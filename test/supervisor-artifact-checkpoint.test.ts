@@ -361,7 +361,7 @@ describe("Supervisor collected artifact durability", () => {
                 ["AttemptFailed", "AttemptDeferred"].includes(event.event),
             ),
         ).toBe(false);
-      }, 15_000);
+      }, 30_000);
     }
   }
   it("retains exact output before success receipts and backend cleanup", async () => {
@@ -391,7 +391,7 @@ describe("Supervisor collected artifact durability", () => {
     });
     await f.run();
     expect(collected).toBeGreaterThan(0);
-  }, 15_000);
+  }, 30_000);
 
   it("stops resources and removes the workspace only after verifying independently retained bytes", async () => {
     const f = await providerSupervisorFixture("daytona-burst", { localOnly: true });

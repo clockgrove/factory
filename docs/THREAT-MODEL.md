@@ -41,6 +41,9 @@ explicitly authorized hardened backend or escalate.
 6. Recovery may reproduce missing receipts or resume known resources; it may not infer new authority.
 7. Installation performs no lifecycle script, repository mutation, daemon activation, or provider
    provisioning.
+8. A deferred repository operation is admitted only from a canonical immutable graph binding plus a
+   fresh proof of its exact integrated base, provider generation, authority paths, operation, packet,
+   and selected runtime; scope or ambient PATH alone grants no execution authority.
 
 ## Threats and mitigations
 
@@ -49,16 +52,16 @@ explicitly authorized hardened backend or escalate.
 | Prompt injection asks a worker to control Factory or GitHub | Minimal Work Packets; workers receive no Director tools or GitHub write credentials; output is treated as an artifact, not an instruction. |
 | A local or Factory-controlled sandbox worker exfiltrates credentials | Ambient secrets and GitHub credentials are removed; Git credential helpers are disabled; network is denied or allowlisted; sandbox model secrets are brokered by name. |
 | Untrusted code attacks the developer host | Provenance and trust preflight; local execution only for explicitly trusted repositories/Objectives; hardened sandbox or escalation for hostile-code risk. |
-| A worker changes forbidden or sensitive paths | Exact-SHA isolated worktree; manifest-first collection; allowed-path and sensitive-surface checks; fresh-checkout validation before publication. The one greenfield package-bootstrap exception is dependency-root-only, structurally bounds exact manifests, lock integrity, workspace/task closure and commands, and stops at human PR merge. |
+| A worker changes forbidden or sensitive paths | Exact-SHA isolated worktree; manifest-first collection; allowed-path and sensitive-surface checks; fresh-checkout validation before publication. The pnpm greenfield adapter is dependency-root-only and structurally bounds exact manifests, lock integrity, workspace/task closure and commands. Workflow additions must also satisfy a parsed, credential-free protected-push-only policy before publication. The exact immutable Git diff is checked again at integration, and every execution-affecting surface stops at human merge. |
 | A malicious or stale artifact reaches `main` | Content-addressed artifact, clean application, independent validation, exact-head receipt, branch-rule recheck, and fenced integration. |
 | Two controllers execute or merge the same work | Repository and Objective compare-and-swap leases, fencing epochs, deterministic attempt refs, and pre-mutation lease observation. |
 | Two chat/MCP/CLI processes submit the same command or lose a comment response | The authenticated Objective-comment stream is the single atomic request journal; one centralized semantic request-ID comparison tolerates identical at-least-once duplicates and rejects conflicting reuse. |
-| A replayed or partially written graph changes scope | Immutable per-run graph ref, digest-bound graph receipt, per-item compiler envelopes, idempotent repair, and fail-closed divergence handling. |
+| A replayed or partially written graph changes scope or deferred command authority | Immutable per-run graph ref, digest-bound graph receipt, per-item compiler envelopes, host-derived typed capability generations, canonical re-derivation before graph copy/projection, raw-byte-preserving legacy omission adaptation only in the execution view, strict fresh/issue-only persistence with exact authenticated historical copying, post-persistence runtime selection, provider-generation receipt inheritance from an authenticated reservation, independent provider/current authority comparison, exact-base activation proofs and full origin receipts bound into `AttemptReserved`, exact historical receipt restoration without latest selection or active-pointer mutation, dispatch-time ref/provider/runtime re-observation, idempotent repair, and fail-closed divergence handling. |
 | A provider launch is lost or duplicated during a crash | Durable reservation before launch, deterministic provider identity, bounded reconciliation, cancellation, hard TTL, and cleanup verification. |
 | Cloud fallback overspends | Paid execution off by default; explicit backend allowlist; sandbox-minute or managed-session ceilings; atomic phase reservations; no retry-time budget widening. |
 | GitHub API pressure prevents fencing or cleanup | Shared limiter, pacing, circuit breaker, reserved lease capacity, conservative quota admission, and stop-on-platform-refusal behavior. |
 | A lower stacked-PR layer changes after validation | Stack/base/head receipts; descendant invalidation; revalidation of the changed exact head; asynchronous merge reconciliation. |
-| Package or dependency compromise changes install behavior | Lockfile and production audit, committed standalone bundles, package allowlist, no install lifecycle scripts, clean-install verification, checksums/provenance in the release process. Greenfield bootstrap validation additionally rejects exotic lock sources, requires SHA-512 registry integrity and exact tool/dependency versions, scrubs package-manager configuration, fetches only from the declared npm registry with scripts disabled, and copies rather than hard-links from the verified store. |
+| Package or dependency compromise changes install behavior | Lockfile and production audit, committed standalone bundles, package allowlist, no install lifecycle scripts, clean-install verification, checksums/provenance in the release process. Greenfield pnpm validation additionally rejects partial authority and exotic lock sources, requires SHA-512 registry integrity and exact tool/dependency versions, scrubs package-manager configuration, uses checksum-pinned Factory Node/pnpm bytes, fetches only from the declared npm registry with scripts disabled, and copies rather than hard-links from the verified store. Other missing package/language recipes have no future-authority adapter and fail before execution. |
 | Logs or issue receipts disclose secrets | Bounded output, secret scanning before durable evidence, named-secret references rather than values, and explicit unavailable fields rather than raw provider payloads. |
 
 ## Provider boundaries
@@ -101,6 +104,10 @@ worker, artifact, accounting and cleanup contracts; neither can widen authority.
   rewrite history, or buy/increase provider capacity autonomously.
 - No control prevents an authorized GitHub administrator from changing repository state outside
   Factory. The Supervisor re-reads relevant state and fails closed when evidence no longer matches.
+  Workflow-safety state is checked after the final publication authority fence, adjacent to ref and
+  pull-request dispatch, but GitHub does not atomically couple those reads to every publication
+  effect. The residual authorized-administrator race is tracked in
+  [#301](https://github.com/clockgrove/factory/issues/301).
 - GitHub comments are editable and deletable. Authenticated journal entries prove their observed
   author and content, but do not provide an independently immutable audit log. An authorized actor
   deleting history may remove evidence that replay needs, including usage receipts; complete

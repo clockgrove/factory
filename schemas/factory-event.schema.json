@@ -42,6 +42,106 @@
           "dependencies": { "producerUnit": ["producerInvocationId"], "producerInvocationId": ["producerUnit"] }
         }
       }
+    },
+    "runtimeBundleReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "tool", "adapter", "adapterContract", "platform", "components", "resolvedAt", "digest"],
+      "properties": {
+        "protocol": { "const": "clockgrove.factory/toolchain-runtime-bundle-v1" },
+        "tool": { "const": "pnpm" },
+        "adapter": { "$ref": "#/definitions/safeId" },
+        "adapterContract": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "platform": {
+          "type": "object", "additionalProperties": false,
+          "required": ["os", "architecture", "libc"],
+          "properties": {
+            "os": { "const": "linux" },
+            "architecture": { "const": "x64" },
+            "libc": { "const": "glibc" }
+          }
+        },
+        "components": {
+          "type": "array", "minItems": 1, "maxItems": 8,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["id", "version", "release", "asset", "executablePath", "executableSha256", "treeSha256"],
+            "properties": {
+              "id": { "$ref": "#/definitions/safeId" },
+              "version": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "release": {
+                "type": "object", "additionalProperties": false,
+                "required": ["provider", "repository", "releaseId", "tag", "publishedAt"],
+                "properties": {
+                  "provider": { "enum": ["github", "nodejs"] },
+                  "repository": { "type": "string", "minLength": 1, "maxLength": 200 },
+                  "releaseId": { "type": "string", "minLength": 1, "maxLength": 500 },
+                  "tag": { "type": "string", "minLength": 1, "maxLength": 200 },
+                  "publishedAt": { "type": "string", "format": "date-time" }
+                }
+              },
+              "asset": {
+                "type": "object", "additionalProperties": false,
+                "required": ["assetId", "name", "url", "size", "sha256", "archive"],
+                "properties": {
+                  "assetId": { "type": "string", "minLength": 1, "maxLength": 2048 },
+                  "name": { "type": "string", "minLength": 1, "maxLength": 500 },
+                  "url": { "type": "string", "minLength": 1, "maxLength": 2048 },
+                  "size": { "type": "integer", "minimum": 1, "maximum": 536870912 },
+                  "sha256": { "$ref": "#/definitions/digest" },
+                  "archive": { "enum": ["raw", "tar.gz", "tar.xz", "zip"] }
+                }
+              },
+              "executablePath": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*\\\\).+$" },
+              "executableSha256": { "$ref": "#/definitions/digest" },
+              "treeSha256": { "$ref": "#/definitions/digest" },
+              "executableOnly": { "const": true }
+            }
+          }
+        },
+        "resolvedAt": { "type": "string", "format": "date-time" },
+        "digest": { "$ref": "#/definitions/digest" }
+      }
+    },
+    "managedRuntimeActivation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "baseSha", "sourceRef", "requirements", "receipts", "packetDigest", "proofDigests", "digest"],
+      "properties": {
+        "protocol": { "const": "clockgrove.factory/managed-runtime-activation-v1" },
+        "baseSha": { "$ref": "#/definitions/gitSha" },
+        "sourceRef": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "requirements": {
+          "type": "array", "minItems": 1, "maxItems": 8,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["tool", "adapter", "adapterContract", "platform", "releaseChannel", "bundleDigest"],
+            "properties": {
+              "tool": { "const": "pnpm" },
+              "adapter": { "$ref": "#/definitions/safeId" },
+              "adapterContract": { "type": "integer", "minimum": 1, "maximum": 1000 },
+              "platform": {
+                "type": "object", "additionalProperties": false,
+                "required": ["os", "architecture", "libc"],
+                "properties": {
+                  "os": { "const": "linux" },
+                  "architecture": { "const": "x64" },
+                  "libc": { "const": "glibc" }
+                }
+              },
+              "releaseChannel": { "const": "ga" },
+              "bundleDigest": { "$ref": "#/definitions/digest" }
+            }
+          }
+        },
+        "receipts": {
+          "type": "array", "minItems": 1, "maxItems": 8,
+          "items": { "$ref": "#/definitions/runtimeBundleReceipt" }
+        },
+        "packetDigest": { "$ref": "#/definitions/digest" },
+        "proofDigests": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/definitions/digest" } },
+        "digest": { "$ref": "#/definitions/digest" }
+      }
     }
   },
   "required": ["protocol", "kind", "event", "objective", "runId", "sequence", "at"],
@@ -82,6 +182,7 @@
     "resourceHostIdentity": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
     "sourceArchiveDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
     "sourceArchiveBytes": { "type": "integer", "minimum": 0, "maximum": 268435456 },
+    "managedRuntimeActivation": { "$ref": "#/definitions/managedRuntimeActivation" },
     "evidenceDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
     "graphDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
     "graphSize": { "type": "integer", "minimum": 1, "maximum": 100 },
@@ -388,6 +489,10 @@
     {
       "if": { "required": ["isolatedFailure"] },
       "then": { "required": ["isolatedValidation"], "properties": { "event": { "const": "CapacityReconciled" } } }
+    },
+    {
+      "if": { "required": ["managedRuntimeActivation"] },
+      "then": { "properties": { "kind": { "const": "attempt" }, "event": { "const": "AttemptReserved" } } }
     },
     {
       "if": { "required": ["localScopeBatch"], "properties": { "kind": { "const": "attempt" } } },

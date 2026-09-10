@@ -58,6 +58,7 @@ import {
   workerPacketPrompt,
   type LocalCapabilityProbe,
 } from "./codex-cli-local.js";
+import { withManagedToolchainPath } from "../toolchains/authority.js";
 
 interface WorkerFinal {
   outcome: "succeeded" | "failed" | "declined";
@@ -556,9 +557,14 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
       if (hasAuth) await symlink(authFile, join(home, "auth.json"));
 
       const env = this.#sdkEnvironment(
-        isolateCodexEnvironment(
-          sanitizedWorkerEnvironment(process.env, this.#options.permittedModelCredentials ?? []),
+        await withManagedToolchainPath(
+          isolateCodexEnvironment(
+            sanitizedWorkerEnvironment(process.env, this.#options.permittedModelCredentials ?? []),
+            home,
+          ),
           home,
+          context.packet.requirements.tools,
+          context.packet.managedRuntimes,
         ),
       );
       const attemptId = durableAttemptId(context);

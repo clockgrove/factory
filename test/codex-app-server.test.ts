@@ -792,6 +792,7 @@ describe("Codex App Server local backend", () => {
       directorEpoch: ctx.directorEpoch,
       policyDigest: ctx.policyDigest,
       sequence: 2,
+      receiptDigest: "d".repeat(64),
       createdAt: new Date(),
       localScopeBatch: ctx.localExecutionScope!.batch,
     };

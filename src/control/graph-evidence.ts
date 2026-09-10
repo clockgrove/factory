@@ -1,8 +1,8 @@
 import {
   compiledGraphDigest,
+  executionWorkerPacketFromCompiled,
   parseGraphItemMetadata,
   renderWorkPacket,
-  workerPacketFromCompiled,
   type CompiledObjective,
 } from "../graph.js";
 import type { FactoryEvent } from "../protocol/events.js";
@@ -96,7 +96,7 @@ export function assertSnapshotMatchesCompiledGraph(
     if ((observed.item.body ?? "").trim() !== expectedBody) {
       throw new Error(`Work Item #${observed.item.number} body was modified`);
     }
-    packets.set(observed.item.number, workerPacketFromCompiled(expected));
+    packets.set(observed.item.number, executionWorkerPacketFromCompiled(expected));
   }
   if (observedById.size !== compiledById.size) {
     throw new Error("Objective contains Work Items outside the immutable graph");

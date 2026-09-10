@@ -1,7 +1,31 @@
 import { createHash } from "node:crypto";
 
 import type { WorkerPacket } from "../protocol/worker-packet.js";
+import {
+  futurePackageScriptCommand,
+  PACKAGE_SETUP_REGISTRY,
+  PNPM_VALIDATION_SETUP_COMMAND,
+  PNPM_VERSION_COMMAND,
+  validationSetupCommandCount,
+} from "../toolchains/authority.js";
 import type { ValidationEvidence } from "./evidence.js";
+import { runtimeBundleByDigestSync } from "../runtime/toolchain-store.js";
+
+function managedPnpmVersion(packet?: WorkerPacket): string {
+  const digests = new Set(
+    (packet?.managedRuntimes ?? []).flatMap((runtime) =>
+      runtime?.tool === "pnpm" && runtime.bundleDigest ? [runtime.bundleDigest] : [],
+    ),
+  );
+  if (digests.size !== 1)
+    throw new Error(
+      `pnpm validation lacks one exact activated runtime; observed ${JSON.stringify(packet?.managedRuntimes ?? [])}`,
+    );
+  const receipt = runtimeBundleByDigestSync("pnpm", [...digests][0]!);
+  const component = receipt.components.find(({ id }) => id === "pnpm");
+  if (!component) throw new Error("pnpm runtime bundle lacks its executable component");
+  return component.version;
+}
 
 export interface ValidationPlan {
   commands: string[];
@@ -9,21 +33,15 @@ export interface ValidationPlan {
   isolation: "local" | "isolated";
 }
 
-export const NPM_VALIDATION_SETUP_COMMAND = "npm ci --no-audit --no-fund";
-export const PNPM_BOOTSTRAP_VERSION_COMMAND = "pnpm --version";
-export const PNPM_BOOTSTRAP_VALIDATION_SETUP_COMMAND =
-  "pnpm install --frozen-lockfile --ignore-scripts --registry=https://registry.npmjs.org/";
-export const PNPM_BOOTSTRAP_REGISTRY = "registry.npmjs.org";
-
-const PACKAGE_SCRIPT_NAME = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$/;
+export { NPM_VALIDATION_SETUP_COMMAND } from "../toolchains/authority.js";
+export const PNPM_BOOTSTRAP_VERSION_COMMAND = PNPM_VERSION_COMMAND;
+export const PNPM_BOOTSTRAP_VALIDATION_SETUP_COMMAND = PNPM_VALIDATION_SETUP_COMMAND;
+export const PNPM_BOOTSTRAP_REGISTRY = PACKAGE_SETUP_REGISTRY;
 
 export type BootstrapPackageValidationCommand = {
   manager: "pnpm";
   script: string;
 };
-
-const BOOTSTRAP_VALIDATION_SCRIPT =
-  /^(?:typecheck|test|lint|check|verify|build)(?:[:._-][A-Za-z0-9][A-Za-z0-9:_.-]{0,111})?$/;
 
 /**
  * Recognize only finite package-script entry points. The script body remains
@@ -32,18 +50,57 @@ const BOOTSTRAP_VALIDATION_SCRIPT =
 export function bootstrapPackageValidationCommand(
   command: string,
 ): BootstrapPackageValidationCommand | null {
-  const tokens = command.trim().split(/\s+/);
-  const manager = tokens[0];
-  if (manager !== "pnpm") return null;
-  const script =
-    tokens.length === 3 && tokens[1] === "run"
-      ? tokens[2]
-      : tokens.length === 2
-        ? tokens[1]
-        : undefined;
-  if (!script || !PACKAGE_SCRIPT_NAME.test(script) || !BOOTSTRAP_VALIDATION_SCRIPT.test(script))
-    return null;
-  return { manager, script };
+  const parsed = futurePackageScriptCommand(command);
+  return parsed?.manager === "pnpm" ? { manager: "pnpm", script: parsed.script } : null;
+}
+
+/** Upper bound reserved for trusted-local validation scopes. npm may consume
+ * one setup command; pnpm always proves the bundled version and installs once. */
+export function validationLocalCommandCount(packet: WorkerPacket): number {
+  return packet.validationCommands.length + validationSetupCommandCount(packet.validationCommands);
+}
+
+/** Verify that every finite pnpm command is supplied by the exact immutable
+ * execution base. This is intentionally cheap enough to run before admission;
+ * clean validation later repeats the deeper lock/configuration inspection. */
+export function assertPnpmCommandsGroundedOnManifest(
+  packet: WorkerPacket,
+  manifestText: string,
+): boolean {
+  const declared = packet.validationCommands.filter((command) => /^pnpm(?:\s|$)/.test(command));
+  if (declared.length === 0) return false;
+  const parsed = declared.map((command) => bootstrapPackageValidationCommand(command));
+  if (parsed.some((command) => command === null))
+    throw new Error("pnpm validation command is outside the finite script contract");
+  if (!packet.requirements.tools.includes("pnpm"))
+    throw new Error("pnpm validation is missing its declared tool requirement");
+  if (!packet.requirements.networkDestinations.includes(PNPM_BOOTSTRAP_REGISTRY))
+    throw new Error("pnpm validation is missing registry.npmjs.org setup authority");
+  if (Buffer.byteLength(manifestText) > 256 * 1024)
+    throw new Error("pnpm execution-base package.json exceeds the inspection bound");
+  let value: unknown;
+  try {
+    value = JSON.parse(manifestText);
+  } catch {
+    throw new Error("pnpm execution-base package.json is invalid JSON");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("pnpm execution-base package.json is invalid");
+  const manifest = value as { packageManager?: unknown; scripts?: unknown };
+  const version = managedPnpmVersion(packet);
+  if (manifest.packageManager !== `pnpm@${version}`)
+    throw new Error(`pnpm execution base must pin packageManager to pnpm@${version}`);
+  if (!manifest.scripts || typeof manifest.scripts !== "object" || Array.isArray(manifest.scripts))
+    throw new Error("pnpm execution base has no valid script map");
+  const scripts = manifest.scripts as Record<string, unknown>;
+  for (const command of parsed) {
+    const script = command!.script;
+    if (typeof scripts[script] !== "string" || scripts[script].length === 0)
+      throw new Error(`pnpm validation script is absent on execution base: ${script}`);
+    if (scripts[`pre${script}`] !== undefined || scripts[`post${script}`] !== undefined)
+      throw new Error(`pnpm validation script has lifecycle hooks on execution base: ${script}`);
+  }
+  return true;
 }
 
 export interface ExactHeadValidationEvidence {

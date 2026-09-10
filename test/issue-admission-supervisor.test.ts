@@ -114,7 +114,10 @@ describe("Supervisor issue admission with synthetic local execution", () => {
     }
   }, 30_000);
   it("finishes the real pipeline with issue ledgers and immutable metadata pointers", async () => {
-    const f = await providerSupervisorFixture("daytona-burst", { localOnly: true });
+    const f = await providerSupervisorFixture("daytona-burst", {
+      dependencyChain: true,
+      localOnly: true,
+    });
     try {
       const result = await f.run();
       expect(result, result.reason).toMatchObject({ status: "completed" });
@@ -146,6 +149,7 @@ describe("Supervisor issue admission with synthetic local execution", () => {
     const launches: Array<{ workItem: number; attempt: number }> = [];
     const cleanups: Array<{ workItem: number; attempt: number }> = [];
     const f = await providerSupervisorFixture("daytona-burst", {
+      dependencyChain: true,
       localOnly: true,
       maxAttemptsPerItem: 2,
       configureLocalBackend: (backend) => ({

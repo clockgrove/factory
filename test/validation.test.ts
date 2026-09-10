@@ -19,8 +19,10 @@ import {
   validationFailureReason,
   validateArtifactClean,
 } from "../src/validation/clean-run.js";
+import { assertReviewOnlyWorkflowArtifacts } from "../src/publication/workflow-safety.js";
 import { verifyValidationEvidence } from "../src/validation/evidence.js";
 import { pnpmBootstrapLock } from "./helpers/pnpm-bootstrap.js";
+import { selectedManagedRuntimeRequirements } from "./helpers/managed-runtime.js";
 
 async function repositoryFixture(): Promise<{ repository: string; baseSha: string }> {
   const repository = await mkdtemp(join(tmpdir(), "factory-validation-repo-"));
@@ -82,8 +84,45 @@ async function nodeRepositoryFixture(): Promise<{ repository: string; baseSha: s
   };
 }
 
-function packet(baseSha: string, over: Partial<WorkerPacket> = {}): WorkerPacket {
+async function pnpmRepositoryFixture(): Promise<{ repository: string; baseSha: string }> {
+  const fixture = await repositoryFixture();
+  await mkdir(join(fixture.repository, "test"));
+  await writeFile(
+    join(fixture.repository, "package.json"),
+    JSON.stringify({
+      name: "factory-pnpm-validation-fixture",
+      version: "1.0.0",
+      private: true,
+      packageManager: "pnpm@10.34.5",
+      scripts: {
+        check: "node --test test/check.js",
+        verify: "node --test test/verify.js",
+      },
+    }),
+  );
+  await writeFile(
+    join(fixture.repository, "pnpm-lock.yaml"),
+    "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
+  );
+  await writeFile(join(fixture.repository, "test/check.js"), "// check\n");
+  await writeFile(join(fixture.repository, "test/verify.js"), "// verify\n");
+  execFileSync("git", ["add", "package.json", "pnpm-lock.yaml", "test"], {
+    cwd: fixture.repository,
+  });
+  execFileSync("git", ["commit", "-q", "-m", "pnpm fixture"], {
+    cwd: fixture.repository,
+  });
   return {
+    repository: fixture.repository,
+    baseSha: execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: fixture.repository,
+      encoding: "utf8",
+    }).trim(),
+  };
+}
+
+function packet(baseSha: string, over: Partial<WorkerPacket> = {}): WorkerPacket {
+  const result: WorkerPacket = {
     goal: "Change the value.",
     acceptanceCriteria: ["value.txt contains changed"],
     allowedPaths: ["value.txt"],
@@ -104,9 +143,127 @@ function packet(baseSha: string, over: Partial<WorkerPacket> = {}): WorkerPacket
     artifactContract: "clockgrove.factory/artifact-v1",
     ...over,
   };
+  if (over.managedRuntimes === undefined) {
+    const managedRuntimes = selectedManagedRuntimeRequirements(result.validationCommands);
+    if (managedRuntimes.length > 0) result.managedRuntimes = managedRuntimes;
+  }
+  return result;
 }
 
 describe("clean validation", () => {
+  it("permits workflow publication only when the changed workflow cannot run before protected-branch merge", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-workflow-publication-"));
+    const path = ".github/workflows/ci.yml";
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    const safe = `name: CI
+on:
+  push:
+    branches:
+      - main
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@0123456789012345678901234567890123456789
+        with:
+          persist-credentials: false
+      - run: pnpm check
+`;
+    const safeActions = {
+      defaultWorkflowPermissions: "read" as const,
+      referencedSecrets: [],
+    };
+    const inspect = (
+      branch: string | undefined,
+      scripts: readonly string[] = [],
+      baseWorkflows: ReadonlyMap<string, string> = new Map(),
+    ) =>
+      assertReviewOnlyWorkflowArtifacts(root, [path], branch, scripts, baseWorkflows, safeActions);
+    await writeFile(join(root, path), safe);
+    await expect(inspect("main")).resolves.toEqual(new Set([path]));
+    await expect(assertReviewOnlyWorkflowArtifacts(root, [path])).rejects.toThrow(
+      /exact protected base branch/,
+    );
+    await writeFile(join(root, path), safe.replace("  push:\n", "  pull_request:\n"));
+    await expect(inspect("main")).rejects.toThrow(/unsafe trigger|only after a push/);
+    await writeFile(join(root, path), safe.replace("      - main", "      - feature"));
+    await expect(inspect("main")).rejects.toThrow(/only after a push/);
+    for (const unsafe of [
+      safe.replace("      - main", "      - main\n      - feature/**"),
+      safe.replace("  push:", "  pull_request:"),
+      safe.replace("  push:", "  pull_request_target:"),
+      safe.replace("  push:", "  workflow_run:"),
+      safe.replace("  push:", "  create:"),
+      safe.replace("  push:", "  workflow_dispatch:"),
+      safe.replace("    steps:", "    permissions:\n      contents: write\n    steps:"),
+      safe.replace("      - run: pnpm check", "      - run: echo ${{ secrets['TOKEN'] }}"),
+      safe.replace("      - run: pnpm check", "      - run: echo ${{ toJSON(secrets) }}"),
+      safe.replace("  contents: read", "  contents: read\n  id-token: write"),
+      safe.replace("runs-on: ubuntu-latest", "runs-on: self-hosted"),
+      safe.replace(
+        "uses: actions/checkout@0123456789012345678901234567890123456789",
+        "uses:\n          repository: actions/checkout",
+      ),
+      safe.replace("          persist-credentials: false", "          persist-credentials: true"),
+      safe.replace("      - run: pnpm check", "      - token: inherited\n        run: pnpm check"),
+    ]) {
+      await writeFile(join(root, path), unsafe);
+      await expect(inspect("main")).rejects.toThrow();
+    }
+
+    const basePath = ".github/workflows/base.yml";
+    await writeFile(
+      join(root, basePath),
+      safe.replace("  push:\n    branches:\n      - main", "  pull_request:"),
+    );
+    await writeFile(join(root, path), safe);
+    await expect(inspect("main", ["check"], new Map([[basePath, safe]]))).rejects.toThrow(
+      /base workflow .* may acquire changed package-script authority/,
+    );
+    await expect(
+      inspect(
+        "main",
+        [],
+        new Map([
+          [path, safe.replace("  push:\n    branches:\n      - main", "  pull_request_target:")],
+        ]),
+      ),
+    ).rejects.toThrow(/base workflow may run or be chained.*pull_request_target/);
+    await expect(
+      assertReviewOnlyWorkflowArtifacts(
+        root,
+        [".github/actions/local/action.yml"],
+        "main",
+        [],
+        new Map([
+          [basePath, safe.replace("  push:\n    branches:\n      - main", "  pull_request:")],
+        ]),
+      ),
+    ).rejects.toThrow(/base workflow may run or be chained.*pull_request/);
+    await expect(
+      inspect(
+        "main",
+        [],
+        new Map([[path, safe.replace("  push:\n    branches:\n      - main", "  create:")]]),
+      ),
+    ).rejects.toThrow(/feature ref or pull request.*create/);
+    await expect(
+      inspect(
+        "main",
+        [],
+        new Map([[path, safe.replace("  push:\n    branches:\n      - main", "  push:")]]),
+      ),
+    ).rejects.toThrow(/push trigger is not restricted to protected branch main/);
+    await expect(
+      assertReviewOnlyWorkflowArtifacts(root, [path], "main", [], new Map(), {
+        defaultWorkflowPermissions: "write",
+        referencedSecrets: [],
+      }),
+    ).rejects.toThrow(/read-only repository Actions permissions/);
+  });
+
   it("fences scoped npm setup and tests in order and retains actual command evidence", async () => {
     const fixture = await nodeRepositoryFixture();
     const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
@@ -381,7 +538,7 @@ describe("clean validation", () => {
       JSON.stringify({
         name: "greenfield",
         private: true,
-        packageManager: "pnpm@10.17.1",
+        packageManager: "pnpm@10.34.5",
         scripts: { check: "turbo run check" },
         devDependencies: { turbo: "2.5.6", typescript: "5.9.2" },
       }),
@@ -415,7 +572,7 @@ describe("clean validation", () => {
       .mockImplementation(async (identity) => ({
         exitCode: 0,
         signal: null,
-        stdout: identity.commandIndex === 0 ? "10.17.1\n" : "",
+        stdout: identity.commandIndex === 0 ? "10.34.5\n" : "",
         stderr: "",
         durationMs: 1,
         timedOut: false,
@@ -466,13 +623,16 @@ describe("clean validation", () => {
       expect(scoped).toHaveBeenNthCalledWith(
         1,
         expect.objectContaining({ commandIndex: 0 }),
-        expect.objectContaining({ command: "pnpm", args: ["--version"] }),
+        expect.objectContaining({
+          command: expect.stringMatching(/\/pnpm\/root\/pnpm$/),
+          args: ["--version"],
+        }),
       );
       expect(scoped).toHaveBeenNthCalledWith(
         2,
         expect.objectContaining({ commandIndex: 1 }),
         expect.objectContaining({
-          command: "pnpm",
+          command: expect.stringMatching(/\/pnpm\/root\/pnpm$/),
           args: [
             "install",
             "--frozen-lockfile",
@@ -484,7 +644,10 @@ describe("clean validation", () => {
       expect(scoped).toHaveBeenNthCalledWith(
         3,
         expect.objectContaining({ commandIndex: 2 }),
-        expect.objectContaining({ command: "/bin/sh", args: ["-c", "pnpm check"] }),
+        expect.objectContaining({
+          command: expect.stringMatching(/\/pnpm\/root\/pnpm$/),
+          args: ["run", "check"],
+        }),
       );
       expect(result.evidence.passed).toBe(true);
       await discardValidationResult(result);
@@ -538,6 +701,172 @@ describe("clean validation", () => {
     }
   });
 
+  it("materializes a later script generation only for its declared descendant operation", async () => {
+    const fixture = await pnpmRepositoryFixture();
+    const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+    await writeFile(join(worker.path, "test/verify-next.js"), "// next generation\n");
+    await writeFile(
+      join(worker.path, "package.json"),
+      JSON.stringify({
+        name: "factory-pnpm-validation-fixture",
+        version: "1.0.0",
+        private: true,
+        packageManager: "pnpm@10.34.5",
+        scripts: {
+          check: "node --test test/check.js",
+          verify: "node --test test/verify-next.js",
+        },
+      }),
+    );
+    execFileSync("git", ["add", "package.json", "test/verify-next.js"], { cwd: worker.path });
+    const artifact = await collectLocalArtifact(worker);
+    await cleanupLocalWorktree(worker);
+    const scoped = vi
+      .spyOn(localScopeRuntime, "runScopedLocalProcess")
+      .mockImplementation(async (identity) => ({
+        exitCode: 0,
+        signal: null,
+        stdout: identity.commandIndex === 0 ? "10.34.5\n" : "",
+        stderr: "",
+        durationMs: 1,
+        timedOut: false,
+      }));
+    try {
+      const result = await validateArtifactClean({
+        repository: fixture.repository,
+        artifact,
+        packet: packet(fixture.baseSha, {
+          allowedPaths: ["package.json", "test/"],
+          validationCommands: ["pnpm verify"],
+          requirements: {
+            ...packet(fixture.baseSha).requirements,
+            tools: ["node", "pnpm"],
+            networkDestinations: ["registry.npmjs.org"],
+          },
+          repositoryCapabilities: {
+            provides: [
+              {
+                adapter: "node-pnpm",
+                generation: "node-pnpm/mutate",
+                authorityPaths: ["package.json"],
+                operations: [{ kind: "package-script", key: "verify" }],
+              },
+            ],
+            requires: [
+              {
+                adapter: "node-pnpm",
+                generation: "node-pnpm/bootstrap",
+                providerWorkItem: "bootstrap",
+                authorityPaths: ["package.json", "pnpm-lock.yaml"],
+                operation: { kind: "package-script", key: "verify" },
+                activation: "integrated-base",
+              },
+            ],
+          },
+        }),
+        localScope: {
+          identity: {
+            protocol: "clockgrove.factory/local-scope-v1",
+            repository: "o/r",
+            objective: 1,
+            workItem: 3,
+            attempt: 1,
+            runId: "later-generation",
+            directorEpoch: 1,
+            policyDigest: "a".repeat(64),
+            phase: "validation",
+            invocationDigest: artifact.digest,
+            hostIdentity: "b".repeat(64),
+          },
+          deadline: new Date(Date.now() + 60_000).toISOString(),
+          beforeLaunch: async () => {},
+          afterStop: async () => {},
+        },
+      });
+      expect(result.evidence.passed).toBe(true);
+      expect(result.publicationReview.changedPackageScripts).toEqual(["verify"]);
+      expect(result.evidence.commands.map(({ command }) => command)).toEqual([
+        "pnpm --version",
+        "pnpm install --frozen-lockfile --ignore-scripts --registry=https://registry.npmjs.org/",
+        "pnpm verify",
+      ]);
+      await discardValidationResult(result);
+    } finally {
+      scoped.mockRestore();
+    }
+  });
+
+  it.each([
+    [
+      "undeclared script",
+      {
+        check: "node --test test/check.js",
+        verify: "node --test test/verify.js",
+        lint: "eslint .",
+      },
+      /undeclared package script/,
+    ],
+    [
+      "unsafe selected body",
+      { check: "node --test test/check.js", verify: "node --test test/verify.js && curl x" },
+      /finite validation allowlist/,
+    ],
+    [
+      "lifecycle hook",
+      {
+        check: "node --test test/check.js",
+        verify: "node --test test/verify.js",
+        preinstall: "node test/verify.js",
+      },
+      /lifecycle hook/,
+    ],
+  ] as const)(
+    "rejects an established pnpm generation with an %s",
+    async (_name, scripts, reason) => {
+      const fixture = await pnpmRepositoryFixture();
+      const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+      await writeFile(
+        join(worker.path, "package.json"),
+        JSON.stringify({
+          name: "factory-pnpm-validation-fixture",
+          version: "1.0.0",
+          private: true,
+          packageManager: "pnpm@10.34.5",
+          scripts,
+        }),
+      );
+      execFileSync("git", ["add", "package.json"], { cwd: worker.path });
+      const artifact = await collectLocalArtifact(worker);
+      await cleanupLocalWorktree(worker);
+      await expect(
+        validateArtifactClean({
+          repository: fixture.repository,
+          artifact,
+          packet: packet(fixture.baseSha, {
+            allowedPaths: ["package.json", "test/"],
+            validationCommands: ["pnpm verify"],
+            requirements: {
+              ...packet(fixture.baseSha).requirements,
+              tools: ["node", "pnpm"],
+              networkDestinations: ["registry.npmjs.org"],
+            },
+            repositoryCapabilities: {
+              provides: [
+                {
+                  adapter: "node-pnpm",
+                  generation: "node-pnpm/mutate",
+                  authorityPaths: ["package.json"],
+                  operations: [{ kind: "package-script", key: "verify" }],
+                },
+              ],
+              requires: [],
+            },
+          }),
+        }),
+      ).rejects.toThrow(reason);
+    },
+  );
+
   it("rejects exotic, unverified, and escaping pnpm lockfile authority", async () => {
     const valid = pnpmBootstrapLock(["."], ["typescript@5.9.2"]);
     for (const lockfile of [
@@ -557,7 +886,7 @@ describe("clean validation", () => {
         join(worker.path, "package.json"),
         JSON.stringify({
           name: "greenfield",
-          packageManager: "pnpm@10.17.1",
+          packageManager: "pnpm@10.34.5",
           scripts: { check: "tsc --noEmit" },
           devDependencies: { typescript: "5.9.2" },
         }),
@@ -603,7 +932,7 @@ describe("clean validation", () => {
       join(worker.path, "package.json"),
       JSON.stringify({
         name: "greenfield",
-        packageManager: "pnpm@10.17.1",
+        packageManager: "pnpm@10.34.5",
         scripts: { check: "tsc --noEmit" },
         devDependencies: { typescript: "5.9.2" },
       }),
@@ -639,7 +968,7 @@ describe("clean validation", () => {
       join(worker.path, "package.json"),
       JSON.stringify({
         name: "greenfield",
-        packageManager: "pnpm@10.17.1",
+        packageManager: "pnpm@10.34.5",
         scripts: { check: "tsc --noEmit" },
         devDependencies: { typescript: "5.9.2" },
       }),
@@ -694,7 +1023,7 @@ describe("clean validation", () => {
       expect(result.evidence).toMatchObject({
         passed: false,
         commands: [{ command: "pnpm --version", exitCode: 1 }],
-        failureReason: expect.stringContaining("expected 10.17.1"),
+        failureReason: expect.stringContaining("expected 10.34.5"),
       });
       expect(scoped).toHaveBeenCalledOnce();
       await discardValidationResult(result);
@@ -728,7 +1057,7 @@ describe("clean validation", () => {
         join(worker.path, "package.json"),
         JSON.stringify({
           name: "greenfield",
-          packageManager: "pnpm@10.17.1",
+          packageManager: "pnpm@10.34.5",
           ...manifest,
         }),
       );
@@ -785,7 +1114,7 @@ describe("clean validation", () => {
         join(worker.path, "package.json"),
         JSON.stringify({
           name: "greenfield",
-          packageManager: "pnpm@10.17.1",
+          packageManager: "pnpm@10.34.5",
           scripts: { check: "turbo run check" },
           devDependencies: unsafe.devDependencies,
         }),
@@ -830,8 +1159,8 @@ describe("clean validation", () => {
   it("rejects missing bootstrap evidence and validation targets outside Work Item scope", async () => {
     for (const variant of [
       { packageManager: "yarn@4.9.2", script: "tsc --noEmit", lockfile: true },
-      { packageManager: "pnpm@10.17.1", script: "tsc --noEmit", lockfile: false },
-      { packageManager: "pnpm@10.17.1", script: "node --test outside.test.js", lockfile: true },
+      { packageManager: "pnpm@10.34.5", script: "tsc --noEmit", lockfile: false },
+      { packageManager: "pnpm@10.34.5", script: "node --test outside.test.js", lockfile: true },
     ]) {
       const fixture = await repositoryFixture();
       await writeFile(join(fixture.repository, "outside.test.js"), "export {};\n");

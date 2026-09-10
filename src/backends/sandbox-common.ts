@@ -13,13 +13,12 @@ import type {
   StaleAttemptIdentity,
 } from "../execution/backend.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
-import {
-  bootstrapPackageValidationCommand,
-  NPM_VALIDATION_SETUP_COMMAND,
-  PNPM_BOOTSTRAP_REGISTRY,
-  PNPM_BOOTSTRAP_VALIDATION_SETUP_COMMAND,
-  PNPM_BOOTSTRAP_VERSION_COMMAND,
-} from "../validation/plan.js";
+import { NPM_VALIDATION_SETUP_COMMAND } from "../validation/plan.js";
+import { isolatedManagedToolchainPlan } from "../toolchains/authority.js";
+import type {
+  ManagedToolchainPlan,
+  RuntimeBundleRequirement,
+} from "../runtime/toolchain-bundle.js";
 import { CODEX_WORKER_OUTPUT_SCHEMA, workerPacketPrompt } from "./codex-cli-local.js";
 import { validationInvocationOwnership } from "./validation-invocation.js";
 
@@ -83,6 +82,138 @@ export interface SandboxBootstrapFile {
   content: Buffer;
   mode?: number;
 }
+
+function managedConfiguration(plan: ManagedToolchainPlan) {
+  return {
+    tool: plan.tool,
+    bundleDigest: plan.bundleDigest,
+    assets: plan.assets.map(({ content: _content, ...asset }) => asset),
+    executables: plan.executables,
+    setup: plan.setup,
+    validation: plan.validation,
+    environment: plan.environment,
+  };
+}
+
+function packetRuntimeRequirements(packet: AttemptContext["packet"]): RuntimeBundleRequirement[] {
+  return packet.managedRuntimes ?? [];
+}
+
+function managedAssetFiles(plan: ManagedToolchainPlan): SandboxBootstrapFile[] {
+  return plan.assets.map((asset) => ({
+    path: `factory/${asset.path}`,
+    content: asset.content,
+    mode: 0o400,
+  }));
+}
+
+export function sandboxManagedToolchainFiles(plan: ManagedToolchainPlan): SandboxBootstrapFile[] {
+  return [
+    {
+      path: "factory/managed-toolchain.json",
+      content: Buffer.from(JSON.stringify(managedConfiguration(plan)), "utf8"),
+    },
+    {
+      path: "factory/materialize-toolchain.mjs",
+      content: Buffer.from(MANAGED_TOOLCHAIN_MATERIALIZER, "utf8"),
+      mode: 0o500,
+    },
+    ...managedAssetFiles(plan),
+  ];
+}
+
+const MANAGED_TOOLCHAIN_MATERIALIZER = String.raw`import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { chmodSync, copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+
+const configPath = resolve(process.argv[2]);
+const outputPath = resolve(process.argv[3]);
+const config = JSON.parse(readFileSync(configPath, "utf8"));
+const factoryRoot = dirname(configPath);
+const runtimeRoot = "/tmp/factory-toolchain/runtime";
+const binRoot = "/tmp/factory-toolchain/bin";
+const safeRelative = value => typeof value === "string" && value.length > 0 && !value.startsWith("/") && !value.includes("\\") && value.split("/").every(part => part && part !== "." && part !== "..");
+const safeChild = (root, relative) => {
+  if (!safeRelative(relative)) throw new Error("managed runtime path is unsafe");
+  const target = resolve(root, relative);
+  if (!target.startsWith(resolve(root) + "/")) throw new Error("managed runtime path escaped its root");
+  return target;
+};
+const digest = path => createHash("sha256").update(readFileSync(path)).digest("hex");
+const validateListing = (listing, executablePath) => {
+  const entries = listing.split(/\r?\n/).filter(Boolean);
+  if (entries.length === 0 || entries.length > 100000) throw new Error("managed runtime archive has an invalid entry count");
+  for (const entry of entries) {
+    const normalized = entry.replace(/\/$/, "");
+    if (normalized && !safeRelative(normalized)) throw new Error("managed runtime archive contains an unsafe path");
+  }
+  if (!entries.some(entry => entry.replace(/\/$/, "") === executablePath)) throw new Error("managed runtime archive lacks its declared executable");
+};
+const assertRegularTree = root => {
+  const visit = directory => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) {
+        const link = readlinkSync(path);
+        const target = resolve(directory, link);
+        if (link.startsWith("/") || (target !== resolve(root) && !target.startsWith(resolve(root) + "/"))) throw new Error("managed runtime archive contains an escaping symbolic link");
+      } else if (stat.isDirectory()) visit(path);
+      else if (!stat.isFile()) throw new Error("managed runtime archive contains an unsupported entry");
+    }
+  };
+  visit(root);
+};
+
+mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
+mkdirSync(binRoot, { recursive: true, mode: 0o700 });
+const assetExecutables = new Map();
+for (const asset of config.assets) {
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(asset.id) || !safeRelative(asset.path) || !safeRelative(asset.executablePath)) throw new Error("managed runtime asset metadata is invalid");
+  const archive = safeChild(factoryRoot, asset.path);
+  if (digest(archive) !== asset.sha256) throw new Error("managed runtime archive digest mismatch");
+  const target = safeChild(runtimeRoot, asset.id);
+  mkdirSync(target, { recursive: true, mode: 0o700 });
+  if (asset.archive === "raw") {
+    if (asset.executablePath.includes("/")) throw new Error("raw managed runtime executable must be top-level");
+    copyFileSync(archive, safeChild(target, asset.executablePath));
+  } else if (asset.archive === "tar.gz" || asset.archive === "tar.xz") {
+    const compression = asset.archive === "tar.gz" ? "z" : "J";
+    const listing = execFileSync("tar", ["-t" + compression + "f", archive], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+    validateListing(listing, asset.executablePath);
+    execFileSync("tar", ["-x" + compression + "f", archive, "-C", target, "--no-same-owner", "--no-same-permissions", ...(asset.executableOnly ? [asset.executablePath] : [])], { maxBuffer: 1024 * 1024 });
+  } else if (asset.archive === "zip") {
+    const listing = execFileSync("unzip", ["-Z1", archive], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+    validateListing(listing, asset.executablePath);
+    execFileSync("unzip", ["-q", archive, "-d", target], { maxBuffer: 1024 * 1024 });
+  } else throw new Error("managed runtime archive format is unsupported");
+  assertRegularTree(target);
+  const executable = safeChild(target, asset.executablePath);
+  if (!statSync(executable).isFile() || digest(executable) !== asset.executableSha256) throw new Error("managed runtime executable digest mismatch");
+  chmodSync(executable, 0o700);
+  assetExecutables.set(asset.id, executable);
+}
+
+const executables = {};
+for (const executable of config.executables) {
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(executable.id) || !Array.isArray(executable.argsPrefix)) throw new Error("managed executable metadata is invalid");
+  if (executable.kind === "generated") {
+    const path = resolve(executable.relativePath);
+    if (!path.startsWith("/tmp/factory-toolchain/")) throw new Error("generated executable escaped the private runtime root");
+    executables[executable.id] = { path, argsPrefix: executable.argsPrefix, generated: true };
+    continue;
+  }
+  const assetPath = assetExecutables.get(executable.assetId);
+  if (!assetPath) throw new Error("managed executable names a missing asset");
+  executables[executable.id] = executable.kind === "node"
+    ? { path: process.execPath, argsPrefix: [assetPath, ...executable.argsPrefix], generated: false }
+    : { path: assetPath, argsPrefix: executable.argsPrefix, generated: false };
+  const shim = safeChild(binRoot, executable.id);
+  try { symlinkSync(assetPath, shim); } catch (error) { if (error?.code !== "EEXIST") throw error; }
+}
+writeFileSync(outputPath, JSON.stringify({ binRoot, executables }), { mode: 0o600 });
+`;
 
 export function sandboxIdentity(context: AttemptContext | StaleAttemptIdentity): string {
   const raw = `factory-o${context.objective}-w${context.workItem}-a${context.attempt}-${context.runId.slice(0, 12)}`;
@@ -150,12 +281,36 @@ export async function repositoryArchive(repository: string, baseSha: string): Pr
 export function sandboxBootstrapFiles(
   context: AttemptContext,
   archive: Buffer,
+  options: { managedToolchains?: boolean } = {},
 ): SandboxBootstrapFile[] {
+  const managedToolchain = options.managedToolchains
+    ? isolatedManagedToolchainPlan(
+        context.packet.validationCommands,
+        packetRuntimeRequirements(context.packet),
+      )
+    : null;
+  const managedEnvironment = managedToolchain
+    ? Object.entries(managedToolchain.environment)
+        .map(([key, value]) => {
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
+            throw new Error("managed toolchain environment contains an invalid key");
+          return `export ${key}=${JSON.stringify(value)}`;
+        })
+        .join("\n")
+    : "";
+  const managedBootstrap = managedToolchain
+    ? String.raw`mkdir -p /tmp/factory-toolchain-config
+node "$factory_root/materialize-toolchain.mjs" "$factory_root/managed-toolchain.json" "$factory_root/toolchain-paths.json"
+export PATH="/tmp/factory-toolchain/bin:$PATH"
+${managedEnvironment}
+export PATH="/tmp/factory-toolchain/bin:$PATH"
+`
+    : "";
   const script = `#!/usr/bin/env bash
 set -euo pipefail
 factory_root="$PWD/factory"
 workspace="$PWD/workspace"
-mkdir -p "$workspace"
+${managedBootstrap}mkdir -p "$workspace"
 tar -xf "$factory_root/source.tar" -C "$workspace"
 cd "$workspace"
 git init -q
@@ -219,6 +374,7 @@ printf '%s' "$worker_status" > "$factory_root/exit-code"
           },
         ]
       : []),
+    ...(managedToolchain ? sandboxManagedToolchainFiles(managedToolchain.plan) : []),
     { path: "factory/run.sh", content: Buffer.from(script, "utf8"), mode: 0o700 },
   ];
 }
@@ -232,65 +388,83 @@ export function sandboxValidationFiles(
     throw new Error(
       "externalized artifact requires a verified file upload; a payload marker is not a patch",
     );
+  const managedToolchain = isolatedManagedToolchainPlan(
+    context.packet.validationCommands,
+    packetRuntimeRequirements(context.packet),
+  );
   const configuration = {
     expectedPaths: [...context.artifact.changedPaths].sort(),
     commands: context.packet.validationCommands,
-    bootstrapPnpm:
-      context.packet.validationCommands.length === 1 &&
-      context.artifact.changedPaths.includes("package.json") &&
-      bootstrapPackageValidationCommand(context.packet.validationCommands[0]!) !== null,
+    managedToolchain: managedToolchain ? managedConfiguration(managedToolchain.plan) : null,
     timeoutMsPerCommand: Math.min(
       (context.packet.requirements.timeoutMinutes ?? 30) * 60_000,
       60 * 60_000,
     ),
   };
   const validator = String.raw`import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 const root = new URL(".", import.meta.url).pathname;
 const workspace = new URL("../workspace/", import.meta.url).pathname;
 const config = JSON.parse(readFileSync(new URL("config.json", import.meta.url), "utf8"));
+if (config.managedToolchain) execFileSync(process.execPath, [
+  new URL("materialize-toolchain.mjs", import.meta.url).pathname,
+  new URL("managed-toolchain.json", import.meta.url).pathname,
+  new URL("toolchain-paths.json", import.meta.url).pathname,
+]);
+const managedPaths = config.managedToolchain
+  ? JSON.parse(readFileSync(new URL("toolchain-paths.json", import.meta.url), "utf8"))
+  : null;
 const startedAt = new Date().toISOString();
 const commands = [];
 const childEnv = {
-  PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
   HOME: "/tmp/factory-home",
   CI: "true",
   FACTORY_SUPERVISED: "1",
-  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
-  COREPACK_ENABLE_NETWORK: "0",
-  COREPACK_ENABLE_PROJECT_SPEC: "0",
-  XDG_CONFIG_HOME: "/tmp/factory-pnpm-config",
-  NPM_CONFIG_USERCONFIG: "/dev/null",
-  npm_config_dangerously_allow_all_builds: "false",
-  npm_config_enable_global_virtual_store: "false",
-  npm_config_enable_pre_post_scripts: "false",
-  npm_config_frozen_lockfile: "true",
-  npm_config_ignore_scripts: "true",
-  npm_config_lockfile: "true",
-  npm_config_manage_package_manager_versions: "false",
-  npm_config_modules_dir: "node_modules",
-  npm_config_node_linker: "isolated",
-  npm_config_package_import_method: "copy",
-  npm_config_registry: ${JSON.stringify(`https://${PNPM_BOOTSTRAP_REGISTRY}/`)},
-  npm_config_script_shell: "/bin/sh",
-  npm_config_side_effects_cache: "false",
-  npm_config_strict_store_pkg_content_check: "true",
-  npm_config_symlink: "true",
-  npm_config_use_running_store_server: "false",
-  npm_config_verify_deps_before_run: "error",
-  npm_config_verify_store_integrity: "true",
-  npm_config_virtual_store_dir: "node_modules/.pnpm",
+  ...(config.managedToolchain?.environment ?? {}),
+  PATH: managedPaths
+    ? managedPaths.binRoot + ":" + (config.managedToolchain.environment.PATH ?? "/usr/bin:/bin")
+    : process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
 };
 
 function git(args) {
   return execFileSync("git", args, { cwd: workspace, encoding: "utf8", maxBuffer: 1024 * 1024 });
 }
 
+function stepCwd(step) {
+  if (!step.cwd) return workspace;
+  if (typeof step.cwd !== "string" || step.cwd.startsWith("/") || step.cwd.includes("\\") || step.cwd.split("/").some(part => !part || part === "." || part === "..")) throw new Error("managed command cwd is unsafe");
+  const target = resolve(workspace, step.cwd);
+  if (!target.startsWith(resolve(workspace) + "/")) throw new Error("managed command cwd escaped the workspace");
+  return target;
+}
+
+function executeManagedStep(step, setup) {
+  const executable = managedPaths.executables[step.executableId];
+  if (!executable) throw new Error("managed command names an unknown executable");
+  if (!Array.isArray(step.args) || step.args.some(arg => typeof arg !== "string")) throw new Error("managed command argv is invalid");
+  if (executable.generated && (!existsSync(executable.path) || !lstatSync(executable.path).isFile())) throw new Error("generated managed executable is missing");
+  const python = managedPaths.executables.python?.path;
+  const args = [...executable.argsPrefix, ...step.args.map(arg => arg === "__FACTORY_PYTHON__" ? python : arg)];
+  if (args.some(arg => typeof arg !== "string")) throw new Error("managed command requires an unavailable Python executable");
+  const began = Date.now();
+  const result = spawnSync(executable.path, args, {
+    cwd: stepCwd(step), timeout: config.timeoutMsPerCommand, encoding: "utf8",
+    maxBuffer: 1024 * 1024, env: childEnv,
+  });
+  let exitCode = result.status ?? (result.error?.code === "ETIMEDOUT" ? 124 : 1);
+  if (exitCode === 0 && step.expectedStdout !== undefined && result.stdout.trim() !== step.expectedStdout) exitCode = 1;
+  commands.push({ command: step.display, exitCode, durationMs: Date.now() - began });
+  return exitCode === 0 ? undefined : exitCode === 124
+    ? (setup ? "validation setup timed out: " : "validation timed out: ") + step.display
+    : (setup ? "validation setup failed (" : "validation failed (") + exitCode + "): " + step.display;
+}
+
 try {
   mkdirSync(workspace, { recursive: true });
   mkdirSync("/tmp/factory-home", { recursive: true });
-  mkdirSync("/tmp/factory-pnpm-config", { recursive: true });
+  if (config.managedToolchain) mkdirSync("/tmp/factory-toolchain-config", { recursive: true });
   execFileSync("tar", ["-xf", root + "source.tar", "-C", workspace]);
   git(["init", "-q"]);
   git(["config", "user.name", "clockgrove-factory"]);
@@ -304,41 +478,10 @@ try {
     throw new Error("applied artifact paths do not match its manifest");
   }
   let failureReason;
-  if (config.bootstrapPnpm) {
-    const manifest = JSON.parse(readFileSync(workspace + "package.json", "utf8"));
-    const expectedVersion = typeof manifest.packageManager === "string" && manifest.packageManager.startsWith("pnpm@")
-      ? manifest.packageManager.slice("pnpm@".length)
-      : "";
-    const versionCommand = ${JSON.stringify(PNPM_BOOTSTRAP_VERSION_COMMAND)};
-    const versionBegan = Date.now();
-    const version = spawnSync("pnpm", ["--version"], {
-      cwd: workspace,
-      timeout: config.timeoutMsPerCommand,
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024,
-      env: childEnv,
-    });
-    let versionExitCode = version.status ?? (version.error?.code === "ETIMEDOUT" ? 124 : 1);
-    if (versionExitCode === 0 && version.stdout.trim() !== expectedVersion) versionExitCode = 1;
-    commands.push({ command: versionCommand, exitCode: versionExitCode, durationMs: Date.now() - versionBegan });
-    if (versionExitCode !== 0) {
-      failureReason = versionExitCode === 124 ? "validation setup timed out: " + versionCommand : "validation setup used a pnpm version other than " + expectedVersion;
-    }
-    if (!failureReason) {
-      const command = ${JSON.stringify(PNPM_BOOTSTRAP_VALIDATION_SETUP_COMMAND)};
-      const began = Date.now();
-      const install = spawnSync("pnpm", ["install", "--frozen-lockfile", "--ignore-scripts", ${JSON.stringify(`--registry=https://${PNPM_BOOTSTRAP_REGISTRY}/`)}], {
-        cwd: workspace,
-        timeout: config.timeoutMsPerCommand,
-        encoding: "utf8",
-        maxBuffer: 1024 * 1024,
-        env: childEnv,
-      });
-      const exitCode = install.status ?? (install.error?.code === "ETIMEDOUT" ? 124 : 1);
-      commands.push({ command, exitCode, durationMs: Date.now() - began });
-      if (exitCode !== 0) {
-        failureReason = exitCode === 124 ? "validation setup timed out: " + command : "validation setup failed (" + exitCode + "): " + command;
-      }
+  if (config.managedToolchain) {
+    for (const setup of config.managedToolchain.setup) {
+      failureReason = executeManagedStep(setup, true);
+      if (failureReason) break;
     }
   } else if (existsSync(workspace + "package-lock.json") || existsSync(workspace + "npm-shrinkwrap.json")) {
     const command = ${JSON.stringify(NPM_VALIDATION_SETUP_COMMAND)};
@@ -356,15 +499,14 @@ try {
       failureReason = exitCode === 124 ? "validation setup timed out: " + command : "validation setup failed (" + exitCode + "): " + command;
     }
   }
-  for (const command of failureReason ? [] : config.commands) {
+  for (const command of failureReason ? [] : config.managedToolchain?.validation ?? config.commands) {
+    if (config.managedToolchain) {
+      failureReason = executeManagedStep(command, false);
+      if (failureReason) break;
+      continue;
+    }
     const began = Date.now();
-    const result = spawnSync("/bin/sh", ["-c", command], {
-      cwd: workspace,
-      timeout: config.timeoutMsPerCommand,
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024,
-      env: childEnv,
-    });
+    const result = spawnSync("/bin/sh", ["-c", command], { cwd: workspace, timeout: config.timeoutMsPerCommand, encoding: "utf8", maxBuffer: 1024 * 1024, env: childEnv });
     const exitCode = result.status ?? (result.error?.code === "ETIMEDOUT" ? 124 : 1);
     commands.push({ command, exitCode, durationMs: Date.now() - began });
     if (exitCode !== 0) {
@@ -392,6 +534,7 @@ try {
       path: "factory/config.json",
       content: Buffer.from(JSON.stringify(configuration), "utf8"),
     },
+    ...(managedToolchain ? sandboxManagedToolchainFiles(managedToolchain.plan) : []),
     { path: "factory/validate.mjs", content: Buffer.from(validator, "utf8"), mode: 0o700 },
   ];
 }

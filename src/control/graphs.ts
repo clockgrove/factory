@@ -6,6 +6,7 @@ import {
   compiledGraphDigest,
   parsePersistedCompiledObjective,
   serializeCompiledObjective,
+  validateGraph,
   type CompiledObjective,
 } from "../graph.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "./lease.js";
@@ -262,27 +263,51 @@ export class CompiledGraphManager {
     return loadCompiledGraph(this.store, objective, runId);
   }
 
-  async persist(args: {
-    lease: LeaseState;
-    base: GitCommitObject;
-    objective: CompiledObjective;
-    compilation?: {
-      invocationId: string;
-      inputTokens: number;
-      outputTokens: number;
-      cachedInputTokens?: number | undefined;
-    };
-  }): Promise<CompiledGraphRecord> {
+  async persist(
+    args: {
+      lease: LeaseState;
+      base: GitCommitObject;
+    } & (
+      | {
+          objective: CompiledObjective;
+          compilation?: {
+            invocationId: string;
+            inputTokens: number;
+            outputTokens: number;
+            cachedInputTokens?: number | undefined;
+          };
+        }
+      | {
+          /** An exact record already authenticated by load; its raw graph bytes
+           * may retain the historical managed-runtime omission. */
+          source: CompiledGraphRecord;
+        }
+    ),
+  ): Promise<CompiledGraphRecord> {
     await this.leases.assertMutationAuthorized(args.lease);
-    const parsed = parsePersistedCompiledObjective(args.objective);
+    const source = "source" in args ? args.source : undefined;
+    const objective = "source" in args ? args.source.objective : args.objective;
+    // Fresh compilation and issue-only reconstruction are strict. An exact
+    // loaded source may be copied byte-for-byte; compatibility is still added
+    // only later in the non-persisted execution view.
+    if (!source) validateGraph(objective);
+    const parsed = parsePersistedCompiledObjective(objective);
     const graphDigest = compiledGraphDigest(parsed);
-    const compilation = args.compilation
-      ? CompilationReceiptSchema.parse({
-          protocol: "clockgrove.factory/compilation-receipt-v1",
-          graphDigest,
-          ...args.compilation,
-        })
-      : undefined;
+    if (
+      source &&
+      (source.graphDigest !== graphDigest ||
+        source.graphSize !== parsed.workItems.length ||
+        JSON.stringify(source.objective) !== JSON.stringify(parsed))
+    )
+      throw new Error("historical compiled graph changed before exact copy");
+    const compilation =
+      "compilation" in args && args.compilation
+        ? CompilationReceiptSchema.parse({
+            protocol: "clockgrove.factory/compilation-receipt-v1",
+            graphDigest,
+            ...args.compilation,
+          })
+        : undefined;
     const existing = await this.load(args.lease.objective, args.lease.runId);
     if (existing) {
       if (
@@ -294,7 +319,11 @@ export class CompiledGraphManager {
       return existing;
     }
 
-    const blobOid = await this.store.createBlob(serializeCompiledObjective(parsed));
+    // A recovery copy retains the already-authenticated object itself. Re-encoding
+    // even semantically identical historical JSON would change its bytes and OID.
+    const blobOid = source
+      ? source.blobOid
+      : await this.store.createBlob(serializeCompiledObjective(parsed));
     const compilationBlobOid = compilation
       ? await this.store.createBlob(Buffer.from(JSON.stringify(compilation), "utf8"))
       : null;

@@ -1,8 +1,9 @@
 import { posix } from "node:path";
 import {
-  assertSafeValidationCommand,
-  bootstrapPackageValidationCommand,
-} from "../validation/plan.js";
+  futureToolchainCommand,
+  repositoryLacksFutureToolchainAuthority,
+} from "../toolchains/authority.js";
+import { assertSafeValidationCommand } from "../validation/plan.js";
 import { normalizePinnedLfsFacts, type PinnedLfsFacts } from "./git-lfs.js";
 
 export { readRepositoryFacts } from "./read.js";
@@ -231,18 +232,15 @@ export function isGroundedValidationCommand(
   // test the current Work Item is explicitly allowed to create. An observed
   // targeted recipe does not authorize replacing its targets or adding flags.
   if (!observed.includes("node --test")) {
-    const packageScript = bootstrapPackageValidationCommand(command);
+    const packageScript = futureToolchainCommand(command);
     const basePaths = new Set(normalizeRepositoryFacts(facts).files.map((file) => file.path));
     return Boolean(
       packageScript &&
         bootstrap?.root &&
-        bootstrap.tools.includes(packageScript.manager) &&
+        bootstrap.tools.includes(packageScript.runner) &&
         observed.length === 0 &&
-        !basePaths.has("package.json") &&
-        scope.some(
-          (path) =>
-            path === "package.json" || (path.endsWith("/") && "package.json".startsWith(path)),
-        ),
+        repositoryLacksFutureToolchainAuthority(packageScript.adapter, basePaths) &&
+        packageScript.adapter.requiredRootPaths.every((path) => scope.includes(path)),
     );
   }
   const targets = nodeTestTargets(command);

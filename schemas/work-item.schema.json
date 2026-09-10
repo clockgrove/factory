@@ -120,6 +120,8 @@
     "context": { "$ref": "worker-packet.schema.json#/properties/context" },
     "changeSurface": { "$ref": "worker-packet.schema.json#/properties/changeSurface" },
     "delivery": { "$ref": "worker-packet.schema.json#/properties/delivery" },
+    "repositoryCapabilities": { "$ref": "worker-packet.schema.json#/properties/repositoryCapabilities" },
+    "managedRuntimes": { "$ref": "worker-packet.schema.json#/properties/managedRuntimes" },
     "validation": {
       "type": "array", "minItems": 1, "maxItems": 4,
       "items": {

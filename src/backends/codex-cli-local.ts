@@ -48,6 +48,7 @@ import {
 import { restrictedCodexArgs } from "./codex-cli-policy.js";
 import { readLocalResourceHostIdentity } from "../recovery/local-resources.js";
 import { bootstrapPackageValidationCommand } from "../validation/plan.js";
+import { managedToolAvailable, withManagedToolchainPath } from "../toolchains/authority.js";
 
 export const CODEX_WORKER_OUTPUT_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -146,7 +147,7 @@ export async function probeLocalCapabilities(
 ): Promise<LocalCapabilities> {
   const tools: string[] = [];
   for (const tool of requirements.tools) {
-    if (await executableOnPath(tool)) tools.push(tool);
+    if (await managedToolAvailable(tool, executableOnPath)) tools.push(tool);
   }
   const services: string[] = [];
   if (
@@ -440,9 +441,14 @@ export class CodexCliLocalBackend implements ExecutionBackend {
       }
       args.push(workerPacketPrompt(context));
 
-      const env = isolateCodexEnvironment(
-        sanitizedWorkerEnvironment(process.env, this.#options.permittedModelCredentials ?? []),
+      const env = await withManagedToolchainPath(
+        isolateCodexEnvironment(
+          sanitizedWorkerEnvironment(process.env, this.#options.permittedModelCredentials ?? []),
+          codexHome,
+        ),
         codexHome,
+        context.packet.requirements.tools,
+        context.packet.managedRuntimes,
       );
       env.FACTORY_ATTEMPT_ID = durableAttemptId(context);
       const resourceHostIdentity = await readLocalResourceHostIdentity();

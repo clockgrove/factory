@@ -8,6 +8,7 @@ import {
   boundedText,
   gitSha,
   safeId,
+  sha256Digest,
 } from "./limits.js";
 
 const shortList = (item: z.ZodTypeAny, max = 64) => z.array(item).max(max);
@@ -175,6 +176,190 @@ export const CriterionRiskAssessmentSchema = z
   .min(1)
   .max(64);
 
+export const RepositoryCapabilityOperationSchema = z
+  .object({
+    kind: safeId,
+    key: safeId,
+  })
+  .strict();
+
+export const RuntimeBundleRequirementSchema = z
+  .object({
+    tool: z.literal("pnpm"),
+    adapter: safeId,
+    adapterContract: z.number().int().positive().max(1_000),
+    platform: z
+      .object({
+        os: z.literal("linux"),
+        architecture: z.literal("x64"),
+        libc: z.literal("glibc"),
+      })
+      .strict(),
+    releaseChannel: z.literal("ga"),
+    bundleDigest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+  })
+  .strict();
+
+export const SelectedRuntimeBundleRequirementSchema = RuntimeBundleRequirementSchema.extend({
+  bundleDigest: sha256Digest,
+}).strict();
+
+export const RuntimeBundleReceiptSchema = z
+  .object({
+    protocol: z.literal("clockgrove.factory/toolchain-runtime-bundle-v1"),
+    tool: z.literal("pnpm"),
+    adapter: safeId,
+    adapterContract: z.number().int().positive().max(1_000),
+    platform: z
+      .object({
+        os: z.literal("linux"),
+        architecture: z.literal("x64"),
+        libc: z.literal("glibc"),
+      })
+      .strict(),
+    components: shortList(
+      z
+        .object({
+          id: safeId,
+          version: boundedText(160),
+          release: z
+            .object({
+              provider: z.enum(["github", "nodejs"]),
+              repository: boundedText(200),
+              releaseId: boundedText(500),
+              tag: boundedText(200),
+              publishedAt: z.string().datetime(),
+            })
+            .strict(),
+          asset: z
+            .object({
+              assetId: boundedText(2_048),
+              name: boundedText(500),
+              url: boundedText(2_048),
+              size: z
+                .number()
+                .int()
+                .positive()
+                .max(512 * 1024 * 1024),
+              sha256: sha256Digest,
+              archive: z.enum(["raw", "tar.gz", "tar.xz", "zip"]),
+            })
+            .strict(),
+          executablePath: RepositoryScopePathSchema.refine(
+            (value) => !value.endsWith("/"),
+            "runtime executable must be a file path",
+          ),
+          executableSha256: sha256Digest,
+          treeSha256: sha256Digest,
+          executableOnly: z.literal(true).optional(),
+        })
+        .strict(),
+      8,
+    ).min(1),
+    resolvedAt: z.string().datetime(),
+    digest: sha256Digest,
+  })
+  .strict()
+  .superRefine((receipt, context) => {
+    if (new Set(receipt.components.map(({ id }) => id)).size !== receipt.components.length) {
+      context.addIssue({ code: "custom", message: "runtime receipt components are duplicated" });
+    }
+    const { digest, resolvedAt: _resolvedAt, ...identity } = receipt;
+    if (digest !== createHash("sha256").update(canonicalJson(identity)).digest("hex")) {
+      context.addIssue({ code: "custom", message: "runtime receipt digest mismatch" });
+    }
+  });
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export const ManagedRuntimeActivationSchema = z
+  .object({
+    protocol: z.literal("clockgrove.factory/managed-runtime-activation-v1"),
+    baseSha: gitSha,
+    sourceRef: boundedText(500),
+    requirements: shortList(SelectedRuntimeBundleRequirementSchema, 8).min(1),
+    receipts: shortList(RuntimeBundleReceiptSchema, 8).min(1),
+    packetDigest: sha256Digest,
+    proofDigests: shortList(sha256Digest, 32),
+    digest: sha256Digest,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      new Set(value.requirements.map(({ adapter, tool }) => `${adapter}\0${tool}`)).size !==
+        value.requirements.length ||
+      value.proofDigests.some((digest, index) => value.proofDigests.indexOf(digest) !== index)
+    ) {
+      context.addIssue({ code: "custom", message: "managed runtime activation is duplicated" });
+    }
+    if (
+      value.receipts.length !== value.requirements.length ||
+      value.requirements.some(
+        (requirement) =>
+          !value.receipts.some(
+            (receipt) =>
+              receipt.tool === requirement.tool &&
+              receipt.adapter === requirement.adapter &&
+              receipt.adapterContract === requirement.adapterContract &&
+              receipt.digest === requirement.bundleDigest &&
+              canonicalJson(receipt.platform) === canonicalJson(requirement.platform),
+          ),
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "managed runtime activation receipts differ from its requirements",
+      });
+    }
+    const { digest, ...identity } = value;
+    if (digest !== createHash("sha256").update(canonicalJson(identity)).digest("hex")) {
+      context.addIssue({ code: "custom", message: "managed runtime activation digest mismatch" });
+    }
+  });
+
+const RepositoryCapabilityProvisionSchema = z
+  .object({
+    adapter: safeId,
+    generation: safeId,
+    authorityPaths: shortList(RepositoryScopePathSchema, 16).min(1),
+    operations: shortList(RepositoryCapabilityOperationSchema, 32).min(1),
+    runtime: RuntimeBundleRequirementSchema.optional(),
+  })
+  .strict();
+
+const RepositoryCapabilityRequirementSchema = z
+  .object({
+    adapter: safeId,
+    generation: safeId,
+    providerWorkItem: safeId,
+    authorityPaths: shortList(RepositoryScopePathSchema, 16).min(1),
+    operation: RepositoryCapabilityOperationSchema,
+    activation: z.enum(["artifact", "integrated-base"]),
+    runtime: RuntimeBundleRequirementSchema.optional(),
+  })
+  .strict();
+
+export const RepositoryCapabilityBindingsSchema = z
+  .object({
+    provides: shortList(RepositoryCapabilityProvisionSchema, 16).default([]),
+    requires: shortList(RepositoryCapabilityRequirementSchema, 32).default([]),
+  })
+  .strict();
+
 export const WorkerPacketSchema = z
   .object({
     goal: boundedText(4_000),
@@ -189,6 +374,8 @@ export const WorkerPacketSchema = z
     delivery: DeliveryHintSchema.optional(),
     criterionRisks: CriterionRiskAssessmentSchema.optional(),
     validation: ValidationDesignSchema.optional(),
+    repositoryCapabilities: RepositoryCapabilityBindingsSchema.optional(),
+    managedRuntimes: shortList(RuntimeBundleRequirementSchema, 8).optional(),
     baseSha: gitSha,
     validationCommands: shortList(boundedText(1_000), 32).min(1),
     requirements: ExecutionRequirementsSchema,
@@ -198,6 +385,31 @@ export const WorkerPacketSchema = z
 
 export type ExecutionRequirements = z.infer<typeof ExecutionRequirementsSchema>;
 export type WorkerPacket = z.infer<typeof WorkerPacketSchema>;
+export type ManagedRuntimeActivation = z.infer<typeof ManagedRuntimeActivationSchema>;
+export interface RepositoryCapabilityOperation {
+  kind: string;
+  key: string;
+}
+export interface RepositoryCapabilityProvision {
+  adapter: string;
+  generation: string;
+  authorityPaths: string[];
+  operations: RepositoryCapabilityOperation[];
+  runtime?: z.infer<typeof RuntimeBundleRequirementSchema>;
+}
+export interface RepositoryCapabilityRequirement {
+  adapter: string;
+  generation: string;
+  providerWorkItem: string;
+  authorityPaths: string[];
+  operation: RepositoryCapabilityOperation;
+  activation: "artifact" | "integrated-base";
+  runtime?: z.infer<typeof RuntimeBundleRequirementSchema>;
+}
+export interface RepositoryCapabilityBindings {
+  provides: RepositoryCapabilityProvision[];
+  requires: RepositoryCapabilityRequirement[];
+}
 
 /** Legacy packets conservatively retain semantic review of every criterion. */
 export function semanticReviewCriteria(packet: WorkerPacket): string[] {
@@ -243,16 +455,5 @@ export function parseWorkerPacket(input: unknown): WorkerPacket {
  * policy-grounded requirements. Object key order is not execution authority. */
 export function workerPacketDigest(input: unknown): string {
   const packet: unknown = JSON.parse(JSON.stringify(parseWorkerPacket(input)));
-  const canonical = (value: unknown): string => {
-    if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-    if (value !== null && typeof value === "object") {
-      const record = value as Record<string, unknown>;
-      return `{${Object.keys(record)
-        .sort()
-        .map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`)
-        .join(",")}}`;
-    }
-    return JSON.stringify(value);
-  };
-  return createHash("sha256").update(canonical(packet)).digest("hex");
+  return createHash("sha256").update(canonicalJson(packet)).digest("hex");
 }

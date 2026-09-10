@@ -84,7 +84,9 @@ class GitObjectStore implements PublicationStore {
   constructor(
     readonly repository: string,
     readonly baseSha: string,
-  ) {}
+  ) {
+    this.refs.set("refs/heads/main", baseSha);
+  }
 
   async readRef(ref: string): Promise<string | null> {
     return this.refs.get(ref) ?? null;
@@ -539,15 +541,21 @@ describe("host-owned publication", () => {
     const first = await publishValidated(args);
     const second = await publishValidated(args);
     // Standalone stores retain a preflight before each of four Git-object
-    // writes, plus the phase assertion before PR discovery. An idempotent
-    // replay performs only that final phase assertion.
-    expect(assertLease).toHaveBeenCalledTimes(6);
+    // writes and the PR mutation, plus the phase assertion before PR
+    // discovery. An idempotent replay performs only that final phase assertion.
+    expect(assertLease).toHaveBeenCalledTimes(7);
     expect(second).toEqual(first);
     expect(git(repository, ["rev-parse", `${first.commitSha}^{tree}`])).toBe(
       validation.evidence.outputTreeSha,
     );
     const fencedStore = new GitObjectStore(repository, base.oid);
     Object.defineProperty(fencedStore, "objectivePublicationFenceAtDispatch", { value: true });
+    Object.defineProperty(fencedStore, "withPublicationSafetyFence", {
+      value: async (fence: () => Promise<void>, operation: () => Promise<unknown>) => {
+        await fence();
+        return operation();
+      },
+    });
     const transportFencedAssert = vi.fn(async () => {});
     await publishValidated({
       ...args,
@@ -557,6 +565,103 @@ describe("host-owned publication", () => {
     // The concrete transport owns the four per-write fences; the meaningful
     // publication-phase assertion before PR discovery remains.
     expect(transportFencedAssert).toHaveBeenCalledTimes(1);
+
+    const incompleteFencedStore = new GitObjectStore(repository, base.oid);
+    Object.defineProperty(incompleteFencedStore, "objectivePublicationFenceAtDispatch", {
+      value: true,
+    });
+    await expect(
+      publishValidated({
+        ...args,
+        store: incompleteFencedStore,
+        beforeRefMutation: async () => {},
+      }),
+    ).rejects.toThrow(/transport-bound publication safety fence is unavailable/i);
+    expect([...incompleteFencedStore.refs.keys()].some((ref) => ref !== "refs/heads/main")).toBe(
+      false,
+    );
+
+    const pullRaceStore = new GitObjectStore(repository, base.oid);
+    await expect(
+      publishValidated({
+        ...args,
+        store: pullRaceStore,
+        beforePullRequestMutation: async () => {
+          const branch = [...pullRaceStore.refs.keys()].find((ref) => ref !== "refs/heads/main");
+          if (!branch) throw new Error("publication branch was not created");
+          pullRaceStore.refs.set(branch, "8".repeat(40));
+        },
+      }),
+    ).rejects.toThrow(/publication branch .* changed after policy admission/i);
+    expect(pullRaceStore.pull).toBeNull();
+    expect([...pullRaceStore.refs.keys()].some((ref) => ref !== "refs/heads/main")).toBe(true);
+
+    const refAuthorityRaceStore = new GitObjectStore(repository, base.oid);
+    let commitPrepared = false;
+    let refBaseAdvanced = false;
+    const createCommit = refAuthorityRaceStore.createCommit.bind(refAuthorityRaceStore);
+    refAuthorityRaceStore.createCommit = async (input) => {
+      const oid = await createCommit(input);
+      commitPrepared = true;
+      return oid;
+    };
+    const assertRefAuthority = vi.fn(async () => {
+      if (refAuthorityRaceStore.refs.get("refs/heads/main") !== base.oid)
+        throw new Error("workflow authority changed before ref publication");
+    });
+    await expect(
+      publishValidated({
+        ...args,
+        store: refAuthorityRaceStore,
+        assertLease: async () => {
+          if (
+            commitPrepared &&
+            !refBaseAdvanced &&
+            ![...refAuthorityRaceStore.refs.keys()].some((ref) => ref !== "refs/heads/main")
+          ) {
+            refBaseAdvanced = true;
+            refAuthorityRaceStore.refs.set("refs/heads/main", "9".repeat(40));
+          }
+        },
+        beforeRefMutation: assertRefAuthority,
+      }),
+    ).rejects.toThrow(/workflow authority changed before ref publication/i);
+    expect(refBaseAdvanced).toBe(true);
+    expect(assertRefAuthority).toHaveBeenCalledTimes(1);
+    expect([...refAuthorityRaceStore.refs.keys()].some((ref) => ref !== "refs/heads/main")).toBe(
+      false,
+    );
+    expect(refAuthorityRaceStore.pull).toBeNull();
+
+    const pullAuthorityRaceStore = new GitObjectStore(repository, base.oid);
+    let publicationPhaseLeaseReads = 0;
+    let pullBaseAdvanced = false;
+    const assertPullAuthority = vi.fn(async () => {
+      if (pullAuthorityRaceStore.refs.get("refs/heads/main") !== base.oid)
+        throw new Error("workflow authority changed before pull-request publication");
+    });
+    await expect(
+      publishValidated({
+        ...args,
+        store: pullAuthorityRaceStore,
+        assertLease: async () => {
+          const branchExists = [...pullAuthorityRaceStore.refs.keys()].some(
+            (ref) => ref !== "refs/heads/main",
+          );
+          if (branchExists && ++publicationPhaseLeaseReads === 2) {
+            pullBaseAdvanced = true;
+            pullAuthorityRaceStore.refs.set("refs/heads/main", "9".repeat(40));
+          }
+        },
+        beforePullRequestMutation: assertPullAuthority,
+      }),
+    ).rejects.toThrow(/workflow authority changed before pull-request publication/i);
+    expect(pullBaseAdvanced).toBe(true);
+    expect(assertPullAuthority).toHaveBeenCalledTimes(1);
+    expect([...pullAuthorityRaceStore.refs.keys()].some((ref) => ref !== "refs/heads/main")).toBe(
+      true,
+    );
+    expect(pullAuthorityRaceStore.pull).toBeNull();
     await discardValidationResult(validation);
     await rm(repository, { recursive: true, force: true });
   });

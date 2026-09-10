@@ -21,6 +21,7 @@ async function completedBeforeOutage() {
     this: CompiledGraphManager,
     args,
   ) {
+    if ("source" in args) return persist.call(this, args);
     return persist.call(this, {
       ...args,
       compilation: args.compilation ?? {
@@ -32,6 +33,7 @@ async function completedBeforeOutage() {
   });
   const f = await providerSupervisorFixture("daytona-burst", {
     controllerActivation: true,
+    dependencyChain: true,
     localOnly: true,
   });
   const hostIdentity = "b".repeat(64);
@@ -194,16 +196,7 @@ describe("completion-only restart beyond the original Objective deadline", () =>
         }
         expect(await f.run()).toMatchObject({
           status: "escalated",
-          // Without the original review, the activation's own-trunk proof fails
-          // before the completion-only gate may acquire any run authority.
-          ...(fault === "missing-review"
-            ? {
-                runId: "not-started",
-                reason: expect.stringMatching(
-                  /^activation fixture-activation is stale: main advanced from [a-f0-9]{40} to [a-f0-9]{40}; reactivate against the new head$/,
-                ),
-              }
-            : { reason: "Objective timeout exhausted" }),
+          reason: "Objective timeout exhausted",
         });
         expect(f.snapshot.closed).toBe(false);
         expect(f.activity).toEqual(f.before);

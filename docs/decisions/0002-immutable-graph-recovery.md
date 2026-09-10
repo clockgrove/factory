@@ -54,10 +54,21 @@ durable dispatch/actual-usage pair for that invocation. Historical graph copies 
 compilation claim. After body projection, an authenticated `GraphProjected` receipt may finish
 publishing only the exact staged projection blob it already names.
 
+An immutable graph may contain Factory-derived repository-capability provisions and requirements
+for operations created by an ancestor artifact. Those bindings are canonical plan provenance, not a
+snapshot of executable authority. Fresh compilation, graph loading, historical graph copying, and
+projection all use the registered adapter derivation and reject coordinated binding tampering before
+any new durable write. Recovery reuses the same graph and compilation accounting, but each deferred
+consumer must still wait for its provider generation and obtain a new exact-base activation proof
+before reservation. A human merge can therefore make a planned operation available without a
+second compiler invocation; it cannot change the operation, provider, scope, or graph generation.
+
 ## Consequences
 
 - Recovery after a durable graph is deterministic and never needs a model call; the explicit
   graphless-adoption bootstrap permits one constrained, durably admitted compilation.
+- Planned descendant operations may become executable after an exact human-integrated provider
+  artifact without recompilation, while exact-base grounding remains fresh and fail-closed.
 - Existing issue and attempt history keeps one auditable meaning.
 - Factory can safely repair a response-lost graph write without duplicating valid work.
 - A moved or replaced sub-issue cannot inherit another compiler ID's receipts after restart.

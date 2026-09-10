@@ -1,4 +1,4 @@
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { executionAffectingReason } from "../approval.js";
 import {
@@ -18,7 +18,8 @@ import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/proc
 import { verifyValidationEvidence } from "../validation/evidence.js";
 import {
   assertBootstrapPackageValidation,
-  isBootstrapDependencySurface,
+  assertEstablishedPnpmValidation,
+  isPermittedSensitiveArtifactSurface,
 } from "../validation/clean-run.js";
 import type { ReviewContext } from "./backend.js";
 import { ReviewCheckoutCleanupError } from "./backend.js";
@@ -58,6 +59,12 @@ export async function withVerifiedReviewCheckout<T>(
     () => true,
     () => false,
   );
+  const basePackageManifest = basePackageJsonPresent
+    ? (JSON.parse(await readFile(join(worktree.path, "package.json"), "utf8")) as Record<
+        string,
+        unknown
+      >)
+    : null;
   const deadline = Date.now() + 120_000;
   const git = async (args: string[]) => {
     const remaining = deadline - Date.now();
@@ -111,15 +118,22 @@ export async function withVerifiedReviewCheckout<T>(
     )
       throw new Error("semantic review materialized tree differs from validated output tree");
     await verifyMaterializedFiles(worktree.path, manifest);
-    const bootstrapValidation = basePackageJsonPresent
-      ? null
+    const pnpmValidation = basePackageJsonPresent
+      ? await assertEstablishedPnpmValidation(
+          worktree,
+          input.packet,
+          input.packet.validationCommands,
+          artifact.changedPaths.includes("package.json") ? basePackageManifest! : undefined,
+          artifact.changedPaths.includes("package.json") ? input.packet.allowedPaths : undefined,
+        )
       : await assertBootstrapPackageValidation(
           worktree,
           artifact,
           input.packet,
           input.packet.validationCommands,
         );
-    if (sensitive.length > 0 && !isBootstrapDependencySurface(sensitive, bootstrapValidation))
+    const packageValidation = pnpmValidation;
+    if (sensitive.length > 0 && !isPermittedSensitiveArtifactSurface(sensitive, packageValidation))
       throw new Error("semantic review artifact touches a sensitive surface");
     return await review(worktree.path);
   } catch (error) {

@@ -9,7 +9,7 @@ import { durableAttemptId } from "../src/execution/session.js";
 import { workerPacketFromCompiled, type CompiledObjective } from "../src/graph.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
-import { workerPacketDigest } from "../src/protocol/worker-packet.js";
+import { parseWorkerPacket, workerPacketDigest } from "../src/protocol/worker-packet.js";
 import type { LocalScopeBatch } from "../src/protocol/local-scope.js";
 import type { RecoveryReadStore } from "../src/recovery/assessment.js";
 import { deriveForegroundCompletion } from "../src/recovery/foreground-completion.js";
@@ -26,6 +26,12 @@ import {
   observeLocalScopeBatch,
 } from "../src/recovery/scope-resources.js";
 import { localScopeUnit, type LocalScopeReadPort } from "../src/runtime/local-scope.js";
+import { activeRuntimeBundleSync } from "../src/runtime/toolchain-store.js";
+import {
+  createManagedRuntimeActivation,
+  TOOLCHAIN_AUTHORITY_ADAPTERS,
+} from "../src/toolchains/authority.js";
+import { validationLocalCommandCount } from "../src/validation/plan.js";
 
 const sha = (c: string) => c.repeat(40);
 const digest = (c: string) => c.repeat(64);
@@ -33,7 +39,7 @@ const now = new Date("2026-09-05T00:00:00Z");
 const policy = structuredClone(DEFAULT_RUN_POLICY);
 const pd = policyDigest(policy);
 
-async function fixture(backend = "codex-sdk/local-worktree") {
+async function fixture(backend = "codex-sdk/local-worktree", managedRuntime = false) {
   const refs = new Map<string, string>(),
     commits = new Map<string, GitCommitObject>(),
     blobs = new Map<string, Buffer>(),
@@ -108,17 +114,25 @@ async function fixture(backend = "codex-sdk/local-worktree") {
         conventions: [],
         dependsOn: [],
         baseSha: base.oid,
-        validationCommands: ["node --test test/work.test.js"],
+        validationCommands: managedRuntime ? ["pnpm test"] : ["node --test test/work.test.js"],
         requirements: {
           os: [],
           architecture: [],
-          tools: ["node"],
+          tools: managedRuntime ? ["node", "pnpm"] : ["node"],
           services: [],
-          networkDestinations: [],
+          networkDestinations: managedRuntime ? ["registry.npmjs.org"] : [],
           permittedSecretNames: [],
           trust: "trusted_local",
         },
         artifactContract: "clockgrove.factory/artifact-v1",
+        ...(managedRuntime
+          ? {
+              managedRuntimes: [
+                TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-pnpm")!
+                  .runtimeRequirement!,
+              ],
+            }
+          : {}),
       },
     ],
   };
@@ -133,6 +147,24 @@ async function fixture(backend = "codex-sdk/local-worktree") {
     graph,
     bindings: [{ compilerId: "work", issueNodeId: "I_8", issueNumber: 8 }],
   });
+  const abstractPacket = workerPacketFromCompiled(objective.workItems[0]!);
+  const selectedPacket = managedRuntime
+    ? parseWorkerPacket({
+        ...abstractPacket,
+        managedRuntimes: abstractPacket.managedRuntimes!.map((requirement) => ({
+          ...requirement,
+          bundleDigest: activeRuntimeBundleSync(requirement.tool).digest,
+        })),
+      })
+    : abstractPacket;
+  const managedRuntimeActivation = managedRuntime
+    ? createManagedRuntimeActivation({
+        packet: selectedPacket,
+        baseSha: base.oid,
+        sourceRef: "refs/heads/main",
+        proofDigests: [],
+      })
+    : undefined;
   const execution: LocalScopeBatch = {
     identity: {
       protocol: "clockgrove.factory/local-scope-v1",
@@ -145,7 +177,7 @@ async function fixture(backend = "codex-sdk/local-worktree") {
       policyDigest: pd,
       phase: "execution",
       commandIndex: 0,
-      invocationDigest: workerPacketDigest(workerPacketFromCompiled(objective.workItems[0]!)),
+      invocationDigest: workerPacketDigest(selectedPacket),
       hostIdentity: digest("c"),
     },
     commandCount: 1,
@@ -156,7 +188,7 @@ async function fixture(backend = "codex-sdk/local-worktree") {
   const validation: LocalScopeBatch = {
     ...structuredClone(execution),
     identity: { ...execution.identity, phase: "validation", invocationDigest: digest("d") },
-    commandCount: 2,
+    commandCount: validationLocalCommandCount(selectedPacket),
   };
   const events: FactoryEvent[] = [];
   const add = (sequence: number, fields: Record<string, unknown>) => {
@@ -231,7 +263,10 @@ async function fixture(backend = "codex-sdk/local-worktree") {
       ...fields,
     });
   // Captured ordinary source order: cap22 -> collected24 -> validation26.
-  const reserved = attempt(9, "AttemptReserved", { localScopeBatch: execution });
+  const reserved = attempt(9, "AttemptReserved", {
+    localScopeBatch: execution,
+    ...(managedRuntimeActivation ? { managedRuntimeActivation } : {}),
+  });
   const reservationOid = next();
   const writeReservation = () =>
     commits.set(reservationOid, {
@@ -518,6 +553,18 @@ describe("completed original foreground invocation witness", () => {
       );
     },
   );
+  it("reconstructs the exact selected managed-runtime packet from its immutable activation", async () => {
+    const f = await fixture("codex-sdk/local-worktree", true);
+    f.events.push(structuredClone(f.reserved));
+    await expect(deriveForegroundCompletion({ ...f, batch: f.execution })).resolves.toMatch(
+      /^[a-f0-9]{64}$/,
+    );
+    expect(f.reserved).toMatchObject({
+      managedRuntimeActivation: {
+        packetDigest: f.execution.identity.invocationDigest,
+      },
+    });
+  });
   it.each([
     "AttemptSucceeded",
     "AttemptCollected",

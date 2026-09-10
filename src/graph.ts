@@ -46,13 +46,21 @@ import {
   CriterionRiskAssessmentSchema,
   DeliveryHintSchema,
   ExecutionRequirementsSchema,
+  RepositoryCapabilityBindingsSchema,
   RepositoryScopePathSchema,
+  RuntimeBundleRequirementSchema,
   ValidationDesignSchema,
   parseWorkerPacket,
   type ExecutionRequirements,
+  type RepositoryCapabilityBindings,
   type WorkerPacket,
 } from "./protocol/worker-packet.js";
 import { assertWithinBytes } from "./protocol/limits.js";
+import { validateCapabilityGraphBindings } from "./repository-capabilities/model.js";
+import {
+  DEFERRED_CAPABILITY_ADAPTERS,
+  managedRuntimeRequirements,
+} from "./toolchains/authority.js";
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
@@ -110,6 +118,8 @@ export interface CompiledWorkItem {
         paidMeasurementRequired: boolean;
       }
     | undefined;
+  repositoryCapabilities?: RepositoryCapabilityBindings | undefined;
+  managedRuntimes?: z.infer<typeof RuntimeBundleRequirementSchema>[] | undefined;
 }
 
 /** Matches `schemas/objective.schema.json` — the objective-compilation skill's output. */
@@ -487,6 +497,8 @@ const PersistedCompiledWorkItemSchema = z
       })
       .strict()
       .optional(),
+    repositoryCapabilities: RepositoryCapabilityBindingsSchema.optional(),
+    managedRuntimes: z.array(RuntimeBundleRequirementSchema).min(1).max(8).optional(),
   })
   .strict();
 
@@ -499,7 +511,7 @@ const PersistedCompiledObjectiveSchema = z
 
 export function parsePersistedCompiledObjective(input: unknown): CompiledObjective {
   const objective = PersistedCompiledObjectiveSchema.parse(input);
-  validateGraph(objective);
+  validateGraphShape(objective, true);
   return objective;
 }
 
@@ -520,7 +532,10 @@ export interface CreatedWorkItem {
  * GitHub issue exists. Throws with a message naming the specific violation;
  * never partially applies a graph it has rejected.
  */
-export function validateGraph(objective: CompiledObjective): void {
+function validateGraphShape(
+  objective: CompiledObjective,
+  allowLegacyManagedRuntimeOmission: boolean,
+): void {
   if (objective.workItems.length < 1 || objective.workItems.length > 100) {
     throw new Error("compiled Objective must contain between 1 and 100 Work Items");
   }
@@ -531,7 +546,6 @@ export function validateGraph(objective: CompiledObjective): void {
     }
     ids.add(wi.id);
   }
-
   for (const wi of objective.workItems) {
     for (const dep of wi.dependsOn) {
       if (!ids.has(dep)) {
@@ -585,12 +599,34 @@ export function validateGraph(objective: CompiledObjective): void {
     }
   }
 
+  validateCapabilityGraphBindings(objective.workItems, DEFERRED_CAPABILITY_ADAPTERS);
+
   for (const wi of objective.workItems) {
+    if (wi.validationCommands) {
+      const expectedRuntimes = managedRuntimeRequirements(wi.validationCommands);
+      if ((wi.managedRuntimes ?? []).some(({ bundleDigest }) => bundleDigest !== undefined))
+        throw new Error(`Work Item ${wi.id} immutable graph selected a managed runtime bundle`);
+      if (
+        !(
+          allowLegacyManagedRuntimeOmission &&
+          wi.managedRuntimes === undefined &&
+          expectedRuntimes.length > 0
+        ) &&
+        JSON.stringify(wi.managedRuntimes ?? []) !== JSON.stringify(expectedRuntimes)
+      )
+        throw new Error(
+          `Work Item ${wi.id} managed runtime contract differs from canonical host derivation: observed ${JSON.stringify(wi.managedRuntimes ?? [])}; expected ${JSON.stringify(expectedRuntimes)}`,
+        );
+    }
     const v2Fields = [wi.baseSha, wi.validationCommands, wi.requirements, wi.artifactContract];
     if (v2Fields.some((value) => value !== undefined)) {
       workerPacketFromCompiled(wi);
     }
   }
+}
+
+export function validateGraph(objective: CompiledObjective): void {
+  validateGraphShape(objective, false);
 }
 
 const WORKER_PACKET_MARKER = "clockgrove-factory:worker-packet";
@@ -637,7 +673,7 @@ export function serializeCompiledObjective(objective: CompiledObjective): Buffer
 }
 
 export function compiledGraphDigest(objective: CompiledObjective): string {
-  validateGraph(objective);
+  validateGraphShape(objective, true);
   return createHash("sha256").update(canonical(objective)).digest("hex");
 }
 
@@ -682,7 +718,23 @@ export function workerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
     ...(wi.criterionRisks ? { criterionRisks: wi.criterionRisks } : {}),
     ...(wi.delivery ? { delivery: wi.delivery } : {}),
     ...(wi.validation ? { validation: wi.validation } : {}),
+    ...(wi.repositoryCapabilities ? { repositoryCapabilities: wi.repositoryCapabilities } : {}),
+    ...(wi.managedRuntimes ? { managedRuntimes: wi.managedRuntimes } : {}),
   });
+}
+
+/**
+ * Construct the non-persisted execution view of an authenticated historical
+ * graph. Older graphs predate the host-derived top-level runtime contract, so
+ * omission alone may be adapted to the current abstract contract. The raw
+ * graph, digest, projection, and rendered issue body remain byte-for-byte
+ * unchanged; selected bundle data is never synthesized here.
+ */
+export function executionWorkerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
+  const packet = workerPacketFromCompiled(wi);
+  if (wi.managedRuntimes !== undefined) return packet;
+  const managedRuntimes = managedRuntimeRequirements(packet.validationCommands);
+  return managedRuntimes.length === 0 ? packet : parseWorkerPacket({ ...packet, managedRuntimes });
 }
 
 export function encodeWorkerPacket(packet: WorkerPacket): string {

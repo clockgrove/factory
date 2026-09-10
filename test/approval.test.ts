@@ -1,6 +1,11 @@
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  EXECUTION_AFFECTING_GIT_PATHS,
   assessBlastRadius,
   referencedSecretNames,
   triggersOnPullRequest,
@@ -130,6 +135,43 @@ describe("assessBlastRadius", () => {
     it("reports every offending path, not just the first", () => {
       const verdict = assess([".github/workflows/ci.yml", "package.json", ".npmrc"]);
       expect(verdict.blockers).toHaveLength(3);
+    });
+
+    it("keeps the exact merge-boundary Git pathspec aligned with classification", async () => {
+      const repository = await mkdtemp(join(tmpdir(), "factory-sensitive-pathspec-"));
+      const sensitive = [
+        ".GitHub/Workflows/CI.yml",
+        "Package.JSON",
+        "packages/api/uv.lock",
+        "config/PIP.CONF",
+        "tools/action.yaml",
+      ];
+      const ordinary = "src/package.json.md";
+      try {
+        execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repository });
+        execFileSync("git", ["config", "user.name", "Factory Test"], { cwd: repository });
+        execFileSync("git", ["config", "user.email", "factory@example.invalid"], {
+          cwd: repository,
+        });
+        for (const path of [...sensitive, ordinary]) {
+          await mkdir(dirname(join(repository, path)), { recursive: true });
+          await writeFile(join(repository, path), "before\n");
+        }
+        execFileSync("git", ["add", "."], { cwd: repository });
+        execFileSync("git", ["commit", "-qm", "base"], { cwd: repository });
+        for (const path of [...sensitive, ordinary])
+          await writeFile(join(repository, path), "after\n");
+        const matched = execFileSync(
+          "git",
+          ["diff", "--no-renames", "--name-only", "HEAD", "--", ...EXECUTION_AFFECTING_GIT_PATHS],
+          { cwd: repository, encoding: "utf8" },
+        )
+          .trim()
+          .split("\n");
+        expect(matched.sort()).toEqual(sensitive.sort());
+      } finally {
+        await rm(repository, { recursive: true, force: true });
+      }
     });
   });
 

@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { LeaseManager, type LeaseState } from "../src/control/lease.js";
 import { observeLeaseAssertion } from "../src/control/mutation-observation.js";
-import { ContentCreationPacer, MutationScheduler } from "../src/platform.js";
+import { ConcurrencyLimiter, ContentCreationPacer, MutationScheduler } from "../src/platform.js";
 
 function deferred() {
   let resolve!: () => void;
@@ -95,6 +95,78 @@ it("captures Objective authority before quota queueing and rejects stale queued 
       readRequests: 0,
       outcome: "failed",
     }),
+  ]);
+});
+
+it("runs publication safety after the queued Objective fence and before transport", async () => {
+  const mutations = scheduler();
+  const blocker = await mutations.acquire();
+  const order: string[] = [];
+  let baseSafe = true;
+  let transports = 0;
+  const store = new GitHubControlStore({
+    token: "publication-safety-fixture",
+    owner: "fixture",
+    repo: "project",
+    mutationScheduler: mutations,
+    concurrency: new ConcurrencyLimiter(1),
+    captureMutationFence: () => async () => {
+      order.push("objective-authority");
+      observeLeaseAssertion();
+    },
+    beforeMutation: async () => {
+      order.push("shared-mutation-fence");
+    },
+    requestFetch: async (_input, init) => {
+      if (init?.method === "GET") {
+        order.push("publication-safety-read");
+        return new Response(
+          JSON.stringify({ object: { sha: baseSafe ? "a".repeat(40) : "b".repeat(40) } }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      transports++;
+      order.push("transport");
+      return response();
+    },
+  });
+  const pending = store.withPublicationSafetyFence(
+    async () => {
+      order.push("publication-safety");
+      if ((await store.readRef("refs/heads/main")) !== "a".repeat(40))
+        throw new Error("unsafe protected-base advance");
+    },
+    () => publish(store),
+  );
+  baseSafe = false;
+  blocker.release();
+  await expect(pending).rejects.toThrow("unsafe protected-base advance");
+  expect(order).toEqual([
+    "objective-authority",
+    "shared-mutation-fence",
+    "publication-safety",
+    "publication-safety-read",
+  ]);
+  expect(transports).toBe(0);
+  expect(store.mutationOperationTelemetry().records).toEqual([
+    expect.objectContaining({
+      operation: "createRef",
+      leaseAssertions: 1,
+      mutationRequests: 0,
+      outcome: "failed",
+    }),
+  ]);
+
+  await publish(store, "hold-receipt");
+  expect(transports).toBe(1);
+  expect(order).toEqual([
+    "objective-authority",
+    "shared-mutation-fence",
+    "publication-safety",
+    "publication-safety-read",
+    "objective-authority",
+    "shared-mutation-fence",
+    "transport",
   ]);
 });
 

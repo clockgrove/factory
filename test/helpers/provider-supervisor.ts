@@ -7,11 +7,16 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { vi } from "vitest";
-import { FactorySupervisor, createRepositorySupervisorResources } from "../../src/supervisor.js";
+import {
+  FactorySupervisor,
+  createRepositorySupervisorResources,
+  type SupervisorOptions,
+} from "../../src/supervisor.js";
 import { GitHubReader } from "../../src/github.js";
 import { GitHubControlStore } from "../../src/control/github-store.js";
 import { CompiledGraphManager, type CompiledGraphStore } from "../../src/control/graphs.js";
 import { LeaseManager, type GitCommitObject, type LeaseState } from "../../src/control/lease.js";
+import { IssueAdmissionLedger } from "../../src/control/issue-admission.js";
 import { decodeEventComments } from "../../src/control/receipts.js";
 import {
   DEFAULT_RUN_POLICY,
@@ -34,6 +39,7 @@ import { validateArtifactClean, discardValidationResult } from "../../src/valida
 import type { ObjectiveSnapshot, LinkedPullRequest } from "../../src/types.js";
 import { GitHubStacks } from "../../src/publication/github-stacks.js";
 import { PlatformUnavailableError } from "../../src/platform.js";
+import { TOOLCHAIN_AUTHORITY_ADAPTERS } from "../../src/toolchains/authority.js";
 import * as artifactTransfers from "../../src/control/artifact-transfers.js";
 import { pnpmBootstrapLock } from "./pnpm-bootstrap.js";
 
@@ -43,12 +49,16 @@ export const COPILOT = "github-copilot/github-managed";
 export const CODEX = "openai-codex/github-managed";
 export type ProviderScenario = "daytona-burst" | "copilot-objective" | "codex-objective";
 const pendingFixtureRetirements = new Set<object>();
+const PNPM_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-pnpm")!
+  .runtimeRequirement!;
 export interface ProviderFaults {
   compilerEvaluation?: RunPolicy["compilerEvaluation"];
   repositoryFence?: () => Promise<void>;
   configureLocalBackend?: (backend: ExecutionBackend) => ExecutionBackend;
   controllerActivation?: boolean;
   afterIntegration?: () => void;
+  waitForSiblingLaunchBeforeIntegration?: boolean;
+  holdSiblingDispatchUntilIntegrationFailure?: boolean;
   localOnly?: boolean;
   maxAttemptsPerItem?: number;
   noModelTokenBudget?: boolean;
@@ -75,6 +85,19 @@ export interface ProviderFaults {
   nativeRebaseReviewRejects?: boolean;
   nativeRebaseBudgetExhaustion?: boolean;
   greenfieldBootstrap?: boolean;
+  greenfieldLifecycle?: boolean;
+  pnpmUnavailable?: boolean;
+  capabilityAdmission?: "valid" | "unsafe";
+  capabilityProviderLineageMismatch?: boolean;
+  capabilityProviderLineageMismatchAfterReservation?: boolean;
+  capabilityProviderReservationCommentMismatch?: boolean;
+  capabilitySourceRefRace?: boolean;
+  capabilitySourceRefRaceAfterReservation?: boolean;
+  workflowArtifact?: "safe" | "unsafe";
+  workflowPublicationCrash?: boolean;
+  capabilityConsumerPublicationCrash?: boolean;
+  workflowLiveBaseUnsafe?: boolean | "create" | "push";
+  afterWorkflowCandidatePreparedSnapshot?: () => Promise<void>;
 }
 
 export async function providerSupervisorFixture(
@@ -108,6 +131,27 @@ export async function providerSupervisorFixture(
   git("config", "user.email", "fixture@example.invalid");
   git("remote", "add", "origin", "https://github.com/fixture/provider-qualification.git");
   await writeFile(join(repository, "README.md"), "Disposable provider qualification fixture\n");
+  if (faults.capabilityAdmission) {
+    await mkdir(join(repository, "test"));
+    await writeFile(join(repository, "test/check.js"), "// exact-base capability fixture\n");
+    await writeFile(
+      join(repository, "package.json"),
+      JSON.stringify({
+        name: "capability-admission-fixture",
+        version: "1.0.0",
+        private: true,
+        packageManager: "pnpm@10.34.5",
+        scripts: {
+          test: "node --test test/check.js",
+          check: "node --test test/check.js",
+        },
+      }),
+    );
+    await writeFile(
+      join(repository, "pnpm-lock.yaml"),
+      "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
+    );
+  }
   if (faults.compilerEvaluation)
     await writeFile(
       join(repository, "package.json"),
@@ -167,6 +211,16 @@ export async function providerSupervisorFixture(
   });
   const pd = policyDigest(policy);
   const refs = new Map<string, string>();
+  let workflowPublicationCrash = Boolean(faults.workflowPublicationCrash);
+  let workflowCandidatePrepared = false;
+  let workflowLiveBaseMutated = false;
+  let capabilityProviderIntegrated = false;
+  let capabilityConsumerReserved = false;
+  let capabilitySourceRefReads = 0;
+  let releaseSiblingLaunch!: () => void;
+  const siblingLaunch = new Promise<void>((resolve) => {
+    releaseSiblingLaunch = resolve;
+  });
   const readCommit = async (oid: string): Promise<GitCommitObject> => {
     // One fresh immutable read, not three subprocesses per ledger observation.
     // Split only the metadata delimiters so the full message stays unchanged.
@@ -186,11 +240,69 @@ export async function providerSupervisorFixture(
     };
   };
   const storage: CompiledGraphStore = {
-    readRef: async (ref) => refs.get(ref) ?? null,
+    readRef: async (ref) => {
+      let current = refs.get(ref) ?? (ref === "refs/heads/main" ? git("rev-parse", "main") : null);
+      if (
+        current &&
+        ref === "refs/heads/main" &&
+        faults.workflowLiveBaseUnsafe &&
+        workflowCandidatePrepared &&
+        !workflowLiveBaseMutated
+      ) {
+        workflowLiveBaseMutated = true;
+        await mkdir(join(repository, ".github/workflows"), { recursive: true });
+        const liveTrigger =
+          faults.workflowLiveBaseUnsafe === "create"
+            ? "create:"
+            : faults.workflowLiveBaseUnsafe === "push"
+              ? "push:"
+              : "pull_request_target:";
+        await writeFile(
+          join(repository, ".github/workflows/ci.yml"),
+          `name: Base CI\non:\n  ${liveTrigger}\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n`,
+        );
+        git("add", ".github/workflows/ci.yml");
+        git("commit", "-qm", "simulate unsafe live workflow");
+        current = git("rev-parse", "main");
+      }
+      if (
+        current &&
+        ref === "refs/heads/main" &&
+        faults.capabilitySourceRefRace &&
+        capabilityProviderIntegrated &&
+        ++capabilitySourceRefReads === 2
+      ) {
+        const advanced = rawGit(
+          ["commit-tree", git("rev-parse", `${current}^{tree}`), "-p", current],
+          "simulated protected ref advance",
+        ).trim();
+        refs.set(ref, advanced);
+      }
+      return current;
+    },
     readCommit,
     readBlob: async (oid) => Buffer.from(rawGit(["cat-file", "blob", oid])),
     readTreeEntry: async (oid, path) => git("ls-tree", oid, "--", path).split(/\s+/)[2] ?? null,
-    createBlob: async (bytes) => rawGit(["hash-object", "-w", "--stdin"], bytes).trim(),
+    createBlob: async (bytes) => {
+      if (bytes.toString("utf8").startsWith("name: CI\non:\n")) {
+        workflowCandidatePrepared = true;
+      }
+      if (workflowPublicationCrash && bytes.toString("utf8").startsWith("name: CI\non:\n")) {
+        workflowPublicationCrash = false;
+        throw new PlatformUnavailableError(
+          { kind: "server_error", retryAfterMs: 1 },
+          new Error("simulated publication transport outage before ref creation"),
+        );
+      }
+      if (faults.capabilityConsumerPublicationCrash && bytes.toString("utf8") === "consumer\n") {
+        faults.capabilityConsumerPublicationCrash = false;
+        throw new PlatformUnavailableError(
+          { kind: "server_error", retryAfterMs: 1 },
+          new Error("simulated consumer publication transport outage before ref creation"),
+        );
+      }
+      return rawGit(["hash-object", "-w", "--stdin"], bytes).trim();
+    },
     createTree: async ({ baseTreeOid, entries }) => {
       const index = join(repository, "fixture-tree-index");
       const indexed = (args: string[]) =>
@@ -286,48 +398,215 @@ export async function providerSupervisorFixture(
           : { group: id, relationship: index === 2 ? "join-after-merge" : "root" },
     })),
   };
-  const graph: CompiledObjective = faults.greenfieldBootstrap
-    ? {
-        title: "Greenfield bootstrap qualification",
-        workItems: [
-          {
-            id: "bootstrap",
-            title: "Bootstrap workspace",
-            goal: "Create a pinned workspace and deterministic check",
-            acceptance: ["the introduced workspace check passes"],
-            scope: [
-              "package.json",
-              "pnpm-lock.yaml",
-              "pnpm-workspace.yaml",
-              "turbo.json",
-              "packages/",
-            ],
-            preconditions: [],
-            outOfScope: [],
-            conventions: [],
-            dependsOn: [],
-            baseSha,
-            validationCommands: ["pnpm check"],
-            requirements: {
-              os: ["linux"],
-              architecture: [],
-              tools: ["node", "pnpm"],
-              services: [],
-              networkDestinations: ["registry.npmjs.org"],
-              permittedSecretNames: [],
-              trust: "trusted_local",
-              estimatedDurationMinutes: 1,
+  const capabilityGraph: CompiledObjective = {
+    title: "Exact-base capability admission qualification",
+    workItems: [
+      {
+        ...ordinaryGraph.workItems[0]!,
+        id: "provider",
+        title: "Integrate provider ancestry",
+        goal: "Create provider.txt containing provider",
+        acceptance: ["provider.txt has the expected text"],
+        scope: ["provider.txt", "package.json", "pnpm-lock.yaml", "test/"],
+        validationCommands: ["pnpm test"],
+        requirements: {
+          ...ordinaryGraph.workItems[0]!.requirements!,
+          tools: ["node", "pnpm"],
+          networkDestinations: ["registry.npmjs.org"],
+        },
+        managedRuntimes: [PNPM_RUNTIME_REQUIREMENT],
+        dependsOn: [],
+        delivery: { group: "provider", relationship: "root" },
+        repositoryCapabilities: {
+          provides: [
+            {
+              adapter: "node-pnpm",
+              generation: "node-pnpm/provider",
+              authorityPaths: ["package.json", "pnpm-lock.yaml"],
+              operations: [
+                { kind: "package-script", key: "check" },
+                { kind: "package-script", key: "test" },
+              ],
+              runtime: PNPM_RUNTIME_REQUIREMENT,
             },
-            artifactContract: "clockgrove.factory/artifact-v1",
-            delivery: { group: "bootstrap", relationship: "root" },
+          ],
+          requires: [
+            {
+              adapter: "node-pnpm",
+              generation: "node-pnpm/provider",
+              providerWorkItem: "provider",
+              authorityPaths: ["package.json", "pnpm-lock.yaml"],
+              operation: { kind: "package-script", key: "test" },
+              activation: "artifact",
+              runtime: PNPM_RUNTIME_REQUIREMENT,
+            },
+          ],
+        },
+      },
+      {
+        ...ordinaryGraph.workItems[1]!,
+        id: "consumer",
+        title: "Consume provider check",
+        goal: "Create consumer.txt containing consumer",
+        acceptance: ["consumer.txt has the expected text"],
+        scope: ["consumer.txt"],
+        validationCommands: ["pnpm check"],
+        requirements: {
+          ...ordinaryGraph.workItems[1]!.requirements!,
+          tools: ["node", "pnpm"],
+          networkDestinations: ["registry.npmjs.org"],
+        },
+        managedRuntimes: [PNPM_RUNTIME_REQUIREMENT],
+        dependsOn: ["provider"],
+        delivery: { group: "consumer", relationship: "sibling" },
+        repositoryCapabilities: {
+          provides: [],
+          requires: [
+            {
+              adapter: "node-pnpm",
+              generation: "node-pnpm/provider",
+              providerWorkItem: "provider",
+              authorityPaths: ["package.json", "pnpm-lock.yaml"],
+              operation: { kind: "package-script", key: "check" },
+              activation: "integrated-base",
+              runtime: PNPM_RUNTIME_REQUIREMENT,
+            },
+          ],
+        },
+      },
+      {
+        ...ordinaryGraph.workItems[2]!,
+        id: "independent",
+        title: "Implement independent",
+        goal: "Create independent.txt containing independent",
+        acceptance: ["independent.txt has the expected text"],
+        scope: ["independent.txt"],
+        validationCommands: ["node --test"],
+        dependsOn: faults.dependencyChain ? ["consumer"] : [],
+        delivery: { group: "independent", relationship: "root" },
+      },
+    ],
+  };
+  const workflowGraph: CompiledObjective = {
+    ...ordinaryGraph,
+    title: "Workflow publication-boundary qualification",
+    workItems: ordinaryGraph.workItems.map((item, index) =>
+      index === 0
+        ? {
+            ...item,
+            title: "Add bounded CI workflow",
+            goal: "Add a bounded CI workflow",
+            acceptance: ["The workflow validates the repository after protected-branch merge"],
+            scope: [".github/workflows/ci.yml"],
+          }
+        : item,
+    ),
+  };
+  const greenfieldRoot: CompiledObjective["workItems"][number] = {
+    id: "bootstrap",
+    title: "Bootstrap workspace",
+    goal: "Create a pinned workspace and deterministic check",
+    acceptance: ["the introduced workspace check passes"],
+    scope: ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "turbo.json", "packages/"],
+    preconditions: [],
+    outOfScope: [],
+    conventions: [],
+    dependsOn: [],
+    baseSha,
+    validationCommands: ["pnpm check"],
+    requirements: {
+      os: ["linux"],
+      architecture: [],
+      tools: ["node", "pnpm"],
+      services: [],
+      networkDestinations: ["registry.npmjs.org"],
+      permittedSecretNames: [],
+      trust: "trusted_local",
+      estimatedDurationMinutes: 1,
+    },
+    artifactContract: "clockgrove.factory/artifact-v1",
+    managedRuntimes: [PNPM_RUNTIME_REQUIREMENT],
+    delivery: { group: "bootstrap", relationship: "root" },
+    ...(faults.greenfieldLifecycle
+      ? {
+          repositoryCapabilities: {
+            provides: [
+              {
+                adapter: "node-pnpm",
+                generation: "node-pnpm/bootstrap",
+                authorityPaths: ["package.json", "pnpm-lock.yaml"],
+                operations: [{ kind: "package-script", key: "check" }],
+                runtime: PNPM_RUNTIME_REQUIREMENT,
+              },
+            ],
+            requires: [
+              {
+                adapter: "node-pnpm",
+                generation: "node-pnpm/bootstrap",
+                providerWorkItem: "bootstrap",
+                authorityPaths: ["package.json", "pnpm-lock.yaml"],
+                operation: { kind: "package-script", key: "check" },
+                activation: "artifact" as const,
+                runtime: PNPM_RUNTIME_REQUIREMENT,
+              },
+            ],
           },
-        ],
-      }
-    : ordinaryGraph;
-  const graphManager = new CompiledGraphManager(storage, {
+        }
+      : {}),
+  };
+  const graph: CompiledObjective =
+    faults.greenfieldBootstrap || faults.greenfieldLifecycle
+      ? {
+          title: "Greenfield bootstrap qualification",
+          workItems: [
+            greenfieldRoot,
+            ...(faults.greenfieldLifecycle
+              ? [
+                  {
+                    ...ordinaryGraph.workItems[1]!,
+                    id: "consumer",
+                    title: "Use integrated workspace check",
+                    goal: "Create consumer.txt containing consumer",
+                    acceptance: ["consumer.txt has the expected text"],
+                    scope: ["consumer.txt"],
+                    dependsOn: ["bootstrap"],
+                    validationCommands: ["pnpm check"],
+                    requirements: {
+                      ...ordinaryGraph.workItems[1]!.requirements!,
+                      tools: ["node", "pnpm"],
+                      networkDestinations: ["registry.npmjs.org"],
+                    },
+                    delivery: { group: "consumer", relationship: "sibling" as const },
+                    managedRuntimes: [PNPM_RUNTIME_REQUIREMENT],
+                    repositoryCapabilities: {
+                      provides: [],
+                      requires: [
+                        {
+                          adapter: "node-pnpm",
+                          generation: "node-pnpm/bootstrap",
+                          providerWorkItem: "bootstrap",
+                          authorityPaths: ["package.json", "pnpm-lock.yaml"],
+                          operation: { kind: "package-script", key: "check" },
+                          activation: "integrated-base" as const,
+                          runtime: PNPM_RUNTIME_REQUIREMENT,
+                        },
+                      ],
+                    },
+                  },
+                ]
+              : []),
+          ],
+        }
+      : faults.capabilityAdmission
+        ? capabilityGraph
+        : faults.workflowArtifact
+          ? workflowGraph
+          : ordinaryGraph;
+  const leases = {
     assertCurrent: async () => undefined,
     assertMutationAuthorized: async () => undefined,
-  } as unknown as LeaseManager);
+  } as unknown as LeaseManager;
+  const graphManager = new CompiledGraphManager(storage, leases);
   const graphRecord = await graphManager.persist({
     lease,
     base: await readCommit(baseSha),
@@ -435,6 +714,15 @@ export async function providerSupervisorFixture(
     );
   for (const name of Object.keys(storage) as Array<keyof CompiledGraphStore>)
     vi.spyOn(GitHubControlStore.prototype, name).mockImplementation(storage[name] as never);
+  // Transport methods are fixture-owned below, so preserve the production
+  // ordering contract explicitly: policy runs after dispatch admission and
+  // immediately before the mocked visible effect.
+  vi.spyOn(GitHubControlStore.prototype, "withPublicationSafetyFence").mockImplementation(
+    async (fence, operation) => {
+      await fence();
+      return operation();
+    },
+  );
   vi.spyOn(GitHubControlStore.prototype, "listRefs").mockImplementation(async (prefix) =>
     [...refs].filter(([ref]) => ref.startsWith(prefix)).map(([ref, oid]) => ({ ref, oid })),
   );
@@ -462,25 +750,77 @@ export async function providerSupervisorFixture(
     readCommit(refs.get(`refs/heads/${branch}`) ?? git("rev-parse", branch)),
   );
   let receiptTransportUnavailable = false;
+  let releaseSiblingDispatchWaiting!: () => void;
+  const siblingDispatchWaiting = new Promise<void>((resolve) => {
+    releaseSiblingDispatchWaiting = resolve;
+  });
+  let releaseIntegrationFailure!: (error: PlatformUnavailableError) => void;
+  const integrationFailure = new Promise<PlatformUnavailableError>((resolve) => {
+    releaseIntegrationFailure = resolve;
+  });
+  let releaseSiblingDispatchFailureObserved!: () => void;
+  const siblingDispatchFailureObserved = new Promise<void>((resolve) => {
+    releaseSiblingDispatchFailureObserved = resolve;
+  });
+  if (faults.holdSiblingDispatchUntilIntegrationFailure) {
+    const transitionIssueAdmission = IssueAdmissionLedger.prototype.transition;
+    vi.spyOn(IssueAdmissionLedger.prototype, "transition").mockImplementation(async function (
+      this: IssueAdmissionLedger,
+      args,
+    ) {
+      if (
+        faults.holdSiblingDispatchUntilIntegrationFailure &&
+        args.workItem === 9 &&
+        args.disposition === "dispatching"
+      ) {
+        releaseSiblingDispatchWaiting();
+        const error = await integrationFailure;
+        faults.holdSiblingDispatchUntilIntegrationFailure = false;
+        releaseSiblingDispatchFailureObserved();
+        throw error;
+      }
+      return transitionIssueAdmission.call(this, args);
+    });
+  }
   const retainedArtifactRoots = new Set<string>();
   vi.spyOn(GitHubControlStore.prototype, "addIssueComment").mockImplementation(
     async (node, body) => {
       const receipt = decodeEventComments(body);
       const integration = receipt.some((event) => event.event === "AttemptIntegrated");
       const loss = integration ? faults.loseIntegrationReceipt : undefined;
-      if (loss) {
-        delete faults.loseIntegrationReceipt;
-        receiptTransportUnavailable = true;
-      }
+      if (loss) delete faults.loseIntegrationReceipt;
       const unavailable = () =>
         new PlatformUnavailableError(
           { kind: "server_error", retryAfterMs: 1 },
           new Error("simulated integration receipt transport outage"),
         );
-      if (receiptTransportUnavailable && loss !== "after") throw unavailable();
+      const lossError = loss ? unavailable() : undefined;
+      const synchronizeSibling = Boolean(loss && faults.holdSiblingDispatchUntilIntegrationFailure);
+      if (synchronizeSibling) await siblingDispatchWaiting;
+      if (lossError) {
+        receiptTransportUnavailable = true;
+        releaseIntegrationFailure(lossError);
+        if (synchronizeSibling) await siblingDispatchFailureObserved;
+      }
+      if (receiptTransportUnavailable && loss !== "after") throw lossError ?? unavailable();
       const target =
         node === snapshot.id ? snapshot : snapshot.workItems.find((item) => item.id === node)!;
-      target.factoryEvents!.push(...receipt);
+      const recordedReceipt = receipt.map((event) =>
+        faults.capabilityProviderReservationCommentMismatch &&
+        event.kind === "attempt" &&
+        event.event === "AttemptReserved" &&
+        event.workItem === 8
+          ? parseFactoryEvent({ ...event, reason: "forged mutable reservation comment" })
+          : event,
+      );
+      target.factoryEvents!.push(...recordedReceipt);
+      if (
+        receipt.some(
+          (event) =>
+            event.kind === "attempt" && event.event === "AttemptIntegrated" && event.workItem === 8,
+        )
+      )
+        capabilityProviderIntegrated = true;
       // Fault tests can remove receipts later; retain only the cleanup identity,
       // derived from reservations this fixture itself successfully recorded.
       for (const event of receipt) {
@@ -506,6 +846,18 @@ export async function providerSupervisorFixture(
         retainedArtifactRoots.add(
           join(tmpdir(), `factory-collected-${process.getuid?.() ?? "unknown"}-${digest}`),
         );
+        if (event.workItem === 9) {
+          capabilityConsumerReserved = true;
+          if (faults.capabilitySourceRefRaceAfterReservation) {
+            const ref = "refs/heads/main";
+            const current = refs.get(ref) ?? git("rev-parse", "main");
+            const advanced = rawGit(
+              ["commit-tree", git("rev-parse", `${current}^{tree}`), "-p", current],
+              "simulated protected ref advance after reservation",
+            ).trim();
+            refs.set(ref, advanced);
+          }
+        }
       }
       if (loss === "after") throw unavailable();
       if (integration) faults.afterIntegration?.();
@@ -526,7 +878,12 @@ export async function providerSupervisorFixture(
         `bounded fixture snapshot budget exhausted: ${notifications.slice(-4).join("; ")}`,
       );
     snapshot.readAt = new Date();
+    if (workflowCandidatePrepared) await faults.afterWorkflowCandidatePreparedSnapshot?.();
     return structuredClone(snapshot);
+  });
+  vi.spyOn(GitHubReader.prototype, "readWorkflowSafetyProfile").mockResolvedValue({
+    defaultWorkflowPermissions: "read",
+    referencedSecrets: [],
   });
   vi.spyOn(GitHubReader.prototype, "resolveUserId").mockResolvedValue("U_operator");
   vi.spyOn(GitHubReader.prototype, "readRunCancellationRequest").mockResolvedValue(null);
@@ -598,9 +955,12 @@ export async function providerSupervisorFixture(
       body: "",
       changedLines: 1,
       changedFiles: 1,
-      changedFilePaths: faults.greenfieldBootstrap
-        ? bootstrapPaths
-        : [`${graph.workItems[workItem - 8]!.id}.txt`],
+      changedFilePaths:
+        (faults.greenfieldBootstrap || faults.greenfieldLifecycle) && workItem === 8
+          ? bootstrapPaths
+          : faults.workflowArtifact && workItem === 8
+            ? [".github/workflows/ci.yml"]
+            : [`${graph.workItems[workItem - 8]!.id}.txt`],
       commitSubjects: [item.title],
       checks: null,
       mergeable: "MERGEABLE",
@@ -646,10 +1006,13 @@ export async function providerSupervisorFixture(
   });
   vi.spyOn(GitHubControlStore.prototype, "readPullRequest").mockImplementation(async (number) => {
     const value = pulls.get(number)!;
-    const base = refs.get(`refs/heads/${value.baseRef}`) ?? git("rev-parse", value.baseRef);
-    const tree = git("merge-tree", "--write-tree", base, value.pull.headSha).split("\n")[0]!;
+    const currentBase = refs.get(`refs/heads/${value.baseRef}`) ?? git("rev-parse", value.baseRef);
+    const observedBase = value.merged
+      ? (await readCommit(value.merged)).parentOids[0]!
+      : currentBase;
+    const tree = git("merge-tree", "--write-tree", currentBase, value.pull.headSha).split("\n")[0]!;
     const preview = rawGit(
-      ["commit-tree", tree, "-p", base, "-p", value.pull.headSha],
+      ["commit-tree", tree, "-p", currentBase, "-p", value.pull.headSha],
       "simulated GitHub test merge",
     ).trim();
     return {
@@ -663,8 +1026,16 @@ export async function providerSupervisorFixture(
       mergeable: true,
       mergeableState: "clean",
       draft: false,
-      headSha: value.pull.headSha,
-      baseSha: base,
+      headSha:
+        (faults.capabilityProviderLineageMismatch ||
+          (faults.capabilityProviderLineageMismatchAfterReservation &&
+            capabilityConsumerReserved)) &&
+        capabilityProviderIntegrated &&
+        number === 108 &&
+        value.merged
+          ? "a".repeat(40)
+          : value.pull.headSha,
+      baseSha: observedBase,
       baseRef: value.baseRef,
       mergeCommitSha: value.merged ?? preview,
       createdAt: value.pull.createdAt,
@@ -676,6 +1047,9 @@ export async function providerSupervisorFixture(
   const mergePull = vi
     .spyOn(GitHubControlStore.prototype, "mergePullRequest")
     .mockImplementation(async ({ number, headSha }) => {
+      if (faults.waitForSiblingLaunchBeforeIntegration && number === 108) {
+        await siblingLaunch;
+      }
       git("merge", "--squash", headSha);
       git("commit", "-qm", `integrate ${number}`);
       const value = pulls.get(number)!;
@@ -781,7 +1155,11 @@ export async function providerSupervisorFixture(
       isolation: providerManaged ? "managed" : remote ? "container" : "process",
       supportedOs: ["linux"],
       supportedArchitectures: ["x64", "arm64"],
-      supportedTools: faults.greenfieldBootstrap ? ["node", "pnpm"] : ["node"],
+      supportedTools:
+        !faults.pnpmUnavailable &&
+        (faults.greenfieldBootstrap || faults.greenfieldLifecycle || faults.capabilityAdmission)
+          ? ["node", "pnpm"]
+          : ["node"],
       supportedServices: [],
       supportsCancellation: true,
       supportsObservation: true,
@@ -807,18 +1185,19 @@ export async function providerSupervisorFixture(
       }),
       launch: async (input) => {
         activity.push({ operation: "launch", backend: id, workItem: input.workItem });
+        if (input.workItem === 9) releaseSiblingLaunch();
         const resourceId = `${id}:${input.workItem}`;
         resources.add(resourceId);
         running.set(resourceId, input);
         const name = graph.workItems[input.workItem - 8]!.id;
-        if (faults.greenfieldBootstrap) {
+        if ((faults.greenfieldBootstrap || faults.greenfieldLifecycle) && input.workItem === 8) {
           await mkdir(join(input.workspace, "packages", "example"), { recursive: true });
           await writeFile(
             join(input.workspace, "package.json"),
             JSON.stringify({
               name: "greenfield",
               private: true,
-              packageManager: "pnpm@10.17.1",
+              packageManager: "pnpm@10.34.5",
               scripts: { check: "turbo run check" },
               devDependencies: { turbo: "2.5.6", typescript: "5.9.2" },
             }),
@@ -840,6 +1219,26 @@ export async function providerSupervisorFixture(
             JSON.stringify({ name: "example", scripts: { check: "tsc --noEmit" } }),
           );
           execFileSync("git", ["add", ...bootstrapPaths], { cwd: input.workspace });
+        } else if (faults.workflowArtifact && input.workItem === 8) {
+          await mkdir(join(input.workspace, ".github", "workflows"), { recursive: true });
+          await writeFile(
+            join(input.workspace, ".github", "workflows", "ci.yml"),
+            `name: CI
+on:
+  ${faults.workflowArtifact === "safe" ? "push:\n    branches:\n      - main" : "pull_request:"}
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@0123456789012345678901234567890123456789
+        with:
+          persist-credentials: false
+      - run: node --test
+`,
+          );
+          execFileSync("git", ["add", ".github/workflows/ci.yml"], { cwd: input.workspace });
         } else {
           await writeFile(join(input.workspace, `${name}.txt`), `${name}\n`);
           execFileSync("git", ["add", `${name}.txt`], { cwd: input.workspace });
@@ -911,9 +1310,12 @@ export async function providerSupervisorFixture(
         return normalizeArtifact({
           baseSha: input.packet.baseSha,
           patch,
-          changedPaths: faults.greenfieldBootstrap
-            ? bootstrapPaths
-            : [`${graph.workItems[input.workItem - 8]!.id}.txt`],
+          changedPaths:
+            (faults.greenfieldBootstrap || faults.greenfieldLifecycle) && input.workItem === 8
+              ? bootstrapPaths
+              : faults.workflowArtifact && input.workItem === 8
+                ? [".github/workflows/ci.yml"]
+                : [`${graph.workItems[input.workItem - 8]!.id}.txt`],
           commands: [],
           logs: "Simulated provider result",
           outcome: "succeeded",
@@ -1113,6 +1515,37 @@ export async function providerSupervisorFixture(
       );
       return run;
     },
+    runRecovery: (recovery: NonNullable<SupervisorOptions["recovery"]>, signal?: AbortSignal) => {
+      if (retirement.signal.aborted)
+        return Promise.reject(new Error("provider Supervisor fixture is already retiring"));
+      receiptTransportUnavailable = false;
+      const run = new FactorySupervisor({
+        token: "fixture-only",
+        owner: "fixture",
+        repo: "provider-qualification",
+        objective: 7,
+        repository,
+        policy,
+        managementBackend: management,
+        backendRegistry: registry,
+        repositoryResources: shared,
+        ...(faults.repositoryFence ? { repositoryFence: faults.repositoryFence } : {}),
+        pollIntervalMs: 20,
+        recovery,
+        signal: signal ? AbortSignal.any([signal, retirement.signal]) : retirement.signal,
+        onStatus: (message) => notifications.push(message),
+      }).run();
+      activeRuns.add(run);
+      void run.then(
+        () => activeRuns.delete(run),
+        () => activeRuns.delete(run),
+      );
+      return run;
+    },
+    storage,
+    leases,
+    lease,
+    baseSha,
     dispose: () => {
       if (disposal) return disposal;
       disposal = (async () => {

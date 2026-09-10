@@ -3,6 +3,20 @@ export interface ExecutionSettlement<Key> {
   error?: unknown;
 }
 
+/** A process-local settlement claimed by the Supervisor's single consumer.
+ * The wrapper preserves which child failed while preventing the final drain
+ * from interpreting the same outcome as a second, independent failure. */
+export class ClaimedExecutionFailure<Key> extends Error {
+  readonly settlement: ExecutionSettlement<Key>;
+
+  constructor(settlement: ExecutionSettlement<Key>) {
+    const cause = settlement.error;
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "ClaimedExecutionFailure";
+    this.settlement = settlement;
+  }
+}
+
 function delay(ms: number, signal?: AbortSignal): Promise<null> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(done, ms);
@@ -90,11 +104,13 @@ export class ContinuousExecutionPool<Key> {
     });
   }
 
-  /** A settled key is no longer active, but its failure is not recovery authority.
-   * Keep the outcome queued for final draining as well as synchronous admission fences. */
-  throwIfFailed(): void {
-    const failure = this.#completed.find((settlement) => settlement.error !== undefined);
-    if (failure) throw failure.error;
+  /** Atomically claim the next child failure before an admission/recovery fence.
+   * Claimed process state is never recovery authority; durable receipts still
+   * control restarts. Any later, independent settlement remains for drain. */
+  throwNextFailure(): void {
+    const index = this.#completed.findIndex((settlement) => settlement.error !== undefined);
+    if (index < 0) return;
+    throw new ClaimedExecutionFailure(this.#completed.splice(index, 1)[0]!);
   }
 
   async waitForChange(
@@ -111,8 +127,13 @@ export class ContinuousExecutionPool<Key> {
     return settlement;
   }
 
-  async settle(): Promise<ExecutionSettlement<Key>[]> {
+  /** Wait for physical child settlement without consuming any outcome. */
+  async waitForIdle(): Promise<void> {
     await Promise.all([...this.#active.values()]);
+  }
+
+  async settle(): Promise<ExecutionSettlement<Key>[]> {
+    await this.waitForIdle();
     return this.#completed.splice(0);
   }
 }

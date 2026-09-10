@@ -3,6 +3,7 @@ import { z } from "zod";
 import { RunPolicySchema } from "./policy.js";
 import { LocalScopeBatchSchema } from "./local-scope.js";
 import { ReportedModelUsageSchema } from "./model-usage.js";
+import { ManagedRuntimeActivationSchema } from "./worker-packet.js";
 export { ReportedModelUsageSchema, type ReportedModelUsage } from "./model-usage.js";
 import {
   MAX_PERSISTED_EVENT_BYTES,
@@ -368,6 +369,7 @@ const Attempt = Common.extend({
     .optional(),
   localScopeBatch: LocalScopeBatchSchema.optional(),
   artifactConsumer: ArtifactConsumerBindingSchema.optional(),
+  managedRuntimeActivation: ManagedRuntimeActivationSchema.optional(),
   artifactDigest: sha256Digest.optional(),
   headSha: gitSha.optional(),
   sessionId: boundedText(500).optional(),
@@ -401,6 +403,12 @@ const Attempt = Common.extend({
       message: "source archive digest and size must be recorded together",
     });
   const scopeBatch = event.localScopeBatch;
+  if (event.managedRuntimeActivation && event.event !== "AttemptReserved")
+    context.addIssue({
+      code: "custom",
+      path: ["managedRuntimeActivation"],
+      message: "managed runtime activation belongs only to an attempt reservation",
+    });
   if (
     event.artifactConsumer &&
     (event.event !== "AttemptReserved" ||

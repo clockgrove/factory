@@ -15,6 +15,7 @@ import type { WorkerPacket } from "../src/protocol/worker-packet.js";
 import type { ReviewResult } from "../src/management/backend.js";
 import { validateArtifactClean, discardValidationResult } from "../src/validation/clean-run.js";
 import { pnpmBootstrapLock } from "./helpers/pnpm-bootstrap.js";
+import { selectedManagedRuntimeRequirements } from "./helpers/managed-runtime.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -108,7 +109,7 @@ async function greenfieldFixture(unsafeLifecycle = false) {
     JSON.stringify({
       name: "greenfield",
       private: true,
-      packageManager: "pnpm@10.17.1",
+      packageManager: "pnpm@10.34.5",
       scripts: {
         check: "turbo run check",
         ...(unsafeLifecycle ? { precheck: "node --test escape.test.js" } : {}),
@@ -147,6 +148,7 @@ async function greenfieldFixture(unsafeLifecycle = false) {
     outOfScope: [],
     conventions: [],
     validationCommands: ["pnpm check"],
+    managedRuntimes: selectedManagedRuntimeRequirements(["pnpm check"]),
     artifactContract: "clockgrove.factory/artifact-v1",
     requirements: {
       os: ["linux"],

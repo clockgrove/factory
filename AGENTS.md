@@ -32,6 +32,39 @@ path.
 Pilot readiness and full release qualification are separate milestones. Never silently drop a
 release requirement, but do not make an unrelated release leaf block an earlier milestone.
 
+## Architecture oversight
+
+Do not let the agent that diagnosed an incident become the sole author and reviewer of the problem
+framing. Before implementation, obtain a fresh-context architecture review when any of these are
+true:
+
+- the change crosses three or more architectural layers, such as compilation, supervision,
+  scheduling, execution, validation, delivery, accounting, or recovery;
+- a provider, framework, language, package manager, or other concrete technology would enter shared
+  orchestration state or interfaces;
+- one incident-specific exception must be propagated through multiple modules;
+- repeated failures suggest that an earlier abstraction or invariant is wrong; or
+- the user asks for a holistic, systemic, permanent, or end-to-end fix.
+
+The reviewer must receive the failure evidence and product contracts without first inheriting the
+implementer's proposed solution. It must:
+
+1. restate the problem at the domain level without relying on incident-specific nouns;
+2. identify material assumptions and actively try to falsify the initial framing;
+3. compare at least two plausible designs and their second-order effects;
+4. test each design against adjacent technologies, providers, repositories, and lifecycle stages;
+5. distinguish a general core contract from adapters and explicitly unsupported capabilities; and
+6. reject technology-specific leakage into shared architecture unless the product contract makes
+   that technology fundamental.
+
+The implementer must reconcile the review before editing and record the selected model and rejected
+alternatives in the issue or applicable decision record. The reviewer has authority to block an
+implementation whose concrete regression would pass but whose framing remains overfit. Repeat the
+review after the first integrated diff, when names, state, and dependencies reveal abstraction
+leakage that was not visible in the proposal. A concrete regression is necessary evidence, not proof
+that the architecture is sound. "Smallest complete fix" means the smallest fix to the correct domain
+model, not the fewest changed lines.
+
 ## When something fails
 
 - Preserve the original failure and exact source, artifact, run, and accounting identities.

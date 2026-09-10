@@ -541,10 +541,19 @@ describe("bounded objective compiler", () => {
         title: "Invalid target",
         baseSha: sha,
         repositoryFacts,
-        workItems: [{ ...workItems[0]!, validationCommands: ["node --test test/unplanned.js"] }],
+        workItems: [
+          {
+            ...workItems[0]!,
+            validationCommands: ["node --test test/unplanned.js"],
+            validation: workItems[0]!.validation!.map((design) => ({
+              ...design,
+              evidenceCommands: ["node --test test/unplanned.js"],
+            })),
+          },
+        ],
       }),
     ).toThrow(
-      /invented validation command in clamp: "node --test test\/unplanned.js"; repository-observed commands:.*node --test/,
+      /invented validation command in clamp: "node --test test\/unplanned.js"; repository-observed commands:.*node --test|node has no Factory-provisioned greenfield toolchain adapter/,
     );
   });
   it("is byte deterministic across enumeration order", () => {
@@ -759,7 +768,36 @@ describe("bounded objective compiler", () => {
     ).toThrow(/root topology/);
   });
 
-  it("admits one scoped pnpm script only for the dependency-root greenfield bootstrap", () => {
+  it("reports independent deterministic compiler violations in one bounded response", () => {
+    let failure: Error | undefined;
+    try {
+      validateCompiledObjective(
+        {
+          title: "x",
+          workItems: [
+            {
+              ...base,
+              acceptance: ["TODO"],
+              validationCommands: [],
+              delivery: { group: "wrong", relationship: "root", parentWorkItem: "other" },
+            },
+            { ...base, id: "two", acceptance: ["Works as expected"] },
+          ],
+        },
+        ["npm test"],
+      );
+    } catch (error) {
+      failure = error as Error;
+    }
+    expect(failure?.message).toMatch(/^compiled Objective has \d+ deterministic violations:/);
+    expect(failure?.message).toContain("invalid acceptance criterion 1 in code");
+    expect(failure?.message).toContain("missing validation command in code");
+    expect(failure?.message).toContain("invalid acceptance criterion 1 in two");
+    expect(failure?.message).toContain("overlapping unordered scopes: code, two");
+    expect(failure?.message).toContain("impossible root topology for code");
+  });
+
+  it("carries finite pnpm script authority from one greenfield root to its descendants", () => {
     const bootstrap = {
       ...base,
       id: "bootstrap",
@@ -784,11 +822,47 @@ describe("bounded objective compiler", () => {
     expect(() =>
       validateCompiledObjective({ title: "Bootstrap", workItems: [bootstrap] }, greenfield),
     ).not.toThrow();
+    const mixedLanguageBase = {
+      files: [
+        { path: "README.md" },
+        { path: "Cargo.toml" },
+        { path: "Cargo.lock" },
+        { path: "src/lib.rs" },
+      ],
+      scripts: {},
+    };
+    expect(() =>
+      validateCompiledObjective({ title: "Bootstrap", workItems: [bootstrap] }, mixedLanguageBase),
+    ).not.toThrow();
+    expect(
+      compileObjective({
+        title: "Bootstrap",
+        baseSha: sha,
+        repositoryFacts: mixedLanguageBase,
+        workItems: [bootstrap] as never,
+      }).workItems[0]?.repositoryCapabilities?.provides,
+    ).toHaveLength(1);
+    for (const partialFiles of [[{ path: "package.json" }], [{ path: "pnpm-lock.yaml" }]]) {
+      expect(() =>
+        validateCompiledObjective(
+          { title: "Bootstrap", workItems: [bootstrap] },
+          { files: [{ path: "README.md" }, ...partialFiles], scripts: {} },
+        ),
+      ).toThrow(/pnpm future authority is partially present/);
+    }
+    const withCommands = (commands: string[]) => ({
+      ...bootstrap,
+      validationCommands: commands,
+      validation: bootstrap.validation.map((design) => ({
+        ...design,
+        evidenceCommands: commands,
+      })),
+    });
     for (const invalid of [
       { ...bootstrap, scope: ["pnpm-lock.yaml", "turbo.json"] },
-      { ...bootstrap, validationCommands: ["pnpm install"] },
-      { ...bootstrap, validationCommands: ["npm test"] },
-      { ...bootstrap, validationCommands: ["pnpm check", "pnpm test"] },
+      withCommands(["pnpm install"]),
+      withCommands(["npm test"]),
+      withCommands(["pnpm check", "pnpm test"]),
       {
         ...bootstrap,
         requirements: { ...bootstrap.requirements, networkDestinations: [] },
@@ -796,7 +870,9 @@ describe("bounded objective compiler", () => {
     ]) {
       expect(() =>
         validateCompiledObjective({ title: "Bootstrap", workItems: [invalid] }, greenfield),
-      ).toThrow(/invented validation command|exactly one pnpm script|must declare registry/);
+      ).toThrow(
+        /invented validation command|exactly one toolchain script|must declare registry|no Factory-provisioned/,
+      );
     }
 
     const later = {
@@ -822,7 +898,142 @@ describe("bounded objective compiler", () => {
     };
     expect(() =>
       validateCompiledObjective({ title: "Bootstrap", workItems: [bootstrap, later] }, greenfield),
-    ).toThrow(/invented validation command in later/);
+    ).not.toThrow();
+    const bound = compileObjective({
+      title: "Bootstrap",
+      baseSha: sha,
+      repositoryFacts: greenfield,
+      workItems: [bootstrap, later] as never,
+    });
+    expect(
+      bound.workItems.find((item) => item.id === "bootstrap")?.repositoryCapabilities,
+    ).toMatchObject({
+      provides: [
+        {
+          adapter: "node-pnpm",
+          generation: "node-pnpm/bootstrap",
+          operations: expect.arrayContaining([{ kind: "package-script", key: "check" }]),
+        },
+      ],
+    });
+    expect(
+      bound.workItems.find((item) => item.id === "later")?.repositoryCapabilities,
+    ).toMatchObject({
+      requires: [
+        {
+          adapter: "node-pnpm",
+          providerWorkItem: "bootstrap",
+          generation: "node-pnpm/bootstrap",
+          activation: "integrated-base",
+        },
+      ],
+    });
+    const multiCommandLater = {
+      ...later,
+      validationCommands: ["pnpm check", "pnpm test"],
+      validation: later.validation.map((design) => ({
+        ...design,
+        evidenceCommands: ["pnpm check", "pnpm test"],
+      })),
+    };
+    expect(() =>
+      validateCompiledObjective(
+        { title: "Bootstrap", workItems: [bootstrap, multiCommandLater] },
+        greenfield,
+      ),
+    ).not.toThrow();
+
+    const deferred = (
+      id: string,
+      dependsOn: string[],
+      command: string,
+      relationship: "sibling" | "join-after-merge",
+    ) => ({
+      ...later,
+      id,
+      scope: [`src/${id}.ts`],
+      dependsOn,
+      validationCommands: [command],
+      delivery: { group: id, relationship },
+      validation: later.validation.map((design) => ({
+        ...design,
+        evidenceCommands: [command],
+      })),
+    });
+    const lifecycle = [
+      bootstrap,
+      deferred("left", ["bootstrap"], "pnpm check", "sibling"),
+      deferred("right", ["bootstrap"], "pnpm test", "sibling"),
+      deferred("join", ["left", "right"], "pnpm lint", "join-after-merge"),
+    ];
+    expect(() =>
+      validateCompiledObjective(
+        { title: "Bootstrap fan-out and join", workItems: lifecycle },
+        greenfield,
+      ),
+    ).not.toThrow();
+    const lifecycleGraph = compileObjective({
+      title: "Bootstrap fan-out and join",
+      baseSha: sha,
+      repositoryFacts: greenfield,
+      workItems: lifecycle as never,
+    });
+    expect(
+      lifecycleGraph.workItems
+        .find((item) => item.id === "bootstrap")
+        ?.repositoryCapabilities?.provides[0]?.operations.map((operation) => operation.key),
+    ).toEqual(["check", "lint", "test"]);
+    expect(
+      lifecycleGraph.workItems
+        .filter((item) => item.id !== "bootstrap")
+        .map((item) => item.repositoryCapabilities?.requires[0]?.providerWorkItem),
+    ).toEqual(["bootstrap", "bootstrap", "bootstrap"]);
+
+    const unrelated = {
+      ...later,
+      id: "unrelated",
+      dependsOn: [],
+      scope: ["src/unrelated.ts"],
+      delivery: { group: "unrelated", relationship: "root" as const },
+    };
+    expect(() =>
+      validateCompiledObjective(
+        { title: "Bootstrap", workItems: [bootstrap, unrelated] },
+        greenfield,
+      ),
+    ).toThrow(/invented validation command in unrelated/);
+    expect(() =>
+      validateCompiledObjective(
+        {
+          title: "Bootstrap",
+          workItems: [
+            bootstrap,
+            {
+              ...later,
+              requirements: { ...later.requirements, networkDestinations: [] },
+            },
+          ],
+        },
+        greenfield,
+      ),
+    ).toThrow(/must declare registry/);
+    expect(() =>
+      validateCompiledObjective(
+        {
+          title: "Bootstrap",
+          workItems: [
+            bootstrap,
+            {
+              ...bootstrap,
+              id: "second-bootstrap",
+              scope: ["package.json", "pnpm-lock.yaml", "second/"],
+              delivery: { group: "second-bootstrap", relationship: "root" as const },
+            },
+          ],
+        },
+        greenfield,
+      ),
+    ).toThrow(/ambiguous greenfield validation authority|overlapping unordered scopes/);
   });
   it("requires every compiler analysis record", () => {
     const incomplete = { ...base };

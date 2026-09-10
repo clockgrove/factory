@@ -1,7 +1,7 @@
 Factory third-party notices
 
 This file is generated from the exact dependency inputs embedded in dist/factory.js and dist/mcp-server.js.
-Bundle inventory SHA-256: a4565248c8f1f153374124ca0ca3ea5173be96c3aa46fa948655b6f6c9b0806f
+Bundle inventory SHA-256: cda70074cb0dac740f2c3d77aae6bcbfa092991351b7073be1b394f093beb631
 
 ================================================================================
 @daytona/analytics-api-client@0.207.1
@@ -4654,6 +4654,29 @@ Source: git://github.com/mjwwit/node-XMLHttpRequest.git
  WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
  OTHER DEALINGS IN THE SOFTWARE.
+
+================================================================================
+yaml@2.9.0
+License: ISC
+Bundled in: factory.js, mcp-server.js
+Attribution: Eemeli Aro <eemeli@gmail.com>
+Source: github:eemeli/yaml
+
+--- LICENSE ---
+
+Copyright Eemeli Aro <eemeli@gmail.com>
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
 
 ================================================================================
 zod-to-json-schema@3.25.2

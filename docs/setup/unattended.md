@@ -136,8 +136,10 @@ When a local Codex management or worker invocation reports a supported GitHub Co
 phase and backend, exact-or-unknown accounting, and the supported Copilot settings URL. Do not retry
 the invocation. Continue monitoring only while Factory drains admitted work and resources; once its
 terminal receipt is visible, stop recurring monitoring. Restoring quota does not resume a terminal
-run: inspect an explicit recovery proposal and authorize its exact digest through the recovery path
-above.
+run. Exact-accounting gates can enter the explicit recovery path above after quota is restored.
+Unknown-accounting gates retain an unreconciled dispatch marker and cannot currently be recovered;
+restoring quota or acknowledging unknown historical usage does not discharge that independent
+liability.
 
 Local recovery can require the existing owned service to exit and restart into a new launcher
 generation. Factory uses only its already configured restart policy; it does not reconfigure a

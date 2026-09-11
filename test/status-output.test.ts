@@ -488,7 +488,40 @@ describe("bounded status, explain, and replay output", () => {
       gate: "provider",
       evidence: { factoryWorkActive: false, monitoring: "stop" },
     });
-    expect(explanation.explanations[0]?.requiredAction).toContain("factory_recovery_plan");
+    expect(explanation.explanations[0]?.requiredAction).toContain("cannot currently be recovered");
+    expect(explanation.explanations[0]?.requiredAction).not.toContain("factory_recovery_plan");
+
+    const gate = current.workItems[0]!.factoryEvents!.find(
+      (candidate) => candidate.kind === "provider",
+    );
+    const terminal = current.factoryEvents!.find(
+      (candidate) => candidate.event === "FactoryRunEscalated",
+    );
+    if (gate?.kind !== "provider" || terminal?.kind !== "run")
+      throw new Error("provider quota fixture is incomplete");
+    gate.accounting = "exact";
+    terminal.sequence = 7;
+    current.workItems[0]!.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        sequence: 6,
+        at: "2026-09-04T12:00:30.500Z",
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 10,
+        usageId: "worker-10-1",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        directorEpoch: 4,
+        policyDigest: policyDigest(policy),
+      }),
+    );
+    const exact = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
+    expect(
+      "requiredAction" in exact.operatorAction && exact.operatorAction.requiredAction,
+    ).toContain("factory_recovery_plan");
   });
 
   it("keeps monitoring a provider-neutral quota gate until terminal drain is durable", () => {
@@ -568,9 +601,10 @@ describe("bounded status, explain, and replay output", () => {
     });
     expect(
       "requiredAction" in stopped.operatorAction && stopped.operatorAction.requiredAction,
-    ).toBe(
-      'Restore quota for provider "another-model-provider" at https://provider.example/quota, then explicitly request recovery through factory_recovery_plan. Do not keep polling or retry this invocation.',
-    );
+    ).toContain("cannot currently be recovered");
+    expect(
+      "requiredAction" in stopped.operatorAction && stopped.operatorAction.requiredAction,
+    ).not.toContain("factory_recovery_plan");
   });
 
   it("keeps ordinary terminal guidance when a quota-gated run is cancelled", () => {

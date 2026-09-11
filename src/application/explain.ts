@@ -130,8 +130,12 @@ export function buildExplanationReport(input: {
       summary: providerGate.providerMessage,
       gate: "provider",
       requiredAction: terminal
-        ? `No Factory work is active; stop recurring monitoring. Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}, then explicitly request recovery through factory_recovery_plan.`
-        : `New model work is blocked, but admitted work and resources may still be reconciling. Continue recurring monitoring until the run has a terminal receipt; do not retry this invocation. Quota for provider "${providerGate.provider}" must be restored before explicit recovery.`,
+        ? providerGate.accounting === "unknown"
+          ? `No Factory work is active; stop recurring monitoring. Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""} for future model work. This run cannot currently be recovered because the invocation's model usage is unknown and its dispatch remains unreconciled.`
+          : `No Factory work is active; stop recurring monitoring. Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}, then explicitly request recovery through factory_recovery_plan.`
+        : providerGate.accounting === "unknown"
+          ? `New model work is blocked, but admitted work and resources may still be reconciling. Continue recurring monitoring until the run has a terminal receipt; do not retry this invocation. This run cannot currently be recovered because the invocation's model usage is unknown and its dispatch remains unreconciled. Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""} only for future model work.`
+          : `New model work is blocked, but admitted work and resources may still be reconciling. Continue recurring monitoring until the run has a terminal receipt; do not retry this invocation. Quota for provider "${providerGate.provider}" must be restored before explicit recovery.`,
       evidence: {
         reasonCode: providerGate.reasonCode,
         provider: providerGate.provider,

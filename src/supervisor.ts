@@ -4268,7 +4268,9 @@ export class FactorySupervisor {
           );
         return await terminalAfterDrain(
           "FactoryRunEscalated",
-          `${startupProviderGate.providerMessage}; restore provider quota${startupProviderGate.actionUrl ? ` at ${startupProviderGate.actionUrl}` : ""} before explicit recovery`,
+          startupProviderGate.accounting === "unknown"
+            ? `${startupProviderGate.providerMessage}; model usage remains unknown, so this run cannot currently be recovered`
+            : `${startupProviderGate.providerMessage}; restore provider quota${startupProviderGate.actionUrl ? ` at ${startupProviderGate.actionUrl}` : ""} before explicit recovery`,
         );
       }
       const deliveryPolicy = this.#policy.delivery ?? {
@@ -5339,7 +5341,9 @@ export class FactorySupervisor {
         if (durableProviderGate?.kind === "provider") {
           return await terminalAfterDrain(
             "FactoryRunEscalated",
-            `${durableProviderGate.providerMessage}; restore provider quota${durableProviderGate.actionUrl ? ` at ${durableProviderGate.actionUrl}` : ""} before explicit recovery`,
+            durableProviderGate.accounting === "unknown"
+              ? `${durableProviderGate.providerMessage}; model usage remains unknown, so this run cannot currently be recovered`
+              : `${durableProviderGate.providerMessage}; restore provider quota${durableProviderGate.actionUrl ? ` at ${durableProviderGate.actionUrl}` : ""} before explicit recovery`,
           );
         }
 
@@ -16003,7 +16007,10 @@ export class FactorySupervisor {
             reservation,
             event: "AttemptFailed",
             sequence: this.#sequences.take(),
-            reason: `${providerGate.providerMessage}; provider quota must be restored before explicit recovery`,
+            reason:
+              providerGate.accounting === "unknown"
+                ? `${providerGate.providerMessage}; model usage remains unknown, so this run cannot currently be recovered`
+                : `${providerGate.providerMessage}; provider quota must be restored before explicit recovery`,
             allowRecovery: true,
           }),
         );

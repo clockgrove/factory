@@ -227,17 +227,21 @@ write without replaying the model call or writing usage separately. The run stop
 On restart, the controller reconciles every durable attempt, capacity reservation and resource
 owner before it may write the terminal escalation. Until that drain is durable, status/explain
 retain monitoring so admitted attempts and resources cannot be abandoned; after an escalation
-receipt they tell the initiating operator to stop monitoring until quota is restored and an
-explicit recovery is requested. An explicit cancellation remains the terminal operator intent and
-does not instruct the operator to restore quota or recover the cancelled run. Pre-dispatch
-preparation failures and transient transport errors do not create this gate.
+receipt they tell the initiating operator to stop monitoring. Exact-accounting gates permit an
+explicit recovery request after quota is restored. Unknown-accounting gates retain their unresolved
+dispatch marker and state that the run cannot currently be recovered; restoring quota alone does
+not resolve or acknowledge that liability. An explicit cancellation remains the terminal operator
+intent and does not instruct the operator to restore quota or recover the cancelled run.
+Pre-dispatch preparation failures and transient transport errors do not create this gate.
 
 The selected model is a provider-neutral durable gate populated by provider adapters. Keeping
 Copilot literals in the shared event was rejected because every additional model provider would
 require a protocol and lifecycle edit; treating quota text as an ordinary backend failure was also
 rejected because it loses the non-retryable, human-action state. New adapters may emit the shared
 gate only after converting captured diagnostics into bounded canonical metadata; they must not pass
-through arbitrary provider output.
+through arbitrary provider output. A backend may emit the gate only when it declares model-usage
+reporting, which gives every gated invocation a durable dispatch marker even when terminal counters
+are unavailable.
 
 Model quota is protected at retry boundaries as well. After an artifact has passed host scope,
 secret, clean-apply, and sensitive-path checks, the running Supervisor may retain it in a bounded

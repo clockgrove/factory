@@ -562,7 +562,10 @@ export function buildStatusReport(input: {
                 monitoring: "continue",
                 code: "provider-quota-draining",
                 summary: `${providerGate.providerMessage}. New model work is blocked, but admitted work and resources are still reconciling.`,
-                requiredAction: `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}. Continue monitoring only until Factory writes the terminal receipt; do not retry this invocation.`,
+                requiredAction:
+                  providerGate.accounting === "unknown"
+                    ? `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}. Continue monitoring only until Factory writes the terminal receipt. This run cannot currently be recovered because the invocation's model usage is unknown and its dispatch remains unreconciled; do not retry this invocation.`
+                    : `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}. Continue monitoring only until Factory writes the terminal receipt; do not retry this invocation.`,
                 evidence: {
                   reasonCode: providerGate.reasonCode,
                   provider: providerGate.provider,
@@ -585,7 +588,10 @@ export function buildStatusReport(input: {
                   monitoring: "stop",
                   code: "provider-quota",
                   summary: `No Factory work is active. ${providerGate.providerMessage}.`,
-                  requiredAction: `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}, then explicitly request recovery through factory_recovery_plan. Do not keep polling or retry this invocation.`,
+                  requiredAction:
+                    providerGate.accounting === "unknown"
+                      ? `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""} for future model work. This run cannot currently be recovered because the invocation's model usage is unknown and its dispatch remains unreconciled. Do not keep polling or retry this invocation.`
+                      : `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}, then explicitly request recovery through factory_recovery_plan. Do not keep polling or retry this invocation.`,
                   evidence: {
                     reasonCode: providerGate.reasonCode,
                     provider: providerGate.provider,

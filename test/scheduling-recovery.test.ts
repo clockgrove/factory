@@ -221,7 +221,7 @@ describe("continuous refill and recovery", () => {
     expect(pool.size).toBe(0);
   });
 
-  it("retains a worker failure that settles before the caller begins draining", async () => {
+  it("claims a worker failure exactly once before final draining", async () => {
     const pool = new ContinuousExecutionPool<number>();
     let settled!: () => void;
     const didSettle = new Promise<void>((resolve) => {
@@ -237,17 +237,33 @@ describe("continuous refill and recovery", () => {
     await didSettle;
 
     expect(pool.size).toBe(0);
-    expect(() => pool.throwIfFailed()).toThrow("unsafe paid cleanup remains unconfirmed");
-    // Inspection cannot consume the failure needed by the final ownership drain.
-    expect(() => pool.throwIfFailed()).toThrow("unsafe paid cleanup remains unconfirmed");
+    expect(() => pool.throwNextFailure()).toThrow("unsafe paid cleanup remains unconfirmed");
+    expect(() => pool.throwNextFailure()).not.toThrow();
+    await expect(pool.settle()).resolves.toEqual([]);
+  });
+
+  it("keeps an independent child failure visible after another is claimed", async () => {
+    const pool = new ContinuousExecutionPool<number>();
+    const first = deferred();
+    const second = deferred();
+    pool.start(1, async () => {
+      await first.promise;
+      throw new Error("human handoff");
+    });
+    pool.start(2, async () => {
+      await second.promise;
+      throw new Error("late cleanup remains unconfirmed");
+    });
+    first.resolve();
+    await pool.waitForCompletion(10_000);
+    expect(() => pool.throwNextFailure()).toThrow("human handoff");
+    second.resolve();
     await expect(pool.settle()).resolves.toEqual([
       {
-        key: 1,
-        error: expect.objectContaining({ message: "unsafe paid cleanup remains unconfirmed" }),
+        key: 2,
+        error: expect.objectContaining({ message: "late cleanup remains unconfirmed" }),
       },
     ]);
-    await expect(pool.settle()).resolves.toEqual([]);
-    expect(() => pool.throwIfFailed()).not.toThrow();
   });
 
   it("preserves other Objectives while reconciling one durable generation", () => {

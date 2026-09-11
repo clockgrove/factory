@@ -1963,16 +1963,17 @@ export class GitHubReader {
    * job the diff would be run *by*, and the review separately proves the diff
    * cannot change that job.
    *
-   * Cached for the process lifetime: these are settings, they do not move
-   * within a cycle, and re-reading them per Work Item would burn rate limit for
-   * no new information.
+   * Cached for ordinary blast-radius observations. Security-sensitive
+   * publication boundaries pass `fresh` so a repository setting or live
+   * workflow change made during the run is observed immediately before the
+   * ref or pull-request mutation.
    *
    * Fails closed. Any error leaves `defaultWorkflowPermissions: "unknown"`,
    * which `assessBlastRadius` treats as a blocker — a review that cannot see the
    * token scope has not established anything.
    */
-  async readWorkflowSafetyProfile(): Promise<WorkflowSafetyProfile> {
-    if (this.#safetyProfile) return this.#safetyProfile;
+  async readWorkflowSafetyProfile(fresh = false): Promise<WorkflowSafetyProfile> {
+    if (!fresh && this.#safetyProfile) return this.#safetyProfile;
 
     let defaultWorkflowPermissions: WorkflowSafetyProfile["defaultWorkflowPermissions"] = "unknown";
     try {

@@ -191,6 +191,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   readonly #onMutationOperation: GitHubControlStoreOptions["onMutationOperation"];
   readonly #operationObservations: MutationOperationObservation[] = [];
   readonly #scopedMutationFence = new AsyncLocalStorage<(waitedMs: number) => Promise<void>>();
+  readonly #publicationSafetyFence = new AsyncLocalStorage<() => Promise<void>>();
+  readonly #transportFenceContext = new AsyncLocalStorage<boolean>();
   #droppedOperationObservations = 0;
   #repositoryId: string | null = null;
 
@@ -231,6 +233,15 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     operation: () => Promise<T>,
   ): Promise<T> {
     return this.#scopedMutationFence.run(fence, operation);
+  }
+
+  /** Compose mutable publication policy with the transport's authoritative
+   * lease fence, after queue admission and immediately before dispatch. */
+  withPublicationSafetyFence<T>(
+    fence: () => Promise<void>,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.#publicationSafetyFence.run(fence, operation);
   }
 
   mutationOperationTelemetry() {
@@ -276,6 +287,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     authorityClass: MutationAuthorityClass = "objective-publication",
   ): Promise<T> {
     const dispatch = () => {
+      if (mutating && this.#transportFenceContext.getStore())
+        throw new Error("mutation dispatch is forbidden inside a transport fence");
       // This callback runs synchronously inside the observation, before any
       // queue await. Even a rejected capture is therefore measured.
       const authoritative = mutating && authorityClass !== "immutable-preparation";
@@ -284,7 +297,10 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       // a second, configured Objective generation for the same operation.
       const fence =
         scopedFence ?? (authoritative ? this.#captureMutationFence?.(mutationClass) : undefined);
-      return this.#dispatch(operation, mutating, mutationClass, fence);
+      const publicationSafetyFence = authoritative
+        ? this.#publicationSafetyFence.getStore()
+        : undefined;
+      return this.#dispatch(operation, mutating, mutationClass, fence, publicationSafetyFence);
     };
     if (!mutating) return dispatch();
     return observeMutationOperation(
@@ -301,6 +317,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     mutating: boolean,
     mutationClass: MutationClass,
     capturedFence?: (waitedMs: number) => Promise<void>,
+    publicationSafetyFence?: () => Promise<void>,
   ): Promise<T> {
     if (this.#breaker.isOpen()) {
       throw new PlatformUnavailableError(
@@ -309,7 +326,11 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       );
     }
     const mutationPermit = mutating ? await this.#mutations.acquire(mutationClass) : undefined;
-    const release = await this.#concurrency.acquire();
+    // A transport-fence policy may make sequential reads through this store.
+    // They reuse the outer request slot; nested mutation is rejected in #call.
+    const release = this.#transportFenceContext.getStore()
+      ? () => {}
+      : await this.#concurrency.acquire();
     let attempted = false;
     try {
       if (this.#breaker.isOpen()) {
@@ -320,10 +341,13 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       }
       if (mutationPermit) {
         observeMutationQueue(mutationPermit.waitedMs);
-        await observeMutationFence(async () => {
-          if (capturedFence) await capturedFence(mutationPermit.waitedMs);
-          await this.#beforeMutation(mutationClass, mutationPermit.waitedMs);
-        });
+        await this.#transportFenceContext.run(true, () =>
+          observeMutationFence(async () => {
+            if (capturedFence) await capturedFence(mutationPermit.waitedMs);
+            await this.#beforeMutation(mutationClass, mutationPermit.waitedMs);
+            await publicationSafetyFence?.();
+          }),
+        );
       }
       if (this.#breaker.isOpen()) {
         throw new PlatformUnavailableError(

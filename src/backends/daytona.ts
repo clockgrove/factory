@@ -27,6 +27,8 @@ import { artifactFromPatchFile } from "../runtime/artifact-patch.js";
 import { repositoryArchiveFile, sourceContentUploads } from "./source-content.js";
 import { assertNoSecretMaterial, MAX_LOG_BYTES } from "../protocol/limits.js";
 import { destinationAllowedByPolicy } from "../protocol/policy.js";
+import type { ManagedToolchain } from "../runtime/toolchain-bundle.js";
+import { toolchainStatus } from "../runtime/toolchain-store.js";
 import { validationInvocationOwnership } from "./validation-invocation.js";
 import {
   parseSandboxPaths,
@@ -161,6 +163,8 @@ const DEFAULT_CREATE_VISIBILITY_ATTEMPTS = 5;
 const DEFAULT_CREATE_VISIBILITY_DELAY_MS = 500;
 const MAX_CREATE_VISIBILITY_WINDOW_MS = 30_000;
 const MAX_SECRET_LIST_PAGES = 100;
+const DAYTONA_BASE_TOOLS = ["git", "node", "npm", "npx", "bash", "sh", "grep"];
+const DAYTONA_MANAGED_TOOLS: readonly ManagedToolchain[] = ["pnpm"];
 
 /** Official Node multi-platform image index pinned by digest for reproducible
  * supported Daytona execution. Tags are deliberately not accepted. */
@@ -278,7 +282,7 @@ export class DaytonaBackend implements ExecutionBackend {
     // Daytona's create API does not pin or report architecture. Empty means
     // architecture-specific packets fail capability matching until observed.
     supportedArchitectures: [],
-    supportedTools: ["git", "node", "npm", "npx", "bash", "sh", "grep"],
+    supportedTools: [...DAYTONA_BASE_TOOLS],
     supportedServices: [],
     supportsCancellation: true,
     supportsObservation: true,
@@ -366,6 +370,7 @@ export class DaytonaBackend implements ExecutionBackend {
   }
 
   async probe(): Promise<BackendProbe> {
+    await this.#refreshManagedTools();
     const provider = this.#credentialAvailable();
     if (!provider || !this.#secretName) {
       return {
@@ -395,6 +400,7 @@ export class DaytonaBackend implements ExecutionBackend {
   }
 
   async probeValidation(): Promise<BackendProbe> {
+    await this.#refreshManagedTools();
     const available = this.#credentialAvailable();
     return {
       available,
@@ -402,6 +408,14 @@ export class DaytonaBackend implements ExecutionBackend {
       ...(!available ? { reason: "Daytona authentication is not available" } : {}),
       measuredAt: new Date().toISOString(),
     };
+  }
+
+  async #refreshManagedTools(): Promise<void> {
+    const statuses = await Promise.all(DAYTONA_MANAGED_TOOLS.map((tool) => toolchainStatus(tool)));
+    this.capabilities.supportedTools = [
+      ...DAYTONA_BASE_TOOLS,
+      ...statuses.filter(({ state }) => state === "ready").map(({ tool }) => tool),
+    ];
   }
 
   async launch(context: AttemptContext): Promise<BackendHandle> {
@@ -484,7 +498,10 @@ export class DaytonaBackend implements ExecutionBackend {
     try {
       await sandbox.fs.createFolder("factory", "700");
       await sandbox.fs.uploadFiles(
-        sourceContentUploads(sandboxBootstrapFiles(context, Buffer.alloc(0)), archive),
+        sourceContentUploads(
+          sandboxBootstrapFiles(context, Buffer.alloc(0), { managedToolchains: true }),
+          archive,
+        ),
       );
       const workdir = await sandbox.getWorkDir();
       void sandbox.process

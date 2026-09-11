@@ -55,12 +55,14 @@ const DEPENDENCY_FILES = new Set([
   "yarn.lock",
   "pnpm-lock.yaml",
   "pnpm-workspace.yaml",
+  "bun.lock",
   "bun.lockb",
   "requirements.txt",
   "pipfile",
   "pipfile.lock",
   "poetry.lock",
   "pyproject.toml",
+  "uv.lock",
   "gemfile",
   "gemfile.lock",
   "go.mod",
@@ -73,6 +75,23 @@ const DEPENDENCY_FILES = new Set([
 
 /** Registry/proxy configuration — redirects where dependency code comes from. */
 const REGISTRY_FILES = new Set([".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", "pip.conf"]);
+
+/**
+ * Exact Git pathspec counterpart to `executionAffectingReason`. Integration
+ * uses this allowlist-shaped query so a huge ordinary diff cannot push an
+ * early sensitive path out of a bounded `--name-only` result.
+ */
+export const EXECUTION_AFFECTING_GIT_PATHS = [
+  ":(icase,glob).github/**",
+  ...[...DEPENDENCY_FILES, ...REGISTRY_FILES].flatMap((name) => [
+    `:(icase,glob)${name}`,
+    `:(icase,glob)**/${name}`,
+  ]),
+  ":(icase,glob)action.yml",
+  ":(icase,glob)**/action.yml",
+  ":(icase,glob)action.yaml",
+  ":(icase,glob)**/action.yaml",
+] as const;
 
 const PATH_RULES: PathRule[] = [
   {

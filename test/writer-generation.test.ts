@@ -4,6 +4,7 @@ import Ajv from "ajv";
 import addFormats from "ajv-formats";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
+import { parseWorkerPacket } from "../src/protocol/worker-packet.js";
 import {
   deduplicateFactoryEvents,
   hasCurrentWriterAuthority,
@@ -14,6 +15,8 @@ import { LifecycleRecorder } from "../src/control/events.js";
 import type { LeaseManager, LeaseState } from "../src/control/lease.js";
 import { objectiveAuthorityObservation, writerAuthority } from "../src/control/authority.js";
 import { RunManager } from "../src/control/runs.js";
+import { activeRuntimeBundleSync } from "../src/runtime/toolchain-store.js";
+import { createManagedRuntimeActivation } from "../src/toolchains/authority.js";
 
 const common = {
   protocol: "clockgrove.factory/v2",
@@ -59,6 +62,71 @@ const terminal = (writerEpoch?: number) =>
   });
 
 describe("Objective receipt writer generation", () => {
+  it("keeps the full restorable runtime receipt in event-schema parity", () => {
+    const receipt = activeRuntimeBundleSync("pnpm");
+    const packet = parseWorkerPacket({
+      goal: "Run an exact managed check.",
+      acceptanceCriteria: ["The exact check passes."],
+      allowedPaths: ["package.json"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      baseSha: "a".repeat(40),
+      validationCommands: ["pnpm check"],
+      requirements: {
+        os: ["linux"],
+        architecture: ["x64"],
+        tools: ["node", "pnpm"],
+        services: [],
+        networkDestinations: ["registry.npmjs.org"],
+        permittedSecretNames: [],
+        trust: "trusted_local",
+      },
+      managedRuntimes: [
+        {
+          tool: "pnpm",
+          adapter: receipt.adapter,
+          adapterContract: receipt.adapterContract,
+          platform: receipt.platform,
+          releaseChannel: "ga",
+          bundleDigest: receipt.digest,
+        },
+      ],
+      artifactContract: "clockgrove.factory/artifact-v1",
+    });
+    const activation = createManagedRuntimeActivation({
+      packet,
+      baseSha: packet.baseSha,
+      sourceRef: "refs/heads/main",
+      proofDigests: [],
+    })!;
+    const reservation = parseFactoryEvent({
+      ...common,
+      kind: "attempt",
+      event: "AttemptReserved",
+      sequence: 2,
+      workItem: 8,
+      attempt: 1,
+      backend: "codex-sdk/local-worktree",
+      baseSha: packet.baseSha,
+      directorEpoch: 1,
+      policyDigest: POLICY_DIGEST,
+      managedRuntimeActivation: activation,
+    });
+    const ajv = new Ajv({ strict: false });
+    addFormats(ajv);
+    const validate = ajv.compile(
+      JSON.parse(
+        readFileSync(new URL("../schemas/factory-event.schema.json", import.meta.url), "utf8"),
+      ),
+    );
+    expect(validate(reservation), JSON.stringify(validate.errors)).toBe(true);
+    const missingReceipts = structuredClone(reservation) as Record<string, unknown>;
+    delete (missingReceipts.managedRuntimeActivation as Record<string, unknown>).receipts;
+    expect(validate(missingReceipts)).toBe(false);
+    expect(() => parseFactoryEvent(missingReceipts)).toThrow();
+  });
+
   it("publishes the same optional generation fields and rejects malformed controller values", () => {
     const ajv = new Ajv({ strict: false });
     addFormats(ajv);

@@ -508,27 +508,80 @@ at the recorded base, rechecks scope and sensitive surfaces, runs the declared v
 required trust boundary, records evidence bound to exact input and output SHAs, and only then creates
 the publication commit and pull request.
 
-Validation commands normally must already be observed at the frozen base. One fail-closed exception
-allows a dependency-root Work Item in a repository with no root `package.json` to introduce exactly
-one finite `pnpm` validation script while owning that manifest and lockfile. Before executing it,
-Factory inspects the materialized tree: the root pins the exact pnpm version; external dependencies
-use exact versions; workspace links remain within enumerated, in-scope direct-child packages; every
-registry lock entry has SHA-512 integrity and the pnpm v9 lock contains no URL, git, tarball, patch, or
-escaping local source; lifecycle hooks and package-manager overrides are absent; and the selected
-leaf/Turbo task closure is drawn from a finite check-only grammar. Factory then proves the installed
-pnpm version, performs a frozen install from only `registry.npmjs.org` with scripts disabled and
-hardened configuration, and runs the exact introduced script. That registry must be declared in the
-packet's policy-bounded network destinations; compiler-authored installer commands remain forbidden.
-Validation evidence records all three commands in order, and
-the semantic-review checkout independently repeats the materialized authority inspection without
-rerunning the checks. This authority belongs only to that root item; dependent Work Items return to
-ordinary base-observed command grounding.
+Validation commands normally must already be observed at the frozen base. A provider-neutral
+repository-capability model handles the narrower case where an immutable graph must refer to an
+operation that an ancestor artifact will create. Adapters define the operation grammar, authority
+paths, provisioning mode, setup plan, and exact-base resolver. The compiler records typed
+provider/requirement bindings and generations derived by Factory; model output cannot mint them.
+Bindings are plan provenance, not execution authority. They are canonicalized again when a graph is
+loaded or copied, and an integrated-base consumer remains unavailable until its exact provider
+generation is complete.
 
-Package manifests and lockfiles remain execution-affecting integration surfaces. A greenfield
-bootstrap artifact that passes the bounded exception may be published for review, but Factory does
-not merge it autonomously. The Supervisor stops at the open pull request with a human merge action;
-after that exact merge, explicit Objective recovery can revalidate and continue from the now-observed
-repository toolchain.
+The graph contains only the abstract adapter, platform, release-channel, and contract requirement;
+compilation never reads or selects a host runtime. After the graph and its accounting are durable,
+the Supervisor selects a content-addressed receipt, materializes the exact protected base, and
+resolves every deferred requirement. Active is the default only for a new or unbound generation. An
+integrated-base consumer inherits the exact receipt from its provider generation's authenticated
+reservation; the provider identity binds the reservation object, receipt, and activation digests.
+The mutable issue comment must digest-identically reproduce the complete immutable reservation
+trailer; matching only selected reservation fields is not provider authority.
+Provider-generation and current-base authority bytes are inspected separately and must remain equal.
+Missing or ambiguous historical activation cannot borrow the current active bundle.
+
+`AttemptReserved` binds the selected receipt, activated Worker Packet, proof digests, source ref, and
+base commit. Immediately before model or worker launch, the Supervisor rereads the Objective,
+protected ref, provider lineage, authority bytes, and receipt components and requires the same
+binding. Local execution, clean validation, semantic review, and Daytona all consume that exact
+selected receipt; a later active-pointer change cannot move the generation or attempt. A later Work
+Item creates a new generation only when it owns the adapter's generation surface and explicitly
+validates the operation it promises; write scope alone cannot create authority. Independent ready
+Work Items continue while one requirement is unavailable. Missing, corrupt, or hostile ambient
+executables cannot substitute for the selected runtime.
+
+Authenticated historical graphs from before the top-level abstract runtime field keep their exact
+stored bytes, digest, projection, and Work Item envelope. The existing-graph read path alone may
+derive an in-memory abstract pnpm execution requirement from omission. Fresh and issue-only
+persistence stays strict; recovery may copy an exact record already authenticated from the durable
+graph store. Explicit empty or selected runtime fields are not legacy omissions, and selected runtime
+data inside capability bindings is always invalid. This compatibility view never includes an active
+selection or receipt and never infers runtime authority for an already-integrated provider that lacks
+an authenticated activation. Copying a historical record reuses its authenticated blob object rather
+than reserializing it. Issue-only inspection reconstructs every raw Worker Packet field before strict
+validation, and foreground completion reapplies a reservation's exact activation to the execution
+view before comparing its invocation digest.
+
+The first concrete future-capable adapter is `node-pnpm`. It applies independently of unrelated
+repository recipes only when both root `package.json` and `pnpm-lock.yaml` are absent. One
+dependency-root Work Item owns both and names one finite pnpm script; a partially present authority
+surface is not bootstrap authority. The root artifact must promise every descendant operation. It
+pins pnpm 10.34.5 and exact dependencies; workspace links remain within enumerated in-scope
+direct-child packages; registry lock entries carry SHA-512 integrity; URL, git, tarball, patch,
+escaping local sources, lifecycle hooks, and package-manager overrides are rejected; and selected
+leaf/Turbo closures use a finite check-only grammar. Factory supplies checksum-pinned Node/pnpm bytes,
+performs one frozen hook-free setup from the declared `registry.npmjs.org`, and records version,
+setup, and validation commands in order. Isolated validation uploads, verifies, and directly executes
+the same receipt-bound Node/pnpm bundle. Unmanaged isolated validation stops after its first failure,
+recording only the successful prefix and that failure; complete success still executes the full plan.
+npm, bun, uv, Cargo, Go, and Python have no future-authority
+adapter in this release; their existing recipes remain usable, while absent recipes fail before
+execution rather than falling back to ambient tools. If a selected pnpm bundle is missing or corrupt,
+recovery fails readiness closed. `AttemptReserved` retains the complete receipt and upstream origin
+identity, so an operator can run `factory toolchains restore RECEIPT.json` to reacquire and verify the
+historical pnpm and Node assets without resolving latest or moving the active pointer. Recovery then
+reuses the same receipt and graph; it does not recompile or silently select a newer active bundle.
+
+Execution-affecting artifacts retain two separate gates. Package manifests, lockfiles, registry
+configuration, workflows, and actions may never auto-integrate: immediately before merge Factory
+derives the exact changed paths from the immutable base/head Git diff and requires a human. Before
+publication, a new workflow is permitted without a human only when its parsed YAML has exactly one
+push trigger restricted to the protected branch, no `create` or pull-request/chaining trigger,
+read-only top-level and job permissions, hosted Ubuntu,
+commit-pinned allowlisted actions, checkout credentials disabled, and no secret/token/OIDC surface;
+existing workflows plus changed package scripts conservatively require pre-publication approval.
+Unsafe workflow bytes are retained behind a durable hold before a ref or pull request exists. After
+a human merges the exact authority-changing pull request, explicit Objective recovery reuses the
+persisted graph without another compiler invocation and re-resolves descendants against the new
+protected base.
 
 Repository CI remains supported but Factory does not impersonate required checks. Preflight reads
 branch rules and required checks before spending on implementation. If a required check cannot be
@@ -665,6 +718,15 @@ graph/projection, reservation, original acceptance/accounting, and actual exact 
 proof establish permissible ancestry. Unrelated trunk changes remain a hard stop.
 Discovery uses GitHub's documented [Issue parent relationship](https://docs.github.com/en/graphql/reference/issues#issue)
 for closing-issue hints; those mutable hints never replace the immutable integration proof.
+
+Within one Supervisor, completed child executions form a single-consumer settlement queue. A progress
+wake or a synchronous admission/recovery fence atomically claims the result it surfaces, so final
+drain cannot reinterpret the same reconciled failure as a second teardown failure. Drain still waits
+for every active child. A human-authority failure that first arrives during drain converts completion,
+cancellation, or lease release into the same escalation it would have produced if claimed earlier;
+late cleanup, accounting, fencing, or resource-absence uncertainty vetoes the terminal outcome.
+Claiming process-local state grants no restart or recovery authority; those decisions continue to
+require durable GitHub receipts.
 
 Compilation reads a separate exact Git-object tree and index, not the controller's mutable checkout.
 Preparation runs no checkout hooks or filters; verified locally available LFS objects are hydrated
@@ -1010,8 +1072,13 @@ attempt failure.
 Immediately before each authoritative publication, the Director re-observes the lease ref and GitHub
 server time in one REST request. An unchanged OID reuses the already-validated lease payload; only a
 concurrently renewed OID requires a second commit read. Immutable Git object creation is preparation,
-not publication, and performs no Objective fence read. This keeps strict effect fencing without
-describing cooperative dispatch checks as an atomic condition on GitHub's comment or pull-request APIs.
+not publication, and performs no Objective fence read. Workflow-safety policy is re-observed after
+mutation-queue admission and the final authority fence, immediately before feature-ref and
+pull-request transport dispatch. An unsafe or unstable observed base fails closed; a stable safe
+advance is independently revalidated. This minimizes the ordinary read-to-mutation interval without
+describing cooperative dispatch checks as an atomic condition on GitHub's ref or pull-request APIs.
+A fully atomic, digest-approved two-phase publication protocol is tracked in
+[#301](https://github.com/clockgrove/factory/issues/301).
 
 ## Packaging and portability
 

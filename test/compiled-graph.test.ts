@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CompiledGraphManager,
+  compiledGraphRef,
   loadCompiledGraph,
   loadCompiledGraphProjection,
   type CompiledGraphReadStore,
@@ -13,7 +14,16 @@ import {
 import { ReviewCheckpointManager } from "../src/control/reviews.js";
 import { LeaseManager, type GitCommitObject, type LeaseStore } from "../src/control/lease.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
-import { workerPacketFromCompiled, type CompiledObjective } from "../src/graph.js";
+import {
+  compiledGraphDigest,
+  executionWorkerPacketFromCompiled,
+  renderWorkPacket,
+  serializeCompiledObjective as serializePersistedGraph,
+  validateGraph,
+  workerPacketFromCompiled,
+  type CompiledObjective,
+} from "../src/graph.js";
+import { managedRuntimeRequirements } from "../src/toolchains/authority.js";
 import {
   compileObjective,
   serializeCompilerObjective,
@@ -160,7 +170,199 @@ function objective(goal = "Implement the feature."): CompiledObjective {
   };
 }
 
+function capabilityObjective(): CompiledObjective {
+  const result = objective("Create the repository validation authority.");
+  const item = result.workItems[0]!;
+  item.scope = ["package.json", "pnpm-lock.yaml"];
+  item.validationCommands = ["pnpm check"];
+  item.requirements = {
+    ...item.requirements!,
+    tools: ["node", "pnpm"],
+    networkDestinations: ["registry.npmjs.org"],
+  };
+  item.repositoryCapabilities = {
+    provides: [
+      {
+        adapter: "node-pnpm",
+        generation: "node-pnpm/feature",
+        authorityPaths: ["package.json", "pnpm-lock.yaml"],
+        operations: [{ kind: "package-script", key: "check" }],
+      },
+    ],
+    requires: [
+      {
+        adapter: "node-pnpm",
+        generation: "node-pnpm/feature",
+        providerWorkItem: "feature",
+        authorityPaths: ["package.json", "pnpm-lock.yaml"],
+        operation: { kind: "package-script", key: "check" },
+        activation: "artifact",
+      },
+    ],
+  };
+  return result;
+}
+
 describe("durable compiled graph", () => {
+  it("loads a legacy pnpm graph without changing its digest or projected body", async () => {
+    const store = new MemoryGraphStore();
+    const legacy = objective("Run the established pnpm check.");
+    const item = legacy.workItems[0]!;
+    item.validationCommands = ["pnpm check"];
+    item.requirements = {
+      ...item.requirements!,
+      tools: ["node", "pnpm"],
+      networkDestinations: ["registry.npmjs.org"],
+    };
+    const digest = compiledGraphDigest(legacy);
+    const metadata = {
+      protocol: "clockgrove.factory/graph-v1" as const,
+      id: item.id,
+      graphDigest: digest,
+      graphSize: 1,
+      index: 0,
+      dependsOn: [] as string[],
+    };
+    const body = renderWorkPacket(item, metadata);
+    // Historical storage was not required to use the current canonical encoder.
+    const bytes = Buffer.concat([serializePersistedGraph(legacy), Buffer.from("\n")]);
+    const blobOid = await store.createBlob(bytes);
+    const treeOid = await store.createTree({
+      baseTreeOid: BASE_TREE,
+      entries: [
+        {
+          path: ".clockgrove-factory/control/compiled-objective.json",
+          mode: "100644",
+          type: "blob",
+          sha: blobOid,
+        },
+      ],
+    });
+    const commitOid = await store.createCommit({
+      treeOid,
+      parentOids: [BASE_SHA],
+      message: "legacy compiled graph",
+    });
+    await store.createRef(compiledGraphRef(42, "legacy-pnpm"), commitOid);
+
+    const loaded = await loadCompiledGraph(store, 42, "legacy-pnpm");
+    expect(loaded).not.toBeNull();
+    expect(loaded!.graphDigest).toBe(digest);
+    expect(loaded!.objective).toEqual(legacy);
+    expect(renderWorkPacket(loaded!.objective.workItems[0]!, metadata)).toBe(body);
+    expect(
+      workerPacketFromCompiled(loaded!.objective.workItems[0]!).managedRuntimes,
+    ).toBeUndefined();
+    expect(
+      executionWorkerPacketFromCompiled(loaded!.objective.workItems[0]!).managedRuntimes,
+    ).toEqual([
+      expect.objectContaining({
+        adapter: "node-pnpm",
+        tool: "pnpm",
+      }),
+    ]);
+    expect(store.refs).toHaveLength(1);
+
+    const leases = new LeaseManager({ store });
+    const lease = await leases.acquire(
+      {
+        objective: 42,
+        runId: "fresh-pnpm",
+        holder: "director",
+        policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      },
+      await store.readCommit(BASE_SHA),
+    );
+    const manager = new CompiledGraphManager(store, leases);
+    await expect(
+      manager.persist({
+        lease,
+        base: await store.readCommit(BASE_SHA),
+        objective: legacy,
+      }),
+    ).rejects.toThrow(/managed runtime contract differs from canonical host derivation/);
+
+    const copied = await manager.persist({
+      lease,
+      base: await store.readCommit(BASE_SHA),
+      source: loaded!,
+    });
+    expect(copied.graphDigest).toBe(digest);
+    expect(copied.objective).toEqual(legacy);
+    expect(copied.compilation).toBeUndefined();
+    expect(copied.blobOid).toBe(loaded!.blobOid);
+    expect(await store.readBlob(copied.blobOid)).toEqual(bytes);
+  });
+
+  it("keeps legacy runtime adaptation narrower than fresh graph validation", () => {
+    const canonical = objective("Run the established pnpm check.");
+    const item = canonical.workItems[0]!;
+    item.validationCommands = ["pnpm check"];
+    item.requirements = {
+      ...item.requirements!,
+      tools: ["node", "pnpm"],
+      networkDestinations: ["registry.npmjs.org"],
+    };
+    const runtime = managedRuntimeRequirements(item.validationCommands)[0]!;
+    item.managedRuntimes = [runtime];
+    expect(() => validateGraph(canonical)).not.toThrow();
+
+    const omitted = structuredClone(canonical);
+    delete omitted.workItems[0]!.managedRuntimes;
+    expect(() => validateGraph(omitted)).toThrow(/managed runtime contract differs/);
+
+    const explicitEmpty = structuredClone(canonical);
+    explicitEmpty.workItems[0]!.managedRuntimes = [];
+    expect(() => validateGraph(explicitEmpty)).toThrow(/managed runtime contract differs/);
+
+    const selectedTopLevel = structuredClone(canonical);
+    selectedTopLevel.workItems[0]!.managedRuntimes = [{ ...runtime, bundleDigest: "a".repeat(64) }];
+    expect(() => validateGraph(selectedTopLevel)).toThrow(
+      /immutable graph selected a managed runtime bundle/,
+    );
+
+    const selectedCapability = capabilityObjective();
+    const selectedRuntime = { ...runtime, bundleDigest: "b".repeat(64) };
+    selectedCapability.workItems[0]!.repositoryCapabilities!.provides[0]!.runtime = selectedRuntime;
+    selectedCapability.workItems[0]!.repositoryCapabilities!.requires[0]!.runtime = selectedRuntime;
+    expect(() => validateGraph(selectedCapability)).toThrow(
+      /immutable repository capability graph selected a managed runtime bundle/,
+    );
+  });
+
+  it("rejects noncanonical recovered capability bindings before writing a copied graph", async () => {
+    const store = new MemoryGraphStore();
+    const leases = new LeaseManager({ store });
+    const base = await store.readCommit(BASE_SHA);
+    const lease = await leases.acquire(
+      {
+        objective: 42,
+        runId: "recovery-copy",
+        holder: "director",
+        policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      },
+      base,
+    );
+    const candidate = capabilityObjective();
+    candidate.workItems[0]!.repositoryCapabilities!.provides[0]!.operations[0]!.key = "tampered";
+    candidate.workItems[0]!.repositoryCapabilities!.requires[0]!.operation.key = "tampered";
+    const before = {
+      refs: new Map(store.refs),
+      blobs: new Map(store.blobs),
+      commits: new Map(store.commits),
+      trees: new Map(store.trees),
+      next: store.next,
+    };
+    await expect(
+      new CompiledGraphManager(store, leases).persist({ lease, base, objective: candidate }),
+    ).rejects.toThrow(/canonical host derivation/);
+    expect(store.refs).toEqual(before.refs);
+    expect(store.blobs).toEqual(before.blobs);
+    expect(store.commits).toEqual(before.commits);
+    expect(store.trees).toEqual(before.trees);
+    expect(store.next).toBe(before.next);
+  });
+
   it("loads graph and projection using only a frozen read-only port, without a lease", async () => {
     const store = new MemoryGraphStore();
     const leases = new LeaseManager({ store });

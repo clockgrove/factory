@@ -178,7 +178,13 @@ function inspectExistingGraph(snapshot: ApplicationSnapshot): {
       artifactContract: packet.artifactContract,
       ...(packet.context ? { context: packet.context } : {}),
       ...(packet.changeSurface ? { changeSurface: packet.changeSurface } : {}),
+      ...(packet.criterionRisks ? { criterionRisks: packet.criterionRisks } : {}),
+      ...(packet.validation ? { validation: packet.validation } : {}),
       ...(packet.delivery ? { delivery: packet.delivery } : {}),
+      ...(packet.repositoryCapabilities
+        ? { repositoryCapabilities: packet.repositoryCapabilities }
+        : {}),
+      ...(packet.managedRuntimes ? { managedRuntimes: packet.managedRuntimes } : {}),
     })),
   };
   validateGraph(objective);

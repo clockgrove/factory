@@ -7,7 +7,7 @@ import {
 } from "../protocol/events.js";
 import type { ArtifactConsumerBinding } from "../protocol/events.js";
 import { assertNoSecretMaterial, PROTOCOL_V2 } from "../protocol/limits.js";
-import { encodeEventComment, encodeEventTrailer } from "./receipts.js";
+import { decodeEventTrailer, encodeEventComment, encodeEventTrailer } from "./receipts.js";
 import { writerAuthority } from "./authority.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "./lease.js";
 import { ensureAdmissionCompatibility } from "./admission-compatibility.js";
@@ -19,6 +19,8 @@ import {
 import { listAttemptReservationRefs } from "./attempt-readers.js";
 export { listAttemptReservationRefs, readAttemptReservationRef } from "./attempt-readers.js";
 import type { LocalScopeBatch } from "../protocol/local-scope.js";
+import type { ManagedRuntimeActivation } from "../protocol/worker-packet.js";
+import { recoveryEventDigest } from "../recovery/identity.js";
 
 export interface AttemptStore {
   readRef(ref: string): Promise<string | null>;
@@ -43,10 +45,13 @@ export interface AttemptReservation {
   directorEpoch: number;
   policyDigest: string;
   sequence: number;
+  /** Canonical digest of the complete immutable AttemptReserved trailer. */
+  receiptDigest: string;
   createdAt: Date;
   admission?: AttemptAdmissionReceipt;
   localScopeBatch?: LocalScopeBatch;
   artifactConsumer?: ArtifactConsumerBinding;
+  managedRuntimeActivation?: ManagedRuntimeActivation;
 }
 
 export interface AttemptAdmissionReceipt {
@@ -171,10 +176,14 @@ function parseReservation(ref: string, commit: GitCommitObject): AttemptReservat
     directorEpoch: event.directorEpoch,
     policyDigest: event.policyDigest,
     sequence: event.sequence,
+    receiptDigest: recoveryEventDigest(event),
     createdAt: new Date(event.at),
     ...(admission ? { admission } : {}),
     ...(event.localScopeBatch ? { localScopeBatch: event.localScopeBatch } : {}),
     ...(event.artifactConsumer ? { artifactConsumer: event.artifactConsumer } : {}),
+    ...(event.managedRuntimeActivation
+      ? { managedRuntimeActivation: event.managedRuntimeActivation }
+      : {}),
   };
 }
 
@@ -186,6 +195,7 @@ export interface AttemptAdmissionBinding {
   budgetReservationId: string;
   resourceIdentity: string;
   artifactConsumer?: ArtifactConsumerBinding;
+  managedRuntimeActivation?: ManagedRuntimeActivation;
 }
 
 export interface AttemptManagerOptions {
@@ -263,6 +273,9 @@ export class AttemptManager {
       ...(args.admission ?? {}),
       ...(localScopeBatch ? { localScopeBatch } : {}),
       ...(binding.artifactConsumer ? { artifactConsumer: binding.artifactConsumer } : {}),
+      ...(binding.managedRuntimeActivation
+        ? { managedRuntimeActivation: binding.managedRuntimeActivation }
+        : {}),
     };
     parseFactoryEvent(event);
     const oid = await this.#store.createCommit({
@@ -310,10 +323,14 @@ export class AttemptManager {
       directorEpoch: event.directorEpoch,
       policyDigest: event.policyDigest,
       sequence: event.sequence,
+      receiptDigest: recoveryEventDigest(event),
       createdAt: now,
       ...(args.admission ? { admission: args.admission } : {}),
       ...(localScopeBatch ? { localScopeBatch } : {}),
       ...(binding.artifactConsumer ? { artifactConsumer: binding.artifactConsumer } : {}),
+      ...(binding.managedRuntimeActivation
+        ? { managedRuntimeActivation: binding.managedRuntimeActivation }
+        : {}),
     };
   }
 
@@ -415,6 +432,10 @@ export class AttemptManager {
       admission.reservation.attempt !== reservation.attempt ||
       admission.reservation.backend !== reservation.backend ||
       admission.reservation.baseSha !== reservation.baseSha ||
+      !isDeepStrictEqual(
+        admission.managedRuntimeActivation,
+        reservation.managedRuntimeActivation,
+      ) ||
       admission.directorEpoch !== reservation.directorEpoch ||
       admission.writerEpoch > lease.epoch ||
       (admission.writerEpoch === lease.epoch && admission.currentWriterHolder !== lease.holder)
@@ -623,29 +644,15 @@ export class AttemptManager {
       throw new Error("cannot repair a reservation from another run or policy");
     }
     await this.assertReservation(args.lease, args.reservation, args.workItemNodeId);
-    const event: AttemptEvent = {
-      protocol: PROTOCOL_V2,
-      kind: "attempt",
-      event: "AttemptReserved",
-      ...writerAuthority(args.lease, args.reservation.sequence),
-      objective: args.reservation.objective,
-      runId: args.reservation.runId,
-      sequence: args.reservation.sequence,
-      at: args.reservation.createdAt.toISOString(),
-      workItem: args.reservation.workItem,
-      attempt: args.reservation.attempt,
-      backend: args.reservation.backend,
-      baseSha: args.reservation.baseSha,
-      directorEpoch: args.reservation.directorEpoch,
-      policyDigest: args.reservation.policyDigest,
-      ...(args.reservation.admission ?? {}),
-      ...(args.reservation.localScopeBatch
-        ? { localScopeBatch: args.reservation.localScopeBatch }
-        : {}),
-      ...(args.reservation.artifactConsumer
-        ? { artifactConsumer: args.reservation.artifactConsumer }
-        : {}),
-    };
+    const commit = await this.#store.readCommit(args.reservation.oid);
+    const event = decodeEventTrailer(commit.message);
+    if (
+      commit.oid !== args.reservation.oid ||
+      event?.kind !== "attempt" ||
+      event.event !== "AttemptReserved" ||
+      recoveryEventDigest(event) !== args.reservation.receiptDigest
+    )
+      throw new Error("cannot repair a reservation whose immutable trailer changed");
     await this.#store.addIssueComment(
       args.workItemNodeId,
       encodeEventComment(

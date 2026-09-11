@@ -1,0 +1,738 @@
+import { execFile } from "node:child_process";
+import { constants as fsConstants, readFileSync } from "node:fs";
+import {
+  access,
+  chmod,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { promisify } from "node:util";
+
+import {
+  assertRuntimeBundleReceipt,
+  assertSupportedRuntimePlatform,
+  canonicalJson,
+  type ManagedToolchain,
+  type RuntimeArchiveFormat,
+  type RuntimeAssetIdentity,
+  type RuntimeBundleReceipt,
+  type RuntimeComponentReceipt,
+  type RuntimeReleaseIdentity,
+  runtimeBundleDigest,
+  safeRelativePath,
+  sha256Bytes,
+  sha256File,
+  sha256FileSync,
+  sha256Tree,
+  sha256TreeSync,
+  SUPPORTED_RUNTIME_PLATFORM,
+} from "./toolchain-bundle.js";
+
+const execFileAsync = promisify(execFile);
+const MAX_ASSET_BYTES = 512 * 1024 * 1024;
+const RECEIPT_FILE = "receipt.json";
+
+export interface GitHubReleaseAsset {
+  id: number;
+  name: string;
+  url: string;
+  browserDownloadUrl: string;
+  size: number;
+  digest: string;
+}
+
+export interface GitHubRelease {
+  id: number;
+  tag: string;
+  draft: boolean;
+  prerelease: boolean;
+  publishedAt: string;
+  assets: GitHubReleaseAsset[];
+}
+
+export interface ToolchainReleaseSource {
+  listReleases(owner: string, repository: string): Promise<GitHubRelease[]>;
+  listReleaseAssets?(
+    owner: string,
+    repository: string,
+    releaseId: number,
+  ): Promise<GitHubReleaseAsset[]>;
+  downloadAsset(owner: string, repository: string, assetId: number): Promise<Buffer>;
+  resolveLatestNodeDistribution?(): Promise<NodeDistributionIdentity>;
+  downloadNodeDistribution?(identity: NodeDistributionIdentity): Promise<Buffer>;
+}
+
+export interface NodeDistributionIdentity {
+  version: string;
+  tag: string;
+  publishedAt: string;
+  name: string;
+  url: string;
+  sha256: string;
+  archive: "raw" | "tar.xz";
+  executablePath: string;
+}
+
+export interface ToolchainProvisionOptions {
+  root?: string;
+  now?: () => Date;
+  source: ToolchainReleaseSource;
+  run?: typeof execFileAsync;
+}
+
+export type ToolchainRestoreOptions = Omit<ToolchainProvisionOptions, "now">;
+
+export interface ToolchainStatus {
+  tool: ManagedToolchain;
+  state: "missing" | "ready" | "corrupt" | "unsupported-platform";
+  receipt?: RuntimeBundleReceipt;
+  reason?: string;
+}
+
+interface ReleaseSpec {
+  owner: string;
+  repository: string;
+  assetName: string;
+  archive: RuntimeArchiveFormat;
+  executablePath: string;
+  version(tag: string): string | null;
+  versionArgs: string[];
+  versionOutput(version: string): string;
+}
+
+const RELEASE_SPECS: Record<ManagedToolchain, ReleaseSpec> = {
+  pnpm: {
+    owner: "pnpm",
+    repository: "pnpm",
+    assetName: "pnpm-linux-x64",
+    archive: "raw",
+    executablePath: "pnpm",
+    version: (tag) => /^v(\d+\.\d+\.\d+)$/.exec(tag)?.[1] ?? null,
+    versionArgs: ["--version"],
+    versionOutput: (version) => version,
+  },
+};
+
+export function toolchainStoreRoot(env: NodeJS.ProcessEnv = process.env): string {
+  const base = env.XDG_DATA_HOME?.trim() || join(homedir(), ".local", "share");
+  return join(base, "clockgrove-factory", "toolchains");
+}
+
+function safeStoreChild(root: string, ...parts: string[]): string {
+  const target = resolve(root, ...parts);
+  const prefix = `${resolve(root)}/`;
+  if (!target.startsWith(prefix)) throw new Error("managed toolchain store path escaped its root");
+  return target;
+}
+
+function activePath(root: string, tool: ManagedToolchain): string {
+  return safeStoreChild(root, "active", `${tool}.json`);
+}
+
+function bundlePath(root: string, digest: string): string {
+  if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error("managed toolchain bundle digest is invalid");
+  return safeStoreChild(root, "bundles", digest);
+}
+
+function selectLatestGa(
+  tool: ManagedToolchain,
+  releases: GitHubRelease[],
+): {
+  release: GitHubRelease;
+  asset: GitHubReleaseAsset;
+  version: string;
+} {
+  const spec = RELEASE_SPECS[tool];
+  for (const release of releases) {
+    const version = !release.draft && !release.prerelease ? spec.version(release.tag) : null;
+    if (!version) continue;
+    const assets = release.assets.filter(({ name }) => name === spec.assetName);
+    if (assets.length !== 1)
+      throw new Error(`${tool} GA ${release.tag} does not have one ${spec.assetName} asset`);
+    const asset = assets[0]!;
+    if (!/^sha256:[a-f0-9]{64}$/.test(asset.digest))
+      throw new Error(`${tool} GA ${release.tag} lacks an official SHA-256 asset digest`);
+    if (asset.size <= 0 || asset.size > MAX_ASSET_BYTES)
+      throw new Error(`${tool} GA ${release.tag} asset size is outside the supported bound`);
+    return { release, asset, version };
+  }
+  throw new Error(`${tool} has no supported stable GA release`);
+}
+
+function validateArchiveListing(listing: string, executablePath: string): void {
+  const entries = listing.split(/\r?\n/).filter(Boolean);
+  if (entries.length === 0 || entries.length > 100_000)
+    throw new Error("managed runtime archive has an invalid entry count");
+  for (const entry of entries) {
+    const normalized = entry.replace(/\/$/, "");
+    if (normalized && !safeRelativePath(normalized))
+      throw new Error(`managed runtime archive contains an unsafe path: ${entry}`);
+  }
+  if (!entries.some((entry) => entry.replace(/\/$/, "") === executablePath))
+    throw new Error("managed runtime archive lacks its declared executable");
+}
+
+async function extractAsset(
+  archivePath: string,
+  format: RuntimeArchiveFormat,
+  target: string,
+  executablePath: string,
+  run: typeof execFileAsync,
+  executableOnly = false,
+): Promise<void> {
+  await mkdir(target, { recursive: true, mode: 0o700 });
+  if (format === "raw") {
+    if (executablePath.includes("/")) throw new Error("raw runtime executable must be top-level");
+    await copyFile(archivePath, join(target, executablePath));
+  } else if (format === "tar.gz" || format === "tar.xz") {
+    const compression = format === "tar.gz" ? "z" : "J";
+    const listed = await run("tar", [`-t${compression}f`, archivePath], {
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: 30_000,
+    });
+    validateArchiveListing(listed.stdout, executablePath);
+    await run(
+      "tar",
+      [
+        `-x${compression}f`,
+        archivePath,
+        "-C",
+        target,
+        "--no-same-owner",
+        "--no-same-permissions",
+        ...(executableOnly ? [executablePath] : []),
+      ],
+      {
+        maxBuffer: 1024 * 1024,
+        timeout: 120_000,
+      },
+    );
+  } else {
+    const listed = await run("unzip", ["-Z1", archivePath], {
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: 30_000,
+    });
+    validateArchiveListing(listed.stdout, executablePath);
+    await run("unzip", ["-q", archivePath, "-d", target], {
+      maxBuffer: 1024 * 1024,
+      timeout: 120_000,
+    });
+  }
+  const executable = safeStoreChild(target, ...executablePath.split("/"));
+  const executableStat = await stat(executable);
+  if (!executableStat.isFile()) throw new Error("managed runtime executable is not a regular file");
+  await chmod(executable, 0o700);
+}
+
+async function createGithubComponent(
+  tool: ManagedToolchain,
+  options: ToolchainProvisionOptions,
+  staging: string,
+  selected?: ReturnType<typeof selectLatestGa>,
+): Promise<RuntimeComponentReceipt> {
+  const spec = RELEASE_SPECS[tool];
+  let resolved = selected;
+  if (!resolved) {
+    const releases = await options.source.listReleases(spec.owner, spec.repository);
+    resolved = selectLatestGa(tool, releases);
+  }
+  const bytes = await options.source.downloadAsset(spec.owner, spec.repository, resolved.asset.id);
+  if (bytes.byteLength !== resolved.asset.size)
+    throw new Error(`${tool} asset size changed during download`);
+  const digest = sha256Bytes(bytes);
+  if (digest !== resolved.asset.digest.slice("sha256:".length))
+    throw new Error(`${tool} asset digest differs from the official release metadata`);
+  const componentRoot = join(staging, tool);
+  await mkdir(componentRoot, { recursive: true, mode: 0o700 });
+  const archivePath = join(componentRoot, "asset");
+  await writeFile(archivePath, bytes, { mode: 0o600, flag: "wx" });
+  const treeRoot = join(componentRoot, "root");
+  await extractAsset(
+    archivePath,
+    spec.archive,
+    treeRoot,
+    spec.executablePath,
+    options.run ?? execFileAsync,
+  );
+  const executable = join(treeRoot, ...spec.executablePath.split("/"));
+  const observed = await (options.run ?? execFileAsync)(executable, spec.versionArgs, {
+    encoding: "utf8",
+    timeout: 15_000,
+    maxBuffer: 1024 * 1024,
+    env: { PATH: "/usr/bin:/bin", HOME: join(staging, "home") },
+  });
+  if (observed.stdout.trim() !== spec.versionOutput(resolved.version))
+    throw new Error(`${tool} executable does not report release version ${resolved.version}`);
+  const release: RuntimeReleaseIdentity = {
+    provider: "github",
+    repository: `${spec.owner}/${spec.repository}`,
+    releaseId: String(resolved.release.id),
+    tag: resolved.release.tag,
+    publishedAt: resolved.release.publishedAt,
+  };
+  const asset: RuntimeAssetIdentity = {
+    assetId: String(resolved.asset.id),
+    name: resolved.asset.name,
+    url: resolved.asset.browserDownloadUrl,
+    size: resolved.asset.size,
+    sha256: digest,
+    archive: spec.archive,
+  };
+  return {
+    id: tool,
+    version: resolved.version,
+    release,
+    asset,
+    executablePath: spec.executablePath,
+    executableSha256: await sha256File(executable),
+    treeSha256: await sha256Tree(treeRoot),
+  };
+}
+
+async function createNodeComponent(
+  identity: NodeDistributionIdentity,
+  options: ToolchainProvisionOptions,
+  staging: string,
+): Promise<RuntimeComponentReceipt> {
+  if (
+    !/^\d+\.\d+\.\d+$/.test(identity.version) ||
+    identity.tag !== `v${identity.version}` ||
+    !/^[a-f0-9]{64}$/.test(identity.sha256) ||
+    !identity.url.startsWith(`https://nodejs.org/dist/${identity.tag}/`) ||
+    !safeRelativePath(identity.executablePath)
+  )
+    throw new Error("official Node distribution identity is invalid");
+  if (!options.source.downloadNodeDistribution)
+    throw new Error("pnpm provisioning source cannot download the official Node distribution");
+  const bytes = await options.source.downloadNodeDistribution(identity);
+  if (bytes.byteLength <= 0 || bytes.byteLength > MAX_ASSET_BYTES)
+    throw new Error("Node distribution size is outside the supported bound");
+  if (sha256Bytes(bytes) !== identity.sha256)
+    throw new Error("Node distribution digest differs from official SHASUMS256.txt");
+  const componentRoot = join(staging, "node");
+  await mkdir(componentRoot, { recursive: true, mode: 0o700 });
+  const archivePath = join(componentRoot, "asset");
+  await writeFile(archivePath, bytes, { mode: 0o600, flag: "wx" });
+  const treeRoot = join(componentRoot, "root");
+  await extractAsset(
+    archivePath,
+    identity.archive,
+    treeRoot,
+    identity.executablePath,
+    options.run ?? execFileAsync,
+    true,
+  );
+  const executable = join(treeRoot, ...identity.executablePath.split("/"));
+  const observed = await (options.run ?? execFileAsync)(executable, ["--version"], {
+    encoding: "utf8",
+    timeout: 15_000,
+    maxBuffer: 1024 * 1024,
+    env: { PATH: "/usr/bin:/bin", HOME: join(staging, "home") },
+  });
+  if (observed.stdout.trim() !== identity.tag)
+    throw new Error(`Node executable does not report release version ${identity.tag}`);
+  return {
+    id: "node",
+    version: identity.version,
+    release: {
+      provider: "nodejs",
+      repository: "nodejs/node",
+      releaseId: identity.tag,
+      tag: identity.tag,
+      publishedAt: identity.publishedAt,
+    },
+    asset: {
+      assetId: identity.url,
+      name: identity.name,
+      url: identity.url,
+      size: bytes.byteLength,
+      sha256: identity.sha256,
+      archive: identity.archive,
+    },
+    executablePath: identity.executablePath,
+    executableSha256: await sha256File(executable),
+    treeSha256: await sha256Tree(treeRoot),
+    executableOnly: true,
+  };
+}
+
+async function atomicWrite(path: string, content: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temporary, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  await rename(temporary, path);
+}
+
+async function installStagedBundle(
+  root: string,
+  staging: string,
+  receipt: RuntimeBundleReceipt,
+): Promise<void> {
+  await writeFile(join(staging, RECEIPT_FILE), `${canonicalJson(receipt)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+    flag: "wx",
+  });
+  const target = bundlePath(root, receipt.digest);
+  const targetExists = await access(target, fsConstants.F_OK).then(
+    () => true,
+    () => false,
+  );
+  if (!targetExists) await rename(staging, target);
+  else {
+    try {
+      await verifyRuntimeBundle(root, await readRuntimeBundle(root, receipt.digest));
+      await rm(staging, { recursive: true, force: true });
+    } catch {
+      await rm(target, { recursive: true, force: true });
+      await rename(staging, target);
+    }
+  }
+  await verifyRuntimeBundle(root, receipt);
+}
+
+export async function provisionToolchain(
+  tool: ManagedToolchain,
+  options: ToolchainProvisionOptions,
+): Promise<RuntimeBundleReceipt> {
+  assertSupportedRuntimePlatform();
+  const root = resolve(options.root ?? toolchainStoreRoot());
+  await mkdir(join(root, "bundles"), { recursive: true, mode: 0o700 });
+  const spec = RELEASE_SPECS[tool];
+  const selected = selectLatestGa(
+    tool,
+    await options.source.listReleases(spec.owner, spec.repository),
+  );
+  const selectedNode = await options.source.resolveLatestNodeDistribution?.();
+  if (!selectedNode)
+    throw new Error("pnpm provisioning source cannot resolve the latest official Node GA");
+  try {
+    const current = await activeRuntimeBundle(tool, root);
+    const component = current.components.find(({ id }) => id === tool);
+    const node = current.components.find(({ id }) => id === "node");
+    if (
+      component?.release.releaseId === String(selected.release.id) &&
+      component.asset.assetId === String(selected.asset.id) &&
+      component.asset.sha256 === selected.asset.digest.slice("sha256:".length) &&
+      node?.version === selectedNode.version &&
+      node.asset.url === selectedNode.url &&
+      node.asset.sha256 === selectedNode.sha256
+    )
+      return current;
+  } catch {
+    // Missing or corrupt active state is repaired by the explicit provision below.
+  }
+  const staging = await mkdtemp(join(root, ".provision-"));
+  try {
+    const primary = await createGithubComponent(tool, options, staging, selected);
+    const components = [await createNodeComponent(selectedNode, options, staging), primary];
+    const unsigned: Omit<RuntimeBundleReceipt, "digest"> = {
+      protocol: "clockgrove.factory/toolchain-runtime-bundle-v1",
+      tool,
+      adapter: "node-pnpm",
+      adapterContract: 1,
+      platform: SUPPORTED_RUNTIME_PLATFORM,
+      components,
+      resolvedAt: (options.now ?? (() => new Date()))().toISOString(),
+    };
+    const receipt: RuntimeBundleReceipt = { ...unsigned, digest: runtimeBundleDigest(unsigned) };
+    assertRuntimeBundleReceipt(receipt);
+    await installStagedBundle(root, staging, receipt);
+    await atomicWrite(activePath(root, tool), `${canonicalJson({ digest: receipt.digest })}\n`);
+    return receipt;
+  } catch (error) {
+    await rm(staging, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function exactPnpmRestoreIdentity(receipt: RuntimeBundleReceipt): {
+  node: NodeDistributionIdentity;
+  selected: ReturnType<typeof selectLatestGa>;
+} {
+  assertRuntimeBundleReceipt(receipt);
+  if (receipt.tool !== "pnpm" || receipt.adapter !== "node-pnpm" || receipt.adapterContract !== 1)
+    throw new Error("managed runtime receipt is not a restorable pnpm adapter");
+  if (
+    receipt.components.length !== 2 ||
+    receipt.components[0]?.id !== "node" ||
+    receipt.components[1]?.id !== "pnpm"
+  )
+    throw new Error("pnpm runtime receipt has an unsupported component topology");
+  const [node, pnpm] = receipt.components as [RuntimeComponentReceipt, RuntimeComponentReceipt];
+  const releaseId = Number(pnpm.release.releaseId);
+  const assetId = Number(pnpm.asset.assetId);
+  if (
+    pnpm.release.provider !== "github" ||
+    pnpm.release.repository !== "pnpm/pnpm" ||
+    !Number.isSafeInteger(releaseId) ||
+    releaseId <= 0 ||
+    pnpm.release.tag !== `v${pnpm.version}` ||
+    !Number.isSafeInteger(assetId) ||
+    assetId <= 0 ||
+    pnpm.asset.name !== "pnpm-linux-x64" ||
+    pnpm.asset.archive !== "raw" ||
+    pnpm.executablePath !== "pnpm" ||
+    pnpm.executableOnly !== undefined
+  )
+    throw new Error("pnpm runtime receipt has an unsupported GitHub origin identity");
+  if (
+    node.release.provider !== "nodejs" ||
+    node.release.repository !== "nodejs/node" ||
+    node.release.releaseId !== node.release.tag ||
+    node.release.tag !== `v${node.version}` ||
+    node.asset.assetId !== node.asset.url ||
+    node.asset.url !== `https://nodejs.org/dist/${node.release.tag}/${node.asset.name}` ||
+    node.asset.name.includes("/") ||
+    (node.asset.archive !== "raw" && node.asset.archive !== "tar.xz") ||
+    (node.asset.archive === "raw" && node.executablePath !== "node") ||
+    (node.asset.archive === "tar.xz" &&
+      (node.asset.name !== `node-${node.release.tag}-linux-x64.tar.xz` ||
+        node.executablePath !== `node-${node.release.tag}-linux-x64/bin/node`)) ||
+    node.executableOnly !== true
+  )
+    throw new Error("pnpm runtime receipt has an unsupported Node origin identity");
+  return {
+    node: {
+      version: node.version,
+      tag: node.release.tag,
+      publishedAt: node.release.publishedAt,
+      name: node.asset.name,
+      url: node.asset.url,
+      sha256: node.asset.sha256,
+      archive: node.asset.archive,
+      executablePath: node.executablePath,
+    },
+    selected: {
+      version: pnpm.version,
+      release: {
+        id: releaseId,
+        tag: pnpm.release.tag,
+        draft: false,
+        prerelease: false,
+        publishedAt: pnpm.release.publishedAt,
+        assets: [],
+      },
+      asset: {
+        id: assetId,
+        name: pnpm.asset.name,
+        url: pnpm.asset.url,
+        browserDownloadUrl: pnpm.asset.url,
+        size: pnpm.asset.size,
+        digest: `sha256:${pnpm.asset.sha256}`,
+      },
+    },
+  };
+}
+
+/** Reacquire one historical receipt exactly. This never changes the active pointer. */
+export async function restoreToolchain(
+  receipt: RuntimeBundleReceipt,
+  options: ToolchainRestoreOptions,
+): Promise<RuntimeBundleReceipt> {
+  assertSupportedRuntimePlatform();
+  const exact = exactPnpmRestoreIdentity(receipt);
+  const root = resolve(options.root ?? toolchainStoreRoot());
+  await mkdir(join(root, "bundles"), { recursive: true, mode: 0o700 });
+  try {
+    return await runtimeBundleByDigest(receipt.tool, receipt.digest, root);
+  } catch {
+    // Missing or corrupt exact state is reconstructed from the durable origin receipt below.
+  }
+  const staging = await mkdtemp(join(root, ".restore-"));
+  try {
+    const primary = await createGithubComponent("pnpm", options, staging, exact.selected);
+    const node = await createNodeComponent(exact.node, options, staging);
+    if (
+      canonicalJson([node, primary]) !== canonicalJson(receipt.components) ||
+      runtimeBundleDigest({
+        protocol: receipt.protocol,
+        tool: receipt.tool,
+        adapter: receipt.adapter,
+        adapterContract: receipt.adapterContract,
+        platform: receipt.platform,
+        components: [node, primary],
+        resolvedAt: receipt.resolvedAt,
+      }) !== receipt.digest
+    )
+      throw new Error("restored managed runtime differs from its exact durable receipt");
+    await installStagedBundle(root, staging, receipt);
+    return await runtimeBundleByDigest(receipt.tool, receipt.digest, root);
+  } catch (error) {
+    await rm(staging, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function readRuntimeBundle(
+  root: string,
+  digest: string,
+): Promise<RuntimeBundleReceipt> {
+  const raw = await readFile(join(bundlePath(root, digest), RECEIPT_FILE), "utf8");
+  const receipt = JSON.parse(raw) as RuntimeBundleReceipt;
+  assertRuntimeBundleReceipt(receipt);
+  if (receipt.digest !== digest)
+    throw new Error("managed toolchain receipt path differs from digest");
+  return receipt;
+}
+
+export async function activeRuntimeBundle(
+  tool: ManagedToolchain,
+  root = toolchainStoreRoot(),
+): Promise<RuntimeBundleReceipt> {
+  const pointer = JSON.parse(await readFile(activePath(root, tool), "utf8")) as {
+    digest?: unknown;
+  };
+  if (typeof pointer.digest !== "string") throw new Error(`${tool} active receipt is malformed`);
+  const receipt = await readRuntimeBundle(root, pointer.digest);
+  if (receipt.tool !== tool) throw new Error(`${tool} active receipt names another toolchain`);
+  await verifyRuntimeBundle(root, receipt);
+  return receipt;
+}
+
+export function activeRuntimeBundleSync(
+  tool: ManagedToolchain,
+  root = toolchainStoreRoot(),
+): RuntimeBundleReceipt {
+  const pointer = JSON.parse(readFileSync(activePath(root, tool), "utf8")) as { digest?: unknown };
+  if (typeof pointer.digest !== "string") throw new Error(`${tool} active receipt is malformed`);
+  const directory = bundlePath(root, pointer.digest);
+  const receipt = JSON.parse(
+    readFileSync(join(directory, RECEIPT_FILE), "utf8"),
+  ) as RuntimeBundleReceipt;
+  assertRuntimeBundleReceipt(receipt);
+  if (receipt.tool !== tool || receipt.digest !== pointer.digest)
+    throw new Error(`${tool} active receipt identity is inconsistent`);
+  for (const component of receipt.components) {
+    const componentRoot = safeStoreChild(directory, component.id);
+    const tree = join(componentRoot, "root");
+    const executable = safeStoreChild(tree, ...component.executablePath.split("/"));
+    if (
+      sha256FileSync(join(componentRoot, "asset")) !== component.asset.sha256 ||
+      sha256FileSync(executable) !== component.executableSha256 ||
+      sha256TreeSync(tree) !== component.treeSha256
+    )
+      throw new Error(`${receipt.tool} managed runtime cache failed integrity verification`);
+  }
+  return receipt;
+}
+
+export async function runtimeBundleByDigest(
+  tool: ManagedToolchain,
+  digest: string,
+  root = toolchainStoreRoot(),
+): Promise<RuntimeBundleReceipt> {
+  const receipt = await readRuntimeBundle(root, digest);
+  if (receipt.tool !== tool) throw new Error(`${tool} runtime receipt names another toolchain`);
+  await verifyRuntimeBundle(root, receipt);
+  return receipt;
+}
+
+export function runtimeBundleByDigestSync(
+  tool: ManagedToolchain,
+  digest: string,
+  root = toolchainStoreRoot(),
+): RuntimeBundleReceipt {
+  if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error("managed runtime bundle digest is invalid");
+  const directory = bundlePath(root, digest);
+  const receipt = JSON.parse(
+    readFileSync(join(directory, RECEIPT_FILE), "utf8"),
+  ) as RuntimeBundleReceipt;
+  assertRuntimeBundleReceipt(receipt);
+  if (receipt.tool !== tool || receipt.digest !== digest)
+    throw new Error(`${tool} runtime receipt identity is inconsistent`);
+  for (const component of receipt.components) {
+    const componentRoot = safeStoreChild(directory, component.id);
+    const tree = join(componentRoot, "root");
+    const executable = safeStoreChild(tree, ...component.executablePath.split("/"));
+    if (
+      sha256FileSync(join(componentRoot, "asset")) !== component.asset.sha256 ||
+      sha256FileSync(executable) !== component.executableSha256 ||
+      sha256TreeSync(tree) !== component.treeSha256
+    )
+      throw new Error(`${receipt.tool} managed runtime cache failed integrity verification`);
+  }
+  return receipt;
+}
+
+export async function verifyRuntimeBundle(
+  root: string,
+  receipt: RuntimeBundleReceipt,
+): Promise<void> {
+  assertRuntimeBundleReceipt(receipt);
+  const directory = bundlePath(root, receipt.digest);
+  for (const component of receipt.components) {
+    const componentRoot = safeStoreChild(directory, component.id);
+    const archive = join(componentRoot, "asset");
+    const tree = join(componentRoot, "root");
+    const executable = safeStoreChild(tree, ...component.executablePath.split("/"));
+    const [archiveDigest, executableDigest, treeDigest] = await Promise.all([
+      sha256File(archive),
+      sha256File(executable),
+      sha256Tree(tree),
+    ]);
+    if (
+      archiveDigest !== component.asset.sha256 ||
+      executableDigest !== component.executableSha256 ||
+      treeDigest !== component.treeSha256
+    )
+      throw new Error(`${receipt.tool} managed runtime cache failed integrity verification`);
+  }
+}
+
+export async function toolchainStatus(
+  tool: ManagedToolchain,
+  root = toolchainStoreRoot(),
+): Promise<ToolchainStatus> {
+  try {
+    assertSupportedRuntimePlatform();
+  } catch (error) {
+    return {
+      tool,
+      state: "unsupported-platform",
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+  try {
+    const receipt = await activeRuntimeBundle(tool, root);
+    return { tool, state: "ready", receipt };
+  } catch (error) {
+    const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+    return {
+      tool,
+      state: missing ? "missing" : "corrupt",
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export function runtimeComponentPaths(
+  root: string,
+  receipt: RuntimeBundleReceipt,
+): Array<{ component: RuntimeComponentReceipt; asset: string; root: string; executable: string }> {
+  const directory = bundlePath(root, receipt.digest);
+  return receipt.components.map((component) => {
+    const componentRoot = safeStoreChild(directory, component.id);
+    const tree = join(componentRoot, "root");
+    return {
+      component,
+      asset: join(componentRoot, "asset"),
+      root: tree,
+      executable: safeStoreChild(tree, ...component.executablePath.split("/")),
+    };
+  });
+}
+
+export function receiptIdentity(receipt: RuntimeBundleReceipt): string {
+  return `${receipt.adapter}@${receipt.adapterContract}/${receipt.platform.os}-${receipt.platform.architecture}-${receipt.platform.libc}/${receipt.digest}`;
+}

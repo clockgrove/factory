@@ -31,6 +31,7 @@ function fixture() {
     oid: "c".repeat(40),
     baseSha: "d".repeat(40),
     sequence: 2,
+    receiptDigest: "e".repeat(64),
     createdAt: now,
   };
   const store = { addIssueComment: vi.fn(async () => {}), serverTime: vi.fn(async () => now) };

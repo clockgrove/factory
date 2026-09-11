@@ -61,6 +61,7 @@ import {
   workerPacketPrompt,
   type LocalCapabilityProbe,
 } from "./codex-cli-local.js";
+import { withManagedToolchainPath } from "../toolchains/authority.js";
 
 interface WorkerFinal {
   outcome: "succeeded" | "failed" | "declined";
@@ -916,6 +917,14 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     context?: AttemptContext,
   ): Promise<AppServerConnection> {
     const target = await resolveCodexCommand(this.#options.command);
+    const environment = context
+      ? await withManagedToolchainPath(
+          isolateCodexEnvironment(process.env, home),
+          home,
+          context.packet.requirements.tools,
+          context.packet.managedRuntimes,
+        )
+      : isolateCodexEnvironment(process.env, home);
     const connection = await (this.#options.connect?.(home) ??
       startCodexAppServer({
         command: target.command,
@@ -926,7 +935,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
           ...codexAppServerArgs(home, this.#options.profile),
         ],
         cwd,
-        env: isolateCodexEnvironment(process.env, home),
+        env: environment,
         permittedSecretNames: this.#options.permittedModelCredentials ?? [],
         attemptIdentity: attemptId,
         ...(context?.localExecutionScope

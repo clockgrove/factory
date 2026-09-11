@@ -322,7 +322,7 @@ describe("representative executable corpus integrity, not compiler/model quality
     const invalidCommand = structuredClone(graph);
     invalidCommand.workItems[0]!.validationCommands = ["npm run imaginary"];
     expect(() => assessCompilerCorpusResult(value, invalidCommand, bindings(value), sha)).toThrow(
-      /invented validation/,
+      /validation design references ungrounded command/,
     );
     const noAsset = structuredClone(graph);
     noAsset.workItems[0]!.scope = ["scripts/module.mjs"];

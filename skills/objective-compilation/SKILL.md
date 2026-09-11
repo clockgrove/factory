@@ -15,6 +15,17 @@ configuration, and files that determine likely seams. Never invent paths or comm
 alone. If the Objective cannot support observable acceptance criteria, escalate instead of creating
 fictional work.
 
+Validation operations normally come from the frozen repository. Use a future repository-capability
+adapter only when the compilation context explicitly advertises its authority paths, finite command
+grammar, exact runtime, setup destination, and provisioning support. One dependency-root item must
+own the adapter's complete absent root authority; a partially present authority surface is observed
+state and cannot be completed this way. Descendants may name only promised operations on a transitive
+dependency path. A later generation requires an explicit mutator that owns the generation surface
+and validates the new operation; scope alone is not a promise. Do not emit capability bindings—the
+trusted compiler derives provider, requirement, and generation records after validating the graph.
+If no advertised adapter applies, an absent npm, pnpm, bun, uv, Cargo, Go, Python, or other recipe is
+unavailable evidence, not permission to rely on an ambient executable.
+
 ## Decompose
 
 Prefer independently deliverable behavior with disjoint file scope. Add a dependency only when one
@@ -30,7 +41,8 @@ Every Work Item must contain:
 - explicit `preconditions`, `outOfScope`, and repository-derived `conventions`;
 - sibling IDs in `dependsOn`;
 - the exact observed `baseSha`;
-- one or more authoritative `validationCommands` from the repository's toolchain;
+- one or more authoritative `validationCommands` from the repository's toolchain or an explicitly
+  advertised future-capability adapter;
 - complete `requirements`: OS, architecture, tools, services, operator-allowed network destinations,
   an empty permitted-secret list, optional resource/time bounds, and `trust`;
 - a bounded repository-derived `context` manifest, mechanically classified `changeSurface`,
@@ -87,7 +99,8 @@ Before returning the object:
 - every overlapping scope pair has a dependency path, and stack parents exactly match dependencies;
 - context, conflict/resource, validation, delivery, and economic fields agree with repository facts;
 - every base SHA equals the supplied base;
-- validation commands are non-empty and actually available in the repository/backend requirements;
+- validation commands are non-empty and either observed in the repository or connected to exactly
+  one advertised provider generation through the dependency graph and backend requirements;
 - no field contains a secret value;
 - the result validates against `schemas/objective.schema.json` and
   `schemas/work-item.schema.json`.

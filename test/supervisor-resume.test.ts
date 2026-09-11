@@ -93,9 +93,16 @@ describe("same-run controller restart after integration", () => {
     "recovers an overlapping intent only with durable non-dispatch proof (dispatch possible: %s)",
     async (dispatchPossible) => {
       const f = await providerSupervisorFixture("daytona-burst", {
+        configureLocalBackend: (backend) => ({
+          ...backend,
+          capabilities: { ...backend.capabilities, reportsModelUsage: false },
+        }),
         controllerActivation: true,
+        holdSiblingDispatchUntilIntegrationFailure: true,
         localOnly: true,
+        localMaxParallel: 2,
         loseIntegrationReceipt: "before",
+        noModelTokenBudget: true,
       });
       try {
         await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
@@ -120,7 +127,8 @@ describe("same-run controller restart after integration", () => {
           .events()
           .filter((event) => event.kind === "budget" && event.workItem === 9);
         if (!dispatchPossible) {
-          expect(await f.run()).toMatchObject({ status: "completed", runId: f.runId });
+          const resumed = await f.run();
+          expect(resumed, resumed.reason).toMatchObject({ status: "completed", runId: f.runId });
           const history = (await ledger.read(9))!.history;
           expect(history).toHaveLength(2);
           expect(history[0]).toMatchObject({
@@ -313,6 +321,7 @@ describe("same-run controller restart after integration", () => {
       const f = await providerSupervisorFixture("daytona-burst", {
         controllerActivation: true,
         localOnly: true,
+        waitForSiblingLaunchBeforeIntegration: true,
         afterIntegration: () => shutdown.abort(),
       });
       try {

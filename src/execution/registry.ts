@@ -215,7 +215,6 @@ export class BackendRegistry {
       ) {
         permanentReasons.push("validation boundary is weaker than a container");
       }
-      permanentReasons.push(...capabilityMismatch(backend.capabilities, validationRequirements));
       if (
         backend.capabilities.requiresPaidRuntime &&
         !args.policy.allowedPaidBackends.includes(id)
@@ -251,6 +250,10 @@ export class BackendRegistry {
         else if (!probe.authenticated) {
           transientReasons.push(probe.reason ?? "not authenticated");
         }
+        // A probe may authenticate a bundled or discovered runtime and then
+        // advertise it. Match requirements against that observed capability,
+        // not only the constructor's conservative initial shape.
+        permanentReasons.push(...capabilityMismatch(backend.capabilities, validationRequirements));
       }
       candidates.push({
         id,

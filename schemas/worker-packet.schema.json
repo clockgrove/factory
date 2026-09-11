@@ -127,6 +127,78 @@
         }
       }
     },
+    "repositoryCapabilities": {
+      "type": "object",
+      "description": "Host-derived deferred repository capability bindings. These establish immutable plan provenance, not executable authority; the Supervisor must resolve integrated-base requirements again before dispatch.",
+      "additionalProperties": false,
+      "required": ["provides", "requires"],
+      "properties": {
+        "provides": {
+          "type": "array", "maxItems": 16,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["adapter", "generation", "authorityPaths", "operations"],
+            "properties": {
+              "adapter": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
+              "generation": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
+              "authorityPaths": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*[*?\\[]).+$" } },
+              "operations": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/definitions/repositoryCapabilityOperation" } },
+              "runtime": { "$ref": "#/definitions/runtimeBundleRequirement" }
+            }
+          }
+        },
+        "requires": {
+          "type": "array", "maxItems": 32,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["adapter", "generation", "providerWorkItem", "authorityPaths", "operation", "activation"],
+            "properties": {
+              "adapter": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
+              "generation": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
+              "providerWorkItem": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
+              "authorityPaths": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*[*?\\[]).+$" } },
+              "operation": { "$ref": "#/definitions/repositoryCapabilityOperation" },
+              "activation": { "enum": ["artifact", "integrated-base"] },
+              "runtime": { "$ref": "#/definitions/runtimeBundleRequirement" }
+            }
+          }
+        }
+      }
+    },
+    "managedRuntimes": {
+      "type": "array", "minItems": 1, "maxItems": 8,
+      "items": { "$ref": "#/definitions/runtimeBundleRequirement" }
+    },
     "artifactContract": { "const": "clockgrove.factory/artifact-v1" }
+  },
+  "definitions": {
+    "repositoryCapabilityOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "key"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
+        "key": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" }
+      }
+    },
+    "runtimeBundleRequirement": {
+      "type": "object", "additionalProperties": false,
+      "required": ["tool", "adapter", "adapterContract", "platform", "releaseChannel"],
+      "properties": {
+        "tool": { "const": "pnpm" },
+        "adapter": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
+        "adapterContract": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "platform": {
+          "type": "object", "additionalProperties": false,
+          "required": ["os", "architecture", "libc"],
+          "properties": {
+            "os": { "const": "linux" },
+            "architecture": { "const": "x64" },
+            "libc": { "const": "glibc" }
+          }
+        },
+        "releaseChannel": { "const": "ga" },
+        "bundleDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    }
   }
 }

@@ -9,17 +9,30 @@ import { isModelInvocationMarker, unresolvedModelInvocations } from "../src/cont
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 import { GithubOctokitGraphWriter, renderLegacyWorkItemCore } from "../src/graph.js";
 import * as localScopeRuntime from "../src/runtime/local-scope.js";
+import { buildRecoveryProposal } from "../src/recovery/proposal.js";
+import { recoveryReadPort } from "../src/recovery/github-read-port.js";
+import { RecoveryPlanManager } from "../src/recovery/plan.js";
+import { RecoveryClaimManager } from "../src/recovery/claims.js";
+import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
+import { CompiledGraphManager } from "../src/control/graphs.js";
 
 const fixtures: Awaited<ReturnType<typeof providerSupervisorFixture>>[] = [];
 afterEach(async () => {
   for (const fixture of fixtures.splice(0)) await fixture.dispose();
 });
 
-async function fixture(fresh = true, greenfieldBootstrap = false) {
+async function fixture(
+  fresh = true,
+  greenfieldBootstrap = false,
+  greenfieldLifecycle = false,
+  pnpmUnavailable = false,
+) {
   const f = await providerSupervisorFixture("daytona-burst", {
     controllerActivation: true,
     localOnly: true,
     greenfieldBootstrap,
+    greenfieldLifecycle,
+    pnpmUnavailable,
   });
   fixtures.push(f);
   vi.spyOn(GitHubReader.prototype, "readRepositoryLayout").mockResolvedValue({
@@ -284,7 +297,7 @@ describe("Supervisor activation withdrawal races", () => {
       .mockImplementation(async (identity) => ({
         exitCode: 0,
         signal: null,
-        stdout: identity.commandIndex === 0 ? "10.17.1\n" : "",
+        stdout: identity.commandIndex === 0 ? "10.34.5\n" : "",
         stderr: "",
         durationMs: 1,
         timedOut: false,
@@ -327,6 +340,269 @@ describe("Supervisor activation withdrawal races", () => {
     ).toHaveLength(1);
     expect(f.mergePull).not.toHaveBeenCalled();
   });
+
+  it("persists one greenfield graph before an unavailable managed runtime blocks execution", async () => {
+    const f = await fixture(true, true, false, true);
+    f.compile.mockImplementation(async (_context, checkpoint) => {
+      const result = {
+        objective: f.graph,
+        usage: { inputTokens: 10, outputTokens: 5 },
+      };
+      await checkpoint(result);
+      return result;
+    });
+    vi.spyOn(GithubOctokitGraphWriter.prototype, "createWorkItemIssue").mockImplementation(
+      async ({ title, body }) => {
+        f.snapshot.workItems.push({
+          id: "I_8",
+          number: 8,
+          title,
+          body,
+          closed: false,
+          assignees: [],
+          labels: ["factory:work-item"],
+          blockedBy: [],
+          linkedPullRequests: [],
+          copilotAssignments: [],
+          factoryEvents: [],
+        });
+        return { id: "I_8", number: 8 };
+      },
+    );
+
+    const first = await f.run();
+    expect(first).toMatchObject({
+      status: "escalated",
+      reason: expect.stringMatching(/pnpm|tool|backend/i),
+    });
+    expect(f.compile).toHaveBeenCalledOnce();
+    const persisted = await new CompiledGraphManager(f.storage, f.leases).load(7, first.runId);
+    expect(persisted).not.toBeNull();
+    expect(persisted?.objective).toEqual(f.graph);
+    expect(
+      f
+        .events()
+        .filter(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReconciled" &&
+            event.runId === first.runId &&
+            event.unit === "model_tokens",
+        ),
+    ).toHaveLength(1);
+    // Runtime preflight intentionally occurs after graph authentication but
+    // before projection or any Work Item/attempt mutation.
+    expect(f.events().filter((event) => event.event === "GraphCompiled")).toHaveLength(1);
+    expect(f.events().filter((event) => event.event === "GraphProjected")).toHaveLength(0);
+    expect(f.events().filter((event) => event.kind === "attempt")).toHaveLength(0);
+    expect(f.activity).toEqual([]);
+
+    const restarted = await f.run();
+    expect(restarted).toMatchObject({
+      status: "escalated",
+      reason: expect.stringMatching(/pnpm|tool|backend/i),
+    });
+    expect(restarted.runId).not.toBe(first.runId);
+    expect(f.compile).toHaveBeenCalledOnce();
+    expect(await new CompiledGraphManager(f.storage, f.leases).load(7, first.runId)).toEqual(
+      persisted,
+    );
+    expect(
+      (await new CompiledGraphManager(f.storage, f.leases).load(7, restarted.runId))?.objective,
+    ).toEqual(f.graph);
+    expect(f.activity).toEqual([]);
+  }, 30_000);
+
+  it("reuses one authenticated greenfield graph after human merge and admits its descendant", async () => {
+    const f = await fixture(true, false, true);
+    f.compile.mockImplementation(async (_context, checkpoint) => {
+      const result = {
+        objective: f.graph,
+        usage: { inputTokens: 10, outputTokens: 5 },
+      };
+      await checkpoint(result);
+      return result;
+    });
+    const byNode = new Map<string, number>();
+    vi.spyOn(GithubOctokitGraphWriter.prototype, "createWorkItemIssue").mockImplementation(
+      async ({ title, body }) => {
+        const number = 8 + f.snapshot.workItems.length;
+        const id = `I_${number}`;
+        byNode.set(id, number);
+        f.snapshot.workItems.push({
+          id,
+          number,
+          title,
+          body,
+          closed: false,
+          assignees: [],
+          labels: ["factory:work-item"],
+          blockedBy: [],
+          linkedPullRequests: [],
+          copilotAssignments: [],
+          factoryEvents: [],
+        });
+        return { id, number };
+      },
+    );
+    vi.spyOn(GithubOctokitGraphWriter.prototype, "addBlockedBy").mockImplementation(
+      async (issueId, blockingIssueId) => {
+        const item = f.snapshot.workItems.find((candidate) => candidate.id === issueId)!;
+        item.blockedBy.push({ number: byNode.get(blockingIssueId)!, closed: false });
+      },
+    );
+    const scoped = vi
+      .spyOn(localScopeRuntime, "runScopedLocalProcess")
+      .mockImplementation(async (identity) => ({
+        exitCode: 0,
+        signal: null,
+        stdout: identity.commandIndex === 0 ? "10.34.5\n" : "",
+        stderr: "",
+        durationMs: 1,
+        timedOut: false,
+      }));
+    const hostIdentity = "b".repeat(64);
+    vi.spyOn(localScopeRuntime, "discoverLocalScopeHost").mockResolvedValue({
+      hostIdentity,
+      producerPid: process.pid,
+      producerStartTicks: "456",
+      producerUnit: "factory-greenfield-lifecycle.service",
+      producerInvocationId: "c".repeat(32),
+    });
+    vi.spyOn(localScopeRuntime.linuxLocalScopeReadPort, "hostIdentity").mockResolvedValue(
+      hostIdentity,
+    );
+    vi.spyOn(localScopeRuntime.linuxLocalScopeReadPort, "read").mockRejectedValue(
+      Object.assign(new Error("absent fixture producer"), { code: "ENOENT" }),
+    );
+    vi.spyOn(localScopeRuntime.linuxLocalScopeReadPort, "show").mockImplementation(
+      async (unit) =>
+        `Id=${unit}\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nControlGroup=\nJob=\nInvocationID=\nKillMode=control-group\n`,
+    );
+
+    const initial = await f.run();
+    expect(initial).toMatchObject({
+      status: "escalated",
+      reason: expect.stringContaining("greenfield bootstrap pull request #108"),
+    });
+    expect(f.compile).toHaveBeenCalledOnce();
+    expect(
+      f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.workItem),
+    ).toEqual([8]);
+    expect(f.mergePull).not.toHaveBeenCalled();
+    const predecessorRunId = initial.runId;
+
+    const bootstrapPull = f.snapshot.workItems[0]!.linkedPullRequests[0]!;
+    await f.mergePull({
+      number: bootstrapPull.number,
+      headSha: bootstrapPull.headSha,
+      commitTitle: "Human-approved bootstrap",
+    });
+    // GitHub closes the linked Work Item when the human merges the Factory PR.
+    f.snapshot.workItems[0]!.closed = true;
+    for (const item of f.snapshot.workItems)
+      for (const dependency of item.blockedBy)
+        if (dependency.number === f.snapshot.workItems[0]!.number) dependency.closed = true;
+
+    const store = new GitHubControlStore({
+      token: "fixture-token",
+      owner: "fixture",
+      repo: "provider-qualification",
+    });
+    const proposalInput = {
+      repository: "fixture/provider-qualification",
+      snapshot: f.snapshot,
+      historyComplete: true,
+      store: recoveryReadPort(store, "fixture", "provider-qualification"),
+      requestId: "greenfield-successor-request",
+      successorRunId: "greenfield-successor",
+    };
+    let proposal = await buildRecoveryProposal(proposalInput);
+    if (proposal.unknownUsageDigest)
+      proposal = await buildRecoveryProposal({
+        ...proposalInput,
+        unknownUsageAcknowledgementDigest: proposal.unknownUsageDigest,
+      });
+    expect(proposal.status, JSON.stringify(proposal.blockers)).toBe("proposed");
+    if (!proposal.plan) throw new Error("greenfield successor plan unavailable");
+    const successorLease = { ...f.lease, runId: proposal.plan.successorRunId };
+    const planRecord = await new RecoveryPlanManager(f.storage, f.leases).persist({
+      lease: successorLease,
+      plan: proposal.plan,
+    });
+    const predecessorStart = f.snapshot.factoryEvents!.find(
+      (event) => event.event === "FactoryRunStarted" && event.runId === predecessorRunId,
+    );
+    if (predecessorStart?.event !== "FactoryRunStarted")
+      throw new Error("greenfield predecessor start unavailable");
+    const nextSequence = () => Math.max(...f.events().map((event) => event.sequence)) + 1;
+    const request = parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      kind: "recovery",
+      event: "RecoveryRequested",
+      objective: 7,
+      runId: predecessorRunId,
+      sequence: nextSequence(),
+      at: new Date().toISOString(),
+      requestedBy: "operator",
+      requestId: proposal.plan.requestId,
+      repository: "fixture/provider-qualification",
+      planDigest: planRecord.digest,
+      predecessorRunId,
+      predecessorTerminalDigest: proposal.plan.predecessor.terminalDigest,
+      successorRunId: proposal.plan.successorRunId,
+      policyDigest: proposal.plan.policyDigest,
+      baseSha: proposal.plan.expectedBaseSha,
+    });
+    if (request.event !== "RecoveryRequested") throw new Error("greenfield recovery request");
+    f.snapshot.factoryEvents!.push(request);
+    const claim = await new RecoveryClaimManager(f.storage, f.leases).claim({
+      lease: successorLease,
+      planRecord,
+      authenticatedRequest: request,
+      transaction: {
+        at: new Date().toISOString(),
+        startSequence: nextSequence(),
+        evidenceDigest: "1".repeat(64),
+        accountingDigest: "2".repeat(64),
+        resourceEvidenceDigest: "3".repeat(64),
+      },
+    });
+    f.snapshot.factoryEvents!.push(
+      ...recoveryAdoptionEvents({
+        planRecord,
+        claim,
+        authenticatedRequest: request,
+        predecessorStart,
+      }),
+    );
+
+    const resumed = await f.runRecovery({
+      requestId: planRecord.plan.requestId,
+      planDigest: planRecord.digest,
+      successorRunId: planRecord.plan.successorRunId,
+    });
+    expect(resumed).toMatchObject({ status: "completed", runId: "greenfield-successor" });
+    expect(f.compile).toHaveBeenCalledOnce();
+    expect(
+      f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.workItem),
+    ).toEqual([8, 9]);
+    expect(f.snapshot.workItems.every((item) => item.closed)).toBe(true);
+    expect(
+      f
+        .events()
+        .filter(
+          (event) => event.event === "GraphCompiled" && event.runId === "greenfield-successor",
+        ),
+    ).toHaveLength(0);
+    const graphManager = new CompiledGraphManager(f.storage, f.leases);
+    const sourceGraph = await graphManager.load(7, predecessorRunId);
+    if (!planRecord.plan.graph || !("digest" in planRecord.plan.graph))
+      throw new Error("greenfield successor did not retain its authenticated graph");
+    expect(sourceGraph?.graphDigest).toBe(planRecord.plan.graph.digest);
+    expect(sourceGraph?.objective.workItems[1]?.repositoryCapabilities?.requires).toHaveLength(1);
+    expect(scoped).toHaveBeenCalledTimes(6);
+  }, 60_000);
 
   it("refuses adoption writes when a legacy Work Item changes during compilation", async () => {
     const f = await fixture(true);

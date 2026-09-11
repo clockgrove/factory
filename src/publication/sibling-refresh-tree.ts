@@ -73,6 +73,9 @@ export async function prepareSiblingRefreshTree(input: {
   assertCurrent: () => Promise<void>;
   /** Recovery can bind an already validated tree before any immutable upload. */
   expectedOutputTreeSha?: string;
+  /** Only validated-publication recovery may reconstruct a sensitive tree. The
+   * caller must run the independent publication policy before any ref mutation. */
+  allowSensitiveValidatedRecovery?: boolean;
 }): Promise<string> {
   const artifact = verifyArtifact(input.artifact);
   if (
@@ -82,7 +85,10 @@ export async function prepareSiblingRefreshTree(input: {
   )
     throw new Error("sibling tree preparation requires an exact executable artifact base");
   assertArtifactScope(artifact, input.packet.allowedPaths);
-  if (artifact.changedPaths.some((path) => executionAffectingReason(path) !== null))
+  if (
+    !input.allowSensitiveValidatedRecovery &&
+    artifact.changedPaths.some((path) => executionAffectingReason(path) !== null)
+  )
     throw new Error("sibling tree preparation touches a sensitive surface");
   assertNoSecretMaterial({ patch: artifact.patch, logs: artifact.logs }, "artifact");
   await input.assertCurrent();

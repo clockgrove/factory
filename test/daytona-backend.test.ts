@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 
 import type { Daytona } from "@daytona/sdk";
@@ -16,7 +16,11 @@ import {
 import { normalizeArtifact } from "../src/execution/artifacts.js";
 import { MAX_CONTENT_BYTES } from "../src/execution/artifact-content.js";
 import type { AttemptContext } from "../src/execution/backend.js";
+import { BackendRegistry } from "../src/execution/registry.js";
 import { MAX_LOG_BYTES } from "../src/protocol/limits.js";
+import { DEFAULT_RUN_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
+import { managedRuntimeRequirements } from "../src/toolchains/authority.js";
+import { activeRuntimeBundleSync } from "../src/runtime/toolchain-store.js";
 
 const temporaryPaths = new Set<string>();
 const MAX_CHANGED_PATHS_BYTES = 10_000 * 501;
@@ -136,6 +140,7 @@ function fakeProvider() {
       id,
       name,
       labels,
+      files,
       fs: {
         createFolder: async () => undefined,
         uploadFiles: async (uploads: Array<{ source: Buffer | string; destination: string }>) => {
@@ -333,6 +338,7 @@ function fakeProvider() {
     overrideStream: (path: string, content: Buffer) => {
       streamOverrides.set(path, content);
     },
+    uploadedFiles: (id: string) => resources.get(id)?.files,
     client: client as unknown as Daytona,
   };
 }
@@ -600,6 +606,105 @@ describe("Daytona supported provider contract", () => {
     });
     expect(validator).not.toHaveProperty("secrets");
     expect(provider.deleted).toContain("sandbox-2");
+  });
+
+  it("routes an exact provisioned pnpm runtime through the production Daytona worker bootstrap", async () => {
+    const source = await fixture();
+    source.context.packet.validationCommands = ["pnpm check"];
+    source.context.packet.requirements.tools = ["git", "node", "pnpm"];
+    source.context.packet.requirements.networkDestinations = ["registry.npmjs.org"];
+    const runtime = activeRuntimeBundleSync("pnpm");
+    source.context.packet.managedRuntimes = managedRuntimeRequirements(
+      source.context.packet.validationCommands,
+    ).map((requirement) => ({ ...requirement, bundleDigest: runtime.digest }));
+    const provider = fakeProvider();
+    const backend = new DaytonaBackend({
+      repository: source.repository,
+      daytonaSecretName: "factory-openai",
+      credentialAvailable: () => true,
+      createClient: () => provider.client,
+    });
+
+    const registry = new BackendRegistry();
+    registry.register(backend);
+    const selection = await registry.select({
+      policy: parseRunPolicy({
+        ...DEFAULT_RUN_POLICY,
+        backendOrder: [backend.capabilities.id],
+        allowedPaidBackends: [backend.capabilities.id],
+        cloudFallback: "explicit",
+        maxSandboxMinutes: 10,
+      }),
+      requirements: source.context.packet.requirements,
+      budget: { sandboxMinutes: 10, managedAgentSessions: 0 },
+      estimatedDurationMs: 60_000,
+    });
+    expect(selection.backend).toBe(backend);
+    expect(backend.capabilities.supportedTools).toContain("pnpm");
+    const handle = await selection.backend.launch(source.context);
+    const files = provider.uploadedFiles(handle.resourceId)!;
+    const configuration = JSON.parse(
+      files.get("factory/managed-toolchain.json")!.toString("utf8"),
+    ) as { tool: string; assets: Array<{ path: string; sha256: string }> };
+    const descriptor = configuration.assets[0]!;
+    const asset = files.get(`factory/${descriptor.path}`)!;
+    expect(asset).toBeDefined();
+    expect(configuration.tool).toBe("pnpm");
+    expect(configuration.assets).toHaveLength(2);
+    expect(descriptor.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(files.get("factory/materialize-toolchain.mjs")?.toString("utf8")).toContain(
+      "managed runtime executable digest mismatch",
+    );
+    const bootstrap = files.get("factory/run.sh")?.toString("utf8") ?? "";
+    expect(bootstrap).toContain("materialize-toolchain.mjs");
+    expect(bootstrap).toContain('export PATH="/tmp/factory-toolchain/bin:$PATH"');
+    const materialization = await mkdtemp(join(tmpdir(), "factory-daytona-materializer-"));
+    const hostile = join(materialization, "hostile-bin");
+    await mkdir(hostile, { recursive: true });
+    await writeFile(join(hostile, "node"), "#!/bin/sh\necho hostile-node >&2\nexit 97\n", {
+      mode: 0o700,
+    });
+    await writeFile(join(hostile, "pnpm"), "#!/bin/sh\necho hostile-pnpm >&2\nexit 98\n", {
+      mode: 0o700,
+    });
+    for (const [path, content] of files) {
+      const destination = join(materialization, path);
+      await mkdir(dirname(destination), { recursive: true });
+      await writeFile(destination, content);
+    }
+    await rm("/tmp/factory-toolchain", { recursive: true, force: true });
+    try {
+      const output = join(materialization, "factory/toolchain-paths.json");
+      execFileSync(
+        process.execPath,
+        [
+          join(materialization, "factory/materialize-toolchain.mjs"),
+          join(materialization, "factory/managed-toolchain.json"),
+          output,
+        ],
+        { env: { ...process.env, PATH: `${hostile}:/usr/bin:/bin` } },
+      );
+      const paths = JSON.parse(await readFile(output, "utf8")) as {
+        executables: Record<string, { path: string; argsPrefix: string[] }>;
+      };
+      expect(
+        execFileSync(
+          paths.executables.pnpm!.path,
+          [...paths.executables.pnpm!.argsPrefix, "--version"],
+          { cwd: materialization, encoding: "utf8", env: { ...process.env, PATH: hostile } },
+        ).trim(),
+      ).toBe("10.34.5");
+      expect(
+        execFileSync(
+          paths.executables.node!.path,
+          [...paths.executables.node!.argsPrefix, "--version"],
+          { cwd: materialization, encoding: "utf8", env: { ...process.env, PATH: hostile } },
+        ).trim(),
+      ).toBe(process.version);
+    } finally {
+      await rm("/tmp/factory-toolchain", { recursive: true, force: true });
+    }
+    await backend.cleanup(handle);
   });
 
   it("rejects oversized remote artifact files from metadata before starting any download", async () => {

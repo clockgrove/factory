@@ -619,20 +619,14 @@ describe("attempt reservation", () => {
     });
     const [repaired] = decodeEventComments(store.comments.at(-1)!.body);
     expect(repaired).toMatchObject({
-      writerHolder: "host-2",
-      writerEpoch: takeover.epoch,
+      writerHolder: identity.holder,
+      writerEpoch: lease.epoch,
       directorEpoch: lease.epoch,
       policyDigest: identity.policyDigest,
     });
-    const withoutWriter = (event: Record<string, unknown>) => {
-      const value = { ...event };
-      delete value.writerOperationId;
-      delete value.writerHolder;
-      delete value.writerEpoch;
-      delete value.writerPolicyDigest;
-      return value;
-    };
-    expect(withoutWriter(repaired!)).toEqual(withoutWriter(original!));
+    // The takeover lease authorizes publication, but it must not rewrite the
+    // immutable reservation identity authenticated by the commit trailer.
+    expect(repaired).toEqual(original);
     expect(await restarted.list(identity.objective, 43)).toEqual([reservation]);
   });
 

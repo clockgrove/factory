@@ -27,13 +27,22 @@ import {
 } from "../repository-profiles/index.js";
 import { groundExecutionRequirements } from "./requirements.js";
 import {
-  type CriterionValidationDesign,
   type CriterionRiskAssessment,
   type CriterionValidationTier,
+  type CriterionValidationDesign,
   inferCriterionRisk,
   validateCriterionValidationDesign,
 } from "./validation-design.js";
-import { bootstrapPackageValidationCommand, PNPM_BOOTSTRAP_REGISTRY } from "../validation/plan.js";
+import {
+  assertFutureToolchainRequirements,
+  DEFERRED_CAPABILITY_ADAPTERS,
+  futureToolchainCommand,
+  isFutureToolchainProvider,
+  managedRuntimeRequirements,
+  repositoryLacksFutureToolchainAuthority,
+  unprovisionedFutureToolchainReason,
+} from "../toolchains/authority.js";
+import { bindDeferredCapabilityGraph } from "../repository-capabilities/model.js";
 
 export type ConflictClass = "parallel-safe" | "exclusive" | "generated" | "large-binary";
 export type ValidationTier = CriterionValidationTier;
@@ -52,6 +61,8 @@ export type CompilerWorkItem = {
   validationCommands: string[];
   requirements: ExecutionRequirements;
   artifactContract: "clockgrove.factory/artifact-v1";
+  repositoryCapabilities?: import("../protocol/worker-packet.js").RepositoryCapabilityBindings;
+  managedRuntimes?: import("../runtime/toolchain-bundle.js").RuntimeBundleRequirement[];
   context: {
     mustRead: string[];
     searchSeeds: string[];
@@ -90,7 +101,14 @@ export const ExclusiveResourcesSchema = z
   .max(64);
 export type CompilerWorkItemInput = Omit<
   CompilerWorkItem,
-  "context" | "changeSurface" | "validation" | "criterionRisks" | "delivery" | "economicReview"
+  | "context"
+  | "changeSurface"
+  | "validation"
+  | "criterionRisks"
+  | "delivery"
+  | "economicReview"
+  | "repositoryCapabilities"
+  | "managedRuntimes"
 > & {
   exclusiveResources?: string[] | undefined;
   validation?: CriterionValidationDesign[] | undefined;
@@ -240,53 +258,89 @@ export function validateCompiledObjective(
 ): void {
   if (objective.workItems.length < 1 || objective.workItems.length > 100)
     throw new Error("Work Item count is out of bounds");
+  const violations: string[] = [];
+  const reject = (message: string): void => {
+    if (!violations.includes(message)) violations.push(message);
+  };
+  const capture = (operation: () => void): void => {
+    try {
+      operation();
+    } catch (error) {
+      reject(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const throwViolations = (): void => {
+    if (violations.length === 0) return;
+    if (violations.length === 1) throw new Error(violations[0]);
+    throw new Error(
+      `compiled Objective has ${violations.length} deterministic violations:\n${violations
+        .map((violation) => `- ${violation}`)
+        .join("\n")}`,
+    );
+  };
   const byId = new Map<string, CompilerWorkItem>();
+  const observed = commandEvidence
+    ? Array.isArray(commandEvidence)
+      ? commandEvidence
+      : discoverValidationCommands(commandEvidence)
+    : [];
+  const facts = !Array.isArray(commandEvidence) ? commandEvidence : undefined;
+  const basePaths = new Set(
+    facts ? normalizeRepositoryFacts(facts).files.map((file) => file.path) : [],
+  );
+  const hasAbsentFutureAuthority = (command: string): boolean => {
+    const parsed = futureToolchainCommand(command);
+    return Boolean(parsed && repositoryLacksFutureToolchainAuthority(parsed.adapter, basePaths));
+  };
+  const ungrounded: Array<{ item: CompilerWorkItem; command: string }> = [];
   for (const w of objective.workItems) {
-    if (byId.has(w.id)) throw new Error(`duplicate Work Item id ${w.id}`);
+    if (byId.has(w.id)) reject(`duplicate Work Item id ${w.id}`);
     byId.set(w.id, w);
-    w.scope.forEach((p) => RepositoryScopePathSchema.parse(p));
+    w.scope.forEach((p) => capture(() => void RepositoryScopePathSchema.parse(p)));
     if (w.acceptance.length < 1 || w.acceptance.length > 64)
-      throw new Error(`invalid acceptance criteria in ${w.id}: provide between 1 and 64 criteria`);
+      reject(`invalid acceptance criteria in ${w.id}: provide between 1 and 64 criteria`);
     for (const [index, criterion] of w.acceptance.entries()) {
       const problem = acceptanceTextProblem(criterion);
       if (problem)
-        throw new Error(
+        reject(
           `invalid acceptance criterion ${index + 1} in ${w.id}: ${problem}; state a concrete expected behavior or result and associate it with validation evidence`,
         );
     }
-    if (w.validationCommands.length < 1) throw new Error(`missing validation command in ${w.id}`);
+    if (w.validationCommands.length < 1) reject(`missing validation command in ${w.id}`);
     if (commandEvidence) {
-      const observed = Array.isArray(commandEvidence)
-        ? commandEvidence
-        : discoverValidationCommands(commandEvidence);
-      const invalid = w.validationCommands.find((command) =>
-        Array.isArray(commandEvidence)
-          ? !commandEvidence.includes(command)
-          : !isGroundedValidationCommand(command, commandEvidence, w.scope, {
-              root: w.dependsOn.length === 0,
-              tools: w.requirements.tools,
-            }),
-      );
-      if (invalid !== undefined)
-        throw new Error(
-          `invented validation command in ${w.id}: ${JSON.stringify(invalid.slice(0, 200))}; repository-observed commands: ${JSON.stringify(observed).slice(0, 600)}. Use an observed command, specialize an observed bare node --test with concrete existing or Work Item-scoped JavaScript test files, or use one finite pnpm validation script only for a dependency-root bootstrap item that creates package.json; flags, shell syntax, and unplanned targets are not allowed.`,
-        );
+      for (const command of w.validationCommands)
+        if (
+          Array.isArray(commandEvidence)
+            ? !commandEvidence.includes(command)
+            : !isGroundedValidationCommand(command, commandEvidence, w.scope, {
+                root: w.dependsOn.length === 0,
+                tools: w.requirements.tools,
+              })
+        )
+          ungrounded.push({ item: w, command });
       if (
-        !Array.isArray(commandEvidence) &&
-        observed.length === 0 &&
-        w.validationCommands.some((command) => bootstrapPackageValidationCommand(command)) &&
+        facts &&
+        w.dependsOn.length === 0 &&
+        w.validationCommands.some(hasAbsentFutureAuthority) &&
         w.validationCommands.length !== 1
       )
-        throw new Error(`bootstrap validation in ${w.id} must name exactly one pnpm script`);
-      if (
-        !Array.isArray(commandEvidence) &&
-        observed.length === 0 &&
-        w.validationCommands.some((command) => bootstrapPackageValidationCommand(command)) &&
-        !w.requirements.networkDestinations.includes(PNPM_BOOTSTRAP_REGISTRY)
-      )
-        throw new Error(
-          `bootstrap validation in ${w.id} must declare ${PNPM_BOOTSTRAP_REGISTRY} for the Supervisor-owned frozen setup`,
-        );
+        reject(`greenfield validation in ${w.id} must name exactly one toolchain script`);
+      if (facts && w.validationCommands.some(hasAbsentFutureAuthority)) {
+        for (const command of w.validationCommands) {
+          const parsed = futureToolchainCommand(command);
+          if (parsed && repositoryLacksFutureToolchainAuthority(parsed.adapter, basePaths))
+            capture(() =>
+              assertFutureToolchainRequirements(
+                parsed,
+                {
+                  allowedPaths: w.scope,
+                  requirements: w.requirements,
+                },
+                false,
+              ),
+            );
+        }
+      }
     }
     if (
       !w.context ||
@@ -296,13 +350,14 @@ export function validateCompiledObjective(
       !w.delivery ||
       !w.economicReview
     )
-      throw new Error(`missing compiler analysis record in ${w.id}`);
+      reject(`missing compiler analysis record in ${w.id}`);
     if (
-      w.context.mustRead.length > 64 ||
-      w.context.searchSeeds.length > 64 ||
-      w.context.dependencyEvidence.length > 64
+      w.context &&
+      (w.context.mustRead.length > 64 ||
+        w.context.searchSeeds.length > 64 ||
+        w.context.dependencyEvidence.length > 64)
     )
-      throw new Error(`unbounded context manifest in ${w.id}`);
+      reject(`unbounded context manifest in ${w.id}`);
     const validationProfile =
       commandEvidence && !Array.isArray(commandEvidence)
         ? profileRepository({
@@ -314,34 +369,51 @@ export function validateCompiledObjective(
             ...(commandEvidence.scripts === undefined ? {} : { scripts: commandEvidence.scripts }),
           })
         : undefined;
-    validateCriterionValidationDesign({
-      itemId: w.id,
-      acceptance: w.acceptance,
-      validationCommands: w.validationCommands,
-      validation: w.validation,
-      criterionRisks: w.criterionRisks,
-      deterministicSimulation: validationProfile?.deterministicSimulation ?? true,
-      visualValidation: validationProfile?.visualValidation ?? true,
-    });
-    if (w.changeSurface.exclusiveResources.length > 64)
-      throw new Error(`unbounded exclusive resources in ${w.id}`);
-    if (w.changeSurface.mergeClass === "parallel-safe" && w.changeSurface.exclusiveResources.length)
-      throw new Error(`invalid exclusive resources in ${w.id}`);
+    if (w.validation && w.criterionRisks)
+      capture(() =>
+        validateCriterionValidationDesign({
+          itemId: w.id,
+          acceptance: w.acceptance,
+          validationCommands: w.validationCommands,
+          validation: w.validation!,
+          criterionRisks: w.criterionRisks!,
+          deterministicSimulation: validationProfile?.deterministicSimulation ?? true,
+          visualValidation: validationProfile?.visualValidation ?? true,
+        }),
+      );
+    if (w.changeSurface) {
+      if (w.changeSurface.exclusiveResources.length > 64)
+        reject(`unbounded exclusive resources in ${w.id}`);
+      if (
+        w.changeSurface.mergeClass === "parallel-safe" &&
+        w.changeSurface.exclusiveResources.length
+      )
+        reject(`invalid exclusive resources in ${w.id}`);
+      if (
+        w.changeSurface.mergeClass !== "parallel-safe" &&
+        !w.changeSurface.exclusiveResources.length
+      )
+        reject(`missing exclusive resource in ${w.id}`);
+    }
     if (
-      w.changeSurface.mergeClass !== "parallel-safe" &&
-      !w.changeSurface.exclusiveResources.length
+      w.economicReview &&
+      (!w.economicReview.conservative || w.economicReview.paidMeasurementRequired)
     )
-      throw new Error(`missing exclusive resource in ${w.id}`);
-    if (!w.economicReview.conservative || w.economicReview.paidMeasurementRequired)
-      throw new Error(`non-conservative economic review in ${w.id}`);
+      reject(`non-conservative economic review in ${w.id}`);
   }
   const visiting = new Set<string>(),
     done = new Set<string>();
   const visit = (id: string): void => {
-    if (visiting.has(id)) throw new Error("dependency cycle");
+    if (visiting.has(id)) {
+      reject("dependency cycle");
+      return;
+    }
     if (done.has(id)) return;
     const w = byId.get(id);
-    if (!w) throw new Error(`unknown dependency ${id}`);
+    if (!w) {
+      reject(`unknown dependency ${id}`);
+      return;
+    }
     visiting.add(id);
     w.dependsOn.forEach(visit);
     visiting.delete(id);
@@ -360,6 +432,56 @@ export function validateCompiledObjective(
     }
     return false;
   };
+  const futureProviders = new Map<string, CompilerWorkItem[]>();
+  if (facts)
+    for (const item of byId.values()) {
+      const parsed =
+        item.validationCommands.length === 1
+          ? futureToolchainCommand(item.validationCommands[0]!)
+          : null;
+      if (
+        parsed &&
+        repositoryLacksFutureToolchainAuthority(parsed.adapter, basePaths) &&
+        isFutureToolchainProvider({
+          allowedPaths: item.scope,
+          requirements: item.requirements,
+          validationCommands: item.validationCommands,
+          dependsOn: item.dependsOn,
+        })
+      )
+        futureProviders.set(parsed.adapter.id, [
+          ...(futureProviders.get(parsed.adapter.id) ?? []),
+          item,
+        ]);
+    }
+  if (ungrounded.length > 0) {
+    for (const invalid of ungrounded.filter(({ item, command }) => {
+      const parsed = futureToolchainCommand(command);
+      const providers = parsed ? (futureProviders.get(parsed.adapter.id) ?? []) : [];
+      return !providers.some((provider) => path(item.id, provider.id));
+    })) {
+      const unavailable = facts ? unprovisionedFutureToolchainReason(invalid.command) : undefined;
+      const future = facts ? futureToolchainCommand(invalid.command) : null;
+      const presentAuthorityPaths = future
+        ? future.adapter.requiredRootPaths.filter((path) => basePaths.has(path))
+        : [];
+      const partialFutureAuthority =
+        future &&
+        presentAuthorityPaths.length > 0 &&
+        presentAuthorityPaths.length < future.adapter.requiredRootPaths.length
+          ? `${future.adapter.runner} future authority is partially present ` +
+            `(${presentAuthorityPaths.join(", ")}); Factory will not replace or complete an ` +
+            `observed package-manager authority surface from a compiler-proposed bootstrap ` +
+            `(Work Item ${invalid.item.id})`
+          : undefined;
+      reject(
+        partialFutureAuthority ??
+          (unavailable
+            ? `${unavailable} (Work Item ${invalid.item.id})`
+            : `invented validation command in ${invalid.item.id}: ${JSON.stringify(invalid.command.slice(0, 200))}; repository-observed commands: ${JSON.stringify(observed).slice(0, 600)}. Use an observed command, specialize an observed bare node --test with concrete existing or Work Item-scoped JavaScript test files, or bind a finite script to one audited future-capable toolchain provider and its transitive dependency path; flags, shell syntax, unplanned targets, siblings, and unrelated roots are not allowed.`),
+      );
+    }
+  }
   const items = [...byId.values()];
   for (let i = 0; i < items.length; i++)
     for (let j = i + 1; j < items.length; j++) {
@@ -370,7 +492,7 @@ export function validateCompiledObjective(
         !path(a.id, b.id) &&
         !path(b.id, a.id)
       )
-        throw new Error(`overlapping unordered scopes: ${a.id}, ${b.id}`);
+        reject(`overlapping unordered scopes: ${a.id}, ${b.id}`);
     }
   for (let i = 0; i < items.length; i++)
     for (let j = i + 1; j < items.length; j++) {
@@ -383,7 +505,7 @@ export function validateCompiledObjective(
         !path(a.id, b.id) &&
         !path(b.id, a.id)
       )
-        throw new Error(`conflicting unordered exclusive resource: ${a.id}, ${b.id}`);
+        reject(`conflicting unordered exclusive resource: ${a.id}, ${b.id}`);
     }
   for (const w of items) {
     const d = w.delivery;
@@ -392,7 +514,7 @@ export function validateCompiledObjective(
       d.relationship === "root" &&
       (d.parentWorkItem || w.dependsOn.length !== 0 || d.group !== w.id)
     )
-      throw new Error(`impossible root topology for ${w.id}`);
+      reject(`impossible root topology for ${w.id}`);
     if (
       d.relationship === "continue-stack" &&
       (!d.parentWorkItem ||
@@ -400,7 +522,7 @@ export function validateCompiledObjective(
         w.dependsOn[0] !== d.parentWorkItem ||
         byId.get(d.parentWorkItem)?.delivery?.group !== d.group)
     )
-      throw new Error(`impossible stack topology for ${w.id}`);
+      reject(`impossible stack topology for ${w.id}`);
     if (d.relationship === "join-after-merge") {
       const groups = w.dependsOn.map((id) => byId.get(id)?.delivery?.group);
       if (
@@ -410,7 +532,7 @@ export function validateCompiledObjective(
         new Set(groups).size !== groups.length ||
         groups.includes(d.group)
       )
-        throw new Error(`impossible join topology for ${w.id}`);
+        reject(`impossible join topology for ${w.id}`);
     }
     if (
       d.relationship === "sibling" &&
@@ -419,8 +541,9 @@ export function validateCompiledObjective(
         byId.get(w.dependsOn[0]!)?.delivery?.group === d.group ||
         d.group !== w.id)
     )
-      throw new Error(`impossible sibling topology for ${w.id}`);
+      reject(`impossible sibling topology for ${w.id}`);
   }
+  throwViolations();
 }
 
 export function compileObjective(input: CompileInput): CompilerObjective {
@@ -580,6 +703,26 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     title: input.title,
     workItems: items,
   });
+  const basePaths = new Set(facts.files.map((file) => file.path));
+  const deferred = bindDeferredCapabilityGraph(
+    result.workItems,
+    DEFERRED_CAPABILITY_ADAPTERS,
+    (item, command) => {
+      const parsed = futureToolchainCommand(command);
+      return Boolean(
+        parsed &&
+          !isGroundedValidationCommand(command, facts, [...item.scope], undefined) &&
+          repositoryLacksFutureToolchainAuthority(parsed.adapter, basePaths),
+      );
+    },
+  );
+  for (const item of result.workItems) {
+    const bindings = deferred.get(item.id)!;
+    if (bindings.provides.length > 0 || bindings.requires.length > 0)
+      item.repositoryCapabilities = bindings;
+    const runtimes = managedRuntimeRequirements(item.validationCommands);
+    if (runtimes.length > 0) item.managedRuntimes = runtimes;
+  }
   for (const item of result.workItems)
     assertRequirementsWithinPolicy(item.requirements, runPolicy, `Work Item ${item.id}`);
   validateCompiledObjective(result, facts);

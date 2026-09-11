@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FactorySupervisor } from "../src/supervisor.js";
 import * as localScopes from "../src/runtime/local-scope.js";
-import { runContainedProcess } from "../src/runtime/process-group.js";
+import * as processGroup from "../src/runtime/process-group.js";
 import { GitHubReader } from "../src/github.js";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
@@ -42,6 +42,7 @@ import {
 } from "../src/control/integration-admission.js";
 import * as cleanValidation from "../src/validation/clean-run.js";
 const actualValidate = cleanValidation.validateArtifactClean;
+const runContainedProcess = processGroup.runContainedProcess;
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -89,6 +90,43 @@ async function fixture(
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
     }).trim();
+  vi.spyOn(processGroup, "runContainedProcess").mockImplementation(async (input) => {
+    if (input.command !== "git" || input.cwd !== repository) return runContainedProcess(input);
+    const startedAt = Date.now();
+    try {
+      const stdout = execFileSync("git", input.args ?? [], {
+        cwd: input.cwd,
+        env: input.env,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: input.timeoutMs,
+        maxBuffer: input.maxOutputBytes,
+      });
+      return {
+        exitCode: 0,
+        signal: null,
+        stdout,
+        stderr: "",
+        durationMs: Date.now() - startedAt,
+        timedOut: false,
+      };
+    } catch (error) {
+      const failure = error as {
+        status?: number | null;
+        signal?: NodeJS.Signals | null;
+        stdout?: string | Buffer;
+        stderr?: string | Buffer;
+      };
+      return {
+        exitCode: failure.status ?? 1,
+        signal: failure.signal ?? null,
+        stdout: failure.stdout?.toString() ?? "",
+        stderr: failure.stderr?.toString() ?? "",
+        durationMs: Date.now() - startedAt,
+        timedOut: failure.signal === "SIGTERM",
+      };
+    }
+  });
   git("init", "-q", "-b", "main");
   git("config", "user.name", "Fixture");
   git("config", "user.email", "fixture@example.invalid");
@@ -893,32 +931,34 @@ async function fixture(
       const lag = staleRefreshHeads.get(number);
       const observedHead = lag && lag.remaining-- > 0 ? lag.head : pull.headSha;
       const currentBase = git("rev-parse", "main");
-      const preview = createHash("sha1")
-        .update(`preview:${currentBase}:${pull.headSha}`)
-        .digest("hex");
-      if (pull.state === "OPEN")
-        commits.set(preview, {
-          oid: preview,
-          treeOid:
-            options.wrongPreviewTree && number === 19
-              ? git("rev-parse", `${heads[number - 18]}^{tree}`)
-              : git("merge-tree", "--write-tree", currentBase, pull.headSha).split("\n")[0]!,
-          parentOids: [currentBase, pull.headSha],
-          message: "GitHub test merge",
-          serverTime: new Date(),
-        });
-      if (
+      const previewState = number === 19 ? options.previewState?.() : "fresh";
+      const oneShotStaleParents =
         options.stalePreviewOnce &&
         !stalePreviewServed &&
         number === 19 &&
-        [...refs.keys()].filter((ref) => ref.includes("/reviews/")).length > names.length
-      ) {
-        stalePreviewOid = preview;
-        commits.get(preview)!.parentOids = [baseSha, pull.headSha];
-      }
-      const previewState = number === 19 ? options.previewState?.() : "fresh";
-      if (previewState === "stale-parents" && pull.state === "OPEN")
-        commits.get(preview)!.parentOids = [baseSha, pull.headSha];
+        [...refs.keys()].filter((ref) => ref.includes("/reviews/")).length > names.length;
+      const previewTree =
+        options.wrongPreviewTree && number === 19
+          ? git("rev-parse", `${heads[number - 18]}^{tree}`)
+          : git("merge-tree", "--write-tree", currentBase, pull.headSha).split("\n")[0]!;
+      const previewParents = [
+        oneShotStaleParents || previewState === "stale-parents" ? baseSha : currentBase,
+        pull.headSha,
+      ];
+      const preview = execFileSync(
+        "git",
+        ["commit-tree", previewTree, ...previewParents.flatMap((parent) => ["-p", parent])],
+        { cwd: repository, input: "GitHub test merge", encoding: "utf8" },
+      ).trim();
+      if (pull.state === "OPEN")
+        commits.set(preview, {
+          oid: preview,
+          treeOid: previewTree,
+          parentOids: previewParents,
+          message: "GitHub test merge",
+          serverTime: new Date(),
+        });
+      if (oneShotStaleParents) stalePreviewOid = preview;
       return {
         number,
         nodeId: pull.id,
@@ -1755,7 +1795,7 @@ describe("Supervisor parallel independent sibling integration", () => {
       expect(readsWhileWaiting).toBeGreaterThan(0);
       // Each due observation now additionally rebinds the immutable refresh to
       // current PR/ref/base; pacing still bounds reads independently of loop ticks.
-      expect(readsWhileWaiting).toBeLessThanOrEqual(36);
+      expect(readsWhileWaiting).toBeLessThanOrEqual(40);
       expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
       expect(f.validate).toHaveBeenCalledOnce();
       expect(f.review).toHaveBeenCalledOnce();
@@ -1764,6 +1804,7 @@ describe("Supervisor parallel independent sibling integration", () => {
       );
       state = "fresh";
       await vi.advanceTimersByTimeAsync(300_000);
+      vi.useRealTimers();
       const result = await completion;
       expect(result, result.reason).toMatchObject({ status: "completed" });
       expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18, 19]);
@@ -1813,7 +1854,8 @@ describe("Supervisor parallel independent sibling integration", () => {
         at: new Date().toISOString(),
       }),
     );
-    await vi.advanceTimersByTimeAsync(60_000);
+    vi.advanceTimersByTime(60_000);
+    vi.useRealTimers();
     expect(await completion).toMatchObject({ status: "cancelled" });
     expect(f.pullReads.mock.calls.length).toBe(readsBeforeCancel);
     expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);

@@ -108,7 +108,7 @@ describe("Codex management backend", () => {
       expect(prompt).toContain(
         "Every non-ordinary criterionRisks entry must appear in a mechanical or deterministic-simulation entry even when it also requires semantic review",
       );
-      expect(prompt).toContain("created within this Work Item's declared scope");
+      expect(prompt).toContain("created within this Work Item's scope");
       expect(prompt).toContain("available before publication");
       expect(prompt).toContain("Never copy Factory-owned publication, pull-request creation");
       expect(prompt).toContain("the Supervisor owns those phases");

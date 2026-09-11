@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { EXECUTION_AFFECTING_GIT_PATHS, executionAffectingReason } from "./approval.js";
 import { assertPeerActivation } from "./recovery/peer-trunk.js";
 import {
   withIntegrationAdmission,
@@ -184,7 +185,12 @@ import {
   ValidationCheckpointManager,
   type ValidationIdentity,
 } from "./control/validation-checkpoints.js";
-import { parseFactoryEvent, type FactoryEvent } from "./protocol/events.js";
+import {
+  parseFactoryEvent,
+  type AttemptEvent,
+  type FactoryEvent,
+  type PublicationEvent,
+} from "./protocol/events.js";
 import { assertIsolatedCandidateFailureProof } from "./recovery/isolated-candidate.js";
 import { assertNoSecretMaterial, PROTOCOL_V2 } from "./protocol/limits.js";
 import {
@@ -225,11 +231,11 @@ import { Dispatcher, GithubOctokitWriter } from "./dispatch.js";
 import {
   assertCompiledObjectiveAdoptsLegacyConstraints,
   assertExistingGraphWorkItemsMatchCompiled,
+  executionWorkerPacketFromCompiled,
   GraphApplier,
   GithubOctokitGraphWriter,
   legacyGraphConstraintsDigest,
   parseGraphItemMetadata,
-  workerPacketFromCompiled,
   type CompiledObjective,
   type ExistingGraphWorkItem,
   type LegacyGraphConstraints,
@@ -257,6 +263,7 @@ import type {
 } from "./management/backend.js";
 import {
   assertPublicationMutationAuthorized,
+  dispatchPublicationMutation,
   integrationReadiness,
   publicationBranch,
   publishValidated,
@@ -319,7 +326,10 @@ import {
 } from "./scheduling/capacity-ledger.js";
 import { rankReadyWorkItems } from "./scheduling/priority.js";
 import { validatePriorityFieldDefinition } from "./scheduling/github-priority.js";
-import { ContinuousExecutionPool } from "./scheduling/continuous-refill.js";
+import {
+  ClaimedExecutionFailure,
+  ContinuousExecutionPool,
+} from "./scheduling/continuous-refill.js";
 import { ObjectiveFairness } from "./scheduling/fairness.js";
 import { waitForProgress } from "./scheduling/progress-wake.js";
 import {
@@ -336,10 +346,28 @@ import {
   type CleanValidationInput,
 } from "./validation/clean-run.js";
 import {
+  assertReviewOnlyWorkflowArtifacts,
+  isReviewOnlyWorkflowSurface,
+} from "./publication/workflow-safety.js";
+import {
   bindValidationToPublishedHead,
   bootstrapPackageValidationCommand,
+  validationLocalCommandCount,
   validationPlanFromPacket,
 } from "./validation/plan.js";
+import {
+  activateManagedRuntimePacket,
+  assertManagedRuntimeActivationCurrent,
+  assertRepositoryCapabilityProofsCurrent,
+  createManagedRuntimeActivation,
+  managedRuntimeRequirements,
+  packetWithManagedRuntimeActivation,
+  resolveIntegratedRepositoryCapabilities,
+  toolchainAdapterById,
+  type CapabilityProviderIdentity,
+  type RepositoryCapabilityProof,
+} from "./toolchains/authority.js";
+import type { ManagedRuntimeActivation } from "./protocol/worker-packet.js";
 import {
   discoverLocalScopeHost,
   observeLocalScope,
@@ -376,6 +404,13 @@ class ControllerObservationRetiredError extends Error {
   constructor() {
     super("repository-controller observation retired before dispatch");
     this.name = "ControllerObservationRetiredError";
+  }
+}
+
+class ExecutionSourceAdvancedBeforeDispatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ExecutionSourceAdvancedBeforeDispatchError";
   }
 }
 
@@ -515,6 +550,16 @@ class ArtifactCompletionUnavailableError extends Error {
       "execution completion is unknown after dispatch; recover the exact original output or obtain explicit recovery direction before replacement",
     );
     this.name = "ArtifactCompletionUnavailableError";
+  }
+}
+
+class PrepublicationApprovalRequiredError extends Error {
+  constructor(cause: unknown) {
+    super(
+      `validated artifact is held before any feature-ref or pull-request mutation; human pre-publication approval is required: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+    this.name = "PrepublicationApprovalRequiredError";
   }
 }
 
@@ -1726,7 +1771,8 @@ export class FactorySupervisor {
         throw new Error(`unsupported recovery delivery: ${planned.reason}`);
       this.#deliveryPlan = planned;
     }
-    await this.#preflightCompiledGraph(compiled);
+    this.#validateCompiledGraphStatic(compiled);
+    await this.#preflightCompiledGraphRuntime(compiled);
     this.#compiledGraph = compiled;
     this.#compiledProjection = runtime.projection;
     this.#fenceSnapshot(snapshot);
@@ -1769,12 +1815,7 @@ export class FactorySupervisor {
         // Ordinary npm setup consumes at most one additional index; a bootstrap
         // pnpm validation proves the tool version and then performs setup.
         // Unused scopes stay absent; every actual command is pre-authorized.
-        commandCount:
-          validationPlanFromPacket(packet).commands.length +
-          (packet.validationCommands.length === 1 &&
-          bootstrapPackageValidationCommand(packet.validationCommands[0]!)
-            ? 2
-            : 1),
+        commandCount: validationLocalCommandCount(packet),
         producerPid: host.producerPid,
         producerStartTicks: host.producerStartTicks,
         deadline: deadline.toISOString(),
@@ -1796,6 +1837,382 @@ export class FactorySupervisor {
         afterStop: async () => {},
       },
     };
+  }
+
+  async #resolveExecutionBaseCapabilities(
+    item: DerivedWorkItem,
+    packet: WorkerPacket,
+    base: { oid: string; treeOid: string },
+    sourceRef: string,
+    objectiveItems: readonly DerivedWorkItem[],
+    providerIdentities?: ReadonlyMap<string, CapabilityProviderIdentity>,
+  ): Promise<RepositoryCapabilityProof[]> {
+    const requirements = packet.repositoryCapabilities?.requires ?? [];
+    if (requirements.length === 0) return [];
+    const compilerId = parseGraphItemMetadata(item.body ?? "").id;
+    for (const requirement of requirements) {
+      const adapter = toolchainAdapterById(requirement.adapter);
+      if (!adapter?.deferredOperations)
+        throw new Error(
+          `unsupported deferred repository capability adapter: ${requirement.adapter}`,
+        );
+      if (requirement.activation === "artifact") {
+        if (requirement.providerWorkItem !== compilerId)
+          throw new Error("artifact-time repository capability provider identity changed");
+      }
+    }
+    try {
+      if ((await this.#store.readRef(sourceRef)) !== base.oid)
+        throw new Error(`execution source ref ${sourceRef} no longer names ${base.oid}`);
+      const providers =
+        providerIdentities ??
+        (await this.#capabilityProviderIdentities(packet, objectiveItems, base.oid));
+      const proofs = await resolveIntegratedRepositoryCapabilities({
+        repository: this.#options.repository,
+        base,
+        sourceRef,
+        packet,
+        providerById: (id) => providers.get(id),
+      });
+      if ((await this.#store.readRef(sourceRef)) !== base.oid)
+        throw new Error(`execution source ref ${sourceRef} changed during capability inspection`);
+      return proofs;
+    } catch (error) {
+      throw new Error(
+        `repository validation for ${compilerId} is not grounded on exact base ${base.oid}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  async #capabilityProviderIdentities(
+    packet: WorkerPacket,
+    objectiveItems: readonly DerivedWorkItem[],
+    baseSha: string,
+  ): Promise<Map<string, CapabilityProviderIdentity>> {
+    const providers = new Map<string, CapabilityProviderIdentity>();
+    for (const providerId of new Set(
+      (packet.repositoryCapabilities?.requires ?? [])
+        .filter((requirement) => requirement.activation === "integrated-base")
+        .map((requirement) => requirement.providerWorkItem),
+    ))
+      providers.set(
+        providerId,
+        await this.#capabilityProviderIdentity(providerId, objectiveItems, baseSha),
+      );
+    return providers;
+  }
+
+  async #commitIncludes(baseSha: string, ancestorSha: string): Promise<boolean> {
+    const pending = [baseSha];
+    const seen = new Set<string>();
+    while (pending.length > 0) {
+      const oid = pending.pop()!;
+      if (oid === ancestorSha) return true;
+      if (seen.has(oid)) continue;
+      if (seen.size >= 512) throw new Error("capability integration ancestry exceeds bound");
+      seen.add(oid);
+      const commit = await this.#store.readCommit(oid);
+      if (commit.oid !== oid || commit.parentOids.length > 16)
+        throw new Error("capability integration ancestry contains an invalid commit");
+      pending.push(...commit.parentOids);
+    }
+    return false;
+  }
+
+  async #capabilityProviderIdentity(
+    compilerId: string,
+    objectiveItems: readonly DerivedWorkItem[],
+    baseSha: string,
+  ): Promise<CapabilityProviderIdentity> {
+    const compiled = this.#compiledGraph?.workItems.find(
+      (candidate) => candidate.id === compilerId,
+    );
+    const provider = objectiveItems.find(
+      (candidate) => parseGraphItemMetadata(candidate.body ?? "").id === compilerId,
+    );
+    if (
+      !compiled ||
+      !provider ||
+      provider.state !== "done" ||
+      provider.doneWithoutMergedPullRequest
+    )
+      throw new Error(`repository capability provider ${compilerId} lacks integrated completion`);
+
+    const durableReservations = await this.#attempts.list(this.#run.objective, provider.number);
+    const authenticatedReservation = (
+      runId: string,
+      attempt: number,
+      expectedOid?: string,
+      expectedReceiptDigest?: string,
+    ) => {
+      const reservations = durableReservations.filter(
+        (candidate) => candidate.runId === runId && candidate.attempt === attempt,
+      );
+      const events = (provider.factoryEvents ?? []).filter(
+        (event): event is AttemptEvent =>
+          event.kind === "attempt" &&
+          event.event === "AttemptReserved" &&
+          event.runId === runId &&
+          event.attempt === attempt &&
+          (expectedReceiptDigest === undefined ||
+            recoveryEventDigest(event) === expectedReceiptDigest),
+      );
+      if (reservations.length !== 1 || events.length !== 1)
+        throw new Error(
+          `repository capability provider ${compilerId} lacks one authenticated source reservation`,
+        );
+      const reservation = reservations[0]!;
+      const event = events[0]!;
+      if (
+        (expectedOid !== undefined && reservation.oid !== expectedOid) ||
+        reservation.objective !== this.#run.objective ||
+        reservation.workItem !== provider.number ||
+        reservation.receiptDigest !== recoveryEventDigest(event) ||
+        reservation.baseSha !== event.baseSha ||
+        reservation.policyDigest !== event.policyDigest ||
+        JSON.stringify(reservation.managedRuntimeActivation ?? null) !==
+          JSON.stringify(event.managedRuntimeActivation ?? null)
+      )
+        throw new Error(`repository capability provider ${compilerId} source reservation changed`);
+      return {
+        reservation,
+        receiptDigest: reservation.receiptDigest,
+      };
+    };
+
+    let integration: CapabilityProviderIdentity["integration"] | undefined;
+    const recovered = this.#recoveryRuntime?.sourceIntegrations.find(
+      (proof) => proof.outcome.workItem === provider.number,
+    );
+    if (recovered) {
+      const source = authenticatedReservation(
+        recovered.outcome.sourceRunId,
+        recovered.outcome.sourceAttempt,
+        recovered.outcome.sourceReservationCommitOid,
+        recovered.outcome.sourceReservationReceiptDigest,
+      );
+      const commit = await this.#store.readCommit(recovered.outcome.mergeCommitSha);
+      integration = {
+        kind: "recovery",
+        runId: recovered.outcome.sourceRunId,
+        attempt: recovered.outcome.sourceAttempt,
+        commitSha: commit.oid,
+        treeOid: commit.treeOid,
+        reservationOid: source.reservation.oid,
+        reservationReceiptDigest: source.receiptDigest,
+        receiptDigest: recoveryEventDigest(recovered.outcome),
+        ...(source.reservation.managedRuntimeActivation
+          ? { managedRuntimeActivation: source.reservation.managedRuntimeActivation }
+          : {}),
+      };
+    } else {
+      const candidates = (provider.factoryEvents ?? []).filter(
+        (event): event is AttemptEvent =>
+          event.kind === "attempt" &&
+          event.event === "AttemptIntegrated" &&
+          event.runId === this.#run.runId &&
+          Boolean(event.headSha),
+      );
+      for (const event of candidates) {
+        const source = authenticatedReservation(event.runId, event.attempt);
+        const publication = (provider.factoryEvents ?? []).find(
+          (candidate): candidate is PublicationEvent =>
+            candidate.kind === "publication" &&
+            candidate.event === "PublicationRecorded" &&
+            candidate.runId === event.runId &&
+            candidate.workItem === provider.number &&
+            candidate.attempt === event.attempt,
+        );
+        if (!publication || !event.headSha) continue;
+        const pull = await this.#store.readPullRequest(publication.pullRequest);
+        if (
+          !pull.merged ||
+          pull.mergeCommitSha !== event.headSha ||
+          pull.headSha !== publication.headSha
+        )
+          continue;
+        const merge = await this.#store.readCommit(event.headSha);
+        const head = await this.#store.readCommit(publication.headSha);
+        if (
+          merge.parentOids.length !== 1 ||
+          merge.parentOids[0] !== publication.baseSha ||
+          merge.treeOid !== head.treeOid
+        )
+          continue;
+        const value: CapabilityProviderIdentity["integration"] = {
+          kind: "attempt",
+          runId: event.runId,
+          attempt: event.attempt,
+          commitSha: merge.oid,
+          treeOid: merge.treeOid,
+          reservationOid: source.reservation.oid,
+          reservationReceiptDigest: source.receiptDigest,
+          receiptDigest: createHash("sha256")
+            .update(
+              `${source.reservation.oid}\0${source.receiptDigest}\0${recoveryEventDigest(publication)}\0${recoveryEventDigest(event)}`,
+            )
+            .digest("hex"),
+          ...(source.reservation.managedRuntimeActivation
+            ? { managedRuntimeActivation: source.reservation.managedRuntimeActivation }
+            : {}),
+        };
+        if (integration && JSON.stringify(integration) !== JSON.stringify(value))
+          throw new Error(`repository capability provider ${compilerId} has ambiguous lineage`);
+        integration = value;
+      }
+    }
+    if (!integration || !(await this.#commitIncludes(baseSha, integration.commitSha)))
+      throw new Error(
+        `repository capability provider ${compilerId} merge is not authenticated in the execution base`,
+      );
+    return {
+      id: compiled.id,
+      dependsOn: compiled.dependsOn,
+      scope: compiled.scope,
+      issueNumber: provider.number,
+      integration,
+    };
+  }
+
+  async #baseWorkflowInventory(baseSha: string): Promise<Map<string, string>> {
+    await ensureLocalCommit(this.#options.repository, baseSha);
+    const paths = (
+      await hostGit(
+        this.#options.repository,
+        ["ls-tree", "-r", "--name-only", "-z", baseSha, "--", ".github/workflows"],
+        512 * 501,
+        true,
+      )
+    )
+      .split("\0")
+      .filter(isReviewOnlyWorkflowSurface)
+      .sort();
+    if (paths.length > 512) throw new Error("base workflow directory exceeds inspection bound");
+    const workflows = new Map<string, string>();
+    for (const path of paths) {
+      workflows.set(
+        path,
+        await hostGit(
+          this.#options.repository,
+          ["show", `${baseSha}:${path}`],
+          64 * 1024 + 1,
+          true,
+        ),
+      );
+    }
+    return workflows;
+  }
+
+  async #assertWorkflowPublicationSafety(args: {
+    candidateRoot: string;
+    artifact: Pick<NormalizedArtifact, "baseSha" | "changedPaths">;
+    baseBranch: string;
+    changedPackageScripts?: readonly string[];
+  }): Promise<void> {
+    const sensitivePaths = args.artifact.changedPaths.filter(
+      (path) => executionAffectingReason(path) !== null,
+    );
+    const workflowChange = sensitivePaths.some(isReviewOnlyWorkflowSurface);
+    const actionsProfile = workflowChange
+      ? await this.#reader.readWorkflowSafetyProfile(true)
+      : undefined;
+    const changedPackageScripts =
+      args.changedPackageScripts ??
+      (args.artifact.changedPaths.includes("package.json") ? ["<unknown>"] : []);
+    const assertAgainst = (baseWorkflows: ReadonlyMap<string, string>) =>
+      assertReviewOnlyWorkflowArtifacts(
+        args.candidateRoot,
+        sensitivePaths,
+        args.baseBranch,
+        changedPackageScripts,
+        baseWorkflows,
+        actionsProfile,
+      );
+    await assertAgainst(await this.#baseWorkflowInventory(args.artifact.baseSha));
+    const liveBase = await this.#store.readRef(`refs/heads/${args.baseBranch}`);
+    if (!liveBase) throw new Error(`publication base ${args.baseBranch} is unavailable`);
+    if (liveBase !== args.artifact.baseSha) {
+      await assertAgainst(await this.#baseWorkflowInventory(liveBase));
+    }
+    if ((await this.#store.readRef(`refs/heads/${args.baseBranch}`)) !== liveBase) {
+      throw new Error(`publication base ${args.baseBranch} changed during workflow inspection`);
+    }
+  }
+
+  /** Reconstruct policy input from immutable Git objects for recovery and
+   * adoption paths that no longer hold the original validation worktree. */
+  async #assertWorkflowPublicationHeadSafety(args: {
+    baseSha: string;
+    headSha: string;
+    baseBranch: string;
+  }): Promise<void> {
+    await ensureLocalCommit(this.#options.repository, args.baseSha);
+    await ensureLocalCommit(this.#options.repository, args.headSha);
+    const sensitiveOutput = await hostGit(
+      this.#options.repository,
+      [
+        "diff",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        args.baseSha,
+        args.headSha,
+        "--",
+        ...EXECUTION_AFFECTING_GIT_PATHS,
+      ],
+      256 * 1024,
+      true,
+    );
+    const changedPaths = sensitiveOutput.split("\0").filter(Boolean);
+    if (changedPaths.length === 0) return;
+    const candidate = await createLocalWorktree(this.#options.repository, args.headSha);
+    try {
+      await this.#assertWorkflowPublicationSafety({
+        candidateRoot: candidate.path,
+        artifact: { baseSha: args.baseSha, changedPaths },
+        baseBranch: args.baseBranch,
+      });
+    } finally {
+      await cleanupLocalWorktree(candidate);
+    }
+  }
+
+  async #assertPublicationHeadCurrent(args: {
+    headBranch: string;
+    headSha: string;
+  }): Promise<void> {
+    if ((await this.#store.readRef(`refs/heads/${args.headBranch}`)) !== args.headSha) {
+      throw new Error(`publication branch ${args.headBranch} changed from ${args.headSha}`);
+    }
+  }
+
+  async #holdRecoveredPrepublication(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    cause: unknown,
+  ): Promise<never> {
+    const error = new PrepublicationApprovalRequiredError(cause);
+    const alreadyDeferred = (item.factoryEvents ?? []).some(
+      (event) =>
+        event.kind === "attempt" &&
+        event.event === "AttemptDeferred" &&
+        event.runId === reservation.runId &&
+        event.attempt === reservation.attempt,
+    );
+    if (!alreadyDeferred) {
+      await this.#lease.use((lease) =>
+        this.#attempts.record({
+          lease,
+          workItemNodeId: item.id,
+          reservation,
+          event: "AttemptDeferred",
+          sequence: this.#sequences.take(),
+          reason: error.message,
+          allowRecovery: true,
+        }),
+      );
+    }
+    throw error;
   }
 
   async #recordControllerObservation(
@@ -2517,7 +2934,8 @@ export class FactorySupervisor {
           const packet = graph.objective.workItems.find((item) => item.id === compilerId);
           if (
             !packet ||
-            batch.commandCount !== workerPacketFromCompiled(packet).validationCommands.length + 1
+            batch.commandCount !==
+              validationLocalCommandCount(executionWorkerPacketFromCompiled(packet))
           )
             return false;
           const candidate = candidates.get(
@@ -3653,32 +4071,84 @@ export class FactorySupervisor {
     const forwardAbort = () => executionAbort.abort();
     this.#options.signal?.addEventListener("abort", forwardAbort, { once: true });
     if (this.#options.signal?.aborted) executionAbort.abort();
-    const drainExecutions = async (): Promise<void> => {
+    type DrainOutcome =
+      | {
+          event: "FactoryRunCompleted" | "FactoryRunCancelled" | "FactoryRunEscalated";
+          reason?: string;
+        }
+      | { event: "release-shutdown" | "release-command"; reason?: never };
+    const terminalVeto = (error: unknown): boolean =>
+      error instanceof LeaseLostError ||
+      error instanceof PlatformUnavailableError ||
+      error instanceof SafeArtifactCheckpointHeldError ||
+      error instanceof ArtifactCompletionUnavailableError ||
+      error instanceof ArtifactCollectionCheckpointError ||
+      error instanceof DaytonaResourceCleanupError ||
+      error instanceof CancellationAccountingPublicationError ||
+      (error instanceof Error &&
+        /automated replacement is blocked|cannot prove (?:that )?(?:the )?resource absent|may still be (?:active|billable)/i.test(
+          error.message,
+        ));
+    const drainExecutions = async (proposed: DrainOutcome): Promise<DrainOutcome> => {
       executionAbort.abort();
       const settlements = await activeExecutions.settle();
       // Intentional teardown reports this typed cancellation only after the
       // execution has reconciled cleanup and its attempt receipt. It is not a
       // new operator command and must not replace the outcome being drained for.
-      // Every other failure (including cleanup or fencing uncertainty) survives.
-      const failure = settlements.find(
-        (settlement) =>
-          settlement.error && !(settlement.error instanceof RunCancellationRequestedError),
+      // Safety/cleanup uncertainty vetoes every terminal proposal. Otherwise a
+      // late human-authority failure deterministically turns any proposal into
+      // escalation, just as the same failure does when claimed before drain.
+      const errors = settlements.flatMap((settlement) =>
+        settlement.error === undefined ? [] : [settlement.error],
       );
-      if (failure?.error) throw failure.error;
+      const veto = errors.find(terminalVeto);
+      if (veto !== undefined) throw veto;
+      const escalation = errors.find(
+        (error) =>
+          !(error instanceof RunCancellationRequestedError) &&
+          !(error instanceof CompilerDraftReportCompleted),
+      );
+      if (escalation !== undefined)
+        return {
+          event: "FactoryRunEscalated",
+          reason: escalation instanceof Error ? escalation.message : String(escalation),
+        };
+      const completed = errors.find((error) => error instanceof CompilerDraftReportCompleted);
+      if (completed instanceof CompilerDraftReportCompleted)
+        return { event: "FactoryRunCompleted", reason: completed.message };
+      return proposed;
     };
     const terminalAfterDrain = async (
       event: "FactoryRunCompleted" | "FactoryRunCancelled" | "FactoryRunEscalated",
       reason?: string,
     ): Promise<SupervisorResult> => {
-      await drainExecutions();
+      const outcome = await drainExecutions({ event, ...(reason ? { reason } : {}) });
+      if (outcome.event === "release-shutdown" || outcome.event === "release-command")
+        throw new Error("terminal drain produced an invalid release outcome");
       snapshot = await this.#reader.readObjective(snapshot.number);
       this.#fenceSnapshot(snapshot);
       this.#sequences.observe(snapshotEvents(snapshot));
-      return this.#terminal(runManager, snapshot, event, reason);
+      return this.#terminal(runManager, snapshot, outcome.event, outcome.reason);
     };
     const releaseAfterDrain = async (): Promise<SupervisorResult> => {
-      await drainExecutions();
-      return this.#releaseForShutdown(snapshot);
+      const outcome = await drainExecutions({ event: "release-shutdown" });
+      if (outcome.event === "release-shutdown") return this.#releaseForShutdown(snapshot);
+      if (outcome.event === "release-command")
+        throw new Error("shutdown drain produced an invalid command release outcome");
+      snapshot = await this.#reader.readObjective(snapshot.number);
+      this.#fenceSnapshot(snapshot);
+      this.#sequences.observe(snapshotEvents(snapshot));
+      return this.#terminal(runManager, snapshot, outcome.event, outcome.reason);
+    };
+    const releaseCommandAfterDrain = async (): Promise<SupervisorResult> => {
+      const outcome = await drainExecutions({ event: "release-command" });
+      if (outcome.event === "release-command") return this.#releaseForDrain(snapshot);
+      if (outcome.event === "release-shutdown")
+        throw new Error("command drain produced an invalid shutdown release outcome");
+      snapshot = await this.#reader.readObjective(snapshot.number);
+      this.#fenceSnapshot(snapshot);
+      this.#sequences.observe(snapshotEvents(snapshot));
+      return this.#terminal(runManager, snapshot, outcome.event, outcome.reason);
     };
     const finishExpired = async (): Promise<SupervisorResult> => {
       snapshot = await this.#reader.readObjective(snapshot.number);
@@ -3689,8 +4159,8 @@ export class FactorySupervisor {
         activeExecutions.size === 0 &&
         (await this.#recordedCompletionReady(snapshot, deadline))
       ) {
-        const failure = (await activeExecutions.settle()).find((value) => value.error);
-        if (failure?.error) throw failure.error;
+        await activeExecutions.waitForIdle();
+        activeExecutions.throwNextFailure();
         const finalSnapshot = await this.#reader.readObjective(snapshot.number);
         this.#sequences.observe(snapshotEvents(finalSnapshot));
         if (hasCancellationRequest(finalSnapshot, this.#run.runId) || this.#options.signal?.aborted)
@@ -3707,7 +4177,7 @@ export class FactorySupervisor {
           await this.#lease.assert();
           this.#options.signal?.throwIfAborted();
           if (!finalSnapshot.closed) await this.#store.closeIssue(finalSnapshot.number);
-          return this.#terminal(runManager, finalSnapshot, "FactoryRunCompleted");
+          return terminalAfterDrain("FactoryRunCompleted");
         }
       }
       return terminalAfterDrain("FactoryRunEscalated", "Objective timeout exhausted");
@@ -3716,10 +4186,14 @@ export class FactorySupervisor {
       item: DerivedWorkItem,
       reason: string,
     ): Promise<SupervisorResult> => {
-      await drainExecutions();
+      const outcome = await drainExecutions({ event: "FactoryRunEscalated", reason });
+      if (outcome.event === "release-shutdown" || outcome.event === "release-command")
+        throw new Error("escalation drain produced an invalid release outcome");
       snapshot = await this.#reader.readObjective(snapshot.number);
       this.#fenceSnapshot(snapshot);
       this.#sequences.observe(snapshotEvents(snapshot));
+      if (outcome.event !== "FactoryRunEscalated" || outcome.reason !== reason)
+        return this.#terminal(runManager, snapshot, outcome.event, outcome.reason);
       const refreshed = derive(snapshot).items.find(
         (candidate) => candidate.number === item.number,
       );
@@ -4102,7 +4576,7 @@ export class FactorySupervisor {
             graphManager.persist({
               lease,
               base,
-              objective: recoverableObjective,
+              ...(sourceGraph ? { source: sourceGraph } : { objective: recoverableObjective }),
             }),
           );
         }
@@ -4220,7 +4694,7 @@ export class FactorySupervisor {
               }
               this.#deliveryPlan = planned;
             }
-            await this.#preflightCompiledGraph(objective);
+            this.#validateCompiledGraphStatic(objective);
           },
         });
         const compiled = durableGraph.objective;
@@ -4320,6 +4794,11 @@ export class FactorySupervisor {
             }),
           );
         }
+        // Authenticate the immutable graph before checking transient runtime
+        // availability. A missing backend/tool must not orphan a paid compiler
+        // result and force a second model invocation on restart. No Work Item,
+        // attempt, or publication mutation occurs before this preflight passes.
+        await this.#preflightCompiledGraphRuntime(compiled);
         const graph = new GraphApplier({
           writer: new GithubOctokitGraphWriter({
             token: this.#options.token,
@@ -4500,7 +4979,7 @@ export class FactorySupervisor {
         const fairnessRevision = this.#fairness.revision;
         const executionRevision = activeExecutions.revision;
         if (heartbeatError) throw heartbeatError;
-        activeExecutions.throwIfFailed();
+        activeExecutions.throwNextFailure();
         if (this.#options.signal?.aborted) {
           if (this.#options.shutdownBehavior === "release-lease") {
             return await releaseAfterDrain();
@@ -4511,7 +4990,7 @@ export class FactorySupervisor {
         snapshot = await this.#reader.readObjective(snapshot.number);
         // A hold/cleanup failure can settle while the snapshot is in flight.
         // An absent active key must not turn that failure into same-process recovery.
-        activeExecutions.throwIfFailed();
+        activeExecutions.throwNextFailure();
         this.#options.signal?.throwIfAborted();
         this.#fenceSnapshot(snapshot);
         this.#ciExpectedOnPullRequests = snapshot.ciExpectedOnPullRequests;
@@ -4546,7 +5025,7 @@ export class FactorySupervisor {
           );
           continue;
         }
-        activeExecutions.throwIfFailed();
+        activeExecutions.throwNextFailure();
         this.#options.signal?.throwIfAborted();
         const adoptedPublication =
           this.#recoveryRuntime &&
@@ -4669,9 +5148,8 @@ export class FactorySupervisor {
           deferredIntegration = true;
         }
         if (!deferredIntegration && allDone(objective)) {
-          const settlements = await activeExecutions.settle();
-          const failure = settlements.find((settlement) => settlement.error);
-          if (failure?.error) throw failure.error;
+          await activeExecutions.waitForIdle();
+          activeExecutions.throwNextFailure();
           snapshot = await this.#reader.readObjective(snapshot.number);
           this.#fenceSnapshot(snapshot);
           this.#sequences.observe(snapshotEvents(snapshot));
@@ -4679,7 +5157,7 @@ export class FactorySupervisor {
           if (!allDone(this.#deriveObjective(snapshot))) continue;
           await this.#lease.assert();
           await this.#store.closeIssue(snapshot.number);
-          return await this.#terminal(runManager, snapshot, "FactoryRunCompleted");
+          return await terminalAfterDrain("FactoryRunCompleted");
         }
 
         const retryEligible = new Set(
@@ -4712,7 +5190,7 @@ export class FactorySupervisor {
           }
         }
 
-        activeExecutions.throwIfFailed();
+        activeExecutions.throwNextFailure();
         this.#options.signal?.throwIfAborted();
         const recoverable = objective.items.filter(
           (item) =>
@@ -4724,7 +5202,7 @@ export class FactorySupervisor {
         );
         if (recoverable.length > 0) {
           for (const item of recoverable) {
-            activeExecutions.throwIfFailed();
+            activeExecutions.throwNextFailure();
             this.#options.signal?.throwIfAborted();
             const planned = this.#plannedRecoveryItem(item.number);
             if (planned?.action === "reconcile" && planned.source?.artifactDigest)
@@ -4783,12 +5261,15 @@ export class FactorySupervisor {
         if (commandState.admissionsPaused) {
           this.#fairness.reportDemand(objective.number, 0);
           if (activeExecutions.size === 0) {
+            // Settlement removes the active key before enqueueing its result.
+            // Claim that edge before acknowledging an operational stop.
+            activeExecutions.throwNextFailure();
             if (!commandState.admissionGate) {
               throw new Error("paused run has no durable admission-gate command");
             }
             await this.#acknowledgeOperationalGate(snapshot, commandState.admissionGate);
             if (commandState.draining) {
-              return await this.#releaseForDrain(snapshot);
+              return await releaseCommandAfterDrain();
             }
             await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
           } else {
@@ -4796,7 +5277,7 @@ export class FactorySupervisor {
               this.#options.pollIntervalMs ?? 2_000,
               this.#options.signal,
             );
-            if (settled?.error) throw settled.error;
+            if (settled?.error) throw new ClaimedExecutionFailure(settled);
           }
           continue;
         }
@@ -4817,6 +5298,39 @@ export class FactorySupervisor {
                   (candidate) => candidate.itemId === itemId,
                 );
                 if (!plan?.parentItemId) return false;
+                const providers =
+                  this.#compiledGraph?.workItems
+                    .find((candidate) => candidate.id === itemId)
+                    ?.repositoryCapabilities?.requires.filter(
+                      (requirement) => requirement.activation === "integrated-base",
+                    )
+                    .map((requirement) => requirement.providerWorkItem) ?? [];
+                if (
+                  providers.length > 0 &&
+                  !providers.every((provider) => {
+                    const state = objective.items.find(
+                      (candidate) => parseGraphItemMetadata(candidate.body ?? "").id === provider,
+                    )?.state;
+                    return state === "done";
+                  })
+                ) {
+                  const compiled = this.#compiledGraph?.workItems.find(
+                    (candidate) => candidate.id === itemId,
+                  );
+                  const pending = [...(compiled?.dependsOn ?? [])];
+                  const seen = new Set<string>();
+                  while (pending.length) {
+                    const dependency = pending.pop()!;
+                    if (providers.includes(dependency)) return false;
+                    if (seen.has(dependency)) continue;
+                    seen.add(dependency);
+                    pending.push(
+                      ...(this.#compiledGraph?.workItems.find(
+                        (candidate) => candidate.id === dependency,
+                      )?.dependsOn ?? []),
+                    );
+                  }
+                }
                 const parent = objective.items.find(
                   (candidate) =>
                     parseGraphItemMetadata(candidate.body ?? "").id === plan.parentItemId,
@@ -4919,6 +5433,9 @@ export class FactorySupervisor {
           string,
           Promise<{ executionRequiresIsolation: boolean }>
         >();
+        const repositoryCapabilityProofs = new Map<number, RepositoryCapabilityProof[]>();
+        const activatedPackets = new Map<number, WorkerPacket>();
+        const managedRuntimeActivations = new Map<number, ManagedRuntimeActivation>();
         const executionHead = runnable.length
           ? await this.#store.getBranchHead(this.#baseBranch)
           : null;
@@ -5049,8 +5566,15 @@ export class FactorySupervisor {
                 requiresIsolation: proof.executionRequiresIsolation,
               });
             }
-            const packet = parseWorkerPacket({
+            const executionBase = await this.#store.readCommit(
+              deliveryBases.get(priority.item.number)!.sha,
+            );
+            const graphPacket = parseWorkerPacket({
               ...original,
+              baseSha: executionBase.oid,
+              ...(retryContext(priority.item, this.#run.runId)
+                ? { retryContext: retryContext(priority.item, this.#run.runId) }
+                : {}),
               requirements: {
                 ...original.requirements,
                 ...((this.#policy.trust === "sandbox_untrusted" ||
@@ -5060,6 +5584,39 @@ export class FactorySupervisor {
                   : {}),
               },
             });
+            let packet = graphPacket;
+            let capabilityBlocker: string | undefined;
+            try {
+              const capabilitySourceRef = `refs/heads/${deliveryBases.get(priority.item.number)!.branch}`;
+              const providerIdentities = await this.#capabilityProviderIdentities(
+                graphPacket,
+                objective.items,
+                executionBase.oid,
+              );
+              packet = await activateManagedRuntimePacket(graphPacket, (id) =>
+                providerIdentities.get(id),
+              );
+              const proofs = await this.#resolveExecutionBaseCapabilities(
+                priority.item,
+                packet,
+                executionBase,
+                capabilitySourceRef,
+                objective.items,
+                providerIdentities,
+              );
+              repositoryCapabilityProofs.set(priority.item.number, proofs);
+              activatedPackets.set(priority.item.number, packet);
+              const activation = createManagedRuntimeActivation({
+                packet,
+                baseSha: executionBase.oid,
+                sourceRef: capabilitySourceRef,
+                proofDigests: proofs.map(({ digest }) => digest),
+              });
+              if (activation) managedRuntimeActivations.set(priority.item.number, activation);
+            } catch (error) {
+              capabilityBlocker =
+                error instanceof Error ? error.message : `repository capability refusal: ${error}`;
+            }
             const timeoutMs = Math.min(
               (packet.requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000,
               Math.max(1, deadline - nowMs),
@@ -5083,6 +5640,17 @@ export class FactorySupervisor {
               }),
               commandState.cloudPaused,
             );
+            if (capabilityBlocker)
+              for (const candidate of backends) candidate.permanentReasons.push(capabilityBlocker);
+            const mayChangeExecutionAuthority = packet.allowedPaths.some(
+              (path) => executionAffectingReason(path) !== null,
+            );
+            if (mayChangeExecutionAuthority)
+              for (const candidate of backends)
+                if (candidate.capabilities?.providerManagedPublication)
+                  candidate.permanentReasons.push(
+                    "execution-authority artifacts require host-owned pre-publication inspection before any feature ref or pull request exists",
+                  );
             if (this.#deliverySelection.selected === "native-stacks") {
               const metadata = parseGraphItemMetadata(priority.item.body ?? "");
               const unit = this.#deliveryPlan?.units.find((unit) =>
@@ -5242,7 +5810,7 @@ export class FactorySupervisor {
           );
         }
         const permanent = plan.queued.find((decision) => decision.permanent);
-        if (permanent) {
+        if (permanent && safeAdmissions.length === 0 && activeExecutions.size === 0) {
           const item = objective.items.find(
             (candidate) => candidate.number === permanent.workItem,
           )!;
@@ -5270,7 +5838,7 @@ export class FactorySupervisor {
           const item = objective.items.find(
             (candidate) => candidate.number === admission.workItem,
           )!;
-          activeExecutions.throwIfFailed();
+          activeExecutions.throwNextFailure();
           this.#options.signal?.throwIfAborted();
           const committed = await this.#reserveCapacity(
             expectedCapacityGeneration,
@@ -5304,6 +5872,9 @@ export class FactorySupervisor {
                 releaseExecutionCapacity,
                 deliveryBases.get(item.number),
                 executionAbort.signal,
+                repositoryCapabilityProofs.get(item.number) ?? [],
+                activatedPackets.get(item.number),
+                managedRuntimeActivations.get(item.number),
               );
             } finally {
               await releaseExecutionCapacity();
@@ -5322,43 +5893,46 @@ export class FactorySupervisor {
         );
       }
     } catch (error) {
-      if (error instanceof CompilerDraftReportCompleted)
-        return await terminalAfterDrain("FactoryRunCompleted", error.message);
-      if (error instanceof LeaseLostError) throw error;
-      if (error instanceof PlatformUnavailableError) throw error;
-      if (error instanceof SafeArtifactCheckpointHeldError) throw error;
-      if (error instanceof ArtifactCompletionUnavailableError) throw error;
-      const unsafeCleanup =
-        error instanceof DaytonaResourceCleanupError ||
-        (error instanceof Error &&
-          /automated replacement is blocked|cannot prove (?:that )?(?:the )?resource absent|may still be (?:active|billable)/i.test(
-            error.message,
-          ));
-      if (unsafeCleanup) throw error;
-      // A concurrent execution may finish teardown with an accounting failure
-      // after the operator signal is raised. That failure is not itself an
-      // orderly cancellation and cannot authorize either a terminal receipt or
-      // a lease release that would permit replacement.
-      if (error instanceof CancellationAccountingPublicationError) throw error;
-      if (this.#options.signal?.aborted && this.#options.shutdownBehavior === "release-lease") {
+      const claimed = error instanceof ClaimedExecutionFailure ? error : undefined;
+      const failure = claimed?.settlement.error ?? error;
+      if (failure instanceof CompilerDraftReportCompleted)
+        return await terminalAfterDrain("FactoryRunCompleted", failure.message);
+      if (terminalVeto(failure)) {
+        executionAbort.abort();
+        await activeExecutions.settle();
+        throw failure;
+      }
+      if (
+        this.#options.signal?.aborted &&
+        this.#options.shutdownBehavior === "release-lease" &&
+        (!claimed || failure instanceof RunCancellationRequestedError)
+      ) {
         return await releaseAfterDrain();
       }
-      if (error instanceof RunCancellationRequestedError || this.#options.signal?.aborted) {
+      if (
+        failure instanceof RunCancellationRequestedError ||
+        (!claimed && this.#options.signal?.aborted)
+      ) {
         return await terminalAfterDrain(
           "FactoryRunCancelled",
-          error instanceof RunCancellationRequestedError ? error.message : "operator cancelled run",
+          failure instanceof RunCancellationRequestedError
+            ? failure.message
+            : "operator cancelled run",
         );
       }
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = failure instanceof Error ? failure.message : String(failure);
       return await terminalAfterDrain("FactoryRunEscalated", reason);
     } finally {
       clearInterval(heartbeat);
       this.#options.signal?.removeEventListener("abort", forwardAbort);
       const unsettled = await activeExecutions.settle();
       this.#fairness.unregister(this.#options.objective);
-      const failure = unsettled.find((settlement) => settlement.error);
-      // biome-ignore lint/correctness/noUnsafeFinally: cleanup uncertainty must keep the durable run resumable instead of releasing it as terminal
-      if (failure?.error) throw failure.error;
+      // Every outcome path above claims or drains child settlements. Reaching
+      // finally with anything left is an internal lifecycle bug, not another
+      // timing-dependent outcome arbiter.
+      if (unsettled.length > 0)
+        // biome-ignore lint/correctness/noUnsafeFinally: classified exits drain the pool; a leftover settlement proves the lifecycle invariant itself failed
+        throw new Error("execution pool exited without classified settlement drain");
     }
   }
 
@@ -5369,9 +5943,12 @@ export class FactorySupervisor {
     releaseExecutionCapacity: (alreadyReleased?: boolean) => Promise<void>,
     deliveryBase?: DeliveryExecutionBase,
     executionSignal?: AbortSignal,
+    repositoryCapabilityProofs: readonly RepositoryCapabilityProof[] = [],
+    activatedPacket?: WorkerPacket,
+    managedRuntimeActivation?: ManagedRuntimeActivation,
     recovered?: CollectedAttemptContinuation,
   ): Promise<void> {
-    return this.#modelInvocations.run(() =>
+    const execute = () =>
       withArtifactContentScope(() =>
         this.#executeWithArtifactContent(
           item,
@@ -5380,10 +5957,13 @@ export class FactorySupervisor {
           releaseExecutionCapacity,
           deliveryBase,
           executionSignal,
+          repositoryCapabilityProofs,
+          activatedPacket,
+          managedRuntimeActivation,
           recovered,
         ),
-      ),
-    );
+      );
+    return recovered ? execute() : this.#modelInvocations.run(execute);
   }
 
   async #executeWithArtifactContent(
@@ -5393,6 +5973,9 @@ export class FactorySupervisor {
     releaseExecutionCapacity: (alreadyReleased?: boolean) => Promise<void>,
     deliveryBase?: DeliveryExecutionBase,
     executionSignal?: AbortSignal,
+    repositoryCapabilityProofs: readonly RepositoryCapabilityProof[] = [],
+    activatedPacket?: WorkerPacket,
+    managedRuntimeActivation?: ManagedRuntimeActivation,
     recovered?: CollectedAttemptContinuation,
   ): Promise<void> {
     if (
@@ -5488,7 +6071,7 @@ export class FactorySupervisor {
           throw new Error("stack parent branch changed before child admission");
         }
       }
-      const packet =
+      const graphPacket =
         recovered?.packet ??
         parseWorkerPacket({
           ...originalPacket,
@@ -5504,12 +6087,65 @@ export class FactorySupervisor {
               : {}),
           },
         });
+      const packet = packetWithManagedRuntimeActivation(
+        graphPacket,
+        recovered ? reservation?.managedRuntimeActivation : managedRuntimeActivation,
+      );
+      if (activatedPacket && workerPacketDigest(packet) !== workerPacketDigest(activatedPacket))
+        throw new Error("managed runtime packet changed after admission planning");
       assertRequirementsWithinPolicy(
         packet.requirements,
         this.#policy,
         `Work Item #${item.number}`,
       );
       await ensureLocalCommit(this.#options.repository, base.oid);
+      const capabilitySourceRef = `refs/heads/${publicationBaseBranch}`;
+      let currentRepositoryCapabilityProofs = [...repositoryCapabilityProofs];
+      let currentProviderIdentities = new Map<string, CapabilityProviderIdentity>();
+      if ((packet.repositoryCapabilities?.requires.length ?? 0) > 0) {
+        const currentSnapshot = await this.#reader.readObjective(this.#run.objective);
+        this.#fenceSnapshot(currentSnapshot);
+        const currentObjective = this.#deriveObjective(currentSnapshot);
+        const currentItem = currentObjective.items.find((candidate) => candidate.id === item.id);
+        if (!currentItem || currentItem.number !== item.number)
+          throw new Error("repository capability consumer identity changed before admission");
+        currentProviderIdentities = await this.#capabilityProviderIdentities(
+          packet,
+          currentObjective.items,
+          base.oid,
+        );
+        if (!recovered) {
+          const refreshed = await this.#resolveExecutionBaseCapabilities(
+            currentItem,
+            packet,
+            base,
+            capabilitySourceRef,
+            currentObjective.items,
+            currentProviderIdentities,
+          );
+          const plannedDigests = currentRepositoryCapabilityProofs
+            .map((proof) => proof.digest)
+            .sort();
+          const refreshedDigests = refreshed.map((proof) => proof.digest).sort();
+          if (JSON.stringify(plannedDigests) !== JSON.stringify(refreshedDigests))
+            throw new Error("repository capability proof changed before admission");
+          currentRepositoryCapabilityProofs = refreshed;
+        }
+      }
+      await assertRepositoryCapabilityProofsCurrent({
+        proofs: currentRepositoryCapabilityProofs,
+        base,
+        sourceRef: capabilitySourceRef,
+        packet,
+        providerById: (id) => currentProviderIdentities.get(id),
+      });
+      await assertManagedRuntimeActivationCurrent({
+        packet,
+        activation: recovered ? reservation?.managedRuntimeActivation : managedRuntimeActivation,
+        baseSha: base.oid,
+        sourceRef: capabilitySourceRef,
+        proofDigests: currentRepositoryCapabilityProofs.map(({ digest }) => digest),
+      });
       const timeoutMs = Math.min(
         (packet.requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000,
         Math.max(1, objectiveDeadline - Date.now()),
@@ -5627,6 +6263,24 @@ export class FactorySupervisor {
           // The issue ledger CAS admits work after the local backend/capacity plan.
           // Capture the Objective generation immediately before that transition.
           await this.#leases.assertGeneration(lease, "admission");
+          if ((packet.repositoryCapabilities?.requires.length ?? 0) > 0) {
+            if ((await this.#store.readRef(capabilitySourceRef)) !== base.oid)
+              throw new Error("repository capability source ref changed before reservation");
+            await assertRepositoryCapabilityProofsCurrent({
+              proofs: currentRepositoryCapabilityProofs,
+              base,
+              sourceRef: capabilitySourceRef,
+              packet,
+              providerById: (id) => currentProviderIdentities.get(id),
+            });
+          }
+          await assertManagedRuntimeActivationCurrent({
+            packet,
+            activation: managedRuntimeActivation,
+            baseSha: base.oid,
+            sourceRef: capabilitySourceRef,
+            proofDigests: currentRepositoryCapabilityProofs.map(({ digest }) => digest),
+          });
           reservation = await this.#attempts.reserve({
             ...(reassignmentAuthorityReceiptOid ? { reassignmentAuthorityReceiptOid } : {}),
             lease,
@@ -5666,7 +6320,9 @@ export class FactorySupervisor {
                   selected!.capabilities.id,
                   lease.epoch,
                   lease.policyDigest,
+                  managedRuntimeActivation?.digest ?? null,
                 ]),
+                ...(managedRuntimeActivation ? { managedRuntimeActivation } : {}),
               };
             },
             prepareLocalScope: async (attempt) => {
@@ -5813,6 +6469,54 @@ export class FactorySupervisor {
             ? await this.#sessionJournal(reservation)
             : undefined;
         handle = await this.#externalAdmission(async () => {
+          if ((await this.#store.readRef(capabilitySourceRef)) !== base.oid)
+            throw new ExecutionSourceAdvancedBeforeDispatchError(
+              "execution source ref changed after attempt reservation",
+            );
+          const dispatchSnapshot = await this.#reader.readObjective(this.#run.objective);
+          this.#fenceSnapshot(dispatchSnapshot);
+          const dispatchObjective = this.#deriveObjective(dispatchSnapshot);
+          const dispatchItem = dispatchObjective.items.find(
+            (candidate) => candidate.id === item.id && candidate.number === item.number,
+          );
+          if (!dispatchItem)
+            throw new Error("repository capability consumer changed after attempt reservation");
+          const dispatchProviderIdentities = await this.#capabilityProviderIdentities(
+            packet,
+            dispatchObjective.items,
+            base.oid,
+          );
+          const dispatchProofs = await this.#resolveExecutionBaseCapabilities(
+            dispatchItem,
+            packet,
+            base,
+            capabilitySourceRef,
+            dispatchObjective.items,
+            dispatchProviderIdentities,
+          );
+          if (
+            JSON.stringify(dispatchProofs.map(({ digest }) => digest).sort()) !==
+            JSON.stringify(currentRepositoryCapabilityProofs.map(({ digest }) => digest).sort())
+          )
+            throw new Error("repository capability proof changed after attempt reservation");
+          await assertRepositoryCapabilityProofsCurrent({
+            proofs: dispatchProofs,
+            base,
+            sourceRef: capabilitySourceRef,
+            packet,
+            providerById: (id) => dispatchProviderIdentities.get(id),
+          });
+          await assertManagedRuntimeActivationCurrent({
+            packet,
+            activation: reservation!.managedRuntimeActivation,
+            baseSha: base.oid,
+            sourceRef: capabilitySourceRef,
+            proofDigests: dispatchProofs.map(({ digest }) => digest),
+          });
+          if ((await this.#store.readRef(capabilitySourceRef)) !== base.oid)
+            throw new ExecutionSourceAdvancedBeforeDispatchError(
+              "execution source ref changed during final dispatch validation",
+            );
           assertSupportedModelTokenBudgetIntent(this.#policy);
           if (selected!.capabilities.reportsModelUsage)
             await this.#admitModelInvocation(
@@ -6245,6 +6949,7 @@ export class FactorySupervisor {
           repository: this.#options.repository,
           artifact,
           packet,
+          publicationBaseBranch: this.#baseBranch,
           ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
           ...(validator
             ? {
@@ -6371,6 +7076,7 @@ export class FactorySupervisor {
               packet,
               artifact,
               evidence: validation!.evidence,
+              publicationBaseBranch: this.#baseBranch,
               requiresIsolation:
                 this.#policy.trust === "sandbox_untrusted" ||
                 packet.requirements.trust !== "trusted_local" ||
@@ -6404,8 +7110,23 @@ export class FactorySupervisor {
         recordUsage: (record) => this.#recordReviewUsage(record, item, reservation!),
         recordOutcome: (record) => this.#recordInitialReviewOutcome(record, item, reservation!),
       });
+      const assertPublicationSafety = async () => {
+        try {
+          await this.#assertWorkflowPublicationSafety({
+            candidateRoot: validation!.worktree.path,
+            artifact,
+            baseBranch: publicationBaseBranch,
+            changedPackageScripts: validation!.publicationReview.changedPackageScripts,
+          });
+        } catch (cause) {
+          throw new PrepublicationApprovalRequiredError(cause);
+        }
+      };
       await this.#lease.assertGeneration("publication");
       if (selected.capabilities.providerManagedPublication) {
+        // Execution-authority paths are rejected for managed publication at
+        // admission. Retain a fail-closed assertion if that contract drifts.
+        await assertPublicationSafety();
         const pullNumber = Number(handle!.metadata?.pullNumber);
         const headSha = handle!.metadata?.headSha;
         if (!Number.isInteger(pullNumber) || pullNumber <= 0 || !headSha) {
@@ -6439,6 +7160,8 @@ export class FactorySupervisor {
           attempt: reservation.attempt,
           title: item.title,
           baseBranch: publicationBaseBranch,
+          beforeRefMutation: assertPublicationSafety,
+          beforePullRequestMutation: assertPublicationSafety,
         });
       }
       if (!published) throw new Error("publication did not return a pull request");
@@ -6700,6 +7423,28 @@ export class FactorySupervisor {
       }
       if (cancelledUsageWriteFailure) throw cancelledUsageWriteFailure.error;
       const reason = error instanceof Error ? error.message : String(error);
+      const deferredBeforeDispatch =
+        error instanceof ExecutionSourceAdvancedBeforeDispatchError && !backendLaunchAttempted;
+      if (error instanceof PrepublicationApprovalRequiredError) {
+        if (!reservation || !retryableArtifact || !completedArtifactRetained)
+          throw new Error("pre-publication hold lacks a durable completed artifact", {
+            cause: error,
+          });
+        await this.#retryArtifacts.set(item.number, retryableArtifact);
+        await this.#lease.use((lease) =>
+          this.#attempts.record({
+            ...(recovered ? { allowRecovery: true } : {}),
+            lease,
+            workItemNodeId: item.id,
+            reservation: reservation!,
+            event: "AttemptDeferred",
+            sequence: this.#sequences.take(),
+            reason,
+          }),
+        );
+        admissionPipelineClosed = true;
+        throw error;
+      }
       if (!published && selected?.capabilities.providerManagedPublication) {
         const managedPull = Number(handle?.metadata?.pullNumber);
         if (Number.isInteger(managedPull) && managedPull > 0) {
@@ -6759,7 +7504,11 @@ export class FactorySupervisor {
               sequence: this.#sequences.take(),
               event: "BudgetReconciled",
               unit: budgetUnit,
-              amount: budgetUnit === "managed_sessions" ? 1 : Date.now() - started,
+              amount: backendLaunchAttempted
+                ? budgetUnit === "managed_sessions"
+                  ? 1
+                  : Date.now() - started
+                : 0,
             });
             this.#budgetEvents.push(event);
             executionBudgetReconciled = true;
@@ -6792,7 +7541,11 @@ export class FactorySupervisor {
             lease,
             workItemNodeId: item.id,
             reservation: reservation!,
-            event: cancellation ? "AttemptCancelled" : "AttemptFailed",
+            event: deferredBeforeDispatch
+              ? "AttemptDeferred"
+              : cancellation
+                ? "AttemptCancelled"
+                : "AttemptFailed",
             sequence: this.#sequences.take(),
             reason,
             ...(backendLaunchAttempted && terminalModelProfile
@@ -6809,7 +7562,11 @@ export class FactorySupervisor {
       }
       admissionPipelineClosed = true;
       if (cancellation) throw new RunCancellationRequestedError(reason);
-      this.#notify(`Work Item #${item.number} failed: ${reason}`);
+      this.#notify(
+        deferredBeforeDispatch
+          ? `Work Item #${item.number} returned to queue before dispatch: ${reason}`
+          : `Work Item #${item.number} failed: ${reason}`,
+      );
     } finally {
       if (executionSignal?.aborted && handle && selected && !executionCleanupConfirmed) {
         try {
@@ -7140,6 +7897,18 @@ export class FactorySupervisor {
       }
     }
     this.#options.signal?.throwIfAborted();
+    const retainedBase = await this.#store.readCommit(reservation.baseSha);
+    const capabilitySnapshot = await this.#reader.readObjective(this.#run.objective);
+    this.#fenceSnapshot(capabilitySnapshot);
+    const capabilityObjective = this.#deriveObjective(capabilitySnapshot);
+    const capabilitySourceRef = `refs/heads/${deliveryBase?.branch ?? this.#baseBranch}`;
+    const repositoryCapabilityProofs = await this.#resolveExecutionBaseCapabilities(
+      item,
+      packet,
+      retainedBase,
+      capabilitySourceRef,
+      capabilityObjective.items,
+    );
     await this.#execute(
       item,
       deadline,
@@ -7147,6 +7916,9 @@ export class FactorySupervisor {
       async () => {},
       deliveryBase,
       this.#options.signal,
+      repositoryCapabilityProofs,
+      packet,
+      reservation.managedRuntimeActivation,
       recovered,
     );
   }
@@ -7473,7 +8245,7 @@ export class FactorySupervisor {
       item,
       adoptedSource?.reservation.runId ?? this.#run.runId,
     );
-    const packet = parseWorkerPacket({
+    const graphPacket = parseWorkerPacket({
       ...original,
       baseSha: reservation.baseSha,
       ...(retainedRetryContext ? { retryContext: retainedRetryContext } : {}),
@@ -7485,6 +8257,10 @@ export class FactorySupervisor {
           : {}),
       },
     });
+    const packet = packetWithManagedRuntimeActivation(
+      graphPacket,
+      reservation.managedRuntimeActivation,
+    );
     if (
       reservation.localScopeBatch &&
       reservation.localScopeBatch.identity.invocationDigest !== workerPacketDigest(packet)
@@ -7828,17 +8604,15 @@ export class FactorySupervisor {
         );
       }
       const original = this.#packetFor(item.number);
-      const packet = parseWorkerPacket({
-        ...original,
-        baseSha: reservation.baseSha,
-        requirements: {
-          ...original.requirements,
-          ...(this.#policy.trust === "sandbox_untrusted" &&
+      const packet = this.#packetBoundToReservation(
+        item,
+        reservation,
+        reservation.baseSha,
+        this.#policy.trust === "sandbox_untrusted" &&
           original.requirements.trust === "trusted_local"
-            ? { trust: "isolated" as const }
-            : {}),
-        },
-      });
+          ? "isolated"
+          : original.requirements.trust,
+      );
       const artifact = await resumeArtifactTransfer({
         store: this.#store,
         identity: this.#artifactTransferIdentity(reservation),
@@ -7875,6 +8649,7 @@ export class FactorySupervisor {
             packet,
             artifact,
             evidence: checkpoint.evidence,
+            publicationBaseBranch: this.#baseBranch,
             requiresIsolation:
               this.#policy.trust === "sandbox_untrusted" ||
               packet.requirements.trust !== "trusted_local" ||
@@ -8321,10 +9096,31 @@ export class FactorySupervisor {
     );
   }
 
-  async #preflightCompiledGraph(graph: CompiledObjective): Promise<void> {
+  #validateCompiledGraphStatic(graph: CompiledObjective): void {
+    for (const item of graph.workItems) {
+      const packet = executionWorkerPacketFromCompiled(item);
+      if (
+        JSON.stringify(packet.managedRuntimes ?? []) !==
+          JSON.stringify(managedRuntimeRequirements(packet.validationCommands)) ||
+        (packet.managedRuntimes ?? []).some(({ bundleDigest }) => bundleDigest !== undefined)
+      )
+        throw new Error(
+          `compiled graph managed runtime contract differs from canonical host derivation for ${item.id}: observed ${JSON.stringify(packet.managedRuntimes ?? [])}; expected ${JSON.stringify(managedRuntimeRequirements(packet.validationCommands))}`,
+        );
+      for (const requirement of packet.repositoryCapabilities?.requires ?? []) {
+        const adapter = toolchainAdapterById(requirement.adapter);
+        if (!adapter?.deferredOperations)
+          throw new Error(
+            `compiled graph requires unsupported deferred repository capability adapter ${requirement.adapter}`,
+          );
+      }
+    }
+  }
+
+  async #preflightCompiledGraphRuntime(graph: CompiledObjective): Promise<void> {
     const budgets = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
     for (const item of graph.workItems) {
-      const packet = workerPacketFromCompiled(item);
+      const packet = executionWorkerPacketFromCompiled(item);
       const requirements = {
         ...packet.requirements,
         ...(this.#policy.trust === "sandbox_untrusted" &&
@@ -8651,7 +9447,11 @@ export class FactorySupervisor {
         reservation.backend,
         reservation.directorEpoch,
         reservation.policyDigest,
+        reservation.managedRuntimeActivation?.digest ?? null,
       ]),
+      ...(reservation.managedRuntimeActivation
+        ? { managedRuntimeActivation: reservation.managedRuntimeActivation }
+        : {}),
     };
   }
 
@@ -8808,6 +9608,54 @@ export class FactorySupervisor {
       throw new Error(`Work Item #${workItem} has no immutable compiled Worker Packet`);
     }
     return packet;
+  }
+
+  /** Reconstruct the exact Worker Packet admitted by a durable reservation,
+   * then carry that reservation's immutable runtime selection onto a later
+   * validation base. The activation packet digest chooses between the only
+   * host-authorized trust variants; no active toolchain pointer is consulted. */
+  #packetBoundToReservation(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    baseSha = reservation.baseSha,
+    trust?: WorkerPacket["requirements"]["trust"],
+  ): WorkerPacket {
+    const original = this.#packetFor(item.number);
+    const context = retryContext(item, reservation.runId);
+    const trusts = [
+      original.requirements.trust,
+      ...(original.requirements.trust === "trusted_local" ? (["isolated"] as const) : []),
+    ];
+    let failure: unknown;
+    for (const candidateTrust of trusts) {
+      const graphPacket = parseWorkerPacket({
+        ...original,
+        baseSha: reservation.baseSha,
+        ...(context ? { retryContext: context } : {}),
+        requirements: { ...original.requirements, trust: candidateTrust },
+      });
+      try {
+        const admitted = packetWithManagedRuntimeActivation(
+          graphPacket,
+          reservation.managedRuntimeActivation,
+        );
+        if (
+          reservation.localScopeBatch &&
+          reservation.localScopeBatch.identity.invocationDigest !== workerPacketDigest(admitted)
+        )
+          continue;
+        return parseWorkerPacket({
+          ...admitted,
+          baseSha,
+          ...(trust ? { requirements: { ...admitted.requirements, trust } } : {}),
+        });
+      } catch (error) {
+        failure = error;
+      }
+    }
+    throw new Error("durable reservation differs from its exact activated Worker Packet", {
+      cause: failure,
+    });
   }
 
   #fenceSnapshot(snapshot: Snapshot): void {
@@ -10002,6 +10850,7 @@ export class FactorySupervisor {
             repository: this.#options.repository,
             artifact,
             packet,
+            publicationBaseBranch: this.#baseBranch,
             isolatedValidator: () =>
               this.#externalAdmission(async () => {
                 await this.#nativeRebaseAdmissionCurrent(
@@ -10110,7 +10959,7 @@ export class FactorySupervisor {
     baseSha: string,
     baseBranch: string,
   ): Promise<void> {
-    const originalPacket = this.#packetFor(item.number);
+    const originalPacket = this.#packetBoundToReservation(item, member.reservation);
     const executionBackend = this.#registry.get(member.reservation.backend);
     const isolated =
       originalPacket.requirements.trust !== "trusted_local" ||
@@ -10154,10 +11003,7 @@ export class FactorySupervisor {
         authenticatedLegacyDigest: priorNative?.validation.artifactDigest,
       }),
     );
-    const packet = parseWorkerPacket({
-      ...originalPacket,
-      baseSha,
-    });
+    const packet = this.#packetBoundToReservation(item, member.reservation, baseSha);
     // Keep local scoped capacity separate from the isolated provider checkpoint.
     const prepareLocal = async () => {
       const invocation = createHash("sha256")
@@ -10266,6 +11112,7 @@ export class FactorySupervisor {
             repository: this.#options.repository,
             artifact,
             packet,
+            publicationBaseBranch: this.#baseBranch,
             ...(scoped ? { localScope: scoped.hooks } : {}),
           }),
         );
@@ -10354,6 +11201,7 @@ export class FactorySupervisor {
               packet,
               artifact,
               evidence: validation.evidence,
+              publicationBaseBranch: this.#baseBranch,
               requiresIsolation: isolated || this.#policy.trust === "sandbox_untrusted",
               ...(reviewModel ? { modelSelection: reviewModel } : {}),
             },
@@ -10734,7 +11582,7 @@ export class FactorySupervisor {
       if (budget.modelTokens !== null && budget.modelTokens <= 0)
         throw new Error("model-token budget exhausted before sibling refresh");
       const artifact = await this.#siblingArtifact(member, targetBaseSha);
-      const packet = parseWorkerPacket({ ...this.#packetFor(item.number), baseSha: targetBaseSha });
+      const packet = this.#packetBoundToReservation(item, member.reservation, targetBaseSha);
       const outputTreeSha = await prepareSiblingRefreshTree({
         repository: this.#options.repository,
         artifact,
@@ -11294,7 +12142,7 @@ export class FactorySupervisor {
       this.#options.signal?.throwIfAborted();
     };
     assertDeadline();
-    const originalPacket = this.#packetFor(item.number);
+    const originalPacket = this.#packetBoundToReservation(item, member.reservation);
     const backend = this.#registry.get(member.reservation.backend);
     const { snapshot, requiresIsolation: baseRequiresIsolation } =
       await this.#assertOwnTrunkAdvance(
@@ -11389,7 +12237,7 @@ export class FactorySupervisor {
         "merged sibling has no pre-merge candidate checkpoint; refusing retrospective validation",
       );
     }
-    const packet = parseWorkerPacket({ ...originalPacket, baseSha: targetBaseSha });
+    const packet = this.#packetBoundToReservation(item, member.reservation, targetBaseSha);
     const capacityBackend = `factory/integration-${isolated ? "sandbox" : "validation"}-${identityDigest}`;
     const priorCapacity = unreconciledCapacityReservations(snapshotEvents(snapshot)).filter(
       (event) =>
@@ -11593,6 +12441,7 @@ export class FactorySupervisor {
             repository: this.#options.repository,
             artifact: artifact!,
             packet,
+            publicationBaseBranch: this.#baseBranch,
             ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
             ...(validator
               ? {
@@ -11738,6 +12587,7 @@ export class FactorySupervisor {
             packet,
             artifact: artifact!,
             evidence: record.validation,
+            publicationBaseBranch: this.#baseBranch,
             requiresIsolation: isolated || this.#policy.trust === "sandbox_untrusted",
             ...(reviewModel ? { modelSelection: reviewModel } : {}),
           },
@@ -11853,6 +12703,11 @@ export class FactorySupervisor {
       await this.#restoreNativeAdoptedStack(artifact);
       return;
     }
+    await this.#assertWorkflowPublicationHeadSafety({
+      baseSha: artifact.exactHeadValidation.baseSha,
+      headSha: artifact.headSha,
+      baseBranch: this.#baseBranch,
+    });
     let pull = await this.#store.findPullRequestForBranch(artifact.branch);
     if (!pull) {
       try {
@@ -11860,11 +12715,27 @@ export class FactorySupervisor {
           await this.#lease.assertGeneration("publication");
           if ((await this.#store.readRef(`refs/heads/${artifact.branch}`)) !== artifact.headSha)
             throw new Error("acknowledged source artifact branch changed before PR creation");
-          const created = await this.#store.createPullRequest({
-            title: item.title,
-            body: `Implements Work Item #${item.number} for Objective #${this.#run.objective}.\n\nCloses #${item.number}\n\nRecovered exact validated source artifact; no replacement worker ran.`,
-            head: artifact.branch,
-            base: this.#baseBranch,
+          const created = await dispatchPublicationMutation({
+            store: this.#store,
+            assertCurrent: () => this.#lease.assertGeneration("publication"),
+            assertSafety: async () => {
+              await this.#assertWorkflowPublicationHeadSafety({
+                baseSha: artifact.exactHeadValidation.baseSha,
+                headSha: artifact.headSha,
+                baseBranch: this.#baseBranch,
+              });
+              await this.#assertPublicationHeadCurrent({
+                headBranch: artifact.branch,
+                headSha: artifact.headSha,
+              });
+            },
+            mutate: () =>
+              this.#store.createPullRequest({
+                title: item.title,
+                body: `Implements Work Item #${item.number} for Objective #${this.#run.objective}.\n\nCloses #${item.number}\n\nRecovered exact validated source artifact; no replacement worker ran.`,
+                head: artifact.branch,
+                base: this.#baseBranch,
+              }),
           });
           return { ...created, state: "open", merged: false };
         });
@@ -11955,6 +12826,11 @@ export class FactorySupervisor {
       const base = parent?.publication?.branch ?? parent?.artifactHead?.branch ?? this.#baseBranch;
       if (artifact.delivery.position > 0 && !parent)
         throw new Error("native source parent branch unavailable");
+      await this.#assertWorkflowPublicationHeadSafety({
+        baseSha: artifact.exactHeadValidation.baseSha,
+        headSha: artifact.headSha,
+        baseBranch: base,
+      });
       let pull = await this.#store.findPullRequestForBranch(artifact.branch);
       if (!pull) {
         try {
@@ -11966,11 +12842,27 @@ export class FactorySupervisor {
               const title = runtime.graph.objective.workItems.find(
                 (entry) => entry.id === artifact.delivery.itemId,
               )!.title;
-              const created = await this.#store.createPullRequest({
-                title,
-                body: `Implements Work Item #${artifact.workItem} for Objective #${this.#run.objective}.\n\nCloses #${artifact.workItem}\n\nRecovered exact validated source artifact; no replacement worker ran.`,
-                head: artifact.branch,
-                base,
+              const created = await dispatchPublicationMutation({
+                store: this.#store,
+                assertCurrent: () => this.#lease.assertGeneration("publication"),
+                assertSafety: async () => {
+                  await this.#assertWorkflowPublicationHeadSafety({
+                    baseSha: artifact.exactHeadValidation.baseSha,
+                    headSha: artifact.headSha,
+                    baseBranch: base,
+                  });
+                  await this.#assertPublicationHeadCurrent({
+                    headBranch: artifact.branch,
+                    headSha: artifact.headSha,
+                  });
+                },
+                mutate: () =>
+                  this.#store.createPullRequest({
+                    title,
+                    body: `Implements Work Item #${artifact.workItem} for Objective #${this.#run.objective}.\n\nCloses #${artifact.workItem}\n\nRecovered exact validated source artifact; no replacement worker ran.`,
+                    head: artifact.branch,
+                    base,
+                  }),
               });
               return { ...created, state: "open", merged: false };
             }),
@@ -12828,14 +13720,12 @@ export class FactorySupervisor {
           item.number,
         );
       const original = this.#packetFor(item.number);
-      const packet = parseWorkerPacket({
-        ...original,
-        baseSha: target,
-        requirements: {
-          ...original.requirements,
-          trust: isolated ? "isolated" : original.requirements.trust,
-        },
-      });
+      const packet = this.#packetBoundToReservation(
+        item,
+        reserved,
+        target,
+        isolated ? "isolated" : original.requirements.trust,
+      );
       const deadline = new Date(
         this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
       );
@@ -13215,6 +14105,7 @@ export class FactorySupervisor {
               repository: this.#options.repository,
               artifact: artifact!,
               packet,
+              publicationBaseBranch: this.#baseBranch,
               ...(scope ? { localScope: scope.hooks } : {}),
               ...(isolated
                 ? {
@@ -13432,6 +14323,7 @@ export class FactorySupervisor {
               packet,
               artifact: artifact!,
               evidence: candidate!.validation,
+              publicationBaseBranch: this.#baseBranch,
               requiresIsolation:
                 requiresIsolatedCandidate || this.#policy.trust === "sandbox_untrusted",
               ...(model ? { modelSelection: model } : {}),
@@ -13518,7 +14410,7 @@ export class FactorySupervisor {
       retryDeadlines: [...this.#integrationWaits.values()].map((wait) => wait.until),
       ...(this.#options.signal ? { signal: this.#options.signal } : {}),
     });
-    if (settled?.error) throw settled.error;
+    if (settled?.error) throw new ClaimedExecutionFailure(settled);
   }
 
   #deferIntegration(workItem: number, reason: string): false {
@@ -13556,6 +14448,40 @@ export class FactorySupervisor {
           throw new Error(
             `greenfield bootstrap pull request #${pull.number} passed bounded validation but changes dependency authority; review and merge it by hand before recovering the Objective`,
           );
+      }
+    }
+    const observedSource = await this.#store.readPullRequest(pull.number);
+    if (!observedSource.merged) {
+      await ensureLocalCommit(this.#options.repository, pull.exactHeadValidation.baseSha);
+      await ensureLocalCommit(this.#options.repository, pull.commitSha);
+      const sensitiveOutput = await hostGit(
+        this.#options.repository,
+        [
+          "diff",
+          "--no-renames",
+          "--name-only",
+          "-z",
+          pull.exactHeadValidation.baseSha,
+          pull.commitSha,
+          "--",
+          ...EXECUTION_AFFECTING_GIT_PATHS,
+        ],
+        256 * 1024,
+        true,
+      );
+      const changedPaths = sensitiveOutput.split("\0").filter(Boolean);
+      const sensitive = changedPaths.flatMap((path) => {
+        const reason = executionAffectingReason(path);
+        return reason === null ? [] : [{ path, reason }];
+      });
+      if (sensitiveOutput.length > 0) {
+        throw new Error(
+          `pull request #${pull.number} changes a security-sensitive execution surface and ` +
+            `must be reviewed and merged by a human` +
+            (sensitive.length > 0
+              ? `: ${sensitive.map(({ path, reason }) => `${path} (${reason})`).join("; ")}`
+              : "; the bounded sensitive-path listing was truncated"),
+        );
       }
     }
     if (siblingRefresh) {
@@ -14263,13 +15189,7 @@ export class FactorySupervisor {
         candidate.ref === source.reservationRef,
     );
     if (!sourceReservation) throw new Error("retained artifact source reservation is unavailable");
-    const sourcePacket = parseWorkerPacket({
-      ...this.#packetFor(item.number),
-      baseSha: sourceReservation.baseSha,
-      ...(retryContext(item, source.runId)
-        ? { retryContext: retryContext(item, source.runId) }
-        : {}),
-    });
+    const sourcePacket = this.#packetBoundToReservation(item, sourceReservation);
     if (
       sourceReservation.localScopeBatch?.identity.invocationDigest !==
       workerPacketDigest(sourcePacket)
@@ -14766,6 +15686,48 @@ export class FactorySupervisor {
           return;
         }
       }
+      const stackMetadata =
+        this.#deliverySelection.selected === "native-stacks"
+          ? parseGraphItemMetadata(item.body ?? "")
+          : undefined;
+      const stackPlan = stackMetadata
+        ? this.#deliveryPlan?.items.find((candidate) => candidate.itemId === stackMetadata.id)
+        : undefined;
+      if (stackMetadata && !stackPlan) {
+        throw new Error(`Work Item ${stackMetadata.id} is absent from the delivery plan`);
+      }
+      let recoveryBaseBranch = this.#baseBranch;
+      if (stackPlan?.parentItemId) {
+        const parent = objectiveItems.find(
+          (candidate) => parseGraphItemMetadata(candidate.body ?? "").id === stackPlan.parentItemId,
+        );
+        const parentPublished = [...(parent?.factoryEvents ?? [])]
+          .sort((left, right) => right.sequence - left.sequence)
+          .find(
+            (event) =>
+              event.kind === "attempt" &&
+              event.runId === this.#run.runId &&
+              event.event === "AttemptPublished" &&
+              Boolean(event.headSha),
+          );
+        if (!parent || parentPublished?.kind !== "attempt" || !parentPublished.headSha) {
+          throw new Error(`stack parent ${stackPlan.parentItemId} has no recoverable publication`);
+        }
+        recoveryBaseBranch = publicationBranch(
+          this.#run.objective,
+          parent.number,
+          parentPublished.attempt,
+        );
+        const parentHead = await this.#store.getBranchHead(recoveryBaseBranch);
+        if (
+          parentHead.oid !== validation.baseSha ||
+          parentPublished.headSha !== validation.baseSha
+        ) {
+          throw new Error(
+            `stack parent ${stackPlan.parentItemId} changed after the child was validated`,
+          );
+        }
+      }
       const branch = publicationBranch(this.#run.objective, item.number, reservation.attempt);
       let headSha = await this.#store.readRef(`refs/heads/${branch}`);
       if (!headSha && !backend.capabilities.providerManagedPublication) {
@@ -14820,6 +15782,7 @@ export class FactorySupervisor {
           packet,
           artifact,
           expectedOutputTreeSha: validation.outputTreeSha,
+          allowSensitiveValidatedRecovery: true,
           assertCurrent: () => this.#lease.assertGeneration("publication"),
         });
         const message = `${item.title}\n\nCloses #${item.number}\nFactory-Artifact: ${artifact.digest}\nFactory-Validation: ${validation.evidenceDigest}`;
@@ -14831,12 +15794,36 @@ export class FactorySupervisor {
           parentOids: [artifact.baseSha],
           message,
         });
-        await assertPublicationMutationAuthorized(this.#store, () =>
-          this.#lease.assertGeneration("publication"),
-        );
         try {
-          await this.#store.createRef(`refs/heads/${branch}`, plannedHead);
+          await this.#assertWorkflowPublicationHeadSafety({
+            baseSha: artifact.baseSha,
+            headSha: plannedHead,
+            baseBranch: recoveryBaseBranch,
+          });
+        } catch (cause) {
+          await this.#holdRecoveredPrepublication(item, reservation, cause);
+        }
+        try {
+          await dispatchPublicationMutation({
+            store: this.#store,
+            assertCurrent: () => this.#lease.assertGeneration("publication"),
+            assertSafety: async () => {
+              try {
+                await this.#assertWorkflowPublicationHeadSafety({
+                  baseSha: artifact.baseSha,
+                  headSha: plannedHead,
+                  baseBranch: recoveryBaseBranch,
+                });
+              } catch (cause) {
+                throw new PrepublicationApprovalRequiredError(cause);
+              }
+            },
+            mutate: () => this.#store.createRef(`refs/heads/${branch}`, plannedHead),
+          });
         } catch (error) {
+          if (error instanceof PrepublicationApprovalRequiredError) {
+            await this.#holdRecoveredPrepublication(item, reservation, error.cause);
+          }
           if (!(await this.#store.readRef(`refs/heads/${branch}`))) throw error;
         }
         headSha = await this.#store.readRef(`refs/heads/${branch}`);
@@ -14862,57 +15849,16 @@ export class FactorySupervisor {
             `recovery branch for Work Item #${item.number} does not descend from its validated base`,
           );
         }
-        const stackMetadata =
-          this.#deliverySelection.selected === "native-stacks"
-            ? parseGraphItemMetadata(item.body ?? "")
-            : undefined;
-        const stackPlan = stackMetadata
-          ? this.#deliveryPlan?.items.find((candidate) => candidate.itemId === stackMetadata.id)
-          : undefined;
-        if (stackMetadata && !stackPlan) {
-          throw new Error(`Work Item ${stackMetadata.id} is absent from the delivery plan`);
-        }
-        let recoveryBaseBranch = this.#baseBranch;
-        if (stackPlan?.parentItemId) {
-          const parent = objectiveItems.find(
-            (candidate) =>
-              parseGraphItemMetadata(candidate.body ?? "").id === stackPlan.parentItemId,
-          );
-          const parentPublished = [...(parent?.factoryEvents ?? [])]
-            .sort((left, right) => right.sequence - left.sequence)
-            .find(
-              (event) =>
-                event.kind === "attempt" &&
-                event.runId === this.#run.runId &&
-                event.event === "AttemptPublished" &&
-                Boolean(event.headSha),
-            );
-          if (
-            !parent ||
-            !parentPublished ||
-            parentPublished.kind !== "attempt" ||
-            !parentPublished.headSha
-          ) {
-            throw new Error(
-              `stack parent ${stackPlan.parentItemId} has no recoverable publication`,
-            );
-          }
-          recoveryBaseBranch = publicationBranch(
-            this.#run.objective,
-            parent.number,
-            parentPublished.attempt,
-          );
-          const parentHead = await this.#store.getBranchHead(recoveryBaseBranch);
-          if (
-            parentHead.oid !== validation.baseSha ||
-            parentPublished.headSha !== validation.baseSha
-          ) {
-            throw new Error(
-              `stack parent ${stackPlan.parentItemId} changed after the child was validated`,
-            );
-          }
-        }
         await this.#lease.assert();
+        try {
+          await this.#assertWorkflowPublicationHeadSafety({
+            baseSha: validation.baseSha,
+            headSha,
+            baseBranch: recoveryBaseBranch,
+          });
+        } catch (cause) {
+          await this.#holdRecoveredPrepublication(item, reservation, cause);
+        }
         let existing = await this.#store.findPullRequestForBranch(branch);
         if (existing && existing.state !== "open" && !existing.merged) {
           throw new Error(`recovery pull request #${existing.number} was closed without merge`);
@@ -14920,19 +15866,39 @@ export class FactorySupervisor {
         if (!existing) {
           try {
             existing = {
-              ...(await this.#store.createPullRequest({
-                title: item.title,
-                body:
-                  `Implements Work Item #${item.number} for Objective #${this.#run.objective}.\n\n` +
-                  `Closes #${item.number}\n\n` +
-                  `Recovered validation: \`${validation.evidenceDigest}\``,
-                head: branch,
-                base: recoveryBaseBranch,
+              ...(await dispatchPublicationMutation({
+                store: this.#store,
+                assertCurrent: () => this.#lease.assertGeneration("publication"),
+                assertSafety: async () => {
+                  try {
+                    await this.#assertWorkflowPublicationHeadSafety({
+                      baseSha: validation.baseSha,
+                      headSha,
+                      baseBranch: recoveryBaseBranch,
+                    });
+                  } catch (cause) {
+                    throw new PrepublicationApprovalRequiredError(cause);
+                  }
+                  await this.#assertPublicationHeadCurrent({ headBranch: branch, headSha });
+                },
+                mutate: () =>
+                  this.#store.createPullRequest({
+                    title: item.title,
+                    body:
+                      `Implements Work Item #${item.number} for Objective #${this.#run.objective}.\n\n` +
+                      `Closes #${item.number}\n\n` +
+                      `Recovered validation: \`${validation.evidenceDigest}\``,
+                    head: branch,
+                    base: recoveryBaseBranch,
+                  }),
               })),
               state: "open",
               merged: false,
             };
           } catch (error) {
+            if (error instanceof PrepublicationApprovalRequiredError) {
+              await this.#holdRecoveredPrepublication(item, reservation, error.cause);
+            }
             existing = await this.#store.findPullRequestForBranch(branch);
             if (!existing || existing.state !== "open") throw error;
           }

@@ -221,7 +221,7 @@ async function fixture(
       at: now.toISOString(),
       ...fields,
     });
-  const refs = new Map<string, string>();
+  const refs = new Map<string, string>([["refs/heads/main", baseSha]]);
   const commits = new Map<string, GitCommitObject>();
   const blobs = new Map<string, Buffer>();
   const trees = new Map<string, Map<string, string>>();
@@ -820,6 +820,7 @@ async function fixture(
       git("merge", "--squash", headSha);
       git("commit", "-qm", `merge PR ${number}`);
       const merged = git("rev-parse", "HEAD");
+      refs.set("refs/heads/main", merged);
       mergeShas.set(number, merged);
       findPull(number).state = "MERGED";
       if (options.retainedPrefix) {
@@ -857,6 +858,7 @@ async function fixture(
         await writeFile(join(repository, "external.txt"), "outside this run\n");
         git("add", ".");
         git("commit", "-qm", "external advance");
+        refs.set("refs/heads/main", git("rev-parse", "HEAD"));
       }
       return merged;
     });
@@ -1144,9 +1146,13 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
   vi.spyOn(localScopes, "runScopedLocalProcess").mockImplementation(async (_identity, options) =>
     runContainedProcess(options),
   );
-  for (const item of f.snapshot.workItems) {
+  for (const [index, item] of f.snapshot.workItems.entries()) {
     const reserved = item.factoryEvents!.find((entry) => entry.event === "AttemptReserved")!;
     if (reserved.kind !== "attempt") throw new Error("fixture reservation");
+    const reservedPacket = parseWorkerPacket({
+      ...workerPacketFromCompiled(f.graph.workItems[index]!),
+      baseSha: reserved.baseSha,
+    });
     const batch = {
       identity: {
         protocol: "clockgrove.factory/local-scope-v1",
@@ -1159,7 +1165,7 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
         policyDigest: f.pd,
         phase: "execution",
         commandIndex: 0,
-        invocationDigest: "a".repeat(64),
+        invocationDigest: workerPacketDigest(reservedPacket),
         hostIdentity,
         producerUnit: "factory-fixture.service",
         producerInvocationId: "c".repeat(32),

@@ -1,5 +1,6 @@
 import { access, lstat, mkdir, readFile, readdir } from "node:fs/promises";
 import { join, posix } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { executionAffectingReason } from "../approval.js";
 import {
@@ -14,8 +15,9 @@ import {
 } from "../execution/artifact-content.js";
 import { inspectPatchManifest } from "../runtime/artifact-patch.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
-import type { WorkerPacket } from "../protocol/worker-packet.js";
+import type { RepositoryCapabilityOperation, WorkerPacket } from "../protocol/worker-packet.js";
 import type { IsolatedValidationResult } from "../execution/backend.js";
+import { isReviewOnlyWorkflowSurface } from "../publication/workflow-safety.js";
 import {
   cleanupLocalWorktree,
   createLocalWorktree,
@@ -33,6 +35,24 @@ import {
   type LocalScopeIdentity,
 } from "../runtime/local-scope.js";
 import { createValidationEvidence, type ValidationEvidence } from "./evidence.js";
+import { runtimeBundleByDigestSync } from "../runtime/toolchain-store.js";
+
+function managedPnpmVersion(packet?: WorkerPacket): string {
+  const digests = new Set(
+    (packet?.managedRuntimes ?? []).flatMap((runtime) =>
+      runtime.tool === "pnpm" && runtime.bundleDigest ? [runtime.bundleDigest] : [],
+    ),
+  );
+  if (digests.size !== 1)
+    throw new Error(
+      `pnpm validation lacks one exact activated runtime; observed ${JSON.stringify(packet?.managedRuntimes ?? [])}`,
+    );
+  const receipt = runtimeBundleByDigestSync("pnpm", [...digests][0]!);
+  const component = receipt.components.find(({ id }) => id === "pnpm");
+  if (!component) throw new Error("pnpm runtime bundle lacks its executable component");
+  return component.version;
+}
+import { localManagedToolchainPlan } from "../toolchains/authority.js";
 import {
   assertSafeValidationCommand,
   bootstrapPackageValidationCommand,
@@ -62,6 +82,8 @@ export interface CleanValidationInput {
   repository: string;
   artifact: NormalizedArtifact;
   packet: WorkerPacket;
+  /** Protected branch whose update is the human-authorized integration event. */
+  publicationBaseBranch?: string;
   isolatedValidator?: () => Promise<IsolatedValidationResult>;
   /** The Supervisor journals each exact scope before launch and fences each
    * command. This never authorizes a local substitute for isolated validation. */
@@ -76,6 +98,10 @@ export interface CleanValidationInput {
 export interface CleanValidationResult {
   evidence: ValidationEvidence;
   worktree: LocalWorktree;
+  publicationReview: {
+    sensitivePaths: string[];
+    changedPackageScripts: string[];
+  };
 }
 
 async function hasNpmLockfile(worktree: LocalWorktree): Promise<boolean> {
@@ -208,7 +234,7 @@ function assertSafeBootstrapLeafScript(
   script: string,
   manifest: PackageManifest,
   manifestPath: string,
-  allowedPaths: string[],
+  allowedPaths?: string[],
 ): void {
   const targets = nodeTestTargets(script);
   const allowed: readonly [string | null, string] | null =
@@ -230,13 +256,14 @@ function assertSafeBootstrapLeafScript(
   const [dependency, executable] = allowed;
   if (dependency && !pinnedDependency(manifest, dependency))
     throw new Error(`bootstrap package script runner is not pinned: ${manifestPath}`);
-  for (const target of targets ?? []) {
-    const repositoryPath = posix.normalize(posix.join(posix.dirname(manifestPath), target));
-    if (!pathIsAllowed(repositoryPath, allowedPaths))
-      throw new Error(
-        `bootstrap package script target is outside Work Item scope: ${repositoryPath}`,
-      );
-  }
+  if (allowedPaths)
+    for (const target of targets ?? []) {
+      const repositoryPath = posix.normalize(posix.join(posix.dirname(manifestPath), target));
+      if (!pathIsAllowed(repositoryPath, allowedPaths))
+        throw new Error(
+          `bootstrap package script target is outside Work Item scope: ${repositoryPath}`,
+        );
+    }
   assertSafeValidationCommand(script, [executable]);
 }
 
@@ -335,6 +362,7 @@ async function assertNoBootstrapPackageManagerConfig(
 async function assertPnpmBootstrapLock(
   root: string,
   manifests: Array<{ path: string; manifest: PackageManifest }>,
+  requireExactManifestBindings = true,
 ): Promise<void> {
   const raw = await readBoundedRegularFile(root, "pnpm-lock.yaml", 4 * 1024 * 1024);
   if (raw.includes("\0") || raw.includes("\t") || raw.includes("${"))
@@ -468,9 +496,10 @@ async function assertPnpmBootstrapLock(
   }
   if (externalDependencies.size > 0 && !topLevel.has("packages"))
     throw new Error("bootstrap pnpm lockfile lacks integrity-bound packages");
-  for (const dependency of externalDependencies)
-    if (![...packageKeys].some((key) => key === dependency || key.startsWith(`${dependency}(`)))
-      throw new Error(`bootstrap pnpm lockfile lacks exact dependency: ${dependency}`);
+  if (requireExactManifestBindings)
+    for (const dependency of externalDependencies)
+      if (![...packageKeys].some((key) => key === dependency || key.startsWith(`${dependency}(`)))
+        throw new Error(`bootstrap pnpm lockfile lacks exact dependency: ${dependency}`);
 }
 
 async function assertTurboTaskConfiguration(root: string, script: string): Promise<void> {
@@ -500,9 +529,168 @@ async function assertTurboTaskConfiguration(root: string, script: string): Promi
 export interface BootstrapPackageValidation {
   manager: "pnpm";
   expectedVersion: string;
-  versionCommand: typeof PNPM_BOOTSTRAP_VERSION_COMMAND;
-  setupCommand: typeof PNPM_BOOTSTRAP_VALIDATION_SETUP_COMMAND;
+  versionCommand: string;
+  setupCommand: string;
   permittedSensitivePaths: Set<string>;
+  changedOperations: Set<string>;
+}
+
+function pnpmValidationCommands(commands: string[]): Array<{
+  command: string;
+  parsed: NonNullable<ReturnType<typeof bootstrapPackageValidationCommand>>;
+}> {
+  const pnpmCommands = commands.filter((command) => /^pnpm(?:\s|$)/.test(command.trim()));
+  const parsed = pnpmCommands.flatMap((command) => {
+    const value = bootstrapPackageValidationCommand(command);
+    return value ? [{ command, parsed: value }] : [];
+  });
+  if (parsed.length !== pnpmCommands.length)
+    throw new Error("pnpm validation may use only a finite declared package script");
+  return parsed;
+}
+
+async function existingWorkspaceManifests(
+  root: string,
+): Promise<Array<{ path: string; manifest: PackageManifest }>> {
+  const manifests: Array<{ path: string; manifest: PackageManifest }> = [];
+  const workspace = await access(join(root, "pnpm-workspace.yaml")).then(
+    () => true,
+    () => false,
+  );
+  if (!workspace) return manifests;
+  const patterns = parsePnpmWorkspacePatterns(
+    await readBoundedRegularFile(root, "pnpm-workspace.yaml"),
+  );
+  for (const path of await workspaceManifestPaths(root, patterns))
+    manifests.push({ path, manifest: await readPackageManifest(root, path) });
+  return manifests;
+}
+
+/**
+ * Re-ground an established pnpm execution base before any worker or validation
+ * command runs. A compiler-declared command is authority only after the exact
+ * protected base supplies that script and pins Factory's audited pnpm runtime.
+ */
+export async function assertEstablishedPnpmValidation(
+  worktree: Pick<LocalWorktree, "path">,
+  packet: WorkerPacket,
+  commands: string[],
+  baseManifest?: PackageManifest,
+  authorityScope?: string[],
+): Promise<BootstrapPackageValidation | null> {
+  const packageCommands = pnpmValidationCommands(commands);
+  if (packageCommands.length === 0) return null;
+  if (!packet.requirements.tools.includes("pnpm"))
+    throw new Error("pnpm validation package manager is not a declared tool");
+  if (!packet.requirements.networkDestinations.includes(PNPM_BOOTSTRAP_REGISTRY))
+    throw new Error("pnpm validation must declare registry.npmjs.org network access");
+
+  const root = await readPackageManifest(worktree.path, "package.json");
+  const expectedPnpmVersion = managedPnpmVersion(packet);
+  if (root.packageManager !== `pnpm@${expectedPnpmVersion}`)
+    throw new Error(`pnpm validation base must pin packageManager to pnpm@${expectedPnpmVersion}`);
+  const scripts = stringRecord(root.scripts, "scripts in package.json");
+  const selected = new Set(packageCommands.map(({ parsed }) => parsed.script));
+  const required = new Set(
+    (packet.repositoryCapabilities?.requires ?? []).flatMap((requirement) =>
+      requirement.adapter === "node-pnpm" && requirement.operation.kind === "package-script"
+        ? [requirement.operation.key]
+        : [],
+    ),
+  );
+  const provided = new Set(
+    (packet.repositoryCapabilities?.provides ?? []).flatMap((provision) =>
+      provision.adapter === "node-pnpm"
+        ? provision.operations.flatMap((operation: RepositoryCapabilityOperation) =>
+            operation.kind === "package-script" ? [operation.key] : [],
+          )
+        : [],
+    ),
+  );
+  const inspected = new Set([...selected, ...required, ...provided]);
+  assertPackageManifestSafety(root, "package.json");
+  for (const script of inspected) {
+    if (!scripts[script])
+      throw new Error(`pnpm validation script is absent on execution base: ${script}`);
+    if (scripts[`pre${script}`] || scripts[`post${script}`])
+      throw new Error(`pnpm validation script has lifecycle hooks: ${script}`);
+  }
+
+  const permittedSensitivePaths = new Set<string>();
+  const changedOperations = new Set<string>();
+  if (baseManifest) {
+    const before = { ...baseManifest, scripts: undefined };
+    const after = { ...root, scripts: undefined };
+    if (!isDeepStrictEqual(before, after))
+      throw new Error("established pnpm artifact may change only root package scripts");
+    const previousScripts = stringRecord(baseManifest.scripts, "scripts in base package.json");
+    const changedScripts = new Set(
+      [...new Set([...Object.keys(previousScripts), ...Object.keys(scripts)])].filter(
+        (name) => previousScripts[name] !== scripts[name],
+      ),
+    );
+    const declaredChanges = new Set([...selected, ...provided]);
+    if ([...changedScripts].some((name) => !declaredChanges.has(name)))
+      throw new Error("established pnpm artifact changes an undeclared package script");
+    for (const script of changedScripts) {
+      const body = scripts[script];
+      if (!body) throw new Error(`established pnpm artifact removes declared script ${script}`);
+      changedOperations.add(script);
+    }
+    permittedSensitivePaths.add("package.json");
+  }
+
+  const workspaceManifests = await existingWorkspaceManifests(worktree.path);
+  for (const { path, manifest } of workspaceManifests) assertPackageManifestSafety(manifest, path);
+  await assertNoBootstrapPackageManagerConfig(worktree.path, [
+    "package.json",
+    ...workspaceManifests.map(({ path }) => path),
+  ]);
+  const turboScripts = [...inspected].filter((script) => scripts[script] === `turbo run ${script}`);
+  for (const script of inspected) {
+    const body = scripts[script]!;
+    if (turboScripts.includes(script)) {
+      if (!pinnedDependency(root, "turbo"))
+        throw new Error("pnpm turbo runner is not pinned in the root package manifest");
+      assertSafeValidationCommand(body, ["turbo"]);
+      await assertTurboTaskConfiguration(worktree.path, script);
+      for (const { path, manifest } of workspaceManifests) {
+        const childScripts = stringRecord(manifest.scripts, `scripts in ${path}`);
+        const childBody = childScripts[script];
+        if (!childBody) continue;
+        if (childScripts[`pre${script}`] || childScripts[`post${script}`])
+          throw new Error(`pnpm package script has lifecycle hooks: ${path}`);
+        assertSafeBootstrapLeafScript(childBody, { ...root, ...manifest }, path, authorityScope);
+      }
+    } else {
+      assertSafeBootstrapLeafScript(body, root, "package.json", authorityScope);
+    }
+  }
+  await assertPnpmBootstrapLock(worktree.path, [
+    { path: "package.json", manifest: root },
+    ...workspaceManifests,
+  ]);
+  return {
+    manager: "pnpm",
+    expectedVersion: expectedPnpmVersion,
+    versionCommand: PNPM_BOOTSTRAP_VERSION_COMMAND,
+    setupCommand: PNPM_BOOTSTRAP_VALIDATION_SETUP_COMMAND,
+    permittedSensitivePaths,
+    changedOperations,
+  };
+}
+
+export function isPermittedSensitiveArtifactSurface(
+  paths: string[],
+  validation: Pick<BootstrapPackageValidation, "permittedSensitivePaths"> | null,
+  reviewOnlyWorkflows: ReadonlySet<string> = new Set(),
+): boolean {
+  return paths.every(
+    (path) =>
+      validation?.permittedSensitivePaths.has(path) ||
+      reviewOnlyWorkflows.has(path) ||
+      isReviewOnlyWorkflowSurface(path),
+  );
 }
 
 export async function assertBootstrapPackageValidation(
@@ -542,7 +730,7 @@ export async function assertBootstrapPackageValidation(
     throw new Error("bootstrap validation must declare registry.npmjs.org network access");
   if (
     typeof root.packageManager !== "string" ||
-    !/^pnpm@\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(root.packageManager) ||
+    root.packageManager !== `pnpm@${managedPnpmVersion(packet)}` ||
     !artifact.changedPaths.includes("pnpm-lock.yaml") ||
     !packet.allowedPaths.includes("pnpm-lock.yaml")
   )
@@ -552,24 +740,44 @@ export async function assertBootstrapPackageValidation(
 
   assertPackageManifestSafety(root, "package.json");
   const rootScripts = stringRecord(root.scripts, "scripts in package.json");
-  const rootScript = rootScripts[parsed.script];
-  if (!rootScript) throw new Error(`bootstrap validation script is absent: ${parsed.script}`);
-  if (rootScripts[`pre${parsed.script}`] || rootScripts[`post${parsed.script}`])
-    throw new Error(`bootstrap validation script has lifecycle hooks: ${parsed.script}`);
-
-  const turbo = new RegExp(`^turbo run ${parsed.script.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
+  const promisedScripts = new Set([
+    parsed.script,
+    ...(packet.repositoryCapabilities?.provides ?? [])
+      .filter((provision) => provision.adapter === "node-pnpm")
+      .flatMap((provision) =>
+        provision.operations.flatMap((operation: RepositoryCapabilityOperation) =>
+          operation.kind === "package-script" ? [operation.key] : [],
+        ),
+      ),
+  ]);
+  for (const script of promisedScripts) {
+    if (!rootScripts[script]) throw new Error(`bootstrap validation script is absent: ${script}`);
+    if (rootScripts[`pre${script}`] || rootScripts[`post${script}`])
+      throw new Error(`bootstrap validation script has lifecycle hooks: ${script}`);
+  }
+  const turboScripts = [...promisedScripts].filter(
+    (script) => rootScripts[script] === `turbo run ${script}`,
+  );
+  for (const script of promisedScripts)
+    if (!turboScripts.includes(script))
+      assertSafeBootstrapLeafScript(
+        rootScripts[script]!,
+        root,
+        "package.json",
+        packet.allowedPaths,
+      );
   const permittedSensitivePaths = new Set(["package.json", "pnpm-lock.yaml"]);
-  if (turbo.test(rootScript)) {
+  if (turboScripts.length > 0) {
     if (!pinnedDependency(root, "turbo"))
       throw new Error("bootstrap turbo runner is not pinned in the root package manifest");
-    assertSafeValidationCommand(rootScript, ["turbo"]);
+    for (const script of turboScripts) assertSafeValidationCommand(rootScripts[script]!, ["turbo"]);
     for (const path of ["pnpm-workspace.yaml", "turbo.json"])
       if (!artifact.changedPaths.includes(path) || !packet.allowedPaths.includes(path))
         throw new Error(`bootstrap validation is not bound to a scoped ${path} artifact`);
     const patterns = parsePnpmWorkspacePatterns(
       await readBoundedRegularFile(worktree.path, "pnpm-workspace.yaml"),
     );
-    await assertTurboTaskConfiguration(worktree.path, parsed.script);
+    for (const script of turboScripts) await assertTurboTaskConfiguration(worktree.path, script);
     const workspaceManifests = await workspaceManifestPaths(worktree.path, patterns);
     const materializedManifests: Array<{ path: string; manifest: PackageManifest }> = [
       { path: "package.json", manifest: root },
@@ -586,11 +794,13 @@ export async function assertBootstrapPackageValidation(
       materializedManifests.push({ path, manifest });
       permittedSensitivePaths.add(path);
       const scripts = stringRecord(manifest.scripts, `scripts in ${path}`);
-      const body = scripts[parsed.script];
-      if (!body) continue;
-      if (scripts[`pre${parsed.script}`] || scripts[`post${parsed.script}`])
-        throw new Error(`bootstrap package script has lifecycle hooks: ${path}`);
-      assertSafeBootstrapLeafScript(body, { ...root, ...manifest }, path, packet.allowedPaths);
+      for (const script of turboScripts) {
+        const body = scripts[script];
+        if (!body) continue;
+        if (scripts[`pre${script}`] || scripts[`post${script}`])
+          throw new Error(`bootstrap package script has lifecycle hooks: ${path}`);
+        assertSafeBootstrapLeafScript(body, { ...root, ...manifest }, path, packet.allowedPaths);
+      }
     }
     await assertNoBootstrapPackageManagerConfig(worktree.path, [...expectedManifests]);
     await assertPnpmBootstrapLock(worktree.path, materializedManifests);
@@ -599,16 +809,16 @@ export async function assertBootstrapPackageValidation(
   } else {
     if (changedManifestPaths.some((path) => path !== "package.json"))
       throw new Error("bootstrap leaf validation may not authorize unrelated package manifests");
-    assertSafeBootstrapLeafScript(rootScript, root, "package.json", packet.allowedPaths);
     await assertNoBootstrapPackageManagerConfig(worktree.path, ["package.json"]);
     await assertPnpmBootstrapLock(worktree.path, [{ path: "package.json", manifest: root }]);
   }
   return {
     manager: "pnpm",
-    expectedVersion: root.packageManager.slice("pnpm@".length),
+    expectedVersion: managedPnpmVersion(packet),
     versionCommand: PNPM_BOOTSTRAP_VERSION_COMMAND,
     setupCommand: PNPM_BOOTSTRAP_VALIDATION_SETUP_COMMAND,
     permittedSensitivePaths,
+    changedOperations: new Set(),
   };
 }
 
@@ -620,60 +830,44 @@ export function isBootstrapDependencySurface(
 }
 
 function isPotentialBootstrapDependencySurface(paths: string[], managers: Set<"pnpm">): boolean {
-  return (
-    managers.has("pnpm") &&
-    paths.every(
-      (path) =>
-        path === "package.json" ||
-        path === "pnpm-lock.yaml" ||
-        path === "pnpm-workspace.yaml" ||
-        path === "turbo.json" ||
-        path.endsWith("/package.json"),
-    )
+  return paths.every(
+    (path) =>
+      isReviewOnlyWorkflowSurface(path) ||
+      (managers.has("pnpm") &&
+        (path === "package.json" ||
+          path === "pnpm-lock.yaml" ||
+          path === "pnpm-workspace.yaml" ||
+          path === "turbo.json" ||
+          path.endsWith("/package.json"))),
   );
 }
 
-async function pnpmBootstrapEnvironment(
+async function managedValidationPlan(
   source: NodeJS.ProcessEnv,
   worktreeRoot: string,
-): Promise<NodeJS.ProcessEnv> {
+  commands: readonly string[],
+  packet: WorkerPacket,
+) {
   const environment = sanitizedWorkerEnvironment(source);
   for (const key of Object.keys(environment))
-    if (/^(?:npm_config_|pnpm_)/i.test(key)) delete environment[key];
-  const configRoot = join(worktreeRoot, "pnpm-config");
+    if (/^(?:npm_config_|pnpm_|bun_|uv_|pip_|python|virtual_env)/i.test(key))
+      delete environment[key];
+  const configRoot = join(worktreeRoot, "managed-toolchain-config");
   await mkdir(configRoot, { recursive: true });
-  return {
-    ...environment,
-    BASH_ENV: "/dev/null",
-    CI: "true",
-    COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
-    COREPACK_ENABLE_NETWORK: "0",
-    COREPACK_ENABLE_PROJECT_SPEC: "0",
-    ENV: "/dev/null",
-    NODE_OPTIONS: "",
-    NODE_PATH: "",
-    XDG_CONFIG_HOME: configRoot,
-    NPM_CONFIG_USERCONFIG: "/dev/null",
-    npm_config_dangerously_allow_all_builds: "false",
-    npm_config_enable_global_virtual_store: "false",
-    npm_config_enable_pre_post_scripts: "false",
-    npm_config_frozen_lockfile: "true",
-    npm_config_ignore_scripts: "true",
-    npm_config_lockfile: "true",
-    npm_config_manage_package_manager_versions: "false",
-    npm_config_modules_dir: "node_modules",
-    npm_config_node_linker: "isolated",
-    npm_config_package_import_method: "copy",
-    npm_config_registry: `https://${PNPM_BOOTSTRAP_REGISTRY}/`,
-    npm_config_script_shell: "/bin/sh",
-    npm_config_side_effects_cache: "false",
-    npm_config_strict_store_pkg_content_check: "true",
-    npm_config_symlink: "true",
-    npm_config_use_running_store_server: "false",
-    npm_config_verify_deps_before_run: "error",
-    npm_config_verify_store_integrity: "true",
-    npm_config_virtual_store_dir: "node_modules/.pnpm",
-  };
+  return localManagedToolchainPlan(
+    commands,
+    {
+      ...environment,
+      BASH_ENV: "/dev/null",
+      CI: "true",
+      ENV: "/dev/null",
+      NODE_OPTIONS: "",
+      NODE_PATH: "",
+      XDG_CONFIG_HOME: configRoot,
+    },
+    worktreeRoot,
+    packet.managedRuntimes ?? [],
+  );
 }
 
 export function validationFailureReason(
@@ -754,7 +948,7 @@ export async function validateArtifactClean(
   assertNoSecretMaterial({ patch: artifact.patch, logs: artifact.logs }, "artifact");
 
   const plan = validationPlanFromPacket(input.packet);
-  const potentialBootstrapManagers = new Set(
+  const potentialBootstrapManagers = new Set<"pnpm">(
     plan.commands.flatMap((command) => {
       const parsed = bootstrapPackageValidationCommand(command);
       return parsed ? [parsed.manager] : [];
@@ -762,9 +956,7 @@ export async function validateArtifactClean(
   );
   if (
     sensitive.length > 0 &&
-    (!artifact.changedPaths.includes("package.json") ||
-      !input.packet.allowedPaths.includes("package.json") ||
-      !isPotentialBootstrapDependencySurface(sensitive, potentialBootstrapManagers))
+    !isPotentialBootstrapDependencySurface(sensitive, potentialBootstrapManagers)
   )
     throw new Error(`artifact touches a sensitive surface: ${sensitive.join(", ")}`);
   if (plan.isolation === "isolated" && !input.isolatedValidator) {
@@ -806,6 +998,9 @@ export async function validateArtifactClean(
     () => true,
     () => false,
   );
+  const basePackageManifest = basePackageJsonPresent
+    ? await readPackageManifest(worktree.path, "package.json")
+    : null;
   const commands: Array<{ command: string; exitCode: number; durationMs: number }> = [];
   let passed = false;
   let failureReason: string | undefined;
@@ -853,20 +1048,27 @@ export async function validateArtifactClean(
         throw new Error("applied artifact tree differs from trusted collection manifest");
       await verifyMaterializedFiles(worktree.path, trustedManifest);
     }
-    const bootstrapValidation = basePackageJsonPresent
-      ? null
+    const pnpmValidation = basePackageJsonPresent
+      ? await assertEstablishedPnpmValidation(
+          worktree,
+          input.packet,
+          plan.commands,
+          artifact.changedPaths.includes("package.json") ? basePackageManifest! : undefined,
+          artifact.changedPaths.includes("package.json") ? input.packet.allowedPaths : undefined,
+        )
       : await assertBootstrapPackageValidation(worktree, artifact, input.packet, plan.commands);
-    const bootstrapDependencySurface = isBootstrapDependencySurface(sensitive, bootstrapValidation);
-    if (sensitive.length > 0 && !bootstrapDependencySurface)
+    const packageValidation = pnpmValidation;
+    if (sensitive.length > 0 && !isPermittedSensitiveArtifactSurface(sensitive, packageValidation))
       throw new Error(`artifact touches a sensitive surface: ${sensitive.join(", ")}`);
-    const setupCommands = bootstrapValidation
-      ? [bootstrapValidation.versionCommand, bootstrapValidation.setupCommand]
+    const managedExecution = packageValidation
+      ? await managedValidationPlan(process.env, worktree.root, plan.commands, input.packet)
+      : null;
+    const setupCommands = managedExecution
+      ? managedExecution.setup.map((step) => step.command)
       : (await hasNpmLockfile(worktree))
         ? [NPM_VALIDATION_SETUP_COMMAND]
         : [];
-    const bootstrapEnvironment = bootstrapValidation
-      ? await pnpmBootstrapEnvironment(process.env, worktree.root)
-      : null;
+    const bootstrapEnvironment = managedExecution?.environment ?? null;
     let evidenceStartedAt = startedAt.toISOString();
     let evidenceCompletedAt: string;
     let environmentIdentity: string | undefined;
@@ -877,7 +1079,12 @@ export async function validateArtifactClean(
           `isolated validator tree ${isolated.outputTreeSha} does not match host tree ${outputTreeSha}`,
         );
       }
-      const expectedCommands = [...setupCommands, ...plan.commands];
+      const expectedCommands = [
+        ...setupCommands,
+        ...(managedExecution
+          ? managedExecution.validation.map((step) => step.command)
+          : plan.commands),
+      ];
       assertIsolatedValidationMatchesPlan(isolated, expectedCommands);
       commands.push(...isolated.commands);
       passed = isolated.passed;
@@ -886,30 +1093,14 @@ export async function validateArtifactClean(
       evidenceCompletedAt = isolated.completedAt;
       environmentIdentity = isolated.environmentIdentity;
     } else {
-      const localCommands = setupCommands.map((command) =>
-        command === NPM_VALIDATION_SETUP_COMMAND
-          ? {
-              command,
-              executable: "npm",
-              args: ["ci", "--no-audit", "--no-fund"],
-            }
-          : command === PNPM_BOOTSTRAP_VERSION_COMMAND
-            ? {
-                command,
-                executable: "pnpm",
-                args: ["--version"],
-              }
-            : {
-                command,
-                executable: "pnpm",
-                args: [
-                  "install",
-                  "--frozen-lockfile",
-                  "--ignore-scripts",
-                  `--registry=https://${PNPM_BOOTSTRAP_REGISTRY}/`,
-                ],
-              },
-      );
+      const localCommands =
+        managedExecution?.setup ??
+        setupCommands.map((command) => ({
+          command,
+          executable: "npm",
+          args: ["ci", "--no-audit", "--no-fund"],
+          expectedStdout: undefined as string | undefined,
+        }));
       for (const setup of localCommands) {
         const result = await runLocalCommand({
           command: setup.executable,
@@ -919,9 +1110,9 @@ export async function validateArtifactClean(
           timeoutMs: plan.timeoutMsPerCommand,
         });
         const versionMismatch =
-          setup.command === PNPM_BOOTSTRAP_VERSION_COMMAND &&
+          setup.expectedStdout !== undefined &&
           result.exitCode === 0 &&
-          result.stdout.trim() !== bootstrapValidation?.expectedVersion;
+          result.stdout.trim() !== setup.expectedStdout;
         const exitCode = versionMismatch ? 1 : (result.exitCode ?? (result.timedOut ? 124 : 1));
         commands.push({
           command: setup.command,
@@ -930,26 +1121,38 @@ export async function validateArtifactClean(
         });
         if (exitCode !== 0) {
           failureReason = versionMismatch
-            ? `validation setup used pnpm ${JSON.stringify(result.stdout.trim().slice(0, 100))}, expected ${bootstrapValidation?.expectedVersion}`
+            ? `validation setup used ${JSON.stringify(result.stdout.trim().slice(0, 100))}, expected ${setup.expectedStdout}`
             : validationFailureReason("validation setup", setup.command, result);
           break;
         }
       }
-      for (const command of failureReason ? [] : plan.commands) {
+      const validationCommands: Array<{
+        command: string;
+        executable: string;
+        args: string[];
+        cwd?: string;
+      }> = managedExecution
+        ? managedExecution.validation
+        : plan.commands.map((command) => ({
+            command,
+            executable: "/bin/sh",
+            args: ["-c", command],
+          }));
+      for (const command of failureReason ? [] : validationCommands) {
         const result = await runLocalCommand({
-          command: "/bin/sh",
-          args: ["-c", command],
-          cwd: worktree.path,
+          command: command.executable,
+          args: command.args,
+          cwd: command.cwd ? join(worktree.path, command.cwd) : worktree.path,
           env: bootstrapEnvironment ?? sanitizedWorkerEnvironment(process.env),
           timeoutMs: plan.timeoutMsPerCommand,
         });
         commands.push({
-          command,
+          command: command.command,
           exitCode: result.exitCode ?? (result.timedOut ? 124 : 1),
           durationMs: result.durationMs,
         });
         if (result.exitCode !== 0) {
-          failureReason = validationFailureReason("validation", command, result);
+          failureReason = validationFailureReason("validation", command.command, result);
           break;
         }
       }
@@ -968,7 +1171,14 @@ export async function validateArtifactClean(
       completedAt: evidenceCompletedAt,
       ...(environmentIdentity ? { environmentIdentity } : {}),
     });
-    return { evidence, worktree };
+    return {
+      evidence,
+      worktree,
+      publicationReview: {
+        sensitivePaths: sensitive,
+        changedPackageScripts: [...(packageValidation?.changedOperations ?? [])].sort(),
+      },
+    };
   } catch (error) {
     // Do not remove a workspace while an escaped command may still be using it.
     // The unresolved scope remains a recovery liability, not successful validation.

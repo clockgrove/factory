@@ -54,6 +54,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Recheck mutable workflow safety inside the transport fence, after mutation-queue admission and
+  final publication-authority validation, immediately before feature-ref and pull-request dispatch.
+  Unsafe or unstable observed bases fail closed; GitHub's irreducible non-atomic
+  administrator-mutation boundary remains explicit and tracked in #301.
+
 - Recovery successor verification now builds one bounded, immutable event observation per
   authenticated repository snapshot and shares its validated canonical/digest index across chain,
   accounting, evidence, outcome, publication, resource, and sibling-refresh proofs. Large histories
@@ -67,14 +72,44 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
   effect, unresolved invocation, changed Work Item, surviving graph/projection ref, or conflicting
   chain evidence still fails closed with a graph-bootstrap-specific diagnostic.
   ([#287](https://github.com/clockgrove/factory/issues/287))
-- A dependency-root Work Item may now introduce one tightly bounded pnpm validation script when the
-  frozen repository has no package recipe. Compiler admission, fresh-checkout validation, isolated
-  validators and semantic review bind the exact package-manager version, scoped manifests, SHA-512
-  lock integrity, workspace/Turbo closure and finite leaf checks; setup is hook-free and restricted
-  to the declared npm registry.
-  Because these manifests establish dependency authority, Factory publishes the validated PR but
-  requires a human merge before Objective recovery continues. Existing Work Items retain the
-  repository-observed command rule. ([#284](https://github.com/clockgrove/factory/issues/284))
+- Immutable graphs now carry host-derived, adapter-qualified repository-capability generations for
+  validation operations created by ancestor artifacts. The Supervisor waits for the exact provider
+  integration, resolves every operation against the protected base before reservation, and binds
+  dispatch to the base commit/tree, packet, provider, operation, authority paths and runtime. Graph
+  recovery re-derives canonical bindings and reuses the persisted graph without another compiler
+  invocation; independent ready work is not suppressed by one unavailable generation.
+  Graphs retain only an abstract pnpm runtime contract; after persistence, an exact content-addressed
+  Node/pnpm receipt is selected and bound through `AttemptReserved` to every local or isolated
+  consumer, then reverified with source/provider lineage immediately before launch. Integrated-base
+  consumers inherit their provider generation's authenticated reservation receipt rather than the
+  mutable active default, and provider/current authority drift fails before dispatch. Historical
+  provider comments must reproduce the complete immutable reservation trailer digest, including its
+  runtime activation. Historical
+  graphs with an omitted top-level runtime retain their exact persisted identity while a read-only
+  abstract execution view preserves compatibility; only an exact authenticated record may be copied
+  by reusing its blob object for recovery, while fresh/issue-only persistence and selected graph data
+  remain invalid. Issue-only inspection retains every packet field, and foreground completion
+  reconstructs the exact activated invocation.
+  Active-pointer changes cannot move a generation or reserved attempt, and missing or corrupt
+  selected bytes fail readiness closed without recompilation. If that protected source advances
+  after reservation but before launch, the attempt is durably deferred and replanned without
+  spending an implementation retry or worker-session allowance. Reservations retain the full
+  immutable origin receipt, and explicit
+  `factory toolchains restore RECEIPT.json` reacquires that historical bundle without selecting
+  latest or changing the active pointer. The adapter performs one frozen hook-free setup, validates
+  root and later script generations, and rejects partial authority, unsafe script bodies, lifecycle
+  hooks, workspace/lock drift and hostile ambient runtimes. Missing npm, bun, uv, Cargo, Go or Python recipes
+  remain explicit unsupported future-authority gates. Safe protected-push-only workflow artifacts
+  may be published only after a parsed credential/permission review; unsafe ones are durably held
+  before a ref or PR, and every
+  workflow, action, manifest, lock or registry change remains human-only at the exact Git-diff merge
+  boundary. Unmanaged isolated validators stop at the first failed command while successful plans
+  still run to completion. Concurrent execution settlements are now claimed exactly once by either
+  the progress wake or synchronous scheduler fence, preventing a reconciled human hold from being
+  reinterpreted as a second drain failure. The same hold arriving during terminal drain deterministically
+  changes the proposal to escalation, while late cleanup/accounting/resource uncertainty vetoes it.
+  ([#284](https://github.com/clockgrove/factory/issues/284),
+  [#289](https://github.com/clockgrove/factory/issues/289))
 - Interrupted accepted compiler-evaluation graphs now authenticate their pre-receipt restart through
   exact immutable draft-selection and per-stage accounting evidence, while ordinary compilation
   retains its single-invocation checkpoint requirement. Changed Objective input still blocks before

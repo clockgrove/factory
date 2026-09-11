@@ -3,13 +3,13 @@
   "bundles": [
     {
       "file": "factory.js",
-      "bytes": 3656221,
-      "sha256": "17c1ec1ac024ffbe2746f8f9988331e1742cc883ab38e927f687855a963bd7e0"
+      "bytes": 3861405,
+      "sha256": "512d5e0a86e02df9e97893f9a2ac110ef7cb5777ed382ff463884d57e285d4ef"
     },
     {
       "file": "mcp-server.js",
-      "bytes": 3805635,
-      "sha256": "ed9839c83bdf3cfaaa258de91222c6f8d79dbab038eedd817450e17e31c37ce2"
+      "bytes": 3997987,
+      "sha256": "4a2115dbe82f6e5307920238940428f60573fd2d041f4ddb1d3b0a808372b729"
     }
   ],
   "components": [
@@ -1180,6 +1180,20 @@
       "license": "UNKNOWN",
       "author": "Michael de Wit",
       "repository": "git://github.com/mjwwit/node-XMLHttpRequest.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "yaml",
+      "version": "2.9.0",
+      "license": "ISC",
+      "author": "Eemeli Aro <eemeli@gmail.com>",
+      "repository": "github:eemeli/yaml",
       "bundles": [
         "factory.js",
         "mcp-server.js"

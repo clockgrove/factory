@@ -16,8 +16,15 @@ import {
   validatePlanningCheckout,
   readPlanningRepositoryLayout,
 } from "../src/application/plan.js";
-import { compiledGraphDigest, renderLegacyWorkItemCore, renderWorkPacket } from "../src/graph.js";
+import {
+  compiledGraphDigest,
+  renderLegacyWorkItemCore,
+  renderWorkPacket,
+  validateGraph,
+  type CompiledObjective,
+} from "../src/graph.js";
 import { compileObjective } from "../src/compiler/index.js";
+import { managedRuntimeRequirements } from "../src/toolchains/authority.js";
 import type { ManagementBackend } from "../src/management/backend.js";
 import type { CompilationContext, CompilationCheckpoint } from "../src/management/backend.js";
 
@@ -390,5 +397,142 @@ describe("read-only checkout preflight", () => {
     expect(compiledGraphDigest(graph)).not.toBe(claimed);
     expect(report.diagnostics[0]!.status).toBe("warning");
     expect(compile).not.toHaveBeenCalled();
+  });
+
+  it("reconstructs every authenticated issue packet field for a current pnpm provider graph", async () => {
+    const baseSha = "a".repeat(40);
+    const runtime = managedRuntimeRequirements(["pnpm test"])[0]!;
+    const common = {
+      preconditions: [] as string[],
+      outOfScope: [] as string[],
+      conventions: ["Keep the change bounded."],
+      baseSha,
+      requirements: {
+        os: ["linux"],
+        architecture: [],
+        tools: ["node", "pnpm"],
+        services: [],
+        networkDestinations: ["registry.npmjs.org"],
+        permittedSecretNames: [],
+        trust: "trusted_local" as const,
+      },
+      artifactContract: "clockgrove.factory/artifact-v1" as const,
+      context: {
+        mustRead: ["package.json"],
+        searchSeeds: ["pnpm"],
+        dependencyEvidence: [],
+      },
+      changeSurface: { mergeClass: "parallel-safe" as const, exclusiveResources: [] },
+      managedRuntimes: [runtime],
+    };
+    const graph: CompiledObjective = {
+      title: "Current pnpm graph",
+      workItems: [
+        {
+          ...common,
+          id: "provider",
+          title: "Provide validation",
+          goal: "Provide the pinned validation authority.",
+          acceptance: ["The test authority is integrated."],
+          criterionRisks: [{ criterion: "The test authority is integrated.", risk: "recovery" }],
+          validation: [
+            {
+              tier: "mechanical",
+              criteria: ["The test authority is integrated."],
+              evidenceCommands: ["pnpm test"],
+            },
+          ],
+          scope: ["package.json", "pnpm-lock.yaml"],
+          dependsOn: [],
+          validationCommands: ["pnpm test"],
+          repositoryCapabilities: {
+            provides: [
+              {
+                adapter: "node-pnpm",
+                generation: "node-pnpm/provider",
+                authorityPaths: ["package.json", "pnpm-lock.yaml"],
+                operations: [{ kind: "package-script", key: "test" }],
+                runtime,
+              },
+            ],
+            requires: [
+              {
+                adapter: "node-pnpm",
+                generation: "node-pnpm/provider",
+                providerWorkItem: "provider",
+                authorityPaths: ["package.json", "pnpm-lock.yaml"],
+                operation: { kind: "package-script", key: "test" },
+                activation: "artifact",
+                runtime,
+              },
+            ],
+          },
+        },
+        {
+          ...common,
+          id: "consumer",
+          title: "Consume validation",
+          goal: "Use the integrated validation authority.",
+          acceptance: ["The check runs on the integrated base."],
+          criterionRisks: [
+            { criterion: "The check runs on the integrated base.", risk: "ordinary" },
+          ],
+          validation: [
+            {
+              tier: "semantic",
+              criteria: ["The check runs on the integrated base."],
+              evidenceCommands: ["pnpm check"],
+            },
+          ],
+          scope: ["src/consumer.ts"],
+          changeSurface: { mergeClass: "parallel-safe", exclusiveResources: [] },
+          dependsOn: ["provider"],
+          validationCommands: ["pnpm check"],
+          repositoryCapabilities: {
+            provides: [],
+            requires: [
+              {
+                adapter: "node-pnpm",
+                generation: "node-pnpm/provider",
+                providerWorkItem: "provider",
+                authorityPaths: ["package.json", "pnpm-lock.yaml"],
+                operation: { kind: "package-script", key: "check" },
+                activation: "integrated-base",
+                runtime,
+              },
+            ],
+          },
+        },
+      ],
+    };
+    graph.workItems[0]!.repositoryCapabilities!.provides[0]!.operations.push({
+      kind: "package-script",
+      key: "check",
+    });
+    validateGraph(graph);
+    const digest = compiledGraphDigest(graph);
+    const workItems = graph.workItems.map((item, index) => ({
+      number: 8 + index,
+      title: item.title,
+      body: renderWorkPacket(item, {
+        protocol: "clockgrove.factory/graph-v1" as const,
+        id: item.id,
+        graphDigest: digest,
+        graphSize: graph.workItems.length,
+        index,
+        dependsOn: item.dependsOn,
+      }),
+    }));
+    const report = await buildPlanReport({
+      repository: "o/r",
+      request: { objective: 7 },
+      snapshot: { ...snapshot, title: graph.title, workItems },
+    });
+    expect(report.graph).toMatchObject({
+      digest,
+      claimedDigest: digest,
+      workItemCount: 2,
+    });
+    expect(report.diagnostics[0]!.status).toBe("warning");
   });
 });

@@ -4,11 +4,12 @@ import { attemptRef, readAttemptReservationRef } from "../control/attempts.js";
 import { assertAuthenticatedGraphProjection } from "../control/graph-evidence.js";
 import { decodeEventTrailer } from "../control/receipts.js";
 import { durableAttemptId } from "../execution/session.js";
-import { workerPacketFromCompiled } from "../graph.js";
+import { executionWorkerPacketFromCompiled, workerPacketFromCompiled } from "../graph.js";
 import { LocalScopeBatchSchema, type LocalScopeBatch } from "../protocol/local-scope.js";
 import { policyDigest } from "../protocol/policy.js";
 import { parseWorkerPacket, workerPacketDigest } from "../protocol/worker-packet.js";
-import { validationPlanFromPacket } from "../validation/plan.js";
+import { validationLocalCommandCount, validationPlanFromPacket } from "../validation/plan.js";
+import { packetWithManagedRuntimeActivation } from "../toolchains/authority.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import {
   recoveryEventDigest,
@@ -322,10 +323,18 @@ export async function deriveForegroundCompletion(
     ),
   );
   const compiled = one(graph.objective.workItems.filter((work) => work.id === item.compilerId));
-  const packet = parseWorkerPacket({
-    ...workerPacketFromCompiled(compiled),
-    baseSha: reserved.baseSha,
-  });
+  const packet = reserved.managedRuntimeActivation
+    ? packetWithManagedRuntimeActivation(
+        parseWorkerPacket({
+          ...executionWorkerPacketFromCompiled(compiled),
+          baseSha: reserved.baseSha,
+        }),
+        reserved.managedRuntimeActivation,
+      )
+    : parseWorkerPacket({
+        ...workerPacketFromCompiled(compiled),
+        baseSha: reserved.baseSha,
+      });
   requireProof(
     packet.requirements.trust === "trusted_local" &&
       reserved.localScopeBatch.identity.invocationDigest === workerPacketDigest(packet),
@@ -333,7 +342,7 @@ export async function deriveForegroundCompletion(
   const validationPlan = validationPlanFromPacket(packet);
   requireProof(
     validationPlan.isolation === "local" &&
-      capacity.localScopeBatch.commandCount === validationPlan.commands.length + 1,
+      capacity.localScopeBatch.commandCount === validationLocalCommandCount(packet),
   );
   // All slots, including the optional setup slot, are covered physically. A
   // passed original receipt follows the awaited serial loop and its cleanup;

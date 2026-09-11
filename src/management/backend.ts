@@ -151,6 +151,7 @@ export interface ReviewContext {
   packet: WorkerPacket;
   artifact: NormalizedArtifact;
   evidence: ValidationEvidence;
+  publicationBaseBranch?: string;
   modelSelection?: ModelSelection;
   /** Includes current/source policy and inherited execution isolation. Packet
    * trust remains independently authoritative, including for legacy callers. */

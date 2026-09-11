@@ -37,6 +37,12 @@ export interface PublicationStore {
    * by transport safety controls without spending a lease read per object.
    */
   readonly objectivePublicationFenceAtDispatch?: boolean;
+  /** Run mutable publication policy inside the concrete transport fence,
+   * after queue admission and authority validation. */
+  withPublicationSafetyFence?<T>(
+    fence: () => Promise<void>,
+    operation: () => Promise<T>,
+  ): Promise<T>;
   readRef(ref: string): Promise<string | null>;
   readCommit(oid: string): Promise<GitCommitObject>;
   /** Required only for independent immutable sibling-refresh verification. */
@@ -96,6 +102,28 @@ export async function assertPublicationMutationAuthorized(
   assertCurrent: () => Promise<void>,
 ): Promise<void> {
   if (!store.objectivePublicationFenceAtDispatch) await assertCurrent();
+}
+
+/** Dispatch one externally visible publication effect with both Objective
+ * authority and mutable content policy as fresh as the transport permits. */
+export async function dispatchPublicationMutation<T>(args: {
+  store: PublicationStore;
+  assertCurrent: () => Promise<void>;
+  assertSafety?: () => Promise<void>;
+  mutate: () => Promise<T>;
+}): Promise<T> {
+  if (
+    args.assertSafety &&
+    args.store.objectivePublicationFenceAtDispatch &&
+    !args.store.withPublicationSafetyFence
+  )
+    throw new Error("transport-bound publication safety fence is unavailable");
+  await assertPublicationMutationAuthorized(args.store, args.assertCurrent);
+  if (args.assertSafety && args.store.withPublicationSafetyFence) {
+    return args.store.withPublicationSafetyFence(args.assertSafety, args.mutate);
+  }
+  await args.assertSafety?.();
+  return args.mutate();
 }
 
 export interface PublishedPullRequest {
@@ -225,6 +253,9 @@ export async function publishValidated(args: {
   attempt: number;
   title: string;
   baseBranch: string;
+  /** Deterministic content-policy checks replayed at the actual remote effects. */
+  beforeRefMutation?: () => Promise<void>;
+  beforePullRequestMutation?: () => Promise<void>;
 }): Promise<PublishedPullRequest> {
   verifyValidationEvidence(args.validation.evidence);
   if (!args.validation.evidence.passed) throw new Error("cannot publish failed validation");
@@ -298,13 +329,18 @@ export async function publishValidated(args: {
       parentOids: [args.base.oid],
       message: expectedMessage,
     });
-    await assertPublicationMutationAuthorized(args.store, args.assertLease);
+    const preparedCommitSha = commitSha;
     let branchCreated: boolean;
     try {
-      branchCreated = await args.store.createRef(`refs/heads/${branch}`, commitSha);
+      branchCreated = await dispatchPublicationMutation({
+        store: args.store,
+        assertCurrent: args.assertLease,
+        ...(args.beforeRefMutation ? { assertSafety: args.beforeRefMutation } : {}),
+        mutate: () => args.store.createRef(`refs/heads/${branch}`, preparedCommitSha),
+      });
     } catch (error) {
       const recoveredSha = await args.store.readRef(`refs/heads/${branch}`);
-      if (recoveredSha !== commitSha) throw error;
+      if (recoveredSha !== preparedCommitSha) throw error;
       branchCreated = true;
     }
     if (!branchCreated) {
@@ -347,15 +383,26 @@ export async function publishValidated(args: {
   }
   let pull;
   try {
-    pull = await args.store.createPullRequest({
-      title: args.title,
-      body:
-        `Implements Work Item #${args.workItem} for Objective #${args.objective}.\n\n` +
-        `Closes #${args.workItem}\n\n` +
-        `Artifact: \`${args.artifact.digest}\`\n\n` +
-        `Validation: \`${args.validation.evidence.digest}\``,
-      head: branch,
-      base: args.baseBranch,
+    pull = await dispatchPublicationMutation({
+      store: args.store,
+      assertCurrent: args.assertLease,
+      assertSafety: async () => {
+        await args.beforePullRequestMutation?.();
+        if ((await args.store.readRef(`refs/heads/${branch}`)) !== commitSha) {
+          throw new Error(`publication branch ${branch} changed after policy admission`);
+        }
+      },
+      mutate: () =>
+        args.store.createPullRequest({
+          title: args.title,
+          body:
+            `Implements Work Item #${args.workItem} for Objective #${args.objective}.\n\n` +
+            `Closes #${args.workItem}\n\n` +
+            `Artifact: \`${args.artifact.digest}\`\n\n` +
+            `Validation: \`${args.validation.evidence.digest}\``,
+          head: branch,
+          base: args.baseBranch,
+        }),
     });
   } catch (error) {
     // The create may have committed even when its response was lost. Recover

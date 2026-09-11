@@ -35,6 +35,15 @@ import { readCompilerCausalAnnotationsFile } from "./application/compiler-eval.j
 import { readSuppliedReplayFile } from "./replay/file.js";
 import { SUPPLIED_REPLAY_ERROR } from "./replay/supplied.js";
 import { ContentCreationPacer, MutationScheduler, primaryQuotaForCredential } from "./platform.js";
+import { OctokitToolchainReleaseSource } from "./runtime/toolchain-github-source.js";
+import {
+  provisionToolchain,
+  restoreToolchain,
+  toolchainStatus,
+  type ToolchainStatus,
+} from "./runtime/toolchain-store.js";
+import type { ManagedToolchain } from "./runtime/toolchain-bundle.js";
+import { RuntimeBundleReceiptSchema } from "./protocol/worker-packet.js";
 
 const controllerLifecycle = new SystemdControllerLifecycle(
   new SystemdUserService({
@@ -63,7 +72,45 @@ const USAGE = [
   "  factory priority-fields OWNER/REPO",
   "  factory backends probe",
   "  factory management probe",
+  "  factory toolchains provision pnpm|all",
+  "  factory toolchains restore RECEIPT.json",
+  "  factory toolchains status",
 ].join("\n");
+
+const MANAGED_TOOLCHAINS: readonly ManagedToolchain[] = ["pnpm"];
+
+function parseManagedToolchain(value: string): ManagedToolchain {
+  if (!MANAGED_TOOLCHAINS.includes(value as ManagedToolchain))
+    fail(`unknown managed toolchain ${value}; expected pnpm or all`);
+  return value as ManagedToolchain;
+}
+
+async function toolchainsCommand(args: string[]): Promise<void> {
+  const [operation, selection, ...rest] = args;
+  if (rest.length > 0) fail(USAGE);
+  if (operation === "status" && selection === undefined) {
+    const statuses: ToolchainStatus[] = [];
+    for (const tool of MANAGED_TOOLCHAINS) statuses.push(await toolchainStatus(tool));
+    process.stdout.write(`${JSON.stringify(statuses, null, 2)}\n`);
+    return;
+  }
+  if (operation === "restore" && selection) {
+    const receipt = RuntimeBundleReceiptSchema.parse(
+      JSON.parse(await readFile(resolve(selection), "utf8")),
+    );
+    const restored = await restoreToolchain(receipt, {
+      source: new OctokitToolchainReleaseSource(resolveGitHubToken()),
+    });
+    process.stdout.write(`${JSON.stringify(restored, null, 2)}\n`);
+    return;
+  }
+  if (operation !== "provision" || !selection) fail(USAGE);
+  const tools = selection === "all" ? MANAGED_TOOLCHAINS : [parseManagedToolchain(selection)];
+  const source = new OctokitToolchainReleaseSource(resolveGitHubToken());
+  const receipts = [];
+  for (const tool of tools) receipts.push(await provisionToolchain(tool, { source }));
+  process.stdout.write(`${JSON.stringify(receipts, null, 2)}\n`);
+}
 
 function fail(message: string): never {
   process.stderr.write(`${message}\n`);
@@ -547,6 +594,10 @@ export async function main(argv: string[]): Promise<void> {
   }
   if (command === "management" && rest[0] === "probe") {
     await probeManagement();
+    return;
+  }
+  if (command === "toolchains") {
+    await toolchainsCommand(rest);
     return;
   }
   if (

@@ -96,24 +96,42 @@ describe("credential-free provider Supervisor qualification", () => {
         expect(
           f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.backend),
         ).toEqual([backend, backend, backend]);
+        expect(
+          f
+            .events()
+            .some(
+              (event) =>
+                event.kind === "attempt" &&
+                event.event === "AttemptDeferred" &&
+                event.workItem === 9 &&
+                event.reason === "execution source ref changed after attempt reservation",
+            ),
+        ).toBe(true);
+        expect(
+          f
+            .events()
+            .some(
+              (event) =>
+                event.kind === "budget" &&
+                event.event === "BudgetReconciled" &&
+                event.workItem === 9 &&
+                event.phase === "execution" &&
+                event.unit === "managed_sessions" &&
+                event.amount === 0,
+            ),
+        ).toBe(true);
         const original = f.activity.filter(
           (entry) => entry.operation === "validate" && !entry.invocation,
         );
         expect(original.map((entry) => entry.workItem).sort((left, right) => left - right)).toEqual(
           [8, 9, 10],
         );
-        const candidates = f.activity.filter(
-          (entry) => entry.operation === "validate" && entry.invocation,
-        );
-        expect(candidates).toHaveLength(1);
+        expect(
+          f.activity.filter((entry) => entry.operation === "validate" && entry.invocation),
+        ).toEqual([]);
         expect(f.activity.filter((entry) => entry.operation === "candidate-review")).toHaveLength(
           1,
         );
-        expect(
-          [...f.refs.keys()].some(
-            (ref) => ref.includes("/merge-candidates/") && ref.endsWith(candidates[0]!.invocation!),
-          ),
-        ).toBe(true);
         expect(f.resources.size).toBe(0);
       } finally {
         await f.dispose();

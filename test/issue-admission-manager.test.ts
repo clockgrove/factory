@@ -11,6 +11,9 @@ import { LeaseManager, type GitCommitObject, type LeaseState } from "../src/cont
 import { issueAdmissionRef, parseIssueAdmissionCommit } from "../src/control/issue-admission.js";
 import { decodeEventComments, encodeEventTrailer } from "../src/control/receipts.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
+import { parseWorkerPacket } from "../src/protocol/worker-packet.js";
+import { activeRuntimeBundleSync } from "../src/runtime/toolchain-store.js";
+import { createManagedRuntimeActivation } from "../src/toolchains/authority.js";
 const sha = (value: string) => createHash("sha1").update(value).digest("hex");
 const base: GitCommitObject = {
   oid: sha("base"),
@@ -174,6 +177,69 @@ describe("production issue admission manager", () => {
     expect(await f.manager.list(7, 12)).toHaveLength(1);
     expect((await f.manager.list(7, 12))[0]!.oid).toBe(original.oid);
     expect(f.store.comments).toHaveLength(1);
+  });
+  it("repairs a lost reservation comment with the exact durable runtime activation", async () => {
+    const f = await fixture();
+    const runtimeReceipt = activeRuntimeBundleSync("pnpm");
+    const packet = parseWorkerPacket({
+      goal: "Run the exact managed check.",
+      acceptanceCriteria: ["the check passes"],
+      allowedPaths: ["src/"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      baseSha: base.oid,
+      validationCommands: ["pnpm check"],
+      requirements: {
+        os: ["linux"],
+        architecture: ["x64"],
+        tools: ["node", "pnpm"],
+        services: [],
+        networkDestinations: ["registry.npmjs.org"],
+        permittedSecretNames: [],
+        trust: "trusted_local",
+      },
+      managedRuntimes: [
+        {
+          tool: "pnpm",
+          adapter: "node-pnpm",
+          adapterContract: 1,
+          platform: { os: "linux", architecture: "x64", libc: "glibc" },
+          releaseChannel: "ga",
+          bundleDigest: runtimeReceipt.digest,
+        },
+      ],
+      artifactContract: "clockgrove.factory/artifact-v1",
+    });
+    const activation = createManagedRuntimeActivation({
+      packet,
+      baseSha: base.oid,
+      sourceRef: "refs/heads/main",
+      proofDigests: ["d".repeat(64)],
+    })!;
+    const original = await f.manager.reserve({
+      ...f.args(),
+      binding: async (attempt) => ({
+        ...binding(attempt),
+        resourceIdentity: `resource-${attempt}:${activation.digest}`,
+        managedRuntimeActivation: activation,
+      }),
+    });
+    f.store.comments.length = 0;
+    const restarted = new AttemptManager({ store: f.store, leases: f.leases });
+    const [rehydrated] = await restarted.list(7, 12);
+    expect(rehydrated?.managedRuntimeActivation).toEqual(activation);
+    await restarted.repairReservationComment({
+      lease: f.lease,
+      workItemNodeId: "I_12",
+      reservation: rehydrated!,
+    });
+    const [repaired] = decodeEventComments(f.store.comments[0]!.body);
+    expect(repaired?.event).toBe("AttemptReserved");
+    expect(
+      repaired?.event === "AttemptReserved" ? repaired.managedRuntimeActivation : undefined,
+    ).toEqual(activation);
+    expect(original.managedRuntimeActivation?.digest).toBe(activation.digest);
   });
   it("permits only the winning dispatch transition to launch", async () => {
     const f = await fixture(),

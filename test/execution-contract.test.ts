@@ -18,6 +18,7 @@ import {
   verifyArtifact,
 } from "../src/execution/artifacts.js";
 import { BackendRegistry, NoExecutionBackendError } from "../src/execution/registry.js";
+import { VercelSandboxBackend } from "../src/backends/vercel-sandbox.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import { byteLength, MAX_LOG_BYTES } from "../src/protocol/limits.js";
 import type { NormalizedArtifact } from "../src/execution/artifacts.js";
@@ -235,6 +236,22 @@ describe("backend registry", () => {
         trust: "trusted_local",
       }),
     ).toEqual([]);
+  });
+
+  it("keeps pnpm unavailable on the unqualified Vercel runtime", () => {
+    const vercel = new VercelSandboxBackend({ repository: "/tmp/factory-vercel-fixture" });
+    expect(vercel.capabilities.supportedTools).not.toContain("pnpm");
+    expect(
+      capabilityMismatch(vercel.capabilities, {
+        os: ["linux"],
+        architecture: ["x64"],
+        tools: ["git", "node", "pnpm"],
+        services: [],
+        networkDestinations: [],
+        permittedSecretNames: [],
+        trust: "isolated",
+      }),
+    ).toContain("missing tool pnpm");
   });
 
   it("rejects arbitrary agent/runtime identifiers", () => {

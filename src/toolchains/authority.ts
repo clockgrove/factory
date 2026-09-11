@@ -1207,29 +1207,31 @@ async function withProvisionedToolPath(
   const sourceDirectories = (source.PATH ?? "")
     .split(delimiter)
     .filter((directory) => directory.startsWith("/"));
-  for (const name of MANAGED_SYSTEM_TOOLS) {
-    let target: string | undefined;
-    for (const directory of sourceDirectories) {
-      const candidate = join(directory, name);
-      if (
-        await Promise.all([stat(candidate), access(candidate, fsConstants.X_OK)]).then(
-          ([info]) => info.isFile(),
-          () => false,
-        )
-      ) {
-        target = candidate;
-        break;
+  await Promise.all(
+    MANAGED_SYSTEM_TOOLS.map(async (name) => {
+      let target: string | undefined;
+      for (const directory of sourceDirectories) {
+        const candidate = join(directory, name);
+        if (
+          await Promise.all([stat(candidate), access(candidate, fsConstants.X_OK)]).then(
+            ([info]) => info.isFile(),
+            () => false,
+          )
+        ) {
+          target = candidate;
+          break;
+        }
       }
-    }
-    const shim = join(systemBin, name);
-    if (!target) {
-      await unlink(shim).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") throw error;
-      });
-      continue;
-    }
-    await ensureShim(name, target, systemBin);
-  }
+      const shim = join(systemBin, name);
+      if (!target) {
+        await unlink(shim).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+        return;
+      }
+      await ensureShim(name, target, systemBin);
+    }),
+  );
   const sanitized = managedWorkerSourceEnvironment(source, tool);
   return { ...sanitized, PATH: `${bin}${delimiter}${systemBin}` };
 }

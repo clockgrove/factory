@@ -442,6 +442,32 @@ export function sandboxBootstrapFiles(
         })
         .join("\n")
     : "";
+  const managedExecutables = new Set(
+    managedToolchain?.plan.executables.map((executable) => executable.id) ?? [],
+  );
+  const declaredHostTools = managedToolchain
+    ? context.packet.requirements.tools.filter(
+        (name) =>
+          !managedExecutables.has(name) &&
+          !MANAGED_SYSTEM_TOOLS.includes(name as (typeof MANAGED_SYSTEM_TOOLS)[number]),
+      )
+    : [];
+  if (declaredHostTools.some((name) => !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(name)))
+    throw new Error("managed worker declares an unsafe host tool name");
+  const declaredToolBootstrap =
+    declaredHostTools.length > 0
+      ? String.raw`factory_declared_tools="/tmp/factory-declared-tools"
+mkdir -p "$factory_declared_tools"
+for factory_declared_tool in ${declaredHostTools.join(" ")}; do
+  factory_declared_tool_path="$(PATH="$factory_bootstrap_path" command -v "$factory_declared_tool" || true)"
+  if [[ "$factory_declared_tool_path" != /* || ! -x "$factory_declared_tool_path" ]]; then
+    printf 'Factory could not resolve declared host tool %s\n' "$factory_declared_tool" >&2
+    exit 1
+  fi
+  ln -s "$factory_declared_tool_path" "$factory_declared_tools/$factory_declared_tool"
+done
+`
+      : 'factory_declared_tools="/tmp/factory-declared-tools"\nmkdir -p "$factory_declared_tools"\n';
   const managedBootstrap = managedToolchain
     ? String.raw`factory_system_tools="/tmp/factory-system-tools"
 mkdir -p "$factory_system_tools"
@@ -451,11 +477,11 @@ for factory_system_tool in ${MANAGED_SYSTEM_TOOLS.join(" ")}; do
     ln -s "$factory_system_tool_path" "$factory_system_tools/$factory_system_tool"
   fi
 done
-mkdir -p /tmp/factory-toolchain-config
+${declaredToolBootstrap}mkdir -p /tmp/factory-toolchain-config
 node "$factory_root/materialize-toolchain.mjs" "$factory_root/managed-toolchain.json" "$factory_root/toolchain-paths.json"
-export PATH="/tmp/factory-toolchain/bin:$factory_system_tools"
+export PATH="/tmp/factory-toolchain/bin:$factory_system_tools:$factory_declared_tools"
 ${managedEnvironment}
-export PATH="/tmp/factory-toolchain/bin:$factory_system_tools"
+export PATH="/tmp/factory-toolchain/bin:$factory_system_tools:$factory_declared_tools"
 `
     : "";
   const script = `#!/usr/bin/env bash

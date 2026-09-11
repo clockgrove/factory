@@ -611,7 +611,7 @@ describe("Daytona supported provider contract", () => {
   it("routes an exact provisioned pnpm runtime through the production Daytona worker bootstrap", async () => {
     const source = await fixture();
     source.context.packet.validationCommands = ["pnpm check"];
-    source.context.packet.requirements.tools = ["git", "node", "pnpm"];
+    source.context.packet.requirements.tools = ["git", "node", "pnpm", "npx"];
     source.context.packet.requirements.networkDestinations = ["registry.npmjs.org"];
     const runtime = activeRuntimeBundleSync("pnpm");
     source.context.packet.managedRuntimes = managedRuntimeRequirements(
@@ -657,7 +657,10 @@ describe("Daytona supported provider contract", () => {
     );
     const bootstrap = files.get("factory/run.sh")?.toString("utf8") ?? "";
     expect(bootstrap).toContain("materialize-toolchain.mjs");
-    expect(bootstrap).toContain('export PATH="/tmp/factory-toolchain/bin:$factory_system_tools"');
+    expect(bootstrap).toContain("for factory_declared_tool in npx");
+    expect(bootstrap).toContain(
+      'export PATH="/tmp/factory-toolchain/bin:$factory_system_tools:$factory_declared_tools"',
+    );
     const materialization = await mkdtemp(join(tmpdir(), "factory-daytona-materializer-"));
     const hostile = join(materialization, "hostile-bin");
     await mkdir(hostile, { recursive: true });

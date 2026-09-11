@@ -99,6 +99,19 @@ candidate, and rerun it only when that candidate changes as described under **Ve
 Before merge, state the exact reviewed head, review-round count, unresolved follow-ups, and explicitly
 accepted risks.
 
+## Code Review Rules
+
+### Exhaustive review pass
+
+- Review the complete pull-request diff and all materially affected call paths before finishing.
+- Do not stop after identifying the first valid finding.
+- Continue reviewing the remaining diff after every finding.
+- Report all independent P0/P1 findings discovered in the same review pass.
+- Before completing the review, make a second pass for correctness, invariant violations, race
+  conditions, stale-state handling, error paths, compatibility regressions, and fail-closed behavior.
+- Do not suppress a later finding merely because an earlier finding may require changes to the same
+  code.
+
 ## When something fails
 
 - Preserve the original failure and exact source, artifact, run, and accounting identities.

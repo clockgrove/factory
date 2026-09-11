@@ -216,7 +216,12 @@ import {
   NoExecutionBackendError,
   type BackendCandidate,
 } from "./execution/registry.js";
-import type { BackendHandle, ExecutionBackend, ExecutionUsage } from "./execution/backend.js";
+import type {
+  BackendHandle,
+  BackendObservation,
+  ExecutionBackend,
+  ExecutionUsage,
+} from "./execution/backend.js";
 import { ProviderResourceCleanupError } from "./execution/backend.js";
 import {
   MAX_ARTIFACT_PATCH_BYTES,
@@ -6814,7 +6819,42 @@ export class FactorySupervisor {
               );
             }
           }
-          const observation = await selected.observe(handle);
+          let observation: BackendObservation;
+          try {
+            observation = await selected.observe(handle);
+          } catch (error) {
+            if (!(error instanceof ProviderQuotaError)) throw error;
+            if (!selected.capabilities.reportsModelUsage)
+              throw new Error(
+                `backend ${selected.capabilities.id} emitted a provider quota failure without declaring model-usage reporting`,
+                { cause: error },
+              );
+            executionTerminalObserved = true;
+            const invocationId = `worker-${item.number}-${reservation!.attempt}`;
+            error.bindInvocation(invocationId);
+            try {
+              await this.#recordProviderQuotaGate(
+                error,
+                item.id,
+                "execution",
+                selected.capabilities.id,
+                reservation!,
+              );
+            } catch (checkpointError) {
+              throw new ProviderQuotaError(error.gate, {
+                invocationId,
+                cause: new AggregateError(
+                  [error.cause, checkpointError].filter((cause) => cause !== undefined),
+                  "worker provider refusal could not be durably checkpointed",
+                ),
+              });
+            }
+            terminalModelUsage = reportedModelUsage(error.usage);
+            terminalModelTokens = error.usage
+              ? error.usage.inputTokens + error.usage.outputTokens
+              : undefined;
+            throw error;
+          }
           if (
             selected.capabilities.id === "codex-app-server/local-worktree" &&
             observation.state === "unknown"

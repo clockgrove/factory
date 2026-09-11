@@ -23,6 +23,7 @@ import {
 import { restrictedCodexArgs } from "../src/backends/codex-cli-policy.js";
 import type { AttemptContext, StaleAttemptIdentity } from "../src/execution/backend.js";
 import { durableAttemptId } from "../src/execution/session.js";
+import { ProviderQuotaError } from "../src/providers/quota.js";
 import { cleanupLocalWorktree, createLocalWorktree } from "../src/runtime/local-worktree.js";
 import {
   linuxProcessGroupId,
@@ -476,6 +477,60 @@ describe("Codex CLI local backend", () => {
         reasonCode: "provider-quota-exhausted",
         provider: "github-copilot",
       },
+    });
+    await backend.cleanup(handle);
+    await cleanupLocalWorktree(worktree);
+  });
+
+  it("propagates a failed provider-refusal checkpoint without losing exact quota identity", async () => {
+    const source = await fixture();
+    const worktree = await createLocalWorktree(source.repository, source.baseSha);
+    await writeFile(
+      source.fakeCodex,
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' '${JSON.stringify({
+          type: "turn.failed",
+          error: { message: "You have exceeded your monthly quota." },
+        })}'`,
+        `printf '%s\\n' '${JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: 9, output_tokens: 4, cached_input_tokens: 2 },
+        })}'`,
+        "exit 1",
+      ].join("\n"),
+    );
+    await chmod(source.fakeCodex, 0o700);
+    const backend = new CodexCliLocalBackend({
+      command: source.fakeCodex,
+      authFile: source.authFile,
+      createCodexHome: async (kind) => {
+        const root = join(source.repository, ".factory-test-quota-failure-homes");
+        await mkdir(root, { recursive: true });
+        return mkdtemp(join(root, `${kind}-`));
+      },
+    });
+    const checkpointFailure = new Error("fixture provider checkpoint unavailable");
+    const attempt = attemptContext(worktree.path, source.baseSha);
+    attempt.checkpointProviderRefusal = async () => {
+      throw checkpointFailure;
+    };
+
+    const handle = await backend.launch(attempt);
+    let observed: unknown;
+    for (let check = 0; check < 20 && observed === undefined; check += 1) {
+      try {
+        await backend.observe(handle);
+      } catch (error) {
+        observed = error;
+      }
+      if (observed === undefined) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(observed).toBeInstanceOf(ProviderQuotaError);
+    expect(observed).toMatchObject({
+      gate: { reasonCode: "provider-quota-exhausted", provider: "github-copilot" },
+      usage: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2 },
+      cause: checkpointFailure,
     });
     await backend.cleanup(handle);
     await cleanupLocalWorktree(worktree);

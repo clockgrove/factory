@@ -19,6 +19,7 @@ import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js"
 import * as worktrees from "../src/runtime/local-worktree.js";
 import * as cleanValidation from "../src/validation/clean-run.js";
 import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
+import { ProviderQuotaError } from "../src/providers/quota.js";
 import { providerQuotaGates } from "../src/control/provider-gates.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
@@ -84,6 +85,47 @@ describe("Supervisor model dispatch journal", () => {
         disposition: "released",
         evidence: { accountingSettled: false, unknownModelUsageRetained: true },
       });
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
+  it("recovers an adapter checkpoint failure as the same exact provider refusal without retrying", async () => {
+    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
+    const checkpointFailure = new Error("fixture adapter checkpoint transport failed");
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      maxAttemptsPerItem: 3,
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        observe: async (handle) => {
+          await backend.observe(handle);
+          throw new ProviderQuotaError(gate, {
+            usage: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 },
+            cause: checkpointFailure,
+          });
+        },
+      }),
+    });
+    try {
+      expect(await f.run()).toMatchObject({
+        status: "escalated",
+        reason: expect.stringContaining("GitHub Copilot monthly quota exceeded"),
+      });
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+      expect(providerQuotaGates(f.events(), f.runId)).toHaveLength(1);
+      expect(modelBudgets(f)).toEqual([
+        expect.objectContaining({
+          event: "BudgetReserved",
+          modelInvocationId: "worker-8-1",
+        }),
+        expect.objectContaining({
+          event: "BudgetReconciled",
+          modelInvocationId: "worker-8-1",
+          amount: 10,
+        }),
+      ]);
     } finally {
       await f.dispose();
     }

@@ -97,6 +97,7 @@ interface RunningAttempt {
   progress: string | undefined;
   failure?: string;
   providerQuotaGate?: ProviderQuotaGate;
+  providerQuotaFailure?: ProviderQuotaError;
   cancelled: boolean;
 }
 
@@ -501,22 +502,25 @@ export class CodexCliLocalBackend implements ExecutionBackend {
       const recordResult = async (result: ProcessResult) => {
         const details = parseCodexWorkerStream(result.stdout);
         if (details.providerQuotaGate) {
+          const usage = exactProviderQuotaUsage(normalizeExecutionUsage(details.usage));
+          const quotaError = new ProviderQuotaError(details.providerQuotaGate, {
+            ...(usage ? { usage } : {}),
+          });
           try {
             if (!context.checkpointProviderRefusal)
               throw new Error("provider-refusal durability port is unavailable");
-            const usage = exactProviderQuotaUsage(normalizeExecutionUsage(details.usage));
-            await context.checkpointProviderRefusal(
-              new ProviderQuotaError(details.providerQuotaGate, {
-                ...(usage ? { usage } : {}),
-              }),
-            );
-          } catch {
+            await context.checkpointProviderRefusal(quotaError);
+          } catch (cause) {
             running.result = result;
             running.final = null;
             running.usage = details.usage;
             running.progress = details.progress;
             running.failure =
               "worker provider refusal could not be durably checkpointed; consumption remains unknown";
+            running.providerQuotaFailure = new ProviderQuotaError(details.providerQuotaGate, {
+              ...(usage ? { usage } : {}),
+              cause,
+            });
             return;
           }
         }
@@ -568,6 +572,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
         ...(running.progress ? { progress: running.progress } : {}),
       };
     }
+    if (running.providerQuotaFailure) throw running.providerQuotaFailure;
     const state = running.cancelled
       ? "cancelled"
       : running.result.timedOut

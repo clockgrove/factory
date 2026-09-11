@@ -97,6 +97,7 @@ interface SdkAttempt {
   logs: string;
   reason?: string;
   providerQuotaGate?: ProviderQuotaGate;
+  providerQuotaFailure?: ProviderQuotaError;
   cancelled: boolean;
   timedOut: boolean;
   scopeSettled?: boolean;
@@ -657,6 +658,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     const running = this.#require(handle);
     const state =
       running.context.localExecutionScope && !running.scopeSettled ? "running" : running.state;
+    if (state === "failed" && running.providerQuotaFailure) throw running.providerQuotaFailure;
     return {
       state,
       observedAt: new Date().toISOString(),
@@ -849,19 +851,16 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     let providerRefusalCheckpointed = false;
     const checkpointProviderRefusal = async (gate: ProviderQuotaGate) => {
       if (providerRefusalCheckpointed) return;
-      if (!running.context.checkpointProviderRefusal)
-        throw new Error(
-          "worker provider refusal could not be durably checkpointed; consumption remains unknown",
-        );
+      const usage = exactProviderQuotaUsage(normalizeExecutionUsage(running.usage));
+      const quotaError = new ProviderQuotaError(gate, { ...(usage ? { usage } : {}) });
       try {
-        const usage = exactProviderQuotaUsage(normalizeExecutionUsage(running.usage));
-        await running.context.checkpointProviderRefusal(
-          new ProviderQuotaError(gate, { ...(usage ? { usage } : {}) }),
-        );
-      } catch {
-        throw new Error(
-          "worker provider refusal could not be durably checkpointed; consumption remains unknown",
-        );
+        if (!running.context.checkpointProviderRefusal)
+          throw new Error(
+            "worker provider refusal could not be durably checkpointed; consumption remains unknown",
+          );
+        await running.context.checkpointProviderRefusal(quotaError);
+      } catch (cause) {
+        throw new ProviderQuotaError(gate, { ...(usage ? { usage } : {}), cause });
       }
       providerRefusalCheckpointed = true;
       running.providerQuotaGate = gate;
@@ -968,6 +967,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
         running.reason = running.final?.summary ?? "SDK worker returned no valid final result";
       }
     } catch (error) {
+      if (error instanceof ProviderQuotaError) running.providerQuotaFailure = error;
       if (
         running.context.localExecutionScope &&
         error instanceof Error &&

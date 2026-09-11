@@ -23,6 +23,7 @@ import {
   isFutureToolchainProvider,
   isolatedManagedToolchainPlan,
   managedToolAvailable,
+  managedRuntimeRequirements,
   localManagedToolchainPlan,
   packageScriptValidationCommand,
   assertRepositoryCapabilityProofsCurrent,
@@ -127,7 +128,7 @@ describe("toolchain authority adapters", () => {
       })),
     ).toEqual(
       expect.arrayContaining([
-        { runner: "npm", provisioning: "host-observed", future: false },
+        { runner: "npm", provisioning: "factory-provisioned", future: true },
         { runner: "pnpm", provisioning: "factory-provisioned", future: true },
         { runner: "bun", provisioning: "factory-provisioned", future: true },
         { runner: "uv", provisioning: "factory-provisioned", future: true },
@@ -416,7 +417,8 @@ describe("toolchain authority adapters", () => {
   });
 
   it("distinguishes provisioned adapters from unsupported greenfield runners", () => {
-    expect(unprovisionedFutureToolchainReason("npm test")).toMatch(/npm.*no Factory-provisioned/);
+    expect(unprovisionedFutureToolchainReason("npm test")).toBeUndefined();
+    expect(unprovisionedFutureToolchainReason("npm run test")).toBeUndefined();
     expect(unprovisionedFutureToolchainReason("bun run test")).toBeUndefined();
     expect(
       unprovisionedFutureToolchainReason("uv run --locked --no-sync python -m pytest"),
@@ -437,6 +439,26 @@ describe("toolchain authority adapters", () => {
     expect(validationSetupCommandCount(["npm test"])).toBe(1);
     expect(validationSetupCommandCount(["pnpm check", "pnpm test"])).toBe(2);
     expect(() => validationSetupCommandCount(["npm test", "pnpm check"])).toThrow(/mix/);
+  });
+
+  it("keeps observed npm host-bound until an explicit node-npm capability selects it", async () => {
+    expect(managedRuntimeRequirements(["npm run test"])).toEqual([]);
+    expect(
+      managedRuntimeRequirements(["npm run test"], {
+        provides: [
+          {
+            adapter: "node-npm",
+            generation: "node-npm/provider",
+            authorityPaths: ["package.json", "package-lock.json"],
+            operations: [{ kind: "package-script", key: "test" }],
+          },
+        ],
+        requires: [],
+      } as never),
+    ).toMatchObject([{ tool: "npm", adapter: "node-npm" }]);
+    await expect(
+      localManagedToolchainPlan(["npm test"], process.env, "/tmp/factory-observed-npm", []),
+    ).resolves.toBeNull();
   });
 
   it("probes bundled tools without consulting ambient PATH", async () => {
@@ -832,6 +854,10 @@ describe("toolchain authority adapters", () => {
       ).managedRuntimes,
     );
     expect(plan).not.toBeNull();
+    expect(plan!.environment).toMatchObject({
+      npm_config_ignore_scripts: "true",
+      npm_config_registry: "https://registry.npmjs.org/",
+    });
     expect(await readlink(join(bin, "node"))).toMatch(/\/bundles\/[0-9a-f]{64}\/node\/root\/node$/);
     expect(await readlink(join(bin, "pnpm"))).toMatch(/\/bundles\/[0-9a-f]{64}\/pnpm\/root\/pnpm$/);
     expect(

@@ -419,4 +419,131 @@ describe("sandbox bootstrap contracts", () => {
       await rm(runtimeRoot, { recursive: true, force: true });
     }
   });
+
+  it("runs an interpreted npm entrypoint only through its attested managed Node", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-npm-materializer-"));
+    const runtimeRoot = "/tmp/factory-toolchain";
+    try {
+      await rm(runtimeRoot, { recursive: true, force: true });
+      const fixture = join(root, "fixture");
+      const prefix = "node-v22.20.0-linux-x64";
+      const nodeRelative = `${prefix}/bin/node`;
+      const npmRelative = `${prefix}/lib/node_modules/npm/bin/npm-cli.js`;
+      await mkdir(dirname(join(fixture, nodeRelative)), { recursive: true });
+      await mkdir(dirname(join(fixture, npmRelative)), { recursive: true });
+      const node = Buffer.from(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'v22.20.0\\n'; else printf '10.9.3\\n'; fi\n",
+      );
+      const npm = Buffer.from("// embedded npm cli\n");
+      await writeFile(join(fixture, nodeRelative), node, { mode: 0o755 });
+      await writeFile(join(fixture, npmRelative), npm);
+      const archivePath = join(root, "node.tar.xz");
+      execFileSync("tar", ["-cJf", archivePath, "-C", fixture, prefix]);
+      const archive = await readFile(archivePath);
+      const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+      const plan: ManagedToolchainPlan = {
+        tool: "npm",
+        bundleDigest: "c".repeat(64),
+        assets: [
+          {
+            id: "npm",
+            path: "toolchains/npm.asset",
+            content: archive,
+            sha256: sha256(archive),
+            archive: "tar.xz",
+            executablePath: nodeRelative,
+            executableSha256: sha256(node),
+            treeSha256: await sha256Tree(fixture),
+            entrypoints: [
+              { id: "node", version: "22.20.0", path: nodeRelative, sha256: sha256(node) },
+              {
+                id: "npm",
+                version: "10.9.3",
+                path: npmRelative,
+                sha256: sha256(npm),
+                interpreter: "node",
+              },
+            ],
+          },
+        ],
+        executables: [
+          {
+            id: "node",
+            assetId: "npm",
+            kind: "native",
+            relativePath: nodeRelative,
+            argsPrefix: [],
+          },
+          {
+            id: "npm",
+            assetId: "npm",
+            kind: "interpreted",
+            interpreterId: "node",
+            relativePath: npmRelative,
+            argsPrefix: [],
+          },
+        ],
+        setup: [],
+        validation: [],
+        environment: { PATH: "/factory-no-ambient-path" },
+      };
+      for (const file of sandboxManagedToolchainFiles(plan)) {
+        const path = join(root, file.path);
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, file.content, { mode: file.mode ?? 0o600 });
+      }
+      const ambient = join(root, "ambient");
+      await mkdir(ambient);
+      const marker = join(root, "ambient-ran");
+      for (const name of ["node", "npm"])
+        await writeFile(
+          join(ambient, name),
+          `#!/bin/sh\nprintf ran > ${JSON.stringify(marker)}\n`,
+          {
+            mode: 0o755,
+          },
+        );
+      const materializer = join(root, "factory/materialize-toolchain.mjs");
+      const config = join(root, "factory/managed-toolchain.json");
+      const output = join(root, "materialized.json");
+      execFileSync(process.execPath, [materializer, config, output], {
+        env: { PATH: `${ambient}:${process.env.PATH ?? "/usr/bin:/bin"}` },
+      });
+      const materialized = JSON.parse(await readFile(output, "utf8")) as {
+        binRoot: string;
+        executables: Record<string, { path: string; argsPrefix: string[] }>;
+      };
+      expect(materialized.executables.npm!.path).not.toBe(process.execPath);
+      expect(materialized.executables.npm!.argsPrefix[0]).toContain("npm-cli.js");
+      expect(
+        execFileSync(
+          materialized.executables.npm!.path,
+          [...materialized.executables.npm!.argsPrefix, "--version"],
+          { encoding: "utf8", env: { PATH: ambient } },
+        ).trim(),
+      ).toBe("10.9.3");
+      expect(
+        execFileSync(join(materialized.binRoot, "npm"), ["--version"], {
+          encoding: "utf8",
+          env: { PATH: ambient },
+        }).trim(),
+      ).toBe("10.9.3");
+      await expect(access(marker)).rejects.toThrow();
+
+      const swapped = JSON.parse(await readFile(config, "utf8")) as {
+        executables: Array<{ id: string; relativePath: string }>;
+      };
+      swapped.executables.find(({ id }) => id === "npm")!.relativePath = nodeRelative;
+      await writeFile(config, JSON.stringify(swapped));
+      expect(() =>
+        execFileSync(process.execPath, [materializer, config, join(root, "swapped.json")], {
+          env: { PATH: process.env.PATH },
+          stdio: "ignore",
+        }),
+      ).toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(runtimeRoot, { recursive: true, force: true });
+    }
+  });
 });

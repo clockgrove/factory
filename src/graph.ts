@@ -603,7 +603,10 @@ function validateGraphShape(
 
   for (const wi of objective.workItems) {
     if (wi.validationCommands) {
-      const expectedRuntimes = managedRuntimeRequirements(wi.validationCommands);
+      const expectedRuntimes = managedRuntimeRequirements(
+        wi.validationCommands,
+        wi.repositoryCapabilities,
+      );
       if ((wi.managedRuntimes ?? []).some(({ bundleDigest }) => bundleDigest !== undefined))
         throw new Error(`Work Item ${wi.id} immutable graph selected a managed runtime bundle`);
       if (
@@ -733,7 +736,10 @@ export function workerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
 export function executionWorkerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
   const packet = workerPacketFromCompiled(wi);
   if (wi.managedRuntimes !== undefined) return packet;
-  const managedRuntimes = managedRuntimeRequirements(packet.validationCommands);
+  const managedRuntimes = managedRuntimeRequirements(
+    packet.validationCommands,
+    packet.repositoryCapabilities,
+  );
   return managedRuntimes.length === 0 ? packet : parseWorkerPacket({ ...packet, managedRuntimes });
 }
 

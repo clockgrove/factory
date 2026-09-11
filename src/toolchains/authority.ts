@@ -25,8 +25,17 @@ import {
   toolchainStatus,
   toolchainStoreRoot,
 } from "../runtime/toolchain-store.js";
-import { delimiter, join } from "node:path";
-import { mkdir, symlink, unlink, lstat, readlink, access, readFile } from "node:fs/promises";
+import { delimiter, join, posix } from "node:path";
+import {
+  mkdir,
+  symlink,
+  unlink,
+  lstat,
+  readlink,
+  access,
+  readFile,
+  writeFile,
+} from "node:fs/promises";
 import { constants as fsConstants, readFileSync } from "node:fs";
 import {
   BUN_ADAPTER_CONTRACT,
@@ -38,6 +47,20 @@ import {
   createBunManagedExecutionPlan,
   inspectBunAuthority,
 } from "./bun.js";
+import {
+  createNpmManagedToolchainPlan,
+  findNestedNpmRoots,
+  inspectNpmAuthority,
+  NPM_ADAPTER_CONTRACT,
+  NPM_ADAPTER_ID,
+  NPM_INSTALL_COMMAND,
+  NPM_NODE_VERSION_COMMAND,
+  NPM_PACKAGE_REGISTRY,
+  NPM_VERSION_COMMAND,
+  npmCapabilityOperation,
+  npmEnvironment,
+  npmValidationCommandForOperation,
+} from "./npm.js";
 import {
   inspectUvAuthority,
   loadUvAuthoritySurface,
@@ -181,7 +204,7 @@ export function adapterNetworkDestinations(adapter: ToolchainAuthorityAdapter): 
 }
 
 const runtimeRequirement = (
-  tool: "pnpm" | "bun" | "uv",
+  tool: "npm" | "pnpm" | "bun" | "uv",
   adapter: string,
 ): RuntimeBundleRequirement => ({
   tool,
@@ -329,6 +352,19 @@ function legacyManagedProjection(
   };
 }
 
+function npmIsolatedPlan(
+  commands: readonly string[] = [],
+  receipt?: RuntimeBundleReceipt,
+): IsolatedManagedToolchainPlan {
+  if (!receipt) throw new Error("npm isolated execution lacks an exact activated runtime");
+  const plan = createNpmManagedToolchainPlan({
+    receipt,
+    commands,
+    assets: isolatedAssets(receipt),
+  });
+  return legacyManagedProjection("npm", receipt, plan);
+}
+
 function isolatedAssets(bundle: RuntimeBundleReceipt) {
   return runtimeComponentPaths(toolchainStoreRoot(), bundle).map(({ component, asset }) => ({
     id: component.id,
@@ -339,6 +375,7 @@ function isolatedAssets(bundle: RuntimeBundleReceipt) {
     executablePath: component.executablePath,
     executableSha256: component.executableSha256,
     treeSha256: component.treeSha256,
+    ...(component.entrypoints ? { entrypoints: component.entrypoints } : {}),
     ...(component.executableOnly ? { executableOnly: true as const } : {}),
   }));
 }
@@ -437,12 +474,21 @@ function runtimeContract(requirement: RuntimeBundleRequirement | undefined) {
 
 export function managedRuntimeRequirements(
   commands: readonly string[],
+  capabilities?: WorkerPacket["repositoryCapabilities"],
 ): RuntimeBundleRequirement[] {
   const requirements = new Map<string, RuntimeBundleRequirement>();
   for (const command of commands) {
     const parsed = futureToolchainCommand(command);
     const runtime = parsed?.adapter.runtimeRequirement;
     if (!runtime || parsed.adapter.provisioning !== "factory-provisioned") continue;
+    if (
+      parsed.adapter.id === NPM_ADAPTER_ID &&
+      ![
+        ...(capabilities?.requires ?? []).map(({ adapter }) => adapter),
+        ...(capabilities?.provides ?? []).map(({ adapter }) => adapter),
+      ].includes(NPM_ADAPTER_ID)
+    )
+      continue;
     if (runtime.bundleDigest !== undefined)
       throw new Error(`${parsed.adapter.runner} adapter contract must not select a runtime bundle`);
     requirements.set(`${runtime.adapter}\0${runtime.tool}`, { ...runtime });
@@ -835,6 +881,93 @@ async function authorityDigestForPaths(root: string, paths: readonly string[]): 
   return createHash("sha256").update(canonical(content)).digest("hex");
 }
 
+async function resolveNpmIntegratedBase(
+  input: IntegratedCapabilityResolutionInput,
+): Promise<RepositoryCapabilityProof[]> {
+  const adapter = toolchainAdapterById(NPM_ADAPTER_ID)!;
+  assertCanonicalManagedRequirements(input, adapter);
+  const runtime = await runtimeForRequirements(input.requirements, adapter, input.packet);
+  const component = runtime.components.find(({ id }) => id === "npm");
+  const node = component?.entrypoints?.find(({ id }) => id === "node");
+  const npm = component?.entrypoints?.find(({ id }) => id === "npm");
+  if (!component || !node || !npm || npm.interpreter !== "node")
+    throw new Error("npm runtime bundle lacks its exact Node/npm entrypoint relationship");
+  const commands = input.requirements.map((requirement) => {
+    const parsed = npmValidationCommandForOperation(requirement.operation);
+    if (!parsed) throw new Error("npm operation is outside the finite adapter contract");
+    return parsed;
+  });
+  const { createLocalWorktree, cleanupLocalWorktree } = await import(
+    "../runtime/local-worktree.js"
+  );
+  const inspect = async (
+    commitSha: string,
+  ): Promise<{ authorityDigest: string; authorityPaths: string[] }> => {
+    const worktree = await createLocalWorktree(input.repository, commitSha);
+    try {
+      const inspection = await inspectNpmAuthority({
+        root: worktree.path,
+        commands,
+        nodeVersion: node.version,
+        npmVersion: npm.version,
+      });
+      const nested = await findNestedNpmRoots(
+        worktree.path,
+        inspection.manifestPaths
+          .filter((path) => path !== "package.json")
+          .map((path) => posix.dirname(path)),
+      );
+      if (nested.length > 0)
+        throw new Error(`npm authority contains an undeclared nested root: ${nested.join(", ")}`);
+      if (inspection.authorityPaths.some((path) => !input.provider.scope.includes(path)))
+        throw new Error("npm authority includes a path outside its provider scope");
+      return {
+        authorityDigest: await authorityDigestForPaths(worktree.path, inspection.authorityPaths),
+        authorityPaths: inspection.authorityPaths,
+      };
+    } finally {
+      await cleanupLocalWorktree(worktree);
+    }
+  };
+  const providerAuthority = await inspect(input.provider.integration.commitSha);
+  const currentAuthority =
+    input.provider.integration.commitSha === input.base.oid
+      ? providerAuthority
+      : await inspect(input.base.oid);
+  if (
+    providerAuthority.authorityDigest !== currentAuthority.authorityDigest ||
+    canonical(providerAuthority.authorityPaths) !== canonical(currentAuthority.authorityPaths)
+  )
+    throw new Error("npm authority bytes changed after the declared provider generation");
+  const providerRuntime = exactProviderGenerationRuntime(
+    input.provider,
+    input.requirements[0]!.runtime!,
+  );
+  if (canonical(runtime) !== canonical(providerRuntime.receipt))
+    throw new Error("activated runtime differs from its npm provider generation");
+  const preparationDigest = createHash("sha256")
+    .update(
+      canonical({
+        setup: adapter.setupCommands,
+        network: adapterNetworkDestinations(adapter),
+        environment: npmEnvironment(),
+        entrypoints: component.entrypoints,
+      }),
+    )
+    .digest("hex");
+  return input.requirements.map((requirement) =>
+    capabilityProof(
+      input,
+      requirement,
+      receiptIdentity(runtime),
+      runtime.digest,
+      providerAuthority.authorityDigest,
+      preparationDigest,
+      providerAuthority.authorityPaths,
+    ),
+  );
+}
+
 async function resolveBunIntegratedBase(
   input: IntegratedCapabilityResolutionInput,
 ): Promise<RepositoryCapabilityProof[]> {
@@ -990,7 +1123,7 @@ async function resolveUvIntegratedBase(
 }
 
 async function withProvisionedToolPath(
-  tool: "pnpm" | "bun" | "uv",
+  tool: "npm" | "pnpm" | "bun" | "uv",
   source: NodeJS.ProcessEnv,
   privateRoot: string,
   receipt: RuntimeBundleReceipt,
@@ -1015,7 +1148,32 @@ async function withProvisionedToolPath(
       }
     } else await symlink(target, shim);
   };
-  await ensureShim(tool, primary.executable);
+  const shellLiteral = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+  if (tool !== "npm") await ensureShim(tool, primary.executable);
+  else {
+    const node = primary.component.entrypoints?.find(({ id }) => id === "node");
+    const npm = primary.component.entrypoints?.find(({ id }) => id === "npm");
+    if (!node || !npm || npm.interpreter !== node.id)
+      throw new Error("npm runtime bundle lacks its exact Node/npm entrypoint relationship");
+    await ensureShim("node", join(primary.root, ...node.path.split("/")));
+    const npmLauncher = join(bin, "npm");
+    const launcher = `#!/bin/sh\nexec ${shellLiteral(join(primary.root, ...node.path.split("/")))} ${shellLiteral(join(primary.root, ...npm.path.split("/")))} "$@"\n`;
+    const exists = await access(npmLauncher, fsConstants.F_OK).then(
+      () => true,
+      () => false,
+    );
+    if (exists) {
+      const info = await lstat(npmLauncher);
+      if (
+        !info.isFile() ||
+        (info.mode & 0o111) === 0 ||
+        (await readFile(npmLauncher, "utf8")) !== launcher
+      ) {
+        await unlink(npmLauncher);
+        await writeFile(npmLauncher, launcher, { mode: 0o700, flag: "wx" });
+      }
+    } else await writeFile(npmLauncher, launcher, { mode: 0o700, flag: "wx" });
+  }
   const managedNode = components.find(({ component }) => component.id === "node");
   if (managedNode) await ensureShim("node", managedNode.executable);
   if (tool === "uv") {
@@ -1023,7 +1181,18 @@ async function withProvisionedToolPath(
     if (!python) throw new Error("uv runtime bundle lacks its Python executable");
     await ensureShim("python", python.executable);
   }
-  return { ...source, PATH: `${bin}${delimiter}${source.PATH ?? "/usr/bin:/bin"}` };
+  const sanitized = Object.fromEntries(
+    Object.entries(source).filter(
+      ([key]) =>
+        !/^npm_config_/i.test(key) &&
+        !/^(?:NODE_OPTIONS|NODE_PATH|COREPACK_HOME|COREPACK_DEFAULT_TO_LATEST)$/i.test(key) &&
+        (tool !== "npm" ||
+          !/^(?:NODE_ENV|NODE_EXTRA_CA_CERTS|LD_PRELOAD|LD_AUDIT|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|SSL_CERT_FILE|SSL_CERT_DIR)$/i.test(
+            key,
+          )),
+    ),
+  );
+  return { ...sanitized, PATH: `${bin}${delimiter}${source.PATH ?? "/usr/bin:/bin"}` };
 }
 
 /**
@@ -1034,14 +1203,24 @@ async function withProvisionedToolPath(
  */
 export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] = [
   {
-    id: "node-npm",
+    id: NPM_ADAPTER_ID,
     runner: "npm",
-    provisioning: "host-observed",
-    deferredOperations: false,
-    futurePackageScripts: false,
+    provisioning: "factory-provisioned",
+    deferredOperations: true,
+    futurePackageScripts: true,
     requiredRootPaths: ["package.json", "package-lock.json"],
-    setupCommands: [NPM_VALIDATION_SETUP_COMMAND],
-    networkDestination: PACKAGE_SETUP_REGISTRY,
+    setupCommands: [NPM_NODE_VERSION_COMMAND, NPM_VERSION_COMMAND, NPM_INSTALL_COMMAND],
+    networkDestination: NPM_PACKAGE_REGISTRY,
+    runtimeRequirement: {
+      ...runtimeRequirement("npm", NPM_ADAPTER_ID),
+      adapterContract: NPM_ADAPTER_CONTRACT,
+    },
+    operation: npmCapabilityOperation,
+    resolveIntegratedBase: resolveNpmIntegratedBase,
+    isolatedPlan: npmIsolatedPlan,
+    available: async () => (await toolchainStatus("npm")).state === "ready",
+    prepareEnvironment: (source, privateRoot, receipt) =>
+      withProvisionedToolPath("npm", source, privateRoot, receipt),
   },
   {
     id: "node-pnpm",
@@ -1317,7 +1496,7 @@ export function packageScriptValidationCommand(
 
 export function futurePackageScriptCommand(command: string): PackageScriptValidationCommand | null {
   const parsed = packageScriptValidationCommand(command);
-  return parsed?.adapter.deferredOperations ? parsed : null;
+  return parsed?.adapter.deferredOperations && parsed.adapter.operation?.(command) ? parsed : null;
 }
 
 /** Resolve a finite adapter-owned operation without interpreting shell syntax. */
@@ -1406,18 +1585,27 @@ export function unprovisionedFutureToolchainReason(command: string): string | un
   return `${adapter?.runner ?? runner} has no Factory-provisioned greenfield toolchain adapter; use an observed repository recipe or add an audited adapter before compiling this graph`;
 }
 
-export function validationSetupCommandCount(commands: readonly string[]): number {
+export function validationSetupCommandCount(
+  commands: readonly string[],
+  capabilities?: WorkerPacket["repositoryCapabilities"],
+): number {
+  const managedNpm = [
+    ...(capabilities?.requires ?? []).map(({ adapter }) => adapter),
+    ...(capabilities?.provides ?? []).map(({ adapter }) => adapter),
+  ].includes(NPM_ADAPTER_ID);
   const adapters = new Set(
     commands.flatMap((command) => {
       const managed = futureToolchainCommand(command);
-      if (managed) return [managed.adapter.id];
+      if (managed && (managed.adapter.id !== NPM_ADAPTER_ID || managedNpm))
+        return [managed.adapter.id];
       const packageScript = packageScriptValidationCommand(command);
-      return packageScript ? [packageScript.adapter.id] : [];
+      return packageScript ? [`observed:${packageScript.manager}`] : [];
     }),
   );
   if (adapters.size > 1)
     throw new Error("one validation packet may not mix managed toolchain authorities");
-  const adapter = toolchainAdapterById([...adapters][0] ?? "");
+  const id = [...adapters][0] ?? "";
+  const adapter = toolchainAdapterById(id);
   return adapter?.setupCommands.length ?? 1;
 }
 
@@ -1439,6 +1627,9 @@ export function isolatedManagedToolchainPlan(
   const matching = runtimeRequirements.filter(
     (requirement) => requirement.adapter === adapter.id && requirement.tool === adapter.runner,
   );
+  // Existing repositories may already use host-observed npm. Only the explicit
+  // deferred node-npm capability receives a selected managed runtime.
+  if (adapter.id === NPM_ADAPTER_ID && matching.length === 0) return null;
   if (matching.length !== 1 || !matching[0]!.bundleDigest)
     throw new Error(`${adapter.runner} validation lacks one exact activated runtime`);
   const receipt = runtimeBundleByDigestSync(matching[0]!.tool, matching[0]!.bundleDigest);
@@ -1466,22 +1657,23 @@ export async function localManagedToolchainPlan(
       value.replaceAll("/tmp/factory-toolchain", localToolchainRoot),
     ]),
   );
-  const environment = await adapter.prepareEnvironment(
-    {
-      ...source,
-      ...localizedEnvironment,
-      ...(source.XDG_CONFIG_HOME ? { XDG_CONFIG_HOME: source.XDG_CONFIG_HOME } : {}),
-    },
+  const preparedEnvironment = await adapter.prepareEnvironment(
+    source,
     privateRoot,
     isolated.bundle,
   );
+  const environment = {
+    ...preparedEnvironment,
+    ...localizedEnvironment,
+    PATH: `${preparedEnvironment.PATH?.split(delimiter)[0] ?? join(privateRoot, "factory-tools")}${delimiter}${localizedEnvironment.PATH ?? "/usr/bin:/bin"}`,
+  };
   const componentByAsset = new Map(
     runtimeComponentPaths(toolchainStoreRoot(), isolated.bundle).map((component) => [
       component.component.id,
       component,
     ]),
   );
-  const localExecutable = (id: string) => {
+  const localExecutable = (id: string): { command: string; argsPrefix: string[] } => {
     const executable = isolated.plan.executables.find((candidate) => candidate.id === id);
     if (!executable) throw new Error(`managed toolchain plan has no executable ${id}`);
     if (executable.kind === "generated")
@@ -1491,12 +1683,41 @@ export async function localManagedToolchainPlan(
       };
     const component = executable.assetId ? componentByAsset.get(executable.assetId) : undefined;
     if (!component) throw new Error(`managed executable ${id} has no runtime component`);
-    return executable.kind === "node"
-      ? {
-          command: process.execPath,
-          argsPrefix: [component.executable, ...executable.argsPrefix],
-        }
-      : { command: component.executable, argsPrefix: executable.argsPrefix };
+    if (executable.kind === "node")
+      throw new Error(`managed executable ${id} requests an ambient Node interpreter`);
+    const target = join(component.root, ...executable.relativePath.split("/"));
+    if (executable.kind === "interpreted") {
+      if (!executable.interpreterId)
+        throw new Error(`managed interpreted executable ${id} lacks its interpreter`);
+      const entrypoint = component.component.entrypoints?.find(
+        (candidate) => candidate.id === executable.entrypointId,
+      );
+      if (
+        !entrypoint ||
+        entrypoint.path !== executable.relativePath ||
+        entrypoint.interpreter !== executable.interpreterId
+      )
+        throw new Error(`managed interpreted executable ${id} differs from its receipt`);
+      const interpreter = localExecutable(executable.interpreterId);
+      return {
+        command: interpreter.command,
+        argsPrefix: [...interpreter.argsPrefix, target, ...executable.argsPrefix],
+      };
+    }
+    const entrypoint = component.component.entrypoints?.find(
+      (candidate) => candidate.id === (executable.entrypointId ?? executable.assetId),
+    );
+    if (
+      component.component.entrypoints &&
+      (!entrypoint || entrypoint.path !== executable.relativePath || entrypoint.interpreter)
+    )
+      throw new Error(`managed native executable ${id} differs from its receipt`);
+    if (
+      !component.component.entrypoints &&
+      executable.relativePath !== component.component.executablePath
+    )
+      throw new Error(`managed native executable ${id} differs from its component executable`);
+    return { command: target, argsPrefix: executable.argsPrefix };
   };
   const localArgs = (args: string[]) => {
     const python = isolated.plan.executables.some(({ id }) => id === "python")
@@ -1537,7 +1758,10 @@ export async function managedToolAvailable(
   hostProbe: (tool: string) => Promise<boolean>,
 ): Promise<boolean> {
   const adapter = toolchainAdapterForRunner(tool);
-  if (adapter?.provisioning === "factory-provisioned") return adapter.available?.() ?? false;
+  if (adapter?.provisioning === "factory-provisioned") {
+    if (tool === "npm") return (await adapter.available?.()) || hostProbe(tool);
+    return adapter.available?.() ?? false;
+  }
   return hostProbe(tool);
 }
 
@@ -1555,6 +1779,7 @@ export async function withManagedToolchainPath(
       const matching = runtimeRequirements.filter(
         (requirement) => requirement.adapter === adapter.id && requirement.tool === adapter.runner,
       );
+      if (adapter.id === NPM_ADAPTER_ID && matching.length === 0) continue;
       if (matching.length !== 1 || !matching[0]!.bundleDigest)
         throw new Error(`${adapter.runner} worker lacks its exact managed runtime activation`);
       const receipt = await runtimeBundleByDigest(matching[0]!.tool, matching[0]!.bundleDigest);

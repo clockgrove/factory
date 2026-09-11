@@ -185,7 +185,7 @@ export const RepositoryCapabilityOperationSchema = z
 
 export const RuntimeBundleRequirementSchema = z
   .object({
-    tool: z.enum(["pnpm", "bun", "uv"]),
+    tool: z.enum(["npm", "pnpm", "bun", "uv"]),
     adapter: safeId,
     adapterContract: z.number().int().positive().max(1_000),
     platform: z
@@ -210,7 +210,7 @@ export const SelectedRuntimeBundleRequirementSchema = RuntimeBundleRequirementSc
 export const RuntimeBundleReceiptSchema = z
   .object({
     protocol: z.literal("clockgrove.factory/toolchain-runtime-bundle-v1"),
-    tool: z.enum(["pnpm", "bun", "uv"]),
+    tool: z.enum(["npm", "pnpm", "bun", "uv"]),
     adapter: safeId,
     adapterContract: z.number().int().positive().max(1_000),
     platform: z
@@ -232,6 +232,7 @@ export const RuntimeBundleReceiptSchema = z
               releaseId: boundedText(500),
               tag: boundedText(200),
               publishedAt: z.string().datetime(),
+              channel: boundedText(160).optional(),
             })
             .strict(),
           asset: z
@@ -255,6 +256,23 @@ export const RuntimeBundleReceiptSchema = z
           executableSha256: sha256Digest,
           treeSha256: sha256Digest,
           executableOnly: z.literal(true).optional(),
+          entrypoints: shortList(
+            z
+              .object({
+                id: safeId,
+                version: boundedText(160),
+                path: RepositoryScopePathSchema.refine(
+                  (value) => !value.endsWith("/"),
+                  "runtime entrypoint must be a file path",
+                ),
+                sha256: sha256Digest,
+                interpreter: safeId.optional(),
+              })
+              .strict(),
+            16,
+          )
+            .min(1)
+            .optional(),
         })
         .strict(),
       8,

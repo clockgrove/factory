@@ -720,7 +720,10 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     const bindings = deferred.get(item.id)!;
     if (bindings.provides.length > 0 || bindings.requires.length > 0)
       item.repositoryCapabilities = bindings;
-    const runtimes = managedRuntimeRequirements(item.validationCommands);
+    const runtimes = managedRuntimeRequirements(
+      item.validationCommands,
+      item.repositoryCapabilities,
+    );
     if (runtimes.length > 0) item.managedRuntimes = runtimes;
   }
   for (const item of result.workItems)

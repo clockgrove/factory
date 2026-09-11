@@ -37,18 +37,61 @@ function admitLocalValidation(version = "10.34.5") {
     .mockImplementation(async (_identity, command) => ({
       exitCode: 0,
       signal: null,
-      stdout:
-        command.args?.[0] === "--version"
+      stdout: command.args?.some((arg) => arg.endsWith("/npm-cli.js"))
+        ? "11.6.0\n"
+        : command.args?.[0] === "--version"
           ? version === "0.12.12"
             ? command.command.includes("python")
               ? "Python 3.14.7\n"
               : "uv 0.12.12\n"
-            : `${version}\n`
+            : version === "11.6.0"
+              ? "v24.8.0\n"
+              : `${version}\n`
           : "",
       stderr: "",
       durationMs: 1,
       timedOut: false,
     }));
+}
+
+async function provisionNpmFixture(): Promise<void> {
+  const assets = await mkdtemp(join(tmpdir(), "factory-npm-supervisor-assets-"));
+  const prefix = "node-v24.8.0-linux-x64";
+  const nodePath = `${prefix}/bin/node`;
+  const npmPath = `${prefix}/lib/node_modules/npm/bin/npm-cli.js`;
+  const tree = join(assets, "tree");
+  await mkdir(join(tree, prefix, "bin"), { recursive: true });
+  await mkdir(join(tree, prefix, "lib/node_modules/npm/bin"), { recursive: true });
+  await writeFile(
+    join(tree, nodePath),
+    "#!/bin/sh\ncase \"$1\" in */npm-cli.js) printf '11.6.0\\n' ;; --version) printf 'v24.8.0\\n' ;; esac\n",
+    { mode: 0o700 },
+  );
+  await writeFile(join(tree, npmPath), "fixture npm cli");
+  const archivePath = join(assets, `${prefix}.tar.xz`);
+  execFileSync("tar", ["-cJf", archivePath, "-C", tree, prefix]);
+  const archive = await readFile(archivePath);
+  const identity = {
+    version: "24.8.0",
+    tag: "v24.8.0",
+    publishedAt: "2026-09-10T00:00:00.000Z",
+    name: `${prefix}.tar.xz`,
+    url: `https://nodejs.org/dist/v24.8.0/${prefix}.tar.xz`,
+    sha256: sha256Bytes(archive),
+    archive: "tar.xz" as const,
+    executablePath: nodePath,
+    npmVersion: "11.6.0",
+    lts: "Krypton",
+  };
+  await provisionToolchain("npm", {
+    source: {
+      listReleases: async () => [],
+      downloadAsset: async () => Buffer.alloc(0),
+      resolveLatestNodeDistribution: async () => identity,
+      downloadNodeDistribution: async () => archive,
+    },
+  });
+  await rm(assets, { recursive: true, force: true });
 }
 
 async function provisionBunFixture(): Promise<void> {
@@ -178,6 +221,41 @@ async function installAlternativePnpmReceipt(
 }
 
 describe("Supervisor repository-capability admission", () => {
+  it("runs an npm provider through integration before its exact-base consumer", async () => {
+    await provisionNpmFixture();
+    const fixture = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      localMaxParallel: 2,
+      capabilityAdmission: "valid",
+      capabilityAdapter: "npm",
+    });
+    fixtures.push(fixture);
+    const scoped = admitLocalValidation("11.6.0");
+    try {
+      const result = await fixture.run();
+      expect(result, result.reason).toMatchObject({ status: "completed" });
+      const providerIntegrated = fixture
+        .events()
+        .find(
+          (event) =>
+            event.kind === "attempt" && event.event === "AttemptIntegrated" && event.workItem === 8,
+        );
+      const consumerReserved = fixture
+        .events()
+        .find(
+          (event) =>
+            event.kind === "attempt" && event.event === "AttemptReserved" && event.workItem === 9,
+        );
+      expect(providerIntegrated).toBeDefined();
+      expect(consumerReserved).toBeDefined();
+      expect(consumerReserved!.sequence).toBeGreaterThan(providerIntegrated!.sequence);
+      expect(fixture.events().filter((event) => event.event === "GraphCompiled")).toHaveLength(1);
+      expect(scoped).toHaveBeenCalled();
+    } finally {
+      scoped.mockRestore();
+    }
+  }, 60_000);
+
   it("runs a uv provider through integration before its exact-base consumer", async () => {
     await provisionUvFixture();
     const fixture = await providerSupervisorFixture("daytona-burst", {

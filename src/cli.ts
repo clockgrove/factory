@@ -72,16 +72,16 @@ const USAGE = [
   "  factory priority-fields OWNER/REPO",
   "  factory backends probe",
   "  factory management probe",
-  "  factory toolchains provision pnpm|bun|uv|all",
+  "  factory toolchains provision npm|pnpm|bun|uv|all",
   "  factory toolchains restore RECEIPT.json",
   "  factory toolchains status",
 ].join("\n");
 
-const MANAGED_TOOLCHAINS: readonly ManagedToolchain[] = ["pnpm", "bun", "uv"];
+const MANAGED_TOOLCHAINS: readonly ManagedToolchain[] = ["npm", "pnpm", "bun", "uv"];
 
 function parseManagedToolchain(value: string): ManagedToolchain {
   if (!MANAGED_TOOLCHAINS.includes(value as ManagedToolchain))
-    fail(`unknown managed toolchain ${value}; expected pnpm, bun, uv, or all`);
+    fail(`unknown managed toolchain ${value}; expected npm, pnpm, bun, uv, or all`);
   return value as ManagedToolchain;
 }
 

@@ -4,7 +4,7 @@ import { lstat, opendir, readFile, readlink } from "node:fs/promises";
 import { arch, platform } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 
-export type ManagedToolchain = "pnpm" | "bun" | "uv";
+export type ManagedToolchain = "npm" | "pnpm" | "bun" | "uv";
 export type RuntimeArchiveFormat = "raw" | "tar.gz" | "tar.xz" | "zip";
 
 export interface RuntimePlatform {
@@ -19,6 +19,8 @@ export interface RuntimeReleaseIdentity {
   releaseId: string;
   tag: string;
   publishedAt: string;
+  /** Durable channel evidence supplied by the official release index, when relevant. */
+  channel?: string;
 }
 
 export interface RuntimeAssetIdentity {
@@ -39,6 +41,17 @@ export interface RuntimeComponentReceipt {
   executableSha256: string;
   treeSha256: string;
   executableOnly?: true;
+  /** Additional independently verified entrypoints within this one acquired tree. */
+  entrypoints?: RuntimeEntrypointReceipt[];
+}
+
+export interface RuntimeEntrypointReceipt {
+  id: string;
+  version: string;
+  path: string;
+  sha256: string;
+  /** An interpreted entrypoint is valid only through this verified native entrypoint. */
+  interpreter?: string;
 }
 
 export interface RuntimeBundleReceipt {
@@ -72,14 +85,19 @@ export interface ManagedRuntimeAsset {
   executableSha256: string;
   treeSha256: string;
   executableOnly?: true;
+  entrypoints?: RuntimeEntrypointReceipt[];
 }
 
 export interface ManagedExecutable {
   id: string;
   assetId?: string;
-  kind: "native" | "node" | "generated";
+  kind: "native" | "interpreted" | "node" | "generated";
   relativePath: string;
   argsPrefix: string[];
+  /** Verified asset entrypoint selected by this executable. */
+  entrypointId?: string;
+  /** Managed executable that must interpret an interpreted entrypoint. */
+  interpreterId?: string;
   /** Verified executable whose resolved target a generated symlink must retain. */
   generatedFrom?: string;
 }
@@ -157,6 +175,7 @@ export function assertRuntimeBundleReceipt(receipt: RuntimeBundleReceipt): void 
     new Set(receipt.components.map(({ id }) => id)).size !== receipt.components.length
   )
     throw new Error("managed toolchain receipt has missing or duplicate components");
+  const entrypoints = new Map<string, RuntimeEntrypointReceipt>();
   for (const component of receipt.components) {
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(component.id))
       throw new Error("managed toolchain component identity is invalid");
@@ -170,6 +189,42 @@ export function assertRuntimeBundleReceipt(receipt: RuntimeBundleReceipt): void 
       throw new Error("managed toolchain component size is outside the supported bound");
     if (!safeRelativePath(component.executablePath))
       throw new Error("managed toolchain executable path is unsafe");
+    if (component.entrypoints !== undefined) {
+      if (
+        component.entrypoints.length === 0 ||
+        new Set(component.entrypoints.map(({ id }) => id)).size !== component.entrypoints.length ||
+        new Set(component.entrypoints.map(({ path }) => path)).size !== component.entrypoints.length
+      )
+        throw new Error("managed toolchain entrypoints are missing or duplicate");
+      for (const entrypoint of component.entrypoints) {
+        if (
+          !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(entrypoint.id) ||
+          !safeRelativePath(entrypoint.path) ||
+          !/^[a-f0-9]{64}$/.test(entrypoint.sha256) ||
+          !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(entrypoint.version) ||
+          (entrypoint.interpreter !== undefined &&
+            !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(entrypoint.interpreter))
+        )
+          throw new Error("managed toolchain entrypoint identity is invalid");
+        entrypoints.set(`${component.id}\0${entrypoint.id}`, entrypoint);
+      }
+      const primary = component.entrypoints.filter(
+        ({ interpreter, path, sha256 }) =>
+          interpreter === undefined &&
+          path === component.executablePath &&
+          sha256 === component.executableSha256,
+      );
+      if (primary.length !== 1)
+        throw new Error("managed toolchain primary executable is not an attested entrypoint");
+    }
+  }
+  for (const component of receipt.components) {
+    for (const entrypoint of component.entrypoints ?? []) {
+      if (entrypoint.interpreter === undefined) continue;
+      const interpreter = entrypoints.get(`${component.id}\0${entrypoint.interpreter}`);
+      if (!interpreter || interpreter.interpreter !== undefined)
+        throw new Error("managed toolchain interpreter relation is invalid");
+    }
   }
   const { digest, ...unsigned } = receipt;
   if (digest !== runtimeBundleDigest(unsigned))

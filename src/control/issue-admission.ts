@@ -40,10 +40,18 @@ const evidenceSchema = z
     producerStopped: z.literal(true),
     resourcesReleased: z.literal(true),
     capacityReleased: z.literal(true),
-    accountingSettled: z.literal(true),
+    accountingSettled: z.boolean(),
+    unknownModelUsageRetained: z.literal(true).optional(),
     evidenceOid: gitSha,
   })
-  .strict();
+  .strict()
+  .superRefine((evidence, context) => {
+    if (evidence.accountingSettled === Boolean(evidence.unknownModelUsageRetained))
+      context.addIssue({
+        code: "custom",
+        message: "settlement must either prove accounting or explicitly retain unknown model usage",
+      });
+  });
 const successorSchema = z
   .object({
     objective: positive,

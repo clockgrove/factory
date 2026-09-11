@@ -6165,6 +6165,7 @@ export class FactorySupervisor {
     let terminalModelTokens: number | undefined;
     let terminalModelUsage: ReportedModelUsage | undefined;
     let terminalModelProfile: string | undefined;
+    let retainedUnknownModelInvocationId: string | undefined;
     let noHandleReplacementNotBefore: string | undefined;
     let validationNoHandleReplacementNotBefore: string | undefined;
     const started = Date.now();
@@ -7459,6 +7460,8 @@ export class FactorySupervisor {
       }
       const cancellation =
         error instanceof RunCancellationRequestedError || executionSignal?.aborted;
+      if (error instanceof ProviderQuotaError && !error.usage)
+        retainedUnknownModelInvocationId = error.invocationId;
       if (backendLaunchAttempted && !executionTerminalObserved && !cancellation)
         retainCollectedSource = true;
       if (
@@ -7805,6 +7808,7 @@ export class FactorySupervisor {
           definitiveNonExecution: !backendLaunchAttempted && !recovered,
           modelUsageExpected:
             !recovered?.adoptedSource && (selected?.capabilities.reportsModelUsage ?? false),
+          ...(retainedUnknownModelInvocationId ? { retainedUnknownModelInvocationId } : {}),
           ...(recovered?.adoptedSource
             ? {
                 artifactConsumer: {
@@ -9873,6 +9877,7 @@ export class FactorySupervisor {
       cleanupConfirmed: boolean;
       definitiveNonExecution: boolean;
       modelUsageExpected: boolean;
+      retainedUnknownModelInvocationId?: string;
       artifactConsumer?: {
         sourceRunId: string;
         sourceReservationOid: string;
@@ -9911,6 +9916,9 @@ export class FactorySupervisor {
         writerHolder: lease.holder,
         writerEpoch: lease.epoch,
         definitiveNonExecution: proof.definitiveNonExecution,
+        ...(proof.retainedUnknownModelInvocationId
+          ? { retainedUnknownModelInvocationId: proof.retainedUnknownModelInvocationId }
+          : {}),
         ...(proof.artifactConsumer ? { artifactConsumer: proof.artifactConsumer } : {}),
         producerStopped: true,
         resourcesReleased: true,
@@ -9929,6 +9937,9 @@ export class FactorySupervisor {
         entry,
         events,
         modelUsageExpected: proof.modelUsageExpected,
+        ...(proof.retainedUnknownModelInvocationId
+          ? { retainedUnknownModelInvocationId: proof.retainedUnknownModelInvocationId }
+          : {}),
         authority: snapshot.objectiveAuthority,
         cleanup: {
           reservationOid: reservation.oid,
@@ -16043,6 +16054,9 @@ export class FactorySupervisor {
         cleanupConfirmed: true,
         definitiveNonExecution: false,
         modelUsageExpected: backend.capabilities.reportsModelUsage ?? false,
+        ...(providerGate.accounting === "unknown"
+          ? { retainedUnknownModelInvocationId: providerGate.modelInvocationId }
+          : {}),
       });
       if (await this.#hasUnsettledIssueAdmission(item))
         throw new ProviderQuotaDrainIncompleteError();

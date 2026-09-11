@@ -69,6 +69,80 @@ describe("Supervisor model dispatch journal", () => {
       });
       expect(JSON.stringify(providerEvents)).not.toContain("arbitrary provider diagnostic");
       expect(unresolvedModelInvocations(f.events())).toHaveLength(1);
+      expect(
+        (
+          await new IssueAdmissionLedger(
+            new GitHubControlStore({
+              token: "fixture-only",
+              owner: "fixture",
+              repo: "provider-qualification",
+            }),
+          ).read(8)
+        )?.history.at(-1),
+      ).toMatchObject({
+        disposition: "released",
+        evidence: { accountingSettled: false, unknownModelUsageRetained: true },
+      });
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
+  it("releases a restarted gated admission while preserving unknown model usage", async () => {
+    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      maxAttemptsPerItem: 3,
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        observe: async (handle) => ({
+          ...(await backend.observe(handle)),
+          state: "failed",
+          usage: { inputTokens: null, outputTokens: null, cachedInputTokens: null },
+          providerQuotaGate: gate,
+        }),
+      }),
+    });
+    const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation();
+    if (!write) throw new Error("fixture receipt transport missing");
+    let interruptAttemptFailure = true;
+    vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+      async (node, body) => {
+        const receipts = decodeEventComments(body);
+        if (interruptAttemptFailure && receipts.some((event) => event.event === "AttemptFailed")) {
+          interruptAttemptFailure = false;
+          throw new PlatformUnavailableError(
+            { kind: "server_error", retryAfterMs: 1 },
+            new Error("fixture: controller exited after the unknown provider gate"),
+          );
+        }
+        await write(node, body);
+      },
+    );
+    try {
+      await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+      expect(f.events().some((event) => event.event === "ProviderQuotaBlocked")).toBe(true);
+      expect(await f.run()).toMatchObject({
+        status: "escalated",
+        reason: expect.stringContaining("GitHub Copilot monthly quota exceeded"),
+      });
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+      expect(unresolvedModelInvocations(f.events())).toHaveLength(1);
+      expect(
+        (
+          await new IssueAdmissionLedger(
+            new GitHubControlStore({
+              token: "fixture-only",
+              owner: "fixture",
+              repo: "provider-qualification",
+            }),
+          ).read(8)
+        )?.history.at(-1),
+      ).toMatchObject({
+        disposition: "released",
+        evidence: { accountingSettled: false, unknownModelUsageRetained: true },
+      });
     } finally {
       await f.dispose();
     }

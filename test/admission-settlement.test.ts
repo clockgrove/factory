@@ -64,6 +64,21 @@ function budget(event: string, sequence: number, extra: object = {}) {
     ...extra,
   });
 }
+function unknownProviderGate(modelInvocationId: string, sequence: number) {
+  return parseFactoryEvent({
+    ...common,
+    kind: "provider",
+    event: "ProviderQuotaBlocked",
+    sequence,
+    reasonCode: "provider-quota-exhausted",
+    provider: "fixture-provider",
+    phase: "execution",
+    backend: "codex-sdk-local",
+    modelInvocationId,
+    providerMessage: "fixture provider quota exhausted",
+    accounting: "unknown",
+  });
+}
 const events = [
   attempt("AttemptReserved", 1),
   budget("BudgetReserved", 2),
@@ -135,6 +150,33 @@ describe("admission settlement evidence", () => {
     expect(
       settle([...events, marker, actual], { modelUsageExpected: true }).accountingSettled,
     ).toBe(true);
+  });
+  it("releases resource and capacity ownership while retaining authenticated unknown model usage", () => {
+    const marker = budget("BudgetReserved", 5, {
+      unit: "model_tokens",
+      amount: 0,
+      modelInvocationId: "worker",
+      usageId: "invocation-worker",
+    });
+    const gate = unknownProviderGate("worker", 6);
+    expect(
+      settle([...events, marker, gate], {
+        modelUsageExpected: true,
+        retainedUnknownModelInvocationId: "worker",
+      }),
+    ).toMatchObject({ accountingSettled: false, unknownModelUsageRetained: true });
+    expect(() =>
+      settle([...events, marker], {
+        modelUsageExpected: true,
+        retainedUnknownModelInvocationId: "worker",
+      }),
+    ).toThrow("remains unknown");
+    expect(() =>
+      settle([...events, marker, gate], {
+        modelUsageExpected: true,
+        retainedUnknownModelInvocationId: "other",
+      }),
+    ).toThrow("remains unknown");
   });
   it("requires actual worker usage when the backend reports it", () => {
     expect(() => settle(events, { modelUsageExpected: true })).toThrow("actual worker model usage");

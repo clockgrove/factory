@@ -354,6 +354,45 @@ describe("bounded original checkpoint observation continuation", () => {
         .modelTokens,
     ).toBe(61350);
   });
+  it("accepts a reached v2 witness under its immutable authenticated Objective deadline", () => {
+    const f = fixture();
+    const startedAt = "2026-09-07T05:00:00.000Z";
+    const deadline = "2026-09-07T05:45:00.000Z";
+    const { expiresAt: _legacyExpiry, ...legacyArm } = f.original.sessionArm.arm;
+    const arm = {
+      ...legacyArm,
+      protocol: "clockgrove.factory/app-server-checkpoint-arm-v2",
+      eligibilityDurationMs: 45 * 60_000,
+      holdDurationMs: 10 * 60_000,
+    };
+    const armDigest = hash(JSON.stringify(arm));
+    const legacyWitness = Object.fromEntries(
+      Object.entries(f.witness).filter(([key]) => key !== "expiresAt"),
+    );
+    const witness = {
+      ...legacyWitness,
+      protocol: "clockgrove.factory/app-server-checkpoint-reached-v2",
+      armDigest,
+      startedAt,
+      eligibleUntil: deadline,
+      holdUntil: "2026-09-07T05:12:19.000Z",
+    };
+    const original = {
+      ...f.original,
+      sessionArm: { ...f.original.sessionArm, arm, digest: armDigest },
+      objectiveDeadline: {
+        source: "FactoryRunStarted",
+        runId: f.witness.runId,
+        policyDigest: f.original.sessionArm.arm.policyDigest,
+        startedAt,
+        deadline,
+      },
+    };
+
+    expect(
+      assertContinuationSeed(original, witness, f.pause, original.artifact, f.now),
+    ).toMatchObject({ deadline: Date.parse(deadline), runId: "run-original" });
+  });
   it.each([
     "expired",
     "artifact",

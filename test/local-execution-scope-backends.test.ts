@@ -181,6 +181,7 @@ describe("prepared local execution scope bindings", () => {
       const wrapper = await createSdkContainmentWrapper(
         directory,
         { command: "/must-not-launch", args: [] },
+        input.deadline,
         process.pid,
         { identity, deadline: input.deadline },
       );
@@ -193,6 +194,46 @@ describe("prepared local execution scope bindings", () => {
         code: 1,
         stderr: expect.stringContaining("Factory SDK producer generation changed"),
       });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it("rechecks the deadline after scope observations before starting the executable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-sdk-scope-deadline-"));
+    const marker = join(directory, "started");
+    try {
+      const input = context();
+      input.deadline = new Date(Date.now() + 300);
+      const identity = input.localExecutionScope!.batch.identity;
+      const systemctl = join(directory, "systemctl");
+      const systemdRun = join(directory, "systemd-run");
+      await writeFile(
+        systemctl,
+        `#!${process.execPath}\nAtomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,400);const unit=process.argv[4];console.log(Object.entries({Id:unit,LoadState:'not-found',ActiveState:'inactive',ControlGroup:'',Job:'',InvocationID:'',KillMode:'control-group'}).map(([k,v])=>k+'='+v).join('\\n'));\n`,
+      );
+      await writeFile(
+        systemdRun,
+        `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)},'started');\n`,
+      );
+      await chmod(systemctl, 0o700);
+      await chmod(systemdRun, 0o700);
+      const wrapper = await createSdkContainmentWrapper(
+        directory,
+        { command: "/must-not-launch", args: [] },
+        input.deadline,
+        process.pid,
+        { identity, deadline: input.deadline },
+      );
+      await expect(
+        promisify(execFile)(wrapper, [], {
+          env: { ...process.env, PATH: `${directory}:${process.env.PATH}` },
+          timeout: 3000,
+        }),
+      ).rejects.toMatchObject({
+        code: 1,
+        stderr: expect.stringContaining("Factory SDK model dispatch deadline expired"),
+      });
+      await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

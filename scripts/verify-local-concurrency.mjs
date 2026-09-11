@@ -745,7 +745,6 @@ export async function main(env = process.env, run = checkpointMain) {
         : runConcurrencyLeaseFaultScenario;
     return await run(env, scenario, {
       authority,
-      observationWindowMinutes: authority.policy.objectiveTimeoutMinutes,
       scope:
         authority.scenario === "throughput"
           ? "installed-two-objective-useful-throughput"

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { normalizeArtifact } from "../src/execution/artifacts.js";
+import { DEFAULT_RUN_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
 import {
   assertArtifactTransferProof,
   observeArtifactTransfer,
@@ -74,7 +75,10 @@ function fixture() {
   const authority = {
     repository: "example/disposable",
     namespace: "large-case",
-    policy: { backendOrder: ["codex-app-server/local-worktree"], maxParallel: 1 },
+    policy: {
+      ...DEFAULT_RUN_POLICY,
+      backendOrder: ["codex-app-server/local-worktree"],
+    },
   };
   const identity = {
     repository: authority.repository,
@@ -416,6 +420,34 @@ describe("independent installed externalized artifact transfer proof", () => {
       executionAuthority: false,
     });
     expect(ready.artifact.patch).not.toEqual(ready.patch?.toString());
+  });
+  it("rejects a v2 witness reached exactly at the half-open Objective boundary", () => {
+    const f = fixture();
+    const startedAt = String(
+      f.heldObservation.receipts.find(({ event }) => event.event === "FactoryRunStarted")!.event.at,
+    );
+    const policy = parseRunPolicy(f.authority.policy);
+    const eligibleUntil = new Date(
+      Date.parse(startedAt) + policy.objectiveTimeoutMinutes * 60_000,
+    ).toISOString();
+    const { expiresAt: _expiresAt, ...legacy } = f.witness;
+    const witness = {
+      ...legacy,
+      protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached-v2",
+      startedAt,
+      eligibleUntil,
+      reachedAt: eligibleUntil,
+      holdUntil: new Date(
+        Date.parse(eligibleUntil) + policy.workItemTimeoutMinutes * 60_000,
+      ).toISOString(),
+    };
+
+    expect(() =>
+      assertArtifactTransferProof(f.heldObservation, f.authority, f.held, {
+        phase: "intent",
+        witness,
+      }),
+    ).toThrow();
   });
   it("separates ordinary ready delivery from demonstrated partial-transfer recovery", () => {
     const f = fixture();

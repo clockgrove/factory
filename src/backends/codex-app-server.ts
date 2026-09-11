@@ -13,7 +13,7 @@ import type {
   ExecutionBackendCapabilities,
   StaleAttemptIdentity,
 } from "../execution/backend.js";
-import { localExecutionScopeBatch } from "../execution/backend.js";
+import { localExecutionScopeBatch, remainingBeforeAttemptDeadline } from "../execution/backend.js";
 import {
   APP_SERVER_SESSION_PROTOCOL,
   appServerBoundaryDigest,
@@ -418,9 +418,8 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
   }
 
   async launch(context: AttemptContext): Promise<BackendHandle> {
-    if (Date.now() >= context.deadline.getTime()) {
-      throw new Error("attempt deadline already elapsed");
-    }
+    const deadlineFailure = "attempt deadline elapsed before App Server model dispatch";
+    remainingBeforeAttemptDeadline(context.deadline, deadlineFailure);
     const journal = context.sessionJournal;
     if (!journal)
       throw new Error("durable App Server execution requires the fenced GitHub session journal");
@@ -462,11 +461,15 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     let connection: AppServerConnection | undefined;
     let resourceId: string | undefined;
     try {
+      remainingBeforeAttemptDeadline(context.deadline, deadlineFailure);
       await this.#installAuth(home);
+      remainingBeforeAttemptDeadline(context.deadline, deadlineFailure);
       connection = await this.#connection(home, context.workspace, attemptId, context);
       await journal.assertCurrent();
+      const boundary = await threadBoundary(context);
+      remainingBeforeAttemptDeadline(context.deadline, deadlineFailure);
       const threadResult = await connection.request("thread/start", {
-        ...(await threadBoundary(context)),
+        ...boundary,
         ...((context.modelSelection?.model ?? this.#options.model)
           ? { model: context.modelSelection?.model ?? this.#options.model }
           : {}),
@@ -545,6 +548,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         packet: context.packet,
       });
       await journal.assertCurrent();
+      remainingBeforeAttemptDeadline(context.deadline, deadlineFailure);
       const turnResult = await connection.request("turn/start", {
         threadId,
         input: [
@@ -926,6 +930,12 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
           context.packet.managedRuntimes,
         )
       : isolateCodexEnvironment(process.env, home);
+    if (context) {
+      remainingBeforeAttemptDeadline(
+        context.deadline,
+        "attempt deadline elapsed before App Server process launch",
+      );
+    }
     const connection = await (this.#options.connect?.(home) ??
       startCodexAppServer({
         command: target.command,
@@ -950,6 +960,12 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
           : {}),
       }));
     try {
+      if (context) {
+        remainingBeforeAttemptDeadline(
+          context.deadline,
+          "attempt deadline elapsed before App Server initialization",
+        );
+      }
       const initialization = record(
         await connection.request("initialize", {
           clientInfo: {

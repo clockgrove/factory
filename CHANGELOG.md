@@ -6,6 +6,14 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Added
 
+- Make authenticated Objective and attempt deadlines authoritative across management dispatch,
+  provider creation and installed checkpoint qualification. App Server and artifact-transfer v2
+  arms now separate Objective-bound reach eligibility from the post-proof hold; reached v1 evidence
+  stays readable while unreached v1 arms fail closed. Management invocations retain the explicit
+  Run Policy Work Item timeout as their inner process-stall bound while never exceeding the Objective
+  remainder. Vercel cleanup uses a separate bounded stop-confirmation window and preserves timed-out
+  cleanup as an unresolved provider resource. ([#309](https://github.com/clockgrove/factory/issues/309))
+
 - Opt-in obligation-first compiler judgment and bounded draft repair, with immutable revisions,
   independent full-coverage review, exact accepted projection and per-invocation accounting.
   Report-only runs never dispatch implementation. Read-only compiler evaluation JSON/Markdown

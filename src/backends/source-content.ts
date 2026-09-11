@@ -8,15 +8,27 @@ import { streamCommandFile, streamGitFile } from "../runtime/artifact-patch.js";
 import type { SandboxBootstrapFile } from "./sandbox-common.js";
 
 export const MAX_SOURCE_TRANSFER_BYTES = 256 * 1024 * 1024;
-export async function repositoryArchiveFile(repository: string, baseSha: string) {
-  const lfs = await inspectPinnedLfs(repository, baseSha);
+export async function repositoryArchiveFile(
+  repository: string,
+  baseSha: string,
+  options: { deadline?: Date; signal?: AbortSignal; now?: () => number } = {},
+) {
+  options.signal?.throwIfAborted();
+  const deadlineOptions = {
+    ...(options.deadline ? { deadline: options.deadline } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.now ? { now: options.now } : {}),
+  };
+  const lfs = await inspectPinnedLfs(repository, baseSha, deadlineOptions);
+  options.signal?.throwIfAborted();
   if (lfs.assets.length)
     throw new Error(
       "remote source transport does not support LFS hydration; select a local backend with verified existing LFS objects",
     );
-  const prepared = await materializePinnedCompilationTree(repository, baseSha);
+  const prepared = await materializePinnedCompilationTree(repository, baseSha, deadlineOptions);
   let root: string;
   try {
+    options.signal?.throwIfAborted();
     root = await mkdtemp(join(tmpdir(), "factory-source-content-"));
   } catch (error) {
     await prepared.dispose();
@@ -24,7 +36,8 @@ export async function repositoryArchiveFile(repository: string, baseSha: string)
   }
   try {
     const treePath = join(root, "base-tree");
-    await streamGitFile(prepared.path, ["rev-parse", "HEAD^{tree}"], treePath, 42);
+    await streamGitFile(prepared.path, ["rev-parse", "HEAD^{tree}"], treePath, 42, deadlineOptions);
+    options.signal?.throwIfAborted();
     const baseTreeSha = (await readFile(treePath, "utf8")).trim();
     if (!/^[a-f0-9]{40}$/.test(baseTreeSha)) throw new Error("invalid pinned source tree identity");
     const list = join(root, "paths");
@@ -39,8 +52,11 @@ export async function repositoryArchiveFile(repository: string, baseSha: string)
       prepared.path,
       path,
       MAX_SOURCE_TRANSFER_BYTES,
+      deadlineOptions,
     );
+    options.signal?.throwIfAborted();
     const content = await inspectContentFile(path, MAX_SOURCE_TRANSFER_BYTES);
+    options.signal?.throwIfAborted();
     return {
       path,
       baseSha,

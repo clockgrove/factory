@@ -152,6 +152,9 @@ costs, capacity readings, or timing data that were not durably observed.
 
 The default policy is exported as `DEFAULT_RUN_POLICY`. A complete JSON override looks like:
 
+`workItemTimeoutMinutes` is the maximum duration of one supervised execution attempt or management
+model invocation. Each use is additionally capped by the remaining authenticated Objective time.
+
 ```json
 {
   "backendOrder": ["codex-sdk/local-worktree", "codex-cli/local-worktree"],

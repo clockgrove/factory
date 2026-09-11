@@ -34,7 +34,7 @@ import {
   GitHubManagedAgentBackend,
   resolveManagedAgentActor,
 } from "./backends/github-copilot.js";
-import { DaytonaBackend, DaytonaResourceCleanupError } from "./backends/daytona.js";
+import { DaytonaBackend } from "./backends/daytona.js";
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
 import { validationInvocationOwnership } from "./backends/validation-invocation.js";
 import {
@@ -216,6 +216,7 @@ import {
   type BackendCandidate,
 } from "./execution/registry.js";
 import type { BackendHandle, ExecutionBackend, ExecutionUsage } from "./execution/backend.js";
+import { ProviderResourceCleanupError } from "./execution/backend.js";
 import {
   MAX_ARTIFACT_PATCH_BYTES,
   assertArtifactScope,
@@ -4083,7 +4084,7 @@ export class FactorySupervisor {
       error instanceof SafeArtifactCheckpointHeldError ||
       error instanceof ArtifactCompletionUnavailableError ||
       error instanceof ArtifactCollectionCheckpointError ||
-      error instanceof DaytonaResourceCleanupError ||
+      error instanceof ProviderResourceCleanupError ||
       error instanceof CancellationAccountingPublicationError ||
       (error instanceof Error &&
         /automated replacement is blocked|cannot prove (?:that )?(?:the )?resource absent|may still be (?:active|billable)/i.test(
@@ -4447,6 +4448,10 @@ export class FactorySupervisor {
                   repositoryLfs,
                   allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
                   runPolicy: this.#policy,
+                  invocationTimeoutMs: Math.min(
+                    deadline - Date.now(),
+                    this.#policy.workItemTimeoutMinutes * 60_000,
+                  ),
                   economicEvidence: (items) =>
                     collectCompilationEvidence(items, {
                       objective: snapshot.number,
@@ -4463,15 +4468,18 @@ export class FactorySupervisor {
                 };
                 if (!this.#policy.compilerEvaluation) {
                   const admitCompilation = () =>
-                    this.#externalAdmission(() =>
-                      this.#admitModelInvocation(compilationInvocationId, snapshot.id),
+                    this.#externalAdmission(async () =>
+                      Math.min(
+                        await this.#admitModelInvocation(compilationInvocationId, snapshot.id),
+                        this.#policy.workItemTimeoutMinutes * 60_000,
+                      ),
                     );
                   if (this.#management.supportsCompilerAdmission) {
                     return await this.#management.compile(context, checkpoint, admitCompilation);
                   }
                   // Compatibility for injected legacy backends that cannot place
                   // durable admission at their own final dispatch boundary.
-                  await admitCompilation();
+                  context.invocationTimeoutMs = await admitCompilation();
                   return await this.#management.compile(context, checkpoint);
                 }
                 const inputDigest = compilerEvalDigest(context.objective);
@@ -4519,7 +4527,9 @@ export class FactorySupervisor {
                       inputDigest,
                     },
                     admit: (id) =>
-                      this.#externalAdmission(() => this.#admitModelInvocation(id, snapshot.id)),
+                      this.#externalAdmission(async () => {
+                        await this.#admitModelInvocation(id, snapshot.id);
+                      }),
                     recordUsage: (id, _stage, usage) =>
                       this.#recordManagementUsage(id, usage, snapshot.id, undefined, `draft-${id}`),
                     assertInputs,
@@ -6687,6 +6697,7 @@ export class FactorySupervisor {
           reservation,
           packet,
           artifact,
+          objectiveDeadline,
           !recovered
             ? {
                 modelTokens: terminalModelTokens,
@@ -6793,6 +6804,11 @@ export class FactorySupervisor {
             modelTokens: terminalModelTokens ?? NaN,
             nativeMilliseconds: native?.kind === "budget" ? native.amount : NaN,
             batch: reservation.localScopeBatch,
+            objectiveStartedAt: this.#run.startedAt,
+            objectiveDeadline: new Date(
+              this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+            ),
+            holdDurationMs: this.#policy.workItemTimeoutMinutes * 60_000,
             ...(executionSignal ? { signal: executionSignal } : {}),
             assertCurrent: () => this.#lease.assert(),
             proveTerminal: async () => {
@@ -6908,7 +6924,7 @@ export class FactorySupervisor {
             reservation!,
             artifact,
             packet,
-            new Date(Date.now() + timeoutMs),
+            new Date(Math.min(objectiveDeadline, Date.now() + timeoutMs)),
           );
       await this.#lease.use(async (lease) => {
         executionSignal?.throwIfAborted();
@@ -6925,7 +6941,9 @@ export class FactorySupervisor {
           requestedMemoryMb: validationCapacity!.memoryMb,
           ...(scopedValidation ? { localScopeBatch: scopedValidation.batch } : {}),
         });
-        const validationDeadline = new Date(new Date(capacityEvent.at).getTime() + timeoutMs);
+        const validationDeadline = new Date(
+          Math.min(objectiveDeadline, new Date(capacityEvent.at).getTime() + timeoutMs),
+        );
         if (validationDeadline.getTime() <= Date.now()) {
           throw new Error("validation deadline expired before validator launch");
         }
@@ -7373,7 +7391,7 @@ export class FactorySupervisor {
         }
       }
       await confirmExecutionCleanup("failed-attempt backend cleanup");
-      if (error instanceof DaytonaResourceCleanupError && validationCapacity) {
+      if (error instanceof ProviderResourceCleanupError && validationCapacity) {
         if (!reservation || !validator?.reconcileStale) {
           throw new Error(
             `validation cleanup was not confirmed and no stale-resource reconciler is available; automated replacement is blocked: ${error.message}`,
@@ -8124,7 +8142,7 @@ export class FactorySupervisor {
       // The same durable artifact boundary as fresh execution. Never remove the
       // original materialization on persistence failure, and never generate again.
       try {
-        await this.#persistCollectedArtifact(reservation, prepared.packet, artifact);
+        await this.#persistCollectedArtifact(reservation, prepared.packet, artifact, deadline);
       } catch (error) {
         throw new ArtifactCollectionCheckpointError(error);
       }
@@ -8430,6 +8448,7 @@ export class FactorySupervisor {
     reservation: AttemptReservation,
     packet: WorkerPacket,
     artifact: NormalizedArtifact,
+    objectiveDeadline: number,
     qualification?: {
       modelTokens: number | undefined;
       providerResourceId: string;
@@ -8452,6 +8471,9 @@ export class FactorySupervisor {
                   ? { activationRequestId: this.#run.activationRequestId }
                   : {}),
                 batch: reservation.localScopeBatch,
+                objectiveStartedAt: this.#run.startedAt,
+                objectiveDeadline: new Date(objectiveDeadline),
+                holdDurationMs: this.#policy.workItemTimeoutMinutes * 60_000,
                 ...(qualification.signal ? { signal: qualification.signal } : {}),
                 assertCurrent: () => this.#externalAdmission(async () => {}),
                 proveTerminal: async () => {
@@ -8538,25 +8560,36 @@ export class FactorySupervisor {
   #invokeSemanticReview(
     context: ReviewContext,
     checkpoint: ReviewCheckpoint,
-    admit: () => Promise<void>,
+    admit: () => Promise<number>,
   ): Promise<ReviewResult> {
+    const operationTimeoutMs = this.#policy.workItemTimeoutMinutes * 60_000;
+    context.invocationTimeoutMs = Math.min(
+      context.invocationTimeoutMs ?? operationTimeoutMs,
+      operationTimeoutMs,
+    );
     let dispatched = false;
     let admitted = false;
-    const dispatch = (invoke: () => Promise<ReviewResult>) =>
+    const beforeModelInvocation = () =>
       this.#externalAdmission(async () => {
         if (dispatched) throw new Error("semantic review attempted duplicate dispatch");
         dispatched = true;
-        await admit();
+        const remainingMs = Math.min(await admit(), operationTimeoutMs);
         admitted = true;
-        return invoke();
+        return remainingMs;
       });
     const admittedCheckpoint: ReviewCheckpoint = (result) => {
       if (!admitted) throw new Error("semantic review checkpoint precedes dispatch admission");
       return checkpoint(result);
     };
     return this.#management.reviewWithAdmission
-      ? this.#management.reviewWithAdmission(context, admittedCheckpoint, dispatch)
-      : dispatch(() => this.#management.review(context, admittedCheckpoint));
+      ? this.#management.reviewWithAdmission(context, admittedCheckpoint, beforeModelInvocation)
+      : beforeModelInvocation().then((remainingMs) => {
+          context.invocationTimeoutMs = Math.min(
+            remainingMs,
+            context.invocationTimeoutMs ?? remainingMs,
+          );
+          return this.#management.review(context, admittedCheckpoint);
+        });
   }
 
   async #recoverMissingInitialReview(
@@ -8744,8 +8777,8 @@ export class FactorySupervisor {
     reservation?: AttemptReservation,
     workItem?: number,
     phase: "management" | "execution" = "management",
-  ): Promise<void> {
-    await this.#modelInvocations.admit(() =>
+  ): Promise<number> {
+    return this.#modelInvocations.admit(() =>
       this.#lease.use(async (lease) => {
         const snapshot = await this.#reader.readObjective(this.#run.objective);
         this.#fenceSnapshot(snapshot);
@@ -8755,6 +8788,10 @@ export class FactorySupervisor {
             "operator cancelled before model invocation dispatch",
           );
         }
+        const objectiveDeadline =
+          this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000;
+        if (Date.now() >= objectiveDeadline)
+          throw new Error("Objective deadline exhausted before model invocation dispatch");
         this.#budgetEvents = deduplicateFactoryEvents([
           ...this.#budgetEvents,
           ...this.#accountingEvents(snapshotEvents(snapshot)),
@@ -8818,6 +8855,12 @@ export class FactorySupervisor {
         }
         this.#modelInvocations.claim(key);
         await this.#lease.assertGeneration("admission");
+        const remainingMs = objectiveDeadline - Date.now();
+        if (remainingMs <= 0)
+          throw new Error("Objective deadline exhausted after model invocation admission");
+        return phase === "management"
+          ? Math.min(remainingMs, this.#policy.workItemTimeoutMinutes * 60_000)
+          : remainingMs;
       }),
     );
   }

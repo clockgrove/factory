@@ -206,8 +206,11 @@ evidence files. A successful preflight proves prerequisites, not model execution
 The positive case runs three real serial App Server workers: a deterministic 6 MiB PCM WAV,
 metadata plus executable, then a verification join. Only the first oversized result is held, after
 durable transfer intent and retained bytes but before chunk/ready upload. The private one-shot arm
-binds activation, policy, base and exact controller incarnation, expires within ten minutes, and
-latches the original attempt/session/usage and artifact. Absent an arm, runtime behavior is unchanged.
+binds activation, policy, base and exact controller incarnation. Its eligibility duration equals the
+policy Objective timeout and is anchored by runtime to authenticated `FactoryRunStarted.at`; a
+separate hold equal to the Work Item timeout begins only after the original terminal, accounting,
+retention and producer proof reaches the seam. The reached witness records both clocks and latches
+the original attempt/session/usage and artifact. Absent an arm, runtime behavior is unchanged.
 Resume does not rearm or grant a replacement worker. An expired/uncertain hold is incomplete—not
 permission to upload or rerun. The runner independently verifies intent→ready continuation, actual
 reachable chunk bytes, original session/accounting, exact owned resource absence, all merged patch

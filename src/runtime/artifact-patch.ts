@@ -61,8 +61,9 @@ export async function streamGitFile(
   args: string[],
   destination: string,
   limit = MAX_CONTENT_BYTES,
+  options: { deadline?: Date; signal?: AbortSignal; now?: () => number } = {},
 ): Promise<void> {
-  return streamCommandFile("git", [...safeGit, ...args], repository, destination, limit);
+  return streamCommandFile("git", [...safeGit, ...args], repository, destination, limit, options);
 }
 export async function streamCommandFile(
   command: string,
@@ -70,7 +71,17 @@ export async function streamCommandFile(
   repository: string,
   destination: string,
   limit = MAX_CONTENT_BYTES,
+  options: { deadline?: Date; signal?: AbortSignal; now?: () => number } = {},
 ): Promise<void> {
+  const now = options.now ?? Date.now;
+  const timeoutMs = Math.min(
+    120_000,
+    options.deadline ? options.deadline.getTime() - now() : Number.POSITIVE_INFINITY,
+  );
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("Git content command deadline exhausted");
+  }
+  options.signal?.throwIfAborted();
   const child = spawn(command, args, {
     cwd: repository,
     env: gitEnvironment(),
@@ -86,7 +97,9 @@ export async function streamCommandFile(
       if (child.pid) process.kill(-child.pid, "SIGKILL");
     } catch {}
   };
-  const timer = setTimeout(stop, 120_000);
+  const onAbort = (): void => stop();
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(stop, timeoutMs);
   const completed = new Promise<void>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code) =>
@@ -124,6 +137,7 @@ export async function streamCommandFile(
     throw error;
   } finally {
     clearTimeout(timer);
+    options.signal?.removeEventListener("abort", onAbort);
   }
 }
 

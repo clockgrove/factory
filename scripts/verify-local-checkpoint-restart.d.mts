@@ -8,8 +8,44 @@ export interface CheckpointAuthority {
   policy: Record<string, unknown>;
   sessionRecovery?: true;
 }
-export function checkpointDeadline(startedAt: string, minutes?: number): number;
+export function checkpointDeadline(startedAt: string, minutes: number): number;
+export function checkpointObjectiveDeadline(
+  observation: unknown,
+  authority: CheckpointAuthority,
+):
+  | {
+      source: "FactoryRunStarted";
+      runId: string;
+      policyDigest: string;
+      startedAt: string;
+      deadline: string;
+    }
+  | undefined;
+export function checkpointPoll<T>(options: {
+  phase: string;
+  observe(deadline: number): Promise<T>;
+  accept(observation: T): boolean | Promise<boolean>;
+  deadline(): number;
+  bind?(observation: T): unknown;
+  read?<R>(stage: string, operation: () => R | Promise<R>): Promise<R>;
+  wait?(milliseconds: number): Promise<unknown>;
+  now?(): number;
+  intervalMs?: number;
+}): Promise<T>;
 export function checkpointTimeout(deadline: number, maximumMs: number, now?: number): number;
+export function checkpointScenarioDeadline(
+  evidence: {
+    actions: Array<{ action: string; returnedAt?: string }>;
+    objectiveDeadline?: { deadline: string };
+  },
+  observationWindowMinutes: number,
+): number | undefined;
+export function checkpointBoundedCall<T>(
+  operation: (timeoutMs: number) => T,
+  deadline: number | undefined,
+  maximumMs: number,
+  now?: () => number,
+): T;
 export function checkpointAuthority(
   env: Record<string, string | undefined>,
 ): CheckpointAuthority | null;
@@ -177,7 +213,6 @@ export function continueAppServerCheckpointScenario(
 /** Internal committed adapters only; no operator-supplied module is loaded. */
 export interface CheckpointExtension {
   authority?: CheckpointAuthority;
-  observationWindowMinutes?: number;
   scope?: string;
   harnessPaths?: string[];
   objectiveBody?(authority: CheckpointAuthority): string;

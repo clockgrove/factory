@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 
 import {
   CodexAppServerLocalBackend,
@@ -43,6 +43,7 @@ interface FakeOptions {
   liveProducer?: boolean;
   presentScope?: boolean;
   version?: string;
+  afterThreadStart?: () => void;
 }
 const storedThreads = new Map<string, Record<string, unknown>>();
 
@@ -86,6 +87,7 @@ class FakeConnection implements AppServerConnection {
         turns: [],
       };
       storedThreads.set(thread.id, thread);
+      this.options.afterThreadStart?.();
       return { thread, model: thread.model, approvalPolicy: "never" } as T;
     }
     if (method === "turn/start") {
@@ -349,6 +351,55 @@ describe("Codex App Server local backend", () => {
   it("advertises supported durable local execution without promoting the default route", () => {
     expect(new CodexAppServerLocalBackend().capabilities.supportedOs).toEqual(["linux"]);
     expect(new CodexAppServerLocalBackend().capabilities.supportTier).toBe("supported");
+  });
+
+  it("rechecks the deadline immediately before App Server thread creation", async () => {
+    const root = join(suiteRoot, "deadline-thread");
+    const connections = new Map<string, FakeConnection>();
+    const backend = factory(root, connections);
+    const ctx = await context(90);
+    ctx.deadline = new Date(2_000);
+    ctx.localExecutionScope!.batch = LocalScopeBatchSchema.parse({
+      ...ctx.localExecutionScope!.batch,
+      deadline: ctx.deadline.toISOString(),
+    });
+    let now = 1_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    ctx.sessionJournal!.assertCurrent = async () => {
+      now = 2_000;
+    };
+    try {
+      await expect(backend.launch(ctx)).rejects.toThrow(/deadline elapsed before App Server/);
+      const connection = [...connections.values()][0]!;
+      expect(connection.calls.map(({ method }) => method)).toEqual(["initialize"]);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("rechecks the deadline after thread preparation and before App Server model dispatch", async () => {
+    const root = join(suiteRoot, "deadline-turn");
+    const connections = new Map<string, FakeConnection>();
+    let now = 1_000;
+    const backend = factory(root, connections, {
+      afterThreadStart: () => {
+        now = 2_000;
+      },
+    });
+    const ctx = await context(91);
+    ctx.deadline = new Date(2_000);
+    ctx.localExecutionScope!.batch = LocalScopeBatchSchema.parse({
+      ...ctx.localExecutionScope!.batch,
+      deadline: ctx.deadline.toISOString(),
+    });
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      await expect(backend.launch(ctx)).rejects.toThrow(/deadline elapsed before App Server/);
+      const connection = [...connections.values()][0]!;
+      expect(connection.calls.map(({ method }) => method)).toEqual(["initialize", "thread/start"]);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("performs the negotiated handshake and applies the CLI-equivalent security boundary", async () => {

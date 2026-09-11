@@ -21,7 +21,7 @@ import type {
   ExecutionBackendCapabilities,
   StaleAttemptIdentity,
 } from "../execution/backend.js";
-import { localExecutionScopeBatch } from "../execution/backend.js";
+import { localExecutionScopeBatch, remainingBeforeAttemptDeadline } from "../execution/backend.js";
 import {
   assertLocalScopeLaunch,
   localScopeUnit,
@@ -121,6 +121,7 @@ const supervisorPid = __FACTORY_SUPERVISOR_PID__;
 const command = __FACTORY_CODEX_COMMAND__;
 const prefixArgs = __FACTORY_CODEX_ARGS__;
 const scope = __FACTORY_LOCAL_SCOPE__;
+const deadline = __FACTORY_ATTEMPT_DEADLINE__;
 function unitProperties(unit, allowPendingJob = false) {
   let text;
   try {
@@ -146,8 +147,10 @@ if (scope) {
     const producer = unitProperties(scope.producerUnit);
     if (producer.LoadState !== "loaded" || producer.ActiveState !== "active" || producer.InvocationID !== scope.producerInvocationId || producer.KillMode !== "control-group") throw new Error("Factory SDK producer generation changed");
   }
-  const remaining = Date.parse(scope.deadline) - Date.now();
-  if (!Number.isFinite(remaining) || remaining <= 0) throw new Error("Factory SDK scope launch deadline expired");
+}
+const remaining = Date.parse(deadline) - Date.now();
+if (!Number.isFinite(remaining) || remaining <= 0) throw new Error("Factory SDK model dispatch deadline expired");
+if (scope) {
   const ttl = prefixArgs.findIndex((arg) => arg.startsWith("--property=RuntimeMaxSec="));
   if (ttl < 0) throw new Error("Factory SDK scope runtime bound missing");
   prefixArgs[ttl] = "--property=RuntimeMaxSec=" + Math.floor(remaining) + "ms";
@@ -319,6 +322,7 @@ child.once("exit", (code, signal) => {
 export async function createSdkContainmentWrapper(
   home: string,
   target: CodexCommand,
+  deadline: Date,
   supervisorPid = process.pid,
   preparedScope?: { identity: LocalScopeIdentity; deadline: Date },
 ): Promise<string> {
@@ -346,7 +350,8 @@ export async function createSdkContainmentWrapper(
     .replace("__FACTORY_SUPERVISOR_PID__", String(supervisorPid))
     .replace("__FACTORY_CODEX_COMMAND__", () => JSON.stringify(executable.command))
     .replace("__FACTORY_CODEX_ARGS__", () => JSON.stringify(executable.args))
-    .replace("__FACTORY_LOCAL_SCOPE__", () => JSON.stringify(scope));
+    .replace("__FACTORY_LOCAL_SCOPE__", () => JSON.stringify(scope))
+    .replace("__FACTORY_ATTEMPT_DEADLINE__", () => JSON.stringify(deadline.toISOString()));
   await writeFile(wrapper, source, { mode: 0o700 });
   await chmod(wrapper, 0o700);
   return wrapper;
@@ -545,9 +550,8 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
   async launch(context: AttemptContext): Promise<BackendHandle> {
     this.#assertNoUnverifiedLauncher(context);
     const scope = localExecutionScopeBatch(context);
-    if (Date.now() >= context.deadline.getTime()) {
-      throw new Error("attempt deadline already elapsed");
-    }
+    const deadlineFailure = "attempt deadline elapsed before Codex SDK model dispatch";
+    remainingBeforeAttemptDeadline(context.deadline, deadlineFailure);
     const home = await (this.#options.createCodexHome ?? createIsolatedCodexHome)("worker");
     try {
       const authFile = resolveCodexAuthFile(this.#options.authFile);
@@ -582,6 +586,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
         clientOptions.codexPathOverride = await createSdkContainmentWrapper(
           home,
           command,
+          context.deadline,
           process.pid,
           scope ? { identity: scope.identity, deadline: context.deadline } : undefined,
         );
@@ -594,6 +599,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
           this.#options.localScopePort,
         );
       }
+      remainingBeforeAttemptDeadline(context.deadline, deadlineFailure);
       const client = this.#client(clientOptions);
       const model = context.modelSelection?.model ?? this.#options.model;
       const modelReasoningEffort =
@@ -631,8 +637,8 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
         cancelled: false,
         timedOut: false,
       };
-      this.#running.set(resourceId, running);
       running.terminal = this.#run(thread, running);
+      this.#running.set(resourceId, running);
       return handle;
     } catch (error) {
       await rm(home, { recursive: true, force: true });
@@ -813,8 +819,19 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     return hasAuthFile || hasModelCredential;
   }
 
-  async #run(thread: SdkThread, running: SdkAttempt): Promise<void> {
-    const remaining = Math.max(1, running.context.deadline.getTime() - Date.now());
+  #run(thread: SdkThread, running: SdkAttempt): Promise<void> {
+    const remaining = remainingBeforeAttemptDeadline(
+      running.context.deadline,
+      "attempt deadline elapsed before Codex SDK model dispatch",
+    );
+    return this.#runWithinDeadline(thread, running, remaining);
+  }
+
+  async #runWithinDeadline(
+    thread: SdkThread,
+    running: SdkAttempt,
+    remaining: number,
+  ): Promise<void> {
     let streamViolation: string | undefined;
     let terminalFailure: string | undefined;
     let completionObserved = false;

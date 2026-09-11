@@ -17,6 +17,10 @@ import type {
   StaleAttemptIdentity,
 } from "../execution/backend.js";
 import {
+  ProviderResourceCleanupError,
+  remainingBeforeAttemptDeadline,
+} from "../execution/backend.js";
+import {
   normalizeArtifact,
   assertChangedPathScope,
   materializeArtifactPatch,
@@ -60,7 +64,7 @@ interface AmbiguousDaytonaCreate {
   createFailure: string;
 }
 
-export class DaytonaResourceCleanupError extends Error {
+export class DaytonaResourceCleanupError extends ProviderResourceCleanupError {
   override readonly name = "DaytonaResourceCleanupError";
   readonly resourceId: string;
   readonly resourceName: string;
@@ -162,6 +166,7 @@ const MAX_EXIT_CODE_BYTES = 32;
 const DEFAULT_CREATE_VISIBILITY_ATTEMPTS = 5;
 const DEFAULT_CREATE_VISIBILITY_DELAY_MS = 500;
 const MAX_CREATE_VISIBILITY_WINDOW_MS = 30_000;
+const DEFAULT_DAYTONA_CLEANUP_TIMEOUT_MS = 120_000;
 const MAX_SECRET_LIST_PAGES = 100;
 const DAYTONA_BASE_TOOLS = ["git", "node", "npm", "npx", "bash", "sh", "grep"];
 const DAYTONA_MANAGED_TOOLS: readonly ManagedToolchain[] = ["pnpm", "bun", "uv"];
@@ -266,8 +271,17 @@ export interface DaytonaBackendOptions {
   /** Bounded eventual-visibility seam for ambiguous create responses. */
   createVisibilityAttempts?: number;
   createVisibilityDelayMs?: number;
+  /** Per-read cleanup envelope in milliseconds; defaults to 120 seconds. */
+  cleanupTimeoutMs?: number;
   sleep?: (milliseconds: number) => Promise<void>;
   now?: () => number;
+  deadlineSignal?: (
+    deadline: Date,
+    failure: string,
+  ) => {
+    signal: AbortSignal;
+    dispose: () => void;
+  };
 }
 
 export class DaytonaBackend implements ExecutionBackend {
@@ -303,8 +317,10 @@ export class DaytonaBackend implements ExecutionBackend {
   readonly #credentialAvailable: () => boolean;
   readonly #createVisibilityAttempts: number;
   readonly #createVisibilityDelayMs: number;
+  readonly #cleanupTimeoutMs: number;
   readonly #sleep: (milliseconds: number) => Promise<void>;
   readonly #now: () => number;
+  readonly #deadlineSignal: NonNullable<DaytonaBackendOptions["deadlineSignal"]>;
   readonly #running = new Map<string, RunningDaytona>();
   readonly #resources = new Map<string, TrackedDaytona>();
   readonly #ambiguousCreates = new Map<string, AmbiguousDaytonaCreate>();
@@ -346,10 +362,32 @@ export class DaytonaBackend implements ExecutionBackend {
       options.createVisibilityAttempts ?? DEFAULT_CREATE_VISIBILITY_ATTEMPTS;
     this.#createVisibilityDelayMs =
       options.createVisibilityDelayMs ?? DEFAULT_CREATE_VISIBILITY_DELAY_MS;
+    this.#cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_DAYTONA_CLEANUP_TIMEOUT_MS;
     this.#sleep =
       options.sleep ??
       ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.#now = options.now ?? Date.now;
+    this.#deadlineSignal =
+      options.deadlineSignal ??
+      ((deadline, failure) => {
+        const controller = new AbortController();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const arm = (): void => {
+          const remaining = deadline.getTime() - this.#now();
+          if (!Number.isFinite(remaining) || remaining <= 0) {
+            controller.abort(new Error(failure));
+            return;
+          }
+          timer = setTimeout(arm, Math.min(remaining, 2_147_483_647));
+        };
+        arm();
+        return {
+          signal: controller.signal,
+          dispose: () => {
+            if (timer) clearTimeout(timer);
+          },
+        };
+      });
     if (
       !Number.isInteger(this.#createVisibilityAttempts) ||
       this.#createVisibilityAttempts < 1 ||
@@ -368,6 +406,9 @@ export class DaytonaBackend implements ExecutionBackend {
         "Daytona create visibility delay must be between 0 and 5000 milliseconds with a total window no longer than 30000 milliseconds",
       );
     }
+    if (!Number.isSafeInteger(this.#cleanupTimeoutMs) || this.#cleanupTimeoutMs <= 0) {
+      throw new Error("Daytona cleanup timeout must be a positive safe integer");
+    }
   }
 
   async probe(): Promise<BackendProbe> {
@@ -384,7 +425,11 @@ export class DaytonaBackend implements ExecutionBackend {
       };
     }
     try {
-      await this.#resolveScopedModelSecret(this.#createClient());
+      await this.#resolveScopedModelSecret(
+        this.#createClient(),
+        new Date(this.#now() + this.#cleanupTimeoutMs),
+        `Daytona model Secret probe exceeded its ${this.#cleanupTimeoutMs} ms provider operation bound`,
+      );
     } catch (error) {
       return {
         available: true,
@@ -420,58 +465,85 @@ export class DaytonaBackend implements ExecutionBackend {
   }
 
   async launch(context: AttemptContext): Promise<BackendHandle> {
-    if (this.#now() >= context.deadline.getTime()) {
-      throw new Error("Daytona execution deadline elapsed before sandbox creation");
-    }
-    if (!this.#secretName) throw new Error("Daytona model Secret is not configured");
+    const deadlineFailure = "Daytona execution deadline elapsed before sandbox creation";
+    remainingBeforeAttemptDeadline(context.deadline, deadlineFailure, this.#now);
+    const modelSecretName = this.#secretName;
+    if (!modelSecretName) throw new Error("Daytona model Secret is not configured");
     const domains = explicitDaytonaDomains(
       context.packet.requirements.networkDestinations,
       context.policyNetworkDestinations ?? [],
       "execution",
     );
+    remainingBeforeAttemptDeadline(context.deadline, deadlineFailure, this.#now);
     const daytona = this.#createClient();
-    await this.#resolveScopedModelSecret(daytona);
-    const archive = await repositoryArchiveFile(this.#repository, context.packet.baseSha);
-    const ttlMinutes = Math.max(1, Math.ceil((context.deadline.getTime() - this.#now()) / 60_000));
+    await this.#resolveScopedModelSecret(
+      daytona,
+      context.deadline,
+      "Daytona execution deadline elapsed during model Secret metadata inspection",
+    );
+    remainingBeforeAttemptDeadline(context.deadline, deadlineFailure, this.#now);
+    const archive = await this.#withinDeadline(
+      context.deadline,
+      "Daytona execution deadline elapsed during source archive preparation",
+      (signal) =>
+        repositoryArchiveFile(this.#repository, context.packet.baseSha, {
+          deadline: context.deadline,
+          signal,
+          now: this.#now,
+        }),
+    );
+    let remainingMs: number;
+    try {
+      remainingMs = remainingBeforeAttemptDeadline(context.deadline, deadlineFailure, this.#now);
+    } catch (error) {
+      await archive.dispose();
+      throw error;
+    }
+    const ttlMinutes = Math.ceil(remainingMs / 60_000);
     const resourceName = sandboxResourceName(context);
     let sandbox: Sandbox;
     try {
-      sandbox = await daytona.create(
-        {
-          name: resourceName,
-          image: this.#image,
-          ephemeral: true,
-          autoDeleteInterval: 0,
-          ttlMinutes,
-          domainAllowList: [...new Set(domains)].join(","),
-          labels: {
-            factory: "v2",
-            objective: String(context.objective),
-            workItem: String(context.workItem),
-            attempt: String(context.attempt),
-            run: context.runId.slice(0, 48),
-          },
-          secrets: { [this.#modelCredential]: this.#secretName },
-          envVars: { FACTORY_SUPERVISED: "1" },
-          ...(context.packet.requirements.cpu ||
-          context.packet.requirements.memoryMb ||
-          context.packet.requirements.diskMb
-            ? {
-                resources: {
-                  ...(context.packet.requirements.cpu
-                    ? { cpu: context.packet.requirements.cpu }
-                    : {}),
-                  ...(context.packet.requirements.memoryMb
-                    ? { memory: context.packet.requirements.memoryMb / 1024 }
-                    : {}),
-                  ...(context.packet.requirements.diskMb
-                    ? { disk: context.packet.requirements.diskMb / 1024 }
-                    : {}),
-                },
-              }
-            : {}),
-        },
-        { timeout: 120 },
+      sandbox = await this.#withinDeadline(
+        context.deadline,
+        "Daytona execution deadline elapsed during sandbox creation",
+        () =>
+          daytona.create(
+            {
+              name: resourceName,
+              image: this.#image,
+              ephemeral: true,
+              autoDeleteInterval: 0,
+              ttlMinutes,
+              domainAllowList: [...new Set(domains)].join(","),
+              labels: {
+                factory: "v2",
+                objective: String(context.objective),
+                workItem: String(context.workItem),
+                attempt: String(context.attempt),
+                run: context.runId.slice(0, 48),
+              },
+              secrets: { [this.#modelCredential]: modelSecretName },
+              envVars: { FACTORY_SUPERVISED: "1" },
+              ...(context.packet.requirements.cpu ||
+              context.packet.requirements.memoryMb ||
+              context.packet.requirements.diskMb
+                ? {
+                    resources: {
+                      ...(context.packet.requirements.cpu
+                        ? { cpu: context.packet.requirements.cpu }
+                        : {}),
+                      ...(context.packet.requirements.memoryMb
+                        ? { memory: context.packet.requirements.memoryMb / 1024 }
+                        : {}),
+                      ...(context.packet.requirements.diskMb
+                        ? { disk: context.packet.requirements.diskMb / 1024 }
+                        : {}),
+                    },
+                  }
+                : {}),
+            },
+            { timeout: Math.min(120, remainingMs / 1_000) },
+          ),
       );
     } catch (createFailure) {
       await archive.dispose();
@@ -497,20 +569,43 @@ export class DaytonaBackend implements ExecutionBackend {
     this.#track(running);
     this.#running.set(sandbox.id, running);
     try {
-      await sandbox.fs.createFolder("factory", "700");
-      await sandbox.fs.uploadFiles(
-        sourceContentUploads(
-          sandboxBootstrapFiles(context, Buffer.alloc(0), { managedToolchains: true }),
-          archive,
-        ),
+      remainingBeforeAttemptDeadline(
+        context.deadline,
+        "Daytona execution deadline elapsed after sandbox creation",
+        this.#now,
       );
-      const workdir = await sandbox.getWorkDir();
+      await this.#withinDeadline(
+        context.deadline,
+        "Daytona execution deadline elapsed during sandbox folder setup",
+        () => sandbox.fs.createFolder("factory", "700"),
+      );
+      await this.#withinDeadline(
+        context.deadline,
+        "Daytona execution deadline elapsed during source upload",
+        () =>
+          sandbox.fs.uploadFiles(
+            sourceContentUploads(
+              sandboxBootstrapFiles(context, Buffer.alloc(0), { managedToolchains: true }),
+              archive,
+            ),
+          ),
+      );
+      const workdir = await this.#withinDeadline(
+        context.deadline,
+        "Daytona execution deadline elapsed while resolving the sandbox work directory",
+        () => sandbox.getWorkDir(),
+      );
+      const workerRemainingMs = remainingBeforeAttemptDeadline(
+        context.deadline,
+        "Daytona execution deadline elapsed before worker dispatch",
+        this.#now,
+      );
       void sandbox.process
         .executeCommand(
           "bash factory/run.sh",
           workdir,
           undefined,
-          Math.max(1, Math.ceil((context.deadline.getTime() - Date.now()) / 1000)),
+          Math.ceil(workerRemainingMs / 1000),
         )
         .then(
           (result) => {
@@ -572,32 +667,43 @@ export class DaytonaBackend implements ExecutionBackend {
     const root = await mkdtemp(join(tmpdir(), "factory-daytona-content-"));
     const patchPath = join(root, "artifact.patch");
     try {
-      const details = await Promise.all(
-        REMOTE_ARTIFACT_FILES.map(async (file) => ({
-          file,
-          details: await running.sandbox.fs.getFileDetails(file.path),
-        })),
-      );
-      const expectedSizes = details.map(({ file, details: metadata }) => {
-        if (metadata.isDir) throw new Error(`${file.label} is a directory, not a file`);
-        if (!Number.isSafeInteger(metadata.size) || metadata.size < 0) {
-          throw new Error(`${file.label} has invalid provider size metadata`);
-        }
-        if (metadata.size > file.maxBytes) {
-          throw new Error(`${file.label} is ${metadata.size} bytes; maximum is ${file.maxBytes}`);
-        }
-        return metadata.size;
-      });
-      await this.#downloadRemoteFileToPath(
-        running.sandbox,
-        REMOTE_ARTIFACT_FILES[0],
-        expectedSizes[0]!,
-        patchPath,
-      );
-      const files = await Promise.all(
-        REMOTE_ARTIFACT_FILES.slice(1).map((file, index) =>
-          this.#downloadRemoteFile(running.sandbox, file, expectedSizes[index + 1]!),
-        ),
+      const { expectedSizes, files } = await this.#withinDeadline(
+        running.context.deadline,
+        "Daytona execution artifact collection exceeded the attempt deadline",
+        async (signal) => {
+          const details = await Promise.all(
+            REMOTE_ARTIFACT_FILES.map(async (file) => ({
+              file,
+              details: await running.sandbox.fs.getFileDetails(file.path),
+            })),
+          );
+          signal.throwIfAborted();
+          const expectedSizes = details.map(({ file, details: metadata }) => {
+            if (metadata.isDir) throw new Error(`${file.label} is a directory, not a file`);
+            if (!Number.isSafeInteger(metadata.size) || metadata.size < 0) {
+              throw new Error(`${file.label} has invalid provider size metadata`);
+            }
+            if (metadata.size > file.maxBytes) {
+              throw new Error(
+                `${file.label} is ${metadata.size} bytes; maximum is ${file.maxBytes}`,
+              );
+            }
+            return metadata.size;
+          });
+          await this.#downloadRemoteFileToPath(
+            running.sandbox,
+            REMOTE_ARTIFACT_FILES[0],
+            expectedSizes[0]!,
+            patchPath,
+            signal,
+          );
+          const files = await Promise.all(
+            REMOTE_ARTIFACT_FILES.slice(1).map((file, index) =>
+              this.#downloadRemoteFile(running.sandbox, file, expectedSizes[index + 1]!, signal),
+            ),
+          );
+          return { expectedSizes, files };
+        },
       );
       const [paths, exit, stdout, stderr] = files as [Buffer, Buffer, Buffer, Buffer];
       const exitCode = Number(exit.toString("utf8"));
@@ -639,57 +745,77 @@ export class DaytonaBackend implements ExecutionBackend {
 
   async validate(context: IsolatedValidationContext): Promise<IsolatedValidationResult> {
     const invocationOwner = validationInvocationOwnership(context);
-    if (this.#now() >= context.deadline.getTime()) {
-      throw new Error("Daytona validation deadline elapsed before sandbox creation");
-    }
+    const deadlineFailure = "Daytona validation deadline elapsed before sandbox creation";
+    remainingBeforeAttemptDeadline(context.deadline, deadlineFailure, this.#now);
     const domains = explicitDaytonaDomains(
       context.packet.requirements.networkDestinations,
       context.policyNetworkDestinations ?? [],
       "validation",
     );
-    const archive = await repositoryArchiveFile(this.#repository, context.packet.baseSha);
-    const ttlMinutes = Math.max(1, Math.ceil((context.deadline.getTime() - this.#now()) / 60_000));
+    const archive = await this.#withinDeadline(
+      context.deadline,
+      "Daytona validation deadline elapsed during source archive preparation",
+      (signal) =>
+        repositoryArchiveFile(this.#repository, context.packet.baseSha, {
+          deadline: context.deadline,
+          signal,
+          now: this.#now,
+        }),
+    );
+    let remainingMs: number;
+    try {
+      remainingMs = remainingBeforeAttemptDeadline(context.deadline, deadlineFailure, this.#now);
+    } catch (error) {
+      await archive.dispose();
+      throw error;
+    }
+    const ttlMinutes = Math.ceil(remainingMs / 60_000);
     const daytona = this.#createClient();
     const resourceName = sandboxResourceName(context, "validation");
     let sandbox: Sandbox;
     try {
-      sandbox = await daytona.create(
-        {
-          name: resourceName,
-          image: this.#image,
-          ephemeral: true,
-          autoDeleteInterval: 0,
-          ttlMinutes,
-          domainAllowList: [...new Set(domains)].join(","),
-          labels: {
-            factory: "v2",
-            phase: "validation",
-            ...(invocationOwner ? { invocationOwner } : {}),
-            objective: String(context.objective),
-            workItem: String(context.workItem),
-            attempt: String(context.attempt),
-            run: context.runId.slice(0, 48),
-          },
-          envVars: { FACTORY_SUPERVISED: "1" },
-          ...(context.packet.requirements.cpu ||
-          context.packet.requirements.memoryMb ||
-          context.packet.requirements.diskMb
-            ? {
-                resources: {
-                  ...(context.packet.requirements.cpu
-                    ? { cpu: context.packet.requirements.cpu }
-                    : {}),
-                  ...(context.packet.requirements.memoryMb
-                    ? { memory: context.packet.requirements.memoryMb / 1024 }
-                    : {}),
-                  ...(context.packet.requirements.diskMb
-                    ? { disk: context.packet.requirements.diskMb / 1024 }
-                    : {}),
-                },
-              }
-            : {}),
-        },
-        { timeout: 120 },
+      sandbox = await this.#withinDeadline(
+        context.deadline,
+        "Daytona validation deadline elapsed during sandbox creation",
+        () =>
+          daytona.create(
+            {
+              name: resourceName,
+              image: this.#image,
+              ephemeral: true,
+              autoDeleteInterval: 0,
+              ttlMinutes,
+              domainAllowList: [...new Set(domains)].join(","),
+              labels: {
+                factory: "v2",
+                phase: "validation",
+                ...(invocationOwner ? { invocationOwner } : {}),
+                objective: String(context.objective),
+                workItem: String(context.workItem),
+                attempt: String(context.attempt),
+                run: context.runId.slice(0, 48),
+              },
+              envVars: { FACTORY_SUPERVISED: "1" },
+              ...(context.packet.requirements.cpu ||
+              context.packet.requirements.memoryMb ||
+              context.packet.requirements.diskMb
+                ? {
+                    resources: {
+                      ...(context.packet.requirements.cpu
+                        ? { cpu: context.packet.requirements.cpu }
+                        : {}),
+                      ...(context.packet.requirements.memoryMb
+                        ? { memory: context.packet.requirements.memoryMb / 1024 }
+                        : {}),
+                      ...(context.packet.requirements.diskMb
+                        ? { disk: context.packet.requirements.diskMb / 1024 }
+                        : {}),
+                    },
+                  }
+                : {}),
+            },
+            { timeout: Math.min(120, remainingMs / 1_000) },
+          ),
       );
     } catch (createFailure) {
       await archive.dispose();
@@ -730,28 +856,60 @@ export class DaytonaBackend implements ExecutionBackend {
     let validationFailed = false;
     let patchRoot: string | undefined;
     try {
+      remainingBeforeAttemptDeadline(
+        context.deadline,
+        "Daytona validation deadline elapsed after sandbox creation",
+        this.#now,
+      );
       patchRoot = await mkdtemp(join(tmpdir(), "factory-daytona-validation-content-"));
       const patchPath = join(patchRoot, "artifact.patch");
       await materializeArtifactPatch(context.artifact, patchPath);
-      await sandbox.fs.createFolder("factory", "700");
-      await sandbox.fs.uploadFiles([
-        ...sourceContentUploads(
-          sandboxValidationFiles(context, Buffer.alloc(0), { externalizedPatchUpload: true }),
-          archive,
-        ),
-        { source: patchPath, destination: "factory/artifact.patch" },
-      ]);
-      const workdir = await sandbox.getWorkDir();
-      const command = await sandbox.process.executeCommand(
-        "node factory/validate.mjs",
-        workdir,
-        undefined,
-        Math.max(1, Math.ceil((context.deadline.getTime() - Date.now()) / 1000)),
+      await this.#withinDeadline(
+        context.deadline,
+        "Daytona validation deadline elapsed during sandbox folder setup",
+        () => sandbox.fs.createFolder("factory", "700"),
+      );
+      await this.#withinDeadline(
+        context.deadline,
+        "Daytona validation deadline elapsed during source upload",
+        () =>
+          sandbox.fs.uploadFiles([
+            ...sourceContentUploads(
+              sandboxValidationFiles(context, Buffer.alloc(0), { externalizedPatchUpload: true }),
+              archive,
+            ),
+            { source: patchPath, destination: "factory/artifact.patch" },
+          ]),
+      );
+      const workdir = await this.#withinDeadline(
+        context.deadline,
+        "Daytona validation deadline elapsed while resolving the sandbox work directory",
+        () => sandbox.getWorkDir(),
+      );
+      const validationRemainingMs = remainingBeforeAttemptDeadline(
+        context.deadline,
+        "Daytona validation deadline elapsed before command dispatch",
+        this.#now,
+      );
+      const command = await this.#withinDeadline(
+        context.deadline,
+        "Daytona validation deadline elapsed while awaiting command completion",
+        () =>
+          sandbox.process.executeCommand(
+            "node factory/validate.mjs",
+            workdir,
+            undefined,
+            Math.ceil(validationRemainingMs / 1000),
+          ),
       );
       if (command.exitCode !== 0) {
         let detail: Buffer | null = null;
         try {
-          detail = await this.#downloadBoundedRemoteFile(sandbox, REMOTE_VALIDATION_ERROR);
+          detail = await this.#downloadBoundedRemoteFile(
+            sandbox,
+            REMOTE_VALIDATION_ERROR,
+            context.deadline,
+          );
         } catch (error) {
           if (!isNotFound(error)) throw error;
         }
@@ -764,7 +922,7 @@ export class DaytonaBackend implements ExecutionBackend {
         );
       }
       result = parseIsolatedValidationResult(
-        await this.#downloadBoundedRemoteFile(sandbox, REMOTE_VALIDATION_RESULT),
+        await this.#downloadBoundedRemoteFile(sandbox, REMOTE_VALIDATION_RESULT, context.deadline),
       );
     } catch (error) {
       validationFailed = true;
@@ -883,13 +1041,17 @@ export class DaytonaBackend implements ExecutionBackend {
     sandbox: Sandbox,
     file: RemoteArtifactFile,
     expectedSize: number,
+    signal?: AbortSignal,
   ): Promise<Buffer> {
     const controller = new AbortController();
+    const downloadSignal = signal
+      ? AbortSignal.any([controller.signal, signal])
+      : controller.signal;
     let progressExceeded = false;
     let stream: Readable;
     try {
       stream = await sandbox.fs.downloadFileStream(file.path, {
-        signal: controller.signal,
+        signal: downloadSignal,
         onProgress: ({ bytesReceived }) => {
           if (bytesReceived > file.maxBytes) {
             progressExceeded = true;
@@ -921,6 +1083,9 @@ export class DaytonaBackend implements ExecutionBackend {
         throw new Error(`${file.label} exceeded ${file.maxBytes} bytes while downloading`);
       }
       throw error;
+    } finally {
+      controller.abort();
+      stream.destroy();
     }
     if (received !== expectedSize) {
       throw new Error(
@@ -935,14 +1100,21 @@ export class DaytonaBackend implements ExecutionBackend {
     file: RemoteArtifactFile,
     expectedSize: number,
     destination: string,
+    signal?: AbortSignal,
   ): Promise<void> {
+    signal?.throwIfAborted();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 120_000);
-    const output = await open(destination, "wx", 0o600);
+    const downloadSignal = signal
+      ? AbortSignal.any([controller.signal, signal])
+      : controller.signal;
+    let output: Awaited<ReturnType<typeof open>> | undefined;
     let received = 0;
     try {
+      output = await open(destination, "wx", 0o600);
+      signal?.throwIfAborted();
       const stream = await sandbox.fs.downloadFileStream(file.path, {
-        signal: controller.signal,
+        signal: downloadSignal,
         onProgress: ({ bytesReceived }) => {
           if (bytesReceived > file.maxBytes) controller.abort();
         },
@@ -966,23 +1138,62 @@ export class DaytonaBackend implements ExecutionBackend {
     } finally {
       clearTimeout(timer);
       controller.abort();
-      await output.close();
+      await output?.close();
     }
   }
 
-  async #downloadBoundedRemoteFile(sandbox: Sandbox, file: RemoteArtifactFile): Promise<Buffer> {
-    const metadata = await sandbox.fs.getFileDetails(file.path);
-    if (metadata.isDir) throw new Error(`${file.label} is a directory, not a file`);
-    if (!Number.isSafeInteger(metadata.size) || metadata.size < 0) {
-      throw new Error(`${file.label} has invalid provider size metadata`);
-    }
-    if (metadata.size > file.maxBytes) {
-      throw new Error(`${file.label} is ${metadata.size} bytes; maximum is ${file.maxBytes}`);
-    }
-    return this.#downloadRemoteFile(sandbox, file, metadata.size);
+  async #downloadBoundedRemoteFile(
+    sandbox: Sandbox,
+    file: RemoteArtifactFile,
+    deadline?: Date,
+  ): Promise<Buffer> {
+    const read = async (signal?: AbortSignal): Promise<Buffer> => {
+      const metadata = await sandbox.fs.getFileDetails(file.path);
+      if (metadata.isDir) throw new Error(`${file.label} is a directory, not a file`);
+      if (!Number.isSafeInteger(metadata.size) || metadata.size < 0) {
+        throw new Error(`${file.label} has invalid provider size metadata`);
+      }
+      if (metadata.size > file.maxBytes) {
+        throw new Error(`${file.label} is ${metadata.size} bytes; maximum is ${file.maxBytes}`);
+      }
+      return this.#downloadRemoteFile(sandbox, file, metadata.size, signal);
+    };
+    if (!deadline) return read();
+
+    const failure = `Daytona ${file.label} download exceeded the validation deadline`;
+    return this.#withinDeadline(deadline, failure, read);
   }
 
-  async #resolveScopedModelSecret(daytona: Daytona): Promise<Secret> {
+  async #withinDeadline<T>(
+    deadline: Date,
+    failure: string,
+    operation: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    remainingBeforeAttemptDeadline(deadline, failure, this.#now);
+    const bound = this.#deadlineSignal(deadline, failure);
+    const rejectForDeadline = (): never => {
+      throw bound.signal.reason ?? new Error(failure);
+    };
+    let rejectDeadline!: (reason: unknown) => void;
+    const deadlineElapsed = new Promise<never>((_resolve, reject) => {
+      rejectDeadline = reject;
+    });
+    const onAbort = (): void => rejectDeadline(bound.signal.reason ?? new Error(failure));
+    try {
+      if (bound.signal.aborted) return rejectForDeadline();
+      bound.signal.addEventListener("abort", onAbort, { once: true });
+      return await Promise.race([operation(bound.signal), deadlineElapsed]);
+    } finally {
+      bound.signal.removeEventListener("abort", onAbort);
+      bound.dispose();
+    }
+  }
+
+  async #resolveScopedModelSecret(
+    daytona: Daytona,
+    deadline: Date,
+    deadlineFailure: string,
+  ): Promise<Secret> {
     const configuredName = this.#secretName;
     if (!configuredName) throw new Error("Daytona model Secret is not configured");
 
@@ -992,11 +1203,13 @@ export class DaytonaBackend implements ExecutionBackend {
     let exhausted = false;
     try {
       for (let page = 0; page < MAX_SECRET_LIST_PAGES; page += 1) {
-        const result = await daytona.secret.list({
-          name: configuredName,
-          limit: 200,
-          ...(cursor ? { cursor } : {}),
-        });
+        const inspectPage = () =>
+          daytona.secret.list({
+            name: configuredName,
+            limit: 200,
+            ...(cursor ? { cursor } : {}),
+          });
+        const result = await this.#withinDeadline(deadline, deadlineFailure, inspectPage);
         exactMatches.push(...result.items.filter((secret) => secret.name === configuredName));
         if (exactMatches.length > 1) break;
         if (!result.nextCursor) {
@@ -1118,7 +1331,11 @@ export class DaytonaBackend implements ExecutionBackend {
   ): Promise<Sandbox | null> {
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
-        return await daytona.get(locator);
+        return await this.#withinDeadline(
+          new Date(this.#now() + this.#cleanupTimeoutMs),
+          `Daytona sandbox visibility lookup exceeded its ${this.#cleanupTimeoutMs} ms cleanup operation bound`,
+          () => daytona.get(locator),
+        );
       } catch (error) {
         if (!isNotFound(error)) throw error;
         if (attempt < attempts) {
@@ -1154,7 +1371,12 @@ export class DaytonaBackend implements ExecutionBackend {
     if (pending) return pending;
     const deletion = (async () => {
       try {
-        await resource.sandbox.delete(60, true);
+        await this.#withinDeadline(
+          new Date(this.#now() + this.#cleanupTimeoutMs),
+          `Daytona sandbox deletion exceeded its ${this.#cleanupTimeoutMs} ms cleanup operation bound`,
+          () =>
+            resource.sandbox.delete(Math.min(60, Math.ceil(this.#cleanupTimeoutMs / 1_000)), true),
+        );
       } catch (error) {
         if (isNotFound(error)) {
           this.#forget(resource);

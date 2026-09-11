@@ -684,7 +684,13 @@ describe("Supervisor activation withdrawal races", () => {
     Object.assign(f.management, { supportsCompilerAdmission: true });
     f.compile.mockImplementation(async (context, _checkpoint, beforeModelInvocation) => {
       expect(f.events().filter(isModelInvocationMarker)).toEqual([]);
-      await beforeModelInvocation?.();
+      expect(context.invocationTimeoutMs).toBeGreaterThan(0);
+      expect(context.invocationTimeoutMs).toBeLessThanOrEqual(
+        f.policy.objectiveTimeoutMinutes * 60_000,
+      );
+      const remainingMs = await beforeModelInvocation?.();
+      expect(remainingMs).toBeGreaterThan(0);
+      expect(remainingMs).toBeLessThanOrEqual(context.invocationTimeoutMs!);
       const markers = f.events().filter(isModelInvocationMarker);
       expect(markers).toHaveLength(1);
       const start = f
@@ -726,6 +732,68 @@ describe("Supervisor activation withdrawal races", () => {
     ).toEqual([]);
     expect(f.review).not.toHaveBeenCalled();
     expect(f.activity).toEqual([]);
+    expect(f.events().some((event) => event.event === "GraphCompiled")).toBe(false);
+  });
+
+  it("expires ordinary compilation before admission without writing a dispatch marker", async () => {
+    const f = await fixture(true);
+    Object.assign(f.management, { supportsCompilerAdmission: true });
+    f.compile.mockImplementation(async (_context, _checkpoint, beforeModelInvocation) => {
+      const start = f
+        .events()
+        .find((event) => event.kind === "run" && event.event === "FactoryRunStarted");
+      if (start?.kind !== "run" || start.event !== "FactoryRunStarted")
+        throw new Error("fixture run start unavailable");
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValue(Date.parse(start.at) + f.policy.objectiveTimeoutMinutes * 60_000);
+      try {
+        await beforeModelInvocation?.();
+      } finally {
+        now.mockRestore();
+      }
+      throw new Error("expired compilation dispatched");
+    });
+
+    expect(await f.run()).toMatchObject({
+      status: "escalated",
+      reason: "Objective deadline exhausted before model invocation dispatch",
+    });
+    expect(f.events().filter(isModelInvocationMarker)).toEqual([]);
+    expect(f.events().some((event) => event.event === "GraphCompiled")).toBe(false);
+  });
+
+  it("keeps an admitted compilation unknown when its Objective expires after the marker", async () => {
+    const f = await fixture(true);
+    Object.assign(f.management, { supportsCompilerAdmission: true });
+    const actualNow = Date.now.bind(Date);
+    let forcedNow: number | undefined;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => forcedNow ?? actualNow());
+    vi.mocked(LeaseManager.prototype.assertGeneration).mockImplementation(async (_lease, phase) => {
+      if (phase !== "admission" || !f.events().some(isModelInvocationMarker)) return;
+      const start = f
+        .events()
+        .find((event) => event.kind === "run" && event.event === "FactoryRunStarted");
+      if (start?.kind !== "run" || start.event !== "FactoryRunStarted")
+        throw new Error("fixture run start unavailable");
+      forcedNow = Date.parse(start.at) + f.policy.objectiveTimeoutMinutes * 60_000;
+    });
+    f.compile.mockImplementation(async (_context, _checkpoint, beforeModelInvocation) => {
+      await beforeModelInvocation?.();
+      throw new Error("expired admitted compilation dispatched");
+    });
+    try {
+      expect(await f.run()).toMatchObject({
+        status: "escalated",
+        reason: "Objective deadline exhausted after model invocation admission",
+      });
+    } finally {
+      now.mockRestore();
+      vi.mocked(LeaseManager.prototype.assertGeneration).mockResolvedValue(undefined);
+    }
+    const markers = f.events().filter(isModelInvocationMarker);
+    expect(markers).toHaveLength(1);
+    expect(unresolvedModelInvocations(f.events())).toEqual(markers);
     expect(f.events().some((event) => event.event === "GraphCompiled")).toBe(false);
   });
 

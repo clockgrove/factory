@@ -118,22 +118,47 @@ export function assertContinuationSeed(original, witness, pause, installed, now 
   assert.equal(original.authority.policy.economics.modelTokenBudgetMode, "observed-stop");
   assert.equal(original.authority.policy.objectiveTimeoutMinutes, 45);
   assert.deepEqual(original.authority.policy.allowedPaidBackends, []);
-  const deadline = Date.parse(original.startedAt) + 2700000;
+  assert.ok(
+    [
+      "clockgrove.factory/app-server-checkpoint-reached-v1",
+      "clockgrove.factory/app-server-checkpoint-reached-v2",
+    ].includes(witness.protocol),
+    "unsupported reached checkpoint witness",
+  );
+  const deadline =
+    witness.protocol === "clockgrove.factory/app-server-checkpoint-reached-v2"
+      ? Date.parse(witness.eligibleUntil)
+      : Date.parse(original.startedAt) + 2700000;
   assert.ok(Number.isFinite(deadline) && now < deadline, "original qualification deadline expired");
   const arm = original.sessionArm;
   assert.equal(hash(JSON.stringify(arm.arm)), arm.digest);
   assert.ok(arm.writtenAt);
-  assert.equal(witness.protocol, "clockgrove.factory/app-server-checkpoint-reached-v1");
   assert.equal(witness.armDigest, arm.digest);
-  for (const key of ["repository", "objective", "activationRequestId", "policyDigest", "expiresAt"])
+  for (const key of ["repository", "objective", "activationRequestId", "policyDigest"])
     assert.equal(witness[key], arm.arm[key]);
+  if (witness.protocol === "clockgrove.factory/app-server-checkpoint-reached-v2") {
+    assert.equal(arm.arm.protocol, "clockgrove.factory/app-server-checkpoint-arm-v2");
+    assert.equal(
+      arm.arm.eligibilityDurationMs,
+      original.authority.policy.objectiveTimeoutMinutes * 60_000,
+    );
+    assert.equal(witness.startedAt, original.objectiveDeadline?.startedAt);
+    assert.equal(witness.eligibleUntil, original.objectiveDeadline?.deadline);
+    assert.equal(
+      Date.parse(witness.holdUntil) - Date.parse(witness.reachedAt),
+      arm.arm.holdDurationMs,
+    );
+  } else {
+    assert.equal(witness.expiresAt, arm.arm.expiresAt);
+  }
   assert.equal(witness.baseSha, original.base);
   assert.equal(witness.policyDigest, activation.policyDigest);
   assert.ok(Date.parse(witness.reachedAt) >= Date.parse(arm.writtenAt));
-  assert.ok(
-    Date.parse(witness.reachedAt) < Date.parse(witness.expiresAt),
-    "historical hold was not timely",
-  );
+  const witnessEligibility =
+    witness.protocol === "clockgrove.factory/app-server-checkpoint-reached-v2"
+      ? deadline
+      : Date.parse(witness.expiresAt);
+  assert.ok(Date.parse(witness.reachedAt) < witnessEligibility, "historical hold was not timely");
   assert.equal(pause.event, "RunPauseRequested");
   assert.equal(pause.runId, witness.runId);
   assert.equal(pause.objective, witness.objective);

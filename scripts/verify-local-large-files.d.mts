@@ -38,7 +38,6 @@ export function largeFileTransferArm(
   },
   objective: number,
   baseSha: string,
-  now?: number,
 ): Record<string, unknown>;
 export function transferHoldReady(
   observation: unknown,

@@ -7,6 +7,10 @@ import {
   assertControllerUnit,
   checkpointAuthority,
   checkpointDeadline,
+  checkpointObjectiveDeadline,
+  checkpointPoll,
+  checkpointScenarioDeadline,
+  checkpointBoundedCall,
   checkpointTimeout,
   createCheckpointList,
   checkpointFacts,
@@ -30,30 +34,21 @@ const repository = "example/disposable";
 describe("opt-in original-start observation window", () => {
   const startedAt = "2026-01-01T00:00:00.000Z";
   const start = Date.parse(startedAt);
-  it("retains 45 minutes by default and never rolls a selected deadline forward", () => {
-    expect(checkpointDeadline(startedAt)).toBe(start + 45 * 60000);
+  it("derives the selected window from policy and never rolls it forward", () => {
+    expect(checkpointDeadline(startedAt, 45)).toBe(start + 45 * 60000);
     const deadline = checkpointDeadline(startedAt, 120);
     expect(checkpointTimeout(deadline, 120000, start + 80 * 60000)).toBe(120000);
     expect(checkpointTimeout(deadline, 120000, deadline - 7)).toBe(7);
     expect(() => checkpointTimeout(deadline, 120000, deadline)).toThrow("deadline exhausted");
     expect(checkpointDeadline(startedAt, 120)).toBe(deadline);
-    expect(() => checkpointTimeout(checkpointDeadline(startedAt), 1, start + 45 * 60000)).toThrow(
-      "deadline exhausted",
-    );
+    expect(() =>
+      checkpointTimeout(checkpointDeadline(startedAt, 45), 1, start + 45 * 60000),
+    ).toThrow("deadline exhausted");
   });
-  it.each([44, 121, 45.5, Number.NaN, Number.POSITIVE_INFINITY])(
-    "rejects invalid internal observation window %s before host or lifecycle work",
-    async (minutes) => {
-      await expect(main(env, undefined, { observationWindowMinutes: minutes })).rejects.toThrow(
-        "observation window",
-      );
-    },
+  it.each([0, 30 * 24 * 60 + 1, 45.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects deadline duration %s outside the Run Policy domain",
+    (minutes) => expect(() => checkpointDeadline(startedAt, minutes)).toThrow("policy timeout"),
   );
-  it("rejects an opt-in window inconsistent with the prospective policy", async () => {
-    await expect(main(env, undefined, { observationWindowMinutes: 120 })).rejects.toThrow(
-      "must match prospective Objective policy",
-    );
-  });
   it("uses the same selected deadline across paginated reads after the old 45-minute limit", async () => {
     const deadline = checkpointDeadline(startedAt, 120);
     let now = deadline - 1000;
@@ -71,6 +66,156 @@ describe("opt-in original-start observation window", () => {
       { per_page: 100, page: 1 },
       1000,
     );
+  });
+  it("binds once to the authenticated run start rather than the harness process start", () => {
+    const value = observation();
+    const bound = checkpointObjectiveDeadline(value, authority);
+    expect(bound).toMatchObject({
+      source: "FactoryRunStarted",
+      runId: "original",
+      startedAt: "2026-09-06T10:00:00.000Z",
+      deadline: "2026-09-06T10:45:00.000Z",
+    });
+    value.receipts.find(({ event }) => event.event === "FactoryRunStarted")!.event.policy = {
+      ...authority.policy,
+      objectiveTimeoutMinutes: 46,
+    };
+    expect(() => checkpointObjectiveDeadline(value, authority)).toThrow("policy differs");
+  });
+  it("keeps the bootstrap deadline until the authenticated run start appears", async () => {
+    const pending = observation();
+    pending.receipts = pending.receipts.filter(({ event }) => event.event !== "FactoryRunStarted");
+    const started = observation();
+    const bootstrapDeadline = Date.parse("2026-09-06T10:10:00.000Z");
+    let now = Date.parse("2026-09-06T10:00:00.000Z");
+    let bound: ReturnType<typeof checkpointObjectiveDeadline>;
+    let reads = 0;
+    const selected: number[] = [];
+
+    expect(checkpointObjectiveDeadline(pending, authority)).toBeUndefined();
+    await checkpointPoll({
+      phase: "worker-start",
+      deadline: () => (bound ? Date.parse(bound.deadline) : bootstrapDeadline),
+      now: () => now,
+      intervalMs: 1_000,
+      wait: async (milliseconds) => {
+        now += milliseconds;
+      },
+      observe: async (deadline) => {
+        selected.push(deadline);
+        return reads++ === 0 ? pending : started;
+      },
+      bind: (value) => {
+        const authenticated = checkpointObjectiveDeadline(value, authority);
+        if (authenticated) {
+          if (bound) expect(authenticated).toEqual(bound);
+          else bound = authenticated;
+        }
+      },
+      accept: () => reads >= 3,
+    });
+
+    expect(selected).toEqual([
+      bootstrapDeadline,
+      bootstrapDeadline,
+      Date.parse("2026-09-06T10:45:00.000Z"),
+    ]);
+  });
+  it("rejects conflicting authenticated run starts instead of treating them as pending", () => {
+    const value = observation();
+    const start = value.receipts.find(({ event }) => event.event === "FactoryRunStarted")!;
+    value.receipts.push(structuredClone(start));
+    expect(() => checkpointObjectiveDeadline(value, authority)).toThrow(
+      "at most one authenticated Factory run start permitted",
+    );
+  });
+  it("waits beyond the former four-minute worker-start clock under the Objective deadline", async () => {
+    let now = 0;
+    let reads = 0;
+    const result = await checkpointPoll({
+      phase: "worker-start",
+      deadline: () => 10 * 60_000,
+      now: () => now,
+      intervalMs: 30_000,
+      wait: async (milliseconds) => {
+        now += milliseconds;
+      },
+      observe: async () => ({ receipts: [], elapsed: now }),
+      accept: (value) => (++reads >= 11 ? value.elapsed >= 5 * 60_000 : false),
+    });
+    expect(result.elapsed).toBe(5 * 60_000);
+    expect(reads).toBe(11);
+  });
+  it("fails at the immutable Objective deadline without granting a phase reset", async () => {
+    let now = 0;
+    await expect(
+      checkpointPoll({
+        phase: "worker-start",
+        deadline: () => 120_000,
+        now: () => now,
+        intervalMs: 30_000,
+        wait: async (milliseconds) => {
+          now += milliseconds;
+        },
+        observe: async () => ({ receipts: [] }),
+        accept: () => false,
+      }),
+    ).rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
+    expect(now).toBe(120_000);
+  });
+  it("refuses an observation that finishes after its selected deadline before acceptance", async () => {
+    let now = 0;
+    const accept = vi.fn(() => true);
+
+    await expect(
+      checkpointPoll({
+        phase: "worker-start",
+        deadline: () => 100,
+        now: () => now,
+        observe: async () => {
+          now = 100;
+          return { receipts: [] };
+        },
+        accept,
+      }),
+    ).rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
+    expect(accept).not.toHaveBeenCalled();
+  });
+  it("refuses an observation that binds to an already-expired authenticated deadline", async () => {
+    let deadline = 100;
+    const accept = vi.fn(() => true);
+
+    await expect(
+      checkpointPoll({
+        phase: "worker-start",
+        deadline: () => deadline,
+        now: () => 50,
+        observe: async () => ({ receipts: [] }),
+        bind: () => {
+          deadline = 40;
+        },
+        accept,
+      }),
+    ).rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
+    expect(accept).not.toHaveBeenCalled();
+  });
+  it("refuses a post-poll operator action at the bound deadline before dispatch", () => {
+    const dispatch = vi.fn();
+    const evidence = {
+      actions: [
+        {
+          action: "activate",
+          returnedAt: "2026-09-06T10:00:01.000Z",
+        },
+      ],
+      objectiveDeadline: { deadline: "2026-09-06T10:45:00.000Z" },
+    };
+    const deadline = checkpointScenarioDeadline(evidence, 45);
+
+    expect(() => checkpointBoundedCall(dispatch, deadline, 120_000, () => deadline!)).toThrow(
+      "deadline exhausted",
+    );
+    expect(dispatch).not.toHaveBeenCalled();
   });
 });
 const checkout = "/home/example/disposable";

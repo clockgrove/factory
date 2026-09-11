@@ -54,6 +54,7 @@ import {
   assertAppServerCheckpoint,
   observeAppServerCheckpoints,
 } from "./qualification-app-server-checkpoint.mjs";
+import { boundedQualificationEvidenceText } from "./qualification-evidence-boundary.mjs";
 
 const hash = (value) =>
   createHash("sha256")
@@ -1340,6 +1341,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       "scripts/qualification-receipts.mjs",
       "scripts/qualification-sibling-refresh-proof.mjs",
       "scripts/qualification-reservation-authority.mjs",
+      "scripts/qualification-evidence-boundary.mjs",
       "scripts/qualification-merge-proof.mjs",
       ...(authority.sessionRecovery ? ["scripts/qualification-app-server-checkpoint.mjs"] : []),
       ...(extension.harnessPaths ?? []),
@@ -1393,8 +1395,9 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     0o600,
   );
   const save = () => {
-    const text = JSON.stringify(evidence, null, 2).replaceAll(token, "[REDACTED]");
-    assert.ok(Buffer.byteLength(text) <= 8 * 1024 * 1024);
+    const text = boundedQualificationEvidenceText(evidence, token, {
+      allowLargeFileRefusal: extension.scope === "installed-large-file-qualification",
+    });
     const meta = fstatSync(evidenceFd);
     assert.equal(meta.uid, process.getuid());
     assert.equal(meta.mode & 0o777, 0o600);

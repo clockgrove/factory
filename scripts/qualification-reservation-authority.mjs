@@ -8,6 +8,7 @@ const MAX_HISTORY = 4096;
 const MAX_PARENTS = 16384;
 const marker = "Factory-Issue-Admission: ";
 const eventMarker = "Factory-Event: ";
+const barrierMarker = "Factory-Admission-Barrier: ";
 
 const sha = (value, message = "invalid Git object identity") => assert.match(value, SHA, message);
 const positive = (value, message = "invalid positive identity") =>
@@ -521,6 +522,33 @@ function reservationCommit(commit, oid, reserved) {
   return commit;
 }
 
+function admissionBarrierCommit(commit, oid, logicalRef, compatibilityClaimOid, reserved) {
+  sha(oid);
+  assert.equal(commit?.oid, oid, "admission compatibility barrier OID changed");
+  assert.deepEqual(
+    commit.parentOids,
+    [compatibilityClaimOid],
+    "admission compatibility barrier lost its authenticated claim binding",
+  );
+  const barrier = onlyMarker(commit.message, barrierMarker, "admission compatibility barrier");
+  exactKeys(barrier, ["protocol", "objective", "workItem", "attempt"]);
+  assert.equal(barrier.protocol, "clockgrove.factory/admission-barrier-v1");
+  positive(barrier.objective);
+  positive(barrier.workItem);
+  positive(barrier.attempt);
+  assert.equal(
+    logicalRef,
+    `refs/clockgrove-factory/attempts/objective-${barrier.objective}/work-item-${barrier.workItem}/attempt-${barrier.attempt}`,
+    "admission compatibility barrier binding differs",
+  );
+  assert.deepEqual(
+    [barrier.objective, barrier.workItem, barrier.attempt],
+    [reserved.objective, reserved.workItem, reserved.attempt],
+    "admission compatibility barrier reservation identity differs",
+  );
+  return commit;
+}
+
 export function assertQualificationReservationAuthority(proof, reserved) {
   assert.ok(proof && typeof proof === "object");
   const refs = qualificationReservationRefs(reserved);
@@ -530,7 +558,7 @@ export function assertQualificationReservationAuthority(proof, reserved) {
   exactKeys(proof.authority, ["source", "canonical", "legacy"]);
   const { canonical, legacy } = proof.authority;
   exactKeys(canonical, ["ref", "openingOid", "closingOid"], ["commit"]);
-  exactKeys(legacy, ["ref", "openingOid", "closingOid"]);
+  exactKeys(legacy, ["ref", "openingOid", "closingOid"], ["commit"]);
   assert.equal(canonical.ref, refs.authorityRef);
   assert.equal(legacy.ref, refs.logicalRef);
   assert.equal(canonical.openingOid, canonical.closingOid, "canonical authority moved");
@@ -540,15 +568,22 @@ export function assertQualificationReservationAuthority(proof, reserved) {
     assert.equal(canonical.openingOid, canonical.commit?.oid);
     const parsed = parseLedger(canonical.commit, reserved, refs.authorityRef);
     assert.equal(parsed.entry.reservation.oid, proof.reservationOid);
-    assert.ok(
-      legacy.openingOid === null || legacy.openingOid === proof.reservationOid,
-      "legacy reservation conflicts with canonical authority",
-    );
+    if (legacy.openingOid === null || legacy.openingOid === proof.reservationOid)
+      assert.equal(legacy.commit, undefined, "unexpected legacy authority commit");
+    else
+      admissionBarrierCommit(
+        legacy.commit,
+        legacy.openingOid,
+        refs.logicalRef,
+        parsed.entry.compatibilityClaimOid,
+        reserved,
+      );
   } else {
     assert.equal(proof.authority.source, "legacy-attempt");
     assert.equal(canonical.openingOid, null, "legacy fallback has canonical authority");
     assert.equal(canonical.commit, undefined);
     assert.equal(legacy.openingOid, proof.reservationOid);
+    assert.equal(legacy.commit, undefined, "unexpected legacy authority commit");
   }
   return proof;
 }
@@ -565,8 +600,10 @@ export async function resolveQualificationReservationAuthority(port, reserved) {
     const oid = parsed.entry.reservation.oid;
     const commit = reservationCommit(await port.readCommit(oid), oid, reserved);
     const legacyOpening = await port.readRef(refs.logicalRef);
-    if (legacyOpening !== null)
-      assert.equal(legacyOpening, oid, "legacy reservation conflicts with canonical authority");
+    const legacyCommit =
+      legacyOpening !== null && legacyOpening !== oid
+        ? await port.readCommit(legacyOpening)
+        : undefined;
     const legacyClosing = await port.readRef(refs.logicalRef);
     const canonicalClosing = await port.readRef(refs.authorityRef);
     return assertQualificationReservationAuthority(
@@ -586,6 +623,7 @@ export async function resolveQualificationReservationAuthority(port, reserved) {
             ref: refs.logicalRef,
             openingOid: legacyOpening,
             closingOid: legacyClosing,
+            ...(legacyCommit ? { commit: legacyCommit } : {}),
           },
         },
       },
@@ -631,6 +669,12 @@ export function qualificationReservationAuthorityExpectation(proof, reserved) {
     legacy: {
       ref: checked.authority.legacy.ref,
       oid: checked.authority.legacy.closingOid,
+      kind:
+        checked.authority.legacy.closingOid === null
+          ? "absent"
+          : checked.authority.legacy.closingOid === checked.reservationOid
+            ? "reservation"
+            : "compatibility-barrier",
     },
     reservationOid: checked.reservationOid,
   };
@@ -639,7 +683,7 @@ export function qualificationReservationAuthorityExpectation(proof, reserved) {
 function checkedAuthorityExpectation(expectation) {
   exactKeys(expectation, ["source", "canonical", "legacy", "reservationOid"]);
   exactKeys(expectation.canonical, ["ref", "oid"]);
-  exactKeys(expectation.legacy, ["ref", "oid"]);
+  exactKeys(expectation.legacy, ["ref", "oid", "kind"]);
   assert.ok(["issue-admission", "legacy-attempt"].includes(expectation.source));
   assert.match(
     expectation.canonical.ref,
@@ -653,13 +697,19 @@ function checkedAuthorityExpectation(expectation) {
   for (const oid of [expectation.canonical.oid, expectation.legacy.oid]) if (oid !== null) sha(oid);
   if (expectation.source === "issue-admission") {
     assert.notEqual(expectation.canonical.oid, null, "canonical authority is absent");
-    assert.ok(
-      expectation.legacy.oid === null || expectation.legacy.oid === expectation.reservationOid,
-      "legacy reservation conflicts with canonical authority",
+    assert.equal(
+      expectation.legacy.kind,
+      expectation.legacy.oid === null
+        ? "absent"
+        : expectation.legacy.oid === expectation.reservationOid
+          ? "reservation"
+          : "compatibility-barrier",
+      "legacy authority classification differs",
     );
   } else {
     assert.equal(expectation.canonical.oid, null, "legacy fallback has canonical authority");
     assert.equal(expectation.legacy.oid, expectation.reservationOid);
+    assert.equal(expectation.legacy.kind, "reservation");
   }
   return expectation;
 }

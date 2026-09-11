@@ -11,12 +11,12 @@ import {
   observeQualificationReservationAuthority,
   reobserveQualificationReservationAuthority,
 } from "./qualification-reservation-authority.mjs";
+import {
+  assertQualificationEvidenceValue,
+  largeFileRefusalEvidenceBytes,
+} from "./qualification-evidence-boundary.mjs";
 
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
-// One canonical admission commit may be 8 MiB. Leave an equal bounded envelope
-// for the independently read packet/checkpoint/refusal proof without retaining
-// a second parsed copy of that ledger.
-const MAX_REFUSAL_EVIDENCE = 16 * 1024 * 1024;
 const canonical = (value) =>
   Array.isArray(value)
     ? `[${value.map(canonical).join(",")}]`
@@ -32,20 +32,8 @@ const one = (rows, message) => {
 };
 const gitOid = (kind, bytes) =>
   createHash("sha1").update(`${kind} ${bytes.length}\0`).update(bytes).digest("hex");
-const safe = (value, maximum = 4 * 1024 * 1024) => {
-  const bytes = JSON.stringify(value);
-  assert.ok(
-    bytes !== undefined && Buffer.byteLength(bytes) <= maximum,
-    "refusal evidence exceeds bound",
-  );
-  assert.ok(
-    !/\b(?:gh[opurs]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|authorization\s*:\s*(?:bearer|basic)\s+\S+/i.test(
-      bytes,
-    ),
-    "refusal evidence contains suspected credential material",
-  );
-  return value;
-};
+const safe = (value, maximum = 4 * 1024 * 1024) =>
+  assertQualificationEvidenceValue(value, maximum, "refusal evidence");
 const phases = new Set(["scope", "secret", "symlink"]);
 const identityKeys = [
   "repository",
@@ -449,7 +437,7 @@ export function createLargeFileRefusalPorts(context, fixture) {
     "refusal fixture differs from exact qualification namespace/base",
   );
   const save = async () => {
-    safe(evidence.largeFileRefusal, MAX_REFUSAL_EVIDENCE);
+    largeFileRefusalEvidenceBytes(evidence.largeFileRefusal);
     await context.save();
   };
   return {

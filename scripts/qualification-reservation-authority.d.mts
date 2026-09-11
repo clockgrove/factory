@@ -34,7 +34,11 @@ export function observeQualificationReservationAuthority(
 export interface QualificationReservationAuthorityExpectation {
   source: "issue-admission" | "legacy-attempt";
   canonical: { ref: string; oid: string | null };
-  legacy: { ref: string; oid: string | null };
+  legacy: {
+    ref: string;
+    oid: string | null;
+    kind: "absent" | "reservation" | "compatibility-barrier";
+  };
   reservationOid: string;
 }
 export interface QualificationReservationAuthorityReobservation {

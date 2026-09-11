@@ -14,7 +14,7 @@ const digest = (value: string) => createHash("sha256").update(value).digest("hex
 const encoded = (marker: string, value: unknown) =>
   `${marker}: ${Buffer.from(JSON.stringify(value)).toString("base64url")}`;
 
-function fixture({ canonical = true, legacy = false } = {}) {
+function fixture({ canonical = true, legacy = false, barrier = false } = {}) {
   const baseSha = sha("base");
   const reserved = {
     protocol: "clockgrove.factory/v2",
@@ -99,10 +99,26 @@ function fixture({ canonical = true, legacy = false } = {}) {
   };
   const refs = new Map<string, string>();
   if (canonical) refs.set(authorityRef, ledgerOid);
-  if (legacy) refs.set(logicalRef, reservationOid);
+  const barrierOid = sha("barrier");
+  const barrierCommit = {
+    oid: barrierOid,
+    treeOid: sha("tree"),
+    parentOids: [entry.compatibilityClaimOid],
+    message: `Factory permanently sealed historical attempt namespace\n\n${encoded(
+      "Factory-Admission-Barrier",
+      {
+        protocol: "clockgrove.factory/admission-barrier-v1",
+        objective: reserved.objective,
+        workItem: reserved.workItem,
+        attempt: reserved.attempt,
+      },
+    )}`,
+  };
+  if (legacy) refs.set(logicalRef, barrier ? barrierOid : reservationOid);
   const commits = new Map([
     [reservationOid, reservationCommit],
     [ledgerOid, ledgerCommit],
+    [barrierOid, barrierCommit],
   ]);
   const port = {
     readRef: vi.fn(async (ref: string) => refs.get(ref) ?? null),
@@ -122,6 +138,8 @@ function fixture({ canonical = true, legacy = false } = {}) {
     record,
     ledgerOid,
     ledgerCommit,
+    barrierOid,
+    barrierCommit,
     refs,
     commits,
     port,
@@ -151,6 +169,46 @@ describe("qualification reservation authority", () => {
       expect(proof.authority.canonical).not.toHaveProperty("record");
     },
   );
+
+  it("accepts only an authenticated compatibility barrier beside canonical authority", async () => {
+    const f = fixture({ canonical: true, legacy: true, barrier: true });
+    const proof = await resolveQualificationReservationAuthority(f.port, f.reserved);
+    expect(proof.authority.legacy).toMatchObject({
+      openingOid: f.barrierOid,
+      closingOid: f.barrierOid,
+      commit: f.barrierCommit,
+    });
+    expect(qualificationReservationAuthorityExpectation(proof, f.reserved).legacy).toEqual({
+      ref: f.logicalRef,
+      oid: f.barrierOid,
+      kind: "compatibility-barrier",
+    });
+    const expectation = qualificationReservationAuthorityExpectation(proof, f.reserved);
+    f.refs.set(f.logicalRef, sha("replacement-barrier"));
+    await expect(revalidateQualificationReservationAuthority(f.port, expectation)).rejects.toThrow(
+      /changed/,
+    );
+
+    for (const fault of ["parent", "protocol", "binding", "unknown-field"]) {
+      const broken = fixture({ canonical: true, legacy: true, barrier: true });
+      if (fault === "parent") broken.barrierCommit.parentOids = [sha("foreign-claim")];
+      const value = {
+        protocol:
+          fault === "protocol"
+            ? "clockgrove.factory/admission-barrier-v2"
+            : "clockgrove.factory/admission-barrier-v1",
+        objective: broken.reserved.objective,
+        workItem: broken.reserved.workItem,
+        attempt: fault === "binding" ? 2 : broken.reserved.attempt,
+        ...(fault === "unknown-field" ? { authority: "forged" } : {}),
+      };
+      if (fault !== "parent")
+        broken.barrierCommit.message = encoded("Factory-Admission-Barrier", value);
+      await expect(
+        resolveQualificationReservationAuthority(broken.port, broken.reserved),
+      ).rejects.toThrow();
+    }
+  });
 
   it.each([
     "conflicting-dual",

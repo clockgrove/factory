@@ -1146,7 +1146,8 @@ export function assertControllerUnit(body, expected) {
       line,
       /^Environment="(?:PATH=\/[A-Za-z0-9_./:-]+|FACTORY_CODEX_PATH=\/[A-Za-z0-9_./-]+)"$/,
     );
-  const rendered = `# Managed by Clockgrove Factory v2\n[Unit]\nDescription=Clockgrove Factory repository controller for ${expected.repository}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${expected.checkout}\n${environments.map((line) => `${line}\n`).join("")}ExecStart="${expected.node}" "${expected.bundle}" controller run "${expected.repository}" --repo "${expected.checkout}"\nRestart=on-failure\nRestartPreventExitStatus=2 130\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
+  assert.match(expected.identity, /^[a-f0-9]{64}$/);
+  const rendered = `# Managed by Clockgrove Factory v2\n[Unit]\nDescription=Clockgrove Factory repository controller for ${expected.repository}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${expected.checkout}\n${environments.map((line) => `${line}\n`).join("")}# FactoryExecutableIdentity=sha256:${expected.identity}\nExecStart="${expected.node}" "${expected.bundle}" controller run "${expected.repository}" --repo "${expected.checkout}" --executable-identity "sha256:${expected.identity}"\nRestart=on-failure\nRestartPreventExitStatus=2 65 70 72 78 130 203\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
   assert.equal(body, rendered, "controller config differs from exact installed identity");
   return hash(body);
 }
@@ -1414,6 +1415,9 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     ...authority,
     node: realpathSync(process.execPath),
     bundle: realpathSync(join(pluginRoot, "dist/factory.js")),
+    identity: createHash("sha256")
+      .update(readFileSync(join(pluginRoot, "dist/factory.js")))
+      .digest("hex"),
   };
   const unitPath = join(home, ".config/systemd/user", authority.unit);
   let controllerBoundary;

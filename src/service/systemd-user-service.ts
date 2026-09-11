@@ -4,6 +4,12 @@ import { constants as fsConstants } from "node:fs";
 import { access, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
+import {
+  CONTROLLER_FATAL_EXIT_STATUS,
+  controllerExecutableIdentity,
+  controllerFatalAction,
+  type ControllerFatalDiagnosticCode,
+} from "../controller/failure.js";
 
 const execFileAsync = promisify(execFile);
 const FACTORY_UNIT_MARKER = "# Managed by Clockgrove Factory v2";
@@ -29,6 +35,17 @@ export interface SystemdStatus {
   enabled: boolean;
   active: boolean;
   launcherCurrent: boolean;
+  executableIdentity: string | null;
+  currentExecutableIdentity: string | null;
+  restartCount: number | null;
+  fuseState: "armed" | "tripped" | "unavailable";
+  lastSafeDiagnosticCode:
+    | ControllerFatalDiagnosticCode
+    | "controller-process-signal"
+    | "controller-process-failure"
+    | null;
+  serviceResult: string | null;
+  mainExitStatus: number | null;
   healthy: boolean;
   reasonCode:
     | "controller-not-installed"
@@ -36,6 +53,7 @@ export interface SystemdStatus {
     | "controller-launcher-stale"
     | "controller-disabled"
     | "controller-inactive"
+    | ControllerFatalDiagnosticCode
     | null;
   action: string | null;
   unit: string;
@@ -95,17 +113,27 @@ export class SystemdUserService {
   async install(input: SystemdServiceInput): Promise<SystemdStatus> {
     validateInput(input);
     const path = this.unitPath(input);
-    const body = this.#unit(input, await this.#discoverCommandEnvironment());
-    await mkdir(dirname(path), { recursive: true });
     let old: string | undefined;
     try {
       old = await readFile(path, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    if (old !== undefined && old !== body && !old.startsWith(FACTORY_UNIT_MARKER)) {
+    if (old !== undefined && !old.startsWith(FACTORY_UNIT_MARKER)) {
       throw new Error(`refusing to overwrite unmanaged unit ${path}`);
     }
+    const [environment, executableIdentity, commandAvailable] = await Promise.all([
+      this.#discoverCommandEnvironment(),
+      controllerExecutableIdentity(this.#artifactPath()),
+      this.#commandAvailable(),
+    ]);
+    if (!executableIdentity || !commandAvailable) {
+      throw new Error(
+        "controller-launcher-failure: the exact Factory launch command is unavailable; restore it before installing the controller",
+      );
+    }
+    const body = this.#unit(input, environment, executableIdentity);
+    await mkdir(dirname(path), { recursive: true });
     if (old !== body) {
       const temporary = `${path}.tmp-${process.pid}`;
       await writeFile(temporary, body, { mode: 0o600 });
@@ -170,46 +198,102 @@ export class SystemdUserService {
     // Query systemd even after the file is removed: its manager may still
     // have a loaded or enabled unit, which uninstall must never conceal.
     const enabled = await this.#is(["is-enabled", "--quiet", this.unitName(input)]);
-    const active = await this.#is(["is-active", "--quiet", this.unitName(input)]);
+    const activeProbe = await this.#is(["is-active", "--quiet", this.unitName(input)]);
     const managed = body?.startsWith(FACTORY_UNIT_MARKER) ?? false;
+    const executableIdentity = installedExecutableIdentity(body);
+    const currentExecutableIdentity = await controllerExecutableIdentity(this.#artifactPath());
     const launcherCurrent = Boolean(
       managed &&
-        body?.split("\n").includes(this.#execStart(input)) &&
+        body?.split("\n").includes(this.#execStart(input, executableIdentity)) &&
+        executableIdentity &&
+        executableIdentity === currentExecutableIdentity &&
         (await this.#commandAvailable()),
     );
+    const runtime = await this.#runtimeState(input);
+    const active = runtime.active ?? activeProbe;
+    const fatalCode =
+      !active && runtime.mainExitStatus !== null
+        ? fatalCodeForExitStatus(runtime.mainExitStatus)
+        : null;
+    const lastSafeDiagnosticCode = fatalCode
+      ? fatalCode
+      : runtime.result === "signal" || runtime.result === "core-dump"
+        ? "controller-process-signal"
+        : runtime.result === "exit-code" && runtime.mainExitStatus !== null
+          ? "controller-process-failure"
+          : null;
     const reasonCode = !installed
       ? "controller-not-installed"
       : !managed
         ? "controller-unit-unmanaged"
         : !launcherCurrent
           ? "controller-launcher-stale"
-          : !enabled
-            ? "controller-disabled"
-            : !active
-              ? "controller-inactive"
-              : null;
+          : fatalCode
+            ? fatalCode
+            : !enabled
+              ? "controller-disabled"
+              : !active
+                ? "controller-inactive"
+                : null;
     const action =
       reasonCode === "controller-not-installed"
         ? "install the repository controller"
         : reasonCode === "controller-unit-unmanaged"
           ? "resolve the unmanaged unit conflict before installing Factory"
           : reasonCode === "controller-launcher-stale"
-            ? "run the idempotent controller install operation to refresh the launcher"
+            ? "run the idempotent controller install operation to refresh the launcher, then explicitly restart it"
             : reasonCode === "controller-disabled"
               ? "run the idempotent controller install operation to enable the unit"
-              : reasonCode === "controller-inactive"
-                ? "start the repository controller"
-                : null;
+              : fatalCode
+                ? controllerFatalAction(fatalCode)
+                : reasonCode === "controller-inactive"
+                  ? "start the repository controller"
+                  : null;
     return {
       installed,
       enabled,
       active,
       launcherCurrent,
+      executableIdentity,
+      currentExecutableIdentity,
+      restartCount: runtime.restartCount,
+      fuseState: !installed || !managed ? "unavailable" : fatalCode ? "tripped" : "armed",
+      lastSafeDiagnosticCode,
+      serviceResult: runtime.result,
+      mainExitStatus: runtime.mainExitStatus,
       healthy: reasonCode === null,
       reasonCode,
       action,
       unit: this.unitName(input),
     };
+  }
+  async #runtimeState(input: SystemdServiceInput): Promise<{
+    active: boolean | null;
+    result: string | null;
+    mainExitStatus: number | null;
+    restartCount: number | null;
+  }> {
+    try {
+      const output = await this.#run([
+        "show",
+        this.unitName(input),
+        "--property=ActiveState,Result,ExecMainStatus,NRestarts",
+        "--no-pager",
+      ]);
+      const stdout = (output as { stdout?: unknown } | null)?.stdout;
+      if (typeof stdout !== "string" && !Buffer.isBuffer(stdout))
+        return { active: null, result: null, mainExitStatus: null, restartCount: null };
+      const fields = parseSystemdProperties(stdout.toString());
+      return {
+        active:
+          fields.ActiveState === "active" ? true : fields.ActiveState === undefined ? null : false,
+        result: fields.Result || null,
+        mainExitStatus: nonNegativeInteger(fields.ExecMainStatus),
+        restartCount: nonNegativeInteger(fields.NRestarts),
+      };
+    } catch {
+      return { active: null, result: null, mainExitStatus: null, restartCount: null };
+    }
   }
   async #is(args: readonly string[]): Promise<boolean> {
     try {
@@ -282,13 +366,23 @@ export class SystemdUserService {
     if (configured && codex) assignments.push(`FACTORY_CODEX_PATH=${codex}`);
     return assignments.map((assignment) => `Environment=${systemdQuote(assignment)}\n`);
   }
-  #unit(input: SystemdServiceInput, environment: string[]): string {
+  #unit(
+    input: SystemdServiceInput,
+    environment: string[],
+    executableIdentity: string | null,
+  ): string {
     const checkout = resolve(input.checkout);
-    return `${FACTORY_UNIT_MARKER}\n[Unit]\nDescription=Clockgrove Factory repository controller for ${escapeDescription(input.repository)}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${systemdDirectivePath(checkout)}\n${environment.join("")}${this.#execStart(input)}\nRestart=on-failure\nRestartPreventExitStatus=2 130\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
+    const identity = executableIdentity
+      ? `# FactoryExecutableIdentity=${executableIdentity}\n`
+      : "";
+    return `${FACTORY_UNIT_MARKER}\n[Unit]\nDescription=Clockgrove Factory repository controller for ${escapeDescription(input.repository)}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${systemdDirectivePath(checkout)}\n${environment.join("")}${identity}${this.#execStart(input, executableIdentity)}\nRestart=on-failure\nRestartPreventExitStatus=2 65 70 72 78 130 203\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
   }
-  #execStart(input: SystemdServiceInput): string {
+  #execStart(input: SystemdServiceInput, executableIdentity?: string | null): string {
     const command = this.#command.map(systemdQuote).join(" ");
-    return `ExecStart=${command} controller run ${systemdQuote(input.repository)} --repo ${systemdQuote(resolve(input.checkout))}`;
+    const identity = executableIdentity
+      ? ` --executable-identity ${systemdQuote(executableIdentity)}`
+      : "";
+    return `ExecStart=${command} controller run ${systemdQuote(input.repository)} --repo ${systemdQuote(resolve(input.checkout))}${identity}`;
   }
   async #commandAvailable(): Promise<boolean> {
     for (const [index, part] of this.#command.entries()) {
@@ -302,6 +396,36 @@ export class SystemdUserService {
     }
     return true;
   }
+  #artifactPath(): string {
+    return [...this.#command].reverse().find((part) => isAbsolute(part)) ?? this.#command[0];
+  }
+}
+
+function installedExecutableIdentity(body: string | undefined): string | null {
+  const match = body?.match(/^# FactoryExecutableIdentity=(sha256:[a-f0-9]{64})$/m);
+  return match?.[1] ?? null;
+}
+
+function fatalCodeForExitStatus(status: number): ControllerFatalDiagnosticCode | null {
+  for (const [code, exitStatus] of Object.entries(CONTROLLER_FATAL_EXIT_STATUS)) {
+    if (exitStatus === status) return code as ControllerFatalDiagnosticCode;
+  }
+  return null;
+}
+
+function parseSystemdProperties(stdout: string): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const line of stdout.trim().split("\n")) {
+    const separator = line.indexOf("=");
+    if (separator > 0) fields[line.slice(0, separator)] = line.slice(separator + 1);
+  }
+  return fields;
+}
+
+function nonNegativeInteger(value: string | undefined): number | null {
+  if (!/^\d+$/.test(value ?? "")) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 function unsafeEnvironmentValue(value: string): boolean {

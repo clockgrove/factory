@@ -37,6 +37,15 @@ import {
 import { adoptRecoveryActivation, type RecoveryRepositoryOwnership } from "./recovery.js";
 import { ControllerGenerationRetirement } from "./retirement.js";
 import { LeaseAcquisitionContendedError, LeaseLostError } from "../control/lease.js";
+import {
+  ControllerFatalError,
+  isDurableStateCompatibilityError,
+  type ControllerFatalDiagnosticCode,
+} from "./failure.js";
+import {
+  observeGitHubTransportPhase,
+  type GitHubTransportObservation,
+} from "../control/mutation-observation.js";
 
 export interface DiscoveredObjective {
   number: number;
@@ -164,6 +173,7 @@ export interface GitHubRepositoryControllerOptions {
   /** Discovery-election retirement. Stops new dispatch but not active Objectives. */
   discoverySignal?: AbortSignal;
   onError?: (error: unknown, objective: number) => void;
+  onFirstDiscoveryRequestAccounting?: (observation: GitHubTransportObservation) => void;
   resources?: RepositorySupervisorResources;
 }
 
@@ -181,6 +191,7 @@ export class GitHubRepositoryController {
   readonly #executionSignal: AbortSignal;
   #platformFailure: PlatformUnavailableError | undefined;
   #fatalFailure: unknown;
+  #firstDiscovery = true;
 
   constructor(options: GitHubRepositoryControllerOptions) {
     this.#options = options;
@@ -201,7 +212,28 @@ export class GitHubRepositoryController {
 
   async reconcileOnce(): Promise<number> {
     if (this.#discoverySignal.aborted) return 0;
-    const discovered = [...(await this.#options.store.discoverObjectiveActivations())]
+    let activations: DurableObjectiveActivation[];
+    try {
+      const firstDiscovery = this.#firstDiscovery;
+      this.#firstDiscovery = false;
+      activations =
+        firstDiscovery && this.#options.onFirstDiscoveryRequestAccounting
+          ? await observeGitHubTransportPhase(
+              "activation-discovery",
+              this.#options.onFirstDiscoveryRequestAccounting,
+              () => this.#options.store.discoverObjectiveActivations(),
+            )
+          : await this.#options.store.discoverObjectiveActivations();
+    } catch (error) {
+      if (platformFailure(error)) throw error;
+      throw fatalControllerFailure(
+        isDurableStateCompatibilityError(error)
+          ? "controller-durable-state-incompatible"
+          : "controller-discovery-failure",
+        error,
+      );
+    }
+    const discovered = [...activations]
       .filter(
         (item, index, all) =>
           all.findIndex((other) => other.objective === item.objective) === index,
@@ -328,6 +360,8 @@ export interface RunRepositoryControllerOptions {
   pollIntervalMs?: number;
   signal?: AbortSignal;
   onStatus?: (message: string) => void;
+  /** Process-local cold-start request counts; never durable quota authority. */
+  onColdStartRequestAccounting?: (observation: GitHubTransportObservation) => void;
   /** Current repository-controller lease identity for durable observations. */
   controllerObservation?: () => ControllerObservation | undefined;
   /** Historical election identity for recovery diagnostics, not mutation authority. */
@@ -383,6 +417,12 @@ export function createGitHubRepositoryController(
     ...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.discoverySignal === undefined ? {} : { discoverySignal: options.discoverySignal }),
+    ...(options.onColdStartRequestAccounting || options.onStatus
+      ? {
+          onFirstDiscoveryRequestAccounting: (observation: GitHubTransportObservation) =>
+            reportColdStartAccounting(options, observation),
+        }
+      : {}),
     onError: (error, objective) =>
       options.onStatus?.(
         `Objective #${objective} reconciliation failed: ${controllerFailureDiagnostic(error)}`,
@@ -439,7 +479,11 @@ export function createGitHubRepositoryController(
 export async function runGitHubRepositoryController(
   options: RunRepositoryControllerOptions,
 ): Promise<void> {
-  await verifyLocalRepository(options.repository, options.owner, options.repo);
+  try {
+    await verifyLocalRepository(options.repository, options.owner, options.repo);
+  } catch (error) {
+    throw fatalControllerFailure("controller-local-configuration", error);
+  }
   const policy = parseControllerPolicy({
     ...DEFAULT_CONTROLLER_POLICY,
     ...(options.capacity === undefined ? {} : { maxActiveObjectives: options.capacity }),
@@ -481,6 +525,9 @@ export async function runGitHubRepositoryController(
             ],
             ...(options.signal ? { signal: options.signal } : {}),
             ...(options.onStatus ? { onStatus: options.onStatus } : {}),
+            ...(options.onColdStartRequestAccounting
+              ? { onColdStartRequestAccounting: options.onColdStartRequestAccounting }
+              : {}),
           },
           async ({ store, signal, executionSignal, observation, recoveryOwnership }) =>
             createGitHubRepositoryController({
@@ -521,11 +568,11 @@ export async function runGitHubRepositoryController(
         }
         if (!unavailable) {
           if (error instanceof ControllerGenerationRetirement) throw error;
+          if (error instanceof ControllerFatalError) throw error;
           // Octokit errors can embed request headers and raw response bodies.
-          // Keep fatal errors fatal without letting Node print those secrets.
-          throw new Error(
-            `Factory repository controller stopped after a non-retryable failure (${controllerFailureDiagnostic(error)})`,
-          );
+          // Retain the cause internally while the process boundary emits only
+          // the fixed code, safe identity and keyed failure fingerprint.
+          throw fatalControllerFailure("controller-internal-invariant", error);
         }
         const delayMs = Math.max(unavailable.retryAfterMs, resources.circuitBreaker.waitMs());
         options.onStatus?.(
@@ -680,6 +727,7 @@ interface RepositoryOwnershipOptions {
   configureCapacity: readonly ("maxLocalParallel" | "maxCloudParallel")[];
   signal?: AbortSignal;
   onStatus?: (message: string) => void;
+  onColdStartRequestAccounting?: (observation: GitHubTransportObservation) => void;
 }
 
 interface RepositoryOwnership {
@@ -712,27 +760,41 @@ async function withRepositoryOwnership<T>(
     ...(options.onStatus ? { onThrottle: options.onStatus } : {}),
   });
   options.signal?.throwIfAborted();
-  const facts = await store.getRepositoryFacts();
+  const facts = await coldStartPhase(options, "repository-facts", () => store.getRepositoryFacts());
   options.signal?.throwIfAborted();
-  const base = await store.getBranchHead(facts.defaultBranch);
+  const base = await coldStartPhase(options, "default-branch-head", () =>
+    store.getBranchHead(facts.defaultBranch),
+  );
   options.signal?.throwIfAborted();
   const leases = new RepositoryLeaseManager({ store });
-  let lease = await leases.acquire(
-    {
-      controllerId: options.controllerId ?? randomUUID(),
-      policyDigest: controllerPolicyDigest(options.policy),
-    },
-    base,
+  let lease = await coldStartPhase(
+    options,
+    "repository-lease-acquisition",
+    () =>
+      leases.acquire(
+        {
+          controllerId: options.controllerId ?? randomUUID(),
+          policyDigest: controllerPolicyDigest(options.policy),
+        },
+        base,
+      ),
+    "controller-durable-state-incompatible",
   );
   try {
-    await attachSharedCapacity(options, options.policy, options.resources, {
-      store,
-      leases,
-      lease,
-      base,
-      sharedPaidCeiling: options.sharedPaidCeiling,
-      configureCapacity: options.configureCapacity,
-    });
+    await coldStartPhase(
+      options,
+      "shared-capacity",
+      () =>
+        attachSharedCapacity(options, options.policy, options.resources, {
+          store,
+          leases,
+          lease,
+          base,
+          sharedPaidCeiling: options.sharedPaidCeiling,
+          configureCapacity: options.configureCapacity,
+        }),
+      "controller-durable-state-incompatible",
+    );
   } catch (error) {
     // Failed migration never authorizes a Supervisor or discards source claims.
     await leases.release(lease).catch(() => undefined);
@@ -845,6 +907,40 @@ async function withRepositoryOwnership<T>(
   return result as T;
 }
 
+async function coldStartPhase<T>(
+  options: RepositoryOwnershipOptions,
+  phase: string,
+  operation: () => Promise<T>,
+  code: Exclude<
+    ControllerFatalDiagnosticCode,
+    "controller-launcher-failure"
+  > = "controller-discovery-failure",
+): Promise<T> {
+  try {
+    return await observeGitHubTransportPhase(
+      phase,
+      (observation) => reportColdStartAccounting(options, observation),
+      operation,
+    );
+  } catch (error) {
+    if (platformFailure(error) || error instanceof ControllerFatalError) throw error;
+    throw fatalControllerFailure(
+      isDurableStateCompatibilityError(error) ? "controller-durable-state-incompatible" : code,
+      error,
+    );
+  }
+}
+
+function reportColdStartAccounting(
+  options: Pick<RunRepositoryControllerOptions, "onColdStartRequestAccounting" | "onStatus">,
+  observation: GitHubTransportObservation,
+): void {
+  options.onColdStartRequestAccounting?.(observation);
+  options.onStatus?.(
+    `controller cold-start phase=${observation.phase} outcome=${observation.outcome} requests=${observation.readRequests + observation.mutationRequests + observation.unclassifiedRequests} reads=${observation.readRequests} mutations=${observation.mutationRequests} unclassified=${observation.unclassifiedRequests}`,
+  );
+}
+
 function platformFailure(error: unknown): PlatformUnavailableError | undefined {
   if (error instanceof PlatformUnavailableError) return error;
   const refusal = classifyRefusal(error);
@@ -881,6 +977,14 @@ function controllerFailureDiagnostic(error: unknown): string {
   )
     return "recovery-activation-identity-mismatch";
   return "controller-invariant-failure";
+}
+
+function fatalControllerFailure(
+  code: Exclude<ControllerFatalDiagnosticCode, "controller-launcher-failure">,
+  error: unknown,
+): ControllerFatalError {
+  if (error instanceof ControllerFatalError) return error;
+  return new ControllerFatalError(code, controllerFailureDiagnostic(error), error);
 }
 
 /** Cleanup must not erase the failure that selected this teardown. */

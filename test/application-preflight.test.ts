@@ -326,6 +326,39 @@ describe("read-only checkout preflight", () => {
       status: "warning",
       summary: expect.stringContaining("controller-launcher-stale"),
     });
+    const fusedController = await report({
+      ...healthyChecks(),
+      controller: {
+        status: async () => ({
+          installed: true,
+          enabled: true,
+          active: false,
+          launcherCurrent: true,
+          healthy: false,
+          executableIdentity: `sha256:${"a".repeat(64)}`,
+          currentExecutableIdentity: `sha256:${"a".repeat(64)}`,
+          restartCount: 400,
+          fuseState: "tripped",
+          lastSafeDiagnosticCode: "controller-discovery-failure",
+          serviceResult: "exit-code",
+          mainExitStatus: 72,
+          reasonCode: "controller-discovery-failure",
+          action: "correct discovery state, then explicitly restart",
+        }),
+      } as unknown as NonNullable<DoctorChecks["controller"]>,
+    });
+    expect(fusedController.diagnostics.find((entry) => entry.area === "controller")).toMatchObject({
+      status: "warning",
+      summary: expect.stringContaining(
+        "controller-discovery-failure); correct discovery state, then explicitly restart",
+      ),
+      details: expect.objectContaining({
+        executableIdentity: `sha256:${"a".repeat(64)}`,
+        restartCount: 400,
+        fuseState: "tripped",
+        lastSafeDiagnosticCode: "controller-discovery-failure",
+      }),
+    });
     for (const resourceProbe of [
       async () => ({}),
       async () => ({ ...((await healthyChecks().resourceProbe!()) as object), effectiveCpu: 0.5 }),

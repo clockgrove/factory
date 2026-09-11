@@ -28,7 +28,14 @@ import { assessRecovery } from "./recovery/assessment.js";
 import { recoveryReadPort } from "./recovery/github-read-port.js";
 import { RecoveryRequestService } from "./recovery/requests.js";
 import { CodexCliManagementBackend } from "./management/codex-cli.js";
-import { runForegroundObjective, runGitHubRepositoryController } from "./controller/index.js";
+import {
+  ControllerFatalError,
+  controllerExecutableIdentity,
+  controllerFatalDiagnostic,
+  runForegroundObjective,
+  runGitHubRepositoryController,
+} from "./controller/index.js";
+import { ControllerGenerationRetirement } from "./controller/retirement.js";
 import { SystemdControllerLifecycle, SystemdUserService } from "./service/index.js";
 import { GitHubStacks, type GitHubStackTransport } from "./publication/github-stacks.js";
 import { readCompilerCausalAnnotationsFile } from "./application/compiler-eval.js";
@@ -485,22 +492,88 @@ async function runRepositoryController(args: string[]): Promise<void> {
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
-    await runGitHubRepositoryController({
-      token: resolveGitHubToken(),
-      owner: repository.owner,
-      repo: repository.repo,
-      repository: checkout,
-      capacity: maxActiveObjectives,
-      maxLocalWorkers,
-      maxPaidWorkers,
-      pollIntervalMs: pollIntervalSeconds * 1_000,
-      signal: controller.signal,
-      onStatus: (message) => process.stderr.write(`[factory-controller] ${message}\n`),
-    });
+    const executableIdentity = await controllerExecutableIdentity(fileURLToPath(import.meta.url));
+    const expectedExecutableIdentity = option(args, "--executable-identity");
+    if (!executableIdentity) {
+      emitControllerFatalFailure(
+        new ControllerFatalError(
+          "controller-launcher-failure",
+          "controller-artifact-identity-unavailable",
+          new Error("controller artifact identity unavailable"),
+        ),
+        "sha256:unavailable",
+      );
+      return;
+    }
+    if (expectedExecutableIdentity && expectedExecutableIdentity !== executableIdentity) {
+      emitControllerFatalFailure(
+        new ControllerFatalError(
+          "controller-launcher-failure",
+          "controller-artifact-identity-mismatch",
+          new Error("installed controller artifact identity mismatch"),
+        ),
+        executableIdentity,
+      );
+      return;
+    }
+    let token: string;
+    try {
+      token = resolveGitHubToken();
+    } catch (error) {
+      emitControllerFatalFailure(
+        new ControllerFatalError(
+          "controller-local-configuration",
+          "github-credential-unavailable",
+          error,
+        ),
+        executableIdentity,
+      );
+      return;
+    }
+    try {
+      await runGitHubRepositoryController({
+        token,
+        owner: repository.owner,
+        repo: repository.repo,
+        repository: checkout,
+        capacity: maxActiveObjectives,
+        maxLocalWorkers,
+        maxPaidWorkers,
+        pollIntervalMs: pollIntervalSeconds * 1_000,
+        signal: controller.signal,
+        onStatus: (message) => process.stderr.write(`[factory-controller] ${message}\n`),
+      });
+    } catch (error) {
+      if (error instanceof ControllerGenerationRetirement) {
+        process.stderr.write(
+          `[factory-controller] retryable code=controller-generation-retirement executableIdentity=${executableIdentity}; systemd will reconstruct the acknowledged generation\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      emitControllerFatalFailure(
+        error instanceof ControllerFatalError
+          ? error
+          : new ControllerFatalError(
+              "controller-internal-invariant",
+              "controller-invariant-failure",
+              error,
+            ),
+        executableIdentity,
+      );
+    }
   } finally {
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
   }
+}
+
+function emitControllerFatalFailure(error: ControllerFatalError, executableIdentity: string): void {
+  const diagnostic = controllerFatalDiagnostic(error, executableIdentity);
+  process.stderr.write(
+    `[factory-controller] fatal code=${diagnostic.code} identity=${diagnostic.safeIdentity} fingerprint=${diagnostic.failureFingerprint} executableIdentity=${diagnostic.executableIdentity}; ${diagnostic.action}\n`,
+  );
+  process.exitCode = diagnostic.exitStatus;
 }
 
 async function probeBackends(): Promise<void> {

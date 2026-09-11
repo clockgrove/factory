@@ -145,6 +145,45 @@ describe("npm deferred toolchain authority", () => {
     expect(await findNestedNpmRoots(root, ["packages/api"])).toEqual([]);
   });
 
+  it("layers root binaries beneath nearer workspace providers", async () => {
+    const root = await fixture({ workspace: true });
+    const memberPath = join(root, "packages/api/package.json");
+    const member = JSON.parse(await readFile(memberPath, "utf8"));
+    member.scripts.test = "vitest run";
+    await writeFile(memberPath, JSON.stringify(member));
+
+    await expect(
+      inspectNpmAuthority({
+        root,
+        commands: [{ workspace: "packages/api", script: "test" }],
+        nodeVersion: NODE_VERSION,
+        npmVersion: NPM_VERSION,
+      }),
+    ).resolves.toBeDefined();
+
+    member.devDependencies = { "workspace-runner": "1.0.0" };
+    await writeFile(memberPath, JSON.stringify(member));
+    const lockPath = join(root, "package-lock.json");
+    const lock = JSON.parse(await readFile(lockPath, "utf8"));
+    lock.packages["packages/api"].devDependencies = member.devDependencies;
+    lock.packages["packages/api/node_modules/workspace-runner"] = {
+      version: "1.0.0",
+      resolved: "https://registry.npmjs.org/workspace-runner/-/workspace-runner-1.0.0.tgz",
+      integrity: `sha512-${"A".repeat(86)}==`,
+      bin: { vitest: "bin.js" },
+    };
+    await writeFile(lockPath, JSON.stringify(lock));
+
+    await expect(
+      inspectNpmAuthority({
+        root,
+        commands: [{ workspace: "packages/api", script: "test" }],
+        nodeVersion: NODE_VERSION,
+        npmVersion: NPM_VERSION,
+      }),
+    ).resolves.toBeDefined();
+  });
+
   it("rejects runtime drift, lifecycle authority, exotic sources, and nested roots", async () => {
     const root = await fixture();
     await expect(

@@ -625,9 +625,9 @@ function assertLock(
     )
       throw new Error(`npm workspace ${member.directory} lacks one canonical root link`);
   }
-  const importerBinProviders = new Map<string, Map<string, string>>();
+  const directBinProviders = new Map<string, Map<string, string>>();
   for (const { directory, manifest } of manifests) {
-    const importerBins = new Map<string, string>();
+    const directBins = new Map<string, string>();
     for (const [name, version] of Object.entries(dependencyMaps(manifest))) {
       const member = manifests.find((entry) => entry.manifest.name === name);
       const installedPath = dependencyResolutionPaths(
@@ -649,12 +649,26 @@ function assertLock(
       for (const bin of Object.keys(
         (installedPath && packageBinsByPath.get(installedPath)) ?? {},
       )) {
-        if (importerBins.has(bin))
+        if (directBins.has(bin))
           throw new Error(`npm importer ${directory} has an ambiguous direct binary ${bin}`);
-        importerBins.set(bin, name);
+        directBins.set(bin, name);
       }
     }
-    importerBinProviders.set(directory, importerBins);
+    directBinProviders.set(directory, directBins);
+  }
+  const importerBinProviders = new Map<string, Map<string, string>>();
+  const rootBins = directBinProviders.get(".") ?? new Map<string, string>();
+  for (const { directory } of manifests) {
+    // npm-run-path layers node_modules/.bin from the selected workspace up to
+    // the repository root. A nearer workspace link therefore shadows a root
+    // link with the same name; collisions within either direct layer were
+    // rejected above.
+    importerBinProviders.set(
+      directory,
+      directory === "."
+        ? new Map(rootBins)
+        : new Map([...rootBins, ...(directBinProviders.get(directory) ?? new Map())]),
+    );
   }
   for (const { directory, manifest } of manifests) {
     const importer = directory === "." ? "" : directory;

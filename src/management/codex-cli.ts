@@ -68,7 +68,7 @@ import {
   type CompilerEvidence,
 } from "../evaluation/compiler-eval.js";
 import { ManagementOutputError } from "./backend.js";
-import { ProviderQuotaError } from "../providers/quota.js";
+import { preserveProviderQuotaError, ProviderQuotaError } from "../providers/quota.js";
 import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
 import { discoverValidationCommands, readRepositoryFacts } from "../repository-profiles/index.js";
 
@@ -81,11 +81,7 @@ async function propagateProviderQuotaFailure(
     try {
       await admission.checkpointProviderRefusal(error);
     } catch (cause) {
-      throw new ProviderQuotaError(error.gate, {
-        ...(error.usage ? { usage: error.usage } : {}),
-        ...(error.invocationId ? { invocationId: error.invocationId } : {}),
-        cause,
-      });
+      throw preserveProviderQuotaError(error, cause, "provider-refusal adapter checkpoint failed");
     }
   }
   throw error;
@@ -1636,17 +1632,11 @@ export class CodexCliManagementBackend implements ManagementBackend {
       await (this.#options.removeCodexHome ?? removeCodexHome)(codexHome);
     } catch (cleanupError) {
       if (primaryError instanceof ProviderQuotaError) {
-        throw new ProviderQuotaError(primaryError.gate, {
-          ...(primaryError.usage ? { usage: primaryError.usage } : {}),
-          ...(primaryError.invocationId ? { invocationId: primaryError.invocationId } : {}),
-          cause:
-            primaryError.cause === undefined
-              ? cleanupError
-              : new AggregateError(
-                  [primaryError.cause, cleanupError],
-                  "provider-refusal checkpoint and isolated-home cleanup both failed",
-                ),
-        });
+        throw preserveProviderQuotaError(
+          primaryError,
+          cleanupError,
+          "provider-refusal checkpoint and isolated-home cleanup both failed",
+        );
       }
       throw cleanupError;
     }

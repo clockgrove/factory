@@ -288,6 +288,48 @@ describe("durable compilation transaction", () => {
     expect(recordFailureUsage).not.toHaveBeenCalled();
   });
 
+  it("retains quota evidence when the transaction-level gate retry also fails", async () => {
+    const adapterCheckpointFailure = new Error("adapter checkpoint failed");
+    const transactionCheckpointFailure = new Error("transaction checkpoint retry failed");
+    const error = new ProviderQuotaError(
+      classifyGitHubCopilotQuota("You have exceeded your monthly quota")!,
+      {
+        invocationId: "compile-double-checkpoint-failure",
+        usage: compilation.usage,
+        cause: adapterCheckpointFailure,
+      },
+    );
+    let observed: unknown;
+    try {
+      await runDurableCompilationTransaction({
+        existing: null,
+        invoke: async () => {
+          throw error;
+        },
+        persist: async () => record(),
+        recover: async () => null,
+        recordUsage: async () => {},
+        recordProviderGate: async () => {
+          throw transactionCheckpointFailure;
+        },
+        preflight: async () => {},
+      });
+    } catch (failure) {
+      observed = failure;
+    }
+    expect(observed).toBeInstanceOf(ProviderQuotaError);
+    expect(observed).toMatchObject({
+      gate: { reasonCode: "provider-quota-exhausted", provider: "github-copilot" },
+      invocationId: "compile-double-checkpoint-failure",
+      usage: compilation.usage,
+      cause: expect.any(AggregateError),
+    });
+    expect(((observed as ProviderQuotaError).cause as AggregateError).errors).toEqual([
+      adapterCheckpointFailure,
+      transactionCheckpointFailure,
+    ]);
+  });
+
   it("charges only the recovered checkpoint if a backend fails after saving its result", async () => {
     const recordFailureUsage = vi.fn();
     const recordUsage = vi.fn();

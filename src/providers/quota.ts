@@ -76,3 +76,16 @@ export class ProviderQuotaError extends Error {
     return this;
   }
 }
+
+/** Retain the provider result while accumulating failures from later durability or cleanup work. */
+export function preserveProviderQuotaError(
+  error: ProviderQuotaError,
+  cause: unknown,
+  message: string,
+): ProviderQuotaError {
+  return new ProviderQuotaError(error.gate, {
+    ...(error.usage ? { usage: error.usage } : {}),
+    ...(error.invocationId ? { invocationId: error.invocationId } : {}),
+    cause: error.cause === undefined ? cause : new AggregateError([error.cause, cause], message),
+  });
+}

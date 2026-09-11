@@ -3,7 +3,10 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { withVerifiedReviewCheckout } from "../src/management/review-checkout.js";
+import {
+  reviewCheckoutCleanupFailure,
+  withVerifiedReviewCheckout,
+} from "../src/management/review-checkout.js";
 import { CodexCliManagementBackend } from "../src/management/codex-cli.js";
 import {
   cleanupLocalWorktree,
@@ -435,6 +438,33 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:4, output
       cause: checkpointFailure,
     });
     await expect(stat(reviewCheckout)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("combines review-checkpoint and checkout-cleanup failures without losing quota evidence", () => {
+    const checkpointFailure = new Error("review provider gate checkpoint unavailable");
+    const cleanupFailure = new Error("verified review checkout cleanup unavailable");
+    const refusal = new ProviderQuotaError(
+      {
+        reasonCode: "provider-quota-exhausted",
+        provider: "synthetic-provider",
+        message: "Synthetic provider quota exhausted",
+      },
+      {
+        usage: { inputTokens: 13, outputTokens: 17 },
+        invocationId: "review-combined-failure",
+        cause: checkpointFailure,
+      },
+    );
+
+    const observed = reviewCheckoutCleanupFailure(refusal, cleanupFailure);
+    expect(observed).toBeInstanceOf(ProviderQuotaError);
+    expect(observed).toMatchObject({
+      gate: { reasonCode: "provider-quota-exhausted", provider: "synthetic-provider" },
+      usage: { inputTokens: 13, outputTokens: 17 },
+      invocationId: "review-combined-failure",
+      cause: expect.any(AggregateError),
+    });
+    expect((observed.cause as AggregateError).errors).toEqual([checkpointFailure, cleanupFailure]);
   });
 
   it("does not launch review when the final post-preparation admission is expired", async () => {

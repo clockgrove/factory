@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { ManagementOutputError, ReviewCheckoutCleanupError } from "../management/backend.js";
-import { ProviderQuotaError } from "../providers/quota.js";
+import { preserveProviderQuotaError, ProviderQuotaError } from "../providers/quota.js";
 
 import { z } from "zod";
 
@@ -120,7 +120,15 @@ export async function runDurableReviewTransaction(args: {
       if (!record) {
         if (error instanceof ManagementOutputError) await args.recordFailureUsage?.(error.usage);
         if (error instanceof ProviderQuotaError) {
-          await args.recordProviderGate?.(error);
+          try {
+            await args.recordProviderGate?.(error);
+          } catch (cause) {
+            throw preserveProviderQuotaError(
+              error,
+              cause,
+              "provider-refusal adapter and semantic-review transaction checkpoints both failed",
+            );
+          }
         }
         if (error instanceof ReviewCheckoutCleanupError && error.usage)
           await args.recordFailureUsage?.(error.usage);

@@ -69,6 +69,48 @@ describe("durable semantic review transaction", () => {
     expect(recordProviderGate).toHaveBeenCalledExactlyOnceWith(error);
   });
 
+  it("retains quota evidence when the transaction-level gate retry also fails", async () => {
+    const adapterCheckpointFailure = new Error("adapter checkpoint failed");
+    const transactionCheckpointFailure = new Error("transaction checkpoint retry failed");
+    const error = new ProviderQuotaError(
+      classifyGitHubCopilotQuota("You have exceeded your monthly quota")!,
+      {
+        invocationId: "review-double-checkpoint-failure",
+        usage: result.usage,
+        cause: adapterCheckpointFailure,
+      },
+    );
+    let observed: unknown;
+    try {
+      await runDurableReviewTransaction({
+        existing: null,
+        invoke: async () => {
+          throw error;
+        },
+        persist: async () => checkpoint(),
+        recover: async () => null,
+        recordUsage: async () => {},
+        recordProviderGate: async () => {
+          throw transactionCheckpointFailure;
+        },
+        recordOutcome: async () => {},
+      });
+    } catch (failure) {
+      observed = failure;
+    }
+    expect(observed).toBeInstanceOf(ProviderQuotaError);
+    expect(observed).toMatchObject({
+      gate: { reasonCode: "provider-quota-exhausted", provider: "github-copilot" },
+      invocationId: "review-double-checkpoint-failure",
+      usage: result.usage,
+      cause: expect.any(AggregateError),
+    });
+    expect(((observed as ProviderQuotaError).cause as AggregateError).errors).toEqual([
+      adapterCheckpointFailure,
+      transactionCheckpointFailure,
+    ]);
+  });
+
   it("retains exact malformed-response usage when private cleanup also fails before a checkpoint", async () => {
     const failure = new ReviewCheckoutCleanupError(
       Error("owned checkout removal failed"),

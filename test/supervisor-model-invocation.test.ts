@@ -131,6 +131,59 @@ describe("Supervisor model dispatch journal", () => {
     }
   }, 30_000);
 
+  it("retains exact worker quota evidence when both durable checkpoint attempts fail", async () => {
+    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
+    const adapterCheckpointFailure = new Error("fixture adapter checkpoint failed");
+    const transactionCheckpointFailure = new Error("fixture Supervisor checkpoint retry failed");
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      maxAttemptsPerItem: 3,
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        observe: async (handle) => {
+          await backend.observe(handle);
+          throw new ProviderQuotaError(gate, {
+            usage: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 },
+            cause: adapterCheckpointFailure,
+          });
+        },
+      }),
+    });
+    const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation();
+    if (!write) throw new Error("fixture receipt transport missing");
+    vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+      async (node, body) => {
+        if (
+          decodeEventComments(body).some(
+            (event) => event.kind === "provider" && event.event === "ProviderQuotaBlocked",
+          )
+        )
+          throw transactionCheckpointFailure;
+        await write(node, body);
+      },
+    );
+    try {
+      await f.run().catch((error) => error);
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+      expect(providerQuotaGates(f.events(), f.runId)).toHaveLength(0);
+      expect(
+        f
+          .events()
+          .find(
+            (event) =>
+              event.kind === "attempt" && event.event === "AttemptFailed" && event.workItem === 8,
+          ),
+      ).toMatchObject({ reportedModelTokens: 10 });
+      expect(unresolvedModelInvocations(f.events())).toHaveLength(1);
+
+      await f.run().catch((error) => error);
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
   it("releases a restarted gated admission while preserving unknown model usage", async () => {
     const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
     const f = await providerSupervisorFixture("daytona-burst", {

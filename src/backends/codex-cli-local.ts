@@ -51,6 +51,7 @@ import { bootstrapPackageValidationCommand } from "../validation/plan.js";
 import { managedToolAvailable, withManagedToolchainPath } from "../toolchains/authority.js";
 import {
   exactProviderQuotaUsage,
+  preserveProviderQuotaError,
   ProviderQuotaError,
   type ProviderQuotaGate,
 } from "../providers/quota.js";
@@ -517,10 +518,11 @@ export class CodexCliLocalBackend implements ExecutionBackend {
             running.progress = details.progress;
             running.failure =
               "worker provider refusal could not be durably checkpointed; consumption remains unknown";
-            running.providerQuotaFailure = new ProviderQuotaError(details.providerQuotaGate, {
-              ...(usage ? { usage } : {}),
+            running.providerQuotaFailure = preserveProviderQuotaError(
+              quotaError,
               cause,
-            });
+              "worker provider-refusal adapter checkpoint failed",
+            );
             return;
           }
         }

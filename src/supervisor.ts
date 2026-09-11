@@ -257,7 +257,7 @@ import { CompilerDraftManager, loadCompilerDrafts } from "./control/compiler-dra
 import { compilerEvalDigest } from "./evaluation/compiler-eval.js";
 import { collectCompilationEvidence } from "./compiler/runtime-evidence.js";
 import { ManagementOutputError } from "./management/backend.js";
-import { ProviderQuotaError } from "./providers/quota.js";
+import { preserveProviderQuotaError, ProviderQuotaError } from "./providers/quota.js";
 import { providerQuotaGates, providerQuotaGateState } from "./control/provider-gates.js";
 import { reportedModelUsage, type ReportedModelUsage } from "./protocol/model-usage.js";
 import type {
@@ -702,7 +702,15 @@ export async function runDurableCompilationTransaction(args: {
       if (!record) {
         if (error instanceof ManagementOutputError) await args.recordFailureUsage?.(error.usage);
         if (error instanceof ProviderQuotaError) {
-          await args.recordProviderGate?.(error);
+          try {
+            await args.recordProviderGate?.(error);
+          } catch (cause) {
+            throw preserveProviderQuotaError(
+              error,
+              cause,
+              "provider-refusal adapter and compilation transaction checkpoints both failed",
+            );
+          }
         }
         throw error;
       }
@@ -6832,6 +6840,10 @@ export class FactorySupervisor {
             executionTerminalObserved = true;
             const invocationId = `worker-${item.number}-${reservation!.attempt}`;
             error.bindInvocation(invocationId);
+            terminalModelUsage = reportedModelUsage(error.usage);
+            terminalModelTokens = error.usage
+              ? error.usage.inputTokens + error.usage.outputTokens
+              : undefined;
             try {
               await this.#recordProviderQuotaGate(
                 error,
@@ -6841,18 +6853,12 @@ export class FactorySupervisor {
                 reservation!,
               );
             } catch (checkpointError) {
-              throw new ProviderQuotaError(error.gate, {
-                invocationId,
-                cause: new AggregateError(
-                  [error.cause, checkpointError].filter((cause) => cause !== undefined),
-                  "worker provider refusal could not be durably checkpointed",
-                ),
-              });
+              throw preserveProviderQuotaError(
+                error,
+                checkpointError,
+                "worker provider-refusal adapter and Supervisor checkpoints both failed",
+              );
             }
-            terminalModelUsage = reportedModelUsage(error.usage);
-            terminalModelTokens = error.usage
-              ? error.usage.inputTokens + error.usage.outputTokens
-              : undefined;
             throw error;
           }
           if (

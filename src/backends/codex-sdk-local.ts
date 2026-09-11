@@ -61,6 +61,7 @@ import {
 import { withManagedToolchainPath } from "../toolchains/authority.js";
 import {
   exactProviderQuotaUsage,
+  preserveProviderQuotaError,
   ProviderQuotaError,
   type ProviderQuotaGate,
 } from "../providers/quota.js";
@@ -860,7 +861,11 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
           );
         await running.context.checkpointProviderRefusal(quotaError);
       } catch (cause) {
-        throw new ProviderQuotaError(gate, { ...(usage ? { usage } : {}), cause });
+        throw preserveProviderQuotaError(
+          quotaError,
+          cause,
+          "worker provider-refusal adapter checkpoint failed",
+        );
       }
       providerRefusalCheckpointed = true;
       running.providerQuotaGate = gate;

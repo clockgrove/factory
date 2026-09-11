@@ -805,6 +805,105 @@ describe("bounded status, explain, and replay output", () => {
     );
   });
 
+  it("explains a newer activation rejection instead of an older terminal provider gate", () => {
+    const current = snapshot();
+    current.workItems[0]!.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        sequence: 6,
+        at: "2026-09-04T12:00:29.000Z",
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: "invocation-worker-10-1",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        directorEpoch: 4,
+        policyDigest: policyDigest(policy),
+      }),
+      event({
+        kind: "provider",
+        event: "ProviderQuotaBlocked",
+        sequence: 7,
+        at: "2026-09-04T12:00:30.000Z",
+        reasonCode: "provider-quota-exhausted",
+        provider: "another-model-provider",
+        phase: "execution",
+        backend: "another/local-backend",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        providerMessage: "Older provider gate requires operator action",
+        accounting: "unknown",
+      }),
+    );
+    current.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "FactoryRunEscalated",
+        sequence: 8,
+        at: "2026-09-04T12:00:31.000Z",
+        reason: "provider quota exhausted",
+      }),
+      event({
+        kind: "run",
+        event: "ActivationRequested",
+        runId: "activation-after-quota",
+        sequence: 9,
+        at: "2026-09-04T12:00:32.000Z",
+        requestedBy: "private-operator-name",
+        requestId: "activation-after-quota",
+        repository: "clockgrove/factory",
+        baseSha: sha,
+        policy,
+        policyDigest: policyDigest(policy),
+        controllerProtocolMin: "clockgrove.factory/v2",
+        controllerProtocolMax: "clockgrove.factory/v2",
+      }),
+      event({
+        kind: "run",
+        event: "ActivationRejected",
+        runId: "activation-after-quota",
+        sequence: 10,
+        at: "2026-09-04T12:00:33.000Z",
+        activationRequestId: "activation-after-quota",
+        requestedBy: "private-operator-name",
+        baseSha: sha,
+        policyDigest: policyDigest(policy),
+        reason: "current preflight rejects the replacement activation",
+      }),
+    );
+
+    const status = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
+    expect(status.operatorAction).toMatchObject({
+      code: "activation-rejected",
+      evidence: {
+        activationRequestId: "activation-after-quota",
+        reason: "current preflight rejects the replacement activation",
+      },
+    });
+    const explanations = buildExplanationReport({
+      repository: "clockgrove/factory",
+      snapshot: current,
+    }).explanations;
+    expect(explanations[0]).toMatchObject({
+      code: EXPLANATION_CODES.authorityActivationRejected,
+      summary: "current preflight rejects the replacement activation",
+      requiredAction: expect.stringContaining("submit a new explicitly authorized activation"),
+      evidence: {
+        activationRequestId: "activation-after-quota",
+        reason: "current preflight rejects the replacement activation",
+        factoryWorkActive: false,
+        monitoring: "stop",
+      },
+    });
+    expect(explanations).not.toContainEqual(
+      expect.objectContaining({ code: EXPLANATION_CODES.providerQuotaExhausted }),
+    );
+  });
+
   it("binds status and explanation to a terminal recovery successor instead of an older escalation", () => {
     const current = snapshot();
     const successorRunId =

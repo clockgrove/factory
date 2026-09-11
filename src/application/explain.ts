@@ -87,36 +87,29 @@ export function buildExplanationReport(input: {
     );
   }
   const explanations: Array<Explanation & { workItem?: number }> = [];
-  if (!run) {
+  if (status.operatorAction.code === "activation-rejected") {
+    explanations.push({
+      code: EXPLANATION_CODES.authorityActivationRejected,
+      category: "authority",
+      disposition: "failed",
+      summary: status.activation?.rejectionReason ?? status.operatorAction.summary,
+      gate: "activation",
+      requiredAction: status.operatorAction.requiredAction,
+      evidence: {
+        ...status.operatorAction.evidence,
+        factoryWorkActive: false,
+        monitoring: "stop",
+      },
+    });
+  } else if (!run) {
     const inactive = explainGate({ gate: "authority", reason: "run-inactive" });
     explanations.push(
-      status.activation?.state === "rejected"
+      status.activation?.state === "withdrawn"
         ? {
-            code: EXPLANATION_CODES.authorityActivationRejected,
-            category: "authority",
-            disposition: "failed",
-            summary:
-              status.activation.rejectionReason ??
-              "The activation was rejected before a Factory run started.",
-            gate: "activation",
-            requiredAction:
-              "No Factory work is active; stop recurring monitoring. Correct the recorded preflight reason, then submit a new explicitly authorized activation request.",
-            evidence: {
-              activationRequestId: status.activation.requestId,
-              ...(status.activation.rejectedAt ? { rejectedAt: status.activation.rejectedAt } : {}),
-              ...(status.activation.rejectionReason
-                ? { reason: status.activation.rejectionReason }
-                : {}),
-              factoryWorkActive: false,
-              monitoring: "stop",
-            },
+            ...inactive,
+            summary: `Activation ${status.activation.requestId} was withdrawn by request ${status.activation.cancellationRequestId}; no Factory run started.`,
           }
-        : status.activation?.state === "withdrawn"
-          ? {
-              ...inactive,
-              summary: `Activation ${status.activation.requestId} was withdrawn by request ${status.activation.cancellationRequestId}; no Factory run started.`,
-            }
-          : inactive,
+        : inactive,
     );
   }
   if (

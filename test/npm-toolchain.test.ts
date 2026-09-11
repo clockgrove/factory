@@ -170,10 +170,21 @@ describe("npm deferred toolchain authority", () => {
       version: "1.0.0",
       resolved: "https://registry.npmjs.org/workspace-runner/-/workspace-runner-1.0.0.tgz",
       integrity: `sha512-${"A".repeat(86)}==`,
-      bin: { vitest: "bin.js" },
+      bin: { "workspace-runner": "bin.js" },
     };
     await writeFile(lockPath, JSON.stringify(lock));
 
+    await expect(
+      inspectNpmAuthority({
+        root,
+        commands: [{ workspace: "packages/api", script: "test" }],
+        nodeVersion: NODE_VERSION,
+        npmVersion: NPM_VERSION,
+      }),
+    ).resolves.toBeDefined();
+
+    lock.packages["packages/api/node_modules/workspace-runner"].bin = { vitest: "bin.js" };
+    await writeFile(lockPath, JSON.stringify(lock));
     await expect(
       inspectNpmAuthority({
         root,

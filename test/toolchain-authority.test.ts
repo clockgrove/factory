@@ -37,6 +37,7 @@ import {
   TOOLCHAIN_AUTHORITY_ADAPTERS,
   unprovisionedFutureToolchainReason,
   validationSetupCommandCount,
+  withManagedToolchainPath,
   type ToolchainAuthorityAdapter,
 } from "../src/toolchains/authority.js";
 
@@ -562,6 +563,35 @@ describe("toolchain authority adapters", () => {
     expect(environment).not.toHaveProperty("NODE_OPTIONS");
     expect(environment).not.toHaveProperty("LD_PRELOAD");
     expect(environment).not.toHaveProperty("npm_config_registry");
+  });
+
+  it("keeps ambient package launchers outside a managed npm worker PATH", async () => {
+    const receipt = await installNpmFixture();
+    const root = await mkdtemp(join(tmpdir(), "factory-npm-worker-path-"));
+    const hostile = join(root, "hostile");
+    await mkdir(hostile);
+    for (const name of ["node", "npm", "npx", "corepack"])
+      await writeFile(join(hostile, name), "#!/bin/sh\nexit 99\n", { mode: 0o700 });
+    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-npm")!;
+    const environment = await withManagedToolchainPath(
+      { ...process.env, PATH: `${hostile}:${process.env.PATH ?? ""}` },
+      join(root, "private"),
+      ["npm"],
+      [{ ...adapter.runtimeRequirement!, bundleDigest: receipt.digest }],
+    );
+
+    expect(environment.PATH).not.toContain(hostile);
+    expect(
+      execFileSync("sh", ["-c", "command -v node; command -v npm; command -v git"], {
+        env: environment,
+        encoding: "utf8",
+      }),
+    ).toMatch(/factory-tools\/node[\s\S]*factory-tools\/npm[\s\S]*factory-system-tools\/git/);
+    expect(() =>
+      execFileSync("sh", ["-c", "command -v npx || command -v corepack"], {
+        env: environment,
+      }),
+    ).toThrow();
   });
 
   it("keeps npm proof ownership on the declared generation while hashing full authority", async () => {

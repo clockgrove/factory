@@ -19,6 +19,7 @@ import type {
   ManagedToolchainPlan,
   RuntimeBundleRequirement,
 } from "../runtime/toolchain-bundle.js";
+import { MANAGED_SYSTEM_TOOLS } from "../runtime/system-tools.js";
 import { CODEX_WORKER_OUTPUT_SCHEMA, workerPacketPrompt } from "./codex-cli-local.js";
 import { validationInvocationOwnership } from "./validation-invocation.js";
 
@@ -444,7 +445,7 @@ export function sandboxBootstrapFiles(
   const managedBootstrap = managedToolchain
     ? String.raw`factory_system_tools="/tmp/factory-system-tools"
 mkdir -p "$factory_system_tools"
-for factory_system_tool in awk bash cat chmod cmp cp cut diff dirname env find git grep head ln ls mkdir mktemp mv od paste pwd readlink realpath rg rm rmdir sed sh sort tail tar tee touch tr uname wc xargs; do
+for factory_system_tool in ${MANAGED_SYSTEM_TOOLS.join(" ")}; do
   factory_system_tool_path="$(PATH="$factory_bootstrap_path" command -v "$factory_system_tool" || true)"
   if [[ "$factory_system_tool_path" == /* && -x "$factory_system_tool_path" ]]; then
     ln -s "$factory_system_tool_path" "$factory_system_tools/$factory_system_tool"

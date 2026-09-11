@@ -28,6 +28,8 @@ import {
 import { delimiter, join, posix } from "node:path";
 import {
   mkdir,
+  readdir,
+  stat,
   symlink,
   unlink,
   lstat,
@@ -69,6 +71,7 @@ import {
   UV_ADAPTER_ID,
   uvPytestOperation,
 } from "./uv.js";
+import { MANAGED_SYSTEM_TOOLS } from "../runtime/system-tools.js";
 
 export type ToolchainProvisioning =
   | "host-observed"
@@ -1148,8 +1151,8 @@ async function withProvisionedToolPath(
   if (!primary) throw new Error(`${tool} runtime bundle lacks its primary executable`);
   const bin = join(privateRoot, "factory-tools");
   await mkdir(bin, { recursive: true, mode: 0o700 });
-  const ensureShim = async (name: string, target: string) => {
-    const shim = join(bin, name);
+  const ensureShim = async (name: string, target: string, directory = bin) => {
+    const shim = join(directory, name);
     const exists = await access(shim, fsConstants.F_OK).then(
       () => true,
       () => false,
@@ -1195,8 +1198,40 @@ async function withProvisionedToolPath(
     if (!python) throw new Error("uv runtime bundle lacks its Python executable");
     await ensureShim("python", python.executable);
   }
+  const systemBin = join(privateRoot, "factory-system-tools");
+  await mkdir(systemBin, { recursive: true, mode: 0o700 });
+  const allowedSystemTools = new Set<string>(MANAGED_SYSTEM_TOOLS);
+  for (const entry of await readdir(systemBin)) {
+    if (!allowedSystemTools.has(entry)) await unlink(join(systemBin, entry));
+  }
+  const sourceDirectories = (source.PATH ?? "")
+    .split(delimiter)
+    .filter((directory) => directory.startsWith("/"));
+  for (const name of MANAGED_SYSTEM_TOOLS) {
+    let target: string | undefined;
+    for (const directory of sourceDirectories) {
+      const candidate = join(directory, name);
+      if (
+        await Promise.all([stat(candidate), access(candidate, fsConstants.X_OK)]).then(
+          ([info]) => info.isFile(),
+          () => false,
+        )
+      ) {
+        target = candidate;
+        break;
+      }
+    }
+    const shim = join(systemBin, name);
+    if (!target) {
+      await unlink(shim).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+      continue;
+    }
+    await ensureShim(name, target, systemBin);
+  }
   const sanitized = managedWorkerSourceEnvironment(source, tool);
-  return { ...sanitized, PATH: `${bin}${delimiter}${source.PATH ?? "/usr/bin:/bin"}` };
+  return { ...sanitized, PATH: `${bin}${delimiter}${systemBin}` };
 }
 
 /**

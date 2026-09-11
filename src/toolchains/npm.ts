@@ -798,9 +798,23 @@ export async function inspectNpmAuthority(input: {
     if (!body) throw new Error(`npm validation script is absent: ${command.script}`);
     if (scripts[`pre${command.script}`] || scripts[`post${command.script}`])
       throw new Error(`npm validation script has lifecycle companions: ${command.script}`);
+    const scriptManifest =
+      selected.directory === "."
+        ? rootManifest
+        : {
+            ...selected.manifest,
+            // npm exposes root dependencies to workspace scripts, while a
+            // nearer workspace dependency of the same name takes precedence.
+            dependencies: {
+              ...dependencyMaps(rootManifest),
+              ...dependencyMaps(selected.manifest),
+            },
+            devDependencies: undefined,
+            optionalDependencies: undefined,
+          };
     assertSafeScriptBody(
       body,
-      { ...rootManifest, ...selected.manifest },
+      scriptManifest,
       selected.path,
       binProviders.get(selected.directory) ?? new Map(),
     );

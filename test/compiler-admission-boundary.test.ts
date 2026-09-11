@@ -325,9 +325,11 @@ describe("compiler dispatch admission", () => {
     async (exitCode) => {
       const f = await fixture();
       const cleanupFailure = new Error("isolated home cleanup failed");
+      let refusalCheckpointed = false;
       const backend = new CodexCliManagementBackend({
         createCodexHome: home,
         removeCodexHome: async () => {
+          expect(refusalCheckpointed).toBe(true);
           throw cleanupFailure;
         },
         authFile: join(f.directory, "no-auth"),
@@ -352,6 +354,10 @@ describe("compiler dispatch admission", () => {
           async () => {},
           async () => ({
             modelInvocationId: "compile-fixture",
+            checkpointProviderRefusal: async (error) => {
+              expect(error).toMatchObject({ invocationId: "compile-fixture", usage });
+              refusalCheckpointed = true;
+            },
           }),
         );
       } catch (error) {
@@ -367,6 +373,7 @@ describe("compiler dispatch admission", () => {
         invocationId: "compile-fixture",
         cause: cleanupFailure,
       });
+      expect(refusalCheckpointed).toBe(true);
     },
   );
   it("rechecks cancellation after all local preparation and before durable invocation or provider admission", async () => {

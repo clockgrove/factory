@@ -546,7 +546,24 @@ describe("Codex SDK local backend", () => {
     });
 
     try {
-      const handle = await backend.launch(context(workspace, "b".repeat(40)));
+      let releaseCheckpoint!: () => void;
+      const checkpointHeld = new Promise<void>((resolve) => {
+        releaseCheckpoint = resolve;
+      });
+      const checkpointProviderRefusal = vi.fn(async () => checkpointHeld);
+      const attempt = context(workspace, "b".repeat(40));
+      attempt.checkpointProviderRefusal = checkpointProviderRefusal;
+      const handle = await backend.launch(attempt);
+      for (
+        let check = 0;
+        check < 20 && checkpointProviderRefusal.mock.calls.length === 0;
+        check += 1
+      )
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(checkpointProviderRefusal).toHaveBeenCalledOnce();
+      expect(await backend.observe(handle)).toMatchObject({ state: "running" });
+      expect(await backend.observe(handle)).not.toHaveProperty("providerQuotaGate");
+      releaseCheckpoint();
       let observation = await backend.observe(handle);
       for (let check = 0; check < 20 && observation.state === "running"; check += 1) {
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -560,6 +577,15 @@ describe("Codex SDK local backend", () => {
           provider: "github-copilot",
         },
       });
+      expect(checkpointProviderRefusal).toHaveBeenCalledWith(
+        expect.objectContaining({
+          gate: expect.objectContaining({
+            reasonCode: "provider-quota-exhausted",
+            provider: "github-copilot",
+          }),
+          usage: undefined,
+        }),
+      );
       await backend.cleanup(handle);
     } finally {
       await rm(root, { recursive: true, force: true });

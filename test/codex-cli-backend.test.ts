@@ -413,6 +413,74 @@ describe("Codex CLI local backend", () => {
     await cleanupLocalWorktree(worktree);
   });
 
+  it("keeps a captured provider refusal nonterminal until its durable checkpoint completes", async () => {
+    const source = await fixture();
+    const worktree = await createLocalWorktree(source.repository, source.baseSha);
+    await writeFile(
+      source.fakeCodex,
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' '${JSON.stringify({
+          type: "turn.failed",
+          error: { message: "You have exceeded your monthly quota." },
+        })}'`,
+        `printf '%s\\n' '${JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: 9, output_tokens: 4, cached_input_tokens: 2 },
+        })}'`,
+        "exit 1",
+      ].join("\n"),
+    );
+    await chmod(source.fakeCodex, 0o700);
+    const backend = new CodexCliLocalBackend({
+      command: source.fakeCodex,
+      authFile: source.authFile,
+      createCodexHome: async (kind) => {
+        const root = join(source.repository, ".factory-test-quota-homes");
+        await mkdir(root, { recursive: true });
+        return mkdtemp(join(root, `${kind}-`));
+      },
+    });
+    let releaseCheckpoint!: () => void;
+    const checkpointHeld = new Promise<void>((resolve) => {
+      releaseCheckpoint = resolve;
+    });
+    const checkpointProviderRefusal = vi.fn(async () => checkpointHeld);
+    const context = attemptContext(worktree.path, source.baseSha);
+    context.checkpointProviderRefusal = checkpointProviderRefusal;
+
+    const handle = await backend.launch(context);
+    for (let check = 0; check < 20 && checkpointProviderRefusal.mock.calls.length === 0; check += 1)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(checkpointProviderRefusal).toHaveBeenCalledOnce();
+    expect(await backend.observe(handle)).toMatchObject({ state: "running" });
+    expect(await backend.observe(handle)).not.toHaveProperty("providerQuotaGate");
+    releaseCheckpoint();
+    let observation = await backend.observe(handle);
+    for (let check = 0; check < 20 && observation.state === "running"; check += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      observation = await backend.observe(handle);
+    }
+    expect(checkpointProviderRefusal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        gate: expect.objectContaining({
+          reasonCode: "provider-quota-exhausted",
+          provider: "github-copilot",
+        }),
+        usage: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2 },
+      }),
+    );
+    expect(observation).toMatchObject({
+      state: "failed",
+      providerQuotaGate: {
+        reasonCode: "provider-quota-exhausted",
+        provider: "github-copilot",
+      },
+    });
+    await backend.cleanup(handle);
+    await cleanupLocalWorktree(worktree);
+  });
+
   it.skipIf(process.platform !== "linux")(
     "reconciles the complete stale process group including a TERM-resistant descendant",
     async () => {

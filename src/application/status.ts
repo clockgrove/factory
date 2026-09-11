@@ -30,6 +30,7 @@ import { queuedReasonCode } from "../explanations/index.js";
 import type { GitHubMutationTelemetry } from "../platform.js";
 import type { ObjectiveAuthorityObservation } from "../control/authority.js";
 import { providerQuotaGateState } from "../control/provider-gates.js";
+import { unreconciledBudgetReservations } from "../control/budget.js";
 
 export interface ReadWorkItemSnapshot {
   id?: string;
@@ -410,6 +411,32 @@ export function buildStatusReport(input: {
   const providerGateState = run ? providerQuotaGateState(runEvents, run.runId) : undefined;
   const providerGate = providerGateState?.gate;
   const providerGateAccounting = providerGateState?.accounting ?? "unknown";
+  const startedRunIds = new Set(
+    events
+      .filter((event) => event.kind === "run" && event.event === "FactoryRunStarted")
+      .map((event) => event.runId),
+  );
+  const outstandingRecoveryReservations = unreconciledBudgetReservations(
+    events.filter((event) => startedRunIds.has(event.runId)),
+  );
+  const recoveryAccounting =
+    outstandingRecoveryReservations.length === 0 ? "clear" : "unreconciled";
+  const recoveryAccountingEvidence = {
+    recoveryAccounting,
+    unreconciledReservationCount: outstandingRecoveryReservations.length,
+    unreconciledReservations: outstandingRecoveryReservations.slice(0, 20).map((reservation) => ({
+      runId: reservation.runId,
+      ...(reservation.workItem === undefined ? {} : { workItem: reservation.workItem }),
+      ...(reservation.attempt === undefined ? {} : { attempt: reservation.attempt }),
+      phase: reservation.phase,
+      unit: reservation.unit,
+      ...(reservation.usageId ? { usageId: reservation.usageId } : {}),
+      ...(reservation.modelInvocationId
+        ? { modelInvocationId: reservation.modelInvocationId }
+        : {}),
+    })),
+    unreconciledReservationsTruncated: outstandingRecoveryReservations.length > 20,
+  };
   const cancellationRequest =
     run && !run.terminal
       ? ([...runEvents]
@@ -565,8 +592,8 @@ export function buildStatusReport(input: {
                 code: "provider-quota-draining",
                 summary: `${providerGate.providerMessage}. New model work is blocked, but admitted work and resources are still reconciling.`,
                 requiredAction:
-                  providerGateAccounting === "unknown"
-                    ? `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}. Continue monitoring only until Factory writes the terminal receipt. This run cannot currently be recovered because the invocation's model usage is unknown and its dispatch remains unreconciled; do not retry this invocation.`
+                  recoveryAccounting === "unreconciled"
+                    ? `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}. Continue monitoring only until Factory writes the terminal receipt. Recovery remains blocked by ${outstandingRecoveryReservations.length} unreconciled source reservation${outstandingRecoveryReservations.length === 1 ? "" : "s"}; do not retry any unresolved invocation.`
                     : `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}. Continue monitoring only until Factory writes the terminal receipt; do not retry this invocation.`,
                 evidence: {
                   reasonCode: providerGate.reasonCode,
@@ -576,6 +603,7 @@ export function buildStatusReport(input: {
                   modelInvocationId: providerGate.modelInvocationId,
                   observedAt: providerGate.at,
                   accounting: providerGateAccounting,
+                  ...recoveryAccountingEvidence,
                   ...(providerGate.actionUrl ? { actionUrl: providerGate.actionUrl } : {}),
                   ...(providerGate.workItem !== undefined
                     ? { workItem: providerGate.workItem }
@@ -591,9 +619,9 @@ export function buildStatusReport(input: {
                   code: "provider-quota",
                   summary: `No Factory work is active. ${providerGate.providerMessage}.`,
                   requiredAction:
-                    providerGateAccounting === "unknown"
-                      ? `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""} for future model work. This run cannot currently be recovered because the invocation's model usage is unknown and its dispatch remains unreconciled. Do not keep polling or retry this invocation.`
-                      : `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}, then explicitly request recovery through factory_recovery_plan. Do not keep polling or retry this invocation.`,
+                    recoveryAccounting === "unreconciled"
+                      ? `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""} for future model work. This run cannot currently be recovered because ${outstandingRecoveryReservations.length} source reservation${outstandingRecoveryReservations.length === 1 ? " remains" : "s remain"} unreconciled. Do not keep polling or retry any unresolved invocation.`
+                      : `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}, then use factory_recovery_plan for a read-only recovery assessment before proposing an explicitly authorized successor. Do not keep polling or retry this invocation.`,
                   evidence: {
                     reasonCode: providerGate.reasonCode,
                     provider: providerGate.provider,
@@ -602,6 +630,7 @@ export function buildStatusReport(input: {
                     modelInvocationId: providerGate.modelInvocationId,
                     observedAt: providerGate.at,
                     accounting: providerGateAccounting,
+                    ...recoveryAccountingEvidence,
                     ...(providerGate.actionUrl ? { actionUrl: providerGate.actionUrl } : {}),
                     ...(providerGate.workItem !== undefined
                       ? { workItem: providerGate.workItem }
@@ -637,13 +666,18 @@ export function buildStatusReport(input: {
                           : "run-escalated",
                         summary: `No Factory work is active. ${run.terminal.reason ?? "The run ended in terminal escalation."}`,
                         requiredAction: run.start.predecessorRunId
-                          ? "Resolve the recorded terminal reason, then use factory_recovery_plan before proposing another explicitly authorized successor. Do not keep polling this terminal run."
-                          : "Resolve the recorded terminal reason, then use factory_recovery_plan before proposing an explicitly authorized successor. Do not keep polling this terminal run.",
+                          ? recoveryAccounting === "unreconciled"
+                            ? `Resolve the recorded terminal reason. Recovery remains blocked by ${outstandingRecoveryReservations.length} unreconciled source reservation${outstandingRecoveryReservations.length === 1 ? "" : "s"}; do not keep polling or propose another successor.`
+                            : "Resolve the recorded terminal reason, then use factory_recovery_plan for a read-only assessment before proposing another explicitly authorized successor. Do not keep polling this terminal run."
+                          : recoveryAccounting === "unreconciled"
+                            ? `Resolve the recorded terminal reason. Recovery remains blocked by ${outstandingRecoveryReservations.length} unreconciled source reservation${outstandingRecoveryReservations.length === 1 ? "" : "s"}; do not keep polling or request a successor.`
+                            : "Resolve the recorded terminal reason, then use factory_recovery_plan for a read-only assessment before proposing an explicitly authorized successor. Do not keep polling this terminal run.",
                         evidence: {
                           runId: run.runId,
                           terminalAt: run.terminal.at,
                           terminalSequence: run.terminal.sequence,
                           ...(run.terminal.reason ? { reason: run.terminal.reason } : {}),
+                          ...recoveryAccountingEvidence,
                         },
                       }
                 : commandState?.admissionsPaused

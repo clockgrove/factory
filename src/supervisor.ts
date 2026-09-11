@@ -4541,7 +4541,17 @@ export class FactorySupervisor {
                         this.#policy.workItemTimeoutMinutes * 60_000,
                       ),
                     );
-                    return { timeoutMs, modelInvocationId: compilationInvocationId };
+                    return {
+                      timeoutMs,
+                      modelInvocationId: compilationInvocationId,
+                      checkpointProviderRefusal: (error: ProviderQuotaError) =>
+                        this.#recordProviderQuotaGate(
+                          error,
+                          snapshot.id,
+                          "management",
+                          this.#management.id,
+                        ),
+                    };
                   };
                   if (this.#management.supportsCompilerAdmission) {
                     return await this.#management.compile(context, checkpoint, admitCompilation);
@@ -6721,6 +6731,31 @@ export class FactorySupervisor {
             policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
             providerBaseRef: publicationBaseBranch,
             deadline: attemptDeadline,
+            ...(selected!.capabilities.reportsModelUsage
+              ? {
+                  checkpointProviderRefusal: async (error: ProviderQuotaError) => {
+                    const invocationId = `worker-${item.number}-${reservation!.attempt}`;
+                    const invocationKey = modelInvocationKey({
+                      objective: reservation!.objective,
+                      runId: reservation!.runId,
+                      workItem: item.number,
+                      attempt: reservation!.attempt,
+                      phase: "execution",
+                      modelInvocationId: invocationId,
+                    });
+                    error.bindInvocation(invocationId);
+                    if (!error.usage && this.#modelInvocations.active.has(invocationKey))
+                      this.#modelInvocations.retire(invocationKey);
+                    await this.#recordProviderQuotaGate(
+                      error,
+                      item.id,
+                      "execution",
+                      selected!.capabilities.id,
+                      reservation!,
+                    );
+                  },
+                }
+              : {}),
             ...(reservation!.localScopeBatch
               ? {
                   localExecutionScope: {
@@ -6796,17 +6831,18 @@ export class FactorySupervisor {
                 throw new Error(
                   `backend ${selected.capabilities.id} emitted a provider quota gate without declaring model-usage reporting`,
                 );
-              if (observedTokens === null && selected.capabilities.reportsModelUsage)
-                this.#modelInvocations.retire(
-                  modelInvocationKey({
-                    objective: reservation!.objective,
-                    runId: reservation!.runId,
-                    workItem: item.number,
-                    attempt: reservation!.attempt,
-                    phase: "execution",
-                    modelInvocationId: `worker-${item.number}-${reservation!.attempt}`,
-                  }),
-                );
+              if (observedTokens === null && selected.capabilities.reportsModelUsage) {
+                const invocationKey = modelInvocationKey({
+                  objective: reservation!.objective,
+                  runId: reservation!.runId,
+                  workItem: item.number,
+                  attempt: reservation!.attempt,
+                  phase: "execution",
+                  modelInvocationId: `worker-${item.number}-${reservation!.attempt}`,
+                });
+                if (this.#modelInvocations.active.has(invocationKey))
+                  this.#modelInvocations.retire(invocationKey);
+              }
               const quotaError = new ProviderQuotaError(observation.providerQuotaGate, {
                 invocationId: `worker-${item.number}-${reservation!.attempt}`,
                 ...(observedTokens !== null
@@ -7310,6 +7346,14 @@ export class FactorySupervisor {
               this.#admitModelInvocation(
                 `review-${reviewIdentityDigest(reviewIdentity)}`,
                 item.id,
+                reservation!,
+              ),
+            (error) =>
+              this.#recordProviderQuotaGate(
+                error,
+                item.id,
+                "management",
+                this.#management.id,
                 reservation!,
               ),
           );
@@ -8774,6 +8818,7 @@ export class FactorySupervisor {
     checkpoint: ReviewCheckpoint,
     invocationId: string,
     admit: () => Promise<number>,
+    checkpointProviderRefusal: (error: ProviderQuotaError) => Promise<void>,
   ): Promise<ReviewResult> {
     const operationTimeoutMs = this.#policy.workItemTimeoutMinutes * 60_000;
     context.invocationTimeoutMs = Math.min(
@@ -8788,7 +8833,11 @@ export class FactorySupervisor {
         dispatched = true;
         const remainingMs = Math.min(await admit(), operationTimeoutMs);
         admitted = true;
-        return { timeoutMs: remainingMs, modelInvocationId: invocationId };
+        return {
+          timeoutMs: remainingMs,
+          modelInvocationId: invocationId,
+          checkpointProviderRefusal,
+        };
       });
     const admittedCheckpoint: ReviewCheckpoint = (result) => {
       if (!admitted) throw new Error("semantic review checkpoint precedes dispatch admission");
@@ -8914,6 +8963,14 @@ export class FactorySupervisor {
           reviewCheckpoint,
           invocationId,
           () => this.#admitModelInvocation(invocationId, item.id, reservation),
+          (error) =>
+            this.#recordProviderQuotaGate(
+              error,
+              item.id,
+              "management",
+              this.#management.id,
+              reservation,
+            ),
         );
     }
     const record = await this.#reviewTransaction({
@@ -11689,6 +11746,14 @@ export class FactorySupervisor {
                 item.id,
                 member.reservation,
               ),
+            (error) =>
+              this.#recordProviderQuotaGate(
+                error,
+                item.id,
+                "management",
+                this.#management.id,
+                member.reservation,
+              ),
           );
       }
       const commit = await this.#store.readCommit(headSha);
@@ -13079,6 +13144,14 @@ export class FactorySupervisor {
           checkpoint,
           invocationId,
           () => this.#admitModelInvocation(invocationId, item.id, member.reservation),
+          (error) =>
+            this.#recordProviderQuotaGate(
+              error,
+              item.id,
+              "management",
+              this.#management.id,
+              member.reservation,
+            ),
         );
     }
     await this.#reviewTransaction({
@@ -14825,6 +14898,15 @@ export class FactorySupervisor {
             checkpoint,
             invocationId,
             () => this.#admitModelInvocation(invocationId, item.id, undefined, item.number),
+            (error) =>
+              this.#recordProviderQuotaGate(
+                error,
+                item.id,
+                "management",
+                this.#management.id,
+                undefined,
+                item.number,
+              ),
           );
       }
       await this.#reviewTransaction({

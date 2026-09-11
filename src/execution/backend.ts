@@ -4,7 +4,7 @@ import { workerPacketDigest } from "../protocol/worker-packet.js";
 import type { NormalizedArtifact } from "./artifacts.js";
 import { LocalScopeBatchSchema, type LocalScopeBatch } from "../protocol/local-scope.js";
 import type { AppServerSessionJournal } from "./app-server-session.js";
-import type { ProviderQuotaGate } from "../providers/quota.js";
+import type { ProviderQuotaCheckpoint, ProviderQuotaGate } from "../providers/quota.js";
 
 export type IsolationKind = "none" | "process" | "container" | "microvm" | "managed";
 
@@ -71,6 +71,12 @@ export interface AttemptContext {
   deadline: Date;
   /** A prior host-validated patch is already present for an incremental retry. */
   seededFromArtifact?: boolean;
+  /**
+   * Required by a model-usage-reporting backend before it exposes a bounded
+   * account-level refusal. The owner durably binds the refusal to this exact
+   * attempt and its pre-dispatch marker; adapters never receive journal access.
+   */
+  checkpointProviderRefusal?: ProviderQuotaCheckpoint;
   /** Current fenced GitHub journal, required by durable App Server execution. */
   sessionJournal?: AppServerSessionJournal;
   /** Prepared and durably journaled by the Supervisor, never by a backend. */

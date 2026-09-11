@@ -14,6 +14,32 @@ export interface ProviderQuotaUsage {
   cachedInputTokens?: number | undefined;
 }
 
+/** Owner-supplied durability port that every provider adapter must await before exposing a refusal. */
+export type ProviderQuotaCheckpoint = (error: ProviderQuotaError) => Promise<void>;
+
+/** Partial provider counters never become an exact refusal receipt. */
+export function exactProviderQuotaUsage(usage: {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
+}): ProviderQuotaUsage | undefined {
+  if (!Number.isSafeInteger(usage.inputTokens) || !Number.isSafeInteger(usage.outputTokens))
+    return undefined;
+  if (usage.inputTokens! < 0 || usage.outputTokens! < 0) return undefined;
+  if (
+    usage.cachedInputTokens !== null &&
+    (!Number.isSafeInteger(usage.cachedInputTokens) ||
+      usage.cachedInputTokens < 0 ||
+      usage.cachedInputTokens > usage.inputTokens!)
+  )
+    return undefined;
+  return {
+    inputTokens: usage.inputTokens!,
+    outputTokens: usage.outputTokens!,
+    ...(usage.cachedInputTokens === null ? {} : { cachedInputTokens: usage.cachedInputTokens }),
+  };
+}
+
 /** A captured account-level refusal. Arbitrary provider diagnostics are never retained here. */
 export class ProviderQuotaError extends Error {
   readonly gate: ProviderQuotaGate;

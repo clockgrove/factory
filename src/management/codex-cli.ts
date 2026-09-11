@@ -1490,17 +1490,25 @@ export class CodexCliManagementBackend implements ManagementBackend {
       const effectiveTimeoutMs = effectiveInvocationTimeout(admittedTimeoutMs, invocationTimeoutMs);
       if (!Number.isFinite(effectiveTimeoutMs) || effectiveTimeoutMs <= 0)
         throw new Error("compiler invocation deadline exhausted");
-      const result = await this.#options.runStructured(
-        cwd,
-        schema,
-        prompt,
-        modelSelection,
-        effectiveTimeoutMs,
-      );
-      return {
-        value: result.value as T,
-        usage: assertManagementUsage(result.usage),
-      };
+      try {
+        const result = await this.#options.runStructured(
+          cwd,
+          schema,
+          prompt,
+          modelSelection,
+          effectiveTimeoutMs,
+        );
+        return {
+          value: result.value as T,
+          usage: assertManagementUsage(result.usage),
+        };
+      } catch (error) {
+        if (error instanceof ProviderQuotaError && admission && typeof admission === "object") {
+          error.bindInvocation(admission.modelInvocationId);
+          await admission.checkpointProviderRefusal(error);
+        }
+        throw error;
+      }
     }
     const codexHome = await (this.#options.createCodexHome ?? createIsolatedCodexHome)(
       "management",
@@ -1562,20 +1570,25 @@ export class CodexCliManagementBackend implements ManagementBackend {
         maxOutputBytes: 2 * 1024 * 1024,
       });
       if (result.exitCode !== 0) {
+        let quotaError: ProviderQuotaError | undefined;
         for (const line of result.stdout.split(/\r?\n/)) {
           try {
             const event = JSON.parse(line) as unknown;
             const gate = githubCopilotQuotaFromStreamEvent(event);
             if (gate)
-              throw new ProviderQuotaError(gate, {
+              quotaError = new ProviderQuotaError(gate, {
                 ...(observedCompletionUsage(result.stdout)
                   ? { usage: observedCompletionUsage(result.stdout)! }
                   : {}),
                 ...(invocationId ? { invocationId } : {}),
               });
-          } catch (error) {
-            if (error instanceof ProviderQuotaError) throw error;
-          }
+          } catch {}
+          if (quotaError) break;
+        }
+        if (quotaError) {
+          if (admission && typeof admission === "object")
+            await admission.checkpointProviderRefusal(quotaError);
+          throw quotaError;
         }
         const streams = [
           result.stderr.trim() ? `stderr:\n${result.stderr.trim()}` : "",
@@ -1595,7 +1608,11 @@ export class CodexCliManagementBackend implements ManagementBackend {
       try {
         output = parseManagementJsonlOutput<T>(result.stdout);
       } catch (error) {
-        if (error instanceof ProviderQuotaError && invocationId) error.bindInvocation(invocationId);
+        if (error instanceof ProviderQuotaError) {
+          if (invocationId) error.bindInvocation(invocationId);
+          if (admission && typeof admission === "object")
+            await admission.checkpointProviderRefusal(error);
+        }
         throw error;
       }
     } catch (error) {

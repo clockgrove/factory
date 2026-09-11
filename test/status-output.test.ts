@@ -500,7 +500,7 @@ describe("bounded status, explain, and replay output", () => {
     if (gate?.kind !== "provider" || terminal?.kind !== "run")
       throw new Error("provider quota fixture is incomplete");
     gate.accounting = "exact";
-    terminal.sequence = 7;
+    terminal.sequence = 8;
     current.workItems[0]!.factoryEvents!.push(
       event({
         kind: "budget",
@@ -517,11 +517,27 @@ describe("bounded status, explain, and replay output", () => {
         directorEpoch: 4,
         policyDigest: policyDigest(policy),
       }),
+      event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        sequence: 7,
+        at: "2026-09-04T12:00:30.750Z",
+        phase: "execution",
+        unit: "sandbox_milliseconds",
+        amount: 120_000,
+        workItem: 10,
+        attempt: 1,
+      }),
     );
     const exact = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
     expect(
       "requiredAction" in exact.operatorAction && exact.operatorAction.requiredAction,
     ).toContain("factory_recovery_plan");
+    expect(exact.operatorAction.evidence).toMatchObject({
+      accounting: "exact",
+      recoveryAccounting: "clear",
+      unreconciledReservationCount: 0,
+    });
   });
 
   it("keeps monitoring a provider-neutral quota gate until terminal drain is durable", () => {
@@ -605,6 +621,111 @@ describe("bounded status, explain, and replay output", () => {
     expect(
       "requiredAction" in stopped.operatorAction && stopped.operatorAction.requiredAction,
     ).not.toContain("factory_recovery_plan");
+  });
+
+  it("does not mistake an exact quota gate for history-wide recovery accounting", () => {
+    const current = snapshot();
+    current.workItems[0]!.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        sequence: 5,
+        phase: "execution",
+        unit: "sandbox_milliseconds",
+        amount: 120_000,
+        workItem: 10,
+        attempt: 1,
+      }),
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        sequence: 6,
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: "invocation-worker-10-1",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        directorEpoch: 4,
+        policyDigest: policyDigest(policy),
+      }),
+      event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        sequence: 7,
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 12,
+        usageId: "worker-10-1",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        directorEpoch: 4,
+        policyDigest: policyDigest(policy),
+      }),
+      event({
+        kind: "provider",
+        event: "ProviderQuotaBlocked",
+        sequence: 8,
+        reasonCode: "provider-quota-exhausted",
+        provider: "another-model-provider",
+        phase: "execution",
+        backend: "another/local-backend",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        providerMessage: "Provider quota requires operator action",
+        accounting: "exact",
+      }),
+    );
+    current.workItems[1]!.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        sequence: 9,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: "invocation-review-independent",
+        modelInvocationId: "review-independent",
+        workItem: 11,
+        attempt: 1,
+        directorEpoch: 4,
+        policyDigest: policyDigest(policy),
+      }),
+    );
+    current.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "FactoryRunEscalated",
+        sequence: 10,
+        reason: "Provider quota requires operator action",
+      }),
+    );
+
+    const status = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
+    expect(status.operatorAction).toMatchObject({
+      code: "provider-quota",
+      evidence: {
+        accounting: "exact",
+        recoveryAccounting: "unreconciled",
+        unreconciledReservationCount: 1,
+        unreconciledReservations: [{ modelInvocationId: "review-independent" }],
+      },
+    });
+    expect(
+      "requiredAction" in status.operatorAction && status.operatorAction.requiredAction,
+    ).not.toContain("factory_recovery_plan");
+    const explanation = buildExplanationReport({
+      repository: "clockgrove/factory",
+      snapshot: current,
+    }).explanations[0]!;
+    expect(explanation.evidence).toMatchObject({
+      accounting: "exact",
+      recoveryAccounting: "unreconciled",
+    });
+    expect(explanation.requiredAction).not.toContain("factory_recovery_plan");
   });
 
   it("keeps recovery fenced when any provider gate in the run has unknown accounting", () => {
@@ -991,7 +1112,7 @@ describe("bounded status, explain, and replay output", () => {
       disposition: "failed",
       summary: terminalReason,
       gate: "recovery-successor",
-      requiredAction: expect.stringContaining("factory_recovery_plan"),
+      requiredAction: expect.not.stringContaining("factory_recovery_plan"),
       evidence: {
         runId: successorRunId,
         predecessorRunId: "run-status",
@@ -1002,6 +1123,8 @@ describe("bounded status, explain, and replay output", () => {
         reasonDigest: "0536a190cf51e1d827a3ebdfd212e9dd59016f2dbd56544b9c9184f5092276ac",
         factoryWorkActive: false,
         monitoring: "stop",
+        recoveryAccounting: "unreconciled",
+        unreconciledReservationCount: 1,
       },
     });
   });

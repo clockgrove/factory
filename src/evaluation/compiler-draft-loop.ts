@@ -101,6 +101,7 @@ export interface CompilerDraftCallbacks {
     request: DraftInvocation,
     checkpoint: (result: DraftInvocationResult) => Promise<void>,
     reserve?: () => Promise<void>,
+    checkpointProviderRefusal?: (error: ProviderQuotaError) => Promise<void>,
   ): Promise<DraftInvocationResult>;
   /** Prepare locally before recording a possible paid invocation. */
   reserveAtDispatch?: boolean;
@@ -462,7 +463,10 @@ export async function runCompilerDraftLoop(args: {
     let conflictingResultDigest: string | null = null;
     let conflictingUsageDigest: string | null = null;
     let usageConflict = false;
+    let savedProviderQuota: ProviderQuotaError | null = null;
     const checkpoint = async (result: DraftInvocationResult): Promise<void> => {
+      if (savedProviderQuota)
+        throw new Error("compiler success conflicts with its provider refusal checkpoint");
       const parsedUsage =
         result.usage === null
           ? { success: true as const, data: null }
@@ -500,16 +504,45 @@ export async function runCompilerDraftLoop(args: {
       }
       saved = { value: result.value, usage };
     };
+    const checkpointProviderRefusal = async (error: ProviderQuotaError): Promise<void> => {
+      if (saved) throw new Error("compiler provider refusal conflicts with its result checkpoint");
+      error.bindInvocation(invocationId);
+      const gate = ProviderQuotaCheckpointSchema.parse(error.gate);
+      const usage = error.usage ? UsageSchema.parse(error.usage) : null;
+      if (savedProviderQuota) {
+        if (
+          draftDigest({
+            gate: savedProviderQuota.gate,
+            usage: savedProviderQuota.usage ?? null,
+          }) !== draftDigest({ gate, usage })
+        )
+          throw new Error("conflicting compiler provider refusal checkpoint");
+        return;
+      }
+      await append("result", {
+        invocationId,
+        stage,
+        revision,
+        value: null,
+        usage,
+        ...timing(),
+        error: diagnostic(error),
+        providerQuota: gate,
+      });
+      savedProviderQuota = error;
+    };
     let result: DraftInvocationResult;
     try {
       result = await callbacks.invoke(
         { invocationId, stage, revision, inventory, previous, failure, reviewEvidence },
         checkpoint,
         reserve,
+        checkpointProviderRefusal,
       );
       await checkpoint(result);
     } catch (error) {
       if (error instanceof CompilerDraftAdmissionError) throw error;
+      if (savedProviderQuota) throw error;
       // A successful terminal checkpoint survives a caller/transport failure after it.
       if (contradictory) {
         await append("terminal-conflict", {

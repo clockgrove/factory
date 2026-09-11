@@ -59,7 +59,11 @@ import {
   type LocalCapabilityProbe,
 } from "./codex-cli-local.js";
 import { withManagedToolchainPath } from "../toolchains/authority.js";
-import type { ProviderQuotaGate } from "../providers/quota.js";
+import {
+  exactProviderQuotaUsage,
+  ProviderQuotaError,
+  type ProviderQuotaGate,
+} from "../providers/quota.js";
 import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
 
 interface WorkerFinal {
@@ -842,6 +846,26 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     let terminalFailure: string | undefined;
     let completionObserved = false;
     let completionCount = 0;
+    let providerRefusalCheckpointed = false;
+    const checkpointProviderRefusal = async (gate: ProviderQuotaGate) => {
+      if (providerRefusalCheckpointed) return;
+      if (!running.context.checkpointProviderRefusal)
+        throw new Error(
+          "worker provider refusal could not be durably checkpointed; consumption remains unknown",
+        );
+      try {
+        const usage = exactProviderQuotaUsage(normalizeExecutionUsage(running.usage));
+        await running.context.checkpointProviderRefusal(
+          new ProviderQuotaError(gate, { ...(usage ? { usage } : {}) }),
+        );
+      } catch {
+        throw new Error(
+          "worker provider refusal could not be durably checkpointed; consumption remains unknown",
+        );
+      }
+      providerRefusalCheckpointed = true;
+      running.providerQuotaGate = gate;
+    };
     const timeout = setTimeout(() => {
       running.timedOut = true;
       running.controller.abort("Factory worker deadline elapsed");
@@ -900,13 +924,13 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
           }
         } else if (event.type === "turn.failed") {
           const gate = githubCopilotQuotaFromStreamEvent(event);
-          if (gate) running.providerQuotaGate = gate;
+          if (gate) await checkpointProviderRefusal(gate);
           terminalFailure = safeDiagnostic(event.error.message);
           running.reason = terminalFailure;
           running.controller.abort(terminalFailure);
         } else if (event.type === "error") {
           const gate = githubCopilotQuotaFromStreamEvent(event);
-          if (gate) running.providerQuotaGate = gate;
+          if (gate) await checkpointProviderRefusal(gate);
           terminalFailure = safeDiagnostic(event.message);
           running.reason = terminalFailure;
           running.controller.abort(terminalFailure);

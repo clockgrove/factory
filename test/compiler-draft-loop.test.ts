@@ -203,11 +203,13 @@ describe("compiler draft durable repair", () => {
     const args = await setup();
     const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
     let observed: ProviderQuotaError | undefined;
-    args.callbacks.invoke = async (request) => {
-      throw new ProviderQuotaError(gate, {
+    args.callbacks.invoke = async (request, _checkpoint, _reserve, checkpointProviderRefusal) => {
+      const error = new ProviderQuotaError(gate, {
         invocationId: request.invocationId,
         usage: { inputTokens: 2, outputTokens: 1 },
       });
+      await checkpointProviderRefusal!(error);
+      throw error;
     };
 
     try {

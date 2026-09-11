@@ -16,6 +16,7 @@ import type { ReviewContext } from "../src/management/backend.js";
 import { validateArtifactClean, discardValidationResult } from "../src/validation/clean-run.js";
 import { pnpmBootstrapLock } from "./helpers/pnpm-bootstrap.js";
 import { selectedManagedRuntimeRequirements } from "./helpers/managed-runtime.js";
+import { ProviderQuotaError } from "../src/providers/quota.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -355,6 +356,41 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:4, output
 
     expect(calls).toEqual(["admission", "dispatch"]);
     expect(beforeModelInvocation).toHaveBeenCalledOnce();
+  });
+
+  it("checkpoints a semantic-review provider refusal before private-checkout cleanup", async () => {
+    const input = await fixture();
+    let reviewCheckout = "";
+    const refusal = new ProviderQuotaError({
+      reasonCode: "provider-quota-exhausted",
+      provider: "synthetic-provider",
+      message: "Synthetic provider quota exhausted",
+    });
+    const backend = new CodexCliManagementBackend({
+      runStructured: async (cwd) => {
+        reviewCheckout = cwd;
+        throw refusal;
+      },
+    });
+    const checkpointProviderRefusal = vi.fn(async (error: ProviderQuotaError) => {
+      expect(error).toBe(refusal);
+      expect(error.invocationId).toBe("review-checkpoint-fixture");
+      await expect(stat(reviewCheckout)).resolves.toBeDefined();
+    });
+
+    await expect(
+      backend.reviewWithAdmission(
+        input,
+        async () => {},
+        async () => ({
+          modelInvocationId: "review-checkpoint-fixture",
+          checkpointProviderRefusal,
+        }),
+      ),
+    ).rejects.toBe(refusal);
+
+    expect(checkpointProviderRefusal).toHaveBeenCalledOnce();
+    await expect(stat(reviewCheckout)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("does not launch review when the final post-preparation admission is expired", async () => {

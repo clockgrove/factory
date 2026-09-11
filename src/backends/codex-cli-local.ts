@@ -49,7 +49,11 @@ import { restrictedCodexArgs } from "./codex-cli-policy.js";
 import { readLocalResourceHostIdentity } from "../recovery/local-resources.js";
 import { bootstrapPackageValidationCommand } from "../validation/plan.js";
 import { managedToolAvailable, withManagedToolchainPath } from "../toolchains/authority.js";
-import type { ProviderQuotaGate } from "../providers/quota.js";
+import {
+  exactProviderQuotaUsage,
+  ProviderQuotaError,
+  type ProviderQuotaGate,
+} from "../providers/quota.js";
 import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
 
 export const CODEX_WORKER_OUTPUT_SCHEMA = {
@@ -84,6 +88,7 @@ interface WorkerFinal {
 
 interface RunningAttempt {
   process: ContainedProcess;
+  terminal: Promise<void>;
   context: AttemptContext;
   codexHome: string;
   result: ProcessResult | null;
@@ -483,6 +488,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
       const resourceId = `local-${processHandle.pid}`;
       const running: RunningAttempt = {
         process: processHandle,
+        terminal: Promise.resolve(),
         context,
         codexHome,
         result: null,
@@ -492,18 +498,38 @@ export class CodexCliLocalBackend implements ExecutionBackend {
         cancelled: false,
       };
       this.#running.set(resourceId, running);
-      const recordResult = (result: ProcessResult) => {
-        running.result = result;
+      const recordResult = async (result: ProcessResult) => {
         const details = parseCodexWorkerStream(result.stdout);
+        if (details.providerQuotaGate) {
+          try {
+            if (!context.checkpointProviderRefusal)
+              throw new Error("provider-refusal durability port is unavailable");
+            const usage = exactProviderQuotaUsage(normalizeExecutionUsage(details.usage));
+            await context.checkpointProviderRefusal(
+              new ProviderQuotaError(details.providerQuotaGate, {
+                ...(usage ? { usage } : {}),
+              }),
+            );
+          } catch {
+            running.result = result;
+            running.final = null;
+            running.usage = details.usage;
+            running.progress = details.progress;
+            running.failure =
+              "worker provider refusal could not be durably checkpointed; consumption remains unknown";
+            return;
+          }
+        }
+        running.result = result;
         running.final = details.final;
         if (details.failure) running.failure = details.failure;
         if (details.providerQuotaGate) running.providerQuotaGate = details.providerQuotaGate;
         running.usage = details.usage;
         running.progress = details.progress;
       };
-      void processHandle.completed.then(recordResult, (error: unknown) => {
+      running.terminal = processHandle.completed.then(recordResult, async (error: unknown) => {
         const result = error instanceof LocalScopeCleanupError ? error.result : null;
-        recordResult({
+        await recordResult({
           exitCode: 1,
           signal: result?.signal ?? null,
           stdout: result?.stdout ?? "",
@@ -584,8 +610,9 @@ export class CodexCliLocalBackend implements ExecutionBackend {
 
   async collect(handle: BackendHandle): Promise<NormalizedArtifact> {
     const running = this.#require(handle);
-    const result = running.result ?? (await running.process.completed);
-    running.result = result;
+    await running.terminal;
+    const result = running.result;
+    if (!result) throw new Error("local worker terminal result is unavailable");
     const details = parseCodexWorkerStream(result.stdout);
     running.final = details.final;
     running.usage = details.usage;
@@ -634,6 +661,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
   async cleanup(handle: BackendHandle): Promise<void> {
     const running = this.#require(handle);
     if (!running.result) await running.process.cancel();
+    await running.terminal;
     const scope = localExecutionScopeBatch(running.context);
     if (scope) await stopLocalScope(scope.identity, this.#options.localScopePort);
     this.#running.delete(handle.resourceId);

@@ -171,6 +171,7 @@ describe.skipIf(!LIVE)("live GitHub managed-agent plus isolated-validator smoke"
         defaultBranch = snapshot.defaultBranch;
         const base = await store.getBranchHead(snapshot.defaultBranch);
         const compiled: CompiledObjective = {
+          deferredCapabilityAdapters: [],
           title: `Factory managed conformance ${suffix}`,
           workItems: [
             {

@@ -40,6 +40,11 @@ function dependencyPath(
 
 const operationIdentity = (operation: CapabilityOperation) => `${operation.kind}\0${operation.key}`;
 
+/** A trailing slash grants a directory subtree; every other scope entry names one exact path. */
+export function scopeOwnsPath(scope: readonly string[], path: string): boolean {
+  return scope.some((entry) => entry === path || (entry.endsWith("/") && path.startsWith(entry)));
+}
+
 function itemOperations(
   item: CapabilityGraphItem,
   adapter: DeferredCapabilityAdapter,
@@ -84,7 +89,7 @@ export function bindDeferredCapabilityGraph(
       const rootCandidates = items.filter(
         (candidate) =>
           dependencyPath(byId, item.id, candidate.id) &&
-          adapter.rootAuthorityPaths.every((path) => candidate.scope.includes(path)) &&
+          adapter.rootAuthorityPaths.every((path) => scopeOwnsPath(candidate.scope, path)) &&
           itemOperations(candidate, adapter).length > 0,
       );
       const roots = rootCandidates.filter(
@@ -104,7 +109,9 @@ export function bindDeferredCapabilityGraph(
           dependencyPath(byId, item.id, candidate.id) &&
           dependencyPath(byId, candidate.id, root.id) &&
           (candidate.id === root.id ||
-            (adapter.generationAuthorityPaths.every((path) => candidate.scope.includes(path)) &&
+            (adapter.generationAuthorityPaths.every((path) =>
+              scopeOwnsPath(candidate.scope, path),
+            ) &&
               itemOperations(candidate, adapter).some(
                 (candidateOperation) =>
                   operationIdentity(candidateOperation) === operationIdentity(operation),
@@ -217,9 +224,11 @@ export function validateCapabilityGraphBindings(
     repositoryCapabilities?: RepositoryCapabilityBindings | undefined;
   })[],
   adapters: readonly DeferredCapabilityAdapter[],
+  deferredAdapterIds?: readonly string[] | undefined,
 ): void {
   const hasBindings = items.some((item) => item.repositoryCapabilities !== undefined);
-  if (!hasBindings) return;
+  if (!hasBindings && deferredAdapterIds === undefined) return;
+  if (!hasBindings && deferredAdapterIds?.length === 0) return;
   if (
     items.some((item) =>
       [
@@ -235,8 +244,44 @@ export function validateCapabilityGraphBindings(
     ...item,
     validationCommands: item.validationCommands!,
   }));
+  // Fresh graphs persist the host-derived, objective-wide adapter disposition.
+  // Historical graphs predate that field, so their authenticated bindings are
+  // the narrow compatibility source. Selection is graph-wide because complete
+  // root-authority absence is an adapter/repository fact, not an item-local
+  // property that a deleted requirement may redefine.
+  const selectedIds =
+    deferredAdapterIds ??
+    [
+      ...new Set(
+        items.flatMap((item) =>
+          [
+            ...(item.repositoryCapabilities?.provides ?? []),
+            ...(item.repositoryCapabilities?.requires ?? []),
+          ].map(({ adapter }) => adapter),
+        ),
+      ),
+    ].sort();
+  if (
+    new Set(selectedIds).size !== selectedIds.length ||
+    JSON.stringify(selectedIds) !== JSON.stringify([...selectedIds].sort())
+  )
+    throw new Error("deferred repository capability adapters are not canonical");
+  const adaptersById = new Map(adapters.map((adapter) => [adapter.id, adapter]));
+  for (const id of selectedIds)
+    if (!adaptersById.has(id))
+      throw new Error(`unknown deferred repository capability adapter ${id}`);
+  const selected = new Set(selectedIds);
+  for (const id of selected) {
+    const adapter = adaptersById.get(id)!;
+    if (
+      !capabilityItems.some((item) =>
+        item.validationCommands.some((command) => adapter.operation(command)),
+      )
+    )
+      throw new Error(`deferred repository capability adapter ${id} has no operation`);
+  }
   const expected = bindDeferredCapabilityGraph(capabilityItems, adapters, (_item, command) =>
-    adapters.some((adapter) => adapter.operation(command) !== null),
+    adapters.some((adapter) => selected.has(adapter.id) && adapter.operation(command) !== null),
   );
   for (const item of items) {
     const actual = canonicalBindings(item.repositoryCapabilities, true);
@@ -258,7 +303,7 @@ export function validateCapabilityGraphBindings(
           `repository capability generation has multiple providers: ${provision.generation}`,
         );
       generations.set(identity, item.id);
-      if (!provision.authorityPaths.every((path) => item.scope.includes(path)))
+      if (!provision.authorityPaths.every((path) => scopeOwnsPath(item.scope, path)))
         throw new Error(
           `repository capability provider ${item.id} does not own its authority paths`,
         );
@@ -283,7 +328,7 @@ export function validateCapabilityGraphBindings(
       if (
         provision.authorityPaths.join("\0") !== requirement.authorityPaths.join("\0") ||
         JSON.stringify(provision.runtime) !== JSON.stringify(requirement.runtime) ||
-        !requirement.authorityPaths.every((path) => provider.scope.includes(path))
+        !requirement.authorityPaths.every((path) => scopeOwnsPath(provider.scope, path))
       )
         throw new Error(
           `repository capability authority paths disagree with provider ${provider.id}`,

@@ -84,7 +84,7 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
   recovery re-derives canonical bindings and reuses the persisted graph without another compiler
   invocation; independent ready work is not suppressed by one unavailable generation.
   Graphs retain only abstract managed-runtime contracts; after persistence, exact content-addressed
-  Node/pnpm, Bun, or uv/CPython receipts are selected and bound through `AttemptReserved` to every local or isolated
+  Node/npm, Node/pnpm, Bun, or uv/CPython receipts are selected and bound through `AttemptReserved` to every local or isolated
   consumer, then reverified with source/provider lineage immediately before launch. Integrated-base
   consumers inherit their provider generation's authenticated reservation receipt rather than the
   mutable active default, and provider/current authority drift fails before dispatch. Historical
@@ -102,10 +102,15 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
   `factory toolchains restore RECEIPT.json` reacquires that historical bundle without selecting
   latest or changing the active pointer. Each adapter performs one frozen hook-free setup, validates
   root and later operation generations, and rejects partial authority, unsafe commands, lifecycle
-  hooks, workspace/lock drift and hostile ambient runtimes. Bun ZIP extraction is in-process and uv
+  hooks, workspace/lock drift and hostile ambient runtimes. The npm adapter retains one full official
+  Node LTS distribution and attests both its native Node entrypoint and embedded `npm-cli.js`, which
+  executes only through that exact Node interpreter. It accepts bounded Node 22/npm 10 and Node
+  24/npm 11 pairs, exact `devEngines` pins, lockfile v3, exact workspace members, canonical public
+  registry SHA-512 dependencies, and finite `npm run` validations. Bun ZIP extraction is in-process and uv
   carries exact official CPython bytes; neither depends on an ambient archive, package-manager,
-  Python, or self-download path. Missing npm, Cargo, Go, ambient Python, or uncatalogued recipes
-  remain explicit unsupported future-authority gates. Safe protected-push-only workflow artifacts
+  Python, or self-download path. Existing observed npm recipes remain host-bound unless an explicit
+  `node-npm` capability selects the managed adapter. Missing Cargo, Go, ambient Python, or
+  uncatalogued recipes remain explicit unsupported future-authority gates. Safe protected-push-only workflow artifacts
   may be published only after a parsed credential/permission review; unsafe ones are durably held
   before a ref or PR, and every
   workflow, action, manifest, lock or registry change remains human-only at the exact Git-diff merge
@@ -117,7 +122,8 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
   ([#284](https://github.com/clockgrove/factory/issues/284),
   [#289](https://github.com/clockgrove/factory/issues/289),
   [#293](https://github.com/clockgrove/factory/issues/293),
-  [#291](https://github.com/clockgrove/factory/issues/291))
+  [#291](https://github.com/clockgrove/factory/issues/291),
+  [#294](https://github.com/clockgrove/factory/issues/294))
 - Interrupted accepted compiler-evaluation graphs now authenticate their pre-receipt restart through
   exact immutable draft-selection and per-stage accounting evidence, while ordinary compilation
   retains its single-invocation checkpoint requirement. Changed Objective input still blocks before

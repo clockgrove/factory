@@ -42,6 +42,12 @@ import {
   parseBunValidationCommand,
 } from "../toolchains/bun.js";
 import {
+  findNestedNpmRoots,
+  inspectNpmAuthority,
+  npmValidationCommandForOperation,
+  parseNpmValidationCommand,
+} from "../toolchains/npm.js";
+import {
   inspectUvAuthority,
   loadUvAuthoritySurface,
   parseUvPytestCommand,
@@ -542,7 +548,7 @@ async function assertTurboTaskConfiguration(root: string, script: string): Promi
 }
 
 export interface BootstrapPackageValidation {
-  manager: "pnpm" | "bun" | "uv";
+  manager: "npm" | "pnpm" | "bun" | "uv";
   expectedVersion: string;
   versionCommand: string;
   setupCommand: string;
@@ -559,12 +565,23 @@ export async function assertBunOrUvValidation(
 ): Promise<BootstrapPackageValidation | null> {
   const managed = commands.flatMap((command) => {
     const parsed = futureToolchainCommand(command);
-    return parsed && (parsed.runner === "bun" || parsed.runner === "uv") ? [parsed] : [];
+    if (
+      parsed?.runner === "npm" &&
+      ![
+        ...(packet.repositoryCapabilities?.requires ?? []).map(({ adapter }) => adapter),
+        ...(packet.repositoryCapabilities?.provides ?? []).map(({ adapter }) => adapter),
+      ].includes(parsed.adapter.id)
+    )
+      return [];
+    return parsed && (parsed.runner === "npm" || parsed.runner === "bun" || parsed.runner === "uv")
+      ? [parsed]
+      : [];
   });
   if (managed.length === 0) return null;
-  const runners = new Set<"bun" | "uv">(
+  const runners = new Set<"npm" | "bun" | "uv">(
     managed.map(({ runner }) => {
-      if (runner !== "bun" && runner !== "uv") throw new Error("unsupported managed adapter");
+      if (runner !== "npm" && runner !== "bun" && runner !== "uv")
+        throw new Error("unsupported managed adapter");
       return runner;
     }),
   );
@@ -598,7 +615,59 @@ export async function assertBunOrUvValidation(
   let authorityPaths: string[];
   let expectedVersion: string;
   const changedOperations = new Set<string>();
-  if (runner === "bun") {
+  if (runner === "npm") {
+    const component = runtime.components.find(({ id }) => id === "npm");
+    const node = component?.entrypoints?.find(({ id }) => id === "node");
+    const npm = component?.entrypoints?.find(({ id }) => id === "npm");
+    if (!component || !node || !npm || npm.interpreter !== "node")
+      throw new Error("npm runtime bundle lacks its exact Node/npm entrypoint relationship");
+    const inspectionCommands = [
+      ...commands.map((command) => {
+        const parsed = parseNpmValidationCommand(command);
+        if (!parsed)
+          throw new Error("npm validation command is outside the finite adapter contract");
+        return parsed;
+      }),
+      ...promisedOperations.map((operation) => {
+        const parsed = npmValidationCommandForOperation(operation);
+        if (!parsed)
+          throw new Error("npm capability operation is outside the finite adapter contract");
+        return parsed;
+      }),
+    ];
+    const inspection = await inspectNpmAuthority({
+      root: worktree.path,
+      commands: inspectionCommands,
+      nodeVersion: node.version,
+      npmVersion: npm.version,
+    });
+    const nested = await findNestedNpmRoots(
+      worktree.path,
+      inspection.manifestPaths
+        .filter((path) => path !== "package.json")
+        .map((path) => posix.dirname(path)),
+    );
+    if (nested.length > 0)
+      throw new Error(`npm authority contains an undeclared nested root: ${nested.join(", ")}`);
+    authorityPaths = inspection.authorityPaths;
+    for (const manifestPath of inspection.manifestPaths) {
+      if (!artifact.changedPaths.includes(manifestPath)) continue;
+      const before = stringRecord(
+        basePackageManifests.get(manifestPath)?.scripts,
+        `scripts in base ${manifestPath}`,
+      );
+      const after = stringRecord(
+        (await readPackageManifest(worktree.path, manifestPath)).scripts,
+        `scripts in ${manifestPath}`,
+      );
+      for (const name of new Set([...Object.keys(before), ...Object.keys(after)]))
+        if (before[name] !== after[name])
+          changedOperations.add(
+            manifestPath === "package.json" ? name : `${posix.dirname(manifestPath)}:${name}`,
+          );
+    }
+    expectedVersion = `${node.version}/npm ${npm.version}`;
+  } else if (runner === "bun") {
     const component = runtime.components.find(({ id }) => id === "bun");
     if (!component) throw new Error("Bun runtime bundle lacks its executable component");
     const inspectionCommands = [
@@ -984,11 +1053,15 @@ export function isBootstrapDependencySurface(
 
 function isPotentialBootstrapDependencySurface(
   paths: string[],
-  managers: Set<"pnpm" | "bun" | "uv">,
+  managers: Set<"npm" | "pnpm" | "bun" | "uv">,
 ): boolean {
   return paths.every(
     (path) =>
       isReviewOnlyWorkflowSurface(path) ||
+      (managers.has("npm") &&
+        (path === "package.json" ||
+          path === "package-lock.json" ||
+          path.endsWith("/package.json"))) ||
       (managers.has("pnpm") &&
         (path === "package.json" ||
           path === "pnpm-lock.yaml" ||
@@ -1111,12 +1184,13 @@ export async function validateArtifactClean(
   assertNoSecretMaterial({ patch: artifact.patch, logs: artifact.logs }, "artifact");
 
   const plan = validationPlanFromPacket(input.packet);
-  const potentialBootstrapManagers = new Set<"pnpm" | "bun" | "uv">(
+  const potentialBootstrapManagers = new Set<"npm" | "pnpm" | "bun" | "uv">(
     plan.commands.flatMap((command) => {
       const parsed = bootstrapPackageValidationCommand(command);
       if (parsed) return [parsed.manager];
       const managed = futureToolchainCommand(command);
-      return managed && (managed.runner === "bun" || managed.runner === "uv")
+      return managed &&
+        (managed.runner === "npm" || managed.runner === "bun" || managed.runner === "uv")
         ? [managed.runner]
         : [];
     }),

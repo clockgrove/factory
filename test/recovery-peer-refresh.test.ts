@@ -135,6 +135,7 @@ async function fixture(sameObjective = false, peerNonhost = false) {
       expiresAt: new Date("2026-09-07T00:10:00Z"),
     };
     const compiled: CompiledObjective = {
+      deferredCapabilityAdapters: [],
       title: `Objective ${objective}`,
       workItems: numbers.map((number) => ({
         id: `item-${number}`,
@@ -271,6 +272,7 @@ async function fixture(sameObjective = false, peerNonhost = false) {
           graphSize: numbers.length,
           index,
           dependsOn: [],
+          deferredCapabilityAdapters: compiled.deferredCapabilityAdapters,
         }),
         closed: false,
         blockedBy: [],

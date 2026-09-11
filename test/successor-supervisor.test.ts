@@ -329,6 +329,7 @@ async function fixture(
     assertMutationAuthorized: async (lease: LeaseState) => leases.assertCurrent(lease),
   } as unknown as LeaseManager;
   const graph: CompiledObjective = {
+    deferredCapabilityAdapters: [],
     title: "Parallel siblings",
     workItems: ["a", "b", "c", "d"]
       .slice(0, options.noJoin ? 2 : (options.stackLength ?? 3))
@@ -526,6 +527,7 @@ async function fixture(
         graphSize: graph.workItems.length,
         index,
         dependsOn: item.dependsOn,
+        deferredCapabilityAdapters: graph.deferredCapabilityAdapters,
       }),
       closed: false,
       assignees: [],
@@ -1295,6 +1297,7 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
         graphSize: 3,
         index: 2,
         dependsOn: ["a", "b"],
+        deferredCapabilityAdapters: f.graph.deferredCapabilityAdapters,
       }),
       closed: false,
       assignees: [],
@@ -1321,6 +1324,7 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
           graphSize: f.graph.workItems.length,
           index,
           dependsOn: packet.dependsOn,
+          deferredCapabilityAdapters: f.graph.deferredCapabilityAdapters,
         }),
         closed: false,
         assignees: [],
@@ -3529,6 +3533,7 @@ describe("Supervisor authenticated successor execution", () => {
       f.graph.workItems.map((item, index) => [item.id, `adopted-${index + 8}`]),
     );
     const compiled: CompiledObjective = {
+      deferredCapabilityAdapters: [],
       title: f.graph.title,
       workItems: f.graph.workItems.map((item, index) => ({
         ...item,

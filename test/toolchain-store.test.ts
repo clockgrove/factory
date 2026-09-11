@@ -580,4 +580,105 @@ describe("managed toolchain store", () => {
     expect(restored.digest).toBe(receipt.digest);
     expect(latestLookups).toBe(0);
   });
+
+  it("provisions and exactly restores npm from one full official Node LTS tree", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-toolchain-store-"));
+    const fixtures = await mkdtemp(join(tmpdir(), "factory-npm-runtime-"));
+    roots.push(root, fixtures);
+    const prefix = "node-v22.20.0-linux-x64";
+    const tree = join(fixtures, "tree");
+    const nodePath = join(tree, prefix, "bin/node");
+    const npmPath = join(tree, prefix, "lib/node_modules/npm/bin/npm-cli.js");
+    await mkdir(join(tree, prefix, "bin"), { recursive: true });
+    await mkdir(join(tree, prefix, "lib/node_modules/npm/bin"), { recursive: true });
+    await mkdir(join(tree, prefix, "include/node"), { recursive: true });
+    await writeFile(
+      nodePath,
+      "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'v22.20.0\\n'; else printf '10.9.3\\n'; fi\n",
+      { mode: 0o755 },
+    );
+    await writeFile(npmPath, "// exact embedded npm cli fixture\n");
+    await writeFile(join(tree, prefix, "include/node/node.h"), "/* retained full tree */\n");
+    const archivePath = join(fixtures, `${prefix}.tar.xz`);
+    execFileSync("tar", ["-cJf", archivePath, "-C", tree, prefix]);
+    const archive = await readFile(archivePath);
+    const identity = {
+      version: "22.20.0",
+      tag: "v22.20.0",
+      publishedAt: "2026-09-08T00:00:00.000Z",
+      name: `${prefix}.tar.xz`,
+      url: `https://nodejs.org/dist/v22.20.0/${prefix}.tar.xz`,
+      sha256: digest(archive),
+      archive: "tar.xz" as const,
+      executablePath: `${prefix}/bin/node`,
+      npmVersion: "10.9.3",
+      lts: "Jod",
+    };
+    const releaseSource: ToolchainReleaseSource = {
+      listReleases: async () => {
+        throw new Error("npm must not resolve a separate GitHub release");
+      },
+      downloadAsset: async () => {
+        throw new Error("npm must not download a separate asset");
+      },
+      resolveLatestNodeDistribution: async (requirement) => {
+        expect(requirement).toEqual({ embeddedNpm: true });
+        return identity;
+      },
+      downloadNodeDistribution: async () => archive,
+    };
+    const receipt = await provisionToolchain("npm", { root, source: releaseSource });
+    expect(receipt).toMatchObject({
+      tool: "npm",
+      adapter: "node-npm",
+      components: [
+        {
+          id: "npm",
+          version: "22.20.0",
+          release: { provider: "nodejs", channel: "lts:Jod" },
+          entrypoints: [
+            { id: "node", version: "22.20.0" },
+            { id: "npm", version: "10.9.3", interpreter: "node" },
+          ],
+        },
+      ],
+    });
+    expect(receipt.components[0]).not.toHaveProperty("executableOnly");
+    const [component] = runtimeComponentPaths(root, receipt);
+    await expect(
+      access(join(component!.root, prefix, "include/node/node.h")),
+    ).resolves.toBeUndefined();
+    expect(component!.entrypoints.map(({ entrypoint }) => entrypoint.id)).toEqual(["node", "npm"]);
+
+    await rm(join(root, "bundles", receipt.digest), { recursive: true });
+    let latestLookups = 0;
+    const restored = await restoreToolchain(receipt, {
+      root,
+      source: {
+        listReleases: async () => {
+          latestLookups += 1;
+          throw new Error("exact npm restore must not resolve latest");
+        },
+        downloadAsset: async () => {
+          throw new Error("exact npm restore must not download a separate npm asset");
+        },
+        resolveLatestNodeDistribution: async () => {
+          latestLookups += 1;
+          throw new Error("exact npm restore must not resolve latest");
+        },
+        downloadNodeDistribution: async () => archive,
+      },
+    });
+    expect(restored.digest).toBe(receipt.digest);
+    expect(latestLookups).toBe(0);
+
+    const restoredComponent = runtimeComponentPaths(root, restored)[0]!;
+    const restoredNpm = restoredComponent.entrypoints.find(
+      ({ entrypoint }) => entrypoint.id === "npm",
+    )!;
+    await writeFile(restoredNpm.path, "swapped ambient entrypoint\n");
+    await expect(runtimeBundleByDigest("npm", receipt.digest, root)).rejects.toThrow(
+      /integrity verification/,
+    );
+  });
 });

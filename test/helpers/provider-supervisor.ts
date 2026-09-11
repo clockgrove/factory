@@ -51,6 +51,8 @@ export type ProviderScenario = "daytona-burst" | "copilot-objective" | "codex-ob
 const pendingFixtureRetirements = new Set<object>();
 const PNPM_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-pnpm")!
   .runtimeRequirement!;
+const NPM_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-npm")!
+  .runtimeRequirement!;
 const BUN_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(
   ({ id }) => id === "javascript-bun",
 )!.runtimeRequirement!;
@@ -94,7 +96,7 @@ export interface ProviderFaults {
   greenfieldLifecycle?: boolean;
   pnpmUnavailable?: boolean;
   capabilityAdmission?: "valid" | "unsafe";
-  capabilityAdapter?: "bun" | "uv";
+  capabilityAdapter?: "npm" | "bun" | "uv";
   capabilityProviderLineageMismatch?: boolean;
   capabilityProviderLineageMismatchAfterReservation?: boolean;
   capabilityProviderReservationCommentMismatch?: boolean;
@@ -179,7 +181,20 @@ wheels = [
           name: "capability-admission-fixture",
           version: "1.0.0",
           private: true,
-          packageManager: faults.capabilityAdapter === "bun" ? "bun@1.3.10" : "pnpm@10.34.5",
+          packageManager:
+            faults.capabilityAdapter === "bun"
+              ? "bun@1.3.10"
+              : faults.capabilityAdapter === "npm"
+                ? "npm@11.6.0"
+                : "pnpm@10.34.5",
+          ...(faults.capabilityAdapter === "npm"
+            ? {
+                devEngines: {
+                  runtime: { name: "node", version: "24.8.0", onFail: "error" },
+                  packageManager: { name: "npm", version: "11.6.0", onFail: "error" },
+                },
+              }
+            : {}),
           scripts:
             faults.capabilityAdapter === "bun"
               ? { test: "bun test", check: "bun test" }
@@ -190,7 +205,14 @@ wheels = [
         }),
       );
       await writeFile(
-        join(repository, faults.capabilityAdapter === "bun" ? "bun.lock" : "pnpm-lock.yaml"),
+        join(
+          repository,
+          faults.capabilityAdapter === "bun"
+            ? "bun.lock"
+            : faults.capabilityAdapter === "npm"
+              ? "package-lock.json"
+              : "pnpm-lock.yaml",
+        ),
         faults.capabilityAdapter === "bun"
           ? `${JSON.stringify({
               lockfileVersion: 1,
@@ -198,7 +220,17 @@ wheels = [
               workspaces: { "": { name: "capability-admission-fixture" } },
               packages: {},
             })}\n`
-          : "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
+          : faults.capabilityAdapter === "npm"
+            ? `${JSON.stringify({
+                name: "capability-admission-fixture",
+                version: "1.0.0",
+                lockfileVersion: 3,
+                requires: true,
+                packages: {
+                  "": { name: "capability-admission-fixture", version: "1.0.0" },
+                },
+              })}\n`
+            : "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
       );
     }
   }
@@ -414,6 +446,7 @@ wheels = [
   ];
   const ordinaryGraph: CompiledObjective = {
     title: "Provider multi-wave qualification",
+    deferredCapabilityAdapters: [],
     workItems: ["a", "b", "join"].map((id, index) => ({
       id,
       title: `Implement ${id}`,
@@ -453,43 +486,65 @@ wheels = [
     })),
   };
   const capabilityAdapter =
-    faults.capabilityAdapter === "bun"
-      ? "javascript-bun"
-      : faults.capabilityAdapter === "uv"
-        ? "python-uv"
-        : "node-pnpm";
+    faults.capabilityAdapter === "npm"
+      ? "node-npm"
+      : faults.capabilityAdapter === "bun"
+        ? "javascript-bun"
+        : faults.capabilityAdapter === "uv"
+          ? "python-uv"
+          : "node-pnpm";
   const capabilityRuntime =
-    faults.capabilityAdapter === "bun"
-      ? BUN_RUNTIME_REQUIREMENT
-      : faults.capabilityAdapter === "uv"
-        ? UV_RUNTIME_REQUIREMENT
-        : PNPM_RUNTIME_REQUIREMENT;
+    faults.capabilityAdapter === "npm"
+      ? NPM_RUNTIME_REQUIREMENT
+      : faults.capabilityAdapter === "bun"
+        ? BUN_RUNTIME_REQUIREMENT
+        : faults.capabilityAdapter === "uv"
+          ? UV_RUNTIME_REQUIREMENT
+          : PNPM_RUNTIME_REQUIREMENT;
   const capabilityAuthorityPaths =
     faults.capabilityAdapter === "uv"
       ? ["pyproject.toml", "uv.lock", ".python-version"]
-      : ["package.json", faults.capabilityAdapter === "bun" ? "bun.lock" : "pnpm-lock.yaml"];
+      : [
+          "package.json",
+          faults.capabilityAdapter === "bun"
+            ? "bun.lock"
+            : faults.capabilityAdapter === "npm"
+              ? "package-lock.json"
+              : "pnpm-lock.yaml",
+        ];
   const capabilityRunner = faults.capabilityAdapter ?? "pnpm";
   const capabilityTestCommand =
-    faults.capabilityAdapter === "bun"
-      ? "bun run test"
-      : faults.capabilityAdapter === "uv"
-        ? "uv run --locked --no-sync python -m pytest"
-        : "pnpm test";
+    faults.capabilityAdapter === "npm"
+      ? "npm run test"
+      : faults.capabilityAdapter === "bun"
+        ? "bun run test"
+        : faults.capabilityAdapter === "uv"
+          ? "uv run --locked --no-sync python -m pytest"
+          : "pnpm test";
   const capabilityCheckCommand =
-    faults.capabilityAdapter === "bun"
-      ? "bun run check"
-      : faults.capabilityAdapter === "uv"
-        ? "uv run --locked --no-sync python -m pytest"
-        : "pnpm check";
+    faults.capabilityAdapter === "npm"
+      ? "npm run check"
+      : faults.capabilityAdapter === "bun"
+        ? "bun run check"
+        : faults.capabilityAdapter === "uv"
+          ? "uv run --locked --no-sync python -m pytest"
+          : "pnpm check";
   const capabilityOperations =
     faults.capabilityAdapter === "uv"
       ? [{ kind: "python-test" as const, key: "." }]
       : [
-          { kind: "package-script" as const, key: "check" },
-          { kind: "package-script" as const, key: "test" },
+          {
+            kind: "package-script" as const,
+            key: faults.capabilityAdapter === "npm" ? "1:.:check" : "check",
+          },
+          {
+            kind: "package-script" as const,
+            key: faults.capabilityAdapter === "npm" ? "1:.:test" : "test",
+          },
         ];
   const capabilityGraph: CompiledObjective = {
     title: "Exact-base capability admission qualification",
+    deferredCapabilityAdapters: [capabilityAdapter],
     workItems: [
       {
         ...ordinaryGraph.workItems[0]!,
@@ -529,7 +584,10 @@ wheels = [
               operation:
                 faults.capabilityAdapter === "uv"
                   ? { kind: "python-test", key: "." }
-                  : { kind: "package-script", key: "test" },
+                  : {
+                      kind: "package-script",
+                      key: faults.capabilityAdapter === "npm" ? "1:.:test" : "test",
+                    },
               activation: "artifact",
               runtime: capabilityRuntime,
             },
@@ -566,7 +624,10 @@ wheels = [
               operation:
                 faults.capabilityAdapter === "uv"
                   ? { kind: "python-test", key: "." }
-                  : { kind: "package-script", key: "check" },
+                  : {
+                      kind: "package-script",
+                      key: faults.capabilityAdapter === "npm" ? "1:.:check" : "check",
+                    },
               activation: "integrated-base",
               runtime: capabilityRuntime,
             },
@@ -657,6 +718,7 @@ wheels = [
     faults.greenfieldBootstrap || faults.greenfieldLifecycle
       ? {
           title: "Greenfield bootstrap qualification",
+          deferredCapabilityAdapters: faults.greenfieldLifecycle ? ["node-pnpm"] : [],
           workItems: [
             greenfieldRoot,
             ...(faults.greenfieldLifecycle
@@ -794,6 +856,7 @@ wheels = [
         graphSize: graph.workItems.length,
         index,
         dependsOn: item.dependsOn,
+        deferredCapabilityAdapters: graph.deferredCapabilityAdapters,
       }),
       closed: false,
       assignees: [],
@@ -1264,6 +1327,7 @@ wheels = [
       supportsObservation: true,
       supportsResume: false,
       supportsLocalInference: false,
+      supportsManagedToolchainExecution: id === LOCAL || id === DAYTONA,
       reportsModelUsage: !remote,
       requiresPaidRuntime: remote,
       providerManagedPublication: providerManaged,

@@ -2,6 +2,7 @@ import type { FactoryEvent } from "../protocol/events.js";
 import {
   compiledGraphDigest,
   parseGraphItemMetadata,
+  graphCapabilityDisposition,
   parseLegacyGraphConstraints,
   parseLegacyGraphConstraintsSnapshot,
   parseWorkerPacketFromIssue,
@@ -170,8 +171,12 @@ export function inspectObjectiveGraphInput(
       ...(legacyGraphConstraints ? { legacyGraphConstraints } : {}),
     };
   }
+  const deferredCapabilityAdapters = graphCapabilityDisposition(
+    parsed.map(({ metadata }) => metadata),
+  );
   const completeObjective: CompiledObjective = {
     title: snapshot.title,
+    ...(deferredCapabilityAdapters === undefined ? {} : { deferredCapabilityAdapters }),
     workItems: parsed.map(({ item, metadata }) => {
       const packet = parseWorkerPacketFromIssue(item.body);
       return {

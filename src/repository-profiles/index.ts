@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { scopeOwnsPath } from "../repository-capabilities/model.js";
 import {
   futureToolchainCommand,
   repositoryLacksFutureToolchainAuthority,
@@ -240,7 +241,7 @@ export function isGroundedValidationCommand(
         bootstrap.tools.includes(packageScript.runner) &&
         observed.length === 0 &&
         repositoryLacksFutureToolchainAuthority(packageScript.adapter, basePaths) &&
-        packageScript.adapter.requiredRootPaths.every((path) => scope.includes(path)),
+        packageScript.adapter.requiredRootPaths.every((path) => scopeOwnsPath(scope, path)),
     );
   }
   const targets = nodeTestTargets(command);

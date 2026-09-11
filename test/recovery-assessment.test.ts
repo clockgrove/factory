@@ -91,6 +91,7 @@ async function fixture(topology: "regular" | "sibling" | "stack" = "regular") {
     },
   };
   const objective: CompiledObjective = {
+    deferredCapabilityAdapters: [],
     title: "Private Objective text",
     workItems: [
       {
@@ -237,6 +238,7 @@ async function fixture(topology: "regular" | "sibling" | "stack" = "regular") {
           graphSize: 1,
           index: 0,
           dependsOn: [],
+          deferredCapabilityAdapters: objective.deferredCapabilityAdapters,
         }),
         closed: false,
         blockedBy: [],
@@ -276,6 +278,7 @@ async function fixture(topology: "regular" | "sibling" | "stack" = "regular") {
         graphSize: 2,
         index,
         dependsOn: item.dependsOn,
+        deferredCapabilityAdapters: objective.deferredCapabilityAdapters,
       }),
       closed: false,
       blockedBy: item.dependsOn.map(() => ({ number: 8, closed: false })),

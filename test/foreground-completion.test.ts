@@ -101,6 +101,7 @@ async function fixture(backend = "codex-sdk/local-worktree", managedRuntime = fa
     expiresAt: now,
   };
   const objective: CompiledObjective = {
+    deferredCapabilityAdapters: [],
     title: "Fixture",
     workItems: [
       {

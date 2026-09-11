@@ -138,6 +138,7 @@ async function fixture(withPublications = true, native: "siblings" | "stack" | f
     },
   } as unknown as LeaseManager;
   const objective: CompiledObjective = {
+    deferredCapabilityAdapters: [],
     title: "Private graph",
     workItems: ["a", "b", "c"].map((id) => ({
       id,
@@ -257,6 +258,7 @@ async function fixture(withPublications = true, native: "siblings" | "stack" | f
         graphSize: 3,
         index,
         dependsOn: item.dependsOn,
+        deferredCapabilityAdapters: objective.deferredCapabilityAdapters,
       }),
       closed: false,
       assignees: [],

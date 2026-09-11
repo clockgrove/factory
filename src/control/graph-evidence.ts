@@ -84,6 +84,9 @@ export function assertSnapshotMatchesCompiledGraph(
       graphSize: graph.workItems.length,
       index,
       dependsOn: expected.dependsOn,
+      ...(graph.deferredCapabilityAdapters === undefined
+        ? {}
+        : { deferredCapabilityAdapters: graph.deferredCapabilityAdapters }),
     };
     const actualMetadata = parseGraphItemMetadata(observed.item.body ?? "");
     if (JSON.stringify(actualMetadata) !== JSON.stringify(expectedMetadata)) {

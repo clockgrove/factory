@@ -486,6 +486,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     supportsObservation: true,
     supportsResume: false,
     supportsLocalInference: false,
+    supportsManagedToolchainExecution: true,
     reportsModelUsage: true,
     supportsModelSelection: true,
     requiresPaidRuntime: false,

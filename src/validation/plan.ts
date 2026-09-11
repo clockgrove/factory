@@ -57,7 +57,10 @@ export function bootstrapPackageValidationCommand(
 /** Upper bound reserved for trusted-local validation scopes. npm may consume
  * one setup command; pnpm always proves the bundled version and installs once. */
 export function validationLocalCommandCount(packet: WorkerPacket): number {
-  return packet.validationCommands.length + validationSetupCommandCount(packet.validationCommands);
+  return (
+    packet.validationCommands.length +
+    validationSetupCommandCount(packet.validationCommands, packet.repositoryCapabilities)
+  );
 }
 
 /** Verify that every finite pnpm command is supplied by the exact immutable

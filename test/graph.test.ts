@@ -38,7 +38,7 @@ function workItem(over: Partial<CompiledWorkItem> = {}): CompiledWorkItem {
 }
 
 function objective(workItems: CompiledWorkItem[]): CompiledObjective {
-  return { title: "Add three pure functions", workItems };
+  return { title: "Add three pure functions", deferredCapabilityAdapters: [], workItems };
 }
 
 function existingItem(
@@ -65,6 +65,7 @@ function existingItem(
       graphSize: graph.workItems.length,
       index,
       dependsOn: item.dependsOn,
+      deferredCapabilityAdapters: graph.deferredCapabilityAdapters,
     }),
     blockedByNumbers,
   };
@@ -392,6 +393,23 @@ describe("renderWorkPacket", () => {
 });
 
 describe("GraphApplier.apply", () => {
+  it("projects an exact authenticated historical graph without rewriting its omission", async () => {
+    const historical = objective([workItem({ id: "a" })]);
+    delete historical.deferredCapabilityAdapters;
+    const writer = new FakeGraphWriter();
+    const applier = new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() });
+
+    await expect(applier.apply(historical, ctx)).rejects.toThrow(
+      /lacks deferred capability adapter disposition/,
+    );
+    await expect(
+      applier.apply(historical, { ...ctx, allowAuthenticatedLegacyOmissions: true }),
+    ).resolves.toEqual(new Map([["a", { id: "I_100", number: 100 }]]));
+    expect(parseGraphItemMetadata(writer.bodies[0]!)).not.toHaveProperty(
+      "deferredCapabilityAdapters",
+    );
+  });
+
   const ctx = { repositoryId: "R_1", objectiveIssueId: "I_OBJ" };
 
   it("creates every Work Item as a sub-issue of the Objective", async () => {

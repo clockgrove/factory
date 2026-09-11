@@ -4901,6 +4901,9 @@ export class FactorySupervisor {
               ...(snapshot.workItemLabelId ? { workItemLabelId: snapshot.workItemLabelId } : {}),
               existingWorkItems: existingGraphItems,
               ...(legacyGraphConstraints ? { legacyGraphConstraints } : {}),
+              ...(compiled.deferredCapabilityAdapters === undefined
+                ? { allowAuthenticatedLegacyOmissions: true }
+                : {}),
             });
             break;
           } catch (error) {
@@ -5780,6 +5783,7 @@ export class FactorySupervisor {
               await this.#registry.evaluate({
                 policy: this.#policy,
                 requirements: packet.requirements,
+                requiresManagedToolchain: Boolean(packet.managedRuntimes?.length),
                 nowMs,
               }),
               commandState.cloudPaused,
@@ -9502,11 +9506,13 @@ export class FactorySupervisor {
       const packet = executionWorkerPacketFromCompiled(item);
       if (
         JSON.stringify(packet.managedRuntimes ?? []) !==
-          JSON.stringify(managedRuntimeRequirements(packet.validationCommands)) ||
+          JSON.stringify(
+            managedRuntimeRequirements(packet.validationCommands, packet.repositoryCapabilities),
+          ) ||
         (packet.managedRuntimes ?? []).some(({ bundleDigest }) => bundleDigest !== undefined)
       )
         throw new Error(
-          `compiled graph managed runtime contract differs from canonical host derivation for ${item.id}: observed ${JSON.stringify(packet.managedRuntimes ?? [])}; expected ${JSON.stringify(managedRuntimeRequirements(packet.validationCommands))}`,
+          `compiled graph managed runtime contract differs from canonical host derivation for ${item.id}: observed ${JSON.stringify(packet.managedRuntimes ?? [])}; expected ${JSON.stringify(managedRuntimeRequirements(packet.validationCommands, packet.repositoryCapabilities))}`,
         );
       for (const requirement of packet.repositoryCapabilities?.requires ?? []) {
         const adapter = toolchainAdapterById(requirement.adapter);
@@ -9547,6 +9553,7 @@ export class FactorySupervisor {
             }
           : this.#policy,
         requirements,
+        requiresManagedToolchain: Boolean(packet.managedRuntimes?.length),
         budget: budgets,
         estimatedDurationMs: timeoutMs,
         requireHostExecution:

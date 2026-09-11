@@ -85,6 +85,8 @@ export type CompilerWorkItem = {
 export type CompilerObjective = {
   title: string;
   workItems: CompilerWorkItem[];
+  /** Host-derived objective-wide classification; never accepted from model output. */
+  deferredCapabilityAdapters?: string[] | undefined;
 };
 export const ExclusiveResourcesSchema = z
   .array(
@@ -226,6 +228,9 @@ export function canonicalizeObjective(input: CompilerObjective): CompilerObjecti
   }));
   return {
     title: input.title,
+    ...(input.deferredCapabilityAdapters === undefined
+      ? {}
+      : { deferredCapabilityAdapters: sorted(input.deferredCapabilityAdapters) }),
     workItems: dependencyOrder(workItems),
   };
 }
@@ -720,9 +725,22 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     const bindings = deferred.get(item.id)!;
     if (bindings.provides.length > 0 || bindings.requires.length > 0)
       item.repositoryCapabilities = bindings;
-    const runtimes = managedRuntimeRequirements(item.validationCommands);
+    const runtimes = managedRuntimeRequirements(
+      item.validationCommands,
+      item.repositoryCapabilities,
+    );
     if (runtimes.length > 0) item.managedRuntimes = runtimes;
   }
+  result.deferredCapabilityAdapters = [
+    ...new Set(
+      result.workItems.flatMap((item) =>
+        [
+          ...(item.repositoryCapabilities?.provides ?? []),
+          ...(item.repositoryCapabilities?.requires ?? []),
+        ].map(({ adapter }) => adapter),
+      ),
+    ),
+  ].sort();
   for (const item of result.workItems)
     assertRequirementsWithinPolicy(item.requirements, runPolicy, `Work Item ${item.id}`);
   validateCompiledObjective(result, facts);

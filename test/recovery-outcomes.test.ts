@@ -109,6 +109,7 @@ async function fixture(rebase = false) {
     },
   } as unknown as LeaseManager;
   const objective: CompiledObjective = {
+    deferredCapabilityAdapters: [],
     title: "Private objective",
     workItems: [
       {
@@ -318,6 +319,7 @@ async function fixture(rebase = false) {
           graphSize: 2,
           index: 0,
           dependsOn: [],
+          deferredCapabilityAdapters: objective.deferredCapabilityAdapters,
         }),
         closed: false,
         blockedBy: [],
@@ -338,6 +340,7 @@ async function fixture(rebase = false) {
       graphSize: 2,
       index: 1,
       dependsOn: [],
+      deferredCapabilityAdapters: objective.deferredCapabilityAdapters,
     }),
     closed: false,
     blockedBy: [],

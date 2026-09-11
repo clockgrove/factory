@@ -303,6 +303,50 @@ describe("npm deferred toolchain authority", () => {
     ).rejects.toThrow(/does not satisfy/);
   });
 
+  it("allows the same binary name in separate npm resolution scopes", async () => {
+    const root = await fixture();
+    const manifestPath = join(root, "package.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.devDependencies = {
+      ...manifest.devDependencies,
+      parent: "1.0.0",
+      runner: "1.0.0",
+    };
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    const lockPath = join(root, "package-lock.json");
+    const lock = JSON.parse(await readFile(lockPath, "utf8"));
+    lock.packages[""].devDependencies = manifest.devDependencies;
+    lock.packages["node_modules/parent"] = {
+      version: "1.0.0",
+      resolved: "https://registry.npmjs.org/parent/-/parent-1.0.0.tgz",
+      integrity: `sha512-${"A".repeat(86)}==`,
+      dependencies: { runner: "2.0.0" },
+    };
+    lock.packages["node_modules/runner"] = {
+      version: "1.0.0",
+      resolved: "https://registry.npmjs.org/runner/-/runner-1.0.0.tgz",
+      integrity: `sha512-${"A".repeat(86)}==`,
+      bin: { runner: "bin.js" },
+    };
+    lock.packages["node_modules/parent/node_modules/runner"] = {
+      version: "2.0.0",
+      resolved: "https://registry.npmjs.org/runner/-/runner-2.0.0.tgz",
+      integrity: `sha512-${"A".repeat(86)}==`,
+      bin: { runner: "bin.js" },
+    };
+    await writeFile(lockPath, JSON.stringify(lock));
+
+    await expect(
+      inspectNpmAuthority({
+        root,
+        commands: [{ workspace: ".", script: "test" }],
+        nodeVersion: NODE_VERSION,
+        npmVersion: NPM_VERSION,
+      }),
+    ).resolves.toBeDefined();
+  });
+
   it("rejects a workspace reached through an intermediate symlink", async () => {
     const root = await fixture({ workspace: true });
     await mkdir(join(root, "actual-packages/api"), { recursive: true });

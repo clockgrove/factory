@@ -533,6 +533,9 @@ reservation; the provider identity binds the reservation object, receipt, and ac
 The mutable issue comment must digest-identically reproduce the complete immutable reservation
 trailer; matching only selected reservation fields is not provider authority.
 Provider-generation and current-base authority bytes are inspected separately and must remain equal.
+Proof ownership remains the adapter's declared root or later-generation surface. An adapter may bind
+additional discovered manifests and lock data into its authority digest without falsely attributing
+those paths to the provider that selected the generation.
 Missing or ambiguous historical activation cannot borrow the current active bundle.
 
 `AttemptReserved` binds the selected receipt, activated Worker Packet, proof digests, source ref, and

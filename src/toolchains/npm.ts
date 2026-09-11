@@ -505,7 +505,6 @@ function assertLock(
     manifests.filter(({ directory }) => directory !== ".").map(({ directory }) => directory),
   );
   const names = new Set<string>();
-  const binProviders = new Map<string, string>();
   const packageBinsByPath = new Map<string, Record<string, string>>();
   const platformCompatibility = new Map<string, boolean>();
   const outgoing = new Map<
@@ -578,9 +577,8 @@ function assertLock(
     packageBinsByPath.set(path, bins);
     if (compatible)
       for (const name of Object.keys(bins)) {
-        if (["node", "npm", "npx", "corepack"].includes(name) || binProviders.has(name))
-          throw new Error(`npm lock package bin ${name} is reserved or ambiguous: ${path}`);
-        binProviders.set(name, installedName);
+        if (["node", "npm", "npx", "corepack"].includes(name))
+          throw new Error(`npm lock package bin ${name} is reserved: ${path}`);
       }
     const dependencies = {
       ...stringMap(descriptor.dependencies, `dependencies in ${path}`),

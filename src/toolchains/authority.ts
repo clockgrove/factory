@@ -919,8 +919,6 @@ async function resolveNpmIntegratedBase(
       );
       if (nested.length > 0)
         throw new Error(`npm authority contains an undeclared nested root: ${nested.join(", ")}`);
-      if (inspection.authorityPaths.some((path) => !scopeOwnsPath(input.provider.scope, path)))
-        throw new Error("npm authority includes a path outside its provider scope");
       return {
         authorityDigest: await authorityDigestForPaths(worktree.path, inspection.authorityPaths),
         authorityPaths: inspection.authorityPaths,
@@ -963,7 +961,6 @@ async function resolveNpmIntegratedBase(
       runtime.digest,
       providerAuthority.authorityDigest,
       preparationDigest,
-      providerAuthority.authorityPaths,
     ),
   );
 }

@@ -65,6 +65,40 @@ leakage that was not visible in the proposal. A concrete regression is necessary
 that the architecture is sound. "Smallest complete fix" means the smallest fix to the correct domain
 model, not the fewest changed lines.
 
+## Bound review loops
+
+Freeze the PR's acceptance surface before its initial full-diff review. It consists of the linked
+issue's accepted outcome, repository contracts that the change touches, and regressions introduced
+by the proposed diff. Adjacent hardening, cleaner abstractions, and newly imagined failure
+combinations remain valuable findings, but they do not silently expand that surface.
+
+Use at most three substantive review rounds for one PR: the initial consolidated review followed by
+no more than two repair-and-rereview rounds. A substantive round reviews a distinct candidate across
+the declared acceptance surface; comment clarification and verification of an already reported fix
+do not create another round. Reviewers must inspect the whole relevant diff and batch their findings
+by invariant or root cause instead of serially revealing one adjacent instance per round.
+
+Classify every finding when it is raised:
+
+- **Blocker:** a P0/P1 defect, a failure of the declared acceptance criteria, a security or data-loss
+  defect on a supported path, or a violation of a non-negotiable boundary in this file or
+  [`docs/DESIGN.md`](docs/DESIGN.md).
+- **Follow-up:** P2/P3 hardening, a compounded or unlikely failure outside the declared acceptance
+  surface, an adjacent architectural improvement, or work assigned to another milestone.
+
+At the third-round boundary, stop automatic full-diff review. Record each remaining finding in the
+PR as resolved, an accepted risk, or a linked follow-up issue with an owner and acceptance boundary.
+A follow-up is not silent debt and must not be described as implemented. If a genuine blocker
+remains, the PR is not mergeable; the owner may authorize one bounded blocker-only repair and focused
+verification, but that exception does not reopen the entire diff or admit adjacent scope. If the
+blocker shows the accepted design itself is wrong, stop and redesign or replace the PR rather than
+continuing an unbounded patch-and-review loop.
+
+Run focused checks during repair rounds. Run the coordinated release gate only on the intended final
+candidate, and rerun it only when that candidate changes as described under **Verify proportionally**.
+Before merge, state the exact reviewed head, review-round count, unresolved follow-ups, and explicitly
+accepted risks.
+
 ## When something fails
 
 - Preserve the original failure and exact source, artifact, run, and accounting identities.

@@ -592,6 +592,28 @@ describe("toolchain authority adapters", () => {
         env: environment,
       }),
     ).toThrow();
+
+    const withDeclaredNpx = await withManagedToolchainPath(
+      { ...process.env, PATH: `${hostile}:${process.env.PATH ?? ""}` },
+      join(root, "private"),
+      ["node", "npm", "npx", "git"],
+      [{ ...adapter.runtimeRequirement!, bundleDigest: receipt.digest }],
+    );
+    expect(
+      execFileSync(
+        "sh",
+        ["-c", "command -v node; command -v npm; command -v git; command -v npx"],
+        {
+          env: withDeclaredNpx,
+          encoding: "utf8",
+        },
+      ),
+    ).toMatch(
+      /factory-tools\/node[\s\S]*factory-tools\/npm[\s\S]*factory-system-tools\/git[\s\S]*factory-declared-tools\/npx/,
+    );
+    expect(() =>
+      execFileSync("sh", ["-c", "command -v corepack"], { env: withDeclaredNpx }),
+    ).toThrow();
   });
 
   it("keeps npm proof ownership on the declared generation while hashing full authority", async () => {

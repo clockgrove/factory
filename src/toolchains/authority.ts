@@ -1835,5 +1835,64 @@ export async function withManagedToolchainPath(
       const receipt = await runtimeBundleByDigest(matching[0]!.tool, matching[0]!.bundleDigest);
       environment = await adapter.prepareEnvironment(environment, privateRoot, receipt);
     }
+  if (environment.PATH !== source.PATH) {
+    const declaredBin = join(privateRoot, "factory-declared-tools");
+    await mkdir(declaredBin, { recursive: true, mode: 0o700 });
+    const unsafeDeclaredTool = declaredTools.find(
+      (name) => !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(name),
+    );
+    if (unsafeDeclaredTool)
+      throw new Error(`declared local tool name is unsafe: ${unsafeDeclaredTool}`);
+    const declared = new Set(declaredTools);
+    for (const entry of await readdir(declaredBin)) {
+      if (!declared.has(entry)) await unlink(join(declaredBin, entry));
+    }
+    const sourceDirectories = (source.PATH ?? "")
+      .split(delimiter)
+      .filter((directory) => directory.startsWith("/"));
+    const managedBin = environment.PATH?.split(delimiter)[0];
+    for (const name of declared) {
+      const declaredShim = join(declaredBin, name);
+      if (
+        MANAGED_SYSTEM_TOOLS.includes(name as (typeof MANAGED_SYSTEM_TOOLS)[number]) ||
+        (managedBin &&
+          (await access(join(managedBin, name), fsConstants.X_OK).then(
+            () => true,
+            () => false,
+          )))
+      ) {
+        await unlink(declaredShim).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+        continue;
+      }
+      let target: string | undefined;
+      for (const directory of sourceDirectories) {
+        const candidate = join(directory, name);
+        if (
+          await Promise.all([stat(candidate), access(candidate, fsConstants.X_OK)]).then(
+            ([info]) => info.isFile(),
+            () => false,
+          )
+        ) {
+          target = candidate;
+          break;
+        }
+      }
+      if (!target) throw new Error(`declared local tool ${name} disappeared before worker launch`);
+      const exists = await access(declaredShim, fsConstants.F_OK).then(
+        () => true,
+        () => false,
+      );
+      if (exists) {
+        const info = await lstat(declaredShim);
+        if (!info.isSymbolicLink() || (await readlink(declaredShim)) !== target) {
+          await unlink(declaredShim);
+          await symlink(target, declaredShim);
+        }
+      } else await symlink(target, declaredShim);
+    }
+    environment.PATH = `${environment.PATH}${delimiter}${declaredBin}`;
+  }
   return environment;
 }

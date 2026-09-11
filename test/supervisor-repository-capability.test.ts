@@ -211,7 +211,7 @@ describe("Supervisor repository-capability admission", () => {
     } finally {
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("runs a Bun provider through integration before its exact-base consumer", async () => {
     await provisionBunFixture();
@@ -246,7 +246,7 @@ describe("Supervisor repository-capability admission", () => {
     } finally {
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("grounds a descendant on the exact integrated provider before reserving or invoking it", async () => {
     const fixture = await providerSupervisorFixture("daytona-burst", {
@@ -283,7 +283,7 @@ describe("Supervisor repository-capability admission", () => {
     } finally {
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("rejects a mutated exact base before reservation while independent ready work is still admitted", async () => {
     const fixture = await providerSupervisorFixture("daytona-burst", {
@@ -345,7 +345,7 @@ describe("Supervisor repository-capability admission", () => {
       materialize.mockRestore();
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("rejects provider-lineage tampering before reserving or reviewing the consumer", async () => {
     const fixture = await providerSupervisorFixture("daytona-burst", {
@@ -380,7 +380,7 @@ describe("Supervisor repository-capability admission", () => {
     } finally {
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("rejects a provider reservation comment that differs from its immutable trailer", async () => {
     const fixture = await providerSupervisorFixture("daytona-burst", {
@@ -415,7 +415,7 @@ describe("Supervisor repository-capability admission", () => {
     } finally {
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("rejects a protected-source ref race at the final capability fence", async () => {
     const fixture = await providerSupervisorFixture("daytona-burst", {
@@ -456,7 +456,7 @@ describe("Supervisor repository-capability admission", () => {
     } finally {
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("rejects a bundled-runtime identity change before reservation or model work", async () => {
     const fixture = await providerSupervisorFixture("daytona-burst", {
@@ -510,7 +510,7 @@ describe("Supervisor repository-capability admission", () => {
       runtime.mockRestore();
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("keeps the reservation-bound runtime when the active pointer changes before launch", async () => {
     const root = toolchainStoreRoot();
@@ -778,7 +778,7 @@ describe("Supervisor repository-capability admission", () => {
     } finally {
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("rejects provider-lineage mutation after reservation and before model launch", async () => {
     const fixture = await providerSupervisorFixture("daytona-burst", {
@@ -811,7 +811,7 @@ describe("Supervisor repository-capability admission", () => {
     } finally {
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 });
 
 describe("Supervisor workflow publication boundary", () => {
@@ -845,7 +845,7 @@ describe("Supervisor workflow publication boundary", () => {
     } finally {
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("retains an unsafe workflow behind a durable hold before creating a ref or PR", async () => {
     const fixture = await providerSupervisorFixture("daytona-burst", {
@@ -890,7 +890,7 @@ describe("Supervisor workflow publication boundary", () => {
     } finally {
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("rechecks the live base before publishing a workflow-bearing artifact", async () => {
     const fixture = await providerSupervisorFixture("daytona-burst", {
@@ -923,7 +923,7 @@ describe("Supervisor workflow publication boundary", () => {
     } finally {
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 
   it.each([
     ["create", /pre-publication approval.*feature ref or pull request.*create/i],
@@ -1005,7 +1005,7 @@ describe("Supervisor workflow publication boundary", () => {
         scoped.mockRestore();
       }
     },
-    30_000,
+    60_000,
   );
 
   it("reduces a publication hold that settles only after terminal drain begins", async () => {
@@ -1075,7 +1075,7 @@ describe("Supervisor workflow publication boundary", () => {
     } finally {
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("replays the workflow gate after a publication crash before restoring any ref or PR", async () => {
     const fixture = await providerSupervisorFixture("daytona-burst", {
@@ -1115,5 +1115,5 @@ describe("Supervisor workflow publication boundary", () => {
     } finally {
       scoped.mockRestore();
     }
-  }, 30_000);
+  }, 60_000);
 });

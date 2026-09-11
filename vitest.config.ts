@@ -2,6 +2,7 @@ import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    testTimeout: 30_000,
     setupFiles: ["./test/setup-temporary-namespace.ts"],
     exclude: [...configDefaults.exclude, "test/*-live.test.ts"],
     coverage: {

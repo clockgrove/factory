@@ -212,6 +212,37 @@ does not reuse a stale lease or rely on service restarts to retry. Authenticatio
 failures remain errors. The controller honors GitHub's [rate-limit response headers](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit),
 not a contradictory later balance from another observation.
 
+Local Codex model-provider quota refusals are a separate plane from GitHub REST/GraphQL rate limits
+and Factory's own model-token allowance. After a durable model-dispatch marker, only captured narrow
+Copilot entitlement messages may produce an invocation-bound `ProviderQuotaBlocked` event. The
+durable event and backend contract are provider-neutral: they carry a bounded provider identity,
+canonical redacted message and optional HTTPS action URL. The GitHub Copilot adapter alone owns the
+captured-message classifier and maps those diagnostics to its provider identity, safe summaries and
+supported settings URL. Provider-reported usage and the quota gate share one authenticated comment
+when exact counters are present, so a crash cannot retain the charge while losing the actionable
+provider metadata; absent counters remain unknown. Evaluated compilation first retains that same
+bounded metadata and exact-or-unknown usage in its immutable invocation-result checkpoint. A
+restart reconstructs the original quota refusal from that checkpoint and completes the atomic gate
+write without replaying the model call or writing usage separately. The run stops without retry.
+On restart, the controller reconciles every durable attempt, capacity reservation and resource
+owner before it may write the terminal escalation. Until that drain is durable, status/explain
+retain monitoring so admitted attempts and resources cannot be abandoned; after an escalation
+receipt they tell the initiating operator to stop monitoring. Exact-accounting gates permit an
+explicit recovery request after quota is restored. Unknown-accounting gates retain their unresolved
+dispatch marker and state that the run cannot currently be recovered; restoring quota alone does
+not resolve or acknowledge that liability. An explicit cancellation remains the terminal operator
+intent and does not instruct the operator to restore quota or recover the cancelled run.
+Pre-dispatch preparation failures and transient transport errors do not create this gate.
+
+The selected model is a provider-neutral durable gate populated by provider adapters. Keeping
+Copilot literals in the shared event was rejected because every additional model provider would
+require a protocol and lifecycle edit; treating quota text as an ordinary backend failure was also
+rejected because it loses the non-retryable, human-action state. New adapters may emit the shared
+gate only after converting captured diagnostics into bounded canonical metadata; they must not pass
+through arbitrary provider output. A backend may emit the gate only when it declares model-usage
+reporting, which gives every gated invocation a durable dispatch marker even when terminal counters
+are unavailable.
+
 Model quota is protected at retry boundaries as well. After an artifact has passed host scope,
 secret, clean-apply, and sensitive-path checks, the running Supervisor may retain it in a bounded
 32 MiB in-memory cache, with at most 512 MiB of separately leased file-backed payload content.

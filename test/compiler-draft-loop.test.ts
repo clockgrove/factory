@@ -15,6 +15,8 @@ import {
   CompilerDraftStopError,
   type CompilerDraftCallbacks,
 } from "../src/evaluation/compiler-draft-loop.js";
+import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
+import { ProviderQuotaError } from "../src/providers/quota.js";
 const BASE_SHA = "a".repeat(40);
 const BASE_TREE = "b".repeat(40);
 
@@ -197,6 +199,81 @@ async function setup() {
   return { store, leases, manager, lease, binding, callbacks };
 }
 describe("compiler draft durable repair", () => {
+  it("leaves exact provider quota usage attached for the Supervisor's atomic gate batch", async () => {
+    const args = await setup();
+    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
+    let observed: ProviderQuotaError | undefined;
+    args.callbacks.invoke = async (request, _checkpoint, _reserve, checkpointProviderRefusal) => {
+      const error = new ProviderQuotaError(gate, {
+        invocationId: request.invocationId,
+        usage: { inputTokens: 2, outputTokens: 1 },
+      });
+      await checkpointProviderRefusal!(error);
+      throw error;
+    };
+
+    try {
+      await runCompilerDraftLoop(args);
+    } catch (error) {
+      if (error instanceof ProviderQuotaError) observed = error;
+      else throw error;
+    }
+
+    expect(observed).toMatchObject({
+      invocationId: expect.any(String),
+      usage: { inputTokens: 2, outputTokens: 1 },
+    });
+    expect(args.callbacks.recordUsage).not.toHaveBeenCalled();
+    expect(
+      (await args.manager.load(args.binding)).find((record) => record.kind === "result")?.payload,
+    ).toMatchObject({
+      invocationId: observed!.invocationId,
+      usage: { inputTokens: 2, outputTokens: 1 },
+      providerQuota: gate,
+    });
+
+    const replayInvoke = vi.fn(args.callbacks.invoke);
+    args.callbacks.invoke = replayInvoke;
+    let recovered: ProviderQuotaError | undefined;
+    try {
+      await runCompilerDraftLoop(args);
+    } catch (error) {
+      if (error instanceof ProviderQuotaError) recovered = error;
+      else throw error;
+    }
+    expect(replayInvoke).not.toHaveBeenCalled();
+    expect(recovered).not.toBe(observed);
+    expect(recovered).toMatchObject({
+      gate,
+      invocationId: observed!.invocationId,
+      usage: { inputTokens: 2, outputTokens: 1 },
+    });
+    expect(args.callbacks.recordUsage).not.toHaveBeenCalled();
+  });
+
+  it("reconstructs unknown provider quota metadata without replay or invented usage", async () => {
+    const args = await setup();
+    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
+    args.callbacks.invoke = async (request) => {
+      throw new ProviderQuotaError(gate, { invocationId: request.invocationId });
+    };
+
+    await expect(runCompilerDraftLoop(args)).rejects.toMatchObject({
+      gate,
+      invocationId: expect.any(String),
+      usage: undefined,
+    });
+    const replayInvoke = vi.fn(args.callbacks.invoke);
+    args.callbacks.invoke = replayInvoke;
+    await expect(runCompilerDraftLoop(args)).rejects.toMatchObject({
+      gate,
+      invocationId: expect.any(String),
+      usage: undefined,
+    });
+    expect(replayInvoke).not.toHaveBeenCalled();
+    expect(args.callbacks.recordUsage).not.toHaveBeenCalled();
+  });
+
   it("uses valid canonical JSON and binds read-only evidence to one run", async () => {
     expect(JSON.parse(canonicalDraftJson({ z: [1, null], a: { b: true } }))).toEqual({
       z: [1, null],

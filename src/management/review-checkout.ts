@@ -24,6 +24,20 @@ import {
 import type { ReviewContext } from "./backend.js";
 import { ReviewCheckoutCleanupError } from "./backend.js";
 import { pinnedGitEnvironment } from "../runtime/pinned-git-environment.js";
+import { preserveProviderQuotaError, ProviderQuotaError } from "../providers/quota.js";
+
+export function reviewCheckoutCleanupFailure(
+  reviewFailure: unknown,
+  cleanupFailure: unknown,
+): Error {
+  if (reviewFailure instanceof ProviderQuotaError)
+    return preserveProviderQuotaError(
+      reviewFailure,
+      cleanupFailure,
+      "provider-refusal checkpoint and semantic-review checkout cleanup both failed",
+    );
+  return new ReviewCheckoutCleanupError(cleanupFailure, reviewFailure);
+}
 
 /** Reconstruct exactly the already-validated artifact, without running validation,
  * setup, hooks, filters, or a model. Neither a mutable controller checkout nor a
@@ -144,7 +158,7 @@ export async function withVerifiedReviewCheckout<T>(
       await worktree.dispose();
     } catch (cause) {
       // biome-ignore lint/correctness/noUnsafeFinally: unresolved private checkout cleanup must retain known review usage and prevent acceptance
-      throw new ReviewCheckoutCleanupError(cause, reviewFailure);
+      throw reviewCheckoutCleanupFailure(reviewFailure, cause);
     }
   }
 }

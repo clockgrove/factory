@@ -59,6 +59,13 @@ import {
   type LocalCapabilityProbe,
 } from "./codex-cli-local.js";
 import { withManagedToolchainPath } from "../toolchains/authority.js";
+import {
+  exactProviderQuotaUsage,
+  preserveProviderQuotaError,
+  ProviderQuotaError,
+  type ProviderQuotaGate,
+} from "../providers/quota.js";
+import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
 
 interface WorkerFinal {
   outcome: "succeeded" | "failed" | "declined";
@@ -90,6 +97,8 @@ interface SdkAttempt {
   progress?: string;
   logs: string;
   reason?: string;
+  providerQuotaGate?: ProviderQuotaGate;
+  providerQuotaFailure?: ProviderQuotaError;
   cancelled: boolean;
   timedOut: boolean;
   scopeSettled?: boolean;
@@ -650,6 +659,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     const running = this.#require(handle);
     const state =
       running.context.localExecutionScope && !running.scopeSettled ? "running" : running.state;
+    if (state === "failed" && running.providerQuotaFailure) throw running.providerQuotaFailure;
     return {
       state,
       observedAt: new Date().toISOString(),
@@ -657,6 +667,9 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
       ...(running.progress ? { progress: running.progress } : {}),
       ...(state === "failed"
         ? { reason: running.reason ?? running.final?.summary ?? "SDK worker failed" }
+        : {}),
+      ...(state === "failed" && running.providerQuotaGate
+        ? { providerQuotaGate: running.providerQuotaGate }
         : {}),
     };
   }
@@ -836,6 +849,27 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     let terminalFailure: string | undefined;
     let completionObserved = false;
     let completionCount = 0;
+    let providerRefusalCheckpointed = false;
+    const checkpointProviderRefusal = async (gate: ProviderQuotaGate) => {
+      if (providerRefusalCheckpointed) return;
+      const usage = exactProviderQuotaUsage(normalizeExecutionUsage(running.usage));
+      const quotaError = new ProviderQuotaError(gate, { ...(usage ? { usage } : {}) });
+      try {
+        if (!running.context.checkpointProviderRefusal)
+          throw new Error(
+            "worker provider refusal could not be durably checkpointed; consumption remains unknown",
+          );
+        await running.context.checkpointProviderRefusal(quotaError);
+      } catch (cause) {
+        throw preserveProviderQuotaError(
+          quotaError,
+          cause,
+          "worker provider-refusal adapter checkpoint failed",
+        );
+      }
+      providerRefusalCheckpointed = true;
+      running.providerQuotaGate = gate;
+    };
     const timeout = setTimeout(() => {
       running.timedOut = true;
       running.controller.abort("Factory worker deadline elapsed");
@@ -893,10 +927,14 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
             running.reason = terminalFailure;
           }
         } else if (event.type === "turn.failed") {
+          const gate = githubCopilotQuotaFromStreamEvent(event);
+          if (gate) await checkpointProviderRefusal(gate);
           terminalFailure = safeDiagnostic(event.error.message);
           running.reason = terminalFailure;
           running.controller.abort(terminalFailure);
         } else if (event.type === "error") {
+          const gate = githubCopilotQuotaFromStreamEvent(event);
+          if (gate) await checkpointProviderRefusal(gate);
           terminalFailure = safeDiagnostic(event.message);
           running.reason = terminalFailure;
           running.controller.abort(terminalFailure);
@@ -934,6 +972,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
         running.reason = running.final?.summary ?? "SDK worker returned no valid final result";
       }
     } catch (error) {
+      if (error instanceof ProviderQuotaError) running.providerQuotaFailure = error;
       if (
         running.context.localExecutionScope &&
         error instanceof Error &&

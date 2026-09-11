@@ -12,6 +12,7 @@ import type { ValidationEvidence } from "../validation/evidence.js";
 import type { ModelSelection, RunPolicy } from "../protocol/policy.js";
 import type { CompilerWorkItem, DecompositionEvidence } from "../compiler/index.js";
 import type { PinnedLfsFacts } from "../repository-profiles/git-lfs.js";
+import type { ProviderQuotaCheckpoint } from "../providers/quota.js";
 
 export interface ManagementUsage {
   inputTokens: number;
@@ -172,7 +173,17 @@ export interface ReviewResult {
 export type ReviewCheckpoint = (result: ReviewResult) => Promise<void>;
 
 /** Called once after local preparation, immediately before dispatch; may return remaining timeout milliseconds. */
-export type CompilerModelAdmission = () => Promise<number | void>;
+export interface CompilerModelAdmissionReceipt {
+  timeoutMs?: number;
+  modelInvocationId: string;
+  /**
+   * A bounded provider refusal is a terminal result of this exact paid
+   * invocation. The adapter must await this owner-supplied durability port
+   * before it exposes the refusal or begins fallible local cleanup.
+   */
+  checkpointProviderRefusal: ProviderQuotaCheckpoint;
+}
+export type CompilerModelAdmission = () => Promise<number | void | CompilerModelAdmissionReceipt>;
 export interface ManagementBackend {
   /** Required for evaluated drafts; older backends must not silently ignore admission. */
   readonly supportsCompilerAdmission?: true;

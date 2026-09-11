@@ -794,6 +794,35 @@ const Budget = Common.extend({
     });
 });
 
+const ProviderQuotaBlocked = Common.extend({
+  kind: z.literal("provider"),
+  event: z.literal("ProviderQuotaBlocked"),
+  reasonCode: z.literal("provider-quota-exhausted"),
+  provider: safeId,
+  phase: z.enum(["management", "execution"]),
+  backend: boundedText(160),
+  modelInvocationId: safeId,
+  workItem: z.number().int().positive().optional(),
+  attempt: z.number().int().positive().optional(),
+  providerMessage: boundedText(320),
+  actionUrl: z
+    .string()
+    .url()
+    .max(2_048)
+    .refine((value) => value.startsWith("https://"), "provider action URL must use HTTPS")
+    .optional(),
+  accounting: z.enum(["exact", "unknown"]),
+}).superRefine((event, context) => {
+  if (
+    (event.attempt !== undefined && event.workItem === undefined) ||
+    (event.phase === "execution" && (event.workItem === undefined || event.attempt === undefined))
+  )
+    context.addIssue({
+      code: "custom",
+      message: "provider quota evidence requires an exact execution attempt binding",
+    });
+});
+
 export const FactoryEventSchema = z.union([
   RunStarted,
   RunTerminal,
@@ -821,6 +850,7 @@ export const FactoryEventSchema = z.union([
   GraphCompiled,
   GraphProjected,
   Budget,
+  ProviderQuotaBlocked,
 ]);
 
 export type FactoryEvent = z.infer<typeof FactoryEventSchema>;
@@ -828,6 +858,7 @@ export type AttemptEvent = z.infer<typeof Attempt>;
 export type LeaseEvent = z.infer<typeof Lease>;
 export type DeliveryEvent = z.infer<typeof Delivery>;
 export type PublicationEvent = z.infer<typeof Publication>;
+export type ProviderQuotaEvent = z.infer<typeof ProviderQuotaBlocked>;
 
 export function parseFactoryEvent(input: unknown): FactoryEvent {
   const record = FactoryEventSchema.parse(input);

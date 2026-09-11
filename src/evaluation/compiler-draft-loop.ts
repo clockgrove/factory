@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { assertNoSecretMaterial, assertWithinBytes } from "../protocol/limits.js";
+import {
+  assertNoSecretMaterial,
+  assertWithinBytes,
+  boundedText,
+  safeId,
+} from "../protocol/limits.js";
 import {
   compiledGraphDigest,
   parsePersistedCompiledObjective,
@@ -13,6 +18,7 @@ import {
   type CompilerDraftRecord,
 } from "../control/compiler-drafts.js";
 import type { LeaseState } from "../control/lease.js";
+import { ProviderQuotaError } from "../providers/quota.js";
 
 function diagnostic(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error);
@@ -52,6 +58,19 @@ const UsageSchema = z
     (value) =>
       value.cachedInputTokens === undefined || value.cachedInputTokens <= value.inputTokens,
   );
+const ProviderQuotaCheckpointSchema = z
+  .object({
+    reasonCode: z.literal("provider-quota-exhausted"),
+    provider: safeId,
+    message: boundedText(320),
+    actionUrl: z
+      .string()
+      .url()
+      .max(2_048)
+      .refine((value) => value.startsWith("https://"), "provider action URL must use HTTPS")
+      .optional(),
+  })
+  .strict();
 export type DraftUsage = z.infer<typeof UsageSchema>;
 export class CompilerDraftStopError extends Error {}
 /** Admission failed before provider dispatch; absence of provider usage is not a failed paid call. */
@@ -82,6 +101,7 @@ export interface CompilerDraftCallbacks {
     request: DraftInvocation,
     checkpoint: (result: DraftInvocationResult) => Promise<void>,
     reserve?: () => Promise<void>,
+    checkpointProviderRefusal?: (error: ProviderQuotaError) => Promise<void>,
   ): Promise<DraftInvocationResult>;
   /** Prepare locally before recording a possible paid invocation. */
   reserveAtDispatch?: boolean;
@@ -215,6 +235,35 @@ export async function runCompilerDraftLoop(args: {
       } else if (TimestampSchema.parse(record.payload.observedMilliseconds) !== completedAt - start)
         throw new Error("compiler invocation interval mismatch");
     }
+  }
+  const providerQuotaResults = records.filter(
+    (record) => record.kind === "result" && record.payload.providerQuota !== undefined,
+  );
+  if (providerQuotaResults.length > 1)
+    throw new Error("compiler draft contains conflicting provider quota checkpoints");
+  const providerQuotaResult = providerQuotaResults[0];
+  if (providerQuotaResult) {
+    const invocationId = safeId.parse(providerQuotaResult.payload.invocationId);
+    const intent = records.filter(
+      (record) => record.kind === "invocation" && record.payload.invocationId === invocationId,
+    );
+    if (
+      intent.length !== 1 ||
+      intent[0]?.payload.stage !== providerQuotaResult.payload.stage ||
+      intent[0]?.payload.revision !== providerQuotaResult.payload.revision ||
+      providerQuotaResult.payload.value !== null ||
+      typeof providerQuotaResult.payload.error !== "string"
+    )
+      throw new Error("compiler provider quota checkpoint lacks its exact invocation binding");
+    const gate = ProviderQuotaCheckpointSchema.parse(providerQuotaResult.payload.providerQuota);
+    const usage =
+      providerQuotaResult.payload.usage === null
+        ? undefined
+        : UsageSchema.parse(providerQuotaResult.payload.usage);
+    throw new ProviderQuotaError(gate, {
+      invocationId,
+      ...(usage ? { usage } : {}),
+    });
   }
   const conflicts = records.filter((item) => item.kind === "terminal-conflict");
   const disputedUsage = new Set(
@@ -414,7 +463,10 @@ export async function runCompilerDraftLoop(args: {
     let conflictingResultDigest: string | null = null;
     let conflictingUsageDigest: string | null = null;
     let usageConflict = false;
+    let savedProviderQuota: ProviderQuotaError | null = null;
     const checkpoint = async (result: DraftInvocationResult): Promise<void> => {
+      if (savedProviderQuota)
+        throw new Error("compiler success conflicts with its provider refusal checkpoint");
       const parsedUsage =
         result.usage === null
           ? { success: true as const, data: null }
@@ -452,16 +504,45 @@ export async function runCompilerDraftLoop(args: {
       }
       saved = { value: result.value, usage };
     };
+    const checkpointProviderRefusal = async (error: ProviderQuotaError): Promise<void> => {
+      if (saved) throw new Error("compiler provider refusal conflicts with its result checkpoint");
+      error.bindInvocation(invocationId);
+      const gate = ProviderQuotaCheckpointSchema.parse(error.gate);
+      const usage = error.usage ? UsageSchema.parse(error.usage) : null;
+      if (savedProviderQuota) {
+        if (
+          draftDigest({
+            gate: savedProviderQuota.gate,
+            usage: savedProviderQuota.usage ?? null,
+          }) !== draftDigest({ gate, usage })
+        )
+          throw new Error("conflicting compiler provider refusal checkpoint");
+        return;
+      }
+      await append("result", {
+        invocationId,
+        stage,
+        revision,
+        value: null,
+        usage,
+        ...timing(),
+        error: diagnostic(error),
+        providerQuota: gate,
+      });
+      savedProviderQuota = error;
+    };
     let result: DraftInvocationResult;
     try {
       result = await callbacks.invoke(
         { invocationId, stage, revision, inventory, previous, failure, reviewEvidence },
         checkpoint,
         reserve,
+        checkpointProviderRefusal,
       );
       await checkpoint(result);
     } catch (error) {
       if (error instanceof CompilerDraftAdmissionError) throw error;
+      if (savedProviderQuota) throw error;
       // A successful terminal checkpoint survives a caller/transport failure after it.
       if (contradictory) {
         await append("terminal-conflict", {
@@ -497,6 +578,10 @@ export async function runCompilerDraftLoop(args: {
             : error instanceof Error && error.cause instanceof CompilerDraftStopError
               ? error.cause
               : null;
+        const providerQuota =
+          error instanceof ProviderQuotaError
+            ? ProviderQuotaCheckpointSchema.parse(error.bindInvocation(invocationId).gate)
+            : undefined;
         await append("result", {
           invocationId,
           stage,
@@ -506,12 +591,16 @@ export async function runCompilerDraftLoop(args: {
           ...timing(),
           ...safeProposal(error),
           error: diagnostic(error),
+          ...(providerQuota ? { providerQuota } : {}),
           ...(stopCause ? { stopReason: diagnostic(stopCause) } : {}),
         });
         if (usage) {
           tokens += usage.inputTokens + usage.outputTokens;
-          await recordUsage(invocationId, stage, usage);
-        } else throw new Stop("accounting-unavailable");
+          // Provider quota metadata and exact usage must cross the durable boundary
+          // together. The outer Supervisor owns that authenticated atomic batch.
+          if (!(error instanceof ProviderQuotaError)) await recordUsage(invocationId, stage, usage);
+        } else if (!(error instanceof ProviderQuotaError)) throw new Stop("accounting-unavailable");
+        if (error instanceof ProviderQuotaError) throw error;
         if (stopCause) throw stopCause;
         throw error;
       }
@@ -555,7 +644,8 @@ export async function runCompilerDraftLoop(args: {
           error instanceof CompilerDraftStopError ||
           error instanceof CompilerDraftReservationConflictError ||
           error instanceof CompilerDraftAccountingError ||
-          error instanceof CompilerDraftAdmissionError
+          error instanceof CompilerDraftAdmissionError ||
+          error instanceof ProviderQuotaError
         )
           throw error;
         if (
@@ -663,7 +753,8 @@ export async function runCompilerDraftLoop(args: {
           error instanceof CompilerDraftStopError ||
           error instanceof CompilerDraftReservationConflictError ||
           error instanceof CompilerDraftAccountingError ||
-          error instanceof CompilerDraftAdmissionError
+          error instanceof CompilerDraftAdmissionError ||
+          error instanceof ProviderQuotaError
         )
           throw error;
         failure = {
@@ -677,7 +768,8 @@ export async function runCompilerDraftLoop(args: {
     if (
       error instanceof CompilerDraftReservationConflictError ||
       error instanceof CompilerDraftAccountingError ||
-      error instanceof CompilerDraftAdmissionError
+      error instanceof CompilerDraftAdmissionError ||
+      error instanceof ProviderQuotaError
     )
       throw error;
     if (error instanceof CompilerDraftStopError) return await stop(error.message);

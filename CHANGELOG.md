@@ -6,6 +6,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Added
 
+- A provider-neutral durable quota-gate contract, with narrow GitHub Copilot classification at the
+  local Codex adapter boundary. Factory preserves exact or explicitly unknown usage, stops automatic
+  retries, and exposes one redacted human-action result through status and explain.
+  ([#283](https://github.com/clockgrove/factory/issues/283))
+
 - Make authenticated Objective and attempt deadlines authoritative across management dispatch,
   provider creation and installed checkpoint qualification. App Server and artifact-transfer v2
   arms now separate Objective-bound reach eligibility from the post-proof hold; reached v1 evidence

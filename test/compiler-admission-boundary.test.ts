@@ -22,6 +22,7 @@ import type {
   CompilerDraftRecord,
 } from "../src/control/compiler-drafts.js";
 import type { LeaseState } from "../src/control/lease.js";
+import { ProviderQuotaError } from "../src/providers/quota.js";
 const mocks = vi.hoisted(() => ({ resolve: vi.fn(), run: vi.fn(), environment: vi.fn() }));
 vi.mock("../src/runtime/codex-command.js", () => ({ resolveCodexCommand: mocks.resolve }));
 vi.mock("../src/runtime/process-group.js", async (original) => ({
@@ -319,6 +320,108 @@ describe("compiler dispatch admission", () => {
     expect(mocks.run).toHaveBeenCalledOnce();
     expect(admit).toHaveBeenCalledOnce();
   });
+  it.each([0, 1])(
+    "preserves a structured quota failure when isolated-home cleanup fails after exit %i",
+    async (exitCode) => {
+      const f = await fixture();
+      const cleanupFailure = new Error("isolated home cleanup failed");
+      let refusalCheckpointed = false;
+      const backend = new CodexCliManagementBackend({
+        createCodexHome: home,
+        removeCodexHome: async () => {
+          expect(refusalCheckpointed).toBe(true);
+          throw cleanupFailure;
+        },
+        authFile: join(f.directory, "no-auth"),
+      });
+      const providerMessage =
+        "You've reached your additional usage limit for your plan. Go to https://github.com/settings/copilot/features for more details.";
+      mocks.run.mockResolvedValue({
+        exitCode,
+        stderr: "",
+        stdout: [
+          JSON.stringify({ type: "turn.failed", error: { message: providerMessage } }),
+          JSON.stringify({
+            type: "turn.completed",
+            usage: { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens },
+          }),
+        ].join("\n"),
+      });
+      let observed: unknown;
+      try {
+        await backend.compile(
+          f.context,
+          async () => {},
+          async () => ({
+            modelInvocationId: "compile-fixture",
+            checkpointProviderRefusal: async (error) => {
+              expect(error).toMatchObject({ invocationId: "compile-fixture", usage });
+              refusalCheckpointed = true;
+            },
+          }),
+        );
+      } catch (error) {
+        observed = error;
+      }
+      expect(observed).toBeInstanceOf(ProviderQuotaError);
+      expect(observed).toMatchObject({
+        gate: {
+          reasonCode: "provider-quota-exhausted",
+          provider: "github-copilot",
+        },
+        usage,
+        invocationId: "compile-fixture",
+        cause: cleanupFailure,
+      });
+      expect(refusalCheckpointed).toBe(true);
+    },
+  );
+  it.each([0, 1])(
+    "preserves a structured quota failure when its durable checkpoint fails after exit %i",
+    async (exitCode) => {
+      const f = await fixture();
+      const checkpointFailure = new Error("provider gate checkpoint unavailable");
+      const backend = new CodexCliManagementBackend({
+        createCodexHome: home,
+        authFile: join(f.directory, "no-auth"),
+      });
+      const providerMessage =
+        "You've reached your additional usage limit for your plan. Go to https://github.com/settings/copilot/features for more details.";
+      mocks.run.mockResolvedValue({
+        exitCode,
+        stderr: "",
+        stdout: [
+          JSON.stringify({ type: "turn.failed", error: { message: providerMessage } }),
+          JSON.stringify({
+            type: "turn.completed",
+            usage: { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens },
+          }),
+        ].join("\n"),
+      });
+      let observed: unknown;
+      try {
+        await backend.compile(
+          f.context,
+          async () => {},
+          async () => ({
+            modelInvocationId: "compile-checkpoint-failure",
+            checkpointProviderRefusal: async () => {
+              throw checkpointFailure;
+            },
+          }),
+        );
+      } catch (error) {
+        observed = error;
+      }
+      expect(observed).toBeInstanceOf(ProviderQuotaError);
+      expect(observed).toMatchObject({
+        gate: { reasonCode: "provider-quota-exhausted", provider: "github-copilot" },
+        usage,
+        invocationId: "compile-checkpoint-failure",
+        cause: checkpointFailure,
+      });
+    },
+  );
   it("rechecks cancellation after all local preparation and before durable invocation or provider admission", async () => {
     const f = await fixture();
     const cancellation = new Error("activation withdrawn during local preparation");

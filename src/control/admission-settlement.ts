@@ -57,6 +57,7 @@ export function buildAdmissionSettlementEvidence(args: {
   definitiveNonExecution?: AdmissionNonExecutionProof;
   definitiveArtifactConsumer?: AdmissionArtifactConsumerProof;
   modelUsageExpected?: boolean;
+  retainedUnknownModelInvocationId?: string;
   authority?: ObjectiveAuthorityObservation | null | undefined;
 }): IssueAdmissionEvidence {
   const { entry, cleanup, capacity } = args;
@@ -194,8 +195,31 @@ export function buildAdmissionSettlementEvidence(args: {
     )
   )
     throw new Error("admission accounting contradicts original epoch or policy");
-  if (unreconciledBudgetReservations(scoped).length)
-    throw new Error("admission budget or model usage remains unknown");
+  const unreconciled = unreconciledBudgetReservations(scoped);
+  const retainedUnknownModelInvocationId = args.retainedUnknownModelInvocationId;
+  if (unreconciled.length) {
+    const matchingUnknownGates = scoped.filter(
+      (event) =>
+        event.kind === "provider" &&
+        event.event === "ProviderQuotaBlocked" &&
+        event.accounting === "unknown" &&
+        event.modelInvocationId === retainedUnknownModelInvocationId,
+    );
+    if (
+      !retainedUnknownModelInvocationId ||
+      matchingUnknownGates.length !== 1 ||
+      unreconciled.some(
+        (event) =>
+          event.kind !== "budget" ||
+          event.unit !== "model_tokens" ||
+          event.phase !== matchingUnknownGates[0]!.phase ||
+          event.modelInvocationId !== retainedUnknownModelInvocationId,
+      )
+    )
+      throw new Error("admission budget or model usage remains unknown");
+  } else if (retainedUnknownModelInvocationId) {
+    throw new Error("admission cannot retain model usage that is already reconciled");
+  }
   if (unreconciledCapacityReservations(scoped).length)
     throw new Error("admission capacity remains reserved");
   if (
@@ -214,6 +238,7 @@ export function buildAdmissionSettlementEvidence(args: {
     !nonExecution &&
     !artifactConsumer &&
     args.modelUsageExpected &&
+    !retainedUnknownModelInvocationId &&
     !scoped.some(
       (event) =>
         event.kind === "budget" &&
@@ -233,7 +258,8 @@ export function buildAdmissionSettlementEvidence(args: {
     producerStopped: true,
     resourcesReleased: true,
     capacityReleased: true,
-    accountingSettled: true,
+    accountingSettled: !retainedUnknownModelInvocationId,
+    ...(retainedUnknownModelInvocationId ? { unknownModelUsageRetained: true as const } : {}),
     evidenceOid: cleanup.evidenceOid,
   };
 }

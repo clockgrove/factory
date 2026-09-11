@@ -8,6 +8,7 @@ import {
 } from "../explanations/index.js";
 import { latestRunReceipts, terminalRunEvidence } from "../control/receipts.js";
 import { buildStatusReport, snapshotEvents, type FactoryReadSnapshot } from "./status.js";
+import { providerQuotaGateState } from "../control/provider-gates.js";
 
 export interface FactoryExplanationReport {
   operation: "explain";
@@ -70,6 +71,8 @@ export function buildExplanationReport(input: {
 }): FactoryExplanationReport {
   const events = snapshotEvents(input.snapshot);
   const run = latestRunReceipts(events, input.snapshot.objectiveAuthority);
+  const providerGateState = run ? providerQuotaGateState(run.events, run.runId) : undefined;
+  const providerGate = providerGateState?.gate;
   const status = buildStatusReport({
     repository: input.repository,
     snapshot: input.snapshot,
@@ -83,39 +86,56 @@ export function buildExplanationReport(input: {
     );
   }
   const explanations: Array<Explanation & { workItem?: number }> = [];
-  if (!run) {
+  if (status.operatorAction.code === "activation-rejected") {
+    explanations.push({
+      code: EXPLANATION_CODES.authorityActivationRejected,
+      category: "authority",
+      disposition: "failed",
+      summary: status.activation?.rejectionReason ?? status.operatorAction.summary,
+      gate: "activation",
+      requiredAction: status.operatorAction.requiredAction,
+      evidence: {
+        ...status.operatorAction.evidence,
+        factoryWorkActive: false,
+        monitoring: "stop",
+      },
+    });
+  } else if (!run) {
     const inactive = explainGate({ gate: "authority", reason: "run-inactive" });
     explanations.push(
-      status.activation?.state === "rejected"
+      status.activation?.state === "withdrawn"
         ? {
-            code: EXPLANATION_CODES.authorityActivationRejected,
-            category: "authority",
-            disposition: "failed",
-            summary:
-              status.activation.rejectionReason ??
-              "The activation was rejected before a Factory run started.",
-            gate: "activation",
-            requiredAction:
-              "No Factory work is active; stop recurring monitoring. Correct the recorded preflight reason, then submit a new explicitly authorized activation request.",
-            evidence: {
-              activationRequestId: status.activation.requestId,
-              ...(status.activation.rejectedAt ? { rejectedAt: status.activation.rejectedAt } : {}),
-              ...(status.activation.rejectionReason
-                ? { reason: status.activation.rejectionReason }
-                : {}),
-              factoryWorkActive: false,
-              monitoring: "stop",
-            },
+            ...inactive,
+            summary: `Activation ${status.activation.requestId} was withdrawn by request ${status.activation.cancellationRequestId}; no Factory run started.`,
           }
-        : status.activation?.state === "withdrawn"
-          ? {
-              ...inactive,
-              summary: `Activation ${status.activation.requestId} was withdrawn by request ${status.activation.cancellationRequestId}; no Factory run started.`,
-            }
-          : inactive,
+        : inactive,
     );
   }
-  if (run?.terminal?.event === "FactoryRunEscalated") {
+  if (
+    providerGate?.kind === "provider" &&
+    (status.operatorAction.code === "provider-quota" ||
+      status.operatorAction.code === "provider-quota-draining")
+  ) {
+    const terminal = Boolean(run?.terminal);
+    explanations.push({
+      code: EXPLANATION_CODES.providerQuotaExhausted,
+      category: "provider",
+      disposition: "blocked",
+      summary: providerGate.providerMessage,
+      gate: "provider",
+      requiredAction: status.operatorAction.requiredAction,
+      evidence: {
+        ...status.operatorAction.evidence,
+        factoryWorkActive: !terminal,
+        monitoring: terminal ? "stop" : "continue",
+      },
+    });
+  }
+  if (
+    (status.operatorAction.code === "run-escalated" ||
+      status.operatorAction.code === "recovery-successor-escalated") &&
+    run?.terminal?.event === "FactoryRunEscalated"
+  ) {
     const terminal = terminalRunEvidence(run.terminal);
     const recoverySuccessor = Boolean(run.start.predecessorRunId);
     explanations.push({
@@ -126,10 +146,9 @@ export function buildExplanationReport(input: {
       disposition: "failed",
       summary: terminal.reason ?? "The selected Factory run ended in terminal escalation.",
       gate: recoverySuccessor ? "recovery-successor" : "execution",
-      requiredAction: recoverySuccessor
-        ? "No Factory work is active; stop recurring monitoring. Resolve the recorded terminal reason, then use factory_recovery_plan before proposing another explicitly authorized successor."
-        : "No Factory work is active; stop recurring monitoring. Resolve the recorded terminal reason before requesting an explicitly authorized recovery successor.",
+      requiredAction: status.operatorAction.requiredAction,
       evidence: {
+        ...status.operatorAction.evidence,
         runId: terminal.runId,
         terminalSequence: terminal.sequence,
         terminalAt: terminal.at,

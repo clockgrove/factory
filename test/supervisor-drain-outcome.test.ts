@@ -70,6 +70,36 @@ describe("Supervisor selected outcome survives execution teardown", () => {
     }
   }, 30_000);
 
+  it("does not let controller shutdown relabel a claimed failure as operator cancellation", async () => {
+    const shutdown = new AbortController();
+    const f = await providerSupervisorFixture("daytona-burst", {
+      validationFailure: true,
+      controllerActivation: true,
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        cancel: async (handle) => {
+          shutdown.abort();
+          await backend.cancel(handle);
+        },
+      }),
+    });
+    try {
+      expect(await f.run(shutdown.signal)).toMatchObject({
+        status: "escalated",
+        reason: expect.stringMatching(/attempt|failed/i),
+      });
+      expect(
+        f
+          .events()
+          .filter((event) => terminalNames.includes(event.event))
+          .map((event) => event.event),
+      ).toEqual(["FactoryRunEscalated"]);
+      expect(f.events().some((event) => event.event === "FactoryRunCancelled")).toBe(false);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
   it.each(["release", "cancel"] as const)(
     "drains an active worker for explicit %s without throwing its internal cancellation",
     async (mode) => {

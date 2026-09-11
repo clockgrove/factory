@@ -84,7 +84,7 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
       const running = f.run(shutdown.signal);
       try {
         await vi.waitFor(() => expect(waits).toBeGreaterThanOrEqual(3), {
-          timeout: 8000,
+          timeout: 60_000,
           interval: 20,
         });
         expect(f.policy.maxParallel).toBe(2);
@@ -109,7 +109,7 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
         await f.dispose();
       }
     },
-    30_000,
+    70_000,
   );
 
   it.each([

@@ -31,6 +31,7 @@ import { resolveCodexCommand } from "../runtime/codex-command.js";
 import type {
   CompilationContext,
   CompilerModelAdmission,
+  CompilerModelAdmissionReceipt,
   ObligationCheckpoint,
   ObligationResult,
   PlanJudgeContext,
@@ -67,7 +68,24 @@ import {
   type CompilerEvidence,
 } from "../evaluation/compiler-eval.js";
 import { ManagementOutputError } from "./backend.js";
+import { preserveProviderQuotaError, ProviderQuotaError } from "../providers/quota.js";
+import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
 import { discoverValidationCommands, readRepositoryFacts } from "../repository-profiles/index.js";
+
+async function propagateProviderQuotaFailure(
+  error: ProviderQuotaError,
+  admission: number | void | CompilerModelAdmissionReceipt,
+): Promise<never> {
+  if (admission && typeof admission === "object") {
+    error.bindInvocation(admission.modelInvocationId);
+    try {
+      await admission.checkpointProviderRefusal(error);
+    } catch (cause) {
+      throw preserveProviderQuotaError(error, cause, "provider-refusal adapter checkpoint failed");
+    }
+  }
+  throw error;
+}
 
 export const CODEX_COMPILED_OBJECTIVE_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -774,6 +792,7 @@ export interface CodexManagementOptions {
   authFile?: string;
   permittedModelCredentials?: string[];
   createCodexHome?: CodexHomeFactory;
+  removeCodexHome?: (path: string) => Promise<void>;
   /** Testable provider boundary; production leaves this unset. */
   runStructured?: (
     cwd: string,
@@ -834,6 +853,10 @@ export function parseManagementJsonlOutput<T>(stdout: string): {
     return parseManagementJsonlResult<T>(stdout);
   } catch (error) {
     const usage = observedCompletionUsage(stdout);
+    if (error instanceof ProviderQuotaError) {
+      if (usage) error.bindUsage(usage);
+      throw error;
+    }
     if (usage) throw new ManagementOutputError(error, usage);
     throw error;
   }
@@ -885,6 +908,8 @@ function parseManagementJsonlResult<T>(stdout: string): { value: T; usage: Manag
       continue;
     }
     if (event.type === "turn.failed" || event.type === "error") {
+      const gate = githubCopilotQuotaFromStreamEvent(event);
+      if (gate) throw new ProviderQuotaError(gate);
       throw new Error(`management backend reported ${event.type}`);
     }
     if (event.type === "turn.completed") {
@@ -962,7 +987,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       const codexHome = await (this.#options.createCodexHome ?? createIsolatedCodexHome)(
         "management",
       );
-      await rm(codexHome, { recursive: true, force: true });
+      await (this.#options.removeCodexHome ?? removeCodexHome)(codexHome);
     } catch (error) {
       return {
         available: false,
@@ -1476,25 +1501,35 @@ export class CodexCliManagementBackend implements ManagementBackend {
     )
       throw new Error("compiler invocation deadline exhausted");
     if (this.#options.runStructured) {
-      const admittedTimeoutMs = await beforeModelInvocation?.();
+      const admission = await beforeModelInvocation?.();
+      const admittedTimeoutMs = typeof admission === "number" ? admission : admission?.timeoutMs;
       const effectiveTimeoutMs = effectiveInvocationTimeout(admittedTimeoutMs, invocationTimeoutMs);
       if (!Number.isFinite(effectiveTimeoutMs) || effectiveTimeoutMs <= 0)
         throw new Error("compiler invocation deadline exhausted");
-      const result = await this.#options.runStructured(
-        cwd,
-        schema,
-        prompt,
-        modelSelection,
-        effectiveTimeoutMs,
-      );
-      return {
-        value: result.value as T,
-        usage: assertManagementUsage(result.usage),
-      };
+      try {
+        const result = await this.#options.runStructured(
+          cwd,
+          schema,
+          prompt,
+          modelSelection,
+          effectiveTimeoutMs,
+        );
+        return {
+          value: result.value as T,
+          usage: assertManagementUsage(result.usage),
+        };
+      } catch (error) {
+        if (error instanceof ProviderQuotaError)
+          await propagateProviderQuotaFailure(error, admission);
+        throw error;
+      }
     }
     const codexHome = await (this.#options.createCodexHome ?? createIsolatedCodexHome)(
       "management",
     );
+    let output: { value: T; usage: ManagementUsage } | undefined;
+    let failed = false;
+    let primaryError: unknown;
     try {
       const schemaPath = join(codexHome, "output.schema.json");
       await writeFile(schemaPath, JSON.stringify(schema), { mode: 0o600 });
@@ -1536,7 +1571,10 @@ export class CodexCliManagementBackend implements ManagementBackend {
         codexHome,
       );
       const invocationArgs = [...target.args, ...args];
-      const admittedTimeoutMs = await beforeModelInvocation?.();
+      const admission = await beforeModelInvocation?.();
+      const admittedTimeoutMs = typeof admission === "number" ? admission : admission?.timeoutMs;
+      const invocationId =
+        admission && typeof admission === "object" ? admission.modelInvocationId : undefined;
       const result = await runContainedProcess({
         command: target.command,
         args: invocationArgs,
@@ -1546,6 +1584,24 @@ export class CodexCliManagementBackend implements ManagementBackend {
         maxOutputBytes: 2 * 1024 * 1024,
       });
       if (result.exitCode !== 0) {
+        let quotaError: ProviderQuotaError | undefined;
+        for (const line of result.stdout.split(/\r?\n/)) {
+          try {
+            const event = JSON.parse(line) as unknown;
+            const gate = githubCopilotQuotaFromStreamEvent(event);
+            if (gate)
+              quotaError = new ProviderQuotaError(gate, {
+                ...(observedCompletionUsage(result.stdout)
+                  ? { usage: observedCompletionUsage(result.stdout)! }
+                  : {}),
+                ...(invocationId ? { invocationId } : {}),
+              });
+          } catch {}
+          if (quotaError) break;
+        }
+        if (quotaError) {
+          await propagateProviderQuotaFailure(quotaError, admission);
+        }
         const streams = [
           result.stderr.trim() ? `stderr:\n${result.stderr.trim()}` : "",
           result.stdout.trim() ? `stdout:\n${result.stdout.trim()}` : "",
@@ -1561,9 +1617,34 @@ export class CodexCliManagementBackend implements ManagementBackend {
         if (usage) throw new ManagementOutputError(error, usage);
         throw error;
       }
-      return parseManagementJsonlOutput<T>(result.stdout);
-    } finally {
-      await rm(codexHome, { recursive: true, force: true });
+      try {
+        output = parseManagementJsonlOutput<T>(result.stdout);
+      } catch (error) {
+        if (error instanceof ProviderQuotaError)
+          await propagateProviderQuotaFailure(error, admission);
+        throw error;
+      }
+    } catch (error) {
+      failed = true;
+      primaryError = error;
     }
+    try {
+      await (this.#options.removeCodexHome ?? removeCodexHome)(codexHome);
+    } catch (cleanupError) {
+      if (primaryError instanceof ProviderQuotaError) {
+        throw preserveProviderQuotaError(
+          primaryError,
+          cleanupError,
+          "provider-refusal checkpoint and isolated-home cleanup both failed",
+        );
+      }
+      throw cleanupError;
+    }
+    if (failed) throw primaryError;
+    return output!;
   }
+}
+
+async function removeCodexHome(path: string): Promise<void> {
+  await rm(path, { recursive: true, force: true });
 }

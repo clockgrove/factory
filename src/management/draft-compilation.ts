@@ -249,6 +249,9 @@ export async function compileEvaluatedDraft(args: {
         reserve = async () => {
           throw new Error("compiler dispatch reservation missing");
         },
+        checkpointProviderRefusal = async () => {
+          throw new Error("compiler provider-refusal checkpoint missing");
+        },
       ) => {
         let dispatched = false;
         let dispatchRequested = false;
@@ -269,7 +272,11 @@ export async function compileEvaluatedDraft(args: {
             const dispatchTimeoutMs = deadlineAt - Date.now();
             if (dispatchTimeoutMs <= 0) throw new Error("compiler evaluation deadline exhausted");
             dispatched = true;
-            return dispatchTimeoutMs;
+            return {
+              timeoutMs: dispatchTimeoutMs,
+              modelInvocationId: request.invocationId,
+              checkpointProviderRefusal,
+            };
           } catch (error) {
             throw new CompilerDraftAdmissionError(error);
           }

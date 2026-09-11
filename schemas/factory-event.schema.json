@@ -271,6 +271,7 @@
         "validation",
         "graph",
         "budget",
+        "provider",
         "recovery"
       ]
     },
@@ -412,6 +413,7 @@
     },
     "reasonCode": {
       "enum": [
+        "provider-quota-exhausted",
         "lease-unavailable",
         "policy-constraint",
         "backend-incompatible",
@@ -499,11 +501,23 @@
       "$ref": "#/definitions/safeId",
       "description": "Dispatch/actual-usage linkage. Exact marker usageId equality and authenticated closure identity are additionally checked by the runtime."
     },
+    "provider": { "$ref": "#/definitions/safeId" },
+    "providerMessage": { "type": "string", "minLength": 1, "maxLength": 320 },
+    "actionUrl": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://",
+      "maxLength": 2048
+    },
+    "accounting": { "enum": ["exact", "unknown"] },
     "amount": { "type": "number", "minimum": 0 }
   },
   "allOf": [
     {
-      "if": { "required": ["modelInvocationId"] },
+      "if": {
+        "required": ["modelInvocationId"],
+        "properties": { "kind": { "const": "budget" } }
+      },
       "then": {
         "required": ["usageId", "phase", "unit", "amount"],
         "properties": {
@@ -536,6 +550,36 @@
               }
             },
             "else": { "properties": { "usageId": { "not": { "pattern": "^invocation-" } } } }
+          }
+        ]
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "provider" } } },
+      "then": {
+        "required": [
+          "reasonCode",
+          "provider",
+          "phase",
+          "backend",
+          "modelInvocationId",
+          "providerMessage",
+          "accounting"
+        ],
+        "properties": {
+          "event": { "const": "ProviderQuotaBlocked" },
+          "reasonCode": { "const": "provider-quota-exhausted" },
+          "phase": { "enum": ["management", "execution"] },
+          "backend": { "type": "string", "minLength": 1, "maxLength": 160 }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "phase": { "const": "execution" } } },
+            "then": { "required": ["workItem", "attempt"] }
+          },
+          {
+            "if": { "required": ["attempt"] },
+            "then": { "required": ["workItem"] }
           }
         ]
       }

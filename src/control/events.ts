@@ -487,4 +487,98 @@ export class LifecycleRecorder {
     );
     return event;
   }
+
+  async providerQuotaBlocked(args: {
+    lease: LeaseState;
+    issueNodeId: string;
+    sequence: number;
+    phase: "management" | "execution";
+    backend: string;
+    modelInvocationId: string;
+    provider: string;
+    providerMessage: string;
+    actionUrl?: string;
+    accounting: "exact" | "unknown";
+    usage?: {
+      sequence: number;
+      usageId: string;
+      amount: number;
+      reportedModelUsage: ReportedModelUsage;
+      directorEpoch: number;
+      policyDigest: string;
+    };
+    reservation?: AttemptReservation;
+    workItem?: number;
+  }): Promise<FactoryEvent[]> {
+    await this.leases.assertMutationAuthorized(args.lease);
+    if (args.reservation) assertReservationLease(args.reservation, args.lease);
+    if (args.phase === "execution" && !args.reservation)
+      throw new Error("execution provider quota evidence requires its attempt reservation");
+    if ((args.accounting === "exact") !== Boolean(args.usage))
+      throw new Error("provider quota accounting must match its atomic usage receipt");
+    if (
+      args.usage &&
+      (args.usage.policyDigest !== args.lease.policyDigest ||
+        args.usage.directorEpoch > args.lease.epoch ||
+        args.usage.sequence >= args.sequence)
+    )
+      throw new Error("provider quota usage is fenced from its original run policy or sequence");
+    const now = await this.store.serverTime();
+    const scope = args.reservation
+      ? { workItem: args.reservation.workItem, attempt: args.reservation.attempt }
+      : args.workItem !== undefined
+        ? { workItem: args.workItem }
+        : {};
+    const usage = args.usage
+      ? parseFactoryEvent({
+          protocol: PROTOCOL_V2,
+          kind: "budget",
+          event: "BudgetReconciled",
+          ...writerAuthority(args.lease, args.usage.sequence),
+          objective: args.lease.objective,
+          runId: args.lease.runId,
+          sequence: args.usage.sequence,
+          at: now.toISOString(),
+          ...scope,
+          phase: args.phase,
+          unit: "model_tokens",
+          amount: args.usage.amount,
+          usageId: args.usage.usageId,
+          modelInvocationId: args.modelInvocationId,
+          directorEpoch: args.usage.directorEpoch,
+          policyDigest: args.usage.policyDigest,
+          reportedModelUsage: args.usage.reportedModelUsage,
+        })
+      : undefined;
+    const gate = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "provider",
+      event: "ProviderQuotaBlocked",
+      ...writerAuthority(args.lease, args.sequence),
+      objective: args.lease.objective,
+      runId: args.lease.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      reasonCode: "provider-quota-exhausted",
+      provider: args.provider,
+      phase: args.phase,
+      backend: args.backend,
+      modelInvocationId: args.modelInvocationId,
+      ...scope,
+      providerMessage: args.providerMessage,
+      ...(args.actionUrl ? { actionUrl: args.actionUrl } : {}),
+      accounting: args.accounting,
+    });
+    const events = usage ? [usage, gate] : [gate];
+    const recoveryGuidance =
+      "Restore provider quota for future model work. Recovery eligibility is determined only from the complete run history after Factory has reconciled admitted work and written a terminal receipt.";
+    await this.store.addIssueComment(
+      args.issueNodeId,
+      encodeEventBatchComment(
+        `Factory stopped at a non-retryable ${args.providerMessage}. ${recoveryGuidance}`,
+        events,
+      ),
+    );
+    return events;
+  }
 }

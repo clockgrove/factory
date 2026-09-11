@@ -15932,11 +15932,40 @@ export class FactorySupervisor {
       await this.#recoverInterrupted(item, this.#run.startedAt.getTime(), objectiveItems);
       return;
     }
-    const reservation = (await this.#attempts.list(this.#run.objective, item.number))
+    const reservations = await this.#attempts.list(this.#run.objective, item.number);
+    const reservation = reservations
       .filter((candidate) => candidate.runId === this.#run.runId)
       .sort((left, right) => right.attempt - left.attempt)[0];
     if (!reservation)
       throw new Error(`Work Item #${item.number} has recoverable state but no attempt ref`);
+    const artifactConsumer = reservation.artifactConsumer;
+    if (
+      artifactConsumer &&
+      (item.factoryEvents ?? []).some(
+        (event) =>
+          event.kind === "attempt" &&
+          event.runId === reservation.runId &&
+          event.attempt === reservation.attempt &&
+          event.event === "AttemptSucceeded" &&
+          event.artifactDigest === artifactConsumer.artifactDigest,
+      )
+    ) {
+      const sourceReservation = reservations.find(
+        (candidate) =>
+          candidate.runId === artifactConsumer.sourceRunId &&
+          candidate.oid === artifactConsumer.sourceReservationOid &&
+          candidate.attempt === artifactConsumer.sourceAttempt,
+      );
+      if (!sourceReservation)
+        throw new Error(
+          "retained artifact source reservation is unavailable during terminal drain",
+        );
+      await this.#settleArtifactConsumerAdmission(item, reservation, {
+        reservation: sourceReservation,
+        artifactDigest: artifactConsumer.artifactDigest,
+      });
+      return;
+    }
     if (await this.#recoverUndispatchedAdmission(item, reservation)) return;
     const backend = this.#registry.get(reservation.backend);
     if (!backend) throw new Error(`cannot reconcile unavailable backend ${reservation.backend}`);
@@ -16866,6 +16895,25 @@ export class FactorySupervisor {
     providerGates: readonly ProviderQuotaEvent[],
     includeAnyUnsettledAdmission = false,
   ): Promise<boolean> {
+    if (includeAnyUnsettledAdmission) {
+      const consumerSuccess = [...(item.factoryEvents ?? [])]
+        .reverse()
+        .find(
+          (event) =>
+            event.kind === "attempt" &&
+            event.runId === this.#run.runId &&
+            event.event === "AttemptSucceeded",
+        );
+      if (consumerSuccess?.kind === "attempt" && consumerSuccess.artifactDigest) {
+        const settledConsumer = (await this.#attempts.ledger.read(item.number))?.history.find(
+          (entry) =>
+            entry.runId === this.#run.runId &&
+            entry.reservation.attempt === consumerSuccess.attempt &&
+            entry.artifactConsumer?.artifactDigest === consumerSuccess.artifactDigest,
+        );
+        if (settledConsumer?.disposition === "released") return false;
+      }
+    }
     if (["reserved", "in_flight", "validating"].includes(item.state)) return true;
     if (
       item.state === "failed" &&

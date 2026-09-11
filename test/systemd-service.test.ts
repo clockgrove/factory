@@ -284,6 +284,8 @@ describe("systemd user service lifecycle", () => {
       `ExecStart="${process.execPath}" "${bundle}" controller run "Owner/Repo" --repo "/work/repo"`,
     );
     expect(unit).toMatch(/^# Managed by Clockgrove Factory v2/);
+    expect(unit).toMatch(/^# FactoryExecutableIdentity=sha256:[a-f0-9]{64}$/m);
+    expect(unit).toContain("RestartPreventExitStatus=2 65 70 72 78 130 203");
     expect(await service.start(input)).toMatchObject({ active: true });
     expect(await service.start(input)).toMatchObject({ active: true });
     expect(await service.stop(input)).toMatchObject({ active: false });
@@ -389,6 +391,149 @@ describe("systemd user service lifecycle", () => {
     });
   });
 
+  it.each([
+    [65, "controller-durable-state-incompatible"],
+    [70, "controller-internal-invariant"],
+    [72, "controller-discovery-failure"],
+    [78, "controller-local-configuration"],
+    [203, "controller-launcher-failure"],
+  ] as const)(
+    "reports fatal exit %i as a tripped %s fuse with an operator action",
+    async (exitStatus, code) => {
+      const f = await commandFixture();
+      let enabled = true;
+      const service = new SystemdUserService({
+        factoryCommand: [process.execPath, f.factoryBundle],
+        unitDirectory: join(f.root, "units"),
+        commandEnvironment: () => ({ PATH: "" }),
+        startupHealthDelayMs: 0,
+        run: async (args) => {
+          if (args[0] === "enable") enabled = true;
+          if (args[0] === "is-enabled" && !enabled) throw new Error("disabled");
+          if (args[0] === "is-active") throw new Error("inactive");
+          if (args[0] === "show") {
+            return {
+              stdout: `Result=exit-code\nExecMainStatus=${exitStatus}\nNRestarts=3\n`,
+            };
+          }
+        },
+      });
+      await service.install(f.input);
+      expect(await service.status(f.input)).toMatchObject({
+        active: false,
+        healthy: false,
+        fuseState: "tripped",
+        lastSafeDiagnosticCode: code,
+        reasonCode: code,
+        mainExitStatus: exitStatus,
+        restartCount: 3,
+        action: expect.stringContaining("explicitly restart"),
+        executableIdentity: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        currentExecutableIdentity: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      });
+    },
+  );
+
+  it("keeps unexpected process signals retryable instead of misreporting a fatal fuse", async () => {
+    const f = await commandFixture();
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, f.factoryBundle],
+      unitDirectory: join(f.root, "units"),
+      commandEnvironment: () => ({ PATH: "" }),
+      startupHealthDelayMs: 0,
+      run: async (args) => {
+        if (args[0] === "is-active") throw new Error("inactive");
+        if (args[0] === "show") {
+          return { stdout: "Result=signal\nExecMainStatus=9\nNRestarts=1\n" };
+        }
+      },
+    });
+    await service.install(f.input);
+    expect(await service.status(f.input)).toMatchObject({
+      fuseState: "armed",
+      lastSafeDiagnosticCode: "controller-process-signal",
+      reasonCode: "controller-inactive",
+      restartCount: 1,
+    });
+  });
+
+  it("lets an explicit operator restart re-evaluate a tripped controller", async () => {
+    const f = await commandFixture();
+    let fatal = true;
+    let active = false;
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, f.factoryBundle],
+      unitDirectory: join(f.root, "units"),
+      commandEnvironment: () => ({ PATH: "" }),
+      startupHealthDelayMs: 0,
+      run: async (args) => {
+        if (args[0] === "restart") {
+          fatal = false;
+          active = true;
+        }
+        if (args[0] === "is-active" && !active) throw new Error("inactive");
+        if (args[0] === "show") {
+          return fatal
+            ? { stdout: "Result=exit-code\nExecMainStatus=72\nNRestarts=0\n" }
+            : { stdout: "Result=success\nExecMainStatus=0\nNRestarts=0\n" };
+        }
+      },
+    });
+    expect(await service.install(f.input)).toMatchObject({
+      fuseState: "tripped",
+      reasonCode: "controller-discovery-failure",
+    });
+    expect(await service.restart(f.input)).toMatchObject({
+      active: true,
+      healthy: true,
+      fuseState: "armed",
+      lastSafeDiagnosticCode: null,
+    });
+  });
+
+  it("detects changed artifact bytes and refreshes their exact identity before explicit restart", async () => {
+    const f = await commandFixture();
+    let active = false;
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, f.factoryBundle],
+      unitDirectory: join(f.root, "units"),
+      commandEnvironment: () => ({ PATH: "" }),
+      startupHealthDelayMs: 0,
+      run: async (args) => {
+        if (args[0] === "restart") active = true;
+        if (args[0] === "is-active" && !active) throw new Error("inactive");
+      },
+    });
+    const installed = await service.install(f.input);
+    await writeFile(f.factoryBundle, "// corrected controller fixture\n");
+    const changed = await service.status(f.input);
+    expect(changed).toMatchObject({
+      launcherCurrent: false,
+      reasonCode: "controller-launcher-stale",
+    });
+    expect(changed.currentExecutableIdentity).not.toBe(installed.executableIdentity);
+    const refreshed = await service.install(f.input);
+    expect(refreshed).toMatchObject({ launcherCurrent: true });
+    expect(refreshed.executableIdentity).toBe(changed.currentExecutableIdentity);
+    expect(await service.restart(f.input)).toMatchObject({ active: true, healthy: true });
+  });
+
+  it("refuses to install an unavailable launcher without creating a startable unit", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-missing-launcher-"));
+    const run = vi.fn(async () => {});
+    const service = new SystemdUserService({
+      factoryExecutable: join(directory, "missing-factory"),
+      unitDirectory: directory,
+      commandEnvironment: () => ({ PATH: "" }),
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await expect(service.install(input)).rejects.toThrow("controller-launcher-failure");
+    await expect(readFile(service.unitPath(input))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(run).not.toHaveBeenCalled();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("never overwrites an unmanaged unit with the deterministic Factory name", async () => {
     const directory = await mkdtemp(join(tmpdir(), "factory-systemd-owned-"));
     const service = new SystemdUserService({
@@ -436,6 +581,50 @@ describe("systemd user service lifecycle", () => {
         enabled: false,
         active: false,
       });
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  integration("bounds a real deterministic fatal process to one service generation", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "factory-systemd-fatal-"));
+    const executable = join(checkout, "factory-controller-fatal-fixture");
+    const launches = join(checkout, "launches");
+    const requests = join(checkout, "requests");
+    const leases = join(checkout, "leases");
+    const objectives = join(checkout, "objectives");
+    const resources = join(checkout, "resources");
+    await writeFile(
+      executable,
+      `#!/bin/sh\nprintf 'launch\\n' >> ${JSON.stringify(launches)}\nprintf 'repository-facts\\nbranch-head\\nlease-acquire\\nactivation-discovery\\n' >> ${JSON.stringify(requests)}\nprintf 'epoch-1\\n' >> ${JSON.stringify(leases)}\nexit 70\n`,
+      { mode: 0o700 },
+    );
+    const service = new SystemdUserService({
+      factoryExecutable: executable,
+      startupHealthDelayMs: 250,
+    });
+    const input = { repository: "FactoryFatalFuseGate/Fixture", checkout };
+    try {
+      await service.install(input);
+      await expect(service.start(input)).rejects.toThrow("controller-internal-invariant");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect((await readFile(launches, "utf8")).trim().split("\n")).toEqual(["launch"]);
+      expect((await readFile(requests, "utf8")).trim().split("\n")).toEqual([
+        "repository-facts",
+        "branch-head",
+        "lease-acquire",
+        "activation-discovery",
+      ]);
+      expect((await readFile(leases, "utf8")).trim().split("\n")).toEqual(["epoch-1"]);
+      await expect(readFile(objectives)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(readFile(resources)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await service.status(input)).toMatchObject({
+        active: false,
+        fuseState: "tripped",
+        lastSafeDiagnosticCode: "controller-internal-invariant",
+        restartCount: 0,
+      });
+    } finally {
+      await service.uninstall(input);
       await rm(checkout, { recursive: true, force: true });
     }
   });

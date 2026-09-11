@@ -67,6 +67,12 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Repository controllers now preserve typed fatal causes behind redacted diagnostic codes and
+  artifact-keyed fingerprints. Installed systemd units bind the exact Factory artifact identity,
+  keep transient failures and generation retirement restartable, stop deterministic discovery,
+  durable-state, configuration, launcher, and invariant crash loops, and expose fuse/restart state
+  with the next operator action through status and doctor. ([#314](https://github.com/clockgrove/factory/issues/314))
+
 - Recheck mutable workflow safety inside the transport fence, after mutation-queue admission and
   final publication-authority validation, immediately before feature-ref and pull-request dispatch.
   Unsafe or unstable observed bases fail closed; GitHub's irreducible non-atomic

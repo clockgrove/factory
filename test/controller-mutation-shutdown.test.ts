@@ -273,7 +273,8 @@ it("does not hide unresolved cleanup behind a pre-dispatch cancellation", async 
   f.abort.abort();
   await advanceUntil(() => settled);
   expect(await outcome).toMatchObject({
-    message: expect.stringContaining("non-retryable failure"),
+    code: "controller-internal-invariant",
+    safeIdentity: "controller-invariant-failure",
   });
   expect(f.request).toHaveBeenCalledTimes(1); // Repository lease retirement only, no claimed Objective cleanup.
 });

@@ -89,7 +89,8 @@ uninstall reports both `installed=false` and `enabled=false`.
 
 The unit starts with a Factory ownership marker. Installation refuses to overwrite an existing unit
 at the deterministic path unless that marker is present. It records both the absolute Node runtime
-and shipped `dist/factory.js` path, so startup never relies on a login shell or `PATH`.
+and shipped `dist/factory.js` path plus the Factory artifact's exact SHA-256 identity, so startup
+never relies on a login shell or silently accepts changed bytes at the same path.
 
 The generated unit is equivalent to:
 
@@ -102,9 +103,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/absolute/path/to/repository
-ExecStart=/absolute/path/to/node /absolute/path/to/installed/dist/factory.js controller run OWNER/REPO --repo /absolute/path/to/repository
+# FactoryExecutableIdentity=sha256:...
+ExecStart=/absolute/path/to/node /absolute/path/to/installed/dist/factory.js controller run OWNER/REPO --repo /absolute/path/to/repository --executable-identity sha256:...
 Restart=on-failure
-RestartPreventExitStatus=2 130
+RestartPreventExitStatus=2 65 70 72 78 130 203
 RestartSec=30
 TimeoutStopSec=90
 KillMode=control-group
@@ -126,9 +128,19 @@ Codex login, and the `gh` login. Do not put tokens in the unit. On WSL, systemd 
 for the distribution, and Windows must start that distribution before its user services can run.
 For a Linux guest on macOS, the guest must likewise be running before its user service can start.
 
-`Restart=on-failure` restarts operational crashes. A completed, cancelled, or durably escalated run
-is terminal and should not be looped. Factory reconstructs the active run from GitHub after a restart;
-the unit does not carry orchestration state.
+`Restart=on-failure` restarts unexpected process crashes and signals. Fatal controller exits are a
+different contract: durable-state incompatibility (65), internal invariant (70), discovery failure
+(72), local configuration (78), and launcher execution failure (203) trip the service fuse and do
+not automatically restart. `controller status` and `doctor` return the exact executable identity,
+restart count, fuse state, last safe diagnostic code, and recovery action without requiring journal
+access. The fatal log line contains a stable fingerprint keyed by artifact identity but never the raw
+exception, provider headers, response body, token, or Objective content.
+
+Correct the reported condition, reinstall when the artifact identity changed, then explicitly start
+or restart the unit. That operator action re-evaluates a tripped controller. Never replace bytes or
+restart merely to pick up an upgrade while active work or resource cleanup is unresolved; drain and
+confirm the owned generation first. Factory reconstructs active state from GitHub after a restart;
+the unit does not carry orchestration authority.
 
 ## Stopping versus cancelling
 

@@ -17,6 +17,7 @@ import {
   ConcurrencyLimiter,
   PlatformUnavailableError,
 } from "../src/platform.js";
+import { verifyLocalRepository } from "../src/supervisor.js";
 
 vi.mock("../src/supervisor.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/supervisor.js")>()),
@@ -108,6 +109,20 @@ async function parkedFailure(error: unknown) {
 }
 
 describe("controller quota boundary", () => {
+  it("classifies local repository preflight before any GitHub request", async () => {
+    const failure = new Error("private checkout path");
+    vi.mocked(verifyLocalRepository).mockRejectedValueOnce(failure);
+    const facts = vi.spyOn(GitHubControlStore.prototype, "getRepositoryFacts");
+    await expect(
+      runGitHubRepositoryController(options(new AbortController().signal)),
+    ).rejects.toMatchObject({
+      code: "controller-local-configuration",
+      safeIdentity: "controller-invariant-failure",
+      cause: failure,
+    });
+    expect(facts).not.toHaveBeenCalled();
+  });
+
   it("preserves a contended peer's independent sibling cleanup failure instead of retrying", async () => {
     const failure = Error("second Objective cleanup remains unknown");
     const seen: number[] = [];
@@ -209,7 +224,10 @@ describe("controller quota boundary", () => {
       });
       const result =
         boundary === "release"
-          ? expect(task).rejects.toThrow("non-retryable failure (objective-lease-lost)")
+          ? expect(task).rejects.toMatchObject({
+              code: "controller-internal-invariant",
+              safeIdentity: "objective-lease-lost",
+            })
           : expect(task).resolves.toBeUndefined();
       await vi.advanceTimersByTimeAsync(30_000);
       expect(run).toHaveBeenCalledTimes(1);
@@ -322,8 +340,59 @@ describe("controller quota boundary", () => {
     mock.facts.mockRejectedValueOnce(failure);
     await expect(
       runGitHubRepositoryController(options(new AbortController().signal)),
-    ).rejects.toThrow("non-retryable failure");
+    ).rejects.toMatchObject({
+      code: "controller-discovery-failure",
+      safeIdentity: "github-permission-403",
+      cause: failure,
+    });
     expect(mock.facts).toHaveBeenCalledTimes(1);
+  });
+
+  it("fuses a deterministic discovery invariant after one acquired repository lease", async () => {
+    const mock = ownershipMocks();
+    const secret = "private Objective body and Bearer token";
+    const failure = new Error(secret);
+    mock.discover.mockRejectedValueOnce(failure);
+    const accounting: Array<{ phase: string; outcome: string }> = [];
+    const supervisorFactory = vi.fn(() => ({ run: vi.fn(async () => {}) }));
+    await expect(
+      runGitHubRepositoryController({
+        ...options(new AbortController().signal),
+        onColdStartRequestAccounting: (observation) => accounting.push(observation),
+        supervisorFactory,
+      }),
+    ).rejects.toMatchObject({
+      code: "controller-discovery-failure",
+      safeIdentity: "controller-invariant-failure",
+      cause: failure,
+      message: expect.not.stringContaining(secret),
+    });
+    expect(mock.acquire).toHaveBeenCalledTimes(1);
+    expect(mock.discover).toHaveBeenCalledTimes(1);
+    expect(mock.release).toHaveBeenCalledTimes(1);
+    expect(supervisorFactory).not.toHaveBeenCalled();
+    expect(accounting.map(({ phase, outcome }) => [phase, outcome])).toEqual([
+      ["repository-facts", "succeeded"],
+      ["default-branch-head", "succeeded"],
+      ["repository-lease-acquisition", "succeeded"],
+      ["shared-capacity", "succeeded"],
+      ["activation-discovery", "failed"],
+    ]);
+  });
+
+  it("classifies malformed discovered durable state separately from discovery transport", async () => {
+    const mock = ownershipMocks();
+    const failure = new SyntaxError("private durable payload");
+    mock.discover.mockRejectedValueOnce(failure);
+    await expect(
+      runGitHubRepositoryController(options(new AbortController().signal)),
+    ).rejects.toMatchObject({
+      code: "controller-durable-state-incompatible",
+      cause: failure,
+    });
+    expect(mock.acquire).toHaveBeenCalledTimes(1);
+    expect(mock.discover).toHaveBeenCalledTimes(1);
+    expect(mock.release).toHaveBeenCalledTimes(1);
   });
 
   it("does not acquire a repository lease when stopped during bootstrap reads", async () => {
@@ -417,7 +486,9 @@ describe("controller quota boundary", () => {
     expect(mock.release).not.toHaveBeenCalled();
     finish();
     expect(await outcome).toMatchObject({
-      message: expect.stringContaining("non-retryable failure (repository-lease-lost)"),
+      code: "controller-internal-invariant",
+      safeIdentity: "repository-lease-lost",
+      cause: takeover,
     });
   });
 

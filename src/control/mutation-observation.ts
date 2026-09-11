@@ -33,6 +33,18 @@ interface Context {
 
 const current = new AsyncLocalStorage<Context>();
 
+export interface GitHubTransportObservation {
+  measurementScope: "process-local-controller-phase";
+  phase: string;
+  startedAt: string;
+  readRequests: number;
+  mutationRequests: number;
+  unclassifiedRequests: number;
+  outcome: "succeeded" | "failed";
+}
+
+const transportObservation = new AsyncLocalStorage<GitHubTransportObservation>();
+
 /** These measurements never supply lease, accounting, or GitHub quota authority. */
 export function observeLeaseAssertion(): void {
   const context = current.getStore();
@@ -54,11 +66,12 @@ export function observeGitHubTransport(
   input: Parameters<typeof globalThis.fetch>[0],
   init?: RequestInit,
 ): void {
-  if (!current.getStore()) return;
   const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   if (method === "GET" || method === "HEAD") {
     observeControlTransport(false);
+    const observation = transportObservation.getStore();
+    if (observation) observation.readRequests++;
     return;
   }
   try {
@@ -68,22 +81,64 @@ export function observeGitHubTransport(
         const normalized = query.replace(/#[^\n]*/g, "").trimStart();
         if (/^(?:query\b|\{)/.test(normalized)) {
           observeControlTransport(false);
+          const observation = transportObservation.getStore();
+          if (observation) observation.readRequests++;
           return;
         }
         if (/^mutation\b/.test(normalized)) {
           observeControlTransport(true);
+          const observation = transportObservation.getStore();
+          if (observation) observation.mutationRequests++;
           return;
         }
       }
-      current.getStore()!.observation.unclassifiedRequests++;
+      const mutation = current.getStore();
+      if (mutation) mutation.observation.unclassifiedRequests++;
+      const observation = transportObservation.getStore();
+      if (observation) observation.unclassifiedRequests++;
       return;
     }
   } catch {
     // Diagnostic parsing cannot invalidate transport or silently guess its kind.
-    current.getStore()!.observation.unclassifiedRequests++;
+    const mutation = current.getStore();
+    if (mutation) mutation.observation.unclassifiedRequests++;
+    const observation = transportObservation.getStore();
+    if (observation) observation.unclassifiedRequests++;
     return;
   }
   observeControlTransport(true);
+  const observation = transportObservation.getStore();
+  if (observation) observation.mutationRequests++;
+}
+
+/** Process-local request accounting only; never a durable authority or quota grant. */
+export async function observeGitHubTransportPhase<T>(
+  phase: string,
+  report: (observation: GitHubTransportObservation) => void,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const observation: GitHubTransportObservation = {
+    measurementScope: "process-local-controller-phase",
+    phase,
+    startedAt: new Date().toISOString(),
+    readRequests: 0,
+    mutationRequests: 0,
+    unclassifiedRequests: 0,
+    outcome: "failed",
+  };
+  return transportObservation.run(observation, async () => {
+    try {
+      const result = await operation();
+      observation.outcome = "succeeded";
+      return result;
+    } finally {
+      try {
+        report(Object.freeze({ ...observation }));
+      } catch {
+        // Accounting is diagnostic and cannot alter controller safety.
+      }
+    }
+  });
 }
 
 export async function observeMutationFence(operation: () => Promise<void>): Promise<void> {

@@ -34,7 +34,10 @@ the service separately even if a foreground plugin probe already works.
    `controller-launcher-stale` means the managed unit no longer names an available exact Factory
    launcher; the supported repair is an idempotent controller install followed by start. A start or
    restart response is accepted only after the service remains healthy through its initial
-   observation window.
+   observation window. A `fuseState` of `tripped` means Factory deliberately stopped a deterministic
+   failure loop. Follow the returned `action`, preserve the `lastSafeDiagnosticCode`, artifact
+   `executableIdentity`, and safe log fingerprint for support, and explicitly restart only after the
+   condition is corrected. Raw journal output is not required for this diagnosis.
 2. In that Linux user's home, create a private directory such as
    `~/.config/clockgrove-factory` with mode `0700`, and a file `providers.env` with mode `0600`.
    Edit it privately. This is an operator-chosen file, not a path Factory searches automatically.

@@ -1444,14 +1444,16 @@ describe("preinstalled configuration identity", () => {
     checkout,
     node: "/usr/bin/node",
     bundle: "/home/example/.codex/plugins/cache/personal/factory/2.0.26/dist/factory.js",
+    identity: "d".repeat(64),
   };
-  const body = `# Managed by Clockgrove Factory v2\n[Unit]\nDescription=Clockgrove Factory repository controller for ${repository}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${checkout}\nEnvironment="PATH=/usr/bin:/bin"\nExecStart="${expected.node}" "${expected.bundle}" controller run "${repository}" --repo "${checkout}"\nRestart=on-failure\nRestartPreventExitStatus=2 130\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
+  const body = `# Managed by Clockgrove Factory v2\n[Unit]\nDescription=Clockgrove Factory repository controller for ${repository}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${checkout}\nEnvironment="PATH=/usr/bin:/bin"\n# FactoryExecutableIdentity=sha256:${expected.identity}\nExecStart="${expected.node}" "${expected.bundle}" controller run "${repository}" --repo "${checkout}" --executable-identity "sha256:${expected.identity}"\nRestart=on-failure\nRestartPreventExitStatus=2 65 70 72 78 130 203\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
   it("accepts only the exact generated nonsecret unit", () =>
     expect(assertControllerUnit(body, expected)).toMatch(/^[a-f0-9]{64}$/));
   it.each([
     body.replace("KillMode=control-group", "KillMode=process"),
     body.replace("controller run", "run"),
     body.replace(expected.bundle, "/tmp/other.js"),
+    body.replace(expected.identity, "e".repeat(64)),
     body.replace("[Service]", "[Service]\nExecStartPre=/tmp/other"),
     body.replace('Environment="PATH=/usr/bin:/bin"', 'Environment="GITHUB_TOKEN=private"'),
     body.replace(

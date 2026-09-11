@@ -28,13 +28,23 @@ import {
 import { delimiter, join } from "node:path";
 import { mkdir, symlink, unlink, lstat, readlink, access, readFile } from "node:fs/promises";
 import { constants as fsConstants, readFileSync } from "node:fs";
+import {
+  BUN_ADAPTER_CONTRACT,
+  BUN_ADAPTER_ID,
+  BUN_INSTALL_COMMAND,
+  BUN_PACKAGE_REGISTRY,
+  BUN_VERSION_COMMAND,
+  bunCapabilityOperation,
+  createBunManagedExecutionPlan,
+  inspectBunAuthority,
+} from "./bun.js";
 
 export type ToolchainProvisioning =
   | "host-observed"
   | "factory-bundled"
   | "factory-provisioned"
   | "unprovisioned";
-export type PackageScriptManager = "npm" | "pnpm";
+export type PackageScriptManager = "npm" | "pnpm" | "bun";
 
 export interface ToolchainAuthorityAdapter {
   id: string;
@@ -162,7 +172,7 @@ export function adapterNetworkDestinations(adapter: ToolchainAuthorityAdapter): 
   ];
 }
 
-const runtimeRequirement = (tool: "pnpm", adapter: string): RuntimeBundleRequirement => ({
+const runtimeRequirement = (tool: "pnpm" | "bun", adapter: string): RuntimeBundleRequirement => ({
   tool,
   adapter,
   adapterContract: 1,
@@ -285,6 +295,29 @@ function pnpmIsolatedPlan(
   };
 }
 
+function legacyManagedProjection(
+  runner: string,
+  bundle: RuntimeBundleReceipt,
+  plan: ManagedToolchainPlan,
+): IsolatedManagedToolchainPlan {
+  const primary = plan.assets.find(({ id }) => id === runner) ?? plan.assets[0];
+  const component = bundle.components.find(({ id }) => id === runner) ?? bundle.components[0];
+  if (!primary || !component) throw new Error(`${runner} managed plan has no primary asset`);
+  return {
+    runner,
+    bundle,
+    plan,
+    asset: { path: primary.path, content: primary.content, sha256: primary.sha256 },
+    version: component.version,
+    setup: plan.setup.map((step) => ({
+      command: step.display,
+      args: step.args,
+      ...(step.expectedStdout !== undefined ? { expectedStdout: step.expectedStdout } : {}),
+    })),
+    environment: plan.environment,
+  };
+}
+
 function isolatedAssets(bundle: RuntimeBundleReceipt) {
   return runtimeComponentPaths(toolchainStoreRoot(), bundle).map(({ component, asset }) => ({
     id: component.id,
@@ -294,8 +327,23 @@ function isolatedAssets(bundle: RuntimeBundleReceipt) {
     archive: component.asset.archive,
     executablePath: component.executablePath,
     executableSha256: component.executableSha256,
+    treeSha256: component.treeSha256,
     ...(component.executableOnly ? { executableOnly: true as const } : {}),
   }));
+}
+
+function bunIsolatedPlan(
+  commands: readonly string[] = [],
+  receipt?: RuntimeBundleReceipt,
+): IsolatedManagedToolchainPlan {
+  if (!receipt) throw new Error("Bun isolated execution lacks an exact activated runtime");
+  const plan = createBunManagedExecutionPlan({
+    receipt,
+    privateRoot: "/tmp/factory-toolchain",
+    commands,
+    assets: isolatedAssets(receipt),
+  });
+  return legacyManagedProjection("bun", receipt, plan);
 }
 
 function canonical(value: unknown): string {
@@ -317,6 +365,7 @@ function capabilityProof(
   runtimeBundle: string,
   authorityDigest: string,
   preparationDigest: string,
+  authorityPaths: readonly string[] = requirement.authorityPaths,
 ): RepositoryCapabilityProof {
   const evidence = {
     protocol: "clockgrove.factory/repository-capability-proof-v1" as const,
@@ -324,7 +373,7 @@ function capabilityProof(
     generation: requirement.generation,
     providerWorkItem: requirement.providerWorkItem,
     operation: requirement.operation,
-    authorityPaths: [...requirement.authorityPaths],
+    authorityPaths: [...authorityPaths],
     baseSha: input.base.oid,
     baseTreeOid: input.base.treeOid,
     packetDigest: workerPacketDigest(input.packet),
@@ -707,8 +756,133 @@ async function resolvePnpmIntegratedBase(
   );
 }
 
+function assertCanonicalManagedRequirements(
+  input: IntegratedCapabilityResolutionInput,
+  adapter: ToolchainAuthorityAdapter,
+): void {
+  if (input.requirements.length === 0)
+    throw new Error(`${adapter.runner} capability group is empty`);
+  const expectedPaths = input.requirements[0]!.authorityPaths;
+  if (
+    input.requirements.some(
+      (requirement) =>
+        requirement.adapter !== adapter.id ||
+        requirement.activation !== "integrated-base" ||
+        requirement.generation !== `${adapter.id}/${input.provider.id}` ||
+        requirement.providerWorkItem !== input.provider.id ||
+        canonical(requirement.authorityPaths) !== canonical(expectedPaths) ||
+        canonical(runtimeContract(requirement.runtime)) !==
+          canonical(runtimeContract(adapter.runtimeRequirement)) ||
+        !input.packet.validationCommands.some((command) => {
+          const operation = adapter.operation?.(command);
+          return (
+            operation?.kind === requirement.operation.kind &&
+            operation.key === requirement.operation.key
+          );
+        }),
+    ) ||
+    !expectedPaths.every((path) => input.provider.scope.includes(path))
+  )
+    throw new Error(
+      `${adapter.runner} capability requirement differs from its canonical provider contract`,
+    );
+}
+
+function commandForOperation(
+  adapter: ToolchainAuthorityAdapter,
+  packet: WorkerPacket,
+  operation: RepositoryCapabilityRequirement["operation"],
+): string {
+  const command = packet.validationCommands.find((candidate) => {
+    const parsed = adapter.operation?.(candidate);
+    return parsed?.kind === operation.kind && parsed.key === operation.key;
+  });
+  if (!command) throw new Error(`${adapter.runner} operation has no exact packet command`);
+  return command;
+}
+
+async function authorityDigestForPaths(root: string, paths: readonly string[]): Promise<string> {
+  const content = await Promise.all(
+    [...new Set(paths)]
+      .sort()
+      .map(async (path) => [path, await readFile(join(root, path), "utf8")]),
+  );
+  return createHash("sha256").update(canonical(content)).digest("hex");
+}
+
+async function resolveBunIntegratedBase(
+  input: IntegratedCapabilityResolutionInput,
+): Promise<RepositoryCapabilityProof[]> {
+  const adapter = toolchainAdapterById(BUN_ADAPTER_ID)!;
+  assertCanonicalManagedRequirements(input, adapter);
+  const runtime = await runtimeForRequirements(input.requirements, adapter, input.packet);
+  const component = runtime.components.find(({ id }) => id === "bun");
+  if (!component) throw new Error("Bun runtime bundle lacks its executable component");
+  const { createLocalWorktree, cleanupLocalWorktree } = await import(
+    "../runtime/local-worktree.js"
+  );
+  const inspect = async (
+    commitSha: string,
+  ): Promise<{ authorityDigest: string; authorityPaths: string[] }> => {
+    const worktree = await createLocalWorktree(input.repository, commitSha);
+    try {
+      const inspections = [];
+      for (const requirement of input.requirements)
+        inspections.push(
+          await inspectBunAuthority({
+            root: worktree.path,
+            command: commandForOperation(adapter, input.packet, requirement.operation),
+            exactVersion: component.version,
+          }),
+        );
+      const authorityPaths = [
+        ...new Set(inspections.flatMap(({ authorityPaths }) => authorityPaths)),
+      ].sort();
+      if (authorityPaths.some((path) => !input.provider.scope.includes(path)))
+        throw new Error("Bun authority includes a path outside its provider scope");
+      return {
+        authorityDigest: await authorityDigestForPaths(worktree.path, authorityPaths),
+        authorityPaths,
+      };
+    } finally {
+      await cleanupLocalWorktree(worktree);
+    }
+  };
+  const providerAuthority = await inspect(input.provider.integration.commitSha);
+  const currentAuthority =
+    input.provider.integration.commitSha === input.base.oid
+      ? providerAuthority
+      : await inspect(input.base.oid);
+  if (
+    providerAuthority.authorityDigest !== currentAuthority.authorityDigest ||
+    canonical(providerAuthority.authorityPaths) !== canonical(currentAuthority.authorityPaths)
+  )
+    throw new Error("Bun authority bytes changed after the declared provider generation");
+  const authorityDigest = providerAuthority.authorityDigest;
+  const preparationDigest = createHash("sha256")
+    .update(
+      canonical({
+        setup: adapter.setupCommands,
+        network: adapterNetworkDestinations(adapter),
+        environment: "isolated-bun-v1",
+      }),
+    )
+    .digest("hex");
+  return input.requirements.map((requirement) =>
+    capabilityProof(
+      input,
+      requirement,
+      receiptIdentity(runtime),
+      runtime.digest,
+      authorityDigest,
+      preparationDigest,
+      providerAuthority.authorityPaths,
+    ),
+  );
+}
+
 async function withProvisionedToolPath(
-  tool: "pnpm",
+  tool: "pnpm" | "bun",
   source: NodeJS.ProcessEnv,
   privateRoot: string,
   receipt: RuntimeBundleReceipt,
@@ -775,6 +949,26 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
     available: async () => (await toolchainStatus("pnpm")).state === "ready",
     prepareEnvironment: (source, privateRoot, receipt) =>
       withProvisionedToolPath("pnpm", source, privateRoot, receipt),
+  },
+  {
+    id: BUN_ADAPTER_ID,
+    runner: "bun",
+    provisioning: "factory-provisioned",
+    deferredOperations: true,
+    futurePackageScripts: true,
+    requiredRootPaths: ["package.json", "bun.lock"],
+    setupCommands: [BUN_VERSION_COMMAND, BUN_INSTALL_COMMAND],
+    networkDestination: BUN_PACKAGE_REGISTRY,
+    runtimeRequirement: {
+      ...runtimeRequirement("bun", BUN_ADAPTER_ID),
+      adapterContract: BUN_ADAPTER_CONTRACT,
+    },
+    operation: bunCapabilityOperation,
+    resolveIntegratedBase: resolveBunIntegratedBase,
+    isolatedPlan: bunIsolatedPlan,
+    available: async () => (await toolchainStatus("bun")).state === "ready",
+    prepareEnvironment: (source, privateRoot, receipt) =>
+      withProvisionedToolPath("bun", source, privateRoot, receipt),
   },
   {
     id: "rust-cargo",
@@ -917,7 +1111,8 @@ export async function assertRepositoryCapabilityProofsCurrent(input: {
       proof.baseTreeOid !== input.base.treeOid ||
       proof.sourceRef !== input.sourceRef ||
       proof.packetDigest !== packetDigest ||
-      canonical(proof.authorityPaths) !== canonical(requirement.authorityPaths)
+      new Set(proof.authorityPaths).size !== proof.authorityPaths.length ||
+      requirement.authorityPaths.some((path: string) => !proof.authorityPaths.includes(path))
     )
       throw new Error("repository capability proof was invalidated before dispatch");
     const { digest, ...evidence } = proof;
@@ -937,6 +1132,8 @@ export async function assertRepositoryCapabilityProofsCurrent(input: {
       const provider = input.providerById(requirement.providerWorkItem);
       if (!provider || provider.id !== requirement.providerWorkItem)
         throw new Error(`unknown repository capability provider ${requirement.providerWorkItem}`);
+      if (proof.authorityPaths.some((path) => !provider.scope.includes(path)))
+        throw new Error("repository capability proof includes authority outside provider scope");
       const providerRuntime = exactProviderGenerationRuntime(provider, requirement.runtime);
       if (
         proof.providerIssue !== provider.issueNumber ||

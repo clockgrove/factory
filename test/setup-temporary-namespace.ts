@@ -39,7 +39,8 @@ await provisionToolchain("pnpm", {
             id: 1,
             name: "pnpm-linux-x64",
             url: "test://pnpm-release-asset",
-            browserDownloadUrl: "test://pnpm-release-asset",
+            browserDownloadUrl:
+              "https://github.com/pnpm/pnpm/releases/download/v10.34.5/pnpm-linux-x64",
             size: wrapper.byteLength,
             digest: `sha256:${await crypto.subtle
               .digest("SHA-256", wrapper)

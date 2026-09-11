@@ -6,9 +6,10 @@ Status: accepted
 
 ## Context
 
-Deferred pnpm repository capabilities must execute with an exact runtime after their provider has
-been integrated. Embedding only a pnpm program and launching it with the controller's Node executable
-would leave part of the runtime identity ambient and would not provide durable provenance.
+Deferred repository capabilities must execute with an exact runtime after their provider has been
+integrated. A package-manager program without its interpreter, or any tool resolved from the
+controller's `PATH`, leaves part of the runtime identity ambient and does not provide durable
+provenance.
 
 Runtime absence is a temporal readiness condition. It must not invalidate or recompile an already
 persisted graph, and installing a newer release must not silently change the runtime used by a graph
@@ -60,15 +61,26 @@ identities, recheck every asset, executable, tree and canonical bundle digest, a
 content-addressed bundle. Restore never resolves a latest release and never changes the active
 pointer. Recovery can then reverify the reservation and continue without recompiling the graph.
 
-The core owns bundle shapes, receipt verification, platform matching, direct execution plans and
-readiness. The pnpm adapter owns release selection, repository pins, authority files, finite
+The core owns bundle shapes, receipt verification, platform matching, typed direct-executable plans,
+active selection, exact restoration and readiness. The bounded provisioning catalog owns each
+official release origin and asset pattern. Repository adapters own pins, authority files, finite
 operations, preparation, environment isolation and source/lock policy. The first qualified platform
 is Linux x64 glibc.
 
-Factory provisions an exact Node distribution and pnpm program. Old receipts remain addressable so a
-reserved or recovered attempt does not move to a newer active selection. Bun, uv and other managers
-have no executable Factory adapter in this decision; each requires separate qualification before it
-can be exposed.
+Factory initially exposes two provisioned bundles:
+
+- `node-pnpm`: the latest stable official Node Linux x64 distribution plus the latest stable pnpm
+  standalone program. Repository authority is `package.json`, `pnpm-lock.yaml`, and any explicitly
+  enumerated workspace/task files.
+- `javascript-bun`: the latest stable official baseline Linux x64 Bun ZIP. Factory extracts ZIPs in
+  its bounded materializer rather than requiring an ambient archive utility. Repository authority is
+  an exact `packageManager` pin, `bun.lock`, and declared direct-child workspace manifests.
+Old receipts remain addressable so a reserved or recovered attempt does not move to a newer active
+selection. Provisioning `all` resolves each tool independently and activates a bundle only after all
+of its components pass digest, extraction, executable-version and tree verification. Tree identity
+uses deterministic code-unit path ordering plus file bytes and bounded symlink targets, independent
+of the provisioning or backend process umask; executable bytes and permissions are checked and
+normalized separately.
 
 ## Rejected alternatives
 
@@ -78,7 +90,7 @@ can be exposed.
   rejected.
 - Treating one backend container image as the core identity would make a backend-specific mechanism
   fundamental and weaken the local-first contract.
-- A pnpm-only program without its exact Node interpreter is rejected because it leaves runtime
+- A package-manager-only program without its interpreter is rejected because it leaves runtime
   identity incomplete.
 - Moving the active pointer during restore is rejected because it races independent Objectives and
   cannot represent old and new provider generations concurrently.
@@ -86,6 +98,8 @@ can be exposed.
   host's cache and would change historical graph identity.
 - A separate capability-generation event is unnecessary while the authenticated provider
   reservation and integration lineage already carry the exact generation receipt.
+- Shelling out to ambient `unzip` for Bun is rejected because host utilities would become an
+  undeclared readiness and parsing boundary.
 
 ## Consequences
 
@@ -93,8 +107,9 @@ can be exposed.
 - Backend adapters must materialize and attest every component or report the capability unavailable.
 - Provisioning and adapter qualification remain separate evidence boundaries; one installed bundle
   does not qualify its adapter or an adjacent platform.
-- Native Win32/Darwin, Linux arm64/musl, source builds and non-pnpm managers remain unsupported until
-  a dedicated contract and evidence exist.
+- Native Win32/Darwin, Linux arm64/musl, arbitrary Bun commands, uv/Python execution,
+  and toolchains outside the catalog remain unsupported until a dedicated contract and evidence
+  exist.
 - Loss or corruption of an already selected local bundle fails readiness closed. Automatic network
   restoration is intentionally outside this change; an operator must explicitly restore the exact
   durable receipt before recovery can continue.

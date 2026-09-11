@@ -51,6 +51,9 @@ export type ProviderScenario = "daytona-burst" | "copilot-objective" | "codex-ob
 const pendingFixtureRetirements = new Set<object>();
 const PNPM_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-pnpm")!
   .runtimeRequirement!;
+const BUN_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(
+  ({ id }) => id === "javascript-bun",
+)!.runtimeRequirement!;
 export interface ProviderFaults {
   compilerEvaluation?: RunPolicy["compilerEvaluation"];
   repositoryFence?: () => Promise<void>;
@@ -88,6 +91,7 @@ export interface ProviderFaults {
   greenfieldLifecycle?: boolean;
   pnpmUnavailable?: boolean;
   capabilityAdmission?: "valid" | "unsafe";
+  capabilityAdapter?: "bun";
   capabilityProviderLineageMismatch?: boolean;
   capabilityProviderLineageMismatchAfterReservation?: boolean;
   capabilityProviderReservationCommentMismatch?: boolean;
@@ -140,16 +144,26 @@ export async function providerSupervisorFixture(
         name: "capability-admission-fixture",
         version: "1.0.0",
         private: true,
-        packageManager: "pnpm@10.34.5",
-        scripts: {
-          test: "node --test test/check.js",
-          check: "node --test test/check.js",
-        },
+        packageManager: faults.capabilityAdapter === "bun" ? "bun@1.3.10" : "pnpm@10.34.5",
+        scripts:
+          faults.capabilityAdapter === "bun"
+            ? { test: "bun test", check: "bun test" }
+            : {
+                test: "node --test test/check.js",
+                check: "node --test test/check.js",
+              },
       }),
     );
     await writeFile(
-      join(repository, "pnpm-lock.yaml"),
-      "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
+      join(repository, faults.capabilityAdapter === "bun" ? "bun.lock" : "pnpm-lock.yaml"),
+      faults.capabilityAdapter === "bun"
+        ? `${JSON.stringify({
+            lockfileVersion: 1,
+            configVersion: 1,
+            workspaces: { "": { name: "capability-admission-fixture" } },
+            packages: {},
+          })}\n`
+        : "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
     );
   }
   if (faults.compilerEvaluation)
@@ -398,6 +412,14 @@ export async function providerSupervisorFixture(
           : { group: id, relationship: index === 2 ? "join-after-merge" : "root" },
     })),
   };
+  const capabilityAdapter = faults.capabilityAdapter === "bun" ? "javascript-bun" : "node-pnpm";
+  const capabilityRuntime =
+    faults.capabilityAdapter === "bun" ? BUN_RUNTIME_REQUIREMENT : PNPM_RUNTIME_REQUIREMENT;
+  const capabilityLock = faults.capabilityAdapter === "bun" ? "bun.lock" : "pnpm-lock.yaml";
+  const capabilityRunner = faults.capabilityAdapter === "bun" ? "bun" : "pnpm";
+  const capabilityTestCommand = faults.capabilityAdapter === "bun" ? "bun run test" : "pnpm test";
+  const capabilityCheckCommand =
+    faults.capabilityAdapter === "bun" ? "bun run check" : "pnpm check";
   const capabilityGraph: CompiledObjective = {
     title: "Exact-base capability admission qualification",
     workItems: [
@@ -407,38 +429,38 @@ export async function providerSupervisorFixture(
         title: "Integrate provider ancestry",
         goal: "Create provider.txt containing provider",
         acceptance: ["provider.txt has the expected text"],
-        scope: ["provider.txt", "package.json", "pnpm-lock.yaml", "test/"],
-        validationCommands: ["pnpm test"],
+        scope: ["provider.txt", "package.json", capabilityLock, "test/"],
+        validationCommands: [capabilityTestCommand],
         requirements: {
           ...ordinaryGraph.workItems[0]!.requirements!,
-          tools: ["node", "pnpm"],
+          tools: ["node", capabilityRunner],
           networkDestinations: ["registry.npmjs.org"],
         },
-        managedRuntimes: [PNPM_RUNTIME_REQUIREMENT],
+        managedRuntimes: [capabilityRuntime],
         dependsOn: [],
         delivery: { group: "provider", relationship: "root" },
         repositoryCapabilities: {
           provides: [
             {
-              adapter: "node-pnpm",
-              generation: "node-pnpm/provider",
-              authorityPaths: ["package.json", "pnpm-lock.yaml"],
+              adapter: capabilityAdapter,
+              generation: `${capabilityAdapter}/provider`,
+              authorityPaths: ["package.json", capabilityLock],
               operations: [
                 { kind: "package-script", key: "check" },
                 { kind: "package-script", key: "test" },
               ],
-              runtime: PNPM_RUNTIME_REQUIREMENT,
+              runtime: capabilityRuntime,
             },
           ],
           requires: [
             {
-              adapter: "node-pnpm",
-              generation: "node-pnpm/provider",
+              adapter: capabilityAdapter,
+              generation: `${capabilityAdapter}/provider`,
               providerWorkItem: "provider",
-              authorityPaths: ["package.json", "pnpm-lock.yaml"],
+              authorityPaths: ["package.json", capabilityLock],
               operation: { kind: "package-script", key: "test" },
               activation: "artifact",
-              runtime: PNPM_RUNTIME_REQUIREMENT,
+              runtime: capabilityRuntime,
             },
           ],
         },
@@ -450,26 +472,26 @@ export async function providerSupervisorFixture(
         goal: "Create consumer.txt containing consumer",
         acceptance: ["consumer.txt has the expected text"],
         scope: ["consumer.txt"],
-        validationCommands: ["pnpm check"],
+        validationCommands: [capabilityCheckCommand],
         requirements: {
           ...ordinaryGraph.workItems[1]!.requirements!,
-          tools: ["node", "pnpm"],
+          tools: ["node", capabilityRunner],
           networkDestinations: ["registry.npmjs.org"],
         },
-        managedRuntimes: [PNPM_RUNTIME_REQUIREMENT],
+        managedRuntimes: [capabilityRuntime],
         dependsOn: ["provider"],
         delivery: { group: "consumer", relationship: "sibling" },
         repositoryCapabilities: {
           provides: [],
           requires: [
             {
-              adapter: "node-pnpm",
-              generation: "node-pnpm/provider",
+              adapter: capabilityAdapter,
+              generation: `${capabilityAdapter}/provider`,
               providerWorkItem: "provider",
-              authorityPaths: ["package.json", "pnpm-lock.yaml"],
+              authorityPaths: ["package.json", capabilityLock],
               operation: { kind: "package-script", key: "check" },
               activation: "integrated-base",
-              runtime: PNPM_RUNTIME_REQUIREMENT,
+              runtime: capabilityRuntime,
             },
           ],
         },
@@ -1158,7 +1180,7 @@ export async function providerSupervisorFixture(
       supportedTools:
         !faults.pnpmUnavailable &&
         (faults.greenfieldBootstrap || faults.greenfieldLifecycle || faults.capabilityAdmission)
-          ? ["node", "pnpm"]
+          ? ["node", faults.capabilityAdapter === "bun" ? "bun" : "pnpm"]
           : ["node"],
       supportedServices: [],
       supportsCancellation: true,

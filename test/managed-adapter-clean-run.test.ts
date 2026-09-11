@@ -1,0 +1,141 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { describe, expect, it, vi } from "vitest";
+
+import type { WorkerPacket } from "../src/protocol/worker-packet.js";
+
+const receipts = vi.hoisted(() => ({
+  bun: {
+    tool: "bun",
+    adapter: "javascript-bun",
+    digest: "b".repeat(64),
+    components: [{ id: "bun", version: "1.3.10" }],
+  },
+}));
+
+vi.mock("../src/runtime/toolchain-store.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/runtime/toolchain-store.js")>()),
+  runtimeBundleByDigestSync: (tool: string) => receipts[tool as keyof typeof receipts],
+}));
+
+import { assertBunValidation } from "../src/validation/clean-run.js";
+
+const writeJson = (path: string, value: unknown) =>
+  writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
+
+describe("managed adapter clean validation", () => {
+  it("inspects every Bun operation promised to descendants before provider publication", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-bun-clean-"));
+    await mkdir(join(root, "packages/api"), { recursive: true });
+    await writeJson(join(root, "package.json"), {
+      name: "root",
+      version: "1.0.0",
+      packageManager: "bun@1.3.10",
+      scripts: { test: "bun test" },
+      workspaces: ["packages/*"],
+    });
+    await writeJson(join(root, "packages/api/package.json"), {
+      name: "api",
+      version: "1.0.0",
+      scripts: {},
+    });
+    await writeJson(join(root, "bun.lock"), {
+      lockfileVersion: 1,
+      configVersion: 1,
+      workspaces: {
+        "": { name: "root" },
+        "packages/api": { name: "api" },
+      },
+      packages: {},
+    });
+    const packet: WorkerPacket = {
+      goal: "Establish Bun validation.",
+      acceptanceCriteria: ["Bun validation is finite."],
+      allowedPaths: ["package.json", "bun.lock", "packages/"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      baseSha: "a".repeat(40),
+      validationCommands: ["bun run test"],
+      requirements: {
+        os: ["linux"],
+        architecture: ["x64"],
+        tools: ["bun"],
+        services: [],
+        networkDestinations: ["registry.npmjs.org"],
+        permittedSecretNames: [],
+        trust: "isolated",
+      },
+      repositoryCapabilities: {
+        requires: [],
+        provides: [
+          {
+            adapter: "javascript-bun",
+            generation: "javascript-bun/provider",
+            authorityPaths: ["package.json", "bun.lock"],
+            operations: [
+              { kind: "package-script", key: "test" },
+              { kind: "package-script", key: "packages/api:check" },
+            ],
+          },
+        ],
+      },
+      managedRuntimes: [
+        {
+          tool: "bun",
+          adapter: "javascript-bun",
+          adapterContract: 1,
+          platform: { os: "linux", architecture: "x64", libc: "glibc" },
+          releaseChannel: "ga",
+          bundleDigest: receipts.bun.digest,
+        },
+      ],
+      artifactContract: "clockgrove.factory/artifact-v1",
+    };
+    const artifact = {
+      protocol: "clockgrove.factory/artifact-v1" as const,
+      baseSha: packet.baseSha,
+      patch: "",
+      changedPaths: [],
+      commands: [],
+      logs: "",
+      outcome: "succeeded" as const,
+      digest: "c".repeat(64),
+      createdAt: "2026-09-10T00:00:00.000Z",
+    };
+    await expect(
+      assertBunValidation({ path: root }, artifact, packet, packet.validationCommands),
+    ).rejects.toThrow(/validation script is absent: check/);
+
+    await writeJson(join(root, "packages/api/package.json"), {
+      name: "api",
+      version: "1.0.0",
+      scripts: { check: "bun test" },
+    });
+    await expect(
+      assertBunValidation({ path: root }, artifact, packet, packet.validationCommands),
+    ).resolves.toMatchObject({ manager: "bun", expectedVersion: "1.3.10" });
+    await expect(
+      assertBunValidation(
+        { path: root },
+        { ...artifact, changedPaths: ["package.json"] },
+        packet,
+        packet.validationCommands,
+        new Map([
+          [
+            "package.json",
+            {
+              name: "root",
+              version: "1.0.0",
+              packageManager: "bun@1.3.10",
+              scripts: { test: "bun test --timeout 1000" },
+              workspaces: ["packages/*"],
+            },
+          ],
+        ]),
+      ),
+    ).resolves.toMatchObject({ changedOperations: new Set(["test"]) });
+  });
+});

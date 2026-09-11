@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { cp, mkdir, mkdtemp, readlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import * as localWorktreeRuntime from "../src/runtime/local-worktree.js";
@@ -9,6 +9,9 @@ import { activeRuntimeBundleSync, toolchainStoreRoot } from "../src/runtime/tool
 import {
   canonicalJson,
   runtimeBundleDigest,
+  sha256Bytes,
+  sha256Tree,
+  SUPPORTED_RUNTIME_PLATFORM,
   type RuntimeBundleReceipt,
 } from "../src/runtime/toolchain-bundle.js";
 import { parseWorkerPacket } from "../src/protocol/worker-packet.js";
@@ -18,16 +21,77 @@ import {
   createManagedRuntimeActivation,
   futurePackageScriptCommand,
   isFutureToolchainProvider,
+  isolatedManagedToolchainPlan,
   managedToolAvailable,
   localManagedToolchainPlan,
   packageScriptValidationCommand,
   assertRepositoryCapabilityProofsCurrent,
   resolveIntegratedRepositoryCapabilities,
   TOOLCHAIN_AUTHORITY_ADAPTERS,
-  toolchainAdapterForRunner,
   unprovisionedFutureToolchainReason,
   validationSetupCommandCount,
 } from "../src/toolchains/authority.js";
+
+async function installManagedFixture(): Promise<RuntimeBundleReceipt> {
+  const tool = "bun" as const;
+  const specifications = [{ id: "bun", version: "1.3.10", executablePath: "bun/bin/bun" }];
+  const scratch = await mkdtemp(join(tmpdir(), `factory-${tool}-authority-plan-`));
+  const components = [];
+  for (const specification of specifications) {
+    const root = join(scratch, specification.id, "root");
+    const executable = join(root, specification.executablePath);
+    const bytes = Buffer.from(`${specification.id} executable`);
+    const asset = Buffer.from(`${specification.id} archive`);
+    await mkdir(dirname(executable), { recursive: true });
+    await writeFile(executable, bytes, { mode: 0o700 });
+    components.push({
+      id: specification.id,
+      version: specification.version,
+      release: {
+        provider: "github" as const,
+        repository: `fixture/${specification.id}`,
+        releaseId: "1",
+        tag: specification.version,
+        publishedAt: "2026-09-10T00:00:00.000Z",
+      },
+      asset: {
+        assetId: "1",
+        name: `${specification.id}.asset`,
+        url: `https://example.invalid/${specification.id}.asset`,
+        size: asset.length,
+        sha256: sha256Bytes(asset),
+        archive: specification.id === "bun" ? ("zip" as const) : ("tar.gz" as const),
+      },
+      executablePath: specification.executablePath,
+      executableSha256: sha256Bytes(bytes),
+      treeSha256: await sha256Tree(root),
+    });
+  }
+  const unsigned = {
+    protocol: "clockgrove.factory/toolchain-runtime-bundle-v1" as const,
+    tool,
+    adapter: "javascript-bun",
+    adapterContract: 1,
+    platform: SUPPORTED_RUNTIME_PLATFORM,
+    components,
+    resolvedAt: "2026-09-10T00:00:00.000Z",
+  };
+  const receipt: RuntimeBundleReceipt = { ...unsigned, digest: runtimeBundleDigest(unsigned) };
+  const bundle = join(toolchainStoreRoot(), "bundles", receipt.digest);
+  for (const [index, specification] of specifications.entries()) {
+    const target = join(bundle, specification.id);
+    await mkdir(dirname(join(target, "root", specification.executablePath)), { recursive: true });
+    await writeFile(join(target, "asset"), `${specification.id} archive`);
+    await writeFile(
+      join(target, "root", specification.executablePath),
+      `${specification.id} executable`,
+      { mode: 0o700 },
+    );
+    expect(await sha256Tree(join(target, "root"))).toBe(components[index]!.treeSha256);
+  }
+  await writeFile(join(bundle, "receipt.json"), JSON.stringify(receipt));
+  return receipt;
+}
 
 async function installDistinctRuntime(source: RuntimeBundleReceipt): Promise<RuntimeBundleReceipt> {
   const unsigned = structuredClone(source) as Omit<RuntimeBundleReceipt, "digest"> & {
@@ -60,13 +124,179 @@ describe("toolchain authority adapters", () => {
       expect.arrayContaining([
         { runner: "npm", provisioning: "host-observed", future: false },
         { runner: "pnpm", provisioning: "factory-provisioned", future: true },
+        { runner: "bun", provisioning: "factory-provisioned", future: true },
         { runner: "cargo", provisioning: "host-observed", future: false },
         { runner: "go", provisioning: "host-observed", future: false },
         { runner: "python", provisioning: "host-observed", future: false },
       ]),
     );
-    expect(toolchainAdapterForRunner("bun")).toBeUndefined();
-    expect(toolchainAdapterForRunner("uv")).toBeUndefined();
+  });
+
+  it("uses the adapter-owned Bun plan in production isolation", async () => {
+    const receipt = await installManagedFixture();
+    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "javascript-bun")!;
+    const plan = isolatedManagedToolchainPlan(
+      ["bun run test"],
+      [
+        {
+          ...adapter.runtimeRequirement!,
+          bundleDigest: receipt.digest,
+        },
+      ],
+    );
+    expect(plan?.plan.environment.PATH).toBe("/tmp/factory-toolchain/bin");
+    expect(
+      plan?.plan.setup.some(({ display }) => display.startsWith("bun install --frozen-lockfile")),
+    ).toBe(true);
+    expect(plan?.plan.setup.map(({ display }) => display)).toEqual(adapter.setupCommands);
+    expect(plan?.plan.assets.every(({ treeSha256 }) => /^[a-f0-9]{64}$/.test(treeSha256))).toBe(
+      true,
+    );
+  });
+
+  it("rejects Bun authority changed after its provider generation", async () => {
+    const receipt = await installManagedFixture();
+    const repository = await mkdtemp(join(tmpdir(), "factory-bun-provider-proof-"));
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repository });
+    execFileSync("git", ["config", "user.name", "Factory Test"], { cwd: repository });
+    execFileSync("git", ["config", "user.email", "factory@example.invalid"], {
+      cwd: repository,
+    });
+    const manifest = {
+      name: "proof",
+      version: "1.0.0",
+      packageManager: "bun@1.3.10",
+      workspaces: ["packages/*"],
+    };
+    await writeFile(join(repository, "package.json"), JSON.stringify(manifest));
+    await mkdir(join(repository, "packages/api"), { recursive: true });
+    await writeFile(
+      join(repository, "packages/api/package.json"),
+      JSON.stringify({ name: "api", version: "1.0.0", scripts: { test: "bun test" } }),
+    );
+    await writeFile(
+      join(repository, "bun.lock"),
+      JSON.stringify({
+        lockfileVersion: 1,
+        configVersion: 1,
+        workspaces: { "": { name: "proof" }, "packages/api": { name: "api" } },
+        packages: { api: ["api@workspace:packages/api"] },
+      }),
+    );
+    execFileSync("git", ["add", "."], { cwd: repository });
+    execFileSync("git", ["commit", "-qm", "provider generation"], { cwd: repository });
+    const providerBase = {
+      oid: execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repository,
+        encoding: "utf8",
+      }).trim(),
+      treeOid: execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+        cwd: repository,
+        encoding: "utf8",
+      }).trim(),
+    };
+    await writeFile(
+      join(repository, "package.json"),
+      JSON.stringify({ ...manifest, description: "authority drift" }),
+    );
+    execFileSync("git", ["add", "package.json"], { cwd: repository });
+    execFileSync("git", ["commit", "-qm", "change authority"], { cwd: repository });
+    const currentBase = {
+      oid: execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repository,
+        encoding: "utf8",
+      }).trim(),
+      treeOid: execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+        cwd: repository,
+        encoding: "utf8",
+      }).trim(),
+    };
+    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "javascript-bun")!;
+    const runtime = { ...adapter.runtimeRequirement!, bundleDigest: receipt.digest };
+    const sourceRef = "refs/heads/main";
+    const packet = parseWorkerPacket({
+      goal: "Use the integrated Bun test.",
+      acceptanceCriteria: ["The test passes."],
+      allowedPaths: ["src/"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      baseSha: currentBase.oid,
+      validationCommands: ["bun --cwd packages/api run test"],
+      requirements: {
+        os: ["linux"],
+        architecture: [],
+        tools: ["bun"],
+        services: [],
+        networkDestinations: ["registry.npmjs.org"],
+        permittedSecretNames: [],
+        trust: "trusted_local",
+      },
+      repositoryCapabilities: {
+        provides: [],
+        requires: [
+          {
+            adapter: adapter.id,
+            generation: `${adapter.id}/root`,
+            providerWorkItem: "root",
+            authorityPaths: ["package.json", "bun.lock"],
+            operation: { kind: "package-script", key: "packages/api:test" },
+            activation: "integrated-base",
+            runtime: adapter.runtimeRequirement,
+          },
+        ],
+      },
+      managedRuntimes: [runtime],
+      artifactContract: "clockgrove.factory/artifact-v1",
+    });
+    const providerPacket = parseWorkerPacket({
+      ...packet,
+      baseSha: providerBase.oid,
+      repositoryCapabilities: undefined,
+    });
+    const providerActivation = createManagedRuntimeActivation({
+      packet: providerPacket,
+      baseSha: providerBase.oid,
+      sourceRef,
+      proofDigests: [],
+      receipts: [receipt],
+    })!;
+    const provider = {
+      id: "root",
+      dependsOn: [] as string[],
+      scope: ["package.json", "bun.lock"],
+      issueNumber: 293,
+      integration: {
+        kind: "attempt" as const,
+        runId: "00000000-0000-4000-8000-000000000293",
+        attempt: 1,
+        commitSha: providerBase.oid,
+        treeOid: providerBase.treeOid,
+        reservationOid: "c".repeat(40),
+        reservationReceiptDigest: "d".repeat(64),
+        receiptDigest: "a".repeat(64),
+        managedRuntimeActivation: providerActivation,
+      },
+    };
+    await expect(
+      resolveIntegratedRepositoryCapabilities({
+        repository,
+        base: currentBase,
+        sourceRef,
+        packet,
+        providerById: () => provider,
+      }),
+    ).rejects.toThrow(/Bun authority includes a path outside its provider scope/);
+    provider.scope.push("packages/api/package.json");
+    await expect(
+      resolveIntegratedRepositoryCapabilities({
+        repository,
+        base: currentBase,
+        sourceRef,
+        packet,
+        providerById: () => provider,
+      }),
+    ).rejects.toThrow(/Bun authority bytes changed after the declared provider generation/);
   });
 
   it("parses npm and pnpm as distinct finite package-script adapters", () => {
@@ -116,9 +346,7 @@ describe("toolchain authority adapters", () => {
 
   it("distinguishes provisioned adapters from unsupported greenfield runners", () => {
     expect(unprovisionedFutureToolchainReason("npm test")).toMatch(/npm.*no Factory-provisioned/);
-    expect(unprovisionedFutureToolchainReason("bun run test")).toMatch(
-      /bun.*no Factory-provisioned/,
-    );
+    expect(unprovisionedFutureToolchainReason("bun run test")).toBeUndefined();
     expect(
       unprovisionedFutureToolchainReason("uv run --locked --no-sync python -m pytest"),
     ).toMatch(/uv.*no Factory-provisioned/);

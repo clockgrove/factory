@@ -49,7 +49,7 @@
       "required": ["protocol", "tool", "adapter", "adapterContract", "platform", "components", "resolvedAt", "digest"],
       "properties": {
         "protocol": { "const": "clockgrove.factory/toolchain-runtime-bundle-v1" },
-        "tool": { "const": "pnpm" },
+        "tool": { "enum": ["pnpm", "bun"] },
         "adapter": { "$ref": "#/definitions/safeId" },
         "adapterContract": { "type": "integer", "minimum": 1, "maximum": 1000 },
         "platform": {
@@ -117,7 +117,7 @@
             "type": "object", "additionalProperties": false,
             "required": ["tool", "adapter", "adapterContract", "platform", "releaseChannel", "bundleDigest"],
             "properties": {
-              "tool": { "const": "pnpm" },
+              "tool": { "enum": ["pnpm", "bun"] },
               "adapter": { "$ref": "#/definitions/safeId" },
               "adapterContract": { "type": "integer", "minimum": 1, "maximum": 1000 },
               "platform": {

@@ -1035,6 +1035,85 @@ describe("bounded objective compiler", () => {
       ),
     ).toThrow(/ambiguous greenfield validation authority|overlapping unordered scopes/);
   });
+
+  it.each([
+    {
+      runner: "bun",
+      adapter: "javascript-bun",
+      rootPaths: ["package.json", "bun.lock"],
+      networks: ["registry.npmjs.org"],
+      providerCommand: "bun run test",
+      descendantCommand: "bun --cwd packages/api run check",
+      operationKeys: ["packages/api:check", "test"],
+      descendantKey: "packages/api:check",
+    },
+  ])(
+    "derives absent $runner authority, operations, and runtime bindings",
+    ({
+      runner,
+      adapter,
+      rootPaths,
+      networks,
+      providerCommand,
+      descendantCommand,
+      operationKeys,
+      descendantKey,
+    }) => {
+      const item = (id: string, command: string, dependsOn: string[]) => ({
+        ...base,
+        id,
+        scope: id === "provider" ? [...rootPaths, "packages/"] : ["packages/api/tests/"],
+        dependsOn,
+        validationCommands: [command],
+        requirements: {
+          ...base.requirements,
+          tools: [runner],
+          networkDestinations: networks,
+        },
+        validation: base.validation.map((entry) => ({
+          ...entry,
+          evidenceCommands: [command],
+        })),
+      });
+      const graph = compileObjective({
+        title: `${runner} bootstrap`,
+        baseSha: sha,
+        repositoryFacts: { files: [{ path: "README.md" }], scripts: {} },
+        runPolicy: {
+          ...DEFAULT_RUN_POLICY,
+          allowedNetworkDestinations: [
+            ...new Set([...DEFAULT_RUN_POLICY.allowedNetworkDestinations, ...networks]),
+          ],
+        },
+        workItems: [
+          item("provider", providerCommand, []),
+          item("descendant", descendantCommand, ["provider"]),
+        ] as never,
+      });
+      const provider = graph.workItems.find(({ id }) => id === "provider")!;
+      const descendant = graph.workItems.find(({ id }) => id === "descendant")!;
+      expect(provider.repositoryCapabilities?.provides).toMatchObject([
+        {
+          adapter,
+          generation: `${adapter}/provider`,
+          operations: operationKeys.map((key) => expect.objectContaining({ key })),
+        },
+      ]);
+      expect(descendant.repositoryCapabilities?.requires).toMatchObject([
+        {
+          adapter,
+          providerWorkItem: "provider",
+          generation: `${adapter}/provider`,
+          activation: "integrated-base",
+          operation: { key: descendantKey },
+        },
+      ]);
+      expect(provider.managedRuntimes).toEqual([
+        expect.objectContaining({ tool: runner, adapter, releaseChannel: "ga" }),
+      ]);
+      expect(descendant.managedRuntimes).toEqual(provider.managedRuntimes);
+    },
+  );
   it("requires every compiler analysis record", () => {
     const incomplete = { ...base };
     delete (incomplete as Partial<CompilerWorkItem>).context;

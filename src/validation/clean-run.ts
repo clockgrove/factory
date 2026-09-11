@@ -36,6 +36,11 @@ import {
 } from "../runtime/local-scope.js";
 import { createValidationEvidence, type ValidationEvidence } from "./evidence.js";
 import { runtimeBundleByDigestSync } from "../runtime/toolchain-store.js";
+import {
+  bunValidationCommandForOperation,
+  inspectBunAuthority,
+  parseBunValidationCommand,
+} from "../toolchains/bun.js";
 
 function managedPnpmVersion(packet?: WorkerPacket): string {
   const digests = new Set(
@@ -52,7 +57,11 @@ function managedPnpmVersion(packet?: WorkerPacket): string {
   if (!component) throw new Error("pnpm runtime bundle lacks its executable component");
   return component.version;
 }
-import { localManagedToolchainPlan } from "../toolchains/authority.js";
+import {
+  adapterNetworkDestinations,
+  futureToolchainCommand,
+  localManagedToolchainPlan,
+} from "../toolchains/authority.js";
 import {
   assertSafeValidationCommand,
   bootstrapPackageValidationCommand,
@@ -527,12 +536,104 @@ async function assertTurboTaskConfiguration(root: string, script: string): Promi
 }
 
 export interface BootstrapPackageValidation {
-  manager: "pnpm";
+  manager: "pnpm" | "bun";
   expectedVersion: string;
   versionCommand: string;
   setupCommand: string;
   permittedSensitivePaths: Set<string>;
   changedOperations: Set<string>;
+}
+
+export async function assertBunValidation(
+  worktree: Pick<LocalWorktree, "path">,
+  artifact: NormalizedArtifact,
+  packet: WorkerPacket,
+  commands: string[],
+  basePackageManifests: ReadonlyMap<string, PackageManifest> = new Map(),
+): Promise<BootstrapPackageValidation | null> {
+  const managed = commands.flatMap((command) => {
+    const parsed = futureToolchainCommand(command);
+    return parsed?.runner === "bun" ? [parsed] : [];
+  });
+  if (managed.length === 0) return null;
+  if (managed.length !== commands.length)
+    throw new Error("validation may not mix or bypass managed toolchain adapters");
+  const runner = "bun";
+  if (!packet.requirements.tools.includes(runner))
+    throw new Error(`${runner} validation is missing its declared tool requirement`);
+  const adapter = managed[0]!.adapter;
+  const missingDestinations = adapterNetworkDestinations(adapter).filter(
+    (destination) => !packet.requirements.networkDestinations.includes(destination),
+  );
+  if (missingDestinations.length > 0)
+    throw new Error(
+      `${runner} validation must declare ${missingDestinations.join(" and ")} setup authority`,
+    );
+  const selected = (packet.managedRuntimes ?? []).filter(
+    (runtime) => runtime.tool === runner && runtime.adapter === adapter.id,
+  );
+  if (selected.length !== 1 || !selected[0]!.bundleDigest)
+    throw new Error(`${runner} validation lacks one exact activated runtime`);
+  const runtime = runtimeBundleByDigestSync(runner, selected[0]!.bundleDigest);
+  const promisedOperations = [
+    ...(packet.repositoryCapabilities?.requires ?? [])
+      .filter(({ adapter: candidate }) => candidate === adapter.id)
+      .map(({ operation }) => operation),
+    ...(packet.repositoryCapabilities?.provides ?? [])
+      .filter(({ adapter: candidate }) => candidate === adapter.id)
+      .flatMap(({ operations }) => operations),
+  ];
+  const component = runtime.components.find(({ id }) => id === "bun");
+  if (!component) throw new Error("Bun runtime bundle lacks its executable component");
+  const inspectionCommands = [
+    ...commands,
+    ...promisedOperations.map((operation) => {
+      const parsed = bunValidationCommandForOperation(operation);
+      if (!parsed)
+        throw new Error("Bun capability operation is outside the finite adapter contract");
+      return parsed.workspace === "."
+        ? `bun run ${parsed.script}`
+        : `bun --cwd ${parsed.workspace} run ${parsed.script}`;
+    }),
+  ];
+  const inspections = await Promise.all(
+    [...new Set(inspectionCommands)].map(async (command) => {
+      if (!parseBunValidationCommand(command))
+        throw new Error("Bun validation command is outside the finite adapter contract");
+      return inspectBunAuthority({
+        root: worktree.path,
+        command,
+        exactVersion: component.version,
+      });
+    }),
+  );
+  const authorityPaths = [...new Set(inspections.flatMap(({ authorityPaths: paths }) => paths))];
+  const changedOperations = new Set<string>();
+  for (const manifestPath of new Set(inspections.map(({ manifestPath }) => manifestPath))) {
+    if (!artifact.changedPaths.includes(manifestPath)) continue;
+    const before = stringRecord(
+      basePackageManifests.get(manifestPath)?.scripts,
+      `scripts in base ${manifestPath}`,
+    );
+    const after = stringRecord(
+      (await readPackageManifest(worktree.path, manifestPath)).scripts,
+      `scripts in ${manifestPath}`,
+    );
+    for (const name of new Set([...Object.keys(before), ...Object.keys(after)]))
+      if (before[name] !== after[name]) changedOperations.add(name);
+  }
+  const authority = new Set(authorityPaths);
+  const sensitive = artifact.changedPaths.filter((path) => executionAffectingReason(path) !== null);
+  if (sensitive.some((path) => !authority.has(path) || !pathIsAllowed(path, packet.allowedPaths)))
+    throw new Error(`${runner} artifact changes authority outside its inspected scope`);
+  return {
+    manager: runner,
+    expectedVersion: component.version,
+    versionCommand: `${runner} --version`,
+    setupCommand: adapter.setupCommands.at(-1) ?? `${runner} setup`,
+    permittedSensitivePaths: new Set(authorityPaths),
+    changedOperations,
+  };
 }
 
 function pnpmValidationCommands(commands: string[]): Array<{
@@ -829,7 +930,10 @@ export function isBootstrapDependencySurface(
   return Boolean(validation && paths.every((path) => validation.permittedSensitivePaths.has(path)));
 }
 
-function isPotentialBootstrapDependencySurface(paths: string[], managers: Set<"pnpm">): boolean {
+function isPotentialBootstrapDependencySurface(
+  paths: string[],
+  managers: Set<"pnpm" | "bun">,
+): boolean {
   return paths.every(
     (path) =>
       isReviewOnlyWorkflowSurface(path) ||
@@ -838,7 +942,9 @@ function isPotentialBootstrapDependencySurface(paths: string[], managers: Set<"p
           path === "pnpm-lock.yaml" ||
           path === "pnpm-workspace.yaml" ||
           path === "turbo.json" ||
-          path.endsWith("/package.json"))),
+          path.endsWith("/package.json"))) ||
+      (managers.has("bun") &&
+        (path === "package.json" || path === "bun.lock" || path.endsWith("/package.json"))),
   );
 }
 
@@ -850,8 +956,7 @@ async function managedValidationPlan(
 ) {
   const environment = sanitizedWorkerEnvironment(source);
   for (const key of Object.keys(environment))
-    if (/^(?:npm_config_|pnpm_|bun_|uv_|pip_|python|virtual_env)/i.test(key))
-      delete environment[key];
+    if (/^(?:npm_config_|pnpm_|bun_)/i.test(key)) delete environment[key];
   const configRoot = join(worktreeRoot, "managed-toolchain-config");
   await mkdir(configRoot, { recursive: true });
   return localManagedToolchainPlan(
@@ -948,10 +1053,12 @@ export async function validateArtifactClean(
   assertNoSecretMaterial({ patch: artifact.patch, logs: artifact.logs }, "artifact");
 
   const plan = validationPlanFromPacket(input.packet);
-  const potentialBootstrapManagers = new Set<"pnpm">(
+  const potentialBootstrapManagers = new Set<"pnpm" | "bun">(
     plan.commands.flatMap((command) => {
       const parsed = bootstrapPackageValidationCommand(command);
-      return parsed ? [parsed.manager] : [];
+      if (parsed) return [parsed.manager];
+      const managed = futureToolchainCommand(command);
+      return managed?.runner === "bun" ? [managed.runner] : [];
     }),
   );
   if (
@@ -1001,6 +1108,16 @@ export async function validateArtifactClean(
   const basePackageManifest = basePackageJsonPresent
     ? await readPackageManifest(worktree.path, "package.json")
     : null;
+  const basePackageManifests = new Map<string, PackageManifest>();
+  for (const path of artifact.changedPaths.filter(
+    (candidate) => candidate === "package.json" || candidate.endsWith("/package.json"),
+  )) {
+    try {
+      basePackageManifests.set(path, await readPackageManifest(worktree.path, path));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
   const commands: Array<{ command: string; exitCode: number; durationMs: number }> = [];
   let passed = false;
   let failureReason: string | undefined;
@@ -1057,7 +1174,15 @@ export async function validateArtifactClean(
           artifact.changedPaths.includes("package.json") ? input.packet.allowedPaths : undefined,
         )
       : await assertBootstrapPackageValidation(worktree, artifact, input.packet, plan.commands);
-    const packageValidation = pnpmValidation;
+    const packageValidation =
+      pnpmValidation ??
+      (await assertBunValidation(
+        worktree,
+        artifact,
+        input.packet,
+        plan.commands,
+        basePackageManifests,
+      ));
     if (sensitive.length > 0 && !isPermittedSensitiveArtifactSurface(sensitive, packageValidation))
       throw new Error(`artifact touches a sensitive surface: ${sensitive.join(", ")}`);
     const managedExecution = packageValidation

@@ -7,7 +7,7 @@ import {
   type RepositoryCapabilityRequirement,
   type WorkerPacket,
 } from "../protocol/worker-packet.js";
-import type { DeferredCapabilityAdapter } from "../repository-capabilities/model.js";
+import { scopeOwnsPath, type DeferredCapabilityAdapter } from "../repository-capabilities/model.js";
 import {
   assertRuntimeBundleReceipt,
   type ManagedExecutionStep,
@@ -761,7 +761,7 @@ async function resolvePnpmIntegratedBase(
           );
         }),
     ) ||
-    !expectedPaths.every((path) => input.provider.scope.includes(path))
+    !expectedPaths.every((path) => scopeOwnsPath(input.provider.scope, path))
   )
     throw new Error("pnpm capability requirement differs from its canonical provider contract");
   const { createLocalWorktree, cleanupLocalWorktree } = await import(
@@ -852,7 +852,7 @@ function assertCanonicalManagedRequirements(
           );
         }),
     ) ||
-    !expectedPaths.every((path) => input.provider.scope.includes(path))
+    !expectedPaths.every((path) => scopeOwnsPath(input.provider.scope, path))
   )
     throw new Error(
       `${adapter.runner} capability requirement differs from its canonical provider contract`,
@@ -919,7 +919,7 @@ async function resolveNpmIntegratedBase(
       );
       if (nested.length > 0)
         throw new Error(`npm authority contains an undeclared nested root: ${nested.join(", ")}`);
-      if (inspection.authorityPaths.some((path) => !input.provider.scope.includes(path)))
+      if (inspection.authorityPaths.some((path) => !scopeOwnsPath(input.provider.scope, path)))
         throw new Error("npm authority includes a path outside its provider scope");
       return {
         authorityDigest: await authorityDigestForPaths(worktree.path, inspection.authorityPaths),
@@ -996,7 +996,7 @@ async function resolveBunIntegratedBase(
       const authorityPaths = [
         ...new Set(inspections.flatMap(({ authorityPaths }) => authorityPaths)),
       ].sort();
-      if (authorityPaths.some((path) => !input.provider.scope.includes(path)))
+      if (authorityPaths.some((path) => !scopeOwnsPath(input.provider.scope, path)))
         throw new Error("Bun authority includes a path outside its provider scope");
       return {
         authorityDigest: await authorityDigestForPaths(worktree.path, authorityPaths),
@@ -1079,7 +1079,7 @@ async function resolveUvIntegratedBase(
       const authorityPaths = [
         ...new Set(inspections.flatMap(({ authorityPaths }) => authorityPaths)),
       ].sort();
-      if (authorityPaths.some((path) => !input.provider.scope.includes(path)))
+      if (authorityPaths.some((path) => !scopeOwnsPath(input.provider.scope, path)))
         throw new Error("uv authority includes a path outside its provider scope");
       return {
         authorityDigest: await authorityDigestForPaths(worktree.path, authorityPaths),
@@ -1453,7 +1453,7 @@ export async function assertRepositoryCapabilityProofsCurrent(input: {
       const provider = input.providerById(requirement.providerWorkItem);
       if (!provider || provider.id !== requirement.providerWorkItem)
         throw new Error(`unknown repository capability provider ${requirement.providerWorkItem}`);
-      if (proof.authorityPaths.some((path) => !provider.scope.includes(path)))
+      if (proof.authorityPaths.some((path) => !scopeOwnsPath(provider.scope, path)))
         throw new Error("repository capability proof includes authority outside provider scope");
       const providerRuntime = exactProviderGenerationRuntime(provider, requirement.runtime);
       if (
@@ -1553,7 +1553,10 @@ export function assertFutureToolchainRequirements(
     throw new Error(
       `${adapter.runner} has no Factory-provisioned greenfield toolchain adapter; use an observed repository recipe or add an audited adapter before compiling this graph`,
     );
-  if (provider && !adapter.requiredRootPaths.every((path) => packet.allowedPaths.includes(path)))
+  if (
+    provider &&
+    !adapter.requiredRootPaths.every((path) => scopeOwnsPath(packet.allowedPaths, path))
+  )
     throw new Error(
       `${adapter.runner} greenfield authority must own ${adapter.requiredRootPaths.join(" and ")}`,
     );

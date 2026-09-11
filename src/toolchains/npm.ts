@@ -310,22 +310,35 @@ export function parseNpmValidationCommand(command: string): NpmValidationCommand
 export function npmCapabilityOperation(command: string): RepositoryCapabilityOperation | null {
   const parsed = parseNpmValidationCommand(command);
   if (!parsed) return null;
+  const key = npmOperationKey(parsed.workspace, parsed.script);
+  if (key.length > 160) return null;
   return {
     kind: "package-script",
-    key: parsed.workspace === "." ? parsed.script : `${parsed.workspace}:${parsed.script}`,
+    key,
   };
+}
+
+function npmOperationKey(workspace: string, script: string): string {
+  return `${workspace.length}:${workspace}:${script}`;
 }
 
 export function npmValidationCommandForOperation(
   operation: RepositoryCapabilityOperation,
 ): NpmValidationCommand | null {
   if (operation.kind !== "package-script") return null;
-  const separator = operation.key.lastIndexOf(":");
-  if (separator < 0)
-    return SAFE_SCRIPT.test(operation.key) ? { workspace: ".", script: operation.key } : null;
-  const workspace = operation.key.slice(0, separator);
-  const script = operation.key.slice(separator + 1);
-  return safeMember(workspace) && SAFE_SCRIPT.test(script) ? { workspace, script } : null;
+  const lengthSeparator = operation.key.indexOf(":");
+  if (lengthSeparator <= 0) return null;
+  const encodedLength = operation.key.slice(0, lengthSeparator);
+  if (!/^(?:0|[1-9][0-9]{0,2})$/.test(encodedLength)) return null;
+  const workspaceLength = Number(encodedLength);
+  const workspaceStart = lengthSeparator + 1;
+  const scriptSeparator = workspaceStart + workspaceLength;
+  if (operation.key[scriptSeparator] !== ":") return null;
+  const workspace = operation.key.slice(workspaceStart, scriptSeparator);
+  const script = operation.key.slice(scriptSeparator + 1);
+  return (workspace === "." || safeMember(workspace)) && SAFE_SCRIPT.test(script)
+    ? { workspace, script }
+    : null;
 }
 
 function workspaceMembers(manifest: Manifest): string[] {
@@ -786,7 +799,7 @@ export async function inspectNpmAuthority(input: {
     manifestPaths,
     operations: input.commands.map((command) => ({
       kind: "package-script",
-      key: command.workspace === "." ? command.script : `${command.workspace}:${command.script}`,
+      key: npmOperationKey(command.workspace, command.script),
     })),
     nodeVersion: input.nodeVersion,
     npmVersion: input.npmVersion,

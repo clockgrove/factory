@@ -89,11 +89,31 @@ describe("npm deferred toolchain authority", () => {
     });
     expect(npmCapabilityOperation("npm run test --workspace=packages/api")).toEqual({
       kind: "package-script",
-      key: "packages/api:test",
+      key: "12:packages/api:test",
     });
     expect(
-      npmValidationCommandForOperation({ kind: "package-script", key: "packages/api:test" }),
+      npmValidationCommandForOperation({ kind: "package-script", key: "12:packages/api:test" }),
     ).toEqual({ workspace: "packages/api", script: "test" });
+    expect(npmCapabilityOperation("npm run test:unit --workspace=packages/api")).toEqual({
+      kind: "package-script",
+      key: "12:packages/api:test:unit",
+    });
+    expect(
+      npmValidationCommandForOperation({
+        kind: "package-script",
+        key: "12:packages/api:test:unit",
+      }),
+    ).toEqual({ workspace: "packages/api", script: "test:unit" });
+    expect(npmCapabilityOperation("npm run test:unit")).toEqual({
+      kind: "package-script",
+      key: "1:.:test:unit",
+    });
+    expect(
+      npmValidationCommandForOperation({ kind: "package-script", key: "1:.:test:unit" }),
+    ).toEqual({ workspace: ".", script: "test:unit" });
+    expect(
+      npmValidationCommandForOperation({ kind: "package-script", key: "packages/api:test:unit" }),
+    ).toBeNull();
     for (const command of [
       "npm test",
       "npm run test -- --watch",

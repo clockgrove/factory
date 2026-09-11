@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   bindDeferredCapabilityGraph,
+  scopeOwnsPath,
   validateCapabilityGraphBindings,
   type DeferredCapabilityAdapter,
 } from "../src/repository-capabilities/model.js";
@@ -15,6 +16,12 @@ const adapter = (id = "example/tool"): DeferredCapabilityAdapter => ({
 });
 
 describe("deferred repository capability model", () => {
+  it("treats only trailing-slash scope entries as directory ownership", () => {
+    expect(scopeOwnsPath(["package.json", "packages/"], "packages/api/package.json")).toBe(true);
+    expect(scopeOwnsPath(["package.json", "packages"], "packages/api/package.json")).toBe(false);
+    expect(scopeOwnsPath(["packages/"], "package.json")).toBe(false);
+  });
+
   it("binds a fan-out and join to one typed provider generation", () => {
     const items = [
       {

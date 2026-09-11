@@ -442,11 +442,19 @@ export function sandboxBootstrapFiles(
         .join("\n")
     : "";
   const managedBootstrap = managedToolchain
-    ? String.raw`mkdir -p /tmp/factory-toolchain-config
+    ? String.raw`factory_system_tools="/tmp/factory-system-tools"
+mkdir -p "$factory_system_tools"
+for factory_system_tool in awk bash cat chmod cmp cp cut diff dirname env find git grep head ln ls mkdir mktemp mv od paste pwd readlink realpath rg rm rmdir sed sh sort tail tar tee touch tr uname wc xargs; do
+  factory_system_tool_path="$(PATH="$factory_bootstrap_path" command -v "$factory_system_tool" || true)"
+  if [[ "$factory_system_tool_path" == /* && -x "$factory_system_tool_path" ]]; then
+    ln -s "$factory_system_tool_path" "$factory_system_tools/$factory_system_tool"
+  fi
+done
+mkdir -p /tmp/factory-toolchain-config
 node "$factory_root/materialize-toolchain.mjs" "$factory_root/managed-toolchain.json" "$factory_root/toolchain-paths.json"
-export PATH="/tmp/factory-toolchain/bin:$PATH"
+export PATH="/tmp/factory-toolchain/bin:$factory_system_tools"
 ${managedEnvironment}
-export PATH="/tmp/factory-toolchain/bin:$PATH"
+export PATH="/tmp/factory-toolchain/bin:$factory_system_tools"
 `
     : "";
   const script = `#!/usr/bin/env bash

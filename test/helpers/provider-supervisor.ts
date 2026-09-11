@@ -531,8 +531,14 @@ wheels = [
     faults.capabilityAdapter === "uv"
       ? [{ kind: "python-test" as const, key: "." }]
       : [
-          { kind: "package-script" as const, key: "check" },
-          { kind: "package-script" as const, key: "test" },
+          {
+            kind: "package-script" as const,
+            key: faults.capabilityAdapter === "npm" ? "1:.:check" : "check",
+          },
+          {
+            kind: "package-script" as const,
+            key: faults.capabilityAdapter === "npm" ? "1:.:test" : "test",
+          },
         ];
   const capabilityGraph: CompiledObjective = {
     title: "Exact-base capability admission qualification",
@@ -575,7 +581,10 @@ wheels = [
               operation:
                 faults.capabilityAdapter === "uv"
                   ? { kind: "python-test", key: "." }
-                  : { kind: "package-script", key: "test" },
+                  : {
+                      kind: "package-script",
+                      key: faults.capabilityAdapter === "npm" ? "1:.:test" : "test",
+                    },
               activation: "artifact",
               runtime: capabilityRuntime,
             },
@@ -612,7 +621,10 @@ wheels = [
               operation:
                 faults.capabilityAdapter === "uv"
                   ? { kind: "python-test", key: "." }
-                  : { kind: "package-script", key: "check" },
+                  : {
+                      kind: "package-script",
+                      key: faults.capabilityAdapter === "npm" ? "1:.:check" : "check",
+                    },
               activation: "integrated-base",
               runtime: capabilityRuntime,
             },

@@ -15,6 +15,7 @@ import {
   type RuntimeBundleReceipt,
 } from "../src/runtime/toolchain-bundle.js";
 import { parseWorkerPacket } from "../src/protocol/worker-packet.js";
+import { isGroundedValidationCommand } from "../src/repository-profiles/index.js";
 import {
   assertFutureToolchainRequirements,
   activateManagedRuntimePacket,
@@ -32,6 +33,7 @@ import {
   TOOLCHAIN_AUTHORITY_ADAPTERS,
   unprovisionedFutureToolchainReason,
   validationSetupCommandCount,
+  type ToolchainAuthorityAdapter,
 } from "../src/toolchains/authority.js";
 
 async function installManagedFixture(tool: "bun" | "uv"): Promise<RuntimeBundleReceipt> {
@@ -359,7 +361,7 @@ describe("toolchain authority adapters", () => {
           providerById: () => provider,
         }),
       ).rejects.toThrow(/Bun authority includes a path outside its provider scope/);
-      provider.scope.push(fixture.discoveredAuthorityPath);
+      provider.scope.push("packages/");
     }
     await expect(
       resolveIntegratedRepositoryCapabilities({
@@ -417,6 +419,38 @@ describe("toolchain authority adapters", () => {
     ).toThrow(/registry\.npmjs\.org setup authority/);
   });
 
+  it("admits a future adapter whose root authority is owned by a directory scope", () => {
+    const adapter: ToolchainAuthorityAdapter = {
+      id: "example-tool",
+      runner: "fixture",
+      provisioning: "factory-provisioned",
+      deferredOperations: true,
+      futurePackageScripts: false,
+      requiredRootPaths: ["example/tool/root.lock"],
+      setupCommands: [],
+      operation: (command) =>
+        command === "fixture check" ? { kind: "check", key: "check" } : null,
+    };
+    const registry = TOOLCHAIN_AUTHORITY_ADAPTERS as ToolchainAuthorityAdapter[];
+    registry.push(adapter);
+    try {
+      expect(
+        isGroundedValidationCommand("fixture check", { files: [] }, ["example/tool/"], {
+          root: true,
+          tools: ["fixture"],
+        }),
+      ).toBe(true);
+      expect(() =>
+        assertFutureToolchainRequirements({ adapter }, {
+          allowedPaths: ["example/tool/"],
+          requirements: { tools: ["fixture"], networkDestinations: [] },
+        } as never),
+      ).not.toThrow();
+    } finally {
+      registry.splice(registry.indexOf(adapter), 1);
+    }
+  });
+
   it("distinguishes provisioned adapters from unsupported greenfield runners", () => {
     expect(unprovisionedFutureToolchainReason("npm test")).toBeUndefined();
     expect(unprovisionedFutureToolchainReason("npm run test")).toBeUndefined();
@@ -451,7 +485,7 @@ describe("toolchain authority adapters", () => {
             adapter: "node-npm",
             generation: "node-npm/provider",
             authorityPaths: ["package.json", "package-lock.json"],
-            operations: [{ kind: "package-script", key: "test" }],
+            operations: [{ kind: "package-script", key: "1:.:test" }],
           },
         ],
         requires: [],

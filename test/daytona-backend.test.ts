@@ -657,7 +657,7 @@ describe("Daytona supported provider contract", () => {
     );
     const bootstrap = files.get("factory/run.sh")?.toString("utf8") ?? "";
     expect(bootstrap).toContain("materialize-toolchain.mjs");
-    expect(bootstrap).toContain('export PATH="/tmp/factory-toolchain/bin:$PATH"');
+    expect(bootstrap).toContain('export PATH="/tmp/factory-toolchain/bin:$factory_system_tools"');
     const materialization = await mkdtemp(join(tmpdir(), "factory-daytona-materializer-"));
     const hostile = join(materialization, "hostile-bin");
     await mkdir(hostile, { recursive: true });

@@ -188,6 +188,25 @@ describe("sandbox bootstrap contracts", () => {
     expect(rendered).not.toContain("GITHUB_TOKEN");
   });
 
+  it("gives managed workers an allowlisted system-tool directory without package runtimes", () => {
+    const base = context();
+    base.packet.validationCommands = ["pnpm check"];
+    base.packet.managedRuntimes = selectedManagedRuntimeRequirements(["pnpm check"]);
+    base.packet.requirements.tools = ["node", "pnpm"];
+    base.packet.requirements.networkDestinations = ["registry.npmjs.org"];
+    const rendered = sandboxBootstrapFiles(base, Buffer.from("archive"), {
+      managedToolchains: true,
+    })
+      .map((file) => file.content.toString("utf8"))
+      .join("\n");
+    expect(rendered).toContain('factory_system_tools="/tmp/factory-system-tools"');
+    expect(rendered).toContain("find git grep");
+    expect(rendered).toContain("realpath rg rm");
+    expect(rendered).toContain("rmdir sed sh");
+    expect(rendered).not.toMatch(/factory_system_tool in [^\n]*(?:node|npm|npx|corepack)/);
+    expect(rendered).toContain('export PATH="/tmp/factory-toolchain/bin:$factory_system_tools"');
+  });
+
   it("builds a validator without a model or GitHub credential", () => {
     const base = context();
     const validation: IsolatedValidationContext = {

@@ -117,5 +117,25 @@ describe("managed adapter clean validation", () => {
     await expect(
       assertBunValidation({ path: root }, artifact, packet, packet.validationCommands),
     ).resolves.toMatchObject({ manager: "bun", expectedVersion: "1.3.10" });
+    await expect(
+      assertBunValidation(
+        { path: root },
+        { ...artifact, changedPaths: ["package.json"] },
+        packet,
+        packet.validationCommands,
+        new Map([
+          [
+            "package.json",
+            {
+              name: "root",
+              version: "1.0.0",
+              packageManager: "bun@1.3.10",
+              scripts: { test: "bun test --timeout 1000" },
+              workspaces: ["packages/*"],
+            },
+          ],
+        ]),
+      ),
+    ).resolves.toMatchObject({ changedOperations: new Set(["test"]) });
   });
 });

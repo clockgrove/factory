@@ -549,6 +549,7 @@ export async function assertBunValidation(
   artifact: NormalizedArtifact,
   packet: WorkerPacket,
   commands: string[],
+  basePackageManifests: ReadonlyMap<string, PackageManifest> = new Map(),
 ): Promise<BootstrapPackageValidation | null> {
   const managed = commands.flatMap((command) => {
     const parsed = futureToolchainCommand(command);
@@ -607,6 +608,20 @@ export async function assertBunValidation(
     }),
   );
   const authorityPaths = [...new Set(inspections.flatMap(({ authorityPaths: paths }) => paths))];
+  const changedOperations = new Set<string>();
+  for (const manifestPath of new Set(inspections.map(({ manifestPath }) => manifestPath))) {
+    if (!artifact.changedPaths.includes(manifestPath)) continue;
+    const before = stringRecord(
+      basePackageManifests.get(manifestPath)?.scripts,
+      `scripts in base ${manifestPath}`,
+    );
+    const after = stringRecord(
+      (await readPackageManifest(worktree.path, manifestPath)).scripts,
+      `scripts in ${manifestPath}`,
+    );
+    for (const name of new Set([...Object.keys(before), ...Object.keys(after)]))
+      if (before[name] !== after[name]) changedOperations.add(name);
+  }
   const authority = new Set(authorityPaths);
   const sensitive = artifact.changedPaths.filter((path) => executionAffectingReason(path) !== null);
   if (sensitive.some((path) => !authority.has(path) || !pathIsAllowed(path, packet.allowedPaths)))
@@ -617,7 +632,7 @@ export async function assertBunValidation(
     versionCommand: `${runner} --version`,
     setupCommand: adapter.setupCommands.at(-1) ?? `${runner} setup`,
     permittedSensitivePaths: new Set(authorityPaths),
-    changedOperations: new Set(),
+    changedOperations,
   };
 }
 
@@ -1093,6 +1108,16 @@ export async function validateArtifactClean(
   const basePackageManifest = basePackageJsonPresent
     ? await readPackageManifest(worktree.path, "package.json")
     : null;
+  const basePackageManifests = new Map<string, PackageManifest>();
+  for (const path of artifact.changedPaths.filter(
+    (candidate) => candidate === "package.json" || candidate.endsWith("/package.json"),
+  )) {
+    try {
+      basePackageManifests.set(path, await readPackageManifest(worktree.path, path));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
   const commands: Array<{ command: string; exitCode: number; durationMs: number }> = [];
   let passed = false;
   let failureReason: string | undefined;
@@ -1151,7 +1176,13 @@ export async function validateArtifactClean(
       : await assertBootstrapPackageValidation(worktree, artifact, input.packet, plan.commands);
     const packageValidation =
       pnpmValidation ??
-      (await assertBunValidation(worktree, artifact, input.packet, plan.commands));
+      (await assertBunValidation(
+        worktree,
+        artifact,
+        input.packet,
+        plan.commands,
+        basePackageManifests,
+      ));
     if (sensitive.length > 0 && !isPermittedSensitiveArtifactSurface(sensitive, packageValidation))
       throw new Error(`artifact touches a sensitive surface: ${sensitive.join(", ")}`);
     const managedExecution = packageValidation

@@ -365,6 +365,7 @@ function capabilityProof(
   runtimeBundle: string,
   authorityDigest: string,
   preparationDigest: string,
+  authorityPaths: readonly string[] = requirement.authorityPaths,
 ): RepositoryCapabilityProof {
   const evidence = {
     protocol: "clockgrove.factory/repository-capability-proof-v1" as const,
@@ -372,7 +373,7 @@ function capabilityProof(
     generation: requirement.generation,
     providerWorkItem: requirement.providerWorkItem,
     operation: requirement.operation,
-    authorityPaths: [...requirement.authorityPaths],
+    authorityPaths: [...authorityPaths],
     baseSha: input.base.oid,
     baseTreeOid: input.base.treeOid,
     packetDigest: workerPacketDigest(input.packet),
@@ -820,7 +821,9 @@ async function resolveBunIntegratedBase(
   const { createLocalWorktree, cleanupLocalWorktree } = await import(
     "../runtime/local-worktree.js"
   );
-  const inspect = async (commitSha: string): Promise<string> => {
+  const inspect = async (
+    commitSha: string,
+  ): Promise<{ authorityDigest: string; authorityPaths: string[] }> => {
     const worktree = await createLocalWorktree(input.repository, commitSha);
     try {
       const inspections = [];
@@ -832,22 +835,30 @@ async function resolveBunIntegratedBase(
             exactVersion: component.version,
           }),
         );
-      return await authorityDigestForPaths(
-        worktree.path,
-        inspections.flatMap(({ authorityPaths }) => authorityPaths),
-      );
+      const authorityPaths = [
+        ...new Set(inspections.flatMap(({ authorityPaths }) => authorityPaths)),
+      ].sort();
+      if (authorityPaths.some((path) => !input.provider.scope.includes(path)))
+        throw new Error("Bun authority includes a path outside its provider scope");
+      return {
+        authorityDigest: await authorityDigestForPaths(worktree.path, authorityPaths),
+        authorityPaths,
+      };
     } finally {
       await cleanupLocalWorktree(worktree);
     }
   };
-  const providerAuthorityDigest = await inspect(input.provider.integration.commitSha);
-  const currentAuthorityDigest =
+  const providerAuthority = await inspect(input.provider.integration.commitSha);
+  const currentAuthority =
     input.provider.integration.commitSha === input.base.oid
-      ? providerAuthorityDigest
+      ? providerAuthority
       : await inspect(input.base.oid);
-  if (providerAuthorityDigest !== currentAuthorityDigest)
+  if (
+    providerAuthority.authorityDigest !== currentAuthority.authorityDigest ||
+    canonical(providerAuthority.authorityPaths) !== canonical(currentAuthority.authorityPaths)
+  )
     throw new Error("Bun authority bytes changed after the declared provider generation");
-  const authorityDigest = providerAuthorityDigest;
+  const authorityDigest = providerAuthority.authorityDigest;
   const preparationDigest = createHash("sha256")
     .update(
       canonical({
@@ -865,6 +876,7 @@ async function resolveBunIntegratedBase(
       runtime.digest,
       authorityDigest,
       preparationDigest,
+      providerAuthority.authorityPaths,
     ),
   );
 }
@@ -1099,7 +1111,8 @@ export async function assertRepositoryCapabilityProofsCurrent(input: {
       proof.baseTreeOid !== input.base.treeOid ||
       proof.sourceRef !== input.sourceRef ||
       proof.packetDigest !== packetDigest ||
-      canonical(proof.authorityPaths) !== canonical(requirement.authorityPaths)
+      new Set(proof.authorityPaths).size !== proof.authorityPaths.length ||
+      requirement.authorityPaths.some((path: string) => !proof.authorityPaths.includes(path))
     )
       throw new Error("repository capability proof was invalidated before dispatch");
     const { digest, ...evidence } = proof;
@@ -1119,6 +1132,8 @@ export async function assertRepositoryCapabilityProofsCurrent(input: {
       const provider = input.providerById(requirement.providerWorkItem);
       if (!provider || provider.id !== requirement.providerWorkItem)
         throw new Error(`unknown repository capability provider ${requirement.providerWorkItem}`);
+      if (proof.authorityPaths.some((path) => !provider.scope.includes(path)))
+        throw new Error("repository capability proof includes authority outside provider scope");
       const providerRuntime = exactProviderGenerationRuntime(provider, requirement.runtime);
       if (
         proof.providerIssue !== provider.issueNumber ||

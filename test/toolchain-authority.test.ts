@@ -166,16 +166,21 @@ describe("toolchain authority adapters", () => {
       name: "proof",
       version: "1.0.0",
       packageManager: "bun@1.3.10",
-      scripts: { test: "bun test" },
+      workspaces: ["packages/*"],
     };
     await writeFile(join(repository, "package.json"), JSON.stringify(manifest));
+    await mkdir(join(repository, "packages/api"), { recursive: true });
+    await writeFile(
+      join(repository, "packages/api/package.json"),
+      JSON.stringify({ name: "api", version: "1.0.0", scripts: { test: "bun test" } }),
+    );
     await writeFile(
       join(repository, "bun.lock"),
       JSON.stringify({
         lockfileVersion: 1,
         configVersion: 1,
-        workspaces: { "": { name: "proof" } },
-        packages: {},
+        workspaces: { "": { name: "proof" }, "packages/api": { name: "api" } },
+        packages: { api: ["api@workspace:packages/api"] },
       }),
     );
     execFileSync("git", ["add", "."], { cwd: repository });
@@ -217,7 +222,7 @@ describe("toolchain authority adapters", () => {
       outOfScope: [],
       conventions: [],
       baseSha: currentBase.oid,
-      validationCommands: ["bun run test"],
+      validationCommands: ["bun --cwd packages/api run test"],
       requirements: {
         os: ["linux"],
         architecture: [],
@@ -235,7 +240,7 @@ describe("toolchain authority adapters", () => {
             generation: `${adapter.id}/root`,
             providerWorkItem: "root",
             authorityPaths: ["package.json", "bun.lock"],
-            operation: { kind: "package-script", key: "test" },
+            operation: { kind: "package-script", key: "packages/api:test" },
             activation: "integrated-base",
             runtime: adapter.runtimeRequirement,
           },
@@ -273,6 +278,16 @@ describe("toolchain authority adapters", () => {
         managedRuntimeActivation: providerActivation,
       },
     };
+    await expect(
+      resolveIntegratedRepositoryCapabilities({
+        repository,
+        base: currentBase,
+        sourceRef,
+        packet,
+        providerById: () => provider,
+      }),
+    ).rejects.toThrow(/Bun authority includes a path outside its provider scope/);
+    provider.scope.push("packages/api/package.json");
     await expect(
       resolveIntegratedRepositoryCapabilities({
         repository,

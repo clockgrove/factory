@@ -827,6 +827,7 @@ async function fixture(
     if (++reads > 500) throw new Error("fixture exceeded bounded snapshot reads");
     return structuredClone(snapshot);
   });
+  vi.spyOn(GitHubReader.prototype, "readRunCancellationRequest").mockResolvedValue(null);
   vi.spyOn(LeaseManager.prototype, "read").mockResolvedValue(null);
   let acquisitions = 0;
   vi.spyOn(LeaseManager.prototype, "acquire").mockImplementation(

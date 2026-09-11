@@ -571,6 +571,23 @@ class ProviderQuotaDrainIncompleteError extends Error {
   }
 }
 
+function terminalizationVeto(error: unknown): boolean {
+  return (
+    error instanceof LeaseLostError ||
+    error instanceof PlatformUnavailableError ||
+    error instanceof SafeArtifactCheckpointHeldError ||
+    error instanceof ArtifactCompletionUnavailableError ||
+    error instanceof ArtifactCollectionCheckpointError ||
+    error instanceof ProviderQuotaDrainIncompleteError ||
+    error instanceof ProviderResourceCleanupError ||
+    error instanceof CancellationAccountingPublicationError ||
+    (error instanceof Error &&
+      /automated replacement is blocked|cannot prove (?:that )?(?:the )?resource absent|may still be (?:active|billable)/i.test(
+        error.message,
+      ))
+  );
+}
+
 class PrepublicationApprovalRequiredError extends Error {
   constructor(cause: unknown) {
     super(
@@ -4111,19 +4128,7 @@ export class FactorySupervisor {
           reason?: string;
         }
       | { event: "release-shutdown" | "release-command"; reason?: never };
-    const terminalVeto = (error: unknown): boolean =>
-      error instanceof LeaseLostError ||
-      error instanceof PlatformUnavailableError ||
-      error instanceof SafeArtifactCheckpointHeldError ||
-      error instanceof ArtifactCompletionUnavailableError ||
-      error instanceof ArtifactCollectionCheckpointError ||
-      error instanceof ProviderQuotaDrainIncompleteError ||
-      error instanceof ProviderResourceCleanupError ||
-      error instanceof CancellationAccountingPublicationError ||
-      (error instanceof Error &&
-        /automated replacement is blocked|cannot prove (?:that )?(?:the )?resource absent|may still be (?:active|billable)/i.test(
-          error.message,
-        ));
+    const terminalVeto = terminalizationVeto;
     const drainExecutions = async (proposed: DrainOutcome): Promise<DrainOutcome> => {
       executionAbort.abort();
       const settlements = await activeExecutions.settle();
@@ -6090,6 +6095,37 @@ export class FactorySupervisor {
     } catch (error) {
       const claimed = error instanceof ClaimedExecutionFailure ? error : undefined;
       const failure = claimed?.settlement.error ?? error;
+      if (failure instanceof ProviderQuotaError) {
+        let durable = false;
+        try {
+          const observed = await this.#reader.readObjective(snapshot.number);
+          this.#fenceSnapshot(observed);
+          const events = snapshotEvents(observed);
+          durable = providerQuotaGates(events, this.#run.runId).some(
+            (gate) =>
+              gate.modelInvocationId === failure.invocationId &&
+              gate.provider === failure.gate.provider &&
+              gate.providerMessage === failure.gate.message &&
+              gate.actionUrl === failure.gate.actionUrl &&
+              gate.accounting === (failure.usage ? "exact" : "unknown"),
+          );
+          snapshot = observed;
+          this.#sequences.observe(events);
+        } catch (cause) {
+          executionAbort.abort();
+          await activeExecutions.settle();
+          throw preserveProviderQuotaError(
+            failure,
+            cause,
+            "provider-refusal durability verification failed",
+          );
+        }
+        if (!durable) {
+          executionAbort.abort();
+          await activeExecutions.settle();
+          throw failure;
+        }
+      }
       if (failure instanceof CompilerDraftReportCompleted)
         return await terminalAfterDrain("FactoryRunCompleted", failure.message);
       if (terminalVeto(failure)) {
@@ -6214,6 +6250,7 @@ export class FactorySupervisor {
     let retainedUnknownModelInvocationId: string | undefined;
     let noHandleReplacementNotBefore: string | undefined;
     let validationNoHandleReplacementNotBefore: string | undefined;
+    let providerQuotaFailure: ProviderQuotaError | undefined;
     const started = Date.now();
     const confirmExecutionCleanup = async (operation: string): Promise<void> => {
       if (executionCleanupConfirmed || !handle || !selected) return;
@@ -7537,359 +7574,371 @@ export class FactorySupervisor {
       await this.#retryArtifacts.delete(item.number);
       admissionPipelineClosed = true;
     } catch (error) {
-      if (
-        error instanceof SafeArtifactCheckpointShutdownError &&
-        completedArtifactRetained &&
-        executionCleanupConfirmed &&
-        !validationCapacityRecorded &&
-        executionSignal?.aborted &&
-        this.#options.signal?.aborted &&
-        this.#options.shutdownBehavior === "release-lease"
-      ) {
-        safeHoldShutdown = true;
-        throw new RunCancellationRequestedError(
-          "repository controller stopped at proved terminal artifact hold; validation was not admitted",
-        );
-      }
-      if (error instanceof SafeArtifactCheckpointHeldError) throw error;
-      // Shutdown before validation admission preserves a durable successful
-      // checkpoint for the next fenced controller. Use the intentional teardown
-      // signal so a fresh worker's pool settlement also drains without failure;
-      // no durable AttemptCancelled/Failed receipt is manufactured here.
-      if (
-        completedArtifactRetained &&
-        !validationCapacityRecorded &&
-        executionSignal?.aborted &&
-        this.#options.shutdownBehavior === "release-lease"
-      ) {
-        if (error === executionSignal.reason)
+      if (error instanceof ProviderQuotaError) providerQuotaFailure = error;
+      try {
+        if (
+          error instanceof SafeArtifactCheckpointShutdownError &&
+          completedArtifactRetained &&
+          executionCleanupConfirmed &&
+          !validationCapacityRecorded &&
+          executionSignal?.aborted &&
+          this.#options.signal?.aborted &&
+          this.#options.shutdownBehavior === "release-lease"
+        ) {
+          safeHoldShutdown = true;
           throw new RunCancellationRequestedError(
-            "repository controller stopped after durable execution completion; validation was not admitted",
-          );
-        // Preserve unrelated fencing/receipt failures rather than disguising
-        // their uncertain outcome as an intentional pool teardown.
-        throw error;
-      }
-      if (
-        retryableArtifact &&
-        validation &&
-        selected &&
-        selected.capabilities.hostExecution &&
-        !selected.capabilities.providerManagedPublication
-      ) {
-        await this.#retryArtifacts.set(item.number, retryableArtifact);
-      }
-      const cancellation =
-        error instanceof RunCancellationRequestedError || executionSignal?.aborted;
-      if (error instanceof ProviderQuotaError && !error.usage)
-        retainedUnknownModelInvocationId = error.invocationId;
-      if (backendLaunchAttempted && !executionTerminalObserved && !cancellation)
-        retainCollectedSource = true;
-      if (
-        backendLaunchAttempted &&
-        !handle &&
-        !executionCleanupConfirmed &&
-        selected &&
-        reservation
-      ) {
-        if (!selected.reconcileStale) {
-          throw new Error(
-            `backend ${selected.capabilities.id} launch failed before returning a handle and cannot prove that no resource was created; automated replacement is blocked`,
+            "repository controller stopped at proved terminal artifact hold; validation was not admitted",
           );
         }
-        try {
-          await selected.reconcileStale({
-            repository: `${this.#options.owner}/${this.#options.repo}`,
-            objective: reservation.objective,
-            workItem: reservation.workItem,
-            attempt: reservation.attempt,
-            runId: reservation.runId,
-            directorEpoch: reservation.directorEpoch,
-            phase: "execution",
-            ...(reservation.localScopeBatch
-              ? { localScopeBatch: reservation.localScopeBatch }
-              : {}),
-            policyDigest: reservation.policyDigest,
-            ...(noHandleReplacementNotBefore ? { noHandleReplacementNotBefore } : {}),
-          });
-          executionCleanupConfirmed = true;
-        } catch (reconcileError) {
-          throw new Error(
-            `backend ${selected.capabilities.id} launch failed before returning a handle; automated replacement is blocked because absence could not be proven: ${reconcileError instanceof Error ? reconcileError.message : String(reconcileError)}`,
-          );
-        }
-      }
-      const stopRequested = cancellation || error instanceof PlatformUnavailableError;
-      let cancelledModelUsageObserved = false;
-      if (stopRequested && handle && selected && !executionCleanupConfirmed) {
-        try {
-          await selected.cancel(handle);
-        } catch (cancelError) {
-          this.#notify(
-            `backend cancellation did not confirm absence; cleanup reconciliation will decide: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`,
-          );
-        }
-        if (terminalModelTokens === undefined && selected.capabilities.reportsModelUsage) {
-          try {
-            // Cancellation drains some backends' terminal stream. Read any real
-            // counters before cleanup discards the handle; absence stays unknown.
-            const observation = await selected.observe(handle);
-            if (["succeeded", "failed", "cancelled"].includes(observation.state)) {
-              terminalModelUsage = reportedModelUsage(observation.usage);
-              const tokens = reportedModelTokens(observation.usage);
-              if (tokens !== null) {
-                terminalModelTokens = tokens;
-                cancelledModelUsageObserved = true;
-              }
-            }
-          } catch (observationError) {
-            this.#notify(
-              `cancelled backend usage is unavailable: ${observationError instanceof Error ? observationError.message : String(observationError)}`,
+        if (error instanceof SafeArtifactCheckpointHeldError) throw error;
+        // Shutdown before validation admission preserves a durable successful
+        // checkpoint for the next fenced controller. Use the intentional teardown
+        // signal so a fresh worker's pool settlement also drains without failure;
+        // no durable AttemptCancelled/Failed receipt is manufactured here.
+        if (
+          completedArtifactRetained &&
+          !validationCapacityRecorded &&
+          executionSignal?.aborted &&
+          this.#options.shutdownBehavior === "release-lease"
+        ) {
+          if (error === executionSignal.reason)
+            throw new RunCancellationRequestedError(
+              "repository controller stopped after durable execution completion; validation was not admitted",
             );
-          }
+          // Preserve unrelated fencing/receipt failures rather than disguising
+          // their uncertain outcome as an intentional pool teardown.
+          throw error;
         }
-      }
-      let cancelledUsageWriteFailure: { error: unknown } | undefined;
-      if (
-        cancelledModelUsageObserved &&
-        reservation &&
-        !(error instanceof PlatformUnavailableError) &&
-        !(error instanceof LeaseLostError)
-      ) {
-        try {
-          await this.#lease.use(async (lease) => {
-            const event = await this.#recorder.budget({
-              lease,
-              workItemNodeId: item.id,
-              reservation: reservation!,
-              sequence: this.#sequences.take(),
-              event: "BudgetReconciled",
-              unit: "model_tokens",
-              phase: "execution",
-              amount: terminalModelTokens!,
-              usageId: `worker-${item.number}-${reservation!.attempt}`,
-              ...this.#modelInvocationLink(
-                `worker-${item.number}-${reservation!.attempt}`,
-                reservation!,
-                undefined,
-                "execution",
-              ),
-              ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
-            });
-            this.#budgetEvents.push(event);
-          });
-        } catch (usageError) {
-          // Accounting is independent of resource absence. Always attempt
-          // cleanup, but never turn a failed fenced receipt into permission
-          // to finish or replace this attempt.
-          cancelledUsageWriteFailure = {
-            error:
-              usageError instanceof LeaseLostError || usageError instanceof PlatformUnavailableError
-                ? usageError
-                : new CancellationAccountingPublicationError(usageError),
-          };
+        if (
+          retryableArtifact &&
+          validation &&
+          selected &&
+          selected.capabilities.hostExecution &&
+          !selected.capabilities.providerManagedPublication
+        ) {
+          await this.#retryArtifacts.set(item.number, retryableArtifact);
         }
-      }
-      await confirmExecutionCleanup("failed-attempt backend cleanup");
-      if (error instanceof ProviderResourceCleanupError && validationCapacity) {
-        if (!reservation || !validator?.reconcileStale) {
-          throw new Error(
-            `validation cleanup was not confirmed and no stale-resource reconciler is available; automated replacement is blocked: ${error.message}`,
-          );
-        }
-        try {
-          await validator.reconcileStale({
-            repository: `${this.#options.owner}/${this.#options.repo}`,
-            objective: reservation.objective,
-            workItem: reservation.workItem,
-            attempt: reservation.attempt,
-            runId: reservation.runId,
-            directorEpoch: reservation.directorEpoch,
-            phase: "validation",
-            ...(validationNoHandleReplacementNotBefore
-              ? {
-                  noHandleReplacementNotBefore: validationNoHandleReplacementNotBefore,
-                }
-              : {}),
-          });
-        } catch (reconcileError) {
-          throw new Error(
-            `validation cleanup was not confirmed; automated replacement is blocked because the validator may still be billable. Cleanup error: ${error.message}. Reconciliation error: ${reconcileError instanceof Error ? reconcileError.message : String(reconcileError)}`,
-          );
-        }
-      }
-      if (
-        error instanceof PlatformUnavailableError ||
-        error instanceof LeaseLostError ||
-        error instanceof ArtifactCollectionCheckpointError ||
-        error instanceof NoExecutionBackendError ||
-        (selected?.capabilities.id === "codex-app-server/local-worktree" &&
-          error instanceof Error &&
-          /automated replacement is blocked/.test(error.message))
-      ) {
-        throw error;
-      }
-      if (
-        backendLaunchAttempted &&
-        !executionTerminalObserved &&
-        !cancellation &&
-        !selected?.capabilities.providerManagedPublication
-      ) {
-        retainCollectedSource = true;
-        throw new ArtifactCollectionCheckpointError(
-          new Error(
-            "execution completion is unknown after dispatch; absence alone does not authorize replacement",
-            { cause: error },
-          ),
-        );
-      }
-      if (cancelledUsageWriteFailure) throw cancelledUsageWriteFailure.error;
-      const reason = error instanceof Error ? error.message : String(error);
-      const deferredBeforeDispatch =
-        error instanceof ExecutionSourceAdvancedBeforeDispatchError && !backendLaunchAttempted;
-      if (error instanceof PrepublicationApprovalRequiredError) {
-        if (!reservation || !retryableArtifact || !completedArtifactRetained)
-          throw new Error("pre-publication hold lacks a durable completed artifact", {
-            cause: error,
-          });
-        await this.#retryArtifacts.set(item.number, retryableArtifact);
-        await this.#lease.use((lease) =>
-          this.#attempts.record({
-            ...(recovered ? { allowRecovery: true } : {}),
-            lease,
-            workItemNodeId: item.id,
-            reservation: reservation!,
-            event: "AttemptDeferred",
-            sequence: this.#sequences.take(),
-            reason,
-          }),
-        );
-        admissionPipelineClosed = true;
-        throw error;
-      }
-      if (!published && selected?.capabilities.providerManagedPublication) {
-        const managedPull = Number(handle?.metadata?.pullNumber);
-        if (Number.isInteger(managedPull) && managedPull > 0) {
-          try {
-            await this.#store.closePullRequest(managedPull);
-          } catch (closeError) {
+        const cancellation =
+          error instanceof RunCancellationRequestedError || executionSignal?.aborted;
+        if (error instanceof ProviderQuotaError && !error.usage)
+          retainedUnknownModelInvocationId = error.invocationId;
+        if (backendLaunchAttempted && !executionTerminalObserved && !cancellation)
+          retainCollectedSource = true;
+        if (
+          backendLaunchAttempted &&
+          !handle &&
+          !executionCleanupConfirmed &&
+          selected &&
+          reservation
+        ) {
+          if (!selected.reconcileStale) {
             throw new Error(
-              `pull request #${managedPull} could not be closed; automated replacement is blocked: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
+              `backend ${selected.capabilities.id} launch failed before returning a handle and cannot prove that no resource was created; automated replacement is blocked`,
+            );
+          }
+          try {
+            await selected.reconcileStale({
+              repository: `${this.#options.owner}/${this.#options.repo}`,
+              objective: reservation.objective,
+              workItem: reservation.workItem,
+              attempt: reservation.attempt,
+              runId: reservation.runId,
+              directorEpoch: reservation.directorEpoch,
+              phase: "execution",
+              ...(reservation.localScopeBatch
+                ? { localScopeBatch: reservation.localScopeBatch }
+                : {}),
+              policyDigest: reservation.policyDigest,
+              ...(noHandleReplacementNotBefore ? { noHandleReplacementNotBefore } : {}),
+            });
+            executionCleanupConfirmed = true;
+          } catch (reconcileError) {
+            throw new Error(
+              `backend ${selected.capabilities.id} launch failed before returning a handle; automated replacement is blocked because absence could not be proven: ${reconcileError instanceof Error ? reconcileError.message : String(reconcileError)}`,
             );
           }
         }
-      }
-      if (published && this.#deliverySelection.selected === "native-stacks" && !cancellation) {
-        this.#notify(
-          `Work Item #${item.number} publication will be reconciled from GitHub: ${reason}`,
-        );
-        return;
-      }
-      if (published) {
-        const current = await this.#store.readPullRequest(published.number).catch(() => null);
-        if (current?.merged) throw error;
-        try {
-          await this.#store.closePullRequest(published.number);
-        } catch (closeError) {
-          throw new Error(
-            `published pull request #${published.number} could not be closed; automated replacement is blocked: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
-          );
+        const stopRequested = cancellation || error instanceof PlatformUnavailableError;
+        let cancelledModelUsageObserved = false;
+        if (stopRequested && handle && selected && !executionCleanupConfirmed) {
+          try {
+            await selected.cancel(handle);
+          } catch (cancelError) {
+            this.#notify(
+              `backend cancellation did not confirm absence; cleanup reconciliation will decide: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`,
+            );
+          }
+          if (terminalModelTokens === undefined && selected.capabilities.reportsModelUsage) {
+            try {
+              // Cancellation drains some backends' terminal stream. Read any real
+              // counters before cleanup discards the handle; absence stays unknown.
+              const observation = await selected.observe(handle);
+              if (["succeeded", "failed", "cancelled"].includes(observation.state)) {
+                terminalModelUsage = reportedModelUsage(observation.usage);
+                const tokens = reportedModelTokens(observation.usage);
+                if (tokens !== null) {
+                  terminalModelTokens = tokens;
+                  cancelledModelUsageObserved = true;
+                }
+              }
+            } catch (observationError) {
+              this.#notify(
+                `cancelled backend usage is unavailable: ${observationError instanceof Error ? observationError.message : String(observationError)}`,
+              );
+            }
+          }
         }
-      }
-      if (reservation) {
-        if (validationCapacity && validationCapacityRecorded && !validationCapacityReconciled) {
-          await this.#lease
-            .use(async (lease) => {
-              await this.#attempts.recordCapacity({
-                ...(recovered ? { allowRecovery: true } : {}),
+        let cancelledUsageWriteFailure: { error: unknown } | undefined;
+        if (
+          cancelledModelUsageObserved &&
+          reservation &&
+          !(error instanceof PlatformUnavailableError) &&
+          !(error instanceof LeaseLostError)
+        ) {
+          try {
+            await this.#lease.use(async (lease) => {
+              const event = await this.#recorder.budget({
                 lease,
                 workItemNodeId: item.id,
                 reservation: reservation!,
                 sequence: this.#sequences.take(),
-                event: "CapacityReconciled",
-                phase: "validation",
-                backend: validationCapacity!.backendId,
-                requestedCpu: validationCapacity!.cpu,
-                requestedMemoryMb: validationCapacity!.memoryMb,
-                reason: "validation ended before its normal capacity receipt",
+                event: "BudgetReconciled",
+                unit: "model_tokens",
+                phase: "execution",
+                amount: terminalModelTokens!,
+                usageId: `worker-${item.number}-${reservation!.attempt}`,
+                ...this.#modelInvocationLink(
+                  `worker-${item.number}-${reservation!.attempt}`,
+                  reservation!,
+                  undefined,
+                  "execution",
+                ),
+                ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
               });
-              validationCapacityReconciled = true;
-            })
-            .catch(() => {});
-        }
-        if (executionBudgetReserved && !executionBudgetReconciled) {
-          await this.#lease.use(async (lease) => {
-            const event = await this.#recorder.budget({
-              lease,
-              workItemNodeId: item.id,
-              reservation: reservation!,
-              sequence: this.#sequences.take(),
-              event: "BudgetReconciled",
-              unit: budgetUnit,
-              amount: backendLaunchAttempted
-                ? budgetUnit === "managed_sessions"
-                  ? 1
-                  : Date.now() - started
-                : 0,
+              this.#budgetEvents.push(event);
             });
-            this.#budgetEvents.push(event);
-            executionBudgetReconciled = true;
-          });
+          } catch (usageError) {
+            // Accounting is independent of resource absence. Always attempt
+            // cleanup, but never turn a failed fenced receipt into permission
+            // to finish or replace this attempt.
+            cancelledUsageWriteFailure = {
+              error:
+                usageError instanceof LeaseLostError ||
+                usageError instanceof PlatformUnavailableError
+                  ? usageError
+                  : new CancellationAccountingPublicationError(usageError),
+            };
+          }
         }
-        if (validationBudgetReserved && !validationBudgetReconciled && validationBudgetUnit) {
-          const unit = validationBudgetUnit;
-          await this.#lease.use(async (lease) => {
-            const event = await this.#recorder.budget({
-              lease,
-              workItemNodeId: item.id,
-              reservation: reservation!,
-              sequence: this.#sequences.take(),
-              event: "BudgetReconciled",
-              unit,
+        await confirmExecutionCleanup("failed-attempt backend cleanup");
+        if (error instanceof ProviderResourceCleanupError && validationCapacity) {
+          if (!reservation || !validator?.reconcileStale) {
+            throw new Error(
+              `validation cleanup was not confirmed and no stale-resource reconciler is available; automated replacement is blocked: ${error.message}`,
+            );
+          }
+          try {
+            await validator.reconcileStale({
+              repository: `${this.#options.owner}/${this.#options.repo}`,
+              objective: reservation.objective,
+              workItem: reservation.workItem,
+              attempt: reservation.attempt,
+              runId: reservation.runId,
+              directorEpoch: reservation.directorEpoch,
               phase: "validation",
-              amount: validationStartedAt
-                ? unit === "managed_sessions"
-                  ? 1
-                  : Date.now() - validationStartedAt
-                : 0,
+              ...(validationNoHandleReplacementNotBefore
+                ? {
+                    noHandleReplacementNotBefore: validationNoHandleReplacementNotBefore,
+                  }
+                : {}),
             });
-            this.#budgetEvents.push(event);
-            validationBudgetReconciled = true;
-          });
+          } catch (reconcileError) {
+            throw new Error(
+              `validation cleanup was not confirmed; automated replacement is blocked because the validator may still be billable. Cleanup error: ${error.message}. Reconciliation error: ${reconcileError instanceof Error ? reconcileError.message : String(reconcileError)}`,
+            );
+          }
         }
-        await this.#lease.use((lease) =>
-          this.#attempts.record({
-            ...(recovered ? { allowRecovery: true } : {}),
-            lease,
-            workItemNodeId: item.id,
-            reservation: reservation!,
-            event: deferredBeforeDispatch
-              ? "AttemptDeferred"
-              : cancellation
-                ? "AttemptCancelled"
-                : "AttemptFailed",
-            sequence: this.#sequences.take(),
-            reason,
-            ...(backendLaunchAttempted && terminalModelProfile
-              ? { modelProfile: terminalModelProfile }
-              : {}),
-            ...(terminalModelTokens === undefined
-              ? {}
-              : { reportedModelTokens: terminalModelTokens }),
-            ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
-          }),
+        if (
+          error instanceof PlatformUnavailableError ||
+          error instanceof LeaseLostError ||
+          error instanceof ArtifactCollectionCheckpointError ||
+          error instanceof NoExecutionBackendError ||
+          (selected?.capabilities.id === "codex-app-server/local-worktree" &&
+            error instanceof Error &&
+            /automated replacement is blocked/.test(error.message))
+        ) {
+          throw error;
+        }
+        if (
+          backendLaunchAttempted &&
+          !executionTerminalObserved &&
+          !cancellation &&
+          !selected?.capabilities.providerManagedPublication
+        ) {
+          retainCollectedSource = true;
+          throw new ArtifactCollectionCheckpointError(
+            new Error(
+              "execution completion is unknown after dispatch; absence alone does not authorize replacement",
+              { cause: error },
+            ),
+          );
+        }
+        if (cancelledUsageWriteFailure) throw cancelledUsageWriteFailure.error;
+        const reason = error instanceof Error ? error.message : String(error);
+        const deferredBeforeDispatch =
+          error instanceof ExecutionSourceAdvancedBeforeDispatchError && !backendLaunchAttempted;
+        if (error instanceof PrepublicationApprovalRequiredError) {
+          if (!reservation || !retryableArtifact || !completedArtifactRetained)
+            throw new Error("pre-publication hold lacks a durable completed artifact", {
+              cause: error,
+            });
+          await this.#retryArtifacts.set(item.number, retryableArtifact);
+          await this.#lease.use((lease) =>
+            this.#attempts.record({
+              ...(recovered ? { allowRecovery: true } : {}),
+              lease,
+              workItemNodeId: item.id,
+              reservation: reservation!,
+              event: "AttemptDeferred",
+              sequence: this.#sequences.take(),
+              reason,
+            }),
+          );
+          admissionPipelineClosed = true;
+          throw error;
+        }
+        if (!published && selected?.capabilities.providerManagedPublication) {
+          const managedPull = Number(handle?.metadata?.pullNumber);
+          if (Number.isInteger(managedPull) && managedPull > 0) {
+            try {
+              await this.#store.closePullRequest(managedPull);
+            } catch (closeError) {
+              throw new Error(
+                `pull request #${managedPull} could not be closed; automated replacement is blocked: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
+              );
+            }
+          }
+        }
+        if (published && this.#deliverySelection.selected === "native-stacks" && !cancellation) {
+          this.#notify(
+            `Work Item #${item.number} publication will be reconciled from GitHub: ${reason}`,
+          );
+          return;
+        }
+        if (published) {
+          const current = await this.#store.readPullRequest(published.number).catch(() => null);
+          if (current?.merged) throw error;
+          try {
+            await this.#store.closePullRequest(published.number);
+          } catch (closeError) {
+            throw new Error(
+              `published pull request #${published.number} could not be closed; automated replacement is blocked: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
+            );
+          }
+        }
+        if (reservation) {
+          if (validationCapacity && validationCapacityRecorded && !validationCapacityReconciled) {
+            await this.#lease
+              .use(async (lease) => {
+                await this.#attempts.recordCapacity({
+                  ...(recovered ? { allowRecovery: true } : {}),
+                  lease,
+                  workItemNodeId: item.id,
+                  reservation: reservation!,
+                  sequence: this.#sequences.take(),
+                  event: "CapacityReconciled",
+                  phase: "validation",
+                  backend: validationCapacity!.backendId,
+                  requestedCpu: validationCapacity!.cpu,
+                  requestedMemoryMb: validationCapacity!.memoryMb,
+                  reason: "validation ended before its normal capacity receipt",
+                });
+                validationCapacityReconciled = true;
+              })
+              .catch(() => {});
+          }
+          if (executionBudgetReserved && !executionBudgetReconciled) {
+            await this.#lease.use(async (lease) => {
+              const event = await this.#recorder.budget({
+                lease,
+                workItemNodeId: item.id,
+                reservation: reservation!,
+                sequence: this.#sequences.take(),
+                event: "BudgetReconciled",
+                unit: budgetUnit,
+                amount: backendLaunchAttempted
+                  ? budgetUnit === "managed_sessions"
+                    ? 1
+                    : Date.now() - started
+                  : 0,
+              });
+              this.#budgetEvents.push(event);
+              executionBudgetReconciled = true;
+            });
+          }
+          if (validationBudgetReserved && !validationBudgetReconciled && validationBudgetUnit) {
+            const unit = validationBudgetUnit;
+            await this.#lease.use(async (lease) => {
+              const event = await this.#recorder.budget({
+                lease,
+                workItemNodeId: item.id,
+                reservation: reservation!,
+                sequence: this.#sequences.take(),
+                event: "BudgetReconciled",
+                unit,
+                phase: "validation",
+                amount: validationStartedAt
+                  ? unit === "managed_sessions"
+                    ? 1
+                    : Date.now() - validationStartedAt
+                  : 0,
+              });
+              this.#budgetEvents.push(event);
+              validationBudgetReconciled = true;
+            });
+          }
+          await this.#lease.use((lease) =>
+            this.#attempts.record({
+              ...(recovered ? { allowRecovery: true } : {}),
+              lease,
+              workItemNodeId: item.id,
+              reservation: reservation!,
+              event: deferredBeforeDispatch
+                ? "AttemptDeferred"
+                : cancellation
+                  ? "AttemptCancelled"
+                  : "AttemptFailed",
+              sequence: this.#sequences.take(),
+              reason,
+              ...(backendLaunchAttempted && terminalModelProfile
+                ? { modelProfile: terminalModelProfile }
+                : {}),
+              ...(terminalModelTokens === undefined
+                ? {}
+                : { reportedModelTokens: terminalModelTokens }),
+              ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
+            }),
+          );
+        } else {
+          throw error;
+        }
+        admissionPipelineClosed = true;
+        if (cancellation) throw new RunCancellationRequestedError(reason);
+        if (error instanceof ProviderQuotaError) throw error;
+        this.#notify(
+          deferredBeforeDispatch
+            ? `Work Item #${item.number} returned to queue before dispatch: ${reason}`
+            : `Work Item #${item.number} failed: ${reason}`,
         );
-      } else {
-        throw error;
+      } catch (cause) {
+        if (providerQuotaFailure && cause !== providerQuotaFailure && !terminalizationVeto(cause))
+          throw preserveProviderQuotaError(
+            providerQuotaFailure,
+            cause,
+            "worker provider refusal and failure-path durability both failed",
+          );
+        throw cause;
       }
-      admissionPipelineClosed = true;
-      if (cancellation) throw new RunCancellationRequestedError(reason);
-      if (error instanceof ProviderQuotaError) throw error;
-      this.#notify(
-        deferredBeforeDispatch
-          ? `Work Item #${item.number} returned to queue before dispatch: ${reason}`
-          : `Work Item #${item.number} failed: ${reason}`,
-      );
     } finally {
       if (executionSignal?.aborted && handle && selected && !executionCleanupConfirmed) {
         try {
@@ -7913,8 +7962,12 @@ export class FactorySupervisor {
         finalizationError ??= error;
       } finally {
         if (validationCapacity && !validationCapacityReleased) {
-          await this.#releaseCapacity(validationCapacity.key);
-          validationCapacityReleased = true;
+          try {
+            await this.#releaseCapacity(validationCapacity.key);
+            validationCapacityReleased = true;
+          } catch (error) {
+            finalizationError ??= error;
+          }
         }
       }
       if (
@@ -7923,28 +7976,39 @@ export class FactorySupervisor {
         reservation &&
         (!backendLaunchAttempted || executionCleanupConfirmed)
       ) {
-        await releaseExecutionCapacity();
-        await this.#settleIssueAdmission(item, reservation, {
-          cleanupConfirmed: executionCleanupConfirmed || !backendLaunchAttempted,
-          definitiveNonExecution: !backendLaunchAttempted && !recovered,
-          modelUsageExpected:
-            !recovered?.adoptedSource && (selected?.capabilities.reportsModelUsage ?? false),
-          ...(retainedUnknownModelInvocationId ? { retainedUnknownModelInvocationId } : {}),
-          ...(recovered?.adoptedSource
-            ? {
-                artifactConsumer: {
-                  sourceRunId: recovered.adoptedSource.reservation.runId,
-                  sourceReservationOid: recovered.adoptedSource.reservation.oid,
-                  sourceAttempt: recovered.adoptedSource.reservation.attempt,
-                  artifactDigest: recovered.adoptedSource.artifactDigest,
-                },
-              }
-            : {}),
-        });
+        try {
+          await releaseExecutionCapacity();
+          await this.#settleIssueAdmission(item, reservation, {
+            cleanupConfirmed: executionCleanupConfirmed || !backendLaunchAttempted,
+            definitiveNonExecution: !backendLaunchAttempted && !recovered,
+            modelUsageExpected:
+              !recovered?.adoptedSource && (selected?.capabilities.reportsModelUsage ?? false),
+            ...(retainedUnknownModelInvocationId ? { retainedUnknownModelInvocationId } : {}),
+            ...(recovered?.adoptedSource
+              ? {
+                  artifactConsumer: {
+                    sourceRunId: recovered.adoptedSource.reservation.runId,
+                    sourceReservationOid: recovered.adoptedSource.reservation.oid,
+                    sourceAttempt: recovered.adoptedSource.reservation.attempt,
+                    artifactDigest: recovered.adoptedSource.artifactDigest,
+                  },
+                }
+              : {}),
+          });
+        } catch (error) {
+          finalizationError ??= error;
+        }
       }
       if (finalizationError) {
         // An orderly hold is not permission to suppress a later cleanup failure
         // through the outer signal-aborted shutdown branch.
+        if (providerQuotaFailure && !terminalizationVeto(finalizationError))
+          // biome-ignore lint/correctness/noUnsafeFinally: preserve the paid refusal while attaching a later cleanup/settlement failure
+          throw preserveProviderQuotaError(
+            providerQuotaFailure,
+            finalizationError,
+            "worker provider refusal and final admission settlement both failed",
+          );
         // biome-ignore lint/correctness/noUnsafeFinally: uncertain cleanup must override success so Factory cannot launch a duplicate paid or local worker
         throw safeHoldShutdown
           ? new SafeArtifactCheckpointHeldError(finalizationError)

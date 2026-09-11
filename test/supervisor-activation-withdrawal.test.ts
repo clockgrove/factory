@@ -15,6 +15,8 @@ import { RecoveryPlanManager } from "../src/recovery/plan.js";
 import { RecoveryClaimManager } from "../src/recovery/claims.js";
 import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
 import { CompiledGraphManager } from "../src/control/graphs.js";
+import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
+import { preserveProviderQuotaError, ProviderQuotaError } from "../src/providers/quota.js";
 
 const fixtures: Awaited<ReturnType<typeof providerSupervisorFixture>>[] = [];
 afterEach(async () => {
@@ -735,6 +737,67 @@ describe("Supervisor activation withdrawal races", () => {
     expect(f.review).not.toHaveBeenCalled();
     expect(f.activity).toEqual([]);
     expect(f.events().some((event) => event.event === "GraphCompiled")).toBe(false);
+  });
+
+  it("does not generic-terminalize an admitted compiler refusal while every gate receipt fails", async () => {
+    const f = await fixture(true);
+    Object.assign(f.management, { supportsCompilerAdmission: true });
+    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
+    const adapterCheckpointFailure = new Error("fixture adapter checkpoint failed");
+    const transactionCheckpointFailure = new Error("fixture transaction checkpoint failed");
+    f.compile.mockImplementation(async (context, _checkpoint, beforeModelInvocation) => {
+      const admission = await beforeModelInvocation?.();
+      if (!admission || typeof admission === "number")
+        throw new Error("missing compiler admission");
+      const refusal = new ProviderQuotaError(gate, {
+        invocationId: admission.modelInvocationId,
+        usage: { inputTokens: 5, outputTokens: 3 },
+      });
+      try {
+        await admission.checkpointProviderRefusal(refusal);
+      } catch (cause) {
+        throw preserveProviderQuotaError(
+          refusal,
+          cause,
+          "fixture adapter provider-refusal checkpoint failed",
+        );
+      }
+      throw new Error(`unexpected durable checkpoint for ${context.baseSha}`);
+    });
+    const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation();
+    if (!write) throw new Error("fixture receipt transport missing");
+    let checkpointAttempts = 0;
+    vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+      async (node, body) => {
+        if (
+          decodeEventComments(body).some(
+            (event) => event.kind === "provider" && event.event === "ProviderQuotaBlocked",
+          )
+        ) {
+          checkpointAttempts++;
+          throw checkpointAttempts === 1 ? adapterCheckpointFailure : transactionCheckpointFailure;
+        }
+        await write(node, body);
+      },
+    );
+
+    const observed = await f.run().catch((error) => error);
+    expect(observed).toBeInstanceOf(ProviderQuotaError);
+    expect(observed).toMatchObject({
+      gate,
+      invocationId: `compile-${f.baseSha}`,
+      usage: { inputTokens: 5, outputTokens: 3 },
+    });
+    expect((observed as ProviderQuotaError).cause).toBeInstanceOf(AggregateError);
+    expect(((observed as ProviderQuotaError).cause as AggregateError).errors).toEqual([
+      adapterCheckpointFailure,
+      transactionCheckpointFailure,
+    ]);
+    expect(checkpointAttempts).toBe(2);
+    expect(f.compile).toHaveBeenCalledOnce();
+    expect(f.events().filter(isModelInvocationMarker)).toHaveLength(1);
+    expect(f.events().filter((event) => event.kind === "provider")).toEqual([]);
+    expect(f.events().some((event) => event.event === "FactoryRunEscalated")).toBe(false);
   });
 
   it("expires ordinary compilation before admission without writing a dispatch marker", async () => {

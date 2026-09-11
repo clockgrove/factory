@@ -32,6 +32,13 @@ const modelBudgets = (f: Fixture): BudgetEvent[] =>
       (event): event is BudgetEvent => event.kind === "budget" && event.unit === "model_tokens",
     );
 
+function errorChain(error: unknown): unknown[] {
+  if (error instanceof AggregateError) return error.errors.flatMap(errorChain);
+  if (error instanceof Error && error.cause !== undefined)
+    return [error, ...errorChain(error.cause)];
+  return [error];
+}
+
 describe("Supervisor model dispatch journal", () => {
   it("durably stops after one post-dispatch provider quota refusal with unknown usage", async () => {
     const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
@@ -135,6 +142,9 @@ describe("Supervisor model dispatch journal", () => {
     const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
     const adapterCheckpointFailure = new Error("fixture adapter checkpoint failed");
     const transactionCheckpointFailure = new Error("fixture Supervisor checkpoint retry failed");
+    const admissionSettlementFailure = new Error(
+      "fixture admission budget or model usage remains unknown",
+    );
     const f = await providerSupervisorFixture("daytona-burst", {
       localOnly: true,
       dependencyChain: true,
@@ -152,21 +162,50 @@ describe("Supervisor model dispatch journal", () => {
     });
     const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation();
     if (!write) throw new Error("fixture receipt transport missing");
+    let providerCheckpointFailed = false;
     vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
       async (node, body) => {
         if (
           decodeEventComments(body).some(
             (event) => event.kind === "provider" && event.event === "ProviderQuotaBlocked",
           )
-        )
+        ) {
+          providerCheckpointFailed = true;
           throw transactionCheckpointFailure;
+        }
         await write(node, body);
       },
     );
+    const readAdmission = IssueAdmissionLedger.prototype.read;
+    const settle = vi
+      .spyOn(IssueAdmissionLedger.prototype, "read")
+      .mockImplementation(async function (this: IssueAdmissionLedger, workItem) {
+        if (
+          providerCheckpointFailed &&
+          f.events().some((event) => event.kind === "attempt" && event.event === "AttemptFailed")
+        )
+          throw admissionSettlementFailure;
+        return readAdmission.call(this, workItem);
+      });
     try {
-      await f.run().catch((error) => error);
+      const observed = await f.run().catch((error) => error);
+      expect(observed).toBeInstanceOf(ProviderQuotaError);
+      expect(observed).toMatchObject({
+        gate,
+        invocationId: "worker-8-1",
+        usage: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 },
+      });
+      expect(errorChain(observed)).toEqual(
+        expect.arrayContaining([
+          adapterCheckpointFailure,
+          transactionCheckpointFailure,
+          admissionSettlementFailure,
+        ]),
+      );
+      expect(settle).toHaveBeenCalledWith(8);
       expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
       expect(providerQuotaGates(f.events(), f.runId)).toHaveLength(0);
+      expect(f.events().some((event) => event.event === "FactoryRunEscalated")).toBe(false);
       expect(
         f
           .events()

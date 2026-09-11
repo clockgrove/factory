@@ -611,9 +611,36 @@ describe("bounded status, explain, and replay output", () => {
     current.factoryEvents!.push(
       event({
         kind: "run",
-        event: "FactoryRunCancelled",
+        event: "FactoryRunCancellationRequested",
         sequence: 6,
         at: "2026-09-04T12:00:31.000Z",
+        requestedBy: "private-operator-name",
+        requestId: "cancel-provider-gated-run",
+        reason: "operator requested cancellation",
+      }),
+    );
+
+    const pending = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
+    expect(pending.run).toMatchObject({ state: "provider-gated" });
+    expect(pending.operatorAction).toMatchObject({
+      required: false,
+      monitoring: "continue",
+      code: "run-draining",
+      evidence: { cancellationRequestId: "cancel-provider-gated-run" },
+    });
+    expect(JSON.stringify(pending.operatorAction)).not.toContain("Restore quota");
+    expect(
+      buildExplanationReport({ repository: "clockgrove/factory", snapshot: current }).explanations,
+    ).not.toContainEqual(
+      expect.objectContaining({ code: EXPLANATION_CODES.providerQuotaExhausted }),
+    );
+
+    current.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "FactoryRunCancelled",
+        sequence: 7,
+        at: "2026-09-04T12:00:32.000Z",
         reason: "operator requested cancellation",
       }),
     );

@@ -195,6 +195,18 @@ describe("uv structural authority", () => {
     });
   });
 
+  it("normalizes dotted distribution names consistently with uv locks", () => {
+    const files = {
+      ...authorityInput().files,
+      "pyproject.toml": rootPyproject().replace("anyio==4.11.0", "zope.interface==7.0"),
+      "uv.lock": lockfile().replace(
+        wheelPackage("anyio", "4.11.0"),
+        wheelPackage("zope-interface", "7.0"),
+      ),
+    };
+    expect(() => inspectUvAuthority(authorityInput({ files }))).not.toThrow();
+  });
+
   it("requires an exact declared workspace member and inspects its pyproject", () => {
     const command = parseUvPytestCommand(
       "uv run --project packages/api --locked --no-sync python -m pytest",

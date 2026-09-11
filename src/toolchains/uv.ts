@@ -288,6 +288,10 @@ function section(document: TomlDocument, name: string): Map<string, string> {
   return document.sections.get(name) ?? new Map();
 }
 
+function normalizePythonPackageName(value: string): string {
+  return value.toLowerCase().replace(/[._-]+/g, "-");
+}
+
 function exactRequirement(requirement: string, label: string): { name: string; version: string } {
   if (/[@/\\]|\b(?:git|https?|file|path|editable)\b/i.test(requirement))
     throw new Error(`${label} contains a URL, VCS, path, or editable dependency`);
@@ -299,7 +303,7 @@ function exactRequirement(requirement: string, label: string): { name: string; v
     throw new Error(`${label} must pin every dependency with ==`);
   if (match[3] && !SAFE_MARKER.test(match[3]))
     throw new Error(`${label} contains an unsupported environment marker`);
-  return { name: match[1]!.toLowerCase().replaceAll("_", "-"), version: match[2]! };
+  return { name: normalizePythonPackageName(match[1]!), version: match[2]! };
 }
 
 function inspectProject(
@@ -526,7 +530,7 @@ function inspectLock(
       throw new Error(`${label} contains a build, VCS, path, editable, or sdist surface`);
     const nameMatch = /^\s*name\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*$/m.exec(block);
     const versionMatch = /^\s*version\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*$/m.exec(block);
-    const name = tomlString(nameMatch?.[1], `${label} name`).toLowerCase().replaceAll("_", "-");
+    const name = normalizePythonPackageName(tomlString(nameMatch?.[1], `${label} name`));
     const version = tomlString(versionMatch?.[1], `${label} version`);
     const source = parseInlineSource(block, label);
     if (source.kind === "registry") {

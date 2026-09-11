@@ -127,7 +127,7 @@ describe("managed adapter clean validation", () => {
       assertBunOrUvValidation({ path: root }, artifact, packet, packet.validationCommands),
     ).resolves.toMatchObject({ manager: "bun", expectedVersion: "1.3.10" });
     await expect(
-      assertBunValidation(
+      assertBunOrUvValidation(
         { path: root },
         { ...artifact, changedPaths: ["package.json"] },
         packet,

@@ -918,7 +918,9 @@ async function resolveUvIntegratedBase(
   const { createLocalWorktree, cleanupLocalWorktree } = await import(
     "../runtime/local-worktree.js"
   );
-  const inspect = async (commitSha: string): Promise<string> => {
+  const inspect = async (
+    commitSha: string,
+  ): Promise<{ authorityDigest: string; authorityPaths: string[] }> => {
     const worktree = await createLocalWorktree(input.repository, commitSha);
     try {
       const commands = input.requirements.map((requirement) => {
@@ -941,22 +943,30 @@ async function resolveUvIntegratedBase(
           pythonVersion: python.version,
         });
       });
-      return await authorityDigestForPaths(
-        worktree.path,
-        inspections.flatMap(({ authorityPaths }) => authorityPaths),
-      );
+      const authorityPaths = [
+        ...new Set(inspections.flatMap(({ authorityPaths }) => authorityPaths)),
+      ].sort();
+      if (authorityPaths.some((path) => !input.provider.scope.includes(path)))
+        throw new Error("uv authority includes a path outside its provider scope");
+      return {
+        authorityDigest: await authorityDigestForPaths(worktree.path, authorityPaths),
+        authorityPaths,
+      };
     } finally {
       await cleanupLocalWorktree(worktree);
     }
   };
-  const providerAuthorityDigest = await inspect(input.provider.integration.commitSha);
-  const currentAuthorityDigest =
+  const providerAuthority = await inspect(input.provider.integration.commitSha);
+  const currentAuthority =
     input.provider.integration.commitSha === input.base.oid
-      ? providerAuthorityDigest
+      ? providerAuthority
       : await inspect(input.base.oid);
-  if (providerAuthorityDigest !== currentAuthorityDigest)
+  if (
+    providerAuthority.authorityDigest !== currentAuthority.authorityDigest ||
+    canonical(providerAuthority.authorityPaths) !== canonical(currentAuthority.authorityPaths)
+  )
     throw new Error("uv authority bytes changed after the declared provider generation");
-  const authorityDigest = providerAuthorityDigest;
+  const authorityDigest = providerAuthority.authorityDigest;
   const preparationDigest = createHash("sha256")
     .update(
       canonical({
@@ -974,6 +984,7 @@ async function resolveUvIntegratedBase(
       runtime.digest,
       authorityDigest,
       preparationDigest,
+      providerAuthority.authorityPaths,
     ),
   );
 }

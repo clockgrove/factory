@@ -222,6 +222,24 @@ describe("toolchain authority adapters", () => {
       networkDestinations: ["pypi.org", "files.pythonhosted.org"],
       expected: /uv authority bytes changed/,
     },
+    {
+      tool: "uv" as const,
+      adapterId: "python-uv",
+      command: "uv run --project packages/api --locked --no-sync python -m pytest",
+      authorityPaths: ["pyproject.toml", "uv.lock", ".python-version"],
+      files: {
+        "pyproject.toml": `[project]\nname = "root"\n\n[tool.uv]\nrequired-version = "==0.12.12"\npackage = false\n\n[tool.uv.workspace]\nmembers = ["packages/api", "packages/shared"]\n`,
+        "packages/api/pyproject.toml": `[project]\nname = "api"\nrequires-python = "==3.14.7"\ndependencies = []\n\n[tool.uv]\npackage = false\n\n[dependency-groups]\ndev = ["pytest==8.4.2"]\n`,
+        "packages/shared/pyproject.toml": `[project]\nname = "shared"\nrequires-python = "==3.14.7"\ndependencies = []\n\n[tool.uv]\npackage = false\n`,
+        "uv.lock": `version = 1\nrequires-python = "==3.14.7"\n\n[[package]]\nname = "root"\nversion = "1.0.0"\nsource = { virtual = "." }\n\n[[package]]\nname = "api"\nversion = "1.0.0"\nsource = { virtual = "packages/api" }\n\n[[package]]\nname = "shared"\nversion = "1.0.0"\nsource = { virtual = "packages/shared" }\n\n[[package]]\nname = "pytest"\nversion = "8.4.2"\nsource = { registry = "https://pypi.org/simple" }\nwheels = [{ url = "https://files.pythonhosted.org/packages/pytest.whl", hash = "sha256:${"a".repeat(64)}" }]\n`,
+        ".python-version": "3.14.7\n",
+      },
+      changedPath: "pyproject.toml",
+      changedContent: `[project]\nname = "root"\ndescription = "authority drift"\n\n[tool.uv]\nrequired-version = "==0.12.12"\npackage = false\n\n[tool.uv.workspace]\nmembers = ["packages/api", "packages/shared"]\n`,
+      tools: ["uv", "python"],
+      networkDestinations: ["pypi.org", "files.pythonhosted.org"],
+      expected: /uv authority includes a path outside its provider scope/,
+    },
   ])("rejects $tool authority changed after its provider generation", async (fixture) => {
     const receipt = await installManagedFixture(fixture.tool);
     const repository = await mkdtemp(join(tmpdir(), `factory-${fixture.tool}-provider-proof-`));

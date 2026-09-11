@@ -250,6 +250,8 @@ import { CompilerDraftManager, loadCompilerDrafts } from "./control/compiler-dra
 import { compilerEvalDigest } from "./evaluation/compiler-eval.js";
 import { collectCompilationEvidence } from "./compiler/runtime-evidence.js";
 import { ManagementOutputError } from "./management/backend.js";
+import { ProviderQuotaError } from "./providers/quota.js";
+import { latestProviderQuotaGate } from "./control/provider-gates.js";
 import { reportedModelUsage, type ReportedModelUsage } from "./protocol/model-usage.js";
 import type {
   CompilationCheckpoint,
@@ -627,15 +629,19 @@ export function assertManagementInvocationNotFailed(
   if (
     events.some(
       (event) =>
-        event.kind === "budget" &&
         event.runId === runId &&
-        event.event === "BudgetReconciled" &&
-        event.phase === "management" &&
-        event.unit === "model_tokens" &&
-        event.usageId === `failed-${invocationId}`,
+        ((event.kind === "budget" &&
+          event.event === "BudgetReconciled" &&
+          event.phase === "management" &&
+          event.unit === "model_tokens" &&
+          event.usageId === `failed-${invocationId}`) ||
+          (event.kind === "provider" &&
+            event.event === "ProviderQuotaBlocked" &&
+            event.phase === "management" &&
+            event.modelInvocationId === invocationId)),
     )
   )
-    throw new Error("management invocation already failed with recorded usage; refusing replay");
+    throw new Error("management invocation already failed or is provider-gated; refusing replay");
 }
 
 /** Report-only runs finish their evaluation purpose without committing an execution graph. */
@@ -659,6 +665,7 @@ export async function runDurableCompilationTransaction(args: {
   recover: () => Promise<CompiledGraphRecord | null>;
   recordUsage: (record: CompiledGraphRecord) => Promise<void>;
   recordFailureUsage?: (usage: ManagementUsage) => Promise<void>;
+  recordProviderGate?: (error: ProviderQuotaError) => Promise<void>;
   preflight: (objective: CompiledObjective) => Promise<void>;
   fault?: (point: CompilationFaultPoint) => Promise<void> | void;
 }): Promise<CompiledGraphRecord> {
@@ -678,6 +685,10 @@ export async function runDurableCompilationTransaction(args: {
       record = await args.recover();
       if (!record) {
         if (error instanceof ManagementOutputError) await args.recordFailureUsage?.(error.usage);
+        if (error instanceof ProviderQuotaError) {
+          if (error.usage) await args.recordFailureUsage?.(error.usage);
+          await args.recordProviderGate?.(error);
+        }
         throw error;
       }
     }
@@ -4462,10 +4473,12 @@ export class FactorySupervisor {
                   ...(compilationModel ? { modelSelection: compilationModel } : {}),
                 };
                 if (!this.#policy.compilerEvaluation) {
-                  const admitCompilation = () =>
-                    this.#externalAdmission(() =>
+                  const admitCompilation = async () => {
+                    await this.#externalAdmission(() =>
                       this.#admitModelInvocation(compilationInvocationId, snapshot.id),
                     );
+                    return { modelInvocationId: compilationInvocationId };
+                  };
                   if (this.#management.supportsCompilerAdmission) {
                     return await this.#management.compile(context, checkpoint, admitCompilation);
                   }
@@ -4606,6 +4619,8 @@ export class FactorySupervisor {
           recover: () => graphManager.load(snapshot.number, this.#run.runId),
           recordFailureUsage: (usage) =>
             this.#recordManagementUsage(compilationInvocationId, usage, snapshot.id),
+          recordProviderGate: (error) =>
+            this.#recordProviderQuotaGate(error, snapshot.id, "management", this.#management.id),
           recordUsage: async (record) => {
             if (!record.compilation) return;
             const amount = record.compilation.inputTokens + record.compilation.outputTokens;
@@ -4999,6 +5014,16 @@ export class FactorySupervisor {
           return await terminalAfterDrain(
             "FactoryRunCancelled",
             "operator requested cancellation through GitHub",
+          );
+        }
+        const durableProviderGate = latestProviderQuotaGate(
+          snapshotEvents(snapshot),
+          this.#run.runId,
+        );
+        if (durableProviderGate?.kind === "provider") {
+          return await terminalAfterDrain(
+            "FactoryRunEscalated",
+            `${durableProviderGate.providerMessage}; restore quota at ${durableProviderGate.actionUrl} before explicit recovery`,
           );
         }
         if (Date.now() >= deadline) {
@@ -6641,7 +6666,7 @@ export class FactorySupervisor {
                 });
                 this.#budgetEvents.push(event);
               });
-            } else if (selected.capabilities.reportsModelUsage) {
+            } else if (selected.capabilities.reportsModelUsage && !observation.providerQuotaGate) {
               this.#modelInvocations.retire(
                 modelInvocationKey({
                   objective: reservation!.objective,
@@ -6659,6 +6684,41 @@ export class FactorySupervisor {
               throw new Error(
                 `backend ${selected.capabilities.id} omitted terminal model-token usage; consumption remains unknown`,
               );
+            }
+            if (observation.providerQuotaGate) {
+              if (observedTokens === null && selected.capabilities.reportsModelUsage)
+                this.#modelInvocations.retire(
+                  modelInvocationKey({
+                    objective: reservation!.objective,
+                    runId: reservation!.runId,
+                    workItem: item.number,
+                    attempt: reservation!.attempt,
+                    phase: "execution",
+                    modelInvocationId: `worker-${item.number}-${reservation!.attempt}`,
+                  }),
+                );
+              const quotaError = new ProviderQuotaError(observation.providerQuotaGate, {
+                invocationId: `worker-${item.number}-${reservation!.attempt}`,
+                ...(observedTokens !== null
+                  ? {
+                      usage: {
+                        inputTokens: observation.usage!.inputTokens!,
+                        outputTokens: observation.usage!.outputTokens!,
+                        ...(typeof observation.usage?.cachedInputTokens === "number"
+                          ? { cachedInputTokens: observation.usage.cachedInputTokens }
+                          : {}),
+                      },
+                    }
+                  : {}),
+              });
+              await this.#recordProviderQuotaGate(
+                quotaError,
+                item.id,
+                "execution",
+                selected.capabilities.id,
+                reservation!,
+              );
+              throw quotaError;
             }
             if (observation.state !== "succeeded") {
               throw new Error(observation.reason ?? `worker ${observation.state}`);
@@ -7084,6 +7144,7 @@ export class FactorySupervisor {
               ...(reviewModel ? { modelSelection: reviewModel } : {}),
             },
             checkpoint,
+            `review-${reviewIdentityDigest(reviewIdentity)}`,
             () =>
               this.#admitModelInvocation(
                 `review-${reviewIdentityDigest(reviewIdentity)}`,
@@ -7105,6 +7166,14 @@ export class FactorySupervisor {
             `review-${reviewIdentityDigest(reviewIdentity)}`,
             usage,
             item.id,
+            reservation!,
+          ),
+        recordProviderGate: (error) =>
+          this.#recordProviderQuotaGate(
+            error,
+            item.id,
+            "management",
+            this.#management.id,
             reservation!,
           ),
         recordUsage: (record) => this.#recordReviewUsage(record, item, reservation!),
@@ -7562,6 +7631,7 @@ export class FactorySupervisor {
       }
       admissionPipelineClosed = true;
       if (cancellation) throw new RunCancellationRequestedError(reason);
+      if (error instanceof ProviderQuotaError) throw error;
       this.#notify(
         deferredBeforeDispatch
           ? `Work Item #${item.number} returned to queue before dispatch: ${reason}`
@@ -8534,6 +8604,7 @@ export class FactorySupervisor {
   #invokeSemanticReview(
     context: ReviewContext,
     checkpoint: ReviewCheckpoint,
+    invocationId: string,
     admit: () => Promise<void>,
   ): Promise<ReviewResult> {
     let dispatched = false;
@@ -8544,7 +8615,12 @@ export class FactorySupervisor {
         dispatched = true;
         await admit();
         admitted = true;
-        return invoke();
+        try {
+          return await invoke();
+        } catch (error) {
+          if (error instanceof ProviderQuotaError) error.bindInvocation(invocationId);
+          throw error;
+        }
       });
     const admittedCheckpoint: ReviewCheckpoint = (result) => {
       if (!admitted) throw new Error("semantic review checkpoint precedes dispatch admission");
@@ -8657,6 +8733,7 @@ export class FactorySupervisor {
             ...(reviewModel ? { modelSelection: reviewModel } : {}),
           },
           reviewCheckpoint,
+          invocationId,
           () => this.#admitModelInvocation(invocationId, item.id, reservation),
         );
     }
@@ -8673,6 +8750,14 @@ export class FactorySupervisor {
           `review-${reviewIdentityDigest(reviewIdentity)}`,
           usage,
           item.id,
+          reservation,
+        ),
+      recordProviderGate: (error) =>
+        this.#recordProviderQuotaGate(
+          error,
+          item.id,
+          "management",
+          this.#management.id,
           reservation,
         ),
       recordUsage: (record) => this.#recordReviewUsage(record, item, reservation),
@@ -8872,6 +8957,71 @@ export class FactorySupervisor {
       this.#sequences.observe(snapshotEvents(snapshot));
       this.#budgetEvents.push(...recovered);
     }
+  }
+
+  async #recordProviderQuotaGate(
+    error: ProviderQuotaError,
+    issueNodeId: string,
+    phase: "management" | "execution",
+    backend: string,
+    reservation?: AttemptReservation,
+    workItem?: number,
+  ): Promise<void> {
+    const invocationId = error.invocationId;
+    if (!invocationId)
+      throw new Error("provider quota failure lacks its admitted invocation identity");
+    const marker = this.#budgetEvents.find(
+      (event) =>
+        isModelInvocationMarker(event) &&
+        event.runId === this.#run.runId &&
+        event.modelInvocationId === invocationId &&
+        event.phase === phase &&
+        event.workItem === (reservation?.workItem ?? workItem) &&
+        event.attempt === reservation?.attempt,
+    );
+    if (!marker)
+      throw new Error("provider quota failure is not linked to a durable dispatch marker");
+    const snapshot = await this.#reader.readObjective(this.#run.objective);
+    this.#fenceSnapshot(snapshot);
+    const matches = snapshotEvents(snapshot).filter(
+      (event) =>
+        event.kind === "provider" &&
+        event.event === "ProviderQuotaBlocked" &&
+        event.runId === this.#run.runId &&
+        event.modelInvocationId === invocationId,
+    );
+    if (matches.length > 1) throw new Error("provider quota evidence is duplicated");
+    if (matches.length === 1) {
+      const existing = matches[0]!;
+      if (
+        existing.kind !== "provider" ||
+        existing.phase !== phase ||
+        existing.backend !== backend ||
+        existing.workItem !== (reservation?.workItem ?? workItem) ||
+        existing.attempt !== reservation?.attempt ||
+        existing.providerMessage !== error.gate.message ||
+        existing.actionUrl !== error.gate.actionUrl ||
+        existing.accounting !== (error.usage ? "exact" : "unknown")
+      )
+        throw new Error("provider quota evidence conflicts with its original observation");
+      return;
+    }
+    this.#sequences.observe(snapshotEvents(snapshot));
+    await this.#lease.use((lease) =>
+      this.#recorder.providerQuotaBlocked({
+        lease,
+        issueNodeId,
+        sequence: this.#sequences.take(),
+        phase,
+        backend,
+        modelInvocationId: invocationId,
+        providerMessage: error.gate.message,
+        actionUrl: error.gate.actionUrl,
+        accounting: error.usage ? "exact" : "unknown",
+        ...(reservation ? { reservation } : {}),
+        ...(!reservation && workItem !== undefined ? { workItem } : {}),
+      }),
+    );
   }
 
   async #recordReviewUsage(
@@ -11206,6 +11356,7 @@ export class FactorySupervisor {
               ...(reviewModel ? { modelSelection: reviewModel } : {}),
             },
             checkpoint,
+            `rebase-review-${reviewIdentityDigest(reviewIdentity)}`,
             () =>
               this.#admitModelInvocation(
                 `rebase-review-${reviewIdentityDigest(reviewIdentity)}`,
@@ -11249,6 +11400,14 @@ export class FactorySupervisor {
             `rebase-review-${reviewIdentityDigest(reviewIdentity)}`,
             usage,
             item.id,
+            member.reservation,
+          ),
+        recordProviderGate: (error) =>
+          this.#recordProviderQuotaGate(
+            error,
+            item.id,
+            "management",
+            this.#management.id,
             member.reservation,
           ),
         recordOutcome: (record) =>
@@ -12592,6 +12751,7 @@ export class FactorySupervisor {
             ...(reviewModel ? { modelSelection: reviewModel } : {}),
           },
           checkpoint,
+          invocationId,
           () => this.#admitModelInvocation(invocationId, item.id, member.reservation),
         );
     }
@@ -12606,6 +12766,14 @@ export class FactorySupervisor {
       recordUsage: (review) => this.#recordReviewUsage(review, item, member.reservation),
       recordFailureUsage: (usage) =>
         this.#recordManagementUsage(invocationId, usage, item.id, member.reservation),
+      recordProviderGate: (error) =>
+        this.#recordProviderQuotaGate(
+          error,
+          item.id,
+          "management",
+          this.#management.id,
+          member.reservation,
+        ),
       recordOutcome: async (review) => {
         if (!review.review.accepted || review.review.unmetCriteria.length > 0)
           throw new Error(
@@ -14329,6 +14497,7 @@ export class FactorySupervisor {
               ...(model ? { modelSelection: model } : {}),
             },
             checkpoint,
+            invocationId,
             () => this.#admitModelInvocation(invocationId, item.id, undefined, item.number),
           );
       }
@@ -14353,6 +14522,15 @@ export class FactorySupervisor {
             `failed-${invocationId}`,
             usage.inputTokens + usage.outputTokens,
             "model_tokens",
+          ),
+        recordProviderGate: (error) =>
+          this.#recordProviderQuotaGate(
+            error,
+            item.id,
+            "management",
+            this.#management.id,
+            undefined,
+            item.number,
           ),
         recordOutcome: async (review) => {
           if (!review.review.accepted || review.review.unmetCriteria.length > 0)

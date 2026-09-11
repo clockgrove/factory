@@ -4,6 +4,7 @@ import { workerPacketDigest } from "../protocol/worker-packet.js";
 import type { NormalizedArtifact } from "./artifacts.js";
 import { LocalScopeBatchSchema, type LocalScopeBatch } from "../protocol/local-scope.js";
 import type { AppServerSessionJournal } from "./app-server-session.js";
+import type { ProviderQuotaGate } from "../providers/quota.js";
 
 export type IsolationKind = "none" | "process" | "container" | "microvm" | "managed";
 
@@ -132,6 +133,8 @@ export interface BackendObservation {
   reason?: string;
   progress?: string;
   usage?: ExecutionUsage;
+  /** Narrow, canonical account-level refusal; arbitrary provider diagnostics remain in reason. */
+  providerQuotaGate?: ProviderQuotaGate;
 }
 
 export interface IsolatedValidationContext extends AttemptContext {

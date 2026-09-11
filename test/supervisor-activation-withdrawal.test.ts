@@ -738,6 +738,7 @@ describe("Supervisor activation withdrawal races", () => {
     });
     expect(f.compile).toHaveBeenCalledOnce();
     expect(f.events().filter(isModelInvocationMarker)).toEqual([]);
+    expect(f.events().filter((event) => event.kind === "provider")).toEqual([]);
     expect(unresolvedModelInvocations(f.events())).toEqual([]);
     expect(f.events().some((event) => event.event === "GraphCompiled")).toBe(false);
     expect(f.review).not.toHaveBeenCalled();

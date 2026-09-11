@@ -415,6 +415,82 @@ describe("bounded status, explain, and replay output", () => {
     });
   });
 
+  it("reports a durable provider quota refusal as a stopped human-action gate", () => {
+    const current = snapshot();
+    current.workItems[0]!.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        sequence: 4,
+        at: "2026-09-04T12:00:29.000Z",
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: "invocation-worker-10-1",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        directorEpoch: 4,
+        policyDigest: policyDigest(policy),
+      }),
+      event({
+        kind: "provider",
+        event: "ProviderQuotaBlocked",
+        sequence: 5,
+        at: "2026-09-04T12:00:30.000Z",
+        reasonCode: "provider-quota-exhausted",
+        provider: "github-copilot",
+        phase: "execution",
+        backend: "codex-cli/local-worktree",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        providerMessage: "GitHub Copilot monthly quota exceeded",
+        actionUrl: "https://github.com/settings/copilot/features",
+        accounting: "unknown",
+      }),
+    );
+    current.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "FactoryRunEscalated",
+        sequence: 6,
+        at: "2026-09-04T12:00:31.000Z",
+        reason: "GitHub Copilot monthly quota exceeded",
+      }),
+    );
+
+    const status = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
+    expect(status.operatorAction).toMatchObject({
+      required: true,
+      monitoring: "stop",
+      code: "provider-quota",
+      evidence: {
+        reasonCode: "provider-quota-exhausted",
+        phase: "execution",
+        backend: "codex-cli/local-worktree",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        accounting: "unknown",
+        factoryWorkActive: false,
+      },
+    });
+
+    const explanation = buildExplanationReport({
+      repository: "clockgrove/factory",
+      snapshot: current,
+    });
+    expect(explanation.explanations[0]).toMatchObject({
+      code: EXPLANATION_CODES.providerQuotaExhausted,
+      category: "provider",
+      disposition: "blocked",
+      gate: "provider",
+      evidence: { factoryWorkActive: false, monitoring: "stop" },
+    });
+    expect(explanation.explanations[0]?.requiredAction).toContain("factory_recovery_plan");
+  });
+
   it("binds status and explanation to a terminal recovery successor instead of an older escalation", () => {
     const current = snapshot();
     const successorRunId =

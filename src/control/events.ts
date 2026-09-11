@@ -487,4 +487,57 @@ export class LifecycleRecorder {
     );
     return event;
   }
+
+  async providerQuotaBlocked(args: {
+    lease: LeaseState;
+    issueNodeId: string;
+    sequence: number;
+    phase: "management" | "execution";
+    backend: string;
+    modelInvocationId: string;
+    providerMessage:
+      | "GitHub Copilot additional usage limit reached"
+      | "GitHub Copilot monthly quota exceeded";
+    actionUrl: "https://github.com/settings/copilot/features";
+    accounting: "exact" | "unknown";
+    reservation?: AttemptReservation;
+    workItem?: number;
+  }): Promise<FactoryEvent> {
+    await this.leases.assertMutationAuthorized(args.lease);
+    if (args.reservation) assertReservationLease(args.reservation, args.lease);
+    if (args.phase === "execution" && !args.reservation)
+      throw new Error("execution provider quota evidence requires its attempt reservation");
+    const now = await this.store.serverTime();
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "provider",
+      event: "ProviderQuotaBlocked",
+      ...writerAuthority(args.lease, args.sequence),
+      objective: args.lease.objective,
+      runId: args.lease.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      reasonCode: "provider-quota-exhausted",
+      provider: "github-copilot",
+      phase: args.phase,
+      backend: args.backend,
+      modelInvocationId: args.modelInvocationId,
+      ...(args.reservation
+        ? { workItem: args.reservation.workItem, attempt: args.reservation.attempt }
+        : args.workItem !== undefined
+          ? { workItem: args.workItem }
+          : {}),
+      providerMessage: args.providerMessage,
+      actionUrl: args.actionUrl,
+      accounting: args.accounting,
+    });
+    await this.store.addIssueComment(
+      args.issueNodeId,
+      encodeEventComment(
+        `Factory stopped at a non-retryable ${args.providerMessage}. Restore provider quota before explicitly resuming.`,
+        event,
+      ),
+    );
+    return event;
+  }
 }

@@ -212,6 +212,14 @@ does not reuse a stale lease or rely on service restarts to retry. Authenticatio
 failures remain errors. The controller honors GitHub's [rate-limit response headers](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit),
 not a contradictory later balance from another observation.
 
+Local Codex model-provider quota refusals are a separate plane from GitHub REST/GraphQL rate limits
+and Factory's own model-token allowance. After a durable model-dispatch marker, only captured narrow
+Copilot entitlement messages may produce an invocation-bound `ProviderQuotaBlocked` event. The event
+stores a canonical redacted reason and supported action URL; provider-reported usage is reconciled
+exactly when present and otherwise remains unknown. The run stops without retry, and status/explain
+tell the initiating operator to stop monitoring until quota is restored and an explicit recovery is
+requested. Pre-dispatch preparation failures and transient transport errors do not create this gate.
+
 Model quota is protected at retry boundaries as well. After an artifact has passed host scope,
 secret, clean-apply, and sensitive-path checks, the running Supervisor may retain it in a bounded
 32 MiB in-memory cache, with at most 512 MiB of separately leased file-backed payload content.

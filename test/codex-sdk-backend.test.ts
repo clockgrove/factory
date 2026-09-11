@@ -448,7 +448,10 @@ describe("Codex SDK local backend", () => {
     }
   });
 
-  it("fails when a valid final result is followed by turn.failed", async () => {
+  it.each([
+    "You've reached your additional usage limit for your plan",
+    "You have exceeded your monthly quota (Request ID: private-request)",
+  ])("classifies a captured quota turn.failed after a valid result: %s", async (message) => {
     const root = await mkdtemp(join(tmpdir(), "factory-sdk-failed-turn-"));
     const workspace = join(root, "workspace");
     const homes = join(root, "homes");
@@ -475,7 +478,7 @@ describe("Codex SDK local backend", () => {
                   }),
                 },
               };
-              yield { type: "turn.failed", error: { message: "provider turn failed" } };
+              yield { type: "turn.failed", error: { message } };
             }
             return { events: events() };
           },
@@ -492,7 +495,11 @@ describe("Codex SDK local backend", () => {
       }
       expect(observation).toMatchObject({
         state: "failed",
-        reason: "provider turn failed",
+        reason: message,
+        providerQuotaGate: {
+          reasonCode: "provider-quota-exhausted",
+          provider: "github-copilot",
+        },
       });
       await backend.cleanup(handle);
     } finally {

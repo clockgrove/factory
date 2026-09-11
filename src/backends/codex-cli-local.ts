@@ -49,6 +49,7 @@ import { restrictedCodexArgs } from "./codex-cli-policy.js";
 import { readLocalResourceHostIdentity } from "../recovery/local-resources.js";
 import { bootstrapPackageValidationCommand } from "../validation/plan.js";
 import { managedToolAvailable, withManagedToolchainPath } from "../toolchains/authority.js";
+import { providerQuotaFromStreamEvent, type ProviderQuotaGate } from "../providers/quota.js";
 
 export const CODEX_WORKER_OUTPUT_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -89,6 +90,7 @@ interface RunningAttempt {
   usage: unknown;
   progress: string | undefined;
   failure?: string;
+  providerQuotaGate?: ProviderQuotaGate;
   cancelled: boolean;
 }
 
@@ -221,11 +223,13 @@ export function parseCodexWorkerStream(stdout: string): {
   usage: unknown;
   progress?: string;
   failure?: string;
+  providerQuotaGate?: ProviderQuotaGate;
 } {
   let final: WorkerFinal | null = null;
   let usage: unknown;
   let progress: string | undefined;
   let failure: string | undefined;
+  let providerQuotaGate: ProviderQuotaGate | undefined;
   let completed = false;
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -234,6 +238,7 @@ export function parseCodexWorkerStream(stdout: string): {
         type?: string;
         usage?: unknown;
         message?: string;
+        error?: { message?: unknown };
         item?: { type?: string; text?: string };
       };
       if (event.type === "turn.completed") {
@@ -243,7 +248,9 @@ export function parseCodexWorkerStream(stdout: string): {
         continue;
       }
       if (event.type === "turn.failed" || event.type === "error") {
-        failure = "CLI worker reported a stream error";
+        const gate = providerQuotaFromStreamEvent(event);
+        if (gate) providerQuotaGate = gate;
+        failure = gate?.message ?? "CLI worker reported a stream error";
         continue;
       }
       if (event.type?.includes("progress"))
@@ -283,6 +290,7 @@ export function parseCodexWorkerStream(stdout: string): {
   return {
     final: failure ? null : final,
     usage,
+    ...(providerQuotaGate ? { providerQuotaGate } : {}),
     ...(progress ? { progress } : {}),
     ...(failure ? { failure } : {}),
   };
@@ -486,6 +494,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
         const details = parseCodexWorkerStream(result.stdout);
         running.final = details.final;
         if (details.failure) running.failure = details.failure;
+        if (details.providerQuotaGate) running.providerQuotaGate = details.providerQuotaGate;
         running.usage = details.usage;
         running.progress = details.progress;
       };
@@ -552,6 +561,9 @@ export class CodexCliLocalBackend implements ExecutionBackend {
               (running.result.timedOut ? "worker timed out" : "worker failed"),
           }
         : {}),
+      ...(state === "failed" && running.providerQuotaGate
+        ? { providerQuotaGate: running.providerQuotaGate }
+        : {}),
     };
   }
 
@@ -575,6 +587,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
     running.final = details.final;
     running.usage = details.usage;
     if (details.failure) running.failure = details.failure;
+    if (details.providerQuotaGate) running.providerQuotaGate = details.providerQuotaGate;
     const collected = await collectLocalArtifact(
       {
         root: join(running.context.workspace, ".."),

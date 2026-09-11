@@ -29,6 +29,7 @@ import { rankReadyWorkItems, type ObservedPrioritySource } from "../scheduling/p
 import { queuedReasonCode } from "../explanations/index.js";
 import type { GitHubMutationTelemetry } from "../platform.js";
 import type { ObjectiveAuthorityObservation } from "../control/authority.js";
+import { latestProviderQuotaGate } from "../control/provider-gates.js";
 
 export interface ReadWorkItemSnapshot {
   id?: string;
@@ -122,7 +123,14 @@ export interface FactoryStatusReport {
     | {
         availability: "observed";
         runId: string;
-        state: "active" | "paused" | "draining" | "completed" | "cancelled" | "escalated";
+        state:
+          | "active"
+          | "provider-gated"
+          | "paused"
+          | "draining"
+          | "completed"
+          | "cancelled"
+          | "escalated";
         policyDigest: string;
         startedAt: string;
         finishedAt?: string;
@@ -151,6 +159,7 @@ export interface FactoryStatusReport {
         monitoring: "stop";
         code:
           | "activation-rejected"
+          | "provider-quota"
           | "run-paused"
           | "run-escalated"
           | "recovery-successor-escalated";
@@ -390,6 +399,7 @@ export function buildStatusReport(input: {
   const rejected = activation ? activationRejection(events, activation) : undefined;
   const policy = policyFor(events);
   const runEvents = run?.events ?? [];
+  const providerGate = run ? latestProviderQuotaGate(runEvents, run.runId) : undefined;
   const effective = policy ? normalizeSchedulingPolicy(policy) : null;
   const commandState =
     run && !run.terminal
@@ -513,83 +523,105 @@ export function buildStatusReport(input: {
               cancellationRequestId: withdrawal.requestId,
             },
           }
-        : run?.terminal
-          ? run.terminal.event === "FactoryRunCompleted"
-            ? {
-                required: false,
-                monitoring: "stop",
-                code: "run-completed",
-                summary: "Factory completed the Objective; recurring monitoring should stop.",
-                evidence: { runId: run.runId, terminalAt: run.terminal.at },
-              }
-            : run.terminal.event === "FactoryRunCancelled"
+        : providerGate?.kind === "provider"
+          ? {
+              required: true,
+              monitoring: "stop",
+              code: "provider-quota",
+              summary: `No Factory work is active. ${providerGate.providerMessage}.`,
+              requiredAction:
+                "Restore the GitHub Copilot quota, then explicitly request recovery through factory_recovery_plan. Do not keep polling or retry this invocation.",
+              evidence: {
+                reasonCode: providerGate.reasonCode,
+                provider: providerGate.provider,
+                phase: providerGate.phase,
+                backend: providerGate.backend,
+                modelInvocationId: providerGate.modelInvocationId,
+                observedAt: providerGate.at,
+                accounting: providerGate.accounting,
+                actionUrl: providerGate.actionUrl,
+                ...(providerGate.workItem !== undefined ? { workItem: providerGate.workItem } : {}),
+                ...(providerGate.attempt !== undefined ? { attempt: providerGate.attempt } : {}),
+                factoryWorkActive: false,
+              },
+            }
+          : run?.terminal
+            ? run.terminal.event === "FactoryRunCompleted"
               ? {
                   required: false,
                   monitoring: "stop",
-                  code: "run-cancelled",
-                  summary: "No Factory work is active. The run was cancelled.",
+                  code: "run-completed",
+                  summary: "Factory completed the Objective; recurring monitoring should stop.",
                   evidence: { runId: run.runId, terminalAt: run.terminal.at },
                 }
-              : {
-                  required: true,
-                  monitoring: "stop",
-                  code: run.start.predecessorRunId
-                    ? "recovery-successor-escalated"
-                    : "run-escalated",
-                  summary: `No Factory work is active. ${run.terminal.reason ?? "The run ended in terminal escalation."}`,
-                  requiredAction: run.start.predecessorRunId
-                    ? "Resolve the recorded terminal reason, then use factory_recovery_plan before proposing another explicitly authorized successor. Do not keep polling this terminal run."
-                    : "Resolve the recorded terminal reason, then use factory_recovery_plan before proposing an explicitly authorized successor. Do not keep polling this terminal run.",
-                  evidence: {
-                    runId: run.runId,
-                    terminalAt: run.terminal.at,
-                    terminalSequence: run.terminal.sequence,
-                    ...(run.terminal.reason ? { reason: run.terminal.reason } : {}),
-                  },
-                }
-          : commandState?.admissionsPaused
-            ? admissionGateAcknowledged
-              ? {
-                  required: true,
-                  monitoring: "stop",
-                  code: "run-paused",
-                  summary: "No Factory work is active. The requested stop is acknowledged.",
-                  requiredAction:
-                    "Use factory_resume only after the user explicitly asks to resume; do not poll an acknowledged stopped run.",
-                  evidence: {
-                    runId: run!.runId,
-                    commandRequestId: commandState.admissionGate!.requestId,
-                    stopKind: commandState.admissionGate!.kind,
-                  },
-                }
-              : {
-                  required: false,
-                  monitoring: "continue",
-                  code: commandState.draining ? "run-draining" : "run-pausing",
-                  summary: commandState.draining
-                    ? "Drain is in progress; admitted work is still reconciling before Factory acknowledges the stop."
-                    : "Pause is in progress; admitted work is still reconciling before Factory acknowledges the stop.",
-                  evidence: {
-                    runId: run!.runId,
-                    commandRequestId: commandState.admissionGate!.requestId,
-                    stopKind: commandState.admissionGate!.kind,
-                  },
-                }
-            : run
-              ? {
-                  required: false,
-                  monitoring: "continue",
-                  code: "run-active",
-                  summary: "The Factory run can still make autonomous progress.",
-                  evidence: { runId: run.runId },
-                }
-              : {
-                  required: false,
-                  monitoring: "stop",
-                  code: "objective-inactive",
-                  summary: "No Factory run or accepted activation is active.",
-                  evidence: {},
-                };
+              : run.terminal.event === "FactoryRunCancelled"
+                ? {
+                    required: false,
+                    monitoring: "stop",
+                    code: "run-cancelled",
+                    summary: "No Factory work is active. The run was cancelled.",
+                    evidence: { runId: run.runId, terminalAt: run.terminal.at },
+                  }
+                : {
+                    required: true,
+                    monitoring: "stop",
+                    code: run.start.predecessorRunId
+                      ? "recovery-successor-escalated"
+                      : "run-escalated",
+                    summary: `No Factory work is active. ${run.terminal.reason ?? "The run ended in terminal escalation."}`,
+                    requiredAction: run.start.predecessorRunId
+                      ? "Resolve the recorded terminal reason, then use factory_recovery_plan before proposing another explicitly authorized successor. Do not keep polling this terminal run."
+                      : "Resolve the recorded terminal reason, then use factory_recovery_plan before proposing an explicitly authorized successor. Do not keep polling this terminal run.",
+                    evidence: {
+                      runId: run.runId,
+                      terminalAt: run.terminal.at,
+                      terminalSequence: run.terminal.sequence,
+                      ...(run.terminal.reason ? { reason: run.terminal.reason } : {}),
+                    },
+                  }
+            : commandState?.admissionsPaused
+              ? admissionGateAcknowledged
+                ? {
+                    required: true,
+                    monitoring: "stop",
+                    code: "run-paused",
+                    summary: "No Factory work is active. The requested stop is acknowledged.",
+                    requiredAction:
+                      "Use factory_resume only after the user explicitly asks to resume; do not poll an acknowledged stopped run.",
+                    evidence: {
+                      runId: run!.runId,
+                      commandRequestId: commandState.admissionGate!.requestId,
+                      stopKind: commandState.admissionGate!.kind,
+                    },
+                  }
+                : {
+                    required: false,
+                    monitoring: "continue",
+                    code: commandState.draining ? "run-draining" : "run-pausing",
+                    summary: commandState.draining
+                      ? "Drain is in progress; admitted work is still reconciling before Factory acknowledges the stop."
+                      : "Pause is in progress; admitted work is still reconciling before Factory acknowledges the stop.",
+                    evidence: {
+                      runId: run!.runId,
+                      commandRequestId: commandState.admissionGate!.requestId,
+                      stopKind: commandState.admissionGate!.kind,
+                    },
+                  }
+              : run
+                ? {
+                    required: false,
+                    monitoring: "continue",
+                    code: "run-active",
+                    summary: "The Factory run can still make autonomous progress.",
+                    evidence: { runId: run.runId },
+                  }
+                : {
+                    required: false,
+                    monitoring: "stop",
+                    code: "objective-inactive",
+                    summary: "No Factory run or accepted activation is active.",
+                    evidence: {},
+                  };
   const statusItems = items.map((item): StatusWorkItem => {
     const itemEvents = (item.factoryEvents ?? [])
       .filter((event) => !run || event.runId === run.runId)
@@ -736,11 +768,13 @@ export function buildStatusReport(input: {
               : run.terminal.event === "FactoryRunCancelled"
                 ? "cancelled"
                 : "escalated"
-            : commandState?.draining
-              ? "draining"
-              : commandState?.admissionsPaused
-                ? "paused"
-                : "active",
+            : providerGate
+              ? "provider-gated"
+              : commandState?.draining
+                ? "draining"
+                : commandState?.admissionsPaused
+                  ? "paused"
+                  : "active",
           policyDigest: run.start.policyDigest,
           startedAt: run.start.at,
           cloudPaused: commandState?.cloudPaused ?? false,

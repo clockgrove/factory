@@ -6,6 +6,10 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Added
 
+- Durable, invocation-bound GitHub Copilot quota gates for local Codex management and worker
+  streams. Factory preserves exact or explicitly unknown usage, stops automatic retries, and exposes
+  one redacted human-action result through status and explain. ([#283](https://github.com/clockgrove/factory/issues/283))
+
 - Opt-in obligation-first compiler judgment and bounded draft repair, with immutable revisions,
   independent full-coverage review, exact accepted projection and per-invocation accounting.
   Report-only runs never dispatch implementation. Read-only compiler evaluation JSON/Markdown

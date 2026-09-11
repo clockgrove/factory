@@ -67,6 +67,7 @@ import {
   type CompilerEvidence,
 } from "../evaluation/compiler-eval.js";
 import { ManagementOutputError } from "./backend.js";
+import { ProviderQuotaError, providerQuotaFromStreamEvent } from "../providers/quota.js";
 import { discoverValidationCommands, readRepositoryFacts } from "../repository-profiles/index.js";
 
 export const CODEX_COMPILED_OBJECTIVE_SCHEMA = {
@@ -816,6 +817,10 @@ export function parseManagementJsonlOutput<T>(stdout: string): {
     return parseManagementJsonlResult<T>(stdout);
   } catch (error) {
     const usage = observedCompletionUsage(stdout);
+    if (error instanceof ProviderQuotaError) {
+      if (usage) error.bindUsage(usage);
+      throw error;
+    }
     if (usage) throw new ManagementOutputError(error, usage);
     throw error;
   }
@@ -867,6 +872,8 @@ function parseManagementJsonlResult<T>(stdout: string): { value: T; usage: Manag
       continue;
     }
     if (event.type === "turn.failed" || event.type === "error") {
+      const gate = providerQuotaFromStreamEvent(event);
+      if (gate) throw new ProviderQuotaError(gate);
       throw new Error(`management backend reported ${event.type}`);
     }
     if (event.type === "turn.completed") {
@@ -1506,7 +1513,10 @@ export class CodexCliManagementBackend implements ManagementBackend {
         codexHome,
       );
       const invocationArgs = [...target.args, ...args];
-      const admittedTimeoutMs = await beforeModelInvocation?.();
+      const admission = await beforeModelInvocation?.();
+      const admittedTimeoutMs = typeof admission === "number" ? admission : admission?.timeoutMs;
+      const invocationId =
+        admission && typeof admission === "object" ? admission.modelInvocationId : undefined;
       const result = await runContainedProcess({
         command: target.command,
         args: invocationArgs,
@@ -1516,6 +1526,21 @@ export class CodexCliManagementBackend implements ManagementBackend {
         maxOutputBytes: 2 * 1024 * 1024,
       });
       if (result.exitCode !== 0) {
+        for (const line of result.stdout.split(/\r?\n/)) {
+          try {
+            const event = JSON.parse(line) as unknown;
+            const gate = providerQuotaFromStreamEvent(event);
+            if (gate)
+              throw new ProviderQuotaError(gate, {
+                ...(observedCompletionUsage(result.stdout)
+                  ? { usage: observedCompletionUsage(result.stdout)! }
+                  : {}),
+                ...(invocationId ? { invocationId } : {}),
+              });
+          } catch (error) {
+            if (error instanceof ProviderQuotaError) throw error;
+          }
+        }
         const streams = [
           result.stderr.trim() ? `stderr:\n${result.stderr.trim()}` : "",
           result.stdout.trim() ? `stdout:\n${result.stdout.trim()}` : "",
@@ -1531,7 +1556,12 @@ export class CodexCliManagementBackend implements ManagementBackend {
         if (usage) throw new ManagementOutputError(error, usage);
         throw error;
       }
-      return parseManagementJsonlOutput<T>(result.stdout);
+      try {
+        return parseManagementJsonlOutput<T>(result.stdout);
+      } catch (error) {
+        if (error instanceof ProviderQuotaError && invocationId) error.bindInvocation(invocationId);
+        throw error;
+      }
     } finally {
       await rm(codexHome, { recursive: true, force: true });
     }

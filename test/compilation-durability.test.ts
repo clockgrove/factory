@@ -13,6 +13,7 @@ import {
   type CompilationFaultPoint,
 } from "../src/supervisor.js";
 import type { CompilationCheckpoint, CompilationResult } from "../src/management/backend.js";
+import { ProviderQuotaError, classifyProviderQuota } from "../src/providers/quota.js";
 
 const graphDigest = "d".repeat(64);
 const policy = "e".repeat(64);
@@ -237,6 +238,54 @@ describe("durable compilation transaction", () => {
     expect(recordFailureUsage).toHaveBeenCalledExactlyOnceWith(compilation.usage);
     expect(recordUsage).not.toHaveBeenCalled();
     expect(persist).not.toHaveBeenCalled();
+  });
+
+  it("records a provider gate after exact failure usage and never converts unknown usage to zero", async () => {
+    const calls: string[] = [];
+    const gate = classifyProviderQuota("You have exceeded your monthly quota")!;
+    const error = new ProviderQuotaError(gate, {
+      invocationId: "compile-base",
+      usage: compilation.usage,
+    });
+    await expect(
+      runDurableCompilationTransaction({
+        existing: null,
+        invoke: async () => {
+          throw error;
+        },
+        persist: async () => record(),
+        recover: async () => null,
+        recordUsage: async () => {},
+        recordFailureUsage: async (usage) => {
+          expect(usage).toEqual(compilation.usage);
+          calls.push("usage");
+        },
+        recordProviderGate: async (observed) => {
+          expect(observed).toBe(error);
+          calls.push("gate");
+        },
+        preflight: async () => {},
+      }),
+    ).rejects.toBe(error);
+    expect(calls).toEqual(["usage", "gate"]);
+
+    const unknown = new ProviderQuotaError(gate, { invocationId: "compile-unknown" });
+    const recordFailureUsage = vi.fn();
+    await expect(
+      runDurableCompilationTransaction({
+        existing: null,
+        invoke: async () => {
+          throw unknown;
+        },
+        persist: async () => record(),
+        recover: async () => null,
+        recordUsage: async () => {},
+        recordFailureUsage,
+        recordProviderGate: async () => {},
+        preflight: async () => {},
+      }),
+    ).rejects.toBe(unknown);
+    expect(recordFailureUsage).not.toHaveBeenCalled();
   });
 
   it("charges only the recovered checkpoint if a backend fails after saving its result", async () => {

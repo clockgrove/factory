@@ -269,7 +269,7 @@ export async function compileEvaluatedDraft(args: {
             const dispatchTimeoutMs = deadlineAt - Date.now();
             if (dispatchTimeoutMs <= 0) throw new Error("compiler evaluation deadline exhausted");
             dispatched = true;
-            return dispatchTimeoutMs;
+            return { timeoutMs: dispatchTimeoutMs, modelInvocationId: request.invocationId };
           } catch (error) {
             throw new CompilerDraftAdmissionError(error);
           }

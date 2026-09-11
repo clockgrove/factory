@@ -8,6 +8,7 @@ import {
 } from "../explanations/index.js";
 import { latestRunReceipts, terminalRunEvidence } from "../control/receipts.js";
 import { buildStatusReport, snapshotEvents, type FactoryReadSnapshot } from "./status.js";
+import { latestProviderQuotaGate } from "../control/provider-gates.js";
 
 export interface FactoryExplanationReport {
   operation: "explain";
@@ -70,6 +71,7 @@ export function buildExplanationReport(input: {
 }): FactoryExplanationReport {
   const events = snapshotEvents(input.snapshot);
   const run = latestRunReceipts(events, input.snapshot.objectiveAuthority);
+  const providerGate = run ? latestProviderQuotaGate(run.events, run.runId) : undefined;
   const status = buildStatusReport({
     repository: input.repository,
     snapshot: input.snapshot,
@@ -115,7 +117,32 @@ export function buildExplanationReport(input: {
           : inactive,
     );
   }
-  if (run?.terminal?.event === "FactoryRunEscalated") {
+  if (providerGate?.kind === "provider") {
+    explanations.push({
+      code: EXPLANATION_CODES.providerQuotaExhausted,
+      category: "provider",
+      disposition: "blocked",
+      summary: providerGate.providerMessage,
+      gate: "provider",
+      requiredAction:
+        "No Factory work is active; stop recurring monitoring. Restore the GitHub Copilot quota, then explicitly request recovery through factory_recovery_plan.",
+      evidence: {
+        reasonCode: providerGate.reasonCode,
+        provider: providerGate.provider,
+        phase: providerGate.phase,
+        backend: providerGate.backend,
+        modelInvocationId: providerGate.modelInvocationId,
+        observedAt: providerGate.at,
+        accounting: providerGate.accounting,
+        actionUrl: providerGate.actionUrl,
+        ...(providerGate.workItem !== undefined ? { workItem: providerGate.workItem } : {}),
+        ...(providerGate.attempt !== undefined ? { attempt: providerGate.attempt } : {}),
+        factoryWorkActive: false,
+        monitoring: "stop",
+      },
+    });
+  }
+  if (!providerGate && run?.terminal?.event === "FactoryRunEscalated") {
     const terminal = terminalRunEvidence(run.terminal);
     const recoverySuccessor = Boolean(run.start.predecessorRunId);
     explanations.push({

@@ -13,6 +13,7 @@ import {
   type CompilerDraftRecord,
 } from "../control/compiler-drafts.js";
 import type { LeaseState } from "../control/lease.js";
+import { ProviderQuotaError } from "../providers/quota.js";
 
 function diagnostic(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error);
@@ -511,7 +512,8 @@ export async function runCompilerDraftLoop(args: {
         if (usage) {
           tokens += usage.inputTokens + usage.outputTokens;
           await recordUsage(invocationId, stage, usage);
-        } else throw new Stop("accounting-unavailable");
+        } else if (!(error instanceof ProviderQuotaError)) throw new Stop("accounting-unavailable");
+        if (error instanceof ProviderQuotaError) throw error;
         if (stopCause) throw stopCause;
         throw error;
       }
@@ -555,7 +557,8 @@ export async function runCompilerDraftLoop(args: {
           error instanceof CompilerDraftStopError ||
           error instanceof CompilerDraftReservationConflictError ||
           error instanceof CompilerDraftAccountingError ||
-          error instanceof CompilerDraftAdmissionError
+          error instanceof CompilerDraftAdmissionError ||
+          error instanceof ProviderQuotaError
         )
           throw error;
         if (
@@ -663,7 +666,8 @@ export async function runCompilerDraftLoop(args: {
           error instanceof CompilerDraftStopError ||
           error instanceof CompilerDraftReservationConflictError ||
           error instanceof CompilerDraftAccountingError ||
-          error instanceof CompilerDraftAdmissionError
+          error instanceof CompilerDraftAdmissionError ||
+          error instanceof ProviderQuotaError
         )
           throw error;
         failure = {
@@ -677,7 +681,8 @@ export async function runCompilerDraftLoop(args: {
     if (
       error instanceof CompilerDraftReservationConflictError ||
       error instanceof CompilerDraftAccountingError ||
-      error instanceof CompilerDraftAdmissionError
+      error instanceof CompilerDraftAdmissionError ||
+      error instanceof ProviderQuotaError
     )
       throw error;
     if (error instanceof CompilerDraftStopError) return await stop(error.message);

@@ -131,6 +131,12 @@ grant neither increment nor acknowledgement. The acknowledgement preserves the u
 usage; it neither asserts zero nor grants additional allowance. Ask for this decision once, show the
 exact digest, and leave monitoring stopped while waiting.
 
+When a local Codex management or worker invocation reports a supported GitHub Copilot quota refusal,
+`factory status` and `factory explain` expose `provider-quota-exhausted`, the affected invocation,
+phase and backend, exact-or-unknown accounting, and the supported Copilot settings URL. Stop recurring
+monitoring and do not retry the invocation. Restoring quota does not resume a terminal run: inspect an
+explicit recovery proposal and authorize its exact digest through the recovery path above.
+
 Local recovery can require the existing owned service to exit and restart into a new launcher
 generation. Factory uses only its already configured restart policy; it does not reconfigure a
 service to pass recovery. The next process still checks the old generation and its command scopes.

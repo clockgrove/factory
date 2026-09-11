@@ -59,6 +59,7 @@ import {
   type LocalCapabilityProbe,
 } from "./codex-cli-local.js";
 import { withManagedToolchainPath } from "../toolchains/authority.js";
+import { providerQuotaFromStreamEvent, type ProviderQuotaGate } from "../providers/quota.js";
 
 interface WorkerFinal {
   outcome: "succeeded" | "failed" | "declined";
@@ -90,6 +91,7 @@ interface SdkAttempt {
   progress?: string;
   logs: string;
   reason?: string;
+  providerQuotaGate?: ProviderQuotaGate;
   cancelled: boolean;
   timedOut: boolean;
   scopeSettled?: boolean;
@@ -651,6 +653,9 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
       ...(state === "failed"
         ? { reason: running.reason ?? running.final?.summary ?? "SDK worker failed" }
         : {}),
+      ...(state === "failed" && running.providerQuotaGate
+        ? { providerQuotaGate: running.providerQuotaGate }
+        : {}),
     };
   }
 
@@ -875,10 +880,14 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
             running.reason = terminalFailure;
           }
         } else if (event.type === "turn.failed") {
+          const gate = providerQuotaFromStreamEvent(event);
+          if (gate) running.providerQuotaGate = gate;
           terminalFailure = safeDiagnostic(event.error.message);
           running.reason = terminalFailure;
           running.controller.abort(terminalFailure);
         } else if (event.type === "error") {
+          const gate = providerQuotaFromStreamEvent(event);
+          if (gate) running.providerQuotaGate = gate;
           terminalFailure = safeDiagnostic(event.message);
           running.reason = terminalFailure;
           running.controller.abort(terminalFailure);

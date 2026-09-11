@@ -17,6 +17,7 @@ export const EXPLANATION_CODES = {
   authorityRunInactive: "authority.run-inactive",
   authorityActivationRejected: "authority.activation-rejected",
   authorityRunPaused: "authority.run-paused",
+  providerQuotaExhausted: "provider.quota-exhausted",
   priorityBurstThreshold: "priority.burst-threshold",
   prioritySourceUnavailable: "priority.source-unavailable",
   priorityObserved: "priority.observed",
@@ -53,6 +54,7 @@ export type ExplanationCategory =
   | "dependency"
   | "capacity"
   | "authority"
+  | "provider"
   | "priority"
   | "scope"
   | "trust"
@@ -77,7 +79,7 @@ export interface Explanation {
     | "complete"
     | "informational";
   summary: string;
-  gate?: "activation" | "execution" | "recovery-successor";
+  gate?: "activation" | "execution" | "provider" | "recovery-successor";
   requiredAction?: string;
   evidence: Record<string, unknown>;
 }

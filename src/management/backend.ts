@@ -167,7 +167,9 @@ export interface ReviewResult {
 export type ReviewCheckpoint = (result: ReviewResult) => Promise<void>;
 
 /** Called once after local preparation, immediately before dispatch; may return remaining timeout milliseconds. */
-export type CompilerModelAdmission = () => Promise<number | void>;
+export type CompilerModelAdmission = () => Promise<
+  number | void | { timeoutMs?: number; modelInvocationId: string }
+>;
 export interface ManagementBackend {
   /** Required for evaluated drafts; older backends must not silently ignore admission. */
   readonly supportsCompilerAdmission?: true;

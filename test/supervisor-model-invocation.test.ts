@@ -16,6 +16,7 @@ import { PlatformUnavailableError } from "../src/platform.js";
 import type { FactoryEvent } from "../src/protocol/events.js";
 import * as worktrees from "../src/runtime/local-worktree.js";
 import * as cleanValidation from "../src/validation/clean-run.js";
+import { classifyProviderQuota } from "../src/providers/quota.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
 type Fixture = Awaited<ReturnType<typeof providerSupervisorFixture>>;
@@ -28,6 +29,49 @@ const modelBudgets = (f: Fixture): BudgetEvent[] =>
     );
 
 describe("Supervisor model dispatch journal", () => {
+  it("durably stops after one post-dispatch provider quota refusal with unknown usage", async () => {
+    const gate = classifyProviderQuota("You have exceeded your monthly quota")!;
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      maxAttemptsPerItem: 3,
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        observe: async (handle) => ({
+          ...(await backend.observe(handle)),
+          state: "failed",
+          usage: { inputTokens: null, outputTokens: null, cachedInputTokens: null },
+          reason: "arbitrary provider diagnostic must not be durable",
+          providerQuotaGate: gate,
+        }),
+      }),
+    });
+    try {
+      expect(await f.run()).toMatchObject({
+        status: "escalated",
+        reason: expect.stringContaining("GitHub Copilot monthly quota exceeded"),
+      });
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+      const providerEvents = f
+        .events()
+        .filter((event) => event.kind === "provider" && event.event === "ProviderQuotaBlocked");
+      expect(providerEvents).toHaveLength(1);
+      expect(providerEvents[0]).toMatchObject({
+        reasonCode: "provider-quota-exhausted",
+        phase: "execution",
+        backend: "codex-sdk/local-worktree",
+        modelInvocationId: "worker-8-1",
+        workItem: 8,
+        attempt: 1,
+        accounting: "unknown",
+      });
+      expect(JSON.stringify(providerEvents)).not.toContain("arbitrary provider diagnostic");
+      expect(unresolvedModelInvocations(f.events())).toHaveLength(1);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
   it.each(["missing", "partial"] as const)(
     "fences terminal %s counters without economics before any review",
     async (kind) => {

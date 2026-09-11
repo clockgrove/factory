@@ -67,7 +67,8 @@ import {
   type CompilerEvidence,
 } from "../evaluation/compiler-eval.js";
 import { ManagementOutputError } from "./backend.js";
-import { ProviderQuotaError, providerQuotaFromStreamEvent } from "../providers/quota.js";
+import { ProviderQuotaError } from "../providers/quota.js";
+import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
 import { discoverValidationCommands, readRepositoryFacts } from "../repository-profiles/index.js";
 
 export const CODEX_COMPILED_OBJECTIVE_SCHEMA = {
@@ -872,7 +873,7 @@ function parseManagementJsonlResult<T>(stdout: string): { value: T; usage: Manag
       continue;
     }
     if (event.type === "turn.failed" || event.type === "error") {
-      const gate = providerQuotaFromStreamEvent(event);
+      const gate = githubCopilotQuotaFromStreamEvent(event);
       if (gate) throw new ProviderQuotaError(gate);
       throw new Error(`management backend reported ${event.type}`);
     }
@@ -1529,7 +1530,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
         for (const line of result.stdout.split(/\r?\n/)) {
           try {
             const event = JSON.parse(line) as unknown;
-            const gate = providerQuotaFromStreamEvent(event);
+            const gate = githubCopilotQuotaFromStreamEvent(event);
             if (gate)
               throw new ProviderQuotaError(gate, {
                 ...(observedCompletionUsage(result.stdout)

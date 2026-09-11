@@ -49,7 +49,8 @@ import { restrictedCodexArgs } from "./codex-cli-policy.js";
 import { readLocalResourceHostIdentity } from "../recovery/local-resources.js";
 import { bootstrapPackageValidationCommand } from "../validation/plan.js";
 import { managedToolAvailable, withManagedToolchainPath } from "../toolchains/authority.js";
-import { providerQuotaFromStreamEvent, type ProviderQuotaGate } from "../providers/quota.js";
+import type { ProviderQuotaGate } from "../providers/quota.js";
+import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
 
 export const CODEX_WORKER_OUTPUT_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -248,7 +249,7 @@ export function parseCodexWorkerStream(stdout: string): {
         continue;
       }
       if (event.type === "turn.failed" || event.type === "error") {
-        const gate = providerQuotaFromStreamEvent(event);
+        const gate = githubCopilotQuotaFromStreamEvent(event);
         if (gate) providerQuotaGate = gate;
         failure = gate?.message ?? "CLI worker reported a stream error";
         continue;

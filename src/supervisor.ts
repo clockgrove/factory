@@ -5023,7 +5023,7 @@ export class FactorySupervisor {
         if (durableProviderGate?.kind === "provider") {
           return await terminalAfterDrain(
             "FactoryRunEscalated",
-            `${durableProviderGate.providerMessage}; restore quota at ${durableProviderGate.actionUrl} before explicit recovery`,
+            `${durableProviderGate.providerMessage}; restore provider quota${durableProviderGate.actionUrl ? ` at ${durableProviderGate.actionUrl}` : ""} before explicit recovery`,
           );
         }
         if (Date.now() >= deadline) {
@@ -8995,6 +8995,7 @@ export class FactorySupervisor {
       const existing = matches[0]!;
       if (
         existing.kind !== "provider" ||
+        existing.provider !== error.gate.provider ||
         existing.phase !== phase ||
         existing.backend !== backend ||
         existing.workItem !== (reservation?.workItem ?? workItem) ||
@@ -9015,8 +9016,9 @@ export class FactorySupervisor {
         phase,
         backend,
         modelInvocationId: invocationId,
+        provider: error.gate.provider,
         providerMessage: error.gate.message,
-        actionUrl: error.gate.actionUrl,
+        ...(error.gate.actionUrl ? { actionUrl: error.gate.actionUrl } : {}),
         accounting: error.usage ? "exact" : "unknown",
         ...(reservation ? { reservation } : {}),
         ...(!reservation && workItem !== undefined ? { workItem } : {}),

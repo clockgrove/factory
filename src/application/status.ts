@@ -539,7 +539,7 @@ export function buildStatusReport(input: {
                 modelInvocationId: providerGate.modelInvocationId,
                 observedAt: providerGate.at,
                 accounting: providerGate.accounting,
-                actionUrl: providerGate.actionUrl,
+                ...(providerGate.actionUrl ? { actionUrl: providerGate.actionUrl } : {}),
                 ...(providerGate.workItem !== undefined ? { workItem: providerGate.workItem } : {}),
                 ...(providerGate.attempt !== undefined ? { attempt: providerGate.attempt } : {}),
                 factoryWorkActive: false,

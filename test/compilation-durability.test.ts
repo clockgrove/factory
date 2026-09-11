@@ -13,7 +13,8 @@ import {
   type CompilationFaultPoint,
 } from "../src/supervisor.js";
 import type { CompilationCheckpoint, CompilationResult } from "../src/management/backend.js";
-import { ProviderQuotaError, classifyProviderQuota } from "../src/providers/quota.js";
+import { ProviderQuotaError } from "../src/providers/quota.js";
+import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
 
 const graphDigest = "d".repeat(64);
 const policy = "e".repeat(64);
@@ -242,7 +243,7 @@ describe("durable compilation transaction", () => {
 
   it("records a provider gate after exact failure usage and never converts unknown usage to zero", async () => {
     const calls: string[] = [];
-    const gate = classifyProviderQuota("You have exceeded your monthly quota")!;
+    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
     const error = new ProviderQuotaError(gate, {
       invocationId: "compile-base",
       usage: compilation.usage,

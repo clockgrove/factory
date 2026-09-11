@@ -495,10 +495,9 @@ export class LifecycleRecorder {
     phase: "management" | "execution";
     backend: string;
     modelInvocationId: string;
-    providerMessage:
-      | "GitHub Copilot additional usage limit reached"
-      | "GitHub Copilot monthly quota exceeded";
-    actionUrl: "https://github.com/settings/copilot/features";
+    provider: string;
+    providerMessage: string;
+    actionUrl?: string;
     accounting: "exact" | "unknown";
     reservation?: AttemptReservation;
     workItem?: number;
@@ -518,7 +517,7 @@ export class LifecycleRecorder {
       sequence: args.sequence,
       at: now.toISOString(),
       reasonCode: "provider-quota-exhausted",
-      provider: "github-copilot",
+      provider: args.provider,
       phase: args.phase,
       backend: args.backend,
       modelInvocationId: args.modelInvocationId,
@@ -528,7 +527,7 @@ export class LifecycleRecorder {
           ? { workItem: args.workItem }
           : {}),
       providerMessage: args.providerMessage,
-      actionUrl: args.actionUrl,
+      ...(args.actionUrl ? { actionUrl: args.actionUrl } : {}),
       accounting: args.accounting,
     });
     await this.store.addIssueComment(

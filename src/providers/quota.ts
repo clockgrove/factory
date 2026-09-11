@@ -1,13 +1,11 @@
 export const PROVIDER_QUOTA_REASON_CODE = "provider-quota-exhausted" as const;
-export const COPILOT_QUOTA_ACTION_URL = "https://github.com/settings/copilot/features" as const;
 
+/** Provider-neutral, already-redacted account quota metadata emitted by an adapter. */
 export interface ProviderQuotaGate {
   reasonCode: typeof PROVIDER_QUOTA_REASON_CODE;
-  provider: "github-copilot";
-  message:
-    | "GitHub Copilot additional usage limit reached"
-    | "GitHub Copilot monthly quota exceeded";
-  actionUrl: typeof COPILOT_QUOTA_ACTION_URL;
+  provider: string;
+  message: string;
+  actionUrl?: string | undefined;
 }
 
 export interface ProviderQuotaUsage {
@@ -51,37 +49,4 @@ export class ProviderQuotaError extends Error {
     this.usage = { ...usage };
     return this;
   }
-}
-
-/** Match only the two captured Copilot entitlement/quota messages from the provider stream. */
-export function classifyProviderQuota(value: unknown): ProviderQuotaGate | null {
-  if (typeof value !== "string") return null;
-  if (/you(?:'|’)ve reached your additional usage limit for your plan/i.test(value)) {
-    return {
-      reasonCode: PROVIDER_QUOTA_REASON_CODE,
-      provider: "github-copilot",
-      message: "GitHub Copilot additional usage limit reached",
-      actionUrl: COPILOT_QUOTA_ACTION_URL,
-    };
-  }
-  if (/you have exceeded your monthly quota/i.test(value)) {
-    return {
-      reasonCode: PROVIDER_QUOTA_REASON_CODE,
-      provider: "github-copilot",
-      message: "GitHub Copilot monthly quota exceeded",
-      actionUrl: COPILOT_QUOTA_ACTION_URL,
-    };
-  }
-  return null;
-}
-
-/** Read only documented message slots; never stringify an arbitrary diagnostic object. */
-export function providerQuotaFromStreamEvent(event: unknown): ProviderQuotaGate | null {
-  if (!event || typeof event !== "object") return null;
-  const record = event as { message?: unknown; error?: unknown };
-  const nested =
-    record.error && typeof record.error === "object"
-      ? (record.error as { message?: unknown }).message
-      : undefined;
-  return classifyProviderQuota(nested) ?? classifyProviderQuota(record.message);
 }

@@ -214,11 +214,21 @@ not a contradictory later balance from another observation.
 
 Local Codex model-provider quota refusals are a separate plane from GitHub REST/GraphQL rate limits
 and Factory's own model-token allowance. After a durable model-dispatch marker, only captured narrow
-Copilot entitlement messages may produce an invocation-bound `ProviderQuotaBlocked` event. The event
-stores a canonical redacted reason and supported action URL; provider-reported usage is reconciled
-exactly when present and otherwise remains unknown. The run stops without retry, and status/explain
-tell the initiating operator to stop monitoring until quota is restored and an explicit recovery is
-requested. Pre-dispatch preparation failures and transient transport errors do not create this gate.
+Copilot entitlement messages may produce an invocation-bound `ProviderQuotaBlocked` event. The
+durable event and backend contract are provider-neutral: they carry a bounded provider identity,
+canonical redacted message and optional HTTPS action URL. The GitHub Copilot adapter alone owns the
+captured-message classifier and maps those diagnostics to its provider identity, safe summaries and
+supported settings URL. Provider-reported usage is reconciled exactly when present and otherwise
+remains unknown. The run stops without retry, and status/explain tell the initiating operator to stop
+monitoring until quota is restored and an explicit recovery is requested. Pre-dispatch preparation
+failures and transient transport errors do not create this gate.
+
+The selected model is a provider-neutral durable gate populated by provider adapters. Keeping
+Copilot literals in the shared event was rejected because every additional model provider would
+require a protocol and lifecycle edit; treating quota text as an ordinary backend failure was also
+rejected because it loses the non-retryable, human-action state. New adapters may emit the shared
+gate only after converting captured diagnostics into bounded canonical metadata; they must not pass
+through arbitrary provider output.
 
 Model quota is protected at retry boundaries as well. After an artifact has passed host scope,
 secret, clean-apply, and sensitive-path checks, the running Supervisor may retain it in a bounded

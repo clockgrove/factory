@@ -59,7 +59,8 @@ import {
   type LocalCapabilityProbe,
 } from "./codex-cli-local.js";
 import { withManagedToolchainPath } from "../toolchains/authority.js";
-import { providerQuotaFromStreamEvent, type ProviderQuotaGate } from "../providers/quota.js";
+import type { ProviderQuotaGate } from "../providers/quota.js";
+import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
 
 interface WorkerFinal {
   outcome: "succeeded" | "failed" | "declined";
@@ -880,13 +881,13 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
             running.reason = terminalFailure;
           }
         } else if (event.type === "turn.failed") {
-          const gate = providerQuotaFromStreamEvent(event);
+          const gate = githubCopilotQuotaFromStreamEvent(event);
           if (gate) running.providerQuotaGate = gate;
           terminalFailure = safeDiagnostic(event.error.message);
           running.reason = terminalFailure;
           running.controller.abort(terminalFailure);
         } else if (event.type === "error") {
-          const gate = providerQuotaFromStreamEvent(event);
+          const gate = githubCopilotQuotaFromStreamEvent(event);
           if (gate) running.providerQuotaGate = gate;
           terminalFailure = safeDiagnostic(event.message);
           running.reason = terminalFailure;

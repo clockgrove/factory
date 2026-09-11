@@ -16,7 +16,7 @@ import { PlatformUnavailableError } from "../src/platform.js";
 import type { FactoryEvent } from "../src/protocol/events.js";
 import * as worktrees from "../src/runtime/local-worktree.js";
 import * as cleanValidation from "../src/validation/clean-run.js";
-import { classifyProviderQuota } from "../src/providers/quota.js";
+import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
 type Fixture = Awaited<ReturnType<typeof providerSupervisorFixture>>;
@@ -30,7 +30,7 @@ const modelBudgets = (f: Fixture): BudgetEvent[] =>
 
 describe("Supervisor model dispatch journal", () => {
   it("durably stops after one post-dispatch provider quota refusal with unknown usage", async () => {
-    const gate = classifyProviderQuota("You have exceeded your monthly quota")!;
+    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
     const f = await providerSupervisorFixture("daytona-burst", {
       localOnly: true,
       dependencyChain: true,

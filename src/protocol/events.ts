@@ -798,17 +798,19 @@ const ProviderQuotaBlocked = Common.extend({
   kind: z.literal("provider"),
   event: z.literal("ProviderQuotaBlocked"),
   reasonCode: z.literal("provider-quota-exhausted"),
-  provider: z.literal("github-copilot"),
+  provider: safeId,
   phase: z.enum(["management", "execution"]),
   backend: boundedText(160),
   modelInvocationId: safeId,
   workItem: z.number().int().positive().optional(),
   attempt: z.number().int().positive().optional(),
-  providerMessage: z.enum([
-    "GitHub Copilot additional usage limit reached",
-    "GitHub Copilot monthly quota exceeded",
-  ]),
-  actionUrl: z.literal("https://github.com/settings/copilot/features"),
+  providerMessage: boundedText(320),
+  actionUrl: z
+    .string()
+    .url()
+    .max(2_048)
+    .refine((value) => value.startsWith("https://"), "provider action URL must use HTTPS")
+    .optional(),
   accounting: z.enum(["exact", "unknown"]),
 }).superRefine((event, context) => {
   if (

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import { parseCodexWorkerStream } from "../src/backends/codex-cli-local.js";
 import { parseManagementJsonlOutput } from "../src/management/codex-cli.js";
-import { ProviderQuotaError, classifyProviderQuota } from "../src/providers/quota.js";
+import { parseFactoryEvent } from "../src/protocol/events.js";
+import { ProviderQuotaError } from "../src/providers/quota.js";
+import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
 
 const messages = [
   "You've reached your additional usage limit for your plan. Go to https://github.com/settings/copilot/features for more details. private tail",
@@ -10,10 +12,34 @@ const messages = [
 ] as const;
 
 describe("provider quota classification", () => {
+  it("keeps the durable gate contract independent of a specific provider adapter", () => {
+    expect(
+      parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        kind: "provider",
+        event: "ProviderQuotaBlocked",
+        objective: 283,
+        runId: "run-provider-neutral",
+        sequence: 2,
+        at: "2026-09-10T12:00:00.000Z",
+        reasonCode: "provider-quota-exhausted",
+        provider: "another-model-provider",
+        phase: "management",
+        backend: "another/local-backend",
+        modelInvocationId: "compile-283",
+        providerMessage: "Model provider quota requires operator action",
+        accounting: "unknown",
+      }),
+    ).toMatchObject({
+      provider: "another-model-provider",
+      providerMessage: "Model provider quota requires operator action",
+    });
+  });
+
   it.each(messages)(
     "classifies captured Copilot refusal without retaining diagnostics",
     (message) => {
-      const gate = classifyProviderQuota(message);
+      const gate = classifyGitHubCopilotQuota(message);
       expect(gate).toMatchObject({
         reasonCode: "provider-quota-exhausted",
         provider: "github-copilot",
@@ -29,7 +55,7 @@ describe("provider quota classification", () => {
     "provider transport timed out",
     "quota unavailable",
   ])("does not broaden the account-level classifier to %s", (message) => {
-    expect(classifyProviderQuota(message)).toBeNull();
+    expect(classifyGitHubCopilotQuota(message)).toBeNull();
   });
 
   it.each(messages)("classifies management turn.failed JSONL with unknown usage", (message) => {

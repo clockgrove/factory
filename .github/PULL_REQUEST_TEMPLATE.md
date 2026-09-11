@@ -10,6 +10,23 @@ Describe the user-visible result and link the issue or product-contract decision
 - Public npm/plugin/API surface:
 - External platform claims and evidence:
 
+## Review budget
+
+- Frozen acceptance surface:
+- Initial consolidated review:
+- Repair/rereview round 1:
+- Repair/rereview round 2:
+- Remaining blockers: none / list with contract evidence
+- Linked follow-ups: none / issue, owner, and acceptance boundary
+- Explicitly accepted risks: none / scope and rationale
+- Exact reviewed head:
+
+- [ ] No more than three substantive review rounds were used.
+- [ ] Any post-cap blocker-only repair and focused verification is recorded separately and did not
+      reopen the full diff.
+- [ ] Findings were consolidated by invariant/root cause and classified using `AGENTS.md`.
+- [ ] Remaining non-blocking work is linked and does not expand this PR's acceptance surface.
+
 ## Verification
 
 List the commands and live gates actually run. Do not claim a paid provider, published artifact, or

@@ -552,7 +552,7 @@ export function buildStatusReport(input: {
                 factoryWorkActive: true,
               },
             }
-          : providerGate?.kind === "provider"
+          : providerGate?.kind === "provider" && run?.terminal?.event !== "FactoryRunCancelled"
             ? {
                 required: true,
                 monitoring: "stop",

@@ -117,7 +117,7 @@ export function buildExplanationReport(input: {
           : inactive,
     );
   }
-  if (providerGate?.kind === "provider") {
+  if (providerGate?.kind === "provider" && run?.terminal?.event !== "FactoryRunCancelled") {
     const terminal = Boolean(run?.terminal);
     explanations.push({
       code: EXPLANATION_CODES.providerQuotaExhausted,

@@ -221,6 +221,54 @@ describe("compiler draft durable repair", () => {
       usage: { inputTokens: 2, outputTokens: 1 },
     });
     expect(args.callbacks.recordUsage).not.toHaveBeenCalled();
+    expect(
+      (await args.manager.load(args.binding)).find((record) => record.kind === "result")?.payload,
+    ).toMatchObject({
+      invocationId: observed!.invocationId,
+      usage: { inputTokens: 2, outputTokens: 1 },
+      providerQuota: gate,
+    });
+
+    const replayInvoke = vi.fn(args.callbacks.invoke);
+    args.callbacks.invoke = replayInvoke;
+    let recovered: ProviderQuotaError | undefined;
+    try {
+      await runCompilerDraftLoop(args);
+    } catch (error) {
+      if (error instanceof ProviderQuotaError) recovered = error;
+      else throw error;
+    }
+    expect(replayInvoke).not.toHaveBeenCalled();
+    expect(recovered).not.toBe(observed);
+    expect(recovered).toMatchObject({
+      gate,
+      invocationId: observed!.invocationId,
+      usage: { inputTokens: 2, outputTokens: 1 },
+    });
+    expect(args.callbacks.recordUsage).not.toHaveBeenCalled();
+  });
+
+  it("reconstructs unknown provider quota metadata without replay or invented usage", async () => {
+    const args = await setup();
+    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
+    args.callbacks.invoke = async (request) => {
+      throw new ProviderQuotaError(gate, { invocationId: request.invocationId });
+    };
+
+    await expect(runCompilerDraftLoop(args)).rejects.toMatchObject({
+      gate,
+      invocationId: expect.any(String),
+      usage: undefined,
+    });
+    const replayInvoke = vi.fn(args.callbacks.invoke);
+    args.callbacks.invoke = replayInvoke;
+    await expect(runCompilerDraftLoop(args)).rejects.toMatchObject({
+      gate,
+      invocationId: expect.any(String),
+      usage: undefined,
+    });
+    expect(replayInvoke).not.toHaveBeenCalled();
+    expect(args.callbacks.recordUsage).not.toHaveBeenCalled();
   });
 
   it("uses valid canonical JSON and binds read-only evidence to one run", async () => {

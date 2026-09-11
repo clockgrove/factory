@@ -573,6 +573,69 @@ describe("bounded status, explain, and replay output", () => {
     );
   });
 
+  it("keeps ordinary terminal guidance when a quota-gated run is cancelled", () => {
+    const current = snapshot();
+    current.workItems[0]!.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        sequence: 4,
+        at: "2026-09-04T12:00:29.000Z",
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: "invocation-worker-10-1",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        directorEpoch: 4,
+        policyDigest: policyDigest(policy),
+      }),
+      event({
+        kind: "provider",
+        event: "ProviderQuotaBlocked",
+        sequence: 5,
+        at: "2026-09-04T12:00:30.000Z",
+        reasonCode: "provider-quota-exhausted",
+        provider: "another-model-provider",
+        phase: "execution",
+        backend: "another/local-backend",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        providerMessage: "Model provider quota requires operator action",
+        actionUrl: "https://provider.example/quota",
+        accounting: "unknown",
+      }),
+    );
+    current.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "FactoryRunCancelled",
+        sequence: 6,
+        at: "2026-09-04T12:00:31.000Z",
+        reason: "operator requested cancellation",
+      }),
+    );
+
+    const status = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
+    expect(status.run).toMatchObject({ state: "cancelled" });
+    expect(status.operatorAction).toMatchObject({
+      required: false,
+      monitoring: "stop",
+      code: "run-cancelled",
+    });
+    expect(JSON.stringify(status.operatorAction)).not.toContain("Restore quota");
+
+    const explanation = buildExplanationReport({
+      repository: "clockgrove/factory",
+      snapshot: current,
+    });
+    expect(explanation.explanations).not.toContainEqual(
+      expect.objectContaining({ code: EXPLANATION_CODES.providerQuotaExhausted }),
+    );
+  });
+
   it("binds status and explanation to a terminal recovery successor instead of an older escalation", () => {
     const current = snapshot();
     const successorRunId =

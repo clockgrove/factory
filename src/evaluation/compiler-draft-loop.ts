@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { assertNoSecretMaterial, assertWithinBytes } from "../protocol/limits.js";
+import {
+  assertNoSecretMaterial,
+  assertWithinBytes,
+  boundedText,
+  safeId,
+} from "../protocol/limits.js";
 import {
   compiledGraphDigest,
   parsePersistedCompiledObjective,
@@ -53,6 +58,19 @@ const UsageSchema = z
     (value) =>
       value.cachedInputTokens === undefined || value.cachedInputTokens <= value.inputTokens,
   );
+const ProviderQuotaCheckpointSchema = z
+  .object({
+    reasonCode: z.literal("provider-quota-exhausted"),
+    provider: safeId,
+    message: boundedText(320),
+    actionUrl: z
+      .string()
+      .url()
+      .max(2_048)
+      .refine((value) => value.startsWith("https://"), "provider action URL must use HTTPS")
+      .optional(),
+  })
+  .strict();
 export type DraftUsage = z.infer<typeof UsageSchema>;
 export class CompilerDraftStopError extends Error {}
 /** Admission failed before provider dispatch; absence of provider usage is not a failed paid call. */
@@ -216,6 +234,35 @@ export async function runCompilerDraftLoop(args: {
       } else if (TimestampSchema.parse(record.payload.observedMilliseconds) !== completedAt - start)
         throw new Error("compiler invocation interval mismatch");
     }
+  }
+  const providerQuotaResults = records.filter(
+    (record) => record.kind === "result" && record.payload.providerQuota !== undefined,
+  );
+  if (providerQuotaResults.length > 1)
+    throw new Error("compiler draft contains conflicting provider quota checkpoints");
+  const providerQuotaResult = providerQuotaResults[0];
+  if (providerQuotaResult) {
+    const invocationId = safeId.parse(providerQuotaResult.payload.invocationId);
+    const intent = records.filter(
+      (record) => record.kind === "invocation" && record.payload.invocationId === invocationId,
+    );
+    if (
+      intent.length !== 1 ||
+      intent[0]?.payload.stage !== providerQuotaResult.payload.stage ||
+      intent[0]?.payload.revision !== providerQuotaResult.payload.revision ||
+      providerQuotaResult.payload.value !== null ||
+      typeof providerQuotaResult.payload.error !== "string"
+    )
+      throw new Error("compiler provider quota checkpoint lacks its exact invocation binding");
+    const gate = ProviderQuotaCheckpointSchema.parse(providerQuotaResult.payload.providerQuota);
+    const usage =
+      providerQuotaResult.payload.usage === null
+        ? undefined
+        : UsageSchema.parse(providerQuotaResult.payload.usage);
+    throw new ProviderQuotaError(gate, {
+      invocationId,
+      ...(usage ? { usage } : {}),
+    });
   }
   const conflicts = records.filter((item) => item.kind === "terminal-conflict");
   const disputedUsage = new Set(
@@ -498,6 +545,10 @@ export async function runCompilerDraftLoop(args: {
             : error instanceof Error && error.cause instanceof CompilerDraftStopError
               ? error.cause
               : null;
+        const providerQuota =
+          error instanceof ProviderQuotaError
+            ? ProviderQuotaCheckpointSchema.parse(error.bindInvocation(invocationId).gate)
+            : undefined;
         await append("result", {
           invocationId,
           stage,
@@ -507,6 +558,7 @@ export async function runCompilerDraftLoop(args: {
           ...timing(),
           ...safeProposal(error),
           error: diagnostic(error),
+          ...(providerQuota ? { providerQuota } : {}),
           ...(stopCause ? { stopReason: diagnostic(stopCause) } : {}),
         });
         if (usage) {

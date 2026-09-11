@@ -38,7 +38,12 @@ function fixture(fault?: "comment-response" | "label-before" | "label-response")
       if (request.method === "POST") writes.push(route);
       const response = (value: unknown, status = 200) =>
         Response.json(value, { status, headers: { date: "Sat, 05 Sep 2026 10:00:00 GMT" } });
-      const issue = { number: 7, state: "open", labels: [...labels].map((name) => ({ name })) };
+      const issue = {
+        number: 7,
+        state: "open",
+        updated_at: "2026-09-05T10:00:00Z",
+        labels: [...labels].map((name) => ({ name })),
+      };
       if (route === "GET /user") return response({ login: actor });
       if (route === "GET /repos/fixture/activation") return response({});
       if (route === "GET /repos/fixture/activation/issues")
@@ -47,12 +52,26 @@ function fixture(fault?: "comment-response" | "label-before" | "label-response")
             ? [issue]
             : [],
         );
+      if (route === "GET /repos/fixture/activation/issues/comments")
+        return response(
+          comments.map((body, index) => ({
+            id: index + 1,
+            body,
+            issue_url: "https://api.github.com/repos/fixture/activation/issues/7",
+            created_at: `2026-09-05T10:00:${String(index).padStart(2, "0")}Z`,
+            updated_at: `2026-09-05T10:00:${String(index).padStart(2, "0")}Z`,
+            user: { login: "operator" },
+            author_association: "OWNER",
+          })),
+        );
       if (route === "GET /repos/fixture/activation/issues/7") return response(issue);
       if (route === "GET /repos/fixture/activation/issues/7/comments")
         return response(
           comments.map((body, index) => ({
             id: index + 1,
             body,
+            created_at: `2026-09-05T10:00:${String(index).padStart(2, "0")}Z`,
+            updated_at: `2026-09-05T10:00:${String(index).padStart(2, "0")}Z`,
             user: { login: "operator" },
             author_association: "OWNER",
           })),

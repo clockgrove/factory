@@ -11,6 +11,7 @@
  * optional.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Octokit } from "@octokit/core";
 import { retry } from "@octokit/plugin-retry";
 import { throttling } from "@octokit/plugin-throttling";
@@ -51,8 +52,13 @@ import {
 } from "./control/lease.js";
 import {
   PlatformUnavailableError,
+  GITHUB_GRAPHQL_NORMAL_REQUEST_ESTIMATE,
+  GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST,
+  admitGitHubRequest,
   classifyRefusal,
+  observeGitHubRequestTransport,
   primaryQuotaForCredential,
+  withGitHubRequestPriority,
   type GitHubPrimaryQuotaCache,
 } from "./platform.js";
 import type { FactoryEvent } from "./protocol/events.js";
@@ -134,6 +140,49 @@ function agentTaskState(value: unknown, label: string): CopilotAgentTaskState {
 }
 
 const FactoryOctokit = Octokit.plugin(retry, throttling);
+
+interface GitHubTransportCallbacks {
+  onTransported(): void;
+}
+
+const githubTransportCallbacks = new AsyncLocalStorage<GitHubTransportCallbacks>();
+const TRANSPORT_OBSERVER_HEADER = "x-clockgrove-factory-transport-observer";
+const transportObservers = new Map<string, GitHubTransportCallbacks>();
+let transportObserverSequence = 0;
+
+function registerTransportObserver(): {
+  id?: string;
+  release(): void;
+} {
+  const callbacks = githubTransportCallbacks.getStore();
+  if (!callbacks) return { release: () => {} };
+  const id = String(++transportObserverSequence);
+  if (transportObservers.size === 1_024)
+    transportObservers.delete(transportObservers.keys().next().value!);
+  transportObservers.set(id, callbacks);
+  return { id, release: () => transportObservers.delete(id) };
+}
+
+/** Let the logical caller account at the actual HTTP boundary, after local
+ * request admission and immediately before the sole transport attempt. */
+export function withGitHubTransportCallbacks<T>(
+  callbacks: GitHubTransportCallbacks,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const parent = githubTransportCallbacks.getStore();
+  let transported = false;
+  return githubTransportCallbacks.run(
+    {
+      onTransported: () => {
+        if (transported) return;
+        transported = true;
+        parent?.onTransported();
+        callbacks.onTransported();
+      },
+    },
+    operation,
+  );
+}
 
 export interface GitHubOptions {
   token: string;
@@ -879,8 +928,21 @@ export function createOctokit(opts: GitHubOptions): Octokit {
     auth: opts.token,
     request: {
       fetch: ((input, init) => {
-        observeGitHubTransport(input, init);
-        return (opts.requestFetch ?? globalThis.fetch)(input, init);
+        const headers = new Headers(
+          init?.headers ?? (input instanceof Request ? input.headers : undefined),
+        );
+        const observerId = headers.get(TRANSPORT_OBSERVER_HEADER);
+        headers.delete(TRANSPORT_OBSERVER_HEADER);
+        const transportInit = { ...init, headers };
+        (observerId ? transportObservers.get(observerId) : undefined)?.onTransported();
+        githubTransportCallbacks.getStore()?.onTransported();
+        observeGitHubTransport(input, transportInit);
+        return observeGitHubRequestTransport(
+          opts.token,
+          input,
+          transportInit,
+          opts.requestFetch ?? globalThis.fetch,
+        );
       }) as typeof globalThis.fetch,
     },
     // A mutation permit prices one transport. Hidden library retries would
@@ -907,19 +969,83 @@ export function createOctokit(opts: GitHubOptions): Octokit {
   // `.endpoint`, which other Octokit helpers rely on.
   octokit.request = new Proxy(octokit.request, {
     async apply(target, thisArg, args) {
+      const endpoint = target.endpoint(...(args as Parameters<typeof target.endpoint>));
+      const release = admitGitHubRequest(opts.token, primaryQuota, endpoint.url, {
+        method: endpoint.method,
+        headers: endpoint.headers as Record<string, string>,
+      });
+      const observer = registerTransportObserver();
+      const first = args[0];
+      const parameters =
+        typeof args[1] === "object" && args[1] !== null ? (args[1] as Record<string, unknown>) : {};
+      const requestOptions =
+        typeof first === "object" && first !== null ? (first as Record<string, unknown>) : {};
+      const invokeArgs = !observer.id
+        ? args
+        : typeof first === "string"
+          ? [
+              first,
+              {
+                ...parameters,
+                headers: {
+                  ...((parameters.headers as Record<string, string> | undefined) ?? {}),
+                  [TRANSPORT_OBSERVER_HEADER]: observer.id,
+                },
+              },
+            ]
+          : [
+              {
+                ...requestOptions,
+                headers: {
+                  ...((requestOptions.headers as Record<string, string> | undefined) ?? {}),
+                  [TRANSPORT_OBSERVER_HEADER]: observer.id,
+                },
+              },
+            ];
       try {
-        return await Reflect.apply(target, thisArg, args);
+        return await Reflect.apply(target, thisArg, invokeArgs);
       } catch (error) {
         surfacePlatformFailure(error);
+      } finally {
+        observer.release();
+        release();
       }
     },
   });
   octokit.graphql = new Proxy(octokit.graphql, {
     async apply(target, thisArg, args) {
+      const query = String(args[0] ?? "");
+      const mutation = /^\s*mutation\b/.test(query);
+      const release = admitGitHubRequest(
+        opts.token,
+        primaryQuota,
+        "https://api.github.com/graphql",
+        { method: "POST" },
+        "normal",
+        mutation ? 1 : GITHUB_GRAPHQL_NORMAL_REQUEST_ESTIMATE,
+      );
+      const observer = registerTransportObserver();
+      const variables =
+        typeof args[1] === "object" && args[1] !== null ? (args[1] as Record<string, unknown>) : {};
+      const invokeArgs = observer.id
+        ? [
+            args[0],
+            {
+              ...variables,
+              headers: {
+                ...((variables.headers as Record<string, string> | undefined) ?? {}),
+                [TRANSPORT_OBSERVER_HEADER]: observer.id,
+              },
+            },
+          ]
+        : args;
       try {
-        return await Reflect.apply(target, thisArg, args);
+        return await Reflect.apply(target, thisArg, invokeArgs);
       } catch (error) {
         surfacePlatformFailure(error);
+      } finally {
+        observer.release();
+        release();
       }
     },
   });
@@ -1559,14 +1685,19 @@ export class GitHubReader {
       };
     };
     const readDetail = (shape: { subIssueCount: number; includeIssueFields: boolean }) =>
-      this.#octokit.graphql<GqlResponse>(
-        this.#recoveryInspection ? RECOVERY_OBJECTIVE_QUERY : OBJECTIVE_QUERY,
-        {
-          owner: this.#owner,
-          repo: this.#repo,
-          number,
-          ...shape,
-        },
+      withGitHubRequestPriority(
+        "normal",
+        () =>
+          this.#octokit.graphql<GqlResponse>(
+            this.#recoveryInspection ? RECOVERY_OBJECTIVE_QUERY : OBJECTIVE_QUERY,
+            {
+              owner: this.#owner,
+              repo: this.#repo,
+              number,
+              ...shape,
+            },
+          ),
+        GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST,
       );
 
     let shape = this.#objectiveShapes.get(number) ?? (await readCardinality());

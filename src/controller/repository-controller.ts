@@ -19,6 +19,7 @@ import {
   verifyLocalRepository,
 } from "../supervisor.js";
 import type { DurableObjectiveActivation } from "../control/github-store.js";
+import type { DiscoverySessionTelemetry } from "../control/discovery-session.js";
 import { GitHubControlStore } from "../control/github-store.js";
 import {
   controllerPolicyDigest,
@@ -32,7 +33,10 @@ import {
   classifyRefusal,
   PlatformUnavailableError,
   MutationAdmissionStoppedError,
+  GitHubPrimaryAdmissionDeferredError,
+  githubRequestTelemetryForCredential,
   primaryQuotaForCredential,
+  type GitHubMutationTelemetry,
 } from "../platform.js";
 import { adoptRecoveryActivation, type RecoveryRepositoryOwnership } from "./recovery.js";
 import { ControllerGenerationRetirement } from "./retirement.js";
@@ -157,6 +161,12 @@ function interruptibleDelay(ms: number, signal?: AbortSignal): Promise<void> {
 
 export interface DurableActivationSource {
   discoverObjectiveActivations(): Promise<DurableObjectiveActivation[]>;
+  discoveryTelemetry?(): DiscoverySessionTelemetry;
+}
+
+export interface RepositoryDiscoveryTelemetry {
+  discovery: DiscoverySessionTelemetry;
+  platform: GitHubMutationTelemetry;
 }
 
 export interface GitHubRepositoryControllerOptions {
@@ -174,6 +184,7 @@ export interface GitHubRepositoryControllerOptions {
   discoverySignal?: AbortSignal;
   onError?: (error: unknown, objective: number) => void;
   onFirstDiscoveryRequestAccounting?: (observation: GitHubTransportObservation) => void;
+  onDiscoveryTelemetry?: (telemetry: RepositoryDiscoveryTelemetry) => void;
   resources?: RepositorySupervisorResources;
 }
 
@@ -184,7 +195,14 @@ export class GitHubRepositoryController {
   readonly #options: GitHubRepositoryControllerOptions;
   readonly #resources: RepositorySupervisorResources;
   readonly #running = new Map<number, Promise<void>>();
-  readonly #parked = new Map<number, { requestId: string; retryAt: number }>();
+  readonly #parked = new Map<
+    number,
+    { requestId: string; discoveryRevision: number; retryAt: number }
+  >();
+  readonly #completedDiscovery = new Map<
+    number,
+    { requestId: string; discoveryRevision: number }
+  >();
   #cursor = 0;
   readonly #failureStop = new AbortController();
   readonly #discoverySignal: AbortSignal;
@@ -225,6 +243,7 @@ export class GitHubRepositoryController {
             )
           : await this.#options.store.discoverObjectiveActivations();
     } catch (error) {
+      this.#emitDiscoveryTelemetry();
       if (platformFailure(error)) throw error;
       throw fatalControllerFailure(
         isDurableStateCompatibilityError(error)
@@ -233,12 +252,18 @@ export class GitHubRepositoryController {
         error,
       );
     }
+    this.#emitDiscoveryTelemetry();
     const discovered = [...activations]
       .filter(
         (item, index, all) =>
           all.findIndex((other) => other.objective === item.objective) === index,
       )
       .sort((a, b) => a.objective - b.objective);
+    const discoveredObjectives = new Set(discovered.map((activation) => activation.objective));
+    for (const objective of this.#parked.keys())
+      if (!discoveredObjectives.has(objective)) this.#parked.delete(objective);
+    for (const objective of this.#completedDiscovery.keys())
+      if (!discoveredObjectives.has(objective)) this.#completedDiscovery.delete(objective);
     if (discovered.length === 0) return 0;
     const ordered = discovered.map(
       (_, index) => discovered[(this.#cursor + index) % discovered.length]!,
@@ -251,9 +276,16 @@ export class GitHubRepositoryController {
     );
     const pending = ordered.filter((activation) => {
       const parked = this.#parked.get(activation.objective);
+      const completed = this.#completedDiscovery.get(activation.objective);
       return (
         !this.#running.has(activation.objective) &&
-        (!parked || parked.requestId !== activation.requestId || parked.retryAt <= Date.now())
+        (!completed ||
+          completed.requestId !== activation.requestId ||
+          completed.discoveryRevision !== (activation.discoveryRevision ?? 0)) &&
+        (!parked ||
+          parked.requestId !== activation.requestId ||
+          parked.discoveryRevision !== (activation.discoveryRevision ?? 0) ||
+          parked.retryAt <= Date.now())
       );
     });
     const resuming = pending.filter((activation) => activation.resuming);
@@ -280,6 +312,16 @@ export class GitHubRepositoryController {
           this.#discoverySignal.throwIfAborted();
           return this.#options.reconcileObjective(activation, signal, this.#resources);
         })
+        .then(() => {
+          // GitHub may briefly serve a conditional discovery snapshot that
+          // predates the Supervisor's terminal comment. Do not restart the
+          // exact hint that just settled; any issue/comment/ref change advances
+          // the process-local revision and restores normal authoritative work.
+          this.#completedDiscovery.set(activation.objective, {
+            requestId: activation.requestId,
+            discoveryRevision: activation.discoveryRevision ?? 0,
+          });
+        })
         .catch((error) => {
           try {
             const unavailable = platformFailure(error);
@@ -294,6 +336,7 @@ export class GitHubRepositoryController {
               // unrelated sessions. An explicit new activation/restart retries it.
               this.#parked.set(activation.objective, {
                 requestId: activation.requestId,
+                discoveryRevision: activation.discoveryRevision ?? 0,
                 retryAt:
                   error instanceof LeaseAcquisitionContendedError
                     ? Date.now() + error.retryAfterMs
@@ -321,11 +364,26 @@ export class GitHubRepositoryController {
     return started;
   }
 
+  #emitDiscoveryTelemetry(): void {
+    const discovery = this.#options.store.discoveryTelemetry?.();
+    if (!discovery) return;
+    this.#options.onDiscoveryTelemetry?.({
+      discovery,
+      platform: this.#resources.mutationScheduler.telemetry(),
+    });
+  }
+
   async run(): Promise<void> {
     let loopFailure: unknown;
     try {
       while (!this.#discoverySignal.aborted) {
-        await this.reconcileOnce();
+        try {
+          await this.reconcileOnce();
+        } catch (error) {
+          if (!(error instanceof GitHubPrimaryAdmissionDeferredError)) throw error;
+          await interruptibleDelay(error.retryAfterMs, this.#discoverySignal);
+          continue;
+        }
         await interruptibleDelay(this.#options.pollIntervalMs ?? 60_000, this.#discoverySignal);
       }
     } catch (error) {
@@ -360,6 +418,8 @@ export interface RunRepositoryControllerOptions {
   pollIntervalMs?: number;
   signal?: AbortSignal;
   onStatus?: (message: string) => void;
+  /** Bounded process-local discovery diagnostics. */
+  onDiscoveryTelemetry?: (telemetry: RepositoryDiscoveryTelemetry) => void;
   /** Process-local cold-start request counts; never durable quota authority. */
   onColdStartRequestAccounting?: (observation: GitHubTransportObservation) => void;
   /** Current repository-controller lease identity for durable observations. */
@@ -397,6 +457,10 @@ export function createGitHubRepositoryController(
       maxLocalWorkers: options.maxLocalWorkers ?? DEFAULT_CONTROLLER_POLICY.maxLocalWorkers,
       maxPaidWorkers: options.maxPaidWorkers ?? DEFAULT_CONTROLLER_POLICY.maxPaidWorkers,
     });
+  resources.mutationScheduler.attachPrimaryQuota(primaryQuotaForCredential(options.token));
+  resources.mutationScheduler.attachRequestTelemetry(() =>
+    githubRequestTelemetryForCredential(options.token),
+  );
   const store =
     options.activationStore ??
     new GitHubControlStore({
@@ -417,6 +481,13 @@ export function createGitHubRepositoryController(
     ...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.discoverySignal === undefined ? {} : { discoverySignal: options.discoverySignal }),
+    onDiscoveryTelemetry: (telemetry) => {
+      options.onDiscoveryTelemetry?.(telemetry);
+      const latest = telemetry.discovery.cycles.at(-1);
+      if (latest && (latest.sequence === 1 || latest.backstop || latest.outcome === "failed")) {
+        options.onStatus?.(discoveryStatusLine(telemetry));
+      }
+    },
     ...(options.onColdStartRequestAccounting || options.onStatus
       ? {
           onFirstDiscoveryRequestAccounting: (observation: GitHubTransportObservation) =>
@@ -747,6 +818,9 @@ async function withRepositoryOwnership<T>(
 ): Promise<T> {
   const primaryQuota = primaryQuotaForCredential(options.token);
   options.resources.mutationScheduler.attachPrimaryQuota(primaryQuota);
+  options.resources.mutationScheduler.attachRequestTelemetry(() =>
+    githubRequestTelemetryForCredential(options.token),
+  );
   const store = new GitHubControlStore({
     ...{ mutationScope: "controller-election" },
     token: options.token,
@@ -938,6 +1012,35 @@ function reportColdStartAccounting(
   options.onColdStartRequestAccounting?.(observation);
   options.onStatus?.(
     `controller cold-start phase=${observation.phase} outcome=${observation.outcome} requests=${observation.readRequests + observation.mutationRequests + observation.unclassifiedRequests} reads=${observation.readRequests} mutations=${observation.mutationRequests} unclassified=${observation.unclassifiedRequests}`,
+  );
+}
+
+function discoveryStatusLine(telemetry: RepositoryDiscoveryTelemetry): string {
+  const latest = telemetry.discovery.cycles.at(-1)!;
+  const probes = latest.probes;
+  const requests = telemetry.platform.requestTelemetry;
+  const endpoints =
+    requests?.endpoints
+      .filter((entry) => entry.admitted > 0 || entry.transported > 0)
+      .map(
+        (entry) =>
+          `${entry.endpoint}:transported=${entry.transported},admitted=${entry.admitted},conditional=${entry.conditional},not-modified=${entry.notModified},successful=${entry.successful}`,
+      )
+      .join(",") || "none";
+  const primary =
+    telemetry.platform.serverPrimaryQuota
+      .filter((entry) => entry.resource === "core" || entry.resource === "graphql")
+      .map((entry) => `${entry.resource}:${entry.remaining}/${entry.limit}@${entry.resetAt}`)
+      .join(",") || "unavailable";
+  return (
+    `discovery sequence=${latest.sequence} mode=${latest.mode} outcome=${latest.outcome} ` +
+    `backstop=${latest.backstop} probes=auth:${probes.authenticatedUser},issues:${probes.issues},` +
+    `repo-comments:${probes.repositoryComments},objective-comments:${probes.objectiveComments},` +
+    `refs:${probes.matchingRefs},classifications:${probes.classifications},304:${probes.notModified} ` +
+    `dirty=${latest.dirtyObjectives} activations=${latest.returnedActivations} ` +
+    `cached=${telemetry.discovery.cachedObjectives}/${telemetry.discovery.cachedComments} ` +
+    `endpoints=${endpoints} primary=${primary} ` +
+    `limiting=${requests?.limitingReason ?? "none"} next=${requests?.nextAdmissionAt ?? "none"}`
   );
 }
 

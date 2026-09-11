@@ -23,14 +23,22 @@ import type { ManagedRuntimeActivation } from "../protocol/worker-packet.js";
 import { recoveryEventDigest } from "../recovery/identity.js";
 
 export interface AttemptStore {
+  withMutationClass?<T>(
+    kind: "normal" | "lease" | "cleanup",
+    operation: () => Promise<T>,
+  ): Promise<T>;
   readRef(ref: string): Promise<string | null>;
   compareAndSwapRef(args: { ref: string; beforeOid: string; afterOid: string }): Promise<boolean>;
   listRefs(prefix: string): Promise<Array<{ ref: string; oid: string }>>;
   readCommit(oid: string): Promise<GitCommitObject>;
   createCommit(args: { treeOid: string; parentOids: string[]; message: string }): Promise<string>;
   createRef(ref: string, oid: string): Promise<boolean>;
-  addIssueComment(issueNodeId: string, body: string): Promise<void>;
-  serverTime(): Promise<Date>;
+  addIssueComment(
+    issueNodeId: string,
+    body: string,
+    mutationClass?: "normal" | "lease" | "cleanup",
+  ): Promise<void>;
+  serverTime(mutationClass?: "normal" | "lease" | "cleanup"): Promise<Date>;
 }
 
 export interface AttemptReservation {
@@ -509,18 +517,22 @@ export class AttemptManager {
     reservation: AttemptReservation,
     evidence: IssueAdmissionEvidence,
   ): Promise<void> {
-    await this.ledger.transition({
-      workItem: reservation.workItem,
-      reservationOid: reservation.oid,
-      objective: lease.objective,
-      runId: lease.runId,
-      directorEpoch: lease.epoch,
-      writerHolder: lease.holder,
-      policyDigest: lease.policyDigest,
-      disposition: "released",
-      evidence,
-      assertCurrent: () => this.#leases.assertCurrent(lease).then(() => {}),
-    });
+    const operation = () =>
+      this.ledger.transition({
+        workItem: reservation.workItem,
+        reservationOid: reservation.oid,
+        objective: lease.objective,
+        runId: lease.runId,
+        directorEpoch: lease.epoch,
+        writerHolder: lease.holder,
+        policyDigest: lease.policyDigest,
+        disposition: "released",
+        evidence,
+        assertCurrent: () => this.#leases.assertCurrent(lease).then(() => {}),
+      });
+    await (this.#store.withMutationClass
+      ? this.#store.withMutationClass("cleanup", operation)
+      : operation());
   }
 
   async record(args: {
@@ -542,93 +554,109 @@ export class AttemptManager {
     reportedModelUsage?: ReportedModelUsage;
     allowRecovery?: boolean;
   }): Promise<AttemptEvent> {
-    await this.#leases.assertMutationAuthorized(args.lease);
-    if (args.environmentIdentity) {
-      assertNoSecretMaterial(args.environmentIdentity, "attempt environment identity");
-    }
-    if (
-      args.reservation.runId !== args.lease.runId ||
-      args.reservation.policyDigest !== args.lease.policyDigest
-    ) {
-      throw new Error("attempt reservation is fenced from the current lease");
-    }
-    if (
-      args.reservation.directorEpoch !== args.lease.epoch &&
-      !(args.allowRecovery && args.reservation.directorEpoch < args.lease.epoch)
-    ) {
-      throw new Error("attempt reservation is fenced from the current lease epoch");
-    }
-    const admission = await this.assertReservation(
-      args.lease,
-      args.reservation,
-      args.workItemNodeId,
-    );
-    const now = await this.#store.serverTime();
-    const event: AttemptEvent = {
-      protocol: PROTOCOL_V2,
-      kind: "attempt",
-      event: args.event,
-      ...writerAuthority(args.lease, args.sequence),
-      objective: args.reservation.objective,
-      runId: args.reservation.runId,
-      sequence: args.sequence,
-      at: now.toISOString(),
-      workItem: args.reservation.workItem,
-      attempt: args.reservation.attempt,
-      backend: args.reservation.backend,
-      baseSha: args.reservation.baseSha,
-      directorEpoch: args.reservation.directorEpoch,
-      ...(args.reservation.directorEpoch === args.lease.epoch
-        ? {}
-        : { recoveryEpoch: args.lease.epoch }),
-      policyDigest: args.reservation.policyDigest,
-      ...(args.reason ? { reason: args.reason } : {}),
-      ...(args.providerResourceId ? { providerResourceId: args.providerResourceId } : {}),
-      ...(args.resourceHostIdentity ? { resourceHostIdentity: args.resourceHostIdentity } : {}),
-      ...(args.sourceArchiveDigest ? { sourceArchiveDigest: args.sourceArchiveDigest } : {}),
-      ...(args.sourceArchiveBytes === undefined
-        ? {}
-        : { sourceArchiveBytes: args.sourceArchiveBytes }),
-      ...(args.environmentIdentity ? { environmentIdentity: args.environmentIdentity } : {}),
-      ...(args.artifactDigest ? { artifactDigest: args.artifactDigest } : {}),
-      ...(args.headSha ? { headSha: args.headSha } : {}),
-      ...(args.modelProfile ? { modelProfile: args.modelProfile } : {}),
-      ...(args.reportedModelTokens === undefined
-        ? {}
-        : { reportedModelTokens: args.reportedModelTokens }),
-      ...(args.reportedModelUsage ? { reportedModelUsage: args.reportedModelUsage } : {}),
-    };
-    await this.#store.addIssueComment(
-      args.workItemNodeId,
-      encodeEventComment(
-        `Factory recorded ${args.event} for attempt ${args.reservation.attempt}.`,
-        event,
-      ),
-    );
-    if (
-      [
-        "AttemptSucceeded",
-        "AttemptFailed",
-        "AttemptTimedOut",
-        "AttemptCancelled",
-        "AttemptDeferred",
-        "AttemptIntegrated",
-      ].includes(args.event) &&
-      !["released", "reconciled", "terminal"].includes(admission.disposition)
-    ) {
-      await this.ledger.transition({
+    const mutationClass = [
+      "AttemptSucceeded",
+      "AttemptFailed",
+      "AttemptTimedOut",
+      "AttemptCancelled",
+      "AttemptDeferred",
+      "AttemptIntegrated",
+    ].includes(args.event)
+      ? "cleanup"
+      : "normal";
+    const operation = async (): Promise<AttemptEvent> => {
+      await this.#leases.assertMutationAuthorized(args.lease);
+      if (args.environmentIdentity) {
+        assertNoSecretMaterial(args.environmentIdentity, "attempt environment identity");
+      }
+      if (
+        args.reservation.runId !== args.lease.runId ||
+        args.reservation.policyDigest !== args.lease.policyDigest
+      ) {
+        throw new Error("attempt reservation is fenced from the current lease");
+      }
+      if (
+        args.reservation.directorEpoch !== args.lease.epoch &&
+        !(args.allowRecovery && args.reservation.directorEpoch < args.lease.epoch)
+      ) {
+        throw new Error("attempt reservation is fenced from the current lease epoch");
+      }
+      const admission = await this.assertReservation(
+        args.lease,
+        args.reservation,
+        args.workItemNodeId,
+      );
+      const now = await this.#store.serverTime(mutationClass);
+      const event: AttemptEvent = {
+        protocol: PROTOCOL_V2,
+        kind: "attempt",
+        event: args.event,
+        ...writerAuthority(args.lease, args.sequence),
+        objective: args.reservation.objective,
+        runId: args.reservation.runId,
+        sequence: args.sequence,
+        at: now.toISOString(),
         workItem: args.reservation.workItem,
-        reservationOid: args.reservation.oid,
-        objective: args.lease.objective,
-        runId: args.lease.runId,
-        directorEpoch: args.lease.epoch,
-        writerHolder: args.lease.holder,
-        policyDigest: args.lease.policyDigest,
-        disposition: "terminal",
-        assertCurrent: () => this.#leases.assertCurrent(args.lease).then(() => {}),
-      });
-    }
-    return event;
+        attempt: args.reservation.attempt,
+        backend: args.reservation.backend,
+        baseSha: args.reservation.baseSha,
+        directorEpoch: args.reservation.directorEpoch,
+        ...(args.reservation.directorEpoch === args.lease.epoch
+          ? {}
+          : { recoveryEpoch: args.lease.epoch }),
+        policyDigest: args.reservation.policyDigest,
+        ...(args.reason ? { reason: args.reason } : {}),
+        ...(args.providerResourceId ? { providerResourceId: args.providerResourceId } : {}),
+        ...(args.resourceHostIdentity ? { resourceHostIdentity: args.resourceHostIdentity } : {}),
+        ...(args.sourceArchiveDigest ? { sourceArchiveDigest: args.sourceArchiveDigest } : {}),
+        ...(args.sourceArchiveBytes === undefined
+          ? {}
+          : { sourceArchiveBytes: args.sourceArchiveBytes }),
+        ...(args.environmentIdentity ? { environmentIdentity: args.environmentIdentity } : {}),
+        ...(args.artifactDigest ? { artifactDigest: args.artifactDigest } : {}),
+        ...(args.headSha ? { headSha: args.headSha } : {}),
+        ...(args.modelProfile ? { modelProfile: args.modelProfile } : {}),
+        ...(args.reportedModelTokens === undefined
+          ? {}
+          : { reportedModelTokens: args.reportedModelTokens }),
+        ...(args.reportedModelUsage ? { reportedModelUsage: args.reportedModelUsage } : {}),
+      };
+      await this.#store.addIssueComment(
+        args.workItemNodeId,
+        encodeEventComment(
+          `Factory recorded ${args.event} for attempt ${args.reservation.attempt}.`,
+          event,
+        ),
+        mutationClass,
+      );
+      if (
+        [
+          "AttemptSucceeded",
+          "AttemptFailed",
+          "AttemptTimedOut",
+          "AttemptCancelled",
+          "AttemptDeferred",
+          "AttemptIntegrated",
+        ].includes(args.event) &&
+        !["released", "reconciled", "terminal"].includes(admission.disposition)
+      ) {
+        await this.ledger.transition({
+          workItem: args.reservation.workItem,
+          reservationOid: args.reservation.oid,
+          objective: args.lease.objective,
+          runId: args.lease.runId,
+          directorEpoch: args.lease.epoch,
+          writerHolder: args.lease.holder,
+          policyDigest: args.lease.policyDigest,
+          disposition: "terminal",
+          assertCurrent: () => this.#leases.assertCurrent(args.lease).then(() => {}),
+        });
+      }
+      return event;
+    };
+    return await (mutationClass === "cleanup" && this.#store.withMutationClass
+      ? this.#store.withMutationClass("cleanup", operation)
+      : operation());
   }
 
   async repairReservationComment(args: {
@@ -716,53 +744,60 @@ export class AttemptManager {
     allowRecovery?: boolean;
     localScopeBatch?: LocalScopeBatch;
   }): Promise<FactoryEvent> {
-    await this.#leases.assertMutationAuthorized(args.lease);
-    if (
-      args.allowRecovery &&
-      args.reservation.directorEpoch !== args.lease.epoch &&
-      args.reservation.directorEpoch >= args.lease.epoch
-    ) {
-      throw new Error("capacity recovery cannot write for a future lease epoch");
-    }
-    if (
-      args.reservation.runId !== args.lease.runId ||
-      args.reservation.policyDigest !== args.lease.policyDigest ||
-      (args.reservation.directorEpoch !== args.lease.epoch && !args.allowRecovery)
-    ) {
-      throw new Error("capacity reservation is fenced from the current lease");
-    }
-    await this.assertReservation(args.lease, args.reservation, args.workItemNodeId);
-    const now = await this.#store.serverTime();
-    const event = parseFactoryEvent({
-      protocol: PROTOCOL_V2,
-      kind: "capacity",
-      event: args.event,
-      ...writerAuthority(args.lease, args.sequence),
-      objective: args.reservation.objective,
-      runId: args.reservation.runId,
-      sequence: args.sequence,
-      at: now.toISOString(),
-      workItem: args.reservation.workItem,
-      attempt: args.reservation.attempt,
-      phase: args.phase,
-      ...(args.localScopeBatch ? { localScopeBatch: args.localScopeBatch } : {}),
-      backend: args.backend,
-      requestedCpu: args.requestedCpu,
-      requestedMemoryMb: args.requestedMemoryMb,
-      directorEpoch: args.reservation.directorEpoch,
-      ...(args.reservation.directorEpoch === args.lease.epoch
-        ? {}
-        : { recoveryEpoch: args.lease.epoch }),
-      policyDigest: args.reservation.policyDigest,
-      ...(args.reason ? { reason: args.reason } : {}),
-    });
-    await this.#store.addIssueComment(
-      args.workItemNodeId,
-      encodeEventComment(
-        `Factory ${args.event === "CapacityReserved" ? "reserved" : "reconciled"} ${args.phase} capacity on \`${args.backend}\`.`,
-        event,
-      ),
-    );
-    return event;
+    const mutationClass = args.event === "CapacityReconciled" ? "cleanup" : "normal";
+    const operation = async (): Promise<FactoryEvent> => {
+      await this.#leases.assertMutationAuthorized(args.lease);
+      if (
+        args.allowRecovery &&
+        args.reservation.directorEpoch !== args.lease.epoch &&
+        args.reservation.directorEpoch >= args.lease.epoch
+      ) {
+        throw new Error("capacity recovery cannot write for a future lease epoch");
+      }
+      if (
+        args.reservation.runId !== args.lease.runId ||
+        args.reservation.policyDigest !== args.lease.policyDigest ||
+        (args.reservation.directorEpoch !== args.lease.epoch && !args.allowRecovery)
+      ) {
+        throw new Error("capacity reservation is fenced from the current lease");
+      }
+      await this.assertReservation(args.lease, args.reservation, args.workItemNodeId);
+      const now = await this.#store.serverTime(mutationClass);
+      const event = parseFactoryEvent({
+        protocol: PROTOCOL_V2,
+        kind: "capacity",
+        event: args.event,
+        ...writerAuthority(args.lease, args.sequence),
+        objective: args.reservation.objective,
+        runId: args.reservation.runId,
+        sequence: args.sequence,
+        at: now.toISOString(),
+        workItem: args.reservation.workItem,
+        attempt: args.reservation.attempt,
+        phase: args.phase,
+        ...(args.localScopeBatch ? { localScopeBatch: args.localScopeBatch } : {}),
+        backend: args.backend,
+        requestedCpu: args.requestedCpu,
+        requestedMemoryMb: args.requestedMemoryMb,
+        directorEpoch: args.reservation.directorEpoch,
+        ...(args.reservation.directorEpoch === args.lease.epoch
+          ? {}
+          : { recoveryEpoch: args.lease.epoch }),
+        policyDigest: args.reservation.policyDigest,
+        ...(args.reason ? { reason: args.reason } : {}),
+      });
+      await this.#store.addIssueComment(
+        args.workItemNodeId,
+        encodeEventComment(
+          `Factory ${args.event === "CapacityReserved" ? "reserved" : "reconciled"} ${args.phase} capacity on \`${args.backend}\`.`,
+          event,
+        ),
+        mutationClass,
+      );
+      return event;
+    };
+    return await (mutationClass === "cleanup" && this.#store.withMutationClass
+      ? this.#store.withMutationClass("cleanup", operation)
+      : operation());
   }
 }

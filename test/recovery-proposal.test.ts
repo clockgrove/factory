@@ -1070,13 +1070,37 @@ describe("explicit recovery request application", () => {
         const route = `${request.method} ${url.pathname}`;
         const response = (value: unknown, status = 200) =>
           Response.json(value, { status, headers: { date: now.toUTCString() } });
-        const issue = { number: 7, state: "open", labels: [...labels].map((name) => ({ name })) };
+        const issue = {
+          number: 7,
+          state: "open",
+          title: "Recovery fixture",
+          body: "",
+          updated_at: now.toISOString(),
+          labels: [...labels].map((name) => ({ name })),
+        };
         if (route === "GET /user") return response({ login: actor });
         if (route === "GET /repos/o/r/issues") {
+          if (url.searchParams.has("since")) {
+            expect(url.searchParams.get("labels")).toBeNull();
+            expect(url.searchParams.get("sort")).toBe("created");
+            return response([issue]);
+          }
           expect(url.searchParams.get("labels")).toBe("factory:objective");
           return response(labels.has("factory:objective") ? [issue] : []);
         }
         if (route === "GET /repos/o/r/issues/7") return response(issue);
+        if (route === "GET /repos/o/r/issues/comments")
+          return response(
+            comments.map((event, index) => ({
+              id: 10_000 + index,
+              issue_url: "https://api.github.com/repos/o/r/issues/7",
+              body: encodeEventComment("fixture", event),
+              user: { login: "operator" },
+              author_association: "OWNER",
+              created_at: now.toISOString(),
+              updated_at: now.toISOString(),
+            })),
+          );
         if (route === "GET /repos/o/r/issues/7/comments")
           return response(
             f.snapshot.factoryEvents!.map((event, index) => ({

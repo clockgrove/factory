@@ -4,11 +4,17 @@ import {
   CircuitBreaker,
   ConcurrencyLimiter,
   ContentCreationPacer,
+  GitHubPrimaryAdmissionDeferredError,
   GitHubPrimaryQuotaCache,
+  GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST,
+  GITHUB_GRAPHQL_PROTECTED_RESERVE,
+  GITHUB_PRIMARY_PROTECTED_RESERVE,
   MutationScheduler,
   PlatformUnavailableError,
   classifyRefusal,
+  githubRequestTelemetryForCredential,
   isPlatformUnavailable,
+  withGitHubRequestPriority,
 } from "../src/platform.js";
 import { createOctokit } from "../src/github.js";
 import { GitHubControlStore } from "../src/control/github-store.js";
@@ -217,6 +223,229 @@ describe("GitHub client throttling", () => {
       { resource: "core", limit: 5000, remaining: 4998, used: 2 },
       { resource: "graphql", limit: 5000, remaining: 4900 },
     ]);
+  });
+
+  it("shares primary-reserve admission across clients using the same credential", async () => {
+    let transports = 0;
+    const reset = Math.floor(Date.now() / 1_000) + 3_600;
+    const requestFetch: typeof globalThis.fetch = async () => {
+      transports++;
+      return new Response(JSON.stringify({ login: "fixture" }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "x-ratelimit-resource": "core",
+          "x-ratelimit-limit": "5000",
+          "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
+          "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+          "x-ratelimit-reset": String(reset),
+        },
+      });
+    };
+    const options = {
+      token: "shared-primary-reserve-test",
+      owner: "clockgrove",
+      repo: "factory",
+      requestFetch,
+    };
+    const first = createOctokit(options);
+    const second = createOctokit(options);
+
+    await first.request("GET /user");
+    await expect(second.request("GET /user")).rejects.toBeInstanceOf(
+      GitHubPrimaryAdmissionDeferredError,
+    );
+    expect(transports).toBe(1);
+    expect(githubRequestTelemetryForCredential(options.token).endpoints).toContainEqual(
+      expect.objectContaining({
+        endpoint: "authenticated-user",
+        admitted: 1,
+        transported: 1,
+        successful: 1,
+      }),
+    );
+  });
+
+  it("reserves normal capacity while allowing explicit safety traffic until exhaustion", async () => {
+    const quota = new GitHubPrimaryQuotaCache();
+    const reset = Math.floor(Date.now() / 1_000) + 3_600;
+    quota.observe({
+      "x-ratelimit-resource": "core",
+      "x-ratelimit-limit": "5000",
+      "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-reset": String(reset),
+    });
+    let transports = 0;
+    const octokit = createOctokit({
+      token: "explicit-protected-reserve-test",
+      owner: "clockgrove",
+      repo: "factory",
+      primaryQuota: quota,
+      requestFetch: async () => {
+        transports++;
+        return new Response(JSON.stringify({ login: "fixture" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    await expect(octokit.request("GET /user")).rejects.toBeInstanceOf(
+      GitHubPrimaryAdmissionDeferredError,
+    );
+    await withGitHubRequestPriority("protected", () => octokit.request("GET /user"));
+    expect(transports).toBe(1);
+
+    quota.observe({
+      "x-ratelimit-resource": "core",
+      "x-ratelimit-limit": "5000",
+      "x-ratelimit-remaining": "0",
+      "x-ratelimit-used": "5000",
+      "x-ratelimit-reset": String(reset),
+    });
+    await expect(
+      withGitHubRequestPriority("protected", () => octokit.request("GET /user")),
+    ).rejects.toBeInstanceOf(GitHubPrimaryAdmissionDeferredError);
+    expect(transports).toBe(1);
+  });
+
+  it("reserves the estimated GraphQL query cost before transport", async () => {
+    const quota = new GitHubPrimaryQuotaCache();
+    quota.observe({
+      "x-ratelimit-resource": "graphql",
+      "x-ratelimit-limit": "5000",
+      "x-ratelimit-remaining": String(
+        GITHUB_GRAPHQL_PROTECTED_RESERVE + GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST - 1,
+      ),
+      "x-ratelimit-used": String(
+        5001 - GITHUB_GRAPHQL_PROTECTED_RESERVE - GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST,
+      ),
+      "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
+    });
+    let transports = 0;
+    const octokit = createOctokit({
+      token: "graphql-estimated-cost-test",
+      owner: "clockgrove",
+      repo: "factory",
+      primaryQuota: quota,
+      requestFetch: async () => {
+        transports++;
+        return new Response(JSON.stringify({ data: { viewer: { login: "fixture" } } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    await expect(octokit.graphql("query { viewer { login } }")).rejects.toBeInstanceOf(
+      GitHubPrimaryAdmissionDeferredError,
+    );
+    expect(transports).toBe(0);
+  });
+
+  it("merges out-of-order observations conservatively within one reset window", () => {
+    const quota = new GitHubPrimaryQuotaCache();
+    const headers = {
+      "x-ratelimit-resource": "core",
+      "x-ratelimit-limit": "5000",
+      "x-ratelimit-reset": "1893456000",
+    };
+    quota.observe(
+      { ...headers, "x-ratelimit-remaining": "4900", "x-ratelimit-used": "100" },
+      new Date("2026-01-01T00:00:02.000Z"),
+    );
+    quota.observe(
+      { ...headers, "x-ratelimit-remaining": "4999", "x-ratelimit-used": "1" },
+      new Date("2026-01-01T00:00:01.000Z"),
+    );
+
+    expect(quota.snapshot()).toMatchObject([
+      {
+        resource: "core",
+        remaining: 4900,
+        used: 100,
+        observedAt: "2026-01-01T00:00:02.000Z",
+      },
+    ]);
+  });
+
+  it("does not count a locally deferred mutation as transported", async () => {
+    const quota = new GitHubPrimaryQuotaCache();
+    quota.observe({
+      "x-ratelimit-resource": "core",
+      "x-ratelimit-limit": "5000",
+      "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
+    });
+    const scheduler = new MutationScheduler({ primaryQuota: quota });
+    let transports = 0;
+    const store = new GitHubControlStore({
+      token: "local-admission-transport-test",
+      owner: "clockgrove",
+      repo: "factory",
+      primaryQuota: quota,
+      mutationScheduler: scheduler,
+      requestFetch: async () => {
+        transports++;
+        return new Response("{}", {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    await expect(
+      store.stackRequest(
+        "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+        { owner: "clockgrove", repo: "factory", issue_number: 313, body: "fixture" },
+        true,
+      ),
+    ).rejects.toBeInstanceOf(GitHubPrimaryAdmissionDeferredError);
+    expect(transports).toBe(0);
+    expect(scheduler.telemetry()).toMatchObject({ admitted: 1, transported: 0, successful: 0 });
+  });
+
+  it("binds prerequisite fence reads to the outer normal mutation class", async () => {
+    const quota = new GitHubPrimaryQuotaCache();
+    quota.observe({
+      "x-ratelimit-resource": "core",
+      "x-ratelimit-limit": "5000",
+      "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
+    });
+    const scheduler = new MutationScheduler({ primaryQuota: quota });
+    let transports = 0;
+    let store!: GitHubControlStore;
+    store = new GitHubControlStore({
+      token: "normal-fence-priority-test",
+      owner: "clockgrove",
+      repo: "factory",
+      primaryQuota: quota,
+      mutationScheduler: scheduler,
+      captureMutationFence: () => async () => {
+        await store.readRefWithServerTime("refs/clockgrove-factory/leases/objective-313");
+      },
+      requestFetch: async () => {
+        transports++;
+        return new Response(JSON.stringify({ object: { sha: "a".repeat(40) } }), {
+          status: 200,
+          headers: { "content-type": "application/json", date: new Date().toUTCString() },
+        });
+      },
+    });
+
+    await expect(
+      store.stackRequest(
+        "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+        { owner: "clockgrove", repo: "factory", issue_number: 313, body: "fixture" },
+        true,
+      ),
+    ).rejects.toBeInstanceOf(GitHubPrimaryAdmissionDeferredError);
+    expect(transports).toBe(0);
+    expect(scheduler.telemetry()).toMatchObject({ admitted: 1, transported: 0 });
   });
 
   it("surfaces quota refusal immediately instead of sleeping inside Octokit", async () => {

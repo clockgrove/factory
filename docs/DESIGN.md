@@ -180,6 +180,40 @@ Both API surfaces still share Factory's circuit breaker, concurrency limiter, co
 and secondary-rate-limit handling. Unchanged idle state is polled no more often than once per minute
 by default, while active local-worker cancellation uses the cheaper REST comments path.
 
+Repository discovery reconstructs complete authenticated Objective history once per controller
+process. It then keeps a process-local, non-authoritative scheduling index from an unfiltered issue
+delta and repository-comment delta each minute. A fifteen-minute backstop repeats the complete
+Objective-label index, a wider overlapping comment delta, and one aggregate
+`clockgrove-factory/` matching-ref read covering Objective leases and recovery plans. Issue/comment
+changes are therefore normally visible within 60 seconds; label-index and control-ref changes are
+visible within 15 minutes. Delta membership is filtered by `updated_at` but traversed in immutable
+creation order; a multi-page watermark advances only through the first response's server time, so
+an item entering an already-scanned page remains eligible on the next overlap. The warm label
+backstop adds candidates while the complete issue delta owns removals, preventing a live label
+removal from shifting and transiently erasing another cached Objective. Cold multi-page label
+discovery requires two consecutive identical scans before it hydrates any Objective. Every changed
+candidate is reclassified, and the Supervisor still
+performs its complete authority reads before a lease or mutation. Conditional responses, cursors,
+cached classifications and process-local revisions never establish absence, ownership, admission or
+execution authority. GitHub does not expose deleted issue comments in its delta feed, so an isolated
+comment deletion remains cached until process restart or until the Objective leaves and later
+re-enters the label index. Warm detection of an otherwise isolated comment deletion is unsupported.
+
+At one-page unchanged cardinality this costs at most 120 fast-delta REST transports plus 12
+backstop REST transports per idle hour. Ten label-index pages for 1,000 Objectives raise discovery
+to 168 transports; the supported 10,000-Objective maximum (100 pages) raises it to 528. Repository
+and Objective lease renewal adds at most 32 REST transports and about 8 GraphQL requests per hour
+under the default controller, so the corresponding pessimistic warm-idle totals are 164, 200 and
+560 REST transports respectively, plus one authenticated-user call per process bootstrap. Valid
+`304` responses do not consume GitHub primary quota, but remain counted in the transport ceiling;
+multi-page label indexes are deliberately unconditional because a page-one validator cannot prove
+later-page cardinality. Discovery fails closed above 10,000 Objectives, 10,000 comments on one
+Objective, 100,000 total retained comments, 64 MiB of retained comment bodies, or 10,000 Factory
+control refs. Primary-reserve pauses retain completed bootstrap and warm-delta hydration or
+classification work in memory and resume the same transaction after reset; bounds are enforced
+before new-object hydration and incrementally during it. No partial result is dispatched, and a
+process restart reconstructs from GitHub.
+
 Primary quota observations come from GitHub's response headers and are cached per credential and
 resource; Factory does not poll `/rate_limit` to reconstruct a fresher-looking answer. GitHub does
 not expose remaining secondary content-generation quota, so that plane is reported separately as a
@@ -190,6 +224,17 @@ are disabled so every retry returns through Factory's shared pacing and circuit 
 Process-local mutation counters include their scheduler-lifetime measurement window and remain
 outside durable run economics. A reader process cannot attribute its own counters to a reconstructed
 run; without durable run-bound evidence, that historical measurement is explicitly unavailable.
+Normal metadata admission conservatively reserves 1,024 REST points and 512 GraphQL points for all
+maximum-sized lease/cleanup cohorts that can be admitted before the primary window resets. The
+largest supported Objective GraphQL shape expands to fewer than 50,000 connection requests under
+GitHub's published cost formula and is therefore admitted at a fail-closed 512-point estimate. Only
+explicitly classified lease/cleanup calls may use that reserve; neither HTTP method, Git-object
+route, nor commit text grants priority, and prerequisite fence reads inherit the class of their
+outer mutation. Lease managers bind their complete read/CAS transaction; shared-capacity release,
+terminal receipts, and resource/accounting reconciliation bind cleanup explicitly. Concurrent
+requests reserve their estimated cost before transport, same-window response headers merge toward
+lower remaining/higher used values, and actual transport is counted only after local admission.
+Endpoint aggregates and the latest 64 discovery cycles are bounded, process-local telemetry.
 
 Recovery may retain bounded immutable Git content by exact object identity across repeated proof
 calls. It never caches mutable refs, authenticated event snapshots, PR/base state, leases, physical

@@ -103,6 +103,84 @@ class MemoryStore implements LeaseStore, AttemptStore {
   }
 }
 
+class ReserveBoundaryStore extends MemoryStore {
+  #activeMutationClass: "normal" | "lease" | "cleanup" | undefined;
+  stopNormalAdmission = false;
+  readonly admittedOperations: Array<{
+    operation: string;
+    mutationClass: "normal" | "lease" | "cleanup";
+  }> = [];
+
+  async withMutationClass<T>(
+    kind: "normal" | "lease" | "cleanup",
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (this.#activeMutationClass) return operation();
+    this.#activeMutationClass = kind;
+    try {
+      return await operation();
+    } finally {
+      this.#activeMutationClass = undefined;
+    }
+  }
+
+  #admit(operation: string): void {
+    const mutationClass = this.#activeMutationClass ?? "normal";
+    this.admittedOperations.push({ operation, mutationClass });
+    if (this.stopNormalAdmission && mutationClass === "normal") {
+      throw new Error("normal GitHub admission stopped at the protected reserve");
+    }
+  }
+
+  override async readRef(ref: string): Promise<string | null> {
+    this.#admit("readRef");
+    return super.readRef(ref);
+  }
+
+  override async listRefs(prefix: string): Promise<Array<{ ref: string; oid: string }>> {
+    this.#admit("listRefs");
+    return super.listRefs(prefix);
+  }
+
+  override async readCommit(oid: string): Promise<GitCommitObject> {
+    this.#admit("readCommit");
+    return super.readCommit(oid);
+  }
+
+  override async createCommit(args: {
+    treeOid: string;
+    parentOids: string[];
+    message: string;
+  }): Promise<string> {
+    this.#admit("createCommit");
+    return super.createCommit(args);
+  }
+
+  override async createRef(ref: string, oid: string): Promise<boolean> {
+    this.#admit("createRef");
+    return super.createRef(ref, oid);
+  }
+
+  override async compareAndSwapRef(args: {
+    ref: string;
+    beforeOid: string;
+    afterOid: string;
+  }): Promise<boolean> {
+    this.#admit("compareAndSwapRef");
+    return super.compareAndSwapRef(args);
+  }
+
+  override async serverTime(): Promise<Date> {
+    this.#admit("serverTime");
+    return super.serverTime();
+  }
+
+  override async addIssueComment(issue: string, body: string): Promise<void> {
+    this.#admit("addIssueComment");
+    return super.addIssueComment(issue, body);
+  }
+}
+
 const binding = async (attempt: number) => ({
   graphDigest: "c".repeat(64),
   graphCommitOid: BASE_SHA,
@@ -611,6 +689,91 @@ describe("attempt reservation", () => {
     expect(store.comments).toHaveLength(commentsBefore);
   });
 
+  it("keeps terminal attempt prerequisite reads inside cleanup admission", async () => {
+    const store = new ReserveBoundaryStore();
+    const leases = new LeaseManager({ store, durationMs: 60_000 });
+    const base = await store.readCommit(BASE_SHA);
+    const lease = await leases.acquire(identity, base);
+    const attempts = new AttemptManager({ store, leases });
+    const reservation = await attempts.reserve({
+      binding,
+      lease,
+      workItem: 43,
+      workItemNodeId: "I_43",
+      backend: "codex-cli/local-worktree",
+      base,
+      sequence: 2,
+    });
+    const operationStart = store.admittedOperations.length;
+    store.stopNormalAdmission = true;
+
+    await expect(
+      attempts.record({
+        lease,
+        workItemNodeId: "I_43",
+        reservation,
+        event: "AttemptSucceeded",
+        sequence: 3,
+      }),
+    ).resolves.toMatchObject({ event: "AttemptSucceeded" });
+
+    const terminalOperations = store.admittedOperations.slice(operationStart);
+    expect(terminalOperations).toEqual(
+      expect.arrayContaining([
+        { operation: "readRef", mutationClass: "cleanup" },
+        { operation: "readCommit", mutationClass: "cleanup" },
+        { operation: "addIssueComment", mutationClass: "cleanup" },
+        { operation: "compareAndSwapRef", mutationClass: "cleanup" },
+      ]),
+    );
+    expect(terminalOperations.every(({ mutationClass }) => mutationClass === "cleanup")).toBe(true);
+  });
+
+  it("keeps capacity reconciliation prerequisite reads inside cleanup admission", async () => {
+    const store = new ReserveBoundaryStore();
+    const leases = new LeaseManager({ store, durationMs: 60_000 });
+    const base = await store.readCommit(BASE_SHA);
+    const lease = await leases.acquire(identity, base);
+    const attempts = new AttemptManager({ store, leases });
+    const reservation = await attempts.reserve({
+      binding,
+      lease,
+      workItem: 43,
+      workItemNodeId: "I_43",
+      backend: "codex-cli/local-worktree",
+      base,
+      sequence: 2,
+    });
+    const operationStart = store.admittedOperations.length;
+    store.stopNormalAdmission = true;
+
+    await expect(
+      attempts.recordCapacity({
+        lease,
+        workItemNodeId: "I_43",
+        reservation,
+        sequence: 3,
+        event: "CapacityReconciled",
+        phase: "execution",
+        backend: "codex-cli/local-worktree",
+        requestedCpu: 2,
+        requestedMemoryMb: 4_096,
+      }),
+    ).resolves.toMatchObject({ event: "CapacityReconciled" });
+
+    const reconciliationOperations = store.admittedOperations.slice(operationStart);
+    expect(reconciliationOperations).toEqual(
+      expect.arrayContaining([
+        { operation: "readRef", mutationClass: "cleanup" },
+        { operation: "readCommit", mutationClass: "cleanup" },
+        { operation: "addIssueComment", mutationClass: "cleanup" },
+      ]),
+    );
+    expect(reconciliationOperations.every(({ mutationClass }) => mutationClass === "cleanup")).toBe(
+      true,
+    );
+  });
+
   it("repairs the exact scoped reservation after a crash between ref and comment creation", async () => {
     const store = new MemoryStore();
     const leases = new LeaseManager({ store, durationMs: 60_000 });
@@ -950,7 +1113,7 @@ describe("Factory event comment routing", () => {
     expect(requests).toBe(1);
   });
 
-  it("admits lease commits through the reserved mutation class", async () => {
+  it("admits only explicitly classified lease commits through the reserved mutation class", async () => {
     const mutationClasses: string[] = [];
     const requestFetch: typeof globalThis.fetch = async () =>
       new Response(JSON.stringify({ sha: BASE_SHA }), {
@@ -976,10 +1139,17 @@ describe("Factory event comment routing", () => {
     await store.createCommit({
       treeOid: TREE_SHA,
       parentOids: [BASE_SHA],
-      message: "Factory lease LeaseRenewed for Objective #14",
+      message: "Factory lease-shaped but ordinary preparation",
     });
+    await store.withMutationClass("lease", () =>
+      store.createCommit({
+        treeOid: TREE_SHA,
+        parentOids: [BASE_SHA],
+        message: "Factory lease LeaseRenewed for Objective #14",
+      }),
+    );
 
-    expect(mutationClasses).toEqual(["lease"]);
+    expect(mutationClasses).toEqual(["normal", "lease"]);
   });
 });
 
@@ -1111,20 +1281,35 @@ describe("authenticated durable activation discovery", () => {
       requestFetch: async (input, init) => {
         const request = new Request(input, init);
         if (request.url.endsWith("/user")) {
-          return Response.json({ login: "operator" });
+          return Response.json(
+            { login: "operator" },
+            { headers: { date: "Thu, 03 Sep 2026 00:00:03 GMT" } },
+          );
         }
+        const repositoryComments = request.url.includes("/issues/comments");
         const isComments = request.url.includes("/issues/14/comments");
-        if (!isComments) {
+        if (!isComments && !repositoryComments) {
           expect(new URL(request.url).searchParams.get("state")).toBe("all");
         }
-        const data = isComments
-          ? comments.map((comment, index) => ({
-              id: index + 1,
-              body: comment.body,
-              user: { login: comment.login },
-              author_association: comment.association,
-            }))
-          : [{ number: 14, state }];
+        const data =
+          isComments || repositoryComments
+            ? comments.map((comment, index) => ({
+                id: index + 1,
+                body: comment.body,
+                issue_url: "https://api.github.com/repos/clockgrove/factory/issues/14",
+                created_at: `2026-09-03T00:00:${String(index).padStart(2, "0")}Z`,
+                updated_at: `2026-09-03T00:00:${String(index).padStart(2, "0")}Z`,
+                user: { login: comment.login },
+                author_association: comment.association,
+              }))
+            : [
+                {
+                  number: 14,
+                  state,
+                  updated_at: "2026-09-03T00:00:03Z",
+                  labels: [{ name: "factory:objective" }],
+                },
+              ];
         return new Response(JSON.stringify(data), {
           status: 200,
           headers: {

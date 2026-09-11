@@ -1,13 +1,15 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createOctokit, type GitHubOptions } from "../github.js";
+import { createOctokit, withGitHubTransportCallbacks, type GitHubOptions } from "../github.js";
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
   ContentCreationPacer,
+  GitHubPrimaryAdmissionDeferredError,
   MutationScheduler,
   PlatformUnavailableError,
   classifyRefusal,
   isSecondaryRateLimitRefusal,
+  withGitHubRequestPriority,
   type MutationAdmission,
   type MutationClass,
 } from "../platform.js";
@@ -43,6 +45,16 @@ import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { parseRunPolicy, policyDigest } from "../protocol/policy.js";
 import { discoverRecoveryActivation } from "../recovery/discovery.js";
 import { activationCancellation } from "./activations.js";
+import {
+  DISCOVERY_SESSION_LIMITS,
+  GitHubDiscoverySession,
+  recordPartialDiscoveryRequests,
+  type DiscoveryCollection,
+  type DiscoveryComment,
+  type DiscoveryIssue,
+  type DiscoveryControlRef,
+  type DiscoverySessionTelemetry,
+} from "./discovery-session.js";
 
 const UPDATE_REFS = `
 mutation FactoryUpdateRefs(
@@ -124,6 +136,8 @@ export interface GitHubControlStoreOptions extends GitHubOptions {
   assertMutationIdentity?: (lease: LeaseState) => void;
   mutationScope?: string;
   onMutationOperation?: (observation: MutationOperationObservation) => void;
+  /** Injectable process clock for deterministic discovery reconciliation tests. */
+  discoveryNow?: () => Date;
 }
 
 export interface DurableObjectiveActivation {
@@ -134,6 +148,8 @@ export interface DurableObjectiveActivation {
   policyDigest: string;
   baseSha: string;
   requestedBy: string;
+  /** Process-local scheduling revision. Never durable authority. */
+  discoveryRevision?: number;
   /** Discovery fact only; the Supervisor still verifies the actual durable run. */
   resuming?: boolean;
   recovery?: { requestId: string; planDigest: string; successorRunId: string };
@@ -193,8 +209,11 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   readonly #scopedMutationFence = new AsyncLocalStorage<(waitedMs: number) => Promise<void>>();
   readonly #publicationSafetyFence = new AsyncLocalStorage<() => Promise<void>>();
   readonly #transportFenceContext = new AsyncLocalStorage<boolean>();
+  readonly #mutationClassContext = new AsyncLocalStorage<MutationClass>();
   #droppedOperationObservations = 0;
   #repositoryId: string | null = null;
+  readonly #discovery: GitHubDiscoverySession;
+  readonly #discoveryCommitCache = new Map<string, Omit<GitCommitObject, "serverTime">>();
 
   constructor(options: GitHubControlStoreOptions) {
     this.#octokit = createOctokit(options);
@@ -214,6 +233,22 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     this.#assertMutationIdentity = options.assertMutationIdentity;
     this.#mutationScope = options.mutationScope ?? "unscoped-control-store";
     this.#onMutationOperation = options.onMutationOperation;
+    this.#discovery = new GitHubDiscoverySession(
+      {
+        authenticate: () => this.#authenticateDiscovery(),
+        listLabelledIssues: (etag) => this.#listDiscoveryIssues("labelled", undefined, etag),
+        listIssueDelta: (since, etag) => this.#listDiscoveryIssues("delta", since, etag),
+        listRepositoryComments: (since, etag) => this.#listRepositoryDiscoveryComments(since, etag),
+        listObjectiveComments: (objective) => this.#listObjectiveDiscoveryComments(objective),
+        listControlRefs: (etag) => this.#listDiscoveryControlRefs(etag),
+        classify: (input) => this.#classifyDiscoveryObjective(input),
+      },
+      options.discoveryNow,
+    );
+  }
+
+  discoveryTelemetry(): DiscoverySessionTelemetry {
+    return this.#discovery.telemetry();
   }
 
   get objectivePublicationFenceAtDispatch(): boolean {
@@ -233,6 +268,20 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     operation: () => Promise<T>,
   ): Promise<T> {
     return this.#scopedMutationFence.run(fence, operation);
+  }
+
+  /** Bind an explicit semantic class across prerequisite reads and writes.
+   * Outer request priority wins, so a lease assertion inside a normal write
+   * fence cannot borrow protected capacity. */
+  withMutationClass<T>(kind: MutationClass, operation: () => Promise<T>): Promise<T> {
+    if (this.#mutationClassContext.getStore()) return operation();
+    return this.#mutationClassContext.run(kind, () =>
+      withGitHubRequestPriority(
+        kind === "normal" ? "normal" : "protected",
+        operation,
+        kind === "normal" ? undefined : 1,
+      ),
+    );
   }
 
   /** Compose mutable publication policy with the transport's authoritative
@@ -286,6 +335,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     operationName = `${mutationClass}-mutation`,
     authorityClass: MutationAuthorityClass = "objective-publication",
   ): Promise<T> {
+    const effectiveMutationClass = this.#mutationClassContext.getStore() ?? mutationClass;
     const dispatch = () => {
       if (mutating && this.#transportFenceContext.getStore())
         throw new Error("mutation dispatch is forbidden inside a transport fence");
@@ -296,11 +346,18 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       // Shared transactions bind an immutable owner; do not capture or recheck
       // a second, configured Objective generation for the same operation.
       const fence =
-        scopedFence ?? (authoritative ? this.#captureMutationFence?.(mutationClass) : undefined);
+        scopedFence ??
+        (authoritative ? this.#captureMutationFence?.(effectiveMutationClass) : undefined);
       const publicationSafetyFence = authoritative
         ? this.#publicationSafetyFence.getStore()
         : undefined;
-      return this.#dispatch(operation, mutating, mutationClass, fence, publicationSafetyFence);
+      return this.#dispatch(
+        operation,
+        mutating,
+        effectiveMutationClass,
+        fence,
+        publicationSafetyFence,
+      );
     };
     if (!mutating) return dispatch();
     return observeMutationOperation(
@@ -341,12 +398,17 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       }
       if (mutationPermit) {
         observeMutationQueue(mutationPermit.waitedMs);
-        await this.#transportFenceContext.run(true, () =>
-          observeMutationFence(async () => {
-            if (capturedFence) await capturedFence(mutationPermit.waitedMs);
-            await this.#beforeMutation(mutationClass, mutationPermit.waitedMs);
-            await publicationSafetyFence?.();
-          }),
+        await withGitHubRequestPriority(
+          mutationClass === "normal" ? "normal" : "protected",
+          () =>
+            this.#transportFenceContext.run(true, () =>
+              observeMutationFence(async () => {
+                if (capturedFence) await capturedFence(mutationPermit.waitedMs);
+                await this.#beforeMutation(mutationClass, mutationPermit.waitedMs);
+                await publicationSafetyFence?.();
+              }),
+            ),
+          mutationClass === "normal" ? undefined : 1,
         );
       }
       if (this.#breaker.isOpen()) {
@@ -356,14 +418,31 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         );
       }
       mutationPermit?.assertDispatchAllowed?.();
-      mutationPermit?.recordTransported?.();
-      attempted = true;
-      const result = await operation();
-      mutationPermit?.recordSuccess?.();
-      this.#breaker.recordSuccess();
+      const invoke = () =>
+        mutating
+          ? withGitHubRequestPriority(
+              mutationClass === "normal" ? "normal" : "protected",
+              operation,
+              mutationClass === "normal" ? undefined : 1,
+            )
+          : operation();
+      const result = await withGitHubTransportCallbacks(
+        {
+          onTransported: () => {
+            attempted = true;
+            mutationPermit?.recordTransported?.();
+          },
+        },
+        invoke,
+      );
+      if (attempted) {
+        mutationPermit?.recordSuccess?.();
+        this.#breaker.recordSuccess();
+      }
       return result;
     } catch (error) {
       if (!attempted) throw error;
+      if (error instanceof GitHubPrimaryAdmissionDeferredError) throw error;
       const refusal =
         error instanceof PlatformUnavailableError ? error.refusal : classifyRefusal(error);
       if (refusal.kind !== "not_refusal") {
@@ -413,16 +492,6 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       }
       throw error;
     }
-  }
-
-  async #readObjectiveAuthority(number: number): Promise<ObjectiveAuthorityObservation | null> {
-    const observation = await this.readRefWithServerTime(leaseRef(number));
-    if (!observation.oid) return null;
-    const lease = parseLeaseCommit(await this.readCommit(observation.oid));
-    if (lease.objective !== number) {
-      throw new Error(`Objective #${number} authority ref names another Objective`);
-    }
-    return objectiveAuthorityObservation(lease, observation.serverTime);
   }
 
   async listRefs(prefix: string): Promise<Array<{ ref: string; oid: string }>> {
@@ -477,10 +546,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           parents: args.parentOids,
         }),
       true,
-      args.message.startsWith("Factory lease ") ||
-        args.message.startsWith("Factory repository-controller lease")
-        ? "lease"
-        : "normal",
+      "normal",
       "createCommit",
       "immutable-preparation",
     );
@@ -498,7 +564,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
             sha: oid,
           }),
         true,
-        ref.startsWith("refs/clockgrove-factory/leases/") ? "lease" : "normal",
+        "normal",
         "createRef",
         "atomic-publication",
       );
@@ -526,7 +592,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
             afterOid: args.afterOid,
           }),
         true,
-        args.ref.startsWith("refs/clockgrove-factory/leases/") ? "lease" : "normal",
+        "normal",
         "compareAndSwapRef",
         "atomic-publication",
       );
@@ -542,7 +608,11 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     }
   }
 
-  async addIssueComment(_issueNodeId: string, body: string): Promise<void> {
+  async addIssueComment(
+    _issueNodeId: string,
+    body: string,
+    mutationClass: MutationClass = "normal",
+  ): Promise<void> {
     const issueNumber = factoryCommentIssueNumber(body);
     await this.#call(
       () =>
@@ -553,17 +623,19 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           body,
         }),
       true,
-      "normal",
+      mutationClass,
       "addIssueComment",
     );
   }
 
-  async serverTime(): Promise<Date> {
-    const response = await this.#call(() =>
-      this.#octokit.request("GET /repos/{owner}/{repo}", {
-        owner: this.#owner,
-        repo: this.#repo,
-      }),
+  async serverTime(mutationClass: MutationClass = "normal"): Promise<Date> {
+    const response = await this.withMutationClass(mutationClass, () =>
+      this.#call(() =>
+        this.#octokit.request("GET /repos/{owner}/{repo}", {
+          owner: this.#owner,
+          repo: this.#repo,
+        }),
+      ),
     );
     return responseDate(response);
   }
@@ -638,233 +710,499 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     );
   }
 
-  /** Reconstruct controller work directly from Objective comments.  There is
-   * deliberately no scheduler cursor or activation cache: every controller
-   * process can recover from the same GitHub records after an interruption. */
+  /** Bootstrap once from complete authenticated history, then consume bounded
+   * conditional deltas. The session is a scheduling index, never authority. */
   async discoverObjectiveActivations(): Promise<DurableObjectiveActivation[]> {
-    const result: DurableObjectiveActivation[] = [];
-    const controllerLogin = (await this.getAuthenticatedLogin()).toLowerCase();
-    for (let page = 1; page <= 100; page += 1) {
-      const issues = await this.#call(() =>
-        this.#octokit.request("GET /repos/{owner}/{repo}/issues", {
-          owner: this.#owner,
-          repo: this.#repo,
-          state: "all",
-          labels: "factory:objective",
-          per_page: 100,
-          page,
-        }),
+    return this.#discovery.discover();
+  }
+
+  async #authenticateDiscovery(): Promise<{ login: string; serverTime: Date }> {
+    let transported = false;
+    let response;
+    try {
+      response = await withGitHubTransportCallbacks(
+        { onTransported: () => (transported = true) },
+        () =>
+          withGitHubRequestPriority("normal", () =>
+            this.#call(() => this.#octokit.request("GET /user")),
+          ),
       );
-      for (const issue of issues.data) {
-        if ("pull_request" in issue) continue;
-        const commentsForAuthentication: Array<{
-          body: string;
-          authorLogin: string | null;
-          authorAssociation: string | null;
-        }> = [];
-        for (let commentsPage = 1; commentsPage <= 100; commentsPage += 1) {
-          const comments = await this.#call(() =>
-            this.#octokit.request("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
-              owner: this.#owner,
-              repo: this.#repo,
-              issue_number: issue.number,
-              per_page: 100,
-              page: commentsPage,
-            }),
-          );
-          for (const comment of comments.data) {
-            commentsForAuthentication.push({
-              body: comment.body ?? "",
-              authorLogin: comment.user?.login ?? null,
-              authorAssociation: comment.author_association ?? null,
-            });
-          }
-          if (comments.data.length < 100) break;
-          if (commentsPage === 100)
-            throw new Error(`Objective #${issue.number} exceeds the controller comment limit`);
-        }
-        const writerBound = commentsForAuthentication.some(
-          (comment) =>
-            comment.authorLogin?.toLowerCase() === controllerLogin &&
-            TRUSTED_CONTROL_ASSOCIATIONS.has(comment.authorAssociation ?? "") &&
-            decodeEventComments(comment.body).some(
-              (event) =>
-                event.writerEpoch !== undefined ||
-                event.writerOperationId !== undefined ||
-                event.writerHolder !== undefined ||
-                event.writerPolicyDigest !== undefined,
+      return { login: response.data.login, serverTime: responseDate(response) };
+    } catch (error) {
+      recordPartialDiscoveryRequests(error, transported ? 1 : 0);
+      throw error;
+    }
+  }
+
+  async #listDiscoveryIssues(
+    mode: "labelled" | "delta",
+    since: string | undefined,
+    etag: string | undefined,
+  ): Promise<DiscoveryCollection<DiscoveryIssue>> {
+    const byNumber = new Map<number, DiscoveryIssue>();
+    let requests = 0;
+    let nextEtag: string | undefined;
+    let firstResponseAt: string | undefined;
+    for (let page = 1; page <= DISCOVERY_SESSION_LIMITS.pagesPerProbe; page++) {
+      let response;
+      let transported = false;
+      try {
+        response = await withGitHubTransportCallbacks(
+          { onTransported: () => (transported = true) },
+          () =>
+            withGitHubRequestPriority("normal", () =>
+              this.#call(() =>
+                this.#octokit.request("GET /repos/{owner}/{repo}/issues", {
+                  owner: this.#owner,
+                  repo: this.#repo,
+                  state: "all",
+                  // `since` still filters by updated_at. Immutable creation
+                  // order prevents an edit from moving a previously scanned
+                  // row across the next page offset.
+                  sort: "created",
+                  direction: "asc",
+                  per_page: 100,
+                  page,
+                  ...(mode === "labelled" ? { labels: "factory:objective" } : { since: since! }),
+                  ...(page === 1 && etag ? { headers: { "if-none-match": etag } } : {}),
+                }),
+              ),
             ),
         );
-        const authority = writerBound
-          ? await this.#readObjectiveAuthority(issue.number)
-          : undefined;
-        if (writerBound && !authority) {
-          throw new Error(
-            `Objective #${issue.number} has writer-bound receipts but no authoritative lease ref`,
-          );
+      } catch (error) {
+        if (page === 1 && this.#status(error) === 304) {
+          return { items: [], requests: 1, notModified: true, ...(etag ? { etag } : {}) };
         }
-        const authenticated = deduplicateFactoryEvents(
-          authenticatedCommentEvents(commentsForAuthentication, authority)
-            .filter(({ login }) => login.toLowerCase() === controllerLogin)
-            .map(({ event }) => event),
-        ).map((event) => ({ event, login: controllerLogin }));
-        const events = authenticated.map(({ event }) => event);
-        const recovery = await discoverRecoveryActivation({
-          repository: `${this.#owner}/${this.#repo}`,
-          objective: issue.number,
-          actor: controllerLogin,
-          closed: issue.state === "closed",
-          events,
-          ...(authority === undefined ? {} : { authority }),
-          store: this,
-        });
-        if (recovery) {
-          const active = latestSupportedRun(events, authority);
-          result.push({
-            ...recovery,
-            ...(active?.event === "FactoryRunStarted" &&
-            active.runId === recovery.recovery?.successorRunId
-              ? { resuming: true }
-              : {}),
+        recordPartialDiscoveryRequests(error, requests + (transported ? 1 : 0));
+        throw error;
+      }
+      requests++;
+      try {
+        nextEtag ??= this.#etag(response.headers);
+        const observedAt = responseDate(response).toISOString();
+        firstResponseAt ??= observedAt;
+        for (const raw of response.data) {
+          if (!Number.isInteger(raw.number) || raw.number <= 0)
+            throw new Error("GitHub issue discovery returned an invalid issue number");
+          if (raw.state !== "open" && raw.state !== "closed")
+            throw new Error(`Objective #${raw.number} returned an invalid issue state`);
+          const labels = raw.labels
+            .map((label) => (typeof label === "string" ? label : label.name))
+            .filter((label): label is string => typeof label === "string")
+            .sort((left, right) => left.localeCompare(right));
+          if (mode === "labelled" && labels.length === 0) labels.push("factory:objective");
+          byNumber.set(raw.number, {
+            number: raw.number,
+            state: raw.state,
+            labels,
+            title: raw.title,
+            body: raw.body ?? "",
+            pullRequest: "pull_request" in raw,
+            updatedAt: raw.updated_at ?? observedAt,
           });
-          continue;
         }
-        const activationsByRequest = new Map<string, string>();
-        for (const { event, login } of authenticated) {
-          if (
-            event.kind !== "run" ||
-            event.event !== "ActivationRequested" ||
-            event.objective !== issue.number
-          ) {
-            continue;
-          }
-          const policy = parseRunPolicy(event.policy);
-          if (
-            event.repository.toLowerCase() !== `${this.#owner}/${this.#repo}`.toLowerCase() ||
-            event.runId !== event.requestId ||
-            event.requestedBy.toLowerCase() !== login.toLowerCase() ||
-            event.policyDigest !== policyDigest(policy) ||
-            event.controllerProtocolMin !== PROTOCOL_V2 ||
-            event.controllerProtocolMax !== PROTOCOL_V2
-          ) {
-            throw new Error(
-              `Objective #${issue.number} has an invalid authenticated activation receipt`,
-            );
-          }
-          const encoded = JSON.stringify(event);
-          const prior = activationsByRequest.get(event.requestId);
-          if (prior && prior !== encoded) {
-            throw new Error(
-              `Objective #${issue.number} has conflicting activations for request ${event.requestId}`,
-            );
-          }
-          activationsByRequest.set(event.requestId, encoded);
-        }
-        let activationIndex = -1;
-        for (let index = events.length - 1; index >= 0; index -= 1) {
-          const event = events[index]!;
-          if (
-            event.kind === "run" &&
-            event.event === "ActivationRequested" &&
-            event.objective === issue.number
-          ) {
-            activationIndex = index;
-            break;
-          }
-        }
-        const activationEntry = activationIndex < 0 ? undefined : authenticated[activationIndex];
-        const activation = activationEntry?.event;
-        const activationRequest =
-          activation?.kind === "run" && activation.event === "ActivationRequested"
-            ? activation
-            : undefined;
-        const terminalAfterActivation =
-          activationIndex >= 0 &&
-          activationRequest !== undefined &&
-          events
-            .slice(activationIndex + 1)
-            .some(
-              (event) =>
-                event.kind === "run" &&
-                event.objective === issue.number &&
-                event.event !== "FactoryRunStarted" &&
-                hasCurrentWriterAuthority(event, events, authority) &&
-                events.some(
-                  (candidate) =>
-                    candidate.kind === "run" &&
-                    candidate.event === "FactoryRunStarted" &&
-                    candidate.runId === event.runId &&
-                    candidate.activationRequestId === activationRequest.requestId &&
-                    candidate.actor.toLowerCase() === activationRequest.requestedBy.toLowerCase() &&
-                    candidate.policyDigest === activationRequest.policyDigest &&
-                    candidate.baseSha === activationRequest.baseSha,
-                ) &&
-                ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
-                  event.event,
-                ),
-            );
-        const rejectionAfterActivation =
-          activationIndex >= 0 &&
-          activationRequest !== undefined &&
-          events
-            .slice(activationIndex + 1)
-            .some(
-              (event) =>
-                event.kind === "run" &&
-                event.event === "ActivationRejected" &&
-                event.objective === issue.number &&
-                event.runId === activationRequest.runId &&
-                event.activationRequestId === activationRequest.requestId &&
-                event.requestedBy.toLowerCase() === activationRequest.requestedBy.toLowerCase() &&
-                event.baseSha === activationRequest.baseSha &&
-                event.policyDigest === activationRequest.policyDigest,
-            );
-        const activeRun = latestSupportedRun(events, authority);
-        const currentRun =
-          activeRun?.kind === "run" &&
-          activeRun.event === "FactoryRunStarted" &&
-          activeRun.activationRequestId === activationRequest?.requestId
-            ? activeRun
-            : null;
-        const commandState = currentRun
-          ? deriveDurableCommandState({
-              events,
-              objective: issue.number,
-              runId: currentRun.runId,
-              runActor: currentRun.actor,
-              runStartSequence: currentRun.sequence,
-            })
-          : null;
-        const gateAcknowledged = Boolean(
-          currentRun &&
-            commandState?.admissionGate &&
-            events.some(
-              (event) =>
-                event.kind === "run" &&
-                event.runId === currentRun.runId &&
-                hasCurrentWriterAuthority(event, events, authority) &&
-                event.event ===
-                  (commandState.admissionGate!.kind === "drain"
-                    ? "RunDrainCompleted"
-                    : "RunPauseAcknowledged") &&
-                event.commandRequestId === commandState.admissionGate!.requestId,
+        if (!this.#hasNext(response.headers))
+          return {
+            items: [...byNumber.values()],
+            requests,
+            notModified: false,
+            ...(requests === 1 && response.data.length < 100 && nextEtag ? { etag: nextEtag } : {}),
+            ...(requests > 1 && firstResponseAt ? { safeThrough: firstResponseAt } : {}),
+          };
+      } catch (error) {
+        recordPartialDiscoveryRequests(error, requests);
+        throw error;
+      }
+    }
+    const error = new Error("repository issue discovery exceeds its page limit");
+    recordPartialDiscoveryRequests(error, requests);
+    throw error;
+  }
+
+  async #listRepositoryDiscoveryComments(
+    since: string,
+    etag?: string,
+  ): Promise<DiscoveryCollection<DiscoveryComment>> {
+    return this.#listDiscoveryComments({ since, ...(etag ? { etag } : {}) });
+  }
+
+  async #listObjectiveDiscoveryComments(
+    objective: number,
+  ): Promise<DiscoveryCollection<DiscoveryComment>> {
+    return this.#listDiscoveryComments({ objective });
+  }
+
+  async #listDiscoveryComments(input: {
+    objective?: number;
+    since?: string;
+    etag?: string;
+  }): Promise<DiscoveryCollection<DiscoveryComment>> {
+    const byId = new Map<string, DiscoveryComment>();
+    let requests = 0;
+    let nextEtag: string | undefined;
+    let firstResponseAt: string | undefined;
+    for (let page = 1; page <= DISCOVERY_SESSION_LIMITS.pagesPerProbe; page++) {
+      let response;
+      let transported = false;
+      try {
+        response = await withGitHubTransportCallbacks(
+          { onTransported: () => (transported = true) },
+          () =>
+            withGitHubRequestPriority("normal", () =>
+              this.#call(() =>
+                input.objective === undefined
+                  ? this.#octokit.request("GET /repos/{owner}/{repo}/issues/comments", {
+                      owner: this.#owner,
+                      repo: this.#repo,
+                      // The delta predicate remains updated_at-based, while
+                      // immutable creation order prevents edits from moving
+                      // rows across live page offsets.
+                      sort: "created",
+                      direction: "asc",
+                      since: input.since!,
+                      per_page: 100,
+                      page,
+                      ...(page === 1 && input.etag
+                        ? { headers: { "if-none-match": input.etag } }
+                        : {}),
+                    })
+                  : this.#octokit.request(
+                      "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
+                      {
+                        owner: this.#owner,
+                        repo: this.#repo,
+                        issue_number: input.objective,
+                        per_page: 100,
+                        page,
+                      },
+                    ),
+              ),
             ),
         );
-        // A command by itself cannot suppress restart recovery: the process
-        // may have crashed while a local or paid attempt was still live.
-        // Supervisor acknowledges the exact gate only after every admitted
-        // attempt and review has been reconciled.
-        const operationallyStopped = Boolean(commandState?.admissionsPaused && gateAcknowledged);
-        const withdrawal = activationRequest && activationCancellation(events, activationRequest);
-        if (
-          activationRequest &&
-          !terminalAfterActivation &&
-          !rejectionAfterActivation &&
-          (currentRun || !withdrawal) &&
-          (issue.state === "closed" || !operationallyStopped || withdrawal)
-        ) {
-          result.push({
-            objective: issue.number,
+      } catch (error) {
+        if (page === 1 && input.etag && this.#status(error) === 304) {
+          return { items: [], requests: 1, notModified: true, etag: input.etag };
+        }
+        recordPartialDiscoveryRequests(error, requests + (transported ? 1 : 0));
+        throw error;
+      }
+      requests++;
+      try {
+        nextEtag ??= this.#etag(response.headers);
+        const observedAt = responseDate(response).toISOString();
+        firstResponseAt ??= observedAt;
+        for (const raw of response.data) {
+          const id = String(raw.id);
+          if (!/^\d+$/.test(id)) throw new Error("GitHub comment discovery returned an invalid ID");
+          const issueNumber = input.objective ?? this.#commentIssueNumber(raw.issue_url);
+          byId.set(id, {
+            id,
+            issueNumber,
+            body: raw.body ?? "",
+            authorLogin: raw.user?.login ?? null,
+            authorAssociation: raw.author_association ?? null,
+            updatedAt: raw.updated_at ?? raw.created_at ?? observedAt,
+          });
+        }
+        if (!this.#hasNext(response.headers))
+          return {
+            items: [...byId.values()],
+            requests,
+            notModified: false,
+            ...(requests === 1 && response.data.length < 100 && nextEtag ? { etag: nextEtag } : {}),
+            ...(input.objective === undefined && requests > 1 && firstResponseAt
+              ? { safeThrough: firstResponseAt }
+              : {}),
+          };
+      } catch (error) {
+        recordPartialDiscoveryRequests(error, requests);
+        throw error;
+      }
+    }
+    const error = new Error(
+      input.objective === undefined
+        ? "repository comment delta exceeds its page limit"
+        : `Objective #${input.objective} exceeds the controller comment limit`,
+    );
+    recordPartialDiscoveryRequests(error, requests);
+    throw error;
+  }
+
+  async #listDiscoveryControlRefs(
+    etag?: string,
+  ): Promise<DiscoveryCollection<DiscoveryControlRef>> {
+    let response;
+    let transported = false;
+    try {
+      response = await withGitHubTransportCallbacks(
+        { onTransported: () => (transported = true) },
+        () =>
+          withGitHubRequestPriority("normal", () =>
+            this.#call(() =>
+              this.#octokit.request("GET /repos/{owner}/{repo}/git/matching-refs/{ref}", {
+                owner: this.#owner,
+                repo: this.#repo,
+                ref: "clockgrove-factory/",
+                ...(etag ? { headers: { "if-none-match": etag } } : {}),
+              }),
+            ),
+          ),
+      );
+    } catch (error) {
+      if (etag && this.#status(error) === 304)
+        return { items: [], requests: 1, notModified: true, etag };
+      recordPartialDiscoveryRequests(error, transported ? 1 : 0);
+      throw error;
+    }
+    try {
+      if (response.data.length > DISCOVERY_SESSION_LIMITS.controlRefs)
+        throw new Error("repository control-ref discovery exceeds its record limit");
+      const serverTime = responseDate(response);
+      const items: DiscoveryControlRef[] = [];
+      const seen = new Map<string, string>();
+      for (const raw of response.data) {
+        const lease = /^refs\/clockgrove-factory\/leases\/objective-(\d+)$/.exec(raw.ref);
+        const recovery =
+          /^refs\/clockgrove-factory\/recovery-plans\/objective-(\d+)\/plan-[a-f0-9]{64}$/.exec(
+            raw.ref,
+          );
+        const match = lease ?? recovery;
+        if (!match) continue;
+        const objective = Number(match[1]);
+        if (!Number.isInteger(objective) || objective <= 0)
+          throw new Error("GitHub control-ref discovery returned an invalid ref");
+        const prior = seen.get(raw.ref);
+        if (prior && prior !== raw.object.sha)
+          throw new Error(`GitHub returned conflicting values for control ref ${raw.ref}`);
+        if (prior) continue;
+        seen.set(raw.ref, raw.object.sha);
+        items.push({
+          kind: lease ? "lease" : "recovery-plan",
+          objective,
+          ref: raw.ref,
+          oid: raw.object.sha,
+          serverTime,
+        });
+      }
+      const responseEtag = this.#etag(response.headers);
+      return {
+        items,
+        requests: 1,
+        notModified: false,
+        ...(responseEtag ? { etag: responseEtag } : {}),
+      };
+    } catch (error) {
+      recordPartialDiscoveryRequests(error, transported ? 1 : 0);
+      throw error;
+    }
+  }
+
+  async #classifyDiscoveryObjective(input: {
+    login: string;
+    issue: DiscoveryIssue;
+    comments: DiscoveryComment[];
+    revision: number;
+    authority?: DiscoveryControlRef | null;
+  }): Promise<{
+    activation: Omit<DurableObjectiveActivation, "discoveryRevision"> | null;
+    writerBound: boolean;
+    authorityOid: string | null;
+    recoveryBound: boolean;
+  }> {
+    const controllerLogin = input.login.toLowerCase();
+    const commentsForAuthentication = input.comments.map((comment) => ({
+      body: comment.body,
+      authorLogin: comment.authorLogin,
+      authorAssociation: comment.authorAssociation,
+    }));
+    const writerBound = commentsForAuthentication.some(
+      (comment) =>
+        comment.authorLogin?.toLowerCase() === controllerLogin &&
+        TRUSTED_CONTROL_ASSOCIATIONS.has(comment.authorAssociation ?? "") &&
+        decodeEventComments(comment.body).some(
+          (event) =>
+            event.writerEpoch !== undefined ||
+            event.writerOperationId !== undefined ||
+            event.writerHolder !== undefined ||
+            event.writerPolicyDigest !== undefined,
+        ),
+    );
+    let authority: ObjectiveAuthorityObservation | undefined;
+    let authorityOid: string | null = null;
+    if (writerBound) {
+      const ref =
+        input.authority === undefined
+          ? await this.#readDiscoveryLeaseRef(input.issue.number)
+          : input.authority;
+      if (!ref)
+        throw new Error(
+          `Objective #${input.issue.number} has writer-bound receipts but no authoritative lease ref`,
+        );
+      authorityOid = ref.oid;
+      const lease = parseLeaseCommit(await this.#readDiscoveryCommit(ref.oid, ref.serverTime));
+      if (lease.objective !== input.issue.number)
+        throw new Error(`Objective #${input.issue.number} authority ref names another Objective`);
+      authority = objectiveAuthorityObservation(lease, ref.serverTime);
+    }
+    const authenticated = deduplicateFactoryEvents(
+      authenticatedCommentEvents(commentsForAuthentication, authority)
+        .filter(({ login }) => login.toLowerCase() === controllerLogin)
+        .map(({ event }) => event),
+    ).map((event) => ({ event, login: controllerLogin }));
+    const events = authenticated.map(({ event }) => event);
+    const recoveryBound = events.some((event) => event.event === "RecoveryRequested");
+    const recovery = await discoverRecoveryActivation({
+      repository: `${this.#owner}/${this.#repo}`,
+      objective: input.issue.number,
+      actor: controllerLogin,
+      closed: input.issue.state === "closed",
+      events,
+      ...(authority === undefined ? {} : { authority }),
+      store: this,
+    });
+    if (recovery) {
+      const active = latestSupportedRun(events, authority);
+      return {
+        activation: {
+          ...recovery,
+          ...(active?.event === "FactoryRunStarted" &&
+          active.runId === recovery.recovery?.successorRunId
+            ? { resuming: true }
+            : {}),
+        },
+        writerBound,
+        authorityOid,
+        recoveryBound,
+      };
+    }
+    const activationsByRequest = new Map<string, string>();
+    for (const { event, login } of authenticated) {
+      if (
+        event.kind !== "run" ||
+        event.event !== "ActivationRequested" ||
+        event.objective !== input.issue.number
+      )
+        continue;
+      const policy = parseRunPolicy(event.policy);
+      if (
+        event.repository.toLowerCase() !== `${this.#owner}/${this.#repo}`.toLowerCase() ||
+        event.runId !== event.requestId ||
+        event.requestedBy.toLowerCase() !== login.toLowerCase() ||
+        event.policyDigest !== policyDigest(policy) ||
+        event.controllerProtocolMin !== PROTOCOL_V2 ||
+        event.controllerProtocolMax !== PROTOCOL_V2
+      )
+        throw new Error(
+          `Objective #${input.issue.number} has an invalid authenticated activation receipt`,
+        );
+      const encoded = JSON.stringify(event);
+      const prior = activationsByRequest.get(event.requestId);
+      if (prior && prior !== encoded)
+        throw new Error(
+          `Objective #${input.issue.number} has conflicting activations for request ${event.requestId}`,
+        );
+      activationsByRequest.set(event.requestId, encoded);
+    }
+    let activationIndex = -1;
+    for (let index = events.length - 1; index >= 0; index--) {
+      const event = events[index]!;
+      if (
+        event.kind === "run" &&
+        event.event === "ActivationRequested" &&
+        event.objective === input.issue.number
+      ) {
+        activationIndex = index;
+        break;
+      }
+    }
+    const activationEntry = activationIndex < 0 ? undefined : authenticated[activationIndex];
+    const activation = activationEntry?.event;
+    const activationRequest =
+      activation?.kind === "run" && activation.event === "ActivationRequested"
+        ? activation
+        : undefined;
+    const terminalAfterActivation =
+      activationIndex >= 0 &&
+      activationRequest !== undefined &&
+      events
+        .slice(activationIndex + 1)
+        .some(
+          (event) =>
+            event.kind === "run" &&
+            event.objective === input.issue.number &&
+            event.event !== "FactoryRunStarted" &&
+            hasCurrentWriterAuthority(event, events, authority) &&
+            events.some(
+              (candidate) =>
+                candidate.kind === "run" &&
+                candidate.event === "FactoryRunStarted" &&
+                candidate.runId === event.runId &&
+                candidate.activationRequestId === activationRequest.requestId &&
+                candidate.actor.toLowerCase() === activationRequest.requestedBy.toLowerCase() &&
+                candidate.policyDigest === activationRequest.policyDigest &&
+                candidate.baseSha === activationRequest.baseSha,
+            ) &&
+            ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
+              event.event,
+            ),
+        );
+    const rejectionAfterActivation =
+      activationIndex >= 0 &&
+      activationRequest !== undefined &&
+      events
+        .slice(activationIndex + 1)
+        .some(
+          (event) =>
+            event.kind === "run" &&
+            event.event === "ActivationRejected" &&
+            event.objective === input.issue.number &&
+            event.runId === activationRequest.runId &&
+            event.activationRequestId === activationRequest.requestId &&
+            event.requestedBy.toLowerCase() === activationRequest.requestedBy.toLowerCase() &&
+            event.baseSha === activationRequest.baseSha &&
+            event.policyDigest === activationRequest.policyDigest,
+        );
+    const activeRun = latestSupportedRun(events, authority);
+    const currentRun =
+      activeRun?.kind === "run" &&
+      activeRun.event === "FactoryRunStarted" &&
+      activeRun.activationRequestId === activationRequest?.requestId
+        ? activeRun
+        : null;
+    const commandState = currentRun
+      ? deriveDurableCommandState({
+          events,
+          objective: input.issue.number,
+          runId: currentRun.runId,
+          runActor: currentRun.actor,
+          runStartSequence: currentRun.sequence,
+        })
+      : null;
+    const gateAcknowledged = Boolean(
+      currentRun &&
+        commandState?.admissionGate &&
+        events.some(
+          (event) =>
+            event.kind === "run" &&
+            event.runId === currentRun.runId &&
+            hasCurrentWriterAuthority(event, events, authority) &&
+            event.event ===
+              (commandState.admissionGate!.kind === "drain"
+                ? "RunDrainCompleted"
+                : "RunPauseAcknowledged") &&
+            event.commandRequestId === commandState.admissionGate!.requestId,
+        ),
+    );
+    const operationallyStopped = Boolean(commandState?.admissionsPaused && gateAcknowledged);
+    const withdrawal = activationRequest && activationCancellation(events, activationRequest);
+    const discovered =
+      activationRequest &&
+      !terminalAfterActivation &&
+      !rejectionAfterActivation &&
+      (currentRun || !withdrawal) &&
+      (input.issue.state === "closed" || !operationallyStopped || withdrawal)
+        ? {
+            objective: input.issue.number,
             activatedAt: activationRequest.at,
             requestId: activationRequest.requestId,
             policy: activationRequest.policy,
@@ -872,12 +1210,78 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
             baseSha: activationRequest.baseSha,
             requestedBy: activationEntry!.login,
             ...(currentRun ? { resuming: true } : {}),
-          });
-        }
-      }
-      if (issues.data.length < 100) return result;
+          }
+        : null;
+    return { activation: discovered, writerBound, authorityOid, recoveryBound };
+  }
+
+  async #readDiscoveryLeaseRef(objective: number): Promise<DiscoveryControlRef | null> {
+    try {
+      const response = await withGitHubRequestPriority("normal", () =>
+        this.#call(() =>
+          this.#octokit.request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
+            owner: this.#owner,
+            repo: this.#repo,
+            ref: stripRefs(leaseRef(objective)),
+          }),
+        ),
+      );
+      return {
+        kind: "lease",
+        objective,
+        ref: leaseRef(objective),
+        oid: response.data.object.sha,
+        serverTime: responseDate(response),
+      };
+    } catch (error) {
+      if (this.#status(error) === 404) return null;
+      throw error;
     }
-    throw new Error("repository exceeds the controller's 10000-Objective discovery limit");
+  }
+
+  async #readDiscoveryCommit(oid: string, serverTime: Date): Promise<GitCommitObject> {
+    const cached = this.#discoveryCommitCache.get(oid);
+    if (cached) return { ...cached, serverTime };
+    const commit = await withGitHubRequestPriority("normal", () => this.readCommit(oid));
+    const { serverTime: _observedAt, ...content } = commit;
+    if (this.#discoveryCommitCache.size === 256)
+      this.#discoveryCommitCache.delete(this.#discoveryCommitCache.keys().next().value!);
+    this.#discoveryCommitCache.set(oid, content);
+    return { ...content, serverTime };
+  }
+
+  #commentIssueNumber(issueUrl: unknown): number {
+    if (typeof issueUrl !== "string")
+      throw new Error("repository comment delta omitted its issue URL");
+    const url = new URL(issueUrl);
+    const match = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/.exec(url.pathname);
+    if (
+      url.hostname.toLowerCase() !== "api.github.com" ||
+      match?.[1]?.toLowerCase() !== this.#owner.toLowerCase() ||
+      match?.[2]?.toLowerCase() !== this.#repo.toLowerCase()
+    )
+      throw new Error("repository comment delta returned another repository's issue URL");
+    const number = Number(match[3]);
+    if (!Number.isInteger(number) || number <= 0)
+      throw new Error("repository comment delta returned an invalid issue URL");
+    return number;
+  }
+
+  #etag(headers: Record<string, string | number | undefined>): string | undefined {
+    const entry = Object.entries(headers).find(([name]) => name.toLowerCase() === "etag");
+    return entry?.[1] === undefined ? undefined : String(entry[1]);
+  }
+
+  #hasNext(headers: Record<string, string | number | undefined>): boolean {
+    const link = Object.entries(headers).find(([name]) => name.toLowerCase() === "link")?.[1];
+    return typeof link === "string" && /<[^>]+>;\s*rel="next"/.test(link);
+  }
+
+  #status(error: unknown): number | undefined {
+    return (
+      (error as { status?: number; response?: { status?: number } }).status ??
+      (error as { response?: { status?: number } }).response?.status
+    );
   }
 
   async readRepositoryPermission(login: string): Promise<string> {
@@ -1397,7 +1801,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           state: "closed",
         }),
       true,
-      "normal",
+      "cleanup",
       "closePullRequest",
     );
   }
@@ -1413,7 +1817,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           state_reason: "completed",
         }),
       true,
-      "normal",
+      "cleanup",
       "closeIssue",
     );
   }

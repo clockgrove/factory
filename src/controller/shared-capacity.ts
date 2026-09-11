@@ -205,6 +205,10 @@ export class SharedCapacityCoordinator {
   constructor(
     private readonly options: {
       store: LeaseStore & {
+        withMutationClass?<T>(
+          kind: "normal" | "lease" | "cleanup",
+          operation: () => Promise<T>,
+        ): Promise<T>;
         withMutationFence?<T>(fence: () => Promise<void>, operation: () => Promise<T>): Promise<T>;
         createBlob(content: Buffer): Promise<string>;
         createTree(args: {
@@ -568,14 +572,18 @@ export class SharedCapacityCoordinator {
   async release(owner: SharedCapacityOwner, key: string, originalOwner = owner): Promise<void> {
     if (originalOwner.objective !== owner.objective)
       throw new Error("capacity cleanup Objective mismatch");
-    await this.#change(owner, (state) => {
-      const claim = state.claims.find(
-        (row) => row.id === sharedCapacityClaimId(originalOwner, key),
-      );
-      if (!claim || claim.released) return { value: undefined, changed: false };
-      claim.released = true;
-      return { value: undefined, changed: true };
-    });
+    const operation = () =>
+      this.#change(owner, (state) => {
+        const claim = state.claims.find(
+          (row) => row.id === sharedCapacityClaimId(originalOwner, key),
+        );
+        if (!claim || claim.released) return { value: undefined, changed: false };
+        claim.released = true;
+        return { value: undefined, changed: true };
+      });
+    await (this.options.store.withMutationClass
+      ? this.options.store.withMutationClass("cleanup", operation)
+      : operation());
   }
 
   /** Reconstruct liabilities; absence from a snapshot NEVER frees an existing claim. */

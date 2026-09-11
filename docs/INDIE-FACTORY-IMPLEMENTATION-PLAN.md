@@ -264,7 +264,7 @@ Keep local host safety separate from per-Objective execution authority. Add a lo
   "maxActiveObjectives": 2,
   "maxLocalWorkers": 8,
   "maxPaidWorkers": 3,
-  "pollIntervalSeconds": 15
+  "pollIntervalSeconds": 60
 }
 ```
 

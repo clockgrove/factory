@@ -39,7 +39,7 @@ import {
 } from "./control/mutation-observation.js";
 import { z } from "zod";
 
-import { createOctokit, type GitHubOptions } from "./github.js";
+import { createOctokit, withGitHubTransportCallbacks, type GitHubOptions } from "./github.js";
 import {
   ChangeSurfaceSchema,
   ContextManifestSchema,
@@ -69,6 +69,7 @@ import {
   PlatformUnavailableError,
   classifyRefusal,
   isSecondaryRateLimitRefusal,
+  withGitHubRequestPriority,
   type MutationAdmission,
 } from "./platform.js";
 
@@ -860,6 +861,8 @@ export function renderWorkPacket(wi: CompiledWorkItem, graphMetadata?: GraphItem
  * `dispatch.ts`'s `GitHubWriter`).
  */
 export interface GraphWriter {
+  /** Real Octokit adapters account at the fetch boundary after local admission. */
+  readonly transportAccounting?: "http-boundary";
   createWorkItemIssue(args: {
     repositoryId: string;
     parentIssueId: string;
@@ -919,6 +922,7 @@ interface CreateIssueResponse {
 }
 
 export class GithubOctokitGraphWriter implements GraphWriter {
+  readonly transportAccounting = "http-boundary" as const;
   readonly #octokit: Octokit;
 
   constructor(opts: GitHubOptions) {
@@ -1256,24 +1260,38 @@ export class GraphApplier {
           new Error("Factory GitHub circuit opened while the graph write was queued"),
         );
       }
-      observeMutationQueue(mutationPermit.waitedMs);
-      await observeMutationFence(async () => {
-        if (fence) await fence(mutationPermit.waitedMs);
-        await this.#beforeMutation(mutationPermit.waitedMs);
-      });
-      if (this.#breaker.isOpen()) {
-        throw new PlatformUnavailableError(
-          { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
-          new Error("Factory GitHub circuit opened during the graph mutation fence"),
+      return await withGitHubRequestPriority("normal", async () => {
+        observeMutationQueue(mutationPermit.waitedMs);
+        await observeMutationFence(async () => {
+          if (fence) await fence(mutationPermit.waitedMs);
+          await this.#beforeMutation(mutationPermit.waitedMs);
+        });
+        if (this.#breaker.isOpen()) {
+          throw new PlatformUnavailableError(
+            { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
+            new Error("Factory GitHub circuit opened during the graph mutation fence"),
+          );
+        }
+        mutationPermit.assertDispatchAllowed?.();
+        if (this.#writer.transportAccounting !== "http-boundary") {
+          attempted = true;
+          mutationPermit.recordTransported?.();
+        }
+        const result = await withGitHubTransportCallbacks(
+          {
+            onTransported: () => {
+              attempted = true;
+              mutationPermit.recordTransported?.();
+            },
+          },
+          fn,
         );
-      }
-      mutationPermit.assertDispatchAllowed?.();
-      mutationPermit.recordTransported?.();
-      attempted = true;
-      const result = await fn();
-      mutationPermit.recordSuccess?.();
-      this.#breaker.recordSuccess();
-      return result;
+        if (attempted) {
+          mutationPermit.recordSuccess?.();
+          this.#breaker.recordSuccess();
+        }
+        return result;
+      });
     } catch (error) {
       if (!attempted) throw error;
       const refusal = classifyRefusal(error);

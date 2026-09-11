@@ -5,6 +5,7 @@ import {
   assertCompiledObjectiveAdoptsLegacyConstraints,
   compiledGraphDigest,
   GraphApplier,
+  GithubOctokitGraphWriter,
   legacyGraphConstraintsDigest,
   parseGraphItemMetadata,
   parseLegacyGraphConstraints,
@@ -17,7 +18,16 @@ import {
   type CreatedWorkItem,
   type GraphWriter,
 } from "../src/graph.js";
-import { CircuitBreaker, PlatformUnavailableError } from "../src/platform.js";
+import { GitHubControlStore } from "../src/control/github-store.js";
+import {
+  CircuitBreaker,
+  GITHUB_GRAPHQL_PROTECTED_RESERVE,
+  GITHUB_PRIMARY_PROTECTED_RESERVE,
+  GitHubPrimaryAdmissionDeferredError,
+  GitHubPrimaryQuotaCache,
+  MutationScheduler,
+  PlatformUnavailableError,
+} from "../src/platform.js";
 import { advancingMutationScheduler } from "./helpers/mutation-scheduler.js";
 
 const NOW = new Date("2026-01-01T00:00:00Z");
@@ -393,6 +403,74 @@ describe("renderWorkPacket", () => {
 });
 
 describe("GraphApplier.apply", () => {
+  it("keeps graph prerequisite reads inside the outer normal mutation class", async () => {
+    const quota = new GitHubPrimaryQuotaCache();
+    quota.observe({
+      "x-ratelimit-resource": "core",
+      "x-ratelimit-limit": "5000",
+      "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
+    });
+    const scheduler = new MutationScheduler({ primaryQuota: quota });
+    let transports = 0;
+    const store = new GitHubControlStore({
+      token: "graph-fence-priority-test",
+      owner: "clockgrove",
+      repo: "factory",
+      primaryQuota: quota,
+      requestFetch: async () => {
+        transports++;
+        return new Response("{}", { status: 200 });
+      },
+    });
+    const applier = new GraphApplier({
+      writer: new FakeGraphWriter(),
+      mutationScheduler: scheduler,
+      captureMutationFence: () => async () => {
+        await store.withMutationClass("lease", () =>
+          store.readRefWithServerTime("refs/clockgrove-factory/leases/objective-313"),
+        );
+      },
+    });
+
+    await expect(applier.apply(objective([workItem({ id: "a" })]), ctx)).rejects.toBeInstanceOf(
+      GitHubPrimaryAdmissionDeferredError,
+    );
+    expect(transports).toBe(0);
+    expect(scheduler.telemetry()).toMatchObject({ admitted: 1, transported: 0 });
+  });
+
+  it("does not count Octokit primary-reserve deferral as a transported graph write", async () => {
+    const quota = new GitHubPrimaryQuotaCache();
+    quota.observe({
+      "x-ratelimit-resource": "graphql",
+      "x-ratelimit-limit": "5000",
+      "x-ratelimit-remaining": String(GITHUB_GRAPHQL_PROTECTED_RESERVE),
+      "x-ratelimit-used": String(5000 - GITHUB_GRAPHQL_PROTECTED_RESERVE),
+      "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
+    });
+    const scheduler = new MutationScheduler({ primaryQuota: quota });
+    let transports = 0;
+    const writer = new GithubOctokitGraphWriter({
+      token: "graph-local-admission-test",
+      owner: "clockgrove",
+      repo: "factory",
+      primaryQuota: quota,
+      requestFetch: async () => {
+        transports++;
+        return new Response("{}", { status: 200 });
+      },
+    });
+    const applier = new GraphApplier({ writer, mutationScheduler: scheduler });
+
+    await expect(applier.apply(objective([workItem({ id: "a" })]), ctx)).rejects.toBeInstanceOf(
+      GitHubPrimaryAdmissionDeferredError,
+    );
+    expect(transports).toBe(0);
+    expect(scheduler.telemetry()).toMatchObject({ admitted: 1, transported: 0, successful: 0 });
+  });
+
   it("projects an exact authenticated historical graph without rewriting its omission", async () => {
     const historical = objective([workItem({ id: "a" })]);
     delete historical.deferredCapabilityAdapters;

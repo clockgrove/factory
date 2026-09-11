@@ -224,7 +224,7 @@ export const DEFAULT_CONTROLLER_POLICY: ControllerPolicy = Object.freeze({
   maxActiveObjectives: 2,
   maxLocalWorkers: 8,
   maxPaidWorkers: 0,
-  pollIntervalSeconds: 15,
+  pollIntervalSeconds: 60,
 });
 
 /** Opt-in draft evaluation; absent historical policies retain their original semantics. */

@@ -13,8 +13,12 @@ import type { PublicationReceipt } from "../publication/stack-manager.js";
 import { writerAuthority } from "./authority.js";
 
 export interface LifecycleEventStore {
-  addIssueComment(issueNodeId: string, body: string): Promise<void>;
-  serverTime(): Promise<Date>;
+  addIssueComment(
+    issueNodeId: string,
+    body: string,
+    mutationClass?: "normal" | "lease" | "cleanup",
+  ): Promise<void>;
+  serverTime(mutationClass?: "normal" | "lease" | "cleanup"): Promise<Date>;
 }
 
 export interface BudgetEventArgs {
@@ -117,8 +121,9 @@ export class LifecycleRecorder {
     event: "RunPauseAcknowledged" | "RunDrainCompleted";
     commandRequestId: string;
   }): Promise<FactoryEvent> {
+    const mutationClass = args.event === "RunDrainCompleted" ? "cleanup" : "normal";
     await this.leases.assertMutationAuthorized(args.lease);
-    const now = await this.store.serverTime();
+    const now = await this.store.serverTime(mutationClass);
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "run",
@@ -138,6 +143,7 @@ export class LifecycleRecorder {
           : "Factory paused new admissions after reconciling admitted work.",
         event,
       ),
+      mutationClass,
     );
     return event;
   }
@@ -366,9 +372,12 @@ export class LifecycleRecorder {
     ) {
       throw new Error("budget event batch must share one lease, reservation, and destination");
     }
+    const mutationClass = args.every((value) => value.event === "BudgetReconciled")
+      ? "cleanup"
+      : "normal";
     await this.leases.assertMutationAuthorized(first.lease);
     assertReservationLease(first.reservation, first.lease);
-    const now = await this.store.serverTime();
+    const now = await this.store.serverTime(mutationClass);
     const events = args.map((value) => {
       if (
         value.modelInvocationId &&
@@ -428,6 +437,7 @@ export class LifecycleRecorder {
           : `Factory recorded ${events.length} adjacent budget reconciliations.`,
         events,
       ),
+      mutationClass,
     );
     return events;
   }
@@ -446,6 +456,7 @@ export class LifecycleRecorder {
     policyDigest?: string;
     reportedModelUsage?: ReportedModelUsage;
   }): Promise<FactoryEvent> {
+    const mutationClass = args.event === "BudgetReconciled" ? "cleanup" : "normal";
     await this.leases.assertMutationAuthorized(args.lease);
     if (
       args.modelInvocationId &&
@@ -455,7 +466,7 @@ export class LifecycleRecorder {
         (args.event === "BudgetReserved" && args.directorEpoch !== args.lease.epoch))
     )
       throw new Error("model invocation receipt is fenced from its original run policy or epoch");
-    const now = await this.store.serverTime();
+    const now = await this.store.serverTime(mutationClass);
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "budget",
@@ -484,6 +495,7 @@ export class LifecycleRecorder {
           : `Factory recorded ${args.amount} ${args.unit} for management.`,
         event,
       ),
+      mutationClass,
     );
     return event;
   }

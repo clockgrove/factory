@@ -15,7 +15,12 @@ import {
   type LeaseManager,
   type LeaseState,
 } from "../src/control/lease.js";
-import { PlatformUnavailableError } from "../src/platform.js";
+import {
+  GITHUB_PRIMARY_PROTECTED_RESERVE,
+  GitHubPrimaryAdmissionDeferredError,
+  PlatformUnavailableError,
+} from "../src/platform.js";
+import { createOctokit } from "../src/github.js";
 import { ControllerGenerationRetirement } from "../src/controller/retirement.js";
 
 function lease(objective: number, epoch = 1): LeaseState {
@@ -111,6 +116,74 @@ describe("repository controller", () => {
     expect(cleaned).toBe(true);
     expect(calls).toBe(1);
     expect(await controller.reconcileOnce()).toBe(0);
+  });
+
+  it("does not restart a completed discovery hint until its revision changes", async () => {
+    let discoveryRevision = 1;
+    const reconciled: number[] = [];
+    const controller = new GitHubRepositoryController({
+      capacity: 1,
+      store: {
+        discoverObjectiveActivations: async () => [
+          {
+            objective: 1,
+            activatedAt: "2026-01-01T00:00:00Z",
+            requestId: "activation-1",
+            policy: {},
+            policyDigest: "c".repeat(64),
+            baseSha: "a".repeat(40),
+            requestedBy: "operator",
+            discoveryRevision,
+          },
+        ],
+      },
+      reconcileObjective: async (candidate) => {
+        reconciled.push(candidate.discoveryRevision ?? 0);
+      },
+    });
+
+    expect(await controller.reconcileOnce()).toBe(1);
+    await controller.settle();
+    expect(await controller.reconcileOnce()).toBe(0);
+    discoveryRevision = 2;
+    expect(await controller.reconcileOnce()).toBe(1);
+    await controller.settle();
+    expect(reconciled).toEqual([1, 2]);
+  });
+
+  it("retries a parked request immediately when discovery advances", async () => {
+    let discoveryRevision = 1;
+    const reconciled: number[] = [];
+    const controller = new GitHubRepositoryController({
+      capacity: 1,
+      pollIntervalMs: 60_000,
+      store: {
+        discoverObjectiveActivations: async () => [
+          {
+            objective: 1,
+            activatedAt: "2026-01-01T00:00:00Z",
+            requestId: "activation-1",
+            policy: {},
+            policyDigest: "c".repeat(64),
+            baseSha: "a".repeat(40),
+            requestedBy: "operator",
+            discoveryRevision,
+          },
+        ],
+      },
+      reconcileObjective: async (candidate) => {
+        reconciled.push(candidate.discoveryRevision ?? 0);
+        throw new Error("Objective-specific fixture failure");
+      },
+    });
+
+    expect(await controller.reconcileOnce()).toBe(1);
+    await controller.settle();
+    expect(await controller.reconcileOnce()).toBe(0);
+    discoveryRevision = 2;
+    expect(await controller.reconcileOnce()).toBe(1);
+    await controller.settle();
+    expect(reconciled).toEqual([1, 2]);
   });
 
   it("parks one failed Objective without aborting an independently running peer", async () => {
@@ -350,6 +423,81 @@ describe("repository controller", () => {
     expect(seen.map((item) => item.objective)).toEqual([1, 2]);
     expect(seen[0]!.resources).toBe(seen[1]!.resources);
     expect(seen.map((item) => item.observation)).toEqual([observed, observed]);
+  });
+
+  it("emits bounded endpoint, primary-quota, limiting, and next-admission discovery status", async () => {
+    const token = "repository-discovery-production-telemetry-test";
+    const reset = Math.floor(Date.now() / 1_000) + 3_600;
+    const client = createOctokit({
+      token,
+      owner: "owner",
+      repo: "repo",
+      requestFetch: async () =>
+        new Response(JSON.stringify({ login: "factory-controller" }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "x-ratelimit-resource": "core",
+            "x-ratelimit-limit": "5000",
+            "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
+            "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+            "x-ratelimit-reset": String(reset),
+          },
+        }),
+    });
+    await client.request("GET /user");
+    await expect(client.request("GET /user")).rejects.toBeInstanceOf(
+      GitHubPrimaryAdmissionDeferredError,
+    );
+    const statuses: string[] = [];
+    const controller = createGitHubRepositoryController({
+      token,
+      owner: "owner",
+      repo: "repo",
+      repository: "/repo",
+      onStatus: (message) => statuses.push(message),
+      activationStore: {
+        discoverObjectiveActivations: async () => [],
+        discoveryTelemetry: () => ({
+          measurementScope: "process-local-discovery-session",
+          cycles: [
+            {
+              sequence: 1,
+              mode: "bootstrap",
+              startedAt: "2026-01-01T00:00:00.000Z",
+              completedAt: "2026-01-01T00:00:01.000Z",
+              outcome: "failed",
+              backstop: false,
+              probes: {
+                authenticatedUser: 1,
+                issues: 2,
+                repositoryComments: 0,
+                objectiveComments: 0,
+                matchingRefs: 0,
+                classifications: 0,
+                notModified: 0,
+              },
+              dirtyObjectives: 0,
+              returnedActivations: 0,
+            },
+          ],
+          droppedCycles: 0,
+          cachedObjectives: 0,
+          cachedComments: 0,
+        }),
+      },
+      supervisorFactory: () => ({ run: async () => {} }),
+    });
+
+    expect(await controller.reconcileOnce()).toBe(0);
+    const status = statuses.find((message) => message.startsWith("discovery sequence="));
+    expect(status).toContain(
+      "endpoints=authenticated-user:transported=1,admitted=1,conditional=0,not-modified=0,successful=1",
+    );
+    expect(status).toContain(`primary=core:${GITHUB_PRIMARY_PROTECTED_RESERVE}/5000@`);
+    expect(status).toContain("limiting=primary-reserve");
+    expect(status).toContain("next=");
+    expect(status).not.toContain("next=none");
   });
 
   it("retires a transient activation generation without terminalizing or redispatching it", async () => {

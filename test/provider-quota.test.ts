@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
 import { describe, expect, it } from "vitest";
 
 import { parseCodexWorkerStream } from "../src/backends/codex-cli-local.js";
@@ -12,6 +15,44 @@ const messages = [
 ] as const;
 
 describe("provider quota classification", () => {
+  it("keeps the exported event schema in parity with the runtime provider gate", () => {
+    const gate = parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      kind: "provider",
+      event: "ProviderQuotaBlocked",
+      objective: 283,
+      runId: "run-provider-schema",
+      sequence: 2,
+      at: "2026-09-10T12:00:00.000Z",
+      reasonCode: "provider-quota-exhausted",
+      provider: "another-model-provider",
+      phase: "execution",
+      backend: "another/local-backend",
+      modelInvocationId: "worker-283-1",
+      workItem: 283,
+      attempt: 1,
+      providerMessage: "Model provider quota requires operator action",
+      actionUrl: "https://provider.example/quota",
+      accounting: "unknown",
+    });
+    const ajv = new Ajv({ strict: false });
+    addFormats(ajv);
+    const validate = ajv.compile(
+      JSON.parse(
+        readFileSync(new URL("../schemas/factory-event.schema.json", import.meta.url), "utf8"),
+      ),
+    );
+    expect(validate(gate), JSON.stringify(validate.errors)).toBe(true);
+    for (const invalid of [
+      { ...gate, actionUrl: "http://provider.example/quota" },
+      { ...gate, attempt: undefined },
+      { ...gate, accounting: "estimated" },
+    ]) {
+      expect(validate(invalid)).toBe(false);
+      expect(() => parseFactoryEvent(invalid)).toThrow();
+    }
+  });
+
   it("keeps the durable gate contract independent of a specific provider adapter", () => {
     expect(
       parseFactoryEvent({

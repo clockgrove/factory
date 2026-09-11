@@ -343,7 +343,7 @@ check(
 );
 const factoryEventSchema = readJson("schemas/factory-event.schema.json");
 const eventKinds = factoryEventSchema.properties?.kind?.enum ?? [];
-for (const kind of ["delivery", "publication"]) {
+for (const kind of ["delivery", "publication", "provider"]) {
   check(eventKinds.includes(kind), `factory-event schema publishes the ${kind} event kind`);
 }
 for (const field of [
@@ -357,6 +357,11 @@ for (const field of [
   "reasonCode",
   "gate",
   "prioritySource",
+  "provider",
+  "providerMessage",
+  "actionUrl",
+  "accounting",
+  "modelInvocationId",
 ]) {
   check(Boolean(factoryEventSchema.properties?.[field]), `factory-event schema publishes ${field}`);
 }

@@ -815,7 +815,7 @@ const ProviderQuotaBlocked = Common.extend({
 }).superRefine((event, context) => {
   if (
     (event.attempt !== undefined && event.workItem === undefined) ||
-    (event.phase === "execution" && event.workItem === undefined)
+    (event.phase === "execution" && (event.workItem === undefined || event.attempt === undefined))
   )
     context.addIssue({
       code: "custom",

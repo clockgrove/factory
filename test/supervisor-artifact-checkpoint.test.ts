@@ -171,7 +171,7 @@ describe("Supervisor collected artifact durability", () => {
     expect(
       f.activity.filter((entry) => entry.operation === "launch" && entry.workItem === 8),
     ).toHaveLength(1);
-  }, 15_000);
+  });
 
   // Includes native-stack setup and two complete Supervisor runs with real Git/Node
   // subprocesses; use the same bounded allowance as the adjacent recovery cases.
@@ -202,7 +202,7 @@ describe("Supervisor collected artifact durability", () => {
     expect(f.activity.some((entry) => entry.operation === "validate" && entry.workItem === 9)).toBe(
       false,
     );
-  }, 15_000);
+  });
 
   it("rejects conflicting terminal usage rather than relaunching or charging a new attempt", async () => {
     const f = await providerSupervisorFixture("daytona-burst", { localOnly: true });
@@ -440,7 +440,7 @@ describe("Supervisor collected artifact durability", () => {
             event.unit === "local_milliseconds",
         ),
     ).toMatchObject([{ usageEvidence: "conservative-reservation" }]);
-  }, 15_000);
+  });
 
   it("retains the owned workspace when collection copying fails before any independent recovery copy exists", async () => {
     const f = await providerSupervisorFixture("daytona-burst", { localOnly: true });

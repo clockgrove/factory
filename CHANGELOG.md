@@ -6,6 +6,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Added
 
+- Change-sensitive repository discovery now reconstructs authenticated history once, consumes
+  bounded issue/comment deltas with a control-ref backstop, reserves credential-shared GitHub quota
+  for lease and cleanup traffic, and exposes bounded request/cycle telemetry. The default unchanged
+  poll interval is one minute. ([#313](https://github.com/clockgrove/factory/issues/313))
+
 - A provider-neutral durable quota-gate contract, with narrow GitHub Copilot classification at the
   local Codex adapter boundary. Factory preserves exact or explicitly unknown usage, stops automatic
   retries, and exposes one redacted human-action result through status and explain.

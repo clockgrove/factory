@@ -14,8 +14,12 @@ import { writerAuthority, type ObjectiveAuthorityObservation } from "./authority
 import type { LeaseState } from "./lease.js";
 
 export interface RunEventStore {
-  addIssueComment(issueNodeId: string, body: string): Promise<void>;
-  serverTime(): Promise<Date>;
+  addIssueComment(
+    issueNodeId: string,
+    body: string,
+    mutationClass?: "normal" | "lease" | "cleanup",
+  ): Promise<void>;
+  serverTime(mutationClass?: "normal" | "lease" | "cleanup"): Promise<Date>;
 }
 
 export interface RunState {
@@ -211,7 +215,7 @@ export class RunManager {
     existingEvents?: FactoryEvent[];
     sequence?: number;
   }): Promise<FactoryEvent> {
-    const now = await this.store.serverTime();
+    const now = await this.store.serverTime("cleanup");
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "run",
@@ -241,6 +245,7 @@ export class RunManager {
           : `Factory stopped: ${args.reason ?? args.event}.`,
         event,
       ),
+      "cleanup",
     );
     return event;
   }

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 /**
  * Platform refusal vs. work failure.
@@ -82,14 +83,35 @@ export class GitHubPrimaryQuotaCache {
     if (limit === null || remaining === null || reset === null) return;
     const resetAt = new Date(reset * 1_000);
     if (Number.isNaN(resetAt.getTime())) return;
-    this.#resources.set(resource, {
+    const next = {
       resource,
       limit,
       remaining,
       used: number("x-ratelimit-used"),
       resetAt: resetAt.toISOString(),
       observedAt: now.toISOString(),
-    });
+    } satisfies PrimaryRateLimitObservation;
+    const previous = this.#resources.get(resource);
+    if (previous) {
+      const previousReset = new Date(previous.resetAt).getTime();
+      const nextReset = resetAt.getTime();
+      // Concurrent requests can complete out of order. Within one primary
+      // window, retain the most conservative observation instead of letting an
+      // older response manufacture capacity that a later response consumed.
+      if (nextReset < previousReset) return;
+      if (nextReset === previousReset) {
+        next.remaining = Math.min(previous.remaining, next.remaining);
+        next.used =
+          previous.used === null || next.used === null
+            ? (previous.used ?? next.used)
+            : Math.max(previous.used, next.used);
+        next.observedAt =
+          new Date(previous.observedAt).getTime() > now.getTime()
+            ? previous.observedAt
+            : next.observedAt;
+      }
+    }
+    this.#resources.set(resource, next);
   }
 
   snapshot(): PrimaryRateLimitObservation[] {
@@ -97,6 +119,264 @@ export class GitHubPrimaryQuotaCache {
       .map((value) => ({ ...value }))
       .sort((left, right) => left.resource.localeCompare(right.resource));
   }
+}
+
+export type GitHubRequestPriority = "normal" | "protected";
+
+interface GitHubRequestAdmissionContext {
+  priority: GitHubRequestPriority;
+  expectedCost?: number;
+}
+
+const requestPriority = new AsyncLocalStorage<GitHubRequestAdmissionContext>();
+
+/** Bind an internal request class without sending Factory-only metadata to GitHub. */
+export function withGitHubRequestPriority<T>(
+  priority: GitHubRequestPriority,
+  operation: () => Promise<T>,
+  expectedCost?: number,
+): Promise<T> {
+  if (requestPriority.getStore()) return operation();
+  return requestPriority.run(
+    { priority, ...(expectedCost === undefined ? {} : { expectedCost }) },
+    operation,
+  );
+}
+
+export interface GitHubEndpointRequestTelemetry {
+  endpoint:
+    | "authenticated-user"
+    | "issues"
+    | "issue-comments"
+    | "repository-comments"
+    | "git-ref"
+    | "git-commit"
+    | "matching-refs"
+    | "graphql"
+    | "other";
+  admitted: number;
+  transported: number;
+  conditional: number;
+  notModified: number;
+  successful: number;
+}
+
+export interface GitHubRequestTelemetry {
+  measurementScope: "process-local-credential";
+  measurementWindow: { startedAt: string; observedAt: string };
+  endpoints: GitHubEndpointRequestTelemetry[];
+  limitingReason: "primary-reserve" | "primary-exhausted" | null;
+  nextAdmissionAt: string | null;
+}
+
+/** Keep enough primary capacity for every maximum-sized (32 Objective) cohort
+ * that can be admitted before one primary window resets. Eight waves times
+ * three fenced REST operations per Objective, plus repository ownership and
+ * bounded repair headroom, fits below 1,024. The equivalent GraphQL CAS/mutation
+ * envelope fits below 512. Normal metadata waits before consuming either. */
+export const GITHUB_PRIMARY_PROTECTED_RESERVE = 1_024;
+export const GITHUB_GRAPHQL_PROTECTED_RESERVE = 512;
+
+/** GitHub's documented GraphQL cost calculation prices unique connections by
+ * their possible parent cardinality, divided by 100. Factory's largest
+ * supported query is Objective: 100 Work Items, 20 linked PRs each, and 20
+ * check suites per status commit. Its complete connection expansion is below
+ * 50,000 requests, hence below 500 points; 512 is the fail-closed bound. */
+export const GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST = 512;
+export const GITHUB_GRAPHQL_NORMAL_REQUEST_ESTIMATE = GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST;
+
+function requestEndpoint(url: URL): GitHubEndpointRequestTelemetry["endpoint"] {
+  const path = url.pathname;
+  if (path.endsWith("/user")) return "authenticated-user";
+  if (path.endsWith("/graphql")) return "graphql";
+  if (/\/issues\/comments$/.test(path)) return "repository-comments";
+  if (/\/issues\/\d+\/comments$/.test(path)) return "issue-comments";
+  if (/\/issues$/.test(path)) return "issues";
+  if (path.includes("/git/matching-refs/")) return "matching-refs";
+  if (path.includes("/git/commits/")) return "git-commit";
+  if (path.includes("/git/ref/")) return "git-ref";
+  return "other";
+}
+
+function inferredRequestPriority(
+  _method: string,
+  _endpoint: GitHubEndpointRequestTelemetry["endpoint"],
+): GitHubRequestPriority {
+  return "normal";
+}
+
+class GitHubRequestGovernor {
+  readonly #startedAt = new Date().toISOString();
+  readonly #endpoints = new Map<
+    GitHubEndpointRequestTelemetry["endpoint"],
+    Omit<GitHubEndpointRequestTelemetry, "endpoint">
+  >();
+  #limitingReason: GitHubRequestTelemetry["limitingReason"] = null;
+  #nextAdmissionAt: string | null = null;
+  readonly #inFlightCost = new Map<"core" | "graphql", number>();
+
+  admit(
+    primaryQuota: GitHubPrimaryQuotaCache,
+    endpoint: GitHubEndpointRequestTelemetry["endpoint"],
+    method: string,
+    conditional: boolean,
+    defaultPriority?: GitHubRequestPriority,
+    defaultExpectedCost?: number,
+    now = new Date(),
+  ): () => void {
+    const context = requestPriority.getStore();
+    const priority =
+      context?.priority ?? defaultPriority ?? inferredRequestPriority(method, endpoint);
+    const resource = endpoint === "graphql" ? "graphql" : "core";
+    const expectedCost = Math.max(
+      1,
+      context?.expectedCost ??
+        defaultExpectedCost ??
+        (resource === "graphql" && priority === "normal"
+          ? GITHUB_GRAPHQL_NORMAL_REQUEST_ESTIMATE
+          : 1),
+    );
+    const observed = primaryQuota.snapshot().find((entry) => entry.resource === resource);
+    if (observed) {
+      const resetAt = new Date(observed.resetAt);
+      if (resetAt.getTime() > now.getTime()) {
+        const effectiveRemaining = observed.remaining - (this.#inFlightCost.get(resource) ?? 0);
+        const reserve =
+          resource === "graphql"
+            ? GITHUB_GRAPHQL_PROTECTED_RESERVE
+            : GITHUB_PRIMARY_PROTECTED_RESERVE;
+        const exhausted = effectiveRemaining < expectedCost;
+        const reserved = priority === "normal" && effectiveRemaining - expectedCost < reserve;
+        if (exhausted || reserved) {
+          this.#limitingReason = exhausted ? "primary-exhausted" : "primary-reserve";
+          this.#nextAdmissionAt = resetAt.toISOString();
+          throw new GitHubPrimaryAdmissionDeferredError(
+            {
+              kind: "rate_limit",
+              retryAfterMs: Math.max(1_000, resetAt.getTime() - now.getTime() + 1_000),
+            },
+            new Error(
+              exhausted
+                ? "GitHub primary quota is exhausted"
+                : "GitHub metadata reads reached Factory's protected primary reserve",
+            ),
+          );
+        }
+      }
+    }
+    if (priority === "normal") {
+      this.#limitingReason = null;
+      this.#nextAdmissionAt = null;
+    }
+    const counters = this.#counters(endpoint);
+    counters.admitted++;
+    if (conditional) counters.conditional++;
+    this.#inFlightCost.set(resource, (this.#inFlightCost.get(resource) ?? 0) + expectedCost);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.#inFlightCost.get(resource) ?? expectedCost) - expectedCost;
+      if (remaining === 0) this.#inFlightCost.delete(resource);
+      else this.#inFlightCost.set(resource, remaining);
+    };
+  }
+
+  transported(endpoint: GitHubEndpointRequestTelemetry["endpoint"]): void {
+    this.#counters(endpoint).transported++;
+  }
+
+  completed(endpoint: GitHubEndpointRequestTelemetry["endpoint"], status: number): void {
+    const counters = this.#counters(endpoint);
+    if (status === 304) counters.notModified++;
+    if (status >= 200 && status < 400) counters.successful++;
+  }
+
+  telemetry(now = new Date()): GitHubRequestTelemetry {
+    return {
+      measurementScope: "process-local-credential",
+      measurementWindow: { startedAt: this.#startedAt, observedAt: now.toISOString() },
+      endpoints: [...this.#endpoints.entries()]
+        .map(([endpoint, counters]) => ({ endpoint, ...counters }))
+        .sort((left, right) => left.endpoint.localeCompare(right.endpoint)),
+      limitingReason: this.#limitingReason,
+      nextAdmissionAt: this.#nextAdmissionAt,
+    };
+  }
+
+  #counters(
+    endpoint: GitHubEndpointRequestTelemetry["endpoint"],
+  ): Omit<GitHubEndpointRequestTelemetry, "endpoint"> {
+    let counters = this.#endpoints.get(endpoint);
+    if (!counters) {
+      counters = { admitted: 0, transported: 0, conditional: 0, notModified: 0, successful: 0 };
+      this.#endpoints.set(endpoint, counters);
+    }
+    return counters;
+  }
+}
+
+const requestGovernorByCredential = new Map<string, GitHubRequestGovernor>();
+
+function requestGovernorForCredential(token: string): GitHubRequestGovernor {
+  const credential = createHash("sha256").update(token).digest("hex");
+  let governor = requestGovernorByCredential.get(credential);
+  if (!governor) {
+    governor = new GitHubRequestGovernor();
+    if (requestGovernorByCredential.size >= 16) {
+      requestGovernorByCredential.delete(requestGovernorByCredential.keys().next().value!);
+    }
+    requestGovernorByCredential.set(credential, governor);
+  }
+  return governor;
+}
+
+export function githubRequestTelemetryForCredential(token: string): GitHubRequestTelemetry {
+  return requestGovernorForCredential(token).telemetry();
+}
+
+/** Admission and transport accounting shared by every Octokit built from one credential. */
+export function admitGitHubRequest(
+  token: string,
+  primaryQuota: GitHubPrimaryQuotaCache,
+  input: Parameters<typeof globalThis.fetch>[0],
+  init: RequestInit | undefined,
+  defaultPriority?: GitHubRequestPriority,
+  defaultExpectedCost?: number,
+): () => void {
+  const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+  const method = String(
+    init?.method ?? (input instanceof Request ? input.method : "GET"),
+  ).toUpperCase();
+  const headers = new Headers(
+    init?.headers ?? (input instanceof Request ? input.headers : undefined),
+  );
+  const endpoint = requestEndpoint(url);
+  const governor = requestGovernorForCredential(token);
+  return governor.admit(
+    primaryQuota,
+    endpoint,
+    method,
+    headers.has("if-none-match") || headers.has("if-modified-since"),
+    defaultPriority,
+    defaultExpectedCost,
+  );
+}
+
+export function observeGitHubRequestTransport(
+  token: string,
+  input: Parameters<typeof globalThis.fetch>[0],
+  init: RequestInit | undefined,
+  transport: typeof globalThis.fetch,
+): Promise<Response> {
+  const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+  const endpoint = requestEndpoint(url);
+  const governor = requestGovernorForCredential(token);
+  governor.transported(endpoint);
+  return transport(input, init).then((response) => {
+    governor.completed(endpoint, response.status);
+    return response;
+  });
 }
 
 const primaryQuotaByCredential = new Map<string, GitHubPrimaryQuotaCache>();
@@ -260,6 +540,15 @@ export class PlatformUnavailableError extends Error {
     this.refusal = refusal;
     this.retryAfterMs = refusal.retryAfterMs;
     this.cause = cause;
+  }
+}
+
+/** Local primary-reserve admission refusal. No HTTP transport occurred, so it
+ * must not trip the remote-refusal circuit breaker. */
+export class GitHubPrimaryAdmissionDeferredError extends PlatformUnavailableError {
+  constructor(refusal: Extract<Refusal, { kind: "rate_limit" }>, cause: unknown) {
+    super(refusal, cause);
+    this.name = "GitHubPrimaryAdmissionDeferredError";
   }
 }
 
@@ -448,7 +737,7 @@ export interface LocalSecondaryQuotaEstimate {
   nextAdmissionAt: string;
 }
 
-export type MutationClass = "normal" | "lease";
+export type MutationClass = "normal" | "lease" | "cleanup";
 
 /** No transport was invoked for this mutation. Never used to classify a
  * transport that was already in flight or a GitHub refusal. */
@@ -480,6 +769,7 @@ export interface MutationSchedulerOptions {
   now?: () => Date;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   primaryQuota?: GitHubPrimaryQuotaCache;
+  requestTelemetry?: () => GitHubRequestTelemetry;
 }
 
 export interface GitHubMutationTelemetry {
@@ -494,6 +784,7 @@ export interface GitHubMutationTelemetry {
   successful: number;
   serverPrimaryQuota: PrimaryRateLimitObservation[];
   localSecondaryEstimate: LocalSecondaryQuotaEstimate;
+  requestTelemetry?: GitHubRequestTelemetry;
 }
 
 /**
@@ -513,6 +804,7 @@ export class MutationScheduler implements MutationAdmission {
   #normalQueue: Array<() => void> = [];
   #lastNoticeAt = 0;
   #primaryQuota: GitHubPrimaryQuotaCache | undefined;
+  #requestTelemetry: (() => GitHubRequestTelemetry) | undefined;
   readonly #startedAt: string;
   #admitted = 0;
   #transported = 0;
@@ -524,11 +816,16 @@ export class MutationScheduler implements MutationAdmission {
     this.#now = options.now ?? (() => new Date());
     this.#sleep = options.sleep ?? mutationDelay;
     this.#primaryQuota = options.primaryQuota;
+    this.#requestTelemetry = options.requestTelemetry;
     this.#startedAt = this.#now().toISOString();
   }
 
   attachPrimaryQuota(cache: GitHubPrimaryQuotaCache): void {
     this.#primaryQuota = cache;
+  }
+
+  attachRequestTelemetry(telemetry: () => GitHubRequestTelemetry): void {
+    this.#requestTelemetry = telemetry;
   }
 
   telemetry(): GitHubMutationTelemetry {
@@ -544,6 +841,7 @@ export class MutationScheduler implements MutationAdmission {
       successful: this.#successful,
       serverPrimaryQuota: this.#primaryQuota?.snapshot() ?? [],
       localSecondaryEstimate: this.#pacer.snapshot(observedAt),
+      ...(this.#requestTelemetry ? { requestTelemetry: this.#requestTelemetry() } : {}),
     };
   }
 
@@ -567,7 +865,7 @@ export class MutationScheduler implements MutationAdmission {
       let wait: number;
       try {
         this.#assertAdmissionOpen(kind);
-        wait = this.#pacer.waitMs(now, { priority: kind === "lease" });
+        wait = this.#pacer.waitMs(now, { priority: kind !== "normal" });
       } catch (error) {
         release();
         throw error;
@@ -602,8 +900,8 @@ export class MutationScheduler implements MutationAdmission {
       if (wait >= 5_000 && now.getTime() - this.#lastNoticeAt >= 60_000) {
         this.#lastNoticeAt = now.getTime();
         this.#notify(
-          kind === "lease"
-            ? `pacing a lease mutation for ${wait}ms`
+          kind !== "normal"
+            ? `pacing a ${kind} mutation for ${wait}ms`
             : `pacing a GitHub mutation for ${wait}ms; lease traffic retains priority`,
         );
       }
@@ -619,7 +917,7 @@ export class MutationScheduler implements MutationAdmission {
       return this.#releaseGate();
     }
     await new Promise<void>((resolve, reject) => {
-      const queue = kind === "lease" ? this.#leaseQueue : this.#normalQueue;
+      const queue = kind === "normal" ? this.#normalQueue : this.#leaseQueue;
       const signal = kind === "normal" ? this.#normalShutdown.signal : undefined;
       const grant = () => {
         signal?.removeEventListener("abort", stop);

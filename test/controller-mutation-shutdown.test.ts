@@ -105,11 +105,13 @@ function setup(input: { paced?: boolean; fetch?: typeof globalThis.fetch } = {})
     .mockImplementation(async (lease) => {
       expect(lease.epoch).toBe(1);
       expect(lease.controllerId).toBe(acquire.mock.calls[0]![0].controllerId);
-      await store.createCommit({
-        treeOid: lease.treeOid,
-        parentOids: [lease.oid],
-        message: "Factory repository-controller lease release",
-      });
+      await store.withMutationClass("lease", () =>
+        store.createCommit({
+          treeOid: lease.treeOid,
+          parentOids: [lease.oid],
+          message: "Factory repository-controller lease release",
+        }),
+      );
       return lease;
     });
   const run = (operation: () => Promise<void>) =>
@@ -160,7 +162,9 @@ it("stops a smoothed normal pacing wait, settles priority cleanup, and never dis
       // This deliberately empty-resource Objective fixture has no unknown writes
       // or accounting to waive. Retire its exact lease through the real scheduler.
       expect(f.resources.capacityLedger.snapshot().reservations).toHaveLength(0);
-      await f.store.createRef("refs/clockgrove-factory/leases/objective-1", "a".repeat(40));
+      await f.store.withMutationClass("cleanup", () =>
+        f.store.createRef("refs/clockgrove-factory/leases/objective-1", "a".repeat(40)),
+      );
       cleanupProved = true;
     }
   });

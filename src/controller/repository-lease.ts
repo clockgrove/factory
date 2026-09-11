@@ -50,140 +50,158 @@ export class RepositoryLeaseManager {
     }
   }
 
+  #withLeaseClass<T>(operation: () => Promise<T>): Promise<T> {
+    return this.#store.withMutationClass
+      ? this.#store.withMutationClass("lease", operation)
+      : operation();
+  }
+
   async read(): Promise<RepositoryLeaseState | null> {
-    const oid = await this.#store.readRef(REPOSITORY_LEASE_REF);
-    return oid ? parseRepositoryLease(await this.#store.readCommit(oid)) : null;
+    return this.#withLeaseClass(async () => {
+      const oid = await this.#store.readRef(REPOSITORY_LEASE_REF);
+      return oid ? parseRepositoryLease(await this.#store.readCommit(oid)) : null;
+    });
   }
 
   async acquire(
     identity: RepositoryLeaseIdentity,
     base: GitCommitObject,
   ): Promise<RepositoryLeaseState> {
-    validateIdentity(identity);
-    const now = await this.#store.serverTime();
-    const current = await this.read();
-    if (current && current.expiresAt.getTime() > now.getTime()) {
-      if (current.controllerId === identity.controllerId) {
-        return this.renew(current);
+    return this.#withLeaseClass(async () => {
+      validateIdentity(identity);
+      const now = await this.#store.serverTime();
+      const current = await this.read();
+      if (current && current.expiresAt.getTime() > now.getTime()) {
+        if (current.controllerId === identity.controllerId) {
+          return this.renew(current);
+        }
+        throw new RepositoryLeaseLostError("another repository controller holds the lease");
       }
-      throw new RepositoryLeaseLostError("another repository controller holds the lease");
-    }
-    const record = makeRecord(
-      "RepositoryLeaseAcquired",
-      identity,
-      (current?.epoch ?? 0) + 1,
-      (current?.sequence ?? 0) + 1,
-      now,
-      this.#durationMs,
-      current?.oid,
-    );
-    const oid = await this.#commit(
-      record,
-      current?.treeOid ?? base.treeOid,
-      current?.oid ?? base.oid,
-    );
-    const won = current
-      ? await this.#store.compareAndSwapRef({
-          ref: REPOSITORY_LEASE_REF,
-          beforeOid: current.oid,
-          afterOid: oid,
-        })
-      : await this.#store.createRef(REPOSITORY_LEASE_REF, oid);
-    if (!won) {
-      throw new RepositoryLeaseLostError("another repository controller won lease acquisition");
-    }
-    return state(record, oid, current?.treeOid ?? base.treeOid);
+      const record = makeRecord(
+        "RepositoryLeaseAcquired",
+        identity,
+        (current?.epoch ?? 0) + 1,
+        (current?.sequence ?? 0) + 1,
+        now,
+        this.#durationMs,
+        current?.oid,
+      );
+      const oid = await this.#commit(
+        record,
+        current?.treeOid ?? base.treeOid,
+        current?.oid ?? base.oid,
+      );
+      const won = current
+        ? await this.#store.compareAndSwapRef({
+            ref: REPOSITORY_LEASE_REF,
+            beforeOid: current.oid,
+            afterOid: oid,
+          })
+        : await this.#store.createRef(REPOSITORY_LEASE_REF, oid);
+      if (!won) {
+        throw new RepositoryLeaseLostError("another repository controller won lease acquisition");
+      }
+      return state(record, oid, current?.treeOid ?? base.treeOid);
+    });
   }
 
   async renew(lease: RepositoryLeaseState): Promise<RepositoryLeaseState> {
-    await this.assertCurrent(lease);
-    const current = await this.#currentGeneration(lease);
-    const now = await this.#store.serverTime();
-    const record = makeRecord(
-      "RepositoryLeaseRenewed",
-      lease,
-      lease.epoch,
-      current.sequence + 1,
-      now,
-      this.#durationMs,
-      current.oid,
-    );
-    const oid = await this.#commit(record, current.treeOid, current.oid);
-    const won = await this.#store.compareAndSwapRef({
-      ref: REPOSITORY_LEASE_REF,
-      beforeOid: current.oid,
-      afterOid: oid,
+    return this.#withLeaseClass(async () => {
+      await this.assertCurrent(lease);
+      const current = await this.#currentGeneration(lease);
+      const now = await this.#store.serverTime();
+      const record = makeRecord(
+        "RepositoryLeaseRenewed",
+        lease,
+        lease.epoch,
+        current.sequence + 1,
+        now,
+        this.#durationMs,
+        current.oid,
+      );
+      const oid = await this.#commit(record, current.treeOid, current.oid);
+      const won = await this.#store.compareAndSwapRef({
+        ref: REPOSITORY_LEASE_REF,
+        beforeOid: current.oid,
+        afterOid: oid,
+      });
+      if (!won) {
+        throw new RepositoryLeaseLostError("another repository controller advanced the lease");
+      }
+      return state(record, oid, current.treeOid);
     });
-    if (!won) {
-      throw new RepositoryLeaseLostError("another repository controller advanced the lease");
-    }
-    return state(record, oid, current.treeOid);
   }
 
   async release(lease: RepositoryLeaseState): Promise<RepositoryLeaseState> {
-    await this.assertCurrent(lease);
-    const current = await this.#currentGeneration(lease);
-    const now = await this.#store.serverTime();
-    const record = makeRecord(
-      "RepositoryLeaseReleased",
-      lease,
-      lease.epoch,
-      current.sequence + 1,
-      now,
-      0,
-      current.oid,
-    );
-    const oid = await this.#commit(record, current.treeOid, current.oid);
-    const won = await this.#store.compareAndSwapRef({
-      ref: REPOSITORY_LEASE_REF,
-      beforeOid: current.oid,
-      afterOid: oid,
-    });
-    if (!won) {
-      throw new RepositoryLeaseLostError(
-        "another repository controller advanced the lease before release",
+    return this.#withLeaseClass(async () => {
+      await this.assertCurrent(lease);
+      const current = await this.#currentGeneration(lease);
+      const now = await this.#store.serverTime();
+      const record = makeRecord(
+        "RepositoryLeaseReleased",
+        lease,
+        lease.epoch,
+        current.sequence + 1,
+        now,
+        0,
+        current.oid,
       );
-    }
-    return state(record, oid, current.treeOid);
+      const oid = await this.#commit(record, current.treeOid, current.oid);
+      const won = await this.#store.compareAndSwapRef({
+        ref: REPOSITORY_LEASE_REF,
+        beforeOid: current.oid,
+        afterOid: oid,
+      });
+      if (!won) {
+        throw new RepositoryLeaseLostError(
+          "another repository controller advanced the lease before release",
+        );
+      }
+      return state(record, oid, current.treeOid);
+    });
   }
 
   async assertCurrent(lease: RepositoryLeaseState): Promise<void> {
-    observeLeaseAssertion();
-    const observation = this.#store.readRefWithServerTime
-      ? await this.#store.readRefWithServerTime(REPOSITORY_LEASE_REF)
-      : {
-          oid: await this.#store.readRef(REPOSITORY_LEASE_REF),
-          serverTime: await this.#store.serverTime(),
-        };
-    if (!observation.oid) throw new RepositoryLeaseLostError();
-    const current =
-      observation.oid === lease.oid
-        ? lease
-        : parseRepositoryLease(await this.#store.readCommit(observation.oid));
-    if (
-      current.controllerId !== lease.controllerId ||
-      current.policyDigest !== lease.policyDigest ||
-      current.epoch !== lease.epoch ||
-      current.sequence < lease.sequence ||
-      current.expiresAt.getTime() <= observation.serverTime.getTime()
-    ) {
-      throw new RepositoryLeaseLostError();
-    }
+    return this.#withLeaseClass(async () => {
+      observeLeaseAssertion();
+      const observation = this.#store.readRefWithServerTime
+        ? await this.#store.readRefWithServerTime(REPOSITORY_LEASE_REF)
+        : {
+            oid: await this.#store.readRef(REPOSITORY_LEASE_REF),
+            serverTime: await this.#store.serverTime(),
+          };
+      if (!observation.oid) throw new RepositoryLeaseLostError();
+      const current =
+        observation.oid === lease.oid
+          ? lease
+          : parseRepositoryLease(await this.#store.readCommit(observation.oid));
+      if (
+        current.controllerId !== lease.controllerId ||
+        current.policyDigest !== lease.policyDigest ||
+        current.epoch !== lease.epoch ||
+        current.sequence < lease.sequence ||
+        current.expiresAt.getTime() <= observation.serverTime.getTime()
+      ) {
+        throw new RepositoryLeaseLostError();
+      }
+    });
   }
 
   async #currentGeneration(lease: RepositoryLeaseState): Promise<RepositoryLeaseState> {
-    const oid = await this.#store.readRef(REPOSITORY_LEASE_REF);
-    if (!oid) throw new RepositoryLeaseLostError();
-    const current =
-      oid === lease.oid ? lease : parseRepositoryLease(await this.#store.readCommit(oid));
-    if (
-      current.controllerId !== lease.controllerId ||
-      current.policyDigest !== lease.policyDigest ||
-      current.epoch !== lease.epoch
-    ) {
-      throw new RepositoryLeaseLostError();
-    }
-    return current;
+    return this.#withLeaseClass(async () => {
+      const oid = await this.#store.readRef(REPOSITORY_LEASE_REF);
+      if (!oid) throw new RepositoryLeaseLostError();
+      const current =
+        oid === lease.oid ? lease : parseRepositoryLease(await this.#store.readCommit(oid));
+      if (
+        current.controllerId !== lease.controllerId ||
+        current.policyDigest !== lease.policyDigest ||
+        current.epoch !== lease.epoch
+      ) {
+        throw new RepositoryLeaseLostError();
+      }
+      return current;
+    });
   }
 
   async #commit(

@@ -390,6 +390,8 @@ import {
   ContentCreationPacer,
   MutationScheduler,
   PlatformUnavailableError,
+  githubRequestTelemetryForCredential,
+  primaryQuotaForCredential,
 } from "./platform.js";
 
 class RunCancellationRequestedError extends Error {
@@ -1226,6 +1228,10 @@ export class FactorySupervisor {
         pacer: this.#pacer,
         onThrottle: this.#notify,
       });
+    this.#mutations.attachPrimaryQuota(primaryQuotaForCredential(options.token));
+    this.#mutations.attachRequestTelemetry(() =>
+      githubRequestTelemetryForCredential(options.token),
+    );
     const scheduling = normalizeSchedulingPolicy(this.#policy);
     this.#capacity = shared?.capacityLedger ?? new CapacityLedger();
     this.#sharedCapacity = shared?.sharedCapacity ?? options.sharedCapacity;
@@ -1252,7 +1258,7 @@ export class FactorySupervisor {
       pacer: this.#pacer,
       concurrency: this.#concurrency,
       mutationScheduler: this.#mutations,
-      captureMutationFence: (kind: "normal" | "lease") =>
+      captureMutationFence: (kind: "normal" | "lease" | "cleanup") =>
         kind === "lease" ? async () => {} : this.#captureMutationFence(),
       assertMutationIdentity: (lease: LeaseState) => {
         if (!this.#lease) throw new LeaseLostError("Objective mutation has no acquired lease");
@@ -10208,12 +10214,14 @@ export class FactorySupervisor {
       } catch {
         return;
       }
-      const evidenceOid = await this.#store.createCommit({
-        treeOid: base.treeOid,
-        parentOids: [record!.oid],
-        message: `Factory exact admission settlement\n\nFactory-Admission-Settlement: ${Buffer.from(JSON.stringify(payload)).toString("base64url")}`,
+      await this.#store.withMutationClass("cleanup", async () => {
+        const evidenceOid = await this.#store.createCommit({
+          treeOid: base.treeOid,
+          parentOids: [record!.oid],
+          message: `Factory exact admission settlement\n\nFactory-Admission-Settlement: ${Buffer.from(JSON.stringify(payload)).toString("base64url")}`,
+        });
+        await this.#attempts.settle(lease, reservation, { ...evidence, evidenceOid });
       });
-      await this.#attempts.settle(lease, reservation, { ...evidence, evidenceOid });
     });
   }
 

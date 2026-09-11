@@ -42,7 +42,12 @@ import {
 
 import type { MechanicalVerdict } from "./evaluate.js";
 import type { BlastRadiusVerdict } from "./approval.js";
-import { createOctokit, type GitHubOptions, type PendingApprovalRun } from "./github.js";
+import {
+  createOctokit,
+  withGitHubTransportCallbacks,
+  type GitHubOptions,
+  type PendingApprovalRun,
+} from "./github.js";
 
 /** Result of `Dispatcher.approveChecks`, reported verbatim to Director. */
 export interface ApprovalOutcome {
@@ -68,6 +73,7 @@ import {
   PlatformUnavailableError,
   classifyRefusal,
   isSecondaryRateLimitRefusal,
+  withGitHubRequestPriority,
   type MutationAdmission,
 } from "./platform.js";
 import {
@@ -313,6 +319,9 @@ mutation UpdatePullRequestBranch($pullRequestId: ID!) {
  * real implementation.
  */
 export interface GitHubWriter {
+  /** Real Octokit adapters account at the fetch boundary after local admission.
+   * Injected writers without this marker treat invoking the adapter as transport. */
+  readonly transportAccounting?: "http-boundary";
   /** Generic managed-agent assignment. Older injected writers may implement only the alias below. */
   assignManagedAgent?(args: {
     issueId: string;
@@ -367,6 +376,7 @@ export interface GitHubWriter {
 
 /** `GitHubWriter` backed by a real Octokit GraphQL client. */
 export class GithubOctokitWriter implements GitHubWriter {
+  readonly transportAccounting = "http-boundary" as const;
   readonly #octokit: Octokit;
   readonly #owner: string;
   readonly #repo: string;
@@ -1139,27 +1149,41 @@ export class Dispatcher {
           new Error("Factory GitHub circuit opened while the dispatch write was queued"),
         );
       }
-      observeMutationQueue(mutationPermit.waitedMs);
-      await observeMutationFence(async () => {
-        if (fence) await fence(mutationPermit.waitedMs);
-        await this.#beforeMutation(mutationPermit.waitedMs);
-      });
-      // Some callers have a deadline that can elapse while waiting for this
-      // shared mutation permit. Keep their final synchronous fence adjacent to
-      // the provider call instead of checking before the queue.
-      beforeCall?.();
-      if (this.#breaker.isOpen()) {
-        throw new PlatformUnavailableError(
-          { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
-          new Error("Factory GitHub circuit opened during the dispatch mutation fence"),
+      await withGitHubRequestPriority("normal", async () => {
+        observeMutationQueue(mutationPermit.waitedMs);
+        await observeMutationFence(async () => {
+          if (fence) await fence(mutationPermit.waitedMs);
+          await this.#beforeMutation(mutationPermit.waitedMs);
+        });
+        // Some callers have a deadline that can elapse while waiting for this
+        // shared mutation permit. Keep their final synchronous fence adjacent to
+        // the provider call instead of checking before the queue.
+        beforeCall?.();
+        if (this.#breaker.isOpen()) {
+          throw new PlatformUnavailableError(
+            { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
+            new Error("Factory GitHub circuit opened during the dispatch mutation fence"),
+          );
+        }
+        mutationPermit.assertDispatchAllowed?.();
+        if (this.#writer.transportAccounting !== "http-boundary") {
+          attempted = true;
+          mutationPermit.recordTransported?.();
+        }
+        await withGitHubTransportCallbacks(
+          {
+            onTransported: () => {
+              attempted = true;
+              mutationPermit.recordTransported?.();
+            },
+          },
+          fn,
         );
-      }
-      mutationPermit.assertDispatchAllowed?.();
-      mutationPermit.recordTransported?.();
-      attempted = true;
-      await fn();
-      mutationPermit.recordSuccess?.();
-      this.#breaker.recordSuccess();
+        if (attempted) {
+          mutationPermit.recordSuccess?.();
+          this.#breaker.recordSuccess();
+        }
+      });
     } catch (error) {
       if (!attempted) throw error;
       const refusal = classifyRefusal(error);

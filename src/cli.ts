@@ -41,7 +41,12 @@ import { GitHubStacks, type GitHubStackTransport } from "./publication/github-st
 import { readCompilerCausalAnnotationsFile } from "./application/compiler-eval.js";
 import { readSuppliedReplayFile } from "./replay/file.js";
 import { SUPPLIED_REPLAY_ERROR } from "./replay/supplied.js";
-import { ContentCreationPacer, MutationScheduler, primaryQuotaForCredential } from "./platform.js";
+import {
+  ContentCreationPacer,
+  MutationScheduler,
+  githubRequestTelemetryForCredential,
+  primaryQuotaForCredential,
+} from "./platform.js";
 import { OctokitToolchainReleaseSource } from "./runtime/toolchain-github-source.js";
 import {
   provisionToolchain,
@@ -149,7 +154,11 @@ function applicationFor(
   const token = resolveGitHubToken();
   const primaryQuota = primaryQuotaForCredential(token);
   const pacer = new ContentCreationPacer();
-  const mutations = new MutationScheduler({ pacer, primaryQuota });
+  const mutations = new MutationScheduler({
+    pacer,
+    primaryQuota,
+    requestTelemetry: () => githubRequestTelemetryForCredential(token),
+  });
   const store = new GitHubControlStore({
     token,
     owner,
@@ -469,7 +478,7 @@ async function runRepositoryController(args: string[]): Promise<void> {
   const repository = parseRepository(args[0]);
   const checkout = resolve(option(args, "--repo") ?? process.cwd());
   const maxActiveObjectives = positiveIntegerOption(args, "--max-active-objectives", 2);
-  const pollIntervalSeconds = positiveIntegerOption(args, "--poll-interval-seconds", 15);
+  const pollIntervalSeconds = positiveIntegerOption(args, "--poll-interval-seconds", 60);
   const maxLocalWorkers = positiveIntegerOption(args, "--max-local-workers", 8);
   const maxPaidWorkers = nonNegativeIntegerOption(args, "--max-paid-workers", 0);
   if (maxActiveObjectives > 32) fail("--max-active-objectives cannot exceed 32");

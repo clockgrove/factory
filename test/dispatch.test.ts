@@ -9,12 +9,23 @@ const READY = {
 
 import {
   Dispatcher,
+  GithubOctokitWriter,
   attemptAction,
   confirmAction,
   type DispatcherOptions,
   type GitHubWriter,
 } from "../src/dispatch.js";
-import { CircuitBreaker, PlatformUnavailableError } from "../src/platform.js";
+import { GitHubControlStore } from "../src/control/github-store.js";
+import { LeaseManager, type LeaseState } from "../src/control/lease.js";
+import {
+  CircuitBreaker,
+  GITHUB_GRAPHQL_PROTECTED_RESERVE,
+  GITHUB_PRIMARY_PROTECTED_RESERVE,
+  GitHubPrimaryAdmissionDeferredError,
+  GitHubPrimaryQuotaCache,
+  MutationScheduler,
+  PlatformUnavailableError,
+} from "../src/platform.js";
 import { advancingMutationScheduler } from "./helpers/mutation-scheduler.js";
 import { attemptCount, deriveState, DISPATCH_CONFIRM_WINDOW_MS } from "../src/state.js";
 import type { DerivedWorkItem } from "../src/state.js";
@@ -244,6 +255,84 @@ describe("attemptAction", () => {
       ],
     });
     expect(attemptAction(item)).toBe("retry");
+  });
+});
+
+describe("Dispatcher transport accounting", () => {
+  it("keeps a semantic lease assertion inside the outer normal dispatch class", async () => {
+    const quota = new GitHubPrimaryQuotaCache();
+    quota.observe({
+      "x-ratelimit-resource": "core",
+      "x-ratelimit-limit": "5000",
+      "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
+    });
+    const scheduler = new MutationScheduler({ primaryQuota: quota });
+    let transports = 0;
+    const store = new GitHubControlStore({
+      token: "dispatcher-fence-priority-test",
+      owner: "clockgrove",
+      repo: "factory",
+      primaryQuota: quota,
+      requestFetch: async () => {
+        transports++;
+        return new Response("{}", { status: 200 });
+      },
+    });
+    const lease: LeaseState = {
+      objective: 313,
+      runId: "run-313",
+      holder: "controller",
+      policyDigest: "a".repeat(64),
+      ref: "refs/clockgrove-factory/leases/objective-313",
+      oid: "b".repeat(40),
+      treeOid: "c".repeat(40),
+      epoch: 1,
+      sequence: 1,
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+    const leases = new LeaseManager({ store });
+    const dispatcher = makeDispatcher(new FakeWriter(), {
+      mutationScheduler: scheduler,
+      captureMutationFence: () => () => leases.assertCurrent(lease),
+    });
+
+    await expect(dispatcher.start(derivedWi())).rejects.toBeInstanceOf(
+      GitHubPrimaryAdmissionDeferredError,
+    );
+    expect(transports).toBe(0);
+    expect(scheduler.telemetry()).toMatchObject({ admitted: 1, transported: 0 });
+  });
+
+  it("does not count Octokit primary-reserve deferral as a transported dispatch", async () => {
+    const quota = new GitHubPrimaryQuotaCache();
+    quota.observe({
+      "x-ratelimit-resource": "graphql",
+      "x-ratelimit-limit": "5000",
+      "x-ratelimit-remaining": String(GITHUB_GRAPHQL_PROTECTED_RESERVE),
+      "x-ratelimit-used": String(5000 - GITHUB_GRAPHQL_PROTECTED_RESERVE),
+      "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
+    });
+    const scheduler = new MutationScheduler({ primaryQuota: quota });
+    let transports = 0;
+    const writer = new GithubOctokitWriter({
+      token: "dispatcher-local-admission-test",
+      owner: "clockgrove",
+      repo: "factory",
+      primaryQuota: quota,
+      requestFetch: async () => {
+        transports++;
+        return new Response("{}", { status: 200 });
+      },
+    });
+    const dispatcher = makeDispatcher(writer, { mutationScheduler: scheduler });
+
+    await expect(dispatcher.start(derivedWi())).rejects.toBeInstanceOf(
+      GitHubPrimaryAdmissionDeferredError,
+    );
+    expect(transports).toBe(0);
+    expect(scheduler.telemetry()).toMatchObject({ admitted: 1, transported: 0, successful: 0 });
   });
 });
 

@@ -32,6 +32,16 @@ class Store implements LeaseStore {
   failCreateTree = false;
   beforeDispatch: (() => Promise<void>) | undefined;
   scopes = new AsyncLocalStorage<() => Promise<void>>();
+  mutationScope = new AsyncLocalStorage<"normal" | "lease" | "cleanup">();
+  mutationClasses: Array<"normal" | "lease" | "cleanup"> = [];
+  async withMutationClass<T>(
+    kind: "normal" | "lease" | "cleanup",
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (this.mutationScope.getStore()) return operation();
+    this.mutationClasses.push(kind);
+    return this.mutationScope.run(kind, operation);
+  }
   async withMutationFence<T>(
     fence: (waitedMs: number) => Promise<void>,
     operation: () => Promise<T>,
@@ -224,6 +234,21 @@ async function seedClaims(
 }
 
 describe("independent-session durable capacity", () => {
+  it("classifies shared-capacity release as cleanup across its complete CAS transaction", async () => {
+    const store = new Store();
+    const shared = coordinator(store);
+    const claimOwner = await owner(store, 1);
+    await shared.initialize();
+    const held = reservation(1);
+    await shared.reserve(claimOwner, held, limits);
+    store.mutationClasses = [];
+
+    await shared.release(claimOwner, held.key);
+
+    expect(store.mutationClasses).toEqual(["cleanup"]);
+    expect((await shared.snapshot()).active).toBe(0);
+  });
+
   it("rejects an Objective takeover while its capacity CAS waits for dispatch", async () => {
     const store = new Store(),
       a = coordinator(store),

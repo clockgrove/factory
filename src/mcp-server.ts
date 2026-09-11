@@ -88,6 +88,7 @@ import {
   CircuitBreaker,
   ConcurrencyLimiter,
   ContentCreationPacer,
+  githubRequestTelemetryForCredential,
   MutationScheduler,
   primaryQuotaForCredential,
 } from "./platform.js";
@@ -176,6 +177,7 @@ function applicationFor(
 ): FactoryApplicationService {
   const token = getToken();
   mutations.attachPrimaryQuota(primaryQuotaForCredential(token));
+  mutations.attachRequestTelemetry(() => githubRequestTelemetryForCredential(token));
   const store = new GitHubControlStore({
     token,
     owner,

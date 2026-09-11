@@ -2258,7 +2258,7 @@ describe("Supervisor adopted isolated candidate validation", () => {
     expect(f.validate).toHaveBeenCalledTimes(3);
     expect(f.review).toHaveBeenCalledTimes(3);
     expect(f.snapshot.workItems.every((item) => item.closed)).toBe(true);
-  }, 60_000);
+  }, 90_000); // Full coverage load exceeded the former 60 s bound by 417 ms.
 
   it("refuses retained-artifact local validation under a tightened successor trust policy", async () => {
     const f = await successorFixture({

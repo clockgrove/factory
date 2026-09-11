@@ -821,7 +821,10 @@ async function fixture(
   let reads = 0;
   vi.spyOn(GitHubReader.prototype, "readObjective").mockImplementation(async (number) => {
     if (number === 6 && peerSnapshot) return structuredClone(peerSnapshot);
-    if (++reads > 80) throw new Error("fixture exceeded bounded snapshot reads");
+    // Concurrent Git and validation work can require more than 80 observations
+    // under the full coverage matrix. Keep a finite runaway fence aligned with
+    // the provider Supervisor fixture instead of racing normal slow progress.
+    if (++reads > 500) throw new Error("fixture exceeded bounded snapshot reads");
     return structuredClone(snapshot);
   });
   vi.spyOn(LeaseManager.prototype, "read").mockResolvedValue(null);

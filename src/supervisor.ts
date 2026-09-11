@@ -4227,12 +4227,16 @@ export class FactorySupervisor {
     this.#fairness.register(this.#options.objective);
 
     try {
-      // A resumed expired run cannot repair graph/publication/checkpoint state.
-      if (Date.now() >= deadline) return await finishExpired();
       const startupProviderGate = latestProviderQuotaGate(
         snapshotEvents(snapshot),
         this.#run.runId,
       );
+      // An expired run normally cannot repair graph/publication/checkpoint state. A
+      // work-item provider gate is different: its already-admitted durable attempt
+      // must reach the reconciliation path below before any terminal receipt can be
+      // written, even when the controller restarts after the deadline.
+      if (Date.now() >= deadline && startupProviderGate?.workItem === undefined)
+        return await finishExpired();
       if (startupProviderGate?.kind === "provider" && startupProviderGate.workItem === undefined) {
         return await terminalAfterDrain(
           "FactoryRunEscalated",
@@ -5014,32 +5018,57 @@ export class FactorySupervisor {
         const executionRevision = activeExecutions.revision;
         if (heartbeatError) throw heartbeatError;
         activeExecutions.throwNextFailure();
-        if (this.#options.signal?.aborted) {
-          if (this.#options.shutdownBehavior === "release-lease") {
-            return await releaseAfterDrain();
-          }
-          return await terminalAfterDrain("FactoryRunCancelled", "operator cancelled run");
-        }
+        const signalCancelled = this.#options.signal?.aborted ?? false;
+        if (signalCancelled && this.#options.shutdownBehavior === "release-lease")
+          return await releaseAfterDrain();
         await this.#lease.renewIfNeeded();
         snapshot = await this.#reader.readObjective(snapshot.number);
         // A hold/cleanup failure can settle while the snapshot is in flight.
         // An absent active key must not turn that failure into same-process recovery.
         activeExecutions.throwNextFailure();
-        this.#options.signal?.throwIfAborted();
         this.#fenceSnapshot(snapshot);
         this.#ciExpectedOnPullRequests = snapshot.ciExpectedOnPullRequests;
         this.#sequences.observe(snapshotEvents(snapshot));
-        if (hasCancellationRequest(snapshot, this.#run.runId)) {
-          return await terminalAfterDrain(
-            "FactoryRunCancelled",
-            "operator requested cancellation through GitHub",
-          );
-        }
         const durableProviderGates = providerQuotaGates(snapshotEvents(snapshot), this.#run.runId);
         const durableProviderGate = durableProviderGates.at(-1);
-        if (Date.now() >= deadline) {
-          return await finishExpired();
+        const cancellationReason = this.#options.signal?.aborted
+          ? "operator cancelled run"
+          : hasCancellationRequest(snapshot, this.#run.runId)
+            ? "operator requested cancellation through GitHub"
+            : undefined;
+        const deadlineExpired = Date.now() >= deadline;
+        if (
+          (cancellationReason || deadlineExpired) &&
+          durableProviderGates.some((gate) => gate.workItem !== undefined)
+        ) {
+          const gatedObjective = this.#deriveObjective(snapshot);
+          await this.#reconcileObjectiveCapacity(gatedObjective.number, gatedObjective.items);
+          const gatedRecoverable = gatedObjective.items.filter(
+            (item) =>
+              !activeExecutions.has(item.number) &&
+              durableProviderGates.some(
+                (gate) => gate.workItem === item.number && gate.attempt !== undefined,
+              ) &&
+              this.#hasUnfinishedAttempt(item),
+          );
+          for (const item of gatedRecoverable)
+            await this.#recoverInterrupted(item, deadline, gatedObjective.items);
+          snapshot = await this.#reader.readObjective(snapshot.number);
+          this.#fenceSnapshot(snapshot);
+          this.#sequences.observe(snapshotEvents(snapshot));
+          const remaining = this.#deriveObjective(snapshot).items.some(
+            (item) =>
+              !activeExecutions.has(item.number) &&
+              durableProviderGates.some(
+                (gate) => gate.workItem === item.number && gate.attempt !== undefined,
+              ) &&
+              this.#hasUnfinishedAttempt(item),
+          );
+          if (remaining) throw new ProviderQuotaDrainIncompleteError();
         }
+        if (cancellationReason)
+          return await terminalAfterDrain("FactoryRunCancelled", cancellationReason);
+        if (deadlineExpired) return await finishExpired();
         await this.#recordControllerObservation(snapshot);
         const commandState = deriveDurableCommandState({
           events: snapshotEvents(snapshot),

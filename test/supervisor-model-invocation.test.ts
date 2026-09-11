@@ -72,106 +72,139 @@ describe("Supervisor model dispatch journal", () => {
     }
   }, 30_000);
 
-  it("atomically retains exact quota usage and reconciles the interrupted attempt before restart terminalizes", async () => {
-    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
-    const f = await providerSupervisorFixture("daytona-burst", {
-      localOnly: true,
-      dependencyChain: true,
-      maxAttemptsPerItem: 3,
-      configureLocalBackend: (backend) => ({
-        ...backend,
-        observe: async (handle) => ({
-          ...(await backend.observe(handle)),
-          state: "failed",
-          usage: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 },
-          providerQuotaGate: gate,
+  it.each(["provider", "cancellation", "deadline"] as const)(
+    "atomically retains exact quota usage and reconciles the interrupted attempt before a %s terminal",
+    async (terminalMode) => {
+      const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
+      const f = await providerSupervisorFixture("daytona-burst", {
+        localOnly: true,
+        dependencyChain: true,
+        maxAttemptsPerItem: 3,
+        configureLocalBackend: (backend) => ({
+          ...backend,
+          observe: async (handle) => ({
+            ...(await backend.observe(handle)),
+            state: "failed",
+            usage: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 },
+            providerQuotaGate: gate,
+          }),
         }),
-      }),
-    });
-    const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation();
-    if (!write) throw new Error("fixture receipt transport missing");
-    let interruptAttemptFailure = true;
-    let loseAtomicGateResponse = true;
-    let atomicGateWrites = 0;
-    vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
-      async (node, body) => {
-        const receipts = decodeEventComments(body);
-        if (receipts.some((event) => event.event === "ProviderQuotaBlocked")) {
-          atomicGateWrites += 1;
-          expect(receipts.map((event) => event.event)).toEqual([
-            "BudgetReconciled",
-            "ProviderQuotaBlocked",
-          ]);
-          await write(node, body);
-          if (loseAtomicGateResponse) {
-            loseAtomicGateResponse = false;
+      });
+      const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation();
+      if (!write) throw new Error("fixture receipt transport missing");
+      let interruptAttemptFailure = true;
+      let loseAtomicGateResponse = true;
+      let atomicGateWrites = 0;
+      vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+        async (node, body) => {
+          const receipts = decodeEventComments(body);
+          if (receipts.some((event) => event.event === "ProviderQuotaBlocked")) {
+            atomicGateWrites += 1;
+            expect(receipts.map((event) => event.event)).toEqual([
+              "BudgetReconciled",
+              "ProviderQuotaBlocked",
+            ]);
+            await write(node, body);
+            if (loseAtomicGateResponse) {
+              loseAtomicGateResponse = false;
+              throw new PlatformUnavailableError(
+                { kind: "server_error", retryAfterMs: 1 },
+                new Error("fixture: atomic provider gate response was lost after persistence"),
+              );
+            }
+            return;
+          }
+          if (
+            interruptAttemptFailure &&
+            receipts.some(
+              (event) =>
+                event.kind === "attempt" && event.event === "AttemptFailed" && event.workItem === 8,
+            )
+          ) {
+            interruptAttemptFailure = false;
             throw new PlatformUnavailableError(
               { kind: "server_error", retryAfterMs: 1 },
-              new Error("fixture: atomic provider gate response was lost after persistence"),
+              new Error("fixture: controller exited after the atomic provider gate"),
             );
           }
-          return;
-        }
-        if (
-          interruptAttemptFailure &&
-          receipts.some(
-            (event) =>
-              event.kind === "attempt" && event.event === "AttemptFailed" && event.workItem === 8,
-          )
-        ) {
-          interruptAttemptFailure = false;
-          throw new PlatformUnavailableError(
-            { kind: "server_error", retryAfterMs: 1 },
-            new Error("fixture: controller exited after the atomic provider gate"),
-          );
-        }
-        return write(node, body);
-      },
-    );
-    try {
-      await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
-      const gateIndex = f.events().findIndex((event) => event.event === "ProviderQuotaBlocked");
-      const usageIndex = f
-        .events()
-        .findIndex(
-          (event) =>
-            event.kind === "budget" &&
-            event.event === "BudgetReconciled" &&
-            event.modelInvocationId === "worker-8-1",
-        );
-      expect(usageIndex).toBeGreaterThanOrEqual(0);
-      expect(gateIndex).toBeGreaterThan(usageIndex);
-      expect(
-        f
+          return write(node, body);
+        },
+      );
+      try {
+        await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+        const gateIndex = f.events().findIndex((event) => event.event === "ProviderQuotaBlocked");
+        const usageIndex = f
           .events()
-          .some(
+          .findIndex(
+            (event) =>
+              event.kind === "budget" &&
+              event.event === "BudgetReconciled" &&
+              event.modelInvocationId === "worker-8-1",
+          );
+        expect(usageIndex).toBeGreaterThanOrEqual(0);
+        expect(gateIndex).toBeGreaterThan(usageIndex);
+        expect(
+          f
+            .events()
+            .some(
+              (event) =>
+                event.kind === "attempt" && event.event === "AttemptFailed" && event.workItem === 8,
+            ),
+        ).toBe(false);
+
+        if (terminalMode === "cancellation") {
+          f.snapshot.factoryEvents!.push({
+            protocol: "clockgrove.factory/v2",
+            kind: "run",
+            event: "FactoryRunCancellationRequested",
+            objective: 7,
+            runId: f.runId,
+            sequence: 10_000,
+            at: new Date().toISOString(),
+            requestId: "cancel-provider-gated-restart",
+            requestedBy: "operator",
+          });
+        } else if (terminalMode === "deadline") {
+          const started = f.events().find((event) => event.event === "FactoryRunStarted")!;
+          started.at = new Date(
+            Date.now() - f.policy.objectiveTimeoutMinutes * 60_000 - 1,
+          ).toISOString();
+        }
+
+        expect(await f.run()).toMatchObject(
+          terminalMode === "cancellation"
+            ? { status: "cancelled", reason: expect.stringContaining("cancellation") }
+            : terminalMode === "deadline"
+              ? { status: "escalated", reason: "Objective timeout exhausted" }
+              : {
+                  status: "escalated",
+                  reason: expect.stringContaining("GitHub Copilot monthly quota exceeded"),
+                },
+        );
+        expect(atomicGateWrites).toBe(1);
+        expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+        expect(
+          f.activity.filter(
+            (entry) => entry.operation === "reconcile-stale" && entry.workItem === 8,
+          ),
+        ).toHaveLength(1);
+        const attemptFailure = f
+          .events()
+          .find(
             (event) =>
               event.kind === "attempt" && event.event === "AttemptFailed" && event.workItem === 8,
-          ),
-      ).toBe(false);
-
-      expect(await f.run()).toMatchObject({
-        status: "escalated",
-        reason: expect.stringContaining("GitHub Copilot monthly quota exceeded"),
-      });
-      expect(atomicGateWrites).toBe(1);
-      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
-      expect(
-        f.activity.filter((entry) => entry.operation === "reconcile-stale" && entry.workItem === 8),
-      ).toHaveLength(1);
-      const attemptFailure = f
-        .events()
-        .find(
-          (event) =>
-            event.kind === "attempt" && event.event === "AttemptFailed" && event.workItem === 8,
-        );
-      const terminal = f.events().find((event) => event.event === "FactoryRunEscalated");
-      expect(attemptFailure?.sequence).toBeLessThan(terminal?.sequence ?? 0);
-      expect(deriveBudgetUsage(f.events()).modelTokens).toBe(10);
-    } finally {
-      await f.dispose();
-    }
-  }, 30_000);
+          );
+        const terminalEvent =
+          terminalMode === "cancellation" ? "FactoryRunCancelled" : "FactoryRunEscalated";
+        const terminal = f.events().find((event) => event.event === terminalEvent);
+        expect(attemptFailure?.sequence).toBeLessThan(terminal?.sequence ?? 0);
+        expect(deriveBudgetUsage(f.events()).modelTokens).toBe(10);
+      } finally {
+        await f.dispose();
+      }
+    },
+    30_000,
+  );
 
   it.each(["missing", "partial"] as const)(
     "fences terminal %s counters without economics before any review",

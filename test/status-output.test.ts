@@ -607,6 +607,114 @@ describe("bounded status, explain, and replay output", () => {
     ).not.toContain("factory_recovery_plan");
   });
 
+  it("keeps recovery fenced when any provider gate in the run has unknown accounting", () => {
+    const current = snapshot();
+    current.workItems[0]!.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        sequence: 4,
+        at: "2026-09-04T12:00:29.000Z",
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: "invocation-worker-10-1",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        directorEpoch: 4,
+        policyDigest: policyDigest(policy),
+      }),
+      event({
+        kind: "provider",
+        event: "ProviderQuotaBlocked",
+        sequence: 5,
+        at: "2026-09-04T12:00:30.000Z",
+        reasonCode: "provider-quota-exhausted",
+        provider: "another-model-provider",
+        phase: "execution",
+        backend: "another/local-backend",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        providerMessage: "First provider gate has unresolved dispatch",
+        accounting: "unknown",
+      }),
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        sequence: 6,
+        at: "2026-09-04T12:00:31.000Z",
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: "invocation-worker-10-2",
+        modelInvocationId: "worker-10-2",
+        workItem: 10,
+        attempt: 2,
+        directorEpoch: 4,
+        policyDigest: policyDigest(policy),
+      }),
+      event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        sequence: 7,
+        at: "2026-09-04T12:00:32.000Z",
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 10,
+        usageId: "worker-10-2",
+        modelInvocationId: "worker-10-2",
+        workItem: 10,
+        attempt: 2,
+        directorEpoch: 4,
+        policyDigest: policyDigest(policy),
+      }),
+      event({
+        kind: "provider",
+        event: "ProviderQuotaBlocked",
+        sequence: 8,
+        at: "2026-09-04T12:00:33.000Z",
+        reasonCode: "provider-quota-exhausted",
+        provider: "another-model-provider",
+        phase: "execution",
+        backend: "another/local-backend",
+        modelInvocationId: "worker-10-2",
+        workItem: 10,
+        attempt: 2,
+        providerMessage: "Latest provider gate has exact usage",
+        accounting: "exact",
+      }),
+    );
+    current.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "FactoryRunEscalated",
+        sequence: 9,
+        at: "2026-09-04T12:00:34.000Z",
+        reason: "provider quota exhausted",
+      }),
+    );
+
+    const status = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
+    expect(status.operatorAction).toMatchObject({
+      code: "provider-quota",
+      evidence: { accounting: "unknown" },
+    });
+    expect(
+      "requiredAction" in status.operatorAction && status.operatorAction.requiredAction,
+    ).toContain("cannot currently be recovered");
+    expect(JSON.stringify(status.operatorAction)).not.toContain("factory_recovery_plan");
+
+    const explanation = buildExplanationReport({
+      repository: "clockgrove/factory",
+      snapshot: current,
+    }).explanations[0]!;
+    expect(explanation.evidence).toMatchObject({ accounting: "unknown" });
+    expect(explanation.requiredAction).toContain("cannot currently be recovered");
+    expect(explanation.requiredAction).not.toContain("factory_recovery_plan");
+  });
+
   it("keeps ordinary terminal guidance when a quota-gated run is cancelled", () => {
     const current = snapshot();
     current.workItems[0]!.factoryEvents!.push(

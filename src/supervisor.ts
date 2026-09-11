@@ -251,7 +251,7 @@ import { compilerEvalDigest } from "./evaluation/compiler-eval.js";
 import { collectCompilationEvidence } from "./compiler/runtime-evidence.js";
 import { ManagementOutputError } from "./management/backend.js";
 import { ProviderQuotaError } from "./providers/quota.js";
-import { latestProviderQuotaGate, providerQuotaGates } from "./control/provider-gates.js";
+import { providerQuotaGates, providerQuotaGateState } from "./control/provider-gates.js";
 import { reportedModelUsage, type ReportedModelUsage } from "./protocol/model-usage.js";
 import type {
   CompilationCheckpoint,
@@ -4160,7 +4160,7 @@ export class FactorySupervisor {
         if (
           cancellation ||
           hasCancellationRequest(snapshot, this.#run.runId) ||
-          this.#options.signal?.aborted
+          (this.#options.signal?.aborted && this.#options.shutdownBehavior !== "release-lease")
         ) {
           if (cancellation) this.#sequences.observe([cancellation]);
           terminalEvent = "FactoryRunCancelled";
@@ -4246,10 +4246,12 @@ export class FactorySupervisor {
     this.#fairness.register(this.#options.objective);
 
     try {
-      const startupProviderGate = latestProviderQuotaGate(
+      const startupProviderGateState = providerQuotaGateState(
         snapshotEvents(snapshot),
         this.#run.runId,
       );
+      const startupProviderGate = startupProviderGateState?.gate;
+      const startupProviderAccounting = startupProviderGateState?.accounting ?? "unknown";
       // An expired run normally cannot repair graph/publication/checkpoint state. A
       // work-item provider gate is different: its already-admitted durable attempt
       // must reach the reconciliation path below before any terminal receipt can be
@@ -4268,7 +4270,7 @@ export class FactorySupervisor {
           );
         return await terminalAfterDrain(
           "FactoryRunEscalated",
-          startupProviderGate.accounting === "unknown"
+          startupProviderAccounting === "unknown"
             ? `${startupProviderGate.providerMessage}; model usage remains unknown, so this run cannot currently be recovered`
             : `${startupProviderGate.providerMessage}; restore provider quota${startupProviderGate.actionUrl ? ` at ${startupProviderGate.actionUrl}` : ""} before explicit recovery`,
         );
@@ -5041,16 +5043,13 @@ export class FactorySupervisor {
           this.#recoveryGraphBootstrap = null;
         }
       }
-      for (;;) {
+      runLoop: for (;;) {
         // Capture before any snapshot or admission work so a peer-capacity change during this
         // iteration cannot happen between our decision and listener registration unnoticed.
         const fairnessRevision = this.#fairness.revision;
         const executionRevision = activeExecutions.revision;
         if (heartbeatError) throw heartbeatError;
         activeExecutions.throwNextFailure();
-        const signalCancelled = this.#options.signal?.aborted ?? false;
-        if (signalCancelled && this.#options.shutdownBehavior === "release-lease")
-          return await releaseAfterDrain();
         await this.#lease.renewIfNeeded();
         snapshot = await this.#reader.readObjective(snapshot.number);
         // A hold/cleanup failure can settle while the snapshot is in flight.
@@ -5061,6 +5060,10 @@ export class FactorySupervisor {
         this.#sequences.observe(snapshotEvents(snapshot));
         const durableProviderGates = providerQuotaGates(snapshotEvents(snapshot), this.#run.runId);
         const durableProviderGate = durableProviderGates.at(-1);
+        const durableProviderGateState = providerQuotaGateState(
+          snapshotEvents(snapshot),
+          this.#run.runId,
+        );
         const cancellationReason = this.#options.signal?.aborted
           ? "operator cancelled run"
           : hasCancellationRequest(snapshot, this.#run.runId)
@@ -5120,8 +5123,13 @@ export class FactorySupervisor {
           }
           if (remaining) throw new ProviderQuotaDrainIncompleteError();
         }
-        if (cancellationReason)
-          return await terminalAfterDrain("FactoryRunCancelled", cancellationReason);
+        if (this.#options.signal?.aborted && this.#options.shutdownBehavior === "release-lease")
+          return await releaseAfterDrain();
+        if (cancellationReason || this.#options.signal?.aborted)
+          return await terminalAfterDrain(
+            "FactoryRunCancelled",
+            cancellationReason ?? "operator cancelled run",
+          );
         if (deadlineExpired) return await finishExpired();
         await this.#recordControllerObservation(snapshot);
         const commandState = deriveDurableCommandState({
@@ -5145,7 +5153,7 @@ export class FactorySupervisor {
           continue;
         }
         activeExecutions.throwNextFailure();
-        this.#options.signal?.throwIfAborted();
+        if (this.#options.signal?.aborted) continue;
         const adoptedPublication =
           this.#recoveryRuntime &&
           objective.items.find((item) => {
@@ -5310,7 +5318,7 @@ export class FactorySupervisor {
         }
 
         activeExecutions.throwNextFailure();
-        this.#options.signal?.throwIfAborted();
+        if (this.#options.signal?.aborted) continue;
         const recoverable: DerivedWorkItem[] = [];
         for (const item of objective.items) {
           if (activeExecutions.has(item.number)) continue;
@@ -5330,7 +5338,7 @@ export class FactorySupervisor {
         if (recoverable.length > 0) {
           for (const item of recoverable) {
             activeExecutions.throwNextFailure();
-            this.#options.signal?.throwIfAborted();
+            if (this.#options.signal?.aborted) continue runLoop;
             const planned = this.#plannedRecoveryItem(item.number);
             if (planned?.action === "reconcile" && planned.source?.artifactDigest)
               await this.#recoverAdoptedRetainedArtifact(item, deadline);
@@ -5338,10 +5346,11 @@ export class FactorySupervisor {
           }
           continue;
         }
+        if (this.#options.signal?.aborted) continue;
         if (durableProviderGate?.kind === "provider") {
           return await terminalAfterDrain(
             "FactoryRunEscalated",
-            durableProviderGate.accounting === "unknown"
+            durableProviderGateState?.accounting === "unknown"
               ? `${durableProviderGate.providerMessage}; model usage remains unknown, so this run cannot currently be recovered`
               : `${durableProviderGate.providerMessage}; restore provider quota${durableProviderGate.actionUrl ? ` at ${durableProviderGate.actionUrl}` : ""} before explicit recovery`,
           );
@@ -8955,7 +8964,7 @@ export class FactorySupervisor {
           ...this.#budgetEvents,
           ...this.#accountingEvents(snapshotEvents(snapshot)),
         ]);
-        if (latestProviderQuotaGate(this.#budgetEvents, this.#run.runId))
+        if (providerQuotaGateState(this.#budgetEvents, this.#run.runId))
           throw new ProviderQuotaDrainIncompleteError();
         assertModelInvocationAdmission(
           this.#budgetEvents,

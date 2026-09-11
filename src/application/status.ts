@@ -29,7 +29,7 @@ import { rankReadyWorkItems, type ObservedPrioritySource } from "../scheduling/p
 import { queuedReasonCode } from "../explanations/index.js";
 import type { GitHubMutationTelemetry } from "../platform.js";
 import type { ObjectiveAuthorityObservation } from "../control/authority.js";
-import { latestProviderQuotaGate } from "../control/provider-gates.js";
+import { providerQuotaGateState } from "../control/provider-gates.js";
 
 export interface ReadWorkItemSnapshot {
   id?: string;
@@ -407,7 +407,9 @@ export function buildStatusReport(input: {
   const rejected = activation ? activationRejection(events, activation) : undefined;
   const policy = policyFor(events);
   const runEvents = run?.events ?? [];
-  const providerGate = run ? latestProviderQuotaGate(runEvents, run.runId) : undefined;
+  const providerGateState = run ? providerQuotaGateState(runEvents, run.runId) : undefined;
+  const providerGate = providerGateState?.gate;
+  const providerGateAccounting = providerGateState?.accounting ?? "unknown";
   const cancellationRequest =
     run && !run.terminal
       ? ([...runEvents]
@@ -563,7 +565,7 @@ export function buildStatusReport(input: {
                 code: "provider-quota-draining",
                 summary: `${providerGate.providerMessage}. New model work is blocked, but admitted work and resources are still reconciling.`,
                 requiredAction:
-                  providerGate.accounting === "unknown"
+                  providerGateAccounting === "unknown"
                     ? `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}. Continue monitoring only until Factory writes the terminal receipt. This run cannot currently be recovered because the invocation's model usage is unknown and its dispatch remains unreconciled; do not retry this invocation.`
                     : `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}. Continue monitoring only until Factory writes the terminal receipt; do not retry this invocation.`,
                 evidence: {
@@ -573,7 +575,7 @@ export function buildStatusReport(input: {
                   backend: providerGate.backend,
                   modelInvocationId: providerGate.modelInvocationId,
                   observedAt: providerGate.at,
-                  accounting: providerGate.accounting,
+                  accounting: providerGateAccounting,
                   ...(providerGate.actionUrl ? { actionUrl: providerGate.actionUrl } : {}),
                   ...(providerGate.workItem !== undefined
                     ? { workItem: providerGate.workItem }
@@ -589,7 +591,7 @@ export function buildStatusReport(input: {
                   code: "provider-quota",
                   summary: `No Factory work is active. ${providerGate.providerMessage}.`,
                   requiredAction:
-                    providerGate.accounting === "unknown"
+                    providerGateAccounting === "unknown"
                       ? `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""} for future model work. This run cannot currently be recovered because the invocation's model usage is unknown and its dispatch remains unreconciled. Do not keep polling or retry this invocation.`
                       : `Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}, then explicitly request recovery through factory_recovery_plan. Do not keep polling or retry this invocation.`,
                   evidence: {
@@ -599,7 +601,7 @@ export function buildStatusReport(input: {
                     backend: providerGate.backend,
                     modelInvocationId: providerGate.modelInvocationId,
                     observedAt: providerGate.at,
-                    accounting: providerGate.accounting,
+                    accounting: providerGateAccounting,
                     ...(providerGate.actionUrl ? { actionUrl: providerGate.actionUrl } : {}),
                     ...(providerGate.workItem !== undefined
                       ? { workItem: providerGate.workItem }

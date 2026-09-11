@@ -61,6 +61,7 @@ export interface ProviderFaults {
   repositoryFence?: () => Promise<void>;
   configureLocalBackend?: (backend: ExecutionBackend) => ExecutionBackend;
   controllerActivation?: boolean;
+  afterControllerObservation?: () => void;
   afterIntegration?: () => void;
   waitForSiblingLaunchBeforeIntegration?: boolean;
   holdSiblingDispatchUntilIntegrationFailure?: boolean;
@@ -1594,12 +1595,15 @@ jobs:
           ? {
               activation: { requestId: "fixture-activation", baseSha },
               shutdownBehavior: "release-lease" as const,
-              controllerObservation: () => ({
-                controllerId: `fixture-controller-${generation}`,
-                epoch: generation,
-                expiresAt: controllerExpiresAt,
-                controllerPolicyDigest: pd,
-              }),
+              controllerObservation: () => {
+                faults.afterControllerObservation?.();
+                return {
+                  controllerId: `fixture-controller-${generation}`,
+                  epoch: generation,
+                  expiresAt: controllerExpiresAt,
+                  controllerPolicyDigest: pd,
+                };
+              },
             }
           : {}),
         signal: signal ? AbortSignal.any([signal, retirement.signal]) : retirement.signal,

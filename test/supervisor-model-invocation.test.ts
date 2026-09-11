@@ -321,6 +321,71 @@ describe("Supervisor model dispatch journal", () => {
     30_000,
   );
 
+  it("reconciles a restarted provider-gated attempt when controller shutdown arrives after cancellation sampling", async () => {
+    const shutdown = new AbortController();
+    let armShutdown = false;
+    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      controllerActivation: true,
+      afterControllerObservation: () => {
+        if (armShutdown) shutdown.abort();
+      },
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        observe: async (handle) => ({
+          ...(await backend.observe(handle)),
+          state: "failed",
+          usage: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 },
+          providerQuotaGate: gate,
+        }),
+      }),
+    });
+    const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation();
+    if (!write) throw new Error("fixture receipt transport missing");
+    let interruptAttemptFailure = true;
+    vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+      async (node, body) => {
+        const receipts = decodeEventComments(body);
+        if (interruptAttemptFailure && receipts.some((event) => event.event === "AttemptFailed")) {
+          interruptAttemptFailure = false;
+          throw new PlatformUnavailableError(
+            { kind: "server_error", retryAfterMs: 1 },
+            new Error("fixture: controller exited after durable provider gate"),
+          );
+        }
+        await write(node, body);
+      },
+    );
+    try {
+      await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+      expect(f.events().some((event) => event.event === "ProviderQuotaBlocked")).toBe(true);
+      expect(f.events().some((event) => event.event === "AttemptFailed")).toBe(false);
+
+      armShutdown = true;
+      expect(await f.run(shutdown.signal)).toMatchObject({
+        status: "cancelled",
+        reason: "repository controller stopped; durable run remains active",
+      });
+      expect(
+        f.activity.filter((entry) => entry.operation === "reconcile-stale" && entry.workItem === 8),
+      ).toHaveLength(1);
+      expect(f.events().some((event) => event.event === "AttemptFailed")).toBe(true);
+      expect(
+        f
+          .events()
+          .some((event) =>
+            ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
+              event.event,
+            ),
+          ),
+      ).toBe(false);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
   it("gives cancellation precedence over a resumed objective-level provider gate", async () => {
     const f = await providerSupervisorFixture("daytona-burst", {
       localOnly: true,

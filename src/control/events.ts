@@ -570,10 +570,14 @@ export class LifecycleRecorder {
       accounting: args.accounting,
     });
     const events = usage ? [usage, gate] : [gate];
+    const recoveryGuidance =
+      args.accounting === "unknown"
+        ? "Restore provider quota for future model work. This run cannot currently be recovered because the invocation's model usage is unknown and its dispatch remains unreconciled."
+        : "Restore provider quota before explicitly requesting recovery.";
     await this.store.addIssueComment(
       args.issueNodeId,
       encodeEventBatchComment(
-        `Factory stopped at a non-retryable ${args.providerMessage}. Restore provider quota before explicitly resuming.`,
+        `Factory stopped at a non-retryable ${args.providerMessage}. ${recoveryGuidance}`,
         events,
       ),
     );

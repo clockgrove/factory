@@ -50,3 +50,17 @@ export function latestProviderQuotaGate(
 ): ProviderQuotaEvent | undefined {
   return providerQuotaGates(events, runId).at(-1);
 }
+
+export function providerQuotaGateState(
+  events: readonly FactoryEvent[],
+  runId: string,
+): { gate: ProviderQuotaEvent; accounting: "exact" | "unknown" } | undefined {
+  const gates = providerQuotaGates(events, runId);
+  const unknown = [...gates].reverse().find((candidate) => candidate.accounting === "unknown");
+  const gate = unknown ?? gates.at(-1);
+  if (!gate) return undefined;
+  return {
+    gate,
+    accounting: unknown ? "unknown" : "exact",
+  };
+}

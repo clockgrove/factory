@@ -1,6 +1,7 @@
 import { access } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { GitHubControlStore } from "../src/control/github-store.js";
+import { GitHubReader, type RunCancellationRequest } from "../src/github.js";
 import { IssueAdmissionLedger } from "../src/control/issue-admission.js";
 import { decodeEventComments } from "../src/control/receipts.js";
 import {
@@ -68,6 +69,93 @@ describe("Supervisor model dispatch journal", () => {
       });
       expect(JSON.stringify(providerEvents)).not.toContain("arbitrary provider diagnostic");
       expect(unresolvedModelInvocations(f.events())).toHaveLength(1);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
+  it("rejects quota gates from backends that do not declare model-usage reporting", async () => {
+    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      maxAttemptsPerItem: 1,
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        capabilities: { ...backend.capabilities, reportsModelUsage: false },
+        observe: async (handle) => ({
+          ...(await backend.observe(handle)),
+          state: "failed",
+          usage: { inputTokens: null, outputTokens: null, cachedInputTokens: null },
+          providerQuotaGate: gate,
+        }),
+      }),
+    });
+    try {
+      expect(await f.run()).toMatchObject({ status: "escalated" });
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+      expect(f.events().some((event) => event.event === "ProviderQuotaBlocked")).toBe(false);
+      expect(modelBudgets(f)).toEqual([]);
+      expect(
+        f.events().find((event) => event.event === "AttemptFailed" && event.workItem === 8),
+      ).toMatchObject({
+        reason: expect.stringContaining(
+          "emitted a provider quota gate without declaring model-usage reporting",
+        ),
+      });
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
+  it("gives a live cancellation precedence over a worker provider quota gate", async () => {
+    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
+    let fixture: Fixture | undefined;
+    let cancellationPublished = false;
+    const cancellation: RunCancellationRequest = {
+      protocol: "clockgrove.factory/v2",
+      kind: "run",
+      event: "FactoryRunCancellationRequested",
+      objective: 7,
+      runId: "pending",
+      sequence: 10_000,
+      at: new Date().toISOString(),
+      requestId: "cancel-live-provider-gate",
+      requestedBy: "operator",
+    };
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        observe: async (handle) => {
+          const observation = await backend.observe(handle);
+          if (!fixture) throw new Error("fixture not yet configured");
+          if (!cancellationPublished) {
+            cancellationPublished = true;
+            fixture.snapshot.factoryEvents!.push({ ...cancellation, runId: fixture.runId });
+          }
+          return {
+            ...observation,
+            state: "failed",
+            usage: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 },
+            providerQuotaGate: gate,
+          };
+        },
+      }),
+    });
+    fixture = f;
+    vi.mocked(GitHubReader.prototype.readRunCancellationRequest).mockImplementation(async () =>
+      cancellationPublished ? { ...cancellation, runId: f.runId } : null,
+    );
+    try {
+      expect(await f.run()).toMatchObject({
+        status: "cancelled",
+        reason: "operator requested cancellation",
+      });
+      expect(f.events().some((event) => event.event === "ProviderQuotaBlocked")).toBe(true);
+      expect(f.events().some((event) => event.event === "FactoryRunEscalated")).toBe(false);
+      expect(f.events().filter((event) => event.event === "FactoryRunCancelled")).toHaveLength(1);
     } finally {
       await f.dispose();
     }

@@ -4145,10 +4145,29 @@ export class FactorySupervisor {
       const outcome = await drainExecutions({ event, ...(reason ? { reason } : {}) });
       if (outcome.event === "release-shutdown" || outcome.event === "release-command")
         throw new Error("terminal drain produced an invalid release outcome");
+      let terminalEvent = outcome.event;
+      let terminalReason = outcome.reason;
       snapshot = await this.#reader.readObjective(snapshot.number);
       this.#fenceSnapshot(snapshot);
       this.#sequences.observe(snapshotEvents(snapshot));
-      return this.#terminal(runManager, snapshot, outcome.event, outcome.reason);
+      if (outcome.event === "FactoryRunEscalated") {
+        const cancellation = await this.#reader.readRunCancellationRequest(
+          this.#run.objective,
+          this.#run.runId,
+          this.#run.actor,
+          this.#activationBinding(),
+        );
+        if (
+          cancellation ||
+          hasCancellationRequest(snapshot, this.#run.runId) ||
+          this.#options.signal?.aborted
+        ) {
+          if (cancellation) this.#sequences.observe([cancellation]);
+          terminalEvent = "FactoryRunCancelled";
+          terminalReason = "operator requested cancellation";
+        }
+      }
+      return this.#terminal(runManager, snapshot, terminalEvent, terminalReason);
     };
     const releaseAfterDrain = async (): Promise<SupervisorResult> => {
       const outcome = await drainExecutions({ event: "release-shutdown" });
@@ -6731,6 +6750,10 @@ export class FactorySupervisor {
             terminalModelUsage = reportedModelUsage(observation.usage);
             const observedTokens = reportedModelTokens(observation.usage);
             if (observation.providerQuotaGate) {
+              if (!selected.capabilities.reportsModelUsage)
+                throw new Error(
+                  `backend ${selected.capabilities.id} emitted a provider quota gate without declaring model-usage reporting`,
+                );
               if (observedTokens === null && selected.capabilities.reportsModelUsage)
                 this.#modelInvocations.retire(
                   modelInvocationKey({
@@ -9050,6 +9073,26 @@ export class FactorySupervisor {
   }
 
   async #recordProviderQuotaGate(
+    error: ProviderQuotaError,
+    issueNodeId: string,
+    phase: "management" | "execution",
+    backend: string,
+    reservation?: AttemptReservation,
+    workItem?: number,
+  ): Promise<void> {
+    return this.#modelInvocations.admit(() =>
+      this.#recordProviderQuotaGateWithinAdmission(
+        error,
+        issueNodeId,
+        phase,
+        backend,
+        reservation,
+        workItem,
+      ),
+    );
+  }
+
+  async #recordProviderQuotaGateWithinAdmission(
     error: ProviderQuotaError,
     issueNodeId: string,
     phase: "management" | "execution",

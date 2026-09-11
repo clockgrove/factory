@@ -133,7 +133,10 @@ export interface BackendObservation {
   reason?: string;
   progress?: string;
   usage?: ExecutionUsage;
-  /** Narrow, canonical account-level refusal; arbitrary provider diagnostics remain in reason. */
+  /**
+   * Narrow, canonical account-level refusal; arbitrary provider diagnostics remain in reason.
+   * Only backends whose capabilities declare reportsModelUsage may emit this gate.
+   */
   providerQuotaGate?: ProviderQuotaGate;
 }
 

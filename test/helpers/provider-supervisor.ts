@@ -445,6 +445,7 @@ wheels = [
   ];
   const ordinaryGraph: CompiledObjective = {
     title: "Provider multi-wave qualification",
+    deferredCapabilityAdapters: [],
     workItems: ["a", "b", "join"].map((id, index) => ({
       id,
       title: `Implement ${id}`,
@@ -542,6 +543,7 @@ wheels = [
         ];
   const capabilityGraph: CompiledObjective = {
     title: "Exact-base capability admission qualification",
+    deferredCapabilityAdapters: [capabilityAdapter],
     workItems: [
       {
         ...ordinaryGraph.workItems[0]!,
@@ -715,6 +717,7 @@ wheels = [
     faults.greenfieldBootstrap || faults.greenfieldLifecycle
       ? {
           title: "Greenfield bootstrap qualification",
+          deferredCapabilityAdapters: faults.greenfieldLifecycle ? ["node-pnpm"] : [],
           workItems: [
             greenfieldRoot,
             ...(faults.greenfieldLifecycle
@@ -852,6 +855,7 @@ wheels = [
         graphSize: graph.workItems.length,
         index,
         dependsOn: item.dependsOn,
+        deferredCapabilityAdapters: graph.deferredCapabilityAdapters,
       }),
       closed: false,
       assignees: [],

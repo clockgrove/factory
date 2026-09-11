@@ -45,6 +45,7 @@ function fixture(originals = 0, retained = 3, failedSuffix = false) {
   };
   const ids = ["a", "b", "c"];
   const graph: CompiledObjective = {
+    deferredCapabilityAdapters: [],
     title: "Native recovery fixture",
     workItems: ids.map((id, index) => ({
       id,

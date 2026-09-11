@@ -10,7 +10,7 @@ import {
   CodexCliManagementBackend,
   parseManagementCompilerOutput,
 } from "../src/management/codex-cli.js";
-import { renderWorkPacket, workerPacketFromCompiled } from "../src/graph.js";
+import { renderWorkPacket, validateGraph, workerPacketFromCompiled } from "../src/graph.js";
 import { semanticReviewCriteria } from "../src/protocol/worker-packet.js";
 import { validationPlanFromPacket } from "../src/validation/plan.js";
 import { workerPacketPrompt } from "../src/backends/codex-cli-local.js";
@@ -1124,6 +1124,69 @@ describe("bounded objective compiler", () => {
       expect(descendant.managedRuntimes).toEqual(provider.managedRuntimes);
     },
   );
+
+  it("preserves an observed npm recipe beside an unrelated deferred capability", () => {
+    const repositoryFacts = {
+      files: [{ path: "package.json" }, { path: "package-lock.json" }, { path: "src/a.ts" }],
+      scripts: { test: "vitest run" },
+    };
+    const uvCommand = "uv run --locked --no-sync python -m pytest";
+    const uvProvider = {
+      ...base,
+      id: "python",
+      scope: ["pyproject.toml", "uv.lock", ".python-version", "tests/"],
+      validationCommands: [uvCommand],
+      requirements: {
+        ...base.requirements,
+        tools: ["uv"],
+        networkDestinations: ["pypi.org", "files.pythonhosted.org"],
+      },
+      validation: base.validation.map((entry) => ({
+        ...entry,
+        evidenceCommands: [uvCommand],
+      })),
+    };
+    const observedNpm = {
+      ...base,
+      id: "javascript",
+      scope: ["src/a.ts"],
+      validationCommands: ["npm test"],
+      validation: base.validation.map((entry) => ({
+        ...entry,
+        evidenceCommands: ["npm test"],
+      })),
+    };
+    const graph = compileObjective({
+      title: "Mixed observed and deferred validation",
+      baseSha: sha,
+      repositoryFacts,
+      runPolicy: {
+        ...DEFAULT_RUN_POLICY,
+        allowedNetworkDestinations: [
+          ...new Set([
+            ...DEFAULT_RUN_POLICY.allowedNetworkDestinations,
+            "pypi.org",
+            "files.pythonhosted.org",
+          ]),
+        ],
+      },
+      workItems: [observedNpm, uvProvider] as never,
+    });
+
+    expect(graph.workItems.find(({ id }) => id === "javascript")?.repositoryCapabilities).toBe(
+      undefined,
+    );
+    expect(
+      graph.workItems.find(({ id }) => id === "python")?.repositoryCapabilities?.provides[0]
+        ?.adapter,
+    ).toBe("python-uv");
+    expect(graph.deferredCapabilityAdapters).toEqual(["python-uv"]);
+    expect(JSON.parse(serializeCompilerObjective(graph)).deferredCapabilityAdapters).toEqual([
+      "python-uv",
+    ]);
+    expect(() => validateGraph(graph)).not.toThrow();
+  });
+
   it("requires every compiler analysis record", () => {
     const incomplete = { ...base };
     delete (incomplete as Partial<CompilerWorkItem>).context;

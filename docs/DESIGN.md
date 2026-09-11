@@ -516,6 +516,13 @@ provider/requirement bindings and generations derived by Factory; model output c
 Bindings are plan provenance, not execution authority. They are canonicalized again when a graph is
 loaded or copied, and an integrated-base consumer remains unavailable until its exact provider
 generation is complete.
+The compiler also records the sorted objective-wide set of adapters actually selected for deferred
+operations after their complete root authority was found absent at the frozen base. Canonical
+binding validation uses this host-derived disposition, not
+the presence or absence of an individual Work Item binding, so deleting a consumer requirement or
+an entire capability island cannot reclassify its commands as repository-grounded. Authenticated
+historical graphs that predate the field derive the compatibility view from their stored bindings;
+fresh persistence requires an explicit disposition, including the empty set.
 
 The graph contains only the abstract adapter, platform, release-channel, and contract requirement;
 compilation never reads or selects a host runtime. After the graph and its accounting are durable,

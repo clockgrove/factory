@@ -273,6 +273,7 @@ async function fixture(
     expiresAt: new Date(at.getTime() + 600_000),
   };
   const graphInput: CompiledObjective = {
+    deferredCapabilityAdapters: [],
     title: "Objective",
     workItems: [
       {
@@ -485,6 +486,7 @@ async function fixture(
               graphSize: 1,
               index: 0,
               dependsOn: [],
+              deferredCapabilityAdapters: graphInput.deferredCapabilityAdapters,
             }),
         closed: false,
         assignees: [],
@@ -829,6 +831,7 @@ describe("verified successor runtime loader", () => {
       graphSize: 1,
       index: 0,
       dependsOn: [],
+      deferredCapabilityAdapters: objective.deferredCapabilityAdapters,
     });
     const successorProjection = await f.graphManager.persistProjection({
       lease: f.args.objectiveLease,
@@ -1190,6 +1193,7 @@ describe("verified successor runtime loader", () => {
       graphSize: 1,
       index: 0,
       dependsOn: [],
+      deferredCapabilityAdapters: objective.deferredCapabilityAdapters,
     });
     let sequence = Math.max(...f.snapshot.factoryEvents!.map((entry) => entry.sequence)) + 1;
     f.snapshot.factoryEvents!.push(

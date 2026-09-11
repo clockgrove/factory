@@ -450,6 +450,11 @@ const CompiledWorkItemSchema = z.object({
 
 const CompiledObjectiveSchema = z.object({
   title: z.string(),
+  deferredCapabilityAdapters: z
+    .array(z.never())
+    .max(0)
+    .default([])
+    .describe("Standalone graph_apply accepts repository-grounded graphs only"),
   workItems: z.array(CompiledWorkItemSchema),
 });
 

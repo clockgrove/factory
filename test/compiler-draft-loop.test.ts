@@ -125,6 +125,7 @@ class MemoryGraphStore implements LeaseStore, CompiledGraphStore {
 
 function objective(goal = "Implement the feature."): CompiledObjective {
   return {
+    deferredCapabilityAdapters: [],
     title: "Ship feature",
     workItems: [
       {

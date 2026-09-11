@@ -79,6 +79,46 @@ describe("deferred repository capability model", () => {
     expect(bindings.get("d")?.requires[0]?.providerWorkItem).toBe("c");
   });
 
+  it("preserves grounded adapter commands beside an unrelated deferred capability", () => {
+    const first = adapter("first");
+    const second = adapter("second");
+    const items = [
+      {
+        id: "observed",
+        dependsOn: [],
+        scope: ["observed/"],
+        validationCommands: ["first:observed"],
+      },
+      {
+        id: "provider",
+        dependsOn: [],
+        scope: ["second/root.lock"],
+        validationCommands: ["second:provider"],
+      },
+      {
+        id: "consumer",
+        dependsOn: ["provider"],
+        scope: ["consumer/"],
+        validationCommands: ["second:consumer"],
+      },
+    ];
+    const bindings = bindDeferredCapabilityGraph(items, [first, second], (_item, command) =>
+      command.startsWith("second:"),
+    );
+    const bound = items.map((item) => {
+      const itemBindings = bindings.get(item.id)!;
+      return {
+        ...item,
+        ...(itemBindings.provides.length > 0 || itemBindings.requires.length > 0
+          ? { repositoryCapabilities: itemBindings }
+          : {}),
+      };
+    });
+
+    expect(bound[0]!.repositoryCapabilities).toBeUndefined();
+    expect(() => validateCapabilityGraphBindings(bound, [first, second])).not.toThrow();
+  });
+
   it("creates a later generation without letting the mutator self-authorize", () => {
     const items = [
       {
@@ -191,6 +231,74 @@ describe("deferred repository capability model", () => {
     expect(() => validateCapabilityGraphBindings(bound, [adapter()])).toThrow(
       /canonical host derivation/,
     );
+  });
+
+  it("rejects coordinated removal of a deferred consumer operation", () => {
+    const items = [
+      {
+        id: "root",
+        dependsOn: [],
+        scope: ["example/tool/root.lock"],
+        validationCommands: ["example/tool:root"],
+      },
+      {
+        id: "child",
+        dependsOn: ["root"],
+        scope: ["src/"],
+        validationCommands: ["example/tool:child"],
+      },
+    ];
+    const bindings = bindDeferredCapabilityGraph(items, [adapter()], () => true);
+    const bound = items.map((item) => ({
+      ...item,
+      repositoryCapabilities: structuredClone(bindings.get(item.id)!),
+    }));
+    bound[0]!.repositoryCapabilities.provides[0]!.operations =
+      bound[0]!.repositoryCapabilities.provides[0]!.operations.filter(({ key }) => key !== "child");
+    bound[1]!.repositoryCapabilities.requires = [];
+
+    expect(() => validateCapabilityGraphBindings(bound, [adapter()], ["example/tool"])).toThrow(
+      /canonical host derivation/,
+    );
+  });
+
+  it("rejects removal of one entire selected capability island", () => {
+    const first = adapter("first");
+    const second = adapter("second");
+    const items = [
+      { id: "a", dependsOn: [], scope: ["first/root.lock"], validationCommands: ["first:a"] },
+      { id: "b", dependsOn: [], scope: ["second/root.lock"], validationCommands: ["second:b"] },
+    ];
+    const bindings = bindDeferredCapabilityGraph(items, [first, second], () => true);
+    const bound = items.map((item) => ({
+      ...item,
+      repositoryCapabilities: structuredClone(bindings.get(item.id)!),
+    }));
+    bound[0]!.repositoryCapabilities = { provides: [], requires: [] };
+
+    expect(() =>
+      validateCapabilityGraphBindings(bound, [first, second], ["first", "second"]),
+    ).toThrow(/canonical host derivation/);
+  });
+
+  it("rejects unknown, duplicate, and noncanonical deferred adapter dispositions", () => {
+    const items = [
+      {
+        id: "root",
+        dependsOn: [],
+        scope: ["example/tool/root.lock"],
+        validationCommands: ["example/tool:root"],
+      },
+    ];
+    for (const disposition of [["retired"], ["example/tool", "example/tool"]])
+      expect(() => validateCapabilityGraphBindings(items, [adapter()], disposition)).toThrow(
+        /unknown deferred|not canonical/,
+      );
+    const first = adapter("z-first");
+    const second = adapter("a-second");
+    expect(() =>
+      validateCapabilityGraphBindings(items, [first, second], ["z-first", "a-second"]),
+    ).toThrow(/not canonical/);
   });
 
   it("does not infer a later generation from write scope without an explicit operation", () => {

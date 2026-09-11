@@ -1,6 +1,7 @@
 import {
   compiledGraphDigest,
   parseGraphItemMetadata,
+  graphCapabilityDisposition,
   parseWorkerPacketFromIssue,
   validateGraph,
   type CompiledObjective,
@@ -160,8 +161,12 @@ function inspectExistingGraph(snapshot: ApplicationSnapshot): {
   if (records.some((record, index) => record.metadata.index !== index)) {
     throw new Error("existing Work Items have missing or duplicate compiled graph positions");
   }
+  const deferredCapabilityAdapters = graphCapabilityDisposition(
+    records.map(({ metadata }) => metadata),
+  );
   const objective: CompiledObjective = {
     title: snapshot.title,
+    ...(deferredCapabilityAdapters === undefined ? {} : { deferredCapabilityAdapters }),
     workItems: records.map(({ item, metadata, packet }) => ({
       id: metadata.id,
       title: item.title ?? `Work Item #${item.number}`,

@@ -253,6 +253,7 @@ async function fixture(
     expiresAt: new Date(at.getTime() + 600_000),
   };
   const graphInput: CompiledObjective = {
+    deferredCapabilityAdapters: [],
     title: "Objective",
     workItems: [
       {
@@ -425,6 +426,7 @@ async function fixture(
           graphSize: 1,
           index: 0,
           dependsOn: [],
+          deferredCapabilityAdapters: graphInput.deferredCapabilityAdapters,
         }),
         closed: false,
         blockedBy: [],

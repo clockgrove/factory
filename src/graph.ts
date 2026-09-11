@@ -126,6 +126,8 @@ export interface CompiledWorkItem {
 export interface CompiledObjective {
   title: string;
   workItems: CompiledWorkItem[];
+  /** Host-derived objective-wide classification; omitted only by authenticated historical graphs. */
+  deferredCapabilityAdapters?: string[] | undefined;
 }
 
 /**
@@ -506,6 +508,15 @@ const PersistedCompiledObjectiveSchema = z
   .object({
     title: z.string().min(1).max(256),
     workItems: z.array(PersistedCompiledWorkItemSchema).min(1).max(100),
+    deferredCapabilityAdapters: z
+      .array(
+        z
+          .string()
+          .regex(/^[a-z0-9][a-z0-9-]*$/)
+          .max(64),
+      )
+      .max(16)
+      .optional(),
   })
   .strict();
 
@@ -534,7 +545,7 @@ export interface CreatedWorkItem {
  */
 function validateGraphShape(
   objective: CompiledObjective,
-  allowLegacyManagedRuntimeOmission: boolean,
+  allowAuthenticatedLegacyOmissions: boolean,
 ): void {
   if (objective.workItems.length < 1 || objective.workItems.length > 100) {
     throw new Error("compiled Objective must contain between 1 and 100 Work Items");
@@ -599,7 +610,13 @@ function validateGraphShape(
     }
   }
 
-  validateCapabilityGraphBindings(objective.workItems, DEFERRED_CAPABILITY_ADAPTERS);
+  if (!allowAuthenticatedLegacyOmissions && objective.deferredCapabilityAdapters === undefined)
+    throw new Error("compiled Objective lacks deferred capability adapter disposition");
+  validateCapabilityGraphBindings(
+    objective.workItems,
+    DEFERRED_CAPABILITY_ADAPTERS,
+    objective.deferredCapabilityAdapters,
+  );
 
   for (const wi of objective.workItems) {
     if (wi.validationCommands) {
@@ -611,7 +628,7 @@ function validateGraphShape(
         throw new Error(`Work Item ${wi.id} immutable graph selected a managed runtime bundle`);
       if (
         !(
-          allowLegacyManagedRuntimeOmission &&
+          allowAuthenticatedLegacyOmissions &&
           wi.managedRuntimes === undefined &&
           expectedRuntimes.length > 0
         ) &&
@@ -652,9 +669,31 @@ const GraphItemMetadataSchema = z.object({
         .max(64),
     )
     .max(50),
+  /** Repeated in every current issue envelope so a complete projection can reconstruct the graph. */
+  deferredCapabilityAdapters: z
+    .array(
+      z
+        .string()
+        .regex(/^[a-z0-9][a-z0-9-]*$/)
+        .max(64),
+    )
+    .max(16)
+    .optional(),
 });
 
 export type GraphItemMetadata = z.infer<typeof GraphItemMetadataSchema>;
+
+export function graphCapabilityDisposition(
+  metadata: readonly GraphItemMetadata[],
+): string[] | undefined {
+  if (metadata.length === 0) return undefined;
+  const dispositions = new Set(
+    metadata.map((entry) => JSON.stringify(entry.deferredCapabilityAdapters)),
+  );
+  if (dispositions.size !== 1)
+    throw new Error("Work Items disagree on deferred capability adapter disposition");
+  return metadata[0]!.deferredCapabilityAdapters;
+}
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -968,6 +1007,9 @@ export function assertExistingGraphWorkItemsMatchCompiled(
       graphSize: objective.workItems.length,
       index,
       dependsOn: expected.dependsOn,
+      ...(objective.deferredCapabilityAdapters === undefined
+        ? {}
+        : { deferredCapabilityAdapters: objective.deferredCapabilityAdapters }),
     };
     if (
       observed.index !== index ||
@@ -1044,9 +1086,13 @@ export class GraphApplier {
       existingWorkItems?: ExistingGraphWorkItem[];
       /** Complete authenticated legacy snapshot. Its cardinality forbids issue creation. */
       legacyGraphConstraints?: LegacyGraphConstraints;
+      /** Exact graph bytes already authenticated by the durable graph read path. */
+      allowAuthenticatedLegacyOmissions?: boolean;
     },
   ): Promise<Map<string, CreatedWorkItem>> {
-    validateGraph(objective);
+    if (ctx.allowAuthenticatedLegacyOmissions || ctx.legacyGraphConstraints)
+      validateGraphShape(objective, true);
+    else validateGraph(objective);
     const digest = compiledGraphDigest(objective);
 
     const created = new Map<string, CreatedWorkItem>();
@@ -1124,6 +1170,9 @@ export class GraphApplier {
             graphSize: objective.workItems.length,
             index,
             dependsOn: wi.dependsOn,
+            ...(objective.deferredCapabilityAdapters === undefined
+              ? {}
+              : { deferredCapabilityAdapters: objective.deferredCapabilityAdapters }),
           }),
           ...(ctx.workItemLabelId ? { labelIds: [ctx.workItemLabelId] } : {}),
         }),
@@ -1149,6 +1198,9 @@ export class GraphApplier {
             graphSize: objective.workItems.length,
             index,
             dependsOn: wi.dependsOn,
+            ...(objective.deferredCapabilityAdapters === undefined
+              ? {}
+              : { deferredCapabilityAdapters: objective.deferredCapabilityAdapters }),
           }),
         }),
       );

@@ -4831,6 +4831,9 @@ export class FactorySupervisor {
               ...(snapshot.workItemLabelId ? { workItemLabelId: snapshot.workItemLabelId } : {}),
               existingWorkItems: existingGraphItems,
               ...(legacyGraphConstraints ? { legacyGraphConstraints } : {}),
+              ...(compiled.deferredCapabilityAdapters === undefined
+                ? { allowAuthenticatedLegacyOmissions: true }
+                : {}),
             });
             break;
           } catch (error) {

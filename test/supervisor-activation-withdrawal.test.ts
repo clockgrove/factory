@@ -212,6 +212,7 @@ describe("Supervisor activation withdrawal races", () => {
       const result = {
         objective: {
           title: f.snapshot.title,
+          deferredCapabilityAdapters: [],
           workItems: [
             {
               id: "adopted-8",
@@ -633,6 +634,7 @@ describe("Supervisor activation withdrawal races", () => {
       const result = {
         objective: {
           title: f.snapshot.title,
+          deferredCapabilityAdapters: [],
           workItems: [
             {
               id: "adopted-8",

@@ -393,6 +393,50 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:4, output
     await expect(stat(reviewCheckout)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("preserves a semantic-review quota failure when its durable checkpoint fails", async () => {
+    const input = await fixture();
+    let reviewCheckout = "";
+    const checkpointFailure = new Error("review provider gate checkpoint unavailable");
+    const refusal = new ProviderQuotaError(
+      {
+        reasonCode: "provider-quota-exhausted",
+        provider: "synthetic-provider",
+        message: "Synthetic provider quota exhausted",
+      },
+      { usage: { inputTokens: 13, outputTokens: 17 } },
+    );
+    const backend = new CodexCliManagementBackend({
+      runStructured: async (cwd) => {
+        reviewCheckout = cwd;
+        throw refusal;
+      },
+    });
+
+    let observed: unknown;
+    try {
+      await backend.reviewWithAdmission(
+        input,
+        async () => {},
+        async () => ({
+          modelInvocationId: "review-checkpoint-failure",
+          checkpointProviderRefusal: async () => {
+            throw checkpointFailure;
+          },
+        }),
+      );
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toBeInstanceOf(ProviderQuotaError);
+    expect(observed).toMatchObject({
+      gate: { reasonCode: "provider-quota-exhausted", provider: "synthetic-provider" },
+      usage: { inputTokens: 13, outputTokens: 17 },
+      invocationId: "review-checkpoint-failure",
+      cause: checkpointFailure,
+    });
+    await expect(stat(reviewCheckout)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("does not launch review when the final post-preparation admission is expired", async () => {
     const input = await fixture();
     const runStructured = vi.fn();

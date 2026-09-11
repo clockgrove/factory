@@ -31,6 +31,7 @@ import { resolveCodexCommand } from "../runtime/codex-command.js";
 import type {
   CompilationContext,
   CompilerModelAdmission,
+  CompilerModelAdmissionReceipt,
   ObligationCheckpoint,
   ObligationResult,
   PlanJudgeContext,
@@ -70,6 +71,25 @@ import { ManagementOutputError } from "./backend.js";
 import { ProviderQuotaError } from "../providers/quota.js";
 import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
 import { discoverValidationCommands, readRepositoryFacts } from "../repository-profiles/index.js";
+
+async function propagateProviderQuotaFailure(
+  error: ProviderQuotaError,
+  admission: number | void | CompilerModelAdmissionReceipt,
+): Promise<never> {
+  if (admission && typeof admission === "object") {
+    error.bindInvocation(admission.modelInvocationId);
+    try {
+      await admission.checkpointProviderRefusal(error);
+    } catch (cause) {
+      throw new ProviderQuotaError(error.gate, {
+        ...(error.usage ? { usage: error.usage } : {}),
+        ...(error.invocationId ? { invocationId: error.invocationId } : {}),
+        cause,
+      });
+    }
+  }
+  throw error;
+}
 
 export const CODEX_COMPILED_OBJECTIVE_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -1503,10 +1523,8 @@ export class CodexCliManagementBackend implements ManagementBackend {
           usage: assertManagementUsage(result.usage),
         };
       } catch (error) {
-        if (error instanceof ProviderQuotaError && admission && typeof admission === "object") {
-          error.bindInvocation(admission.modelInvocationId);
-          await admission.checkpointProviderRefusal(error);
-        }
+        if (error instanceof ProviderQuotaError)
+          await propagateProviderQuotaFailure(error, admission);
         throw error;
       }
     }
@@ -1586,9 +1604,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
           if (quotaError) break;
         }
         if (quotaError) {
-          if (admission && typeof admission === "object")
-            await admission.checkpointProviderRefusal(quotaError);
-          throw quotaError;
+          await propagateProviderQuotaFailure(quotaError, admission);
         }
         const streams = [
           result.stderr.trim() ? `stderr:\n${result.stderr.trim()}` : "",
@@ -1608,11 +1624,8 @@ export class CodexCliManagementBackend implements ManagementBackend {
       try {
         output = parseManagementJsonlOutput<T>(result.stdout);
       } catch (error) {
-        if (error instanceof ProviderQuotaError) {
-          if (invocationId) error.bindInvocation(invocationId);
-          if (admission && typeof admission === "object")
-            await admission.checkpointProviderRefusal(error);
-        }
+        if (error instanceof ProviderQuotaError)
+          await propagateProviderQuotaFailure(error, admission);
         throw error;
       }
     } catch (error) {
@@ -1626,7 +1639,13 @@ export class CodexCliManagementBackend implements ManagementBackend {
         throw new ProviderQuotaError(primaryError.gate, {
           ...(primaryError.usage ? { usage: primaryError.usage } : {}),
           ...(primaryError.invocationId ? { invocationId: primaryError.invocationId } : {}),
-          cause: cleanupError,
+          cause:
+            primaryError.cause === undefined
+              ? cleanupError
+              : new AggregateError(
+                  [primaryError.cause, cleanupError],
+                  "provider-refusal checkpoint and isolated-home cleanup both failed",
+                ),
         });
       }
       throw cleanupError;

@@ -4238,6 +4238,15 @@ export class FactorySupervisor {
       if (Date.now() >= deadline && startupProviderGate?.workItem === undefined)
         return await finishExpired();
       if (startupProviderGate?.kind === "provider" && startupProviderGate.workItem === undefined) {
+        if (this.#options.signal?.aborted) {
+          if (this.#options.shutdownBehavior === "release-lease") return await releaseAfterDrain();
+          return await terminalAfterDrain("FactoryRunCancelled", "operator cancelled run");
+        }
+        if (hasCancellationRequest(snapshot, this.#run.runId))
+          return await terminalAfterDrain(
+            "FactoryRunCancelled",
+            "operator requested cancellation through GitHub",
+          );
         return await terminalAfterDrain(
           "FactoryRunEscalated",
           `${startupProviderGate.providerMessage}; restore provider quota${startupProviderGate.actionUrl ? ` at ${startupProviderGate.actionUrl}` : ""} before explicit recovery`,
@@ -5043,27 +5052,51 @@ export class FactorySupervisor {
         ) {
           const gatedObjective = this.#deriveObjective(snapshot);
           await this.#reconcileObjectiveCapacity(gatedObjective.number, gatedObjective.items);
-          const gatedRecoverable = gatedObjective.items.filter(
-            (item) =>
-              !activeExecutions.has(item.number) &&
-              durableProviderGates.some(
+          const gatedRecoverable: DerivedWorkItem[] = [];
+          for (const item of gatedObjective.items) {
+            if (
+              activeExecutions.has(item.number) ||
+              !durableProviderGates.some(
                 (gate) => gate.workItem === item.number && gate.attempt !== undefined,
-              ) &&
-              this.#hasUnfinishedAttempt(item),
-          );
+              )
+            )
+              continue;
+            if (this.#hasUnfinishedAttempt(item) || (await this.#hasUnsettledIssueAdmission(item)))
+              gatedRecoverable.push(item);
+          }
           for (const item of gatedRecoverable)
             await this.#recoverInterrupted(item, deadline, gatedObjective.items);
           snapshot = await this.#reader.readObjective(snapshot.number);
           this.#fenceSnapshot(snapshot);
           this.#sequences.observe(snapshotEvents(snapshot));
-          const remaining = this.#deriveObjective(snapshot).items.some(
-            (item) =>
+          const settledObjective = this.#deriveObjective(snapshot);
+          await this.#reconcileObjectiveCapacity(settledObjective.number, settledObjective.items);
+          for (const item of settledObjective.items) {
+            if (
               !activeExecutions.has(item.number) &&
               durableProviderGates.some(
                 (gate) => gate.workItem === item.number && gate.attempt !== undefined,
               ) &&
-              this.#hasUnfinishedAttempt(item),
-          );
+              (this.#hasUnfinishedAttempt(item) || (await this.#hasUnsettledIssueAdmission(item)))
+            )
+              await this.#recoverInterrupted(item, deadline, settledObjective.items);
+          }
+          snapshot = await this.#reader.readObjective(snapshot.number);
+          this.#fenceSnapshot(snapshot);
+          this.#sequences.observe(snapshotEvents(snapshot));
+          let remaining = false;
+          for (const item of this.#deriveObjective(snapshot).items) {
+            if (
+              !activeExecutions.has(item.number) &&
+              durableProviderGates.some(
+                (gate) => gate.workItem === item.number && gate.attempt !== undefined,
+              ) &&
+              (this.#hasUnfinishedAttempt(item) || (await this.#hasUnsettledIssueAdmission(item)))
+            ) {
+              remaining = true;
+              break;
+            }
+          }
           if (remaining) throw new ProviderQuotaDrainIncompleteError();
         }
         if (cancellationReason)
@@ -5257,18 +5290,22 @@ export class FactorySupervisor {
 
         activeExecutions.throwNextFailure();
         this.#options.signal?.throwIfAborted();
-        const recoverable = objective.items.filter(
-          (item) =>
-            !activeExecutions.has(item.number) &&
-            (["reserved", "in_flight", "validating"].includes(item.state) ||
-              (item.state === "failed" &&
-                (this.#hasUnfinishedAttempt(item) ||
-                  this.#hasRecoverablePostSuccessCancellation(item))) ||
-              (durableProviderGates.some(
-                (gate) => gate.workItem === item.number && gate.attempt !== undefined,
-              ) &&
-                this.#hasUnfinishedAttempt(item))),
-        );
+        const recoverable: DerivedWorkItem[] = [];
+        for (const item of objective.items) {
+          if (activeExecutions.has(item.number)) continue;
+          const providerGated = durableProviderGates.some(
+            (gate) => gate.workItem === item.number && gate.attempt !== undefined,
+          );
+          if (
+            ["reserved", "in_flight", "validating"].includes(item.state) ||
+            (item.state === "failed" &&
+              (this.#hasUnfinishedAttempt(item) ||
+                this.#hasRecoverablePostSuccessCancellation(item))) ||
+            (providerGated &&
+              (this.#hasUnfinishedAttempt(item) || (await this.#hasUnsettledIssueAdmission(item))))
+          )
+            recoverable.push(item);
+        }
         if (recoverable.length > 0) {
           for (const item of recoverable) {
             activeExecutions.throwNextFailure();
@@ -15848,6 +15885,9 @@ export class FactorySupervisor {
         event.attempt === reservation.attempt,
     );
     if (providerGate?.kind === "provider") {
+      const attemptFailed = events.some(
+        (event) => event.kind === "attempt" && event.event === "AttemptFailed",
+      );
       const started = events.find(
         (event) => event.kind === "attempt" && event.event === "AttemptStarted",
       );
@@ -15912,24 +15952,33 @@ export class FactorySupervisor {
           this.#budgetEvents.push(event);
         });
       }
-      await this.#lease.use((lease) =>
-        this.#attempts.record({
-          lease,
-          workItemNodeId: item.id,
-          reservation,
-          event: "AttemptFailed",
-          sequence: this.#sequences.take(),
-          reason: `${providerGate.providerMessage}; provider quota must be restored before explicit recovery`,
-          allowRecovery: true,
-        }),
-      );
-      await this.#lease.use(async (lease) =>
-        this.#reconcileIssueAdmissionHistory(
-          item,
-          lease,
-          await this.#store.readCommit(reservation.baseSha),
-        ),
-      );
+      if (!attemptFailed)
+        await this.#lease.use((lease) =>
+          this.#attempts.record({
+            lease,
+            workItemNodeId: item.id,
+            reservation,
+            event: "AttemptFailed",
+            sequence: this.#sequences.take(),
+            reason: `${providerGate.providerMessage}; provider quota must be restored before explicit recovery`,
+            allowRecovery: true,
+          }),
+        );
+      const capacity = await this.#capacitySnapshot();
+      for (const held of capacity.reservations.filter(
+        (held) =>
+          held.objective === reservation.objective &&
+          held.workItem === reservation.workItem &&
+          held.attempt === reservation.attempt,
+      ))
+        await this.#releaseCapacity(held.key);
+      await this.#settleIssueAdmission(item, reservation, {
+        cleanupConfirmed: true,
+        definitiveNonExecution: false,
+        modelUsageExpected: backend.capabilities.reportsModelUsage ?? false,
+      });
+      if (await this.#hasUnsettledIssueAdmission(item))
+        throw new ProviderQuotaDrainIncompleteError();
       return;
     }
 
@@ -16589,6 +16638,18 @@ export class FactorySupervisor {
         "AttemptDeferred",
         "AttemptIntegrated",
       ].includes(event.event),
+    );
+  }
+
+  async #hasUnsettledIssueAdmission(item: DerivedWorkItem): Promise<boolean> {
+    const ledger = await this.#attempts.ledger.read(item.number);
+    return Boolean(
+      ledger?.history.some(
+        (entry) =>
+          entry.objective === this.#run.objective &&
+          entry.runId === this.#run.runId &&
+          entry.disposition !== "released",
+      ),
     );
   }
 

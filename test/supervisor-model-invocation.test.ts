@@ -1,6 +1,7 @@
 import { access } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { GitHubControlStore } from "../src/control/github-store.js";
+import { IssueAdmissionLedger } from "../src/control/issue-admission.js";
 import { decodeEventComments } from "../src/control/receipts.js";
 import {
   deriveBudgetUsage,
@@ -13,7 +14,7 @@ import {
   type ReviewIdentity,
 } from "../src/control/reviews.js";
 import { PlatformUnavailableError } from "../src/platform.js";
-import type { FactoryEvent } from "../src/protocol/events.js";
+import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import * as worktrees from "../src/runtime/local-worktree.js";
 import * as cleanValidation from "../src/validation/clean-run.js";
 import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
@@ -72,7 +73,7 @@ describe("Supervisor model dispatch journal", () => {
     }
   }, 30_000);
 
-  it.each(["provider", "cancellation", "deadline"] as const)(
+  it.each(["provider", "cancellation", "deadline", "admission-restart"] as const)(
     "atomically retains exact quota usage and reconciles the interrupted attempt before a %s terminal",
     async (terminalMode) => {
       const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
@@ -92,9 +93,24 @@ describe("Supervisor model dispatch journal", () => {
       });
       const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation();
       if (!write) throw new Error("fixture receipt transport missing");
-      let interruptAttemptFailure = true;
+      let interruptAttemptFailure = terminalMode !== "admission-restart";
+      let interruptAdmissionRelease = terminalMode === "admission-restart";
       let loseAtomicGateResponse = true;
       let atomicGateWrites = 0;
+      const transition = IssueAdmissionLedger.prototype.transition;
+      vi.spyOn(IssueAdmissionLedger.prototype, "transition").mockImplementation(async function (
+        this: IssueAdmissionLedger,
+        args,
+      ) {
+        if (interruptAdmissionRelease && args.disposition === "released") {
+          interruptAdmissionRelease = false;
+          throw new PlatformUnavailableError(
+            { kind: "server_error", retryAfterMs: 1 },
+            new Error("fixture: controller exited after AttemptFailed before admission release"),
+          );
+        }
+        return transition.call(this, args);
+      });
       vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
         async (node, body) => {
           const receipts = decodeEventComments(body);
@@ -150,7 +166,7 @@ describe("Supervisor model dispatch journal", () => {
               (event) =>
                 event.kind === "attempt" && event.event === "AttemptFailed" && event.workItem === 8,
             ),
-        ).toBe(false);
+        ).toBe(terminalMode === "admission-restart");
 
         if (terminalMode === "cancellation") {
           f.snapshot.factoryEvents!.push({
@@ -198,6 +214,17 @@ describe("Supervisor model dispatch journal", () => {
           terminalMode === "cancellation" ? "FactoryRunCancelled" : "FactoryRunEscalated";
         const terminal = f.events().find((event) => event.event === terminalEvent);
         expect(attemptFailure?.sequence).toBeLessThan(terminal?.sequence ?? 0);
+        expect(
+          (
+            await new IssueAdmissionLedger(
+              new GitHubControlStore({
+                token: "fixture-only",
+                owner: "fixture",
+                repo: "provider-qualification",
+              }),
+            ).read(8)
+          )?.history.at(-1)?.disposition,
+        ).toBe("released");
         expect(deriveBudgetUsage(f.events()).modelTokens).toBe(10);
       } finally {
         await f.dispose();
@@ -205,6 +232,63 @@ describe("Supervisor model dispatch journal", () => {
     },
     30_000,
   );
+
+  it("gives cancellation precedence over a resumed objective-level provider gate", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+    });
+    const common = {
+      protocol: "clockgrove.factory/v2" as const,
+      objective: 7,
+      runId: f.runId,
+      at: new Date().toISOString(),
+    };
+    f.snapshot.factoryEvents!.push(
+      parseFactoryEvent({
+        ...common,
+        kind: "budget",
+        event: "BudgetReserved",
+        sequence: 10_000,
+        phase: "management",
+        usageId: "invocation-compile-provider-gated",
+        modelInvocationId: "compile-provider-gated",
+        unit: "model_tokens",
+        amount: 0,
+      }),
+      parseFactoryEvent({
+        ...common,
+        kind: "provider",
+        event: "ProviderQuotaBlocked",
+        sequence: 10_001,
+        reasonCode: "provider-quota-exhausted",
+        provider: "github-copilot",
+        phase: "management",
+        backend: "codex-cli/local",
+        modelInvocationId: "compile-provider-gated",
+        providerMessage: "GitHub Copilot monthly quota exceeded",
+        accounting: "unknown",
+      }),
+      parseFactoryEvent({
+        ...common,
+        kind: "run",
+        event: "FactoryRunCancellationRequested",
+        sequence: 10_002,
+        requestId: "cancel-objective-provider-gate",
+        requestedBy: "operator",
+      }),
+    );
+    try {
+      expect(await f.run()).toMatchObject({
+        status: "cancelled",
+        reason: "operator requested cancellation through GitHub",
+      });
+      expect(f.events().some((event) => event.event === "FactoryRunEscalated")).toBe(false);
+      expect(f.activity).toEqual([]);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
 
   it.each(["missing", "partial"] as const)(
     "fences terminal %s counters without economics before any review",

@@ -6114,6 +6114,7 @@ export class FactorySupervisor {
         } catch (cause) {
           executionAbort.abort();
           await activeExecutions.settle();
+          if (terminalizationVeto(cause)) throw cause;
           throw preserveProviderQuotaError(
             failure,
             cause,

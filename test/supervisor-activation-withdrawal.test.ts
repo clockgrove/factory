@@ -17,6 +17,7 @@ import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
 import { CompiledGraphManager } from "../src/control/graphs.js";
 import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
 import { preserveProviderQuotaError, ProviderQuotaError } from "../src/providers/quota.js";
+import { PlatformUnavailableError } from "../src/platform.js";
 
 const fixtures: Awaited<ReturnType<typeof providerSupervisorFixture>>[] = [];
 afterEach(async () => {
@@ -793,6 +794,64 @@ describe("Supervisor activation withdrawal races", () => {
       adapterCheckpointFailure,
       transactionCheckpointFailure,
     ]);
+    expect(checkpointAttempts).toBe(2);
+    expect(f.compile).toHaveBeenCalledOnce();
+    expect(f.events().filter(isModelInvocationMarker)).toHaveLength(1);
+    expect(f.events().filter((event) => event.kind === "provider")).toEqual([]);
+    expect(f.events().some((event) => event.event === "FactoryRunEscalated")).toBe(false);
+  });
+
+  it("preserves platform backoff when quota durability verification cannot read history", async () => {
+    const f = await fixture(true);
+    Object.assign(f.management, { supportsCompilerAdmission: true });
+    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
+    f.compile.mockImplementation(async (_context, _checkpoint, beforeModelInvocation) => {
+      const admission = await beforeModelInvocation?.();
+      if (!admission || typeof admission === "number")
+        throw new Error("missing compiler admission");
+      const refusal = new ProviderQuotaError(gate, {
+        invocationId: admission.modelInvocationId,
+        usage: { inputTokens: 5, outputTokens: 3 },
+      });
+      try {
+        await admission.checkpointProviderRefusal(refusal);
+      } catch (cause) {
+        throw preserveProviderQuotaError(
+          refusal,
+          cause,
+          "fixture adapter provider-refusal checkpoint failed",
+        );
+      }
+      throw new Error("unexpected durable compiler checkpoint");
+    });
+    const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation();
+    if (!write) throw new Error("fixture receipt transport missing");
+    let checkpointAttempts = 0;
+    vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+      async (node, body) => {
+        if (
+          decodeEventComments(body).some(
+            (event) => event.kind === "provider" && event.event === "ProviderQuotaBlocked",
+          )
+        ) {
+          checkpointAttempts++;
+          throw new Error(`fixture provider checkpoint ${checkpointAttempts} failed`);
+        }
+        await write(node, body);
+      },
+    );
+    const readObjective = vi.mocked(GitHubReader.prototype.readObjective).getMockImplementation();
+    if (!readObjective) throw new Error("fixture Objective reader missing");
+    const platformFailure = new PlatformUnavailableError(
+      { kind: "rate_limit", retryAfterMs: 12_000 },
+      new Error("fixture GitHub cooldown"),
+    );
+    vi.mocked(GitHubReader.prototype.readObjective).mockImplementation(async (...args) => {
+      if (checkpointAttempts >= 2) throw platformFailure;
+      return readObjective(...args);
+    });
+
+    await expect(f.run()).rejects.toBe(platformFailure);
     expect(checkpointAttempts).toBe(2);
     expect(f.compile).toHaveBeenCalledOnce();
     expect(f.events().filter(isModelInvocationMarker)).toHaveLength(1);

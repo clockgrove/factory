@@ -776,6 +776,7 @@ export interface CodexManagementOptions {
   authFile?: string;
   permittedModelCredentials?: string[];
   createCodexHome?: CodexHomeFactory;
+  removeCodexHome?: (path: string) => Promise<void>;
   /** Testable provider boundary; production leaves this unset. */
   runStructured?: (
     cwd: string,
@@ -970,7 +971,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       const codexHome = await (this.#options.createCodexHome ?? createIsolatedCodexHome)(
         "management",
       );
-      await rm(codexHome, { recursive: true, force: true });
+      await (this.#options.removeCodexHome ?? removeCodexHome)(codexHome);
     } catch (error) {
       return {
         available: false,
@@ -1504,6 +1505,9 @@ export class CodexCliManagementBackend implements ManagementBackend {
     const codexHome = await (this.#options.createCodexHome ?? createIsolatedCodexHome)(
       "management",
     );
+    let output: { value: T; usage: ManagementUsage } | undefined;
+    let failed = false;
+    let primaryError: unknown;
     try {
       const schemaPath = join(codexHome, "output.schema.json");
       await writeFile(schemaPath, JSON.stringify(schema), { mode: 0o600 });
@@ -1589,13 +1593,32 @@ export class CodexCliManagementBackend implements ManagementBackend {
         throw error;
       }
       try {
-        return parseManagementJsonlOutput<T>(result.stdout);
+        output = parseManagementJsonlOutput<T>(result.stdout);
       } catch (error) {
         if (error instanceof ProviderQuotaError && invocationId) error.bindInvocation(invocationId);
         throw error;
       }
-    } finally {
-      await rm(codexHome, { recursive: true, force: true });
+    } catch (error) {
+      failed = true;
+      primaryError = error;
     }
+    try {
+      await (this.#options.removeCodexHome ?? removeCodexHome)(codexHome);
+    } catch (cleanupError) {
+      if (primaryError instanceof ProviderQuotaError) {
+        throw new ProviderQuotaError(primaryError.gate, {
+          ...(primaryError.usage ? { usage: primaryError.usage } : {}),
+          ...(primaryError.invocationId ? { invocationId: primaryError.invocationId } : {}),
+          cause: cleanupError,
+        });
+      }
+      throw cleanupError;
+    }
+    if (failed) throw primaryError;
+    return output!;
   }
+}
+
+async function removeCodexHome(path: string): Promise<void> {
+  await rm(path, { recursive: true, force: true });
 }

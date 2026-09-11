@@ -59,7 +59,9 @@ async function fixture(options: { workspace?: boolean } = {}): Promise<string> {
       join(root, "packages/api/package.json"),
       JSON.stringify({ name: "fixture-api", version: "1.0.0", scripts: { test: "node --test" } }),
     );
-    packages["packages/api"] = { name: "fixture-api", version: "1.0.0" };
+    // npm 11 omits the member name here and binds it through the canonical
+    // node_modules/fixture-api workspace link below.
+    packages["packages/api"] = { version: "1.0.0" };
     packages["node_modules/fixture-api"] = { link: true, resolved: "packages/api" };
   }
   await writeFile(join(root, "package.json"), JSON.stringify(manifest));
@@ -142,6 +144,18 @@ describe("npm deferred toolchain authority", () => {
       "package.json",
       "packages/api/package.json",
     ]);
+    const lockPath = join(root, "package-lock.json");
+    const lock = JSON.parse(await readFile(lockPath, "utf8"));
+    lock.packages["packages/api"].name = "wrong-api";
+    await writeFile(lockPath, JSON.stringify(lock));
+    await expect(
+      inspectNpmAuthority({
+        root,
+        commands: [{ workspace: "packages/api", script: "test" }],
+        nodeVersion: NODE_VERSION,
+        npmVersion: NPM_VERSION,
+      }),
+    ).rejects.toThrow(/lock descriptor differs/);
     expect(await findNestedNpmRoots(root, ["packages/api"])).toEqual([]);
   });
 

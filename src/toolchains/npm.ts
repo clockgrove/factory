@@ -521,7 +521,12 @@ function assertLock(
     );
     if (descriptor.link !== undefined)
       throw new Error(`npm workspace descriptor may not be a link: ${directory}`);
-    if (descriptor.name !== manifest.name || descriptor.version !== manifest.version)
+    if (
+      (directory === "."
+        ? descriptor.name !== manifest.name
+        : descriptor.name !== undefined && descriptor.name !== manifest.name) ||
+      descriptor.version !== manifest.version
+    )
       throw new Error(`npm lock descriptor differs from ${directory}/package.json`);
     for (const field of ["dependencies", "devDependencies", "optionalDependencies"] as const)
       if (

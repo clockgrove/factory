@@ -312,6 +312,33 @@ function fixture() {
     reservationRef: "refs/clockgrove-factory/attempts/objective-7/work-item-8/attempt-1",
     reservationOid,
     observedReservationOid: reservationOid,
+    reservationAuthority: {
+      source: "legacy-attempt",
+      canonical: {
+        ref: "refs/clockgrove-factory/admission/work-item-8",
+        openingOid: null,
+        closingOid: null,
+      },
+      legacy: {
+        ref: "refs/clockgrove-factory/attempts/objective-7/work-item-8/attempt-1",
+        openingOid: reservationOid,
+        closingOid: reservationOid,
+      },
+    },
+    observedReservationAuthority: {
+      source: "legacy-attempt",
+      canonical: {
+        ref: "refs/clockgrove-factory/admission/work-item-8",
+        openingOid: null,
+        closingOid: null,
+      },
+      legacy: {
+        ref: "refs/clockgrove-factory/attempts/objective-7/work-item-8/attempt-1",
+        openingOid: reservationOid,
+        closingOid: reservationOid,
+      },
+      reservationOid,
+    },
     reservationCommit: {
       oid: reservationOid,
       treeOid: "f".repeat(40),
@@ -646,24 +673,69 @@ describe("independent installed externalized artifact transfer proof", () => {
     const f = fixture(),
       reads: string[] = [];
     const documents = [f.held.prepared, f.held.turn, f.held.terminal, f.held.intent];
+    const reserved = f.held.receipts.find((event) => event.event === "AttemptReserved")!;
+    const ledgerOid = "d".repeat(40);
+    const ledgerRecord = {
+      protocol: "clockgrove.factory/issue-admission-v1",
+      workItem: 8,
+      workItemNodeId: "I_8",
+      revision: 1,
+      priorRevisionOid: null,
+      history: [
+        {
+          workItem: 8,
+          workItemNodeId: "I_8",
+          objective: 7,
+          runId: reserved.runId,
+          directorEpoch: reserved.directorEpoch,
+          writerHolder: "fixture",
+          policyDigest: reserved.policyDigest,
+          graphDigest: "a".repeat(64),
+          graphCommitOid: "a".repeat(40),
+          projectionCommitOid: "b".repeat(40),
+          reservation: {
+            ref: f.held.reservationRef,
+            oid: f.held.reservationOid,
+            attempt: 1,
+            backend: reserved.backend,
+            baseSha: reserved.baseSha,
+          },
+          capacityReservationId: "capacity-8",
+          budgetReservationId: "budget-8",
+          resourceIdentity: "resource-8",
+          compatibilityClaimOid: "e".repeat(40),
+          disposition: "terminal",
+          writerEpoch: reserved.directorEpoch,
+          currentWriterHolder: "fixture",
+          dispatchPossible: true,
+        },
+      ],
+    };
+    const ledgerCommit = {
+      oid: ledgerOid,
+      treeOid: f.held.reservationCommit.treeOid,
+      parentOids: [reserved.baseSha, f.held.reservationOid],
+      message: `Factory issue admission\nFactory-Issue-Admission: ${Buffer.from(JSON.stringify(ledgerRecord)).toString("base64url")}`,
+    };
     const request = async (route: string, args: Record<string, unknown>) => {
       reads.push(route);
       expect(route.startsWith("GET ")).toBe(true);
       if (route.endsWith("/git/ref/{ref}")) {
         const ref = `refs/${args.ref}`;
-        if (ref === f.held.readyAbsence.ref)
+        if (ref === f.held.readyAbsence.ref || ref === f.held.reservationRef)
           throw Object.assign(new Error("absent"), { status: 404 });
-        const oid =
-          ref === f.held.reservationRef
-            ? f.held.reservationOid
-            : documents.find((value) => value.ref === ref)!.commit.oid;
+        if (ref === "refs/clockgrove-factory/admission/work-item-8")
+          return { data: { ref, object: { type: "commit", sha: ledgerOid } } };
+        const oid = documents.find((value) => value.ref === ref)!.commit.oid;
         return { data: { ref, object: { type: "commit", sha: oid } } };
       }
       if (route.endsWith("/git/commits/{commit_sha}")) {
         const value =
-          args.commit_sha === f.held.reservationOid
-            ? f.held.reservationCommit
-            : documents.find((value) => value.commit.oid === args.commit_sha)!.commit;
+          args.commit_sha === ledgerOid
+            ? ledgerCommit
+            : args.commit_sha === f.held.reservationOid
+              ? f.held.reservationCommit
+              : documents.find((value) => value.commit.oid === args.commit_sha)!.commit;
         return {
           data: {
             sha: value.oid,
@@ -695,7 +767,29 @@ describe("independent installed externalized artifact transfer proof", () => {
       witness: f.witness,
     });
     expect(result.summary.intentOid).toBe(f.held.intent.commit.oid);
+    expect((result.proof.reservationAuthority as { source: string }).source).toBe(
+      "issue-admission",
+    );
     expect(reads.filter((route) => route.endsWith("/git/ref/{ref}")).length).toBeGreaterThan(6);
+    let canonicalReads = 0;
+    await expect(
+      observeArtifactTransfer(
+        async (route, args) => {
+          if (
+            route.endsWith("/git/ref/{ref}") &&
+            args.ref === "clockgrove-factory/admission/work-item-8" &&
+            ++canonicalReads > 2
+          ) {
+            const ref = `refs/${args.ref}`;
+            return { data: { ref, object: { type: "commit", sha: "9".repeat(40) } } };
+          }
+          return request(route, args);
+        },
+        f.heldObservation,
+        f.authority,
+        { workItem: 8, phase: "intent" },
+      ),
+    ).rejects.toThrow(/changed after dependent proof reads/);
     const refusal = Object.assign(new Error("quota"), { status: 403, retryAfterMs: 60000 });
     await expect(
       observeArtifactTransfer(

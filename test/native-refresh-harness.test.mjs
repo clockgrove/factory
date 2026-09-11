@@ -21,6 +21,10 @@ import {
   assertNativeMergeProof,
 } from "../scripts/qualification-sibling-refresh-proof.mjs";
 import {
+  resolveQualificationReservationAuthority,
+  revalidateQualificationReservationAuthority,
+} from "../scripts/qualification-reservation-authority.mjs";
+import {
   nativeRefreshQualification,
   assertNativeRefreshCompletion,
   main,
@@ -245,7 +249,50 @@ function fixture({
       [rootBase],
       `Factory reservation\n\nFactory-Event: ${Buffer.from(JSON.stringify(reservation)).toString("base64url")}`,
     );
-    refs.set(reserveRef, reserveOid);
+    const admissionRef = `refs/clockgrove-factory/admission/work-item-${number}`;
+    const admissionRecord = {
+      protocol: "clockgrove.factory/issue-admission-v1",
+      workItem: number,
+      workItemNodeId: `I_${number}`,
+      revision: 1,
+      priorRevisionOid: null,
+      history: [
+        {
+          workItem: number,
+          workItemNodeId: `I_${number}`,
+          objective,
+          runId,
+          directorEpoch: 1,
+          writerHolder: "operator",
+          policyDigest,
+          graphDigest: hash("graph"),
+          graphCommitOid: sha("graph"),
+          projectionCommitOid: sha("projection"),
+          reservation: {
+            ref: reserveRef,
+            oid: reserveOid,
+            attempt: 1,
+            backend: reservation.backend,
+            baseSha: rootBase,
+          },
+          capacityReservationId: `capacity-${number}`,
+          budgetReservationId: `budget-${number}`,
+          resourceIdentity: `resource-${number}`,
+          compatibilityClaimOid: sha("compatibility"),
+          disposition: "terminal",
+          writerEpoch: 1,
+          currentWriterHolder: "operator",
+          dispatchPossible: true,
+        },
+      ],
+    };
+    const admissionOid = addCommit(
+      sha(admissionRef),
+      commits.get(rootBase).treeOid,
+      [rootBase, reserveOid],
+      `Factory issue admission\n\nFactory-Issue-Admission: ${Buffer.from(JSON.stringify(admissionRecord)).toString("base64url")}`,
+    );
+    refs.set(admissionRef, admissionOid);
     events.push(
       reservation,
       {
@@ -587,6 +634,22 @@ function fixture({
     };
   }
   const read = vi.fn(async (demand) => {
+    if (demand.kind === "reservation-authority")
+      return resolveQualificationReservationAuthority(
+        {
+          readRef: async (ref) => refs.get(ref) ?? null,
+          readCommit: async (oid) => structuredClone(commits.get(oid)),
+        },
+        demand.reserved,
+      );
+    if (demand.kind === "reservation-authority-current")
+      return revalidateQualificationReservationAuthority(
+        {
+          readRef: async (ref) => refs.get(ref) ?? null,
+          readCommit: async (oid) => structuredClone(commits.get(oid)),
+        },
+        demand.expectation,
+      );
     const value =
       demand.kind === "commit"
         ? commits.get(demand.oid)
@@ -631,6 +694,33 @@ function controllerPair() {
     },
   };
   const read = vi.fn(async (demand) => {
+    if (demand.kind === "reservation-authority") {
+      const selected = [receiver, peer].find(({ evidence }) =>
+        evidence.children.some((child) => child.number === demand.reserved.workItem),
+      );
+      if (!selected) throw new Error("reservation authority fixture missing");
+      return resolveQualificationReservationAuthority(
+        {
+          readRef: async (ref) => selected.refs.get(ref) ?? null,
+          readCommit: async (oid) => structuredClone(selected.commits.get(oid)),
+        },
+        demand.reserved,
+      );
+    }
+    if (demand.kind === "reservation-authority-current") {
+      const selected = [receiver, peer].find(
+        ({ refs }) =>
+          refs.has(demand.expectation.canonical.ref) || refs.has(demand.expectation.legacy.ref),
+      );
+      if (!selected) throw new Error("reservation authority fixture missing");
+      return revalidateQualificationReservationAuthority(
+        {
+          readRef: async (ref) => selected.refs.get(ref) ?? null,
+          readCommit: async (oid) => structuredClone(selected.commits.get(oid)),
+        },
+        demand.expectation,
+      );
+    }
     for (const f of [receiver, peer]) {
       const value =
         demand.kind === "commit"
@@ -886,7 +976,7 @@ describe("installed controller peer merge proof", () => {
     );
     record.value.mergeSha = sha("different-merge");
     expect(() => assertNativeMergeProof(replay, proofs[1], f.receiver.inputs[1])).toThrow(
-      /peer GraphQL/,
+      /(?:peer|final) GraphQL/,
     );
   });
 });
@@ -999,6 +1089,7 @@ async function completeFixture(options) {
   e.nativeHarness = [
     "verify-native-refresh-objective.mjs",
     "qualification-sibling-refresh-proof.mjs",
+    "qualification-reservation-authority.mjs",
     "qualification-merge-proof.mjs",
     "qualification-receipts.mjs",
     "verify-live-objective.mjs",
@@ -1031,6 +1122,7 @@ function restTransport(f, mutate = () => {}) {
     let data;
     if (route === "GET /repos/{owner}/{repo}/git/ref/{ref}") {
       const ref = `refs/${parameters.ref}`;
+      if (!f.refs.has(ref)) throw Object.assign(new Error("missing"), { status: 404 });
       data = { ref, object: { type: "commit", sha: f.refs.get(ref) } };
     } else if (route === "GET /repos/{owner}/{repo}/git/commits/{commit_sha}") {
       const value = f.commits.get(parameters.commit_sha);
@@ -1220,7 +1312,7 @@ describe("independent native sibling refresh proof", () => {
     );
     expect(f.request).toHaveBeenCalledTimes(3);
     const lastRead = f.read.mock.invocationCallOrder.at(-1);
-    expect(f.request.mock.invocationCallOrder.at(-1)).toBeGreaterThan(lastRead);
+    expect(f.request.mock.invocationCallOrder.at(-1)).toBeLessThan(lastRead);
   });
   it.each([
     "identity",
@@ -1292,7 +1384,7 @@ describe("independent native sibling refresh proof", () => {
       if (kind === "reservation")
         f.refs.set(
           [...f.refs.keys()].find(
-            (ref) => ref.includes("/attempts/") && ref.includes("work-item-3"),
+            (ref) => ref.includes("/admission/") && ref.includes("work-item-3"),
           ),
           sha("foreign"),
         );
@@ -1321,6 +1413,51 @@ describe("independent native sibling refresh proof", () => {
     record.reads[0].request.ref = "other";
     expect(() => assertNativeMergeProof(f.evidence, proofs[1], f.inputs[1])).toThrow();
   });
+  it("persists the final semantic merge demand before authority closure", async () => {
+    const f = fixture();
+    const proofs = await observeNativeMergeProofs(f, f.read);
+    const record = f.evidence.nativeMergeEvidence[1];
+    const closing = record.reads.at(-1);
+    const semanticIndex = record.reads.findLastIndex(
+      ({ request }) => request.kind === "merge-proof",
+    );
+    expect(closing.request.kind).toBe("reservation-authority-current");
+    expect(semanticIndex).toBe(record.reads.length - 2);
+    const before = structuredClone(record.reads);
+    record.reads.splice(semanticIndex, 1);
+    expect(() => assertNativeMergeProof(f.evidence, proofs[1], f.inputs[1])).toThrow();
+    record.reads = structuredClone(before);
+    record.reads[semanticIndex].request.expected.headSha = sha("substituted-final-head");
+    expect(() => assertNativeMergeProof(f.evidence, proofs[1], f.inputs[1])).toThrow();
+  });
+  it("rejects authority movement during the final semantic merge read", async () => {
+    const f = fixture();
+    const original = f.request.getMockImplementation();
+    f.request.mockImplementation(async (route, parameters) => {
+      const result = await original(route, parameters);
+      if (route === "POST /graphql")
+        for (const [ref] of f.refs)
+          if (ref.includes("/admission/")) f.refs.set(ref, sha(`moved-${ref}`));
+      return result;
+    });
+    await expect(observeNativeMergeProofs(f, f.read)).rejects.toThrow(
+      /changed after dependent proof reads/,
+    );
+  });
+  it.each(["reservation-trailer", "canonical-snapshot"])(
+    "revalidates retained %s authority during offline replay",
+    async (kind) => {
+      const f = fixture();
+      const proofs = await observeNativeMergeProofs(f, f.read);
+      const authority = f.evidence.nativeMergeEvidence[1].reads.find(
+        ({ request }) => request.kind === "reservation-authority",
+      ).value;
+      if (kind === "reservation-trailer")
+        authority.reservationCommit.message = "Factory reservation without its event";
+      else authority.authority.canonical.closingOid = sha("moving-authority");
+      expect(() => assertNativeMergeProof(f.evidence, proofs[1], f.inputs[1])).toThrow();
+    },
+  );
   it("never queries GraphQL for a refreshed head when its immutable intent is missing", async () => {
     const f = fixture();
     f.documents.delete([...f.documents.keys()].find((ref) => ref.includes("sibling-refreshes")));
@@ -1433,7 +1570,7 @@ describe("native qualifier entrypoint and transport boundaries", () => {
     expect(
       request.mock.calls.every(([route]) => route.startsWith("GET ") || route === "POST /graphql"),
     ).toBe(true);
-    expect(request.mock.calls.filter(([route]) => route.includes("/git/ref/"))).toHaveLength(21);
+    expect(request.mock.calls.filter(([route]) => route.includes("/git/ref/"))).toHaveLength(42);
   });
   it.each(["ref", "truncation", "symlink", "blob-size", "blob-content", "commit-oid"])(
     "fails closed on REST %s ambiguity",

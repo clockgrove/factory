@@ -4,6 +4,7 @@ import { parseRunPolicy } from "../src/protocol/policy.js";
 import {
   appServerCheckpointArm,
   assertAppServerCheckpoint,
+  observeAppServerCheckpoints,
 } from "../scripts/qualification-app-server-checkpoint.mjs";
 import {
   appServerHoldReady,
@@ -177,6 +178,33 @@ function fixture() {
     workItem: 8,
     reservationRef,
     reservationOid,
+    reservationAuthority: {
+      source: "legacy-attempt",
+      canonical: {
+        ref: "refs/clockgrove-factory/admission/work-item-8",
+        openingOid: null,
+        closingOid: null,
+      },
+      legacy: {
+        ref: reservationRef,
+        openingOid: reservationOid,
+        closingOid: reservationOid,
+      },
+    },
+    observedReservationAuthority: {
+      source: "legacy-attempt",
+      canonical: {
+        ref: "refs/clockgrove-factory/admission/work-item-8",
+        openingOid: null,
+        closingOid: null,
+      },
+      legacy: {
+        ref: reservationRef,
+        openingOid: reservationOid,
+        closingOid: reservationOid,
+      },
+      reservationOid,
+    },
     reservationCommit: {
       oid: reservationOid,
       parentOids: [baseSha],
@@ -313,6 +341,128 @@ describe("installed App Server checkpoint qualification", () => {
       turnId: "turn-7",
       modelTokens: 110,
     });
+  });
+  it("observes the complete App Server proof through ledger-only reservation authority", async () => {
+    const f = fixture();
+    const reserved = f.observation.receipts.find(({ event }) => event.event === "AttemptReserved")!
+      .event as Record<string, unknown>;
+    const ledgerOid = "d".repeat(40);
+    const record = {
+      protocol: "clockgrove.factory/issue-admission-v1",
+      workItem: 8,
+      workItemNodeId: "I_8",
+      revision: 1,
+      priorRevisionOid: null,
+      history: [
+        {
+          workItem: 8,
+          workItemNodeId: "I_8",
+          objective: 7,
+          runId: reserved.runId,
+          directorEpoch: reserved.directorEpoch,
+          writerHolder: "fixture",
+          policyDigest: reserved.policyDigest,
+          graphDigest: "a".repeat(64),
+          graphCommitOid: "a".repeat(40),
+          projectionCommitOid: "b".repeat(40),
+          reservation: {
+            ref: f.proof.reservationRef,
+            oid: f.proof.reservationOid,
+            attempt: 1,
+            backend: reserved.backend,
+            baseSha: reserved.baseSha,
+          },
+          capacityReservationId: "capacity-8",
+          budgetReservationId: "budget-8",
+          resourceIdentity: "resource-8",
+          compatibilityClaimOid: "e".repeat(40),
+          disposition: "terminal",
+          writerEpoch: reserved.directorEpoch,
+          currentWriterHolder: "fixture",
+          dispatchPossible: true,
+        },
+      ],
+    };
+    const ledger = {
+      oid: ledgerOid,
+      treeOid: "f".repeat(40),
+      parentOids: [reserved.baseSha as string, f.proof.reservationOid],
+      message: `Factory issue admission\nFactory-Issue-Admission: ${Buffer.from(JSON.stringify(record)).toString("base64url")}`,
+    };
+    const documents = [
+      f.proof.prepared,
+      f.proof.turn,
+      f.proof.terminal,
+      f.proof.intent,
+      f.proof.ready,
+    ];
+    const request = async (route: string, args: Record<string, unknown>) => {
+      if (route.endsWith("/git/ref/{ref}")) {
+        const ref = `refs/${args.ref}`;
+        if (ref === f.proof.reservationRef)
+          throw Object.assign(new Error("missing"), { status: 404 });
+        const oid =
+          ref === "refs/clockgrove-factory/admission/work-item-8"
+            ? ledgerOid
+            : documents.find((document) => document.ref === ref)!.commit.oid;
+        return { data: { ref, object: { type: "commit", sha: oid } } };
+      }
+      if (route.endsWith("/git/commits/{commit_sha}")) {
+        const commit =
+          args.commit_sha === ledgerOid
+            ? ledger
+            : args.commit_sha === f.proof.reservationOid
+              ? { ...f.proof.reservationCommit, treeOid: "f".repeat(40) }
+              : documents.find((document) => document.commit.oid === args.commit_sha)!.commit;
+        return {
+          data: {
+            sha: commit.oid,
+            tree: { sha: commit.treeOid },
+            parents: commit.parentOids.map((sha: string) => ({ sha })),
+            message: commit.message,
+          },
+        };
+      }
+      if (route.endsWith("/git/trees/{tree_sha}")) {
+        const tree = documents
+          .flatMap((document) => document.treePaths)
+          .find((candidate) => candidate.sha === args.tree_sha)!;
+        return { data: { sha: tree.sha, tree: tree.entries, truncated: false } };
+      }
+      const document = documents.find((candidate) => candidate.blobOid === args.file_sha)!;
+      return {
+        data: {
+          sha: document.blobOid,
+          encoding: "base64",
+          size: Buffer.byteLength(document.content),
+          content: Buffer.from(document.content).toString("base64"),
+        },
+      };
+    };
+    const [proof] = await observeAppServerCheckpoints(request, f.observation, authority, f.witness);
+    expect((proof!.reservationAuthority as { source: string }).source).toBe("issue-admission");
+    expect(() =>
+      assertAppServerCheckpoint(f.observation, authority, proof, f.witness),
+    ).not.toThrow();
+    let canonicalReads = 0;
+    await expect(
+      observeAppServerCheckpoints(
+        async (route, args) => {
+          if (
+            route.endsWith("/git/ref/{ref}") &&
+            args.ref === "clockgrove-factory/admission/work-item-8" &&
+            ++canonicalReads > 2
+          ) {
+            const ref = `refs/${args.ref}`;
+            return { data: { ref, object: { type: "commit", sha: "9".repeat(40) } } };
+          }
+          return request(route, args);
+        },
+        f.observation,
+        authority,
+        f.witness,
+      ),
+    ).rejects.toThrow(/changed after dependent proof reads/);
   });
   it("rejects a v2 witness reached exactly at the half-open Objective boundary", () => {
     const f = fixture();

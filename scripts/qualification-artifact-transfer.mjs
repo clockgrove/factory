@@ -6,6 +6,13 @@ import {
   assertQualificationCheckpoint,
   nativeProofReader,
 } from "./qualification-sibling-refresh-proof.mjs";
+import {
+  assertQualificationReservationAuthority,
+  assertQualificationReservationAuthorityReobservation,
+  observeQualificationReservationAuthority,
+  qualificationReservationAuthorityExpectation,
+  reobserveQualificationReservationAuthority,
+} from "./qualification-reservation-authority.mjs";
 
 const MAX_PATCH = 256 * 1024 * 1024;
 const MAX_CHUNK = 4 * 1024 * 1024;
@@ -123,6 +130,17 @@ function session(events, authority, proof) {
   assert.equal(hash(canonical(start.policy)), identity.policyDigest);
   assert.deepEqual(start.policy, authority.policy);
   assert.equal(start.activationRequestId, `${authority.namespace}-activate`);
+  const reservationAuthority = {
+    logicalRef: proof.reservationRef,
+    reservationOid: proof.reservationOid,
+    reservationCommit: proof.reservationCommit,
+    authority: proof.reservationAuthority,
+  };
+  assertQualificationReservationAuthority(reservationAuthority, reserved);
+  assertQualificationReservationAuthorityReobservation(
+    proof.observedReservationAuthority,
+    qualificationReservationAuthorityExpectation(reservationAuthority, reserved),
+  );
   assert.equal(proof.reservationRef, refs.reservationRef);
   sha(proof.reservationOid);
   assert.equal(proof.reservationCommit.oid, proof.reservationOid);
@@ -749,15 +767,16 @@ export async function observeArtifactTransfer(request, observation, authority, o
     "one original reservation",
   );
   const refs = identities(authority, reservation),
-    read = nativeProofReader(request);
-  const reservationOid = await read({ kind: "ref", ref: refs.reservationRef });
+    read = nativeProofReader(request),
+    resolved = await observeQualificationReservationAuthority(request, reservation);
   const proof = {
     phase: options.phase,
     workItem: options.workItem,
     receipts: events,
-    reservationRef: refs.reservationRef,
-    reservationOid,
-    reservationCommit: await read({ kind: "commit", oid: reservationOid }),
+    reservationRef: resolved.logicalRef,
+    reservationOid: resolved.reservationOid,
+    reservationCommit: resolved.reservationCommit,
+    reservationAuthority: resolved.authority,
     chunks: [],
     ready: null,
   };
@@ -855,6 +874,11 @@ export async function observeArtifactTransfer(request, observation, authority, o
     await read({ kind: "ref", ref: `${refs.transferRef}/intent` }),
     proof.intent.commit.oid,
   );
-  proof.observedReservationOid = await read({ kind: "ref", ref: refs.reservationRef });
+  proof.observedReservationAuthority = await reobserveQualificationReservationAuthority(
+    request,
+    resolved,
+    reservation,
+  );
+  proof.observedReservationOid = proof.observedReservationAuthority.reservationOid;
   return { proof, ...assertArtifactTransferProof(observation, authority, proof, options) };
 }

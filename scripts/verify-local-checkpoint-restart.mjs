@@ -1334,13 +1334,16 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     readBounded(fileURLToPath(import.meta.url), 262144).trim(),
   );
   const harnessFiles = [
-    harnessPath,
-    "scripts/qualification-model-accounting.mjs",
-    "scripts/qualification-receipts.mjs",
-    "scripts/qualification-sibling-refresh-proof.mjs",
-    "scripts/qualification-merge-proof.mjs",
-    ...(authority.sessionRecovery ? ["scripts/qualification-app-server-checkpoint.mjs"] : []),
-    ...(extension.harnessPaths ?? []),
+    ...new Set([
+      harnessPath,
+      "scripts/qualification-model-accounting.mjs",
+      "scripts/qualification-receipts.mjs",
+      "scripts/qualification-sibling-refresh-proof.mjs",
+      "scripts/qualification-reservation-authority.mjs",
+      "scripts/qualification-merge-proof.mjs",
+      ...(authority.sessionRecovery ? ["scripts/qualification-app-server-checkpoint.mjs"] : []),
+      ...(extension.harnessPaths ?? []),
+    ]),
   ].map((path) => {
     assert.match(path, /^scripts\/[A-Za-z0-9_.-]+\.mjs$/);
     const bytes = readBounded(join(root, path), 262144);

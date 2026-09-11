@@ -204,7 +204,51 @@ function fixture(scenario = "scope") {
     [base],
     `Fixture reservation\nFactory-Event: ${Buffer.from(JSON.stringify(reserved)).toString("base64url")}`,
   );
-  refs.set(reservationRef, reservationOid);
+  const admissionRef = "refs/clockgrove-factory/admission/work-item-8";
+  const admission = {
+    protocol: "clockgrove.factory/issue-admission-v1",
+    workItem: 8,
+    workItemNodeId: "I_8",
+    revision: 1,
+    priorRevisionOid: null,
+    history: [
+      {
+        workItem: 8,
+        workItemNodeId: "I_8",
+        objective: 7,
+        runId: common.runId,
+        directorEpoch: 1,
+        writerHolder: "fixture",
+        policyDigest: pd,
+        graphDigest: hash("graph"),
+        graphCommitOid: "a".repeat(40),
+        projectionCommitOid: "c".repeat(40),
+        reservation: {
+          ref: reservationRef,
+          oid: reservationOid,
+          attempt: 1,
+          backend: reserved.backend,
+          baseSha: base,
+        },
+        capacityReservationId: "capacity-8",
+        budgetReservationId: "budget-8",
+        resourceIdentity: "resource-8",
+        compatibilityClaimOid: "e".repeat(40),
+        disposition: "terminal",
+        writerEpoch: 1,
+        currentWriterHolder: "fixture",
+        dispatchPossible: true,
+      },
+    ],
+  };
+  refs.set(
+    admissionRef,
+    commit(
+      empty,
+      [base, reservationOid],
+      `Factory issue admission\nFactory-Issue-Admission: ${Buffer.from(JSON.stringify(admission)).toString("base64url")}`,
+    ),
+  );
   const graph = { title: "Refusal", workItems: [{ id: "payload", scope: [payload] }] },
     graphDigest = hash(canonical(graph));
   const graphRef = `refs/clockgrove-factory/graphs/objective-7/run-${hash(common.runId).slice(0, 32)}`;
@@ -469,6 +513,7 @@ describe("installed large-file refusal ports (scripted Git/MCP contracts, no liv
     "broadened-packet",
     "ready",
     "unknown-read",
+    "authority-moved",
   ])("refuses invalid %s evidence", async (fault) => {
     const f = fixture();
     if (fault === "duplicate") f.events.push({ ...f.events[2]!, attempt: 2, sequence: 10 });
@@ -494,6 +539,21 @@ describe("installed large-file refusal ports (scripted Git/MCP contracts, no liv
       f.request.mockImplementation(async (route, args) => {
         if (String(args.ref).endsWith("/intent"))
           throw Object.assign(new Error("not authorized"), { status: 403 });
+        return original(route, args);
+      });
+    }
+    if (fault === "authority-moved") {
+      const original = f.request.getMockImplementation()!;
+      let canonicalReads = 0;
+      f.request.mockImplementation(async (route, args) => {
+        if (
+          route.endsWith("/git/ref/{ref}") &&
+          args.ref === "clockgrove-factory/admission/work-item-8" &&
+          ++canonicalReads > 2
+        ) {
+          const ref = `refs/${args.ref}`;
+          return { data: { ref, object: { type: "commit", sha: "9".repeat(40) } } };
+        }
         return original(route, args);
       });
     }

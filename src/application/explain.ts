@@ -147,7 +147,11 @@ export function buildExplanationReport(input: {
       },
     });
   }
-  if (!providerGate && run?.terminal?.event === "FactoryRunEscalated") {
+  if (
+    (status.operatorAction.code === "run-escalated" ||
+      status.operatorAction.code === "recovery-successor-escalated") &&
+    run?.terminal?.event === "FactoryRunEscalated"
+  ) {
     const terminal = terminalRunEvidence(run.terminal);
     const recoverySuccessor = Boolean(run.start.predecessorRunId);
     explanations.push({

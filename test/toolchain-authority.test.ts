@@ -683,6 +683,25 @@ describe("toolchain authority adapters", () => {
     };
     const providerById = (id: string) => (id === provider.id ? provider : undefined);
     const packet = await activateManagedRuntimePacket(graphPacket, providerById);
+    const localPlan = await localManagedToolchainPlan(
+      ["npm run test"],
+      {
+        PATH: process.env.PATH,
+        HTTPS_PROXY: "http://upper-proxy.invalid",
+        https_proxy: "http://lower-proxy.invalid",
+        Http_Proxy: "http://mixed-proxy.invalid",
+        no_proxy: "internal.invalid",
+      },
+      join(repository, ".factory-runtime"),
+      packet.managedRuntimes,
+    );
+    expect(localPlan).not.toBeNull();
+    expect(Object.entries(localPlan!.environment).filter(([key]) => /_proxy$/i.test(key))).toEqual([
+      ["ALL_PROXY", ""],
+      ["HTTPS_PROXY", ""],
+      ["HTTP_PROXY", ""],
+      ["NO_PROXY", ""],
+    ]);
     // Keep the receipt for exact provider-generation restoration without changing
     // the ambient-fallback premise of later availability tests in this file.
     await rm(join(toolchainStoreRoot(), "active/npm.json"), { force: true });

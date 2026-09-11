@@ -1669,10 +1669,18 @@ export async function localManagedToolchainPlan(
     privateRoot,
     isolated.bundle,
   );
+  const commandSourceEnvironment =
+    isolated.runner === "npm"
+      ? Object.fromEntries(
+          Object.entries(preparedEnvironment).filter(
+            ([key]) => !/^(?:ALL|HTTP|HTTPS|NO)_PROXY$/i.test(key),
+          ),
+        )
+      : preparedEnvironment;
   const environment = {
-    ...preparedEnvironment,
+    ...commandSourceEnvironment,
     ...localizedEnvironment,
-    PATH: `${preparedEnvironment.PATH?.split(delimiter)[0] ?? join(privateRoot, "factory-tools")}${delimiter}${localizedEnvironment.PATH ?? "/usr/bin:/bin"}`,
+    PATH: `${commandSourceEnvironment.PATH?.split(delimiter)[0] ?? join(privateRoot, "factory-tools")}${delimiter}${localizedEnvironment.PATH ?? "/usr/bin:/bin"}`,
   };
   const componentByAsset = new Map(
     runtimeComponentPaths(toolchainStoreRoot(), isolated.bundle).map((component) => [

@@ -491,6 +491,88 @@ describe("bounded status, explain, and replay output", () => {
     expect(explanation.explanations[0]?.requiredAction).toContain("factory_recovery_plan");
   });
 
+  it("keeps monitoring a provider-neutral quota gate until terminal drain is durable", () => {
+    const current = snapshot();
+    current.workItems[0]!.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        sequence: 4,
+        at: "2026-09-04T12:00:29.000Z",
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: "invocation-worker-10-1",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        directorEpoch: 4,
+        policyDigest: policyDigest(policy),
+      }),
+      event({
+        kind: "provider",
+        event: "ProviderQuotaBlocked",
+        sequence: 5,
+        at: "2026-09-04T12:00:30.000Z",
+        reasonCode: "provider-quota-exhausted",
+        provider: "another-model-provider",
+        phase: "execution",
+        backend: "another/local-backend",
+        modelInvocationId: "worker-10-1",
+        workItem: 10,
+        attempt: 1,
+        providerMessage: "Model provider quota requires operator action",
+        actionUrl: "https://provider.example/quota",
+        accounting: "unknown",
+      }),
+    );
+
+    const status = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
+    expect(status.run).toMatchObject({ state: "provider-gated" });
+    expect(status.operatorAction).toMatchObject({
+      required: true,
+      monitoring: "continue",
+      code: "provider-quota-draining",
+      evidence: {
+        provider: "another-model-provider",
+        factoryWorkActive: true,
+      },
+    });
+
+    const explanation = buildExplanationReport({
+      repository: "clockgrove/factory",
+      snapshot: current,
+    }).explanations[0]!;
+    expect(explanation).toMatchObject({
+      code: EXPLANATION_CODES.providerQuotaExhausted,
+      evidence: { factoryWorkActive: true, monitoring: "continue" },
+    });
+    expect(explanation.requiredAction).toContain('provider "another-model-provider"');
+    expect(explanation.requiredAction).not.toContain("GitHub Copilot");
+
+    current.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "FactoryRunEscalated",
+        sequence: 6,
+        at: "2026-09-04T12:00:31.000Z",
+        reason: "Model provider quota requires operator action",
+      }),
+    );
+    const stopped = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
+    expect(stopped.operatorAction).toMatchObject({
+      required: true,
+      monitoring: "stop",
+      code: "provider-quota",
+      evidence: { provider: "another-model-provider", factoryWorkActive: false },
+    });
+    expect(
+      "requiredAction" in stopped.operatorAction && stopped.operatorAction.requiredAction,
+    ).toBe(
+      'Restore quota for provider "another-model-provider" at https://provider.example/quota, then explicitly request recovery through factory_recovery_plan. Do not keep polling or retry this invocation.',
+    );
+  });
+
   it("binds status and explanation to a terminal recovery successor instead of an older escalation", () => {
     const current = snapshot();
     const successorRunId =

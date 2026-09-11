@@ -218,10 +218,12 @@ Copilot entitlement messages may produce an invocation-bound `ProviderQuotaBlock
 durable event and backend contract are provider-neutral: they carry a bounded provider identity,
 canonical redacted message and optional HTTPS action URL. The GitHub Copilot adapter alone owns the
 captured-message classifier and maps those diagnostics to its provider identity, safe summaries and
-supported settings URL. Provider-reported usage is reconciled exactly when present and otherwise
-remains unknown. The run stops without retry, and status/explain tell the initiating operator to stop
-monitoring until quota is restored and an explicit recovery is requested. Pre-dispatch preparation
-failures and transient transport errors do not create this gate.
+supported settings URL. Provider-reported usage is reconciled exactly once against its own invocation
+when present and otherwise remains unknown. The run stops without retry. Until terminal drain is
+durable, status/explain retain monitoring so admitted attempts and resources cannot be abandoned;
+after the terminal receipt they tell the initiating operator to stop monitoring until quota is
+restored and an explicit recovery is requested. Pre-dispatch preparation failures and transient
+transport errors do not create this gate.
 
 The selected model is a provider-neutral durable gate populated by provider adapters. Keeping
 Copilot literals in the shared event was rejected because every additional model provider would

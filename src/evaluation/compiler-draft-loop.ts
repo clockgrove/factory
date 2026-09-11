@@ -512,6 +512,7 @@ export async function runCompilerDraftLoop(args: {
         if (usage) {
           tokens += usage.inputTokens + usage.outputTokens;
           await recordUsage(invocationId, stage, usage);
+          if (error instanceof ProviderQuotaError) error.markUsageRecorded();
         } else if (!(error instanceof ProviderQuotaError)) throw new Stop("accounting-unavailable");
         if (error instanceof ProviderQuotaError) throw error;
         if (stopCause) throw stopCause;

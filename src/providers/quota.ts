@@ -19,6 +19,7 @@ export class ProviderQuotaError extends Error {
   readonly gate: ProviderQuotaGate;
   usage: ProviderQuotaUsage | undefined;
   invocationId: string | undefined;
+  #usageRecorded = false;
 
   constructor(
     gate: ProviderQuotaGate,
@@ -47,6 +48,17 @@ export class ProviderQuotaError extends Error {
     )
       throw new Error("provider quota failure conflicts with its reported usage");
     this.usage = { ...usage };
+    return this;
+  }
+
+  get usageRecorded(): boolean {
+    return this.#usageRecorded;
+  }
+
+  /** Mark exact usage only after its invocation-bound durable receipt succeeds. */
+  markUsageRecorded(): this {
+    if (!this.usage) throw new Error("provider quota usage cannot be recorded before it is known");
+    this.#usageRecorded = true;
     return this;
   }
 }

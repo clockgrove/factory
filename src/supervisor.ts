@@ -686,7 +686,7 @@ export async function runDurableCompilationTransaction(args: {
       if (!record) {
         if (error instanceof ManagementOutputError) await args.recordFailureUsage?.(error.usage);
         if (error instanceof ProviderQuotaError) {
-          if (error.usage) await args.recordFailureUsage?.(error.usage);
+          if (error.usage && !error.usageRecorded) await args.recordFailureUsage?.(error.usage);
           await args.recordProviderGate?.(error);
         }
         throw error;

@@ -15,6 +15,8 @@ import {
   CompilerDraftStopError,
   type CompilerDraftCallbacks,
 } from "../src/evaluation/compiler-draft-loop.js";
+import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
+import { ProviderQuotaError } from "../src/providers/quota.js";
 const BASE_SHA = "a".repeat(40);
 const BASE_TREE = "b".repeat(40);
 
@@ -196,6 +198,32 @@ async function setup() {
   return { store, leases, manager, lease, binding, callbacks };
 }
 describe("compiler draft durable repair", () => {
+  it("marks exact provider quota usage as recorded before propagating the gate", async () => {
+    const args = await setup();
+    const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
+    let observed: ProviderQuotaError | undefined;
+    args.callbacks.invoke = async (request) => {
+      throw new ProviderQuotaError(gate, {
+        invocationId: request.invocationId,
+        usage: { inputTokens: 2, outputTokens: 1 },
+      });
+    };
+
+    try {
+      await runCompilerDraftLoop(args);
+    } catch (error) {
+      if (error instanceof ProviderQuotaError) observed = error;
+      else throw error;
+    }
+
+    expect(observed).toMatchObject({ usageRecorded: true });
+    expect(args.callbacks.recordUsage).toHaveBeenCalledExactlyOnceWith(
+      observed!.invocationId,
+      "inventory",
+      observed!.usage,
+    );
+  });
+
   it("uses valid canonical JSON and binds read-only evidence to one run", async () => {
     expect(JSON.parse(canonicalDraftJson({ z: [1, null], a: { b: true } }))).toEqual({
       z: [1, null],

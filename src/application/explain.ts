@@ -118,14 +118,16 @@ export function buildExplanationReport(input: {
     );
   }
   if (providerGate?.kind === "provider") {
+    const terminal = Boolean(run?.terminal);
     explanations.push({
       code: EXPLANATION_CODES.providerQuotaExhausted,
       category: "provider",
       disposition: "blocked",
       summary: providerGate.providerMessage,
       gate: "provider",
-      requiredAction:
-        "No Factory work is active; stop recurring monitoring. Restore the GitHub Copilot quota, then explicitly request recovery through factory_recovery_plan.",
+      requiredAction: terminal
+        ? `No Factory work is active; stop recurring monitoring. Restore quota for provider "${providerGate.provider}"${providerGate.actionUrl ? ` at ${providerGate.actionUrl}` : ""}, then explicitly request recovery through factory_recovery_plan.`
+        : `New model work is blocked, but admitted work and resources may still be reconciling. Continue recurring monitoring until the run has a terminal receipt; do not retry this invocation. Quota for provider "${providerGate.provider}" must be restored before explicit recovery.`,
       evidence: {
         reasonCode: providerGate.reasonCode,
         provider: providerGate.provider,
@@ -137,8 +139,8 @@ export function buildExplanationReport(input: {
         ...(providerGate.actionUrl ? { actionUrl: providerGate.actionUrl } : {}),
         ...(providerGate.workItem !== undefined ? { workItem: providerGate.workItem } : {}),
         ...(providerGate.attempt !== undefined ? { attempt: providerGate.attempt } : {}),
-        factoryWorkActive: false,
-        monitoring: "stop",
+        factoryWorkActive: !terminal,
+        monitoring: terminal ? "stop" : "continue",
       },
     });
   }

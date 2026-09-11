@@ -270,6 +270,29 @@ describe("durable compilation transaction", () => {
     ).rejects.toBe(error);
     expect(calls).toEqual(["usage", "gate"]);
 
+    const alreadyRecorded = new ProviderQuotaError(gate, {
+      invocationId: "draft-compile-base",
+      usage: compilation.usage,
+    }).markUsageRecorded();
+    const duplicateUsage = vi.fn();
+    const recordGate = vi.fn();
+    await expect(
+      runDurableCompilationTransaction({
+        existing: null,
+        invoke: async () => {
+          throw alreadyRecorded;
+        },
+        persist: async () => record(),
+        recover: async () => null,
+        recordUsage: async () => {},
+        recordFailureUsage: duplicateUsage,
+        recordProviderGate: recordGate,
+        preflight: async () => {},
+      }),
+    ).rejects.toBe(alreadyRecorded);
+    expect(duplicateUsage).not.toHaveBeenCalled();
+    expect(recordGate).toHaveBeenCalledExactlyOnceWith(alreadyRecorded);
+
     const unknown = new ProviderQuotaError(gate, { invocationId: "compile-unknown" });
     const recordFailureUsage = vi.fn();
     await expect(

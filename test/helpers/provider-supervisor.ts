@@ -54,6 +54,8 @@ const PNPM_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => i
 const BUN_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(
   ({ id }) => id === "javascript-bun",
 )!.runtimeRequirement!;
+const UV_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "python-uv")!
+  .runtimeRequirement!;
 export interface ProviderFaults {
   compilerEvaluation?: RunPolicy["compilerEvaluation"];
   repositoryFence?: () => Promise<void>;
@@ -91,7 +93,7 @@ export interface ProviderFaults {
   greenfieldLifecycle?: boolean;
   pnpmUnavailable?: boolean;
   capabilityAdmission?: "valid" | "unsafe";
-  capabilityAdapter?: "bun";
+  capabilityAdapter?: "bun" | "uv";
   capabilityProviderLineageMismatch?: boolean;
   capabilityProviderLineageMismatchAfterReservation?: boolean;
   capabilityProviderReservationCommentMismatch?: boolean;
@@ -138,33 +140,66 @@ export async function providerSupervisorFixture(
   if (faults.capabilityAdmission) {
     await mkdir(join(repository, "test"));
     await writeFile(join(repository, "test/check.js"), "// exact-base capability fixture\n");
-    await writeFile(
-      join(repository, "package.json"),
-      JSON.stringify({
-        name: "capability-admission-fixture",
-        version: "1.0.0",
-        private: true,
-        packageManager: faults.capabilityAdapter === "bun" ? "bun@1.3.10" : "pnpm@10.34.5",
-        scripts:
-          faults.capabilityAdapter === "bun"
-            ? { test: "bun test", check: "bun test" }
-            : {
-                test: "node --test test/check.js",
-                check: "node --test test/check.js",
-              },
-      }),
-    );
-    await writeFile(
-      join(repository, faults.capabilityAdapter === "bun" ? "bun.lock" : "pnpm-lock.yaml"),
-      faults.capabilityAdapter === "bun"
-        ? `${JSON.stringify({
-            lockfileVersion: 1,
-            configVersion: 1,
-            workspaces: { "": { name: "capability-admission-fixture" } },
-            packages: {},
-          })}\n`
-        : "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
-    );
+    if (faults.capabilityAdapter === "uv") {
+      await writeFile(
+        join(repository, "pyproject.toml"),
+        `[project]
+name = "capability-admission-fixture"
+requires-python = "==3.14.7"
+dependencies = []
+
+[tool.uv]
+required-version = "==0.12.12"
+package = false
+
+[dependency-groups]
+dev = ["pytest==8.4.2"]
+`,
+      );
+      await writeFile(join(repository, ".python-version"), "3.14.7\n");
+      await writeFile(
+        join(repository, "uv.lock"),
+        `version = 1
+requires-python = "==3.14.7"
+
+[[package]]
+name = "pytest"
+version = "8.4.2"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+  { url = "https://files.pythonhosted.org/pytest.whl", hash = "sha256:${"a".repeat(64)}" },
+]
+`,
+      );
+    } else {
+      await writeFile(
+        join(repository, "package.json"),
+        JSON.stringify({
+          name: "capability-admission-fixture",
+          version: "1.0.0",
+          private: true,
+          packageManager: faults.capabilityAdapter === "bun" ? "bun@1.3.10" : "pnpm@10.34.5",
+          scripts:
+            faults.capabilityAdapter === "bun"
+              ? { test: "bun test", check: "bun test" }
+              : {
+                  test: "node --test test/check.js",
+                  check: "node --test test/check.js",
+                },
+        }),
+      );
+      await writeFile(
+        join(repository, faults.capabilityAdapter === "bun" ? "bun.lock" : "pnpm-lock.yaml"),
+        faults.capabilityAdapter === "bun"
+          ? `${JSON.stringify({
+              lockfileVersion: 1,
+              configVersion: 1,
+              workspaces: { "": { name: "capability-admission-fixture" } },
+              packages: {},
+            })}\n`
+          : "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
+      );
+    }
   }
   if (faults.compilerEvaluation)
     await writeFile(
@@ -186,6 +221,10 @@ export async function providerSupervisorFixture(
     maxAttemptsPerItem: faults.maxAttemptsPerItem ?? 1,
     workItemTimeoutMinutes: 2,
     objectiveTimeoutMinutes: 20,
+    allowedNetworkDestinations:
+      faults.capabilityAdapter === "uv"
+        ? [...DEFAULT_RUN_POLICY.allowedNetworkDestinations, "pypi.org", "files.pythonhosted.org"]
+        : DEFAULT_RUN_POLICY.allowedNetworkDestinations,
     allowedPaidBackends: faults.localOnly ? [] : managed ? [provider, DAYTONA] : [DAYTONA],
     cloudFallback: faults.localOnly ? "never" : "explicit",
     maxSandboxMinutes: 30,
@@ -412,14 +451,42 @@ export async function providerSupervisorFixture(
           : { group: id, relationship: index === 2 ? "join-after-merge" : "root" },
     })),
   };
-  const capabilityAdapter = faults.capabilityAdapter === "bun" ? "javascript-bun" : "node-pnpm";
+  const capabilityAdapter =
+    faults.capabilityAdapter === "bun"
+      ? "javascript-bun"
+      : faults.capabilityAdapter === "uv"
+        ? "python-uv"
+        : "node-pnpm";
   const capabilityRuntime =
-    faults.capabilityAdapter === "bun" ? BUN_RUNTIME_REQUIREMENT : PNPM_RUNTIME_REQUIREMENT;
-  const capabilityLock = faults.capabilityAdapter === "bun" ? "bun.lock" : "pnpm-lock.yaml";
-  const capabilityRunner = faults.capabilityAdapter === "bun" ? "bun" : "pnpm";
-  const capabilityTestCommand = faults.capabilityAdapter === "bun" ? "bun run test" : "pnpm test";
+    faults.capabilityAdapter === "bun"
+      ? BUN_RUNTIME_REQUIREMENT
+      : faults.capabilityAdapter === "uv"
+        ? UV_RUNTIME_REQUIREMENT
+        : PNPM_RUNTIME_REQUIREMENT;
+  const capabilityAuthorityPaths =
+    faults.capabilityAdapter === "uv"
+      ? ["pyproject.toml", "uv.lock", ".python-version"]
+      : ["package.json", faults.capabilityAdapter === "bun" ? "bun.lock" : "pnpm-lock.yaml"];
+  const capabilityRunner = faults.capabilityAdapter ?? "pnpm";
+  const capabilityTestCommand =
+    faults.capabilityAdapter === "bun"
+      ? "bun run test"
+      : faults.capabilityAdapter === "uv"
+        ? "uv run --locked --no-sync python -m pytest"
+        : "pnpm test";
   const capabilityCheckCommand =
-    faults.capabilityAdapter === "bun" ? "bun run check" : "pnpm check";
+    faults.capabilityAdapter === "bun"
+      ? "bun run check"
+      : faults.capabilityAdapter === "uv"
+        ? "uv run --locked --no-sync python -m pytest"
+        : "pnpm check";
+  const capabilityOperations =
+    faults.capabilityAdapter === "uv"
+      ? [{ kind: "python-test" as const, key: "." }]
+      : [
+          { kind: "package-script" as const, key: "check" },
+          { kind: "package-script" as const, key: "test" },
+        ];
   const capabilityGraph: CompiledObjective = {
     title: "Exact-base capability admission qualification",
     workItems: [
@@ -429,12 +496,15 @@ export async function providerSupervisorFixture(
         title: "Integrate provider ancestry",
         goal: "Create provider.txt containing provider",
         acceptance: ["provider.txt has the expected text"],
-        scope: ["provider.txt", "package.json", capabilityLock, "test/"],
+        scope: ["provider.txt", ...capabilityAuthorityPaths, "test/"],
         validationCommands: [capabilityTestCommand],
         requirements: {
           ...ordinaryGraph.workItems[0]!.requirements!,
           tools: ["node", capabilityRunner],
-          networkDestinations: ["registry.npmjs.org"],
+          networkDestinations:
+            faults.capabilityAdapter === "uv"
+              ? ["pypi.org", "files.pythonhosted.org"]
+              : ["registry.npmjs.org"],
         },
         managedRuntimes: [capabilityRuntime],
         dependsOn: [],
@@ -444,11 +514,8 @@ export async function providerSupervisorFixture(
             {
               adapter: capabilityAdapter,
               generation: `${capabilityAdapter}/provider`,
-              authorityPaths: ["package.json", capabilityLock],
-              operations: [
-                { kind: "package-script", key: "check" },
-                { kind: "package-script", key: "test" },
-              ],
+              authorityPaths: capabilityAuthorityPaths,
+              operations: capabilityOperations,
               runtime: capabilityRuntime,
             },
           ],
@@ -457,8 +524,11 @@ export async function providerSupervisorFixture(
               adapter: capabilityAdapter,
               generation: `${capabilityAdapter}/provider`,
               providerWorkItem: "provider",
-              authorityPaths: ["package.json", capabilityLock],
-              operation: { kind: "package-script", key: "test" },
+              authorityPaths: capabilityAuthorityPaths,
+              operation:
+                faults.capabilityAdapter === "uv"
+                  ? { kind: "python-test", key: "." }
+                  : { kind: "package-script", key: "test" },
               activation: "artifact",
               runtime: capabilityRuntime,
             },
@@ -476,7 +546,10 @@ export async function providerSupervisorFixture(
         requirements: {
           ...ordinaryGraph.workItems[1]!.requirements!,
           tools: ["node", capabilityRunner],
-          networkDestinations: ["registry.npmjs.org"],
+          networkDestinations:
+            faults.capabilityAdapter === "uv"
+              ? ["pypi.org", "files.pythonhosted.org"]
+              : ["registry.npmjs.org"],
         },
         managedRuntimes: [capabilityRuntime],
         dependsOn: ["provider"],
@@ -488,8 +561,11 @@ export async function providerSupervisorFixture(
               adapter: capabilityAdapter,
               generation: `${capabilityAdapter}/provider`,
               providerWorkItem: "provider",
-              authorityPaths: ["package.json", capabilityLock],
-              operation: { kind: "package-script", key: "check" },
+              authorityPaths: capabilityAuthorityPaths,
+              operation:
+                faults.capabilityAdapter === "uv"
+                  ? { kind: "python-test", key: "." }
+                  : { kind: "package-script", key: "check" },
               activation: "integrated-base",
               runtime: capabilityRuntime,
             },
@@ -1180,7 +1256,7 @@ export async function providerSupervisorFixture(
       supportedTools:
         !faults.pnpmUnavailable &&
         (faults.greenfieldBootstrap || faults.greenfieldLifecycle || faults.capabilityAdmission)
-          ? ["node", faults.capabilityAdapter === "bun" ? "bun" : "pnpm"]
+          ? ["node", faults.capabilityAdapter ?? "pnpm"]
           : ["node"],
       supportedServices: [],
       supportsCancellation: true,

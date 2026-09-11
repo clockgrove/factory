@@ -37,7 +37,14 @@ function admitLocalValidation(version = "10.34.5") {
     .mockImplementation(async (_identity, command) => ({
       exitCode: 0,
       signal: null,
-      stdout: command.args?.[0] === "--version" ? `${version}\n` : "",
+      stdout:
+        command.args?.[0] === "--version"
+          ? version === "0.12.12"
+            ? command.command.includes("python")
+              ? "Python 3.14.7\n"
+              : "uv 0.12.12\n"
+            : `${version}\n`
+          : "",
       stderr: "",
       durationMs: 1,
       timedOut: false,
@@ -83,6 +90,73 @@ async function provisionBunFixture(): Promise<void> {
   await rm(assets, { recursive: true, force: true });
 }
 
+async function provisionUvFixture(): Promise<void> {
+  const assets = await mkdtemp(join(tmpdir(), "factory-uv-supervisor-assets-"));
+  const uvTree = join(assets, "uv-tree");
+  const pythonTree = join(assets, "python-tree");
+  await mkdir(join(uvTree, "uv-x86_64-unknown-linux-gnu"), { recursive: true });
+  await mkdir(join(pythonTree, "python/bin"), { recursive: true });
+  await writeFile(
+    join(uvTree, "uv-x86_64-unknown-linux-gnu/uv"),
+    "#!/bin/sh\nprintf 'uv 0.12.12\\n'\n",
+  );
+  await writeFile(join(pythonTree, "python/bin/python3"), "#!/bin/sh\nprintf 'Python 3.14.7\\n'\n");
+  const uvArchive = join(assets, "uv.tar.gz");
+  const pythonArchive = join(assets, "python.tar.gz");
+  execFileSync("tar", ["-czf", uvArchive, "-C", uvTree, "uv-x86_64-unknown-linux-gnu"]);
+  execFileSync("tar", ["-czf", pythonArchive, "-C", pythonTree, "python"]);
+  const uvBytes = await readFile(uvArchive);
+  const pythonBytes = await readFile(pythonArchive);
+  const uvName = "uv-x86_64-unknown-linux-gnu.tar.gz";
+  const pythonName =
+    "cpython-3.14.7+20260910-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz";
+  const uvRelease = {
+    id: 291,
+    tag: "0.12.12",
+    draft: false,
+    prerelease: false,
+    publishedAt: "2026-09-10T00:00:00.000Z",
+    assets: [
+      {
+        id: 2910,
+        name: uvName,
+        url: "https://api.github.test/assets/2910",
+        browserDownloadUrl: `https://github.com/astral-sh/uv/releases/download/0.12.12/${uvName}`,
+        size: uvBytes.byteLength,
+        digest: `sha256:${sha256Bytes(uvBytes)}`,
+      },
+    ],
+  };
+  const pythonRelease = {
+    id: 2911,
+    tag: "20260910",
+    draft: false,
+    prerelease: false,
+    publishedAt: "2026-09-10T00:00:00.000Z",
+    assets: [
+      {
+        id: 2912,
+        name: pythonName,
+        url: "https://api.github.test/assets/2912",
+        browserDownloadUrl: `https://github.com/astral-sh/python-build-standalone/releases/download/20260910/${pythonName}`,
+        size: pythonBytes.byteLength,
+        digest: `sha256:${sha256Bytes(pythonBytes)}`,
+      },
+    ],
+  };
+  await provisionToolchain("uv", {
+    source: {
+      listReleases: async (_owner, repository) =>
+        repository === "python-build-standalone" ? [pythonRelease] : [uvRelease],
+      listReleaseAssets: async (_owner, repository) =>
+        repository === "python-build-standalone" ? pythonRelease.assets : uvRelease.assets,
+      downloadAsset: async (_owner, repository) =>
+        repository === "python-build-standalone" ? pythonBytes : uvBytes,
+    },
+  });
+  await rm(assets, { recursive: true, force: true });
+}
+
 async function installAlternativePnpmReceipt(
   source: RuntimeBundleReceipt,
 ): Promise<RuntimeBundleReceipt> {
@@ -104,6 +178,41 @@ async function installAlternativePnpmReceipt(
 }
 
 describe("Supervisor repository-capability admission", () => {
+  it("runs a uv provider through integration before its exact-base consumer", async () => {
+    await provisionUvFixture();
+    const fixture = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      localMaxParallel: 2,
+      capabilityAdmission: "valid",
+      capabilityAdapter: "uv",
+    });
+    fixtures.push(fixture);
+    const scoped = admitLocalValidation("0.12.12");
+    try {
+      const result = await fixture.run();
+      expect(result, result.reason).toMatchObject({ status: "completed" });
+      const providerIntegrated = fixture
+        .events()
+        .find(
+          (event) =>
+            event.kind === "attempt" && event.event === "AttemptIntegrated" && event.workItem === 8,
+        );
+      const consumerReserved = fixture
+        .events()
+        .find(
+          (event) =>
+            event.kind === "attempt" && event.event === "AttemptReserved" && event.workItem === 9,
+        );
+      expect(providerIntegrated).toBeDefined();
+      expect(consumerReserved).toBeDefined();
+      expect(consumerReserved!.sequence).toBeGreaterThan(providerIntegrated!.sequence);
+      expect(fixture.events().filter((event) => event.event === "GraphCompiled")).toHaveLength(1);
+      expect(scoped).toHaveBeenCalled();
+    } finally {
+      scoped.mockRestore();
+    }
+  }, 30_000);
+
   it("runs a Bun provider through integration before its exact-base consumer", async () => {
     await provisionBunFixture();
     const fixture = await providerSupervisorFixture("daytona-burst", {

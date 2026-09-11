@@ -184,7 +184,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["tool", "adapter", "adapterContract", "platform", "releaseChannel"],
       "properties": {
-        "tool": { "enum": ["pnpm", "bun"] },
+        "tool": { "enum": ["pnpm", "bun", "uv"] },
         "adapter": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
         "adapterContract": { "type": "integer", "minimum": 1, "maximum": 1000 },
         "platform": {

@@ -38,6 +38,14 @@ import {
   createBunManagedExecutionPlan,
   inspectBunAuthority,
 } from "./bun.js";
+import {
+  inspectUvAuthority,
+  loadUvAuthoritySurface,
+  createUvManagedToolchainPlan,
+  parseUvPytestCommand,
+  UV_ADAPTER_ID,
+  uvPytestOperation,
+} from "./uv.js";
 
 export type ToolchainProvisioning =
   | "host-observed"
@@ -172,7 +180,10 @@ export function adapterNetworkDestinations(adapter: ToolchainAuthorityAdapter): 
   ];
 }
 
-const runtimeRequirement = (tool: "pnpm" | "bun", adapter: string): RuntimeBundleRequirement => ({
+const runtimeRequirement = (
+  tool: "pnpm" | "bun" | "uv",
+  adapter: string,
+): RuntimeBundleRequirement => ({
   tool,
   adapter,
   adapterContract: 1,
@@ -344,6 +355,20 @@ function bunIsolatedPlan(
     assets: isolatedAssets(receipt),
   });
   return legacyManagedProjection("bun", receipt, plan);
+}
+
+function uvIsolatedPlan(
+  commands: readonly string[] = [],
+  receipt?: RuntimeBundleReceipt,
+): IsolatedManagedToolchainPlan {
+  if (!receipt) throw new Error("uv isolated execution lacks an exact activated runtime");
+  const plan = createUvManagedToolchainPlan({
+    receipt,
+    privateRoot: "/tmp/factory-toolchain",
+    commands,
+    assets: isolatedAssets(receipt),
+  });
+  return legacyManagedProjection("uv", receipt, plan);
 }
 
 function canonical(value: unknown): string {
@@ -881,8 +906,91 @@ async function resolveBunIntegratedBase(
   );
 }
 
+async function resolveUvIntegratedBase(
+  input: IntegratedCapabilityResolutionInput,
+): Promise<RepositoryCapabilityProof[]> {
+  const adapter = toolchainAdapterById(UV_ADAPTER_ID)!;
+  assertCanonicalManagedRequirements(input, adapter);
+  const runtime = await runtimeForRequirements(input.requirements, adapter, input.packet);
+  const uv = runtime.components.find(({ id }) => id === "uv");
+  const python = runtime.components.find(({ id }) => id === "python");
+  if (!uv || !python) throw new Error("uv runtime bundle must contain uv and Python components");
+  const { createLocalWorktree, cleanupLocalWorktree } = await import(
+    "../runtime/local-worktree.js"
+  );
+  const inspect = async (
+    commitSha: string,
+  ): Promise<{ authorityDigest: string; authorityPaths: string[] }> => {
+    const worktree = await createLocalWorktree(input.repository, commitSha);
+    try {
+      const commands = input.requirements.map((requirement) => {
+        const command = parseUvPytestCommand(
+          commandForOperation(adapter, input.packet, requirement.operation),
+        );
+        if (!command) throw new Error("uv operation does not match its canonical pytest command");
+        return command;
+      });
+      const { files, repositoryPaths } = await loadUvAuthoritySurface(
+        worktree.path,
+        commands.map(({ projectDirectory }) => projectDirectory),
+      );
+      const inspections = commands.map((command) => {
+        return inspectUvAuthority({
+          command,
+          files,
+          repositoryPaths,
+          uvVersion: uv.version,
+          pythonVersion: python.version,
+        });
+      });
+      const authorityPaths = [
+        ...new Set(inspections.flatMap(({ authorityPaths }) => authorityPaths)),
+      ].sort();
+      if (authorityPaths.some((path) => !input.provider.scope.includes(path)))
+        throw new Error("uv authority includes a path outside its provider scope");
+      return {
+        authorityDigest: await authorityDigestForPaths(worktree.path, authorityPaths),
+        authorityPaths,
+      };
+    } finally {
+      await cleanupLocalWorktree(worktree);
+    }
+  };
+  const providerAuthority = await inspect(input.provider.integration.commitSha);
+  const currentAuthority =
+    input.provider.integration.commitSha === input.base.oid
+      ? providerAuthority
+      : await inspect(input.base.oid);
+  if (
+    providerAuthority.authorityDigest !== currentAuthority.authorityDigest ||
+    canonical(providerAuthority.authorityPaths) !== canonical(currentAuthority.authorityPaths)
+  )
+    throw new Error("uv authority bytes changed after the declared provider generation");
+  const authorityDigest = providerAuthority.authorityDigest;
+  const preparationDigest = createHash("sha256")
+    .update(
+      canonical({
+        setup: adapter.setupCommands,
+        network: adapterNetworkDestinations(adapter),
+        environment: "isolated-uv-python-v1",
+      }),
+    )
+    .digest("hex");
+  return input.requirements.map((requirement) =>
+    capabilityProof(
+      input,
+      requirement,
+      receiptIdentity(runtime),
+      runtime.digest,
+      authorityDigest,
+      preparationDigest,
+      providerAuthority.authorityPaths,
+    ),
+  );
+}
+
 async function withProvisionedToolPath(
-  tool: "pnpm" | "bun",
+  tool: "pnpm" | "bun" | "uv",
   source: NodeJS.ProcessEnv,
   privateRoot: string,
   receipt: RuntimeBundleReceipt,
@@ -910,6 +1018,11 @@ async function withProvisionedToolPath(
   await ensureShim(tool, primary.executable);
   const managedNode = components.find(({ component }) => component.id === "node");
   if (managedNode) await ensureShim("node", managedNode.executable);
+  if (tool === "uv") {
+    const python = components.find(({ component }) => component.id === "python");
+    if (!python) throw new Error("uv runtime bundle lacks its Python executable");
+    await ensureShim("python", python.executable);
+  }
   return { ...source, PATH: `${bin}${delimiter}${source.PATH ?? "/usr/bin:/bin"}` };
 }
 
@@ -969,6 +1082,28 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
     available: async () => (await toolchainStatus("bun")).state === "ready",
     prepareEnvironment: (source, privateRoot, receipt) =>
       withProvisionedToolPath("bun", source, privateRoot, receipt),
+  },
+  {
+    id: UV_ADAPTER_ID,
+    runner: "uv",
+    provisioning: "factory-provisioned",
+    deferredOperations: true,
+    futurePackageScripts: false,
+    requiredRootPaths: ["pyproject.toml", "uv.lock", ".python-version"],
+    setupCommands: [
+      "uv --version",
+      "python --version",
+      "uv sync --locked --no-build --no-install-workspace",
+    ],
+    networkDestination: "pypi.org",
+    additionalNetworkDestinations: ["files.pythonhosted.org"],
+    runtimeRequirement: runtimeRequirement("uv", UV_ADAPTER_ID),
+    operation: uvPytestOperation,
+    resolveIntegratedBase: resolveUvIntegratedBase,
+    isolatedPlan: uvIsolatedPlan,
+    available: async () => (await toolchainStatus("uv")).state === "ready",
+    prepareEnvironment: (source, privateRoot, receipt) =>
+      withProvisionedToolPath("uv", source, privateRoot, receipt),
   },
   {
     id: "rust-cargo",

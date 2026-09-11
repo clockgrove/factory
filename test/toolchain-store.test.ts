@@ -345,6 +345,179 @@ describe("managed toolchain store", () => {
     expect((await runtimeBundleByDigest("pnpm", first.digest, root)).digest).toBe(first.digest);
     expect((await activeRuntimeBundle("pnpm", root)).digest).toBe(second.digest);
   });
+  it("provisions uv and the latest stable CPython from distinct official GA assets", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-toolchain-store-"));
+    const archives = await mkdtemp(join(tmpdir(), "factory-toolchain-assets-"));
+    roots.push(root, archives);
+    const uvTree = join(archives, "uv-tree");
+    const pythonTree = join(archives, "python-tree");
+    await mkdir(join(uvTree, "uv-x86_64-unknown-linux-gnu"), { recursive: true });
+    await mkdir(join(pythonTree, "python/bin"), { recursive: true });
+    await writeFile(
+      join(uvTree, "uv-x86_64-unknown-linux-gnu/uv"),
+      "#!/bin/sh\nprintf 'uv 0.12.12\\n'\n",
+    );
+    await writeFile(
+      join(pythonTree, "python/bin/python3"),
+      "#!/bin/sh\nprintf 'Python 3.14.7\\n'\n",
+    );
+    const uvArchive = join(archives, "uv.tar.gz");
+    const pythonArchive = join(archives, "python.tar.gz");
+    execFileSync("tar", ["-czf", uvArchive, "-C", uvTree, "uv-x86_64-unknown-linux-gnu"]);
+    execFileSync("tar", ["-czf", pythonArchive, "-C", pythonTree, "python"]);
+    const uvBytes = await readFile(uvArchive);
+    const pythonBytes = await readFile(pythonArchive);
+    const release = (id: number, tag: string, name: string, bytes: Buffer): GitHubRelease => ({
+      id,
+      tag,
+      draft: false,
+      prerelease: false,
+      publishedAt: "2026-09-01T00:00:00.000Z",
+      assets: [
+        {
+          id: id * 10,
+          name,
+          url: `https://api.github.test/assets/${id * 10}`,
+          browserDownloadUrl: name.startsWith("uv-")
+            ? `https://github.com/astral-sh/uv/releases/download/${tag}/${name}`
+            : `https://github.com/astral-sh/python-build-standalone/releases/download/${tag}/${name}`,
+          size: bytes.byteLength,
+          digest: `sha256:${digest(bytes)}`,
+        },
+      ],
+    });
+    const uvRelease = release(1, "0.12.12", "uv-x86_64-unknown-linux-gnu.tar.gz", uvBytes);
+    const pythonRelease = release(
+      2,
+      "20260901",
+      "cpython-3.14.7+20260901-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      pythonBytes,
+    );
+    const receipt = await provisionToolchain("uv", {
+      root,
+      source: {
+        listReleases: async (_owner, repository) =>
+          repository === "python-build-standalone" ? [pythonRelease] : [uvRelease],
+        listReleaseAssets: async (_owner, repository) =>
+          repository === "python-build-standalone" ? pythonRelease.assets : uvRelease.assets,
+        downloadAsset: async (_owner, repository) =>
+          repository === "python-build-standalone" ? pythonBytes : uvBytes,
+      },
+    });
+    expect(receipt.components.map(({ id, version }) => ({ id, version }))).toEqual([
+      { id: "uv", version: "0.12.12" },
+      { id: "python", version: "3.14.7" },
+    ]);
+    expect(receipt.components[1]).toMatchObject({
+      release: { provider: "github", repository: "astral-sh/python-build-standalone" },
+      asset: { sha256: digest(pythonBytes), archive: "tar.gz" },
+    });
+    await expect(runtimeBundleByDigest("uv", receipt.digest, root)).resolves.toMatchObject({
+      digest: receipt.digest,
+    });
+    await rm(join(root, "bundles", receipt.digest), { recursive: true });
+    let latestLookups = 0;
+    const restored = await restoreToolchain(receipt, {
+      root,
+      source: {
+        listReleases: async () => {
+          latestLookups += 1;
+          throw new Error("exact restore must not resolve latest");
+        },
+        downloadAsset: async (_owner, repository) =>
+          repository === "python-build-standalone" ? pythonBytes : uvBytes,
+      },
+    });
+    expect(restored.digest).toBe(receipt.digest);
+    expect(latestLookups).toBe(0);
+  });
+
+  it("fails closed when the newest python-build-standalone GA lacks its asset", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-toolchain-store-"));
+    roots.push(root);
+    const bytes = Buffer.from("uv", "utf8");
+    const uvRelease: GitHubRelease = {
+      id: 1,
+      tag: "0.12.12",
+      draft: false,
+      prerelease: false,
+      publishedAt: "2026-09-01T00:00:00.000Z",
+      assets: [
+        {
+          id: 10,
+          name: "uv-x86_64-unknown-linux-gnu.tar.gz",
+          url: "https://api.github.test/assets/10",
+          browserDownloadUrl:
+            "https://github.com/astral-sh/uv/releases/download/0.12.12/uv-x86_64-unknown-linux-gnu.tar.gz",
+          size: bytes.length,
+          digest: `sha256:${digest(bytes)}`,
+        },
+      ],
+    };
+    const pythonRelease = (
+      id: number,
+      tag: string,
+      assets: GitHubRelease["assets"],
+    ): GitHubRelease => ({
+      id,
+      tag,
+      draft: false,
+      prerelease: false,
+      publishedAt: `${tag.slice(0, 4)}-${tag.slice(4, 6)}-${tag.slice(6)}T00:00:00.000Z`,
+      assets,
+    });
+    await expect(
+      provisionToolchain("uv", {
+        root,
+        source: {
+          listReleases: async (_owner, repository) =>
+            repository === "python-build-standalone"
+              ? [
+                  pythonRelease(3, "20260910", []),
+                  pythonRelease(2, "20260901", [
+                    {
+                      id: 20,
+                      name: "cpython-3.14.7+20260901-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+                      url: "https://api.github.test/assets/20",
+                      browserDownloadUrl: "https://github.test/python.tar.gz",
+                      size: 1,
+                      digest: `sha256:${"b".repeat(64)}`,
+                    },
+                  ]),
+                ]
+              : [uvRelease],
+          downloadAsset: async () => bytes,
+        },
+      }),
+    ).rejects.toThrow(/latest Python GA has no supported CPython/);
+
+    const pythonName =
+      "cpython-3.14.7+20260910-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz";
+    await expect(
+      provisionToolchain("uv", {
+        root,
+        source: {
+          listReleases: async (_owner, repository) =>
+            repository === "python-build-standalone"
+              ? [
+                  pythonRelease(3, "20260910", [
+                    {
+                      id: 30,
+                      name: pythonName,
+                      url: "https://api.github.test/assets/30",
+                      browserDownloadUrl: `https://attacker.invalid/${pythonName}`,
+                      size: 1,
+                      digest: `sha256:${"b".repeat(64)}`,
+                    },
+                  ]),
+                ]
+              : [uvRelease],
+          downloadAsset: async () => bytes,
+        },
+      }),
+    ).rejects.toThrow(/unsupported official origin identity/);
+  });
+
   it("provisions the baseline Bun GA zip without consulting ambient Bun", async () => {
     const root = await mkdtemp(join(tmpdir(), "factory-toolchain-store-"));
     const assets = await mkdtemp(join(tmpdir(), "factory-toolchain-assets-"));

@@ -304,7 +304,8 @@ for (const executable of config.executables) {
   if (executable.kind === "generated") {
     const path = resolve(executable.relativePath);
     if (!path.startsWith("/tmp/factory-toolchain/")) throw new Error("generated executable escaped the private runtime root");
-    executables[executable.id] = { path, argsPrefix: executable.argsPrefix, generated: true };
+    if (typeof executable.generatedFrom !== "string") throw new Error("generated executable lacks its verified source");
+    executables[executable.id] = { path, argsPrefix: executable.argsPrefix, generated: true, generatedFrom: executable.generatedFrom };
     continue;
   }
   const assetPath = assetExecutables.get(executable.assetId);
@@ -505,7 +506,7 @@ export function sandboxValidationFiles(
     ),
   };
   const validator = String.raw`import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const root = new URL(".", import.meta.url).pathname;
@@ -547,7 +548,13 @@ function executeManagedStep(step, setup) {
   const executable = managedPaths.executables[step.executableId];
   if (!executable) throw new Error("managed command names an unknown executable");
   if (!Array.isArray(step.args) || step.args.some(arg => typeof arg !== "string")) throw new Error("managed command argv is invalid");
-  if (executable.generated && (!existsSync(executable.path) || !lstatSync(executable.path).isFile())) throw new Error("generated managed executable is missing");
+  if (executable.generated) {
+    if (!existsSync(executable.path)) throw new Error("generated managed executable is missing");
+    const resolved = realpathSync(executable.path);
+    if (!resolved.startsWith("/tmp/factory-toolchain/") || !statSync(resolved).isFile()) throw new Error("generated managed executable escaped the private runtime root");
+    const source = managedPaths.executables[executable.generatedFrom];
+    if (!source || source.generated || realpathSync(source.path) !== resolved) throw new Error("generated managed executable differs from its verified source");
+  }
   const python = managedPaths.executables.python?.path;
   const args = [...executable.argsPrefix, ...step.args.map(arg => arg === "__FACTORY_PYTHON__" ? python : arg)];
   if (args.some(arg => typeof arg !== "string")) throw new Error("managed command requires an unavailable Python executable");

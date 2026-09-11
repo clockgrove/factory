@@ -32,9 +32,14 @@ import {
   validationSetupCommandCount,
 } from "../src/toolchains/authority.js";
 
-async function installManagedFixture(): Promise<RuntimeBundleReceipt> {
-  const tool = "bun" as const;
-  const specifications = [{ id: "bun", version: "1.3.10", executablePath: "bun/bin/bun" }];
+async function installManagedFixture(tool: "bun" | "uv"): Promise<RuntimeBundleReceipt> {
+  const specifications =
+    tool === "bun"
+      ? [{ id: "bun", version: "1.3.10", executablePath: "bun/bin/bun" }]
+      : [
+          { id: "uv", version: "0.12.12", executablePath: "uv/bin/uv" },
+          { id: "python", version: "3.14.7", executablePath: "python/bin/python3" },
+        ];
   const scratch = await mkdtemp(join(tmpdir(), `factory-${tool}-authority-plan-`));
   const components = [];
   for (const specification of specifications) {
@@ -70,7 +75,7 @@ async function installManagedFixture(): Promise<RuntimeBundleReceipt> {
   const unsigned = {
     protocol: "clockgrove.factory/toolchain-runtime-bundle-v1" as const,
     tool,
-    adapter: "javascript-bun",
+    adapter: tool === "bun" ? "javascript-bun" : "python-uv",
     adapterContract: 1,
     platform: SUPPORTED_RUNTIME_PLATFORM,
     components,
@@ -125,6 +130,7 @@ describe("toolchain authority adapters", () => {
         { runner: "npm", provisioning: "host-observed", future: false },
         { runner: "pnpm", provisioning: "factory-provisioned", future: true },
         { runner: "bun", provisioning: "factory-provisioned", future: true },
+        { runner: "uv", provisioning: "factory-provisioned", future: true },
         { runner: "cargo", provisioning: "host-observed", future: false },
         { runner: "go", provisioning: "host-observed", future: false },
         { runner: "python", provisioning: "host-observed", future: false },
@@ -132,57 +138,120 @@ describe("toolchain authority adapters", () => {
     );
   });
 
-  it("uses the adapter-owned Bun plan in production isolation", async () => {
-    const receipt = await installManagedFixture();
-    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "javascript-bun")!;
-    const plan = isolatedManagedToolchainPlan(
-      ["bun run test"],
-      [
-        {
-          ...adapter.runtimeRequirement!,
-          bundleDigest: receipt.digest,
-        },
-      ],
-    );
+  it.each([
+    {
+      tool: "bun" as const,
+      adapter: "javascript-bun",
+      commands: ["bun run test"],
+      setup: "bun install --frozen-lockfile",
+    },
+    {
+      tool: "uv" as const,
+      adapter: "python-uv",
+      commands: ["uv run --locked --no-sync python -m pytest"],
+      setup: "uv sync --locked",
+    },
+  ])("uses the adapter-owned $tool plan in production isolation", async (fixture) => {
+    const receipt = await installManagedFixture(fixture.tool);
+    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === fixture.adapter)!;
+    const plan = isolatedManagedToolchainPlan(fixture.commands, [
+      {
+        ...adapter.runtimeRequirement!,
+        bundleDigest: receipt.digest,
+      },
+    ]);
     expect(plan?.plan.environment.PATH).toBe("/tmp/factory-toolchain/bin");
-    expect(
-      plan?.plan.setup.some(({ display }) => display.startsWith("bun install --frozen-lockfile")),
-    ).toBe(true);
+    expect(plan?.plan.setup.some(({ display }) => display.startsWith(fixture.setup))).toBe(true);
     expect(plan?.plan.setup.map(({ display }) => display)).toEqual(adapter.setupCommands);
     expect(plan?.plan.assets.every(({ treeSha256 }) => /^[a-f0-9]{64}$/.test(treeSha256))).toBe(
       true,
     );
   });
 
-  it("rejects Bun authority changed after its provider generation", async () => {
-    const receipt = await installManagedFixture();
-    const repository = await mkdtemp(join(tmpdir(), "factory-bun-provider-proof-"));
+  it.each([
+    {
+      tool: "bun" as const,
+      adapterId: "javascript-bun",
+      command: "bun --cwd packages/api run test",
+      authorityPaths: ["package.json", "bun.lock"],
+      discoveredAuthorityPath: "packages/api/package.json",
+      files: {
+        "package.json": JSON.stringify({
+          name: "proof",
+          version: "1.0.0",
+          packageManager: "bun@1.3.10",
+          workspaces: ["packages/*"],
+        }),
+        "packages/api/package.json": JSON.stringify({
+          name: "api",
+          version: "1.0.0",
+          scripts: { test: "bun test" },
+        }),
+        "bun.lock": JSON.stringify({
+          lockfileVersion: 1,
+          configVersion: 1,
+          workspaces: { "": { name: "proof" }, "packages/api": { name: "api" } },
+          packages: { api: ["api@workspace:packages/api"] },
+        }),
+      },
+      changedPath: "package.json",
+      changedContent: JSON.stringify({
+        name: "proof",
+        version: "1.0.0",
+        packageManager: "bun@1.3.10",
+        description: "authority drift",
+        workspaces: ["packages/*"],
+      }),
+      tools: ["bun"],
+      networkDestinations: ["registry.npmjs.org"],
+      expected: /Bun authority bytes changed/,
+    },
+    {
+      tool: "uv" as const,
+      adapterId: "python-uv",
+      command: "uv run --locked --no-sync python -m pytest",
+      authorityPaths: ["pyproject.toml", "uv.lock", ".python-version"],
+      files: {
+        "pyproject.toml": `[project]\nname = "proof"\nrequires-python = "==3.14.7"\ndependencies = []\n\n[tool.uv]\nrequired-version = "==0.12.12"\npackage = false\n\n[dependency-groups]\ndev = ["pytest==8.4.2"]\n`,
+        "uv.lock": `version = 1\nrequires-python = "==3.14.7"\n\n[[package]]\nname = "pytest"\nversion = "8.4.2"\nsource = { registry = "https://pypi.org/simple" }\nwheels = [{ url = "https://files.pythonhosted.org/packages/pytest.whl", hash = "sha256:${"a".repeat(64)}" }]\n`,
+        ".python-version": "3.14.7\n",
+      },
+      changedPath: "pyproject.toml",
+      changedContent: `[project]\nname = "proof"\ndescription = "authority drift"\nrequires-python = "==3.14.7"\ndependencies = []\n\n[tool.uv]\nrequired-version = "==0.12.12"\npackage = false\n\n[dependency-groups]\ndev = ["pytest==8.4.2"]\n`,
+      tools: ["uv", "python"],
+      networkDestinations: ["pypi.org", "files.pythonhosted.org"],
+      expected: /uv authority bytes changed/,
+    },
+    {
+      tool: "uv" as const,
+      adapterId: "python-uv",
+      command: "uv run --project packages/api --locked --no-sync python -m pytest",
+      authorityPaths: ["pyproject.toml", "uv.lock", ".python-version"],
+      files: {
+        "pyproject.toml": `[project]\nname = "root"\n\n[tool.uv]\nrequired-version = "==0.12.12"\npackage = false\n\n[tool.uv.workspace]\nmembers = ["packages/api", "packages/shared"]\n`,
+        "packages/api/pyproject.toml": `[project]\nname = "api"\nrequires-python = "==3.14.7"\ndependencies = []\n\n[tool.uv]\npackage = false\n\n[dependency-groups]\ndev = ["pytest==8.4.2"]\n`,
+        "packages/shared/pyproject.toml": `[project]\nname = "shared"\nrequires-python = "==3.14.7"\ndependencies = []\n\n[tool.uv]\npackage = false\n`,
+        "uv.lock": `version = 1\nrequires-python = "==3.14.7"\n\n[[package]]\nname = "root"\nversion = "1.0.0"\nsource = { virtual = "." }\n\n[[package]]\nname = "api"\nversion = "1.0.0"\nsource = { virtual = "packages/api" }\n\n[[package]]\nname = "shared"\nversion = "1.0.0"\nsource = { virtual = "packages/shared" }\n\n[[package]]\nname = "pytest"\nversion = "8.4.2"\nsource = { registry = "https://pypi.org/simple" }\nwheels = [{ url = "https://files.pythonhosted.org/packages/pytest.whl", hash = "sha256:${"a".repeat(64)}" }]\n`,
+        ".python-version": "3.14.7\n",
+      },
+      changedPath: "pyproject.toml",
+      changedContent: `[project]\nname = "root"\ndescription = "authority drift"\n\n[tool.uv]\nrequired-version = "==0.12.12"\npackage = false\n\n[tool.uv.workspace]\nmembers = ["packages/api", "packages/shared"]\n`,
+      tools: ["uv", "python"],
+      networkDestinations: ["pypi.org", "files.pythonhosted.org"],
+      expected: /uv authority includes a path outside its provider scope/,
+    },
+  ])("rejects $tool authority changed after its provider generation", async (fixture) => {
+    const receipt = await installManagedFixture(fixture.tool);
+    const repository = await mkdtemp(join(tmpdir(), `factory-${fixture.tool}-provider-proof-`));
     execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repository });
     execFileSync("git", ["config", "user.name", "Factory Test"], { cwd: repository });
     execFileSync("git", ["config", "user.email", "factory@example.invalid"], {
       cwd: repository,
     });
-    const manifest = {
-      name: "proof",
-      version: "1.0.0",
-      packageManager: "bun@1.3.10",
-      workspaces: ["packages/*"],
-    };
-    await writeFile(join(repository, "package.json"), JSON.stringify(manifest));
-    await mkdir(join(repository, "packages/api"), { recursive: true });
-    await writeFile(
-      join(repository, "packages/api/package.json"),
-      JSON.stringify({ name: "api", version: "1.0.0", scripts: { test: "bun test" } }),
-    );
-    await writeFile(
-      join(repository, "bun.lock"),
-      JSON.stringify({
-        lockfileVersion: 1,
-        configVersion: 1,
-        workspaces: { "": { name: "proof" }, "packages/api": { name: "api" } },
-        packages: { api: ["api@workspace:packages/api"] },
-      }),
-    );
+    for (const [path, content] of Object.entries(fixture.files)) {
+      await mkdir(dirname(join(repository, path)), { recursive: true });
+      await writeFile(join(repository, path), content);
+    }
     execFileSync("git", ["add", "."], { cwd: repository });
     execFileSync("git", ["commit", "-qm", "provider generation"], { cwd: repository });
     const providerBase = {
@@ -195,11 +264,8 @@ describe("toolchain authority adapters", () => {
         encoding: "utf8",
       }).trim(),
     };
-    await writeFile(
-      join(repository, "package.json"),
-      JSON.stringify({ ...manifest, description: "authority drift" }),
-    );
-    execFileSync("git", ["add", "package.json"], { cwd: repository });
+    await writeFile(join(repository, fixture.changedPath), fixture.changedContent);
+    execFileSync("git", ["add", fixture.changedPath], { cwd: repository });
     execFileSync("git", ["commit", "-qm", "change authority"], { cwd: repository });
     const currentBase = {
       oid: execFileSync("git", ["rev-parse", "HEAD"], {
@@ -211,24 +277,24 @@ describe("toolchain authority adapters", () => {
         encoding: "utf8",
       }).trim(),
     };
-    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "javascript-bun")!;
+    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === fixture.adapterId)!;
     const runtime = { ...adapter.runtimeRequirement!, bundleDigest: receipt.digest };
     const sourceRef = "refs/heads/main";
     const packet = parseWorkerPacket({
-      goal: "Use the integrated Bun test.",
+      goal: `Use the integrated ${fixture.tool} test.`,
       acceptanceCriteria: ["The test passes."],
       allowedPaths: ["src/"],
       preconditions: [],
       outOfScope: [],
       conventions: [],
       baseSha: currentBase.oid,
-      validationCommands: ["bun --cwd packages/api run test"],
+      validationCommands: [fixture.command],
       requirements: {
         os: ["linux"],
         architecture: [],
-        tools: ["bun"],
+        tools: fixture.tools,
         services: [],
-        networkDestinations: ["registry.npmjs.org"],
+        networkDestinations: fixture.networkDestinations,
         permittedSecretNames: [],
         trust: "trusted_local",
       },
@@ -239,8 +305,8 @@ describe("toolchain authority adapters", () => {
             adapter: adapter.id,
             generation: `${adapter.id}/root`,
             providerWorkItem: "root",
-            authorityPaths: ["package.json", "bun.lock"],
-            operation: { kind: "package-script", key: "packages/api:test" },
+            authorityPaths: fixture.authorityPaths,
+            operation: adapter.operation!(fixture.command)!,
             activation: "integrated-base",
             runtime: adapter.runtimeRequirement,
           },
@@ -264,11 +330,14 @@ describe("toolchain authority adapters", () => {
     const provider = {
       id: "root",
       dependsOn: [] as string[],
-      scope: ["package.json", "bun.lock"],
-      issueNumber: 293,
+      scope: fixture.authorityPaths,
+      issueNumber: fixture.tool === "bun" ? 293 : 291,
       integration: {
         kind: "attempt" as const,
-        runId: "00000000-0000-4000-8000-000000000293",
+        runId:
+          fixture.tool === "bun"
+            ? "00000000-0000-4000-8000-000000000293"
+            : "00000000-0000-4000-8000-000000000291",
         attempt: 1,
         commitSha: providerBase.oid,
         treeOid: providerBase.treeOid,
@@ -278,6 +347,18 @@ describe("toolchain authority adapters", () => {
         managedRuntimeActivation: providerActivation,
       },
     };
+    if (fixture.discoveredAuthorityPath) {
+      await expect(
+        resolveIntegratedRepositoryCapabilities({
+          repository,
+          base: currentBase,
+          sourceRef,
+          packet,
+          providerById: () => provider,
+        }),
+      ).rejects.toThrow(/Bun authority includes a path outside its provider scope/);
+      provider.scope.push(fixture.discoveredAuthorityPath);
+    }
     await expect(
       resolveIntegratedRepositoryCapabilities({
         repository,
@@ -286,17 +367,7 @@ describe("toolchain authority adapters", () => {
         packet,
         providerById: () => provider,
       }),
-    ).rejects.toThrow(/Bun authority includes a path outside its provider scope/);
-    provider.scope.push("packages/api/package.json");
-    await expect(
-      resolveIntegratedRepositoryCapabilities({
-        repository,
-        base: currentBase,
-        sourceRef,
-        packet,
-        providerById: () => provider,
-      }),
-    ).rejects.toThrow(/Bun authority bytes changed after the declared provider generation/);
+    ).rejects.toThrow(fixture.expected);
   });
 
   it("parses npm and pnpm as distinct finite package-script adapters", () => {
@@ -349,7 +420,7 @@ describe("toolchain authority adapters", () => {
     expect(unprovisionedFutureToolchainReason("bun run test")).toBeUndefined();
     expect(
       unprovisionedFutureToolchainReason("uv run --locked --no-sync python -m pytest"),
-    ).toMatch(/uv.*no Factory-provisioned/);
+    ).toBeUndefined();
     expect(unprovisionedFutureToolchainReason("cargo test")).toMatch(
       /cargo.*no Factory-provisioned/,
     );

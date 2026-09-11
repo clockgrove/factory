@@ -350,4 +350,73 @@ describe("sandbox bootstrap contracts", () => {
       await rm(runtimeRoot, { recursive: true, force: true });
     }
   });
+
+  it("attests a multi-file runtime tree independently of the materializer umask", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-python-materializer-"));
+    const runtimeRoot = "/tmp/factory-toolchain";
+    try {
+      await rm(runtimeRoot, { recursive: true, force: true });
+      const fixture = join(root, "fixture");
+      const executableRelative = "python/bin/python3";
+      await mkdir(join(fixture, "python/bin"), { recursive: true });
+      await mkdir(join(fixture, "python/lib"), { recursive: true });
+      await writeFile(join(fixture, executableRelative), "#!/bin/sh\nprintf 'Python 3.14.7\\n'\n", {
+        mode: 0o755,
+      });
+      await writeFile(join(fixture, "python/lib/os.py"), "name = 'posix'\n", { mode: 0o644 });
+      const archivePath = join(root, "python.tar.gz");
+      execFileSync("tar", ["-czf", archivePath, "-C", fixture, "python"]);
+      const archive = await readFile(archivePath);
+      const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+      const plan: ManagedToolchainPlan = {
+        tool: "uv",
+        bundleDigest: "b".repeat(64),
+        assets: [
+          {
+            id: "python",
+            path: "toolchains/python.asset",
+            content: archive,
+            sha256: sha256(archive),
+            archive: "tar.gz",
+            executablePath: executableRelative,
+            executableSha256: sha256(await readFile(join(fixture, executableRelative))),
+            treeSha256: await sha256Tree(fixture),
+          },
+        ],
+        executables: [
+          {
+            id: "python",
+            assetId: "python",
+            kind: "native",
+            relativePath: executableRelative,
+            argsPrefix: [],
+          },
+        ],
+        setup: [],
+        validation: [],
+        environment: { PATH: "/tmp/factory-toolchain/bin" },
+      };
+      for (const file of sandboxManagedToolchainFiles(plan)) {
+        const path = join(root, file.path);
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, file.content, { mode: file.mode ?? 0o600 });
+      }
+      const previousUmask = process.umask(0o077);
+      try {
+        execFileSync(process.execPath, [
+          join(root, "factory/materialize-toolchain.mjs"),
+          join(root, "factory/managed-toolchain.json"),
+          join(root, "materialized.json"),
+        ]);
+      } finally {
+        process.umask(previousUmask);
+      }
+      const materialized = JSON.parse(await readFile(join(root, "materialized.json"), "utf8")) as {
+        executables: { python: { path: string } };
+      };
+      await expect(access(materialized.executables.python.path)).resolves.toBeUndefined();
+    } finally {
+      await rm(runtimeRoot, { recursive: true, force: true });
+    }
+  });
 });

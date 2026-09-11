@@ -15938,18 +15938,25 @@ export class FactorySupervisor {
       .sort((left, right) => right.attempt - left.attempt)[0];
     if (!reservation)
       throw new Error(`Work Item #${item.number} has recoverable state but no attempt ref`);
+    const events = (item.factoryEvents ?? [])
+      .filter(
+        (event) =>
+          event.runId === this.#run.runId &&
+          "attempt" in event &&
+          event.attempt === reservation.attempt,
+      )
+      .sort((left, right) => left.sequence - right.sequence);
     const artifactConsumer = reservation.artifactConsumer;
-    if (
+    const artifactConsumerSucceeded =
       artifactConsumer &&
-      (item.factoryEvents ?? []).some(
+      events.some(
         (event) =>
           event.kind === "attempt" &&
-          event.runId === reservation.runId &&
-          event.attempt === reservation.attempt &&
           event.event === "AttemptSucceeded" &&
           event.artifactDigest === artifactConsumer.artifactDigest,
-      )
-    ) {
+      );
+    let adoptedSource: NonNullable<CollectedAttemptContinuation["adoptedSource"]> | undefined;
+    if (artifactConsumerSucceeded) {
       const sourceReservation = reservations.find(
         (candidate) =>
           candidate.runId === artifactConsumer.sourceRunId &&
@@ -15960,23 +15967,18 @@ export class FactorySupervisor {
         throw new Error(
           "retained artifact source reservation is unavailable during terminal drain",
         );
-      await this.#settleArtifactConsumerAdmission(item, reservation, {
+      adoptedSource = {
         reservation: sourceReservation,
         artifactDigest: artifactConsumer.artifactDigest,
-      });
-      return;
+      };
+      if (!this.#hasPostSuccessValidationLiabilities(events)) {
+        await this.#settleArtifactConsumerAdmission(item, reservation, adoptedSource);
+        return;
+      }
     }
-    if (await this.#recoverUndispatchedAdmission(item, reservation)) return;
+    if (!adoptedSource && (await this.#recoverUndispatchedAdmission(item, reservation))) return;
     const backend = this.#registry.get(reservation.backend);
     if (!backend) throw new Error(`cannot reconcile unavailable backend ${reservation.backend}`);
-    const events = (item.factoryEvents ?? [])
-      .filter(
-        (event) =>
-          event.runId === this.#run.runId &&
-          "attempt" in event &&
-          event.attempt === reservation.attempt,
-      )
-      .sort((left, right) => left.sequence - right.sequence);
     await this.#reconcileInterruptedValidationCapacity(item, reservation, events);
     const started = events.find(
       (event) => event.kind === "attempt" && event.event === "AttemptStarted",
@@ -15993,22 +15995,28 @@ export class FactorySupervisor {
             new Date(executionBudget.at).getTime() + executionBudget.amount + 60_000,
           ).toISOString()
         : undefined;
-    if (backend.reconcileStale) {
-      await backend.reconcileStale({
-        repository: `${this.#options.owner}/${this.#options.repo}`,
-        objective: reservation.objective,
-        workItem: reservation.workItem,
-        attempt: reservation.attempt,
-        runId: reservation.runId,
-        directorEpoch: reservation.directorEpoch,
-        phase: "execution",
-        ...(reservation.localScopeBatch ? { localScopeBatch: reservation.localScopeBatch } : {}),
-        policyDigest: reservation.policyDigest,
-        ...(providerResourceId ? { providerResourceId } : {}),
-        ...(noHandleReplacementNotBefore ? { noHandleReplacementNotBefore } : {}),
-      });
-    } else if (started) {
-      throw new Error(`backend ${reservation.backend} cannot prove the stale resource was stopped`);
+    // An artifact consumer never owned execution; only its separately admitted
+    // validation resource can require stale-resource reconciliation.
+    if (!adoptedSource) {
+      if (backend.reconcileStale) {
+        await backend.reconcileStale({
+          repository: `${this.#options.owner}/${this.#options.repo}`,
+          objective: reservation.objective,
+          workItem: reservation.workItem,
+          attempt: reservation.attempt,
+          runId: reservation.runId,
+          directorEpoch: reservation.directorEpoch,
+          phase: "execution",
+          ...(reservation.localScopeBatch ? { localScopeBatch: reservation.localScopeBatch } : {}),
+          policyDigest: reservation.policyDigest,
+          ...(providerResourceId ? { providerResourceId } : {}),
+          ...(noHandleReplacementNotBefore ? { noHandleReplacementNotBefore } : {}),
+        });
+      } else if (started) {
+        throw new Error(
+          `backend ${reservation.backend} cannot prove the stale resource was stopped`,
+        );
+      }
     }
     const validationStartedAt = events.find(
       (event) => event.kind === "attempt" && event.event === "AttemptCollected",
@@ -16062,11 +16070,15 @@ export class FactorySupervisor {
         held.attempt === reservation.attempt,
     ))
       await this.#releaseCapacity(held.key);
-    await this.#settleIssueAdmission(item, reservation, {
-      cleanupConfirmed: true,
-      definitiveNonExecution: false,
-      modelUsageExpected: backend.capabilities.reportsModelUsage ?? false,
-    });
+    if (adoptedSource) {
+      await this.#settleArtifactConsumerAdmission(item, reservation, adoptedSource);
+    } else {
+      await this.#settleIssueAdmission(item, reservation, {
+        cleanupConfirmed: true,
+        definitiveNonExecution: false,
+        modelUsageExpected: backend.capabilities.reportsModelUsage ?? false,
+      });
+    }
     if (await this.#hasUnsettledIssueAdmission(item)) throw new ProviderQuotaDrainIncompleteError();
   }
 
@@ -16905,13 +16917,23 @@ export class FactorySupervisor {
             event.event === "AttemptSucceeded",
         );
       if (consumerSuccess?.kind === "attempt" && consumerSuccess.artifactDigest) {
+        const consumerEvents = (item.factoryEvents ?? []).filter(
+          (event) =>
+            event.runId === this.#run.runId &&
+            "attempt" in event &&
+            event.attempt === consumerSuccess.attempt,
+        );
         const settledConsumer = (await this.#attempts.ledger.read(item.number))?.history.find(
           (entry) =>
             entry.runId === this.#run.runId &&
             entry.reservation.attempt === consumerSuccess.attempt &&
             entry.artifactConsumer?.artifactDigest === consumerSuccess.artifactDigest,
         );
-        if (settledConsumer?.disposition === "released") return false;
+        if (
+          settledConsumer?.disposition === "released" &&
+          !this.#hasPostSuccessValidationLiabilities(consumerEvents)
+        )
+          return false;
       }
     }
     if (["reserved", "in_flight", "validating"].includes(item.state)) return true;
@@ -16929,6 +16951,16 @@ export class FactorySupervisor {
     )
       return true;
     return includeAnyUnsettledAdmission && (await this.#hasUnsettledIssueAdmission(item));
+  }
+
+  #hasPostSuccessValidationLiabilities(events: FactoryEvent[]): boolean {
+    const validationFinished = events.some((event) => event.kind === "validation");
+    return (
+      unreconciledCapacityReservations(events).some((event) => event.phase === "validation") ||
+      unreconciledBudgetReservations(events).some((event) => event.phase === "validation") ||
+      (!validationFinished &&
+        events.some((event) => event.kind === "attempt" && event.event === "AttemptCollected"))
+    );
   }
 
   async #hasUnsettledIssueAdmission(item: DerivedWorkItem): Promise<boolean> {

@@ -2330,99 +2330,176 @@ describe("Supervisor adopted isolated candidate validation", () => {
     ).toMatchObject({ disposition: "released", dispatchPossible: false });
   }, 60_000);
 
-  it("settles a succeeded artifact consumer without resuming work during a quota cancellation drain", async () => {
-    const f = await successorFixture({
-      interruptedRetainedArtifact: true,
-      loseArtifactConsumerSuccessResponse: true,
-    });
-    await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
-    const consumer = f.snapshot.workItems[1]!;
-    expect(
-      consumer.factoryEvents!.some(
+  it.each([false, true])(
+    "settles a succeeded artifact consumer without resuming work during a quota cancellation drain, validationStarted=%s",
+    async (validationStarted) => {
+      const f = await successorFixture({
+        interruptedRetainedArtifact: true,
+        loseArtifactConsumerSuccessResponse: true,
+        ...(validationStarted ? { adoptedIsolatedValidation: {} } : {}),
+      });
+      await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+      const consumer = f.snapshot.workItems[1]!;
+      const consumerSuccess = consumer.factoryEvents!.find(
         (event) =>
           event.kind === "attempt" &&
           event.runId === "successor" &&
           event.event === "AttemptSucceeded",
-      ),
-    ).toBe(true);
-    const gatedSibling = f.snapshot.workItems[2]!;
-    const modelInvocationId = "terminal-drain-sibling-gate";
-    // Keep the synthetic terminal inputs ordered after every receipt written by
-    // the interrupted successor, independent of fixture-local sequence state.
-    const terminalSequence = 10_000;
-    const gatedEvents = [
-      f.event({
-        kind: "budget",
-        event: "BudgetReserved",
-        runId: "successor",
-        sequence: terminalSequence,
-        workItem: gatedSibling.number,
-        attempt: 1,
-        phase: "execution",
-        unit: "model_tokens",
-        amount: 0,
-        usageId: `invocation-${modelInvocationId}`,
-        modelInvocationId,
-        directorEpoch: f.lease.epoch,
-        policyDigest: f.pd,
-      }),
-      f.event({
-        kind: "provider",
-        event: "ProviderQuotaBlocked",
-        runId: "successor",
-        sequence: terminalSequence + 1,
-        workItem: gatedSibling.number,
-        attempt: 1,
-        reasonCode: "provider-quota-exhausted",
-        provider: "fixture-provider",
-        phase: "execution",
-        backend: "codex-sdk/local-worktree",
-        modelInvocationId,
-        providerMessage: "fixture provider quota exhausted",
-        accounting: "unknown",
-      }),
-    ];
-    const cancellation = f.event({
-      kind: "run",
-      event: "FactoryRunCancellationRequested",
-      runId: "successor",
-      sequence: terminalSequence + 2,
-      requestId: "cancel-with-succeeded-artifact-consumer",
-      requestedBy: "operator",
-    });
-    // Let startup authenticate the accepted recovery runtime, then surface the
-    // externally written gate/cancellation on the first refreshed snapshot.
-    const reader = vi.mocked(GitHubReader.prototype.readObjective);
-    const read = reader.getMockImplementation()!;
-    let resumedReads = 0;
-    reader.mockImplementation(async function (this: GitHubReader, ...args) {
-      if (++resumedReads === 3) {
-        gatedSibling.factoryEvents!.push(...gatedEvents);
-        f.snapshot.factoryEvents!.push(cancellation);
-      }
-      return read.apply(this, args);
-    });
-
-    await expect(f.run()).resolves.toMatchObject({ status: "cancelled" });
-    expect(f.launch).not.toHaveBeenCalled();
-    expect(f.validate).not.toHaveBeenCalled();
-    expect(f.review).not.toHaveBeenCalled();
-    expect(
-      consumer.factoryEvents!.some(
+      );
+      expect(consumerSuccess?.kind).toBe("attempt");
+      if (consumerSuccess?.kind !== "attempt" || !consumerSuccess.artifactDigest)
+        throw new Error("fixture artifact consumer success is unavailable");
+      const consumerReservation = consumer.factoryEvents!.find(
         (event) =>
           event.kind === "attempt" &&
           event.runId === "successor" &&
-          event.event === "AttemptDeferred",
-      ),
-    ).toBe(false);
-    expect(
-      (
-        await new IssueAdmissionLedger(
-          f.storage as unknown as ConstructorParameters<typeof IssueAdmissionLedger>[0],
-        ).read(9)
-      )?.history.find((entry) => entry.runId === "successor" && entry.reservation.attempt === 2),
-    ).toMatchObject({ disposition: "released", dispatchPossible: false });
-  }, 60_000);
+          event.event === "AttemptReserved",
+      );
+      if (consumerReservation?.kind !== "attempt")
+        throw new Error("fixture artifact consumer reservation is unavailable");
+      const gatedSibling = f.snapshot.workItems[2]!;
+      const modelInvocationId = "terminal-drain-sibling-gate";
+      // Keep the synthetic terminal inputs ordered after every receipt written by
+      // the interrupted successor, independent of fixture-local sequence state.
+      const terminalSequence = 10_000;
+      const validationEvents = validationStarted
+        ? [
+            f.event({
+              kind: "capacity",
+              event: "CapacityReserved",
+              runId: "successor",
+              sequence: terminalSequence - 3,
+              workItem: consumer.number,
+              attempt: consumerReservation.attempt,
+              phase: "validation",
+              backend: "codex-cli/daytona",
+              requestedCpu: 1,
+              requestedMemoryMb: 512,
+              directorEpoch: consumerReservation.directorEpoch,
+              policyDigest: consumerReservation.policyDigest,
+            }),
+            f.event({
+              kind: "budget",
+              event: "BudgetReserved",
+              runId: "successor",
+              sequence: terminalSequence - 2,
+              workItem: consumer.number,
+              attempt: consumerReservation.attempt,
+              phase: "validation",
+              unit: "sandbox_milliseconds",
+              amount: 120_000,
+              directorEpoch: consumerReservation.directorEpoch,
+              policyDigest: consumerReservation.policyDigest,
+            }),
+            f.event({
+              ...consumerReservation,
+              artifactConsumer: undefined,
+              writerEpoch: undefined,
+              writerOperationId: undefined,
+              event: "AttemptCollected",
+              runId: "successor",
+              sequence: terminalSequence - 1,
+              artifactDigest: consumerSuccess.artifactDigest,
+            }),
+          ]
+        : [];
+      const gatedEvents = [
+        f.event({
+          kind: "budget",
+          event: "BudgetReserved",
+          runId: "successor",
+          sequence: terminalSequence,
+          workItem: gatedSibling.number,
+          attempt: 1,
+          phase: "execution",
+          unit: "model_tokens",
+          amount: 0,
+          usageId: `invocation-${modelInvocationId}`,
+          modelInvocationId,
+          directorEpoch: f.lease.epoch,
+          policyDigest: f.pd,
+        }),
+        f.event({
+          kind: "provider",
+          event: "ProviderQuotaBlocked",
+          runId: "successor",
+          sequence: terminalSequence + 1,
+          workItem: gatedSibling.number,
+          attempt: 1,
+          reasonCode: "provider-quota-exhausted",
+          provider: "fixture-provider",
+          phase: "execution",
+          backend: "codex-sdk/local-worktree",
+          modelInvocationId,
+          providerMessage: "fixture provider quota exhausted",
+          accounting: "unknown",
+        }),
+      ];
+      const cancellation = f.event({
+        kind: "run",
+        event: "FactoryRunCancellationRequested",
+        runId: "successor",
+        sequence: terminalSequence + 2,
+        requestId: "cancel-with-succeeded-artifact-consumer",
+        requestedBy: "operator",
+      });
+      // Let startup authenticate the accepted recovery runtime, then surface the
+      // externally written gate/cancellation on the first refreshed snapshot.
+      const reader = vi.mocked(GitHubReader.prototype.readObjective);
+      const read = reader.getMockImplementation()!;
+      let resumedReads = 0;
+      reader.mockImplementation(async function (this: GitHubReader, ...args) {
+        if (++resumedReads === 3) {
+          consumer.factoryEvents!.push(...validationEvents);
+          gatedSibling.factoryEvents!.push(...gatedEvents);
+          f.snapshot.factoryEvents!.push(cancellation);
+        }
+        return read.apply(this, args);
+      });
+
+      await expect(f.run()).resolves.toMatchObject({ status: "cancelled" });
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(f.validate).not.toHaveBeenCalled();
+      expect(f.review).not.toHaveBeenCalled();
+      const interruptionEvents = consumer.factoryEvents!.filter(
+        (event) =>
+          event.kind === "attempt" &&
+          event.runId === "successor" &&
+          ["AttemptCancelled", "AttemptDeferred"].includes(event.event),
+      );
+      expect(interruptionEvents.map((event) => event.event)).toEqual(
+        validationStarted ? ["AttemptCancelled"] : [],
+      );
+      if (validationStarted) {
+        expect(f.isolatedReconcile).toHaveBeenCalledOnce();
+        expect(
+          consumer
+            .factoryEvents!.filter(
+              (event) => event.kind === "capacity" && event.phase === "validation",
+            )
+            .map((event) => event.event),
+        ).toEqual(["CapacityReserved", "CapacityReconciled"]);
+        expect(
+          consumer
+            .factoryEvents!.filter(
+              (event) =>
+                event.kind === "budget" &&
+                event.phase === "validation" &&
+                event.unit === "sandbox_milliseconds",
+            )
+            .map((event) => event.event),
+        ).toEqual(["BudgetReserved", "BudgetReconciled"]);
+      }
+      expect(
+        (
+          await new IssueAdmissionLedger(
+            f.storage as unknown as ConstructorParameters<typeof IssueAdmissionLedger>[0],
+          ).read(9)
+        )?.history.find((entry) => entry.runId === "successor" && entry.reservation.attempt === 2),
+      ).toMatchObject({ disposition: "released", dispatchPossible: false });
+    },
+    60_000,
+  );
 
   it.each([
     { paid: false, available: true },

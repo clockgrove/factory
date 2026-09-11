@@ -1122,6 +1122,23 @@ async function resolveUvIntegratedBase(
   );
 }
 
+export function managedWorkerSourceEnvironment(
+  source: NodeJS.ProcessEnv,
+  tool: "npm" | "pnpm" | "bun" | "uv",
+): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(source).filter(
+      ([key]) =>
+        !/^npm_config_/i.test(key) &&
+        !/^(?:NODE_OPTIONS|NODE_PATH|COREPACK_HOME|COREPACK_DEFAULT_TO_LATEST)$/i.test(key) &&
+        (tool !== "npm" ||
+          !/^(?:LD_PRELOAD|LD_AUDIT|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH)$/i.test(
+            key,
+          )),
+    ),
+  );
+}
+
 async function withProvisionedToolPath(
   tool: "npm" | "pnpm" | "bun" | "uv",
   source: NodeJS.ProcessEnv,
@@ -1181,17 +1198,7 @@ async function withProvisionedToolPath(
     if (!python) throw new Error("uv runtime bundle lacks its Python executable");
     await ensureShim("python", python.executable);
   }
-  const sanitized = Object.fromEntries(
-    Object.entries(source).filter(
-      ([key]) =>
-        !/^npm_config_/i.test(key) &&
-        !/^(?:NODE_OPTIONS|NODE_PATH|COREPACK_HOME|COREPACK_DEFAULT_TO_LATEST)$/i.test(key) &&
-        (tool !== "npm" ||
-          !/^(?:NODE_ENV|NODE_EXTRA_CA_CERTS|LD_PRELOAD|LD_AUDIT|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|SSL_CERT_FILE|SSL_CERT_DIR)$/i.test(
-            key,
-          )),
-    ),
-  );
+  const sanitized = managedWorkerSourceEnvironment(source, tool);
   return { ...sanitized, PATH: `${bin}${delimiter}${source.PATH ?? "/usr/bin:/bin"}` };
 }
 

@@ -176,7 +176,9 @@ describe("sandbox bootstrap contracts", () => {
       .join("\n");
     expect(rendered).toContain(SANDBOX_CODEX_PACKAGE);
     expect(rendered).toContain('factory_bootstrap_npx="$(command -v npx)"');
-    expect(rendered).toContain('"$factory_bootstrap_npx" --yes');
+    expect(rendered).toContain('factory_worker_path="$PATH"');
+    expect(rendered).toContain('export PATH="$factory_bootstrap_path"\nmkdir -p "$workspace"');
+    expect(rendered).toContain('PATH="$factory_worker_path" "$factory_bootstrap_npx" --yes');
     expect(rendered).not.toContain(`\nnpx --yes ${SANDBOX_CODEX_PACKAGE}`);
     expect(rendered).toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(rendered).toContain('web_search="disabled"');

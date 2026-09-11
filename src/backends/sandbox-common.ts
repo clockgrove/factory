@@ -453,12 +453,15 @@ export PATH="/tmp/factory-toolchain/bin:$PATH"
 set -euo pipefail
 factory_root="$PWD/factory"
 workspace="$PWD/workspace"
+factory_bootstrap_path="$PATH"
 factory_bootstrap_npx="$(command -v npx)"
 if [[ "$factory_bootstrap_npx" != /* || ! -x "$factory_bootstrap_npx" ]]; then
   printf 'Factory could not resolve the sandbox bootstrap npx executable\n' >&2
   exit 1
 fi
-${managedBootstrap}mkdir -p "$workspace"
+${managedBootstrap}factory_worker_path="$PATH"
+export PATH="$factory_bootstrap_path"
+mkdir -p "$workspace"
 tar -xf "$factory_root/source.tar" -C "$workspace"
 cd "$workspace"
 git init -q
@@ -474,7 +477,7 @@ if [[ -f "$factory_root/reasoning-config.txt" ]]; then
   model_args+=(-c "$(<"$factory_root/reasoning-config.txt")")
 fi
 set +e
-"$factory_bootstrap_npx" --yes ${SANDBOX_CODEX_PACKAGE} --dangerously-bypass-approvals-and-sandbox -c 'web_search="disabled"' exec --ephemeral --ignore-user-config --ignore-rules --json --output-schema "$factory_root/output.schema.json" -C "$workspace" "\${model_args[@]}" - < "$factory_root/prompt.txt" > "$factory_root/worker.stdout" 2> "$factory_root/worker.stderr"
+PATH="$factory_worker_path" "$factory_bootstrap_npx" --yes ${SANDBOX_CODEX_PACKAGE} --dangerously-bypass-approvals-and-sandbox -c 'web_search="disabled"' exec --ephemeral --ignore-user-config --ignore-rules --json --output-schema "$factory_root/output.schema.json" -C "$workspace" "\${model_args[@]}" - < "$factory_root/prompt.txt" > "$factory_root/worker.stdout" 2> "$factory_root/worker.stderr"
 worker_status=$?
 set -e
 git add --intent-to-add --all

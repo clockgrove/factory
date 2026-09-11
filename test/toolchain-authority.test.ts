@@ -25,6 +25,7 @@ import {
   managedToolAvailable,
   managedRuntimeRequirements,
   localManagedToolchainPlan,
+  managedWorkerSourceEnvironment,
   packageScriptValidationCommand,
   assertRepositoryCapabilityProofsCurrent,
   resolveIntegratedRepositoryCapabilities,
@@ -459,6 +460,28 @@ describe("toolchain authority adapters", () => {
     await expect(
       localManagedToolchainPlan(["npm test"], process.env, "/tmp/factory-observed-npm", []),
     ).resolves.toBeNull();
+  });
+
+  it("preserves model transport while removing managed npm runtime injection", () => {
+    const environment = managedWorkerSourceEnvironment(
+      {
+        HTTPS_PROXY: "http://proxy.internal:8443",
+        NODE_EXTRA_CA_CERTS: "/etc/factory/model-ca.pem",
+        SSL_CERT_FILE: "/etc/factory/model-ca.pem",
+        NODE_OPTIONS: "--require=/tmp/inject.cjs",
+        LD_PRELOAD: "/tmp/inject.so",
+        npm_config_registry: "https://registry.example.invalid/",
+      },
+      "npm",
+    );
+    expect(environment).toMatchObject({
+      HTTPS_PROXY: "http://proxy.internal:8443",
+      NODE_EXTRA_CA_CERTS: "/etc/factory/model-ca.pem",
+      SSL_CERT_FILE: "/etc/factory/model-ca.pem",
+    });
+    expect(environment).not.toHaveProperty("NODE_OPTIONS");
+    expect(environment).not.toHaveProperty("LD_PRELOAD");
+    expect(environment).not.toHaveProperty("npm_config_registry");
   });
 
   it("probes bundled tools without consulting ambient PATH", async () => {

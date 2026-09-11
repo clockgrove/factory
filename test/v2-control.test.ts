@@ -465,6 +465,33 @@ describe("attempt reservation", () => {
       outputTokens: 30,
       cachedInputTokens: 0,
     });
+    const writesBeforeProviderGate = store.comments.length;
+    const providerEvents = await recorder.providerQuotaBlocked({
+      lease,
+      issueNodeId: "I_43",
+      sequence: 25,
+      phase: "execution",
+      backend: "another/local-backend",
+      modelInvocationId: "worker-43-1",
+      provider: "another-model-provider",
+      providerMessage: "Model provider quota requires operator action",
+      accounting: "exact",
+      usage: {
+        sequence: 24,
+        usageId: "worker-43-1",
+        amount: 9,
+        reportedModelUsage: { inputTokens: 7, outputTokens: 2 },
+        directorEpoch: first.directorEpoch,
+        policyDigest: first.policyDigest,
+      },
+      reservation: first,
+    });
+    expect(store.comments.length - writesBeforeProviderGate).toBe(1);
+    expect(decodeEventComments(store.comments.at(-1)!.body)).toEqual(providerEvents);
+    expect(providerEvents.map((event) => event.event)).toEqual([
+      "BudgetReconciled",
+      "ProviderQuotaBlocked",
+    ]);
 
     const queued = await attempts.recordQueued({
       lease,

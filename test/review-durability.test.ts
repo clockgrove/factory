@@ -7,6 +7,8 @@ import {
   type ReviewFaultPoint,
 } from "../src/control/reviews.js";
 import type { ReviewCheckpoint, ReviewResult } from "../src/management/backend.js";
+import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
+import { ProviderQuotaError } from "../src/providers/quota.js";
 
 const result: ReviewResult = {
   review: {
@@ -42,6 +44,31 @@ function checkpoint(kind: "artifact" | "rebase" = "artifact"): ReviewCheckpointR
 }
 
 describe("durable semantic review transaction", () => {
+  it("delegates exact quota usage and metadata to one atomic gate callback", async () => {
+    const error = new ProviderQuotaError(
+      classifyGitHubCopilotQuota("You have exceeded your monthly quota")!,
+      { invocationId: "review-item", usage: result.usage },
+    );
+    const recordFailureUsage = vi.fn();
+    const recordProviderGate = vi.fn();
+    await expect(
+      runDurableReviewTransaction({
+        existing: null,
+        invoke: async () => {
+          throw error;
+        },
+        persist: async () => checkpoint(),
+        recover: async () => null,
+        recordUsage: async () => {},
+        recordFailureUsage,
+        recordProviderGate,
+        recordOutcome: async () => {},
+      }),
+    ).rejects.toBe(error);
+    expect(recordFailureUsage).not.toHaveBeenCalled();
+    expect(recordProviderGate).toHaveBeenCalledExactlyOnceWith(error);
+  });
+
   it("retains exact malformed-response usage when private cleanup also fails before a checkpoint", async () => {
     const failure = new ReviewCheckoutCleanupError(
       Error("owned checkout removal failed"),

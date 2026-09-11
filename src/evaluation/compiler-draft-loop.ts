@@ -511,8 +511,9 @@ export async function runCompilerDraftLoop(args: {
         });
         if (usage) {
           tokens += usage.inputTokens + usage.outputTokens;
-          await recordUsage(invocationId, stage, usage);
-          if (error instanceof ProviderQuotaError) error.markUsageRecorded();
+          // Provider quota metadata and exact usage must cross the durable boundary
+          // together. The outer Supervisor owns that authenticated atomic batch.
+          if (!(error instanceof ProviderQuotaError)) await recordUsage(invocationId, stage, usage);
         } else if (!(error instanceof ProviderQuotaError)) throw new Stop("accounting-unavailable");
         if (error instanceof ProviderQuotaError) throw error;
         if (stopCause) throw stopCause;

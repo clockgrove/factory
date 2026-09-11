@@ -241,7 +241,7 @@ describe("durable compilation transaction", () => {
     expect(persist).not.toHaveBeenCalled();
   });
 
-  it("records a provider gate after exact failure usage and never converts unknown usage to zero", async () => {
+  it("delegates exact usage and provider metadata to one atomic gate callback", async () => {
     const calls: string[] = [];
     const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
     const error = new ProviderQuotaError(gate, {
@@ -257,9 +257,8 @@ describe("durable compilation transaction", () => {
         persist: async () => record(),
         recover: async () => null,
         recordUsage: async () => {},
-        recordFailureUsage: async (usage) => {
-          expect(usage).toEqual(compilation.usage);
-          calls.push("usage");
+        recordFailureUsage: async () => {
+          calls.push("separate-usage");
         },
         recordProviderGate: async (observed) => {
           expect(observed).toBe(error);
@@ -268,30 +267,7 @@ describe("durable compilation transaction", () => {
         preflight: async () => {},
       }),
     ).rejects.toBe(error);
-    expect(calls).toEqual(["usage", "gate"]);
-
-    const alreadyRecorded = new ProviderQuotaError(gate, {
-      invocationId: "draft-compile-base",
-      usage: compilation.usage,
-    }).markUsageRecorded();
-    const duplicateUsage = vi.fn();
-    const recordGate = vi.fn();
-    await expect(
-      runDurableCompilationTransaction({
-        existing: null,
-        invoke: async () => {
-          throw alreadyRecorded;
-        },
-        persist: async () => record(),
-        recover: async () => null,
-        recordUsage: async () => {},
-        recordFailureUsage: duplicateUsage,
-        recordProviderGate: recordGate,
-        preflight: async () => {},
-      }),
-    ).rejects.toBe(alreadyRecorded);
-    expect(duplicateUsage).not.toHaveBeenCalled();
-    expect(recordGate).toHaveBeenCalledExactlyOnceWith(alreadyRecorded);
+    expect(calls).toEqual(["gate"]);
 
     const unknown = new ProviderQuotaError(gate, { invocationId: "compile-unknown" });
     const recordFailureUsage = vi.fn();

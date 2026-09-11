@@ -1437,7 +1437,12 @@ jobs:
           throw new Error("simulated resource cleanup unavailable");
         resources.delete(handle.resourceId);
       },
-      reconcileStale: async () => {
+      reconcileStale: async (input) => {
+        activity.push({
+          operation: "reconcile-stale",
+          backend: id,
+          workItem: input.workItem,
+        });
         if (faults.cleanupFailure && remote)
           throw new Error("simulated resource may still be active");
       },

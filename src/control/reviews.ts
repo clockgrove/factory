@@ -120,7 +120,6 @@ export async function runDurableReviewTransaction(args: {
       if (!record) {
         if (error instanceof ManagementOutputError) await args.recordFailureUsage?.(error.usage);
         if (error instanceof ProviderQuotaError) {
-          if (error.usage) await args.recordFailureUsage?.(error.usage);
           await args.recordProviderGate?.(error);
         }
         if (error instanceof ReviewCheckoutCleanupError && error.usage)

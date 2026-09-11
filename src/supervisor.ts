@@ -251,7 +251,7 @@ import { compilerEvalDigest } from "./evaluation/compiler-eval.js";
 import { collectCompilationEvidence } from "./compiler/runtime-evidence.js";
 import { ManagementOutputError } from "./management/backend.js";
 import { ProviderQuotaError } from "./providers/quota.js";
-import { latestProviderQuotaGate } from "./control/provider-gates.js";
+import { latestProviderQuotaGate, providerQuotaGates } from "./control/provider-gates.js";
 import { reportedModelUsage, type ReportedModelUsage } from "./protocol/model-usage.js";
 import type {
   CompilationCheckpoint,
@@ -555,6 +555,15 @@ class ArtifactCompletionUnavailableError extends Error {
   }
 }
 
+/** A durable provider gate blocks new model work while already-admitted attempts
+ * are still being reconciled. It is a nonterminal drain hold, not a new failure. */
+class ProviderQuotaDrainIncompleteError extends Error {
+  constructor() {
+    super("provider quota gate is active while durable attempt reconciliation remains incomplete");
+    this.name = "ProviderQuotaDrainIncompleteError";
+  }
+}
+
 class PrepublicationApprovalRequiredError extends Error {
   constructor(cause: unknown) {
     super(
@@ -686,7 +695,6 @@ export async function runDurableCompilationTransaction(args: {
       if (!record) {
         if (error instanceof ManagementOutputError) await args.recordFailureUsage?.(error.usage);
         if (error instanceof ProviderQuotaError) {
-          if (error.usage && !error.usageRecorded) await args.recordFailureUsage?.(error.usage);
           await args.recordProviderGate?.(error);
         }
         throw error;
@@ -4094,6 +4102,7 @@ export class FactorySupervisor {
       error instanceof SafeArtifactCheckpointHeldError ||
       error instanceof ArtifactCompletionUnavailableError ||
       error instanceof ArtifactCollectionCheckpointError ||
+      error instanceof ProviderQuotaDrainIncompleteError ||
       error instanceof DaytonaResourceCleanupError ||
       error instanceof CancellationAccountingPublicationError ||
       (error instanceof Error &&
@@ -4220,6 +4229,16 @@ export class FactorySupervisor {
     try {
       // A resumed expired run cannot repair graph/publication/checkpoint state.
       if (Date.now() >= deadline) return await finishExpired();
+      const startupProviderGate = latestProviderQuotaGate(
+        snapshotEvents(snapshot),
+        this.#run.runId,
+      );
+      if (startupProviderGate?.kind === "provider" && startupProviderGate.workItem === undefined) {
+        return await terminalAfterDrain(
+          "FactoryRunEscalated",
+          `${startupProviderGate.providerMessage}; restore provider quota${startupProviderGate.actionUrl ? ` at ${startupProviderGate.actionUrl}` : ""} before explicit recovery`,
+        );
+      }
       const deliveryPolicy = this.#policy.delivery ?? {
         mode: "regular-prs" as const,
         onUnavailable: "regular-prs" as const,
@@ -5016,16 +5035,8 @@ export class FactorySupervisor {
             "operator requested cancellation through GitHub",
           );
         }
-        const durableProviderGate = latestProviderQuotaGate(
-          snapshotEvents(snapshot),
-          this.#run.runId,
-        );
-        if (durableProviderGate?.kind === "provider") {
-          return await terminalAfterDrain(
-            "FactoryRunEscalated",
-            `${durableProviderGate.providerMessage}; restore provider quota${durableProviderGate.actionUrl ? ` at ${durableProviderGate.actionUrl}` : ""} before explicit recovery`,
-          );
-        }
+        const durableProviderGates = providerQuotaGates(snapshotEvents(snapshot), this.#run.runId);
+        const durableProviderGate = durableProviderGates.at(-1);
         if (Date.now() >= deadline) {
           return await finishExpired();
         }
@@ -5043,7 +5054,7 @@ export class FactorySupervisor {
         // before any member of the starting cohort may acquire fresh capacity.
         await this.#reconcileObjectiveCapacity(objective.number, objective.items);
         this.#fairness.markReconciled(objective.number);
-        if (!this.#fairness.reconciled) {
+        if (!this.#fairness.reconciled && !durableProviderGate) {
           await this.#fairness.waitForChange(
             this.#options.pollIntervalMs ?? 60_000,
             this.#options.signal,
@@ -5223,7 +5234,11 @@ export class FactorySupervisor {
             (["reserved", "in_flight", "validating"].includes(item.state) ||
               (item.state === "failed" &&
                 (this.#hasUnfinishedAttempt(item) ||
-                  this.#hasRecoverablePostSuccessCancellation(item)))),
+                  this.#hasRecoverablePostSuccessCancellation(item))) ||
+              (durableProviderGates.some(
+                (gate) => gate.workItem === item.number && gate.attempt !== undefined,
+              ) &&
+                this.#hasUnfinishedAttempt(item))),
         );
         if (recoverable.length > 0) {
           for (const item of recoverable) {
@@ -5235,6 +5250,12 @@ export class FactorySupervisor {
             else await this.#recoverInterrupted(item, deadline, objective.items);
           }
           continue;
+        }
+        if (durableProviderGate?.kind === "provider") {
+          return await terminalAfterDrain(
+            "FactoryRunEscalated",
+            `${durableProviderGate.providerMessage}; restore provider quota${durableProviderGate.actionUrl ? ` at ${durableProviderGate.actionUrl}` : ""} before explicit recovery`,
+          );
         }
 
         const reviews = objective.items.filter(
@@ -6643,48 +6664,6 @@ export class FactorySupervisor {
             executionTerminalObserved = true;
             terminalModelUsage = reportedModelUsage(observation.usage);
             const observedTokens = reportedModelTokens(observation.usage);
-            if (observedTokens !== null) {
-              terminalModelTokens = observedTokens;
-              await this.#lease.use(async (lease) => {
-                const event = await this.#recorder.budget({
-                  lease,
-                  workItemNodeId: item.id,
-                  reservation: reservation!,
-                  sequence: this.#sequences.take(),
-                  event: "BudgetReconciled",
-                  unit: "model_tokens",
-                  phase: "execution",
-                  amount: observedTokens,
-                  usageId: `worker-${item.number}-${reservation!.attempt}`,
-                  ...this.#modelInvocationLink(
-                    `worker-${item.number}-${reservation!.attempt}`,
-                    reservation!,
-                    undefined,
-                    "execution",
-                  ),
-                  ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
-                });
-                this.#budgetEvents.push(event);
-              });
-            } else if (selected.capabilities.reportsModelUsage && !observation.providerQuotaGate) {
-              this.#modelInvocations.retire(
-                modelInvocationKey({
-                  objective: reservation!.objective,
-                  runId: reservation!.runId,
-                  workItem: item.number,
-                  attempt: reservation!.attempt,
-                  phase: "execution",
-                  modelInvocationId: `worker-${item.number}-${reservation!.attempt}`,
-                }),
-              );
-              if (selected.capabilities.id === "codex-app-server/local-worktree")
-                throw new Error(
-                  "App Server final model usage is unavailable; automated replacement is blocked",
-                );
-              throw new Error(
-                `backend ${selected.capabilities.id} omitted terminal model-token usage; consumption remains unknown`,
-              );
-            }
             if (observation.providerQuotaGate) {
               if (observedTokens === null && selected.capabilities.reportsModelUsage)
                 this.#modelInvocations.retire(
@@ -6718,7 +6697,50 @@ export class FactorySupervisor {
                 selected.capabilities.id,
                 reservation!,
               );
+              terminalModelTokens = observedTokens ?? undefined;
               throw quotaError;
+            }
+            if (observedTokens !== null) {
+              terminalModelTokens = observedTokens;
+              await this.#lease.use(async (lease) => {
+                const event = await this.#recorder.budget({
+                  lease,
+                  workItemNodeId: item.id,
+                  reservation: reservation!,
+                  sequence: this.#sequences.take(),
+                  event: "BudgetReconciled",
+                  unit: "model_tokens",
+                  phase: "execution",
+                  amount: observedTokens,
+                  usageId: `worker-${item.number}-${reservation!.attempt}`,
+                  ...this.#modelInvocationLink(
+                    `worker-${item.number}-${reservation!.attempt}`,
+                    reservation!,
+                    undefined,
+                    "execution",
+                  ),
+                  ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
+                });
+                this.#budgetEvents.push(event);
+              });
+            } else if (selected.capabilities.reportsModelUsage) {
+              this.#modelInvocations.retire(
+                modelInvocationKey({
+                  objective: reservation!.objective,
+                  runId: reservation!.runId,
+                  workItem: item.number,
+                  attempt: reservation!.attempt,
+                  phase: "execution",
+                  modelInvocationId: `worker-${item.number}-${reservation!.attempt}`,
+                }),
+              );
+              if (selected.capabilities.id === "codex-app-server/local-worktree")
+                throw new Error(
+                  "App Server final model usage is unavailable; automated replacement is blocked",
+                );
+              throw new Error(
+                `backend ${selected.capabilities.id} omitted terminal model-token usage; consumption remains unknown`,
+              );
             }
             if (observation.state !== "succeeded") {
               throw new Error(observation.reason ?? `worker ${observation.state}`);
@@ -8840,6 +8862,8 @@ export class FactorySupervisor {
           ...this.#budgetEvents,
           ...this.#accountingEvents(snapshotEvents(snapshot)),
         ]);
+        if (latestProviderQuotaGate(this.#budgetEvents, this.#run.runId))
+          throw new ProviderQuotaDrainIncompleteError();
         assertModelInvocationAdmission(
           this.#budgetEvents,
           this.#policy,
@@ -8981,9 +9005,14 @@ export class FactorySupervisor {
     );
     if (!marker)
       throw new Error("provider quota failure is not linked to a durable dispatch marker");
+    if (typeof marker.directorEpoch !== "number" || typeof marker.policyDigest !== "string")
+      throw new Error("provider quota dispatch marker lacks its original writer binding");
+    const markerDirectorEpoch = marker.directorEpoch;
+    const markerPolicyDigest = marker.policyDigest;
     const snapshot = await this.#reader.readObjective(this.#run.objective);
     this.#fenceSnapshot(snapshot);
-    const matches = snapshotEvents(snapshot).filter(
+    const observedEvents = snapshotEvents(snapshot);
+    const matches = observedEvents.filter(
       (event) =>
         event.kind === "provider" &&
         event.event === "ProviderQuotaBlocked" &&
@@ -8991,6 +9020,32 @@ export class FactorySupervisor {
         event.modelInvocationId === invocationId,
     );
     if (matches.length > 1) throw new Error("provider quota evidence is duplicated");
+    const amount = error.usage ? error.usage.inputTokens + error.usage.outputTokens : undefined;
+    const usageId = phase === "execution" ? invocationId : `failed-${invocationId}`;
+    const usageMatches = observedEvents.filter(
+      (event) =>
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.runId === this.#run.runId &&
+        event.phase === phase &&
+        event.unit === "model_tokens" &&
+        event.modelInvocationId === invocationId &&
+        event.workItem === (reservation?.workItem ?? workItem) &&
+        event.attempt === reservation?.attempt,
+    );
+    if (
+      usageMatches.some(
+        (event) =>
+          amount === undefined ||
+          event.amount !== amount ||
+          event.usageId !== usageId ||
+          event.directorEpoch !== markerDirectorEpoch ||
+          event.policyDigest !== markerPolicyDigest ||
+          JSON.stringify(event.reportedModelUsage) !==
+            JSON.stringify(reportedModelUsage(error.usage!)),
+      )
+    )
+      throw new Error("provider quota usage conflicts with its original observation");
     if (matches.length === 1) {
       const existing = matches[0]!;
       if (
@@ -9005,25 +9060,97 @@ export class FactorySupervisor {
         existing.accounting !== (error.usage ? "exact" : "unknown")
       )
         throw new Error("provider quota evidence conflicts with its original observation");
+      if ((existing.accounting === "exact") !== (usageMatches.length === 1))
+        throw new Error("provider quota accounting conflicts with its atomic usage receipt");
       return;
     }
-    this.#sequences.observe(snapshotEvents(snapshot));
-    await this.#lease.use((lease) =>
-      this.#recorder.providerQuotaBlocked({
-        lease,
-        issueNodeId,
-        sequence: this.#sequences.take(),
-        phase,
-        backend,
-        modelInvocationId: invocationId,
-        provider: error.gate.provider,
-        providerMessage: error.gate.message,
-        ...(error.gate.actionUrl ? { actionUrl: error.gate.actionUrl } : {}),
-        accounting: error.usage ? "exact" : "unknown",
-        ...(reservation ? { reservation } : {}),
-        ...(!reservation && workItem !== undefined ? { workItem } : {}),
-      }),
-    );
+    if (usageMatches.length > 0)
+      throw new Error("provider quota usage exists without its atomic gate metadata");
+    this.#sequences.observe(observedEvents);
+    const usageSequence = error.usage ? this.#sequences.take() : undefined;
+    const gateSequence = this.#sequences.take();
+    try {
+      const recorded = await this.#lease.use((lease) =>
+        this.#recorder.providerQuotaBlocked({
+          lease,
+          issueNodeId,
+          sequence: gateSequence,
+          phase,
+          backend,
+          modelInvocationId: invocationId,
+          provider: error.gate.provider,
+          providerMessage: error.gate.message,
+          ...(error.gate.actionUrl ? { actionUrl: error.gate.actionUrl } : {}),
+          accounting: error.usage ? "exact" : "unknown",
+          ...(error.usage
+            ? {
+                usage: {
+                  sequence: usageSequence!,
+                  usageId,
+                  amount: amount!,
+                  reportedModelUsage: reportedModelUsage(error.usage)!,
+                  directorEpoch: markerDirectorEpoch,
+                  policyDigest: markerPolicyDigest,
+                },
+              }
+            : {}),
+          ...(reservation ? { reservation } : {}),
+          ...(!reservation && workItem !== undefined ? { workItem } : {}),
+        }),
+      );
+      this.#budgetEvents.push(...recorded.filter((event) => event.kind === "budget"));
+    } catch (cause) {
+      const recovered = await this.#reader.readObjective(this.#run.objective);
+      this.#fenceSnapshot(recovered);
+      const recoveredEvents = snapshotEvents(recovered);
+      const recoveredGate = recoveredEvents.filter(
+        (event) =>
+          event.kind === "provider" &&
+          event.event === "ProviderQuotaBlocked" &&
+          event.runId === this.#run.runId &&
+          event.modelInvocationId === invocationId &&
+          event.sequence === gateSequence,
+      );
+      const recoveredUsage = recoveredEvents.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.event === "BudgetReconciled" &&
+          event.runId === this.#run.runId &&
+          event.modelInvocationId === invocationId &&
+          event.sequence === usageSequence,
+      );
+      const recoveredGateEvent = recoveredGate[0];
+      const recoveredUsageEvent = recoveredUsage[0];
+      if (
+        recoveredGate.length !== 1 ||
+        recoveredGateEvent?.kind !== "provider" ||
+        recoveredGateEvent.provider !== error.gate.provider ||
+        recoveredGateEvent.phase !== phase ||
+        recoveredGateEvent.backend !== backend ||
+        recoveredGateEvent.workItem !== (reservation?.workItem ?? workItem) ||
+        recoveredGateEvent.attempt !== reservation?.attempt ||
+        recoveredGateEvent.providerMessage !== error.gate.message ||
+        recoveredGateEvent.actionUrl !== error.gate.actionUrl ||
+        recoveredGateEvent.accounting !== (error.usage ? "exact" : "unknown") ||
+        (error.usage
+          ? recoveredUsage.length !== 1 ||
+            recoveredUsageEvent?.kind !== "budget" ||
+            recoveredUsageEvent.phase !== phase ||
+            recoveredUsageEvent.workItem !== (reservation?.workItem ?? workItem) ||
+            recoveredUsageEvent.attempt !== reservation?.attempt ||
+            recoveredUsageEvent.unit !== "model_tokens" ||
+            recoveredUsageEvent.amount !== amount ||
+            recoveredUsageEvent.usageId !== usageId ||
+            recoveredUsageEvent.directorEpoch !== markerDirectorEpoch ||
+            recoveredUsageEvent.policyDigest !== markerPolicyDigest ||
+            JSON.stringify(recoveredUsageEvent.reportedModelUsage) !==
+              JSON.stringify(reportedModelUsage(error.usage))
+          : recoveredUsage.length !== 0)
+      )
+        throw cause;
+      this.#sequences.observe(recoveredEvents);
+      this.#budgetEvents.push(...recoveredUsage);
+    }
   }
 
   async #recordReviewUsage(
@@ -15682,6 +15809,100 @@ export class FactorySupervisor {
     );
 
     await this.#reconcileInterruptedValidationCapacity(item, reservation, events);
+
+    const providerGate = events.find(
+      (event) =>
+        event.kind === "provider" &&
+        event.event === "ProviderQuotaBlocked" &&
+        event.modelInvocationId &&
+        event.workItem === reservation.workItem &&
+        event.attempt === reservation.attempt,
+    );
+    if (providerGate?.kind === "provider") {
+      const started = events.find(
+        (event) => event.kind === "attempt" && event.event === "AttemptStarted",
+      );
+      const providerResourceId =
+        started?.kind === "attempt" ? started.providerResourceId : undefined;
+      const executionBudget = unreconciledBudgetReservations(events).find(
+        (budget) =>
+          budget.phase === "execution" &&
+          ["local_milliseconds", "sandbox_milliseconds", "managed_sessions"].includes(budget.unit),
+      );
+      const noHandleReplacementNotBefore =
+        !providerResourceId && executionBudget?.unit === "sandbox_milliseconds"
+          ? new Date(
+              new Date(executionBudget.at).getTime() + executionBudget.amount + 60_000,
+            ).toISOString()
+          : undefined;
+      if (backend.reconcileStale) {
+        await backend.reconcileStale({
+          repository: `${this.#options.owner}/${this.#options.repo}`,
+          objective: reservation.objective,
+          workItem: reservation.workItem,
+          attempt: reservation.attempt,
+          runId: reservation.runId,
+          directorEpoch: reservation.directorEpoch,
+          phase: "execution",
+          ...(reservation.localScopeBatch ? { localScopeBatch: reservation.localScopeBatch } : {}),
+          policyDigest: reservation.policyDigest,
+          ...(providerResourceId ? { providerResourceId } : {}),
+          ...(noHandleReplacementNotBefore ? { noHandleReplacementNotBefore } : {}),
+        });
+      } else if (started) {
+        throw new Error(
+          `backend ${reservation.backend} cannot prove the stale resource was stopped`,
+        );
+      }
+      for (const budget of unreconciledBudgetReservations(events)) {
+        // The atomic provider batch is the only authority for exact model usage.
+        if (budget.unit === "model_tokens") continue;
+        const phaseStart =
+          budget.phase === "validation"
+            ? events.find((event) => event.kind === "attempt" && event.event === "AttemptCollected")
+                ?.at
+            : started?.at;
+        const elapsed = phaseStart ? Math.max(0, Date.now() - new Date(phaseStart).getTime()) : 0;
+        const ambiguousPaidLaunch =
+          budget.phase === "execution" && budget.unit === "sandbox_milliseconds" && !started;
+        const amount =
+          budget.unit === "managed_sessions" || ambiguousPaidLaunch
+            ? budget.amount
+            : Math.min(budget.amount, elapsed);
+        await this.#lease.use(async (lease) => {
+          const event = await this.#recorder.budget({
+            lease,
+            workItemNodeId: item.id,
+            reservation,
+            sequence: this.#sequences.take(),
+            event: "BudgetReconciled",
+            unit: budget.unit,
+            phase: budget.phase,
+            amount,
+          });
+          this.#budgetEvents.push(event);
+        });
+      }
+      await this.#lease.use((lease) =>
+        this.#attempts.record({
+          lease,
+          workItemNodeId: item.id,
+          reservation,
+          event: "AttemptFailed",
+          sequence: this.#sequences.take(),
+          reason: `${providerGate.providerMessage}; provider quota must be restored before explicit recovery`,
+          allowRecovery: true,
+        }),
+      );
+      await this.#lease.use(async (lease) =>
+        this.#reconcileIssueAdmissionHistory(
+          item,
+          lease,
+          await this.#store.readCommit(reservation.baseSha),
+        ),
+      );
+      return;
+    }
 
     if (
       !validation &&

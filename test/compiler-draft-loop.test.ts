@@ -198,7 +198,7 @@ async function setup() {
   return { store, leases, manager, lease, binding, callbacks };
 }
 describe("compiler draft durable repair", () => {
-  it("marks exact provider quota usage as recorded before propagating the gate", async () => {
+  it("leaves exact provider quota usage attached for the Supervisor's atomic gate batch", async () => {
     const args = await setup();
     const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
     let observed: ProviderQuotaError | undefined;
@@ -216,12 +216,11 @@ describe("compiler draft durable repair", () => {
       else throw error;
     }
 
-    expect(observed).toMatchObject({ usageRecorded: true });
-    expect(args.callbacks.recordUsage).toHaveBeenCalledExactlyOnceWith(
-      observed!.invocationId,
-      "inventory",
-      observed!.usage,
-    );
+    expect(observed).toMatchObject({
+      invocationId: expect.any(String),
+      usage: { inputTokens: 2, outputTokens: 1 },
+    });
+    expect(args.callbacks.recordUsage).not.toHaveBeenCalled();
   });
 
   it("uses valid canonical JSON and binds read-only evidence to one run", async () => {

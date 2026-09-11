@@ -499,15 +499,58 @@ export class LifecycleRecorder {
     providerMessage: string;
     actionUrl?: string;
     accounting: "exact" | "unknown";
+    usage?: {
+      sequence: number;
+      usageId: string;
+      amount: number;
+      reportedModelUsage: ReportedModelUsage;
+      directorEpoch: number;
+      policyDigest: string;
+    };
     reservation?: AttemptReservation;
     workItem?: number;
-  }): Promise<FactoryEvent> {
+  }): Promise<FactoryEvent[]> {
     await this.leases.assertMutationAuthorized(args.lease);
     if (args.reservation) assertReservationLease(args.reservation, args.lease);
     if (args.phase === "execution" && !args.reservation)
       throw new Error("execution provider quota evidence requires its attempt reservation");
+    if ((args.accounting === "exact") !== Boolean(args.usage))
+      throw new Error("provider quota accounting must match its atomic usage receipt");
+    if (
+      args.usage &&
+      (args.usage.policyDigest !== args.lease.policyDigest ||
+        args.usage.directorEpoch > args.lease.epoch ||
+        args.usage.sequence >= args.sequence)
+    )
+      throw new Error("provider quota usage is fenced from its original run policy or sequence");
     const now = await this.store.serverTime();
-    const event = parseFactoryEvent({
+    const scope = args.reservation
+      ? { workItem: args.reservation.workItem, attempt: args.reservation.attempt }
+      : args.workItem !== undefined
+        ? { workItem: args.workItem }
+        : {};
+    const usage = args.usage
+      ? parseFactoryEvent({
+          protocol: PROTOCOL_V2,
+          kind: "budget",
+          event: "BudgetReconciled",
+          ...writerAuthority(args.lease, args.usage.sequence),
+          objective: args.lease.objective,
+          runId: args.lease.runId,
+          sequence: args.usage.sequence,
+          at: now.toISOString(),
+          ...scope,
+          phase: args.phase,
+          unit: "model_tokens",
+          amount: args.usage.amount,
+          usageId: args.usage.usageId,
+          modelInvocationId: args.modelInvocationId,
+          directorEpoch: args.usage.directorEpoch,
+          policyDigest: args.usage.policyDigest,
+          reportedModelUsage: args.usage.reportedModelUsage,
+        })
+      : undefined;
+    const gate = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "provider",
       event: "ProviderQuotaBlocked",
@@ -521,22 +564,19 @@ export class LifecycleRecorder {
       phase: args.phase,
       backend: args.backend,
       modelInvocationId: args.modelInvocationId,
-      ...(args.reservation
-        ? { workItem: args.reservation.workItem, attempt: args.reservation.attempt }
-        : args.workItem !== undefined
-          ? { workItem: args.workItem }
-          : {}),
+      ...scope,
       providerMessage: args.providerMessage,
       ...(args.actionUrl ? { actionUrl: args.actionUrl } : {}),
       accounting: args.accounting,
     });
+    const events = usage ? [usage, gate] : [gate];
     await this.store.addIssueComment(
       args.issueNodeId,
-      encodeEventComment(
+      encodeEventBatchComment(
         `Factory stopped at a non-retryable ${args.providerMessage}. Restore provider quota before explicitly resuming.`,
-        event,
+        events,
       ),
     );
-    return event;
+    return events;
   }
 }

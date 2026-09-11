@@ -121,13 +121,32 @@ const gitOptions = [
   "-c",
   "core.fsmonitor=false",
 ];
-async function git(repository: string, args: string[], limit = 2 * 1024 * 1024): Promise<string> {
+interface PinnedLfsInspectionOptions {
+  deadline?: Date;
+  now?: () => number;
+}
+
+function inspectionTimeout(maximumMs: number, options: PinnedLfsInspectionOptions): number {
+  if (!options.deadline) return maximumMs;
+  const remainingMs = options.deadline.getTime() - (options.now ?? Date.now)();
+  if (!Number.isSafeInteger(remainingMs) || remainingMs <= 0) {
+    throw new Error("pinned LFS inspection deadline exhausted");
+  }
+  return Math.min(maximumMs, remainingMs);
+}
+
+async function git(
+  repository: string,
+  args: string[],
+  limit = 2 * 1024 * 1024,
+  options: PinnedLfsInspectionOptions = {},
+): Promise<string> {
   const result = await runContainedProcess({
     command: "git",
     args: [...gitOptions, ...args],
     cwd: resolve(repository),
     env: objectEnvironment(),
-    timeoutMs: 30_000,
+    timeoutMs: inspectionTimeout(30_000, options),
     maxOutputBytes: limit,
   });
   if (result.exitCode !== 0 || result.timedOut || result.stdout.startsWith("[output truncated"))
@@ -169,16 +188,21 @@ try {
 async function readBlobs(
   repository: string,
   entries: Array<{ oid: string; size: number }>,
+  options: PinnedLfsInspectionOptions,
 ): Promise<Map<string, Buffer>> {
   const unique = [...new Map(entries.map((entry) => [entry.oid, entry])).values()];
   if (unique.reduce((sum, entry) => sum + entry.size, 0) > 16 * 1024 * 1024)
     throw new Error("LFS inspection contents exceed aggregate bound");
   const blobs = new Map<string, Buffer>();
-  const deadline = Date.now() + 120_000;
+  const now = options.now ?? Date.now;
+  const deadline = Math.min(
+    now() + 120_000,
+    options.deadline?.getTime() ?? Number.POSITIVE_INFINITY,
+  );
   for (let start = 0; start < unique.length; start += 32) {
     const batch = unique.slice(start, start + 32);
     const maximum = batch.reduce((sum, entry) => sum + entry.size + 128, 0) + 1024;
-    const remaining = deadline - Date.now();
+    const remaining = deadline - now();
     if (remaining <= 0) throw new Error("LFS inspection deadline exhausted");
     const result = await runContainedProcess({
       command: process.execPath,
@@ -213,11 +237,18 @@ async function readBlobs(
 export async function inspectPinnedLfs(
   repository: string,
   baseSha: string,
+  options: PinnedLfsInspectionOptions = {},
 ): Promise<PinnedLfsFacts> {
   if (!/^[0-9a-f]{40}$/.test(baseSha)) throw new Error("invalid LFS base SHA");
-  if ((await git(repository, ["rev-parse", "--verify", `${baseSha}^{commit}`])).trim() !== baseSha)
+  if (
+    (
+      await git(repository, ["rev-parse", "--verify", `${baseSha}^{commit}`], undefined, options)
+    ).trim() !== baseSha
+  )
     throw new Error("LFS base is not the exact requested commit");
-  const records = (await git(repository, ["ls-tree", "-r", "-l", "-z", baseSha])).split("\0");
+  const records = (
+    await git(repository, ["ls-tree", "-r", "-l", "-z", baseSha], undefined, options)
+  ).split("\0");
   if (records.pop() !== "" || records.length > 10_000)
     throw new Error("LFS source inventory is incomplete or exceeds its bound");
   const assets: PinnedLfsAsset[] = [];
@@ -245,7 +276,7 @@ export async function inspectPinnedLfs(
       throw new Error("pinned LFS attributes exceed byte bound");
     entries.push({ mode, oid: oid!, path: path!, size, isAttributes });
   }
-  const blobs = await readBlobs(repository, entries);
+  const blobs = await readBlobs(repository, entries, options);
   for (const entry of entries) {
     const bytes = blobs.get(entry.oid)!;
     if (

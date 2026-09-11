@@ -12,7 +12,7 @@ import type {
   ExecutionBackendCapabilities,
   StaleAttemptIdentity,
 } from "../execution/backend.js";
-import { localExecutionScopeBatch } from "../execution/backend.js";
+import { localExecutionScopeBatch, remainingBeforeAttemptDeadline } from "../execution/backend.js";
 import {
   LocalScopeCleanupError,
   startScopedLocalProcess,
@@ -403,8 +403,8 @@ export class CodexCliLocalBackend implements ExecutionBackend {
 
   async launch(context: AttemptContext): Promise<BackendHandle> {
     const scope = localExecutionScopeBatch(context);
-    if (Date.now() >= context.deadline.getTime())
-      throw new Error("attempt deadline already elapsed");
+    const deadlineFailure = "attempt deadline elapsed before Codex CLI process launch";
+    remainingBeforeAttemptDeadline(context.deadline, deadlineFailure);
     const codexHome = await (this.#options.createCodexHome ?? createIsolatedCodexHome)("worker");
     try {
       const schemaPath = join(codexHome, "worker-output.schema.json");
@@ -454,12 +454,13 @@ export class CodexCliLocalBackend implements ExecutionBackend {
       env.FACTORY_ATTEMPT_ID = durableAttemptId(context);
       const resourceHostIdentity = await readLocalResourceHostIdentity();
       const target = await resolveCodexCommand(this.#options.command);
+      const remainingMs = remainingBeforeAttemptDeadline(context.deadline, deadlineFailure);
       const processOptions = {
         command: target.command,
         args: [...target.args, ...args],
         cwd: context.workspace,
         env,
-        timeoutMs: Math.max(1, context.deadline.getTime() - Date.now()),
+        timeoutMs: remainingMs,
         maxOutputBytes: 256 * 1024,
       };
       if (scope) await context.localExecutionScope!.assertCurrent();

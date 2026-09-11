@@ -247,7 +247,10 @@ export const RunPolicySchema = z
       .number()
       .int()
       .min(1)
-      .max(24 * 60),
+      .max(24 * 60)
+      .describe(
+        "Maximum duration of one supervised execution attempt or management model invocation",
+      ),
     objectiveTimeoutMinutes: z
       .number()
       .int()

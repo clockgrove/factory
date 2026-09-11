@@ -79,6 +79,29 @@ export interface AttemptContext {
   };
 }
 
+/** A provider resource may still exist after cleanup failed. Supervisors must
+ * reconcile it before releasing capacity or authorizing replacement work. */
+export class ProviderResourceCleanupError extends Error {
+  override readonly name: string = "ProviderResourceCleanupError";
+}
+
+/** Return the live time remaining at a side-effect boundary, failing closed at
+ * equality. Callers must invoke this immediately before credential use,
+ * provider creation, or model/process dispatch after asynchronous preparation. */
+export function remainingBeforeAttemptDeadline(
+  deadline: Date,
+  failure: string,
+  now: () => number = Date.now,
+): number {
+  const deadlineMs = deadline.getTime();
+  const currentMs = now();
+  const remainingMs = deadlineMs - currentMs;
+  if (!Number.isFinite(deadlineMs) || !Number.isFinite(currentMs) || remainingMs <= 0) {
+    throw new Error(failure);
+  }
+  return remainingMs;
+}
+
 /** Reject a borrowed or stale launch descriptor before touching an executable.
  * This validates bindings only; the caller still needs the supplied live fence. */
 export function localExecutionScopeBatch(context: AttemptContext): LocalScopeBatch | undefined {

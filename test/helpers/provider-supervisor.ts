@@ -59,6 +59,9 @@ const BUN_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(
 const UV_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "python-uv")!
   .runtimeRequirement!;
 export interface ProviderFaults {
+  objectiveTimeoutMinutes?: number;
+  workItemTimeoutMinutes?: number;
+  onValidationDeadline?: (deadline: Date) => void;
   compilerEvaluation?: RunPolicy["compilerEvaluation"];
   repositoryFence?: () => Promise<void>;
   configureLocalBackend?: (backend: ExecutionBackend) => ExecutionBackend;
@@ -251,8 +254,8 @@ wheels = [
     backendOrder: faults.localOnly ? [LOCAL] : managed ? [provider, DAYTONA] : [LOCAL, DAYTONA],
     maxParallel: faults.localOnly ? (faults.localMaxParallel ?? 1) : managed ? 1 : 2,
     maxAttemptsPerItem: faults.maxAttemptsPerItem ?? 1,
-    workItemTimeoutMinutes: 2,
-    objectiveTimeoutMinutes: 20,
+    workItemTimeoutMinutes: faults.workItemTimeoutMinutes ?? 2,
+    objectiveTimeoutMinutes: faults.objectiveTimeoutMinutes ?? 20,
     allowedNetworkDestinations:
       faults.capabilityAdapter === "uv"
         ? [...DEFAULT_RUN_POLICY.allowedNetworkDestinations, "pypi.org", "files.pythonhosted.org"]
@@ -1508,6 +1511,7 @@ jobs:
       ...(id === DAYTONA
         ? {
             validate: async (input: Parameters<NonNullable<ExecutionBackend["validate"]>>[0]) => {
+              faults.onValidationDeadline?.(input.deadline);
               activity.push({
                 operation: "validate",
                 backend: id,

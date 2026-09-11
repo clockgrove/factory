@@ -453,7 +453,7 @@ describe("installed large-file lifecycle authority", () => {
     expect(f.port.armTransfer).not.toHaveBeenCalled();
   });
   it("pins the one-shot transfer fault to exact activation, base and producer", () => {
-    const arm = largeFileTransferArm(authority, original, 7, baseSha, 0);
+    const arm = largeFileTransferArm(authority, original, 7, baseSha);
     expect(arm).toMatchObject({
       repository,
       objective: 7,
@@ -462,7 +462,8 @@ describe("installed large-file lifecycle authority", () => {
       activationRequestId: `${authority.namespace}-activate`,
       invocationId: original.invocationId,
       minPayloadBytes: 5242881,
-      expiresAt: "1970-01-01T00:10:00.000Z",
+      eligibilityDurationMs: 45 * 60_000,
+      holdDurationMs: 600_000,
     });
     expect(transferArmPath(unit, original.invocationId, 1000)).toContain(
       `/${hash(`${unit}\0${original.invocationId}`)}.json`,

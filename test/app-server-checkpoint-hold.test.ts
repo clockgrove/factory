@@ -21,6 +21,7 @@ const digest = "a".repeat(64),
   invocation = "b".repeat(32);
 const roots: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 async function fixture() {
@@ -53,6 +54,7 @@ async function fixture() {
     producerStartTicks: "123",
     deadline: new Date(Date.now() + 60000).toISOString(),
   };
+  const objectiveStartedAt = new Date();
   const args = {
     repository: "example/disposable",
     objective: 7,
@@ -69,6 +71,9 @@ async function fixture() {
     modelTokens: 1234,
     nativeMilliseconds: 500,
     batch,
+    objectiveStartedAt,
+    objectiveDeadline: new Date(objectiveStartedAt.getTime() + 120_000),
+    holdDurationMs: 60_000,
     signal: controller.signal,
     assertCurrent: async () => {
       fenced++;
@@ -79,7 +84,7 @@ async function fixture() {
     },
   };
   const arm = {
-    protocol: "clockgrove.factory/app-server-checkpoint-arm-v1",
+    protocol: "clockgrove.factory/app-server-checkpoint-arm-v2",
     repository: args.repository,
     objective: args.objective,
     activationRequestId: args.activationRequestId,
@@ -89,7 +94,8 @@ async function fixture() {
     hostIdentity: digest,
     producerPid: process.pid,
     producerStartTicks: "123",
-    expiresAt: new Date(Date.now() + 60000).toISOString(),
+    eligibilityDurationMs: 120_000,
+    holdDurationMs: args.holdDurationMs,
   };
   const path = qualificationCheckpointPath(unit, invocation);
   return {
@@ -98,7 +104,7 @@ async function fixture() {
     arm,
     path,
     counts: () => ({ fenced, proved }),
-    async armNow(value = arm) {
+    async armNow(value: unknown = arm) {
       await mkdir(join(state.root, `factory-qualification-checkpoints-${process.getuid!()}`), {
         mode: 0o700,
       });
@@ -109,22 +115,15 @@ async function fixture() {
 describe("one-shot installed App Server checkpoint hold", () => {
   it("keeps reached hold expiry distinct from a shutdown interruption", async () => {
     const f = await fixture();
-    await f.armNow();
-    const now = vi.spyOn(Date, "now");
-    let fences = 0;
-    try {
-      const result = await holdAppServerQualificationCheckpoint({
-        ...f.args,
-        assertCurrent: async () => {
-          if (++fences === 2) now.mockReturnValue(Date.parse(f.arm.expiresAt) + 1);
-        },
-      }).catch((error: unknown) => error);
-      expect(result).toBeInstanceOf(SafeArtifactCheckpointHeldError);
-      expect(result).not.toBeInstanceOf(SafeArtifactCheckpointShutdownError);
-      expect(f.controller.signal.aborted).toBe(false);
-    } finally {
-      now.mockRestore();
-    }
+    await f.armNow({ ...f.arm, holdDurationMs: 1 });
+    const result = await holdAppServerQualificationCheckpoint({
+      ...f.args,
+      holdDurationMs: 1,
+      assertCurrent: async () => {},
+    }).catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(SafeArtifactCheckpointHeldError);
+    expect(result).not.toBeInstanceOf(SafeArtifactCheckpointShutdownError);
+    expect(f.controller.signal.aborted).toBe(false);
   });
   it("is a default no-op without private opt-in and does not even read provider proof", async () => {
     const f = await fixture();
@@ -140,6 +139,7 @@ describe("one-shot installed App Server checkpoint hold", () => {
     );
     const witness = JSON.parse(await readFile(`${f.path}.reached`, "utf8"));
     expect(witness).toMatchObject({
+      protocol: "clockgrove.factory/app-server-checkpoint-reached-v2",
       runId: "run-7",
       workItem: 8,
       attempt: 1,
@@ -149,6 +149,9 @@ describe("one-shot installed App Server checkpoint hold", () => {
       threadId: "thread-1",
       turnId: "turn-1",
     });
+    expect(Date.parse(witness.holdUntil) - Date.parse(witness.reachedAt)).toBe(60_000);
+    expect(witness.startedAt).toBe(f.args.objectiveStartedAt.toISOString());
+    expect(witness.eligibleUntil).toBe(f.args.objectiveDeadline.toISOString());
     expect(f.counts()).toEqual({ fenced: 2, proved: 1 });
     const repeated = await holdAppServerQualificationCheckpoint(f.args).catch(
       (error: unknown) => error,
@@ -156,6 +159,20 @@ describe("one-shot installed App Server checkpoint hold", () => {
     expect(repeated).toBeInstanceOf(SafeArtifactCheckpointHeldError);
     expect(repeated).not.toBeInstanceOf(SafeArtifactCheckpointShutdownError);
     expect(JSON.parse(await readFile(`${f.path}.reached`, "utf8"))).toEqual(witness);
+  });
+  it("samples the reach clock once so a later tick cannot cross eligibility", async () => {
+    const f = await fixture();
+    f.args.objectiveStartedAt = new Date(0);
+    f.args.objectiveDeadline = new Date(100);
+    await f.armNow({ ...f.arm, eligibilityDurationMs: 100 });
+    vi.spyOn(Date, "now").mockReturnValueOnce(98).mockReturnValueOnce(99).mockReturnValue(100);
+
+    await expect(holdAppServerQualificationCheckpoint(f.args)).rejects.toBeInstanceOf(
+      SafeArtifactCheckpointShutdownError,
+    );
+    const witness = JSON.parse(await readFile(`${f.path}.reached`, "utf8"));
+    expect(Date.parse(witness.reachedAt)).toBe(99);
+    expect(Date.parse(witness.reachedAt)).toBeLessThan(Date.parse(witness.eligibleUntil));
   });
   it.each([
     "objective",
@@ -189,8 +206,15 @@ describe("one-shot installed App Server checkpoint hold", () => {
   });
   it("rejects expiry, missing terminal accounting and loss of the current fence", async () => {
     const f = await fixture();
-    await f.armNow({ ...f.arm, expiresAt: new Date(Date.now() - 1).toISOString() });
-    await expect(holdAppServerQualificationCheckpoint(f.args)).rejects.toThrow("expiry");
+    await f.armNow();
+    const expiredDeadline = new Date(Date.now() - 1);
+    await expect(
+      holdAppServerQualificationCheckpoint({
+        ...f.args,
+        objectiveStartedAt: new Date(expiredDeadline.getTime() - f.arm.eligibilityDurationMs),
+        objectiveDeadline: expiredDeadline,
+      }),
+    ).rejects.toThrow("expiry");
     await writeFile(f.path, JSON.stringify(f.arm));
     await expect(
       holdAppServerQualificationCheckpoint({ ...f.args, modelTokens: NaN }),
@@ -212,5 +236,36 @@ describe("one-shot installed App Server checkpoint hold", () => {
       }),
     ).rejects.toThrow("lease lost");
     await expect(readFile(`${f.path}.reached`)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+  it("rejects an unreached v1 arm instead of silently extending it", async () => {
+    const f = await fixture();
+    const {
+      eligibilityDurationMs: _eligibilityDurationMs,
+      holdDurationMs: _holdDurationMs,
+      ...legacy
+    } = f.arm;
+    await f.armNow({
+      ...legacy,
+      protocol: "clockgrove.factory/app-server-checkpoint-arm-v1",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await expect(holdAppServerQualificationCheckpoint(f.args)).rejects.toThrow("arm v1 is retired");
+  });
+  it("reaches after the former ten-minute arm window and starts a fresh bounded hold", async () => {
+    const f = await fixture();
+    const startedAt = new Date(Date.now() - 10 * 60_000 - 1);
+    const eligibilityDurationMs = 45 * 60_000;
+    await f.armNow({ ...f.arm, eligibilityDurationMs, holdDurationMs: 1 });
+    const result = await holdAppServerQualificationCheckpoint({
+      ...f.args,
+      objectiveStartedAt: startedAt,
+      objectiveDeadline: new Date(startedAt.getTime() + eligibilityDurationMs),
+      holdDurationMs: 1,
+      assertCurrent: async () => {},
+    }).catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(SafeArtifactCheckpointHeldError);
+    const witness = JSON.parse(await readFile(`${f.path}.reached`, "utf8"));
+    expect(Date.parse(witness.holdUntil) - Date.parse(witness.reachedAt)).toBe(1);
+    expect(witness.startedAt).toBe(startedAt.toISOString());
   });
 });

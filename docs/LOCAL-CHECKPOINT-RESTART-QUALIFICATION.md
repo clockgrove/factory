@@ -73,10 +73,13 @@ FACTORY_CHECKPOINT_ACK=<repository>:<exact-unit>:start,arm-terminal-artifact-hol
 
 Before activation, the runner exclusively writes a bounded owner-only qualification arm keyed
 to the exact observed controller unit and InvocationID. It binds the plain Objective, original
-activation request, policy, host and producer generation. It expires within ten minutes,
-including compilation, worker execution and hold time. It is private fault coordination, not
-Factory orchestration state or execution authority. No service configuration, arbitrary commands,
-GitHub control receipts, provider home or installed artifact are edited to inject the boundary.
+activation request, policy, host and producer generation. Its eligibility duration must equal the
+activated policy's Objective timeout; the installed runtime anchors that duration to the authenticated
+`FactoryRunStarted.at`, never to arm creation or worker start. A separate hold duration equals the
+policy Work Item timeout and starts only after terminal/accounting/resource proof reaches the seam.
+These clocks are private fault coordination, not Factory orchestration state or execution authority.
+No service configuration, arbitrary commands, GitHub control receipts, provider home or installed
+artifact are edited to inject the boundary.
 
 Only the matching first App Server attempt can reach it. The installed runtime first persists
 the immutable terminal session, complete model counters and ready artifact, records successful
@@ -99,7 +102,11 @@ must be unchanged. Resume then completes the original three-item fixture. The fi
 three unique App Server executions, three publications/integrations, complete known accounting,
 unchanged installed/source identity, all exact scopes absent and the exact controller stopped.
 Written negative contracts reject changed binding, missing raw usage, early validation, repeated
-dispatch, live/unknown resources and expired arms; they are not separate live negative outcomes.
+dispatch, live/unknown resources and an Objective deadline reached before the seam; they are not
+separate live negative outcomes. The v2 reached witness records the authenticated run start,
+Objective eligibility deadline, seam reach time and distinct hold deadline. Already-reached v1
+witnesses remain readable for exact historical continuation, but a fresh runtime refuses an
+unreached v1 arm rather than guessing how its single expiry should be split.
 
 This scenario proves **same-attempt terminal artifact continuation with unchanged durable session
 evidence**. Ready artifact recovery deliberately wins, so it does not claim a cold `thread/read`
@@ -173,7 +180,8 @@ ceiling is an observed admission ceiling, not a provider-side hard token cap. It
 unexhausted at the checkpoint and terminal proof.
 
 All new REST operations have actual 15-second abort signals; complete listings are bounded to
-ten pages. Operator calls and polling are bounded, and each requested mutation is recorded before
+ten pages. Operator calls and polling are bounded by the immutable authenticated Objective deadline,
+with no separate four-minute worker-start allowance or rolling per-phase poll count. Each requested mutation is recorded before
 its single invocation. There is no POST, activation, restart, Resume or Stop retry. The script
 never acknowledges unknown usage, replaces a run, updates a PR head, or writes protocol receipts.
 

@@ -13,6 +13,7 @@ import {
   DaytonaBackend,
   DaytonaResourceCleanupError,
 } from "../src/backends/daytona.js";
+import * as sourceContent from "../src/backends/source-content.js";
 import { normalizeArtifact } from "../src/execution/artifacts.js";
 import { MAX_CONTENT_BYTES } from "../src/execution/artifact-content.js";
 import type { AttemptContext } from "../src/execution/backend.js";
@@ -129,10 +130,16 @@ function fakeProvider() {
   let uploadFailure: Error | undefined;
   let createFailureAfterAllocation: Error | undefined;
   let lookupFailure: Error | undefined;
+  let lookupOverride: (() => Promise<never>) | undefined;
   let workerFailure: Error | undefined;
   let workerExitCode = 0;
   let workerResult = "ok";
   let workerStdout = "worker complete\n";
+  let validationError: Buffer | undefined;
+  let afterUpload: (() => void) | undefined;
+  let afterMetadataRead: ((path: string) => void) | undefined;
+  const stalledDownloads = new Map<string, () => void>();
+  const executedCommands: string[] = [];
 
   function sandbox(id: string, name = id, labels: Record<string, string> = {}) {
     const files = new Map<string, Buffer>();
@@ -156,6 +163,7 @@ function fakeProvider() {
                 ? await readFile(upload.source)
                 : Buffer.from(upload.source),
             );
+          afterUpload?.();
         },
         downloadFile: async (path: string) => {
           const value = files.get(path);
@@ -166,7 +174,7 @@ function fakeProvider() {
           metadataReads.push(path);
           const file = files.get(path) ?? streamOverrides.get(path);
           if (!file) throw new Error(`missing fake Daytona file ${path}`);
-          return {
+          const details = {
             group: "factory",
             isDir: false,
             modTime: "",
@@ -178,20 +186,37 @@ function fakeProvider() {
             permissions: "600",
             size: reportedSizes.get(path) ?? file.byteLength,
           };
+          afterMetadataRead?.(path);
+          return details;
         },
         downloadFileStream: async (
           path: string,
-          options?: { onProgress?: (progress: { bytesReceived: number }) => void },
+          options?: {
+            signal?: AbortSignal;
+            onProgress?: (progress: { bytesReceived: number }) => void;
+          },
         ) => {
           streamed.push(path);
           const file = streamOverrides.get(path) ?? files.get(path);
           if (!file) throw new Error(`missing fake Daytona file ${path}`);
+          const stalled = stalledDownloads.get(path);
+          if (stalled) {
+            const stream = new Readable({ read: () => undefined });
+            options?.signal?.addEventListener(
+              "abort",
+              () => stream.destroy(options.signal?.reason),
+              { once: true },
+            );
+            stalled();
+            return stream;
+          }
           options?.onProgress?.({ bytesReceived: file.byteLength });
           return Readable.from([file]);
         },
       },
       process: {
         executeCommand: async (command: string) => {
+          executedCommands.push(command);
           if (command === "bash factory/run.sh") {
             if (workerFailure) {
               const error = workerFailure;
@@ -214,24 +239,28 @@ function fakeProvider() {
             files.set("factory/worker.stdout", Buffer.from(workerStdout));
             files.set("factory/worker.stderr", Buffer.alloc(0));
           } else if (command === "node factory/validate.mjs") {
-            files.set(
-              "factory/validation-result.json",
-              Buffer.from(
-                JSON.stringify({
-                  outputTreeSha: "d".repeat(40),
-                  commands: [
-                    {
-                      command: "grep -qx changed value.txt",
-                      exitCode: 0,
-                      durationMs: 3,
-                    },
-                  ],
-                  passed: true,
-                  startedAt: "2026-09-04T00:00:00.000Z",
-                  completedAt: "2026-09-04T00:00:01.000Z",
-                }),
-              ),
-            );
+            if (workerExitCode !== 0 && validationError) {
+              files.set("factory/validation-error.txt", validationError);
+            } else {
+              files.set(
+                "factory/validation-result.json",
+                Buffer.from(
+                  JSON.stringify({
+                    outputTreeSha: "d".repeat(40),
+                    commands: [
+                      {
+                        command: "grep -qx changed value.txt",
+                        exitCode: 0,
+                        durationMs: 3,
+                      },
+                    ],
+                    passed: true,
+                    startedAt: "2026-09-04T00:00:00.000Z",
+                    completedAt: "2026-09-04T00:00:01.000Z",
+                  }),
+                ),
+              );
+            }
           }
           return { exitCode: workerExitCode, result: workerResult };
         },
@@ -282,6 +311,7 @@ function fakeProvider() {
     },
     get: async (name: string) => {
       lookedUp.push(name);
+      if (lookupOverride) return lookupOverride();
       if (lookupFailure) throw lookupFailure;
       const misses = visibilityMisses.get(name) ?? 0;
       if (misses > 0) {
@@ -299,6 +329,7 @@ function fakeProvider() {
     lookedUp,
     metadataReads,
     streamed,
+    executedCommands,
     secretLookups,
     setSecrets: (next: FakeSecret[]) => {
       secrets = next;
@@ -306,6 +337,12 @@ function fakeProvider() {
     failNextDelete: (id: string, count = 1) => deleteFailures.set(id, count),
     failNextUpload: (error = new Error("upload failed")) => {
       uploadFailure = error;
+    },
+    advanceAfterUpload: (advance: () => void) => {
+      afterUpload = advance;
+    },
+    afterMetadataRead: (read: (path: string) => void) => {
+      afterMetadataRead = read;
     },
     failNextCreateAfterAllocation: (error = new Error("create timed out")) => {
       createFailureAfterAllocation = error;
@@ -316,6 +353,12 @@ function fakeProvider() {
     clearLookupFailure: () => {
       lookupFailure = undefined;
     },
+    stallLookup: (started: () => void) => {
+      lookupOverride = async () => {
+        started();
+        return new Promise<never>(() => undefined);
+      };
+    },
     failWorker: (error: Error) => {
       workerFailure = error;
     },
@@ -325,6 +368,9 @@ function fakeProvider() {
     },
     setWorkerStdout: (stdout: string) => {
       workerStdout = stdout;
+    },
+    setValidationError: (error: string) => {
+      validationError = Buffer.from(error);
     },
     delayVisibility: (name: string, misses: number) => {
       visibilityMisses.set(name, misses);
@@ -338,6 +384,10 @@ function fakeProvider() {
     overrideStream: (path: string, content: Buffer) => {
       streamOverrides.set(path, content);
     },
+    stallDownload: (path: string, started: () => void) => {
+      stalledDownloads.set(path, started);
+    },
+    resource: (id: string) => resources.get(id),
     uploadedFiles: (id: string) => resources.get(id)?.files,
     client: client as unknown as Daytona,
   };
@@ -516,6 +566,506 @@ describe("Daytona supported provider contract", () => {
     expect(provider.creates).toEqual([]);
   });
 
+  it("bounds stalled model Secret inspection by the immutable execution deadline", async () => {
+    const source = await fixture();
+    const provider = fakeProvider();
+    let secretDeadlineController: AbortController | undefined;
+    let secretPages = 0;
+    vi.spyOn(provider.client.secret, "list").mockImplementation(async () => {
+      secretPages += 1;
+      if (secretPages === 1) {
+        return { items: [], total: 0, nextCursor: "page-2" };
+      }
+      secretDeadlineController?.abort(new Error("immutable Secret inspection deadline elapsed"));
+      return new Promise<never>(() => undefined);
+    });
+    const backend = new DaytonaBackend({
+      repository: source.repository,
+      daytonaSecretName: "factory-openai",
+      createClient: () => provider.client,
+      now: () => 1_000,
+      deadlineSignal: (_deadline, failure) => {
+        const controller = new AbortController();
+        if (/Secret metadata inspection/.test(failure)) secretDeadlineController = controller;
+        return { signal: controller.signal, dispose: () => undefined };
+      },
+    });
+
+    await expect(backend.launch({ ...source.context, deadline: new Date(2_000) })).rejects.toThrow(
+      "immutable Secret inspection deadline elapsed",
+    );
+    expect(secretPages).toBe(2);
+    expect(provider.creates).toEqual([]);
+  });
+
+  it("bounds stalled model Secret probing by one provider-operation deadline", async () => {
+    const source = await fixture();
+    const provider = fakeProvider();
+    let probeDeadlineController: AbortController | undefined;
+    vi.spyOn(provider.client.secret, "list").mockImplementation(async () => {
+      probeDeadlineController?.abort(new Error("Daytona Secret probe bound elapsed"));
+      return new Promise<never>(() => undefined);
+    });
+    const probeDeadlines: number[] = [];
+    const backend = new DaytonaBackend({
+      repository: source.repository,
+      daytonaSecretName: "factory-openai",
+      credentialAvailable: () => true,
+      createClient: () => provider.client,
+      now: () => 1_000,
+      cleanupTimeoutMs: 120_000,
+      deadlineSignal: (deadline, failure) => {
+        const controller = new AbortController();
+        if (/Secret probe exceeded/.test(failure)) {
+          probeDeadlineController = controller;
+          probeDeadlines.push(deadline.getTime());
+        }
+        return { signal: controller.signal, dispose: () => undefined };
+      },
+    });
+
+    await expect(backend.probe()).resolves.toMatchObject({
+      available: true,
+      authenticated: false,
+      reason: expect.stringContaining("Daytona Secret probe bound elapsed"),
+    });
+    expect(probeDeadlines).toEqual([121_000]);
+    expect(provider.creates).toEqual([]);
+  });
+
+  it.each([
+    ["execution", 4],
+    ["validation", 2],
+  ] as const)(
+    "rechecks the %s deadline after source preparation and before sandbox creation",
+    async (phase, expiryRead) => {
+      const source = await fixture();
+      const provider = fakeProvider();
+      let reads = 0;
+      const backend = new DaytonaBackend({
+        repository: source.repository,
+        daytonaSecretName: "factory-openai",
+        createClient: () => provider.client,
+        now: () => (++reads < expiryRead ? 1_000 : 2_000),
+      });
+      const input = { ...source.context, deadline: new Date(2_000) };
+      const operation =
+        phase === "execution"
+          ? backend.launch(input)
+          : backend.validate!({
+              ...input,
+              artifact: normalizeArtifact({
+                baseSha: input.packet.baseSha,
+                patch: "",
+                changedPaths: [],
+                outcome: "declined",
+                reason: "deadline fixture",
+              }),
+            });
+
+      await expect(operation).rejects.toThrow(
+        /deadline elapsed (?:before sandbox creation|during model Secret metadata inspection|during source archive preparation)/,
+      );
+      expect(provider.creates).toEqual([]);
+      expect(provider.executedCommands).toEqual([]);
+    },
+  );
+
+  it.each(["execution", "validation"] as const)(
+    "bounds stalled %s source archive preparation by the immutable deadline",
+    async (phase) => {
+      const source = await fixture();
+      const provider = fakeProvider();
+      let archiveDeadlineController: AbortController | undefined;
+      const archive = vi
+        .spyOn(sourceContent, "repositoryArchiveFile")
+        .mockImplementation(async (_repository, _baseSha, options) => {
+          expect(options).toMatchObject({ deadline: new Date(2_000) });
+          expect(options?.signal).toBe(archiveDeadlineController?.signal);
+          archiveDeadlineController?.abort(new Error("immutable source archive deadline elapsed"));
+          return new Promise<never>(() => undefined);
+        });
+      const backend = new DaytonaBackend({
+        repository: source.repository,
+        daytonaSecretName: "factory-openai",
+        createClient: () => provider.client,
+        now: () => 1_000,
+        deadlineSignal: (_deadline, failure) => {
+          const controller = new AbortController();
+          if (/source archive preparation/.test(failure)) archiveDeadlineController = controller;
+          return { signal: controller.signal, dispose: () => undefined };
+        },
+      });
+      const input = { ...source.context, deadline: new Date(2_000) };
+      const operation =
+        phase === "execution"
+          ? backend.launch(input)
+          : backend.validate!({
+              ...input,
+              artifact: normalizeArtifact({
+                baseSha: input.packet.baseSha,
+                patch: "",
+                changedPaths: [],
+                outcome: "declined",
+                reason: "deadline fixture",
+              }),
+            });
+
+      await expect(operation).rejects.toThrow("immutable source archive deadline elapsed");
+      expect(provider.creates).toEqual([]);
+      expect(provider.executedCommands).toEqual([]);
+      archive.mockRestore();
+    },
+  );
+
+  it.each(["execution", "validation"] as const)(
+    "races ambiguous %s sandbox creation against the immutable deadline",
+    async (phase) => {
+      const source = await fixture();
+      const provider = fakeProvider();
+      const create = provider.client.create.bind(provider.client);
+      let createDeadlineController: AbortController | undefined;
+      vi.spyOn(provider.client, "create").mockImplementation(async (params, options) => {
+        await create(params, options);
+        createDeadlineController?.abort(new Error("immutable Daytona create deadline elapsed"));
+        return new Promise<never>(() => undefined);
+      });
+      const backend = new DaytonaBackend({
+        repository: source.repository,
+        daytonaSecretName: "factory-openai",
+        createClient: () => provider.client,
+        now: () => 1_000,
+        createVisibilityDelayMs: 0,
+        sleep: async () => undefined,
+        deadlineSignal: (_deadline, failure) => {
+          const controller = new AbortController();
+          if (/during sandbox creation/.test(failure)) createDeadlineController = controller;
+          return { signal: controller.signal, dispose: () => undefined };
+        },
+      });
+      const input = { ...source.context, deadline: new Date(2_000) };
+      const operation =
+        phase === "execution"
+          ? backend.launch(input)
+          : backend.validate!({
+              ...input,
+              artifact: normalizeArtifact({
+                baseSha: input.packet.baseSha,
+                patch: "",
+                changedPaths: [],
+                outcome: "declined",
+                reason: "deadline fixture",
+              }),
+            });
+
+      await expect(operation).rejects.toThrow(/immutable Daytona create deadline elapsed/);
+      expect(provider.creates).toHaveLength(1);
+      expect(provider.creates[0]?.options).toEqual({ timeout: 1 });
+      expect(provider.deleted).toEqual(["sandbox-1"]);
+      expect(provider.executedCommands).toEqual([]);
+    },
+  );
+
+  it.each(["execution", "validation"] as const)(
+    "cleans a %s sandbox that completes creation at the deadline before setup",
+    async (phase) => {
+      const source = await fixture();
+      const provider = fakeProvider();
+      const create = provider.client.create.bind(provider.client);
+      let now = 1_000;
+      vi.spyOn(provider.client, "create").mockImplementation(async (params, options) => {
+        const sandbox = await create(params, options);
+        now = 2_000;
+        return sandbox;
+      });
+      const backend = new DaytonaBackend({
+        repository: source.repository,
+        daytonaSecretName: "factory-openai",
+        createClient: () => provider.client,
+        now: () => now,
+      });
+      const input = { ...source.context, deadline: new Date(2_000) };
+      const operation =
+        phase === "execution"
+          ? backend.launch(input)
+          : backend.validate!({
+              ...input,
+              artifact: normalizeArtifact({
+                baseSha: input.packet.baseSha,
+                patch: "",
+                changedPaths: [],
+                outcome: "declined",
+                reason: "deadline fixture",
+              }),
+            });
+
+      await expect(operation).rejects.toThrow(/deadline elapsed after sandbox creation/);
+      expect(provider.creates).toHaveLength(1);
+      expect(provider.deleted).toEqual(["sandbox-1"]);
+      expect(provider.executedCommands).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["execution", "sandbox folder setup"],
+    ["execution", "source upload"],
+    ["execution", "sandbox work directory"],
+    ["validation", "sandbox folder setup"],
+    ["validation", "source upload"],
+    ["validation", "sandbox work directory"],
+  ] as const)("bounds stalled Daytona %s %s and starts cleanup", async (phase, boundary) => {
+    const source = await fixture();
+    const provider = fakeProvider();
+    const create = provider.client.create.bind(provider.client);
+    let setupDeadlineController: AbortController | undefined;
+    vi.spyOn(provider.client, "create").mockImplementation(async (params, options) => {
+      const sandbox = await create(params, options);
+      const stall = async (): Promise<never> => {
+        setupDeadlineController?.abort(new Error(`immutable ${phase} setup deadline elapsed`));
+        return new Promise<never>(() => undefined);
+      };
+      if (boundary === "sandbox folder setup") {
+        vi.spyOn(sandbox.fs, "createFolder").mockImplementation(stall);
+      } else if (boundary === "source upload") {
+        vi.spyOn(sandbox.fs, "uploadFiles").mockImplementation(stall);
+      } else {
+        vi.spyOn(sandbox, "getWorkDir").mockImplementation(stall);
+      }
+      return sandbox;
+    });
+    const backend = new DaytonaBackend({
+      repository: source.repository,
+      daytonaSecretName: "factory-openai",
+      createClient: () => provider.client,
+      now: () => 1_000,
+      deadlineSignal: (_deadline, failure) => {
+        const controller = new AbortController();
+        if (failure.includes(boundary)) setupDeadlineController = controller;
+        return { signal: controller.signal, dispose: () => undefined };
+      },
+    });
+    const input = { ...source.context, deadline: new Date(2_000) };
+    const operation =
+      phase === "execution"
+        ? backend.launch(input)
+        : backend.validate!({
+            ...input,
+            artifact: normalizeArtifact({
+              baseSha: input.packet.baseSha,
+              patch: "",
+              changedPaths: [],
+              outcome: "declined",
+              reason: "deadline fixture",
+            }),
+          });
+
+    await expect(operation).rejects.toThrow(`immutable ${phase} setup deadline elapsed`);
+    expect(provider.deleted).toEqual(["sandbox-1"]);
+    expect(provider.executedCommands).toEqual([]);
+  });
+
+  it.each(["execution", "validation"] as const)(
+    "rechecks the %s deadline after sandbox preparation and before command dispatch",
+    async (phase) => {
+      const source = await fixture();
+      const provider = fakeProvider();
+      let now = 1_000;
+      provider.advanceAfterUpload(() => {
+        now = 2_000;
+      });
+      const backend = new DaytonaBackend({
+        repository: source.repository,
+        daytonaSecretName: "factory-openai",
+        createClient: () => provider.client,
+        now: () => now,
+      });
+      const input = { ...source.context, deadline: new Date(2_000) };
+      const operation =
+        phase === "execution"
+          ? backend.launch(input)
+          : backend.validate!({
+              ...input,
+              artifact: normalizeArtifact({
+                baseSha: input.packet.baseSha,
+                patch: "",
+                changedPaths: [],
+                outcome: "declined",
+                reason: "deadline fixture",
+              }),
+            });
+
+      await expect(operation).rejects.toThrow(
+        /deadline elapsed (?:before .* dispatch|while resolving the sandbox work directory)/,
+      );
+      expect(provider.creates).toHaveLength(1);
+      expect(provider.executedCommands).toEqual([]);
+      expect(provider.deleted).toEqual(["sandbox-1"]);
+    },
+  );
+
+  it.each([
+    ["result", "factory/validation-result.json"],
+    ["diagnostic", "factory/validation-error.txt"],
+  ] as const)(
+    "aborts validation %s download at the immutable deadline before cleanup",
+    async (kind, path) => {
+      const source = await fixture();
+      const provider = fakeProvider();
+      if (kind === "diagnostic") {
+        provider.setWorkerResult(1, "");
+        provider.setValidationError("validator failed");
+      }
+      let deadlineController: AbortController | undefined;
+      provider.stallDownload(path, () => {
+        deadlineController?.abort(new Error("immutable Daytona validation deadline elapsed"));
+      });
+      const backend = new DaytonaBackend({
+        repository: source.repository,
+        daytonaSecretName: "factory-openai",
+        createClient: () => provider.client,
+        now: () => 1_000,
+        deadlineSignal: () => {
+          const controller = new AbortController();
+          deadlineController = controller;
+          return { signal: controller.signal, dispose: () => undefined };
+        },
+      });
+
+      await expect(
+        backend.validate!({
+          ...source.context,
+          deadline: new Date(2_000),
+          artifact: normalizeArtifact({
+            baseSha: source.context.packet.baseSha,
+            patch: "",
+            changedPaths: [],
+            outcome: "declined",
+            reason: "deadline fixture",
+          }),
+        }),
+      ).rejects.toThrow(/immutable Daytona validation deadline elapsed/);
+      expect(provider.streamed).toContain(path);
+      expect(provider.deleted).toEqual(["sandbox-1"]);
+    },
+  );
+
+  it("bounds stalled validation command transport and starts cleanup", async () => {
+    const source = await fixture();
+    const provider = fakeProvider();
+    const create = provider.client.create.bind(provider.client);
+    let commandDeadlineController: AbortController | undefined;
+    vi.spyOn(provider.client, "create").mockImplementation(async (params, options) => {
+      const sandbox = await create(params, options);
+      vi.spyOn(sandbox.process, "executeCommand").mockImplementation(
+        async (command, _cwd, _env, timeout) => {
+          expect(command).toBe("node factory/validate.mjs");
+          expect(timeout).toBe(1);
+          commandDeadlineController?.abort(
+            new Error("immutable validation command deadline elapsed"),
+          );
+          return new Promise<never>(() => undefined);
+        },
+      );
+      return sandbox;
+    });
+    const backend = new DaytonaBackend({
+      repository: source.repository,
+      daytonaSecretName: "factory-openai",
+      createClient: () => provider.client,
+      now: () => 1_000,
+      deadlineSignal: (_deadline, failure) => {
+        const controller = new AbortController();
+        if (/awaiting command completion/.test(failure)) commandDeadlineController = controller;
+        return { signal: controller.signal, dispose: () => undefined };
+      },
+    });
+
+    await expect(
+      backend.validate!({
+        ...source.context,
+        deadline: new Date(2_000),
+        artifact: normalizeArtifact({
+          baseSha: source.context.packet.baseSha,
+          patch: "",
+          changedPaths: [],
+          outcome: "declined",
+          reason: "deadline fixture",
+        }),
+      }),
+    ).rejects.toThrow("immutable validation command deadline elapsed");
+    expect(provider.deleted).toEqual(["sandbox-1"]);
+    expect(provider.streamed).toEqual([]);
+  });
+
+  it.each(["factory/artifact.patch", "factory/worker.stdout"])(
+    "aborts execution artifact download for %s at the immutable deadline",
+    async (path) => {
+      const source = await fixture();
+      const provider = fakeProvider();
+      let deadlineController: AbortController | undefined;
+      provider.stallDownload(path, () => {
+        deadlineController?.abort(new Error("immutable Daytona execution deadline elapsed"));
+      });
+      const backend = new DaytonaBackend({
+        repository: source.repository,
+        daytonaSecretName: "factory-openai",
+        createClient: () => provider.client,
+        now: () => 1_000,
+        deadlineSignal: () => {
+          const controller = new AbortController();
+          deadlineController = controller;
+          return { signal: controller.signal, dispose: () => undefined };
+        },
+      });
+
+      const handle = await backend.launch({ ...source.context, deadline: new Date(2_000) });
+      for (let poll = 0; poll < 20; poll += 1) {
+        if ((await backend.observe(handle)).state !== "running") break;
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      await expect(backend.collect(handle)).rejects.toThrow(
+        /immutable Daytona execution deadline elapsed/,
+      );
+      expect(provider.streamed).toContain(path);
+      await backend.cleanup(handle);
+      expect(provider.deleted).toEqual(["sandbox-1"]);
+    },
+  );
+
+  it("does not start execution downloads after metadata crosses the deadline", async () => {
+    const source = await fixture();
+    const provider = fakeProvider();
+    let deadlineController: AbortController | undefined;
+    provider.afterMetadataRead((path) => {
+      if (path === "factory/worker.stderr") {
+        deadlineController?.abort(new Error("immutable Daytona metadata deadline elapsed"));
+      }
+    });
+    const backend = new DaytonaBackend({
+      repository: source.repository,
+      daytonaSecretName: "factory-openai",
+      createClient: () => provider.client,
+      now: () => 1_000,
+      deadlineSignal: () => {
+        const controller = new AbortController();
+        deadlineController = controller;
+        return { signal: controller.signal, dispose: () => undefined };
+      },
+    });
+
+    const handle = await backend.launch({ ...source.context, deadline: new Date(2_000) });
+    for (let poll = 0; poll < 20; poll += 1) {
+      if ((await backend.observe(handle)).state !== "running") break;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    await expect(backend.collect(handle)).rejects.toThrow(
+      /immutable Daytona metadata deadline elapsed/,
+    );
+    expect(provider.streamed).toEqual([]);
+    await backend.cleanup(handle);
+    expect(provider.deleted).toEqual(["sandbox-1"]);
+  });
+
   it("executes an offline task with backend egress from policy, validates, and cleans up", async () => {
     const source = await fixture();
     const provider = fakeProvider();
@@ -566,7 +1116,9 @@ describe("Daytona supported provider contract", () => {
     });
     expect(execution.domainAllowList).toBe("registry.npmjs.org,*.npmjs.org,api.openai.com");
     expect(JSON.stringify(execution)).not.toContain("GITHUB_TOKEN");
-    expect(executionCall.options).toEqual({ timeout: 120 });
+    expect(executionCall.options.timeout).toEqual(expect.any(Number));
+    expect(executionCall.options.timeout).toBeGreaterThan(0);
+    expect(executionCall.options.timeout).toBeLessThanOrEqual(120);
     expect(provider.secretLookups).toEqual([
       { name: "factory-openai", limit: 200 },
       { name: "factory-openai", limit: 200 },
@@ -1008,6 +1560,58 @@ describe("Daytona supported provider contract", () => {
     expect(provider.deleted).toContain("sandbox-1");
   });
 
+  it.each(["execution", "validation"] as const)(
+    "bounds a stalled ambiguous %s create lookup with cleanup authority",
+    async (phase) => {
+      const source = await fixture();
+      const provider = fakeProvider();
+      provider.failNextCreateAfterAllocation(new Error("create response lost"));
+      let lookupDeadlineController: AbortController | undefined;
+      provider.stallLookup(() => {
+        lookupDeadlineController?.abort(new Error("Daytona cleanup lookup bound elapsed"));
+      });
+      const lookupDeadlines: number[] = [];
+      const backend = new DaytonaBackend({
+        repository: source.repository,
+        daytonaSecretName: "factory-openai",
+        createClient: () => provider.client,
+        now: () => 1_000,
+        cleanupTimeoutMs: 120_000,
+        deadlineSignal: (deadline, failure) => {
+          const controller = new AbortController();
+          if (/visibility lookup/.test(failure)) {
+            lookupDeadlineController = controller;
+            lookupDeadlines.push(deadline.getTime());
+          }
+          return { signal: controller.signal, dispose: () => undefined };
+        },
+      });
+      const input = { ...source.context, deadline: new Date(2_000) };
+      const operation =
+        phase === "execution"
+          ? backend.launch(input)
+          : backend.validate!({
+              ...input,
+              artifact: normalizeArtifact({
+                baseSha: input.packet.baseSha,
+                patch: "",
+                changedPaths: [],
+                outcome: "declined",
+                reason: "deadline fixture",
+              }),
+            });
+
+      await expect(operation).rejects.toMatchObject({
+        name: "DaytonaResourceCleanupError",
+        operation: "ambiguous create lookup",
+        cause: "Daytona cleanup lookup bound elapsed",
+      });
+      expect(lookupDeadlines).toEqual([121_000]);
+      expect(provider.lookedUp).toHaveLength(1);
+      expect(provider.deleted).toEqual([]);
+    },
+  );
+
   it("fails with TTL-bounded leak evidence when delayed create visibility is exhausted", async () => {
     const source = await fixture();
     const provider = fakeProvider();
@@ -1176,6 +1780,48 @@ describe("Daytona supported provider contract", () => {
     });
     await expect(backend.cancel(cancelHandle)).resolves.toBeUndefined();
     await expect(backend.cleanup(cancelHandle)).resolves.toBeUndefined();
+  });
+
+  it("bounds stalled deletion confirmation and keeps the resource retryable", async () => {
+    const source = await fixture();
+    const provider = fakeProvider();
+    let deleteDeadlineController: AbortController | undefined;
+    const backend = new DaytonaBackend({
+      repository: source.repository,
+      daytonaSecretName: "factory-openai",
+      credentialAvailable: () => true,
+      createClient: () => provider.client,
+      now: () => 1_000,
+      cleanupTimeoutMs: 120_000,
+      deadlineSignal: (_deadline, failure) => {
+        const controller = new AbortController();
+        if (/sandbox deletion exceeded/.test(failure)) deleteDeadlineController = controller;
+        return { signal: controller.signal, dispose: () => undefined };
+      },
+    });
+    const handle = await backend.launch({ ...source.context, deadline: new Date(2_000) });
+    const sandbox = provider.resource(handle.resourceId)!;
+    const deletion = vi.spyOn(sandbox, "delete").mockImplementation(async () => {
+      deleteDeadlineController?.abort(new Error("Daytona deletion confirmation bound elapsed"));
+      return new Promise<never>(() => undefined);
+    });
+
+    await expect(backend.cleanup(handle)).rejects.toMatchObject({
+      name: "DaytonaResourceCleanupError",
+      resourceId: handle.resourceId,
+      operation: "final cleanup",
+      cause: "Daytona deletion confirmation bound elapsed",
+    });
+    deletion.mockRestore();
+    await backend.reconcileStale!({
+      repository: source.context.repository,
+      objective: source.context.objective,
+      workItem: source.context.workItem,
+      attempt: source.context.attempt,
+      runId: source.context.runId,
+      directorEpoch: source.context.directorEpoch,
+    });
+    expect(provider.deleted).toEqual([handle.resourceId]);
   });
 
   it("tracks a validator when deletion fails so stale reconciliation can remove it", async () => {

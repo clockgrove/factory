@@ -627,7 +627,7 @@ describe("prospective concurrent qualification attempts", () => {
       };
       const call = vi.fn(async (_tool: string, _args: Record<string, unknown>) => ({}));
       await main(selectedEnv, async (_env, _runner, extension) => {
-        expect(extension.observationWindowMinutes).toBe(minutes);
+        expect(extension.authority?.policy.objectiveTimeoutMinutes).toBe(minutes);
         if (!extension.extendPort) throw Error("missing production extension");
         const port = (await extension.extendPort({
           port: {},

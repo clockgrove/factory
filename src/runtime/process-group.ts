@@ -122,6 +122,56 @@ export interface StartProcessOptions {
   terminateDescendants?: () => Promise<void>;
 }
 
+export const NODE_TIMER_MAX_DELAY_MS = 2_147_483_647;
+
+export interface ProcessTimeoutControl {
+  schedule?: (callback: () => void, delayMs: number) => NodeJS.Timeout;
+  clear?: (timer: NodeJS.Timeout) => void;
+  now?: () => number;
+}
+
+function assertContainedProcessTimeout(timeoutMs: number): void {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)
+    throw new Error("contained process timeout must be a positive safe integer");
+}
+
+/** Preserve the caller's full timeout even when it exceeds Node's one-timer
+ * range. Each bounded slice rearms the same logical watchdog. */
+export function scheduleProcessTimeout(
+  callback: () => void,
+  timeoutMs: number,
+  control: ProcessTimeoutControl = {},
+): () => void {
+  assertContainedProcessTimeout(timeoutMs);
+  const schedule = control.schedule ?? setTimeout;
+  const clear = control.clear ?? clearTimeout;
+  const now = control.now ?? Date.now;
+  const deadlineAt = now() + timeoutMs;
+  if (!Number.isSafeInteger(deadlineAt))
+    throw new Error("contained process deadline exceeds the safe integer range");
+  let timer: NodeJS.Timeout | undefined;
+  let cancelled = false;
+  const arm = (initial = false) => {
+    const remainingMs = initial ? timeoutMs : deadlineAt - now();
+    if (remainingMs <= 0) {
+      callback();
+      return;
+    }
+    const delayMs = Math.min(remainingMs, NODE_TIMER_MAX_DELAY_MS);
+    timer = schedule(() => {
+      timer = undefined;
+      if (cancelled) return;
+      arm();
+    }, delayMs);
+  };
+  arm(true);
+  return () => {
+    cancelled = true;
+    if (timer) clear(timer);
+    timer = undefined;
+  };
+}
+
 export interface ProcessGroupControl {
   platform?: NodeJS.Platform;
   procRoot?: string;
@@ -287,6 +337,7 @@ async function terminateGroup(
 }
 
 export function startContainedProcess(options: StartProcessOptions): ContainedProcess {
+  assertContainedProcessTimeout(options.timeoutMs);
   installExitHook();
   const startedAt = Date.now();
   const command = process.platform === "win32" ? options.command : "/bin/sh";
@@ -364,14 +415,13 @@ export function startContainedProcess(options: StartProcessOptions): ContainedPr
     // not expose a successful command until both pipes have drained.
     child.once("close", () => resolveClosed());
   });
-  let timeout: NodeJS.Timeout | null = setTimeout(() => {
+  const cancelTimeout = scheduleProcessTimeout(() => {
     timedOut = true;
     void terminateOnce("SIGTERM");
   }, options.timeoutMs);
 
   child.once("exit", (exitCode, signal) => {
-    if (timeout) clearTimeout(timeout);
-    timeout = null;
+    cancelTimeout();
     void Promise.all([terminateOnce("SIGTERM"), streamsClosed])
       .then(() => {
         activeGroups.delete(pid);

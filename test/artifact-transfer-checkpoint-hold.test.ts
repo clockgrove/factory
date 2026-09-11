@@ -32,6 +32,7 @@ const digest = policyDigest(DEFAULT_RUN_POLICY),
   invocation = "b".repeat(32);
 const roots: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 async function fixture() {
@@ -158,10 +159,14 @@ async function fixture() {
     batch: exactBatch,
     events,
   };
+  const objectiveStartedAt = new Date();
   const args = {
     checkpoint,
     activationRequestId: proofArgs.activationRequestId,
     batch: exactBatch,
+    objectiveStartedAt,
+    objectiveDeadline: new Date(objectiveStartedAt.getTime() + 120_000),
+    holdDurationMs: 60_000,
     signal: controller.signal,
     assertCurrent: async () => {
       if (++fenced === 2) controller.abort();
@@ -172,7 +177,7 @@ async function fixture() {
     },
   };
   const arm = {
-    protocol: "clockgrove.factory/artifact-transfer-checkpoint-arm-v1",
+    protocol: "clockgrove.factory/artifact-transfer-checkpoint-arm-v2",
     repository: identity.repository,
     objective: 7,
     activationRequestId: args.activationRequestId,
@@ -184,7 +189,8 @@ async function fixture() {
     producerPid: process.pid,
     producerStartTicks: "123",
     minPayloadBytes: 5 * 1024 * 1024 + 1,
-    expiresAt: new Date(Date.now() + 60000).toISOString(),
+    eligibilityDurationMs: 120_000,
+    holdDurationMs: args.holdDurationMs,
   };
   const path = artifactTransferQualificationCheckpointPath(unit, invocation);
   return {
@@ -193,7 +199,7 @@ async function fixture() {
     path,
     proofArgs,
     counts: () => ({ fenced, retained, proved }),
-    armNow: async (value = arm) => {
+    armNow: async (value: unknown = arm) => {
       await mkdir(dirname(path), { mode: 0o700 });
       await writeFile(path, JSON.stringify(value), { flag: "wx", mode: 0o600 });
     },
@@ -221,7 +227,7 @@ describe("one-shot oversized transfer checkpoint", () => {
     const raw = await readFile(`${f.path}.reached`, "utf8"),
       witness = JSON.parse(raw);
     expect(witness).toMatchObject({
-      protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached-v1",
+      protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached-v2",
       ...f.args.checkpoint.identity,
       artifactDigest: f.args.checkpoint.artifactDigest,
       intentCommitSha: f.args.checkpoint.intentCommitSha,
@@ -236,12 +242,29 @@ describe("one-shot oversized transfer checkpoint", () => {
       executionCleanup: "not-proven-by-checkpoint",
       nativeUsage: "not-measured-by-checkpoint",
     });
+    expect(Date.parse(witness.holdUntil) - Date.parse(witness.reachedAt)).toBe(60_000);
+    expect(witness.startedAt).toBe(f.args.objectiveStartedAt.toISOString());
+    expect(witness.eligibleUntil).toBe(f.args.objectiveDeadline.toISOString());
     expect((await stat(`${f.path}.reached`)).mode & 0o777).toBe(0o600);
     expect(f.counts()).toEqual({ fenced: 2, retained: 1, proved: 1 });
     await expect(holdArtifactTransferQualificationCheckpoint(f.args)).rejects.toBeInstanceOf(
       ArtifactTransferQualificationHeldError,
     );
     expect(await readFile(`${f.path}.reached`, "utf8")).toBe(raw);
+  });
+  it("samples the reach clock once so a later tick cannot cross eligibility", async () => {
+    const f = await fixture();
+    f.args.objectiveStartedAt = new Date(0);
+    f.args.objectiveDeadline = new Date(100);
+    await f.armNow({ ...f.arm, eligibilityDurationMs: 100 });
+    vi.spyOn(Date, "now").mockReturnValueOnce(98).mockReturnValueOnce(99).mockReturnValue(100);
+
+    await expect(holdArtifactTransferQualificationCheckpoint(f.args)).rejects.toBeInstanceOf(
+      ArtifactTransferQualificationHeldError,
+    );
+    const witness = JSON.parse(await readFile(`${f.path}.reached`, "utf8"));
+    expect(Date.parse(witness.reachedAt)).toBe(99);
+    expect(Date.parse(witness.reachedAt)).toBeLessThan(Date.parse(witness.eligibleUntil));
   });
   it.each([
     "repository",
@@ -286,10 +309,15 @@ describe("one-shot oversized transfer checkpoint", () => {
     const f = await fixture();
     await f.armNow({
       ...f.arm,
-      expiresAt: new Date(
-        Date.now() + (fault === "expired" ? -1000 : fault === "overlong" ? 700000 : 60000),
-      ).toISOString(),
+      eligibilityDurationMs:
+        fault === "overlong" ? f.arm.eligibilityDurationMs + 60_000 : f.arm.eligibilityDurationMs,
     });
+    if (fault === "expired") {
+      f.args.objectiveDeadline = new Date(Date.now() - 1);
+      f.args.objectiveStartedAt = new Date(
+        f.args.objectiveDeadline.getTime() - f.arm.eligibilityDurationMs,
+      );
+    }
     if (fault === "replacement") state.host.producerStartTicks = "456";
     if (fault === "retry") f.args.checkpoint.identity.attempt = 2;
     if (fault === "retained")
@@ -309,6 +337,39 @@ describe("one-shot oversized transfer checkpoint", () => {
       ArtifactTransferQualificationHeldError,
     );
     await expect(readFile(`${f.path}.reached`)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+  it("rejects an unreached v1 arm without reinterpreting its expiry", async () => {
+    const f = await fixture();
+    const {
+      eligibilityDurationMs: _eligibilityDurationMs,
+      holdDurationMs: _holdDurationMs,
+      ...legacy
+    } = f.arm;
+    await f.armNow({
+      ...legacy,
+      protocol: "clockgrove.factory/artifact-transfer-checkpoint-arm-v1",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await expect(holdArtifactTransferQualificationCheckpoint(f.args)).rejects.toThrow(
+      "arm v1 is retired",
+    );
+  });
+  it("reaches after the former ten-minute arm window and receives the full hold", async () => {
+    const f = await fixture();
+    const startedAt = new Date(Date.now() - 10 * 60_000 - 1);
+    const eligibilityDurationMs = 45 * 60_000;
+    await f.armNow({ ...f.arm, eligibilityDurationMs, holdDurationMs: 1 });
+    const result = await holdArtifactTransferQualificationCheckpoint({
+      ...f.args,
+      objectiveStartedAt: startedAt,
+      objectiveDeadline: new Date(startedAt.getTime() + eligibilityDurationMs),
+      holdDurationMs: 1,
+      assertCurrent: async () => {},
+    }).catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(ArtifactTransferQualificationHeldError);
+    const witness = JSON.parse(await readFile(`${f.path}.reached`, "utf8"));
+    expect(Date.parse(witness.holdUntil) - Date.parse(witness.reachedAt)).toBe(1);
+    expect(witness.startedAt).toBe(startedAt.toISOString());
   });
   it("binds real missing-vs-zero accounting, rejects conflicting receipts and ignores unrelated attempts", async () => {
     const f = await fixture(),

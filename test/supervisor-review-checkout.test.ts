@@ -21,8 +21,13 @@ it("every fresh ordinary Supervisor review inspects the exact candidate rather t
   });
   fixtures.push(f);
   const paths: string[] = [];
+  const invocationTimeouts: number[] = [];
   const backend = new CodexCliManagementBackend({
-    runStructured: async (cwd, _schema, prompt) => {
+    runStructured: async (cwd, _schema, prompt, _model, invocationTimeoutMs) => {
+      expect(invocationTimeoutMs).toBeGreaterThan(0);
+      expect(invocationTimeoutMs).toBeLessThanOrEqual(f.policy.objectiveTimeoutMinutes * 60_000);
+      expect(invocationTimeoutMs).toBeLessThanOrEqual(f.policy.workItemTimeoutMinutes * 60_000);
+      invocationTimeouts.push(invocationTimeoutMs!);
       const context = JSON.parse(prompt.split("\n\n").at(-1)!) as ReviewContext;
       expect(cwd).not.toBe(f.repository);
       paths.push(cwd);
@@ -46,6 +51,7 @@ it("every fresh ordinary Supervisor review inspects the exact candidate rather t
   f.management.reviewWithAdmission = backend.reviewWithAdmission.bind(backend);
   await expect(f.run()).resolves.toMatchObject({ status: "completed" });
   expect(paths.length).toBeGreaterThanOrEqual(3);
+  expect(invocationTimeouts).toHaveLength(paths.length);
   for (const path of paths) await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
 }, 30_000);
 

@@ -189,6 +189,7 @@ import {
   parseFactoryEvent,
   type AttemptEvent,
   type FactoryEvent,
+  type ProviderQuotaEvent,
   type PublicationEvent,
 } from "./protocol/events.js";
 import { assertIsolatedCandidateFailureProof } from "./recovery/isolated-candidate.js";
@@ -5081,18 +5082,22 @@ export class FactorySupervisor {
           await this.#reconcileObjectiveCapacity(gatedObjective.number, gatedObjective.items);
           const gatedRecoverable: DerivedWorkItem[] = [];
           for (const item of gatedObjective.items) {
-            if (
-              activeExecutions.has(item.number) ||
-              !durableProviderGates.some(
-                (gate) => gate.workItem === item.number && gate.attempt !== undefined,
-              )
-            )
-              continue;
-            if (this.#hasUnfinishedAttempt(item) || (await this.#hasUnsettledIssueAdmission(item)))
+            if (activeExecutions.has(item.number)) continue;
+            if (await this.#needsDurableAttemptRecovery(item, durableProviderGates, true))
               gatedRecoverable.push(item);
           }
+          const interruptedTerminal =
+            this.#options.signal?.aborted && this.#options.shutdownBehavior === "release-lease"
+              ? "AttemptDeferred"
+              : cancellationReason
+                ? "AttemptCancelled"
+                : "AttemptTimedOut";
           for (const item of gatedRecoverable)
-            await this.#recoverInterrupted(item, deadline, gatedObjective.items);
+            await this.#reconcileInterruptedForEarlyTerminal(
+              item,
+              gatedObjective.items,
+              interruptedTerminal,
+            );
           snapshot = await this.#reader.readObjective(snapshot.number);
           this.#fenceSnapshot(snapshot);
           this.#sequences.observe(snapshotEvents(snapshot));
@@ -5101,12 +5106,13 @@ export class FactorySupervisor {
           for (const item of settledObjective.items) {
             if (
               !activeExecutions.has(item.number) &&
-              durableProviderGates.some(
-                (gate) => gate.workItem === item.number && gate.attempt !== undefined,
-              ) &&
-              (this.#hasUnfinishedAttempt(item) || (await this.#hasUnsettledIssueAdmission(item)))
+              (await this.#needsDurableAttemptRecovery(item, durableProviderGates, true))
             )
-              await this.#recoverInterrupted(item, deadline, settledObjective.items);
+              await this.#reconcileInterruptedForEarlyTerminal(
+                item,
+                settledObjective.items,
+                interruptedTerminal,
+              );
           }
           snapshot = await this.#reader.readObjective(snapshot.number);
           this.#fenceSnapshot(snapshot);
@@ -5115,10 +5121,7 @@ export class FactorySupervisor {
           for (const item of this.#deriveObjective(snapshot).items) {
             if (
               !activeExecutions.has(item.number) &&
-              durableProviderGates.some(
-                (gate) => gate.workItem === item.number && gate.attempt !== undefined,
-              ) &&
-              (this.#hasUnfinishedAttempt(item) || (await this.#hasUnsettledIssueAdmission(item)))
+              (await this.#needsDurableAttemptRecovery(item, durableProviderGates, true))
             ) {
               remaining = true;
               break;
@@ -5157,6 +5160,23 @@ export class FactorySupervisor {
         }
         activeExecutions.throwNextFailure();
         if (this.#options.signal?.aborted) continue;
+        const gatedRecoverable: DerivedWorkItem[] = [];
+        for (const item of objective.items) {
+          if (
+            activeExecutions.has(item.number) ||
+            !durableProviderGates.some(
+              (gate) => gate.workItem === item.number && gate.attempt !== undefined,
+            )
+          )
+            continue;
+          if (await this.#needsDurableAttemptRecovery(item, durableProviderGates))
+            gatedRecoverable.push(item);
+        }
+        if (gatedRecoverable.length > 0) {
+          for (const item of gatedRecoverable)
+            await this.#recoverInterrupted(item, deadline, objective.items);
+          continue;
+        }
         const adoptedPublication =
           this.#recoveryRuntime &&
           objective.items.find((item) => {
@@ -5311,6 +5331,9 @@ export class FactorySupervisor {
               item.state === "failed" &&
               !activeExecutions.has(item.number) &&
               item.attempts >= this.#policy.maxAttemptsPerItem &&
+              !durableProviderGates.some(
+                (gate) => gate.workItem === item.number && gate.attempt !== undefined,
+              ) &&
               !this.#hasRecoverablePostSuccessCancellation(item),
           );
           if (exhausted) {
@@ -5326,17 +5349,7 @@ export class FactorySupervisor {
         const recoverable: DerivedWorkItem[] = [];
         for (const item of objective.items) {
           if (activeExecutions.has(item.number)) continue;
-          const providerGated = durableProviderGates.some(
-            (gate) => gate.workItem === item.number && gate.attempt !== undefined,
-          );
-          if (
-            ["reserved", "in_flight", "validating"].includes(item.state) ||
-            (item.state === "failed" &&
-              (this.#hasUnfinishedAttempt(item) ||
-                this.#hasRecoverablePostSuccessCancellation(item))) ||
-            (providerGated &&
-              (this.#hasUnfinishedAttempt(item) || (await this.#hasUnsettledIssueAdmission(item))))
-          )
+          if (await this.#needsDurableAttemptRecovery(item, durableProviderGates))
             recoverable.push(item);
         }
         if (recoverable.length > 0) {
@@ -15902,6 +15915,132 @@ export class FactorySupervisor {
     });
   }
 
+  /** Terminal drains reconcile ownership only; they never resume artifact, review, or publication work. */
+  async #reconcileInterruptedForEarlyTerminal(
+    item: DerivedWorkItem,
+    objectiveItems: readonly DerivedWorkItem[],
+    terminalEvent: "AttemptCancelled" | "AttemptTimedOut" | "AttemptDeferred",
+  ): Promise<void> {
+    if (
+      (item.factoryEvents ?? []).some(
+        (event) =>
+          event.kind === "provider" &&
+          event.event === "ProviderQuotaBlocked" &&
+          event.runId === this.#run.runId,
+      )
+    ) {
+      await this.#recoverInterrupted(item, this.#run.startedAt.getTime(), objectiveItems);
+      return;
+    }
+    const reservation = (await this.#attempts.list(this.#run.objective, item.number))
+      .filter((candidate) => candidate.runId === this.#run.runId)
+      .sort((left, right) => right.attempt - left.attempt)[0];
+    if (!reservation)
+      throw new Error(`Work Item #${item.number} has recoverable state but no attempt ref`);
+    if (await this.#recoverUndispatchedAdmission(item, reservation)) return;
+    const backend = this.#registry.get(reservation.backend);
+    if (!backend) throw new Error(`cannot reconcile unavailable backend ${reservation.backend}`);
+    const events = (item.factoryEvents ?? [])
+      .filter(
+        (event) =>
+          event.runId === this.#run.runId &&
+          "attempt" in event &&
+          event.attempt === reservation.attempt,
+      )
+      .sort((left, right) => left.sequence - right.sequence);
+    await this.#reconcileInterruptedValidationCapacity(item, reservation, events);
+    const started = events.find(
+      (event) => event.kind === "attempt" && event.event === "AttemptStarted",
+    );
+    const providerResourceId = started?.kind === "attempt" ? started.providerResourceId : undefined;
+    const executionBudget = unreconciledBudgetReservations(events).find(
+      (budget) =>
+        budget.phase === "execution" &&
+        ["local_milliseconds", "sandbox_milliseconds", "managed_sessions"].includes(budget.unit),
+    );
+    const noHandleReplacementNotBefore =
+      !providerResourceId && executionBudget?.unit === "sandbox_milliseconds"
+        ? new Date(
+            new Date(executionBudget.at).getTime() + executionBudget.amount + 60_000,
+          ).toISOString()
+        : undefined;
+    if (backend.reconcileStale) {
+      await backend.reconcileStale({
+        repository: `${this.#options.owner}/${this.#options.repo}`,
+        objective: reservation.objective,
+        workItem: reservation.workItem,
+        attempt: reservation.attempt,
+        runId: reservation.runId,
+        directorEpoch: reservation.directorEpoch,
+        phase: "execution",
+        ...(reservation.localScopeBatch ? { localScopeBatch: reservation.localScopeBatch } : {}),
+        policyDigest: reservation.policyDigest,
+        ...(providerResourceId ? { providerResourceId } : {}),
+        ...(noHandleReplacementNotBefore ? { noHandleReplacementNotBefore } : {}),
+      });
+    } else if (started) {
+      throw new Error(`backend ${reservation.backend} cannot prove the stale resource was stopped`);
+    }
+    const validationStartedAt = events.find(
+      (event) => event.kind === "attempt" && event.event === "AttemptCollected",
+    )?.at;
+    for (const budget of unreconciledBudgetReservations(events)) {
+      if (budget.unit === "model_tokens") continue;
+      const phaseStart = budget.phase === "validation" ? validationStartedAt : started?.at;
+      const elapsed = phaseStart ? Math.max(0, Date.now() - new Date(phaseStart).getTime()) : 0;
+      const ambiguousPaidLaunch =
+        budget.phase === "execution" && budget.unit === "sandbox_milliseconds" && !started;
+      const amount =
+        budget.unit === "managed_sessions" || ambiguousPaidLaunch
+          ? budget.amount
+          : Math.min(budget.amount, elapsed);
+      await this.#lease.use(async (lease) => {
+        const event = await this.#recorder.budget({
+          lease,
+          workItemNodeId: item.id,
+          reservation,
+          sequence: this.#sequences.take(),
+          event: "BudgetReconciled",
+          unit: budget.unit,
+          phase: budget.phase,
+          amount,
+        });
+        this.#budgetEvents.push(event);
+      });
+    }
+    if (this.#hasUnfinishedAttempt(item))
+      await this.#lease.use((lease) =>
+        this.#attempts.record({
+          lease,
+          workItemNodeId: item.id,
+          reservation,
+          event: terminalEvent,
+          sequence: this.#sequences.take(),
+          reason:
+            terminalEvent === "AttemptCancelled"
+              ? "operator cancellation interrupted the recovered attempt"
+              : terminalEvent === "AttemptTimedOut"
+                ? "objective deadline interrupted the recovered attempt"
+                : "controller retirement deferred the recovered attempt",
+          allowRecovery: true,
+        }),
+      );
+    const capacity = await this.#capacitySnapshot();
+    for (const held of capacity.reservations.filter(
+      (held) =>
+        held.objective === reservation.objective &&
+        held.workItem === reservation.workItem &&
+        held.attempt === reservation.attempt,
+    ))
+      await this.#releaseCapacity(held.key);
+    await this.#settleIssueAdmission(item, reservation, {
+      cleanupConfirmed: true,
+      definitiveNonExecution: false,
+      modelUsageExpected: backend.capabilities.reportsModelUsage ?? false,
+    });
+    if (await this.#hasUnsettledIssueAdmission(item)) throw new ProviderQuotaDrainIncompleteError();
+  }
+
   async #recoverInterrupted(
     item: DerivedWorkItem,
     deadline: number,
@@ -16720,6 +16859,28 @@ export class FactorySupervisor {
         "AttemptIntegrated",
       ].includes(event.event),
     );
+  }
+
+  async #needsDurableAttemptRecovery(
+    item: DerivedWorkItem,
+    providerGates: readonly ProviderQuotaEvent[],
+    includeAnyUnsettledAdmission = false,
+  ): Promise<boolean> {
+    if (["reserved", "in_flight", "validating"].includes(item.state)) return true;
+    if (
+      item.state === "failed" &&
+      (this.#hasUnfinishedAttempt(item) || this.#hasRecoverablePostSuccessCancellation(item))
+    )
+      return true;
+    const providerGated = providerGates.some(
+      (gate) => gate.workItem === item.number && gate.attempt !== undefined,
+    );
+    if (
+      providerGated &&
+      (this.#hasUnfinishedAttempt(item) || (await this.#hasUnsettledIssueAdmission(item)))
+    )
+      return true;
+    return includeAnyUnsettledAdmission && (await this.#hasUnsettledIssueAdmission(item));
   }
 
   async #hasUnsettledIssueAdmission(item: DerivedWorkItem): Promise<boolean> {

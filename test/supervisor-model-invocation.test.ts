@@ -19,6 +19,7 @@ import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js"
 import * as worktrees from "../src/runtime/local-worktree.js";
 import * as cleanValidation from "../src/validation/clean-run.js";
 import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
+import { providerQuotaGates } from "../src/control/provider-gates.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
 type Fixture = Awaited<ReturnType<typeof providerSupervisorFixture>>;
@@ -93,7 +94,7 @@ describe("Supervisor model dispatch journal", () => {
     const f = await providerSupervisorFixture("daytona-burst", {
       localOnly: true,
       dependencyChain: true,
-      maxAttemptsPerItem: 3,
+      maxAttemptsPerItem: 1,
       configureLocalBackend: (backend) => ({
         ...backend,
         observe: async (handle) => ({
@@ -104,25 +105,25 @@ describe("Supervisor model dispatch journal", () => {
         }),
       }),
     });
-    const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation();
-    if (!write) throw new Error("fixture receipt transport missing");
-    let interruptAttemptFailure = true;
-    vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
-      async (node, body) => {
-        const receipts = decodeEventComments(body);
-        if (interruptAttemptFailure && receipts.some((event) => event.event === "AttemptFailed")) {
-          interruptAttemptFailure = false;
-          throw new PlatformUnavailableError(
-            { kind: "server_error", retryAfterMs: 1 },
-            new Error("fixture: controller exited after the unknown provider gate"),
-          );
-        }
-        await write(node, body);
-      },
-    );
+    const transition = IssueAdmissionLedger.prototype.transition;
+    let interruptAdmissionRelease = true;
+    vi.spyOn(IssueAdmissionLedger.prototype, "transition").mockImplementation(async function (
+      this: IssueAdmissionLedger,
+      args,
+    ) {
+      if (interruptAdmissionRelease && args.disposition === "released") {
+        interruptAdmissionRelease = false;
+        throw new PlatformUnavailableError(
+          { kind: "server_error", retryAfterMs: 1 },
+          new Error("fixture: controller exited after AttemptFailed before admission release"),
+        );
+      }
+      return transition.call(this, args);
+    });
     try {
       await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
       expect(f.events().some((event) => event.event === "ProviderQuotaBlocked")).toBe(true);
+      expect(f.events().some((event) => event.event === "AttemptFailed")).toBe(true);
       expect(await f.run()).toMatchObject({
         status: "escalated",
         reason: expect.stringContaining("GitHub Copilot monthly quota exceeded"),
@@ -143,6 +144,113 @@ describe("Supervisor model dispatch journal", () => {
         disposition: "released",
         evidence: { accountingSettled: false, unknownModelUsageRetained: true },
       });
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
+  it("reconciles a nongated resumed sibling before an early cancellation terminal", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      maxAttemptsPerItem: 3,
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        observe: async (handle) => ({
+          ...(await backend.observe(handle)),
+          state: "failed",
+          usage: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 },
+          reason: "fixture ordinary sibling failure",
+        }),
+      }),
+    });
+    const transition = IssueAdmissionLedger.prototype.transition;
+    let interruptSiblingAdmissionRelease = true;
+    vi.spyOn(IssueAdmissionLedger.prototype, "transition").mockImplementation(async function (
+      this: IssueAdmissionLedger,
+      args,
+    ) {
+      if (
+        interruptSiblingAdmissionRelease &&
+        args.workItem === 8 &&
+        args.disposition === "released"
+      ) {
+        interruptSiblingAdmissionRelease = false;
+        throw new PlatformUnavailableError(
+          { kind: "server_error", retryAfterMs: 1 },
+          new Error("fixture: controller exited before sibling admission release"),
+        );
+      }
+      return transition.call(this, args);
+    });
+    try {
+      await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+      expect(f.events().some((event) => event.event === "AttemptFailed")).toBe(true);
+      // Leave room for the restarted controller's lease/observation receipts;
+      // these synthetic durable inputs must remain distinct after deduplication.
+      const sequence = 10_000;
+      f.snapshot.factoryEvents!.push(
+        parseFactoryEvent({
+          protocol: "clockgrove.factory/v2",
+          kind: "budget",
+          event: "BudgetReserved",
+          objective: 7,
+          runId: f.runId,
+          workItem: 9,
+          attempt: 1,
+          sequence,
+          at: new Date().toISOString(),
+          phase: "execution",
+          unit: "model_tokens",
+          amount: 0,
+          usageId: "invocation-synthetic-gate",
+          modelInvocationId: "synthetic-gate",
+          directorEpoch: f.lease.epoch,
+          policyDigest: f.lease.policyDigest,
+        }),
+        parseFactoryEvent({
+          protocol: "clockgrove.factory/v2",
+          kind: "provider",
+          event: "ProviderQuotaBlocked",
+          objective: 7,
+          runId: f.runId,
+          workItem: 9,
+          attempt: 1,
+          sequence: sequence + 1,
+          at: new Date().toISOString(),
+          reasonCode: "provider-quota-exhausted",
+          provider: "fixture-provider",
+          phase: "execution",
+          backend: "codex-sdk/local-worktree",
+          modelInvocationId: "synthetic-gate",
+          providerMessage: "fixture provider quota exhausted",
+          accounting: "unknown",
+        }),
+        parseFactoryEvent({
+          protocol: "clockgrove.factory/v2",
+          kind: "run",
+          event: "FactoryRunCancellationRequested",
+          objective: 7,
+          runId: f.runId,
+          sequence: sequence + 2,
+          at: new Date().toISOString(),
+          requestId: "cancel-with-resumed-sibling",
+          requestedBy: "operator",
+        }),
+      );
+      expect(providerQuotaGates(f.events(), f.runId)).toHaveLength(1);
+
+      expect(await f.run()).toMatchObject({ status: "cancelled" });
+      const siblingAdmission = (
+        await new IssueAdmissionLedger(
+          new GitHubControlStore({
+            token: "fixture-only",
+            owner: "fixture",
+            repo: "provider-qualification",
+          }),
+        ).read(8)
+      )?.history.at(-1);
+      expect(siblingAdmission?.disposition).toBe("released");
     } finally {
       await f.dispose();
     }

@@ -526,6 +526,31 @@ commands, bounded logs, optional checkpoints, and terminal outcome. The Supervis
 SHAs, forbidden paths, malformed outputs, oversized fields, and suspected secrets before any GitHub
 publication.
 
+### Deadline ownership
+
+Factory has several nested clocks, and none may silently replace another. The Objective deadline is
+the immutable authenticated `FactoryRunStarted.at + RunPolicy.objectiveTimeoutMinutes`. Compilation
+and every semantic-review route recompute the remaining Objective time after durable model-invocation
+admission at the final dispatch boundary, then clamp that outer remainder by the immutable Run Policy
+Work Item timeout as the per-invocation management-process stall bound. Expiry before admission
+writes no dispatch marker; expiry after the marker leaves unknown consumption fenced and cannot
+authorize replay.
+
+Each execution or validation attempt receives one immutable deadline derived at admission from its
+trusted requirements and policy, capped by the remaining Objective time. SDK, CLI, App Server,
+Daytona and Vercel adapters consume that same absolute deadline without moving it on resume. A
+provider resource lifetime is an adapter envelope derived from that attempt deadline, including
+documented minimum, maximum, rounding and cleanup allowance; it is not policy authority. An expired
+context must fail before credentials, source archive work or provider resource creation.
+
+Short REST, MCP, process and cleanup limits remain named operation-stall bounds and are always
+clamped to their applicable outer deadline. Process watchdogs preserve longer authoritative windows
+by rearming across Node's bounded native timer range; the timer implementation never truncates the
+outer deadline. Qualification observation follows the authenticated Objective clock rather than a
+provider selected later. One-shot checkpoint arms encode that policy duration; runtime binds it to
+the durable run start. Intentional post-proof holds have their own bounded duration and do not extend
+the Objective, attempt, or permission to execute.
+
 Local collection computes and validates the changed-path manifest before materializing a potentially
 large textual or binary patch. An out-of-scope generated bundle therefore produces a concise path
 diagnostic rather than an opaque size failure. Failed authoritative commands retain a secret-scanned,
@@ -925,6 +950,9 @@ audit can identify both environments without consulting provider defaults.
 ## Routing, costs, and budgets
 
 The default policy is local-only:
+
+`workItemTimeoutMinutes` bounds one supervised execution attempt or management model invocation;
+the authenticated Objective remainder is always the outer cap.
 
 ```json
 {

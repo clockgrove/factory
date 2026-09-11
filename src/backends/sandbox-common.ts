@@ -1,8 +1,6 @@
-import { execFile } from "node:child_process";
 import { open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
 import { z } from "zod";
 
@@ -12,6 +10,7 @@ import type {
   IsolatedValidationResult,
   StaleAttemptIdentity,
 } from "../execution/backend.js";
+import { streamGitFile } from "../runtime/artifact-patch.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import { NPM_VALIDATION_SETUP_COMMAND } from "../validation/plan.js";
 import { isolatedManagedToolchainPlan } from "../toolchains/authority.js";
@@ -23,7 +22,6 @@ import { MANAGED_SYSTEM_TOOLS } from "../runtime/system-tools.js";
 import { CODEX_WORKER_OUTPUT_SCHEMA, workerPacketPrompt } from "./codex-cli-local.js";
 import { validationInvocationOwnership } from "./validation-invocation.js";
 
-const execFileAsync = promisify(execFile);
 const MAX_SOURCE_ARCHIVE_BYTES = 64 * 1024 * 1024;
 export const MAX_ISOLATED_VALIDATION_RESULT_BYTES = 64 * 1024;
 export const SANDBOX_CODEX_PACKAGE = "@openai/codex@0.153.0";
@@ -385,31 +383,44 @@ export function sandboxResourceName(
   return phase === "validation" ? `${identity.slice(0, 54)}-validate` : identity;
 }
 
-export async function repositoryArchive(repository: string, baseSha: string): Promise<Buffer> {
+export async function repositoryArchive(
+  repository: string,
+  baseSha: string,
+  options: { deadline?: Date; signal?: AbortSignal; now?: () => number } = {},
+): Promise<Buffer> {
+  options.signal?.throwIfAborted();
   const path = join(
     tmpdir(),
     `clockgrove-factory-source-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tar`,
   );
   try {
-    await execFileAsync("git", ["archive", "--format=tar", "-o", path, baseSha], {
-      cwd: repository,
-      timeout: 120_000,
-      maxBuffer: 256 * 1024,
-    });
+    await streamGitFile(
+      repository,
+      ["archive", "--format=tar", baseSha],
+      path,
+      MAX_SOURCE_ARCHIVE_BYTES,
+      options,
+    );
+    options.signal?.throwIfAborted();
     const file = await open(path, "r");
     try {
+      options.signal?.throwIfAborted();
       const before = await file.stat();
+      options.signal?.throwIfAborted();
       if (before.size > MAX_SOURCE_ARCHIVE_BYTES) {
         throw new Error(`source archive exceeds ${MAX_SOURCE_ARCHIVE_BYTES} bytes`);
       }
       const archive = Buffer.alloc(before.size);
       let offset = 0;
       while (offset < archive.byteLength) {
+        options.signal?.throwIfAborted();
         const { bytesRead } = await file.read(archive, offset, archive.byteLength - offset, offset);
+        options.signal?.throwIfAborted();
         if (bytesRead === 0) throw new Error("source archive was truncated while reading");
         offset += bytesRead;
       }
       const after = await file.stat();
+      options.signal?.throwIfAborted();
       if (after.size !== before.size) {
         throw new Error("source archive changed while reading");
       }

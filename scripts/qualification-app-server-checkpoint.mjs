@@ -39,10 +39,22 @@ export const appServerCheckpointPath = (unit, invocationId, uid = process.getuid
     `factory-qualification-checkpoints-${uid}`,
     `${hash(`${unit}\0${invocationId}`)}.json`,
   );
-export function appServerCheckpointArm(authority, original, objective, now = Date.now()) {
+export function appServerCheckpointArm(authority, original, objective) {
   assert.equal(authority.sessionRecovery, true);
+  const objectiveTimeoutMinutes = authority.policy.objectiveTimeoutMinutes,
+    workItemTimeoutMinutes = authority.policy.workItemTimeoutMinutes;
+  assert.ok(
+    Number.isInteger(objectiveTimeoutMinutes) &&
+      objectiveTimeoutMinutes >= 1 &&
+      objectiveTimeoutMinutes <= 30 * 24 * 60,
+  );
+  assert.ok(
+    Number.isInteger(workItemTimeoutMinutes) &&
+      workItemTimeoutMinutes >= 1 &&
+      workItemTimeoutMinutes <= 24 * 60,
+  );
   return {
-    protocol: "clockgrove.factory/app-server-checkpoint-arm-v1",
+    protocol: "clockgrove.factory/app-server-checkpoint-arm-v2",
     repository: authority.repository,
     objective,
     activationRequestId: `${authority.namespace}-activate`,
@@ -52,7 +64,8 @@ export function appServerCheckpointArm(authority, original, objective, now = Dat
     hostIdentity: original.hostIdentity,
     producerPid: original.pid,
     producerStartTicks: original.startTicks,
-    expiresAt: new Date(now + 600000).toISOString(),
+    eligibilityDurationMs: objectiveTimeoutMinutes * 60_000,
+    holdDurationMs: workItemTimeoutMinutes * 60_000,
   };
 }
 function identities(authority, reserved) {
@@ -84,6 +97,11 @@ function document(proof, ref, path, parents, maxBytes = 196608) {
 export function assertAppServerCheckpoint(observation, authority, proof, witness) {
   const events = observation.receipts.map(({ event }) => event),
     runId = observation.status.run.runId;
+  const start = one(events.filter((event) => event.event === "FactoryRunStarted"));
+  assert.equal(start.runId, runId);
+  assert.equal(start.activationRequestId, `${authority.namespace}-activate`);
+  assert.deepEqual(start.policy, authority.policy);
+  assert.equal(start.policyDigest, hash(canonical(authority.policy)));
   const reserved = one(
     events.filter(
       (event) =>
@@ -248,7 +266,13 @@ export function assertAppServerCheckpoint(observation, authority, proof, witness
   assert.equal(succeeded.artifactDigest, artifact.digest);
   assert.equal(succeeded.reportedModelTokens, worker.amount);
   if (witness) {
-    assert.equal(witness.protocol, "clockgrove.factory/app-server-checkpoint-reached-v1");
+    assert.ok(
+      [
+        "clockgrove.factory/app-server-checkpoint-reached-v1",
+        "clockgrove.factory/app-server-checkpoint-reached-v2",
+      ].includes(witness.protocol),
+      "unsupported App Server checkpoint witness",
+    );
     for (const key of keys) assert.equal(witness[key], identity[key]);
     assert.equal(witness.activationRequestId, `${authority.namespace}-activate`);
     assert.equal(witness.artifactDigest, artifact.digest);
@@ -258,6 +282,18 @@ export function assertAppServerCheckpoint(observation, authority, proof, witness
     assert.equal(witness.modelTokens, worker.amount);
     assert.equal(witness.nativeMilliseconds, native.amount);
     assert.ok(Date.parse(witness.reachedAt) >= Date.parse(native.at));
+    if (witness.protocol === "clockgrove.factory/app-server-checkpoint-reached-v2") {
+      assert.equal(witness.startedAt, start.at);
+      assert.equal(
+        Date.parse(witness.eligibleUntil),
+        Date.parse(start.at) + authority.policy.objectiveTimeoutMinutes * 60_000,
+      );
+      assert.ok(Date.parse(witness.eligibleUntil) > Date.parse(witness.reachedAt));
+      assert.equal(
+        Date.parse(witness.holdUntil) - Date.parse(witness.reachedAt),
+        authority.policy.workItemTimeoutMinutes * 60_000,
+      );
+    } else assert.ok(Date.parse(witness.expiresAt) > Date.parse(witness.reachedAt));
   }
   return {
     workItem: reserved.workItem,

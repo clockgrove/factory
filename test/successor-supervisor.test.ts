@@ -12,7 +12,7 @@ import { GitHubReader } from "../src/github.js";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
 import { LeaseManager, type GitCommitObject, type LeaseState } from "../src/control/lease.js";
-import { attemptRef } from "../src/control/attempts.js";
+import { AttemptManager, attemptRef } from "../src/control/attempts.js";
 import { IssueAdmissionLedger } from "../src/control/issue-admission.js";
 import {
   decodeEventComments,
@@ -103,6 +103,7 @@ async function fixture(
     interruptedRetainedArtifact?: boolean;
     successorSandboxUntrusted?: boolean;
     loseArtifactConsumerSuccessResponse?: boolean;
+    loseArtifactConsumerSettlementResponse?: boolean;
     loseArtifactPrResponse?: boolean;
     nativeSource?: boolean;
     retainedPrefix?: 1 | 2 | 3;
@@ -644,6 +645,29 @@ async function fixture(
       }
     },
   );
+  let lostArtifactConsumerSettlementResponse = false;
+  const settleAdmission = AttemptManager.prototype.settle;
+  vi.spyOn(AttemptManager.prototype, "settle").mockImplementation(async function (
+    this: AttemptManager,
+    lease,
+    reservation,
+    evidence,
+  ) {
+    await settleAdmission.call(this, lease, reservation, evidence);
+    if (
+      options.loseArtifactConsumerSettlementResponse &&
+      !lostArtifactConsumerSettlementResponse &&
+      reservation.runId === "successor" &&
+      reservation.workItem === 9 &&
+      reservation.artifactConsumer
+    ) {
+      lostArtifactConsumerSettlementResponse = true;
+      throw new PlatformUnavailableError(
+        { kind: "server_error", retryAfterMs: 1 },
+        new Error("artifact consumer settlement response lost"),
+      );
+    }
+  });
   vi.spyOn(GitHubControlStore.prototype, "closeIssue").mockImplementation(async (number) => {
     (number === 7 ? snapshot : snapshot.workItems.find((item) => item.number === number)!).closed =
       true;
@@ -2330,12 +2354,15 @@ describe("Supervisor adopted isolated candidate validation", () => {
     ).toMatchObject({ disposition: "released", dispatchPossible: false });
   }, 60_000);
 
-  it.each([false, true])(
-    "settles a succeeded artifact consumer without resuming work during a quota cancellation drain, validationStarted=%s",
-    async (validationStarted) => {
+  it.each(["pre-validation", "validation", "semantic-review"] as const)(
+    "handles a succeeded artifact consumer without resuming work during a quota cancellation drain, stage=%s",
+    async (stage) => {
+      const validationStarted = stage === "validation";
+      const reviewStarted = stage === "semantic-review";
       const f = await successorFixture({
         interruptedRetainedArtifact: true,
-        loseArtifactConsumerSuccessResponse: true,
+        loseArtifactConsumerSuccessResponse: !reviewStarted,
+        loseArtifactConsumerSettlementResponse: reviewStarted,
         ...(validationStarted ? { adoptedIsolatedValidation: {} } : {}),
       });
       await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
@@ -2362,7 +2389,7 @@ describe("Supervisor adopted isolated candidate validation", () => {
       // Keep the synthetic terminal inputs ordered after every receipt written by
       // the interrupted successor, independent of fixture-local sequence state.
       const terminalSequence = 10_000;
-      const validationEvents = validationStarted
+      const continuationEvents = validationStarted
         ? [
             f.event({
               kind: "capacity",
@@ -2402,7 +2429,57 @@ describe("Supervisor adopted isolated candidate validation", () => {
               artifactDigest: consumerSuccess.artifactDigest,
             }),
           ]
-        : [];
+        : reviewStarted
+          ? [
+              f.event({
+                ...consumerReservation,
+                artifactConsumer: undefined,
+                writerEpoch: undefined,
+                writerOperationId: undefined,
+                event: "AttemptCollected",
+                runId: "successor",
+                sequence: terminalSequence - 4,
+                artifactDigest: consumerSuccess.artifactDigest,
+              }),
+              f.event({
+                kind: "validation",
+                event: "ValidationRecorded",
+                runId: "successor",
+                sequence: terminalSequence - 3,
+                workItem: consumer.number,
+                attempt: consumerReservation.attempt,
+                baseSha: consumerReservation.baseSha,
+                outputTreeSha: consumerReservation.baseSha,
+                evidenceDigest: "d".repeat(64),
+                passed: true,
+              }),
+              f.event({
+                ...consumerReservation,
+                artifactConsumer: undefined,
+                writerEpoch: undefined,
+                writerOperationId: undefined,
+                event: "AttemptValidated",
+                runId: "successor",
+                sequence: terminalSequence - 2,
+                artifactDigest: consumerSuccess.artifactDigest,
+              }),
+              f.event({
+                kind: "budget",
+                event: "BudgetReserved",
+                runId: "successor",
+                sequence: terminalSequence - 1,
+                workItem: consumer.number,
+                attempt: consumerReservation.attempt,
+                phase: "management",
+                unit: "model_tokens",
+                amount: 0,
+                usageId: "invocation-terminal-drain-consumer-review",
+                modelInvocationId: "terminal-drain-consumer-review",
+                directorEpoch: consumerReservation.directorEpoch,
+                policyDigest: consumerReservation.policyDigest,
+              }),
+            ]
+          : [];
       const gatedEvents = [
         f.event({
           kind: "budget",
@@ -2450,14 +2527,20 @@ describe("Supervisor adopted isolated candidate validation", () => {
       let resumedReads = 0;
       reader.mockImplementation(async function (this: GitHubReader, ...args) {
         if (++resumedReads === 3) {
-          consumer.factoryEvents!.push(...validationEvents);
+          consumer.factoryEvents!.push(...continuationEvents);
           gatedSibling.factoryEvents!.push(...gatedEvents);
           f.snapshot.factoryEvents!.push(cancellation);
         }
         return read.apply(this, args);
       });
 
-      await expect(f.run()).resolves.toMatchObject({ status: "cancelled" });
+      if (reviewStarted) {
+        await expect(f.run()).rejects.toThrow(
+          "provider quota gate is active while durable attempt reconciliation remains incomplete",
+        );
+      } else {
+        await expect(f.run()).resolves.toMatchObject({ status: "cancelled" });
+      }
       expect(f.launch).not.toHaveBeenCalled();
       expect(f.validate).not.toHaveBeenCalled();
       expect(f.review).not.toHaveBeenCalled();
@@ -2489,6 +2572,29 @@ describe("Supervisor adopted isolated candidate validation", () => {
             )
             .map((event) => event.event),
         ).toEqual(["BudgetReserved", "BudgetReconciled"]);
+      }
+      if (reviewStarted) {
+        expect(
+          f.snapshot.factoryEvents!.some(
+            (event) =>
+              event.kind === "run" &&
+              event.runId === "successor" &&
+              ["FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event),
+          ),
+        ).toBe(false);
+        expect(
+          consumer.factoryEvents!.filter(
+            (event) =>
+              event.kind === "budget" &&
+              event.phase === "management" &&
+              event.unit === "model_tokens",
+          ),
+        ).toMatchObject([
+          {
+            event: "BudgetReserved",
+            modelInvocationId: "terminal-drain-consumer-review",
+          },
+        ]);
       }
       expect(
         (

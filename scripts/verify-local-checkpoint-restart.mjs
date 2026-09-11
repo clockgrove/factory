@@ -1152,14 +1152,101 @@ export function assertControllerUnit(body, expected) {
 }
 
 // The supplied original start is immutable authority, not a fresh phase start.
-export function checkpointDeadline(startedAt, minutes = 45) {
+export function checkpointDeadline(startedAt, minutes) {
   assert.ok(
-    Number.isInteger(minutes) && minutes >= 45 && minutes <= 120,
-    "checkpoint observation window must be an integer from 45 through 120 minutes",
+    Number.isInteger(minutes) && minutes >= 1 && minutes <= 30 * 24 * 60,
+    "checkpoint observation window must match a valid Objective policy timeout",
   );
   const start = Date.parse(startedAt);
   assert.ok(Number.isFinite(start), "original checkpoint start unavailable");
   return start + minutes * 60000;
+}
+
+/** Bind qualification observation to the run's authenticated control-plane clock.
+ * Attempt/provider deadlines remain execution authority and are intentionally not
+ * reused for compilation, projection, GitHub pacing, or lifecycle observation. */
+export function checkpointObjectiveDeadline(observation, authority) {
+  const starts = observation.receipts
+    .map(({ event }) => event)
+    .filter(
+      (event) =>
+        event.kind === "run" &&
+        event.event === "FactoryRunStarted" &&
+        event.activationRequestId === `${authority.namespace}-activate`,
+    );
+  assert.ok(starts.length <= 1, "at most one authenticated Factory run start permitted");
+  const start = starts[0];
+  if (!start) return undefined;
+  assert.equal(start.repository.toLowerCase(), authority.repository.toLowerCase());
+  assert.equal(start.objective, observation.status.objective.number);
+  assert.equal(start.runId, observation.status.run.runId);
+  assert.equal(start.policyDigest, observation.status.run.policyDigest);
+  assert.deepEqual(start.policy, authority.policy, "started Objective policy differs");
+  return {
+    source: "FactoryRunStarted",
+    runId: start.runId,
+    policyDigest: start.policyDigest,
+    startedAt: start.at,
+    deadline: new Date(
+      checkpointDeadline(start.at, authority.policy.objectiveTimeoutMinutes),
+    ).toISOString(),
+  };
+}
+
+/** Poll one lifecycle phase under the selected Objective deadline. Short reads
+ * may retry independently, but no phase gets a fresh lifecycle allowance. */
+export async function checkpointPoll({
+  phase,
+  observe,
+  accept,
+  deadline,
+  bind = async () => {},
+  read = async (_stage, operation) => operation(),
+  wait = sleep,
+  now = Date.now,
+  intervalMs = 5_000,
+}) {
+  assert.ok(observationPhases.has(phase), "unsupported checkpoint observation phase");
+  assert.ok(Number.isSafeInteger(intervalMs) && intervalMs > 0 && intervalMs <= 30_000);
+  const assertBeforeDeadline = () => {
+    const selected = deadline();
+    if (!Number.isSafeInteger(selected) || now() >= selected)
+      throw Object.assign(Error("bounded checkpoint observation incomplete"), {
+        code: "CHECKPOINT_DEADLINE",
+      });
+  };
+  for (;;) {
+    await read("poll", assertBeforeDeadline);
+    const selected = deadline();
+    let observation;
+    try {
+      observation = await observe(selected);
+    } catch (error) {
+      if (!(error instanceof CheckpointPending)) throw error;
+      await wait(Math.min(intervalMs, Math.max(0, deadline() - now())));
+      continue;
+    }
+    await bind(observation);
+    const accepted = await read("accept", async () => {
+      assertBeforeDeadline();
+      const result = await accept(observation);
+      assertBeforeDeadline();
+      return result;
+    });
+    if (accepted) return observation;
+    await read("poll", () => {
+      assert.ok(
+        !observation.receipts.some(
+          ({ event }) =>
+            terminal.has(event.event) &&
+            !(phase === "completed" && event.event === "FactoryRunCompleted"),
+        ),
+        "run ended before checkpoint qualification",
+      );
+      assertBeforeDeadline();
+    });
+    await wait(Math.min(intervalMs, Math.max(0, deadline() - now())));
+  }
 }
 
 export function checkpointTimeout(deadline, maximumMs, now = Date.now()) {
@@ -1172,6 +1259,31 @@ export function checkpointTimeout(deadline, maximumMs, now = Date.now()) {
   return Math.min(maximumMs, deadline - now);
 }
 
+/** Select the one scenario clock after activation. The completed activation
+ * response is only a bootstrap while the authenticated run-start receipt is
+ * not yet observable; once bound, every subsequent operation uses that clock. */
+export function checkpointScenarioDeadline(evidence, observationWindowMinutes) {
+  if (evidence.objectiveDeadline) {
+    const deadline = Date.parse(evidence.objectiveDeadline.deadline);
+    assert.ok(Number.isSafeInteger(deadline), "authenticated Objective deadline unavailable");
+    return deadline;
+  }
+  const activations = evidence.actions.filter(
+    (entry) => entry.action === "activate" && entry.returnedAt,
+  );
+  assert.ok(activations.length <= 1, "at most one completed activation permitted");
+  return activations[0]
+    ? checkpointDeadline(activations[0].returnedAt, observationWindowMinutes)
+    : undefined;
+}
+
+/** Refuse an expired scenario before entering the side-effecting operation. */
+export function checkpointBoundedCall(operation, deadline, maximumMs, now = Date.now) {
+  const timeoutMs =
+    deadline === undefined ? maximumMs : checkpointTimeout(deadline, maximumMs, now());
+  return operation(timeoutMs);
+}
+
 // Extensions are committed qualification adapters, never a plugin/runtime API or
 // input loaded from an operator-supplied module. They reuse this installed-client,
 // controller-identity, evidence and lifecycle boundary for additional fixtures.
@@ -1181,14 +1293,8 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     console.log("Not exercised: explicit checkpoint-restart opt-in required.");
     return;
   }
-  const observationWindowMinutes = extension.observationWindowMinutes ?? 45;
+  const observationWindowMinutes = authority.policy.objectiveTimeoutMinutes;
   checkpointDeadline(new Date(0).toISOString(), observationWindowMinutes);
-  if (extension.observationWindowMinutes !== undefined)
-    assert.equal(
-      observationWindowMinutes,
-      authority.policy.objectiveTimeoutMinutes,
-      "observation window must match prospective Objective policy",
-    );
   assert.equal(process.platform, "linux");
   const home = realpathSync(homedir());
   assert.ok(!home.startsWith("/mnt/"));
@@ -1251,21 +1357,23 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     auth: token,
     request: { headers: { "X-GitHub-Api-Version": "2026-03-10" } },
   });
+  let evidence;
+  const scenarioDeadline = () => checkpointScenarioDeadline(evidence, observationWindowMinutes);
   const request = (route, args = {}, timeoutMs = 15000) =>
-    schedulingRequest(
-      { request: (r, p) => octokit.request(r, { owner, repo, ...p }) },
-      route,
-      args,
-      undefined,
-      extension.observationWindowMinutes === undefined
-        ? timeoutMs
-        : checkpointTimeout(
-            checkpointDeadline(evidence.startedAt, observationWindowMinutes),
-            timeoutMs,
-          ),
+    checkpointBoundedCall(
+      (boundedTimeout) =>
+        schedulingRequest(
+          { request: (r, p) => octokit.request(r, { owner, repo, ...p }) },
+          route,
+          args,
+          undefined,
+          boundedTimeout,
+        ),
+      scenarioDeadline(),
+      timeoutMs,
     );
   const list = createCheckpointList(request);
-  const evidence = {
+  evidence = {
     protocol: "clockgrove.factory/checkpoint-restart-qualification-v1",
     authority,
     artifact,
@@ -1433,17 +1541,16 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     );
   };
   const invoke = async (name, args = {}, timeoutMs = 120000) => {
-    const boundedTimeout =
-      extension.observationWindowMinutes === undefined
-        ? timeoutMs
-        : checkpointTimeout(
-            checkpointDeadline(evidence.startedAt, observationWindowMinutes),
-            timeoutMs,
-          );
-    return client.callTool({ name, arguments: { owner, repo, ...args } }, undefined, {
-      timeout: boundedTimeout,
-      maxTotalTimeout: boundedTimeout,
-    });
+    const effectiveDeadline = observationDeadline ?? scenarioDeadline();
+    return checkpointBoundedCall(
+      (boundedTimeout) =>
+        client.callTool({ name, arguments: { owner, repo, ...args } }, undefined, {
+          timeout: boundedTimeout,
+          maxTotalTimeout: boundedTimeout,
+        }),
+      effectiveDeadline,
+      timeoutMs,
+    );
   };
   const call = async (name, args = {}, timeoutMs = 120000, retrySnapshot = false) => {
     const response = await invoke(name, args, timeoutMs);
@@ -1481,10 +1588,10 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     checkpointObservationRead(operation, {
       phase: observationPhase,
       stage,
-      deadline: Math.min(
-        observationDeadline ?? Number.MAX_SAFE_INTEGER,
+      deadline:
+        observationDeadline ??
+        scenarioDeadline() ??
         checkpointDeadline(evidence.startedAt, observationWindowMinutes),
-      ),
       record: (diagnostic, error) => {
         lastObservationError = error;
         const failures = (evidence.observationFailures ??= []);
@@ -1741,49 +1848,37 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       save();
     },
     poll: async (phase, accept) => {
-      const deadline = Math.min(
-        Date.now() + (phase === "worker-start" ? 240000 : observationWindowMinutes * 60000),
-        checkpointDeadline(evidence.startedAt, observationWindowMinutes),
-      );
+      assert.ok(scenarioDeadline(), "one completed activation required before observation");
+      const selectedDeadline = scenarioDeadline;
       observationPhase = phase;
-      observationDeadline = deadline;
-      const maximumPolls =
-        extension.observationWindowMinutes === undefined
-          ? 270
-          : Math.ceil((observationWindowMinutes * 60000) / 5000);
-      for (let count = 0; count < maximumPolls; count++) {
-        let observation;
-        try {
-          observation = await observe();
-        } catch (error) {
-          if (!(error instanceof CheckpointPending)) throw error;
-          await sleep(Math.min(5000, Math.max(0, deadline - Date.now())));
-          continue;
-        }
-        if (await observationRead("accept", () => accept(observation))) {
-          if (extension.observationWindowMinutes !== undefined) checkpointTimeout(deadline, 1);
-          observationDeadline = undefined;
-          observationPhase = "observation";
-          return observation;
-        }
-        await observationRead("poll", () => {
-          assert.ok(
-            !observation.receipts.some(
-              ({ event }) =>
-                terminal.has(event.event) &&
-                !(phase === "completed" && event.event === "FactoryRunCompleted"),
-            ),
-            "run ended before checkpoint qualification",
-          );
-          assert.ok(Date.now() < deadline, "bounded checkpoint observation incomplete");
-        });
-        await sleep(Math.min(5000, Math.max(0, deadline - Date.now())));
-      }
-      await observationRead("poll", () => {
-        throw Object.assign(Error("bounded checkpoint polling exhausted"), {
-          code: "CHECKPOINT_DEADLINE",
-        });
+      const result = await checkpointPoll({
+        phase,
+        deadline: selectedDeadline,
+        observe: async (deadline) => {
+          observationDeadline = deadline;
+          return observe();
+        },
+        accept,
+        bind: async (observation) => {
+          const authenticated = checkpointObjectiveDeadline(observation, authority);
+          if (!authenticated) return;
+          if (evidence.objectiveDeadline)
+            assert.deepEqual(
+              authenticated,
+              evidence.objectiveDeadline,
+              "authenticated Objective deadline changed during qualification",
+            );
+          else {
+            evidence.objectiveDeadline = authenticated;
+            save();
+          }
+          observationDeadline = selectedDeadline();
+        },
+        read: observationRead,
       });
+      observationDeadline = undefined;
+      observationPhase = "observation";
+      return result;
     },
     checkpoint: async (value) => {
       evidence.checkpoint = value;

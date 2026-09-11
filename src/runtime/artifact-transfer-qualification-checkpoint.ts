@@ -19,7 +19,7 @@ import { recoveryEventDigest } from "../recovery/identity.js";
 
 export const ArtifactTransferQualificationArmSchema = z
   .object({
-    protocol: z.literal("clockgrove.factory/artifact-transfer-checkpoint-arm-v1"),
+    protocol: z.literal("clockgrove.factory/artifact-transfer-checkpoint-arm-v2"),
     repository: z.string().regex(/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/),
     objective: z.number().int().positive(),
     activationRequestId: z.string().min(1).max(200),
@@ -35,7 +35,16 @@ export const ArtifactTransferQualificationArmSchema = z
       .int()
       .min(MAX_ARTIFACT_PATCH_BYTES + 1)
       .max(256 * 1024 * 1024),
-    expiresAt: z.string().datetime(),
+    eligibilityDurationMs: z
+      .number()
+      .int()
+      .positive()
+      .max(30 * 24 * 60 * 60_000),
+    holdDurationMs: z
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60 * 60_000),
   })
   .strict();
 export type ArtifactTransferQualificationArm = z.infer<
@@ -158,6 +167,7 @@ export class ArtifactTransferQualificationHeldError extends Error {
     this.name = "ArtifactTransferQualificationHeldError";
   }
 }
+class ArtifactTransferQualificationArmVersionError extends Error {}
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 const directoryPath = () =>
   join(tmpdir(), `factory-artifact-transfer-checkpoints-${process.getuid?.()}`);
@@ -204,6 +214,9 @@ export async function holdArtifactTransferQualificationCheckpoint(args: {
   checkpoint: ArtifactTransferIntentCheckpoint;
   activationRequestId?: string;
   batch: unknown;
+  objectiveStartedAt: Date;
+  objectiveDeadline: Date;
+  holdDurationMs: number;
   signal?: AbortSignal;
   assertCurrent(): Promise<void>;
   proveTerminal(): Promise<ArtifactTransferQualificationTerminal>;
@@ -237,9 +250,17 @@ export async function holdArtifactTransferQualificationCheckpoint(args: {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       throw error;
     }
-    const arm = ArtifactTransferQualificationArmSchema.parse(
-      JSON.parse(original.bytes.toString("utf8")),
-    );
+    const rawArm: unknown = JSON.parse(original.bytes.toString("utf8"));
+    if (
+      rawArm !== null &&
+      typeof rawArm === "object" &&
+      (rawArm as { protocol?: unknown }).protocol ===
+        "clockgrove.factory/artifact-transfer-checkpoint-arm-v1"
+    )
+      throw new ArtifactTransferQualificationArmVersionError(
+        "artifact transfer qualification checkpoint arm v1 is retired; use a fresh v2 scenario",
+      );
+    const arm = ArtifactTransferQualificationArmSchema.parse(rawArm);
     const identity = checkpoint.identity;
     for (const key of ["repository", "objective", "policyDigest", "baseSha"] as const)
       if (arm[key] !== identity[key])
@@ -277,8 +298,16 @@ export async function holdArtifactTransferQualificationCheckpoint(args: {
       !Number.isSafeInteger(checkpoint.payloadChunks) ||
       checkpoint.payloadChunks < 2 ||
       checkpoint.payloadChunks > 64 ||
-      Date.parse(arm.expiresAt) <= Date.now() ||
-      Date.parse(arm.expiresAt) > Date.now() + 600_000
+      !(args.objectiveStartedAt instanceof Date) ||
+      !Number.isFinite(args.objectiveStartedAt.getTime()) ||
+      !(args.objectiveDeadline instanceof Date) ||
+      !Number.isFinite(args.objectiveDeadline.getTime()) ||
+      !Number.isSafeInteger(args.holdDurationMs) ||
+      args.holdDurationMs <= 0 ||
+      arm.holdDurationMs !== args.holdDurationMs ||
+      arm.eligibilityDurationMs !==
+        args.objectiveDeadline.getTime() - args.objectiveStartedAt.getTime() ||
+      args.objectiveDeadline.getTime() <= Date.now()
     )
       throw new Error("artifact transfer checkpoint evidence or bounded expiry unavailable");
     const current = await discoverLocalScopeHost();
@@ -305,10 +334,12 @@ export async function holdArtifactTransferQualificationCheckpoint(args: {
     };
     await unchangedArm();
     await args.assertCurrent();
-    if (Date.now() >= Date.parse(arm.expiresAt))
+    const reachedAt = Date.now();
+    if (reachedAt >= args.objectiveDeadline.getTime())
       throw new Error("artifact transfer checkpoint expired before reaching");
+    const holdUntil = reachedAt + arm.holdDurationMs;
     const witness = {
-      protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached-v1",
+      protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached-v2",
       armDigest: hash(original.bytes),
       activationRequestId: arm.activationRequestId,
       ...identity,
@@ -323,8 +354,10 @@ export async function holdArtifactTransferQualificationCheckpoint(args: {
       batch,
       executionCleanup: "not-proven-by-checkpoint",
       nativeUsage: "not-measured-by-checkpoint",
-      reachedAt: new Date().toISOString(),
-      expiresAt: arm.expiresAt,
+      startedAt: args.objectiveStartedAt.toISOString(),
+      eligibleUntil: args.objectiveDeadline.toISOString(),
+      reachedAt: new Date(reachedAt).toISOString(),
+      holdUntil: new Date(holdUntil).toISOString(),
     };
     assertNoSecretMaterial(witness, "artifact transfer qualification witness");
     const bytes = Buffer.from(`${JSON.stringify(witness)}\n`);
@@ -342,17 +375,21 @@ export async function holdArtifactTransferQualificationCheckpoint(args: {
       await file.close();
     }
     await directory.sync();
-    while (!args.signal?.aborted && Date.now() < Date.parse(arm.expiresAt)) {
+    while (!args.signal?.aborted && Date.now() < holdUntil) {
       await unchangedArm();
       await sleep(
-        Math.max(1, Math.min(500, Date.parse(arm.expiresAt) - Date.now())),
+        Math.max(1, Math.min(500, holdUntil - Date.now())),
         undefined,
         args.signal ? { signal: args.signal } : {},
       );
     }
     throw new ArtifactTransferQualificationHeldError();
   } catch (cause) {
-    if (cause instanceof ArtifactTransferQualificationHeldError) throw cause;
+    if (
+      cause instanceof ArtifactTransferQualificationHeldError ||
+      cause instanceof ArtifactTransferQualificationArmVersionError
+    )
+      throw cause;
     throw new ArtifactTransferQualificationHeldError(cause);
   } finally {
     await directory.close();

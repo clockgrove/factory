@@ -12,7 +12,7 @@ import {
 } from "../src/runtime/local-worktree.js";
 import { createValidationEvidence } from "../src/validation/evidence.js";
 import type { WorkerPacket } from "../src/protocol/worker-packet.js";
-import type { ReviewResult } from "../src/management/backend.js";
+import type { ReviewContext } from "../src/management/backend.js";
 import { validateArtifactClean, discardValidationResult } from "../src/validation/clean-run.js";
 import { pnpmBootstrapLock } from "./helpers/pnpm-bootstrap.js";
 import { selectedManagedRuntimeRequirements } from "./helpers/managed-runtime.js";
@@ -320,6 +320,58 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:4, output
     });
   });
 
+  it("clamps the final admission remainder to the supplied operation-stall bound", async () => {
+    const input: ReviewContext = await fixture();
+    input.invocationTimeoutMs = 30 * 60_000;
+    const calls: string[] = [];
+    const runStructured = vi.fn(
+      async (
+        _cwd: string,
+        _schema: unknown,
+        _prompt: string,
+        _model: unknown,
+        invocationTimeoutMs?: number,
+      ) => {
+        calls.push("dispatch");
+        expect(invocationTimeoutMs).toBe(30 * 60_000);
+        return {
+          value: {
+            accepted: true,
+            summary: "reviewed",
+            unmetCriteria: [],
+            risks: [],
+          },
+          usage: { inputTokens: 4, outputTokens: 2 },
+        };
+      },
+    );
+    const beforeModelInvocation = vi.fn(async () => {
+      calls.push("admission");
+      return 40 * 60_000;
+    });
+    const backend = new CodexCliManagementBackend({ runStructured });
+
+    await backend.reviewWithAdmission(input, async () => {}, beforeModelInvocation);
+
+    expect(calls).toEqual(["admission", "dispatch"]);
+    expect(beforeModelInvocation).toHaveBeenCalledOnce();
+  });
+
+  it("does not launch review when the final post-preparation admission is expired", async () => {
+    const input = await fixture();
+    const runStructured = vi.fn();
+    const beforeModelInvocation = vi.fn(async () => {
+      throw new Error("Objective deadline exhausted before model invocation dispatch");
+    });
+    const backend = new CodexCliManagementBackend({ runStructured });
+
+    await expect(
+      backend.reviewWithAdmission(input, vi.fn(), beforeModelInvocation),
+    ).rejects.toThrow("Objective deadline exhausted");
+    expect(beforeModelInvocation).toHaveBeenCalledOnce();
+    expect(runStructured).not.toHaveBeenCalled();
+  });
+
   it.each(["isolation", "tree"])(
     "the real Codex adapter refuses %s before the supplied dispatch admission",
     async (kind) => {
@@ -331,10 +383,12 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:4, output
         input.evidence = createValidationEvidence({ ...evidence, outputTreeSha: "a".repeat(40) });
       }
       const runStructured = vi.fn();
-      const dispatch = vi.fn(async (invoke: () => Promise<ReviewResult>) => invoke());
+      const beforeModelInvocation = vi.fn(async () => 60_000);
       const backend = new CodexCliManagementBackend({ runStructured });
-      await expect(backend.reviewWithAdmission(input, vi.fn(), dispatch)).rejects.toThrow();
-      expect(dispatch).not.toHaveBeenCalled();
+      await expect(
+        backend.reviewWithAdmission(input, vi.fn(), beforeModelInvocation),
+      ).rejects.toThrow();
+      expect(beforeModelInvocation).not.toHaveBeenCalled();
       expect(runStructured).not.toHaveBeenCalled();
     },
   );

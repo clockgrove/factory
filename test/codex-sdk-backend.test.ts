@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { CodexOptions, ThreadEvent, ThreadOptions, TurnOptions } from "@openai/codex-sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   CodexSdkLocalBackend,
@@ -149,6 +149,65 @@ describe("Codex SDK local backend", () => {
 
   it("advertises the release's Linux runtime boundary", () => {
     expect(new CodexSdkLocalBackend().capabilities.supportedOs).toEqual(["linux"]);
+  });
+
+  it("rechecks the deadline after preparation and before SDK model dispatch", async () => {
+    const source = await repositoryFixture();
+    let now = 1_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const createClient = vi.fn(() => ({
+      startThread: vi.fn(() => ({ id: null, runStreamed: vi.fn() })),
+    }));
+    const backend = new CodexSdkLocalBackend({
+      authFile: source.authFile,
+      createCodexHome: async () => {
+        const home = await mkdtemp(join(source.repository, "deadline-home-"));
+        now = 2_000;
+        return home;
+      },
+      createClient,
+    });
+    const input = context(source.repository, source.baseSha);
+    input.deadline = new Date(2_000);
+    try {
+      await expect(backend.launch(input)).rejects.toThrow(/deadline elapsed before Codex SDK/);
+      expect(createClient).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+      await rm(source.repository, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects launch synchronously when SDK thread setup consumes the deadline", async () => {
+    const source = await repositoryFixture();
+    let now = 1_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const runStreamed = vi.fn();
+    const backend = new CodexSdkLocalBackend({
+      authFile: source.authFile,
+      createClient: () => ({
+        startThread: () => {
+          now = 2_000;
+          return { id: null, runStreamed };
+        },
+      }),
+    });
+    const input = context(source.repository, source.baseSha);
+    input.deadline = new Date(2_000);
+    try {
+      await expect(backend.launch(input)).rejects.toThrow(/deadline elapsed before Codex SDK/);
+      expect(runStreamed).not.toHaveBeenCalled();
+      await expect(
+        backend.observe({
+          backendId: backend.capabilities.id,
+          resourceId: `sdk-${durableAttemptId(input).slice(0, 24)}`,
+          startedAt: new Date().toISOString(),
+        }),
+      ).rejects.toThrow(/unknown SDK worker/);
+    } finally {
+      clock.mockRestore();
+      await rm(source.repository, { recursive: true, force: true });
+    }
   });
 
   it("maps the Work Packet network boundary into structured SDK config", () => {
@@ -663,10 +722,38 @@ describe.skipIf(process.platform !== "linux")("Codex SDK process containment", (
     const wrapper = await createSdkContainmentWrapper(
       root,
       { command: process.execPath, args: [target] },
+      new Date(Date.now() + 30_000),
       supervisorPid,
     );
     return { root, wrapper, pidFile };
   }
+
+  it("rejects an expired unscoped dispatch before starting the target executable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-sdk-expired-wrapper-"));
+    const marker = join(root, "started");
+    const target = join(root, "target.mjs");
+    await writeFile(
+      target,
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "started");`,
+    );
+    const wrapper = await createSdkContainmentWrapper(
+      root,
+      { command: process.execPath, args: [target] },
+      new Date(0),
+      process.pid,
+    );
+    try {
+      expect(() =>
+        execFileSync(wrapper, [], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        }),
+      ).toThrow(/Factory SDK model dispatch deadline expired/);
+      await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 
   it("terminates the complete Codex process group on SDK abort", async () => {
     const fixture = await containmentFixture(process.pid, true);
@@ -840,6 +927,7 @@ describe.skipIf(process.platform !== "linux")("Codex SDK process containment", (
     const wrapper = await createSdkContainmentWrapper(
       root,
       { command: process.execPath, args: [target] },
+      new Date(Date.now() + 30_000),
       process.pid,
     );
     try {

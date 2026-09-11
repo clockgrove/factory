@@ -131,6 +131,40 @@ async function fixture(): Promise<{
   return { repository, baseSha, fakeCodex, authFile };
 }
 
+function attemptContext(workspace: string, baseSha: string): AttemptContext {
+  return {
+    repository: "clockgrove/factory",
+    objective: 1,
+    workItem: 2,
+    attempt: 1,
+    runId: "cli-deadline-run",
+    directorEpoch: 1,
+    policyDigest: "f".repeat(64),
+    workspace,
+    deadline: new Date(Date.now() + 10_000),
+    packet: {
+      goal: "Change value.txt.",
+      acceptanceCriteria: ["value.txt contains changed"],
+      allowedPaths: ["value.txt"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      baseSha,
+      validationCommands: ["grep -qx changed value.txt"],
+      requirements: {
+        os: [],
+        architecture: [],
+        tools: [],
+        services: [],
+        networkDestinations: [],
+        permittedSecretNames: [],
+        trust: "trusted_local",
+      },
+      artifactContract: "clockgrove.factory/artifact-v1",
+    },
+  };
+}
+
 describe("Codex CLI local backend", () => {
   it("uses the actual last agent message, not the last parseable success", () => {
     const message = (text: string) => ({
@@ -178,6 +212,30 @@ describe("Codex CLI local backend", () => {
 
   it("advertises the release's Linux runtime boundary", () => {
     expect(new CodexCliLocalBackend().capabilities.supportedOs).toEqual(["linux"]);
+  });
+
+  it("rechecks the deadline after preparation and before spawning Codex", async () => {
+    const source = await fixture();
+    let now = 1_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const backend = new CodexCliLocalBackend({
+      command: source.fakeCodex,
+      authFile: source.authFile,
+      createCodexHome: async () => {
+        const home = await mkdtemp(join(source.repository, "deadline-home-"));
+        now = 2_000;
+        return home;
+      },
+    });
+    const input = attemptContext(source.repository, source.baseSha);
+    input.deadline = new Date(2_000);
+    try {
+      await expect(backend.launch(input)).rejects.toThrow(/deadline elapsed before Codex CLI/);
+      await expect(readFile(join(source.repository, "value.txt"), "utf8")).resolves.toBe("base\n");
+    } finally {
+      clock.mockRestore();
+      await rm(source.repository, { recursive: true, force: true });
+    }
   });
 
   it("runs unattended inside the sandbox with network and web search off by default", () => {

@@ -59,6 +59,12 @@ runner uploads only that competing blob/tree/commit and performs one exact `befo
 It never changes a Factory publication branch. Failed/uncertain writes are retained and not retried.
 Unreferenced Git objects are not claimed absent or automatically deleted.
 
+The one-shot terminal-artifact arm uses the policy Objective duration anchored by the installed
+runtime to the authenticated `FactoryRunStarted.at`; compilation, projection and GitHub pacing do
+not consume an unrelated fixed arm window. Reaching the seam starts a distinct bounded hold equal
+to the policy Work Item timeout. Neither the arm nor the hold extends the Objective or attempt,
+authorizes a replacement, or resets on controller restart.
+
 Same-run resume/restart must produce the exact activation/currentness refusal in the new controller
 invocation's journal, without another worker, validation or model invocation. This demonstrates safe
 early refusal of a **real post-execution conflict**, not internal merge repair. It is not a test of an

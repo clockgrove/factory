@@ -44,7 +44,8 @@ export interface CompilationContext {
   /** Exact immutable policy activated for this compilation. */
   runPolicy: RunPolicy;
   modelSelection?: ModelSelection;
-  /** Remaining per-invocation deadline; not a hard provider token cap. */
+  /** Remaining per-invocation operation-stall bound, capped by immutable policy
+   * and the Objective deadline; not a hard provider token cap. */
   invocationTimeoutMs?: number;
   /** Trusted pinned source evidence captured once for the draft envelope. */
   repositoryEvidence?: CompilerEvidence[];
@@ -153,6 +154,10 @@ export interface ReviewContext {
   evidence: ValidationEvidence;
   publicationBaseBranch?: string;
   modelSelection?: ModelSelection;
+  /** Remaining per-invocation operation-stall bound for legacy review adapters.
+   * Implementations with reviewWithAdmission clamp its fresher final-boundary
+   * callback by this bound. */
+  invocationTimeoutMs?: number;
   /** Includes current/source policy and inherited execution isolation. Packet
    * trust remains independently authoritative, including for legacy callers. */
   requiresIsolation?: boolean;
@@ -202,12 +207,13 @@ export interface ManagementBackend {
     beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<CompilationResult>;
   review(context: ReviewContext, checkpoint: ReviewCheckpoint): Promise<ReviewResult>;
-  /** Optional local preparation boundary. The backend must call dispatch exactly
-   * once immediately around the paid invocation, after non-model preparation. */
+  /** Optional local preparation boundary. The backend must call the admission
+   * callback exactly once immediately before paid invocation dispatch, after
+   * non-model preparation, and use its returned remaining timeout. */
   reviewWithAdmission?(
     context: ReviewContext,
     checkpoint: ReviewCheckpoint,
-    dispatch: (invoke: () => Promise<ReviewResult>) => Promise<ReviewResult>,
+    beforeModelInvocation: CompilerModelAdmission,
   ): Promise<ReviewResult>;
 }
 /** A durable model result does not prove its private review checkout was removed. */

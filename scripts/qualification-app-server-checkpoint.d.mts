@@ -4,7 +4,6 @@ export function appServerCheckpointArm(
   authority: CheckpointAuthority,
   original: Record<string, unknown>,
   objective: number,
-  now?: number,
 ): Record<string, unknown>;
 export function assertAppServerCheckpoint(
   observation: unknown,

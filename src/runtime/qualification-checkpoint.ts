@@ -11,7 +11,7 @@ import { observeLocalScope } from "./local-scope.js";
 
 const Arm = z
   .object({
-    protocol: z.literal("clockgrove.factory/app-server-checkpoint-arm-v1"),
+    protocol: z.literal("clockgrove.factory/app-server-checkpoint-arm-v2"),
     repository: z.string().regex(/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/),
     objective: z.number().int().positive(),
     activationRequestId: z.string().min(1).max(200),
@@ -21,7 +21,16 @@ const Arm = z
     hostIdentity: sha256Digest,
     producerPid: z.number().int().positive(),
     producerStartTicks: z.string().regex(/^[0-9]+$/),
-    expiresAt: z.string().datetime(),
+    eligibilityDurationMs: z
+      .number()
+      .int()
+      .positive()
+      .max(30 * 24 * 60 * 60_000),
+    holdDurationMs: z
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60 * 60_000),
   })
   .strict();
 export class SafeArtifactCheckpointHeldError extends Error {
@@ -93,6 +102,9 @@ export async function holdAppServerQualificationCheckpoint(args: {
   modelTokens: number;
   nativeMilliseconds: number;
   batch: unknown;
+  objectiveStartedAt: Date;
+  objectiveDeadline: Date;
+  holdDurationMs: number;
   signal?: AbortSignal;
   assertCurrent(): Promise<void>;
   proveTerminal(): Promise<void>;
@@ -125,7 +137,17 @@ export async function holdAppServerQualificationCheckpoint(args: {
     throw error;
   }
   // Any reached or malformed arm remains a refusal, never a repeatable hold.
-  const arm = Arm.parse(JSON.parse(bytes.toString("utf8")));
+  const rawArm: unknown = JSON.parse(bytes.toString("utf8"));
+  if (
+    rawArm !== null &&
+    typeof rawArm === "object" &&
+    (rawArm as { protocol?: unknown }).protocol ===
+      "clockgrove.factory/app-server-checkpoint-arm-v1"
+  )
+    throw new Error(
+      "App Server qualification checkpoint arm v1 is retired; use a fresh v2 scenario",
+    );
+  const arm = Arm.parse(rawArm);
   for (const key of ["repository", "objective", "activationRequestId", "policyDigest"] as const)
     if (arm[key] !== args[key])
       throw new Error("qualification arm differs from current activation");
@@ -157,8 +179,16 @@ export async function holdAppServerQualificationCheckpoint(args: {
     args.modelTokens < 0 ||
     !Number.isSafeInteger(args.nativeMilliseconds) ||
     args.nativeMilliseconds < 0 ||
-    Date.parse(arm.expiresAt) <= Date.now() ||
-    Date.parse(arm.expiresAt) > Date.now() + 600000
+    !(args.objectiveStartedAt instanceof Date) ||
+    !Number.isFinite(args.objectiveStartedAt.getTime()) ||
+    !(args.objectiveDeadline instanceof Date) ||
+    !Number.isFinite(args.objectiveDeadline.getTime()) ||
+    !Number.isSafeInteger(args.holdDurationMs) ||
+    args.holdDurationMs <= 0 ||
+    arm.holdDurationMs !== args.holdDurationMs ||
+    arm.eligibilityDurationMs !==
+      args.objectiveDeadline.getTime() - args.objectiveStartedAt.getTime() ||
+    args.objectiveDeadline.getTime() <= Date.now()
   )
     throw new Error("qualification checkpoint evidence or bounded expiry unavailable");
   await args.assertCurrent();
@@ -167,8 +197,12 @@ export async function holdAppServerQualificationCheckpoint(args: {
     throw new Error("qualification checkpoint worker scope is not absent");
   if (!(await privateBytes(path)).equals(bytes)) throw new Error("qualification arm changed");
   await args.assertCurrent();
+  const reachedAt = Date.now();
+  if (reachedAt >= args.objectiveDeadline.getTime())
+    throw new Error("qualification checkpoint expired before reaching");
+  const holdUntil = reachedAt + arm.holdDurationMs;
   const witness = {
-    protocol: "clockgrove.factory/app-server-checkpoint-reached-v1",
+    protocol: "clockgrove.factory/app-server-checkpoint-reached-v2",
     armDigest: hash(bytes.toString("utf8")),
     repository: args.repository,
     objective: args.objective,
@@ -185,8 +219,10 @@ export async function holdAppServerQualificationCheckpoint(args: {
     modelTokens: args.modelTokens,
     nativeMilliseconds: args.nativeMilliseconds,
     batch,
-    reachedAt: new Date().toISOString(),
-    expiresAt: arm.expiresAt,
+    startedAt: args.objectiveStartedAt.toISOString(),
+    eligibleUntil: args.objectiveDeadline.toISOString(),
+    reachedAt: new Date(reachedAt).toISOString(),
+    holdUntil: new Date(holdUntil).toISOString(),
   };
   try {
     const file = await open(
@@ -200,12 +236,12 @@ export async function holdAppServerQualificationCheckpoint(args: {
     } finally {
       await file.close();
     }
-    while (!args.signal?.aborted && Date.now() < Date.parse(arm.expiresAt)) {
+    while (!args.signal?.aborted && Date.now() < holdUntil) {
       if (!(await privateBytes(path)).equals(bytes))
         throw new Error("qualification arm changed while held");
       try {
         await sleep(
-          Math.min(500, Date.parse(arm.expiresAt) - Date.now()),
+          Math.min(500, holdUntil - Date.now()),
           undefined,
           args.signal ? { signal: args.signal } : {},
         );

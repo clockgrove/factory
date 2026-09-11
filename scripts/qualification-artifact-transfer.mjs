@@ -259,7 +259,7 @@ function session(events, authority, proof) {
   assert.ok(worker.sequence > started.sequence);
   if (worker.reportedModelUsage !== undefined)
     assert.deepEqual(worker.reportedModelUsage, terminal.usage);
-  return { ...refs, reserved, started, terminal, binding, worker };
+  return { ...refs, start, reserved, started, terminal, binding, worker };
 }
 function descriptor(proof, ref, parents, identity, phase, externalRequired = true) {
   const value = assertQualificationCheckpoint(
@@ -526,7 +526,7 @@ export function assertArtifactTransferProof(observation, authority, proof, optio
   if (options.workItem !== undefined) assert.equal(proof.workItem, options.workItem);
   const events = eventsFor(observation, proof.workItem);
   const context = session(events, authority, proof);
-  const { identity, transferRef, reserved, started, worker, terminal, binding } = context;
+  const { identity, transferRef, start, reserved, started, worker, terminal, binding } = context;
   assert.deepEqual(proof.receipts, events, "retained receipt snapshot differs");
   const externalRequired =
     options.phase === "intent" || Boolean(options.witness || options.priorIntent);
@@ -593,7 +593,13 @@ export function assertArtifactTransferProof(observation, authority, proof, optio
   }
   const witness = options.witness;
   if (witness) {
-    assert.equal(witness.protocol, "clockgrove.factory/artifact-transfer-checkpoint-reached-v1");
+    assert.ok(
+      [
+        "clockgrove.factory/artifact-transfer-checkpoint-reached-v1",
+        "clockgrove.factory/artifact-transfer-checkpoint-reached-v2",
+      ].includes(witness.protocol),
+      "unsupported artifact transfer checkpoint witness",
+    );
     same(witness, identity);
     assert.equal(witness.activationRequestId, `${authority.namespace}-activate`);
     assert.equal(witness.artifactDigest, intent.artifact.digest);
@@ -625,7 +631,18 @@ export function assertArtifactTransferProof(observation, authority, proof, optio
     });
     digest(witness.armDigest);
     assert.ok(when(witness.reachedAt) >= when(worker.at));
-    assert.ok(when(witness.expiresAt) > when(witness.reachedAt));
+    if (witness.protocol === "clockgrove.factory/artifact-transfer-checkpoint-reached-v2") {
+      assert.equal(witness.startedAt, start.at);
+      assert.equal(
+        when(witness.eligibleUntil),
+        when(start.at) + authority.policy.objectiveTimeoutMinutes * 60_000,
+      );
+      assert.ok(when(witness.eligibleUntil) > when(witness.reachedAt));
+      assert.equal(
+        when(witness.holdUntil) - when(witness.reachedAt),
+        authority.policy.workItemTimeoutMinutes * 60_000,
+      );
+    } else assert.ok(when(witness.expiresAt) > when(witness.reachedAt));
     assert.equal(witness.executionCleanup, "not-proven-by-checkpoint");
     assert.equal(witness.nativeUsage, "not-measured-by-checkpoint");
   }

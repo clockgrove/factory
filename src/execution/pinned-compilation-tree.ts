@@ -1,11 +1,9 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
-import { sanitizedWorkerEnvironment } from "../runtime/process-group.js";
+import { sanitizedWorkerEnvironment, terminateProcessGroup } from "../runtime/process-group.js";
 
-const execute = promisify(execFile);
 const MAX_FILES = 5000;
 const MAX_BLOB_BYTES = 100 * 1024 * 1024;
 const MAX_TREE_BYTES = 256 * 1024 * 1024;
@@ -24,16 +22,128 @@ const options = [
   "credential.helper=",
 ];
 
+async function readPinnedGit(
+  cwd: string,
+  args: string[],
+  input: {
+    env: NodeJS.ProcessEnv;
+    deadline: number;
+    now: () => number;
+    maxBuffer: number;
+    stdin?: string;
+    signal?: AbortSignal;
+  },
+): Promise<Buffer> {
+  const timeoutMs = input.deadline - input.now();
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("pinned compilation preparation deadline exceeded");
+  }
+  input.signal?.throwIfAborted();
+  const child = spawn("git", [...options, ...args], {
+    cwd,
+    env: input.env,
+    detached: process.platform !== "win32",
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const stdout: Buffer[] = [];
+  let stdoutBytes = 0;
+  let diagnostic = "";
+  let outputFailure: Error | undefined;
+  let deadlineElapsed = false;
+  let termination: Promise<void> | undefined;
+  let rejectTermination!: (reason: unknown) => void;
+  const terminationFailure = new Promise<never>((_resolve, reject) => {
+    rejectTermination = reject;
+  });
+  const stop = (): Promise<void> => {
+    if (termination) return termination;
+    termination = (async () => {
+      if (!child.pid) {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        return;
+      }
+      if (process.platform === "win32") {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        return;
+      }
+      await terminateProcessGroup(child.pid, "SIGKILL", 0);
+    })();
+    void termination.then(undefined, rejectTermination);
+    return termination;
+  };
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdoutBytes += chunk.length;
+    if (stdoutBytes > input.maxBuffer) {
+      outputFailure = new Error("pinned compilation Git object read exceeded its byte bound");
+      void stop();
+      return;
+    }
+    stdout.push(chunk);
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    diagnostic = (diagnostic + chunk.toString("utf8")).slice(-8_192);
+  });
+  child.stdin.on("error", () => undefined);
+  child.stdin.end(input.stdin);
+  const onAbort = (): void => {
+    void stop();
+  };
+  input.signal?.addEventListener("abort", onAbort, { once: true });
+  if (input.signal?.aborted) onAbort();
+  const timer = setTimeout(() => {
+    deadlineElapsed = true;
+    void stop();
+  }, timeoutMs);
+  let exitCode: number | null = null;
+  let exitSignal: NodeJS.Signals | null = null;
+  const closed = new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", () => {
+      void stop();
+    });
+    child.once("close", (code, signal) => {
+      exitCode = code;
+      exitSignal = signal;
+      resolve();
+    });
+  });
+  try {
+    await Promise.race([closed, terminationFailure]);
+    if (termination) await termination;
+    input.signal?.throwIfAborted();
+    if (deadlineElapsed) throw new Error("pinned compilation preparation deadline exceeded");
+    if (outputFailure) throw outputFailure;
+    if (exitCode !== 0) {
+      throw new Error(
+        `pinned compilation Git object read failed (${exitCode ?? exitSignal}): ${diagnostic}`,
+      );
+    }
+    return Buffer.concat(stdout, stdoutBytes);
+  } catch (error) {
+    await stop();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    input.signal?.removeEventListener("abort", onAbort);
+  }
+}
+
 /** Materialize raw exact Git blobs, never checkout hooks, filters, package commands or
  * repository executables. The separate clean Git config gives read-only management an
  * exact index/HEAD without inheriting source repository settings or credentials. */
 export async function materializePinnedCompilationTree(
   repository: string,
   baseSha: string,
-  input: { purpose?: "compilation" | "worktree" } = {},
+  input: {
+    purpose?: "compilation" | "worktree";
+    deadline?: Date;
+    signal?: AbortSignal;
+    now?: () => number;
+  } = {},
 ) {
   if (!/^[a-f0-9]{40}$/.test(baseSha)) throw new Error("invalid compilation base SHA");
-  const deadline = Date.now() + 120_000;
+  const now = input.now ?? Date.now;
+  const deadline = Math.min(now() + 120_000, input.deadline?.getTime() ?? Number.POSITIVE_INFINITY);
   const env = sanitizedWorkerEnvironment(process.env);
   for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
   Object.assign(env, {
@@ -45,20 +155,16 @@ export async function materializePinnedCompilationTree(
     GIT_TERMINAL_PROMPT: "0",
     GIT_LFS_SKIP_SMUDGE: "1",
   });
-  const git = async (cwd: string, args: string[], maxBuffer = 4 * 1024 * 1024, input?: string) => {
-    const timeout = deadline - Date.now();
-    if (timeout <= 0) throw new Error("pinned compilation preparation deadline exceeded");
+  const git = async (cwd: string, args: string[], maxBuffer = 4 * 1024 * 1024, stdin?: string) => {
     try {
-      const pending = execute("git", [...options, ...args], {
-        cwd,
+      return await readPinnedGit(cwd, args, {
         env,
-        encoding: "buffer",
+        deadline,
+        now,
         maxBuffer,
-        timeout,
+        ...(stdin === undefined ? {} : { stdin }),
+        ...(input.signal ? { signal: input.signal } : {}),
       });
-      if (input !== undefined) pending.child.stdin?.end(input);
-      const result = await pending;
-      return result.stdout;
     } catch {
       throw new Error("pinned compilation Git object read failed");
     }
@@ -127,8 +233,7 @@ export async function materializePinnedCompilationTree(
     const files: string[] = [];
     let cursor = 0;
     for (const { mode, oid, size, path } of objectsToRead) {
-      if (Date.now() >= deadline)
-        throw new Error("pinned compilation preparation deadline exceeded");
+      if (now() >= deadline) throw new Error("pinned compilation preparation deadline exceeded");
       const target = resolve(checkout, path);
       if (!target.startsWith(checkout + sep))
         throw new Error("pinned compilation path escaped its owned directory");

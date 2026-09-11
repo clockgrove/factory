@@ -152,10 +152,14 @@ export function transferArmPath(unit, invocationId, uid = process.getuid()) {
   );
 }
 
-export function largeFileTransferArm(authority, producer, objective, baseSha, now = Date.now()) {
+export function largeFileTransferArm(authority, producer, objective, baseSha) {
   assert.equal(authority.largeFile.scenario, "transfer-restart");
+  const objectiveTimeoutMinutes = authority.policy.objectiveTimeoutMinutes,
+    workItemTimeoutMinutes = authority.policy.workItemTimeoutMinutes;
+  assert.ok(Number.isInteger(objectiveTimeoutMinutes) && objectiveTimeoutMinutes >= 1);
+  assert.ok(Number.isInteger(workItemTimeoutMinutes) && workItemTimeoutMinutes >= 1);
   return {
-    protocol: "clockgrove.factory/artifact-transfer-checkpoint-arm-v1",
+    protocol: "clockgrove.factory/artifact-transfer-checkpoint-arm-v2",
     repository: authority.repository,
     objective,
     activationRequestId: `${authority.namespace}-activate`,
@@ -167,7 +171,8 @@ export function largeFileTransferArm(authority, producer, objective, baseSha, no
     producerPid: producer.pid,
     producerStartTicks: producer.startTicks,
     minPayloadBytes: 5 * 1024 * 1024 + 1,
-    expiresAt: new Date(now + 600000).toISOString(),
+    eligibilityDurationMs: objectiveTimeoutMinutes * 60_000,
+    holdDurationMs: workItemTimeoutMinutes * 60_000,
   };
 }
 
@@ -180,7 +185,12 @@ export function transferHoldReady(observation, authority, arm) {
   assert.deepEqual(start.policy, authority.policy);
   assert.equal(start.repository, authority.repository);
   assert.equal(start.runId, observation.status.run.runId);
-  assert.equal(witness.protocol, "clockgrove.factory/artifact-transfer-checkpoint-reached-v1");
+  assert.ok(
+    [
+      "clockgrove.factory/artifact-transfer-checkpoint-reached-v1",
+      "clockgrove.factory/artifact-transfer-checkpoint-reached-v2",
+    ].includes(witness.protocol),
+  );
   assert.equal(witness.armDigest, arm.digest);
   assert.equal(witness.runId, start.runId);
   assert.equal(witness.policyDigest, start.policyDigest);

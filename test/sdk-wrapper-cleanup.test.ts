@@ -55,6 +55,7 @@ process.exitCode=${childExit};
     const wrapper = await createSdkContainmentWrapper(
       root,
       { command: "/fixture/fake-cli", args: [] },
+      new Date(Date.now() + 30_000),
       process.pid,
       { identity, deadline: new Date(Date.now() + 30_000) },
     );

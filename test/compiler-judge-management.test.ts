@@ -181,6 +181,32 @@ describe("independent compiler management boundaries", () => {
     ).rejects.toMatchObject({ usage, message: "checkpoint unavailable" });
   });
 
+  it("passes the final admitted Objective remainder without a legacy 30-minute cap", async () => {
+    const { context, proposal } = await fixture();
+    context.invocationTimeoutMs = 45 * 60_000;
+    const runStructured = vi.fn(
+      async (
+        _cwd: string,
+        _schema: unknown,
+        _prompt: string,
+        _model: unknown,
+        invocationTimeoutMs?: number,
+      ) => {
+        expect(invocationTimeoutMs).toBe(30 * 60_000);
+        return { value: proposal, usage };
+      },
+    );
+    const backend = new CodexCliManagementBackend({ runStructured });
+
+    await backend.compile(
+      context,
+      async () => {},
+      async () => 44 * 60_000,
+    );
+
+    expect(runStructured).toHaveBeenCalledOnce();
+  });
+
   it("judges complete coverage in an isolated prompt without compiler self-assessment", async () => {
     const { context, inventory, proposal } = await fixture();
     const compiled = await new CodexCliManagementBackend({

@@ -8,6 +8,28 @@ import {
 } from "./helpers/provider-supervisor.js";
 
 describe("credential-free provider Supervisor qualification", () => {
+  it("caps isolated validation at the authenticated Objective deadline", async () => {
+    const validationDeadlines: Date[] = [];
+    const f = await providerSupervisorFixture("codex-objective", {
+      objectiveTimeoutMinutes: 1,
+      workItemTimeoutMinutes: 2,
+      onValidationDeadline: (deadline) => validationDeadlines.push(deadline),
+    });
+    try {
+      expect(await f.run()).toMatchObject({ status: "completed" });
+      const started = f
+        .events()
+        .find((event) => event.kind === "run" && event.event === "FactoryRunStarted");
+      if (!started) throw new Error("fixture did not record FactoryRunStarted");
+      const objectiveDeadline = Date.parse(started.at) + 60_000;
+      expect(validationDeadlines).toHaveLength(3);
+      expect(validationDeadlines.every((deadline) => deadline.getTime() <= objectiveDeadline)).toBe(
+        true,
+      );
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
   it("uses independent durable run identities for separate host-sharing fixtures", async () => {
     const first = await providerSupervisorFixture("daytona-burst");
     const second = await providerSupervisorFixture("daytona-burst");

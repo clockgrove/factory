@@ -271,6 +271,7 @@ function fixture() {
     nativeMilliseconds: 500,
     armDigest: "d".repeat(64),
     reachedAt: common.at,
+    expiresAt: "2026-09-06T12:05:00.000Z",
   };
   const observation = {
     receipts: events.map((event) => ({ event })),
@@ -312,6 +313,29 @@ describe("installed App Server checkpoint qualification", () => {
       turnId: "turn-7",
       modelTokens: 110,
     });
+  });
+  it("rejects a v2 witness reached exactly at the half-open Objective boundary", () => {
+    const f = fixture();
+    const startedAt = String(
+      f.observation.receipts.find(({ event }) => event.event === "FactoryRunStarted")!.event.at,
+    );
+    const policy = parseRunPolicy(authority.policy);
+    const eligibleUntil = new Date(
+      Date.parse(startedAt) + policy.objectiveTimeoutMinutes * 60_000,
+    ).toISOString();
+    const { expiresAt: _expiresAt, ...legacy } = f.witness;
+    const witness = {
+      ...legacy,
+      protocol: "clockgrove.factory/app-server-checkpoint-reached-v2",
+      startedAt,
+      eligibleUntil,
+      reachedAt: eligibleUntil,
+      holdUntil: new Date(
+        Date.parse(eligibleUntil) + policy.workItemTimeoutMinutes * 60_000,
+      ).toISOString(),
+    };
+
+    expect(() => assertAppServerCheckpoint(f.observation, authority, f.proof, witness)).toThrow();
   });
   it.each(["turn", "policy", "artifact", "accounting", "extra-start", "early-validation"])(
     "rejects %s contradictions",
@@ -371,12 +395,12 @@ describe("installed App Server checkpoint qualification", () => {
           startTicks: "456",
         },
         7,
-        0,
       ),
     ).toMatchObject({
       objective: 7,
       activationRequestId: "session-case-activate",
-      expiresAt: "1970-01-01T00:10:00.000Z",
+      eligibilityDurationMs: 45 * 60_000,
+      holdDurationMs: 600_000,
     });
   });
 });

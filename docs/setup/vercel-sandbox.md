@@ -30,3 +30,8 @@ and [read-only verification](configuration.md#7-verify-the-same-environment-that
 Expired provider credentials need renewal and an affected-process restart. A successful shell probe
 cannot establish the separate controller's environment. Reserve independent validation resources
 and provider-side spending limits before approving a bounded live test.
+
+Factory gives each Vercel `stop` request a separate two-minute adapter operation window after work
+expires. The SDK request receives an AbortSignal and Factory also races signal-ignoring completion.
+Expiry is retained as unknown cleanup, never as proof that the paid sandbox stopped; reconciliation
+must later confirm the exact resource before replacement or capacity release.

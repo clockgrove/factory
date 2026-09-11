@@ -782,7 +782,25 @@ export interface CodexManagementOptions {
     schema: unknown,
     prompt: string,
     modelSelection?: CompilationContext["modelSelection"],
+    invocationTimeoutMs?: number,
   ) => Promise<{ value: unknown; usage: ManagementUsage }>;
+}
+
+const LEGACY_MANAGEMENT_INVOCATION_TIMEOUT_MS = 30 * 60_000;
+
+function compilationInvocationTimeout(context: CompilationContext): number {
+  const policyLimit = context.runPolicy.workItemTimeoutMinutes * 60_000;
+  return Math.min(context.invocationTimeoutMs ?? policyLimit, policyLimit);
+}
+
+function effectiveInvocationTimeout(
+  admittedTimeoutMs: number | void,
+  invocationTimeoutMs: number | undefined,
+): number {
+  const candidates = [admittedTimeoutMs, invocationTimeoutMs].filter(
+    (value): value is number => value !== undefined,
+  );
+  return candidates.length > 0 ? Math.min(...candidates) : LEGACY_MANAGEMENT_INVOCATION_TIMEOUT_MS;
 }
 
 function validUsageCounter(value: unknown): value is number {
@@ -1077,7 +1095,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       finalPrompt,
       context.modelSelection,
       false,
-      context.invocationTimeoutMs,
+      compilationInvocationTimeout(context),
       beforeModelInvocation,
     );
     let result: CompilationResult;
@@ -1240,7 +1258,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       prompt,
       context.compilation.modelSelection,
       false,
-      context.compilation.invocationTimeoutMs,
+      compilationInvocationTimeout(context.compilation),
     );
     try {
       assertWithinBytes(value, 512 * 1024, "compiler label output");
@@ -1302,7 +1320,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       prompt,
       context.modelSelection,
       false,
-      context.invocationTimeoutMs,
+      compilationInvocationTimeout(context),
       beforeModelInvocation,
     );
     try {
@@ -1361,7 +1379,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       prompt,
       compilation.modelSelection,
       false,
-      compilation.invocationTimeoutMs,
+      compilationInvocationTimeout(compilation),
       beforeModelInvocation,
     );
     try {
@@ -1382,24 +1400,25 @@ export class CodexCliManagementBackend implements ManagementBackend {
   }
 
   async review(context: ReviewContext, checkpoint: ReviewCheckpoint): Promise<ReviewResult> {
-    return this.reviewWithAdmission(context, checkpoint, (invoke) => invoke());
+    return this.reviewWithAdmission(context, checkpoint);
   }
 
   async reviewWithAdmission(
     context: ReviewContext,
     checkpoint: ReviewCheckpoint,
-    dispatch: (invoke: () => Promise<ReviewResult>) => Promise<ReviewResult>,
+    beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<ReviewResult> {
     return withVerifiedReviewCheckout(
       { ...context, requiresIsolation: context.requiresIsolation ?? false },
       (repository) =>
-        dispatch(() => this.#reviewMaterialized({ ...context, repository }, checkpoint)),
+        this.#reviewMaterialized({ ...context, repository }, checkpoint, beforeModelInvocation),
     );
   }
 
   async #reviewMaterialized(
     context: ReviewContext,
     checkpoint: ReviewCheckpoint,
+    beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<ReviewResult> {
     const reviewCriteria = semanticReviewCriteria(context.packet);
     const {
@@ -1437,6 +1456,8 @@ export class CodexCliManagementBackend implements ManagementBackend {
       prompt,
       context.modelSelection,
       true,
+      context.invocationTimeoutMs,
+      beforeModelInvocation,
     );
     let result: ReviewResult;
     try {
@@ -1463,8 +1484,18 @@ export class CodexCliManagementBackend implements ManagementBackend {
     )
       throw new Error("compiler invocation deadline exhausted");
     if (this.#options.runStructured) {
-      await beforeModelInvocation?.();
-      const result = await this.#options.runStructured(cwd, schema, prompt, modelSelection);
+      const admission = await beforeModelInvocation?.();
+      const admittedTimeoutMs = typeof admission === "number" ? admission : admission?.timeoutMs;
+      const effectiveTimeoutMs = effectiveInvocationTimeout(admittedTimeoutMs, invocationTimeoutMs);
+      if (!Number.isFinite(effectiveTimeoutMs) || effectiveTimeoutMs <= 0)
+        throw new Error("compiler invocation deadline exhausted");
+      const result = await this.#options.runStructured(
+        cwd,
+        schema,
+        prompt,
+        modelSelection,
+        effectiveTimeoutMs,
+      );
       return {
         value: result.value as T,
         usage: assertManagementUsage(result.usage),
@@ -1523,7 +1554,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
         args: invocationArgs,
         cwd,
         env: invocationEnvironment,
-        timeoutMs: Math.min(30 * 60_000, admittedTimeoutMs ?? invocationTimeoutMs ?? 30 * 60_000),
+        timeoutMs: effectiveInvocationTimeout(admittedTimeoutMs, invocationTimeoutMs),
         maxOutputBytes: 2 * 1024 * 1024,
       });
       if (result.exitCode !== 0) {

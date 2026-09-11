@@ -446,11 +446,15 @@ export function sandboxBootstrapFiles(
     managedToolchain?.plan.executables.map((executable) => executable.id) ?? [],
   );
   const declaredHostTools = managedToolchain
-    ? context.packet.requirements.tools.filter(
-        (name) =>
-          !managedExecutables.has(name) &&
-          !MANAGED_SYSTEM_TOOLS.includes(name as (typeof MANAGED_SYSTEM_TOOLS)[number]),
-      )
+    ? [
+        ...new Set(
+          context.packet.requirements.tools.filter(
+            (name) =>
+              !managedExecutables.has(name) &&
+              !MANAGED_SYSTEM_TOOLS.includes(name as (typeof MANAGED_SYSTEM_TOOLS)[number]),
+          ),
+        ),
+      ]
     : [];
   if (declaredHostTools.some((name) => !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(name)))
     throw new Error("managed worker declares an unsafe host tool name");

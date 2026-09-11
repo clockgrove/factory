@@ -192,7 +192,7 @@ describe("sandbox bootstrap contracts", () => {
     const base = context();
     base.packet.validationCommands = ["pnpm check"];
     base.packet.managedRuntimes = selectedManagedRuntimeRequirements(["pnpm check"]);
-    base.packet.requirements.tools = ["node", "pnpm", "npx"];
+    base.packet.requirements.tools = ["node", "pnpm", "npx", "npx"];
     base.packet.requirements.networkDestinations = ["registry.npmjs.org"];
     const rendered = sandboxBootstrapFiles(base, Buffer.from("archive"), {
       managedToolchains: true,
@@ -204,7 +204,8 @@ describe("sandbox bootstrap contracts", () => {
     expect(rendered).toContain("realpath rg rm");
     expect(rendered).toContain("rmdir sed sh");
     expect(rendered).not.toMatch(/factory_system_tool in [^\n]*(?:node|npm|npx|corepack)/);
-    expect(rendered).toContain("for factory_declared_tool in npx");
+    expect(rendered).toContain("for factory_declared_tool in npx; do");
+    expect(rendered).not.toContain("for factory_declared_tool in npx npx");
     expect(rendered).toContain(
       'export PATH="/tmp/factory-toolchain/bin:$factory_system_tools:$factory_declared_tools"',
     );

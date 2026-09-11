@@ -348,6 +348,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       preferredRouteQualification: "required",
     },
     supportsLocalInference: false,
+    supportsManagedToolchainExecution: true,
     reportsModelUsage: true,
     supportsModelSelection: true,
     requiresPaidRuntime: false,

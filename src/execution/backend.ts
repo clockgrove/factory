@@ -31,6 +31,8 @@ export interface ExecutionBackendCapabilities {
     preferredRouteQualification: "required";
   };
   supportsLocalInference: boolean;
+  /** Launch materializes and executes packet-managed runtime receipts exactly. */
+  supportsManagedToolchainExecution?: boolean;
   /** Terminal observations include provider model-token counters. */
   reportsModelUsage?: boolean;
   /** Launch accepts the immutable model selection carried by AttemptContext. */

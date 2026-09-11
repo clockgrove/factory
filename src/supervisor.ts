@@ -5636,6 +5636,7 @@ export class FactorySupervisor {
               await this.#registry.evaluate({
                 policy: this.#policy,
                 requirements: packet.requirements,
+                requiresManagedToolchain: Boolean(packet.managedRuntimes?.length),
                 nowMs,
               }),
               commandState.cloudPaused,
@@ -9148,6 +9149,7 @@ export class FactorySupervisor {
             }
           : this.#policy,
         requirements,
+        requiresManagedToolchain: Boolean(packet.managedRuntimes?.length),
         budget: budgets,
         estimatedDurationMs: timeoutMs,
         requireHostExecution:

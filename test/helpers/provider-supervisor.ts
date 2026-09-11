@@ -1310,6 +1310,7 @@ wheels = [
       supportsObservation: true,
       supportsResume: false,
       supportsLocalInference: false,
+      supportsManagedToolchainExecution: id === LOCAL || id === DAYTONA,
       reportsModelUsage: !remote,
       requiresPaidRuntime: remote,
       providerManagedPublication: providerManaged,

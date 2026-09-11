@@ -175,6 +175,9 @@ describe("sandbox bootstrap contracts", () => {
       .map((file) => file.content.toString("utf8"))
       .join("\n");
     expect(rendered).toContain(SANDBOX_CODEX_PACKAGE);
+    expect(rendered).toContain('factory_bootstrap_npx="$(command -v npx)"');
+    expect(rendered).toContain('"$factory_bootstrap_npx" --yes');
+    expect(rendered).not.toContain(`\nnpx --yes ${SANDBOX_CODEX_PACKAGE}`);
     expect(rendered).toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(rendered).toContain('web_search="disabled"');
     expect(rendered).toContain("git add --intent-to-add --all");

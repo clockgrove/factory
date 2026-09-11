@@ -5309,6 +5309,7 @@ export class FactorySupervisor {
           const exhausted = objective.items.find(
             (item) =>
               item.state === "failed" &&
+              !activeExecutions.has(item.number) &&
               item.attempts >= this.#policy.maxAttemptsPerItem &&
               !this.#hasRecoverablePostSuccessCancellation(item),
           );

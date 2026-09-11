@@ -254,6 +254,34 @@ describe("backend registry", () => {
     ).toContain("missing tool pnpm");
   });
 
+  it("rejects managed-runtime execution on a backend that cannot materialize receipts", async () => {
+    const registry = new BackendRegistry();
+    const vercel = new VercelSandboxBackend({ repository: "/tmp/factory-vercel-fixture" });
+    registry.register(vercel);
+    const candidates = await registry.evaluate({
+      policy: {
+        ...DEFAULT_RUN_POLICY,
+        backendOrder: [vercel.capabilities.id],
+        allowedPaidBackends: [vercel.capabilities.id],
+      },
+      requirements: {
+        os: ["linux"],
+        architecture: ["x64"],
+        tools: ["node", "npm"],
+        services: [],
+        networkDestinations: ["registry.npmjs.org"],
+        permittedSecretNames: [],
+        trust: "isolated",
+      },
+      requiresManagedToolchain: true,
+    });
+    expect(candidates[0]).toMatchObject({
+      id: "codex-cli/vercel-sandbox",
+      probe: null,
+      permanentReasons: ["backend cannot materialize exact managed toolchain runtimes"],
+    });
+  });
+
   it("rejects arbitrary agent/runtime identifiers", () => {
     const registry = new BackendRegistry();
     expect(() => registry.register(new FakeBackend(capabilities({ id: "local" })))).toThrow(

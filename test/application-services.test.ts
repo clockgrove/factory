@@ -241,6 +241,7 @@ describe("FactoryApplicationService", () => {
         graphSize: graph.workItems.length,
         index,
         dependsOn: item.dependsOn,
+        deferredCapabilityAdapters: graph.deferredCapabilityAdapters,
       }),
     }));
     const backend = new PlanningBackend(graph);

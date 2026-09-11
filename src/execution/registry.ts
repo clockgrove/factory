@@ -89,6 +89,7 @@ export class BackendRegistry {
   async evaluate(args: {
     policy: RunPolicy;
     requirements: ExecutionRequirements;
+    requiresManagedToolchain?: boolean;
     nowMs?: number;
     probeTtlMs?: number;
   }): Promise<BackendCandidate[]> {
@@ -125,6 +126,12 @@ export class BackendRegistry {
       }
       if (args.policy.models && !backend.capabilities.supportsModelSelection) {
         permanentReasons.push("backend cannot honor the immutable models/phaseProfiles selection");
+      }
+      if (
+        args.requiresManagedToolchain &&
+        !backend.capabilities.supportsManagedToolchainExecution
+      ) {
+        permanentReasons.push("backend cannot materialize exact managed toolchain runtimes");
       }
       permanentReasons.push(
         ...(backend.policyRejectionReasons?.({
@@ -274,6 +281,7 @@ export class BackendRegistry {
   async select(args: {
     policy: RunPolicy;
     requirements: ExecutionRequirements;
+    requiresManagedToolchain?: boolean;
     budget: BudgetRemaining;
     estimatedDurationMs?: number;
     requireHostExecution?: boolean;
@@ -282,6 +290,7 @@ export class BackendRegistry {
     for (const candidate of await this.evaluate({
       policy: args.policy,
       requirements: args.requirements,
+      ...(args.requiresManagedToolchain ? { requiresManagedToolchain: true } : {}),
     })) {
       const { id, backend, probe } = candidate;
       const reasons = [...candidate.permanentReasons, ...candidate.transientReasons];

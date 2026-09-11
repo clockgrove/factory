@@ -4,14 +4,59 @@
   "title": "Factory Worker Packet",
   "type": "object",
   "additionalProperties": true,
-  "required": ["goal", "acceptanceCriteria", "allowedPaths", "preconditions", "outOfScope", "conventions", "baseSha", "validationCommands", "requirements", "artifactContract"],
+  "required": [
+    "goal",
+    "acceptanceCriteria",
+    "allowedPaths",
+    "preconditions",
+    "outOfScope",
+    "conventions",
+    "baseSha",
+    "validationCommands",
+    "requirements",
+    "artifactContract"
+  ],
   "properties": {
-    "goal": { "type": "string", "description": "Repository-artifact outcome assigned to the worker; never a Factory-owned lifecycle or scheduling outcome.", "minLength": 1, "maxLength": 4000 },
-    "acceptanceCriteria": { "type": "array", "description": "Criteria provable from the candidate artifact and pre-publication validation evidence; never publication, integration, issue closure, accounting, or scheduling outcomes.", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-    "allowedPaths": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*[*?\\[]).+$" } },
-    "preconditions": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-    "outOfScope": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-    "conventions": { "type": "array", "description": "Repository implementation constraints observable in the candidate artifact; never Factory lifecycle or graph-order instructions.", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+    "goal": {
+      "type": "string",
+      "description": "Repository-artifact outcome assigned to the worker; never a Factory-owned lifecycle or scheduling outcome.",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "acceptanceCriteria": {
+      "type": "array",
+      "description": "Criteria provable from the candidate artifact and pre-publication validation evidence; never publication, integration, issue closure, accounting, or scheduling outcomes.",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
+    },
+    "allowedPaths": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500,
+        "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*[*?\\[]).+$"
+      }
+    },
+    "preconditions": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
+    },
+    "outOfScope": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
+    },
+    "conventions": {
+      "type": "array",
+      "description": "Repository implementation constraints observable in the candidate artifact; never Factory lifecycle or graph-order instructions.",
+      "maxItems": 64,
+      "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
+    },
     "retryContext": {
       "type": "object",
       "additionalProperties": false,
@@ -23,31 +68,81 @@
       }
     },
     "baseSha": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" },
-    "validationCommands": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } },
+    "validationCommands": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    },
     "requirements": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["os", "architecture", "tools", "services", "networkDestinations", "permittedSecretNames", "trust"],
+      "required": [
+        "os",
+        "architecture",
+        "tools",
+        "services",
+        "networkDestinations",
+        "permittedSecretNames",
+        "trust"
+      ],
       "properties": {
-        "os": { "type": "array", "maxItems": 12, "items": { "type": "string", "minLength": 1, "maxLength": 40 } },
-        "architecture": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 40 } },
+        "os": {
+          "type": "array",
+          "maxItems": 12,
+          "items": { "type": "string", "minLength": 1, "maxLength": 40 }
+        },
+        "architecture": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "type": "string", "minLength": 1, "maxLength": 40 }
+        },
         "cpu": { "type": "number", "exclusiveMinimum": 0, "maximum": 256 },
         "memoryMb": { "type": "integer", "minimum": 1, "maximum": 1048576 },
         "diskMb": { "type": "integer", "minimum": 1, "maximum": 10485760 },
         "timeoutMinutes": { "type": "integer", "minimum": 1, "maximum": 1440 },
         "estimatedDurationMinutes": { "type": "integer", "minimum": 1, "maximum": 1440 },
-        "tools": { "type": "array", "maxItems": 64, "items": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" } },
-        "services": { "type": "array", "maxItems": 64, "items": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" } },
-        "networkDestinations": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 253 } },
-        "permittedSecretNames": { "type": "array", "maxItems": 32, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,127}$" } },
+        "tools": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" }
+        },
+        "services": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" }
+        },
+        "networkDestinations": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 253 }
+        },
+        "permittedSecretNames": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,127}$" }
+        },
         "trust": { "enum": ["trusted_local", "isolated", "managed"] },
         "evidence": {
-          "type": "array", "maxItems": 16,
+          "type": "array",
+          "maxItems": 16,
           "description": "Trusted provenance for compiler-grounded platform, resource, artifact, and timeout requirements.",
           "items": {
-            "type": "object", "additionalProperties": false, "required": ["field", "kind", "source"],
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["field", "kind", "source"],
             "properties": {
-              "field": { "enum": ["os", "architecture", "cpu", "memoryMb", "diskMb", "timeoutMinutes", "artifactContract"] },
+              "field": {
+                "enum": [
+                  "os",
+                  "architecture",
+                  "cpu",
+                  "memoryMb",
+                  "diskMb",
+                  "timeoutMinutes",
+                  "artifactContract"
+                ]
+              },
               "kind": { "enum": ["repository", "run-policy", "factory-default"] },
               "source": { "type": "string", "minLength": 1, "maxLength": 500 }
             }
@@ -60,8 +155,16 @@
       "additionalProperties": false,
       "required": ["mustRead", "searchSeeds", "dependencyEvidence"],
       "properties": {
-        "mustRead": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
-        "searchSeeds": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+        "mustRead": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+        },
+        "searchSeeds": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+        },
         "dependencyEvidence": {
           "type": "array",
           "maxItems": 64,
@@ -83,7 +186,11 @@
       "required": ["mergeClass", "exclusiveResources"],
       "properties": {
         "mergeClass": { "enum": ["parallel-safe", "exclusive", "generated", "large-binary"] },
-        "exclusiveResources": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 200 } }
+        "exclusiveResources": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+        }
       }
     },
     "delivery": {
@@ -106,9 +213,18 @@
         "required": ["tier", "criteria"],
         "properties": {
           "tier": { "enum": ["mechanical", "semantic", "visual", "deterministic-simulation"] },
-          "criteria": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+          "criteria": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
+          },
           "rationale": { "type": "string", "minLength": 1, "maxLength": 2000 },
-          "evidenceCommands": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }
+          "evidenceCommands": {
+            "type": "array",
+            "maxItems": 32,
+            "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+          }
         }
       }
     },
@@ -123,7 +239,16 @@
         "required": ["criterion", "risk"],
         "properties": {
           "criterion": { "type": "string", "minLength": 1, "maxLength": 2000 },
-          "risk": { "enum": ["ordinary", "safety", "security", "destructive-action", "accounting", "recovery"] }
+          "risk": {
+            "enum": [
+              "ordinary",
+              "safety",
+              "security",
+              "destructive-action",
+              "accounting",
+              "recovery"
+            ]
+          }
         }
       }
     },
@@ -134,29 +259,90 @@
       "required": ["provides", "requires"],
       "properties": {
         "provides": {
-          "type": "array", "maxItems": 16,
+          "type": "array",
+          "maxItems": 16,
           "items": {
-            "type": "object", "additionalProperties": false,
+            "type": "object",
+            "additionalProperties": false,
             "required": ["adapter", "generation", "authorityPaths", "operations"],
             "properties": {
-              "adapter": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
-              "generation": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
-              "authorityPaths": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*[*?\\[]).+$" } },
-              "operations": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/definitions/repositoryCapabilityOperation" } },
+              "adapter": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160,
+                "pattern": "^[A-Za-z0-9._:/+\\-]+$"
+              },
+              "generation": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160,
+                "pattern": "^[A-Za-z0-9._:/+\\-]+$"
+              },
+              "authorityPaths": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*[*?\\[]).+$"
+                }
+              },
+              "operations": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": { "$ref": "#/definitions/repositoryCapabilityOperation" }
+              },
               "runtime": { "$ref": "#/definitions/runtimeBundleRequirement" }
             }
           }
         },
         "requires": {
-          "type": "array", "maxItems": 32,
+          "type": "array",
+          "maxItems": 32,
           "items": {
-            "type": "object", "additionalProperties": false,
-            "required": ["adapter", "generation", "providerWorkItem", "authorityPaths", "operation", "activation"],
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "adapter",
+              "generation",
+              "providerWorkItem",
+              "authorityPaths",
+              "operation",
+              "activation"
+            ],
             "properties": {
-              "adapter": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
-              "generation": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
-              "providerWorkItem": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
-              "authorityPaths": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*[*?\\[]).+$" } },
+              "adapter": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160,
+                "pattern": "^[A-Za-z0-9._:/+\\-]+$"
+              },
+              "generation": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160,
+                "pattern": "^[A-Za-z0-9._:/+\\-]+$"
+              },
+              "providerWorkItem": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160,
+                "pattern": "^[A-Za-z0-9._:/+\\-]+$"
+              },
+              "authorityPaths": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*[*?\\[]).+$"
+                }
+              },
               "operation": { "$ref": "#/definitions/repositoryCapabilityOperation" },
               "activation": { "enum": ["artifact", "integrated-base"] },
               "runtime": { "$ref": "#/definitions/runtimeBundleRequirement" }
@@ -166,29 +352,49 @@
       }
     },
     "managedRuntimes": {
-      "type": "array", "minItems": 1, "maxItems": 8,
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
       "items": { "$ref": "#/definitions/runtimeBundleRequirement" }
     },
     "artifactContract": { "const": "clockgrove.factory/artifact-v1" }
   },
   "definitions": {
     "repositoryCapabilityOperation": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "required": ["kind", "key"],
       "properties": {
-        "kind": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
-        "key": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" }
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9._:/+\\-]+$"
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9._:/+\\-]+$"
+        }
       }
     },
     "runtimeBundleRequirement": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "required": ["tool", "adapter", "adapterContract", "platform", "releaseChannel"],
       "properties": {
-        "tool": { "enum": ["pnpm", "bun", "uv"] },
-        "adapter": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
+        "tool": { "enum": ["npm", "pnpm", "bun", "uv"] },
+        "adapter": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9._:/+\\-]+$"
+        },
         "adapterContract": { "type": "integer", "minimum": 1, "maximum": 1000 },
         "platform": {
-          "type": "object", "additionalProperties": false,
+          "type": "object",
+          "additionalProperties": false,
           "required": ["os", "architecture", "libc"],
           "properties": {
             "os": { "const": "linux" },

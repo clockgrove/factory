@@ -25,6 +25,7 @@ import {
   type RuntimeAssetIdentity,
   type RuntimeBundleReceipt,
   type RuntimeComponentReceipt,
+  type RuntimeEntrypointReceipt,
   type RuntimeReleaseIdentity,
   runtimeBundleDigest,
   safeRelativePath,
@@ -67,7 +68,9 @@ export interface ToolchainReleaseSource {
     releaseId: number,
   ): Promise<GitHubReleaseAsset[]>;
   downloadAsset(owner: string, repository: string, assetId: number): Promise<Buffer>;
-  resolveLatestNodeDistribution?(): Promise<NodeDistributionIdentity>;
+  resolveLatestNodeDistribution?(requirement?: {
+    embeddedNpm: true;
+  }): Promise<NodeDistributionIdentity>;
   downloadNodeDistribution?(identity: NodeDistributionIdentity): Promise<Buffer>;
 }
 
@@ -80,6 +83,9 @@ export interface NodeDistributionIdentity {
   sha256: string;
   archive: "raw" | "tar.xz";
   executablePath: string;
+  /** Present only when the official index selected this distribution as an npm runtime. */
+  npmVersion?: string;
+  lts?: string;
 }
 
 export interface ToolchainProvisionOptions {
@@ -109,7 +115,9 @@ interface ReleaseSpec {
   versionOutput(version: string): string;
 }
 
-const RELEASE_SPECS: Record<ManagedToolchain, ReleaseSpec> = {
+type GitHubManagedToolchain = Exclude<ManagedToolchain, "npm">;
+
+const RELEASE_SPECS: Record<GitHubManagedToolchain, ReleaseSpec> = {
   pnpm: {
     owner: "pnpm",
     repository: "pnpm",
@@ -164,7 +172,7 @@ function bundlePath(root: string, digest: string): string {
 }
 
 function selectLatestGa(
-  tool: ManagedToolchain,
+  tool: GitHubManagedToolchain,
   releases: GitHubRelease[],
 ): {
   release: GitHubRelease;
@@ -194,7 +202,7 @@ function selectLatestGa(
   return { ...selected, asset };
 }
 
-function validateArchiveListing(listing: string, executablePath: string): void {
+function validateArchiveListing(listing: string, requiredPaths: readonly string[]): void {
   const entries = listing.split(/\r?\n/).filter(Boolean);
   if (entries.length === 0 || entries.length > 100_000)
     throw new Error("managed runtime archive has an invalid entry count");
@@ -203,8 +211,9 @@ function validateArchiveListing(listing: string, executablePath: string): void {
     if (normalized && !safeRelativePath(normalized))
       throw new Error(`managed runtime archive contains an unsafe path: ${entry}`);
   }
-  if (!entries.some((entry) => entry.replace(/\/$/, "") === executablePath))
-    throw new Error("managed runtime archive lacks its declared executable");
+  for (const requiredPath of requiredPaths)
+    if (!entries.some((entry) => entry.replace(/\/$/, "") === requiredPath))
+      throw new Error(`managed runtime archive lacks its declared entrypoint: ${requiredPath}`);
 }
 
 async function extractAsset(
@@ -214,6 +223,7 @@ async function extractAsset(
   executablePath: string,
   run: typeof execFileAsync,
   executableOnly = false,
+  requiredPaths: readonly string[] = [executablePath],
 ): Promise<void> {
   await mkdir(target, { recursive: true, mode: 0o700 });
   if (format === "raw") {
@@ -226,7 +236,7 @@ async function extractAsset(
       maxBuffer: 16 * 1024 * 1024,
       timeout: 30_000,
     });
-    validateArchiveListing(listed.stdout, executablePath);
+    validateArchiveListing(listed.stdout, requiredPaths);
     await run(
       "tar",
       [
@@ -253,7 +263,7 @@ async function extractAsset(
 }
 
 function assertGithubReleaseSelection(
-  tool: ManagedToolchain,
+  tool: GitHubManagedToolchain,
   selected: ReturnType<typeof selectLatestGa>,
 ): void {
   const spec = RELEASE_SPECS[tool];
@@ -286,6 +296,38 @@ function assertNodeDistributionIdentity(identity: NodeDistributionIdentity): voi
     throw new Error("official Node distribution identity is invalid");
 }
 
+const SUPPORTED_NPM_BY_NODE_MAJOR = new Map([
+  [22, 10],
+  [24, 11],
+]);
+
+function npmEntrypointPath(identity: NodeDistributionIdentity): string {
+  return `node-${identity.tag}-linux-x64/lib/node_modules/npm/bin/npm-cli.js`;
+}
+
+function assertNpmDistributionIdentity(
+  identity: NodeDistributionIdentity,
+): asserts identity is NodeDistributionIdentity & {
+  npmVersion: string;
+  lts: string;
+  archive: "tar.xz";
+} {
+  assertNodeDistributionIdentity(identity);
+  const nodeMajor = Number(identity.version.split(".")[0]);
+  const npmMajor = Number(identity.npmVersion?.split(".")[0]);
+  if (
+    identity.archive !== "tar.xz" ||
+    typeof identity.lts !== "string" ||
+    !/^[A-Za-z][A-Za-z0-9._ -]{0,63}$/.test(identity.lts) ||
+    typeof identity.npmVersion !== "string" ||
+    !/^\d+\.\d+\.\d+$/.test(identity.npmVersion) ||
+    SUPPORTED_NPM_BY_NODE_MAJOR.get(nodeMajor) !== npmMajor
+  )
+    throw new Error(
+      "official npm runtime requires an audited Node 22/npm 10 or Node 24/npm 11 LTS pair",
+    );
+}
+
 function assertPythonReleaseSelection(selected: {
   release: GitHubRelease;
   asset: GitHubReleaseAsset;
@@ -307,7 +349,7 @@ function assertPythonReleaseSelection(selected: {
 }
 
 async function createGithubComponent(
-  tool: ManagedToolchain,
+  tool: GitHubManagedToolchain,
   options: ToolchainProvisionOptions,
   staging: string,
   selected?: ReturnType<typeof selectLatestGa>,
@@ -376,39 +418,80 @@ async function createNodeComponent(
   identity: NodeDistributionIdentity,
   options: ToolchainProvisionOptions,
   staging: string,
+  mode: "executable-only" | "full-npm" = "executable-only",
 ): Promise<RuntimeComponentReceipt> {
-  assertNodeDistributionIdentity(identity);
+  if (mode === "full-npm") assertNpmDistributionIdentity(identity);
+  else assertNodeDistributionIdentity(identity);
   if (!options.source.downloadNodeDistribution)
-    throw new Error("pnpm provisioning source cannot download the official Node distribution");
+    throw new Error("toolchain source cannot download the official Node distribution");
   const bytes = await options.source.downloadNodeDistribution(identity);
   if (bytes.byteLength <= 0 || bytes.byteLength > MAX_ASSET_BYTES)
     throw new Error("Node distribution size is outside the supported bound");
   if (sha256Bytes(bytes) !== identity.sha256)
     throw new Error("Node distribution digest differs from official SHASUMS256.txt");
-  const componentRoot = join(staging, "node");
+  const componentId = mode === "full-npm" ? "npm" : "node";
+  const componentRoot = join(staging, componentId);
   await mkdir(componentRoot, { recursive: true, mode: 0o700 });
   const archivePath = join(componentRoot, "asset");
   await writeFile(archivePath, bytes, { mode: 0o600, flag: "wx" });
   const treeRoot = join(componentRoot, "root");
+  const npmPath = mode === "full-npm" ? npmEntrypointPath(identity) : undefined;
   await extractAsset(
     archivePath,
     identity.archive,
     treeRoot,
     identity.executablePath,
     options.run ?? execFileAsync,
-    true,
+    mode === "executable-only",
+    npmPath ? [identity.executablePath, npmPath] : [identity.executablePath],
   );
   const executable = join(treeRoot, ...identity.executablePath.split("/"));
-  const observed = await (options.run ?? execFileAsync)(executable, ["--version"], {
+  const run = options.run ?? execFileAsync;
+  const isolatedEnvironment = { PATH: "/factory-no-ambient-path", HOME: join(staging, "home") };
+  const observed = await run(executable, ["--version"], {
     encoding: "utf8",
     timeout: 15_000,
     maxBuffer: 1024 * 1024,
-    env: { PATH: "/usr/bin:/bin", HOME: join(staging, "home") },
+    env: isolatedEnvironment,
   });
   if (observed.stdout.trim() !== identity.tag)
     throw new Error(`Node executable does not report release version ${identity.tag}`);
+  let entrypoints: RuntimeEntrypointReceipt[] | undefined;
+  if (npmPath) {
+    const npmExecutable = join(treeRoot, ...npmPath.split("/"));
+    if (!(await stat(npmExecutable)).isFile())
+      throw new Error("official Node distribution npm entrypoint is not a regular file");
+    const npmObserved = await run(executable, [npmExecutable, "--version"], {
+      encoding: "utf8",
+      timeout: 15_000,
+      maxBuffer: 1024 * 1024,
+      env: {
+        ...isolatedEnvironment,
+        NPM_CONFIG_USERCONFIG: "/dev/null",
+        npm_config_cache: join(staging, "npm-cache"),
+        npm_config_registry: "https://registry.npmjs.org/",
+      },
+    });
+    if (npmObserved.stdout.trim() !== identity.npmVersion)
+      throw new Error(`embedded npm does not report official index version ${identity.npmVersion}`);
+    entrypoints = [
+      {
+        id: "node",
+        version: identity.version,
+        path: identity.executablePath,
+        sha256: await sha256File(executable),
+      },
+      {
+        id: "npm",
+        version: identity.npmVersion,
+        path: npmPath,
+        sha256: await sha256File(npmExecutable),
+        interpreter: "node",
+      },
+    ];
+  }
   return {
-    id: "node",
+    id: componentId,
     version: identity.version,
     release: {
       provider: "nodejs",
@@ -416,6 +499,7 @@ async function createNodeComponent(
       releaseId: identity.tag,
       tag: identity.tag,
       publishedAt: identity.publishedAt,
+      ...(identity.lts ? { channel: `lts:${identity.lts}` } : {}),
     },
     asset: {
       assetId: identity.url,
@@ -428,7 +512,8 @@ async function createNodeComponent(
     executablePath: identity.executablePath,
     executableSha256: await sha256File(executable),
     treeSha256: await sha256Tree(treeRoot),
-    executableOnly: true,
+    ...(mode === "executable-only" ? { executableOnly: true as const } : {}),
+    ...(entrypoints ? { entrypoints } : {}),
   };
 }
 
@@ -573,26 +658,45 @@ export async function provisionToolchain(
   assertSupportedRuntimePlatform();
   const root = resolve(options.root ?? toolchainStoreRoot());
   await mkdir(join(root, "bundles"), { recursive: true, mode: 0o700 });
-  const spec = RELEASE_SPECS[tool];
-  const selected = selectLatestGa(
-    tool,
-    await options.source.listReleases(spec.owner, spec.repository),
-  );
+  const spec = tool === "npm" ? undefined : RELEASE_SPECS[tool];
+  const selected = spec
+    ? selectLatestGa(
+        tool as GitHubManagedToolchain,
+        await options.source.listReleases(spec.owner, spec.repository),
+      )
+    : undefined;
   const selectedNode =
-    tool === "pnpm" ? await options.source.resolveLatestNodeDistribution?.() : undefined;
+    tool === "npm"
+      ? await options.source.resolveLatestNodeDistribution?.({ embeddedNpm: true })
+      : tool === "pnpm"
+        ? await options.source.resolveLatestNodeDistribution?.()
+        : undefined;
   const selectedPython =
     tool === "uv" ? await selectLatestPythonDistribution(options.source) : undefined;
   if (tool === "pnpm" && !selectedNode)
     throw new Error("pnpm provisioning source cannot resolve the latest official Node GA");
+  if (tool === "npm" && !selectedNode)
+    throw new Error("npm provisioning source cannot resolve a supported official Node LTS");
+  if (tool === "npm") assertNpmDistributionIdentity(selectedNode!);
   try {
     const current = await activeRuntimeBundle(tool, root);
+    const currentNpmIdentity = tool === "npm" ? exactNpmRestoreIdentity(current) : undefined;
     const component = current.components.find(({ id }) => id === tool);
-    const node = current.components.find(({ id }) => id === "node");
+    const node = current.components.find(({ id }) => id === (tool === "npm" ? "npm" : "node"));
     const python = current.components.find(({ id }) => id === "python");
     if (
-      component?.release.releaseId === String(selected.release.id) &&
-      component.asset.assetId === String(selected.asset.id) &&
-      component.asset.sha256 === selected.asset.digest.slice("sha256:".length) &&
+      (tool === "npm" ||
+        (component?.release.releaseId === String(selected!.release.id) &&
+          component.asset.assetId === String(selected!.asset.id) &&
+          component.asset.sha256 === selected!.asset.digest.slice("sha256:".length))) &&
+      (tool !== "npm" ||
+        (current.components.length === 1 &&
+          canonicalJson(currentNpmIdentity) === canonicalJson(selectedNode) &&
+          node?.version === selectedNode!.version &&
+          node.asset.url === selectedNode!.url &&
+          node.asset.sha256 === selectedNode!.sha256 &&
+          node.entrypoints?.find(({ id }) => id === "npm")?.version ===
+            selectedNode!.npmVersion)) &&
       (tool !== "pnpm" ||
         (node?.version === selectedNode!.version &&
           node.asset.url === selectedNode!.url &&
@@ -608,17 +712,30 @@ export async function provisionToolchain(
   }
   const staging = await mkdtemp(join(root, ".provision-"));
   try {
-    const primary = await createGithubComponent(tool, options, staging, selected);
+    const primary =
+      tool === "npm" ? undefined : await createGithubComponent(tool, options, staging, selected!);
     const components =
-      tool === "uv"
-        ? [primary, await createPythonBuildStandaloneComponent(options, staging, selectedPython!)]
-        : tool === "pnpm"
-          ? [await createNodeComponent(selectedNode!, options, staging), primary]
-          : [primary];
+      tool === "npm"
+        ? [await createNodeComponent(selectedNode!, options, staging, "full-npm")]
+        : tool === "uv"
+          ? [
+              primary!,
+              await createPythonBuildStandaloneComponent(options, staging, selectedPython!),
+            ]
+          : tool === "pnpm"
+            ? [await createNodeComponent(selectedNode!, options, staging), primary!]
+            : [primary!];
     const unsigned: Omit<RuntimeBundleReceipt, "digest"> = {
       protocol: "clockgrove.factory/toolchain-runtime-bundle-v1",
       tool,
-      adapter: tool === "pnpm" ? "node-pnpm" : tool === "bun" ? "javascript-bun" : "python-uv",
+      adapter:
+        tool === "npm"
+          ? "node-npm"
+          : tool === "pnpm"
+            ? "node-pnpm"
+            : tool === "bun"
+              ? "javascript-bun"
+              : "python-uv",
       adapterContract: 1,
       platform: SUPPORTED_RUNTIME_PLATFORM,
       components,
@@ -633,6 +750,59 @@ export async function provisionToolchain(
     await rm(staging, { recursive: true, force: true });
     throw error;
   }
+}
+
+function exactNpmRestoreIdentity(receipt: RuntimeBundleReceipt): NodeDistributionIdentity {
+  assertRuntimeBundleReceipt(receipt);
+  if (
+    receipt.tool !== "npm" ||
+    receipt.adapter !== "node-npm" ||
+    receipt.adapterContract !== 1 ||
+    receipt.components.length !== 1 ||
+    receipt.components[0]?.id !== "npm"
+  )
+    throw new Error("managed runtime receipt is not a restorable npm adapter");
+  const node = receipt.components[0];
+  const [nodeEntrypoint, npmEntrypoint] = node.entrypoints ?? [];
+  const lts = /^lts:(.+)$/.exec(node.release.channel ?? "")?.[1];
+  if (
+    node.release.provider !== "nodejs" ||
+    node.release.repository !== "nodejs/node" ||
+    node.release.releaseId !== node.release.tag ||
+    node.release.tag !== `v${node.version}` ||
+    node.asset.assetId !== node.asset.url ||
+    node.asset.url !== `https://nodejs.org/dist/${node.release.tag}/${node.asset.name}` ||
+    node.asset.name !== `node-${node.release.tag}-linux-x64.tar.xz` ||
+    node.asset.archive !== "tar.xz" ||
+    node.executablePath !== `node-${node.release.tag}-linux-x64/bin/node` ||
+    node.executableOnly !== undefined ||
+    node.entrypoints?.length !== 2 ||
+    nodeEntrypoint?.id !== "node" ||
+    nodeEntrypoint.version !== node.version ||
+    nodeEntrypoint.path !== node.executablePath ||
+    nodeEntrypoint.sha256 !== node.executableSha256 ||
+    nodeEntrypoint.interpreter !== undefined ||
+    npmEntrypoint?.id !== "npm" ||
+    npmEntrypoint.path !==
+      `node-${node.release.tag}-linux-x64/lib/node_modules/npm/bin/npm-cli.js` ||
+    npmEntrypoint.interpreter !== "node" ||
+    !lts
+  )
+    throw new Error("npm runtime receipt has an unsupported official Node/npm identity");
+  const identity: NodeDistributionIdentity = {
+    version: node.version,
+    tag: node.release.tag,
+    publishedAt: node.release.publishedAt,
+    name: node.asset.name,
+    url: node.asset.url,
+    sha256: node.asset.sha256,
+    archive: "tar.xz",
+    executablePath: node.executablePath,
+    npmVersion: npmEntrypoint.version,
+    lts,
+  };
+  assertNpmDistributionIdentity(identity);
+  return identity;
 }
 
 function exactPnpmRestoreIdentity(receipt: RuntimeBundleReceipt): {
@@ -826,7 +996,11 @@ export async function restoreToolchain(
   const staging = await mkdtemp(join(root, ".restore-"));
   try {
     let components: RuntimeComponentReceipt[];
-    if (receipt.tool === "pnpm") {
+    if (receipt.tool === "npm") {
+      components = [
+        await createNodeComponent(exactNpmRestoreIdentity(receipt), options, staging, "full-npm"),
+      ];
+    } else if (receipt.tool === "pnpm") {
       const exact = exactPnpmRestoreIdentity(receipt);
       const primary = await createGithubComponent("pnpm", options, staging, exact.selected);
       const node = await createNodeComponent(exact.node, options, staging);
@@ -934,11 +1108,21 @@ export function activeRuntimeBundleSync(
     const componentRoot = safeStoreChild(directory, component.id);
     const tree = join(componentRoot, "root");
     const executable = safeStoreChild(tree, ...component.executablePath.split("/"));
+    const entrypointInvalid = (component.entrypoints ?? []).some((entrypoint) => {
+      const path = safeStoreChild(tree, ...entrypoint.path.split("/"));
+      const info = statSync(path);
+      return (
+        !info.isFile() ||
+        sha256FileSync(path) !== entrypoint.sha256 ||
+        (entrypoint.interpreter === undefined && (info.mode & 0o111) === 0)
+      );
+    });
     if (
       sha256FileSync(join(componentRoot, "asset")) !== component.asset.sha256 ||
       sha256FileSync(executable) !== component.executableSha256 ||
       sha256TreeSync(tree) !== component.treeSha256 ||
-      (statSync(executable).mode & 0o111) === 0
+      (statSync(executable).mode & 0o111) === 0 ||
+      entrypointInvalid
     )
       throw new Error(`${receipt.tool} managed runtime cache failed integrity verification`);
   }
@@ -973,11 +1157,21 @@ export function runtimeBundleByDigestSync(
     const componentRoot = safeStoreChild(directory, component.id);
     const tree = join(componentRoot, "root");
     const executable = safeStoreChild(tree, ...component.executablePath.split("/"));
+    const entrypointInvalid = (component.entrypoints ?? []).some((entrypoint) => {
+      const path = safeStoreChild(tree, ...entrypoint.path.split("/"));
+      const info = statSync(path);
+      return (
+        !info.isFile() ||
+        sha256FileSync(path) !== entrypoint.sha256 ||
+        (entrypoint.interpreter === undefined && (info.mode & 0o111) === 0)
+      );
+    });
     if (
       sha256FileSync(join(componentRoot, "asset")) !== component.asset.sha256 ||
       sha256FileSync(executable) !== component.executableSha256 ||
       sha256TreeSync(tree) !== component.treeSha256 ||
-      (statSync(executable).mode & 0o111) === 0
+      (statSync(executable).mode & 0o111) === 0 ||
+      entrypointInvalid
     )
       throw new Error(`${receipt.tool} managed runtime cache failed integrity verification`);
   }
@@ -1001,11 +1195,25 @@ export async function verifyRuntimeBundle(
       sha256Tree(tree),
       stat(executable),
     ]);
+    const entrypointInvalid = (
+      await Promise.all(
+        (component.entrypoints ?? []).map(async (entrypoint) => {
+          const path = safeStoreChild(tree, ...entrypoint.path.split("/"));
+          const [digest, info] = await Promise.all([sha256File(path), stat(path)]);
+          return (
+            !info.isFile() ||
+            digest !== entrypoint.sha256 ||
+            (entrypoint.interpreter === undefined && (info.mode & 0o111) === 0)
+          );
+        }),
+      )
+    ).some(Boolean);
     if (
       archiveDigest !== component.asset.sha256 ||
       executableDigest !== component.executableSha256 ||
       treeDigest !== component.treeSha256 ||
-      (executableStat.mode & 0o111) === 0
+      (executableStat.mode & 0o111) === 0 ||
+      entrypointInvalid
     )
       throw new Error(`${receipt.tool} managed runtime cache failed integrity verification`);
   }
@@ -1040,7 +1248,13 @@ export async function toolchainStatus(
 export function runtimeComponentPaths(
   root: string,
   receipt: RuntimeBundleReceipt,
-): Array<{ component: RuntimeComponentReceipt; asset: string; root: string; executable: string }> {
+): Array<{
+  component: RuntimeComponentReceipt;
+  asset: string;
+  root: string;
+  executable: string;
+  entrypoints: Array<{ entrypoint: RuntimeEntrypointReceipt; path: string }>;
+}> {
   const directory = bundlePath(root, receipt.digest);
   return receipt.components.map((component) => {
     const componentRoot = safeStoreChild(directory, component.id);
@@ -1050,6 +1264,10 @@ export function runtimeComponentPaths(
       asset: join(componentRoot, "asset"),
       root: tree,
       executable: safeStoreChild(tree, ...component.executablePath.split("/")),
+      entrypoints: (component.entrypoints ?? []).map((entrypoint) => ({
+        entrypoint,
+        path: safeStoreChild(tree, ...entrypoint.path.split("/")),
+      })),
     };
   });
 }

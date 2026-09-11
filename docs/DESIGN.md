@@ -516,6 +516,13 @@ provider/requirement bindings and generations derived by Factory; model output c
 Bindings are plan provenance, not execution authority. They are canonicalized again when a graph is
 loaded or copied, and an integrated-base consumer remains unavailable until its exact provider
 generation is complete.
+The compiler also records the sorted objective-wide set of adapters actually selected for deferred
+operations after their complete root authority was found absent at the frozen base. Canonical
+binding validation uses this host-derived disposition, not
+the presence or absence of an individual Work Item binding, so deleting a consumer requirement or
+an entire capability island cannot reclassify its commands as repository-grounded. Authenticated
+historical graphs that predate the field derive the compatibility view from their stored bindings;
+fresh persistence requires an explicit disposition, including the empty set.
 
 The graph contains only the abstract adapter, platform, release-channel, and contract requirement;
 compilation never reads or selects a host runtime. After the graph and its accounting are durable,
@@ -526,6 +533,9 @@ reservation; the provider identity binds the reservation object, receipt, and ac
 The mutable issue comment must digest-identically reproduce the complete immutable reservation
 trailer; matching only selected reservation fields is not provider authority.
 Provider-generation and current-base authority bytes are inspected separately and must remain equal.
+Proof ownership remains the adapter's declared root or later-generation surface. An adapter may bind
+additional discovered manifests and lock data into its authority digest without falsely attributing
+those paths to the provider that selected the generation.
 Missing or ambiguous historical activation cannot borrow the current active bundle.
 
 `AttemptReserved` binds the selected receipt, activated Worker Packet, proof digests, source ref, and
@@ -550,12 +560,25 @@ than reserializing it. Issue-only inspection reconstructs every raw Worker Packe
 validation, and foreground completion reapplies a reservation's exact activation to the execution
 view before comparing its invocation digest.
 
-The first concrete future-capable adapters are `node-pnpm`, `javascript-bun`, and `python-uv`.
+The first concrete future-capable adapters are `node-npm`, `node-pnpm`, `javascript-bun`, and
+`python-uv`.
 They apply independently of unrelated repository recipes only when their complete root authority is
 absent; a partially present authority surface is never bootstrap authority. One dependency-root Work
 Item owns the authority and promises every descendant finite operation. At explicit
 `factory toolchains provision` time, Factory resolves the latest stable upstream releases, records
 their official immutable identities and digests, and retains older bundles.
+
+`node-npm` retains one complete official Node LTS distribution and independently attests its native
+Node executable and embedded `npm-cli.js`; npm is always invoked as that exact Node plus that exact
+CLI path, never through a shim, ambient interpreter, Corepack, or separate npm download. The bounded
+catalog accepts only Node 22/npm 10 and Node 24/npm 11 pairs. Root `packageManager` and `devEngines`
+must pin the selected exact stable versions. Repository authority is lockfile v3 plus exact root and
+enumerated workspace manifests; dependencies require exact versions, canonical
+`registry.npmjs.org` tarballs, and SHA-512 integrity. Configuration overrides, workspace globs,
+lifecycle/install scripts, native builds, exotic sources, and arbitrary npm commands are rejected.
+Only finite root or exact-member `npm run <validation-script>` operations are admitted. Existing
+repository-observed npm recipes remain on the host-observed compatibility path unless a persisted
+`node-npm` capability explicitly selects the managed adapter.
 
 `node-pnpm` pins the selected pnpm version and exact dependencies; workspace links remain within
 enumerated in-scope direct-child packages; registry lock entries carry SHA-512 integrity; and URL,
@@ -580,8 +603,8 @@ subtrees, and symlinks outside this authority do not become uv authority or read
 
 Every adapter performs one frozen hook-free setup from its declared registry destinations and records
 version, setup and validation commands in order. Isolated validation uploads, verifies and directly
-executes the same receipt-bound components. npm, Cargo, Go, ambient Python, and uncatalogued runners
-have no future-authority adapter; existing observed recipes remain usable, while absent recipes fail
+executes the same receipt-bound components. Cargo, Go, ambient Python, and uncatalogued runners have
+no future-authority adapter; existing observed recipes remain usable, while absent recipes fail
 before execution. If a selected bundle is missing or corrupt, recovery fails readiness closed.
 `AttemptReserved` retains the complete receipt and upstream origin identity, so an operator can run
 `factory toolchains restore RECEIPT.json` to reacquire every historical component without resolving

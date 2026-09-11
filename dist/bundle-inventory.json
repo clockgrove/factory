@@ -3,13 +3,13 @@
   "bundles": [
     {
       "file": "factory.js",
-      "bytes": 3920206,
-      "sha256": "161726a122af5c0d476b2b853f5f6bcfed83d7c9e20cad48f5c0f5b34b71b746"
+      "bytes": 3988782,
+      "sha256": "95109da64d01bb608ab6885e35276d15fde875493b2587e13345f6e756b1be18"
     },
     {
       "file": "mcp-server.js",
-      "bytes": 4045805,
-      "sha256": "b79045b3e91cc2e978bf56c9007efaa4ceb13d921bbd724b7f2e32ccb1f8e65f"
+      "bytes": 4110875,
+      "sha256": "e0b712dbc1e192705b5a98e8d5aaa004b024005cb24986f03da4ba619c31bbe1"
     }
   ],
   "components": [
@@ -990,6 +990,20 @@
       ],
       "licenseFiles": [
         "License"
+      ]
+    },
+    {
+      "name": "semver",
+      "version": "7.8.5",
+      "license": "ISC",
+      "author": "GitHub Inc.",
+      "repository": "git+https://github.com/npm/node-semver.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
       ]
     },
     {

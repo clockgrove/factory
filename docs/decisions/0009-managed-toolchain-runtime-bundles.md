@@ -67,7 +67,15 @@ official release origin and asset pattern. Repository adapters own pins, authori
 operations, preparation, environment isolation and source/lock policy. The first qualified platform
 is Linux x64 glibc.
 
-Factory initially exposes three provisioned bundles:
+Factory initially exposes four provisioned bundles:
+
+- `node-npm`: one complete official Node LTS Linux x64 distribution. The receipt independently
+  attests the native Node executable and embedded `npm-cli.js`, including their exact versions and
+  byte digests, and records that npm may execute only through that Node entrypoint. The bounded
+  catalog accepts Node 22/npm 10 and Node 24/npm 11; later major pairs require a contract revision.
+  Repository authority requires exact `packageManager` and `devEngines` pins, lockfile v3, exact
+  workspace members, canonical public-registry SHA-512 dependency sources, disabled lifecycle hooks,
+  and finite root/member `npm run` operations.
 
 - `node-pnpm`: the latest stable official Node Linux x64 distribution plus the latest stable pnpm
   standalone program. Repository authority is `package.json`, `pnpm-lock.yaml`, and any explicitly
@@ -97,6 +105,9 @@ normalized separately.
   fundamental and weaken the local-first contract.
 - A package-manager-only program without its interpreter is rejected because it leaves runtime
   identity incomplete.
+- Downloading npm separately from Node, invoking its environment-based shim, or representing one
+  Node archive as duplicate components is rejected because each creates an unbound acquisition,
+  interpreter, or tree-identity boundary.
 - Moving the active pointer during restore is rejected because it races independent Objectives and
   cannot represent old and new provider generations concurrently.
 - Persisting a selected bundle in the graph is rejected because it makes compilation depend on one
@@ -112,9 +123,9 @@ normalized separately.
 - Backend adapters must materialize and attest every component or report the capability unavailable.
 - Provisioning and adapter qualification remain separate evidence boundaries; one installed bundle
   does not qualify its adapter or an adjacent platform.
-- Native Win32/Darwin, Linux arm64/musl, arbitrary Bun commands, uv source/editable/native builds,
-  and toolchains outside the catalog remain unsupported until a dedicated contract and evidence
-  exist.
+- Native Win32/Darwin, Linux arm64/musl, arbitrary Bun or npm commands, custom npm registries,
+  workspace globs, native dependency builds, uv source/editable/native builds, and toolchains outside
+  the catalog remain unsupported until a dedicated contract and evidence exist.
 - Loss or corruption of an already selected local bundle fails readiness closed. Automatic network
   restoration is intentionally outside this change; an operator must explicitly restore the exact
   durable receipt before recovery can continue.

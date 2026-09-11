@@ -384,6 +384,7 @@ describe("read-only checkout preflight", () => {
       graphSize: 1,
       index: 0,
       dependsOn: [],
+      deferredCapabilityAdapters: graph.deferredCapabilityAdapters,
     });
     const compile = vi.fn();
     const report = await buildPlanReport({
@@ -427,6 +428,7 @@ describe("read-only checkout preflight", () => {
     };
     const graph: CompiledObjective = {
       title: "Current pnpm graph",
+      deferredCapabilityAdapters: ["node-pnpm"],
       workItems: [
         {
           ...common,
@@ -521,6 +523,7 @@ describe("read-only checkout preflight", () => {
         graphSize: graph.workItems.length,
         index,
         dependsOn: item.dependsOn,
+        deferredCapabilityAdapters: graph.deferredCapabilityAdapters,
       }),
     }));
     const report = await buildPlanReport({

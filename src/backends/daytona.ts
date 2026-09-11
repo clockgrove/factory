@@ -288,6 +288,7 @@ export class DaytonaBackend implements ExecutionBackend {
     supportsObservation: true,
     supportsResume: false,
     supportsLocalInference: false,
+    supportsManagedToolchainExecution: true,
     supportsModelSelection: true,
     requiresPaidRuntime: true,
     providerManagedPublication: false,

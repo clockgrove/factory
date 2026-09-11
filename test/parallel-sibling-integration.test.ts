@@ -275,6 +275,7 @@ async function fixture(
     assertMutationAuthorized: assertCurrent,
   } as unknown as LeaseManager;
   const graph: CompiledObjective = {
+    deferredCapabilityAdapters: [],
     title: "Parallel siblings",
     workItems: names.map((name) => ({
       id: name,
@@ -479,6 +480,7 @@ async function fixture(
         graphSize: names.length,
         index,
         dependsOn: [],
+        deferredCapabilityAdapters: graph.deferredCapabilityAdapters,
       }),
       closed: false,
       assignees: [],
@@ -579,7 +581,11 @@ async function fixture(
     const peerGraph = await graphManager.persist({
       lease: peerLease,
       base: await readCommit(baseSha),
-      objective: { title: "Peer Objective", workItems: [peerItem] },
+      objective: {
+        title: "Peer Objective",
+        deferredCapabilityAdapters: [],
+        workItems: [peerItem],
+      },
     });
     const peerProjection = await graphManager.persistProjection({
       lease: peerLease,
@@ -628,6 +634,7 @@ async function fixture(
         graphSize: 1,
         index: 0,
         dependsOn: [],
+        deferredCapabilityAdapters: [],
       }),
     });
     item.linkedPullRequests = [

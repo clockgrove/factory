@@ -1,11 +1,15 @@
 import { execFileSync } from "node:child_process";
-import { cp, mkdir, mkdtemp, readlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import * as localWorktreeRuntime from "../src/runtime/local-worktree.js";
-import { activeRuntimeBundleSync, toolchainStoreRoot } from "../src/runtime/toolchain-store.js";
+import {
+  activeRuntimeBundleSync,
+  provisionToolchain,
+  toolchainStoreRoot,
+} from "../src/runtime/toolchain-store.js";
 import {
   canonicalJson,
   runtimeBundleDigest,
@@ -15,6 +19,7 @@ import {
   type RuntimeBundleReceipt,
 } from "../src/runtime/toolchain-bundle.js";
 import { parseWorkerPacket } from "../src/protocol/worker-packet.js";
+import { isGroundedValidationCommand } from "../src/repository-profiles/index.js";
 import {
   assertFutureToolchainRequirements,
   activateManagedRuntimePacket,
@@ -23,13 +28,17 @@ import {
   isFutureToolchainProvider,
   isolatedManagedToolchainPlan,
   managedToolAvailable,
+  managedRuntimeRequirements,
   localManagedToolchainPlan,
+  managedWorkerSourceEnvironment,
   packageScriptValidationCommand,
   assertRepositoryCapabilityProofsCurrent,
   resolveIntegratedRepositoryCapabilities,
   TOOLCHAIN_AUTHORITY_ADAPTERS,
   unprovisionedFutureToolchainReason,
   validationSetupCommandCount,
+  withManagedToolchainPath,
+  type ToolchainAuthorityAdapter,
 } from "../src/toolchains/authority.js";
 
 async function installManagedFixture(tool: "bun" | "uv"): Promise<RuntimeBundleReceipt> {
@@ -98,6 +107,48 @@ async function installManagedFixture(tool: "bun" | "uv"): Promise<RuntimeBundleR
   return receipt;
 }
 
+async function installNpmFixture(): Promise<RuntimeBundleReceipt> {
+  const assets = await mkdtemp(join(tmpdir(), "factory-npm-authority-assets-"));
+  try {
+    const prefix = "node-v24.8.0-linux-x64";
+    const tree = join(assets, "tree");
+    const nodePath = `${prefix}/bin/node`;
+    const npmPath = `${prefix}/lib/node_modules/npm/bin/npm-cli.js`;
+    await mkdir(dirname(join(tree, nodePath)), { recursive: true });
+    await mkdir(dirname(join(tree, npmPath)), { recursive: true });
+    await writeFile(
+      join(tree, nodePath),
+      "#!/bin/sh\ncase \"$1\" in */npm-cli.js) printf '11.6.0\\n' ;; --version) printf 'v24.8.0\\n' ;; esac\n",
+      { mode: 0o700 },
+    );
+    await writeFile(join(tree, npmPath), "fixture npm cli\n");
+    const archivePath = join(assets, `${prefix}.tar.xz`);
+    execFileSync("tar", ["-cJf", archivePath, "-C", tree, prefix]);
+    const archive = await readFile(archivePath);
+    return await provisionToolchain("npm", {
+      source: {
+        listReleases: async () => [],
+        downloadAsset: async () => Buffer.alloc(0),
+        resolveLatestNodeDistribution: async () => ({
+          version: "24.8.0",
+          tag: "v24.8.0",
+          publishedAt: "2026-09-10T00:00:00.000Z",
+          name: `${prefix}.tar.xz`,
+          url: `https://nodejs.org/dist/v24.8.0/${prefix}.tar.xz`,
+          sha256: sha256Bytes(archive),
+          archive: "tar.xz" as const,
+          executablePath: nodePath,
+          npmVersion: "11.6.0",
+          lts: "Krypton",
+        }),
+        downloadNodeDistribution: async () => archive,
+      },
+    });
+  } finally {
+    await rm(assets, { recursive: true, force: true });
+  }
+}
+
 async function installDistinctRuntime(source: RuntimeBundleReceipt): Promise<RuntimeBundleReceipt> {
   const unsigned = structuredClone(source) as Omit<RuntimeBundleReceipt, "digest"> & {
     digest?: string;
@@ -127,7 +178,7 @@ describe("toolchain authority adapters", () => {
       })),
     ).toEqual(
       expect.arrayContaining([
-        { runner: "npm", provisioning: "host-observed", future: false },
+        { runner: "npm", provisioning: "factory-provisioned", future: true },
         { runner: "pnpm", provisioning: "factory-provisioned", future: true },
         { runner: "bun", provisioning: "factory-provisioned", future: true },
         { runner: "uv", provisioning: "factory-provisioned", future: true },
@@ -357,7 +408,7 @@ describe("toolchain authority adapters", () => {
           providerById: () => provider,
         }),
       ).rejects.toThrow(/Bun authority includes a path outside its provider scope/);
-      provider.scope.push(fixture.discoveredAuthorityPath);
+      provider.scope.push("packages/");
     }
     await expect(
       resolveIntegratedRepositoryCapabilities({
@@ -415,8 +466,41 @@ describe("toolchain authority adapters", () => {
     ).toThrow(/registry\.npmjs\.org setup authority/);
   });
 
+  it("admits a future adapter whose root authority is owned by a directory scope", () => {
+    const adapter: ToolchainAuthorityAdapter = {
+      id: "example-tool",
+      runner: "fixture",
+      provisioning: "factory-provisioned",
+      deferredOperations: true,
+      futurePackageScripts: false,
+      requiredRootPaths: ["example/tool/root.lock"],
+      setupCommands: [],
+      operation: (command) =>
+        command === "fixture check" ? { kind: "check", key: "check" } : null,
+    };
+    const registry = TOOLCHAIN_AUTHORITY_ADAPTERS as ToolchainAuthorityAdapter[];
+    registry.push(adapter);
+    try {
+      expect(
+        isGroundedValidationCommand("fixture check", { files: [] }, ["example/tool/"], {
+          root: true,
+          tools: ["fixture"],
+        }),
+      ).toBe(true);
+      expect(() =>
+        assertFutureToolchainRequirements({ adapter }, {
+          allowedPaths: ["example/tool/"],
+          requirements: { tools: ["fixture"], networkDestinations: [] },
+        } as never),
+      ).not.toThrow();
+    } finally {
+      registry.splice(registry.indexOf(adapter), 1);
+    }
+  });
+
   it("distinguishes provisioned adapters from unsupported greenfield runners", () => {
-    expect(unprovisionedFutureToolchainReason("npm test")).toMatch(/npm.*no Factory-provisioned/);
+    expect(unprovisionedFutureToolchainReason("npm test")).toBeUndefined();
+    expect(unprovisionedFutureToolchainReason("npm run test")).toBeUndefined();
     expect(unprovisionedFutureToolchainReason("bun run test")).toBeUndefined();
     expect(
       unprovisionedFutureToolchainReason("uv run --locked --no-sync python -m pytest"),
@@ -437,6 +521,289 @@ describe("toolchain authority adapters", () => {
     expect(validationSetupCommandCount(["npm test"])).toBe(1);
     expect(validationSetupCommandCount(["pnpm check", "pnpm test"])).toBe(2);
     expect(() => validationSetupCommandCount(["npm test", "pnpm check"])).toThrow(/mix/);
+  });
+
+  it("keeps observed npm host-bound until an explicit node-npm capability selects it", async () => {
+    expect(managedRuntimeRequirements(["npm run test"])).toEqual([]);
+    expect(
+      managedRuntimeRequirements(["npm run test"], {
+        provides: [
+          {
+            adapter: "node-npm",
+            generation: "node-npm/provider",
+            authorityPaths: ["package.json", "package-lock.json"],
+            operations: [{ kind: "package-script", key: "1:.:test" }],
+          },
+        ],
+        requires: [],
+      } as never),
+    ).toMatchObject([{ tool: "npm", adapter: "node-npm" }]);
+    await expect(
+      localManagedToolchainPlan(["npm test"], process.env, "/tmp/factory-observed-npm", []),
+    ).resolves.toBeNull();
+  });
+
+  it("preserves model transport while removing managed npm runtime injection", () => {
+    const environment = managedWorkerSourceEnvironment(
+      {
+        HTTPS_PROXY: "http://proxy.internal:8443",
+        NODE_EXTRA_CA_CERTS: "/etc/factory/model-ca.pem",
+        SSL_CERT_FILE: "/etc/factory/model-ca.pem",
+        NODE_OPTIONS: "--require=/tmp/inject.cjs",
+        LD_PRELOAD: "/tmp/inject.so",
+        npm_config_registry: "https://registry.example.invalid/",
+      },
+      "npm",
+    );
+    expect(environment).toMatchObject({
+      HTTPS_PROXY: "http://proxy.internal:8443",
+      NODE_EXTRA_CA_CERTS: "/etc/factory/model-ca.pem",
+      SSL_CERT_FILE: "/etc/factory/model-ca.pem",
+    });
+    expect(environment).not.toHaveProperty("NODE_OPTIONS");
+    expect(environment).not.toHaveProperty("LD_PRELOAD");
+    expect(environment).not.toHaveProperty("npm_config_registry");
+  });
+
+  it("keeps ambient package launchers outside a managed npm worker PATH", async () => {
+    const receipt = await installNpmFixture();
+    const root = await mkdtemp(join(tmpdir(), "factory-npm-worker-path-"));
+    const hostile = join(root, "hostile");
+    await mkdir(hostile);
+    for (const name of ["node", "npm", "npx", "corepack"])
+      await writeFile(join(hostile, name), "#!/bin/sh\nexit 99\n", { mode: 0o700 });
+    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-npm")!;
+    const environment = await withManagedToolchainPath(
+      { ...process.env, PATH: `${hostile}:${process.env.PATH ?? ""}` },
+      join(root, "private"),
+      ["npm"],
+      [{ ...adapter.runtimeRequirement!, bundleDigest: receipt.digest }],
+    );
+
+    expect(environment.PATH).not.toContain(hostile);
+    expect(
+      execFileSync("sh", ["-c", "command -v node; command -v npm; command -v git"], {
+        env: environment,
+        encoding: "utf8",
+      }),
+    ).toMatch(/factory-tools\/node[\s\S]*factory-tools\/npm[\s\S]*factory-system-tools\/git/);
+    expect(() =>
+      execFileSync("sh", ["-c", "command -v npx || command -v corepack"], {
+        env: environment,
+      }),
+    ).toThrow();
+
+    const withDeclaredNpx = await withManagedToolchainPath(
+      { ...process.env, PATH: `${hostile}:${process.env.PATH ?? ""}` },
+      join(root, "private"),
+      ["node", "npm", "npx", "git"],
+      [{ ...adapter.runtimeRequirement!, bundleDigest: receipt.digest }],
+    );
+    expect(
+      execFileSync(
+        "sh",
+        ["-c", "command -v node; command -v npm; command -v git; command -v npx"],
+        {
+          env: withDeclaredNpx,
+          encoding: "utf8",
+        },
+      ),
+    ).toMatch(
+      /factory-tools\/node[\s\S]*factory-tools\/npm[\s\S]*factory-system-tools\/git[\s\S]*factory-declared-tools\/npx/,
+    );
+    expect(() =>
+      execFileSync("sh", ["-c", "command -v corepack"], { env: withDeclaredNpx }),
+    ).toThrow();
+  });
+
+  it("keeps npm proof ownership on the declared generation while hashing full authority", async () => {
+    const receipt = await installNpmFixture();
+    const repository = await mkdtemp(join(tmpdir(), "factory-npm-generation-proof-"));
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repository });
+    execFileSync("git", ["config", "user.name", "Factory Test"], { cwd: repository });
+    execFileSync("git", ["config", "user.email", "factory@example.invalid"], {
+      cwd: repository,
+    });
+    const manifest = {
+      name: "proof",
+      version: "1.0.0",
+      private: true,
+      packageManager: "npm@11.6.0",
+      devEngines: {
+        runtime: { name: "node", version: "24.8.0", onFail: "error" },
+        packageManager: { name: "npm", version: "11.6.0", onFail: "error" },
+      },
+      scripts: { test: "vitest run" },
+      devDependencies: { vitest: "1.0.0" },
+    };
+    const lock = {
+      name: manifest.name,
+      version: manifest.version,
+      lockfileVersion: 3,
+      requires: true,
+      packages: {
+        "": {
+          name: manifest.name,
+          version: manifest.version,
+          devDependencies: manifest.devDependencies,
+        },
+        "node_modules/vitest": {
+          version: "1.0.0",
+          resolved: "https://registry.npmjs.org/vitest/-/vitest-1.0.0.tgz",
+          integrity: `sha512-${"A".repeat(86)}==`,
+          bin: { vitest: "vitest.mjs" },
+        },
+      },
+    };
+    await writeFile(join(repository, "package.json"), JSON.stringify(manifest));
+    await writeFile(join(repository, "package-lock.json"), JSON.stringify(lock));
+    execFileSync("git", ["add", "."], { cwd: repository });
+    execFileSync("git", ["commit", "-qm", "npm provider generation"], { cwd: repository });
+    const providerBase = {
+      oid: execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repository,
+        encoding: "utf8",
+      }).trim(),
+      treeOid: execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+        cwd: repository,
+        encoding: "utf8",
+      }).trim(),
+    };
+    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-npm")!;
+    const sourceRef = "refs/heads/main";
+    const graphPacket = parseWorkerPacket({
+      goal: "Use the later npm generation.",
+      acceptanceCriteria: ["The npm check passes."],
+      allowedPaths: ["src/"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      baseSha: providerBase.oid,
+      validationCommands: ["npm run test"],
+      requirements: {
+        os: ["linux"],
+        architecture: [],
+        tools: ["node", "npm"],
+        services: [],
+        networkDestinations: ["registry.npmjs.org"],
+        permittedSecretNames: [],
+        trust: "trusted_local",
+      },
+      repositoryCapabilities: {
+        provides: [],
+        requires: [
+          {
+            adapter: adapter.id,
+            generation: `${adapter.id}/later`,
+            providerWorkItem: "later",
+            authorityPaths: ["package.json"],
+            operation: adapter.operation!("npm run test")!,
+            activation: "integrated-base",
+            runtime: adapter.runtimeRequirement,
+          },
+        ],
+      },
+      managedRuntimes: [adapter.runtimeRequirement],
+      artifactContract: "clockgrove.factory/artifact-v1",
+    });
+    const providerPacket = await activateManagedRuntimePacket(
+      parseWorkerPacket({ ...graphPacket, repositoryCapabilities: undefined }),
+    );
+    const providerActivation = createManagedRuntimeActivation({
+      packet: providerPacket,
+      baseSha: providerBase.oid,
+      sourceRef,
+      proofDigests: [],
+      receipts: [receipt],
+    })!;
+    const provider = {
+      id: "later",
+      dependsOn: ["root"],
+      scope: ["package.json"],
+      issueNumber: 294,
+      integration: {
+        kind: "attempt" as const,
+        runId: "00000000-0000-4000-8000-000000000294",
+        attempt: 1,
+        commitSha: providerBase.oid,
+        treeOid: providerBase.treeOid,
+        reservationOid: "c".repeat(40),
+        reservationReceiptDigest: "d".repeat(64),
+        receiptDigest: "a".repeat(64),
+        managedRuntimeActivation: providerActivation,
+      },
+    };
+    const providerById = (id: string) => (id === provider.id ? provider : undefined);
+    const packet = await activateManagedRuntimePacket(graphPacket, providerById);
+    const localPlan = await localManagedToolchainPlan(
+      ["npm run test"],
+      {
+        PATH: process.env.PATH,
+        HTTPS_PROXY: "http://upper-proxy.invalid",
+        https_proxy: "http://lower-proxy.invalid",
+        Http_Proxy: "http://mixed-proxy.invalid",
+        no_proxy: "internal.invalid",
+      },
+      join(repository, ".factory-runtime"),
+      packet.managedRuntimes,
+    );
+    expect(localPlan).not.toBeNull();
+    expect(Object.entries(localPlan!.environment).filter(([key]) => /_proxy$/i.test(key))).toEqual([
+      ["ALL_PROXY", ""],
+      ["HTTPS_PROXY", ""],
+      ["HTTP_PROXY", ""],
+      ["NO_PROXY", ""],
+    ]);
+    // Keep the receipt for exact provider-generation restoration without changing
+    // the ambient-fallback premise of later availability tests in this file.
+    await rm(join(toolchainStoreRoot(), "active/npm.json"), { force: true });
+    const proofs = await resolveIntegratedRepositoryCapabilities({
+      repository,
+      base: providerBase,
+      sourceRef,
+      packet,
+      providerById,
+    });
+    expect(proofs).toHaveLength(1);
+    expect(proofs[0]!.authorityPaths).toEqual(["package.json"]);
+    await expect(
+      assertRepositoryCapabilityProofsCurrent({
+        proofs,
+        base: providerBase,
+        sourceRef,
+        packet,
+        providerById,
+      }),
+    ).resolves.toBeUndefined();
+
+    const changedLock = structuredClone(lock) as typeof lock & { factoryNote?: string };
+    changedLock.factoryNote = "authority drift";
+    await writeFile(join(repository, "package-lock.json"), JSON.stringify(changedLock));
+    execFileSync("git", ["add", "package-lock.json"], { cwd: repository });
+    execFileSync("git", ["commit", "-qm", "change full npm authority"], { cwd: repository });
+    const currentBase = {
+      oid: execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repository,
+        encoding: "utf8",
+      }).trim(),
+      treeOid: execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+        cwd: repository,
+        encoding: "utf8",
+      }).trim(),
+    };
+    const currentPacket = await activateManagedRuntimePacket(
+      parseWorkerPacket({ ...graphPacket, baseSha: currentBase.oid }),
+      providerById,
+    );
+    await expect(
+      resolveIntegratedRepositoryCapabilities({
+        repository,
+        base: currentBase,
+        sourceRef,
+        packet: currentPacket,
+        providerById,
+      }),
+    ).rejects.toThrow(/authority bytes changed after the declared provider generation/);
   });
 
   it("probes bundled tools without consulting ambient PATH", async () => {
@@ -832,6 +1199,10 @@ describe("toolchain authority adapters", () => {
       ).managedRuntimes,
     );
     expect(plan).not.toBeNull();
+    expect(plan!.environment).toMatchObject({
+      npm_config_ignore_scripts: "true",
+      npm_config_registry: "https://registry.npmjs.org/",
+    });
     expect(await readlink(join(bin, "node"))).toMatch(/\/bundles\/[0-9a-f]{64}\/node\/root\/node$/);
     expect(await readlink(join(bin, "pnpm"))).toMatch(/\/bundles\/[0-9a-f]{64}\/pnpm\/root\/pnpm$/);
     expect(

@@ -17,6 +17,7 @@ import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import {
   compiledGraphDigest,
   executionWorkerPacketFromCompiled,
+  parsePersistedCompiledObjective,
   renderWorkPacket,
   serializeCompiledObjective as serializePersistedGraph,
   validateGraph,
@@ -142,6 +143,7 @@ class MemoryGraphStore implements LeaseStore, CompiledGraphStore {
 function objective(goal = "Implement the feature."): CompiledObjective {
   return {
     title: "Ship feature",
+    deferredCapabilityAdapters: [],
     workItems: [
       {
         id: "feature",
@@ -172,6 +174,7 @@ function objective(goal = "Implement the feature."): CompiledObjective {
 
 function capabilityObjective(): CompiledObjective {
   const result = objective("Create the repository validation authority.");
+  result.deferredCapabilityAdapters = ["node-pnpm"];
   const item = result.workItems[0]!;
   item.scope = ["package.json", "pnpm-lock.yaml"];
   item.validationCommands = ["pnpm check"];
@@ -180,6 +183,8 @@ function capabilityObjective(): CompiledObjective {
     tools: ["node", "pnpm"],
     networkDestinations: ["registry.npmjs.org"],
   };
+  const runtime = managedRuntimeRequirements(item.validationCommands)[0]!;
+  item.managedRuntimes = [runtime];
   item.repositoryCapabilities = {
     provides: [
       {
@@ -187,6 +192,7 @@ function capabilityObjective(): CompiledObjective {
         generation: "node-pnpm/feature",
         authorityPaths: ["package.json", "pnpm-lock.yaml"],
         operations: [{ kind: "package-script", key: "check" }],
+        runtime,
       },
     ],
     requires: [
@@ -197,6 +203,7 @@ function capabilityObjective(): CompiledObjective {
         authorityPaths: ["package.json", "pnpm-lock.yaml"],
         operation: { kind: "package-script", key: "check" },
         activation: "artifact",
+        runtime,
       },
     ],
   };
@@ -207,6 +214,7 @@ describe("durable compiled graph", () => {
   it("loads a legacy pnpm graph without changing its digest or projected body", async () => {
     const store = new MemoryGraphStore();
     const legacy = objective("Run the established pnpm check.");
+    delete legacy.deferredCapabilityAdapters;
     const item = legacy.workItems[0]!;
     item.validationCommands = ["pnpm check"];
     item.requirements = {
@@ -280,7 +288,7 @@ describe("durable compiled graph", () => {
         base: await store.readCommit(BASE_SHA),
         objective: legacy,
       }),
-    ).rejects.toThrow(/managed runtime contract differs from canonical host derivation/);
+    ).rejects.toThrow(/lacks deferred capability adapter disposition/);
 
     const copied = await manager.persist({
       lease,
@@ -328,6 +336,18 @@ describe("durable compiled graph", () => {
     expect(() => validateGraph(selectedCapability)).toThrow(
       /immutable repository capability graph selected a managed runtime bundle/,
     );
+  });
+
+  it("distinguishes explicit empty capability disposition from legacy omission", () => {
+    const selected = capabilityObjective();
+    const omitted = structuredClone(selected);
+    delete omitted.deferredCapabilityAdapters;
+    expect(() => parsePersistedCompiledObjective(omitted)).not.toThrow();
+    expect(() => validateGraph(omitted)).toThrow(/lacks deferred capability adapter disposition/);
+
+    const explicitEmpty = structuredClone(selected);
+    explicitEmpty.deferredCapabilityAdapters = [];
+    expect(() => validateGraph(explicitEmpty)).toThrow(/canonical host derivation/);
   });
 
   it("rejects noncanonical recovered capability bindings before writing a copied graph", async () => {
@@ -614,7 +634,7 @@ describe("durable compiled graph", () => {
     await manager.persist({
       lease,
       base,
-      objective: { title: "Ship feature", workItems: [workItem] },
+      objective: { title: "Ship feature", deferredCapabilityAdapters: [], workItems: [workItem] },
     });
     const replay = await manager.load(42, "run-vnext");
 

@@ -168,6 +168,7 @@ it("imports retained execution using exact original owner and immutable graph sc
     }),
   ]);
   const graph: CompiledObjective = {
+    deferredCapabilityAdapters: [],
     title: "Objective",
     workItems: [
       {

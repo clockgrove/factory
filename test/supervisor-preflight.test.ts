@@ -40,6 +40,7 @@ function immutableGraph(): CompiledObjective {
   };
   return {
     title: "Immutable Objective",
+    deferredCapabilityAdapters: [],
     workItems: [
       {
         id: "a",
@@ -86,6 +87,7 @@ function immutableSnapshot(graph = immutableGraph()): CompiledGraphSnapshot {
         graphSize: graph.workItems.length,
         index,
         dependsOn: item.dependsOn,
+        deferredCapabilityAdapters: graph.deferredCapabilityAdapters,
       };
       return {
         id: `issue-node-${21 + index}`,

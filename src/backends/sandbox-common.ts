@@ -19,6 +19,7 @@ import type {
   ManagedToolchainPlan,
   RuntimeBundleRequirement,
 } from "../runtime/toolchain-bundle.js";
+import { MANAGED_SYSTEM_TOOLS } from "../runtime/system-tools.js";
 import { CODEX_WORKER_OUTPUT_SCHEMA, workerPacketPrompt } from "./codex-cli-local.js";
 import { validationInvocationOwnership } from "./validation-invocation.js";
 
@@ -169,14 +170,14 @@ const treeDigest = root => {
   entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   return createHash("sha256").update(Buffer.from(canonical(entries), "utf8")).digest("hex");
 };
-const validateListing = (listing, executablePath) => {
+const validateListing = (listing, requiredPaths) => {
   const entries = listing.split(/\r?\n/).filter(Boolean);
   if (entries.length === 0 || entries.length > 100000) throw new Error("managed runtime archive has an invalid entry count");
   for (const entry of entries) {
     const normalized = entry.replace(/\/$/, "");
     if (normalized && !safeRelative(normalized)) throw new Error("managed runtime archive contains an unsafe path");
   }
-  if (!entries.some(entry => entry.replace(/\/$/, "") === executablePath)) throw new Error("managed runtime archive lacks its declared executable");
+  for (const requiredPath of requiredPaths) if (!entries.some(entry => entry.replace(/\/$/, "") === requiredPath)) throw new Error("managed runtime archive lacks a declared entrypoint");
 };
 const zipCrc32 = bytes => {
   let crc = 0xffffffff;
@@ -272,7 +273,7 @@ const assertRegularTree = root => {
 
 mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
 mkdirSync(binRoot, { recursive: true, mode: 0o700 });
-const assetExecutables = new Map();
+const assetEntrypoints = new Map();
 for (const asset of config.assets) {
   if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(asset.id) || !safeRelative(asset.path) || !safeRelative(asset.executablePath) || !/^[a-f0-9]{64}$/.test(asset.treeSha256)) throw new Error("managed runtime asset metadata is invalid");
   const archive = safeChild(factoryRoot, asset.path);
@@ -285,7 +286,7 @@ for (const asset of config.assets) {
   } else if (asset.archive === "tar.gz" || asset.archive === "tar.xz") {
     const compression = asset.archive === "tar.gz" ? "z" : "J";
     const listing = execFileSync("tar", ["-t" + compression + "f", archive], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-    validateListing(listing, asset.executablePath);
+    validateListing(listing, (asset.entrypoints ?? [{ path: asset.executablePath }]).map(entrypoint => entrypoint.path));
     execFileSync("tar", ["-x" + compression + "f", archive, "-C", target, "--no-same-owner", "--no-same-permissions", ...(asset.executableOnly ? [asset.executablePath] : [])], { maxBuffer: 1024 * 1024 });
   } else if (asset.archive === "zip") {
     extractZip(archive, target, asset.executablePath);
@@ -293,29 +294,68 @@ for (const asset of config.assets) {
   assertRegularTree(target);
   const executable = safeChild(target, asset.executablePath);
   if (!statSync(executable).isFile() || digest(executable) !== asset.executableSha256) throw new Error("managed runtime executable digest mismatch");
-  chmodSync(executable, 0o700);
+  const declaredEntrypoints = asset.entrypoints ?? [{ id: asset.id, version: "0.0.0", path: asset.executablePath, sha256: asset.executableSha256 }];
+  if (declaredEntrypoints.length === 0 || new Set(declaredEntrypoints.map(entrypoint => entrypoint.id)).size !== declaredEntrypoints.length) throw new Error("managed runtime entrypoint metadata is invalid");
+  const verifiedEntrypoints = new Map();
+  for (const entrypoint of declaredEntrypoints) {
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(entrypoint.id) || !safeRelative(entrypoint.path) || !/^[a-f0-9]{64}$/.test(entrypoint.sha256) || (entrypoint.interpreter !== undefined && !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(entrypoint.interpreter))) throw new Error("managed runtime entrypoint metadata is invalid");
+    const relativePath = entrypoint.path;
+    const path = safeChild(target, relativePath);
+    if (!statSync(path).isFile() || digest(path) !== entrypoint.sha256) throw new Error("managed runtime entrypoint digest mismatch");
+    if (entrypoint.interpreter === undefined) chmodSync(path, 0o700);
+    verifiedEntrypoints.set(entrypoint.id, { ...entrypoint, path, relativePath, componentId: asset.id });
+  }
   if (treeDigest(target) !== asset.treeSha256) throw new Error("managed runtime tree digest mismatch");
-  assetExecutables.set(asset.id, executable);
+  assetEntrypoints.set(asset.id, verifiedEntrypoints);
+}
+for (const entrypoints of assetEntrypoints.values()) {
+  for (const entrypoint of entrypoints.values()) {
+    if (entrypoint.interpreter === undefined) continue;
+    const interpreter = entrypoints.get(entrypoint.interpreter);
+    if (!interpreter || interpreter.interpreter !== undefined) throw new Error("managed runtime interpreter relation is invalid");
+  }
 }
 
 const executables = {};
-for (const executable of config.executables) {
-  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(executable.id) || !Array.isArray(executable.argsPrefix)) throw new Error("managed executable metadata is invalid");
+const executableDefinitions = new Map(config.executables.map(executable => [executable.id, executable]));
+if (executableDefinitions.size !== config.executables.length) throw new Error("managed executable identity is duplicate");
+const resolving = new Set();
+const resolveExecutable = id => {
+  if (executables[id]) return executables[id];
+  const executable = executableDefinitions.get(id);
+  if (!executable || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(executable.id) || !Array.isArray(executable.argsPrefix) || executable.argsPrefix.some(arg => typeof arg !== "string")) throw new Error("managed executable metadata is invalid");
+  if (resolving.has(id)) throw new Error("managed executable interpreter relation is cyclic");
+  resolving.add(id);
   if (executable.kind === "generated") {
     const path = resolve(executable.relativePath);
     if (!path.startsWith("/tmp/factory-toolchain/")) throw new Error("generated executable escaped the private runtime root");
     if (typeof executable.generatedFrom !== "string") throw new Error("generated executable lacks its verified source");
     executables[executable.id] = { path, argsPrefix: executable.argsPrefix, generated: true, generatedFrom: executable.generatedFrom };
-    continue;
+    resolving.delete(id);
+    return executables[id];
   }
-  const assetPath = assetExecutables.get(executable.assetId);
-  if (!assetPath) throw new Error("managed executable names a missing asset");
-  executables[executable.id] = executable.kind === "node"
-    ? { path: process.execPath, argsPrefix: [assetPath, ...executable.argsPrefix], generated: false }
-    : { path: assetPath, argsPrefix: executable.argsPrefix, generated: false };
-  const shim = safeChild(binRoot, executable.id);
-  try { symlinkSync(assetPath, shim); } catch (error) { if (error?.code !== "EEXIST") throw error; }
-}
+  const assetEntries = assetEntrypoints.get(executable.assetId);
+  const matches = assetEntries ? [...assetEntries.values()].filter(entrypoint => executable.entrypointId ? entrypoint.id === executable.entrypointId : entrypoint.relativePath === executable.relativePath) : [];
+  const entrypoint = matches.length === 1 ? matches[0] : undefined;
+  if (!entrypoint || executable.relativePath !== entrypoint.relativePath) throw new Error("managed executable differs from its verified entrypoint");
+  if (executable.kind === "native") {
+    if (entrypoint.interpreter !== undefined || executable.interpreterId !== undefined) throw new Error("managed native executable has an invalid entrypoint relation");
+    executables[id] = { path: entrypoint.path, argsPrefix: executable.argsPrefix, generated: false, componentId: entrypoint.componentId, entrypointId: entrypoint.id };
+    const shim = safeChild(binRoot, executable.id);
+    try { symlinkSync(entrypoint.path, shim); } catch (error) { if (error?.code !== "EEXIST") throw error; }
+  } else if (executable.kind === "interpreted") {
+    if (entrypoint.interpreter === undefined || typeof executable.interpreterId !== "string") throw new Error("managed interpreted executable lacks its verified interpreter");
+    const interpreter = resolveExecutable(executable.interpreterId);
+    if (interpreter.generated || entrypoint.componentId !== interpreter.componentId || entrypoint.interpreter !== interpreter.entrypointId) throw new Error("managed interpreted executable differs from its attested interpreter");
+    executables[id] = { path: interpreter.path, argsPrefix: [...interpreter.argsPrefix, entrypoint.path, ...executable.argsPrefix], generated: false, componentId: entrypoint.componentId, entrypointId: entrypoint.id };
+    const shim = safeChild(binRoot, executable.id);
+    const launcher = "#!/bin/sh\nexec " + JSON.stringify(interpreter.path) + " " + JSON.stringify(entrypoint.path) + " \"$@\"\n";
+    writeFileSync(shim, launcher, { mode: 0o700, flag: "wx" });
+  } else throw new Error("managed executable kind requires an ambient interpreter and is unsupported");
+  resolving.delete(id);
+  return executables[id];
+};
+for (const executable of config.executables) resolveExecutable(executable.id);
 writeFileSync(outputPath, JSON.stringify({ binRoot, executables }), { mode: 0o600 });
 `;
 
@@ -402,19 +442,65 @@ export function sandboxBootstrapFiles(
         })
         .join("\n")
     : "";
+  const managedExecutables = new Set(
+    managedToolchain?.plan.executables.map((executable) => executable.id) ?? [],
+  );
+  const declaredHostTools = managedToolchain
+    ? [
+        ...new Set(
+          context.packet.requirements.tools.filter(
+            (name) =>
+              !managedExecutables.has(name) &&
+              !MANAGED_SYSTEM_TOOLS.includes(name as (typeof MANAGED_SYSTEM_TOOLS)[number]),
+          ),
+        ),
+      ]
+    : [];
+  if (declaredHostTools.some((name) => !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(name)))
+    throw new Error("managed worker declares an unsafe host tool name");
+  const declaredToolBootstrap =
+    declaredHostTools.length > 0
+      ? String.raw`factory_declared_tools="/tmp/factory-declared-tools"
+mkdir -p "$factory_declared_tools"
+for factory_declared_tool in ${declaredHostTools.join(" ")}; do
+  factory_declared_tool_path="$(PATH="$factory_bootstrap_path" command -v "$factory_declared_tool" || true)"
+  if [[ "$factory_declared_tool_path" != /* || ! -x "$factory_declared_tool_path" ]]; then
+    printf 'Factory could not resolve declared host tool %s\n' "$factory_declared_tool" >&2
+    exit 1
+  fi
+  ln -s "$factory_declared_tool_path" "$factory_declared_tools/$factory_declared_tool"
+done
+`
+      : 'factory_declared_tools="/tmp/factory-declared-tools"\nmkdir -p "$factory_declared_tools"\n';
   const managedBootstrap = managedToolchain
-    ? String.raw`mkdir -p /tmp/factory-toolchain-config
+    ? String.raw`factory_system_tools="/tmp/factory-system-tools"
+mkdir -p "$factory_system_tools"
+for factory_system_tool in ${MANAGED_SYSTEM_TOOLS.join(" ")}; do
+  factory_system_tool_path="$(PATH="$factory_bootstrap_path" command -v "$factory_system_tool" || true)"
+  if [[ "$factory_system_tool_path" == /* && -x "$factory_system_tool_path" ]]; then
+    ln -s "$factory_system_tool_path" "$factory_system_tools/$factory_system_tool"
+  fi
+done
+${declaredToolBootstrap}mkdir -p /tmp/factory-toolchain-config
 node "$factory_root/materialize-toolchain.mjs" "$factory_root/managed-toolchain.json" "$factory_root/toolchain-paths.json"
-export PATH="/tmp/factory-toolchain/bin:$PATH"
+export PATH="/tmp/factory-toolchain/bin:$factory_system_tools:$factory_declared_tools"
 ${managedEnvironment}
-export PATH="/tmp/factory-toolchain/bin:$PATH"
+export PATH="/tmp/factory-toolchain/bin:$factory_system_tools:$factory_declared_tools"
 `
     : "";
   const script = `#!/usr/bin/env bash
 set -euo pipefail
 factory_root="$PWD/factory"
 workspace="$PWD/workspace"
-${managedBootstrap}mkdir -p "$workspace"
+factory_bootstrap_path="$PATH"
+factory_bootstrap_npx="$(command -v npx)"
+if [[ "$factory_bootstrap_npx" != /* || ! -x "$factory_bootstrap_npx" ]]; then
+  printf 'Factory could not resolve the sandbox bootstrap npx executable\n' >&2
+  exit 1
+fi
+${managedBootstrap}factory_worker_path="$PATH"
+export PATH="$factory_bootstrap_path"
+mkdir -p "$workspace"
 tar -xf "$factory_root/source.tar" -C "$workspace"
 cd "$workspace"
 git init -q
@@ -430,7 +516,7 @@ if [[ -f "$factory_root/reasoning-config.txt" ]]; then
   model_args+=(-c "$(<"$factory_root/reasoning-config.txt")")
 fi
 set +e
-npx --yes ${SANDBOX_CODEX_PACKAGE} --dangerously-bypass-approvals-and-sandbox -c 'web_search="disabled"' exec --ephemeral --ignore-user-config --ignore-rules --json --output-schema "$factory_root/output.schema.json" -C "$workspace" "\${model_args[@]}" - < "$factory_root/prompt.txt" > "$factory_root/worker.stdout" 2> "$factory_root/worker.stderr"
+PATH="$factory_worker_path" "$factory_bootstrap_npx" --yes ${SANDBOX_CODEX_PACKAGE} --dangerously-bypass-approvals-and-sandbox -c 'web_search="disabled"' exec --ephemeral --ignore-user-config --ignore-rules --json --output-schema "$factory_root/output.schema.json" -C "$workspace" "\${model_args[@]}" - < "$factory_root/prompt.txt" > "$factory_root/worker.stdout" 2> "$factory_root/worker.stderr"
 worker_status=$?
 set -e
 git add --intent-to-add --all

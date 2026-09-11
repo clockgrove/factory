@@ -493,8 +493,10 @@ describe("attempt reservation", () => {
       "ProviderQuotaBlocked",
     ]);
     expect(store.comments.at(-1)!.body).toContain(
-      "Restore provider quota before explicitly requesting recovery.",
+      "Restore provider quota for future model work. Recovery eligibility is determined only from the complete run history after Factory has reconciled admitted work and written a terminal receipt.",
     );
+    expect(store.comments.at(-1)!.body).not.toContain("explicitly requesting recovery");
+    expect(store.comments.at(-1)!.body).not.toContain("cannot currently be recovered");
 
     await recorder.providerQuotaBlocked({
       lease,
@@ -507,8 +509,11 @@ describe("attempt reservation", () => {
       providerMessage: "Model provider quota requires operator action",
       accounting: "unknown",
     });
-    expect(store.comments.at(-1)!.body).toContain("This run cannot currently be recovered");
+    expect(store.comments.at(-1)!.body).toContain(
+      "Restore provider quota for future model work. Recovery eligibility is determined only from the complete run history after Factory has reconciled admitted work and written a terminal receipt.",
+    );
     expect(store.comments.at(-1)!.body).not.toContain("explicitly requesting recovery");
+    expect(store.comments.at(-1)!.body).not.toContain("cannot currently be recovered");
 
     const queued = await attempts.recordQueued({
       lease,

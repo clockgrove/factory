@@ -571,9 +571,7 @@ export class LifecycleRecorder {
     });
     const events = usage ? [usage, gate] : [gate];
     const recoveryGuidance =
-      args.accounting === "unknown"
-        ? "Restore provider quota for future model work. This run cannot currently be recovered because the invocation's model usage is unknown and its dispatch remains unreconciled."
-        : "Restore provider quota before explicitly requesting recovery.";
+      "Restore provider quota for future model work. Recovery eligibility is determined only from the complete run history after Factory has reconciled admitted work and written a terminal receipt.";
     await this.store.addIssueComment(
       args.issueNodeId,
       encodeEventBatchComment(

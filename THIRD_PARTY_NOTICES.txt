@@ -1,7 +1,7 @@
 Factory third-party notices
 
 This file is generated from the exact dependency inputs embedded in dist/factory.js and dist/mcp-server.js.
-Bundle inventory SHA-256: e0c86873df3139687cc9a8b1193c11fc0fb4188b04b4364e7dbfe8f8433b156a
+Bundle inventory SHA-256: 05b373a7b8f61661134f6f287c808210f1b3a62c10ea1804b587414d6d9da4ec
 
 ================================================================================
 @daytona/analytics-api-client@0.207.1

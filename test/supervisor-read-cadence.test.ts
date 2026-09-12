@@ -104,3 +104,25 @@ it("retains an explicit active polling override", async () => {
     vi.restoreAllMocks();
   }
 }, 15_000);
+
+it("admits and completes ready work below the former speculative GraphQL reserve", async () => {
+  const f = await providerSupervisorFixture("daytona-burst", { localOnly: true });
+  // Model affordable current requests with fewer than the former 100-point
+  // wave floor. Transport is simulated; this exercises Supervisor admission.
+  f.snapshot.graphQlRateLimit = {
+    cost: 1,
+    limit: 5_000,
+    remaining: 99,
+    resetAt: new Date(Date.now() + 3_600_000),
+  };
+  try {
+    await expect(f.run()).resolves.toMatchObject({ status: "completed" });
+    const launched = f.activity.filter((entry) => entry.operation === "launch");
+    expect(launched).toHaveLength(f.snapshot.workItems.length);
+    expect(f.activity.filter((entry) => entry.operation === "cleanup")).toHaveLength(
+      launched.length,
+    );
+  } finally {
+    await f.dispose();
+  }
+});

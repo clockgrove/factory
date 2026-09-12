@@ -166,10 +166,11 @@ small cardinality preflight for an Objective and caches that bound; the detailed
 changed `totalCount` and refreshes the bound before it can return a partial graph.
 
 The detailed query also returns its own primary GraphQL cost, remaining balance, and reset time.
-Before acquiring a run lease and again before launching a wave, the Supervisor requires a
-conservative reserve for snapshots, exact-CAS lease renewals, publication/recovery mutations, and a
-full Work Item timeout. Insufficient headroom raises a retryable platform-unavailable result before
-new work is admitted; it never consumes an implementation attempt.
+The Supervisor admits ready work without reserving GitHub quota for a future worker wave, graph
+projection, or timeout interval. Other Objectives and external clients share that quota, so such
+forecasts cannot guarantee later capacity. Request admission uses the observed remaining balance,
+reset time, and cost of the current request; platform refusal remains separate from an
+implementation-attempt failure.
 
 High-volume lifecycle and budget receipts are written through the GitHub issue-comments REST API,
 whose destination issue number is derived from the validated Factory event envelope. Exact custom-ref

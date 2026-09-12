@@ -109,7 +109,6 @@ import {
   materializeLocalLfsAssets,
 } from "./repository-profiles/git-lfs.js";
 import {
-  DEFAULT_LEASE_RENEWAL_INTERVAL_MS,
   DEFAULT_LEASE_RENEWAL_LEAD_MS,
   LeaseLostError,
   LeaseManager,
@@ -248,8 +247,6 @@ import {
   legacyGraphConstraintsDigest,
   parseGraphItemMetadata,
   type CompiledObjective,
-  type ExistingGraphWorkItem,
-  type LegacyGraphConstraints,
 } from "./graph.js";
 import { GitHubReader, type GitHubOptions } from "./github.js";
 import { CodexCliManagementBackend } from "./management/codex-cli.js";
@@ -754,95 +751,6 @@ export async function runDurableCompilationTransaction(args: {
 }
 
 type Snapshot = Awaited<ReturnType<GitHubReader["readObjective"]>>;
-type GraphQlRateLimit = NonNullable<Snapshot["graphQlRateLimit"]>;
-
-/**
- * Keep enough GraphQL capacity to fence a full wave even when every worker
- * runs to its timeout. Factory comments use REST; this reserve covers graph
- * snapshots, lease CAS renewals, publication/recovery mutations, and margin.
- */
-export function graphQlAdmissionReserve(
-  queryCost: number,
-  workItemTimeoutMinutes: number,
-  waveSize: number,
-  additionalMutations = 0,
-): number {
-  if (!Number.isInteger(queryCost) || queryCost < 1) {
-    throw new Error("GraphQL query cost must be a positive integer");
-  }
-  if (!Number.isInteger(workItemTimeoutMinutes) || workItemTimeoutMinutes < 1) {
-    throw new Error("Work Item timeout must be a positive integer");
-  }
-  if (!Number.isInteger(waveSize) || waveSize < 1) {
-    throw new Error("wave size must be a positive integer");
-  }
-  if (!Number.isInteger(additionalMutations) || additionalMutations < 0) {
-    throw new Error("additional GraphQL mutations must be a non-negative integer");
-  }
-  const snapshotReserve = queryCost * 3;
-  const leaseRenewals = Math.ceil(
-    (workItemTimeoutMinutes * 60_000) / DEFAULT_LEASE_RENEWAL_INTERVAL_MS,
-  );
-  const perWorkItemControl = 12 * waveSize;
-  return Math.max(
-    100,
-    snapshotReserve + leaseRenewals + perWorkItemControl + additionalMutations + 10,
-  );
-}
-
-export function pendingGraphQlGraphMutations(
-  objective: CompiledObjective,
-  existing: ExistingGraphWorkItem[],
-  legacyGraphConstraints?: LegacyGraphConstraints,
-): number {
-  const existingById = new Map(existing.map((item) => [item.compilerId, item]));
-  if (legacyGraphConstraints) {
-    assertCompiledObjectiveAdoptsLegacyConstraints(objective, legacyGraphConstraints);
-    return legacyGraphConstraints.workItems.filter((item) => !existingById.has(item.compilerId))
-      .length;
-  }
-  const missingIssues = objective.workItems.filter((item) => !existingById.has(item.id)).length;
-  const missingDependencies = objective.workItems.reduce((count, item) => {
-    const observedItem = existingById.get(item.id);
-    return (
-      count +
-      item.dependsOn.filter((dependencyId) => {
-        const observedDependency = existingById.get(dependencyId);
-        return (
-          !observedItem ||
-          !observedDependency ||
-          !observedItem.blockedByNumbers.includes(observedDependency.number)
-        );
-      }).length
-    );
-  }, 0);
-  return missingIssues + missingDependencies;
-}
-
-export function assertGraphQlAdmissionHeadroom(
-  rateLimit: GraphQlRateLimit | undefined,
-  policy: RunPolicy,
-  waveSize: number,
-  notify: (message: string) => void = () => {},
-  additionalMutations = 0,
-): void {
-  if (!rateLimit) return;
-  const required = graphQlAdmissionReserve(
-    rateLimit.cost,
-    policy.workItemTimeoutMinutes,
-    waveSize,
-    additionalMutations,
-  );
-  if (rateLimit.remaining >= required) return;
-  const retryAfterMs = Math.max(1_000, rateLimit.resetAt.getTime() - Date.now() + 1_000);
-  const reason =
-    `GitHub GraphQL admission paused: ${rateLimit.remaining} points remain; ` +
-    `${required} are reserved for a ${waveSize}-worker wave; quota resets at ` +
-    rateLimit.resetAt.toISOString();
-  notify(reason);
-  throw new PlatformUnavailableError({ kind: "rate_limit", retryAfterMs }, new Error(reason));
-}
-
 function snapshotEvents(snapshot: Snapshot): FactoryEvent[] {
   return deduplicateFactoryEvents([
     ...(snapshot.factoryEvents ?? []),
@@ -4013,12 +3921,6 @@ export class FactorySupervisor {
         this.#notify(`${preflight.reason}; falling back to native sub-issue order for this run`);
       }
     }
-    assertGraphQlAdmissionHeadroom(
-      snapshot.graphQlRateLimit,
-      this.#policy,
-      Math.min(this.#policy.maxParallel, Math.max(1, snapshot.workItems.length)),
-      this.#notify,
-    );
     const configuredManagedProfiles = GITHUB_MANAGED_AGENT_PROFILES.filter((profile) =>
       this.#policy.backendOrder.includes(profile.backendId),
     );
@@ -5073,19 +4975,6 @@ export class FactorySupervisor {
           assertSnapshotMatchesCompiledGraph(compiled, snapshot, staged.bindings);
         }
         let existingGraphItems = observedGraph.existing;
-        const pendingGraphMutations = pendingGraphQlGraphMutations(
-          compiled,
-          existingGraphItems,
-          legacyGraphConstraints,
-        );
-        assertGraphQlAdmissionHeadroom(
-          snapshot.graphQlRateLimit,
-          this.#policy,
-          Math.min(this.#policy.maxParallel, compiled.workItems.length),
-          this.#notify,
-          pendingGraphMutations *
-            (legacyGraphConstraints ? (snapshot.graphQlRateLimit?.cost ?? 1) + 1 : 1),
-        );
         if (observedGraph.receiptRunId !== this.#run.runId) {
           if (this.#policy.compilerEvaluation) {
             const fresh = await this.#reader.readObjective(snapshot.number);
@@ -6216,15 +6105,6 @@ export class FactorySupervisor {
         const newQueueReceipts = plan.queued.filter(
           (decision) => decision.recordQueueStart || decision.recordQueueReasonChange,
         );
-        if (safeAdmissions.length + newQueueReceipts.length > 0) {
-          assertGraphQlAdmissionHeadroom(
-            snapshot.graphQlRateLimit,
-            this.#policy,
-            Math.max(1, safeAdmissions.length),
-            this.#notify,
-            newQueueReceipts.length,
-          );
-        }
         for (const decision of newQueueReceipts) {
           const item = objective.items.find((candidate) => candidate.number === decision.workItem)!;
           await this.#lease.use((lease) =>

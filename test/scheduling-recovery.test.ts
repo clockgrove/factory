@@ -15,6 +15,56 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
 }
 
 describe("continuous refill and recovery", () => {
+  it.each([25, 100])(
+    "bounds external reconciliation while %i executions wait and wakes immediately for local progress",
+    async (count) => {
+      vi.useFakeTimers();
+      const executions = new ContinuousExecutionPool<number>();
+      const operations = Array.from({ length: count }, () => deferred());
+      try {
+        const fairness = new ObjectiveFairness();
+        for (const [index, operation] of operations.entries())
+          executions.start(index, () => operation.promise);
+        const wait = (signal?: AbortSignal) =>
+          waitForProgress({
+            executions,
+            executionRevision: executions.revision,
+            fairness,
+            fairnessRevision: fairness.revision,
+            maximumMs: 60_000,
+            ...(signal ? { signal } : {}),
+          });
+        let observed = false;
+        const external = wait().then((result) => {
+          observed = true;
+          return result;
+        });
+        await vi.advanceTimersByTimeAsync(59_999);
+        expect(observed).toBe(false);
+        expect(executions.size).toBe(count);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(external).resolves.toBeNull();
+        expect(vi.getTimerCount()).toBe(0);
+
+        const completion = wait();
+        operations[0]!.resolve();
+        await expect(completion).resolves.toEqual({ key: 0 });
+        const capacity = wait();
+        fairness.changed();
+        await expect(capacity).resolves.toBeNull();
+        const controller = new AbortController();
+        const shutdown = wait(controller.signal);
+        controller.abort();
+        await expect(shutdown).resolves.toBeNull();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        for (const operation of operations) operation.resolve();
+        await executions.waitForIdle();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("reconstructs every peer before admission, rotates scarce CPU service and lends idle shares", () => {
     const fairness = new ObjectiveFairness();
     fairness.register(10, true);

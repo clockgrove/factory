@@ -1664,7 +1664,7 @@ jobs:
     mergePull,
     events,
     refs,
-    run: (signal?: AbortSignal) => {
+    run: (signal?: AbortSignal, pollIntervalMs: number | null = 20) => {
       if (retirement.signal.aborted)
         return Promise.reject(new Error("provider Supervisor fixture is already retiring"));
       receiptTransportUnavailable = false;
@@ -1681,7 +1681,7 @@ jobs:
         backendRegistry: registry,
         repositoryResources: shared,
         ...(faults.repositoryFence ? { repositoryFence: faults.repositoryFence } : {}),
-        pollIntervalMs: 20,
+        ...(pollIntervalMs === null ? {} : { pollIntervalMs }),
         ...(faults.controllerActivation
           ? {
               activation: { requestId: "fixture-activation", baseSha },

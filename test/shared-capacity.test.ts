@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { LeaseManager, type LeaseStore, type GitCommitObject } from "../src/control/lease.js";
 import { RepositoryLeaseManager } from "../src/controller/repository-lease.js";
@@ -235,6 +235,45 @@ async function seedClaims(
 }
 
 describe("independent-session durable capacity", () => {
+  it.each([25, 100])(
+    "bounds unchanged reconciliation and scheduling reads independently of %i retained claims",
+    async (count) => {
+      const store = new Store();
+      const currentOwner = await owner(store, 1);
+      await seedClaims(store, currentOwner, count, false);
+      const shared = coordinator(store);
+      const imports = Array.from({ length: count }, (_, index) => ({
+        owner: currentOwner,
+        reservation: reservation(1, { workItem: index + 1 }),
+      }));
+      const refReads = vi.spyOn(store, "readRef");
+      const commitReads = vi.spyOn(store, "readCommit");
+      const timeReads = vi.spyOn(store, "serverTime");
+      const writes = vi.spyOn(store, "createCommit");
+
+      // One Objective iteration: reconcile its obligations, then observe repository
+      // capacity for scheduling. Each counted store read maps to one production REST request.
+      expect(await shared.reconcile(currentOwner, imports)).toEqual(imports);
+      expect((await shared.snapshot()).reservations).toHaveLength(count);
+      expect(refReads).toHaveBeenCalledTimes(3);
+      expect(commitReads).toHaveBeenCalledTimes(3);
+      expect(timeReads).toHaveBeenCalledTimes(1);
+      expect(writes).not.toHaveBeenCalled();
+
+      // An independent coordinator's release is visible on the very next read.
+      const peer = coordinator(store);
+      await peer.release(currentOwner, imports[0]!.reservation.key);
+      expect((await shared.snapshot()).reservations).toHaveLength(count - 1);
+      // A new process reconstructs remaining liabilities directly from GitHub.
+      const restarted = coordinator(store);
+      expect(await restarted.reconcile(currentOwner, imports.slice(1))).toEqual(imports.slice(1));
+      expect((await restarted.snapshot()).reservations).toHaveLength(count - 1);
+      await expect(restarted.reconcile(currentOwner, imports)).rejects.toBeInstanceOf(
+        SharedCapacitySnapshotLagError,
+      );
+    },
+  );
+
   it.each([undefined, () => false])(
     "reconstructs the built-in validation interval without changing retained local capacity (%s)",
     async (isLocalBackend) => {

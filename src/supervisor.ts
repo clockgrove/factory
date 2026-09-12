@@ -1783,7 +1783,6 @@ export class FactorySupervisor {
     );
     for (const { owner, reservation } of retained)
       this.#sharedCapacityOwners.set(reservation.key, owner);
-    return this.#sharedCapacity.snapshot();
   }
 
   #snapshotHasDurableCapacity(snapshot: Snapshot): boolean {
@@ -5707,7 +5706,7 @@ export class FactorySupervisor {
             await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
           } else {
             const settled = await activeExecutions.waitForChange(
-              this.#options.pollIntervalMs ?? 2_000,
+              Math.max(1, Math.min(this.#options.pollIntervalMs ?? 60_000, deadline - Date.now())),
               this.#options.signal,
             );
             if (settled?.error) throw new ClaimedExecutionFailure(settled);
@@ -15346,10 +15345,9 @@ export class FactorySupervisor {
     fairnessRevision: number,
     objectiveDeadline: number,
   ): Promise<void> {
-    const normalMaximum =
-      activeExecutions.size === 0
-        ? (this.#options.pollIntervalMs ?? 60_000)
-        : (this.#options.pollIntervalMs ?? 2_000);
+    // Local execution/fairness revisions wake immediately. The timeout only
+    // reconciles external changes; worker cancellation retains its separate poll.
+    const normalMaximum = this.#options.pollIntervalMs ?? 60_000;
     const maximumMs = Math.max(1, Math.min(normalMaximum, objectiveDeadline - Date.now()));
     const settled = await waitForProgress({
       executions: activeExecutions,

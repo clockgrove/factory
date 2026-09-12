@@ -77,6 +77,7 @@ import {
   type DurableCommandState,
 } from "./control/commands.js";
 import { LifecycleRecorder } from "./control/events.js";
+import { observeGitHubTransportPhase } from "./control/mutation-observation.js";
 import {
   CompiledGraphManager,
   loadCompiledGraph,
@@ -3195,9 +3196,21 @@ export class FactorySupervisor {
     }
   }
 
+  #observePhase<T>(phase: string, operation: () => Promise<T>): Promise<T> {
+    return observeGitHubTransportPhase(
+      phase,
+      (observation) => {
+        this.#notify(`Factory phase telemetry: ${JSON.stringify(observation)}`);
+      },
+      operation,
+    );
+  }
+
   async run(): Promise<SupervisorResult> {
     try {
-      return await withArtifactContentScope(() => this.#runWithArtifactContent());
+      return await this.#observePhase("objective", () =>
+        withArtifactContentScope(() => this.#runWithArtifactContent()),
+      );
     } finally {
       await this.#retryArtifacts.clear();
     }
@@ -4735,12 +4748,16 @@ export class FactorySupervisor {
                     };
                   };
                   if (this.#management.supportsCompilerAdmission) {
-                    return await this.#management.compile(context, checkpoint, admitCompilation);
+                    return await this.#observePhase("compilation", () =>
+                      this.#management.compile(context, checkpoint, admitCompilation),
+                    );
                   }
                   // Compatibility for injected legacy backends that cannot place
                   // durable admission at their own final dispatch boundary.
                   context.invocationTimeoutMs = (await admitCompilation()).timeoutMs;
-                  return await this.#management.compile(context, checkpoint);
+                  return await this.#observePhase("compilation", () =>
+                    this.#management.compile(context, checkpoint),
+                  );
                 }
                 const inputDigest = compilerEvalDigest(context.objective);
                 const assertInputs = async () => {
@@ -6363,7 +6380,9 @@ export class FactorySupervisor {
           recovered,
         ),
       );
-    return recovered ? execute() : this.#modelInvocations.run(execute);
+    return this.#observePhase(`work-item-${item.number}`, () =>
+      recovered ? execute() : this.#modelInvocations.run(execute),
+    );
   }
 
   async #executeWithArtifactContent(
@@ -7453,37 +7472,39 @@ export class FactorySupervisor {
 
       const validationStarted = Date.now();
       validationStartedAt = validationStarted;
-      validation = await this.#externalAdmission(() =>
-        validateArtifactClean({
-          repository: this.#options.repository,
-          artifact,
-          packet,
-          publicationBaseBranch: this.#baseBranch,
-          ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
-          ...(validator
-            ? {
-                isolatedValidator: () =>
-                  this.#externalAdmission(() =>
-                    validator!.validate!({
-                      repository: `${this.#options.owner}/${this.#options.repo}`,
-                      objective: this.#run.objective,
-                      workItem: item.number,
-                      attempt: reservation!.attempt,
-                      runId: this.#run.runId,
-                      directorEpoch: reservation!.directorEpoch,
-                      policyDigest: reservation!.policyDigest,
-                      workspace: worker!.path,
-                      packet,
-                      policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
-                      artifact,
-                      deadline: new Date(
-                        new Date(validationNoHandleReplacementNotBefore!).getTime() - 60_000,
-                      ),
-                    }),
-                  ),
-              }
-            : {}),
-        }),
+      validation = await this.#observePhase("validation", () =>
+        this.#externalAdmission(() =>
+          validateArtifactClean({
+            repository: this.#options.repository,
+            artifact,
+            packet,
+            publicationBaseBranch: this.#baseBranch,
+            ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
+            ...(validator
+              ? {
+                  isolatedValidator: () =>
+                    this.#externalAdmission(() =>
+                      validator!.validate!({
+                        repository: `${this.#options.owner}/${this.#options.repo}`,
+                        objective: this.#run.objective,
+                        workItem: item.number,
+                        attempt: reservation!.attempt,
+                        runId: this.#run.runId,
+                        directorEpoch: reservation!.directorEpoch,
+                        policyDigest: reservation!.policyDigest,
+                        workspace: worker!.path,
+                        packet,
+                        policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                        artifact,
+                        deadline: new Date(
+                          new Date(validationNoHandleReplacementNotBefore!).getTime() - 60_000,
+                        ),
+                      }),
+                    ),
+                }
+              : {}),
+          }),
+        ),
       );
       await this.#lease.use((lease) =>
         this.#validations.persist({
@@ -9122,16 +9143,18 @@ export class FactorySupervisor {
       if (!admitted) throw new Error("semantic review checkpoint precedes dispatch admission");
       return checkpoint(result);
     };
-    const invocation = this.#management.reviewWithAdmission
-      ? this.#management.reviewWithAdmission(context, admittedCheckpoint, beforeModelInvocation)
-      : beforeModelInvocation().then((admission) => {
-          const remainingMs = admission.timeoutMs;
-          context.invocationTimeoutMs = Math.min(
-            remainingMs,
-            context.invocationTimeoutMs ?? remainingMs,
-          );
-          return this.#management.review(context, admittedCheckpoint);
-        });
+    const invocation = this.#observePhase("review", () =>
+      this.#management.reviewWithAdmission
+        ? this.#management.reviewWithAdmission(context, admittedCheckpoint, beforeModelInvocation)
+        : beforeModelInvocation().then((admission) => {
+            const remainingMs = admission.timeoutMs;
+            context.invocationTimeoutMs = Math.min(
+              remainingMs,
+              context.invocationTimeoutMs ?? remainingMs,
+            );
+            return this.#management.review(context, admittedCheckpoint);
+          }),
+    );
     return invocation.catch((error: unknown) => {
       if (error instanceof ProviderQuotaError) error.bindInvocation(invocationId);
       throw error;

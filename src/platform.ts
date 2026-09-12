@@ -644,6 +644,8 @@ export class ContentCreationPacer {
   #adaptiveFactor = 1;
   #successfulSinceRefusal = 0;
   #secondaryRefusals = 0;
+  #credit = 60;
+  #creditAt: number | null = null;
 
   constructor(
     private readonly perMinute: number = FACTORY_PACING.maxContentCreatingPerMinute,
@@ -653,15 +655,19 @@ export class ContentCreationPacer {
 
   /**
    * Ms to wait before the next content-creating call is safe to make. Calls
-   * are distributed across the hour so a burst cannot create an hourly cliff.
+   * A bounded ordinary burst avoids hourly spacing on small foreground runs.
+   * Sustained refill reserves that burst inside the hourly budget, so ordinary
+   * traffic cannot spend the entire hour's allowance in its first few minutes.
    */
   waitMs(now: Date = new Date(), options: { priority?: boolean } = {}): number {
     const t = now.getTime();
     this.#prune(t);
     const effectiveHourly = Math.max(1, Math.floor((this.perHour - 1) / this.#adaptiveFactor));
-    const gap = options.priority
-      ? this.minGapMs
-      : Math.max(this.minGapMs, Math.ceil(3_600_000 / effectiveHourly));
+    const { refillPerMs } = this.#refill(t, effectiveHourly);
+    const gap = this.minGapMs;
+    const creditWait = options.priority
+      ? 0
+      : Math.ceil(Math.max(0, 1 - this.#credit) / refillPerMs);
     const gapWait = this.#lastCallAt === null ? 0 : Math.max(0, this.#lastCallAt + gap - t);
     const minuteWait =
       this.#minute.length < this.perMinute
@@ -671,13 +677,16 @@ export class ContentCreationPacer {
       this.#hour.length < effectiveHourly
         ? 0
         : this.#hour[this.#hour.length - effectiveHourly]! + 3_600_000 - t;
-    return Math.max(gapWait, minuteWait, hourWait, 0);
+    return Math.max(gapWait, creditWait, minuteWait, hourWait, 0);
   }
 
   /** Record an actual transport attempt, immediately before invoking HTTP. */
   recordTransported(now: Date = new Date()): void {
     const t = now.getTime();
     this.#prune(t);
+    this.#refill(t, Math.max(1, Math.floor((this.perHour - 1) / this.#adaptiveFactor)));
+    // Priority traffic shares the same allowance; it cannot mint normal credit.
+    this.#credit = Math.max(0, this.#credit - 1);
     this.#minute.push(t);
     this.#hour.push(t);
     this.#lastCallAt = t;
@@ -723,6 +732,15 @@ export class ContentCreationPacer {
     while (this.#hour.length > 0 && this.#hour[0]! <= now - 3_600_000) {
       this.#hour.shift();
     }
+  }
+
+  #refill(now: number, effectiveHourly: number): { refillPerMs: number } {
+    const capacity = Math.min(60, Math.max(1, effectiveHourly - 1));
+    const refillPerMs = Math.max(1, effectiveHourly - capacity) / 3_600_000;
+    const elapsed = this.#creditAt === null ? 0 : Math.max(0, now - this.#creditAt);
+    this.#credit = Math.min(capacity, this.#credit + elapsed * refillPerMs);
+    this.#creditAt = now;
+    return { refillPerMs };
   }
 }
 

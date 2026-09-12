@@ -625,16 +625,18 @@ describe("ContentCreationPacer", () => {
     expect(p.waitMs(new Date(t0.getTime() + 60_001))).toBe(0);
   });
 
-  it("smooths normal traffic across the documented hourly window", () => {
+  it("allows a bounded ordinary burst at the minimum gap", () => {
     const p = new ContentCreationPacer(80, 500, 0);
     const t0 = new Date("2026-01-01T00:00:00.000Z");
     p.recordCall(t0);
-    expect(p.waitMs(new Date(t0.getTime() + 1_000))).toBeGreaterThan(6_000);
+    expect(p.waitMs(new Date(t0.getTime() + 1_000))).toBe(0);
   });
 
   it("keeps lease priority while retaining the hard documented windows", () => {
     const p = new ContentCreationPacer(40, 5, 0);
     const t0 = new Date("2026-01-01T00:00:00.000Z");
+    p.recordCall(t0);
+    p.recordCall(t0);
     p.recordCall(t0);
     expect(p.waitMs(t0)).toBeGreaterThan(0);
     expect(p.waitMs(t0, { priority: true })).toBe(0);
@@ -664,7 +666,33 @@ describe("ContentCreationPacer", () => {
       p.recordTransported(now);
       p.recordSuccess();
     }
-    expect(now.getTime() - start).toBeLessThan(10 * 60_000);
+    expect(now.getTime() - start).toBe(57_000);
+  });
+
+  it("smooths sustained ordinary traffic without an hourly cliff", () => {
+    const p = new ContentCreationPacer();
+    let now = new Date("2026-01-01T00:00:00Z");
+    for (let mutation = 0; mutation < 1_100; mutation += 1) {
+      const wait = p.waitMs(now);
+      expect(wait).toBeLessThanOrEqual(8_201);
+      now = new Date(now.getTime() + wait);
+      expect(p.waitMs(now)).toBe(0);
+      p.recordTransported(now);
+    }
+  });
+
+  it("caps replenishment after idle time and retains the hard hourly limit for priority", () => {
+    const p = new ContentCreationPacer(1_000, 500, 0);
+    const start = new Date("2026-01-01T00:00:00Z");
+    for (let i = 0; i < 60; i++) p.recordTransported(start);
+    expect(p.waitMs(start)).toBeGreaterThan(0);
+    const later = new Date(start.getTime() + 3_600_000);
+    expect(p.waitMs(later)).toBe(0);
+    for (let i = 0; i < 60; i++) p.recordTransported(later);
+    expect(p.waitMs(later)).toBeGreaterThan(0);
+    expect(p.waitMs(later, { priority: true })).toBe(0);
+    for (let i = 60; i < 499; i++) p.recordTransported(later);
+    expect(p.waitMs(later, { priority: true })).toBe(3_600_000);
   });
 });
 

@@ -45,7 +45,11 @@ it("the actual Supervisor drains and releases its owned lease after a queued rec
     reached = resolve;
   });
   const pacer = new ContentCreationPacer(40, 6, 0);
-  pacer.recordCall(new Date());
+  // Test interruption of an ordinary pacing wait without exhausting the
+  // independent priority allowance needed to prove both lease retirements.
+  vi.spyOn(pacer, "waitMs").mockImplementation((_now, options) =>
+    options?.priority ? 0 : 12 * 60_000,
+  );
   const scheduler = new MutationScheduler({
     pacer,
     onThrottle: () => reached(),

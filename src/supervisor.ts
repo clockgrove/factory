@@ -77,6 +77,7 @@ import {
   type DurableCommandState,
 } from "./control/commands.js";
 import { LifecycleRecorder } from "./control/events.js";
+import { observeGitHubTransportPhase } from "./control/mutation-observation.js";
 import {
   CompiledGraphManager,
   loadCompiledGraph,
@@ -395,6 +396,7 @@ import {
   PlatformUnavailableError,
   githubRequestTelemetryForCredential,
   primaryQuotaForCredential,
+  createGitHubMutationScope,
 } from "./platform.js";
 
 class RunCancellationRequestedError extends Error {
@@ -482,14 +484,16 @@ export function createRepositorySupervisorResources(
     maxLocalWorkers: number;
     maxPaidWorkers: number;
   } = { maxLocalWorkers: 8, maxPaidWorkers: 0 },
+  token?: string,
 ): RepositorySupervisorResources {
-  const pacer = new ContentCreationPacer();
+  const quota = token === undefined ? undefined : createGitHubMutationScope(token, onThrottle);
+  const pacer = quota?.pacer ?? new ContentCreationPacer();
   let integrationTail = Promise.resolve();
   return {
     pacer,
-    circuitBreaker: new CircuitBreaker(),
-    concurrency: new ConcurrencyLimiter(),
-    mutationScheduler: new MutationScheduler({ pacer, onThrottle }),
+    circuitBreaker: quota?.circuitBreaker ?? new CircuitBreaker(),
+    concurrency: quota?.concurrency ?? new ConcurrencyLimiter(),
+    mutationScheduler: quota?.mutationScheduler ?? new MutationScheduler({ pacer, onThrottle }),
     capacityLedger: new CapacityLedger(),
     resourceSampler: new LinuxResourceSampler(),
     fairness: new ObjectiveFairness(),
@@ -1224,15 +1228,11 @@ export class FactorySupervisor {
     this.#policy = parseRunPolicy(options.policy);
     this.#notify = options.onStatus ?? (() => {});
     const shared = options.repositoryResources;
-    this.#pacer = shared?.pacer ?? new ContentCreationPacer();
-    this.#breaker = shared?.circuitBreaker ?? new CircuitBreaker();
-    this.#concurrency = shared?.concurrency ?? new ConcurrencyLimiter();
-    this.#mutations =
-      shared?.mutationScheduler ??
-      new MutationScheduler({
-        pacer: this.#pacer,
-        onThrottle: this.#notify,
-      });
+    const quota = shared ?? createGitHubMutationScope(options.token, this.#notify);
+    this.#pacer = quota.pacer;
+    this.#breaker = quota.circuitBreaker;
+    this.#concurrency = quota.concurrency;
+    this.#mutations = quota.mutationScheduler;
     this.#mutations.attachPrimaryQuota(primaryQuotaForCredential(options.token));
     this.#mutations.attachRequestTelemetry(() =>
       githubRequestTelemetryForCredential(options.token),
@@ -3196,9 +3196,21 @@ export class FactorySupervisor {
     }
   }
 
+  #observePhase<T>(phase: string, operation: () => Promise<T>): Promise<T> {
+    return observeGitHubTransportPhase(
+      phase,
+      (observation) => {
+        this.#notify(`Factory phase telemetry: ${JSON.stringify(observation)}`);
+      },
+      operation,
+    );
+  }
+
   async run(): Promise<SupervisorResult> {
     try {
-      return await withArtifactContentScope(() => this.#runWithArtifactContent());
+      return await this.#observePhase("objective", () =>
+        withArtifactContentScope(() => this.#runWithArtifactContent()),
+      );
     } finally {
       await this.#retryArtifacts.clear();
     }
@@ -4738,12 +4750,16 @@ export class FactorySupervisor {
                     };
                   };
                   if (this.#management.supportsCompilerAdmission) {
-                    return await this.#management.compile(context, checkpoint, admitCompilation);
+                    return await this.#observePhase("compilation", () =>
+                      this.#management.compile(context, checkpoint, admitCompilation),
+                    );
                   }
                   // Compatibility for injected legacy backends that cannot place
                   // durable admission at their own final dispatch boundary.
                   context.invocationTimeoutMs = (await admitCompilation()).timeoutMs;
-                  return await this.#management.compile(context, checkpoint);
+                  return await this.#observePhase("compilation", () =>
+                    this.#management.compile(context, checkpoint),
+                  );
                 }
                 const inputDigest = compilerEvalDigest(context.objective);
                 const assertInputs = async () => {
@@ -6398,7 +6414,9 @@ export class FactorySupervisor {
           recovered,
         ),
       );
-    return recovered ? execute() : this.#modelInvocations.run(execute);
+    return this.#observePhase(`work-item-${item.number}`, () =>
+      recovered ? execute() : this.#modelInvocations.run(execute),
+    );
   }
 
   async #executeWithArtifactContent(
@@ -7488,37 +7506,39 @@ export class FactorySupervisor {
 
       const validationStarted = Date.now();
       validationStartedAt = validationStarted;
-      validation = await this.#externalAdmission(() =>
-        validateArtifactClean({
-          repository: this.#options.repository,
-          artifact,
-          packet,
-          publicationBaseBranch: this.#baseBranch,
-          ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
-          ...(validator
-            ? {
-                isolatedValidator: () =>
-                  this.#externalAdmission(() =>
-                    validator!.validate!({
-                      repository: `${this.#options.owner}/${this.#options.repo}`,
-                      objective: this.#run.objective,
-                      workItem: item.number,
-                      attempt: reservation!.attempt,
-                      runId: this.#run.runId,
-                      directorEpoch: reservation!.directorEpoch,
-                      policyDigest: reservation!.policyDigest,
-                      workspace: worker!.path,
-                      packet,
-                      policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
-                      artifact,
-                      deadline: new Date(
-                        new Date(validationNoHandleReplacementNotBefore!).getTime() - 60_000,
-                      ),
-                    }),
-                  ),
-              }
-            : {}),
-        }),
+      validation = await this.#observePhase("validation", () =>
+        this.#externalAdmission(() =>
+          validateArtifactClean({
+            repository: this.#options.repository,
+            artifact,
+            packet,
+            publicationBaseBranch: this.#baseBranch,
+            ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
+            ...(validator
+              ? {
+                  isolatedValidator: () =>
+                    this.#externalAdmission(() =>
+                      validator!.validate!({
+                        repository: `${this.#options.owner}/${this.#options.repo}`,
+                        objective: this.#run.objective,
+                        workItem: item.number,
+                        attempt: reservation!.attempt,
+                        runId: this.#run.runId,
+                        directorEpoch: reservation!.directorEpoch,
+                        policyDigest: reservation!.policyDigest,
+                        workspace: worker!.path,
+                        packet,
+                        policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                        artifact,
+                        deadline: new Date(
+                          new Date(validationNoHandleReplacementNotBefore!).getTime() - 60_000,
+                        ),
+                      }),
+                    ),
+                }
+              : {}),
+          }),
+        ),
       );
       await this.#lease.use((lease) =>
         this.#validations.persist({
@@ -9157,16 +9177,18 @@ export class FactorySupervisor {
       if (!admitted) throw new Error("semantic review checkpoint precedes dispatch admission");
       return checkpoint(result);
     };
-    const invocation = this.#management.reviewWithAdmission
-      ? this.#management.reviewWithAdmission(context, admittedCheckpoint, beforeModelInvocation)
-      : beforeModelInvocation().then((admission) => {
-          const remainingMs = admission.timeoutMs;
-          context.invocationTimeoutMs = Math.min(
-            remainingMs,
-            context.invocationTimeoutMs ?? remainingMs,
-          );
-          return this.#management.review(context, admittedCheckpoint);
-        });
+    const invocation = this.#observePhase("review", () =>
+      this.#management.reviewWithAdmission
+        ? this.#management.reviewWithAdmission(context, admittedCheckpoint, beforeModelInvocation)
+        : beforeModelInvocation().then((admission) => {
+            const remainingMs = admission.timeoutMs;
+            context.invocationTimeoutMs = Math.min(
+              remainingMs,
+              context.invocationTimeoutMs ?? remainingMs,
+            );
+            return this.#management.review(context, admittedCheckpoint);
+          }),
+    );
     return invocation.catch((error: unknown) => {
       if (error instanceof ProviderQuotaError) error.bindInvocation(invocationId);
       throw error;
@@ -15326,6 +15348,32 @@ export class FactorySupervisor {
   }
 
   async #integrate(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    pull: PublishedPullRequest,
+    deadline: number,
+    allowRecovery = false,
+    candidate?: MergeCandidateCheckpointRecord,
+    adoptedSource = false,
+    deliveryHeadSha?: string,
+    siblingRefresh?: SiblingRefreshRecord,
+  ): Promise<boolean> {
+    return this.#observePhase("integration", () =>
+      this.#integrateWork(
+        item,
+        reservation,
+        pull,
+        deadline,
+        allowRecovery,
+        candidate,
+        adoptedSource,
+        deliveryHeadSha,
+        siblingRefresh,
+      ),
+    );
+  }
+
+  async #integrateWork(
     item: DerivedWorkItem,
     reservation: AttemptReservation,
     pull: PublishedPullRequest,

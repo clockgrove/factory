@@ -8,7 +8,7 @@ import {
   verifyValidationEvidence,
   type ValidationEvidence,
 } from "../validation/evidence.js";
-import type { CompiledGraphReadStore, CompiledGraphStore } from "./graphs.js";
+import { gitBlobOid, type CompiledGraphReadStore, type CompiledGraphStore } from "./graphs.js";
 import type { LeaseManager, LeaseState } from "./lease.js";
 
 const CHECKPOINT_PATH = ".clockgrove-factory/control/validation.json";
@@ -182,9 +182,11 @@ export class ValidationCheckpointManager {
     if (bytes.byteLength > MAX_CHECKPOINT_BYTES) {
       throw new Error("validation checkpoint exceeds 512 KiB");
     }
-    const blobOid = await this.store.createBlob(bytes);
+    const blobOid = gitBlobOid(bytes);
     const treeOid = await this.store.createTree({
-      entries: [{ path: CHECKPOINT_PATH, mode: "100644", type: "blob", sha: blobOid }],
+      entries: [
+        { path: CHECKPOINT_PATH, mode: "100644", type: "blob", content: bytes.toString("utf8") },
+      ],
     });
     const commitOid = await this.store.createCommit({
       treeOid,

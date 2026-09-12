@@ -47,12 +47,9 @@
  * subtly wrong. Reads are cheap and unmetered against the content-creation
  * limits (`platform.ts`'s `FACTORY_PACING`) that actually matter here.
  *
- * The `CircuitBreaker` / `ContentCreationPacer` / `ConcurrencyLimiter` are
- * constructed once, at module scope, and shared by every `Dispatcher` and
- * `GraphApplier` this process builds — never per call. A fresh instance per
- * tool call would reset pacing and breaker state on every invocation, which
- * is exactly the discipline Finding 4 exists to enforce (AGENTS.md: "Never
- * burst writes; never retry through an open circuit").
+ * Credential-scoped pacing, breaker and concurrency state is resolved lazily
+ * when a tool uses its credential. Each caller owns its mutation scheduler;
+ * credential sharing must not couple caller shutdown or local telemetry.
  */
 
 import { CompilerCausalAnnotationsSchema } from "./application/compiler-eval.js";
@@ -84,14 +81,7 @@ import {
 } from "./graph.js";
 import type { GitHubOptions } from "./github.js";
 import { createOctokit, GitHubReader } from "./github.js";
-import {
-  CircuitBreaker,
-  ConcurrencyLimiter,
-  ContentCreationPacer,
-  githubRequestTelemetryForCredential,
-  MutationScheduler,
-  primaryQuotaForCredential,
-} from "./platform.js";
+import { createGitHubMutationScope } from "./platform.js";
 import {
   currentOpenPullRequest,
   derive,
@@ -158,11 +148,6 @@ function readerFor(owner: string, repo: string): GitHubReader {
   return reader;
 }
 
-// Shared across every call this process makes — see file header.
-const breaker = new CircuitBreaker();
-const pacer = new ContentCreationPacer();
-const concurrency = new ConcurrencyLimiter();
-const mutations = new MutationScheduler({ pacer, onThrottle: log });
 const controllerLifecycle = new SystemdControllerLifecycle(
   new SystemdUserService({
     factoryCommand: [process.execPath, join(dirname(fileURLToPath(import.meta.url)), "factory.js")],
@@ -176,17 +161,14 @@ function applicationFor(
   checkout = process.cwd(),
 ): FactoryApplicationService {
   const token = getToken();
-  mutations.attachPrimaryQuota(primaryQuotaForCredential(token));
-  mutations.attachRequestTelemetry(() => githubRequestTelemetryForCredential(token));
+  const scope = createGitHubMutationScope(token, log);
+  const mutations = scope.mutationScheduler;
   const store = new GitHubControlStore({
     token,
     owner,
     repo,
     onThrottle: log,
-    circuitBreaker: breaker,
-    pacer,
-    concurrency,
-    mutationScheduler: mutations,
+    ...scope,
   });
   const recoveryReader = recoveryInspection
     ? new GitHubReader({ token, owner, repo, recoveryInspection: true })
@@ -352,9 +334,11 @@ async function dispatcherFor(
     );
   }
   const escalateToId = await resolveUserIdCached(reader, escalateTo);
+  const token = getToken();
+  const scope = createGitHubMutationScope(token, log);
   return new Dispatcher({
     writer: new GithubOctokitWriter({
-      token: getToken(),
+      token,
       owner,
       repo,
       onThrottle: log,
@@ -364,10 +348,7 @@ async function dispatcherFor(
     defaultBranch: objective.defaultBranch,
     escalateToId,
     onThrottle: log,
-    circuitBreaker: breaker,
-    pacer,
-    concurrency,
-    mutationScheduler: mutations,
+    ...scope,
   });
 }
 
@@ -574,7 +555,7 @@ server.registerTool(
       return {
         objective: serializeObjective(objective, minimal ?? false),
         ready: ready(objective).map((i) => i.number),
-        platformExhausted: breaker.exhausted(),
+        platformExhausted: createGitHubMutationScope(getToken(), log).circuitBreaker.exhausted(),
         ...(escalation ? { escalateTo: escalation } : {}),
       };
     },
@@ -1249,18 +1230,17 @@ server.registerTool(
           blockedByNumbers: item.blockedBy.map((dependency) => dependency.number),
         };
       });
+      const token = getToken();
+      const scope = createGitHubMutationScope(token, log);
       const applier = new GraphApplier({
         writer: new GithubOctokitGraphWriter({
-          token: getToken(),
+          token,
           owner,
           repo,
           onThrottle: log,
         }),
         onThrottle: log,
-        circuitBreaker: breaker,
-        pacer,
-        concurrency,
-        mutationScheduler: mutations,
+        ...scope,
       });
       const created = await applier.apply(compiledObjective, {
         repositoryId: snapshot.repositoryId,

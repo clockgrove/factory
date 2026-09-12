@@ -99,6 +99,24 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
         const result = await running;
         expect(result, result.reason).toMatchObject({ status: "completed" });
         assertConcurrent(f);
+        const phases = f.notifications
+          .filter((message) => message.startsWith("Factory phase telemetry: "))
+          .map((message) => JSON.parse(message.slice("Factory phase telemetry: ".length)));
+        expect(phases.find((phase) => phase.phase === "objective")).toMatchObject({
+          outcome: "succeeded",
+          elapsedMs: expect.any(Number),
+          aggregateQueueWaitMs: expect.any(Number),
+          aggregateFenceMs: expect.any(Number),
+        });
+        for (const phase of [
+          "work-item-8",
+          "work-item-9",
+          "work-item-10",
+          "validation",
+          "review",
+          "integration",
+        ])
+          expect(phases.some((entry) => entry.phase === phase)).toBe(true);
         expect(start).toEqual(originalStart);
         expect(start.activationRequestId).toBeUndefined();
         expect(start.baseSha).toBeUndefined();

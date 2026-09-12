@@ -41,12 +41,7 @@ import { GitHubStacks, type GitHubStackTransport } from "./publication/github-st
 import { readCompilerCausalAnnotationsFile } from "./application/compiler-eval.js";
 import { readSuppliedReplayFile } from "./replay/file.js";
 import { SUPPLIED_REPLAY_ERROR } from "./replay/supplied.js";
-import {
-  ContentCreationPacer,
-  MutationScheduler,
-  githubRequestTelemetryForCredential,
-  primaryQuotaForCredential,
-} from "./platform.js";
+import { createGitHubMutationScope, primaryQuotaForCredential } from "./platform.js";
 import { OctokitToolchainReleaseSource } from "./runtime/toolchain-github-source.js";
 import {
   provisionToolchain,
@@ -153,19 +148,14 @@ function applicationFor(
 ): FactoryApplicationService {
   const token = resolveGitHubToken();
   const primaryQuota = primaryQuotaForCredential(token);
-  const pacer = new ContentCreationPacer();
-  const mutations = new MutationScheduler({
-    pacer,
-    primaryQuota,
-    requestTelemetry: () => githubRequestTelemetryForCredential(token),
-  });
+  const scope = createGitHubMutationScope(token);
+  const mutations = scope.mutationScheduler;
   const store = new GitHubControlStore({
     token,
     owner,
     repo,
     primaryQuota,
-    pacer,
-    mutationScheduler: mutations,
+    ...scope,
   });
   const reader = new GitHubReader({ token, owner, repo, recoveryInspection, primaryQuota });
   const registry = executionRegistry(checkout);

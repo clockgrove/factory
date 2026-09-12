@@ -58,6 +58,7 @@ import {
   classifyRefusal,
   observeGitHubRequestTransport,
   primaryQuotaForCredential,
+  githubCircuitForCredential,
   withGitHubRequestPriority,
   type GitHubPrimaryQuotaCache,
 } from "./platform.js";
@@ -143,6 +144,8 @@ const FactoryOctokit = Octokit.plugin(retry, throttling);
 
 interface GitHubTransportCallbacks {
   onTransported(): void;
+  /** The surrounding mutation/control wrapper records real platform refusals. */
+  ownsRefusal?: boolean;
 }
 
 const githubTransportCallbacks = new AsyncLocalStorage<GitHubTransportCallbacks>();
@@ -174,6 +177,7 @@ export function withGitHubTransportCallbacks<T>(
   let transported = false;
   return githubTransportCallbacks.run(
     {
+      ownsRefusal: callbacks.ownsRefusal ?? parent?.ownsRefusal ?? false,
       onTransported: () => {
         if (transported) return;
         transported = true;
@@ -912,7 +916,12 @@ export function createOctokit(opts: GitHubOptions): Octokit {
   const notify = opts.onThrottle ?? (() => {});
   const sharedPrimaryQuota = primaryQuotaForCredential(opts.token);
   const primaryQuota = opts.primaryQuota ?? sharedPrimaryQuota;
-  const surfacePlatformFailure = (error: unknown): never => {
+  const circuit = githubCircuitForCredential(opts.token);
+  const surfacePlatformFailure = (error: unknown, refusalOwned: boolean): never => {
+    // Octokit wraps a local fetch-boundary refusal in a status-500 RequestError.
+    // Preserve the original refusal; no HTTP attempt occurred to record again.
+    if (error instanceof Error && error.cause instanceof PlatformUnavailableError)
+      throw error.cause;
     const observed = error as {
       headers?: Record<string, string | number | undefined>;
       response?: { headers?: Record<string, string | number | undefined> };
@@ -922,6 +931,7 @@ export function createOctokit(opts: GitHubOptions): Octokit {
     if (error instanceof PlatformUnavailableError) throw error;
     const refusal = classifyRefusal(error);
     if (refusal.kind !== "not_refusal") {
+      if (!refusalOwned) circuit.recordRefusal(refusal);
       throw new PlatformUnavailableError(refusal, error);
     }
     throw error;
@@ -930,6 +940,13 @@ export function createOctokit(opts: GitHubOptions): Octokit {
     auth: opts.token,
     request: {
       fetch: ((input, init) => {
+        // Last check before any transport callback or charging. A peer may have
+        // observed a refusal after this request's earlier quota admission.
+        if (circuit.isOpen())
+          throw new PlatformUnavailableError(
+            { kind: "rate_limit", retryAfterMs: circuit.waitMs() },
+            new Error("Factory credential GitHub circuit is open"),
+          );
         const headers = new Headers(
           init?.headers ?? (input instanceof Request ? input.headers : undefined),
         );
@@ -965,12 +982,14 @@ export function createOctokit(opts: GitHubOptions): Octokit {
   });
   octokit.hook.after("request", (response) => {
     primaryQuota.observe(response.headers);
+    if (!githubTransportCallbacks.getStore()?.ownsRefusal) circuit.recordSuccess();
   });
   // The throttling plugin's wrapper is outside Octokit's public hook chain, so
   // wrap the public callables themselves. Proxying retains `.defaults` and
   // `.endpoint`, which other Octokit helpers rely on.
   octokit.request = new Proxy(octokit.request, {
     async apply(target, thisArg, args) {
+      const refusalOwned = githubTransportCallbacks.getStore()?.ownsRefusal ?? false;
       const endpoint = target.endpoint(...(args as Parameters<typeof target.endpoint>));
       const release = admitGitHubRequest(opts.token, primaryQuota, endpoint.url, {
         method: endpoint.method,
@@ -1010,7 +1029,7 @@ export function createOctokit(opts: GitHubOptions): Octokit {
               ];
         return await Reflect.apply(target, thisArg, invokeArgs);
       } catch (error) {
-        surfacePlatformFailure(error);
+        surfacePlatformFailure(error, refusalOwned);
       } finally {
         observer?.release();
         release();
@@ -1019,6 +1038,7 @@ export function createOctokit(opts: GitHubOptions): Octokit {
   });
   octokit.graphql = new Proxy(octokit.graphql, {
     async apply(target, thisArg, args) {
+      const refusalOwned = githubTransportCallbacks.getStore()?.ownsRefusal ?? false;
       const query = String(args[0] ?? "");
       const mutation = /^\s*mutation\b/.test(query);
       const release = admitGitHubRequest(
@@ -1050,7 +1070,7 @@ export function createOctokit(opts: GitHubOptions): Octokit {
           : args;
         return await Reflect.apply(target, thisArg, invokeArgs);
       } catch (error) {
-        surfacePlatformFailure(error);
+        surfacePlatformFailure(error, refusalOwned);
       } finally {
         observer?.release();
         release();

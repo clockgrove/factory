@@ -460,10 +460,14 @@ export function createGitHubRepositoryController(
 ): GitHubRepositoryController {
   const resources =
     options.resources ??
-    createRepositorySupervisorResources(options.onStatus, {
-      maxLocalWorkers: options.maxLocalWorkers ?? DEFAULT_CONTROLLER_POLICY.maxLocalWorkers,
-      maxPaidWorkers: options.maxPaidWorkers ?? DEFAULT_CONTROLLER_POLICY.maxPaidWorkers,
-    });
+    createRepositorySupervisorResources(
+      options.onStatus,
+      {
+        maxLocalWorkers: options.maxLocalWorkers ?? DEFAULT_CONTROLLER_POLICY.maxLocalWorkers,
+        maxPaidWorkers: options.maxPaidWorkers ?? DEFAULT_CONTROLLER_POLICY.maxPaidWorkers,
+      },
+      options.token,
+    );
   resources.mutationScheduler.attachPrimaryQuota(primaryQuotaForCredential(options.token));
   resources.mutationScheduler.attachRequestTelemetry(() =>
     githubRequestTelemetryForCredential(options.token),
@@ -573,10 +577,14 @@ export async function runGitHubRepositoryController(
   });
   const resources =
     options.resources ??
-    createRepositorySupervisorResources(options.onStatus, {
-      maxLocalWorkers: policy.maxLocalWorkers,
-      maxPaidWorkers: policy.maxPaidWorkers,
-    });
+    createRepositorySupervisorResources(
+      options.onStatus,
+      {
+        maxLocalWorkers: policy.maxLocalWorkers,
+        maxPaidWorkers: policy.maxPaidWorkers,
+      },
+      options.token,
+    );
   // One process identity can safely rediscover its own ambiguously acquired
   // lease. Every retry acquires from GitHub anew after the prior loop settles.
   const controllerId = randomUUID();
@@ -685,10 +693,14 @@ export async function runForegroundObjective(
   });
   const resources =
     options.repositoryResources ??
-    createRepositorySupervisorResources(options.onStatus, {
-      maxLocalWorkers: policy.maxLocalWorkers,
-      maxPaidWorkers: policy.maxPaidWorkers,
-    });
+    createRepositorySupervisorResources(
+      options.onStatus,
+      {
+        maxLocalWorkers: policy.maxLocalWorkers,
+        maxPaidWorkers: policy.maxPaidWorkers,
+      },
+      options.token,
+    );
   await attachSharedCapacity(options, policy, resources);
   return new FactorySupervisor({
     ...options,

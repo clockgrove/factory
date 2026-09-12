@@ -6,6 +6,8 @@ export interface MutationOperationObservation {
   measurementScope: "process-local-transport-boundary";
   operationId: string;
   operation: string;
+  /** Innermost controller phase, when the operation runs inside one. */
+  phase?: string;
   authorityClass: MutationAuthorityClass;
   resourceScope: string;
   startedAt: string;
@@ -33,17 +35,35 @@ interface Context {
 
 const current = new AsyncLocalStorage<Context>();
 
+/** Inclusive of nested phases. Counts and aggregate times are not additive across phases. */
 export interface GitHubTransportObservation {
   measurementScope: "process-local-controller-phase";
   phase: string;
   startedAt: string;
+  endedAt: string;
+  elapsedMs: number;
+  /** Summed operation time: concurrent waits/fences can overlap elapsed time. */
+  aggregateQueueWaitMs: number;
+  aggregateFenceMs: number;
   readRequests: number;
   mutationRequests: number;
   unclassifiedRequests: number;
   outcome: "succeeded" | "failed";
 }
 
-const transportObservation = new AsyncLocalStorage<GitHubTransportObservation>();
+interface PhaseContext {
+  observation: GitHubTransportObservation;
+  parent: PhaseContext | undefined;
+}
+
+const transportObservation = new AsyncLocalStorage<PhaseContext>();
+
+/** Parent phases include child work; phase totals must not be added together. */
+function observePhases(observe: (observation: GitHubTransportObservation) => void): void {
+  for (let phase = transportObservation.getStore(); phase; phase = phase.parent) {
+    observe(phase.observation);
+  }
+}
 
 /** These measurements never supply lease, accounting, or GitHub quota authority. */
 export function observeLeaseAssertion(): void {
@@ -70,8 +90,7 @@ export function observeGitHubTransport(
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   if (method === "GET" || method === "HEAD") {
     observeControlTransport(false);
-    const observation = transportObservation.getStore();
-    if (observation) observation.readRequests++;
+    observePhases((observation) => observation.readRequests++);
     return;
   }
   try {
@@ -81,34 +100,29 @@ export function observeGitHubTransport(
         const normalized = query.replace(/#[^\n]*/g, "").trimStart();
         if (/^(?:query\b|\{)/.test(normalized)) {
           observeControlTransport(false);
-          const observation = transportObservation.getStore();
-          if (observation) observation.readRequests++;
+          observePhases((observation) => observation.readRequests++);
           return;
         }
         if (/^mutation\b/.test(normalized)) {
           observeControlTransport(true);
-          const observation = transportObservation.getStore();
-          if (observation) observation.mutationRequests++;
+          observePhases((observation) => observation.mutationRequests++);
           return;
         }
       }
       const mutation = current.getStore();
       if (mutation) mutation.observation.unclassifiedRequests++;
-      const observation = transportObservation.getStore();
-      if (observation) observation.unclassifiedRequests++;
+      observePhases((observation) => observation.unclassifiedRequests++);
       return;
     }
   } catch {
     // Diagnostic parsing cannot invalidate transport or silently guess its kind.
     const mutation = current.getStore();
     if (mutation) mutation.observation.unclassifiedRequests++;
-    const observation = transportObservation.getStore();
-    if (observation) observation.unclassifiedRequests++;
+    observePhases((observation) => observation.unclassifiedRequests++);
     return;
   }
   observeControlTransport(true);
-  const observation = transportObservation.getStore();
-  if (observation) observation.mutationRequests++;
+  observePhases((observation) => observation.mutationRequests++);
 }
 
 /** Process-local request accounting only; never a durable authority or quota grant. */
@@ -117,21 +131,29 @@ export async function observeGitHubTransportPhase<T>(
   report: (observation: GitHubTransportObservation) => void,
   operation: () => Promise<T>,
 ): Promise<T> {
+  const started = performance.now();
   const observation: GitHubTransportObservation = {
     measurementScope: "process-local-controller-phase",
     phase,
     startedAt: new Date().toISOString(),
+    endedAt: "",
+    elapsedMs: 0,
+    aggregateQueueWaitMs: 0,
+    aggregateFenceMs: 0,
     readRequests: 0,
     mutationRequests: 0,
     unclassifiedRequests: 0,
     outcome: "failed",
   };
-  return transportObservation.run(observation, async () => {
+  const context: PhaseContext = { observation, parent: transportObservation.getStore() };
+  return transportObservation.run(context, async () => {
     try {
       const result = await operation();
       observation.outcome = "succeeded";
       return result;
     } finally {
+      observation.endedAt = new Date().toISOString();
+      observation.elapsedMs = performance.now() - started;
       try {
         report(Object.freeze({ ...observation }));
       } catch {
@@ -143,21 +165,27 @@ export async function observeGitHubTransportPhase<T>(
 
 export async function observeMutationFence(operation: () => Promise<void>): Promise<void> {
   const context = current.getStore();
-  if (!context) return operation();
-  const previous = context.fencing;
+  const phase = transportObservation.getStore();
+  if (!context && !phase) return operation();
+  const previous = context?.fencing;
   const started = performance.now();
-  context.fencing = true;
+  if (context) context.fencing = true;
   try {
     await operation();
   } finally {
-    context.fencing = previous;
-    context.observation.fenceMs += performance.now() - started;
+    const elapsed = performance.now() - started;
+    if (context) {
+      context.fencing = previous!;
+      context.observation.fenceMs += elapsed;
+    }
+    observePhases((observation) => (observation.aggregateFenceMs += elapsed));
   }
 }
 
 export function observeMutationQueue(waitedMs: number): void {
   const context = current.getStore();
   if (context) context.observation.queueWaitMs += waitedMs;
+  observePhases((observation) => (observation.aggregateQueueWaitMs += waitedMs));
 }
 
 export async function observeMutationOperation<T>(
@@ -172,6 +200,9 @@ export async function observeMutationOperation<T>(
     measurementScope: "process-local-transport-boundary",
     operationId: randomUUID(),
     operation,
+    ...(transportObservation.getStore()
+      ? { phase: transportObservation.getStore()!.observation.phase }
+      : {}),
     authorityClass,
     resourceScope,
     startedAt: new Date().toISOString(),

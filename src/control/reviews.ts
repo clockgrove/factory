@@ -11,7 +11,7 @@ import type {
   SemanticReview,
 } from "../management/backend.js";
 import { gitSha, sha256Digest } from "../protocol/limits.js";
-import type { CompiledGraphReadStore, CompiledGraphStore } from "./graphs.js";
+import { gitBlobOid, type CompiledGraphReadStore, type CompiledGraphStore } from "./graphs.js";
 import type { LeaseManager, LeaseState } from "./lease.js";
 
 const REVIEW_PATH = ".clockgrove-factory/control/semantic-review.json";
@@ -253,9 +253,11 @@ export class ReviewCheckpointManager {
       return existing;
     }
     const bytes = Buffer.from(canonical(receipt), "utf8");
-    const blobOid = await this.store.createBlob(bytes);
+    const blobOid = gitBlobOid(bytes);
     const treeOid = await this.store.createTree({
-      entries: [{ path: REVIEW_PATH, mode: "100644", type: "blob", sha: blobOid }],
+      entries: [
+        { path: REVIEW_PATH, mode: "100644", type: "blob", content: bytes.toString("utf8") },
+      ],
     });
     const commitOid = await this.store.createCommit({
       treeOid,

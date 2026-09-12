@@ -1172,6 +1172,7 @@ export class Dispatcher {
         }
         await withGitHubTransportCallbacks(
           {
+            ownsRefusal: true,
             onTransported: () => {
               attempted = true;
               mutationPermit.recordTransported?.();

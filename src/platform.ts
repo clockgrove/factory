@@ -316,19 +316,29 @@ class GitHubRequestGovernor {
   }
 }
 
-const requestGovernorByCredential = new Map<string, GitHubRequestGovernor>();
+const stateByCredential = new Map<
+  string,
+  { governor: GitHubRequestGovernor; primaryQuota: GitHubPrimaryQuotaCache }
+>();
+
+/** Keep both controls for every admitted credential for the lifetime of this process. */
+function stateForCredential(token: string) {
+  const credential = createHash("sha256").update(token).digest("hex");
+  let state = stateByCredential.get(credential);
+  if (!state) {
+    if (stateByCredential.size >= 16) {
+      throw new Error(
+        "Factory supports at most 16 distinct GitHub credentials per process; reuse an existing credential or restart the process before using a new credential",
+      );
+    }
+    state = { governor: new GitHubRequestGovernor(), primaryQuota: new GitHubPrimaryQuotaCache() };
+    stateByCredential.set(credential, state);
+  }
+  return state;
+}
 
 function requestGovernorForCredential(token: string): GitHubRequestGovernor {
-  const credential = createHash("sha256").update(token).digest("hex");
-  let governor = requestGovernorByCredential.get(credential);
-  if (!governor) {
-    governor = new GitHubRequestGovernor();
-    if (requestGovernorByCredential.size >= 16) {
-      requestGovernorByCredential.delete(requestGovernorByCredential.keys().next().value!);
-    }
-    requestGovernorByCredential.set(credential, governor);
-  }
-  return governor;
+  return stateForCredential(token).governor;
 }
 
 export function githubRequestTelemetryForCredential(token: string): GitHubRequestTelemetry {
@@ -379,20 +389,9 @@ export function observeGitHubRequestTransport(
   });
 }
 
-const primaryQuotaByCredential = new Map<string, GitHubPrimaryQuotaCache>();
-
 /** Process-local credential sharing; the token never appears in telemetry. */
 export function primaryQuotaForCredential(token: string): GitHubPrimaryQuotaCache {
-  const credential = createHash("sha256").update(token).digest("hex");
-  let cache = primaryQuotaByCredential.get(credential);
-  if (!cache) {
-    cache = new GitHubPrimaryQuotaCache();
-    if (primaryQuotaByCredential.size >= 16) {
-      primaryQuotaByCredential.delete(primaryQuotaByCredential.keys().next().value!);
-    }
-    primaryQuotaByCredential.set(credential, cache);
-  }
-  return cache;
+  return stateForCredential(token).primaryQuota;
 }
 
 export type Refusal =

@@ -2,8 +2,11 @@ import { expect, it, vi } from "vitest";
 
 import {
   SharedCapacitySnapshotLagError,
+  sharedCapacityClaimId,
   type SharedCapacityOwner,
 } from "../src/controller/shared-capacity.js";
+import { GitHubControlStore } from "../src/control/github-store.js";
+import { decodeEventComments } from "../src/control/receipts.js";
 import { GitHubReader } from "../src/github.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import {
@@ -45,6 +48,8 @@ function installLaggingSharedCapacity(
   fixture: Fixture,
   targetWorkItem?: number,
   targetPhase: CapacityReservation["phase"] = "validation",
+  holdPhasePublication = false,
+  foreignClaim = false,
 ) {
   const ledger = new CapacityLedger();
   const owned = new Map<string, OwnedCapacityReservation>();
@@ -52,7 +57,35 @@ function installLaggingSharedCapacity(
   let staleRead: ObjectiveSnapshot | undefined;
   let lagCount = 0;
   let laggedReservation: CapacityReservation | undefined;
-  let servedLag = false;
+  let servedLag = holdPhasePublication;
+  let releasePublication = () => {};
+  const publication = new Promise<void>((resolve) => {
+    releasePublication = resolve;
+  });
+  let publicationHeld = false;
+  let safetyTimer: ReturnType<typeof setTimeout> | undefined;
+  if (holdPhasePublication) {
+    const addComment = vi.mocked(GitHubControlStore.prototype.addIssueComment);
+    const ordinaryComment = addComment.getMockImplementation()!;
+    addComment.mockImplementation(async (node, body) => {
+      if (
+        decodeEventComments(body).some(
+          (event) =>
+            event.kind === "capacity" &&
+            event.event === "CapacityReserved" &&
+            event.phase === "validation" &&
+            event.workItem === targetWorkItem,
+        )
+      ) {
+        publicationHeld = true;
+        // Teardown escape for a broken Supervisor that drains before a fourth read.
+        safetyTimer = setTimeout(releasePublication, 5_000);
+        await publication;
+        clearTimeout(safetyTimer);
+      }
+      return ordinaryComment(node, body);
+    });
+  }
   const readObjective = vi.mocked(GitHubReader.prototype.readObjective);
   const ordinaryRead = readObjective.getMockImplementation();
   if (!ordinaryRead) throw new Error("provider fixture did not install its Objective reader");
@@ -74,14 +107,16 @@ function installLaggingSharedCapacity(
       const lag = imports
         .filter(({ reservation }) => released.has(reservation.key))
         .map(({ owner, reservation }) => ({
-          claimId: `${owner.runId}:${owner.directorEpoch}:${reservation.key}`
-            .padEnd(64, "0")
-            .slice(0, 64),
+          claimId: sharedCapacityClaimId(
+            foreignClaim ? { ...owner, directorEpoch: owner.directorEpoch + 1 } : owner,
+            reservation.key,
+          ),
           key: reservation.key,
           provenance: "journal" as const,
         }));
       if (lag.length > 0) {
         lagCount += 1;
+        if (holdPhasePublication && publicationHeld && lagCount >= 4) releasePublication();
         staleRead = undefined;
         throw new SharedCapacitySnapshotLagError(lag);
       }
@@ -175,6 +210,7 @@ function installLaggingSharedCapacity(
   } as unknown as NonNullable<typeof fixture.repositoryResources.sharedCapacity>;
 
   return {
+    releasePublication,
     lagCount: () => lagCount,
     laggedWorkItem: () => laggedReservation?.workItem,
     laggedPhase: () => laggedReservation?.phase,
@@ -429,3 +465,46 @@ it("keeps an expired Objective nonterminal while released capacity remains ambig
     await fixture.dispose().catch(() => {});
   }
 }, 20_000);
+
+it("waits for an admitted child's phase receipt beyond the visibility retry bound", async () => {
+  const fixture = await providerSupervisorFixture("daytona-burst", {
+    maxParallel: 2,
+    isolatedValidationWorkItem: 8,
+  });
+  const lag = installLaggingSharedCapacity(fixture, 8, "execution", true);
+  try {
+    const result = await fixture.run();
+    expect(result.status, result.reason).toBe("completed");
+    expect(lag.lagCount()).toBeGreaterThanOrEqual(4);
+    const launches = fixture.activity.filter((entry) => entry.operation === "launch");
+    expect(launches).toHaveLength(fixture.snapshot.workItems.length);
+    expect(new Set(launches.map((entry) => entry.workItem)).size).toBe(launches.length);
+    expect(fixture.events().filter((event) => event.event === "AttemptCancelled")).toEqual([]);
+    expect(fixture.events().filter((event) => event.event === "AttemptIntegrated")).toHaveLength(
+      launches.length,
+    );
+    expect(fixture.events().filter((event) => event.event === "FactoryRunCompleted")).toHaveLength(
+      1,
+    );
+    expect(lag.outstanding()).toEqual([]);
+  } finally {
+    lag.releasePublication();
+    await fixture.dispose();
+  }
+}, 30_000);
+
+it("does not treat another owner's claim as a live child's phase publication", async () => {
+  const fixture = await providerSupervisorFixture("daytona-burst", {
+    maxParallel: 2,
+    isolatedValidationWorkItem: 8,
+  });
+  const lag = installLaggingSharedCapacity(fixture, 8, "execution", true, true);
+  try {
+    await expect(fixture.run()).rejects.toBeInstanceOf(SharedCapacitySnapshotLagError);
+    expect(lag.lagCount()).toBe(3);
+    expect(fixture.events().some((event) => event.event === "FactoryRunCompleted")).toBe(false);
+  } finally {
+    lag.releasePublication();
+    await fixture.dispose();
+  }
+}, 30_000);

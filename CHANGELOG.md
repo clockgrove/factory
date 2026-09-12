@@ -6,6 +6,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Fixed
 
+- Preserve live sibling workers while an admitted child's execution-to-validation capacity
+  receipt is still being published. Exact in-flight claims wait for progress and a fresh
+  Objective observation; unrelated or abandoned claims retain bounded refusal.
+  ([#319](https://github.com/clockgrove/factory/issues/319))
+
 - Active-run cancellation checks now scan bounded history once and then read overlapping comment
   deltas. Credential-shared governor/quota entries and live transport observers are never silently
   evicted; exceeding 16 credentials or 1,024 simultaneous observers fails clearly before transport.

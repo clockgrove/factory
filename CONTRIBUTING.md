@@ -38,6 +38,19 @@ Vercel Sandbox remains Labs; an optional Labs adapter cannot change default star
 behavior. Explicit Codex App Server execution and durable terminal recovery are part of supported
 local qualification; the SDK/CLI default chain remains unchanged.
 
+## Prefer pragmatic solutions
+
+Apply the pragmatic-solution policy in [`AGENTS.md`](AGENTS.md) to every coding task, including
+planning and review. Start with the concrete outcome and choose the simplest complete solution.
+Before adding abstractions, recovery paths, or durable state, consider deletion, retaining less data,
+and reuse of existing facilities. Additional complexity must serve a current requirement or a
+demonstrated failure; future flexibility alone is insufficient.
+
+For a material design choice, briefly explain why a simpler alternative is insufficient and what
+operational or maintenance costs the chosen approach adds. Review requests for more generality or
+resilience need the same evidence and must remain within the accepted scope. Preserve the existing
+correctness and authorization boundaries; routine changes do not need another design document.
+
 ## Validate changes
 
 Use Node.js 20 or later. Finish independent implementation capabilities in parallel, isolated
@@ -52,7 +65,13 @@ qualification between intermediate fixes. A narrow live probe is justified only 
 depends on uncertain platform behavior and the probe is within existing authorization. Independent
 lanes own focused acceptance; the integration owner coordinates the full candidate gate below.
 
-After implementation and integration review are complete, use one coordinated qualification phase:
+For instruction-only or documentation-only changes, check the diff, links, and applicable
+formatting. Run runtime tests, builds, or installed qualification only when the changed behavior or
+documented procedure requires them. Contributor-guidance edits alone do not create a release
+candidate or require the release gate.
+
+For a release candidate, after implementation and integration review are complete, use one
+coordinated qualification phase:
 
 1. Review and freeze the source, tests, documentation and manifests as an identified candidate.
 2. Run the complete suite, fix actual failures, and retain security, destructive-action, accounting

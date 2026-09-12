@@ -13,6 +13,36 @@ comments preserve history, not a competing current board. Repository documents r
 procedures and historical evidence, not a second live status table. Distinguish implemented,
 integrated and qualified, and bind qualification to its exact candidate and scenario.
 
+## Pragmatic solutions for every coding task
+
+Apply this policy to planning, implementation, debugging, refactoring, and review. Choose the
+simplest solution that fully satisfies current requirements and preserves correctness. Added
+complexity needs evidence of a present need; hypothetical future value is not sufficient.
+
+- Start with the concrete outcome, observed failure, and supported behavior. Do not turn imagined
+  consumers, future providers, or unlikely failure combinations into acceptance requirements.
+- Before adding machinery, consider removing the behavior causing the problem, retaining less data,
+  using an existing facility, or expressing the solution directly. Fix the cause rather than adding
+  layers to manage its side effects.
+- Prefer fewer moving parts, state transitions, sources of truth, dependencies, and side effects.
+  The smallest diff is not always the simplest design; deleting unnecessary machinery may be better.
+- Reuse established patterns when they fit. New abstractions, extension points, configuration flags,
+  compatibility layers, fallback chains, retries, recovery protocols, and persistent state must
+  serve a current requirement or demonstrated failure, not flexibility or future-proofing alone.
+- Keep authoritative data in its existing source of truth and retain only what current consumers
+  need. Do not build duplicate stores, replay bundles, sidecars, or synchronization mechanisms
+  without a current requirement. The resolution in [#322](https://github.com/clockgrove/factory/issues/322)
+  illustrates this: validate full Git objects transiently and save compact receipts instead of a
+  second durable copy of GitHub state.
+- Before choosing a materially more complex design, identify what the simpler alternative cannot
+  satisfy and account for the added operational and maintenance costs. If no concrete requirement
+  rules out the simpler design, choose it. A brief explanation is enough; routine edits do not need
+  a design document or another approval step.
+- Preserve required authorization, security, data integrity, and supported behavior. Simplicity
+  does not justify weakening validation, suppressing errors, or ignoring a demonstrated defect.
+- Stop when the accepted outcome and relevant checks pass. Keep adjacent cleanup and speculative
+  hardening out of the task unless necessary for its outcome.
+
 ## Mission: trunk, branches, leaves
 
 Finish Factory in this order:
@@ -43,27 +73,31 @@ true:
 - a provider, framework, language, package manager, or other concrete technology would enter shared
   orchestration state or interfaces;
 - one incident-specific exception must be propagated through multiple modules;
-- repeated failures suggest that an earlier abstraction or invariant is wrong; or
-- the user asks for a holistic, systemic, permanent, or end-to-end fix.
+- repeated failures provide concrete evidence that an earlier abstraction or invariant is wrong; or
+- the user explicitly requests an architecture review.
+
+Words such as "permanent" or "end-to-end" do not alone require a redesign or an architecture review.
+Use the actual scope and evidence above to decide.
 
 The reviewer must receive the failure evidence and product contracts without first inheriting the
 implementer's proposed solution. It must:
 
-1. restate the problem at the domain level without relying on incident-specific nouns;
-2. identify material assumptions and actively try to falsify the initial framing;
-3. compare at least two plausible designs and their second-order effects;
-4. test each design against adjacent technologies, providers, repositories, and lifecycle stages;
-5. distinguish a general core contract from adapters and explicitly unsupported capabilities; and
-6. reject technology-specific leakage into shared architecture unless the product contract makes
-   that technology fundamental.
+1. state the concrete outcome, supported behavior, and failure evidence;
+2. challenge assumptions, including whether the problematic mechanism is necessary at all;
+3. compare the simplest viable approach, including deletion or reuse, with any proposed additional
+   machinery and its side effects;
+4. check affected supported technologies and lifecycle paths without inventing requirements for
+   hypothetical consumers or unsupported capabilities;
+5. justify each added abstraction, state record, fallback, or recovery path with a current need; and
+6. preserve established architectural boundaries without demanding generality for its own sake.
 
-The implementer must reconcile the review before editing and record the selected model and rejected
-alternatives in the issue or applicable decision record. The reviewer has authority to block an
-implementation whose concrete regression would pass but whose framing remains overfit. Repeat the
-review after the first integrated diff, when names, state, and dependencies reveal abstraction
-leakage that was not visible in the proposal. A concrete regression is necessary evidence, not proof
-that the architecture is sound. "Smallest complete fix" means the smallest fix to the correct domain
-model, not the fewest changed lines.
+The implementer must reconcile the review before editing and briefly record the choice and any
+material tradeoff in the PR, issue, or applicable decision record. Architecture findings must cite
+concrete supported-path failures, violated contracts, or specific maintenance or operational costs.
+Apply the blocker/follow-up definitions below; "not general enough" is insufficient. Revisit the
+architecture review if the integrated diff materially changes the chosen design or reveals new
+boundary violations. Otherwise, use ordinary diff review. Favor the least complex complete solution,
+even when removing the faulty mechanism changes more lines than patching around it.
 
 ## Bound review loops
 
@@ -101,6 +135,14 @@ accepted risks.
 
 ## Code Review Rules
 
+### Simplicity and scope
+
+- Challenge unnecessary machinery and duplicated state as well as correctness defects. State the
+  concrete cost and a simpler viable alternative; do not demand cosmetic rewrites.
+- Requests for more generality, resilience, or coverage must identify a current requirement or a
+  concrete failure on a supported path. Imagined future cases do not block the accepted task.
+- Apply the declared acceptance surface and review-round limits to every review pass below.
+
 ### Exhaustive review pass
 
 - Review the complete pull-request diff and all materially affected call paths before finishing.
@@ -116,6 +158,8 @@ accepted risks.
 
 - Preserve the original failure and exact source, artifact, run, and accounting identities.
 - Classify it immediately as a trunk blocker, branch blocker, or leaf.
+- Before extending a failing recovery or exception path, consider whether simplifying or removing
+  the mechanism would eliminate the failure while preserving the required behavior.
 - Fix genuine blockers and add a regression for the concrete defect.
 - Attempt recovery at most once when it is the shortest path to current acceptance, unless recovery
   itself is the capability being qualified.
@@ -147,6 +191,9 @@ accepted risks.
   inherit known integration failures while waiting for a release candidate.
 - During implementation, use focused checks and captured platform contracts when they reduce risk.
   Add a regression for each concrete defect.
+- For instruction-only or documentation-only changes, check the diff, links, and applicable
+  formatting. Runtime suites, builds, and installed qualification are required only when the changed
+  behavior or documented procedure needs them; editing contributor guidance is not a release gate.
 - Do not repeatedly run broad suites, packaging, plugin reinstalls, or live qualification between
   intermediate fixes.
 - At a stable candidate boundary, freeze the candidate and run the release gates in

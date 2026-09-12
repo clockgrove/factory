@@ -246,6 +246,7 @@ describe("independent-session durable capacity", () => {
         owner: currentOwner,
         reservation: reservation(1, { workItem: index + 1 }),
       }));
+      await shared.snapshot(); // Warm the immutable OID as an already-active Supervisor does.
       const refReads = vi.spyOn(store, "readRef");
       const commitReads = vi.spyOn(store, "readCommit");
       const timeReads = vi.spyOn(store, "serverTime");
@@ -256,7 +257,7 @@ describe("independent-session durable capacity", () => {
       expect(await shared.reconcile(currentOwner, imports)).toEqual(imports);
       expect((await shared.snapshot()).reservations).toHaveLength(count);
       expect(refReads).toHaveBeenCalledTimes(3);
-      expect(commitReads).toHaveBeenCalledTimes(3);
+      expect(commitReads).toHaveBeenCalledTimes(1); // Only the current Objective lease commit.
       expect(timeReads).toHaveBeenCalledTimes(1);
       expect(writes).not.toHaveBeenCalled();
 
@@ -273,6 +274,34 @@ describe("independent-session durable capacity", () => {
       );
     },
   );
+
+  it("reuses only an immutable observed OID, clones returned data, and refreshes peer changes", async () => {
+    const store = new Store();
+    const currentOwner = await owner(store, 1);
+    await seedClaims(store, currentOwner, 1, false);
+    const shared = coordinator(store);
+    const refs = vi.spyOn(store, "readRef");
+    const commits = vi.spyOn(store, "readCommit");
+    const first = await shared.snapshot();
+    expect(refs).toHaveBeenCalledTimes(1);
+    expect(commits).toHaveBeenCalledTimes(1);
+    (first.reservations[0]!.paths as string[]).push("caller-mutation");
+    const second = await shared.snapshot();
+    expect(refs).toHaveBeenCalledTimes(2);
+    expect(commits).toHaveBeenCalledTimes(1);
+    expect(second.reservations[0]!.paths).toEqual([]);
+
+    await coordinator(store).release(currentOwner, first.reservations[0]!.key);
+    refs.mockClear();
+    commits.mockClear();
+    expect((await shared.snapshot()).active).toBe(0);
+    expect(refs).toHaveBeenCalledTimes(1);
+    expect(commits).toHaveBeenCalledTimes(1);
+    expect((await coordinator(store).snapshot()).active).toBe(0);
+    expect(commits).toHaveBeenCalledTimes(2); // A restarted coordinator reconstructs GitHub state.
+    store.refs.set(SHARED_CAPACITY_REF, base);
+    await expect(shared.snapshot()).rejects.toThrow("invalid shared capacity record");
+  });
 
   it.each([undefined, () => false])(
     "reconstructs the built-in validation interval without changing retained local capacity (%s)",

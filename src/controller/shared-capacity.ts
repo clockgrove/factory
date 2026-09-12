@@ -231,6 +231,8 @@ function ledger(state: State): CapacityLedger {
 /** GitHub CAS serializes only reservation changes, never Objective execution or writes. */
 export class SharedCapacityCoordinator {
   readonly #leases: LeaseManager;
+  // One validated immutable Git object. The mutable ref is always read afresh.
+  #cachedObservation: { oid: string; treeOid: string; state: State } | undefined;
   constructor(
     private readonly options: {
       store: LeaseStore & {
@@ -267,6 +269,7 @@ export class SharedCapacityCoordinator {
   async #read(): Promise<{ oid: string; treeOid: string; state: State } | null> {
     const oid = await this.options.store.readRef(SHARED_CAPACITY_REF);
     if (!oid) return null;
+    if (this.#cachedObservation?.oid === oid) return structuredClone(this.#cachedObservation);
     const commit = await this.options.store.readCommit(oid);
     const encoded = commit.message
       .split("\n")
@@ -300,7 +303,8 @@ export class SharedCapacityCoordinator {
       ids.add(claim.id);
     }
     ledger(state);
-    return { oid, treeOid: commit.treeOid, state };
+    this.#cachedObservation = { oid, treeOid: commit.treeOid, state };
+    return structuredClone(this.#cachedObservation);
   }
 
   async initialize(): Promise<void> {

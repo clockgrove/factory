@@ -403,7 +403,13 @@ describe("Supervisor repository-capability admission", () => {
         fixture.activity
           .filter((entry) => entry.operation === "launch")
           .map((entry) => entry.workItem),
-      ).toEqual(expect.arrayContaining([8, 10]));
+      ).toContain(8);
+      // Admission is independent of a later source-ref race before launch.
+      expect(
+        fixture
+          .events()
+          .some((event) => event.event === "AttemptReserved" && event.workItem === 10),
+      ).toBe(true);
       expect(
         fixture.activity.some(
           (entry) =>

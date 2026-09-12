@@ -104,6 +104,7 @@ describe("same-run controller restart after integration", () => {
         loseIntegrationReceipt: "before",
         noModelTokenBudget: true,
       });
+      f.repositoryResources.controllerLimits.maxLocalWorkers = 2;
       try {
         await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
         expect(

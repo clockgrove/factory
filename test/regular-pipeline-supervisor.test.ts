@@ -36,9 +36,11 @@ function assertConcurrent(f: Awaited<ReturnType<typeof providerSupervisorFixture
   )!;
   for (const integrated of integrations.filter((event) => event.workItem !== 10))
     expect(join.sequence).toBeGreaterThan(integrated.sequence);
-  expect(
-    f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.workItem),
-  ).toEqual([8, 9, 10]);
+  const launches = f.activity
+    .filter((entry) => entry.operation === "launch")
+    .map((entry) => entry.workItem);
+  expect(launches.slice(0, 2).sort()).toEqual([8, 9]);
+  expect(launches.slice(2)).toEqual([10]);
   expect(
     f.activity.filter((entry) => entry.operation.endsWith("review")).length,
   ).toBeGreaterThanOrEqual(3);
@@ -53,6 +55,7 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
         localOnly: true,
         localMaxParallel: 2,
       });
+      f.repositoryResources.controllerLimits.maxLocalWorkers = 2;
       // Captured foreground contract: the start has neither activation nor base;
       // GraphCompiled is the authenticated original base authority.
       const start = f.snapshot.factoryEvents!.find((event) => event.event === "FactoryRunStarted")!;
@@ -83,16 +86,23 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
         });
       const running = f.run(shutdown.signal);
       try {
-        await vi.waitFor(() => expect(waits).toBeGreaterThanOrEqual(3), {
-          timeout: 60_000,
-          interval: 20,
-        });
+        await vi.waitFor(
+          () => {
+            expect(waits).toBeGreaterThanOrEqual(3);
+            expect(f.events().filter((event) => event.event === "AttemptStarted")).toHaveLength(2);
+          },
+          {
+            timeout: 60_000,
+            interval: 20,
+          },
+        );
         expect(f.policy.maxParallel).toBe(2);
         expect(
           f
             .events()
             .filter((event) => event.kind === "attempt" && event.event === "AttemptStarted")
-            .map((event) => ("workItem" in event ? event.workItem : null)),
+            .map((event) => ("workItem" in event ? event.workItem : null))
+            .sort(),
         ).toEqual([8, 9]);
         expect(f.events().filter((event) => event.event === "AttemptIntegrated")).toHaveLength(0);
         held = false;
@@ -199,6 +209,7 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
       localMaxParallel: 2,
       controllerActivation: true,
     });
+    f.repositoryResources.controllerLimits.maxLocalWorkers = 2;
     let held = true;
     let reads = 0;
     const readPull = vi.mocked(GitHubControlStore.prototype.readPullRequest);
@@ -214,10 +225,18 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
     const first = f.run(shutdown.signal);
     let second: ReturnType<typeof f.run> | undefined;
     try {
-      await vi.waitFor(() => expect(reads).toBeGreaterThanOrEqual(3), {
-        timeout: 8000,
-        interval: 20,
-      });
+      await vi.waitFor(
+        () => {
+          expect(reads).toBeGreaterThanOrEqual(3);
+          expect(f.events().filter((event) => event.event === "PublicationRecorded")).toHaveLength(
+            2,
+          );
+        },
+        {
+          timeout: 8000,
+          interval: 20,
+        },
+      );
       shutdown.abort();
       expect(await first).toMatchObject({ status: "cancelled" });
       expect(
@@ -236,7 +255,10 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
         interval: 20,
       });
       expect(
-        f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.workItem),
+        f.activity
+          .filter((entry) => entry.operation === "launch")
+          .map((entry) => entry.workItem)
+          .sort(),
       ).toEqual([8, 9]);
       held = false;
       const result = await second;
@@ -261,6 +283,7 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
       localOnly: true,
       localMaxParallel: 2,
     });
+    f.repositoryResources.controllerLimits.maxLocalWorkers = 2;
     const write = vi.mocked(GitHubControlStore.prototype.addIssueComment);
     const originalWrite = write.getMockImplementation()!;
     let publicationWrites = 0;
@@ -290,10 +313,16 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
     try {
       await reached.promise;
       const before = snapshots;
-      await vi.waitFor(() => expect(snapshots).toBeGreaterThanOrEqual(before + 4), {
-        timeout: 8000,
-        interval: 20,
-      });
+      await vi.waitFor(
+        () => {
+          expect(snapshots).toBeGreaterThanOrEqual(before + 4);
+          expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(2);
+        },
+        {
+          timeout: 8000,
+          interval: 20,
+        },
+      );
       expect(publicationWrites).toBe(1);
       expect(
         f

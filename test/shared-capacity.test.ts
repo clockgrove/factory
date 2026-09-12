@@ -4,6 +4,7 @@ import { LeaseManager, type LeaseStore, type GitCommitObject } from "../src/cont
 import { RepositoryLeaseManager } from "../src/controller/repository-lease.js";
 import {
   SharedCapacityCoordinator,
+  SharedCapacitySnapshotLagError,
   SHARED_CAPACITY_ACTION_REQUIRED_AT,
   SHARED_CAPACITY_COMPACT_AT,
   SHARED_CAPACITY_HARD_LIMIT,
@@ -16,6 +17,7 @@ import {
   type CapacityLimits,
   type CapacityReservation,
 } from "../src/scheduling/capacity-ledger.js";
+import type { MutationClass } from "../src/platform.js";
 
 const base = "a".repeat(40),
   digest = "b".repeat(64);
@@ -32,12 +34,9 @@ class Store implements LeaseStore {
   failCreateTree = false;
   beforeDispatch: (() => Promise<void>) | undefined;
   scopes = new AsyncLocalStorage<() => Promise<void>>();
-  mutationScope = new AsyncLocalStorage<"normal" | "lease" | "cleanup">();
-  mutationClasses: Array<"normal" | "lease" | "cleanup"> = [];
-  async withMutationClass<T>(
-    kind: "normal" | "lease" | "cleanup",
-    operation: () => Promise<T>,
-  ): Promise<T> {
+  mutationScope = new AsyncLocalStorage<MutationClass>();
+  mutationClasses: MutationClass[] = [];
+  async withMutationClass<T>(kind: MutationClass, operation: () => Promise<T>): Promise<T> {
     if (this.mutationScope.getStore()) return operation();
     this.mutationClasses.push(kind);
     return this.mutationScope.run(kind, operation);
@@ -502,7 +501,7 @@ describe("independent-session durable capacity", () => {
     }).initialize();
   });
 
-  it("transfers exact retained liability to a new same-run epoch without freeing a slot", async () => {
+  it("retains the original receipt owner across a new same-run mutation epoch", async () => {
     const store = new Store(),
       a = coordinator(store),
       one = await owner(store, 1),
@@ -510,10 +509,252 @@ describe("independent-session durable capacity", () => {
     await a.reserve(one, item, limits);
     store.now = new Date(store.now.getTime() + 20 * 60_000);
     const successor = await owner(store, 1);
-    await a.reconcile(successor, [item]);
+    await a.reconcile(successor, [{ owner: one, reservation: item }]);
     expect((await a.snapshot()).active).toBe(1);
-    await a.release(successor, item.key);
+    await a.release(successor, item.key, one);
     expect((await a.snapshot()).active).toBe(0);
+  });
+
+  it("imports a missing lower-epoch receipt without re-keying its owner", async () => {
+    const store = new Store(),
+      shared = coordinator(store),
+      source = await owner(store, 1, "same-run"),
+      item = reservation(1);
+    await shared.initialize();
+    store.now = new Date(store.now.getTime() + 20 * 60_000);
+    const successor = await owner(store, 1, "same-run");
+
+    await shared.reconcile(successor, [{ owner: source, reservation: item }]);
+
+    const oid = await store.readRef(SHARED_CAPACITY_REF);
+    const state = JSON.parse(
+      Buffer.from(
+        (await store.readCommit(oid!)).message.split("Factory-Shared-Capacity: ")[1]!,
+        "base64url",
+      ).toString(),
+    );
+    expect(state.claims).toMatchObject([{ owner: source, reservation: item, released: false }]);
+    await shared.release(successor, item.key, source);
+    expect(await shared.snapshot()).toMatchObject({ active: 0 });
+  });
+
+  it.each([false, true])(
+    "retains an old controller's live ownership transfer (compacted=%s)",
+    async (compacted) => {
+      const store = new Store();
+      const shared = coordinator(store);
+      const original = await owner(store, 1);
+      const item = reservation(1);
+      if (compacted) {
+        await seedClaims(store, original, SHARED_CAPACITY_COMPACT_AT - 1, true);
+        await shared.reserve(
+          original,
+          reservation(1, { workItem: SHARED_CAPACITY_COMPACT_AT }),
+          limits,
+        );
+      } else {
+        await shared.reserve(original, item, limits);
+        await shared.release(original, item.key);
+      }
+      store.now = new Date(store.now.getTime() + 20 * 60_000);
+      const transferred = await owner(store, 1);
+      // This is the durable shape written by the previous controller's reconcile:
+      // released original identity and the unchanged active resource under its new lease.
+      await shared.reserve(transferred, item, limits);
+      const before = await store.readRef(SHARED_CAPACITY_REF);
+      expect(await shared.reconcile(transferred, [{ owner: original, reservation: item }])).toEqual(
+        [{ owner: transferred, reservation: item }],
+      );
+      expect(await store.readRef(SHARED_CAPACITY_REF)).toBe(before);
+      await expect(
+        shared.reconcile(transferred, [{ owner: original, reservation: { ...item, cpu: 2 } }]),
+      ).rejects.toThrow(/conflicts/);
+      await shared.release(transferred, item.key, transferred);
+      expect((await shared.snapshot()).reservations.some((entry) => entry.key === item.key)).toBe(
+        false,
+      );
+    },
+  );
+
+  it("requires explicit recovery verification for a different source run", async () => {
+    const store = new Store(),
+      shared = coordinator(store),
+      source = await owner(store, 1, "source-run"),
+      item = reservation(1);
+    await shared.initialize();
+    store.now = new Date(store.now.getTime() + 20 * 60_000);
+    const successor = await owner(store, 1, "successor-run");
+
+    await expect(
+      shared.reconcile(successor, [{ owner: source, reservation: item }]),
+    ).rejects.toThrow("exact verified source claim");
+    await expect(
+      shared.reconcile(
+        successor,
+        [{ owner: source, reservation: item }],
+        [{ owner: source, reservation: item }],
+      ),
+    ).resolves.toEqual([{ owner: source, reservation: item }]);
+    expect(await shared.snapshot()).toMatchObject({ active: 1, reservations: [item] });
+  });
+
+  it("authorizes a recovered predecessor claim exactly rather than its whole owner", async () => {
+    const store = new Store(),
+      shared = coordinator(store),
+      source = await owner(store, 1, "source-run"),
+      selected = reservation(1),
+      unrelated = reservation(1, { workItem: 2 });
+    await shared.initialize();
+    store.now = new Date(store.now.getTime() + 20 * 60_000);
+    const successor = await owner(store, 1, "successor-run");
+
+    await expect(
+      shared.reconcile(
+        successor,
+        [
+          { owner: source, reservation: selected },
+          { owner: source, reservation: unrelated },
+        ],
+        [{ owner: source, reservation: selected }],
+      ),
+    ).rejects.toThrow("exact verified source claim");
+    expect(await shared.snapshot()).toMatchObject({ active: 0 });
+  });
+
+  it("rejects a verified source owner from a future lease epoch", async () => {
+    const store = new Store(),
+      shared = coordinator(store),
+      current = await owner(store, 1),
+      item = reservation(1),
+      future = { ...current, runId: "future", directorEpoch: current.directorEpoch + 1 };
+
+    await expect(
+      shared.reconcile(
+        current,
+        [{ owner: future, reservation: item }],
+        [{ owner: future, reservation: item }],
+      ),
+    ).rejects.toThrow("against lease history");
+    expect(await shared.snapshot()).toMatchObject({ active: 0 });
+  });
+
+  it("classifies an exact released reconstruction as typed snapshot lag without mutation", async () => {
+    const store = new Store(),
+      shared = coordinator(store),
+      claimOwner = await owner(store, 1),
+      item = reservation(1);
+    await shared.reserve(claimOwner, item, limits);
+    await shared.release(claimOwner, item.key);
+    const before = await store.readRef(SHARED_CAPACITY_REF);
+    const next = store.next;
+
+    const error = await shared
+      .reconcile(claimOwner, [{ owner: claimOwner, reservation: item }])
+      .catch((value: unknown) => value);
+
+    expect(error).toBeInstanceOf(SharedCapacitySnapshotLagError);
+    expect(error).toMatchObject({
+      evidence: [
+        {
+          claimId: sharedCapacityClaimId(claimOwner, item.key),
+          key: item.key,
+          provenance: "journal",
+        },
+      ],
+    });
+    expect(await store.readRef(SHARED_CAPACITY_REF)).toBe(before);
+    expect(store.next).toBe(next);
+  });
+
+  it("does not re-arm an epoch-N release when epoch N+1 observes the old receipt", async () => {
+    const store = new Store(),
+      shared = coordinator(store),
+      source = await owner(store, 1, "same-run"),
+      item = reservation(1);
+    await shared.reserve(source, item, limits);
+    await shared.release(source, item.key);
+    store.now = new Date(store.now.getTime() + 20 * 60_000);
+    const successor = await owner(store, 1, "same-run");
+
+    await expect(
+      shared.reconcile(successor, [{ owner: source, reservation: item }]),
+    ).rejects.toBeInstanceOf(SharedCapacitySnapshotLagError);
+    expect(await shared.snapshot()).toMatchObject({ active: 0 });
+  });
+
+  it("classifies the complete reconstruction before adding any missing claim", async () => {
+    const store = new Store(),
+      shared = coordinator(store, { ...limits, maxParallel: 4, maxLocalParallel: 4 }),
+      claimOwner = await owner(store, 1),
+      live = reservation(1, { workItem: 10 }),
+      released = reservation(1, { workItem: 11 }),
+      missing = reservation(1, { workItem: 12 });
+    await shared.reserve(claimOwner, live, { ...limits, maxParallel: 4, maxLocalParallel: 4 });
+    await shared.reserve(claimOwner, released, {
+      ...limits,
+      maxParallel: 4,
+      maxLocalParallel: 4,
+    });
+    await shared.release(claimOwner, released.key);
+    const before = await store.readRef(SHARED_CAPACITY_REF);
+
+    await expect(
+      shared.reconcile(
+        claimOwner,
+        [live, released, missing].map((reservation) => ({ owner: claimOwner, reservation })),
+      ),
+    ).rejects.toBeInstanceOf(SharedCapacitySnapshotLagError);
+
+    expect(await store.readRef(SHARED_CAPACITY_REF)).toBe(before);
+    expect(await shared.snapshot()).toMatchObject({ active: 1, reservations: [live] });
+  });
+
+  it("classifies exact compacted anti-replay evidence as typed snapshot lag", async () => {
+    const store = new Store(),
+      claimOwner = await owner(store, 1),
+      shared = coordinator(store, {
+        ...limits,
+        maxParallel: SHARED_CAPACITY_COMPACT_AT + 1,
+        maxLocalParallel: SHARED_CAPACITY_COMPACT_AT + 1,
+        cpuCapacity: SHARED_CAPACITY_COMPACT_AT + 1,
+        memoryCapacityMb: (SHARED_CAPACITY_COMPACT_AT + 1) * 128,
+      });
+    await seedClaims(store, claimOwner, SHARED_CAPACITY_COMPACT_AT - 1, true);
+    const trigger = reservation(1, { workItem: SHARED_CAPACITY_COMPACT_AT });
+    await shared.reserve(claimOwner, trigger, {
+      ...limits,
+      maxParallel: SHARED_CAPACITY_COMPACT_AT + 1,
+      maxLocalParallel: SHARED_CAPACITY_COMPACT_AT + 1,
+      cpuCapacity: SHARED_CAPACITY_COMPACT_AT + 1,
+      memoryCapacityMb: (SHARED_CAPACITY_COMPACT_AT + 1) * 128,
+    });
+    const retired = reservation(1, { workItem: 1 });
+    const before = await store.readRef(SHARED_CAPACITY_REF);
+    const next = store.next;
+
+    const error = await shared
+      .reconcile(claimOwner, [{ owner: claimOwner, reservation: retired }])
+      .catch((value: unknown) => value);
+
+    expect(error).toBeInstanceOf(SharedCapacitySnapshotLagError);
+    expect(error).toMatchObject({ evidence: [{ provenance: "retired", key: retired.key }] });
+    expect(await store.readRef(SHARED_CAPACITY_REF)).toBe(before);
+    expect(store.next).toBe(next);
+  });
+
+  it("rejects changed resources behind released evidence as fatal identity conflict", async () => {
+    const store = new Store(),
+      shared = coordinator(store),
+      claimOwner = await owner(store, 1),
+      item = reservation(1);
+    await shared.reserve(claimOwner, item, limits);
+    await shared.release(claimOwner, item.key);
+
+    await expect(
+      shared.reconcile(claimOwner, [
+        { owner: claimOwner, reservation: { ...item, cpu: item.cpu + 1 } },
+      ]),
+    ).rejects.toThrow("retained identity");
   });
 
   it("compacts released claims into exact durable anti-replay evidence at the boundary", async () => {

@@ -95,9 +95,10 @@ export {
   type GraphProjectionExpectation,
 } from "./control/graph-evidence.js";
 import { GitHubControlStore } from "./control/github-store.js";
-import type {
-  SharedCapacityCoordinator,
-  SharedCapacityOwner,
+import {
+  SharedCapacitySnapshotLagError,
+  type SharedCapacityCoordinator,
+  type SharedCapacityOwner,
 } from "./controller/shared-capacity.js";
 import { materializePinnedCompilationTree } from "./execution/pinned-compilation-tree.js";
 import {
@@ -325,6 +326,7 @@ import {
   CapacityLedger,
   capacityReservationKey,
   deriveCapacityReservations,
+  deriveOwnedCapacityReservations,
   isIntegrationValidationBackend,
   isLocalIntegrationValidationBackend,
   unreconciledCapacityReservations,
@@ -576,6 +578,7 @@ class ProviderQuotaDrainIncompleteError extends Error {
 function terminalizationVeto(error: unknown): boolean {
   return (
     error instanceof LeaseLostError ||
+    error instanceof SharedCapacitySnapshotLagError ||
     error instanceof PlatformUnavailableError ||
     error instanceof SafeArtifactCheckpointHeldError ||
     error instanceof ArtifactCompletionUnavailableError ||
@@ -1184,6 +1187,7 @@ export class FactorySupervisor {
   readonly #mutations: MutationScheduler;
   readonly #capacity: CapacityLedger;
   readonly #sharedCapacity: SharedCapacityCoordinator | undefined;
+  readonly #sharedCapacityOwners = new Map<string, SharedCapacityOwner>();
   readonly #resourceSampler: CachedResourceSampler;
   readonly #fairness: ObjectiveFairness;
   readonly #controllerLimits: {
@@ -1624,9 +1628,12 @@ export class FactorySupervisor {
   ): Promise<CapacityReservationResult> {
     if (!this.#sharedCapacity)
       return this.#capacity.tryReserve(expectedGeneration, reservation, limits);
-    const result = await this.#lease.use((lease) =>
-      this.#sharedCapacity!.reserve(this.#capacityOwner(lease), reservation, limits),
-    );
+    const result = await this.#lease.use(async (lease) => {
+      const owner = this.#capacityOwner(lease);
+      const result = await this.#sharedCapacity!.reserve(owner, reservation, limits);
+      if (result.reserved) this.#sharedCapacityOwners.set(reservation.key, owner);
+      return result;
+    });
     const snapshot = await this.#sharedCapacity.snapshot();
     return result.reserved
       ? { reserved: true, reservation, generation: snapshot.generation }
@@ -1645,9 +1652,21 @@ export class FactorySupervisor {
   ): Promise<CapacityReservationResult> {
     if (!this.#sharedCapacity)
       return this.#capacity.transition(expectedGeneration, fromKey, reservation, limits);
-    const result = await this.#lease.use((lease) =>
-      this.#sharedCapacity!.transition(this.#capacityOwner(lease), fromKey, reservation, limits),
-    );
+    const result = await this.#lease.use(async (lease) => {
+      const owner = this.#capacityOwner(lease);
+      const result = await this.#sharedCapacity!.transition(
+        owner,
+        fromKey,
+        reservation,
+        limits,
+        this.#sharedCapacityOwners.get(fromKey) ?? owner,
+      );
+      if (result.reserved) {
+        this.#sharedCapacityOwners.delete(fromKey);
+        this.#sharedCapacityOwners.set(reservation.key, owner);
+      }
+      return result;
+    });
     const snapshot = await this.#sharedCapacity.snapshot();
     return result.reserved
       ? { reserved: true, reservation, generation: snapshot.generation }
@@ -1658,11 +1677,16 @@ export class FactorySupervisor {
         };
   }
 
-  async #releaseCapacity(key: string): Promise<void> {
+  async #releaseCapacity(key: string, originalOwner?: SharedCapacityOwner): Promise<void> {
     if (this.#sharedCapacity) {
       await this.#lease.use((lease) =>
-        this.#sharedCapacity!.release(this.#capacityOwner(lease), key),
+        this.#sharedCapacity!.release(
+          this.#capacityOwner(lease),
+          key,
+          this.#sharedCapacityOwners.get(key) ?? originalOwner,
+        ),
       );
+      this.#sharedCapacityOwners.delete(key);
     } else {
       this.#capacity.release(key);
     }
@@ -1671,7 +1695,7 @@ export class FactorySupervisor {
 
   async #reconcileObjectiveCapacity(objective: number, items: DerivedWorkItem[]) {
     const scheduling = normalizeSchedulingPolicy(this.#policy);
-    const reservations = deriveCapacityReservations(
+    const reservations = deriveOwnedCapacityReservations(
       items.map((item) => {
         const packet = this.#packetFor(item.number);
         for (const event of item.factoryEvents ?? []) {
@@ -1700,40 +1724,133 @@ export class FactorySupervisor {
         };
       }),
     );
-    if (!this.#sharedCapacity) return this.#capacity.reconcileObjective(objective, reservations);
+    if (!this.#sharedCapacity)
+      return this.#capacity.reconcileObjective(
+        objective,
+        reservations.map(({ reservation }) => reservation),
+      );
     const verifiedPredecessors = this.#recoveryRuntime
-      ? [
-          ...new Map(
-            items.flatMap((item) =>
-              (item.factoryEvents ?? []).flatMap((event) => {
-                if (
-                  event.kind !== "attempt" ||
-                  event.event !== "AttemptReserved" ||
-                  event.runId === this.#run.runId
-                )
-                  return [];
-                const owner: SharedCapacityOwner = {
-                  objective: event.objective,
-                  runId: event.runId,
-                  directorEpoch: event.directorEpoch,
-                  policyDigest: event.policyDigest,
-                };
-                return [
-                  [`${owner.runId}:${owner.directorEpoch}:${owner.policyDigest}`, owner] as const,
-                ];
-              }),
-            ),
-          ).values(),
-        ]
+      ? reservations.filter((imported) => {
+          if (imported.owner.runId === this.#run.runId) return false;
+          const item = items.find(
+            (candidate) => candidate.number === imported.reservation.workItem,
+          );
+          const planned = this.#recoveryRuntime!.planRecord.plan.items.find(
+            (entry) => entry.workItem === imported.reservation.workItem,
+          );
+          if (
+            !item ||
+            !this.#recoveryRuntime!.accountingRunIds.includes(imported.owner.runId) ||
+            planned?.source?.runId !== imported.owner.runId ||
+            planned.source.attempt !== imported.reservation.attempt
+          )
+            return false;
+          return (item.factoryEvents ?? []).some((event) => {
+            if (
+              event.runId !== imported.owner.runId ||
+              !("attempt" in event) ||
+              event.attempt !== imported.reservation.attempt ||
+              event.workItem !== imported.reservation.workItem ||
+              event.policyDigest !== imported.owner.policyDigest ||
+              !this.#recoveryRuntime!.eventObservation.findByDigest(recoveryEventDigest(event))
+            )
+              return false;
+            if (event.kind === "attempt" && event.event === "AttemptReserved")
+              return (
+                imported.reservation.phase === "execution" &&
+                event.backend === imported.reservation.backendId &&
+                event.directorEpoch === imported.owner.directorEpoch
+              );
+            return (
+              event.kind === "capacity" &&
+              event.event === "CapacityReserved" &&
+              event.phase === "validation" &&
+              imported.reservation.phase === "validation" &&
+              event.backend === imported.reservation.backendId &&
+              (event.recoveryEpoch ?? event.directorEpoch) === imported.owner.directorEpoch
+            );
+          });
+        })
       : [];
-    await this.#lease.use((lease) =>
+    const retained = await this.#lease.use((lease) =>
       this.#sharedCapacity!.reconcile(
         this.#capacityOwner(lease),
         reservations,
         verifiedPredecessors,
       ),
     );
+    for (const { owner, reservation } of retained)
+      this.#sharedCapacityOwners.set(reservation.key, owner);
     return this.#sharedCapacity.snapshot();
+  }
+
+  #snapshotHasDurableCapacity(snapshot: Snapshot): boolean {
+    const scheduling = normalizeSchedulingPolicy(this.#policy);
+    return (
+      deriveCapacityReservations(
+        snapshot.workItems.map((item) => ({
+          objective: snapshot.number,
+          workItem: item.number,
+          events: item.factoryEvents ?? [],
+          defaultCpu: scheduling.capacity.local.defaultCpu,
+          defaultMemoryMb: scheduling.capacity.local.defaultMemoryMb,
+        })),
+      ).length > 0
+    );
+  }
+
+  async #ensureCapacityProjection(snapshot: Snapshot): Promise<boolean> {
+    if (this.#compiledGraph) {
+      this.#fenceSnapshot(snapshot);
+      return true;
+    }
+    if (!this.#snapshotHasDurableCapacity(snapshot)) return false;
+    const graphs = new CompiledGraphManager(this.#store, this.#leases);
+    const graph =
+      this.#recoveryRuntime?.graph ?? (await graphs.load(snapshot.number, this.#run.runId));
+    const projection =
+      this.#recoveryRuntime?.projection ??
+      (graph && (await graphs.loadProjection(snapshot.number, this.#run.runId, graph)));
+    if (!graph || !projection)
+      throw new Error("capacity reconstruction lacks its immutable graph/projection");
+    assertGraphWithinRunPolicy(graph.objective, this.#policy);
+    this.#compiledGraph = graph.objective;
+    this.#compiledProjection = projection;
+    this.#fenceSnapshot(snapshot);
+    return true;
+  }
+
+  /** Return the complete observation used for all subsequent decisions. An exact
+   * released claim contradicts the observation, not an already-admitted child. */
+  async #observeCapacity(initial: Snapshot, deadline: number): Promise<Snapshot> {
+    let snapshot = initial;
+    for (let observation = 0; observation < 3; observation++) {
+      try {
+        if (await this.#ensureCapacityProjection(snapshot)) {
+          const objective = this.#deriveObjective(snapshot);
+          await this.#reconcileObjectiveCapacity(objective.number, objective.items);
+        }
+        return snapshot;
+      } catch (error) {
+        if (!(error instanceof SharedCapacitySnapshotLagError)) throw error;
+        if (observation === 0) this.#notify(error.message);
+        if (
+          observation === 2 ||
+          this.#options.signal?.aborted ||
+          hasCancellationRequest(snapshot, this.#run.runId) ||
+          Date.now() >= deadline
+        )
+          throw error;
+        await sleep(
+          Math.max(1, Math.min(this.#options.pollIntervalMs ?? 2_000, deadline - Date.now())),
+        );
+        await this.#lease.assert();
+        snapshot = await this.#reader.readObjective(snapshot.number);
+        this.#fenceSnapshot(snapshot);
+        this.#sequences.observe(snapshotEvents(snapshot));
+      }
+    }
+    throw new Error("capacity observation bound exhausted");
   }
 
   #deriveObjective(snapshot: Snapshot): ReturnType<typeof derive> {
@@ -3251,6 +3368,7 @@ export class FactorySupervisor {
       } else if (snapshot.workItems.length)
         throw new Error("cancellation graph ownership is unavailable");
       this.#budgetEvents = this.#accountingEvents(snapshotEvents(snapshot), run.runId);
+      snapshot = await this.#observeCapacity(snapshot, deadline);
       const items = this.#deriveObjective(snapshot).items;
       const retired = new Map<string, AttemptReservation>();
       for (const item of items) {
@@ -3588,6 +3706,41 @@ export class FactorySupervisor {
               }),
             );
           }
+          // Cleanup and native accounting above discharged these exact original
+          // liabilities. Receipt absence alone never releases a shared claim.
+          for (const capacity of capacities) {
+            if (capacity.kind !== "capacity") continue;
+            await this.#releaseCapacity(
+              capacityReservationKey({
+                objective: run.objective,
+                workItem: item.number,
+                attempt: reservation.attempt,
+                phase: capacity.phase,
+                backendId: capacity.backend,
+              }),
+              {
+                objective: capacity.objective,
+                runId: capacity.runId,
+                policyDigest: capacity.policyDigest,
+                directorEpoch: capacity.recoveryEpoch ?? capacity.directorEpoch,
+              },
+            );
+          }
+          await this.#releaseCapacity(
+            capacityReservationKey({
+              objective: run.objective,
+              workItem: item.number,
+              attempt: reservation.attempt,
+              phase: "execution",
+              backendId: reservation.backend,
+            }),
+            {
+              objective: reservation.objective,
+              runId: reservation.runId,
+              policyDigest: reservation.policyDigest,
+              directorEpoch: reservation.directorEpoch,
+            },
+          );
           retired.set(`${item.number}:${reservation.attempt}`, reservation);
         }
       }
@@ -4217,6 +4370,7 @@ export class FactorySupervisor {
     };
     const finishExpired = async (): Promise<SupervisorResult> => {
       snapshot = await this.#reader.readObjective(snapshot.number);
+      snapshot = await this.#observeCapacity(snapshot, deadline);
       this.#sequences.observe(snapshotEvents(snapshot));
       if (hasCancellationRequest(snapshot, this.#run.runId) || this.#options.signal?.aborted)
         return terminalAfterDrain("FactoryRunCancelled", "operator requested cancellation");
@@ -4226,7 +4380,10 @@ export class FactorySupervisor {
       ) {
         await activeExecutions.waitForIdle();
         activeExecutions.throwNextFailure();
-        const finalSnapshot = await this.#reader.readObjective(snapshot.number);
+        const finalSnapshot = await this.#observeCapacity(
+          await this.#reader.readObjective(snapshot.number),
+          deadline,
+        );
         this.#sequences.observe(snapshotEvents(finalSnapshot));
         if (hasCancellationRequest(finalSnapshot, this.#run.runId) || this.#options.signal?.aborted)
           return terminalAfterDrain("FactoryRunCancelled", "operator requested cancellation");
@@ -5104,6 +5261,8 @@ export class FactorySupervisor {
         // An absent active key must not turn that failure into same-process recovery.
         activeExecutions.throwNextFailure();
         this.#fenceSnapshot(snapshot);
+        snapshot = await this.#observeCapacity(snapshot, deadline);
+        activeExecutions.throwNextFailure();
         this.#ciExpectedOnPullRequests = snapshot.ciExpectedOnPullRequests;
         this.#sequences.observe(snapshotEvents(snapshot));
         const durableProviderGates = providerQuotaGates(snapshotEvents(snapshot), this.#run.runId);
@@ -5123,7 +5282,6 @@ export class FactorySupervisor {
           durableProviderGates.some((gate) => gate.workItem !== undefined)
         ) {
           const gatedObjective = this.#deriveObjective(snapshot);
-          await this.#reconcileObjectiveCapacity(gatedObjective.number, gatedObjective.items);
           const gatedRecoverable: DerivedWorkItem[] = [];
           for (const item of gatedObjective.items) {
             if (activeExecutions.has(item.number)) continue;
@@ -5145,8 +5303,8 @@ export class FactorySupervisor {
           snapshot = await this.#reader.readObjective(snapshot.number);
           this.#fenceSnapshot(snapshot);
           this.#sequences.observe(snapshotEvents(snapshot));
+          snapshot = await this.#observeCapacity(snapshot, deadline);
           const settledObjective = this.#deriveObjective(snapshot);
-          await this.#reconcileObjectiveCapacity(settledObjective.number, settledObjective.items);
           for (const item of settledObjective.items) {
             if (
               !activeExecutions.has(item.number) &&
@@ -5193,7 +5351,6 @@ export class FactorySupervisor {
         const objective = this.#deriveObjective(snapshot);
         // All resumed peers seed their durable execution/validation liabilities
         // before any member of the starting cohort may acquire fresh capacity.
-        await this.#reconcileObjectiveCapacity(objective.number, objective.items);
         this.#fairness.markReconciled(objective.number);
         if (!this.#fairness.reconciled && !durableProviderGate) {
           await this.#fairness.waitForChange(
@@ -5261,7 +5418,12 @@ export class FactorySupervisor {
           await this.#resumeAdoptedSource(adoptedPublication);
           continue;
         }
-        if (await this.#repairReservationReceipts(objective.items)) continue;
+        if (
+          await this.#repairReservationReceipts(
+            objective.items.filter((item) => !activeExecutions.has(item.number)),
+          )
+        )
+          continue;
         let deferredIntegration = false;
         if (this.#deliverySelection.selected === "regular-prs") {
           const unrecorded = objective.items.find((item) => {
@@ -5594,7 +5756,7 @@ export class FactorySupervisor {
             all.findIndex((candidate) => candidate.number === item.number) === index,
         );
         const scheduling = normalizeSchedulingPolicy(this.#policy);
-        const capacity = await this.#reconcileObjectiveCapacity(objective.number, objective.items);
+        const capacity = await this.#capacitySnapshot();
         this.#budgetEvents = deduplicateFactoryEvents([
           ...this.#budgetEvents,
           ...this.#accountingEvents(snapshotEvents(snapshot)),
@@ -17331,6 +17493,10 @@ export class FactorySupervisor {
     reason?: string,
   ): Promise<SupervisorResult> {
     await this.#lease.assert();
+    snapshot = await this.#observeCapacity(
+      snapshot,
+      this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+    );
     // Deadline-only recovery skips normal admission, but its fresh terminal
     // receipt still needs this writer's boundary. Ordinary runs reuse the
     // already-recorded boundary without another comment.

@@ -4,6 +4,14 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ## Unreleased
 
+### Fixed
+
+- Refresh the complete Objective snapshot when the shared-capacity journal proves that an exact
+  reconstructed claim was already released. Bounded visibility-lag handling preserves validation
+  failures and successful completion without resurrecting capacity; changed identities still fail
+  closed. Reconciliation retains original claim ownership across lease renewal and cleanup.
+  ([#306](https://github.com/clockgrove/factory/issues/306))
+
 ### Added
 
 - Change-sensitive repository discovery now reconstructs authenticated history once, consumes

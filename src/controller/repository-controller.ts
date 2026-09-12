@@ -7,7 +7,11 @@ import {
   RepositoryLeaseLostError,
   RepositoryLeaseManager,
 } from "./repository-lease.js";
-import { SharedCapacityCoordinator, SHARED_CAPACITY_REF } from "./shared-capacity.js";
+import {
+  SharedCapacityCoordinator,
+  SharedCapacitySnapshotLagError,
+  SHARED_CAPACITY_REF,
+} from "./shared-capacity.js";
 import { importLegacyCapacity } from "./legacy-capacity.js";
 import {
   createRepositorySupervisorResources,
@@ -197,7 +201,7 @@ export class GitHubRepositoryController {
   readonly #running = new Map<number, Promise<void>>();
   readonly #parked = new Map<
     number,
-    { requestId: string; discoveryRevision: number; retryAt: number }
+    { requestId: string; discoveryRevision: number; retryAt: number; persistent: boolean }
   >();
   readonly #completedDiscovery = new Map<
     number,
@@ -260,8 +264,9 @@ export class GitHubRepositoryController {
       )
       .sort((a, b) => a.objective - b.objective);
     const discoveredObjectives = new Set(discovered.map((activation) => activation.objective));
-    for (const objective of this.#parked.keys())
-      if (!discoveredObjectives.has(objective)) this.#parked.delete(objective);
+    for (const [objective, parked] of this.#parked)
+      if (!parked.persistent && !discoveredObjectives.has(objective))
+        this.#parked.delete(objective);
     for (const objective of this.#completedDiscovery.keys())
       if (!discoveredObjectives.has(objective)) this.#completedDiscovery.delete(objective);
     if (discovered.length === 0) return 0;
@@ -284,8 +289,9 @@ export class GitHubRepositoryController {
           completed.discoveryRevision !== (activation.discoveryRevision ?? 0)) &&
         (!parked ||
           parked.requestId !== activation.requestId ||
-          parked.discoveryRevision !== (activation.discoveryRevision ?? 0) ||
-          parked.retryAt <= Date.now())
+          (!parked.persistent &&
+            (parked.discoveryRevision !== (activation.discoveryRevision ?? 0) ||
+              parked.retryAt <= Date.now())))
       );
     });
     const resuming = pending.filter((activation) => activation.resuming);
@@ -341,6 +347,7 @@ export class GitHubRepositoryController {
                   error instanceof LeaseAcquisitionContendedError
                     ? Date.now() + error.retryAfterMs
                     : Number.POSITIVE_INFINITY,
+                persistent: error instanceof SharedCapacitySnapshotLagError,
               });
               if (signal.aborted && !(error instanceof LeaseAcquisitionContendedError)) {
                 // A shared stop may expose unknown cleanup; retain that failure

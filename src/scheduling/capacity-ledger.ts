@@ -41,6 +41,19 @@ export interface CapacityReservation {
   exclusiveResources: readonly string[];
 }
 
+/** Immutable receipt identity that originally created a durable reservation. */
+export interface CapacityReservationOwner {
+  objective: number;
+  runId: string;
+  directorEpoch: number;
+  policyDigest: string;
+}
+
+export interface OwnedCapacityReservation {
+  owner: CapacityReservationOwner;
+  reservation: CapacityReservation;
+}
+
 export interface CapacityLimits {
   /** Repository-wide ceilings. */
   maxParallel: number;
@@ -436,11 +449,11 @@ const executionTerminal = new Set([
   "AttemptIntegrated",
 ]);
 
-/** Rebuild all live execution and validation capacity from durable receipts. */
-export function deriveCapacityReservations(
+/** Rebuild all live execution and validation capacity with their durable receipt owners. */
+export function deriveOwnedCapacityReservations(
   inputs: readonly DurableCapacityInput[],
-): CapacityReservation[] {
-  const result = new Map<string, CapacityReservation>();
+): OwnedCapacityReservation[] {
+  const result = new Map<string, OwnedCapacityReservation>();
   for (const input of inputs) {
     const events = deduplicateFactoryEvents([...input.events]).sort(
       (left, right) => left.sequence - right.sequence,
@@ -526,7 +539,15 @@ export function deriveCapacityReservations(
         paths: input.paths ?? [],
         exclusiveResources: input.exclusiveResources ?? [],
       };
-      result.set(reservation.key, reservation);
+      result.set(reservation.key, {
+        owner: {
+          objective: reserved.objective,
+          runId: reserved.runId,
+          directorEpoch: reserved.directorEpoch,
+          policyDigest: reserved.policyDigest,
+        },
+        reservation,
+      });
     }
 
     for (const reserved of unreconciledCapacityReservations(events).filter(
@@ -568,8 +589,23 @@ export function deriveCapacityReservations(
         paths: input.paths ?? [],
         exclusiveResources: input.exclusiveResources ?? [],
       };
-      result.set(reservation.key, reservation);
+      result.set(reservation.key, {
+        owner: {
+          objective: reserved.objective,
+          runId: reserved.runId,
+          directorEpoch: reserved.recoveryEpoch ?? reserved.directorEpoch,
+          policyDigest: reserved.policyDigest,
+        },
+        reservation,
+      });
     }
   }
-  return [...result.values()].sort((a, b) => a.key.localeCompare(b.key));
+  return [...result.values()].sort((a, b) => a.reservation.key.localeCompare(b.reservation.key));
+}
+
+/** Compatibility view for callers that do not need durable provenance. */
+export function deriveCapacityReservations(
+  inputs: readonly DurableCapacityInput[],
+): CapacityReservation[] {
+  return deriveOwnedCapacityReservations(inputs).map(({ reservation }) => reservation);
 }

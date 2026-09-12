@@ -225,7 +225,6 @@ function fixture({
       [rootBase],
       `Factory reservation\n\nFactory-Event: ${Buffer.from(JSON.stringify(reservation)).toString("base64url")}`,
     );
-    refs.set(reserveRef, reserveOid);
     const admissionRef = `refs/clockgrove-factory/admission/work-item-${number}`;
     const admissionRecord = {
       protocol: "clockgrove.factory/issue-admission-v1",
@@ -553,15 +552,11 @@ function fixture({
     ],
     status: { run: {} },
   };
+  const reservationPort = {
+    readRef: async (ref) => refs.get(ref) ?? null,
+    readCommit: async (oid) => structuredClone(commits.get(oid)),
+  };
   const read = vi.fn(async (demand) => {
-    const reservationPort = {
-      readRef: async (ref) => refs.get(ref) ?? null,
-      readCommit: async (oid) => {
-        const value = commits.get(oid);
-        if (value === undefined) throw new Error("immutable reservation commit missing");
-        return structuredClone(value);
-      },
-    };
     if (demand.kind === "reservation-authority")
       return resolveQualificationReservationAuthority(reservationPort, demand.reserved);
     if (demand.kind === "reservation-authority-current")

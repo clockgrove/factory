@@ -6,6 +6,10 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Fixed
 
+- Reconstruct the built-in local validator with its original local capacity identity, avoiding
+  foreground escalation during validation while preserving shared reservation checks.
+  ([#319](https://github.com/clockgrove/factory/issues/319))
+
 - Small foreground runs can use bounded mutation bursts before sustained smoothing, retaining
   rolling limits, lease priority and server backoff. Concurrent foreground/controller instances
   share credential quota and refusal state while shutdown remains owner-local. Validation and review JSON checkpoints create

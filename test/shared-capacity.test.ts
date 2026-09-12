@@ -14,9 +14,11 @@ import {
 } from "../src/controller/shared-capacity.js";
 import {
   capacityReservationKey,
+  deriveOwnedCapacityReservations,
   type CapacityLimits,
   type CapacityReservation,
 } from "../src/scheduling/capacity-ledger.js";
+import { parseFactoryEvent } from "../src/protocol/events.js";
 import type { MutationClass } from "../src/platform.js";
 
 const base = "a".repeat(40),
@@ -233,6 +235,86 @@ async function seedClaims(
 }
 
 describe("independent-session durable capacity", () => {
+  it.each([undefined, () => false])(
+    "reconstructs the built-in validation interval without changing retained local capacity (%s)",
+    async (isLocalBackend) => {
+      const store = new Store();
+      const shared = coordinator(store);
+      const one = await owner(store, 1);
+      const two = await owner(store, 2);
+      await shared.initialize();
+      const execution = reservation(1, { paths: ["src/clamp.js", "test/clamp.test.js"] });
+      const validation = reservation(1, {
+        ...execution,
+        phase: "validation",
+        backendId: "factory/local-validation",
+      });
+      const peer = reservation(2);
+      await shared.reserve(one, execution, limits);
+      await shared.reserve(two, peer, limits);
+      await shared.transition(one, execution.key, validation, limits);
+
+      const common = {
+        protocol: "clockgrove.factory/v2",
+        ...one,
+        at: store.now.toISOString(),
+        workItem: execution.workItem,
+        attempt: 1,
+      };
+      const attempt = (event: string, sequence: number) =>
+        parseFactoryEvent({
+          ...common,
+          kind: "attempt",
+          event,
+          sequence,
+          backend: execution.backendId,
+          baseSha: base,
+        });
+      const reserved = parseFactoryEvent({
+        ...common,
+        kind: "capacity",
+        event: "CapacityReserved",
+        sequence: 21,
+        phase: "validation",
+        backend: validation.backendId,
+        requestedCpu: validation.cpu,
+        requestedMemoryMb: validation.memoryMb,
+      });
+      // The observed failure window: execution succeeded, validation capacity
+      // was published, and neither validation nor its accounting had settled.
+      const events = [attempt("AttemptReserved", 9), attempt("AttemptSucceeded", 18), reserved];
+      for (const prefix of [events, [...events, attempt("AttemptCollected", 22)]]) {
+        const reconstructed = deriveOwnedCapacityReservations([
+          {
+            objective: 1,
+            workItem: execution.workItem,
+            events: prefix,
+            defaultCpu: 1,
+            defaultMemoryMb: 128,
+            paths: execution.paths,
+            exclusiveResources: execution.exclusiveResources,
+            ...(isLocalBackend ? { isLocalBackend } : {}),
+          },
+        ]);
+        await expect(shared.reconcile(one, reconstructed)).resolves.toEqual([
+          { owner: one, reservation: validation },
+        ]);
+        expect((await shared.snapshot()).active).toBe(2);
+      }
+      // Matching classification does not relax the retained resource identity.
+      await expect(
+        shared.reconcile(one, [
+          {
+            owner: one,
+            reservation: { ...validation, cpu: validation.cpu + 1 },
+          },
+        ]),
+      ).rejects.toThrow("retained identity");
+      await shared.release(one, validation.key);
+      expect((await shared.snapshot()).reservations).toEqual([peer]);
+    },
+  );
+
   it("classifies shared-capacity release as cleanup across its complete CAS transaction", async () => {
     const store = new Store();
     const shared = coordinator(store);

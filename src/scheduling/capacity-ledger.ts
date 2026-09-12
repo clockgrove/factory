@@ -565,9 +565,12 @@ export function deriveOwnedCapacityReservations(
       // Original attempt/validation completion cannot discharge a later candidate validator.
       // Only that exact backend's durable CapacityReconciled receipt removes its obligation.
       if (!integrationValidation && (terminalAttempt || validationFinished)) continue;
-      const local = integrationValidation
-        ? isLocalIntegrationValidationBackend(reserved.backend)
-        : (input.isLocalBackend?.(reserved.backend) ?? false);
+      // The built-in validator runs on the host without a registered provider.
+      const local =
+        reserved.backend === "factory/local-validation" ||
+        (integrationValidation
+          ? isLocalIntegrationValidationBackend(reserved.backend)
+          : (input.isLocalBackend?.(reserved.backend) ?? false));
       const reservation: CapacityReservation = {
         key: capacityReservationKey({
           objective: input.objective,

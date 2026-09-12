@@ -717,6 +717,7 @@ export function largeFileExtension(authority) {
       "qualification-large-files-recipe.mjs",
       "qualification-artifact-transfer.mjs",
       "qualification-large-file-refusals.mjs",
+      "qualification-reservation-authority.mjs",
     ].map((path) => `scripts/${path}`),
     objectiveBody,
     preflight(context) {

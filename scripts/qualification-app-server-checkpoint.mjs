@@ -7,6 +7,13 @@ import {
   assertQualificationCheckpoint,
   nativeProofReader,
 } from "./qualification-sibling-refresh-proof.mjs";
+import {
+  assertQualificationReservationAuthority,
+  assertQualificationReservationAuthorityReobservation,
+  observeQualificationReservationAuthority,
+  qualificationReservationAuthorityExpectation,
+  reobserveQualificationReservationAuthority,
+} from "./qualification-reservation-authority.mjs";
 
 const hash = (text) => createHash("sha256").update(text).digest("hex");
 const canonical = (value) =>
@@ -115,6 +122,17 @@ export function assertAppServerCheckpoint(observation, authority, proof, witness
   const { identity, sessionRef, reservationRef, transferRef, attemptId } = identities(
     authority,
     reserved,
+  );
+  const reservationAuthority = {
+    logicalRef: proof.reservationRef,
+    reservationOid: proof.reservationOid,
+    reservationCommit: proof.reservationCommit,
+    authority: proof.reservationAuthority,
+  };
+  assertQualificationReservationAuthority(reservationAuthority, reserved);
+  assertQualificationReservationAuthorityReobservation(
+    proof.observedReservationAuthority,
+    qualificationReservationAuthorityExpectation(reservationAuthority, reserved),
   );
   assert.equal(proof.reservationRef, reservationRef);
   assert.match(proof.reservationOid, /^[a-f0-9]{40}$/);
@@ -319,12 +337,13 @@ export async function observeAppServerCheckpoints(request, observation, authorit
   assert.ok(reservations.length > 0 && reservations.length <= 3);
   for (const reserved of reservations) {
     const refs = identities(authority, reserved),
-      reservationOid = await read({ kind: "ref", ref: refs.reservationRef });
+      reservation = await observeQualificationReservationAuthority(request, reserved);
     const proof = {
       workItem: reserved.workItem,
-      reservationRef: refs.reservationRef,
-      reservationOid,
-      reservationCommit: await read({ kind: "commit", oid: reservationOid }),
+      reservationRef: reservation.logicalRef,
+      reservationOid: reservation.reservationOid,
+      reservationCommit: reservation.reservationCommit,
+      reservationAuthority: reservation.authority,
     };
     for (const stage of ["prepared", "turn", "terminal"])
       proof[stage] = await read({
@@ -340,6 +359,11 @@ export async function observeAppServerCheckpoints(request, observation, authorit
         path: "artifact-transfer.json",
         maxBytes: 1048576,
       });
+    proof.observedReservationAuthority = await reobserveQualificationReservationAuthority(
+      request,
+      reservation,
+      reserved,
+    );
     assertAppServerCheckpoint(
       observation,
       authority,

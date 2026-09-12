@@ -7,6 +7,14 @@ import {
   assertQualificationCheckpoint,
   nativeProofReader,
 } from "./qualification-sibling-refresh-proof.mjs";
+import {
+  observeQualificationReservationAuthority,
+  reobserveQualificationReservationAuthority,
+} from "./qualification-reservation-authority.mjs";
+import {
+  assertQualificationEvidenceValue,
+  largeFileRefusalEvidenceBytes,
+} from "./qualification-evidence-boundary.mjs";
 
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const canonical = (value) =>
@@ -24,20 +32,8 @@ const one = (rows, message) => {
 };
 const gitOid = (kind, bytes) =>
   createHash("sha1").update(`${kind} ${bytes.length}\0`).update(bytes).digest("hex");
-const safe = (value) => {
-  const bytes = JSON.stringify(value);
-  assert.ok(
-    bytes !== undefined && Buffer.byteLength(bytes) <= 4 * 1024 * 1024,
-    "refusal evidence exceeds bound",
-  );
-  assert.ok(
-    !/\b(?:gh[opurs]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|authorization\s*:\s*(?:bearer|basic)\s+\S+/i.test(
-      bytes,
-    ),
-    "refusal evidence contains suspected credential material",
-  );
-  return value;
-};
+const safe = (value, maximum = 4 * 1024 * 1024) =>
+  assertQualificationEvidenceValue(value, maximum, "refusal evidence");
 const phases = new Set(["scope", "secret", "symlink"]);
 const identityKeys = [
   "repository",
@@ -123,21 +119,15 @@ async function absentRef(context, ref) {
   }
   assert.fail("refused collection unexpectedly has a reachable transfer ref");
 }
-async function reservationProof(read, reserved) {
-  const ref = `refs/clockgrove-factory/attempts/objective-${reserved.objective}/work-item-${reserved.workItem}/attempt-${reserved.attempt}`;
-  const oid = await read({ kind: "ref", ref }),
-    commit = await read({ kind: "commit", oid });
-  assert.deepEqual(commit.parentOids, [reserved.baseSha], "reservation source parent differs");
-  const trailer = one(
-    commit.message.split(/\r?\n/).filter((line) => line.startsWith("Factory-Event: ")),
-    "reservation event trailer missing or repeated",
-  );
-  assert.ok(
-    canonical(JSON.parse(Buffer.from(trailer.slice(15), "base64url").toString())) ===
-      canonical(reserved),
-    "reservation trailer differs from authenticated receipt",
-  );
-  return { ref, oid, commit };
+async function reservationProof(request, reserved) {
+  const proof = await observeQualificationReservationAuthority(request, reserved);
+  return {
+    ref: proof.logicalRef,
+    oid: proof.reservationOid,
+    commit: proof.reservationCommit,
+    authority: proof.authority,
+    observedAuthority: null,
+  };
 }
 async function packetProof(context, fixture, read, events, reserved, reservation) {
   const graphEvent = one(
@@ -447,7 +437,7 @@ export function createLargeFileRefusalPorts(context, fixture) {
     "refusal fixture differs from exact qualification namespace/base",
   );
   const save = async () => {
-    safe(evidence.largeFileRefusal);
+    largeFileRefusalEvidenceBytes(evidence.largeFileRefusal);
     await context.save();
   };
   return {
@@ -632,7 +622,7 @@ export function createLargeFileRefusalPorts(context, fixture) {
         "refusal unexpectedly has validation command completion evidence",
       );
       const read = nativeProofReader(context.request),
-        reservation = await reservationProof(read, reserved);
+        reservation = await reservationProof(context.request, reserved);
       const packet = await packetProof(context, fixture, read, run, reserved, reservation);
       const identity = Object.fromEntries(
         identityKeys.map((key) => [
@@ -648,9 +638,15 @@ export function createLargeFileRefusalPorts(context, fixture) {
               intent: await absentRef(context, `${ref}/intent`),
               ready: await absentRef(context, `${ref}/ready`),
             };
-      assert.ok(
-        (await read({ kind: "ref", ref: reservation.ref })) === reservation.oid,
-        "original readable reservation authority changed during refusal observations",
+      reservation.observedAuthority = await reobserveQualificationReservationAuthority(
+        context.request,
+        {
+          logicalRef: reservation.ref,
+          reservationOid: reservation.oid,
+          reservationCommit: reservation.commit,
+          authority: reservation.authority,
+        },
+        reserved,
       );
       const result = {
         scenario,

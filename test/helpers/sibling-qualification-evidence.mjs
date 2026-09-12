@@ -661,6 +661,7 @@ export async function completeSiblingQualificationFixture(options) {
   e.nativeHarness = [
     "verify-native-refresh-objective.mjs",
     "qualification-sibling-refresh-proof.mjs",
+    "qualification-reservation-authority.mjs",
     "qualification-merge-proof.mjs",
     "qualification-receipts.mjs",
     "verify-live-objective.mjs",

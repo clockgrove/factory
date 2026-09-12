@@ -6,6 +6,14 @@ import {
   readQualificationMergeProofForIdentity,
   selectQualificationPublicationRecord,
 } from "./qualification-merge-proof.mjs";
+import {
+  assertQualificationReservationAuthority,
+  assertQualificationReservationAuthorityReobservation,
+  observeQualificationReservationAuthority,
+  qualificationReservationAuthorityExpectation,
+  qualificationReservationReadPort,
+  revalidateQualificationReservationAuthority,
+} from "./qualification-reservation-authority.mjs";
 
 const hash = (text) => createHash("sha256").update(text).digest("hex");
 const canonical = (value) => {
@@ -353,9 +361,7 @@ function* proveControllerReservationBase(evidence, reservation, context) {
       peer.children.filter((child) => child.number === event.workItem),
       "target child missing",
     );
-    const proof = yield* prove(peer, proofInput(peer, child), context);
-    const observed = yield { kind: "merge-proof", expected: proof.expected };
-    assert.deepEqual(observed, proof.expected, "execution base GraphQL binding differs");
+    yield* prove(peer, proofInput(peer, child), context);
     context.visiting.delete(key);
     const object = yield* readCommit(ancestor);
     assert.equal(object.parentOids.length, 1);
@@ -727,17 +733,15 @@ function* prove(evidence, input, context = controllerContext(evidence)) {
   assert.equal(pull.state, "closed");
   assert.equal(pull.merged, true);
   const reservationRef = prefix("attempts", publication).slice(0, -1);
-  const reservationOid = yield { kind: "ref", ref: reservationRef };
-  const reservedCommit = yield* readCommit(reservationOid);
-  const trailers = reservedCommit.message
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith("Factory-Event: "));
-  assert.equal(trailers.length, 1);
-  assert.deepEqual(
-    JSON.parse(Buffer.from(trailers[0].slice(15), "base64url").toString("utf8")),
+  const reservationAuthority = yield { kind: "reservation-authority", reserved: reservation };
+  assertQualificationReservationAuthority(reservationAuthority, reservation);
+  const reservationAuthorityExpectation = qualificationReservationAuthorityExpectation(
+    reservationAuthority,
     reservation,
-    "reservation Git proof differs from authenticated receipt",
   );
+  assert.equal(reservationAuthority.logicalRef, reservationRef);
+  const reservationOid = reservationAuthority.reservationOid;
+  const reservedCommit = reservationAuthority.reservationCommit;
   const base = yield* readCommit(source.baseSha);
   assert.deepEqual(reservedCommit.parentOids, [source.baseSha]);
   assert.equal(reservedCommit.treeOid, base.treeOid);
@@ -881,9 +885,7 @@ function* prove(evidence, input, context = controllerContext(evidence)) {
           peer.children.filter((child) => child.number === event.workItem),
           "peer child missing",
         );
-        const peerProof = yield* prove(peer, proofInput(peer, child), context);
-        const observed = yield { kind: "merge-proof", expected: peerProof.expected };
-        assert.deepEqual(observed, peerProof.expected, "peer GraphQL merge binding differs");
+        yield* prove(peer, proofInput(peer, child), context);
         context.visiting.delete(key);
         if (refreshed === 1) peerIntegrationTimes.push(instant(event.at));
       }
@@ -1071,19 +1073,31 @@ function* prove(evidence, input, context = controllerContext(evidence)) {
     deliveryTree,
     "actual squash differs from independently validated tree",
   );
+  const expected = {
+    runId: publication.runId,
+    objective: publication.objective,
+    workItem: publication.workItem,
+    attempt: publication.attempt,
+    pullRequestNodeId: pull.node_id,
+    pullRequest: pull.number,
+    repository,
+    repositoryNodeId: pull.base.repo.node_id,
+    headSha: final.oid,
+    mergeSha: merged.oid,
+  };
+  const mergeProof = yield { kind: "merge-proof", expected };
+  assert.deepEqual(mergeProof, expected, "final GraphQL merge binding differs");
+  const observedReservationAuthority = yield {
+    kind: "reservation-authority-current",
+    expectation: reservationAuthorityExpectation,
+  };
+  assertQualificationReservationAuthorityReobservation(
+    observedReservationAuthority,
+    reservationAuthorityExpectation,
+  );
   return {
-    expected: {
-      runId: publication.runId,
-      objective: publication.objective,
-      workItem: publication.workItem,
-      attempt: publication.attempt,
-      pullRequestNodeId: pull.node_id,
-      pullRequest: pull.number,
-      repository,
-      repositoryNodeId: pull.base.repo.node_id,
-      headSha: final.oid,
-      mergeSha: merged.oid,
-    },
+    expected,
+    mergeProof,
     refreshed,
   };
 }
@@ -1145,6 +1159,13 @@ export function nativeProofReader(request) {
     return data.object.sha;
   };
   return async (demand) => {
+    if (demand.kind === "reservation-authority")
+      return observeQualificationReservationAuthority(request, demand.reserved);
+    if (demand.kind === "reservation-authority-current")
+      return revalidateQualificationReservationAuthority(
+        qualificationReservationReadPort(request),
+        demand.expectation,
+      );
     if (demand.kind === "commit") return readCommit(demand.oid);
     if (demand.kind === "ref") return readRef(demand.ref);
     assert.equal(demand.kind, "checkpoint");
@@ -1224,15 +1245,13 @@ export async function observeNativeMergeProofs(
       reads.push({ request: step.value, value });
       step = recipe.next(value);
     }
-    // The changed expected head is authorized by the independent proof above, never a relabelled publication.
-    const proof = await readQualificationMergeProofForIdentity({ request }, step.value.expected);
     evidence.nativeMergeEvidence.push({
       workItem: child.number,
       attempt: input.integration.attempt,
       reads,
       refreshed: step.value.refreshed,
     });
-    proofs.push(proof);
+    proofs.push(step.value.mergeProof);
   }
   return proofs;
 }
@@ -1264,7 +1283,7 @@ export function assertNativeMergeProof(evidence, proof, input) {
   assert.equal(record.refreshed, step.value.refreshed);
   assert.deepEqual(
     proof,
-    step.value.expected,
+    step.value.mergeProof,
     "exact GraphQL proof differs from native delivery evidence",
   );
 }

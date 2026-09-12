@@ -179,6 +179,17 @@ each retained envelope keeps its exact sequence and idempotency identity.
 Both API surfaces still share Factory's circuit breaker, concurrency limiter, content-creation pacer,
 and secondary-rate-limit handling. Unchanged idle state is polled no more often than once per minute
 by default, while active local-worker cancellation uses the cheaper REST comments path.
+Active-run cancellation initially reads the complete bounded issue-comment history (at most
+2,000 comments / 20 pages). After a complete negative check, the reader retains one process-local
+cursor for the exact Objective/run/actor/activation binding. Warm checks use `since` with a two-second
+overlap anchored to the first response's server time and deduplicate comments by ID before the
+existing authenticated parser. Failed or incomplete reads never advance the cursor or return partial
+results. Missing/unusable timestamps, binding changes and reader/process restart reconstruct the
+bounded history; positive cancellation results are never cached. The active-worker loop checks at
+ten-second intervals, so newly created or edited requests are observed on the next eligible poll
+plus loop/transport latency (quota admission or platform failures can delay it). An edit entering an
+already traversed page remains in the overlap for the following poll. These observations never
+replace fresh mutation fences. Isolated external comment deletion is outside delta-feed support.
 
 Repository discovery reconstructs complete authenticated Objective history once per controller
 process. It then keeps a process-local, non-authoritative scheduling index from an unfiltered issue
@@ -235,6 +246,11 @@ terminal receipts, and resource/accounting reconciliation bind cleanup explicitl
 requests reserve their estimated cost before transport, same-window response headers merge toward
 lower remaining/higher used values, and actual transport is counted only after local admission.
 Endpoint aggregates and the latest 64 discovery cycles are bounded, process-local telemetry.
+One shared entry per credential hash owns both governor and primary-quota state. A process supports
+at most 16 distinct credentials: a seventeenth fails before transport with restart guidance, and
+existing entries are never evicted. Transport observers likewise fail at the defensive bound of
+1,024 simultaneous callbacks, preserving live observers and releasing acquired request admission.
+Restart clears these process-local registries; credential churn beyond the bound is unsupported.
 
 Recovery may retain bounded immutable Git content by exact object identity across repeated proof
 calls. It never caches mutable refs, authenticated event snapshots, PR/base state, leases, physical

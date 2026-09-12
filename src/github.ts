@@ -156,9 +156,10 @@ function registerTransportObserver(): {
 } {
   const callbacks = githubTransportCallbacks.getStore();
   if (!callbacks) return { release: () => {} };
+  if (transportObservers.size >= 1_024) {
+    throw new Error("Factory supports at most 1,024 simultaneous GitHub transport observers");
+  }
   const id = String(++transportObserverSequence);
-  if (transportObservers.size === 1_024)
-    transportObservers.delete(transportObservers.keys().next().value!);
   transportObservers.set(id, callbacks);
   return { id, release: () => transportObservers.delete(id) };
 }
@@ -909,7 +910,8 @@ function factoryEvents(
  */
 export function createOctokit(opts: GitHubOptions): Octokit {
   const notify = opts.onThrottle ?? (() => {});
-  const primaryQuota = opts.primaryQuota ?? primaryQuotaForCredential(opts.token);
+  const sharedPrimaryQuota = primaryQuotaForCredential(opts.token);
+  const primaryQuota = opts.primaryQuota ?? sharedPrimaryQuota;
   const surfacePlatformFailure = (error: unknown): never => {
     const observed = error as {
       headers?: Record<string, string | number | undefined>;
@@ -974,40 +976,43 @@ export function createOctokit(opts: GitHubOptions): Octokit {
         method: endpoint.method,
         headers: endpoint.headers as Record<string, string>,
       });
-      const observer = registerTransportObserver();
-      const first = args[0];
-      const parameters =
-        typeof args[1] === "object" && args[1] !== null ? (args[1] as Record<string, unknown>) : {};
-      const requestOptions =
-        typeof first === "object" && first !== null ? (first as Record<string, unknown>) : {};
-      const invokeArgs = !observer.id
-        ? args
-        : typeof first === "string"
-          ? [
-              first,
-              {
-                ...parameters,
-                headers: {
-                  ...((parameters.headers as Record<string, string> | undefined) ?? {}),
-                  [TRANSPORT_OBSERVER_HEADER]: observer.id,
-                },
-              },
-            ]
-          : [
-              {
-                ...requestOptions,
-                headers: {
-                  ...((requestOptions.headers as Record<string, string> | undefined) ?? {}),
-                  [TRANSPORT_OBSERVER_HEADER]: observer.id,
-                },
-              },
-            ];
+      let observer: ReturnType<typeof registerTransportObserver> | undefined;
       try {
+        observer = registerTransportObserver();
+        const first = args[0];
+        const parameters =
+          typeof args[1] === "object" && args[1] !== null
+            ? (args[1] as Record<string, unknown>)
+            : {};
+        const requestOptions =
+          typeof first === "object" && first !== null ? (first as Record<string, unknown>) : {};
+        const invokeArgs = !observer.id
+          ? args
+          : typeof first === "string"
+            ? [
+                first,
+                {
+                  ...parameters,
+                  headers: {
+                    ...((parameters.headers as Record<string, string> | undefined) ?? {}),
+                    [TRANSPORT_OBSERVER_HEADER]: observer.id,
+                  },
+                },
+              ]
+            : [
+                {
+                  ...requestOptions,
+                  headers: {
+                    ...((requestOptions.headers as Record<string, string> | undefined) ?? {}),
+                    [TRANSPORT_OBSERVER_HEADER]: observer.id,
+                  },
+                },
+              ];
         return await Reflect.apply(target, thisArg, invokeArgs);
       } catch (error) {
         surfacePlatformFailure(error);
       } finally {
-        observer.release();
+        observer?.release();
         release();
       }
     },
@@ -1024,27 +1029,30 @@ export function createOctokit(opts: GitHubOptions): Octokit {
         "normal",
         mutation ? 1 : GITHUB_GRAPHQL_NORMAL_REQUEST_ESTIMATE,
       );
-      const observer = registerTransportObserver();
-      const variables =
-        typeof args[1] === "object" && args[1] !== null ? (args[1] as Record<string, unknown>) : {};
-      const invokeArgs = observer.id
-        ? [
-            args[0],
-            {
-              ...variables,
-              headers: {
-                ...((variables.headers as Record<string, string> | undefined) ?? {}),
-                [TRANSPORT_OBSERVER_HEADER]: observer.id,
-              },
-            },
-          ]
-        : args;
+      let observer: ReturnType<typeof registerTransportObserver> | undefined;
       try {
+        observer = registerTransportObserver();
+        const variables =
+          typeof args[1] === "object" && args[1] !== null
+            ? (args[1] as Record<string, unknown>)
+            : {};
+        const invokeArgs = observer.id
+          ? [
+              args[0],
+              {
+                ...variables,
+                headers: {
+                  ...((variables.headers as Record<string, string> | undefined) ?? {}),
+                  [TRANSPORT_OBSERVER_HEADER]: observer.id,
+                },
+              },
+            ]
+          : args;
         return await Reflect.apply(target, thisArg, invokeArgs);
       } catch (error) {
         surfacePlatformFailure(error);
       } finally {
-        observer.release();
+        observer?.release();
         release();
       }
     },
@@ -1223,6 +1231,8 @@ export class GitHubReader {
   /** Cached for the process lifetime by `readWorkflowSafetyProfile`. */
   #safetyProfile: WorkflowSafetyProfile | undefined;
   #cachedDefaultBranch: string | undefined;
+  // Observation only. A changed binding (or a new reader) reconstructs from GitHub.
+  #cancellationCursor: { key: string; through: number } | undefined;
   #authenticatedUserId: number | undefined;
   /** Stable after graph application; refreshed automatically if cardinality changes. */
   readonly #objectiveShapes = new Map<
@@ -1454,7 +1464,7 @@ export class GitHubReader {
   }
 
   /**
-   * Poll the Objective's bounded comment history while a worker runs. Fetching the
+   * Bootstrap bounded history, then poll updated comments while a worker runs. Fetching the
    * full nested Objective graph here can spend thousands of GraphQL points on
    * unchanged Work Items during one ordinary local attempt.
    */
@@ -1464,11 +1474,32 @@ export class GitHubReader {
     actor: string,
     activation?: ActivationBinding,
   ): Promise<RunCancellationRequest | null> {
-    // Unlike the repository-wide comments endpoint, issue comments are always
-    // ascending by ID: sort/direction cannot select the newest receipts.
-    // https://docs.github.com/en/rest/issues/comments#list-issue-comments
-    const comments: GitHubIssueCommentEvidence[] = [];
+    const key = JSON.stringify([
+      objectiveNumber,
+      runId,
+      actor,
+      activation
+        ? [
+            activation.objective,
+            activation.requestId,
+            activation.repository,
+            activation.requestedBy,
+            activation.baseSha,
+            activation.policyDigest,
+          ]
+        : null,
+    ]);
+    const previous = this.#cancellationCursor;
+    const through = previous?.key === key ? previous.through : undefined;
+    // GitHub's `since` predicate is exclusive and timestamps have second precision.
+    // Anchor at page one's server time, never the last page or a comment timestamp:
+    // an old comment edited into an already traversed page must remain eligible.
+    const since = through === undefined ? undefined : new Date(through - 2_000).toISOString();
+    const comments = new Map<number, GitHubIssueCommentEvidence>();
     let bytes = 0;
+    let count = 0;
+    let watermark = Number.NaN;
+    let usable = true;
     const maxPages = Math.ceil(RECOVERY_READER_LIMITS.commentsPerIssue / 100);
     for (let page = 1; page <= maxPages; page++) {
       const response = await this.#octokit.request(
@@ -1479,24 +1510,47 @@ export class GitHubReader {
           issue_number: objectiveNumber,
           per_page: 100,
           page,
+          ...(since ? { since } : {}),
         },
       );
+      if (page === 1) watermark = Date.parse(response.headers.date ?? "");
       bytes += Buffer.byteLength(JSON.stringify(response.data), "utf8");
+      count += response.data.length;
       if (
         response.data.length > 100 ||
-        comments.length + response.data.length > RECOVERY_READER_LIMITS.commentsPerIssue ||
+        count > RECOVERY_READER_LIMITS.commentsPerIssue ||
         bytes > RECOVERY_READER_LIMITS.hydratedBytes
       )
         throw new Error("Cancellation poll exceeded its bounded comment history");
-      comments.push(
-        ...response.data.map((comment) => ({
+      for (const comment of response.data) {
+        usable &&=
+          Number.isSafeInteger(comment.id) && Number.isFinite(Date.parse(comment.updated_at));
+        comments.set(comment.id ?? -comments.size - 1, {
           body: comment.body ?? "",
           authorLogin: comment.user?.login ?? null,
           authorAssociation: comment.author_association ?? null,
-        })),
-      );
-      if (!response.headers.link?.includes('rel="next"'))
-        return cancellationRequestFromComments(comments, runId, actor, activation);
+        });
+      }
+      if (!response.headers.link?.includes('rel="next"')) {
+        const result = cancellationRequestFromComments(
+          [...comments.values()],
+          runId,
+          actor,
+          activation,
+        );
+        // Only absence needs an optimization cursor. A positive result is never
+        // retained as authority, and every failed/incomplete read leaves state alone.
+        if (this.#cancellationCursor === previous) {
+          this.#cancellationCursor =
+            !result &&
+            usable &&
+            Number.isFinite(watermark) &&
+            (through === undefined || watermark >= through)
+              ? { key, through: watermark }
+              : undefined;
+        }
+        return result;
+      }
     }
     throw new Error("Cancellation poll exceeded its bounded comment history pages");
   }

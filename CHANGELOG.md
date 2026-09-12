@@ -6,6 +6,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Fixed
 
+- Active-run cancellation checks now scan bounded history once and then read overlapping comment
+  deltas. Credential-shared governor/quota entries and live transport observers are never silently
+  evicted; exceeding 16 credentials or 1,024 simultaneous observers fails clearly before transport.
+  ([#320](https://github.com/clockgrove/factory/issues/320))
+
 - Refresh the complete Objective snapshot when the shared-capacity journal proves that an exact
   reconstructed claim was already released. Bounded visibility-lag handling preserves validation
   failures and successful completion without resurrecting capacity; changed identities still fail

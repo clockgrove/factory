@@ -23,7 +23,7 @@ const cancellation = parseFactoryEvent({
   at: "2026-09-05T10:00:00Z",
 });
 
-function fixture(pageResponse: (page: number) => Response) {
+function fixture(pageResponse: (page: number, url: URL) => Response) {
   const requests: URL[] = [];
   const reader = new GitHubReader({
     token: "fixture-only",
@@ -33,9 +33,9 @@ function fixture(pageResponse: (page: number) => Response) {
       const request = new Request(input, init);
       const url = new URL(request.url);
       expect(request.method).toBe("GET");
-      expect(url.pathname).toBe("/repos/fixture/activation/issues/7/comments");
+      expect(url.pathname).toMatch(/^\/repos\/fixture\/activation\/issues\/\d+\/comments$/);
       requests.push(url);
-      return pageResponse(Number(url.searchParams.get("page") ?? 1));
+      return pageResponse(Number(url.searchParams.get("page") ?? 1), url);
     },
   });
   return { reader, requests };
@@ -128,5 +128,164 @@ describe("bounded cancellation receipt pagination", () => {
       f.reader.readRunCancellationRequest(7, "real-run", "operator", binding),
     ).rejects.toThrow(/cancellation.*bound/i);
     expect(f.requests).toHaveLength(1);
+  });
+});
+
+describe("active cancellation observation cursor", () => {
+  const start = "2026-09-12T10:00:00Z";
+  const comment = (id: number, body = "ordinary", updated_at = start) => ({
+    id,
+    body,
+    updated_at,
+    user: { login: "operator" },
+    author_association: "OWNER",
+  });
+  function dated(comments: unknown[], date = start, next?: number) {
+    const response = page(comments, next);
+    response.headers.set("date", new Date(date).toUTCString());
+    return response;
+  }
+  const poll = (reader: GitHubReader) =>
+    reader.readRunCancellationRequest(7, "real-run", "operator", binding);
+
+  it("bootstraps all pages once, then performs one transport per unchanged poll", async () => {
+    const f = fixture((number, url) =>
+      url.searchParams.has("since")
+        ? dated([])
+        : dated(
+            Array.from({ length: 100 }, (_, i) => comment((number - 1) * 100 + i + 1)),
+            start,
+            number < 10 ? number + 1 : undefined,
+          ),
+    );
+    expect(await poll(f.reader)).toBeNull();
+    expect(f.requests).toHaveLength(10);
+    for (let i = 0; i < 10; i++) expect(await poll(f.reader)).toBeNull();
+    expect(f.requests).toHaveLength(20);
+    expect(
+      f.requests
+        .slice(10)
+        .every((url) => url.searchParams.get("since") === "2026-09-12T09:59:58.000Z"),
+    ).toBe(true);
+  });
+
+  it.each(["created", "edited"])(
+    "observes a %s authenticated same-second request and deduplicates overlap",
+    async (change) => {
+      let changed = false;
+      const f = fixture((_number, url) =>
+        dated(
+          changed
+            ? [
+                comment(change === "edited" ? 1 : 2, encodeEventComment("Withdraw", cancellation)),
+                comment(change === "edited" ? 1 : 2, encodeEventComment("Withdraw", cancellation)),
+              ]
+            : url.searchParams.has("since")
+              ? []
+              : [comment(1)],
+        ),
+      );
+      expect(await poll(f.reader)).toBeNull();
+      changed = true;
+      expect(await poll(f.reader)).toEqual(cancellation);
+      expect(f.requests[1]!.searchParams.get("since")).toBe("2026-09-12T09:59:58.000Z");
+      // Positive results are not retained: the next read reconstructs current evidence.
+      changed = false;
+      expect(await poll(f.reader)).toBeNull();
+      expect(f.requests[2]!.searchParams.has("since")).toBe(false);
+    },
+  );
+
+  it("uses page one's time so edits entering an earlier page remain eligible", async () => {
+    const f = fixture((number, url) =>
+      url.searchParams.has("since")
+        ? dated(
+            [comment(1, encodeEventComment("Withdraw", cancellation), "2026-09-12T10:00:01Z")],
+            "2026-09-12T10:00:05Z",
+          )
+        : dated(
+            [comment(number)],
+            number === 1 ? start : "2026-09-12T10:00:04Z",
+            number === 1 ? 2 : undefined,
+          ),
+    );
+    expect(await poll(f.reader)).toBeNull();
+    expect(await poll(f.reader)).toEqual(cancellation);
+    expect(f.requests[2]!.searchParams.get("since")).toBe("2026-09-12T09:59:58.000Z");
+  });
+
+  it.each(["failed", "incomplete", "oversized"])(
+    "does not publish results or advance after a %s delta",
+    async (failure) => {
+      let mode = "bootstrap";
+      const f = fixture((number) => {
+        if (mode !== "failure") return dated([]);
+        if (failure === "oversized")
+          return dated([comment(1, "x".repeat(RECOVERY_READER_LIMITS.hydratedBytes))]);
+        if (failure === "failed" && number === 2)
+          return Response.json({ message: "unavailable" }, { status: 403 });
+        return dated(
+          [comment(number, encodeEventComment("Withdraw", cancellation))],
+          "2026-09-12T10:00:10Z",
+          number + 1,
+        );
+      });
+      expect(await poll(f.reader)).toBeNull();
+      mode = "failure";
+      await expect(poll(f.reader)).rejects.toThrow();
+      mode = "retry";
+      expect(await poll(f.reader)).toBeNull();
+      expect(f.requests.at(-1)?.searchParams.get("since")).toBe("2026-09-12T09:59:58.000Z");
+    },
+  );
+
+  it("keeps the authenticated parser on deltas", async () => {
+    const f = fixture((_number, url) =>
+      dated(
+        url.searchParams.has("since")
+          ? [
+              {
+                ...comment(1, encodeEventComment("Withdraw", cancellation)),
+                user: { login: "stranger" },
+              },
+            ]
+          : [],
+      ),
+    );
+    expect(await poll(f.reader)).toBeNull();
+    expect(await poll(f.reader)).toBeNull();
+  });
+
+  it("reconstructs on restart and every changed binding field", async () => {
+    const f = fixture(() => dated([]));
+    await poll(f.reader);
+    for (const [field, value] of Object.entries(binding)) {
+      await f.reader.readRunCancellationRequest(7, "real-run", "operator", {
+        ...binding,
+        [field]: typeof value === "number" ? value + 1 : `${value}-changed`,
+      });
+      expect(f.requests.at(-1)?.searchParams.has("since")).toBe(false);
+    }
+    await f.reader.readRunCancellationRequest(7, "other-run", "operator", binding);
+    expect(f.requests.at(-1)?.searchParams.has("since")).toBe(false);
+    await f.reader.readRunCancellationRequest(7, "other-run", "other-actor", binding);
+    expect(f.requests.at(-1)?.searchParams.has("since")).toBe(false);
+    await f.reader.readRunCancellationRequest(8, "other-run", "other-actor", binding);
+    expect(f.requests.at(-1)?.searchParams.has("since")).toBe(false);
+    const restarted = fixture(() => dated([]));
+    await poll(restarted.reader);
+    expect(restarted.requests[0]!.searchParams.has("since")).toBe(false);
+  });
+
+  it("falls back to full reconstruction when the server timestamp is unavailable or regresses", async () => {
+    let date: string | undefined = start;
+    const f = fixture(() => (date ? dated([], date) : page([])));
+    await poll(f.reader);
+    date = "2026-09-12T09:59:00Z";
+    await poll(f.reader);
+    date = undefined;
+    await poll(f.reader);
+    await poll(f.reader);
+    expect(f.requests.slice(2).every((url) => !url.searchParams.has("since"))).toBe(true);
   });
 });

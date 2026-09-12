@@ -157,8 +157,9 @@ demonstrated; safe execution and consumption counters are not substitutes.
 ## Completion rules
 
 Follow the coordinated implementation and verification procedure in [AGENTS.md](../AGENTS.md) and
-[CONTRIBUTING.md](../CONTRIBUTING.md#validate-changes). Reuse evidence only within its exact source,
-artifact and scope boundaries; issue closure is not a substitute for acceptance evidence.
+[release verification procedure](CONFORMANCE.md#release-verification-procedure). Reuse evidence only
+within its exact source, artifact and scope boundaries; issue closure is not a substitute for acceptance
+evidence.
 
 The [definition of done](DESIGN.md#definition-of-done), [delivery plan](DELIVERY-PLAN.md), and
 [conformance ledger](CONFORMANCE.md#verification-required-before-publication) retain all six

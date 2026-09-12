@@ -12,6 +12,8 @@ Describe the user-visible result and link the issue or product-contract decision
 
 ## Review budget
 
+Maintainers complete this section during review; contributors may leave it pending.
+
 - Frozen acceptance surface:
 - Initial consolidated review:
 - Repair/rereview round 1:
@@ -32,8 +34,8 @@ Describe the user-visible result and link the issue or product-contract decision
 List the commands and live gates actually run. Do not claim a paid provider, published artifact, or
 external behavior from a fake alone.
 
-- [ ] Focused tests cover the changed behavior and failure boundary.
-- [ ] `npm run verify:release`
+- [ ] Relevant checks cover the change; documentation-only changes have checked links and examples.
+- [ ] Release candidates only: `npm run verify:release` (maintainer-coordinated; otherwise N/A).
 - [ ] Applicable live conformance gates were run, or the open gate is recorded honestly.
 - [ ] Docs, schemas, changelog, generated bundles, and conformance evidence are updated where needed.
 - [ ] No credentials, local Factory state, installation receipts, private fixtures, or unrelated churn are included.

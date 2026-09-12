@@ -71,6 +71,8 @@ export interface ProviderFaults {
   waitForSiblingLaunchBeforeIntegration?: boolean;
   holdSiblingDispatchUntilIntegrationFailure?: boolean;
   localOnly?: boolean;
+  maxParallel?: 1 | 2;
+  isolatedValidationWorkItem?: number;
   maxAttemptsPerItem?: number;
   noModelTokenBudget?: boolean;
   dependencyChain?: boolean;
@@ -253,7 +255,8 @@ wheels = [
     ...(faults.compilerEvaluation ? { compilerEvaluation: faults.compilerEvaluation } : {}),
     ...(faults.sandboxUntrusted ? { trust: "sandbox_untrusted" } : {}),
     backendOrder: faults.localOnly ? [LOCAL] : managed ? [provider, DAYTONA] : [LOCAL, DAYTONA],
-    maxParallel: faults.localOnly ? (faults.localMaxParallel ?? 1) : managed ? 1 : 2,
+    maxParallel:
+      faults.maxParallel ?? (faults.localOnly ? (faults.localMaxParallel ?? 1) : managed ? 1 : 2),
     maxAttemptsPerItem: faults.maxAttemptsPerItem ?? 1,
     workItemTimeoutMinutes: faults.workItemTimeoutMinutes ?? 2,
     objectiveTimeoutMinutes: faults.objectiveTimeoutMinutes ?? 20,
@@ -476,7 +479,7 @@ wheels = [
         permittedSecretNames: [],
         trust: managed
           ? "managed"
-          : faults.nativeStack && index === 1
+          : (faults.nativeStack && index === 1) || faults.isolatedValidationWorkItem === 8 + index
             ? "isolated"
             : "trusted_local",
         estimatedDurationMinutes: 1,
@@ -485,7 +488,15 @@ wheels = [
       delivery:
         faults.nativeStack && index === 1
           ? { group: "a", relationship: "continue-stack", parentWorkItem: "a" }
-          : { group: id, relationship: index === 2 ? "join-after-merge" : "root" },
+          : {
+              group: id,
+              relationship:
+                index === 2
+                  ? "join-after-merge"
+                  : faults.dependencyChain && index === 1
+                    ? "sibling"
+                    : "root",
+            },
     })),
   };
   const capabilityAdapter =
@@ -1453,6 +1464,7 @@ jobs:
           !managed &&
           !faults.localOnly &&
           !faults.nativeStack &&
+          faults.maxParallel !== 1 &&
           ((running.get(handle.resourceId)!.workItem < 10 &&
             !activity.some(
               (entry) =>
@@ -1552,7 +1564,12 @@ jobs:
                 }
                 return {
                   outputTreeSha: result.evidence.outputTreeSha,
-                  commands: result.evidence.commands,
+                  commands: failed
+                    ? result.evidence.commands.slice(0, 1).map((command) => ({
+                        ...command,
+                        exitCode: 1,
+                      }))
+                    : result.evidence.commands,
                   passed: !failed && result.evidence.passed,
                   startedAt: result.evidence.startedAt,
                   completedAt: result.evidence.completedAt,

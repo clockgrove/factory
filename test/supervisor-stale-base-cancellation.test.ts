@@ -9,9 +9,12 @@ import { SafeArtifactCheckpointHeldError } from "../src/runtime/qualification-ch
 import { linuxLocalScopeProcessPort } from "../src/runtime/local-scope.js";
 import { unreconciledBudgetReservations } from "../src/control/budget.js";
 import {
+  CapacityLedger,
   deriveCapacityReservations,
   unreconciledCapacityReservations,
+  type OwnedCapacityReservation,
 } from "../src/scheduling/capacity-ledger.js";
+import type { SharedCapacityOwner } from "../src/controller/shared-capacity.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
 type Fixture = Awaited<ReturnType<typeof providerSupervisorFixture>>;
@@ -201,6 +204,27 @@ describe("cleanup-only cancellation of a stale activation", () => {
     "reconciles a paused ready attempt without resuming it (%j)",
     async ({ expired, cancel, unknown }) => {
       const h = await held(false);
+      const sharedLedger = new CapacityLedger();
+      const sharedOwners = new Map<string, SharedCapacityOwner>();
+      const releaseShared = vi.fn(
+        async (_owner: SharedCapacityOwner, key: string, originalOwner?: SharedCapacityOwner) => {
+          expect(originalOwner).toEqual(sharedOwners.get(key));
+          sharedLedger.release(key);
+          sharedOwners.delete(key);
+        },
+      );
+      h.f.repositoryResources.sharedCapacity = {
+        snapshot: async () => sharedLedger.snapshot(),
+        reconcile: async (_owner: SharedCapacityOwner, imports: OwnedCapacityReservation[]) => {
+          sharedLedger.reconcileObjective(
+            7,
+            imports.map(({ reservation }) => reservation),
+          );
+          for (const { owner, reservation } of imports) sharedOwners.set(reservation.key, owner);
+          return imports;
+        },
+        release: releaseShared,
+      } as unknown as NonNullable<typeof h.f.repositoryResources.sharedCapacity>;
       const start = h.f.events().find((event) => event.event === "FactoryRunStarted")!;
       if (start.event !== "FactoryRunStarted") throw new Error("fixture start absent");
       h.f.snapshot.factoryEvents!.push(
@@ -246,6 +270,8 @@ describe("cleanup-only cancellation of a stale activation", () => {
         if (unknown) {
           await expect(h.f.run()).rejects.toThrow(/owned local scope cleanup unavailable/);
           expect(active()).toHaveLength(1);
+          expect(sharedLedger.snapshot().reservations).toHaveLength(1);
+          expect(releaseShared).not.toHaveBeenCalled();
           expect(
             h.f
               .events()
@@ -264,6 +290,8 @@ describe("cleanup-only cancellation of a stale activation", () => {
             runId: h.f.runId,
           });
           expect(active()).toEqual([]);
+          expect(sharedLedger.snapshot().reservations).toEqual([]);
+          expect(releaseShared).toHaveBeenCalledTimes(1);
           const closure = h.f
             .events()
             .filter((event) => event.kind === "capacity" && event.phase === "execution");

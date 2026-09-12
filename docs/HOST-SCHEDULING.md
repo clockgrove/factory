@@ -142,6 +142,14 @@ restart merely to pick up an upgrade while active work or resource cleanup is un
 confirm the owned generation first. Factory reconstructs active state from GitHub after a restart;
 the unit does not carry orchestration authority.
 
+An Objective snapshot can temporarily lag the repository shared-capacity journal after cleanup.
+If it reconstructs an exactly matching released claim, Factory checks at most three complete
+Objective snapshots before making further snapshot-dependent decisions. It does not resurrect the
+claim or relax owner, policy, resource or lease checks. Already-admitted work retains its existing
+execution and accounting fences. Persistent lag reports `SharedCapacitySnapshotLagError` and parks
+that activation without replacing the Objective's terminal cause. Discovery changes alone do not
+restart it; a new explicit activation or controller restart re-evaluates the durable evidence.
+
 ## Stopping versus cancelling
 
 Stopping the service interrupts the local process. To record an operator cancellation that another

@@ -143,12 +143,20 @@ confirm the owned generation first. Factory reconstructs active state from GitHu
 the unit does not carry orchestration authority.
 
 An Objective snapshot can temporarily lag the repository shared-capacity journal after cleanup.
-If it reconstructs an exactly matching released claim, Factory checks at most three complete
+If it reconstructs an exactly matching released claim, Factory normally checks at most three complete
 Objective snapshots before making further snapshot-dependent decisions. It does not resurrect the
 claim or relax owner, policy, resource or lease checks. Already-admitted work retains its existing
 execution and accounting fences. Persistent lag reports `SharedCapacitySnapshotLagError` and parks
 that activation without replacing the Objective's terminal cause. Discovery changes alone do not
 restart it; a new explicit activation or controller restart re-evaluates the durable evidence.
+
+There is one live-child exception: if every lagging claim exactly matches an already-admitted child
+that is still running in this Supervisor, its phase receipt may still be publishing. Factory discards
+the stale observation, waits for child settlement or the existing polling interval, and rereads the
+complete Objective before scheduling. This can repeat beyond three snapshots while the matching
+children remain alive, up to cancellation or the Objective deadline. Child failures still propagate;
+startup lag, unknown claims, and claims whose children have settled retain the three-snapshot bound.
+The exception never reactivates a released claim or grants recovery authority.
 
 ## Stopping versus cancelling
 

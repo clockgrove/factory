@@ -98,6 +98,7 @@ export {
 import { GitHubControlStore } from "./control/github-store.js";
 import {
   SharedCapacitySnapshotLagError,
+  sharedCapacityClaimId,
   type SharedCapacityCoordinator,
   type SharedCapacityOwner,
 } from "./controller/shared-capacity.js";
@@ -4290,6 +4291,8 @@ export class FactorySupervisor {
     heartbeat.unref();
     const deadline = this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000;
     const activeExecutions = new ContinuousExecutionPool<number>();
+    // Full identities survive phase transitions only until this process's child settles.
+    const activeExecutionClaims = new Set<string>();
     const executionAbort = new AbortController();
     const forwardAbort = () => executionAbort.abort();
     this.#options.signal?.addEventListener("abort", forwardAbort, { once: true });
@@ -5278,7 +5281,28 @@ export class FactorySupervisor {
         // An absent active key must not turn that failure into same-process recovery.
         activeExecutions.throwNextFailure();
         this.#fenceSnapshot(snapshot);
-        snapshot = await this.#observeCapacity(snapshot, deadline);
+        try {
+          snapshot = await this.#observeCapacity(snapshot, deadline);
+        } catch (error) {
+          if (
+            !(error instanceof SharedCapacitySnapshotLagError) ||
+            error.evidence.length === 0 ||
+            !error.evidence.every((claim) => activeExecutionClaims.has(claim.claimId)) ||
+            this.#options.signal?.aborted ||
+            hasCancellationRequest(snapshot, this.#run.runId) ||
+            Date.now() >= deadline
+          )
+            throw error;
+          // A live child may still be publishing its validation receipt after
+          // the shared phase transition. Retire this observation; never schedule
+          // or recover from it, and never cancel that child merely to reread it.
+          const settled = await activeExecutions.waitForChange(
+            Math.max(1, Math.min(this.#options.pollIntervalMs ?? 2_000, deadline - Date.now())),
+            this.#options.signal,
+          );
+          if (settled?.error) throw new ClaimedExecutionFailure(settled);
+          continue;
+        }
         activeExecutions.throwNextFailure();
         this.#ciExpectedOnPullRequests = snapshot.ciExpectedOnPullRequests;
         this.#sequences.observe(snapshotEvents(snapshot));
@@ -6248,23 +6272,34 @@ export class FactorySupervisor {
             await this.#releaseCapacity(admission.reservation.key);
             executionCapacityReleased = true;
           };
-          activeExecutions.start(item.number, async () => {
-            try {
-              await this.#execute(
-                item,
-                deadline,
-                admission,
-                releaseExecutionCapacity,
-                deliveryBases.get(item.number),
-                executionAbort.signal,
-                repositoryCapabilityProofs.get(item.number) ?? [],
-                activatedPackets.get(item.number),
-                managedRuntimeActivations.get(item.number),
-              );
-            } finally {
-              await releaseExecutionCapacity();
-            }
-          });
+          const capacityOwner = this.#sharedCapacityOwners.get(admission.reservation.key);
+          const executionClaim = capacityOwner
+            ? sharedCapacityClaimId(capacityOwner, admission.reservation.key)
+            : undefined;
+          if (executionClaim) activeExecutionClaims.add(executionClaim);
+          activeExecutions.start(
+            item.number,
+            async () => {
+              try {
+                await this.#execute(
+                  item,
+                  deadline,
+                  admission,
+                  releaseExecutionCapacity,
+                  deliveryBases.get(item.number),
+                  executionAbort.signal,
+                  repositoryCapabilityProofs.get(item.number) ?? [],
+                  activatedPackets.get(item.number),
+                  managedRuntimeActivations.get(item.number),
+                );
+              } finally {
+                await releaseExecutionCapacity();
+              }
+            },
+            () => {
+              if (executionClaim) activeExecutionClaims.delete(executionClaim);
+            },
+          );
         }
         if (started.length > 0) {
           this.#notify(`admitted: ${started.map((number) => `#${number}`).join(", ")}`);

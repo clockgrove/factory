@@ -15,6 +15,10 @@ import {
 import { reviewIdentityDigest, reviewCheckpointRef } from "../../src/control/reviews.js";
 import { observeNativeMergeProofs } from "../../scripts/qualification-sibling-refresh-proof.mjs";
 import {
+  resolveQualificationReservationAuthority,
+  revalidateQualificationReservationAuthority,
+} from "../../scripts/qualification-reservation-authority.mjs";
+import {
   boundedPolicy,
   objectiveBodyFor,
   qualificationPaths,
@@ -221,7 +225,50 @@ function fixture({
       [rootBase],
       `Factory reservation\n\nFactory-Event: ${Buffer.from(JSON.stringify(reservation)).toString("base64url")}`,
     );
-    refs.set(reserveRef, reserveOid);
+    const admissionRef = `refs/clockgrove-factory/admission/work-item-${number}`;
+    const admissionRecord = {
+      protocol: "clockgrove.factory/issue-admission-v1",
+      workItem: number,
+      workItemNodeId: `I_${number}`,
+      revision: 1,
+      priorRevisionOid: null,
+      history: [
+        {
+          workItem: number,
+          workItemNodeId: `I_${number}`,
+          objective: 1,
+          runId: "run",
+          directorEpoch: 1,
+          writerHolder: "operator",
+          policyDigest,
+          graphDigest: hash("graph"),
+          graphCommitOid: sha("graph"),
+          projectionCommitOid: sha("projection"),
+          reservation: {
+            ref: reserveRef,
+            oid: reserveOid,
+            attempt: 1,
+            backend: reservation.backend,
+            baseSha: rootBase,
+          },
+          capacityReservationId: `capacity-${number}`,
+          budgetReservationId: `budget-${number}`,
+          resourceIdentity: `resource-${number}`,
+          compatibilityClaimOid: sha("compatibility"),
+          disposition: "terminal",
+          writerEpoch: 1,
+          currentWriterHolder: "operator",
+          dispatchPossible: true,
+        },
+      ],
+    };
+    const admissionOid = addCommit(
+      sha(admissionRef),
+      commits.get(rootBase).treeOid,
+      [rootBase, reserveOid],
+      `Factory issue admission\n\nFactory-Issue-Admission: ${Buffer.from(JSON.stringify(admissionRecord)).toString("base64url")}`,
+    );
+    refs.set(admissionRef, admissionOid);
     events.push(
       reservation,
       {
@@ -505,7 +552,15 @@ function fixture({
     ],
     status: { run: {} },
   };
+  const reservationPort = {
+    readRef: async (ref) => refs.get(ref) ?? null,
+    readCommit: async (oid) => structuredClone(commits.get(oid)),
+  };
   const read = vi.fn(async (demand) => {
+    if (demand.kind === "reservation-authority")
+      return resolveQualificationReservationAuthority(reservationPort, demand.reserved);
+    if (demand.kind === "reservation-authority-current")
+      return revalidateQualificationReservationAuthority(reservationPort, demand.expectation);
     const value =
       demand.kind === "commit"
         ? commits.get(demand.oid)

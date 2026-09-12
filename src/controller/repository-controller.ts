@@ -37,7 +37,9 @@ import {
   classifyRefusal,
   PlatformUnavailableError,
   MutationAdmissionStoppedError,
-  GitHubPrimaryAdmissionDeferredError,
+  definiteGitHubQuotaRejection,
+  retryGitHubQuota,
+  withGitHubQuotaWait,
   githubRequestTelemetryForCredential,
   primaryQuotaForCredential,
   type GitHubMutationTelemetry,
@@ -186,6 +188,8 @@ export interface GitHubRepositoryControllerOptions {
   signal?: AbortSignal;
   /** Discovery-election retirement. Stops new dispatch but not active Objectives. */
   discoverySignal?: AbortSignal;
+  /** Await an in-progress election renewal before observing new admissions. */
+  beforeDiscovery?: () => Promise<void>;
   onError?: (error: unknown, objective: number) => void;
   onFirstDiscoveryRequestAccounting?: (observation: GitHubTransportObservation) => void;
   onDiscoveryTelemetry?: (telemetry: RepositoryDiscoveryTelemetry) => void;
@@ -234,20 +238,31 @@ export class GitHubRepositoryController {
 
   async reconcileOnce(): Promise<number> {
     if (this.#discoverySignal.aborted) return 0;
+    try {
+      await this.#options.beforeDiscovery?.();
+    } catch (error) {
+      if (this.#discoverySignal.aborted && error === this.#discoverySignal.reason) return 0;
+      throw error;
+    }
+    if (this.#discoverySignal.aborted) return 0;
     let activations: DurableObjectiveActivation[];
     try {
       const firstDiscovery = this.#firstDiscovery;
       this.#firstDiscovery = false;
-      activations =
+      // Keep the retry boundary around the read only. Newly launched Supervisors
+      // must not inherit a discovery retry owner that suppresses their own waits.
+      activations = await retryGitHubQuota(() =>
         firstDiscovery && this.#options.onFirstDiscoveryRequestAccounting
-          ? await observeGitHubTransportPhase(
+          ? observeGitHubTransportPhase(
               "activation-discovery",
               this.#options.onFirstDiscoveryRequestAccounting,
               () => this.#options.store.discoverObjectiveActivations(),
             )
-          : await this.#options.store.discoverObjectiveActivations();
+          : this.#options.store.discoverObjectiveActivations(),
+      );
     } catch (error) {
       this.#emitDiscoveryTelemetry();
+      if (this.#discoverySignal.aborted && error === this.#discoverySignal.reason) return 0;
       if (platformFailure(error)) throw error;
       throw fatalControllerFailure(
         isDurableStateCompatibilityError(error)
@@ -387,7 +402,12 @@ export class GitHubRepositoryController {
         try {
           await this.reconcileOnce();
         } catch (error) {
-          if (!(error instanceof GitHubPrimaryAdmissionDeferredError)) throw error;
+          if (
+            !(error instanceof PlatformUnavailableError) ||
+            error.refusal.kind !== "rate_limit" ||
+            !definiteGitHubQuotaRejection(error)
+          )
+            throw error;
           await interruptibleDelay(error.retryAfterMs, this.#discoverySignal);
           continue;
         }
@@ -450,6 +470,7 @@ export interface RunRepositoryControllerOptions {
 export interface CreateGitHubRepositoryControllerOptions extends RunRepositoryControllerOptions {
   /** Internal election-retirement signal supplied by the ownership wrapper. */
   discoverySignal?: AbortSignal;
+  beforeDiscovery?: () => Promise<void>;
 }
 
 /** Concrete unattended activation path for `factory controller run`.
@@ -492,6 +513,7 @@ export function createGitHubRepositoryController(
     ...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.discoverySignal === undefined ? {} : { discoverySignal: options.discoverySignal }),
+    ...(options.beforeDiscovery ? { beforeDiscovery: options.beforeDiscovery } : {}),
     onDiscoveryTelemetry: (telemetry) => {
       options.onDiscoveryTelemetry?.(telemetry);
       const latest = telemetry.discovery.cycles.at(-1);
@@ -615,7 +637,14 @@ export async function runGitHubRepositoryController(
               ? { onColdStartRequestAccounting: options.onColdStartRequestAccounting }
               : {}),
           },
-          async ({ store, signal, executionSignal, observation, recoveryOwnership }) =>
+          async ({
+            store,
+            signal,
+            executionSignal,
+            observation,
+            recoveryOwnership,
+            beforeDiscovery,
+          }) =>
             createGitHubRepositoryController({
               ...options,
               capacity: policy.maxActiveObjectives,
@@ -626,6 +655,7 @@ export async function runGitHubRepositoryController(
               activationStore: store,
               controllerObservation: observation,
               recoveryOwnership,
+              beforeDiscovery,
             }).run(),
         );
         return;
@@ -827,6 +857,7 @@ interface RepositoryOwnership {
   /** Explicit shutdown/cancellation signal for active Objective execution. */
   executionSignal: AbortSignal;
   fence: () => Promise<void>;
+  beforeDiscovery: () => Promise<void>;
   observation: () => ControllerObservation | undefined;
   recoveryOwnership: RecoveryRepositoryOwnership;
 }
@@ -908,13 +939,36 @@ async function withRepositoryOwnership<T>(
   let renewalFailure: unknown;
   const retire = (error: unknown): void => {
     ownership.abort(error);
-    // Only a proven election loss is discovery-local. Quota, credential,
-    // account and invariant failures retain the previous safety stop.
+    // Definite quota refusals wait inside the active scope. Of the failures
+    // reaching retirement, only a proven election loss is discovery-local.
     if (!(error instanceof RepositoryLeaseLostError)) executionStop.abort(error);
   };
+  // Join the current renewal without holding a transaction mutex during quota
+  // backoff. Discovery waits here too; admitted Objectives retain their own leases.
+  let pendingRenewal: Promise<void> | undefined;
+  const renewLease = (afterQuota = false): Promise<void> => {
+    if (pendingRenewal) return pendingRenewal;
+    pendingRenewal = retryGitHubQuota(
+      async (retried) => {
+        lease = await leases.renew(lease, { allowExpiredAfterQuota: afterQuota || retried });
+      },
+      { refresh: false },
+    ).finally(() => {
+      pendingRenewal = undefined;
+    });
+    return pendingRenewal;
+  };
+  const withQuota = <R>(work: () => Promise<R>): Promise<R> =>
+    withGitHubQuotaWait(
+      {
+        signal,
+        beforeRetry: () => renewLease(true),
+      },
+      work,
+    );
   const fence = async (): Promise<void> => {
     try {
-      await leases.assertCurrent(lease);
+      await withQuota(() => retryGitHubQuota(() => leases.assertCurrent(lease)));
     } catch (error) {
       renewalFailure = error;
       retire(error);
@@ -926,9 +980,10 @@ async function withRepositoryOwnership<T>(
       await interruptibleDelay(DEFAULT_REPOSITORY_LEASE_RENEWAL_INTERVAL_MS, signal);
       if (signal.aborted) return;
       try {
-        lease = await leases.renew(lease);
+        await withQuota(() => renewLease());
         options.onStatus?.(`repository lease renewed at sequence ${lease.sequence}`);
       } catch (error) {
+        if (signal.aborted && error === signal.reason) return;
         renewalFailure = error;
         options.onStatus?.(
           `repository lease renewal failed; retiring controller ownership (${controllerFailureDiagnostic(error)})`,
@@ -957,14 +1012,17 @@ async function withRepositoryOwnership<T>(
   let result: T | undefined;
   let failure: unknown;
   try {
-    result = await operation({
-      store,
-      signal,
-      executionSignal,
-      fence,
-      observation,
-      recoveryOwnership: { leases, current: () => lease },
-    });
+    result = await withQuota(() =>
+      operation({
+        store,
+        signal,
+        executionSignal,
+        fence,
+        beforeDiscovery: () => pendingRenewal ?? Promise.resolve(),
+        observation,
+        recoveryOwnership: { leases, current: () => lease },
+      }),
+    );
   } catch (error) {
     failure = error;
   } finally {

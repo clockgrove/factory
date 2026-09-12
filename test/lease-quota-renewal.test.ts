@@ -56,10 +56,7 @@ class Store implements LeaseStore {
   }
 }
 const quota = () =>
-  new PlatformUnavailableError(
-    { kind: "rate_limit", retryAfterMs: hour },
-    new Error("definite quota refusal"),
-  );
+  new PlatformUnavailableError({ kind: "rate_limit", retryAfterMs: hour }, { status: 429 });
 async function fixture() {
   const store = new Store();
   const manager = new LeaseManager({ store, durationMs: 60_000 });

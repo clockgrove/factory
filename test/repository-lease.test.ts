@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { PlatformUnavailableError, withGitHubQuotaWait } from "../src/platform.js";
 
 import type { GitCommitObject, LeaseStore } from "../src/control/lease.js";
 import {
@@ -79,6 +80,78 @@ class MemoryLeaseStore implements LeaseStore {
 const digest = (character: string) => character.repeat(64);
 
 describe("repository-controller lease", () => {
+  it.each(["createCommit", "compareAndSwapRef"] as const)(
+    "rebuilds an unchanged repository lease after one hour of definite quota at %s",
+    async (boundary) => {
+      const store = new MemoryLeaseStore();
+      const manager = new RepositoryLeaseManager({ store, durationMs: 60_000 });
+      const original = await manager.acquire(
+        { controllerId: "first", policyDigest: digest("a") },
+        store.base(),
+      );
+      vi.spyOn(store, boundary).mockRejectedValueOnce(
+        new PlatformUnavailableError(
+          { kind: "rate_limit", retryAfterMs: 3_600_000 },
+          { status: 429 },
+        ),
+      );
+      const renewed = await withGitHubQuotaWait(
+        {
+          sleep: async (ms) => {
+            store.now = new Date(store.now.getTime() + ms);
+          },
+        },
+        () => manager.renew(original),
+      );
+      expect(renewed).toMatchObject({ controllerId: "first", epoch: original.epoch, sequence: 2 });
+      expect(renewed.expiresAt.getTime()).toBe(store.now.getTime() + 60_000);
+      expect(store.refs.get(original.ref)).toBe(renewed.oid);
+      await expect(manager.assertCurrent(renewed)).resolves.toBeUndefined();
+    },
+  );
+
+  it("retains strict ordinary expiry and refuses to revive a released repository lease", async () => {
+    const store = new MemoryLeaseStore();
+    const manager = new RepositoryLeaseManager({ store, durationMs: 60_000 });
+    const original = await manager.acquire(
+      { controllerId: "first", policyDigest: digest("a") },
+      store.base(),
+    );
+    store.now = new Date(store.now.getTime() + 3_600_000);
+    await expect(manager.renew(original)).rejects.toBeInstanceOf(RepositoryLeaseLostError);
+    const renewed = await manager.renew(original, { allowExpiredAfterQuota: true });
+    const released = await manager.release(renewed);
+    await expect(manager.renew(released, { allowExpiredAfterQuota: true })).rejects.toBeInstanceOf(
+      RepositoryLeaseLostError,
+    );
+    expect(store.refs.get(original.ref)).toBe(released.oid);
+  });
+
+  it("refuses a takeover at the final CAS after the post-quota identity read", async () => {
+    const store = new MemoryLeaseStore();
+    const manager = new RepositoryLeaseManager({ store, durationMs: 60_000 });
+    const original = await manager.acquire(
+      { controllerId: "first", policyDigest: digest("a") },
+      store.base(),
+    );
+    store.now = new Date(store.now.getTime() + 3_600_000);
+    const compare = store.compareAndSwapRef.bind(store);
+    let takeoverOid = "";
+    vi.spyOn(store, "compareAndSwapRef").mockImplementationOnce(async (input) => {
+      takeoverOid = (
+        await manager.acquire({ controllerId: "peer", policyDigest: digest("b") }, store.base())
+      ).oid;
+      return compare(input);
+    });
+    await expect(manager.renew(original, { allowExpiredAfterQuota: true })).rejects.toBeInstanceOf(
+      RepositoryLeaseLostError,
+    );
+    expect(store.refs.get(original.ref)).toBe(takeoverOid);
+    await expect(manager.renew(original, { allowExpiredAfterQuota: true })).rejects.toBeInstanceOf(
+      RepositoryLeaseLostError,
+    );
+  });
+
   it("excludes another controller, renews one epoch, and releases cleanly", async () => {
     const store = new MemoryLeaseStore();
     const manager = new RepositoryLeaseManager({

@@ -1,6 +1,7 @@
 import type { GitCommitObject, LeaseStore } from "../control/lease.js";
 import { observeLeaseAssertion } from "../control/mutation-observation.js";
 import { gitSha } from "../protocol/limits.js";
+import { retryGitHubQuota } from "../platform.js";
 
 export const REPOSITORY_LEASE_REF = "refs/clockgrove-factory/leases/repository-controller";
 export const DEFAULT_REPOSITORY_LEASE_DURATION_MS = 10 * 60_000;
@@ -105,31 +106,63 @@ export class RepositoryLeaseManager {
     });
   }
 
-  async renew(lease: RepositoryLeaseState): Promise<RepositoryLeaseState> {
-    return this.#withLeaseClass(async () => {
-      await this.assertCurrent(lease);
-      const current = await this.#currentGeneration(lease);
-      const now = await this.#store.serverTime();
-      const record = makeRecord(
-        "RepositoryLeaseRenewed",
-        lease,
-        lease.epoch,
-        current.sequence + 1,
-        now,
-        this.#durationMs,
-        current.oid,
-      );
-      const oid = await this.#commit(record, current.treeOid, current.oid);
-      const won = await this.#store.compareAndSwapRef({
-        ref: REPOSITORY_LEASE_REF,
-        beforeOid: current.oid,
-        afterOid: oid,
-      });
-      if (!won) {
-        throw new RepositoryLeaseLostError("another repository controller advanced the lease");
-      }
-      return state(record, oid, current.treeOid);
-    });
+  async renew(
+    lease: RepositoryLeaseState,
+    options: { allowExpiredAfterQuota?: boolean } = {},
+  ): Promise<RepositoryLeaseState> {
+    return retryGitHubQuota(
+      (retried) =>
+        this.#withLeaseClass(async () => {
+          let current: RepositoryLeaseState;
+          if (retried || options.allowExpiredAfterQuota) {
+            current = await this.#quotaRenewalOwner(lease);
+          } else {
+            await this.assertCurrent(lease);
+            current = await this.#currentGeneration(lease);
+          }
+          const now = await this.#store.serverTime();
+          const record = makeRecord(
+            "RepositoryLeaseRenewed",
+            lease,
+            lease.epoch,
+            current.sequence + 1,
+            now,
+            this.#durationMs,
+            current.oid,
+          );
+          const oid = await this.#commit(record, current.treeOid, current.oid);
+          const won = await this.#store.compareAndSwapRef({
+            ref: REPOSITORY_LEASE_REF,
+            beforeOid: current.oid,
+            afterOid: oid,
+          });
+          if (!won) {
+            throw new RepositoryLeaseLostError("another repository controller advanced the lease");
+          }
+          return state(record, oid, current.treeOid);
+        }),
+      { refresh: false },
+    );
+  }
+
+  async #quotaRenewalOwner(lease: RepositoryLeaseState): Promise<RepositoryLeaseState> {
+    observeLeaseAssertion();
+    if (lease.ref !== REPOSITORY_LEASE_REF) throw new RepositoryLeaseLostError();
+    const oid = await this.#store.readRef(REPOSITORY_LEASE_REF);
+    if (oid !== lease.oid) throw new RepositoryLeaseLostError();
+    const commit = await this.#store.readCommit(oid);
+    const record = repositoryLeaseRecord(commit);
+    const current = state(record, commit.oid, commit.treeOid);
+    if (
+      record.event === "RepositoryLeaseReleased" ||
+      current.controllerId !== lease.controllerId ||
+      current.policyDigest !== lease.policyDigest ||
+      current.epoch !== lease.epoch ||
+      current.sequence !== lease.sequence ||
+      current.treeOid !== lease.treeOid
+    )
+      throw new RepositoryLeaseLostError();
+    return current;
   }
 
   async release(lease: RepositoryLeaseState): Promise<RepositoryLeaseState> {
@@ -259,6 +292,10 @@ function repositoryLeaseMessage(record: RepositoryLeaseRecord): string {
 }
 
 function parseRepositoryLease(commit: GitCommitObject): RepositoryLeaseState {
+  return state(repositoryLeaseRecord(commit), commit.oid, commit.treeOid);
+}
+
+function repositoryLeaseRecord(commit: GitCommitObject): RepositoryLeaseRecord {
   const trailer = commit.message
     .split(/\r?\n/)
     .reverse()
@@ -290,7 +327,7 @@ function parseRepositoryLease(commit: GitCommitObject): RepositoryLeaseState {
   }
   gitSha.parse(commit.oid);
   gitSha.parse(commit.treeOid);
-  return state(parsed as RepositoryLeaseRecord, commit.oid, commit.treeOid);
+  return parsed as RepositoryLeaseRecord;
 }
 
 function validateIdentity(identity: RepositoryLeaseIdentity): void {

@@ -109,6 +109,122 @@ async function parkedFailure(error: unknown) {
 }
 
 describe("controller quota boundary", () => {
+  it.each(["discovery", "renewal"] as const)(
+    "keeps concurrent Objectives and the same controller generation through definite %s quota",
+    async (boundary) => {
+      const mock = ownershipMocks();
+      const activations = [
+        activation,
+        { ...activation, objective: 2, requestId: "approved-2" },
+        { ...activation, objective: 3, requestId: "approved-3" },
+      ];
+      mock.discover.mockResolvedValue(activations);
+      const refusal = new PlatformUnavailableError(
+        { kind: "rate_limit", retryAfterMs: 3_600_000 },
+        { status: 429 },
+      );
+      if (boundary === "discovery")
+        mock.discover.mockResolvedValueOnce(activations).mockRejectedValueOnce(refusal);
+      const renew = vi
+        .spyOn(RepositoryLeaseManager.prototype, "renew")
+        .mockImplementation(async (lease) => ({
+          ...lease,
+          sequence: lease.sequence + 1,
+          expiresAt: new Date(Date.now() + 600_000),
+        }));
+      if (boundary === "renewal") renew.mockRejectedValueOnce(refusal);
+      const shutdown = new AbortController();
+      const signals: AbortSignal[] = [];
+      const finish = new Map<number, () => void>();
+      const runs = vi.fn(
+        (objective: number, signal: AbortSignal) =>
+          new Promise<void>((resolve) => {
+            signals.push(signal);
+            finish.set(objective, resolve);
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          }),
+      );
+      const task = runGitHubRepositoryController({
+        ...options(shutdown.signal),
+        capacity: 2,
+        supervisorFactory: (item, _resources, _observation, signal) => ({
+          run: () => runs(item.objective, signal!),
+        }),
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(runs).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(boundary === "discovery" ? 60_000 : 480_000);
+      expect(signals.every((signal) => !signal.aborted)).toBe(true);
+      const discoveryCount = mock.discover.mock.calls.length;
+      finish.get(1)!();
+      await vi.advanceTimersByTimeAsync(3_599_998);
+      expect(signals.every((signal) => !signal.aborted)).toBe(true);
+      expect(mock.acquire).toHaveBeenCalledTimes(1);
+      expect(mock.discover).toHaveBeenCalledTimes(discoveryCount);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(renew.mock.calls.some(([, options]) => options?.allowExpiredAfterQuota)).toBe(true);
+      expect(mock.discover.mock.calls.length).toBeGreaterThan(discoveryCount);
+      expect(runs).toHaveBeenCalledTimes(3);
+      expect(runs.mock.calls.map(([objective]) => objective)).toEqual([1, 2, 3]);
+      expect(mock.acquire).toHaveBeenCalledTimes(1);
+      shutdown.abort();
+      await task;
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+      expect(mock.release).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("keeps election takeover discovery-local after a heartbeat quota wait", async () => {
+    ownershipMocks();
+    const takeover = new RepositoryLeaseLostError("peer acquired the expired repository lease");
+    vi.spyOn(RepositoryLeaseManager.prototype, "renew")
+      .mockRejectedValueOnce(
+        new PlatformUnavailableError(
+          { kind: "rate_limit", retryAfterMs: 3_600_000 },
+          { status: 429 },
+        ),
+      )
+      .mockRejectedValueOnce(takeover);
+    let executionSignal: AbortSignal | undefined;
+    let finish!: () => void;
+    const task = runGitHubRepositoryController({
+      ...options(new AbortController().signal),
+      supervisorFactory: (_activation, _resources, _observation, signal) => ({
+        run: () => {
+          executionSignal = signal;
+          return new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+        },
+      }),
+    });
+    const outcome = task.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(480_001);
+    expect(executionSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(executionSignal?.aborted).toBe(false);
+    finish();
+    expect(await outcome).toMatchObject({ safeIdentity: "repository-lease-lost", cause: takeover });
+  });
+
+  it("interrupts a definite controller quota wait on explicit shutdown without waiting for reset", async () => {
+    const mock = ownershipMocks();
+    mock.discover.mockRejectedValueOnce(
+      new PlatformUnavailableError(
+        { kind: "rate_limit", retryAfterMs: 3_600_000 },
+        { status: 429 },
+      ),
+    );
+    const abort = new AbortController();
+    const task = runGitHubRepositoryController(options(abort.signal));
+    await vi.advanceTimersByTimeAsync(1);
+    abort.abort();
+    await task;
+    expect(mock.acquire).toHaveBeenCalledTimes(1);
+    expect(mock.discover).toHaveBeenCalledTimes(1);
+    expect(mock.release).toHaveBeenCalledTimes(1);
+  });
+
   it("classifies local repository preflight before any GitHub request", async () => {
     const failure = new Error("private checkout path");
     vi.mocked(verifyLocalRepository).mockRejectedValueOnce(failure);

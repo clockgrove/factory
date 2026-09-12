@@ -95,16 +95,11 @@ export function checkpointStartupObservation(
     now?(): number;
   },
 ): Promise<unknown>;
-export function checkpointFailure(
-  error: unknown,
-  boundary?: string,
-): { boundary: string; code: string };
-export interface CheckpointObservationDiagnostic {
-  boundary: "observation";
-  phase: string;
-  stage: string;
-  failedAt: string;
+export function checkpointFailure(error: unknown, boundary?: string): CheckpointDiagnostic;
+export interface CheckpointDiagnostic {
+  boundary: string;
   category:
+    | "rate-limit"
     | "http-refusal"
     | "http"
     | "timeout"
@@ -119,6 +114,17 @@ export interface CheckpointObservationDiagnostic {
   code: string;
   httpStatus?: number;
   mcpCode?: number;
+  rateLimitRemaining?: number;
+  /** Unix seconds. */
+  rateLimitReset?: number;
+  /** Delay in seconds. */
+  retryAfter?: number;
+}
+export interface CheckpointObservationDiagnostic extends CheckpointDiagnostic {
+  boundary: "observation";
+  phase: string;
+  stage: string;
+  failedAt: string;
 }
 export function checkpointObservationFailure(
   error: unknown,

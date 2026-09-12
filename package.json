@@ -36,6 +36,7 @@
     "SUPPORT.md",
     "THIRD_PARTY_NOTICES.txt",
     "assets/",
+    "bin/",
     "dist/",
     "docs/setup/",
     "docs/CREDENTIALS.md",

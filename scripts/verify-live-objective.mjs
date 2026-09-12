@@ -1034,7 +1034,7 @@ export async function main(qualification = {}) {
     qualification.policy?.economics?.maxModelTokens ??
     modelTokenLimit(required("FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS"));
   const mcp = manifest.mcpServers?.factory;
-  assert.equal(mcp?.command, "node");
+  assert.equal(mcp?.command, "/bin/sh");
   const token =
     process.env.GITHUB_TOKEN || process.env.GH_TOKEN || run("gh", ["auth", "token"], checkout);
   const octokit = new Octokit({

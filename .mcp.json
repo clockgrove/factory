@@ -1,8 +1,11 @@
 {
   "mcpServers": {
     "factory": {
-      "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/mcp-server.js"]
+      "command": "/bin/sh",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/bin/factory-mcp",
+        "${CLAUDE_PLUGIN_ROOT}/dist/mcp-server.js"
+      ]
     }
   }
 }

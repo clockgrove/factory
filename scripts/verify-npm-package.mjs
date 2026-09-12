@@ -128,6 +128,7 @@ try {
     ".agents/plugins/marketplace.json",
     ".codex-plugin/plugin.json",
     "THIRD_PARTY_NOTICES.txt",
+    "bin/factory-mcp",
     "dist/bundle-inventory.json",
     "dist/factory.js",
     "dist/mcp-server.js",
@@ -173,6 +174,10 @@ try {
   );
 
   const installedRoot = resolve(installDirectory, "node_modules", "@clockgrove", "factory");
+  const installedMcpLauncher = resolve(installedRoot, "bin", "factory-mcp");
+  if (((await stat(installedMcpLauncher)).mode & 0o111) === 0) {
+    throw new Error("installed Factory MCP launcher is not executable");
+  }
   const documents = Object.fromEntries(
     await Promise.all(
       [...paths]

@@ -1446,7 +1446,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     writeSync(evidenceFd, `${text}\n`, 0, "utf8");
   };
   const mcp = manifest.mcpServers.factory;
-  assert.equal(mcp.command, "node");
+  assert.equal(mcp.command, "/bin/sh");
   const client = new Client({ name: "factory-checkpoint-restart", version: "1.0.0" });
   const transport = new StdioClientTransport({
     command: mcp.command,

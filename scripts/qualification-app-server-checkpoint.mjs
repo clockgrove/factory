@@ -101,7 +101,13 @@ function identities(authority, reserved) {
 function document(proof, ref, path, parents, maxBytes = 196608) {
   return assertQualificationCheckpoint(proof, { ref, path, maxBytes }, parents);
 }
-export function assertAppServerCheckpoint(observation, authority, proof, witness) {
+export function assertAppServerCheckpoint(
+  observation,
+  authority,
+  proof,
+  witness,
+  verifiedAt = new Date().toISOString(),
+) {
   const events = observation.receipts.map(({ event }) => event),
     runId = observation.status.run.runId;
   const start = one(events.filter((event) => event.event === "FactoryRunStarted"));
@@ -313,10 +319,20 @@ export function assertAppServerCheckpoint(observation, authority, proof, witness
       );
     } else assert.ok(Date.parse(witness.expiresAt) > Date.parse(witness.reachedAt));
   }
+  assert.ok(Number.isFinite(Date.parse(verifiedAt)), "invalid verification timestamp");
   return {
+    protocol: "clockgrove.factory/app-server-checkpoint-verification-v1",
+    verifiedAt,
     workItem: reserved.workItem,
     runId,
     attempt: 1,
+    reservationRef: proof.reservationRef,
+    reservationOid: proof.reservationOid,
+    authoritySource: proof.reservationAuthority.source,
+    canonicalAuthorityRef: proof.reservationAuthority.canonical.ref,
+    canonicalAuthorityOid: proof.reservationAuthority.canonical.closingOid,
+    legacyAuthorityRef: proof.reservationAuthority.legacy.ref,
+    legacyAuthorityOid: proof.reservationAuthority.legacy.closingOid,
     threadId: binding.threadId,
     turnId: terminal.turnId,
     modelTokens: worker.amount,
@@ -325,6 +341,12 @@ export function assertAppServerCheckpoint(observation, authority, proof, witness
     terminalOid: proof.terminal.commit.oid,
     readyOid: proof.ready.commit.oid,
   };
+}
+
+export function appServerCheckpointIdentity(receipt) {
+  const { verifiedAt, ...identity } = receipt;
+  assert.ok(Number.isFinite(Date.parse(verifiedAt)), "invalid verification timestamp");
+  return identity;
 }
 export async function observeAppServerCheckpoints(request, observation, authority, witness) {
   const read = nativeProofReader(request),

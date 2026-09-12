@@ -49,6 +49,7 @@ import {
   assertNativeMergeProof,
 } from "./qualification-sibling-refresh-proof.mjs";
 import {
+  appServerCheckpointIdentity,
   appServerCheckpointArm,
   appServerCheckpointPath,
   assertAppServerCheckpoint,
@@ -960,8 +961,8 @@ export async function runAppServerCheckpointScenario(port, authority) {
   const held = await port.poll("terminal-artifact-hold", (value) =>
     appServerHoldReady(value, authority, arm),
   );
-  const sessionProofs = await port.sessionProof(held, held.checkpointReached);
-  assert.equal(sessionProofs.length, 1);
+  const sessionReceipts = await port.sessionProof(held, held.checkpointReached);
+  assert.equal(sessionReceipts.length, 1);
   const scopes = await port.absence(held, [original], true);
   const originalEvents = held.receipts
     .map(({ event }) => event)
@@ -971,12 +972,12 @@ export async function runAppServerCheckpointScenario(port, authority) {
     facts: { runId: held.status.run.runId, stable: originalEvents },
     original,
     scopes,
-    sessionProofs,
+    sessionProofs: sessionReceipts,
   });
   return continueAppServerCheckpointScenario(port, authority, {
     held,
     original,
-    sessionProofs,
+    sessionProofs: sessionReceipts,
     scopes,
     originalEvents,
   });
@@ -1006,10 +1007,10 @@ export async function continueAppServerCheckpointScenario(
       facts.stable.some((current) => JSON.stringify(current) === JSON.stringify(event)),
       "original worker receipt changed",
     );
-  const resumedProofs = await port.sessionProof(paused, held.checkpointReached);
+  const resumedReceipts = await port.sessionProof(paused, held.checkpointReached);
   assert.deepEqual(
-    resumedProofs,
-    sessionProofs,
+    resumedReceipts.map(appServerCheckpointIdentity),
+    sessionProofs.map(appServerCheckpointIdentity),
     "session or ready artifact changed across same-attempt continuation",
   );
   await port.absence(paused, [original, replacement]);
@@ -1020,11 +1021,13 @@ export async function continueAppServerCheckpointScenario(
   );
   const final = checkpointFacts(completed, authority, port.pauseRequestId, false);
   assert.equal(final.runId, facts.runId);
-  const finalSessionProofs = await port.sessionProof(completed);
-  assert.equal(finalSessionProofs.length, 3);
+  const finalSessionReceipts = await port.sessionProof(completed);
+  assert.equal(finalSessionReceipts.length, 3);
   assert.deepEqual(
-    finalSessionProofs.find((proof) => proof.workItem === sessionProofs[0].workItem),
-    sessionProofs[0],
+    appServerCheckpointIdentity(
+      finalSessionReceipts.find((receipt) => receipt.workItem === sessionProofs[0].workItem),
+    ),
+    appServerCheckpointIdentity(sessionProofs[0]),
   );
   await port.finalProof(completed, original, replacement);
   const finalScopes = await port.absence(completed, [original, replacement]);
@@ -1037,7 +1040,7 @@ export async function continueAppServerCheckpointScenario(
     checkpoint: facts,
     final,
     sessionProofs,
-    finalSessionProofs,
+    finalSessionProofs: finalSessionReceipts,
     original,
     replacement,
     scopes,
@@ -1739,20 +1742,23 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     sessionProof: async (observation, witness) => {
       assert.equal(authority.sessionRecovery, true);
       const proofs = await observeAppServerCheckpoints(request, observation, authority, witness);
-      (evidence.sessionObservations ??= []).push({
-        at: new Date().toISOString(),
-        runId: observation.status.run.runId,
-        proofs,
-      });
-      save();
-      return proofs.map((proof) =>
+      const verifiedAt = new Date().toISOString();
+      const receipts = proofs.map((proof) =>
         assertAppServerCheckpoint(
           observation,
           authority,
           proof,
           witness?.workItem === proof.workItem ? witness : undefined,
+          verifiedAt,
         ),
       );
+      (evidence.sessionObservations ??= []).push({
+        at: verifiedAt,
+        runId: observation.status.run.runId,
+        receipts,
+      });
+      save();
+      return receipts;
     },
     preflight: async () => {
       const repository = (await request("GET /repos/{owner}/{repo}")).data;

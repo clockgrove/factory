@@ -72,6 +72,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Installed App Server checkpoint/restart qualification now validates complete reservation,
+  session, and artifact Git objects transiently but persists only bounded verification receipts.
+  Receipts retain exact authority refs/OIDs, session and artifact identities, and observation time
+  without duplicating admission ledgers or checkpoint documents in the evidence envelope. ([#322](https://github.com/clockgrove/factory/issues/322))
+
 - Repository controllers now preserve typed fatal causes behind redacted diagnostic codes and
   artifact-keyed fingerprints. Installed systemd units bind the exact Factory artifact identity,
   keep transient failures and generation retirement restartable, stop deterministic discovery,

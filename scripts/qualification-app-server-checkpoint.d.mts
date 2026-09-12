@@ -10,6 +10,10 @@ export function assertAppServerCheckpoint(
   authority: CheckpointAuthority,
   proof: unknown,
   witness?: unknown,
+  verifiedAt?: string,
+): Record<string, unknown>;
+export function appServerCheckpointIdentity(
+  receipt: Record<string, unknown>,
 ): Record<string, unknown>;
 export function observeAppServerCheckpoints(
   request: (route: string, args: Record<string, unknown>) => Promise<unknown>,

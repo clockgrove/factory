@@ -428,6 +428,48 @@ describe("qualification reservation authority", () => {
     expect(f.port.readCommit).toHaveBeenCalledTimes(1);
   });
 
+  it("fully authenticates a near-maximum admission ledger without reducing the 8 MiB bound", async () => {
+    const f = fixture();
+    const history = [f.entry];
+    for (let attempt = 2; attempt <= 4096; attempt++)
+      history.push({
+        ...structuredClone(f.entry),
+        runId: `older-run-${attempt}`,
+        reservation: {
+          ...f.entry.reservation,
+          ref: `refs/clockgrove-factory/attempts/objective-7/work-item-8/attempt-${attempt}`,
+          oid: sha(`reservation-${attempt}`),
+          attempt,
+        },
+      });
+    f.record.history = history;
+    let low = 1,
+      high = 1024,
+      message = "";
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2),
+        holder = "h".repeat(middle);
+      for (const entry of history) {
+        entry.writerHolder = holder;
+        entry.currentWriterHolder = holder;
+      }
+      const candidate = encoded("Factory-Issue-Admission", f.record);
+      if (Buffer.byteLength(candidate) < 8 * 1024 * 1024) {
+        message = candidate;
+        low = middle + 1;
+      } else high = middle - 1;
+    }
+    expect(Buffer.byteLength(message)).toBeGreaterThan(8 * 1024 * 1024 - 16 * 1024);
+    f.ledgerCommit.message = message;
+    await expect(
+      resolveQualificationReservationAuthority(f.port, f.reserved),
+    ).resolves.toMatchObject({
+      reservationOid: f.reservationOid,
+      authority: { source: "issue-admission" },
+    });
+    expect(f.port.readCommit).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["artifact-consumer", "managed-runtime"])(
     "rejects malformed optional %s data on an unrelated retained history entry",
     async (kind) => {

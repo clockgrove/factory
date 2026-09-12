@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { parseRunPolicy } from "../src/protocol/policy.js";
+import { boundedQualificationEvidenceText } from "../scripts/qualification-evidence-boundary.mjs";
 import {
   appServerCheckpointArm,
+  appServerCheckpointIdentity,
   assertAppServerCheckpoint,
   observeAppServerCheckpoints,
 } from "../scripts/qualification-app-server-checkpoint.mjs";
@@ -73,14 +75,14 @@ function proofDocument(ref: string, path: string, document: unknown, parents: st
     treePaths,
   };
 }
-function fixture() {
+function fixture(workItem = 8) {
   const digest = hash(canonical(authority.policy)),
     baseSha = "b".repeat(40),
     host = "a".repeat(64);
   const identity = {
     repository,
     objective: 7,
-    workItem: 8,
+    workItem,
     attempt: 1,
     runId: "run-7",
     directorEpoch: 2,
@@ -119,9 +121,9 @@ function fixture() {
     localScopeBatch: batch,
   };
   const reservationOid = "c".repeat(40),
-    reservationRef = "refs/clockgrove-factory/attempts/objective-7/work-item-8/attempt-1";
+    reservationRef = `refs/clockgrove-factory/attempts/objective-7/work-item-${workItem}/attempt-1`;
   const attemptId = hash(
-    JSON.stringify(["clockgrove.factory/attempt-v2", repository, "run-7", 7, 8, 1, 2]),
+    JSON.stringify(["clockgrove.factory/attempt-v2", repository, "run-7", 7, workItem, 1, 2]),
   );
   const sessionRef = `refs/clockgrove-factory/sessions/${attemptId}`;
   const tokens = {
@@ -175,13 +177,13 @@ function fixture() {
   const transfer = `refs/clockgrove-factory/artifact-transfers/${hash(JSON.stringify(identity))}`;
   const intent = proofDocument(`${transfer}/intent`, "artifact-transfer.json", descriptor, []);
   const proof = {
-    workItem: 8,
+    workItem,
     reservationRef,
     reservationOid,
     reservationAuthority: {
       source: "legacy-attempt",
       canonical: {
-        ref: "refs/clockgrove-factory/admission/work-item-8",
+        ref: `refs/clockgrove-factory/admission/work-item-${workItem}`,
         openingOid: null,
         closingOid: null,
       },
@@ -194,7 +196,7 @@ function fixture() {
     observedReservationAuthority: {
       source: "legacy-attempt",
       canonical: {
-        ref: "refs/clockgrove-factory/admission/work-item-8",
+        ref: `refs/clockgrove-factory/admission/work-item-${workItem}`,
         openingOid: null,
         closingOid: null,
       },
@@ -259,7 +261,7 @@ function fixture() {
       sequence: 7,
       phase: "execution",
       unit: "model_tokens",
-      usageId: "worker-8-1",
+      usageId: `worker-${workItem}-1`,
       amount: 110,
     },
     {
@@ -334,13 +336,100 @@ describe("installed App Server checkpoint qualification", () => {
       true,
     );
     expect(assertAppServerCheckpoint(f.observation, authority, f.proof, f.witness)).toMatchObject({
+      protocol: "clockgrove.factory/app-server-checkpoint-verification-v1",
       workItem: 8,
       runId: "run-7",
       attempt: 1,
+      reservationRef: f.proof.reservationRef,
+      reservationOid: f.proof.reservationOid,
+      authoritySource: "legacy-attempt",
+      canonicalAuthorityRef: "refs/clockgrove-factory/admission/work-item-8",
+      canonicalAuthorityOid: null,
+      legacyAuthorityRef: f.proof.reservationRef,
+      legacyAuthorityOid: f.proof.reservationOid,
       threadId: "thread-7",
       turnId: "turn-7",
       modelTokens: 110,
     });
+  });
+  it("persists only a bounded compact receipt after validating complete proof objects", () => {
+    const f = fixture();
+    const verifiedAt = "2026-09-11T01:02:03.000Z";
+    const persisted = {
+      at: verifiedAt,
+      runId: "run-7",
+      receipts: [
+        assertAppServerCheckpoint(f.observation, authority, f.proof, f.witness, verifiedAt),
+      ],
+    };
+    expect(persisted).toMatchObject({
+      at: verifiedAt,
+      runId: "run-7",
+      receipts: [
+        {
+          verifiedAt,
+          sessionRef: expect.stringMatching(/^refs\/clockgrove-factory\/sessions\//),
+          terminalOid: f.proof.terminal.commit.oid,
+          readyOid: f.proof.ready.commit.oid,
+          artifactDigest: f.witness.artifactDigest,
+        },
+      ],
+    });
+    const encoded = JSON.stringify(persisted);
+    expect(Buffer.byteLength(encoded)).toBeLessThan(4096);
+    for (const rawField of [
+      "reservationCommit",
+      "history",
+      "prepared",
+      "terminal",
+      "intent",
+      "ready",
+      "content",
+      "treePaths",
+    ])
+      expect(encoded).not.toContain(`"${rawField}"`);
+  });
+  it("retains held-attempt continuity through pre-restart, post-takeover, and final observations", () => {
+    const f = fixture();
+    const receipt = (verifiedAt: string) =>
+      assertAppServerCheckpoint(f.observation, authority, f.proof, f.witness, verifiedAt);
+    const preRestart = receipt("2026-09-11T01:02:03.000Z");
+    const postTakeover = receipt("2026-09-11T01:03:04.000Z");
+    const finalHeld = receipt("2026-09-11T01:04:05.000Z");
+    expect(postTakeover).not.toEqual(preRestart);
+    expect(finalHeld).not.toEqual(preRestart);
+    expect(appServerCheckpointIdentity(postTakeover)).toEqual(
+      appServerCheckpointIdentity(preRestart),
+    );
+    expect(appServerCheckpointIdentity(finalHeld)).toEqual(appServerCheckpointIdentity(preRestart));
+    const siblings = [fixture(9), fixture(10)];
+    const completed = {
+      ...f.observation,
+      receipts: [
+        ...f.observation.receipts,
+        ...siblings.flatMap((sibling) =>
+          sibling.observation.receipts.filter(({ event }) => event.event !== "FactoryRunStarted"),
+        ),
+      ],
+    };
+    const final = [f, ...siblings].map((item) =>
+      assertAppServerCheckpoint(completed, authority, item.proof),
+    );
+    expect(final.map(({ workItem }) => workItem)).toEqual([8, 9, 10]);
+    expect(appServerCheckpointIdentity(final[0]!)).toEqual(appServerCheckpointIdentity(preRestart));
+    expect(
+      Buffer.byteLength(boundedQualificationEvidenceText({ receipts: final }, "unused-token")),
+    ).toBeLessThan(8192);
+    for (const field of [
+      "reservationOid",
+      "canonicalAuthorityOid",
+      "terminalOid",
+      "readyOid",
+      "artifactDigest",
+    ])
+      expect(appServerCheckpointIdentity({ ...finalHeld, [field]: "changed" })).not.toEqual(
+        appServerCheckpointIdentity(preRestart),
+      );
   });
   it("observes the complete App Server proof through ledger-only reservation authority", async () => {
     const f = fixture();
@@ -441,9 +530,42 @@ describe("installed App Server checkpoint qualification", () => {
     };
     const [proof] = await observeAppServerCheckpoints(request, f.observation, authority, f.witness);
     expect((proof!.reservationAuthority as { source: string }).source).toBe("issue-admission");
-    expect(() =>
-      assertAppServerCheckpoint(f.observation, authority, proof, f.witness),
-    ).not.toThrow();
+    expect(assertAppServerCheckpoint(f.observation, authority, proof, f.witness)).toMatchObject({
+      authoritySource: "issue-admission",
+      canonicalAuthorityRef: "refs/clockgrove-factory/admission/work-item-8",
+      canonicalAuthorityOid: ledgerOid,
+      legacyAuthorityRef: f.proof.reservationRef,
+      legacyAuthorityOid: null,
+    });
+    // Exercise the complete bounded reader at its byte ceiling, then serialize
+    // the same observation envelope used by the runner. Raw evidence cannot fit.
+    ledger.message += `\n${"x".repeat(8 * 1024 * 1024 - Buffer.byteLength(ledger.message) - 1)}`;
+    const sessionObservations = [];
+    for (const at of [
+      "2026-09-11T01:02:03.000Z",
+      "2026-09-11T01:03:04.000Z",
+      "2026-09-11T01:04:05.000Z",
+    ]) {
+      const raw = await observeAppServerCheckpoints(request, f.observation, authority, f.witness);
+      expect(() => boundedQualificationEvidenceText({ proofs: raw }, "unused-token")).toThrow(
+        /exceeds bound/,
+      );
+      sessionObservations.push({
+        at,
+        runId: f.observation.status.run.runId,
+        receipts: raw.map((item) =>
+          assertAppServerCheckpoint(f.observation, authority, item, f.witness, at),
+        ),
+      });
+    }
+    const persisted = boundedQualificationEvidenceText({ sessionObservations }, "unused-token");
+    expect(Buffer.byteLength(persisted)).toBeLessThan(8192);
+    expect(persisted).not.toContain("Factory-Issue-Admission");
+    expect(persisted).not.toContain("reservationCommit");
+    for (const observation of sessionObservations)
+      expect(appServerCheckpointIdentity(observation.receipts[0]!)).toEqual(
+        appServerCheckpointIdentity(sessionObservations[0]!.receipts[0]!),
+      );
     let canonicalReads = 0;
     await expect(
       observeAppServerCheckpoints(

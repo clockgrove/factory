@@ -1,11 +1,11 @@
 # Historical completion evidence
 
 This retained snapshot is historical evidence, not the current backlog. See
-[GitHub #69](https://github.com/clockgrove/factory/issues/69) for current capability status and next deliverables.
+[Factory Project](https://github.com/orgs/clockgrove/projects/1) for current status and next deliverables.
 
-Updated: 2026-09-07. [GitHub #69](https://github.com/clockgrove/factory/issues/69) is the
-authoritative backlog. This page summarizes capability boundaries, not execution sessions or a
-second queue. These are ordinary development issues, not Factory Objectives.
+Snapshot date: 2026-09-07. The following descriptions and priorities are historical, not current
+instructions. The Factory Project is the current backlog; linked issues own acceptance and evidence.
+These are ordinary development issues, not Factory Objectives.
 
 Filter open work by
 [code](https://github.com/clockgrove/factory/issues?q=is%3Aissue+is%3Aopen+label%3A%22work%3Acode%22),
@@ -60,7 +60,7 @@ The specific active-cancellation
 accounting case remains incomplete where the provider supplies no complete interrupted-worker usage;
 resource cleanup and unknown counters must be reported separately. Other authorized WSL2 work can
 continue without that provider capability. The live lane states and next deliverables are maintained
-in [#69](https://github.com/clockgrove/factory/issues/69).
+in the [Factory Project](https://github.com/orgs/clockgrove/projects/1).
 
 ### Prior implementation and evidence
 

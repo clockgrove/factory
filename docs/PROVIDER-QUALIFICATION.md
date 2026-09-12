@@ -101,7 +101,7 @@ guesses from timestamps or assumes unassignment stopped compute.
 
 ## Qualification boundaries
 
-Current provider status lives in [GitHub #69](https://github.com/clockgrove/factory/issues/69),
+Current provider status lives in the [Factory Project](https://github.com/orgs/clockgrove/projects/1),
 with detailed acceptance in #83/#84/#85. [CONFORMANCE.md](CONFORMANCE.md) retains exact-candidate
 evidence and required gates. Simulated Daytona/GitHub fixtures do not establish live cloud or billing
 evidence. Native-stack qualification must cover cascading validation, changed heads, conflicts,

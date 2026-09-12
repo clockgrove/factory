@@ -3,16 +3,18 @@
 These rules govern AI contributors building Factory, not the workers Factory runs for adopters.
 
 Use [`docs/DESIGN.md`](docs/DESIGN.md) for the product contract,
-[GitHub #69](https://github.com/clockgrove/factory/issues/69) for current capability status,
+[Factory Project](https://github.com/orgs/clockgrove/projects/1) for current priorities and status,
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for contributor setup and PR expectations, and
 [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md#release-verification-procedure) for release procedures.
 GitHub and the repository are the source of truth; conversation history is not.
 
-Current project status lives in the body of #69, with linked issues owning detailed acceptance
-and evidence. Update that body and affected issue dependencies when a capability changes state;
-comments preserve history, not a competing current board. Repository documents retain contracts,
-procedures and historical evidence, not a second live status table. Distinguish implemented,
-integrated and qualified, and bind qualification to its exact candidate and scenario.
+The Factory Project owns scheduling through Status and Priority. Issues own concrete problems,
+scope, acceptance, dependencies and evidence; PRs own implementation and review. Add each work
+issue to the Project once and update its fields when work starts, blocks, is deferred or finishes.
+Do not maintain #69, release issues, Project descriptions or repository documents as duplicate
+status boards. See [CONTRIBUTING.md](CONTRIBUTING.md#tracking-work) for field meanings.
+Repository documents retain contracts, procedures and historical evidence. Distinguish implemented,
+integrated and qualified in the relevant issue's evidence, not additional tracking fields.
 
 ## Pragmatic solutions for every coding task
 
@@ -227,7 +229,9 @@ accepted risks.
 
 ## Resume efficiently
 
-On resume, read the active goal, `git status`, recent `git log`, the #69 body and linked active issues.
+On resume, read the active task, `git status`, recent `git log`, the Project's Now view and the
+relevant issue and PR. If Project access is unavailable, continue authorized work and report the
+specific tracking update that remains; do not create a replacement status board.
 Identify the current trunk, branches, and leaves before acting. Continue the highest-impact authorized
 deliverable without replanning settled work. Keep tool output narrow and use parallel agents for
 genuinely independent outcomes—not as a measure of progress.

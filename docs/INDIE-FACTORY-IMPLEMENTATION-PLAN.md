@@ -1,6 +1,6 @@
 # Factory for indie developers — implementation plan
 
-Current status: [GitHub #69](https://github.com/clockgrove/factory/issues/69).
+Current status: [Factory Project](https://github.com/orgs/clockgrove/projects/1).
 
 Date: 2026-09-03
 

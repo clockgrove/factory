@@ -32,8 +32,8 @@ the service separately even if a foreground plugin probe already works.
    its installation first; plugin installation alone does not create it.
    Treat `healthy: false` as an execution gate even when systemd transiently reports `active: true`.
    `controller-launcher-stale` means the managed unit no longer names an available exact Factory
-   launcher; the supported repair is an idempotent controller install followed by start. A start or
-   restart response is accepted only after the service remains healthy through its initial
+   launcher or lacks the cache-eviction guard; follow the upgrade sequence below before refreshing it.
+   A start or restart response is accepted only after the service remains healthy through its initial
    observation window. A `fuseState` of `tripped` means Factory deliberately stopped a deterministic
    failure loop. Follow the returned `action`, preserve the `lastSafeDiagnosticCode`, artifact
    `executableIdentity`, and safe log fingerprint for support, and explicitly restart only after the
@@ -85,6 +85,35 @@ See [host scheduling](../HOST-SCHEDULING.md) for lifecycle and cancellation sema
 plugin/package upgrade, verify that the service still references the intended installed executable
 and that its drop-ins remain appropriate. A new plugin cache version does not prove an existing
 controller switched binaries.
+
+### Cache generations and coordinated upgrades
+
+Before replacing or evicting an installed plugin/package generation:
+
+1. Obtain `unit`, `executableIdentity`, and `action` from controller status for each exact repository
+   and checkout. Retain the old installed generation while any work or owned resources remain
+   active or unsettled. Do not use a disposable plugin-cache checkout as a Git worktree's common
+   repository: qualification checkouts must be independent clones or worktrees of a retained clone.
+2. Drain and verify work/resource settlement, then stop the exact service. A stopped process alone
+   does not prove remote resource cleanup, settled accounting, or permission to recover a run.
+3. Explicitly run controller install using the intended installed artifact, then explicitly restart
+   and check status. Install refuses to replace the launcher while systemd reports active,
+   transitioning, or unknown state. Installation alone never starts the controller.
+
+Newly generated units use systemd `ExecCondition` with `/usr/bin/test` outside the plugin cache.
+If a pinned executable or bundle disappears, the next start attempt is skipped without automatic
+retry (`serviceResult: exec-condition`, `fuseState: tripped`). A race with launch can cause one Node
+failure, but the next attempt checks the missing file again. Ordinary process crashes remain
+retryable. A running process is not killed or redirected when its cache generation disappears;
+its normal lifecycle and ownership fences still apply. Status names the exact unit and reports
+`controller-launcher-stale`; no path search or automatic adoption of another generation occurs.
+
+Previously installed units do **not** acquire the guard from a plugin update alone. Reinstall them
+explicitly before evicting their referenced generation. If eviction already happened, preserve the
+unit and diagnostic evidence, settle work/resources and stop that exact service to end its legacy
+retry loop, then perform the repair above. An installer outside Factory that deletes retained
+cache generations must honor this sequence. Drop-ins overriding `ExecStart` must preserve the
+pinned paths and identity and retain equivalent `ExecCondition` checks for those paths.
 
 
 ## Capacity, verification, and recovery

@@ -16,6 +16,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
   failures and successful completion without resurrecting capacity; changed identities still fail
   closed. Reconciliation retains original claim ownership across lease renewal and cleanup.
   ([#306](https://github.com/clockgrove/factory/issues/306))
+- Installed controller units now skip startup when their pinned launcher disappears, preventing
+  plugin-cache eviction from causing an unbounded Node restart loop. Launcher refresh refuses
+  active, transitioning, or unknown service state; status gives the exact unit and settlement-first
+  repair action. Existing units require explicit reinstallation before cache eviction.
+  ([#302](https://github.com/clockgrove/factory/issues/302))
 
 ### Added
 

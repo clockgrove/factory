@@ -327,6 +327,8 @@ describe("systemd user service lifecycle", () => {
         if (args[0] === "start") active = true;
         if (args[0] === "is-enabled" && !enabled) throw new Error("disabled");
         if (args[0] === "is-active" && !active) throw new Error("inactive");
+        if (args[0] === "show")
+          return { stdout: `ActiveState=${active ? "active" : "inactive"}\n` };
       },
     });
     const input = { repository: "Owner/Repo", checkout: "/work/repo" };
@@ -342,7 +344,7 @@ describe("systemd user service lifecycle", () => {
       launcherCurrent: false,
       healthy: false,
       reasonCode: "controller-launcher-stale",
-      action: expect.stringContaining("idempotent controller install"),
+      action: expect.stringContaining("work and owned resources settle"),
     });
     await expect(service.start(input)).rejects.toThrow("controller-launcher-stale");
     expect(calls.some((args) => args[0] === "start")).toBe(false);
@@ -502,6 +504,8 @@ describe("systemd user service lifecycle", () => {
       run: async (args) => {
         if (args[0] === "restart") active = true;
         if (args[0] === "is-active" && !active) throw new Error("inactive");
+        if (args[0] === "show")
+          return { stdout: `ActiveState=${active ? "active" : "inactive"}\n` };
       },
     });
     const installed = await service.install(f.input);

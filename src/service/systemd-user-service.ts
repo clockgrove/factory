@@ -133,6 +133,29 @@ export class SystemdUserService {
       );
     }
     const body = this.#unit(input, environment, executableIdentity);
+    if (
+      old !== undefined &&
+      !old.split("\n").includes(this.#execStart(input, executableIdentity))
+    ) {
+      // Never arrange for an automatic restart to adopt different bytes while
+      // the old service is running, stopping, or its state cannot be verified.
+      const output = await this.#run([
+        "show",
+        this.unitName(input),
+        "--property=ActiveState",
+        "--no-pager",
+      ]);
+      const stdout = (output as { stdout?: unknown } | null)?.stdout;
+      const state =
+        typeof stdout === "string" || Buffer.isBuffer(stdout)
+          ? parseSystemdProperties(stdout.toString()).ActiveState
+          : undefined;
+      if (state !== "inactive" && state !== "failed") {
+        throw new Error(
+          `controller-launcher-stale: ${this.unitName(input)}; settle work and owned resources, then stop the exact unit before refreshing its launcher (service state: ${state ?? "unknown"})`,
+        );
+      }
+    }
     await mkdir(dirname(path), { recursive: true });
     if (old !== body) {
       const temporary = `${path}.tmp-${process.pid}`;
@@ -205,6 +228,7 @@ export class SystemdUserService {
     const launcherCurrent = Boolean(
       managed &&
         body?.split("\n").includes(this.#execStart(input, executableIdentity)) &&
+        body.includes(this.#execConditions()) &&
         executableIdentity &&
         executableIdentity === currentExecutableIdentity &&
         (await this.#commandAvailable()),
@@ -212,9 +236,11 @@ export class SystemdUserService {
     const runtime = await this.#runtimeState(input);
     const active = runtime.active ?? activeProbe;
     const fatalCode =
-      !active && runtime.mainExitStatus !== null
-        ? fatalCodeForExitStatus(runtime.mainExitStatus)
-        : null;
+      !active && runtime.result === "exec-condition"
+        ? "controller-launcher-failure"
+        : !active && runtime.mainExitStatus !== null
+          ? fatalCodeForExitStatus(runtime.mainExitStatus)
+          : null;
     const lastSafeDiagnosticCode = fatalCode
       ? fatalCode
       : runtime.result === "signal" || runtime.result === "core-dump"
@@ -241,7 +267,7 @@ export class SystemdUserService {
         : reasonCode === "controller-unit-unmanaged"
           ? "resolve the unmanaged unit conflict before installing Factory"
           : reasonCode === "controller-launcher-stale"
-            ? "run the idempotent controller install operation to refresh the launcher, then explicitly restart it"
+            ? "preserve the installed generation until work and owned resources settle; then stop this exact unit, run controller install for this repository and checkout, and explicitly restart it"
             : reasonCode === "controller-disabled"
               ? "run the idempotent controller install operation to enable the unit"
               : fatalCode
@@ -375,7 +401,22 @@ export class SystemdUserService {
     const identity = executableIdentity
       ? `# FactoryExecutableIdentity=${executableIdentity}\n`
       : "";
-    return `${FACTORY_UNIT_MARKER}\n[Unit]\nDescription=Clockgrove Factory repository controller for ${escapeDescription(input.repository)}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${systemdDirectivePath(checkout)}\n${environment.join("")}${identity}${this.#execStart(input, executableIdentity)}\nRestart=on-failure\nRestartPreventExitStatus=2 65 70 72 78 130 203\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
+    return `${FACTORY_UNIT_MARKER}\n[Unit]\nDescription=Clockgrove Factory repository controller for ${escapeDescription(input.repository)}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${systemdDirectivePath(checkout)}\n${environment.join("")}${identity}${this.#execConditions()}${this.#execStart(input, executableIdentity)}\nRestart=on-failure\nRestartPreventExitStatus=2 65 70 72 78 130 203\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
+  }
+  #execConditions(): string {
+    // These checks live in the unit, outside the disposable plugin generation.
+    // ExecCondition exit 1 skips startup without triggering Restart=on-failure.
+    // If eviction races ExecStart, the next attempt stops here. Do not classify
+    // Node's generic exit 1 as fatal: ordinary controller crashes remain retryable.
+    return this.#command
+      .flatMap((part, index) =>
+        isAbsolute(part)
+          ? ["-f", index === 0 ? "-x" : "-r"].map(
+              (flag) => `ExecCondition=:/usr/bin/test ${flag} ${systemdQuote(part)}\n`,
+            )
+          : [],
+      )
+      .join("");
   }
   #execStart(input: SystemdServiceInput, executableIdentity?: string | null): string {
     const command = this.#command.map(systemdQuote).join(" ");

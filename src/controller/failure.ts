@@ -19,7 +19,7 @@ const CONTROLLER_FATAL_ACTION: Record<ControllerFatalDiagnosticCode, string> = {
   "controller-local-configuration":
     "correct the repository controller configuration, then explicitly restart it",
   "controller-launcher-failure":
-    "run the idempotent controller install operation to refresh the launcher, then explicitly restart it",
+    "preserve the installed generation until work and owned resources settle; then stop the exact unit, run controller install for its repository and checkout, and explicitly restart it",
   "controller-internal-invariant":
     "upgrade Factory or report the safe failure fingerprint, then explicitly restart the repository controller",
 };

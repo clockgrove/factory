@@ -212,6 +212,10 @@ the required exact executable, command, working directory or cgroup proof.
 
 The passed evidence records the original and replacement controller identities, checkpoint and
 final receipt/accounting facts, exact absence observations, takeover lease and action results.
+Complete reservation-authority commits and session/artifact checkpoint documents are validated
+transiently through their existing bounded readers. `sessionObservations` persists only compact
+verification receipts binding the selected canonical/legacy authority refs and OIDs, reservation,
+session terminal, ready artifact, digest, run/attempt identity, and verification timestamp.
 Its claim is limited to the specified installed checkpoint restart. Deterministic verification is:
 
 ```sh

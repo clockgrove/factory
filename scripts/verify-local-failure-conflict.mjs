@@ -11,6 +11,7 @@ import {
 import {
   observeAppServerCheckpoints,
   assertAppServerCheckpoint,
+  appServerCheckpointIdentity,
 } from "./qualification-app-server-checkpoint.mjs";
 import { assertQualificationCheckpoint } from "./qualification-sibling-refresh-proof.mjs";
 import {
@@ -283,7 +284,9 @@ export function failureExtension(authority) {
       const contentProof = async (observation, witness) => {
         const proofs = await observeAppServerCheckpoints(request, observation, authority, witness);
         const proof = one(proofs, "one exact original session required");
-        const summary = assertAppServerCheckpoint(observation, authority, proof, witness);
+        const summary = appServerCheckpointIdentity(
+          assertAppServerCheckpoint(observation, authority, proof, witness),
+        );
         const prepared = JSON.parse(proof.prepared.content);
         assert.deepEqual(prepared.packet.allowedPaths, [fixture.paths.payload]);
         assert.deepEqual(prepared.packet.validationCommands, [fixture.validationCommand]);

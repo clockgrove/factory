@@ -705,6 +705,28 @@ describe("explicit installed regular qualification", () => {
     const value = await regularEvidence();
     expect(() => assertRegularCompletion(value)).not.toThrow();
     expect(assessRegularCompletion(value).result).toBe("passed");
+    const authorityReads = value.nativeMergeEvidence.map((record) => {
+      const reads = (record as { reads: Array<{ request: { kind: string }; value: unknown }> })
+        .reads;
+      return reads.filter(({ request }) => request.kind.startsWith("reservation-authority"));
+    });
+    expect(authorityReads.map((reads) => reads.map(({ request }) => request.kind))).toEqual(
+      Array.from({ length: 3 }, () => ["reservation-authority", "reservation-authority-current"]),
+    );
+    const changedAuthority = structuredClone(value);
+    const current = (
+      changedAuthority.nativeMergeEvidence[0] as {
+        reads: Array<{
+          request: { kind: string };
+          value: { canonical: { openingOid: string; closingOid: string } };
+        }>;
+      }
+    ).reads.find(({ request }) => request.kind === "reservation-authority-current")!.value;
+    current.canonical.openingOid = "f".repeat(40);
+    current.canonical.closingOid = "f".repeat(40);
+    expect(() => assertRegularCompletion(changedAuthority)).toThrow(
+      /changed after dependent proof reads/,
+    );
     expect(() =>
       assertQualificationCompletion(value, "stacked-prs", undefined, (proof, input) =>
         assertNativeMergeProof(value, proof, input),

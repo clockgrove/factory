@@ -863,7 +863,7 @@ async function runQualification(progress) {
   );
   const actor = (await request("GET /user")).data;
   const mcp = manifest.mcpServers?.factory;
-  assert.equal(mcp?.command, "node");
+  assert.equal(mcp?.command, "/bin/sh");
   const client = new Client({ name: "factory-installed-local-faults", version: "1.0.0" });
   const transport = new StdioClientTransport({
     command: mcp.command,

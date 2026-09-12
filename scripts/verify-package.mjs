@@ -19,7 +19,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -122,10 +122,22 @@ check(server?.type === "stdio", "the factory server is stdio");
 
 // The check that would have caught a manifest pointing at a bundle that was
 // never built, which no schema can catch.
-const arg = (server?.args ?? []).find((a) => a.includes("${PLUGIN_ROOT}"));
+const arg = (server?.args ?? []).find((a) => a.endsWith("/dist/mcp-server.js"));
 check(Boolean(arg), "mcp.json addresses the bundle through ${PLUGIN_ROOT}");
 const bundle = arg?.replace("${PLUGIN_ROOT}", root);
 check(Boolean(bundle) && existsSync(bundle), `the path in mcp.json exists: ${arg}`);
+const launcherArg = (server?.args ?? []).find((a) => a.endsWith("/bin/factory-mcp"));
+const launcher = launcherArg?.replace("${PLUGIN_ROOT}", root);
+check(server?.command === "/bin/sh", "mcp.json uses the supported Linux shell entry point");
+check(
+  Boolean(launcher),
+  "mcp.json addresses the startup diagnostic launcher through ${PLUGIN_ROOT}",
+);
+check(Boolean(launcher) && existsSync(launcher), `the MCP startup launcher exists: ${launcherArg}`);
+check(
+  Boolean(launcher) && existsSync(launcher) && (statSync(launcher).mode & 0o111) !== 0,
+  "the MCP startup launcher is executable",
+);
 if (bundle && existsSync(bundle)) {
   const bundleText = readFileSync(bundle, "utf8");
   for (const removedGraphqlType of [
@@ -196,7 +208,7 @@ check(claude.name === plugin.name, "the Claude manifest agrees on the plugin nam
 check(claude.version === plugin.version, "the Claude manifest agrees on the version");
 const claudeMcp = readJson(".mcp.json");
 const claudeArg = (claudeMcp.mcpServers?.factory?.args ?? []).find((a) =>
-  a.includes("${CLAUDE_PLUGIN_ROOT}"),
+  a.endsWith("/dist/mcp-server.js"),
 );
 check(Boolean(claudeArg), ".mcp.json addresses the bundle through ${CLAUDE_PLUGIN_ROOT}");
 check(
@@ -249,10 +261,19 @@ for (const [field, expected] of [["skills", "./skills/"]]) {
   check(existsSync(resolve(root, codex[field] ?? "")), `the Codex ${field} path exists`);
 }
 const codexServer = codex.mcpServers?.factory;
-const codexBundleArg = (codexServer?.args ?? []).find((value) => value.includes("${PLUGIN_ROOT}"));
+const codexBundleArg = (codexServer?.args ?? []).find((value) =>
+  value.endsWith("/dist/mcp-server.js"),
+);
+const codexLauncherArg = (codexServer?.args ?? []).find((value) =>
+  value.endsWith("/bin/factory-mcp"),
+);
 check(
-  codexServer?.type === "stdio" && codexServer?.command === "node",
+  codexServer?.type === "stdio" && codexServer?.command === "/bin/sh",
   "the Codex manifest declares the Factory stdio server inline",
+);
+check(
+  codexLauncherArg?.replace("${PLUGIN_ROOT}", "") === launcherArg?.replace("${PLUGIN_ROOT}", ""),
+  "the Codex and Agent Plugins manifests use the same startup launcher",
 );
 check(
   codexBundleArg?.replace("${PLUGIN_ROOT}", "") === arg?.replace("${PLUGIN_ROOT}", ""),
@@ -367,6 +388,20 @@ for (const field of [
 }
 
 console.log("\n# the bundle actually runs\n");
+
+const nodeLess = spawnSync(launchCommand, launchArgs, {
+  cwd: root,
+  env: { PATH: resolve(root, ".factory-path-without-node") },
+  encoding: "utf8",
+  timeout: 5_000,
+});
+check(
+  nodeLess.status === 127 &&
+    nodeLess.stderr.includes("the Codex host process cannot resolve 'node' on PATH") &&
+    nodeLess.stderr.includes("fully restart Codex"),
+  "a Node-less Codex host receives an actionable MCP startup diagnostic",
+  nodeLess.error?.message || nodeLess.stderr || `exit ${nodeLess.status}`,
+);
 
 const started = await listTools();
 const tools = started?.tools ?? null;

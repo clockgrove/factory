@@ -37,6 +37,7 @@ const shippedEntries = [
   "README.md",
   "THIRD_PARTY_NOTICES.txt",
   "assets",
+  "bin",
   "dist",
   "docs",
   "mcp.json",
@@ -211,8 +212,30 @@ async function main() {
   );
   const mcp = manifest.mcpServers?.factory;
   const mcpArgs = (mcp?.args ?? []).map((value) => value.replace("${PLUGIN_ROOT}", installedRoot));
-  if (mcp?.command !== "node" || mcpArgs.length === 0) {
+  if (
+    mcp?.command !== "/bin/sh" ||
+    mcpArgs.length !== 2 ||
+    mcpArgs[0] !== join(installedRoot, "bin", "factory-mcp") ||
+    mcpArgs[1] !== join(installedRoot, "dist", "mcp-server.js")
+  ) {
     throw new Error("installed Codex manifest has no runnable Factory MCP server");
+  }
+  const nodeLessPath = join(temporaryRoot, "path-without-node");
+  mkdirSync(nodeLessPath);
+  const nodeLess = spawnSync(mcp.command, mcpArgs, {
+    cwd: installedRoot,
+    env: { ...cleanEnvironment(), PATH: nodeLessPath },
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  if (
+    nodeLess.status !== 127 ||
+    !nodeLess.stderr.includes("the Codex host process cannot resolve 'node' on PATH") ||
+    !nodeLess.stderr.includes("fully restart Codex")
+  ) {
+    throw new Error(
+      `installed Factory MCP launcher did not diagnose a Node-less Codex host: ${nodeLess.stderr.trim()}`,
+    );
   }
   const mcpResult = await listTools(mcp.command, mcpArgs, installedRoot);
   const toolNames = (mcpResult.tools ?? []).map((tool) => tool.name);

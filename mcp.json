@@ -3,8 +3,8 @@
   "mcpServers": {
     "factory": {
       "type": "stdio",
-      "command": "node",
-      "args": ["${PLUGIN_ROOT}/dist/mcp-server.js"]
+      "command": "/bin/sh",
+      "args": ["${PLUGIN_ROOT}/bin/factory-mcp", "${PLUGIN_ROOT}/dist/mcp-server.js"]
     }
   }
 }

@@ -40,6 +40,7 @@ const requiredSubjects = [
   "dist/factory.js",
   "dist/mcp-server.js",
   "dist/bundle-inventory.json",
+  "bin/factory-mcp",
   "package.json",
   "package-lock.json",
   ".codex-plugin/plugin.json",

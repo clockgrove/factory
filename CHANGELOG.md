@@ -107,6 +107,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
   Receipts retain exact authority refs/OIDs, session and artifact identities, and observation time
   without duplicating admission ledgers or checkpoint documents in the evidence envelope. ([#322](https://github.com/clockgrove/factory/issues/322))
 
+- Installed local MCP manifests now enter through a packaged Linux launcher that reports an
+  actionable Codex host `PATH` diagnostic when Node.js cannot be resolved, while preserving the
+  same bundled server and 38-tool surface when Node.js 20 or later is available.
+  ([#262](https://github.com/clockgrove/factory/issues/262))
+
 - Repository controllers now preserve typed fatal causes behind redacted diagnostic codes and
   artifact-keyed fingerprints. Installed systemd units bind the exact Factory artifact identity,
   keep transient failures and generation retirement restartable, stop deterministic discovery,

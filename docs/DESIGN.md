@@ -913,7 +913,7 @@ clock skew is not interpreted as billing or cleanup evidence. Missing completion
 liability unresolved and blocks automatic replacement. A partial rebase publication replays from the
 last complete publication binding rather than pairing an old head with a newer validation receipt.
 This path requires runtime and fault qualification; current acceptance is tracked in
-[GitHub #69](https://github.com/clockgrove/factory/issues/69) and its linked delivery/provider issues.
+the [Factory Project](https://github.com/orgs/clockgrove/projects/1) and its linked delivery/provider issues.
 Immediately before each regular or stacked merge, Factory acquires a short claim for the destination
 branch and
 rechecks the exact validated head, current stack/base relationship, current branch rules, required

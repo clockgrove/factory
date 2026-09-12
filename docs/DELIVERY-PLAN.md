@@ -2,7 +2,7 @@
 
 Date: 2026-09-04
 
-The [GitHub project summary](https://github.com/clockgrove/factory/issues/69) owns current status. This document retains the
+The [Factory Project](https://github.com/orgs/clockgrove/projects/1) owns current status. This document retains the
 accepted product waves and final publication protocol, not a competing execution queue.
 
 ## Goal

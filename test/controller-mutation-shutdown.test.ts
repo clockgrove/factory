@@ -41,11 +41,19 @@ async function advanceUntil(observed: () => boolean, maximumMs = 10_000) {
   expect(observed()).toBe(true);
 }
 
+let fixtureSequence = 0;
+
 function setup(input: { paced?: boolean; fetch?: typeof globalThis.fetch } = {}) {
   const abort = new AbortController();
+  const token = `fixture-controller-shutdown-${++fixtureSequence}`;
   const resources = createRepositorySupervisorResources();
   const pacer = new ContentCreationPacer(40, 6, 0);
-  if (input.paced) pacer.recordCall(new Date());
+  // Hold ordinary admissions deterministically while leaving cleanup reserve
+  // available. This tests shutdown of a wait, independent of burst size.
+  if (input.paced)
+    vi.spyOn(pacer, "waitMs").mockImplementation((_now, options) =>
+      options?.priority ? 0 : 12 * 60_000,
+    );
   const recordCall = vi.spyOn(pacer, "recordTransported");
   let pacingObserved = false;
   resources.mutationScheduler = new MutationScheduler({
@@ -63,7 +71,7 @@ function setup(input: { paced?: boolean; fetch?: typeof globalThis.fetch } = {})
         })),
   );
   const store = new GitHubControlStore({
-    token: "fixture-only",
+    token,
     owner: "fixture",
     repo: "fixture",
     requestFetch: request,
@@ -116,7 +124,7 @@ function setup(input: { paced?: boolean; fetch?: typeof globalThis.fetch } = {})
     });
   const run = (operation: () => Promise<void>) =>
     runGitHubRepositoryController({
-      token: "fixture-only",
+      token,
       owner: "fixture",
       repo: "fixture",
       repository: "/fixture",
@@ -137,6 +145,7 @@ function setup(input: { paced?: boolean; fetch?: typeof globalThis.fetch } = {})
       true,
     );
   return {
+    token,
     abort,
     resources,
     pacer,
@@ -151,7 +160,7 @@ function setup(input: { paced?: boolean; fetch?: typeof globalThis.fetch } = {})
   };
 }
 
-it("stops a smoothed normal pacing wait, settles priority cleanup, and never dispatches it later", async () => {
+it("stops a queued normal pacing wait, settles priority cleanup, and never dispatches it later", async () => {
   const f = setup({ paced: true });
   let cleanupProved = false;
   const task = f.run(async () => {
@@ -290,7 +299,7 @@ it("rechecks the permit after an awaited mutation fence and releases it for leas
     async () => new Response(JSON.stringify({ sha: "d".repeat(40) }), { status: 201 }),
   );
   const store = new GitHubControlStore({
-    token: "fixture-only",
+    token: f.token,
     owner: "fixture",
     repo: "fixture",
     mutationScheduler: f.resources.mutationScheduler,

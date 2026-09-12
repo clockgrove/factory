@@ -694,6 +694,34 @@ describe("ContentCreationPacer", () => {
     for (let i = 60; i < 499; i++) p.recordTransported(later);
     expect(p.waitMs(later, { priority: true })).toBe(3_600_000);
   });
+
+  it("shares burst credit across callers of one pacer, not across independent instances", () => {
+    const shared = new ContentCreationPacer(1_000, 500, 0);
+    const now = new Date("2026-01-01T00:00:00Z");
+    // Two Objectives in one controller consume one allowance.
+    for (let i = 0; i < 30; i++) {
+      shared.recordTransported(now);
+      shared.recordTransported(now);
+    }
+    expect(shared.waitMs(now)).toBeGreaterThan(0);
+    // A fresh foreground process cannot reconstruct secondary quota. This is
+    // explicitly a local estimate, never proof of remaining server capacity.
+    expect(new ContentCreationPacer().waitMs(now)).toBe(0);
+  });
+
+  it("shrinks burst credit after secondary refusal without exempting priority counts", () => {
+    const p = new ContentCreationPacer(1_000, 500, 0);
+    const now = new Date("2026-01-01T00:00:00Z");
+    p.recordSecondaryRefusal();
+    p.recordSecondaryRefusal();
+    p.recordSecondaryRefusal();
+    for (let i = 0; i < 60; i++) p.recordTransported(now);
+    expect(p.waitMs(now)).toBeGreaterThan(0);
+    expect(p.waitMs(now, { priority: true })).toBe(0);
+    p.recordTransported(now);
+    p.recordTransported(now);
+    expect(p.waitMs(now, { priority: true })).toBe(3_600_000);
+  });
 });
 
 describe("MutationScheduler", () => {

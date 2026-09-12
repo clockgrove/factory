@@ -152,10 +152,17 @@ class MemoryStore implements CompiledGraphStore, RecoveryReadStore {
     return oid;
   }
   async createTree(args: Parameters<CompiledGraphStore["createTree"]>[0]) {
+    const materialized = args.entries.map((entry) => {
+      if (entry.content === undefined) return entry;
+      const bytes = Buffer.from(entry.content, "utf8");
+      const sha = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+      this.blobs.set(sha, bytes);
+      return { ...entry, sha };
+    });
     this.before("tree");
     const oid = this.oid("tree");
     const entries = new Map(args.baseTreeOid ? this.trees.get(args.baseTreeOid) : []);
-    for (const item of args.entries) {
+    for (const item of materialized) {
       if (item.sha) entries.set(item.path, item.sha);
       else entries.delete(item.path);
     }

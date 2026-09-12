@@ -1279,6 +1279,7 @@ export class GraphApplier {
         }
         const result = await withGitHubTransportCallbacks(
           {
+            ownsRefusal: true,
             onTransported: () => {
               attempted = true;
               mutationPermit.recordTransported?.();

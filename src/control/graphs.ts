@@ -33,20 +33,22 @@ const CompilationReceiptSchema = z
 
 export type CompilationReceipt = z.infer<typeof CompilationReceiptSchema>;
 
+export type CompiledGraphTreeEntry = {
+  path: string;
+  mode: "100644" | "100755" | "120000";
+  type: "blob";
+} & ({ sha: string | null; content?: never } | { content: string; sha?: never });
+
+export function gitBlobOid(bytes: Buffer): string {
+  return createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+}
+
 export interface CompiledGraphStore {
   readRef(ref: string): Promise<string | null>;
   readCommit(oid: string): Promise<GitCommitObject>;
   createBlob(content: Buffer): Promise<string>;
   readBlob(oid: string): Promise<Buffer>;
-  createTree(args: {
-    baseTreeOid?: string;
-    entries: Array<{
-      path: string;
-      mode: "100644" | "100755" | "120000";
-      type: "blob";
-      sha: string | null;
-    }>;
-  }): Promise<string>;
+  createTree(args: { baseTreeOid?: string; entries: CompiledGraphTreeEntry[] }): Promise<string>;
   readTreeEntry(treeOid: string, path: string): Promise<string | null>;
   createCommit(args: { treeOid: string; parentOids: string[]; message: string }): Promise<string>;
   createRef(ref: string, oid: string): Promise<boolean>;

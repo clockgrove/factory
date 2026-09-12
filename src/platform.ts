@@ -318,7 +318,14 @@ class GitHubRequestGovernor {
 
 const stateByCredential = new Map<
   string,
-  { governor: GitHubRequestGovernor; primaryQuota: GitHubPrimaryQuotaCache }
+  {
+    governor: GitHubRequestGovernor;
+    primaryQuota: GitHubPrimaryQuotaCache;
+    mutations: MutationScheduler;
+    pacer: ContentCreationPacer;
+    circuitBreaker: CircuitBreaker;
+    concurrency: ConcurrencyLimiter;
+  }
 >();
 
 /** Keep both controls for every admitted credential for the lifetime of this process. */
@@ -331,7 +338,15 @@ function stateForCredential(token: string) {
         "Factory supports at most 16 distinct GitHub credentials per process; reuse an existing credential or restart the process before using a new credential",
       );
     }
-    state = { governor: new GitHubRequestGovernor(), primaryQuota: new GitHubPrimaryQuotaCache() };
+    const pacer = new ContentCreationPacer();
+    state = {
+      governor: new GitHubRequestGovernor(),
+      primaryQuota: new GitHubPrimaryQuotaCache(),
+      pacer,
+      mutations: new MutationScheduler({ pacer }),
+      circuitBreaker: new CircuitBreaker(),
+      concurrency: new ConcurrencyLimiter(),
+    };
     stateByCredential.set(credential, state);
   }
   return state;
@@ -343,6 +358,25 @@ function requestGovernorForCredential(token: string): GitHubRequestGovernor {
 
 export function githubRequestTelemetryForCredential(token: string): GitHubRequestTelemetry {
   return requestGovernorForCredential(token).telemetry();
+}
+
+export function githubCircuitForCredential(token: string): CircuitBreaker {
+  return stateForCredential(token).circuitBreaker;
+}
+
+/** Shared credential quota, with a separate shutdown/counter owner for each caller. */
+export function createGitHubMutationScope(token: string, onThrottle?: (message: string) => void) {
+  const state = stateForCredential(token);
+  return {
+    pacer: state.pacer,
+    circuitBreaker: state.circuitBreaker,
+    concurrency: state.concurrency,
+    mutationScheduler: state.mutations.fork({
+      ...(onThrottle ? { onThrottle } : {}),
+      primaryQuota: state.primaryQuota,
+      requestTelemetry: () => state.governor.telemetry(),
+    }),
+  };
 }
 
 /** Admission and transport accounting shared by every Octokit built from one credential. */
@@ -735,7 +769,10 @@ export class ContentCreationPacer {
   }
 
   #refill(now: number, effectiveHourly: number): { refillPerMs: number } {
-    const capacity = Math.min(60, Math.max(1, effectiveHourly - 1));
+    const capacity = Math.min(
+      Math.max(1, Math.floor(60 / this.#adaptiveFactor)),
+      Math.max(1, effectiveHourly - 1),
+    );
     const refillPerMs = Math.max(1, effectiveHourly - capacity) / 3_600_000;
     const elapsed = this.#creditAt === null ? 0 : Math.max(0, now - this.#creditAt);
     this.#credit = Math.min(capacity, this.#credit + elapsed * refillPerMs);
@@ -816,9 +853,11 @@ export class MutationScheduler implements MutationAdmission {
   readonly #now: () => Date;
   readonly #sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   readonly #normalShutdown = new AbortController();
-  #active = false;
-  #leaseQueue: Array<() => void> = [];
-  #normalQueue: Array<() => void> = [];
+  #gate = {
+    active: false,
+    leaseQueue: [] as Array<() => void>,
+    normalQueue: [] as Array<() => void>,
+  };
   #lastNoticeAt = 0;
   #primaryQuota: GitHubPrimaryQuotaCache | undefined;
   #requestTelemetry: (() => GitHubRequestTelemetry) | undefined;
@@ -835,6 +874,19 @@ export class MutationScheduler implements MutationAdmission {
     this.#primaryQuota = options.primaryQuota;
     this.#requestTelemetry = options.requestTelemetry;
     this.#startedAt = this.#now().toISOString();
+  }
+
+  /** Quota and the gate through transport start are shared. Shutdown, reporting
+   * and counters belong to the returned owner, never its peers. */
+  fork(options: Omit<MutationSchedulerOptions, "pacer"> = {}): MutationScheduler {
+    const owner = new MutationScheduler({
+      now: this.#now,
+      sleep: this.#sleep,
+      ...options,
+      pacer: this.#pacer,
+    });
+    owner.#gate = this.#gate;
+    return owner;
   }
 
   attachPrimaryQuota(cache: GitHubPrimaryQuotaCache): void {
@@ -929,12 +981,12 @@ export class MutationScheduler implements MutationAdmission {
 
   async #acquireGate(kind: MutationClass): Promise<() => void> {
     this.#assertAdmissionOpen(kind);
-    if (!this.#active) {
-      this.#active = true;
+    if (!this.#gate.active) {
+      this.#gate.active = true;
       return this.#releaseGate();
     }
     await new Promise<void>((resolve, reject) => {
-      const queue = kind === "normal" ? this.#normalQueue : this.#leaseQueue;
+      const queue = kind === "normal" ? this.#gate.normalQueue : this.#gate.leaseQueue;
       const signal = kind === "normal" ? this.#normalShutdown.signal : undefined;
       const grant = () => {
         signal?.removeEventListener("abort", stop);
@@ -959,9 +1011,9 @@ export class MutationScheduler implements MutationAdmission {
     return () => {
       if (released) return;
       released = true;
-      const next = this.#leaseQueue.shift() ?? this.#normalQueue.shift();
+      const next = this.#gate.leaseQueue.shift() ?? this.#gate.normalQueue.shift();
       if (next) next();
-      else this.#active = false;
+      else this.#gate.active = false;
     };
   }
 }

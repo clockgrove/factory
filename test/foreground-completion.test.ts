@@ -74,7 +74,14 @@ async function fixture(backend = "codex-sdk/local-worktree", managedRuntime = fa
     },
     createTree: async ({ entries }) => {
       const oid = next();
-      trees.set(oid, new Map(entries.filter((e) => e.sha).map((e) => [e.path, e.sha!])));
+      const materialized = entries.map((entry) => {
+        if (entry.content === undefined) return entry;
+        const bytes = Buffer.from(entry.content, "utf8");
+        const sha = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+        blobs.set(sha, bytes);
+        return { ...entry, sha };
+      });
+      trees.set(oid, new Map(materialized.filter((e) => e.sha).map((e) => [e.path, e.sha!])));
       return oid;
     },
     createCommit: async (args) => {

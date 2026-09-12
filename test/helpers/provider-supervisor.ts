@@ -404,12 +404,17 @@ wheels = [
           encoding: "utf8",
         }).trim();
       indexed(baseTreeOid ? ["read-tree", baseTreeOid] : ["read-tree", "--empty"]);
-      for (const entry of entries)
+      for (const entry of entries) {
+        const sha =
+          entry.content !== undefined
+            ? rawGit(["hash-object", "-w", "--stdin"], Buffer.from(entry.content, "utf8")).trim()
+            : entry.sha;
         indexed(
-          entry.sha
-            ? ["update-index", "--add", "--cacheinfo", `${entry.mode},${entry.sha},${entry.path}`]
+          sha
+            ? ["update-index", "--add", "--cacheinfo", `${entry.mode},${sha},${entry.path}`]
             : ["update-index", "--force-remove", entry.path],
         );
+      }
       const oid = indexed(["write-tree"]);
       await rm(index, { force: true });
       return oid;
@@ -1647,6 +1652,7 @@ jobs:
   let disposal: Promise<void> | undefined;
   return {
     repository,
+    notifications,
     runId: lease.runId,
     graph,
     policy,

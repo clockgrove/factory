@@ -277,6 +277,17 @@ async function fixture(
       return id;
     },
     createTree: async ({ entries, baseTreeOid }) => {
+      entries = entries.map((entry) => {
+        if (entry.content === undefined) return entry;
+        const bytes = Buffer.from(entry.content, "utf8");
+        const sha = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+          cwd: repository,
+          input: bytes,
+          encoding: "utf8",
+        }).trim();
+        blobs.set(sha, bytes);
+        return { path: entry.path, mode: entry.mode, type: entry.type, sha };
+      });
       const env = {
         ...process.env,
         GIT_INDEX_FILE: join(repository, `fixture-index-${counter++}`),

@@ -6,6 +6,13 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Fixed
 
+- Small foreground runs can use bounded mutation bursts before sustained smoothing, retaining
+  rolling limits, lease priority and server backoff. Concurrent foreground/controller instances
+  share credential quota and refusal state while shutdown remains owner-local. Validation and review JSON checkpoints create
+  their blobs inline with their trees, saving one request each without changing their Git objects.
+  Process-local phase diagnostics report elapsed time, requests and aggregate admission/fence time.
+  ([#333](https://github.com/clockgrove/factory/issues/333))
+
 - Preserve live sibling workers while an admitted child's execution-to-validation capacity
   receipt is still being published. Exact in-flight claims wait for progress and a fresh
   Objective observation; unrelated or abandoned claims retain bounded refusal.

@@ -229,12 +229,19 @@ Primary quota observations come from GitHub's response headers and are cached pe
 resource; Factory does not poll `/rate_limit` to reconstruct a fresher-looking answer. GitHub does
 not expose remaining secondary content-generation quota, so that plane is reported separately as a
 local estimate with explicit confidence. The estimate counts only actual transport attempts,
-smooths admission below GitHub's documented outer ceiling, reduces throughput after real 403/429
+allows a bounded ordinary burst before smoothing sustained admission below GitHub's documented
+outer ceiling, reduces throughput after real 403/429
 secondary feedback, and recovers gradually after successful transports. Octokit's internal retries
 are disabled so every retry returns through Factory's shared pacing and circuit controls.
 Process-local mutation counters include their scheduler-lifetime measurement window and remain
 outside durable run economics. A reader process cannot attribute its own counters to a reconstructed
 run; without durable run-bound evidence, that historical measurement is explicitly unavailable.
+Foreground status diagnostics include phase start/end timestamps, elapsed time, actual GitHub
+read/write counts and aggregate mutation admission/fence time. Nested phases include their children;
+parallel operation times can overlap. These aggregates are not a disjoint wall-time decomposition,
+and model invocation envelopes are not pure inference time or individual model-request counts.
+Transport-only mutation records retain their innermost phase. No diagnostic changes authority or
+durable accounting, and a failed diagnostic sink cannot fail the operation.
 Normal metadata admission conservatively reserves 1,024 REST points and 512 GraphQL points for all
 maximum-sized lease/cleanup cohorts that can be admitted before the primary window resets. The
 largest supported Objective GraphQL shape expands to fewer than 50,000 connection requests under
@@ -1232,9 +1239,21 @@ supplied untrusted code route to an explicitly permitted sandbox or escalation.
 All GitHub writes continue through the shared circuit breaker, mutation scheduler, content-creation
 pacer, and concurrency limiter. Mutations are issued serially; actual transport attempts, including
 failed HTTP requests, are priced, while a lease or shutdown fence that stops before transport is not.
-Normal traffic is spread predictably across the documented content-generation window instead of
-bursting into a fixed local hourly cliff. Lease traffic retains queue priority and can use safe
-headroom up to the documented outer windows. A platform refusal stops mutation
+Normal traffic may use up to 60 initial mutation credits at the one-second minimum spacing.
+This is a local latency policy, not an entitlement from GitHub. Refill reserves the burst inside
+the adaptive hourly allowance: `(hourly allowance - burst capacity) / hour`; the burst shrinks
+with that allowance. Sustained normal traffic remains smoothed rather than hitting a fixed local
+hourly cliff. All mutation kinds consume this credit and the rolling minute/hour counts. Lease and
+cleanup traffic retain queue priority and may proceed without ordinary credit, but never bypass
+the rolling ceilings; heavy priority traffic can still exhaust a window.
+The existing bounded credential registry shares pacing, admission through transport start,
+concurrency and circuit/refusal state across foreground and controller instances in one process.
+Schedulers retain owner-local shutdown, notifications and counters; stopping one owner cannot
+retire a peer, and resource capacity, fairness and integration ownership remain repository-scoped.
+Primary quota is also credential-shared within the process. Process restarts start a new estimate;
+secondary capacity used by other processes or GitHub clients is unknown. Server-directed backoff
+and open-circuit protection remain required. No Git-object or ref mutation is exempted based on
+an assumed content-generation classification. A platform refusal stops mutation
 under the current lease. On recovery the interrupted
 reservation is reconciled and marked `AttemptDeferred`; it remains in the audit and cost ledgers but
 does not consume a Work Item implementation attempt. A durable failed validation remains a real

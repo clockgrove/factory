@@ -396,6 +396,7 @@ import {
   PlatformUnavailableError,
   githubRequestTelemetryForCredential,
   primaryQuotaForCredential,
+  createGitHubMutationScope,
 } from "./platform.js";
 
 class RunCancellationRequestedError extends Error {
@@ -483,14 +484,16 @@ export function createRepositorySupervisorResources(
     maxLocalWorkers: number;
     maxPaidWorkers: number;
   } = { maxLocalWorkers: 8, maxPaidWorkers: 0 },
+  token?: string,
 ): RepositorySupervisorResources {
-  const pacer = new ContentCreationPacer();
+  const quota = token === undefined ? undefined : createGitHubMutationScope(token, onThrottle);
+  const pacer = quota?.pacer ?? new ContentCreationPacer();
   let integrationTail = Promise.resolve();
   return {
     pacer,
-    circuitBreaker: new CircuitBreaker(),
-    concurrency: new ConcurrencyLimiter(),
-    mutationScheduler: new MutationScheduler({ pacer, onThrottle }),
+    circuitBreaker: quota?.circuitBreaker ?? new CircuitBreaker(),
+    concurrency: quota?.concurrency ?? new ConcurrencyLimiter(),
+    mutationScheduler: quota?.mutationScheduler ?? new MutationScheduler({ pacer, onThrottle }),
     capacityLedger: new CapacityLedger(),
     resourceSampler: new LinuxResourceSampler(),
     fairness: new ObjectiveFairness(),
@@ -1225,15 +1228,11 @@ export class FactorySupervisor {
     this.#policy = parseRunPolicy(options.policy);
     this.#notify = options.onStatus ?? (() => {});
     const shared = options.repositoryResources;
-    this.#pacer = shared?.pacer ?? new ContentCreationPacer();
-    this.#breaker = shared?.circuitBreaker ?? new CircuitBreaker();
-    this.#concurrency = shared?.concurrency ?? new ConcurrencyLimiter();
-    this.#mutations =
-      shared?.mutationScheduler ??
-      new MutationScheduler({
-        pacer: this.#pacer,
-        onThrottle: this.#notify,
-      });
+    const quota = shared ?? createGitHubMutationScope(options.token, this.#notify);
+    this.#pacer = quota.pacer;
+    this.#breaker = quota.circuitBreaker;
+    this.#concurrency = quota.concurrency;
+    this.#mutations = quota.mutationScheduler;
     this.#mutations.attachPrimaryQuota(primaryQuotaForCredential(options.token));
     this.#mutations.attachRequestTelemetry(() =>
       githubRequestTelemetryForCredential(options.token),
@@ -15349,6 +15348,32 @@ export class FactorySupervisor {
   }
 
   async #integrate(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    pull: PublishedPullRequest,
+    deadline: number,
+    allowRecovery = false,
+    candidate?: MergeCandidateCheckpointRecord,
+    adoptedSource = false,
+    deliveryHeadSha?: string,
+    siblingRefresh?: SiblingRefreshRecord,
+  ): Promise<boolean> {
+    return this.#observePhase("integration", () =>
+      this.#integrateWork(
+        item,
+        reservation,
+        pull,
+        deadline,
+        allowRecovery,
+        candidate,
+        adoptedSource,
+        deliveryHeadSha,
+        siblingRefresh,
+      ),
+    );
+  }
+
+  async #integrateWork(
     item: DerivedWorkItem,
     reservation: AttemptReservation,
     pull: PublishedPullRequest,

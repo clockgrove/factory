@@ -1,9 +1,11 @@
+import type { CompiledGraphStore } from "./graphs.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createOctokit, withGitHubTransportCallbacks, type GitHubOptions } from "../github.js";
 import {
-  CircuitBreaker,
-  ConcurrencyLimiter,
-  ContentCreationPacer,
+  type CircuitBreaker,
+  type ConcurrencyLimiter,
+  type ContentCreationPacer,
+  createGitHubMutationScope,
   GitHubPrimaryAdmissionDeferredError,
   MutationScheduler,
   PlatformUnavailableError,
@@ -219,15 +221,18 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     this.#octokit = createOctokit(options);
     this.#owner = options.owner;
     this.#repo = options.repo;
-    this.#breaker = options.circuitBreaker ?? new CircuitBreaker();
-    this.#pacer = options.pacer ?? new ContentCreationPacer();
-    this.#concurrency = options.concurrency ?? new ConcurrencyLimiter();
+    const scope = createGitHubMutationScope(options.token, options.onThrottle);
+    this.#breaker = options.circuitBreaker ?? scope.circuitBreaker;
+    this.#pacer = options.pacer ?? scope.pacer;
+    this.#concurrency = options.concurrency ?? scope.concurrency;
     this.#mutations =
       options.mutationScheduler ??
-      new MutationScheduler({
-        pacer: this.#pacer,
-        ...(options.onThrottle ? { onThrottle: options.onThrottle } : {}),
-      });
+      (options.pacer
+        ? new MutationScheduler({
+            pacer: options.pacer,
+            ...(options.onThrottle ? { onThrottle: options.onThrottle } : {}),
+          })
+        : scope.mutationScheduler);
     this.#beforeMutation = options.beforeMutation ?? (async () => {});
     this.#captureMutationFence = options.captureMutationFence;
     this.#assertMutationIdentity = options.assertMutationIdentity;
@@ -428,6 +433,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           : operation();
       const result = await withGitHubTransportCallbacks(
         {
+          ownsRefusal: true,
           onTransported: () => {
             attempted = true;
             mutationPermit?.recordTransported?.();
@@ -1417,15 +1423,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     return Buffer.from(response.data.content.replace(/\s/g, ""), "base64");
   }
 
-  async createTree(args: {
-    baseTreeOid?: string;
-    entries: Array<{
-      path: string;
-      mode: "100644" | "100755" | "120000";
-      type: "blob";
-      sha: string | null;
-    }>;
-  }): Promise<string> {
+  async createTree(args: Parameters<CompiledGraphStore["createTree"]>[0]): Promise<string> {
     const response = await this.#call(
       () =>
         this.#octokit.request("POST /repos/{owner}/{repo}/git/trees", {

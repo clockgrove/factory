@@ -11,6 +11,31 @@ function response(tree: unknown[], truncated = false) {
 }
 
 describe("bounded Git tree directory reads", () => {
+  it("writes UTF-8 content inline without a separate blob request", async () => {
+    const requests: Request[] = [];
+    const store = new GitHubControlStore({
+      token: "fixture-only",
+      owner: "o",
+      repo: "r",
+      requestFetch: async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ sha: ROOT });
+      },
+    });
+    const entries = [
+      {
+        path: "control/review.json",
+        mode: "100644" as const,
+        type: "blob" as const,
+        content: '{"summary":"café 🚀"}\n',
+      },
+    ];
+    await expect(store.createTree({ entries })).resolves.toBe(ROOT);
+    expect(requests).toHaveLength(1);
+    expect(new URL(requests[0]!.url).pathname).toBe("/repos/o/r/git/trees");
+    expect(await requests[0]!.json()).toEqual({ tree: entries });
+  });
+
   it("walks each path component without a recursive tree materialization", async () => {
     const requests: Request[] = [];
     const store = new GitHubControlStore({

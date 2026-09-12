@@ -1,3 +1,4 @@
+import { observeReactiveQuotaWait } from "./control/mutation-observation.js";
 import { retryGitHubQuota, withGitHubQuotaWait } from "./platform.js";
 import { createHash, randomUUID } from "node:crypto";
 import { EXECUTION_AFFECTING_GIT_PATHS, executionAffectingReason } from "./approval.js";
@@ -840,6 +841,7 @@ class SequenceAllocator {
 
 export class LeaseController {
   #renewalTail: Promise<void> = Promise.resolve();
+  #renewalPending: Promise<void> | undefined;
   #fatal: unknown;
 
   constructor(
@@ -914,10 +916,24 @@ export class LeaseController {
   }
 
   async renewIfNeeded(force = false, afterQuotaWait = false): Promise<void> {
-    await retryGitHubQuota((retried) => this.#mutateLease(async (lease) => {
-      if (!force && lease.expiresAt.getTime() - Date.now() > DEFAULT_LEASE_RENEWAL_LEAD_MS) return;
-      this.lease = await this.manager.renew(lease, this.sequences.take(), { allowExpiredAfterQuota: afterQuotaWait || retried });
-    }), { refresh: false });
+    if (this.#renewalPending) return this.#renewalPending;
+    const pending = retryGitHubQuota(
+      (retried) =>
+        this.#mutateLease(async (lease) => {
+          if (!force && lease.expiresAt.getTime() - Date.now() > DEFAULT_LEASE_RENEWAL_LEAD_MS)
+            return;
+          this.lease = await this.manager.renew(lease, this.sequences.take(), {
+            allowExpiredAfterQuota: afterQuotaWait || retried,
+          });
+        }),
+      { refresh: false },
+    );
+    this.#renewalPending = pending;
+    try {
+      await pending;
+    } finally {
+      if (this.#renewalPending === pending) this.#renewalPending = undefined;
+    }
   }
 
   async release(): Promise<void> {
@@ -3134,17 +3150,27 @@ export class FactorySupervisor {
   }
 
   async run(): Promise<SupervisorResult> {
+    const stopped = new AbortController();
     try {
       const deadline = AbortSignal.timeout(this.#policy.objectiveTimeoutMinutes * 60_000);
-      const signal = this.#options.signal ? AbortSignal.any([this.#options.signal, deadline]) : deadline;
-      return await withGitHubQuotaWait({
-        signal,
-        beforeRetry: async () => { if (this.#lease) await this.#lease.renewIfNeeded(false, true); },
-        onWait: (wait) => this.#notify(`Factory quota wait telemetry: ${JSON.stringify(wait)}`),
-      }, () => this.#observePhase("objective", () =>
-        withArtifactContentScope(() => this.#runWithArtifactContent()),
-      ));
+      const signal = this.#options.signal
+        ? AbortSignal.any([this.#options.signal, deadline, stopped.signal])
+        : AbortSignal.any([deadline, stopped.signal]);
+      return await withGitHubQuotaWait(
+        {
+          signal,
+          beforeRetry: async () => {
+            if (this.#lease) await this.#lease.renewIfNeeded(false, true);
+          },
+          onWait: (wait) => { observeReactiveQuotaWait(wait); this.#notify(`Factory quota wait telemetry: ${JSON.stringify(wait)}`); },
+        },
+        () =>
+          this.#observePhase("objective", () =>
+            withArtifactContentScope(() => this.#runWithArtifactContent()),
+          ),
+      );
     } finally {
+      stopped.abort(new Error("Objective scope finished"));
       await this.#retryArtifacts.clear();
     }
   }
@@ -6974,22 +7000,39 @@ export class FactorySupervisor {
         );
 
         let lastCancellationCheck = 0;
+        let pendingCancellation: Promise<void> | undefined;
+        let observationFailure: unknown;
         for (;;) {
-          await this.#lease.renewIfNeeded();
-          if (Date.now() - lastCancellationCheck >= 10_000) {
+          executionSignal?.throwIfAborted();
+          if (observationFailure) throw observationFailure;
+          // Quota can delay GitHub observation; it must not block local model
+          // observation or owner cancellation. Each background check is single-flight.
+          void this.#lease.renewIfNeeded().catch((error) => {
+            observationFailure = error;
+          });
+          if (!pendingCancellation && Date.now() - lastCancellationCheck >= 10_000) {
             lastCancellationCheck = Date.now();
-            const cancellation = await this.#reader.readRunCancellationRequest(
-              this.#run.objective,
-              this.#run.runId,
-              this.#run.actor,
-              this.#activationBinding(),
-            );
-            if (cancellation) {
-              this.#sequences.observe([cancellation]);
-              throw new RunCancellationRequestedError(
-                "operator requested cancellation through GitHub",
-              );
-            }
+            pendingCancellation = this.#reader
+              .readRunCancellationRequest(
+                this.#run.objective,
+                this.#run.runId,
+                this.#run.actor,
+                this.#activationBinding(),
+              )
+              .then((cancellation) => {
+                if (cancellation) {
+                  this.#sequences.observe([cancellation]);
+                  observationFailure = new RunCancellationRequestedError(
+                    "operator requested cancellation through GitHub",
+                  );
+                }
+              })
+              .catch((error) => {
+                observationFailure = error;
+              })
+              .finally(() => {
+                pendingCancellation = undefined;
+              });
           }
           let observation: BackendObservation;
           try {
@@ -11227,29 +11270,55 @@ export class FactorySupervisor {
                 target.pull.commitSha,
               );
             }
-            if (
-              (await this.#store.getBranchHead(this.#baseBranch)).oid !==
-              integratingMembers[0]!.receipt.baseSha
-            )
-              throw new Error("native integration base advanced before dispatch");
-            for (const member of integratingMembers) {
-              const current = await integrationReadiness(
-                this.#store,
-                member.pull,
-                member.receipt.baseSha,
-                undefined,
-                { ciExpected: this.#ciExpectedOnPullRequests },
-              );
-              if (current.state !== "ready")
-                throw new Error("native integration readiness changed before dispatch");
-            }
+            const assertNativeMergeCurrent = async () => {
+              if (
+                (await this.#store.getBranchHead(this.#baseBranch)).oid !==
+                integratingMembers[0]!.receipt.baseSha
+              )
+                throw new Error("native integration base advanced before dispatch");
+              for (const member of integratingMembers) {
+                const current = await integrationReadiness(
+                  this.#store,
+                  member.pull,
+                  member.receipt.baseSha,
+                  member.receipt.baseBranch,
+                  { ciExpected: this.#ciExpectedOnPullRequests },
+                );
+                if (current.state !== "ready")
+                  throw new Error("native integration readiness changed before dispatch");
+              }
+              const freshStack = await this.#stacks.get(stack.number);
+              if (
+                freshStack.baseRef !== stack.baseRef ||
+                !freshStack.open ||
+                JSON.stringify(freshStack.pullRequests.map((pull) => pull.number)) !==
+                  JSON.stringify(observedPulls)
+              )
+                throw new Error("native stack topology changed while awaiting GitHub admission");
+              const freshRules = await this.#store.readBranchRules(this.#baseBranch);
+              if (branchRuleBlockers(freshRules).length > 0)
+                throw new Error("native branch policy changed before dispatch");
+              for (const member of integratingMembers)
+                if (
+                  missingRequiredChecks(
+                    freshRules,
+                    await this.#store.readChecks(member.pull.commitSha),
+                  ).length > 0
+                )
+                  throw new Error("native required checks changed before dispatch");
+            };
+            await assertNativeMergeCurrent();
             await admission.markDispatched("native");
-            const result = await this.#stacks.requestMerge({
-              pullRequest: target.pull.number,
-              expectedHeadSha: target.pull.commitSha,
-              title: target.receipt.itemId,
-              action: "default",
-            });
+            const result = await this.#store.withPublicationSafetyFence(
+              assertNativeMergeCurrent,
+              () =>
+                this.#stacks.requestMerge({
+                  pullRequest: target.pull.number,
+                  expectedHeadSha: target.pull.commitSha,
+                  title: target.receipt.itemId,
+                  action: "default",
+                }),
+            );
             if (result.state === "pending") await admission.bindAsynchronousMerge(result.uuid);
             return result;
           });
@@ -12405,48 +12474,58 @@ export class FactorySupervisor {
     const pinned = record;
     await this.#serializeIntegration(() =>
       this.#externalAdmission(async () => {
-        assertAdmission();
-        const { snapshot } = await this.#assertOwnTrunkAdvance(
-          member.pull.exactHeadValidation.baseSha,
-          targetBaseSha,
-          item.number,
-        );
-        if (hasCancellationRequest(snapshot, this.#run.runId))
-          throw new RunCancellationRequestedError("operator cancelled before sibling refresh");
-        const current = await this.#store.readPullRequest(member.pull.number);
-        if (
-          current.nodeId !== identity.pullRequestNodeId ||
-          current.headRef !== identity.branch ||
-          current.baseRef !== this.#baseBranch ||
-          current.draft ||
-          current.merged ||
-          current.state !== "open" ||
-          current.headRepository?.toLowerCase() !== identity.repository.toLowerCase() ||
-          current.baseRepository?.toLowerCase() !== identity.repository.toLowerCase()
-        )
-          throw new Error("sibling refresh PR or target changed before branch CAS");
-        await this.#assertRefreshTarget(targetBaseSha, item.number);
-        const branchHead = await this.#store.readRef(`refs/heads/${identity.branch}`);
-        if (branchHead === pinned.plannedHeadSha && current.headSha === pinned.expectedOldHeadSha)
-          throw new SiblingRefreshObservationPendingError(
-            "waiting for GitHub PR metadata to observe the exact refreshed head",
+        const assertRefreshCurrent = async () => {
+          assertAdmission();
+          const { snapshot } = await this.#assertOwnTrunkAdvance(
+            member.pull.exactHeadValidation.baseSha,
+            targetBaseSha,
+            item.number,
           );
-        if (
-          current.headSha !== branchHead ||
-          (branchHead !== pinned.expectedOldHeadSha && branchHead !== pinned.plannedHeadSha)
-        )
-          throw new Error("sibling refresh branch contains an unauthorized third head");
-        const rules = await this.#store.readBranchRules(this.#baseBranch);
-        if (branchRuleBlockers(rules).length)
-          throw new Error("branch policy blocks sibling refresh");
+          if (hasCancellationRequest(snapshot, this.#run.runId))
+            throw new RunCancellationRequestedError("operator cancelled before sibling refresh");
+          const current = await this.#store.readPullRequest(member.pull.number);
+          if (
+            current.nodeId !== identity.pullRequestNodeId ||
+            current.headRef !== identity.branch ||
+            current.baseRef !== this.#baseBranch ||
+            current.draft ||
+            current.merged ||
+            current.state !== "open" ||
+            current.headRepository?.toLowerCase() !== identity.repository.toLowerCase() ||
+            current.baseRepository?.toLowerCase() !== identity.repository.toLowerCase()
+          )
+            throw new Error("sibling refresh PR or target changed before branch CAS");
+          await this.#assertRefreshTarget(targetBaseSha, item.number);
+          const branchHead = await this.#store.readRef(`refs/heads/${identity.branch}`);
+          if (branchHead === pinned.plannedHeadSha && current.headSha === pinned.expectedOldHeadSha)
+            throw new SiblingRefreshObservationPendingError(
+              "waiting for GitHub PR metadata to observe the exact refreshed head",
+            );
+          if (
+            current.headSha !== branchHead ||
+            (branchHead !== pinned.expectedOldHeadSha && branchHead !== pinned.plannedHeadSha)
+          )
+            throw new Error("sibling refresh branch contains an unauthorized third head");
+          const rules = await this.#store.readBranchRules(this.#baseBranch);
+          if (branchRuleBlockers(rules).length)
+            throw new Error("branch policy blocks sibling refresh");
+          return branchHead;
+        };
+        const branchHead = await assertRefreshCurrent();
         if (branchHead === pinned.expectedOldHeadSha) {
           await this.#lease.use(async () => {
             if (
-              !(await this.#store.compareAndSwapRef({
-                ref: `refs/heads/${identity.branch}`,
-                beforeOid: pinned.expectedOldHeadSha,
-                afterOid: pinned.plannedHeadSha,
-              }))
+              !(await this.#store.withPublicationSafetyFence(
+                async () => {
+                  await assertRefreshCurrent();
+                },
+                () =>
+                  this.#store.compareAndSwapRef({
+                    ref: `refs/heads/${identity.branch}`,
+                    beforeOid: pinned.expectedOldHeadSha,
+                    afterOid: pinned.plannedHeadSha,
+                  }),
+              ))
             )
               throw new Error("sibling refresh exact branch CAS lost ownership");
           });
@@ -15412,98 +15491,111 @@ export class FactorySupervisor {
                 };
               }
             }
-            const current = await integrationReadiness(
-              this.#store,
-              pull,
-              validatedBase,
-              this.#baseBranch,
-              {
-                ciExpected: this.#ciExpectedOnPullRequests,
-                ...(candidate ? { mergeCandidateValidation: candidate.evidence } : {}),
-                ...(siblingRefresh
-                  ? { siblingRefresh }
-                  : deliveryHeadSha
-                    ? { mergeCandidateDeliveryHeadSha: deliveryHeadSha }
-                    : {}),
-              },
-            );
-            if (current.state !== "ready") return current;
-            if (candidate) {
-              // REST mergeable/test-merge metadata can lag a trunk update. Check GitHub's
-              // actual proposed tree as well as our clean application before any merge.
-              const preview = await this.#store.readPullRequest(pull.number);
-              if (
-                preview.headSha !== (deliveryHeadSha ?? pull.commitSha) ||
-                preview.baseRef !== this.#baseBranch
-              ) {
-                return {
-                  state: "failed" as const,
-                  reason: "pull request changed before candidate merge",
-                };
-              }
-              if (preview.merged || preview.mergeable !== true || !preview.mergeCommitSha) {
-                return {
-                  state: "wait" as const,
-                  reason: "waiting for current GitHub test-merge evidence",
-                };
-              }
-              const testMerge = await this.#store.readCommit(preview.mergeCommitSha);
-              if (
-                testMerge.oid !== preview.mergeCommitSha ||
-                testMerge.parentOids.length !== 2 ||
-                testMerge.parentOids[0] !== candidate.identity.targetBaseSha ||
-                testMerge.parentOids[1] !== (deliveryHeadSha ?? pull.commitSha)
-              ) {
-                return {
-                  state: "wait" as const,
-                  reason: "GitHub test-merge evidence is stale for the validated candidate",
-                };
-              }
-              if (testMerge.treeOid !== candidate.validation.outputTreeSha) {
-                return {
-                  state: "failed" as const,
-                  reason:
-                    "GitHub test-merge tree differs from the independently validated candidate",
-                };
-              }
-            }
-            const currentBase = await this.#store.getBranchHead(this.#baseBranch);
-            if (currentBase.oid !== validatedBase) {
-              return {
-                state: candidate ? ("wait" as const) : ("failed" as const),
-                reason:
-                  `base branch advanced from validated commit ${validatedBase} ` +
-                  `to ${currentBase.oid}`,
-              };
-            }
-            const currentRules = await this.#store.readBranchRules(this.#baseBranch);
-            const blockers = branchRuleBlockers(currentRules);
-            if (blockers.length > 0) {
-              return {
-                state: "failed" as const,
-                reason: `branch policy changed and now requires HITL: ${blockers.join(", ")}`,
-              };
-            }
-            if (requiredChecks(currentRules).length > 0) {
-              const missing = missingRequiredChecks(
-                currentRules,
-                await this.#store.readChecks(current.headSha),
+            const readCurrentReadiness = async () => {
+              const current = await integrationReadiness(
+                this.#store,
+                pull,
+                validatedBase,
+                this.#baseBranch,
+                {
+                  ciExpected: this.#ciExpectedOnPullRequests,
+                  ...(candidate ? { mergeCandidateValidation: candidate.evidence } : {}),
+                  ...(siblingRefresh
+                    ? { siblingRefresh }
+                    : deliveryHeadSha
+                      ? { mergeCandidateDeliveryHeadSha: deliveryHeadSha }
+                      : {}),
+                },
               );
-              if (missing.length > 0) {
+              if (current.state !== "ready") return current;
+              if (candidate) {
+                // REST mergeable/test-merge metadata can lag a trunk update. Check GitHub's
+                // actual proposed tree as well as our clean application before any merge.
+                const preview = await this.#store.readPullRequest(pull.number);
+                if (
+                  preview.headSha !== (deliveryHeadSha ?? pull.commitSha) ||
+                  preview.baseRef !== this.#baseBranch
+                ) {
+                  return {
+                    state: "failed" as const,
+                    reason: "pull request changed before candidate merge",
+                  };
+                }
+                if (preview.merged || preview.mergeable !== true || !preview.mergeCommitSha) {
+                  return {
+                    state: "wait" as const,
+                    reason: "waiting for current GitHub test-merge evidence",
+                  };
+                }
+                const testMerge = await this.#store.readCommit(preview.mergeCommitSha);
+                if (
+                  testMerge.oid !== preview.mergeCommitSha ||
+                  testMerge.parentOids.length !== 2 ||
+                  testMerge.parentOids[0] !== candidate.identity.targetBaseSha ||
+                  testMerge.parentOids[1] !== (deliveryHeadSha ?? pull.commitSha)
+                ) {
+                  return {
+                    state: "wait" as const,
+                    reason: "GitHub test-merge evidence is stale for the validated candidate",
+                  };
+                }
+                if (testMerge.treeOid !== candidate.validation.outputTreeSha) {
+                  return {
+                    state: "failed" as const,
+                    reason:
+                      "GitHub test-merge tree differs from the independently validated candidate",
+                  };
+                }
+              }
+              const currentBase = await this.#store.getBranchHead(this.#baseBranch);
+              if (currentBase.oid !== validatedBase) {
                 return {
-                  state: "wait" as const,
-                  reason: `required checks have not appeared yet: ${missing.join(", ")}`,
+                  state: candidate ? ("wait" as const) : ("failed" as const),
+                  reason:
+                    `base branch advanced from validated commit ${validatedBase} ` +
+                    `to ${currentBase.oid}`,
                 };
               }
-            }
+              const currentRules = await this.#store.readBranchRules(this.#baseBranch);
+              const blockers = branchRuleBlockers(currentRules);
+              if (blockers.length > 0) {
+                return {
+                  state: "failed" as const,
+                  reason: `branch policy changed and now requires HITL: ${blockers.join(", ")}`,
+                };
+              }
+              if (requiredChecks(currentRules).length > 0) {
+                const missing = missingRequiredChecks(
+                  currentRules,
+                  await this.#store.readChecks(current.headSha),
+                );
+                if (missing.length > 0) {
+                  return {
+                    state: "wait" as const,
+                    reason: `required checks have not appeared yet: ${missing.join(", ")}`,
+                  };
+                }
+              }
+              return current;
+            };
+            const current = await readCurrentReadiness();
+            if (current.state !== "ready") return current;
             await admission.markDispatched("regular");
             let mergeSha: string;
             try {
-              mergeSha = await this.#store.mergePullRequest({
-                number: pull.number,
-                headSha: current.headSha,
-                commitTitle: item.title,
-              });
+              mergeSha = await this.#store.withPublicationSafetyFence(
+                async () => {
+                  const refreshed = await readCurrentReadiness();
+                  if (refreshed.state !== "ready" || refreshed.headSha !== current.headSha)
+                    throw new Error("merge readiness changed while awaiting GitHub admission");
+                },
+                () =>
+                  this.#store.mergePullRequest({
+                    number: pull.number,
+                    headSha: current.headSha,
+                    commitTitle: item.title,
+                  }),
+              );
             } catch (error) {
               if ((error as { status?: number })?.status === 409) {
                 await admission.authoritativeNonExecution({

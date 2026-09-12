@@ -1,3 +1,4 @@
+import { withGitHubQuotaWait } from "../src/platform.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 /** A clean mechanical verdict: in scope, whole file list seen. */
@@ -19,8 +20,6 @@ import { GitHubControlStore } from "../src/control/github-store.js";
 import { LeaseManager, type LeaseState } from "../src/control/lease.js";
 import {
   CircuitBreaker,
-  GITHUB_GRAPHQL_PROTECTED_RESERVE,
-  GITHUB_PRIMARY_PROTECTED_RESERVE,
   GitHubPrimaryAdmissionDeferredError,
   GitHubPrimaryQuotaCache,
   MutationScheduler,
@@ -264,8 +263,8 @@ describe("Dispatcher transport accounting", () => {
     quota.observe({
       "x-ratelimit-resource": "core",
       "x-ratelimit-limit": "5000",
-      "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
-      "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-remaining": String(0),
+      "x-ratelimit-used": String(5000 - 0),
       "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
     });
     const scheduler = new MutationScheduler({ primaryQuota: quota });
@@ -305,13 +304,13 @@ describe("Dispatcher transport accounting", () => {
     expect(scheduler.telemetry()).toMatchObject({ admitted: 1, transported: 0 });
   });
 
-  it("does not count Octokit primary-reserve deferral as a transported dispatch", async () => {
+  it("does not count Octokit primary-exhausted deferral as a transported dispatch", async () => {
     const quota = new GitHubPrimaryQuotaCache();
     quota.observe({
       "x-ratelimit-resource": "graphql",
       "x-ratelimit-limit": "5000",
-      "x-ratelimit-remaining": String(GITHUB_GRAPHQL_PROTECTED_RESERVE),
-      "x-ratelimit-used": String(5000 - GITHUB_GRAPHQL_PROTECTED_RESERVE),
+      "x-ratelimit-remaining": String(0),
+      "x-ratelimit-used": String(5000 - 0),
       "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
     });
     const scheduler = new MutationScheduler({ primaryQuota: quota });
@@ -980,7 +979,7 @@ describe("Dispatcher / platform.ts integration", () => {
     expect(breaker.isOpen(new Date())).toBe(true);
 
     writer.failing.assignCopilot = undefined;
-    const second = d.start(derivedWi());
+    const second = withGitHubQuotaWait({}, () => d.start(derivedWi()));
     await vi.advanceTimersByTimeAsync(60_000);
     await second;
 

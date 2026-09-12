@@ -1,3 +1,4 @@
+import { isKnownPrimaryQuotaRefusal } from "./platform.js";
 import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "./platform.js";
 /**
  * Dispatch and integration: assign, confirm, retry, escalate (§4), then merge
@@ -503,10 +504,6 @@ export interface DispatcherOptions {
   captureMutationFence?: () => (waitedMs: number) => Promise<void>;
   mutationScope?: string;
   onMutationOperation?: (observation: MutationOperationObservation) => void;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export class Dispatcher {
@@ -1137,7 +1134,10 @@ export class Dispatcher {
     if (this.#breaker.isOpen()) {
       const wait = this.#breaker.waitMs();
       this.#notify(`circuit open; waiting ${wait}ms before the next call`);
-      throw new GitHubPreTransportQuotaDeferredError({ kind: "rate_limit", retryAfterMs: wait }, new Error("GitHub circuit is open"));
+      throw new GitHubPreTransportQuotaDeferredError(
+        { kind: "rate_limit", retryAfterMs: wait },
+        new Error("GitHub circuit is open"),
+      );
     }
 
     const mutationPermit = await this.#mutations.acquire("normal");
@@ -1191,7 +1191,7 @@ export class Dispatcher {
       const refusal = classifyRefusal(error);
       if (refusal.kind === "not_refusal") throw error;
       mutationPermit.recordRefusal?.(isSecondaryRateLimitRefusal(error));
-      this.#breaker.recordRefusal(refusal);
+      if (!isKnownPrimaryQuotaRefusal(error)) this.#breaker.recordRefusal(refusal);
       throw new PlatformUnavailableError(refusal, error);
     } finally {
       release();

@@ -1,4 +1,9 @@
-import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "./platform.js";
+import { isKnownPrimaryQuotaRefusal } from "./platform.js";
+import {
+  retryGitHubQuota,
+  GitHubPreTransportQuotaDeferredError,
+  githubQuotaWaitSignal,
+} from "./platform.js";
 /**
  * GitHub reader (§2).
  *
@@ -932,7 +937,7 @@ export function createOctokit(opts: GitHubOptions): Octokit {
     if (error instanceof PlatformUnavailableError) throw error;
     const refusal = classifyRefusal(error);
     if (refusal.kind !== "not_refusal") {
-      if (!refusalOwned) circuit.recordRefusal(refusal);
+      if (!refusalOwned && !isKnownPrimaryQuotaRefusal(error)) circuit.recordRefusal(refusal);
       throw new PlatformUnavailableError(refusal, error);
     }
     throw error;
@@ -953,7 +958,12 @@ export function createOctokit(opts: GitHubOptions): Octokit {
         );
         const observerId = headers.get(TRANSPORT_OBSERVER_HEADER);
         headers.delete(TRANSPORT_OBSERVER_HEADER);
-        const transportInit = { ...init, headers };
+        const ownerSignal = githubQuotaWaitSignal();
+        const signal =
+          ownerSignal && init?.signal
+            ? AbortSignal.any([ownerSignal, init.signal])
+            : (ownerSignal ?? init?.signal);
+        const transportInit = { ...init, headers, ...(signal ? { signal } : {}) };
         (observerId ? transportObservers.get(observerId) : undefined)?.onTransported();
         githubTransportCallbacks.getStore()?.onTransported();
         observeGitHubTransport(input, transportInit);

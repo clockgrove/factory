@@ -1088,7 +1088,7 @@ export function withGitHubQuotaWait<T>(
   options: GitHubQuotaWaitOptions,
   operation: () => Promise<T>,
 ): Promise<T> {
-  return quotaWaitScope.run(options, operation);
+  return quotaRetryBoundary.run(false, () => quotaWaitScope.run(options, operation));
 }
 
 /** Retry only a definite quota refusal, after the complete operation has released
@@ -1110,10 +1110,14 @@ export async function retryGitHubQuota<T>(
         return operation(retried);
       });
     } catch (error) {
-      if (!(error instanceof PlatformUnavailableError) || error.refusal.kind !== "rate_limit" || !definiteGitHubQuotaRejection(error))
+      if (
+        !(error instanceof PlatformUnavailableError) ||
+        error.refusal.kind !== "rate_limit" ||
+        !definiteGitHubQuotaRejection(error)
+      )
         throw error;
       const reason =
-        error instanceof GitHubPrimaryAdmissionDeferredError
+        (error instanceof GitHubPrimaryAdmissionDeferredError || isKnownPrimaryQuotaRefusal(error))
           ? "primary"
           : error instanceof GitHubLocalAdmissionDeferredError
             ? "local-window"
@@ -1140,10 +1144,39 @@ export function definiteGitHubQuotaRejection(error: unknown): boolean {
   let current = error;
   for (let depth = 0; depth < 8 && current && typeof current === "object"; depth++) {
     if (current instanceof GitHubPreTransportQuotaDeferredError) return true;
-    const value = current as { status?: number; name?: string; data?: unknown; cause?: unknown; errors?: Array<{ type?: string }> };
+    const value = current as {
+      status?: number;
+      name?: string;
+      data?: unknown;
+      cause?: unknown;
+      errors?: Array<{ type?: string }>;
+    };
     if (value.status === 403 || value.status === 429) return true;
     if (value.name === "GraphqlResponseError")
-      return value.data == null && !!value.errors?.length && value.errors.every((entry) => entry.type === "RATE_LIMITED");
+      return (
+        value.data == null &&
+        !!value.errors?.length &&
+        value.errors.every((entry) => entry.type === "RATE_LIMITED")
+      );
+    current = value.cause;
+  }
+  return false;
+}
+
+export function githubQuotaWaitSignal(): AbortSignal | undefined {
+  return quotaWaitScope.getStore()?.signal;
+}
+
+/** A known primary resource shortage must not freeze the other API resource. */
+export function isKnownPrimaryQuotaRefusal(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth++) {
+    const value = current as { headers?: Record<string, string | number | undefined>; response?: { headers?: Record<string, string | number | undefined> }; cause?: unknown; message?: string };
+    const headers = value.response?.headers ?? value.headers;
+    if (value.message?.toLowerCase().includes("secondary")) return false;
+    if (headers && String(headers["x-ratelimit-remaining"]) === "0" &&
+      (headers["x-ratelimit-resource"] === "core" || headers["x-ratelimit-resource"] === "graphql") &&
+      Number.isFinite(Number(headers["x-ratelimit-reset"]))) return true;
     current = value.cause;
   }
   return false;

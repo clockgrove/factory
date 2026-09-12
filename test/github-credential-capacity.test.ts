@@ -11,7 +11,7 @@ describe("process credential capacity", () => {
     quota.observe({
       "x-ratelimit-resource": "core",
       "x-ratelimit-limit": "5000",
-      "x-ratelimit-remaining": String(platform.GITHUB_PRIMARY_PROTECTED_RESERVE + 1),
+      "x-ratelimit-remaining": String(1),
       "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3600),
     });
     const release = platform.admitGitHubRequest(token, quota, "https://api.github.com/user", {});

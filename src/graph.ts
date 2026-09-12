@@ -1,3 +1,4 @@
+import { isKnownPrimaryQuotaRefusal } from "./platform.js";
 import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "./platform.js";
 /**
  * Graph application: apply a compiled Objective (`skills/objective-compilation`)
@@ -956,10 +957,6 @@ export class GithubOctokitGraphWriter implements GraphWriter {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export interface GraphApplierOptions {
   writer: GraphWriter;
   onThrottle?: (message: string) => void;
@@ -1248,7 +1245,10 @@ export class GraphApplier {
     if (this.#breaker.isOpen()) {
       const wait = this.#breaker.waitMs();
       this.#notify(`circuit open; waiting ${wait}ms before the next call`);
-      throw new GitHubPreTransportQuotaDeferredError({ kind: "rate_limit", retryAfterMs: wait }, new Error("GitHub circuit is open"));
+      throw new GitHubPreTransportQuotaDeferredError(
+        { kind: "rate_limit", retryAfterMs: wait },
+        new Error("GitHub circuit is open"),
+      );
     }
 
     const mutationPermit = await this.#mutations.acquire("normal");
@@ -1299,7 +1299,7 @@ export class GraphApplier {
       const refusal = classifyRefusal(error);
       if (refusal.kind === "not_refusal") throw error;
       mutationPermit.recordRefusal?.(isSecondaryRateLimitRefusal(error));
-      this.#breaker.recordRefusal(refusal);
+      if (!isKnownPrimaryQuotaRefusal(error)) this.#breaker.recordRefusal(refusal);
       throw new PlatformUnavailableError(refusal, error);
     } finally {
       release();

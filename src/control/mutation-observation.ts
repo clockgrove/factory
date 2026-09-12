@@ -14,6 +14,7 @@ export interface MutationOperationObservation {
   startedAt: string;
   elapsedMs: number;
   queueWaitMs: number;
+  quotaWaitMs: number;
   waitReasonMs: MutationWaitReasons;
   fenceMs: number;
   leaseAssertions: number;
@@ -46,6 +47,8 @@ export interface GitHubTransportObservation {
   elapsedMs: number;
   /** Summed operation time: concurrent waits/fences can overlap elapsed time. */
   aggregateQueueWaitMs: number;
+  aggregateQuotaWaitMs: number;
+  quotaWaitReasonMs: Partial<Record<"primary" | "local-window" | "server", number>>;
   aggregateFenceMs: number;
   mutationWaitReasonMs: MutationWaitReasons;
   requestsByRoute: Partial<Record<GitHubRouteFamily, number>>;
@@ -187,6 +190,8 @@ export async function observeGitHubTransportPhase<T>(
     endedAt: "",
     elapsedMs: 0,
     aggregateQueueWaitMs: 0,
+    aggregateQuotaWaitMs: 0,
+    quotaWaitReasonMs: {},
     aggregateFenceMs: 0,
     mutationWaitReasonMs: {},
     requestsByRoute: {},
@@ -272,6 +277,7 @@ export async function observeMutationOperation<T>(
     startedAt: new Date().toISOString(),
     elapsedMs: 0,
     queueWaitMs: 0,
+    quotaWaitMs: 0,
     waitReasonMs: {},
     fenceMs: 0,
     leaseAssertions: 0,
@@ -295,5 +301,14 @@ export async function observeMutationOperation<T>(
         // Reporting is observational, not part of the durable mutation protocol.
       }
     }
+  });
+}
+
+export function observeReactiveQuotaWait(wait: { reason: "primary" | "local-window" | "server"; waitedMs: number }): void {
+  const context = current.getStore();
+  if (context) context.observation.quotaWaitMs += wait.waitedMs;
+  observePhases((observation) => {
+    observation.aggregateQuotaWaitMs += wait.waitedMs;
+    observation.quotaWaitReasonMs[wait.reason] = (observation.quotaWaitReasonMs[wait.reason] ?? 0) + wait.waitedMs;
   });
 }

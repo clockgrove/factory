@@ -15,11 +15,7 @@ import {
   type LeaseManager,
   type LeaseState,
 } from "../src/control/lease.js";
-import {
-  GITHUB_PRIMARY_PROTECTED_RESERVE,
-  GitHubPrimaryAdmissionDeferredError,
-  PlatformUnavailableError,
-} from "../src/platform.js";
+import { GitHubPrimaryAdmissionDeferredError, PlatformUnavailableError } from "../src/platform.js";
 import { createOctokit } from "../src/github.js";
 import { ControllerGenerationRetirement } from "../src/controller/retirement.js";
 import { SharedCapacitySnapshotLagError } from "../src/controller/shared-capacity.js";
@@ -482,8 +478,8 @@ describe("repository controller", () => {
             "content-type": "application/json",
             "x-ratelimit-resource": "core",
             "x-ratelimit-limit": "5000",
-            "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
-            "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+            "x-ratelimit-remaining": String(0),
+            "x-ratelimit-used": String(5000 - 0),
             "x-ratelimit-reset": String(reset),
           },
         }),
@@ -537,8 +533,8 @@ describe("repository controller", () => {
     expect(status).toContain(
       "endpoints=authenticated-user:transported=1,admitted=1,conditional=0,not-modified=0,successful=1",
     );
-    expect(status).toContain(`primary=core:${GITHUB_PRIMARY_PROTECTED_RESERVE}/5000@`);
-    expect(status).toContain("limiting=primary-reserve");
+    expect(status).toContain(`primary=core:${0}/5000@`);
+    expect(status).toContain("limiting=primary-exhausted");
     expect(status).toContain("next=");
     expect(status).not.toContain("next=none");
   });

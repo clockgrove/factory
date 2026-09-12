@@ -1,3 +1,4 @@
+import { isKnownPrimaryQuotaRefusal } from "../platform.js";
 import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "../platform.js";
 import type { CompiledGraphStore } from "./graphs.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -342,21 +343,19 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     authorityClass: MutationAuthorityClass = "objective-publication",
   ): Promise<T> {
     const effectiveMutationClass = this.#mutationClassContext.getStore() ?? mutationClass;
+    if (mutating && this.#transportFenceContext.getStore())
+      throw new Error("mutation dispatch is forbidden inside a transport fence");
+    const authoritative = mutating && authorityClass !== "immutable-preparation";
+    const scopedFence = authoritative ? this.#scopedMutationFence.getStore() : undefined;
+    // Shared transactions bind an immutable owner; do not capture or recheck
+    // a second, configured Objective generation for the same operation.
+    const fence =
+      scopedFence ??
+      (authoritative ? this.#captureMutationFence?.(effectiveMutationClass) : undefined);
+    const publicationSafetyFence = authoritative
+      ? this.#publicationSafetyFence.getStore()
+      : undefined;
     const dispatch = () => {
-      if (mutating && this.#transportFenceContext.getStore())
-        throw new Error("mutation dispatch is forbidden inside a transport fence");
-      // This callback runs synchronously inside the observation, before any
-      // queue await. Even a rejected capture is therefore measured.
-      const authoritative = mutating && authorityClass !== "immutable-preparation";
-      const scopedFence = authoritative ? this.#scopedMutationFence.getStore() : undefined;
-      // Shared transactions bind an immutable owner; do not capture or recheck
-      // a second, configured Objective generation for the same operation.
-      const fence =
-        scopedFence ??
-        (authoritative ? this.#captureMutationFence?.(effectiveMutationClass) : undefined);
-      const publicationSafetyFence = authoritative
-        ? this.#publicationSafetyFence.getStore()
-        : undefined;
       return this.#dispatch(
         operation,
         mutating,
@@ -454,7 +453,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         error instanceof PlatformUnavailableError ? error.refusal : classifyRefusal(error);
       if (refusal.kind !== "not_refusal") {
         mutationPermit?.recordRefusal?.(isSecondaryRateLimitRefusal(error));
-        this.#breaker.recordRefusal(refusal);
+        if (!isKnownPrimaryQuotaRefusal(error)) this.#breaker.recordRefusal(refusal);
         throw new PlatformUnavailableError(refusal, error);
       }
       throw error;

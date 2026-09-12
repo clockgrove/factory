@@ -7,8 +7,6 @@ import {
   GitHubPrimaryAdmissionDeferredError,
   GitHubPrimaryQuotaCache,
   GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST,
-  GITHUB_GRAPHQL_PROTECTED_RESERVE,
-  GITHUB_PRIMARY_PROTECTED_RESERVE,
   MutationScheduler,
   PlatformUnavailableError,
   classifyRefusal,
@@ -225,7 +223,7 @@ describe("GitHub client throttling", () => {
     ]);
   });
 
-  it("shares primary-reserve admission across clients using the same credential", async () => {
+  it("shares primary-exhausted admission across clients using the same credential", async () => {
     let transports = 0;
     const reset = Math.floor(Date.now() / 1_000) + 3_600;
     const requestFetch: typeof globalThis.fetch = async () => {
@@ -236,14 +234,14 @@ describe("GitHub client throttling", () => {
           "content-type": "application/json",
           "x-ratelimit-resource": "core",
           "x-ratelimit-limit": "5000",
-          "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
-          "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+          "x-ratelimit-remaining": String(0),
+          "x-ratelimit-used": String(5000 - 0),
           "x-ratelimit-reset": String(reset),
         },
       });
     };
     const options = {
-      token: "shared-primary-reserve-test",
+      token: "shared-primary-exhausted-test",
       owner: "clockgrove",
       repo: "factory",
       requestFetch,
@@ -266,14 +264,14 @@ describe("GitHub client throttling", () => {
     );
   });
 
-  it("reserves normal capacity while allowing explicit safety traffic until exhaustion", async () => {
+  it("uses available primary quota greedily for either request class until actual exhaustion", async () => {
     const quota = new GitHubPrimaryQuotaCache();
     const reset = Math.floor(Date.now() / 1_000) + 3_600;
     quota.observe({
       "x-ratelimit-resource": "core",
       "x-ratelimit-limit": "5000",
-      "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
-      "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-remaining": "1",
+      "x-ratelimit-used": "4999",
       "x-ratelimit-reset": String(reset),
     });
     let transports = 0;
@@ -291,11 +289,9 @@ describe("GitHub client throttling", () => {
       },
     });
 
-    await expect(octokit.request("GET /user")).rejects.toBeInstanceOf(
-      GitHubPrimaryAdmissionDeferredError,
-    );
+    await octokit.request("GET /user");
     await withGitHubRequestPriority("protected", () => octokit.request("GET /user"));
-    expect(transports).toBe(1);
+    expect(transports).toBe(2);
 
     quota.observe({
       "x-ratelimit-resource": "core",
@@ -307,7 +303,7 @@ describe("GitHub client throttling", () => {
     await expect(
       withGitHubRequestPriority("protected", () => octokit.request("GET /user")),
     ).rejects.toBeInstanceOf(GitHubPrimaryAdmissionDeferredError);
-    expect(transports).toBe(1);
+    expect(transports).toBe(2);
   });
 
   it("reserves the estimated GraphQL query cost before transport", async () => {
@@ -315,12 +311,8 @@ describe("GitHub client throttling", () => {
     quota.observe({
       "x-ratelimit-resource": "graphql",
       "x-ratelimit-limit": "5000",
-      "x-ratelimit-remaining": String(
-        GITHUB_GRAPHQL_PROTECTED_RESERVE + GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST - 1,
-      ),
-      "x-ratelimit-used": String(
-        5001 - GITHUB_GRAPHQL_PROTECTED_RESERVE - GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST,
-      ),
+      "x-ratelimit-remaining": String(0 + GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST - 1),
+      "x-ratelimit-used": String(5001 - 0 - GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST),
       "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
     });
     let transports = 0;
@@ -375,8 +367,8 @@ describe("GitHub client throttling", () => {
     quota.observe({
       "x-ratelimit-resource": "core",
       "x-ratelimit-limit": "5000",
-      "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
-      "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-remaining": String(0),
+      "x-ratelimit-used": String(5000 - 0),
       "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
     });
     const scheduler = new MutationScheduler({ primaryQuota: quota });
@@ -412,8 +404,8 @@ describe("GitHub client throttling", () => {
     quota.observe({
       "x-ratelimit-resource": "core",
       "x-ratelimit-limit": "5000",
-      "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
-      "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-remaining": String(0),
+      "x-ratelimit-used": String(5000 - 0),
       "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
     });
     const scheduler = new MutationScheduler({ primaryQuota: quota });

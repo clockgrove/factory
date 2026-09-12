@@ -21,8 +21,6 @@ import {
 import { GitHubControlStore } from "../src/control/github-store.js";
 import {
   CircuitBreaker,
-  GITHUB_GRAPHQL_PROTECTED_RESERVE,
-  GITHUB_PRIMARY_PROTECTED_RESERVE,
   GitHubPrimaryAdmissionDeferredError,
   GitHubPrimaryQuotaCache,
   MutationScheduler,
@@ -408,8 +406,8 @@ describe("GraphApplier.apply", () => {
     quota.observe({
       "x-ratelimit-resource": "core",
       "x-ratelimit-limit": "5000",
-      "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
-      "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-remaining": String(0),
+      "x-ratelimit-used": String(5000 - 0),
       "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
     });
     const scheduler = new MutationScheduler({ primaryQuota: quota });
@@ -441,13 +439,13 @@ describe("GraphApplier.apply", () => {
     expect(scheduler.telemetry()).toMatchObject({ admitted: 1, transported: 0 });
   });
 
-  it("does not count Octokit primary-reserve deferral as a transported graph write", async () => {
+  it("does not count Octokit primary-exhausted deferral as a transported graph write", async () => {
     const quota = new GitHubPrimaryQuotaCache();
     quota.observe({
       "x-ratelimit-resource": "graphql",
       "x-ratelimit-limit": "5000",
-      "x-ratelimit-remaining": String(GITHUB_GRAPHQL_PROTECTED_RESERVE),
-      "x-ratelimit-used": String(5000 - GITHUB_GRAPHQL_PROTECTED_RESERVE),
+      "x-ratelimit-remaining": String(0),
+      "x-ratelimit-used": String(5000 - 0),
       "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
     });
     const scheduler = new MutationScheduler({ primaryQuota: quota });

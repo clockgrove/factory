@@ -1,4 +1,6 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
@@ -39,19 +41,36 @@ describe("plugin manifest consistency", () => {
   it("declares the same bundled MCP executable for Agent Plugins, Codex, and Claude", () => {
     expect(mcp.mcpServers.factory).toMatchObject({
       type: "stdio",
-      command: "node",
-      args: ["${PLUGIN_ROOT}/dist/mcp-server.js"],
+      command: "/bin/sh",
+      args: ["${PLUGIN_ROOT}/bin/factory-mcp", "${PLUGIN_ROOT}/dist/mcp-server.js"],
     });
     expect(codex.mcpServers.factory).toEqual(mcp.mcpServers.factory);
     expect(claudeMcp.mcpServers.factory).toMatchObject({
-      command: "node",
-      args: ["${CLAUDE_PLUGIN_ROOT}/dist/mcp-server.js"],
+      command: "/bin/sh",
+      args: ["${CLAUDE_PLUGIN_ROOT}/bin/factory-mcp", "${CLAUDE_PLUGIN_ROOT}/dist/mcp-server.js"],
     });
-    expect(claudeMcp.mcpServers.factory.args[0].replace("${CLAUDE_PLUGIN_ROOT}", "")).toBe(
-      mcp.mcpServers.factory.args[0].replace("${PLUGIN_ROOT}", ""),
-    );
+    expect(
+      claudeMcp.mcpServers.factory.args.map((arg: string) =>
+        arg.replace("${CLAUDE_PLUGIN_ROOT}", ""),
+      ),
+    ).toEqual(mcp.mcpServers.factory.args.map((arg: string) => arg.replace("${PLUGIN_ROOT}", "")));
+    expect(existsSync(new URL("../bin/factory-mcp", import.meta.url))).toBe(true);
     expect(existsSync(new URL("../dist/mcp-server.js", import.meta.url))).toBe(true);
     expect(existsSync(new URL("../dist/factory.js", import.meta.url))).toBe(true);
+  });
+
+  it("diagnoses a Codex host PATH that cannot resolve Node", () => {
+    const launcher = fileURLToPath(new URL("../bin/factory-mcp", import.meta.url));
+    const bundle = fileURLToPath(new URL("../dist/mcp-server.js", import.meta.url));
+    const result = spawnSync("/bin/sh", [launcher, bundle], {
+      env: { PATH: "/factory-test-path-without-node" },
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(127);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("the Codex host process cannot resolve 'node' on PATH");
+    expect(result.stderr).toContain("fully restart Codex");
   });
 
   it("exposes the same discovered skills without manifest-only declarations", () => {

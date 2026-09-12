@@ -126,4 +126,9 @@ is not proof that a desktop client's MCP child or a separate service sees that l
 [process and credential placement](configuration.md#1-identify-the-process-that-will-execute-the-objective).
 For durable execution after chat disconnects, continue with [unattended setup](unattended.md).
 For a missing executable/login, check the actual process PATH, Linux user, and CODEX_HOME before
-reinstalling the plugin. Never print authentication files to diagnose setup.
+reinstalling the plugin. The packaged MCP launcher reports
+`Factory MCP startup failed: the Codex host process cannot resolve 'node' on PATH` when the client
+can discover Factory's skills but its host process cannot start the sibling server. Install Node.js
+20 or later, make it available to the process that launches Codex, and fully restart Codex; opening
+a new chat or confirming Node in the integrated terminal does not change the existing host process.
+Never print authentication files to diagnose setup.

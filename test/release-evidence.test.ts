@@ -27,6 +27,7 @@ const subjects = [
   "dist/factory.js",
   "dist/mcp-server.js",
   "dist/bundle-inventory.json",
+  "bin/factory-mcp",
   "package.json",
   "package-lock.json",
   ".codex-plugin/plugin.json",
@@ -260,7 +261,7 @@ describe("release evidence and publication boundary", () => {
       }),
     );
     write("THIRD_PARTY_NOTICES.txt", "fixture notices\n");
-    write(".gitignore", "release/\nbin/\nnode_modules/\n");
+    write(".gitignore", "release/\nbin/npm\nnode_modules/\n");
     symlinkSync(
       fileURLToPath(new URL("../node_modules", import.meta.url)),
       join(root, "node_modules"),

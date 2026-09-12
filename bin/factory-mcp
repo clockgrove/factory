@@ -1,0 +1,18 @@
+#!/bin/sh
+
+# Keep the manifest entry point runnable even when the Codex host cannot find
+# Node. The JavaScript server still uses the operator-installed Node runtime;
+# this launcher exists so a missing host dependency produces a useful startup
+# error instead of failing before Factory can say what is wrong.
+
+if [ "$#" -ne 1 ]; then
+  echo "Factory MCP startup failed: expected the installed MCP bundle path." >&2
+  exit 64
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "Factory MCP startup failed: the Codex host process cannot resolve 'node' on PATH. Install Node.js 20 or later, make it available to the process that launches Codex, and fully restart Codex; an integrated terminal may have a different PATH." >&2
+  exit 127
+fi
+
+exec node "$1"

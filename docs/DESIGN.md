@@ -137,8 +137,9 @@ Objective whose own current writer epoch still authorizes execution. The retired
 every such Supervisor through completion, failure and cleanup; a successor may immediately discover
 other eligible Objectives, while Objective lease CAS and the shared-capacity ledger prevent duplicate
 ownership or capacity release by inference. Explicit service shutdown and user cancellation still
-propagate to their scoped execution. Credential, account, quota, circuit and other platform-safety
-failures retain their stop or backoff behavior rather than being treated as election handoff.
+propagate to their scoped execution. Definite GitHub quota refusals keep the affected operation pending with abortable backoff.
+Credential, account and invariant failures retain their safety behavior rather than being treated
+as election handoff. Quota waiting does not restart or cancel already active Objectives.
 
 The foreground compatibility entry point remains:
 
@@ -221,7 +222,7 @@ under the default controller, so the corresponding pessimistic warm-idle totals 
 multi-page label indexes are deliberately unconditional because a page-one validator cannot prove
 later-page cardinality. Discovery fails closed above 10,000 Objectives, 10,000 comments on one
 Objective, 100,000 total retained comments, 64 MiB of retained comment bodies, or 10,000 Factory
-control refs. Primary-reserve pauses retain completed bootstrap and warm-delta hydration or
+control refs. Primary-exhaustion waits retain completed bootstrap and warm-delta hydration or
 classification work in memory and resume the same transaction after reset; bounds are enforced
 before new-object hydration and incrementally during it. No partial result is dispatched, and a
 process restart reconstructs from GitHub.
@@ -230,9 +231,9 @@ Primary quota observations come from GitHub's response headers and are cached pe
 resource; Factory does not poll `/rate_limit` to reconstruct a fresher-looking answer. GitHub does
 not expose remaining secondary content-generation quota, so that plane is reported separately as a
 local estimate with explicit confidence. The estimate counts only actual transport attempts,
-allows a bounded ordinary burst before smoothing sustained admission below GitHub's documented
-outer ceiling, reduces throughput after real 403/429
-secondary feedback, and recovers gradually after successful transports. Octokit's internal retries
+greedily admits ready mutations at the minimum spacing within the rolling minute/hour ceilings,
+reduces the local ceiling after real secondary feedback, and recovers gradually after successful
+transports. There is no token-bucket refill or speculative reservation for future Objectives. Octokit's internal retries
 are disabled so every retry returns through Factory's shared pacing and circuit controls.
 Process-local mutation counters include their scheduler-lifetime measurement window and remain
 outside durable run economics. A reader process cannot attribute its own counters to a reconstructed
@@ -241,18 +242,19 @@ Foreground status diagnostics include phase start/end timestamps, elapsed time, 
 read/write counts and aggregate mutation admission/fence time. Nested phases include their children;
 parallel operation times can overlap. These aggregates are not a disjoint wall-time decomposition,
 and model invocation envelopes are not pure inference time or individual model-request counts.
-Transport-only mutation records retain their innermost phase. No diagnostic changes authority or
+Transport-only mutation records retain their innermost phase and are exported with bounded
+retention/drop counts. Fixed route families and quota/mutation wait reasons expose transport cost
+without raw URL labels. Phase metadata includes configured model/reasoning selections and explicitly
+unknown provider-resolved settings; configured policy is not runtime attestation. No diagnostic changes authority or
 durable accounting, and a failed diagnostic sink cannot fail the operation.
-Normal metadata admission conservatively reserves 1,024 REST points and 512 GraphQL points for all
-maximum-sized lease/cleanup cohorts that can be admitted before the primary window resets. The
-largest supported Objective GraphQL shape expands to fewer than 50,000 connection requests under
-GitHub's published cost formula and is therefore admitted at a fail-closed 512-point estimate. Only
-explicitly classified lease/cleanup calls may use that reserve; neither HTTP method, Git-object
-route, nor commit text grants priority, and prerequisite fence reads inherit the class of their
-outer mutation. Lease managers bind their complete read/CAS transaction; shared-capacity release,
-terminal receipts, and resource/accounting reconciliation bind cleanup explicitly. Concurrent
-requests reserve their estimated cost before transport, same-window response headers merge toward
-lower remaining/higher used values, and actual transport is counted only after local admission.
+Primary admission accounts for the current request's estimated cost and concurrent in-flight
+requests against observed remaining quota. It does not reserve points for a hypothetical future
+wave or cleanup cohort. The largest supported Objective GraphQL shape has a conservative 512-point
+current-request estimate. Explicit lease/cleanup classification retains queue priority, but does not
+create additional allowance. Same-window response headers merge toward lower remaining/higher used
+values; known REST-primary exhaustion does not close the GraphQL resource. Actual transport is
+counted only after admission, and definite secondary/unknown-scope refusals share the credential's
+retry deadline. Other processes and external clients may consume capacity at any time.
 Endpoint aggregates and the latest 64 discovery cycles are bounded, process-local telemetry.
 One shared entry per credential hash owns both governor and primary-quota state. A process supports
 at most 16 distinct credentials: a seventeenth fails before transport with restart guidance, and
@@ -274,12 +276,25 @@ independent trailers and events from any later repository read must be fully val
 observation is discarded as a unit on abort or integrity failure and is never global, persisted, or
 used to skip a fresh authority read.
 
-A classified quota refusal imposes a shared retry boundary, including during controller bootstrap,
-discovery and lease retirement. An in-flight success cannot clear a later retry deadline. After
-settling the current generation, the same process waits abortably and reconstructs ownership; it
-does not reuse a stale lease or rely on service restarts to retry. Authentication and invariant
-failures remain errors. The controller honors GitHub's [rate-limit response headers](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit),
-not a contradictory later balance from another observation.
+A definite quota refusal keeps the original operation pending within the active owner. Its outer
+retry boundary releases mutation and concurrency permits before waiting abortably, then rechecks
+current quota and original authority before another attempt. Nested fence reads propagate quota to
+that outer boundary, avoiding a wait while holding permits. Retry-After/reset and shared secondary
+backoff remain binding; an unrelated success cannot clear a newer deadline. Ambiguous network/5xx
+failures or GraphQL mutations with partial results are not automatically replayed.
+
+Lease renewal retries the complete short transaction with fresh server time after quota waiting.
+An expired lease may renew only after such a wait and only when its exact nonreleased OID, holder,
+run, epoch and policy still match; the existing exact CAS rejects takeover. Ordinary admission and
+publication expiry checks remain strict. Heartbeats are single-flight. Local worker observation and
+local cancellation do not join quota-blocked renewal or remote cancellation reads; irreversible
+publication waits for fresh authority. Repository discovery joins election renewal while existing
+Objectives continue. User cancellation and authorized deadlines interrupt waits and prevent replay.
+Initial cleanup requests retain their existing authority checks and may finish when quota is
+available; a quota refusal after cancellation cannot start another wait. Merge retries
+recheck current base, head, rules, checks and native topology before transport; a bound asynchronous
+merge UUID is only polled, never redispatched. Diagnostic quota wait times are separate from mutation
+admission wait and are not a disjoint wall-time decomposition.
 
 Local Codex model-provider quota refusals are a separate plane from GitHub REST/GraphQL rate limits
 and Factory's own model-token allowance. After a durable model-dispatch marker, only captured narrow
@@ -1240,13 +1255,11 @@ supplied untrusted code route to an explicitly permitted sandbox or escalation.
 All GitHub writes continue through the shared circuit breaker, mutation scheduler, content-creation
 pacer, and concurrency limiter. Mutations are issued serially; actual transport attempts, including
 failed HTTP requests, are priced, while a lease or shutdown fence that stops before transport is not.
-Normal traffic may use up to 60 initial mutation credits at the one-second minimum spacing.
-This is a local latency policy, not an entitlement from GitHub. Refill reserves the burst inside
-the adaptive hourly allowance: `(hourly allowance - burst capacity) / hour`; the burst shrinks
-with that allowance. Sustained normal traffic remains smoothed rather than hitting a fixed local
-hourly cliff. All mutation kinds consume this credit and the rolling minute/hour counts. Lease and
-cleanup traffic retain queue priority and may proceed without ordinary credit, but never bypass
-the rolling ceilings; heavy priority traffic can still exhaust a window.
+Ready traffic uses the one-second minimum spacing and shared rolling minute/hour bounds. All
+mutation kinds charge the same transported history, with no credit refill and no future quota
+reservation. Lease and cleanup traffic retain queue priority without bypassing an occupied window.
+At an occupied window, the active operation releases permits, waits until the observed local bound
+can admit again, then rechecks it. This is a local estimate, not an entitlement from GitHub.
 The existing bounded credential registry shares pacing, admission through transport start,
 concurrency and circuit/refusal state across foreground and controller instances in one process.
 Schedulers retain owner-local shutdown, notifications and counters; stopping one owner cannot
@@ -1254,11 +1267,10 @@ retire a peer, and resource capacity, fairness and integration ownership remain 
 Primary quota is also credential-shared within the process. Process restarts start a new estimate;
 secondary capacity used by other processes or GitHub clients is unknown. Server-directed backoff
 and open-circuit protection remain required. No Git-object or ref mutation is exempted based on
-an assumed content-generation classification. A platform refusal stops mutation
-under the current lease. On recovery the interrupted
-reservation is reconciled and marked `AttemptDeferred`; it remains in the audit and cost ledgers but
-does not consume a Work Item implementation attempt. A durable failed validation remains a real
-attempt failure.
+an assumed content-generation classification. Definite quota rejection keeps the same operation
+pending rather than recording an attempt failure or starting replacement work. Ownership loss,
+authorization expiry and ambiguous effects still retain their existing safety boundaries. A durable
+failed validation remains a real attempt failure.
 
 Immediately before each authoritative publication, the Director re-observes the lease ref and GitHub
 server time in one REST request. An unchanged OID reuses the already-validated lease payload; only a

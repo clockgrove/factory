@@ -145,3 +145,57 @@ describe("active operation quota waiting", () => {
     expect(operation).toHaveBeenCalledTimes(1);
   });
 });
+
+it("caps a resumed owner's quota wait at its durable remaining deadline", async () => {
+  vi.useFakeTimers();
+  try {
+    const now = Date.now();
+    const durableStart = now - 50 * 60_000;
+    const operation = vi.fn(async () => {
+      throw new GitHubPrimaryAdmissionDeferredError(
+        { kind: "rate_limit", retryAfterMs: 3_600_000 },
+        new Error("hour reset"),
+      );
+    });
+    const waiting = withGitHubQuotaWait({ deadline: () => durableStart + 60 * 60_000 }, () =>
+      retryGitHubQuota(operation),
+    );
+    const outcome = waiting.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(await outcome).toMatchObject({ name: "TimeoutError" });
+    // Every earlier minute may recheck time, but cannot issue another request
+    // once the durable deadline has been reached.
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("does not overflow a supported thirty-day owner deadline into an immediate abort", async () => {
+  vi.useFakeTimers();
+  try {
+    const stop = new AbortController();
+    const deadline = Date.now() + 30 * 24 * 60 * 60_000;
+    const operation = vi.fn(async () => {
+      throw depleted();
+    });
+    let settled = false;
+    const waiting = withGitHubQuotaWait({ signal: stop.signal, deadline: () => deadline }, () =>
+      retryGitHubQuota(operation),
+    );
+    const outcome = waiting
+      .catch((error: unknown) => error)
+      .finally(() => {
+        settled = true;
+      });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(settled).toBe(false);
+    expect(operation).toHaveBeenCalledTimes(1);
+    stop.abort(new Error("owner stopped"));
+    expect(await outcome).toMatchObject({ message: "owner stopped" });
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});

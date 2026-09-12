@@ -1070,8 +1070,18 @@ export class ConcurrencyLimiter {
   }
 }
 
+export class GitHubQuotaWaitDeadlineError extends Error {
+  constructor() {
+    super("Objective timeout exhausted");
+    this.name = "TimeoutError";
+  }
+}
+
 export interface GitHubQuotaWaitOptions {
+  /** Stops waiting/retrying; initial cleanup requests retain their own authority checks. */
   signal?: AbortSignal;
+  /** Absolute owner deadline, resolved again as durable run identity becomes available. */
+  deadline?: () => number;
   beforeRetry?: () => Promise<void>;
   onWait?: (observation: {
     reason: "primary" | "local-window" | "server";
@@ -1100,13 +1110,17 @@ export async function retryGitHubQuota<T>(
 ): Promise<T> {
   const scope = quotaWaitScope.getStore();
   if (!scope || quotaRetryBoundary.getStore()) return operation(false);
+  const assertCanRetry = () => {
+    scope.signal?.throwIfAborted();
+    if (scope.deadline && Date.now() >= scope.deadline()) throw new GitHubQuotaWaitDeadlineError();
+  };
   let retried = false;
   for (;;) {
-    scope.signal?.throwIfAborted();
+    if (retried) assertCanRetry();
     try {
       return await quotaRetryBoundary.run(true, async () => {
         if (retried && options.refresh !== false) await scope.beforeRetry?.();
-        scope.signal?.throwIfAborted();
+        if (retried) assertCanRetry();
         return operation(retried);
       });
     } catch (error) {
@@ -1116,15 +1130,27 @@ export async function retryGitHubQuota<T>(
         !definiteGitHubQuotaRejection(error)
       )
         throw error;
+      assertCanRetry();
       const reason =
-        (error instanceof GitHubPrimaryAdmissionDeferredError || isKnownPrimaryQuotaRefusal(error))
+        error instanceof GitHubPrimaryAdmissionDeferredError || isKnownPrimaryQuotaRefusal(error)
           ? "primary"
           : error instanceof GitHubLocalAdmissionDeferredError
             ? "local-window"
             : "server";
       const started = Date.now();
       try {
-        await (scope.sleep ?? mutationDelay)(Math.max(1, error.refusal.retryAfterMs), scope.signal);
+        const waitUntil = Date.now() + Math.max(1, error.refusal.retryAfterMs);
+        // Chunk long server waits without retrying HTTP early. The deadline can
+        // become shorter once a resumed run's durable start time is known.
+        do {
+          assertCanRetry();
+          const remaining = Math.min(waitUntil, scope.deadline?.() ?? Infinity) - Date.now();
+          await (scope.sleep ?? mutationDelay)(
+            scope.sleep ? Math.max(1, remaining) : Math.min(60_000, Math.max(1, remaining)),
+            scope.signal,
+          );
+        } while (Date.now() < waitUntil && !scope.sleep);
+        assertCanRetry();
       } finally {
         try {
           scope.onWait?.({ reason, waitedMs: Math.max(0, Date.now() - started) });
@@ -1149,34 +1175,48 @@ export function definiteGitHubQuotaRejection(error: unknown): boolean {
       name?: string;
       data?: unknown;
       cause?: unknown;
-      errors?: Array<{ type?: string }>;
+      errors?: Array<{ type?: string; code?: string }>;
+      response?: { data?: { data?: unknown; errors?: Array<{ type?: string; code?: string }> } };
     };
     if (value.status === 403 || value.status === 429) return true;
-    if (value.name === "GraphqlResponseError")
+    // Octokit's throttling hook also surfaces HTTP-200 GraphQL errors through
+    // response.data. Retain the no-partial-result requirement for both shapes.
+    const envelope = value.name === "GraphqlResponseError" ? value : value.response?.data;
+    if (envelope?.errors?.length)
       return (
-        value.data == null &&
-        !!value.errors?.length &&
-        value.errors.every((entry) => entry.type === "RATE_LIMITED")
+        envelope.data == null &&
+        envelope.errors.every(
+          (entry) =>
+            entry.type === "RATE_LIMITED" ||
+            entry.type === "RATE_LIMIT" ||
+            entry.code === "graphql_rate_limit",
+        )
       );
     current = value.cause;
   }
   return false;
 }
 
-export function githubQuotaWaitSignal(): AbortSignal | undefined {
-  return quotaWaitScope.getStore()?.signal;
-}
-
 /** A known primary resource shortage must not freeze the other API resource. */
 export function isKnownPrimaryQuotaRefusal(error: unknown): boolean {
   let current = error;
   for (let depth = 0; depth < 8 && current && typeof current === "object"; depth++) {
-    const value = current as { headers?: Record<string, string | number | undefined>; response?: { headers?: Record<string, string | number | undefined> }; cause?: unknown; message?: string };
+    const value = current as {
+      headers?: Record<string, string | number | undefined>;
+      response?: { headers?: Record<string, string | number | undefined> };
+      cause?: unknown;
+      message?: string;
+    };
     const headers = value.response?.headers ?? value.headers;
     if (value.message?.toLowerCase().includes("secondary")) return false;
-    if (headers && String(headers["x-ratelimit-remaining"]) === "0" &&
-      (headers["x-ratelimit-resource"] === "core" || headers["x-ratelimit-resource"] === "graphql") &&
-      Number.isFinite(Number(headers["x-ratelimit-reset"]))) return true;
+    if (
+      headers &&
+      String(headers["x-ratelimit-remaining"]) === "0" &&
+      (headers["x-ratelimit-resource"] === "core" ||
+        headers["x-ratelimit-resource"] === "graphql") &&
+      Number.isFinite(Number(headers["x-ratelimit-reset"]))
+    )
+      return true;
     current = value.cause;
   }
   return false;

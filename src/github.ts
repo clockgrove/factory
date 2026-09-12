@@ -1,9 +1,5 @@
 import { isKnownPrimaryQuotaRefusal } from "./platform.js";
-import {
-  retryGitHubQuota,
-  GitHubPreTransportQuotaDeferredError,
-  githubQuotaWaitSignal,
-} from "./platform.js";
+import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "./platform.js";
 /**
  * GitHub reader (§2).
  *
@@ -958,12 +954,7 @@ export function createOctokit(opts: GitHubOptions): Octokit {
         );
         const observerId = headers.get(TRANSPORT_OBSERVER_HEADER);
         headers.delete(TRANSPORT_OBSERVER_HEADER);
-        const ownerSignal = githubQuotaWaitSignal();
-        const signal =
-          ownerSignal && init?.signal
-            ? AbortSignal.any([ownerSignal, init.signal])
-            : (ownerSignal ?? init?.signal);
-        const transportInit = { ...init, headers, ...(signal ? { signal } : {}) };
+        const transportInit = { ...init, headers };
         (observerId ? transportObservers.get(observerId) : undefined)?.onTransported();
         githubTransportCallbacks.getStore()?.onTransported();
         observeGitHubTransport(input, transportInit);

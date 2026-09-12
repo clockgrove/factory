@@ -48,12 +48,13 @@ function setup(input: { paced?: boolean; fetch?: typeof globalThis.fetch } = {})
   const token = `fixture-controller-shutdown-${++fixtureSequence}`;
   const resources = createRepositorySupervisorResources();
   const pacer = new ContentCreationPacer(40, 6, 0);
-  // Hold ordinary admissions deterministically while leaving cleanup reserve
-  // available. This tests shutdown of a wait, independent of burst size.
+  // Hold ordinary admissions at a synthetic spacing delay. This tests owner
+  // shutdown independently of shared rolling-window exhaustion.
   if (input.paced)
-    vi.spyOn(pacer, "waitMs").mockImplementation((_now, options) =>
-      options?.priority ? 0 : 12 * 60_000,
-    );
+    vi.spyOn(pacer, "wait").mockImplementation((_now, options) => ({
+      ms: options?.priority ? 0 : 12 * 60_000,
+      reason: "mutation-spacing",
+    }));
   const recordCall = vi.spyOn(pacer, "recordTransported");
   let pacingObserved = false;
   resources.mutationScheduler = new MutationScheduler({

@@ -45,11 +45,12 @@ it("the actual Supervisor drains and releases its owned lease after a queued rec
     reached = resolve;
   });
   const pacer = new ContentCreationPacer(40, 6, 0);
-  // Test interruption of an ordinary pacing wait without exhausting the
-  // independent priority allowance needed to prove both lease retirements.
-  vi.spyOn(pacer, "waitMs").mockImplementation((_now, options) =>
-    options?.priority ? 0 : 12 * 60_000,
-  );
+  // Test interruption at a synthetic spacing delay, independently of the
+  // shared rolling-window limits that also apply to lease retirement.
+  vi.spyOn(pacer, "wait").mockImplementation((_now, options) => ({
+    ms: options?.priority ? 0 : 12 * 60_000,
+    reason: "mutation-spacing",
+  }));
   const scheduler = new MutationScheduler({
     pacer,
     onThrottle: () => reached(),

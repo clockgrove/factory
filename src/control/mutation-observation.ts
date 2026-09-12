@@ -304,11 +304,15 @@ export async function observeMutationOperation<T>(
   });
 }
 
-export function observeReactiveQuotaWait(wait: { reason: "primary" | "local-window" | "server"; waitedMs: number }): void {
+export function observeReactiveQuotaWait(wait: {
+  reason: "primary" | "local-window" | "server";
+  waitedMs: number;
+}): void {
   const context = current.getStore();
   if (context) context.observation.quotaWaitMs += wait.waitedMs;
   observePhases((observation) => {
     observation.aggregateQuotaWaitMs += wait.waitedMs;
-    observation.quotaWaitReasonMs[wait.reason] = (observation.quotaWaitReasonMs[wait.reason] ?? 0) + wait.waitedMs;
+    observation.quotaWaitReasonMs[wait.reason] =
+      (observation.quotaWaitReasonMs[wait.reason] ?? 0) + wait.waitedMs;
   });
 }

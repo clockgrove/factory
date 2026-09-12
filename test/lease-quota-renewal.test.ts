@@ -177,3 +177,52 @@ describe("Objective lease renewal after quota waiting", () => {
     expect(store.refs.get(lease.ref)).toBe(lease.oid);
   });
 });
+
+describe("Objective lease acquisition after quota waiting", () => {
+  it.each(["createCommit", "createRef", "compareAndSwapRef"] as const)(
+    "rebuilds acquisition after a one-hour refusal at %s",
+    async (boundary) => {
+      const store = new Store();
+      const manager = new LeaseManager({ store, durationMs: 60_000 });
+      if (boundary === "compareAndSwapRef") {
+        await manager.acquire(identity, await store.readCommit(baseOid));
+        store.now = new Date(store.now.getTime() + hour);
+      }
+      vi.spyOn(store, boundary).mockRejectedValueOnce(quota());
+      const lease = await withGitHubQuotaWait(
+        {
+          sleep: async (ms) => {
+            store.now = new Date(store.now.getTime() + ms);
+          },
+        },
+        () => manager.acquire(identity, store.commits.get(baseOid)!),
+      );
+      expect(lease.expiresAt.getTime()).toBe(store.now.getTime() + 60_000);
+      expect(store.refs.get(lease.ref)).toBe(lease.oid);
+      await expect(manager.assertCurrent(lease)).resolves.toBeUndefined();
+    },
+  );
+  it("observes a peer acquisition during the wait without publishing stale ownership", async () => {
+    const store = new Store();
+    const manager = new LeaseManager({ store, durationMs: 60_000 });
+    vi.spyOn(store, "createRef").mockRejectedValueOnce(quota());
+    let peerOid = "";
+    await expect(
+      withGitHubQuotaWait(
+        {
+          sleep: async (ms) => {
+            store.now = new Date(store.now.getTime() + ms);
+            const peer = await manager.acquire(
+              { ...identity, holder: "peer" },
+              store.commits.get(baseOid)!,
+            );
+            peerOid = peer.oid;
+          },
+        },
+        () => manager.acquire(identity, store.commits.get(baseOid)!),
+      ),
+    ).rejects.toThrow(/held|lease|Director/i);
+    expect([...store.refs.values()]).toEqual([peerOid]);
+    expect(store.commits.size).toBe(3);
+  });
+});

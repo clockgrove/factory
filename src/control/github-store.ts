@@ -342,35 +342,28 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     operationName = `${mutationClass}-mutation`,
     authorityClass: MutationAuthorityClass = "objective-publication",
   ): Promise<T> {
-    const effectiveMutationClass = this.#mutationClassContext.getStore() ?? mutationClass;
-    if (mutating && this.#transportFenceContext.getStore())
-      throw new Error("mutation dispatch is forbidden inside a transport fence");
-    const authoritative = mutating && authorityClass !== "immutable-preparation";
-    const scopedFence = authoritative ? this.#scopedMutationFence.getStore() : undefined;
-    // Shared transactions bind an immutable owner; do not capture or recheck
-    // a second, configured Objective generation for the same operation.
-    const fence =
-      scopedFence ??
-      (authoritative ? this.#captureMutationFence?.(effectiveMutationClass) : undefined);
-    const publicationSafetyFence = authoritative
-      ? this.#publicationSafetyFence.getStore()
-      : undefined;
-    const dispatch = () => {
-      return this.#dispatch(
-        operation,
-        mutating,
-        effectiveMutationClass,
-        fence,
-        publicationSafetyFence,
+    const prepare = () => {
+      const effectiveMutationClass = this.#mutationClassContext.getStore() ?? mutationClass;
+      if (mutating && this.#transportFenceContext.getStore())
+        throw new Error("mutation dispatch is forbidden inside a transport fence");
+      const authoritative = mutating && authorityClass !== "immutable-preparation";
+      const fence =
+        (authoritative ? this.#scopedMutationFence.getStore() : undefined) ??
+        (authoritative ? this.#captureMutationFence?.(effectiveMutationClass) : undefined);
+      const publicationSafetyFence = authoritative
+        ? this.#publicationSafetyFence.getStore()
+        : undefined;
+      return retryGitHubQuota(() =>
+        this.#dispatch(operation, mutating, effectiveMutationClass, fence, publicationSafetyFence),
       );
     };
-    if (!mutating) return retryGitHubQuota(dispatch);
+    if (!mutating) return prepare();
     return observeMutationOperation(
       operationName,
       authorityClass,
       this.#mutationScope,
       this.recordMutationOperation,
-      () => retryGitHubQuota(dispatch),
+      prepare,
     );
   }
 

@@ -1,5 +1,5 @@
 import { observeReactiveQuotaWait } from "./control/mutation-observation.js";
-import { retryGitHubQuota, withGitHubQuotaWait } from "./platform.js";
+import { GitHubQuotaWaitDeadlineError, retryGitHubQuota, withGitHubQuotaWait } from "./platform.js";
 import { createHash, randomUUID } from "node:crypto";
 import { EXECUTION_AFFECTING_GIT_PATHS, executionAffectingReason } from "./approval.js";
 import { assertPeerActivation } from "./recovery/peer-trunk.js";
@@ -937,9 +937,11 @@ export class LeaseController {
   }
 
   async release(): Promise<void> {
-    await this.#mutateLease(async (lease) => {
-      this.lease = await this.manager.release(lease, this.sequences.take());
-    });
+    await retryGitHubQuota(() =>
+      this.#mutateLease(async (lease) => {
+        this.lease = await this.manager.release(lease, this.sequences.take());
+      }),
+    );
   }
 
   fail(error: unknown): void {
@@ -3152,17 +3154,23 @@ export class FactorySupervisor {
   async run(): Promise<SupervisorResult> {
     const stopped = new AbortController();
     try {
-      const deadline = AbortSignal.timeout(this.#policy.objectiveTimeoutMinutes * 60_000);
+      const startedAt = Date.now();
       const signal = this.#options.signal
-        ? AbortSignal.any([this.#options.signal, deadline, stopped.signal])
-        : AbortSignal.any([deadline, stopped.signal]);
+        ? AbortSignal.any([this.#options.signal, stopped.signal])
+        : stopped.signal;
       return await withGitHubQuotaWait(
         {
           signal,
+          deadline: () =>
+            (this.#run?.startedAt.getTime() ?? startedAt) +
+            this.#policy.objectiveTimeoutMinutes * 60_000,
           beforeRetry: async () => {
             if (this.#lease) await this.#lease.renewIfNeeded(false, true);
           },
-          onWait: (wait) => { observeReactiveQuotaWait(wait); this.#notify(`Factory quota wait telemetry: ${JSON.stringify(wait)}`); },
+          onWait: (wait) => {
+            observeReactiveQuotaWait(wait);
+            this.#notify(`Factory quota wait telemetry: ${JSON.stringify(wait)}`);
+          },
         },
         () =>
           this.#observePhase("objective", () =>
@@ -3279,6 +3287,13 @@ export class FactorySupervisor {
     let heartbeatError: unknown;
     const heartbeat = setInterval(() => {
       void this.#lease.renewIfNeeded().catch((error) => {
+        // This path already performs cleanup; stopping its quota wait cannot
+        // veto the remaining available-quota retirement operations.
+        if (
+          (this.#options.signal?.aborted && error === this.#options.signal.reason) ||
+          error instanceof GitHubQuotaWaitDeadlineError
+        )
+          return;
         heartbeatError = error;
         this.#lease.fail(error);
       });
@@ -4237,7 +4252,12 @@ export class FactorySupervisor {
     const heartbeat = setInterval(() => {
       void this.#lease.renewIfNeeded().catch((error) => {
         heartbeatError = error;
-        this.#lease.fail(error);
+        // Stopping a quota wait is not evidence that this lease was lost.
+        if (
+          !(this.#options.signal?.aborted && error === this.#options.signal.reason) &&
+          !(error instanceof GitHubQuotaWaitDeadlineError)
+        )
+          this.#lease.fail(error);
       });
     }, 30_000);
     heartbeat.unref();
@@ -7167,7 +7187,11 @@ export class FactorySupervisor {
             }
             break;
           }
-          await sleep(this.#options.pollIntervalMs ?? 2_000, executionSignal);
+          if (observationFailure) throw observationFailure;
+          const nextObservation = sleep(this.#options.pollIntervalMs ?? 2_000, executionSignal);
+          await (pendingCancellation
+            ? Promise.race([nextObservation, pendingCancellation])
+            : nextObservation);
         }
       }
       let artifact = recovered?.artifact ?? (await selected.collect(handle!));

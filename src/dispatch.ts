@@ -1,3 +1,4 @@
+import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "./platform.js";
 /**
  * Dispatch and integration: assign, confirm, retry, escalate (§4), then merge
  * and close (§6) once a PR clears `evaluate.ts`'s mechanical checks.
@@ -1124,7 +1125,7 @@ export class Dispatcher {
       "objective-publication",
       this.#mutationScope,
       this.#onMutationOperation,
-      () => this.#dispatchMutation(fn, fence, beforeCall),
+      () => retryGitHubQuota(() => this.#dispatchMutation(fn, fence, beforeCall)),
     );
   }
 
@@ -1136,7 +1137,7 @@ export class Dispatcher {
     if (this.#breaker.isOpen()) {
       const wait = this.#breaker.waitMs();
       this.#notify(`circuit open; waiting ${wait}ms before the next call`);
-      await sleep(wait);
+      throw new GitHubPreTransportQuotaDeferredError({ kind: "rate_limit", retryAfterMs: wait }, new Error("GitHub circuit is open"));
     }
 
     const mutationPermit = await this.#mutations.acquire("normal");
@@ -1144,13 +1145,13 @@ export class Dispatcher {
     let attempted = false;
     try {
       if (this.#breaker.isOpen()) {
-        throw new PlatformUnavailableError(
+        throw new GitHubPreTransportQuotaDeferredError(
           { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
           new Error("Factory GitHub circuit opened while the dispatch write was queued"),
         );
       }
       await withGitHubRequestPriority("normal", async () => {
-        observeMutationQueue(mutationPermit.waitedMs);
+        observeMutationQueue(mutationPermit.waitedMs, mutationPermit.waitReasonMs);
         await observeMutationFence(async () => {
           if (fence) await fence(mutationPermit.waitedMs);
           await this.#beforeMutation(mutationPermit.waitedMs);
@@ -1160,7 +1161,7 @@ export class Dispatcher {
         // the provider call instead of checking before the queue.
         beforeCall?.();
         if (this.#breaker.isOpen()) {
-          throw new PlatformUnavailableError(
+          throw new GitHubPreTransportQuotaDeferredError(
             { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
             new Error("Factory GitHub circuit opened during the dispatch mutation fence"),
           );

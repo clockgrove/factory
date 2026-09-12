@@ -1,3 +1,4 @@
+import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "../platform.js";
 import type { CompiledGraphStore } from "./graphs.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createOctokit, withGitHubTransportCallbacks, type GitHubOptions } from "../github.js";
@@ -364,13 +365,13 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         publicationSafetyFence,
       );
     };
-    if (!mutating) return dispatch();
+    if (!mutating) return retryGitHubQuota(dispatch);
     return observeMutationOperation(
       operationName,
       authorityClass,
       this.#mutationScope,
       this.recordMutationOperation,
-      dispatch,
+      () => retryGitHubQuota(dispatch),
     );
   }
 
@@ -382,7 +383,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     publicationSafetyFence?: () => Promise<void>,
   ): Promise<T> {
     if (this.#breaker.isOpen()) {
-      throw new PlatformUnavailableError(
+      throw new GitHubPreTransportQuotaDeferredError(
         { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
         new Error("Factory GitHub circuit is open"),
       );
@@ -396,13 +397,13 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     let attempted = false;
     try {
       if (this.#breaker.isOpen()) {
-        throw new PlatformUnavailableError(
+        throw new GitHubPreTransportQuotaDeferredError(
           { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
           new Error("Factory GitHub circuit opened while the request was queued"),
         );
       }
       if (mutationPermit) {
-        observeMutationQueue(mutationPermit.waitedMs);
+        observeMutationQueue(mutationPermit.waitedMs, mutationPermit.waitReasonMs);
         await withGitHubRequestPriority(
           mutationClass === "normal" ? "normal" : "protected",
           () =>
@@ -417,7 +418,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         );
       }
       if (this.#breaker.isOpen()) {
-        throw new PlatformUnavailableError(
+        throw new GitHubPreTransportQuotaDeferredError(
           { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
           new Error("Factory GitHub circuit opened during the mutation fence"),
         );

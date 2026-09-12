@@ -1,3 +1,4 @@
+import type { MutationWaitReasons } from "../platform.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
@@ -13,6 +14,7 @@ export interface MutationOperationObservation {
   startedAt: string;
   elapsedMs: number;
   queueWaitMs: number;
+  waitReasonMs: MutationWaitReasons;
   fenceMs: number;
   leaseAssertions: number;
   readRequests: number;
@@ -45,6 +47,8 @@ export interface GitHubTransportObservation {
   /** Summed operation time: concurrent waits/fences can overlap elapsed time. */
   aggregateQueueWaitMs: number;
   aggregateFenceMs: number;
+  mutationWaitReasonMs: MutationWaitReasons;
+  requestsByRoute: Partial<Record<GitHubRouteFamily, number>>;
   readRequests: number;
   mutationRequests: number;
   unclassifiedRequests: number;
@@ -81,6 +85,46 @@ export function observeControlTransport(mutating: boolean): void {
   }
 }
 
+export type GitHubRouteFamily =
+  | "graphql"
+  | "capacity-ref"
+  | "lease-ref"
+  | "other-ref"
+  | "git-commit"
+  | "git-tree"
+  | "git-blob"
+  | "issue-comments"
+  | "issues"
+  | "pulls"
+  | "checks"
+  | "repository"
+  | "other";
+
+/** Fixed labels only: never retain repository names, identifiers or query text. */
+function routeFamily(url: string): GitHubRouteFamily {
+  let path: string;
+  try {
+    path = decodeURIComponent(new URL(url).pathname);
+  } catch {
+    return "other";
+  }
+  if (path === "/graphql") return "graphql";
+  if (/\/git\/(?:ref|refs)\//.test(path)) {
+    if (path.includes("clockgrove-factory/coordination/capacity")) return "capacity-ref";
+    if (path.includes("clockgrove-factory/leases/")) return "lease-ref";
+    return "other-ref";
+  }
+  if (/\/git\/commits(?:\/|$)/.test(path)) return "git-commit";
+  if (/\/git\/trees(?:\/|$)/.test(path)) return "git-tree";
+  if (/\/git\/blobs(?:\/|$)/.test(path)) return "git-blob";
+  if (/\/issues(?:\/[^/]+)?\/comments(?:\/|$)/.test(path)) return "issue-comments";
+  if (/\/issues(?:\/|$)/.test(path)) return "issues";
+  if (/\/pulls(?:\/|$)/.test(path)) return "pulls";
+  if (/\/(?:check-runs|check-suites|statuses|status)(?:\/|$)/.test(path)) return "checks";
+  if (/^\/repos\/[^/]+\/[^/]+\/?$/.test(path)) return "repository";
+  return "other";
+}
+
 /** Count actual fetch attempts, not method wrappers, permits or hidden retries. */
 export function observeGitHubTransport(
   input: Parameters<typeof globalThis.fetch>[0],
@@ -88,6 +132,10 @@ export function observeGitHubTransport(
 ): void {
   const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  const route = routeFamily(url);
+  observePhases((observation) => {
+    observation.requestsByRoute[route] = (observation.requestsByRoute[route] ?? 0) + 1;
+  });
   if (method === "GET" || method === "HEAD") {
     observeControlTransport(false);
     observePhases((observation) => observation.readRequests++);
@@ -140,6 +188,8 @@ export async function observeGitHubTransportPhase<T>(
     elapsedMs: 0,
     aggregateQueueWaitMs: 0,
     aggregateFenceMs: 0,
+    mutationWaitReasonMs: {},
+    requestsByRoute: {},
     readRequests: 0,
     mutationRequests: 0,
     unclassifiedRequests: 0,
@@ -182,10 +232,24 @@ export async function observeMutationFence(operation: () => Promise<void>): Prom
   }
 }
 
-export function observeMutationQueue(waitedMs: number): void {
+export function observeMutationQueue(waitedMs: number, reasons: MutationWaitReasons = {}): void {
   const context = current.getStore();
   if (context) context.observation.queueWaitMs += waitedMs;
   observePhases((observation) => (observation.aggregateQueueWaitMs += waitedMs));
+  for (const key of [
+    "mutation-spacing",
+    "rolling-minute",
+    "rolling-hour",
+    "admission-contention",
+  ] as const) {
+    const ms = reasons[key];
+    if (ms === undefined) continue;
+    if (context)
+      context.observation.waitReasonMs[key] = (context.observation.waitReasonMs[key] ?? 0) + ms;
+    observePhases((observation) => {
+      observation.mutationWaitReasonMs[key] = (observation.mutationWaitReasonMs[key] ?? 0) + ms;
+    });
+  }
 }
 
 export async function observeMutationOperation<T>(
@@ -208,6 +272,7 @@ export async function observeMutationOperation<T>(
     startedAt: new Date().toISOString(),
     elapsedMs: 0,
     queueWaitMs: 0,
+    waitReasonMs: {},
     fenceMs: 0,
     leaseAssertions: 0,
     readRequests: 0,

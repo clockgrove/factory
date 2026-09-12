@@ -394,6 +394,36 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
     await expect(resumeArtifactTransfer(options)).rejects.toThrow(/incomplete/i);
   });
 
+  it("publishes an inline transfer with one descriptor and tree while retaining both fenced checkpoints", async () => {
+    const memory = store(),
+      id = identity();
+    const value = normalizeArtifact({
+      baseSha: id.baseSha,
+      patch: "",
+      changedPaths: [],
+      outcome: "succeeded",
+    });
+    let fences = 0;
+    const result = await persistArtifactTransfer({
+      store: memory.api,
+      identity: id,
+      artifact: value,
+      allowedPaths: [],
+      assertCurrent: async () => {
+        fences++;
+      },
+    });
+    expect(memory.writes).toEqual(["blob", "tree", "commit", "ref", "commit", "ref"]);
+    expect(fences).toBe(6);
+    const intent = memory.commits.get(memory.refs.get(`${artifactTransferRef(id)}/intent`)!)!;
+    const ready = memory.commits.get(result.commitSha)!;
+    expect(ready.treeOid).toBe(intent.treeOid);
+    expect(ready.parentOids).toEqual([intent.oid]);
+    expect((await recoverArtifactTransfer({ store: memory.api, identity: id }))?.digest).toBe(
+      value.digest,
+    );
+  });
+
   it("fences every mutation and recovers exact bytes only through intent-bound ready refs", async () => {
     const memory = store(),
       id = identity(),
@@ -409,6 +439,8 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
       },
     });
     expect(fences).toBe(memory.writes.length);
+    expect(memory.writes.filter((kind) => kind === "blob")).toHaveLength(2);
+    expect(memory.writes.filter((kind) => kind === "tree")).toHaveLength(2);
     expect(result.lifecycle).toBe("retained");
     expect(memory.refs.has(`${artifactTransferRef(id)}/intent`)).toBe(true);
     await releaseAllArtifactContent();

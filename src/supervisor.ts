@@ -1,3 +1,4 @@
+import { retryGitHubQuota, withGitHubQuotaWait } from "./platform.js";
 import { createHash, randomUUID } from "node:crypto";
 import { EXECUTION_AFFECTING_GIT_PATHS, executionAffectingReason } from "./approval.js";
 import { assertPeerActivation } from "./recovery/peer-trunk.js";
@@ -1004,11 +1005,11 @@ export class LeaseController {
     }
   }
 
-  async renewIfNeeded(force = false): Promise<void> {
-    await this.#mutateLease(async (lease) => {
+  async renewIfNeeded(force = false, afterQuotaWait = false): Promise<void> {
+    await retryGitHubQuota((retried) => this.#mutateLease(async (lease) => {
       if (!force && lease.expiresAt.getTime() - Date.now() > DEFAULT_LEASE_RENEWAL_LEAD_MS) return;
-      this.lease = await this.manager.renew(lease, this.sequences.take());
-    });
+      this.lease = await this.manager.renew(lease, this.sequences.take(), { allowExpiredAfterQuota: afterQuotaWait || retried });
+    }), { refresh: false });
   }
 
   async release(): Promise<void> {
@@ -3200,7 +3201,26 @@ export class FactorySupervisor {
     return observeGitHubTransportPhase(
       phase,
       (observation) => {
-        this.#notify(`Factory phase telemetry: ${JSON.stringify(observation)}`);
+        this.#notify(
+          `Factory phase telemetry: ${JSON.stringify({
+            ...observation,
+            modelConfiguration: {
+              evidenceSource: "configured-policy",
+              selections: Object.fromEntries(
+                (["compile", "implement", "recover", "review"] as const).map((purpose) => [
+                  purpose,
+                  resolveModelSelection(this.#policy, purpose) ?? null,
+                ]),
+              ),
+              providerResolvedModel: null,
+              providerResolvedReasoning: null,
+            },
+          })}`,
+        );
+        if (phase === "objective")
+          this.#notify(
+            `Factory mutation telemetry: ${JSON.stringify(this.mutationOperationTelemetry())}`,
+          );
       },
       operation,
     );
@@ -3208,9 +3228,15 @@ export class FactorySupervisor {
 
   async run(): Promise<SupervisorResult> {
     try {
-      return await this.#observePhase("objective", () =>
+      const deadline = AbortSignal.timeout(this.#policy.objectiveTimeoutMinutes * 60_000);
+      const signal = this.#options.signal ? AbortSignal.any([this.#options.signal, deadline]) : deadline;
+      return await withGitHubQuotaWait({
+        signal,
+        beforeRetry: async () => { if (this.#lease) await this.#lease.renewIfNeeded(false, true); },
+        onWait: (wait) => this.#notify(`Factory quota wait telemetry: ${JSON.stringify(wait)}`),
+      }, () => this.#observePhase("objective", () =>
         withArtifactContentScope(() => this.#runWithArtifactContent()),
-      );
+      ));
     } finally {
       await this.#retryArtifacts.clear();
     }

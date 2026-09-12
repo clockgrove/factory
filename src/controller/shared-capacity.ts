@@ -116,6 +116,35 @@ export interface SharedCapacityRetentionStatus {
   action: string | null;
 }
 
+export interface SharedCapacitySnapshotLagEvidence {
+  claimId: string;
+  key: string;
+  provenance: "journal" | "retired";
+}
+
+/** The Objective projection still contains an exact obligation that the
+ * repository journal has monotonically released. This is visibility lag, not
+ * permission to resurrect the claim or to continue from the stale projection. */
+export class SharedCapacitySnapshotLagError extends Error {
+  readonly evidence: readonly SharedCapacitySnapshotLagEvidence[];
+
+  constructor(evidence: readonly SharedCapacitySnapshotLagEvidence[]) {
+    const sorted = [...evidence].sort(
+      (left, right) =>
+        left.key.localeCompare(right.key) ||
+        left.claimId.localeCompare(right.claimId) ||
+        left.provenance.localeCompare(right.provenance),
+    );
+    super(
+      `shared capacity is ahead of the Objective snapshot: ${sorted
+        .map((entry) => `${entry.key}:${entry.claimId}:${entry.provenance}`)
+        .join(", ")}`,
+    );
+    this.name = "SharedCapacitySnapshotLagError";
+    this.evidence = Object.freeze(sorted.map((entry) => Object.freeze({ ...entry })));
+  }
+}
+
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object") {
@@ -589,45 +618,106 @@ export class SharedCapacityCoordinator {
   /** Reconstruct liabilities; absence from a snapshot NEVER frees an existing claim. */
   async reconcile(
     owner: SharedCapacityOwner,
-    reservations: readonly CapacityReservation[],
-    verifiedPredecessors: readonly SharedCapacityOwner[] = [],
-  ): Promise<void> {
-    if (verifiedPredecessors.some((prior) => prior.objective !== owner.objective))
+    imports: readonly SharedCapacityImport[],
+    verifiedPredecessors: readonly SharedCapacityImport[] = [],
+  ): Promise<SharedCapacityImport[]> {
+    const mutationOwner = ownerSchema.parse(owner);
+    if (
+      verifiedPredecessors.some(
+        ({ owner: prior }) => ownerSchema.parse(prior).objective !== mutationOwner.objective,
+      )
+    )
       throw new Error("capacity adoption Objective mismatch");
-    const claims = reservations.map((reservation) => this.#claim(owner, reservation));
-    await this.#change(owner, async (state, retiredDigest) => {
-      let changed = false;
-      for (const claim of claims) {
+    const verified = new Set(
+      verifiedPredecessors.map(({ owner: prior, reservation }) => {
+        const claim = this.#claim(ownerSchema.parse(prior), reservation);
+        return `${claim.id}:${reservationDigest(claim.reservation)}`;
+      }),
+    );
+    const claims = new Map<string, Claim>();
+    const claimsByKey = new Map<string, string>();
+    for (const imported of imports) {
+      const sourceOwner = ownerSchema.parse(imported.owner);
+      const claim = this.#claim(sourceOwner, imported.reservation);
+      if (
+        sourceOwner.objective !== mutationOwner.objective ||
+        sourceOwner.directorEpoch > mutationOwner.directorEpoch
+      )
+        throw new Error("capacity reconstruction source owner moves against lease history");
+      const sameOwner = canonical(sourceOwner) === canonical(mutationOwner);
+      const sameRunPredecessor =
+        sourceOwner.runId === mutationOwner.runId &&
+        sourceOwner.policyDigest === mutationOwner.policyDigest;
+      if (
+        !sameOwner &&
+        !sameRunPredecessor &&
+        !verified.has(`${claim.id}:${reservationDigest(claim.reservation)}`)
+      )
+        throw new Error("capacity reconstruction requires exact verified source claim");
+      const duplicate = claims.get(claim.id);
+      if (duplicate && canonical(duplicate.reservation) !== canonical(claim.reservation))
+        throw new Error("reconstructed shared capacity has conflicting duplicate identity");
+      const keyOwner = claimsByKey.get(claim.reservation.key);
+      if (keyOwner && keyOwner !== claim.id)
+        throw new Error("reconstructed shared capacity has conflicting source owners");
+      claims.set(claim.id, claim);
+      claimsByKey.set(claim.reservation.key, claim.id);
+    }
+    return this.#change(owner, async (state, retiredDigest) => {
+      const lag: SharedCapacitySnapshotLagEvidence[] = [];
+      const additions: Claim[] = [];
+      const retained: SharedCapacityImport[] = [];
+      for (const claim of claims.values()) {
         const prior = state.claims.find((row) => row.id === claim.id);
+        if (
+          prior &&
+          (canonical(prior.owner) !== canonical(claim.owner) ||
+            canonical(prior.reservation) !== canonical(claim.reservation))
+        )
+          throw new Error("reconstructed shared capacity conflicts with retained identity");
+        const retired = prior ? null : await retiredDigest(claim.id);
+        if (retired && retired !== reservationDigest(claim.reservation))
+          throw new Error("reconstructed shared capacity conflicts with retired identity");
+        // Older controllers transferred active claims on same-run lease renewal.
+        // An exact, still-active transferred claim preserves that liability; the
+        // earlier release alone must not be mistaken for physical cleanup.
+        const transferred = state.claims.filter(
+          (row) =>
+            !row.released && row.reservation.key === claim.reservation.key && row.id !== claim.id,
+        );
+        if (transferred.length) {
+          const active = transferred[0]!;
+          if (
+            transferred.length !== 1 ||
+            !(prior?.released || retired) ||
+            canonical(active.reservation) !== canonical(claim.reservation) ||
+            active.owner.objective !== claim.owner.objective ||
+            active.owner.runId !== claim.owner.runId ||
+            active.owner.policyDigest !== claim.owner.policyDigest ||
+            active.owner.directorEpoch <= claim.owner.directorEpoch ||
+            active.owner.directorEpoch > mutationOwner.directorEpoch
+          )
+            throw new Error("capacity reconstruction conflicts with retained source owner");
+          retained.push({ owner: active.owner, reservation: active.reservation });
+          continue;
+        }
+        retained.push({ owner: claim.owner, reservation: claim.reservation });
         if (prior) {
-          if (canonical(prior.reservation) !== canonical(claim.reservation) || prior.released)
-            throw new Error("reconstructed shared capacity conflicts with retained identity");
+          if (prior.released)
+            lag.push({ claimId: claim.id, key: claim.reservation.key, provenance: "journal" });
         } else {
-          if (await retiredDigest(claim.id))
-            throw new Error("reconstructed shared capacity conflicts with retained identity");
-          const inherited = state.claims.find(
-            (row) => !row.released && row.reservation.key === claim.reservation.key,
-          );
-          if (inherited) {
-            const sameRun =
-              inherited.owner.runId === owner.runId &&
-              inherited.owner.policyDigest === owner.policyDigest &&
-              inherited.owner.directorEpoch < owner.directorEpoch;
-            const verified = verifiedPredecessors.some(
-              (priorOwner) => canonical(priorOwner) === canonical(inherited.owner),
-            );
-            if (
-              (!sameRun && !verified) ||
-              canonical(inherited.reservation) !== canonical(claim.reservation)
-            )
-              throw new Error("capacity adoption requires exact verified predecessor");
-            inherited.released = true;
+          if (retired) {
+            lag.push({ claimId: claim.id, key: claim.reservation.key, provenance: "retired" });
+            continue;
           }
-          state.claims.push(claim);
-          changed = true;
+          if (state.claims.some((row) => row.reservation.key === claim.reservation.key))
+            throw new Error("capacity reconstruction conflicts with retained source owner");
+          additions.push(claim);
         }
       }
-      return { value: undefined, changed };
+      if (lag.length > 0) throw new SharedCapacitySnapshotLagError(lag);
+      state.claims.push(...additions);
+      return { value: retained, changed: additions.length > 0 };
     });
   }
 

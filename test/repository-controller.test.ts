@@ -22,6 +22,7 @@ import {
 } from "../src/platform.js";
 import { createOctokit } from "../src/github.js";
 import { ControllerGenerationRetirement } from "../src/controller/retirement.js";
+import { SharedCapacitySnapshotLagError } from "../src/controller/shared-capacity.js";
 
 function lease(objective: number, epoch = 1): LeaseState {
   return {
@@ -184,6 +185,48 @@ describe("repository controller", () => {
     expect(await controller.reconcileOnce()).toBe(1);
     await controller.settle();
     expect(reconciled).toEqual([1, 2]);
+  });
+
+  it("keeps a snapshot-lag activation parked across incidental discovery revisions", async () => {
+    let requestId = "activation-1";
+    let discoveryRevision = 1;
+    const reconciled: string[] = [];
+    const controller = new GitHubRepositoryController({
+      capacity: 1,
+      store: {
+        discoverObjectiveActivations: async () => [
+          {
+            objective: 1,
+            activatedAt: "2026-01-01T00:00:00Z",
+            requestId,
+            policy: {},
+            policyDigest: "c".repeat(64),
+            baseSha: "a".repeat(40),
+            requestedBy: "operator",
+            discoveryRevision,
+          },
+        ],
+      },
+      reconcileObjective: async (candidate) => {
+        reconciled.push(`${candidate.requestId}:${candidate.discoveryRevision ?? 0}`);
+        throw new SharedCapacitySnapshotLagError([
+          {
+            claimId: "a".repeat(64),
+            key: "1:10:1:execution:local",
+            provenance: "journal",
+          },
+        ]);
+      },
+    });
+
+    expect(await controller.reconcileOnce()).toBe(1);
+    await controller.settle();
+    discoveryRevision = 2;
+    expect(await controller.reconcileOnce()).toBe(0);
+    requestId = "activation-2";
+    expect(await controller.reconcileOnce()).toBe(1);
+    await controller.settle();
+    expect(reconciled).toEqual(["activation-1:1", "activation-2:2"]);
   });
 
   it("parks one failed Objective without aborting an independently running peer", async () => {

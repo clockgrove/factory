@@ -4,6 +4,7 @@ import {
   CapacityLedger,
   capacityReservationKey,
   deriveCapacityReservations,
+  deriveOwnedCapacityReservations,
   isIntegrationValidationBackend,
   unreconciledCapacityReservations,
   type CapacityLimits,
@@ -403,6 +404,70 @@ describe("repository-wide capacity ledger", () => {
       },
     ]);
     expect(terminal).toEqual([]);
+  });
+
+  it("retains the immutable receipt owner for execution and validation obligations", () => {
+    const validation = parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      kind: "capacity",
+      event: "CapacityReserved",
+      objective: 1,
+      runId: "validation-run",
+      sequence: 2,
+      at: "2026-09-04T00:00:02.000Z",
+      workItem: 11,
+      attempt: 2,
+      phase: "validation",
+      backend: "codex-cli/daytona",
+      requestedCpu: 1,
+      requestedMemoryMb: 2_048,
+      directorEpoch: 7,
+      recoveryEpoch: 9,
+      policyDigest: "d".repeat(64),
+    });
+    const owned = deriveOwnedCapacityReservations([
+      {
+        objective: 1,
+        workItem: 10,
+        events: [
+          attemptEvent("AttemptReserved", 1, {
+            runId: "execution-run",
+            directorEpoch: 3,
+            policyDigest: "c".repeat(64),
+          }),
+        ],
+        defaultCpu: 1,
+        defaultMemoryMb: 2_048,
+      },
+      {
+        objective: 1,
+        workItem: 11,
+        events: [validation],
+        defaultCpu: 1,
+        defaultMemoryMb: 2_048,
+      },
+    ]);
+
+    expect(owned).toMatchObject([
+      {
+        owner: {
+          objective: 1,
+          runId: "execution-run",
+          directorEpoch: 3,
+          policyDigest: "c".repeat(64),
+        },
+        reservation: { workItem: 10, phase: "execution" },
+      },
+      {
+        owner: {
+          objective: 1,
+          runId: "validation-run",
+          directorEpoch: 9,
+          policyDigest: "d".repeat(64),
+        },
+        reservation: { workItem: 11, phase: "validation" },
+      },
+    ]);
   });
 
   it("does not reconstruct execution capacity for a bound non-dispatching artifact consumer", () => {

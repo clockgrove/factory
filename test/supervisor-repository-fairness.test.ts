@@ -121,6 +121,7 @@ it("does not mark repository fairness reconciled before retained shared capacity
     reconcile: async () => {
       reconcileStarted.resolve();
       await releaseReconcile.promise;
+      return [];
     },
     snapshot: async () => ({ generation: 1, reservations: [] }),
   } as unknown as NonNullable<typeof f.repositoryResources.sharedCapacity>;

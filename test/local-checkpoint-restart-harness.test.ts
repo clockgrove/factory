@@ -546,7 +546,7 @@ describe("same-generation initial startup observation", () => {
       expect(observe).toHaveBeenCalledTimes(2);
       expect(opts.wait.mock.calls).toEqual([[100]]);
       expect(opts.record).toHaveBeenLastCalledWith({
-        firstDiagnostic: { boundary, code: "EACCES" },
+        firstDiagnostic: { boundary, category: "filesystem", code: "EACCES" },
         attempts: 2,
         outcome: "ready-after-observation-retry",
         identity,
@@ -695,6 +695,7 @@ describe("explicit checkpoint restart authority", () => {
       expect(checkpointFailure(error, "controller-process-executable")).toEqual({
         boundary: "controller-process-executable",
         code: "EACCES",
+        category: "filesystem",
       });
     }
     expect(read).toHaveBeenCalledTimes(1);
@@ -710,6 +711,14 @@ describe("explicit checkpoint restart authority", () => {
       });
       expect(checkpointFailure(error, "controller-process-cwd")).toEqual({
         boundary: "controller-process-cwd",
+        category:
+          code === "ERR_ASSERTION"
+            ? "assertion"
+            : code === "ETIMEDOUT"
+              ? "timeout"
+              : code === "ABORT_ERR"
+                ? "aborted"
+                : "filesystem",
         code,
       });
     },
@@ -717,10 +726,15 @@ describe("explicit checkpoint restart authority", () => {
   it("never emits arbitrary diagnostic strings or misinterprets an unavailable observation as absence", () => {
     expect(
       checkpointFailure({ code: "private secret", message: "raw private log" }, "/private/path"),
-    ).toEqual({ boundary: "scenario", code: "UNAVAILABLE" });
-    expect(checkpointFailure(undefined)).toEqual({ boundary: "scenario", code: "UNAVAILABLE" });
+    ).toEqual({ boundary: "scenario", category: "unavailable", code: "UNAVAILABLE" });
+    expect(checkpointFailure(undefined)).toEqual({
+      boundary: "scenario",
+      category: "unavailable",
+      code: "UNAVAILABLE",
+    });
     expect(checkpointFailure({ code: "ENOENT" }, "controller-process-birth")).toEqual({
       boundary: "controller-process-birth",
+      category: "filesystem",
       code: "ENOENT",
     });
   });
@@ -1161,6 +1175,29 @@ describe("one-shot checkpoint lifecycle", () => {
     });
     await expect(runCheckpointScenario(f.port, authority)).rejects.toThrow(/incarnation changed/);
     expect(f.actions).not.toContain("resume");
+  });
+  it("retains a preflight quota refusal without retry or controller actions", async () => {
+    const f = scenario();
+    const error = Object.assign(new Error("API rate limit exceeded for private identity."), {
+      status: 403,
+      response: { headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1788759000" } },
+    });
+    vi.mocked(f.port.preflight).mockRejectedValue(error);
+    await expect(runCheckpointScenario(f.port, { ...authority, phase: "preflight" })).rejects.toBe(
+      error,
+    );
+    expect(checkpointFailure(error)).toEqual({
+      boundary: "scenario",
+      category: "rate-limit",
+      code: "UNAVAILABLE",
+      httpStatus: 403,
+      rateLimitRemaining: 0,
+      rateLimitReset: 1788759000,
+    });
+    expect(f.port.preflight).toHaveBeenCalledTimes(1);
+    expect(f.actions).toEqual([]);
+    expect(f.port.controller).not.toHaveBeenCalled();
+    expect(f.port.poll).not.toHaveBeenCalled();
   });
   it("only preflights without explicit exercise", async () => {
     const f = scenario();

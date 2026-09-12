@@ -168,18 +168,9 @@ export function checkpointFailure(error, boundary) {
     "controller-process-cgroup",
     "controller-generation",
   ]);
-  const codes = new Set([
-    "ERR_ASSERTION",
-    "EACCES",
-    "EPERM",
-    "ENOENT",
-    "ESRCH",
-    "ETIMEDOUT",
-    "ABORT_ERR",
-  ]);
   return {
     boundary: boundaries.has(boundary) ? boundary : "scenario",
-    code: codes.has(error?.code) ? error.code : "UNAVAILABLE",
+    ...classifyCheckpointFailure(error),
   };
 }
 
@@ -207,14 +198,40 @@ const observationStages = new Set([
 ]);
 const retryableReadStages = new Set(["objective", "children", "comments", "status"]);
 
-/** Only fixed categories leave the process; never serialize the thrown object,
- * its message/cause, request parameters, headers or response body. */
-export function checkpointObservationFailure(error, { phase, stage, now = Date.now() } = {}) {
-  const knownCode = checkpointFailure(error).code;
+/** Only fixed categories and normalized scalars leave the process; never serialize
+ * messages, causes, requests, arbitrary headers or response bodies. */
+function classifyCheckpointFailure(error) {
+  const codes = new Set([
+    "ERR_ASSERTION",
+    "EACCES",
+    "EPERM",
+    "ENOENT",
+    "ESRCH",
+    "ETIMEDOUT",
+    "ABORT_ERR",
+  ]);
+  const knownCode = codes.has(error?.code) ? error.code : "UNAVAILABLE";
   const status =
     Number.isSafeInteger(error?.status) && error.status >= 400 && error.status <= 599
       ? error.status
       : undefined;
+  const headers = error?.response?.headers ?? {};
+  const remaining = checkpointHeaderScalar(headers["x-ratelimit-remaining"]);
+  const reset = checkpointHeaderScalar(headers["x-ratelimit-reset"]);
+  const retryAfter = checkpointHeaderScalar(headers["retry-after"]);
+  // Reset alone is present on ordinary GitHub responses and proves no refusal.
+  const rateLimit =
+    status === 429 ||
+    (status === 403 &&
+      (remaining === 0 ||
+        retryAfter !== undefined ||
+        [error?.message, error?.response?.data?.message].some(
+          (message) =>
+            typeof message === "string" &&
+            /^(?:API rate limit exceeded(?: for |\.|$)|You have exceeded a secondary rate limit(?:\.|$))/i.test(
+              message,
+            ),
+        )));
   const transportCodes = new Set([
     "ECONNRESET",
     "ECONNREFUSED",
@@ -235,8 +252,9 @@ export function checkpointObservationFailure(error, { phase, stage, now = Date.n
     [-32700, -32600, -32601, -32602, -32603, -32000, -32001].includes(error.code)
       ? error.code
       : undefined;
-  const category =
-    status === 403 || status === 429
+  const category = rateLimit
+    ? "rate-limit"
+    : status === 401 || status === 403
       ? "http-refusal"
       : status !== undefined
         ? "http"
@@ -257,16 +275,33 @@ export function checkpointObservationFailure(error, { phase, stage, now = Date.n
                       : knownCode !== "UNAVAILABLE"
                         ? "filesystem"
                         : "unavailable";
+  return {
+    category,
+    code: transportCode ?? (category === "deadline" ? "CHECKPOINT_DEADLINE" : knownCode),
+    ...(status === undefined ? {} : { httpStatus: status }),
+    ...(mcpCode === undefined ? {} : { mcpCode }),
+    ...(remaining === undefined ? {} : { rateLimitRemaining: remaining }),
+    ...(reset === undefined ? {} : { rateLimitReset: reset }),
+    ...(retryAfter === undefined ? {} : { retryAfter }),
+  };
+}
+
+// GitHub quota headers use nonnegative integer counts/seconds, not arbitrary text.
+function checkpointHeaderScalar(value) {
+  if (typeof value !== "number" && (typeof value !== "string" || !/^\d{1,16}$/.test(value)))
+    return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+export function checkpointObservationFailure(error, { phase, stage, now = Date.now() } = {}) {
   assert.ok(Number.isSafeInteger(now) && now >= 0 && now <= 8640000000000000);
   return {
     boundary: "observation",
     phase: observationPhases.has(phase) ? phase : "observation",
     stage: observationStages.has(stage) ? stage : "observation",
     failedAt: new Date(now).toISOString(),
-    category,
-    code: transportCode ?? (category === "deadline" ? "CHECKPOINT_DEADLINE" : knownCode),
-    ...(status === undefined ? {} : { httpStatus: status }),
-    ...(mcpCode === undefined ? {} : { mcpCode }),
+    ...classifyCheckpointFailure(error),
   };
 }
 

@@ -4,6 +4,13 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ## Unreleased
 
+### Fixed
+
+- Active-run cancellation checks now scan bounded history once and then read overlapping comment
+  deltas. Credential-shared governor/quota entries and live transport observers are never silently
+  evicted; exceeding 16 credentials or 1,024 simultaneous observers fails clearly before transport.
+  ([#320](https://github.com/clockgrove/factory/issues/320))
+
 ### Added
 
 - Change-sensitive repository discovery now reconstructs authenticated history once, consumes

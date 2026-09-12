@@ -3,9 +3,10 @@
 These rules govern AI contributors building Factory, not the workers Factory runs for adopters.
 
 Use [`docs/DESIGN.md`](docs/DESIGN.md) for the product contract,
-[GitHub #69](https://github.com/clockgrove/factory/issues/69) for current capability status, and
-[`CONTRIBUTING.md`](CONTRIBUTING.md) for detailed procedures. GitHub and the repository are the
-source of truth; conversation history is not.
+[GitHub #69](https://github.com/clockgrove/factory/issues/69) for current capability status,
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for contributor setup and PR expectations, and
+[`docs/CONFORMANCE.md`](docs/CONFORMANCE.md#release-verification-procedure) for release procedures.
+GitHub and the repository are the source of truth; conversation history is not.
 
 Current project status lives in the body of #69, with linked issues owning detailed acceptance
 and evidence. Update that body and affected issue dependencies when a capability changes state;
@@ -197,8 +198,8 @@ accepted risks.
 - Do not repeatedly run broad suites, packaging, plugin reinstalls, or live qualification between
   intermediate fixes.
 - At a stable candidate boundary, freeze the candidate and run the release gates in
-  [`CONTRIBUTING.md`](CONTRIBUTING.md). Fix failures and rerun affected checks first; repeat broad
-  gates only at the next stable boundary.
+  [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md#release-verification-procedure). Fix failures and rerun
+  affected checks first; repeat broad gates only at the next stable boundary.
 - Build and install the exact passing artifact once per stable candidate. Installed qualification
   must use that artifact, not a mutable worktree or handwritten MCP configuration.
 - Evidence proves only its exact candidate, host, and scenario. Never relabel it more broadly.

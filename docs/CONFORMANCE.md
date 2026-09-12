@@ -102,6 +102,50 @@ when cleanup remains uncertain, no stale-lease accounting writes, and preservati
 cancellation or lease-release outcomes while workers drain. Unknown counters remain unavailable and
 unknown resources still block replacement. These are deterministic regressions, not live fault passes.
 
+## Release verification procedure
+
+Maintainers coordinate qualification for an identified release candidate after implementation and
+integration review. Ordinary contributor checks are described in
+[CONTRIBUTING.md](../CONTRIBUTING.md#validate-changes); a routine PR is not a release candidate.
+
+1. Freeze the source, tests, documentation, and manifests as an identified candidate.
+2. Run the complete suite, fix actual failures, and retain security, destructive-action, accounting,
+   and recovery coverage. Implementation blockers must be resolved before declaring code complete.
+3. Build synchronized bundles and run `npm run verify:release` for the integrated checks.
+4. Install the matching artifact and record its source and artifact identities.
+5. Execute the required installed end-to-end cases and applicable conformance matrices under their
+   separately accepted authority. All six prepublication gates below remain required.
+
+The release gate must run directly on a supported Linux host with systemd 254 or newer and a
+reachable systemd user manager. This includes the Linux side of WSL2, not a nested sandbox without
+access to the user bus. To diagnose the host, run the same read-only user-manager probe used by the
+preflight:
+
+```sh
+systemctl --user show --property=Version --value --no-pager
+```
+
+The preflight also checks the `systemd-run` version. Passing preflight does not replace the suite's
+real transient-scope containment tests.
+
+`verify:package` checks committed plugin manifests and skills, starts the bundled MCP server through
+the manifest's command and arguments, and verifies its public tool surface. It installs a staged
+copy through an isolated `CODEX_HOME` using the Codex CLI and starts the installed MCP and
+repository-controller executables. It does not use the development worktree's Codex configuration
+or credentials or create a paid provider resource. Staged plugin and npm checks do not establish
+published-artifact installation support.
+
+If a check fails, preserve its original result, fix the defect, and run affected checks first.
+Repeat broader checks at the next stable candidate boundary. Keep evidence bound to its exact
+source, artifact, and scenario; never relabel an earlier pass as proof of changed bytes. Reuse
+completed work only through authorized recovery. Record unrun or blocked checks explicitly.
+Simulated providers do not establish live support, and pilot evidence does not replace release gates.
+
+Publication requires `npm run verify:release` and the applicable prepublication gates below. The
+final verified tag also requires the [post-publication completion gate](#post-publication-completion-gate)
+against the actual published artifact. This procedure does not grant publication or provider-spend
+authority.
+
 ## Verification required before publication
 
 | Gate | Status | Evidence or open reason |

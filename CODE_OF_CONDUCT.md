@@ -17,9 +17,10 @@ infrastructure to test destructive or billable behavior without authorization.
 
 ## Reporting and enforcement
 
-For ordinary moderation, contact a maintainer privately through the contact information on their
-GitHub profile. Do not force a person to disclose sensitive conduct publicly. Report security issues
-through [SECURITY.md](SECURITY.md), not through a public conduct report.
+For private conduct reports, email [security@clockgrove.com](mailto:security@clockgrove.com)
+with the subject "Factory conduct report". Include the relevant context and links where safe to
+share. Do not force a person to disclose sensitive conduct publicly. Report security vulnerabilities
+through [SECURITY.md](SECURITY.md).
 
 Maintainers may edit or remove content, close or lock discussions, issue a private warning,
 temporarily restrict participation, or permanently ban an account. Enforcement considers severity,
@@ -28,4 +29,3 @@ a report involving a maintainer should be handled by another maintainer when pos
 
 This code applies in repository issues, pull requests, reviews, discussions, project-controlled chat
 spaces, and private project communication.
-

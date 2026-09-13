@@ -1,7 +1,7 @@
 {
   "name": "factory",
   "version": "2.0.26",
-  "description": "GitHub-backed, local-first unattended software factory.",
+  "description": "Coordinate local coding agents to turn GitHub issues into tested pull requests, with dependency-aware scheduling, validation, and restart recovery.",
   "author": {
     "name": "Clockgrove",
     "url": "https://github.com/clockgrove"
@@ -9,7 +9,7 @@
   "homepage": "https://github.com/clockgrove/factory",
   "repository": "https://github.com/clockgrove/factory",
   "license": "MIT",
-  "keywords": ["github", "engineering-management", "objectives", "work-items", "automation", "mcp"],
+  "keywords": ["ai-agents", "codex", "github", "mcp", "agent-orchestration", "local-first", "developer-tools", "software-factory"],
   "skills": "./skills/",
   "mcpServers": {
     "factory": {
@@ -20,8 +20,8 @@
   },
   "interface": {
     "displayName": "Factory",
-    "shortDescription": "Local-first unattended software factory",
-    "longDescription": "Factory compiles GitHub Objectives into Work Item sub-issues, runs policy-approved local or optional cloud workers, independently validates artifacts, and integrates safe pull requests.",
+    "shortDescription": "Turn GitHub issues into tested pull requests",
+    "longDescription": "Coordinate local coding agents to turn GitHub issues into tested pull requests, with dependency-aware scheduling, validation, and restart recovery. Factory keeps run state in GitHub and supports optional cloud workers.",
     "developerName": "Clockgrove",
     "category": "Productivity",
     "capabilities": [
@@ -31,7 +31,7 @@
       "Validate and integrate completed work",
       "Recover durable runs from GitHub",
       "Explain and replay scheduling decisions",
-      "Track bounded execution costs"
+      "Track execution usage and spending policy"
     ],
     "defaultPrompt": [
       "Run Factory for OWNER/REPO#OBJECTIVE using this checkout.",

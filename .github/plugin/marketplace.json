@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "factory",
-      "description": "GitHub-backed, local-first unattended software factory.",
+      "description": "Coordinate local coding agents to turn GitHub issues into tested pull requests, with dependency-aware scheduling, validation, and restart recovery.",
       "version": "2.0.26",
       "source": "."
     }

@@ -11,7 +11,9 @@ maintainers can reproduce it.
 
 ## Report a vulnerability privately
 
-Use GitHub's **Security → Report a vulnerability** flow for this repository. Include:
+Use [GitHub's private vulnerability reporting form](https://github.com/clockgrove/factory/security/advisories/new)
+for this repository. If you cannot use GitHub's form, email
+[security@clockgrove.com](mailto:security@clockgrove.com). Include:
 
 - affected Factory and Node.js versions;
 - installation method and runtime environment;
@@ -21,9 +23,7 @@ Use GitHub's **Security → Report a vulnerability** flow for this repository. I
 - any workaround already in use.
 
 Do not open a public issue for a suspected vulnerability and do not include live tokens, private
-repository contents, provider secrets, or exploitable public-repository instructions. If private
-vulnerability reporting is unavailable, contact a Clockgrove maintainer privately through the
-contact information on their GitHub profile.
+repository contents, provider secrets, or exploitable public-repository instructions.
 
 Maintainers aim to acknowledge a report within three business days, establish severity and next
 steps within seven business days, and coordinate disclosure after a fix or documented mitigation is

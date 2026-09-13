@@ -1,320 +1,160 @@
-# Factory
+# <img src="assets/logos/clockgrove-mark.png" alt="Clockgrove logo" width="48" height="48"> Factory
 
-> [!IMPORTANT]
-> Factory is under development. Read the [local quick start](docs/setup/local.md) and
-> [current verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md)
-> before authorizing unattended work.
+**Turn GitHub issues into tested pull requests with local coding agents.**
 
-Factory coordinates coding agents to turn a GitHub issue into tested pull requests. Describe what
-you want to build; Factory breaks it into Work Items, runs independent tasks concurrently, checks
-the results, and integrates accepted changes.
-
-Built for indie developers and small teams, Factory uses your local computer first and can burst
-into cloud workers when you authorize the cost. You interact through your agent's chat interface;
+Describe what you want to build in a GitHub issue—an **Objective**. Factory breaks it into smaller
+tasks called **Work Items**, tracks their dependencies, runs ready tasks in parallel, validates
+their results, and integrates accepted changes. You direct the work through Codex chat;
 GitHub holds the issues, dependencies, pull requests, and execution records.
 
-A local controller keeps work moving while it is running and recovers from GitHub records after a
-restart. No Factory GitHub Actions workflow, hosted service, or database is required. Optional
-GitHub-managed agents may consume Actions minutes as part of their own runtime.
+Built for indie developers and small teams, Factory runs on your Linux computer. A local controller
+keeps work moving while it is running and recovers progress from GitHub after a restart. No Factory
+GitHub Actions workflow, hosted service, or database is required.
 
-```text
-Objective issue
-      │
-      ▼
-Factory Supervisor ── compile / lease / schedule / budget / recover
-      │                                      │
-      │ durable receipts                     │ restricted Worker Packets
-      ▼                                      ▼
-GitHub issues, refs, PRs              local Codex SDK (default)
-and native dependencies               or opt-in sandbox/managed backends
-      ▲                                      │
-      └──── validate / publish / merge ──────┘
-```
-
-## What Factory handles
-
-- **Planning:** turns an Objective into GitHub sub-issues with clear acceptance criteria and dependencies.
-- **Scheduling:** prioritizes ready tasks and adjusts local concurrency to available CPU and memory.
-- **Execution:** runs workers in isolated Git worktrees, with explicitly authorized cloud options.
-- **Validation:** independently runs checks and reviews each artifact before publishing a PR.
-- **Delivery:** merges validated changes through ordinary PRs or explicitly selected native stacks.
-- **Recovery:** reconstructs progress from GitHub and stops for specific safety, budget, or correctness blockers.
-
-Local workers use the Codex SDK by default, with Codex CLI fallback. Cloud execution is opt-in.
-Provider availability and outstanding end-to-end checks are listed in
-[verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md).
-
-## Scope
-
-Factory executes on Linux. The supported host configurations are native Linux, a Linux distribution
-under Windows WSL2, and a Linux guest hosted by macOS. The repository, controller, worktrees, locks,
-and credentials stay inside the Linux filesystem. Native Win32 and native Darwin execution or
-service lifecycle are not targets; on macOS, Factory runs inside a Linux VM or equivalent Linux
-guest rather than as a `launchd` service.
-
-Factory's target capabilities are:
-
-- the Codex plugin and a formally packaged `@clockgrove/factory` npm CLI/controller;
-- local Codex SDK workers, with Codex CLI fallback and adaptive Linux CPU and memory admission;
-- fair sharing across Objectives on one computer, and explicit durable App Server sessions with
-  exact terminal recovery and documented provider limits;
-- GitHub Objectives, native Work Item sub-issues and dependencies, and GitHub-only durable state;
-- concurrent regular or native stacked pull requests, with serialized integration and exact-head
-  revalidation when an authenticated sibling advances the base;
-- optional managed-agent integrations with per-provider capability limits: Copilot has limited
-  automation; Codex managed execution remains unavailable pending a real identity/lifecycle interface;
-- local-to-cloud burst through Daytona, with hard TTL, concurrency, credential, and cost boundaries;
-- independent validation, crash recovery, cancellation, replay, explanation, and economic evidence.
-- verified local LFS assets, content-bound binary/media manifests, and bounded large-file transport.
-
-Labs contains Vercel Sandbox and additional harness/provider adapters. Labs
-features are bundled where useful but are not part of the initial delivery scope. Coordinating
-multiple local machines, native Windows/macOS lifecycle support, a custom UI, and a required hosted
-Factory service are deliberately out of scope.
-
-For operating boundaries, see [host scheduling](docs/HOST-SCHEDULING.md) and the
-[threat model](docs/THREAT-MODEL.md). Contributors can read the
-[design contract in the source repository](https://github.com/clockgrove/factory/blob/main/docs/DESIGN.md).
+> [!IMPORTANT]
+> **Development preview.** The plugin currently installs from reviewed repository snapshots on
+> `main`, not a published release tag. Manifest versions identify development builds; older Git tags
+> do not identify the current plugin. The npm CLI/controller is not yet a verified published install
+> path. Record your installed commit/version and read the
+> [verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md)
+> before authorizing unattended work.
 
 ## Install and activate
 
-### TL;DR
+<a id="tldr"></a>
 
-Start with **[the local runner quick start](docs/setup/local.md)**: install the plugin in your Linux
-agent environment, authenticate GitHub and Codex there, then ask the Director to inspect your
-Objective and absolute checkout before authorizing execution. No sandbox account, npm/npx install,
-Factory GitHub workflow, or cloud spending permission is needed for the plugin's local path.
-See [verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md)
-for current installation limitations.
+Start in **Linux, Windows WSL2, or a Linux guest on macOS** with Node.js 20+, Git, GitHub CLI, and
+Codex CLI. The installation procedure is verified with Codex CLI 0.153.0; newer clients must expose
+the same plugin commands. Keep your target checkout and credentials inside the Linux environment.
 
-### Choose your setup
+1. Install the plugin:
 
-| Goal                                                | Guide                                                                                               |
-| --------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| First run on Linux, WSL2, or a Linux guest on macOS | [Local runner](docs/setup/local.md)                                                                 |
-| Continue working after chat disconnects             | [Unattended controller](docs/setup/unattended.md)                                                   |
-| Add sandbox execution or local-to-cloud burst       | [Daytona](docs/setup/daytona.md)                                                                    |
-| Use GitHub-managed coding agents                    | [Managed agents](docs/setup/github-managed.md)                                                      |
-| Use durable local agent sessions                    | [Codex App Server](docs/setup/codex-app-server.md) |
-| Work with binary assets and large files              | [Large-file support](docs/LARGE-FILES.md) |
-| Try an alternative Labs runner                      | [Vercel Sandbox](docs/setup/vercel-sandbox.md) |
+   ```bash
+   codex plugin marketplace add clockgrove/factory --ref main
+   codex plugin add factory@clockgrove-factory
+   codex plugin list
+   ```
 
-The **plugin is the entry point**, the **controller supplies unattended scheduling**, and the
-**runner executes work**. Installing the plugin neither starts a service nor authenticates a cloud
-provider. Configure credentials on the executing Linux process—not in the target repo. Credentials
-and permission to spend are separate.
+2. Authenticate in the same Linux user/process environment:
 
-Each [setup guide](docs/setup/README.md) has a TL;DR followed by detailed instructions and checks.
-For exact environment placement, service boundaries, paid-capacity gates, and troubleshooting, see
-[shared runner configuration](docs/setup/configuration.md).
+   ```bash
+   codex login
+   gh auth login
+   ```
 
-## Inspect through chat or MCP
+3. **Fully restart Codex** to load Factory's skills and bundled MCP server. Open your target
+   repository's checkout and ask:
 
-The Director skill uses bounded, read-only operations when the user is inspecting a run:
+   > Use Factory director to inspect OWNER/REPO#OBJECTIVE with checkout /absolute/linux/checkout.
+   > Check prerequisites before starting anything.
 
-- `factory_doctor` checks the requested repository and checkout, GitHub access and branch rules,
-  available runners, repository-specific validation tools, and measured Linux resource headroom.
-- `factory_plan` inspects existing Work Items without model execution. Explicit `compile: true`
-  compiles a proposed graph against a clean selected checkout without creating issues or starting
-  workers. Compilation consumes model quota; its usage is returned, not persisted as run authority.
-- `factory_status` returns the current Objective/run state, active and queued Work Items, resource
-  pressure, burst activity, and aggregate execution economics. Current GitHub response-header quota
-  observations and process-local mutation counters are reported separately with their measurement
-  scope/window; absent durable run-attributed mutation measurements remain unavailable. Its
-  `operatorAction` says whether autonomous progress remains monitorable or the state is stopped and
-  requires one concrete operator action.
-- `factory_explain` returns stable reason codes, policy gates, observed evidence, and the concrete
-  action needed to unblock waiting or escalated work.
-- `factory_replay` reconstructs durable scheduling receipts and can replay a credential-free pinned
-  admission snapshot without writing GitHub or launching a worker. Supply an optional
-  `pinnedAdmissionSnapshots` array, or use `factory replay OWNER/REPO#NUMBER --snapshots FILE`
-  with a JSON array in an explicitly named regular file (symlinks are rejected).
-  The [collection schema](schemas/replay-snapshots.schema.json) limits input to 8 snapshots,
-  1 MiB of UTF-8 JSON, depth 32 and 100,000 JSON values; every snapshot must match the requested
-  Objective and pass its policy/snapshot digest checks. Results distinguish authenticated receipt
-  reconstruction from recomputation of caller-supplied hypothetical inputs. A reproduced simulation
-  does not authenticate its inputs as historical facts or grant execution authority. Omitting the
-  array/file retains receipt-only inspection; Factory does not capture or invent missing snapshots.
-- `factory_recovery_plan` inspects historical work, graph/PR evidence, and cumulative recorded usage
-  after escalation. Its CLI equivalent is `factory recovery-plan OWNER/REPO#NUMBER`. It neither
-  authorizes execution nor resets budgets.
-- `factory_recovery_propose` builds a read-only, digest-bound successor plan. With explicit user
-  authorization, `factory_recovery_request` records that exact plan for controller adoption;
-  it preserves the original issues and cumulative allowance. Resource and evidence checks still
-  gate execution. The proposal's `operatorAction` distinguishes evidence blockers, exact unknown
-  usage acknowledgement, and a ready-but-unauthorized request; none is active work to poll. See
-  [terminal recovery](docs/setup/unattended.md#continue-after-terminal-escalation).
+Replace the placeholders with an existing Objective issue and its clean checkout. Inspection checks
+repository identity, access, branch rules, local runners, validation tools, and resource headroom.
+Success means the plugin loads, an authenticated local backend is available, and the exact Objective
+and checkout are accessible. **Inspection does not start workers.** Review the reported gates and
+run policy, then explicitly authorize local-only execution.
 
-These reports mark unavailable observations explicitly. They do not invent token counts, provider
-costs, capacity readings, or timing data that were not durably observed.
+The plugin bundles Factory's runtime; npm/npx and a sandbox account are not needed for this path.
+Local workers use the Codex SDK by default, with Codex CLI fallback. Local-only work still consumes
+your model account's quota. Follow the [local quick start](docs/setup/local.md) for permissions,
+activation, troubleshooting, and the source-checkout CLI path.
 
-## Policy and paid backends
+## Try a small Objective
 
-The default policy is exported as `DEFAULT_RUN_POLICY`. A complete JSON override looks like:
+In a trusted Node.js repository with committed npm metadata, a lockfile, and a working `npm test`,
+create an issue like this:
 
-`workItemTimeoutMinutes` is the maximum duration of one supervised execution attempt or management
-model invocation. Each use is additionally capped by the remaining authenticated Objective time.
+```markdown
+## Outcome
+Add a `healthcheck` npm script that runs the existing fast test command.
 
-```json
-{
-  "backendOrder": ["codex-sdk/local-worktree", "codex-cli/local-worktree"],
-  "maxParallel": 2,
-  "workItemTimeoutMinutes": 30,
-  "objectiveTimeoutMinutes": 720,
-  "maxAttemptsPerItem": 3,
-  "allowedPaidBackends": [],
-  "cloudFallback": "never",
-  "maxSandboxMinutes": 0,
-  "maxManagedAgentSessions": 0,
-  "trust": "explicitly_activated_repo",
-  "managementBackend": "codex-cli/local",
-  "allowedNetworkDestinations": [
-    "registry.npmjs.org",
-    "*.npmjs.org",
-    "api.openai.com"
-  ],
-  "priority": {
-    "source": "subissue-order",
-    "unsetRank": 100,
-    "onUnavailable": "fallback-to-subissue-order"
-  },
-  "capacity": {
-    "mode": "fixed",
-    "local": {
-      "maxWorkers": 2,
-      "defaultCpu": 1,
-      "defaultMemoryMb": 2048,
-      "reserveCpu": 0.5,
-      "reserveMemoryMb": 1024,
-      "minimumFreeMemoryMb": 1024,
-      "maxLoadRatio": 0.9,
-      "maxMemoryUsageRatio": 0.85,
-      "sampleIntervalSeconds": 5,
-      "admissionCooldownSeconds": 10
-    }
-  },
-  "burst": {
-    "mode": "never",
-    "backendOrder": [],
-    "maxCloudParallel": 1,
-    "queueDelaySeconds": 120,
-    "deadlineReserveMinutes": 60,
-    "maxPriorityRank": 1000
-  },
-  "delivery": {
-    "mode": "regular-prs",
-    "onUnavailable": "regular-prs",
-    "merge": "bottom-up"
-  }
-}
+## Acceptance
+- `npm run healthcheck` exits successfully from a clean checkout.
+- Existing tests still pass.
+- Change only package metadata and a focused regression test if needed.
+
+## Boundaries
+Use the existing Node/npm toolchain. Do not add dependencies, services,
+secrets, network access, generated files, deployment, or release work.
 ```
 
-The default keeps a fixed two-worker ceiling and still applies CPU, memory and shared-resource
-safety checks. Explicitly set `capacity.mode` to `adaptive-local` and your desired worker ceilings
-to enable adaptive concurrency. Making adaptive scheduling the default retains its live
-qualification prerequisite; existing runs always keep their recorded policy.
+Use its issue number in the inspection prompt above. After authorization, Factory compiles a Work
+Item graph, runs workers, independently validates their artifacts, and delivers tested changes
+through pull requests. The run ends with a terminal status and recorded usage, or a specific
+escalation explaining what needs your attention. See the
+[first-Objective walkthrough](docs/setup/local.md#a-small-first-objective) for expected evidence.
 
-Set `delivery.mode` to `stacked-prs` to request native stacks. Factory pins the GitHub stack adapter
-to API version `2026-03-10`, probes repository capability before compilation spend, and never
-silently changes the recorded delivery selection after publication begins.
+**An observed result:** on September 5, 2026, a staged 2.0.26 artifact completed a serialized
+SDK-first run: three Work Items, three independently validated and merged PRs, and 30 passing tests
+in a fresh clone. The [evidence record](https://github.com/clockgrove/factory/blob/main/docs/release-evidence/regular-delivery-component-2026-09-05.json)
+identifies the exact candidate and scope; full release qualification remains in progress.
 
-To use Daytona, put `codex-cli/daytona` in both `backendOrder` and `allowedPaidBackends`, set
-`cloudFallback` to `explicit`, and provide a nonzero sandbox-minute cap. Sandbox validation consumes
-its own reservation because it runs in a fresh resource, separate from the worker. Managed execution
-also requires explicit session authority and qualification of the specific provider capability being
-claimed. Copilot cannot automatically stop an active task through its documented API; some outcomes
-require the operator's exact-session intervention. Codex managed execution remains unavailable until
-an authoritative identity and provider-specific lifecycle interface are implemented and qualified.
-An unavailable third-party feature limits that integration, not the whole Factory release. See
-[provider qualification](https://github.com/clockgrove/factory/blob/main/docs/PROVIDER-QUALIFICATION.md)
-and [credentials](docs/CREDENTIALS.md).
+## What Factory handles
 
-Optional economics and model-routing policy is evidence-bound. Factory accepts only a
-`models.mode` of `single-profile`; all four `phaseProfiles` entries must name the same explicit model
-and supported reasoning effort. `task-class` and explicit model routing to GitHub-managed agents are
-rejected rather than ignored. `economics.minCloudTimeSavedMinutes` admits overflow burst only when a
-Work Packet has a sufficient configured `estimatedDurationMinutes`; missing evidence fails closed.
-For new requests, `economics.maxModelTokens` requires an explicit
-`economics.modelTokenBudgetMode: "observed-stop"`. This is a stop-before-next-call threshold over
-durably observed management and reporting local-worker tokens, not a provider hard cap.
-Already-started concurrent invocations can each overshoot it. If you require `"hard"` enforcement,
-Factory rejects the request before model work because its current model integrations cannot
-enforce that ceiling. It never silently substitutes the observed mode. Resuming a run preserves its
-recorded policy and usage. Opaque sandbox/managed-agent token use remains unavailable; Factory instead limits
-authorized resource minutes or session admissions. Those limits are not guaranteed dollar caps.
-Factory is open-source orchestration for providers with which the user has a direct relationship:
-the user owns provider billing, subscriptions and provider-side spending limits. Unavailable costs
-are not zero, and billing settlement finality is not a completion requirement. Unknown active compute,
-resource ownership or cleanup still blocks unsafe replacement and further spending.
+- **Planning and scheduling:** acceptance criteria, native GitHub dependencies, ready-task ordering,
+  and local CPU/memory admission. The default ceiling is two workers; adaptive concurrency is opt-in.
+- **Execution and delivery:** isolated Git worktrees, independent validation, ordinary pull requests,
+  and explicitly selected native stacks with capability checks.
+- **Recovery and inspection:** durable GitHub records, restart recovery, cancellation, status,
+  explanations, and replay without a separate database.
+- **Optional execution routes:** durable local Codex App Server sessions, Daytona cloud burst, and
+  limited GitHub-managed integrations, subject to each provider's supported capabilities.
 
-Vercel Sandbox is an optional Labs adapter. Codex App Server is a supported explicit local route,
-not the default: its [session contract](docs/CODEX-APP-SERVER-SESSIONS.md) distinguishes durable
-terminal recovery from currently unavailable cold repair turns. Required qualification remains
-visible in [verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md).
+<a id="scope"></a>
 
-Use native sub-issue order as the zero-configuration priority. To configure an organization
-single-select issue field, inspect its stable field and option IDs without writing GitHub:
-
-```bash
-node dist/factory.js priority-fields OWNER/REPO
-```
-
-Probe without creating paid resources:
-
-```bash
-node dist/factory.js backends probe
-```
+Factory executes on Linux. Native Windows/macOS execution, coordinating multiple local computers,
+and a custom UI are outside the current scope. Vercel Sandbox is a Labs adapter. Supported behavior
+and live qualification are distinct; consult the
+[operating scope](docs/OPERATING-REFERENCE.md#scope) and
+[verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md).
 
 ## Safety and escalation
 
-Factory checks repository identity, Objective provenance, fork status, branch rules, backend
-capabilities, trust boundary, credentials, and remaining budget before launch. It rejects artifacts
-with a wrong base, out-of-scope paths, sensitive execution surfaces, suspected secrets, malformed
-evidence, or a validated tree that differs from the tree being published.
+Use local workers only with trusted code: a same-user local process is not a hardened confidentiality
+boundary. Workers use `workspace-write`; web search and command networking are off by default.
+Factory checks repository identity, permissions, branch rules, scope, artifact evidence, and budget,
+and escalates when it cannot safely proceed. Retries do not widen permissions, scope, or spending.
 
-Local Codex workers never wait on an approval prompt. They stay inside `workspace-write`, run with
-web search and command networking off by default, and receive only the Work Packet's preflighted
-domain allowlist when command networking is required. Provider workers run inside an explicitly
-selected boundary: Daytona supplies provider-enforced TTL and egress policy, while GitHub-managed
-agents are bounded by provider capability, session budget, and exact-head artifact collection.
-Local execution is for trusted code: temporary homes, environment filtering, and disabled credential
-helpers prevent conventional ambient credential discovery, but a same-user local process is not a
-hardened confidentiality boundary and can attempt to read an already-known absolute host path.
+<a id="policy-and-paid-backends"></a>
 
-It escalates with evidence when autonomy would require human review, unavailable credentials,
-privileged/destructive changes, unsupported branch rules, exhausted budgets, repeated failure, or
-semantic judgment below the acceptance bar.
+Paid cloud execution requires explicit authorization and resource limits. Model-token budgets stop
+before a subsequent call using observed usage; concurrent calls can overshoot them. Resource-minute
+and session limits are not guaranteed dollar caps. You own provider billing and provider-side limits;
+unavailable usage is never counted as zero. Read the
+[full policy](docs/OPERATING-REFERENCE.md#policy-and-paid-backends) and
+[threat model](docs/THREAT-MODEL.md) before unattended execution.
 
-Retries receive the prior attempt's bounded failure evidence as explicitly untrusted diagnostic
-data. Factory never widens scope, trust, backend permissions, or budget to make a retry succeed.
+## Documentation
+
+<a id="choose-your-setup"></a>
+<a id="inspect-through-chat-or-mcp"></a>
+
+| I want to… | Start here |
+| --- | --- |
+| Install and run locally | [Local quick start](docs/setup/local.md) |
+| Continue after chat disconnects | [Unattended controller](docs/setup/unattended.md) |
+| Inspect status, plans, recovery, or policy | [Operating reference](docs/OPERATING-REFERENCE.md) |
+| Configure cloud or durable sessions | [Runner guides](docs/setup/README.md) |
+| Handle binary assets and large files | [Large-file support](docs/LARGE-FILES.md) |
+| Understand credentials and host limits | [Credentials](docs/CREDENTIALS.md) · [Host scheduling](docs/HOST-SCHEDULING.md) |
 
 ## Development
+
+Contributions are welcome. Start with the
+[contributor guide](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md)
+for setup, focused checks, and review expectations. The coordinated release gate is:
 
 ```bash
 npm ci
 npm run verify:release
 ```
 
-Run the coordinated release gate directly on supported Linux with systemd 254+ and a reachable
-systemd user manager. Under WSL2, run it in the Linux host environment where
-`systemctl --user show --property=Version --value --no-pager` succeeds, not in a nested sandbox that
-cannot reach the user bus. The gate checks this requirement before starting the broad suite and then
-retains the real user-systemd containment coverage.
+It requires supported Linux, systemd 254+, and a reachable systemd user manager. See the
+[release verification procedure](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md#release-verification-procedure)
+for exact prerequisites and remaining external gates.
 
-`verify:dist` rebuilds into a temporary directory and verifies that the committed bundles match.
-`verify:package` validates every manifest/skill/schema, starts the bundled MCP server with no token,
-installs a staged copy through an isolated Codex home, and starts both installed executables without
-using worktree configuration. `verify:release` also runs the full test suite, typecheck, and
-production dependency audit. See
-[contribution rules](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md).
-
-Current release evidence and the external gates that still require real provider credentials or a
-published installation are tracked in
-[verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md).
-
-Factory is MIT licensed. See
-[contributing](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md),
-[governance](https://github.com/clockgrove/factory/blob/main/GOVERNANCE.md),
-[SECURITY.md](SECURITY.md), [SUPPORT.md](SUPPORT.md), and
-[code of conduct](https://github.com/clockgrove/factory/blob/main/CODE_OF_CONDUCT.md)
-before contributing or reporting a problem.
+Factory is [MIT licensed](https://github.com/clockgrove/factory/blob/main/LICENSE).
+For questions and bug reports, use [support](SUPPORT.md). Report vulnerabilities through
+[the security policy](SECURITY.md). Community participation follows the
+[code of conduct](https://github.com/clockgrove/factory/blob/main/CODE_OF_CONDUCT.md) and
+[governance](https://github.com/clockgrove/factory/blob/main/GOVERNANCE.md).

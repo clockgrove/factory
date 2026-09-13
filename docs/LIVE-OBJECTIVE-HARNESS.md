@@ -122,10 +122,45 @@ after a compilation-only failure. It never revives a terminal run or reuses its 
 Objective recovery requires its separate explicit recovery-authority flow, not this harness.
 Use a new namespace and fresh evidence directory for another authorized live invocation; existing
 evidence files are never overwritten. Preflight and its subsequent live run may share a directory
-because they reserve different filenames. The verification clone is retained for review.
+because they reserve different filenames. The verification clone is retained for review, then follows
+the [fixture retirement checklist](#fixture-retirement).
 
 The REST evidence reader uses GitHub's documented
 [sub-issue endpoint](https://docs.github.com/en/rest/issues/sub-issues) and
 [issue-dependency endpoint](https://docs.github.com/en/rest/issues/issue-dependencies).
 Results must be reviewed and bound to the tested candidate using the release-evidence process in
 [`DELIVERY-PLAN.md`](DELIVERY-PLAN.md); this script never marks release gates passed.
+
+## Fixture retirement
+
+This checklist is required after every contributor smoke, including failure and cancellation.
+It governs explicitly disposable test repositories and local fixture checkouts. Factory does not
+delete an adopter's repository as part of production lifecycle cleanup. The harness preserves its
+outputs; the operator owns retirement rather than an automatic delete-on-exit hook.
+
+1. **Establish disposition before execution.** Record the exact repository and checkout, retirement
+   owner, whether deletion is authorized, and any retention requirement. Existing explicit disposal
+   authorization remains valid; a successful smoke alone does not grant deletion authority.
+2. **Stop and settle the run.** Confirm its terminal state, reconcile recorded usage and verify the
+   relevant workers/resources are absent. Cancel an active run through Factory's supported surface.
+   Never infer zero usage or erase an unresolved reservation by deleting its repository. Retain a
+   failed or uncertain run with its original outcome and a named resolution owner.
+3. **Preserve review evidence privately.** Retain exact source/package identities, policy, terminal
+   status/accounting, validation results and the relevant Git objects/refs, issues, comments and PR
+   metadata. Preserve any unfinished artifact whose disposition is not yet decided. Verify the
+   export and record its location/checksums before deletion. A Git clone alone does not preserve
+   GitHub comments, accounting receipts or PR metadata. Do not publish private fixtures or secrets.
+4. **Check concurrent use immediately before disposal.** Ensure no other task, controller, worker,
+   recovery or pending comparison needs the fixture. Retain shared baselines until their consumers
+   finish. Check local worktrees, active use and uncommitted files; do not discard unrelated work.
+5. **Retire within the granted scope.** Once review/comparisons finish and deletion is authorized,
+   remove the named disposable remote repository and eligible local fixture checkouts. Preserve the
+   evidence export. Source worktrees and installed packages have separate ownership and are not
+   implicitly included. Verify remote and local outcomes; report partial failures honestly.
+6. **Record the final outcome.** The smoke report must say either `deleted` with the evidence location
+   and verification, or `retained` with reason, owner and a specific expiry or review trigger. Missing
+   authorization is a retention reason. A failed smoke is not relabeled completed by retirement.
+
+Keep this disposition in the smoke's existing report or owning issue; no additional tracking service
+or duplicate status board is needed. When an expiry or trigger is reached, recheck concurrent use and
+accounting before acting. This checklist does not schedule deletion or authorize a new run.

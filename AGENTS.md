@@ -209,6 +209,15 @@ accepted risks.
   and evidence identities before model-backed runs. Share compatible scenario evidence across
   issues; separate ordinary throughput cases from fault injection.
 
+## Retire smoke fixtures
+
+Every smoke ends with a fixture disposition: deleted, or retained with a reason, owner and
+expiry/review trigger. Resource cleanup alone does not retire a test repository. Follow
+[the smoke retirement checklist](docs/LIVE-OBJECTIVE-HARNESS.md#fixture-retirement) after success,
+failure or cancellation. Preserve evidence and unresolved accounting; check for concurrent users
+before deletion. Use existing explicit disposal authorization, or retain pending authorization.
+This applies to contributor-owned disposable fixtures, never automatic deletion of adopter repos.
+
 ## Non-negotiable boundaries
 
 - Follow the architecture in [`docs/DESIGN.md`](docs/DESIGN.md). Ask before changing product scope,

@@ -5766,7 +5766,6 @@ export class FactorySupervisor {
           deriveBudgetUsage(this.#budgetEvents),
         );
         if (
-          this.#recoveryRuntime &&
           activeExecutions.size === 0 &&
           runnable.length > 0 &&
           availableBudget.modelTokens !== null &&
@@ -5774,7 +5773,9 @@ export class FactorySupervisor {
         )
           return await terminalAfterDrain(
             "FactoryRunEscalated",
-            "cumulative model-token budget exhausted before successor work admission",
+            this.#recoveryRuntime
+              ? "cumulative model-token budget exhausted before successor work admission"
+              : "model-token budget exhausted before work admission",
           );
         const nowMs = snapshot.readAt.getTime();
         let resource: ResourceSnapshot | null = null;

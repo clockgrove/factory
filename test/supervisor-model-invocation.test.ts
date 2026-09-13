@@ -40,6 +40,41 @@ function errorChain(error: unknown): unknown[] {
 }
 
 describe("Supervisor model dispatch journal", () => {
+  it("terminalizes an ordinary run after worker usage exhausts review and retry admission", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      maxAttemptsPerItem: 3,
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        observe: async (handle) => ({
+          ...(await backend.observe(handle)),
+          usage: { inputTokens: 9_000, outputTokens: 1_000, cachedInputTokens: 0 },
+        }),
+      }),
+    });
+    try {
+      expect(await f.run()).toMatchObject({
+        status: "escalated",
+        reason: "model-token budget exhausted before work admission",
+      });
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+      expect(f.activity.filter((entry) => entry.operation === "review")).toHaveLength(0);
+      expect(deriveBudgetUsage(f.events()).modelTokens).toBe(10_000);
+      expect(unresolvedModelInvocations(f.events())).toHaveLength(0);
+      expect(f.resources.size).toBe(0);
+      const events = f.events();
+      const failed = events.find((event) => event.event === "AttemptFailed");
+      const terminal = events.find((event) => event.event === "FactoryRunEscalated");
+      expect(failed).toBeDefined();
+      expect(terminal).toBeDefined();
+      expect(failed!.sequence).toBeLessThan(terminal!.sequence);
+      expect(events.filter((event) => event.event === "FactoryRunEscalated")).toHaveLength(1);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
   it("durably stops after one post-dispatch provider quota refusal with unknown usage", async () => {
     const gate = classifyGitHubCopilotQuota("You have exceeded your monthly quota")!;
     const f = await providerSupervisorFixture("daytona-burst", {

@@ -2,7 +2,7 @@
   "name": "clockgrove-factory",
   "interface": {
     "displayName": "Clockgrove Factory",
-    "shortDescription": "Local-first, GitHub-backed software factory",
+    "shortDescription": "Turn GitHub issues into tested pull requests",
     "description": "Compile Objectives into Work Items, run policy-approved AI workers, validate artifacts, and integrate pull requests with GitHub as the durable control plane—no hosted Factory infrastructure required.",
     "icon": "./assets/logos/clockgrove-mark.png",
     "website": "https://github.com/clockgrove/factory",
@@ -12,7 +12,7 @@
     {
       "name": "factory",
       "displayName": "Factory",
-      "description": "Local-first unattended engineering orchestration using GitHub, AI agents, and MCP",
+      "description": "Coordinate local coding agents to turn GitHub issues into tested pull requests, with dependency-aware scheduling, validation, and restart recovery.",
       "source": {
         "source": "local",
         "path": "."
@@ -26,7 +26,7 @@
       "capabilities": [
         "Compile Objectives into Work Items",
         "Schedule adaptive local workers",
-        "Use optional bounded cloud burst",
+        "Use optional cloud workers under Run Policy",
         "Validate and integrate pull requests",
         "Recover durable GitHub-backed runs",
         "Explain and replay scheduling decisions"

@@ -22,10 +22,10 @@ artifact is published, use the plugin or source-checkout path documented in the 
 
 ## Ask for help
 
-Before opening an issue, read [README.md](README.md),
-[docs/HOST-SCHEDULING.md](docs/HOST-SCHEDULING.md), and
-[docs/CREDENTIALS.md](docs/CREDENTIALS.md). Search existing issues, then use the bug-report or
-feature-request template.
+Start with [README.md](README.md) and the [setup guide](docs/setup/README.md). For scheduling or
+credential questions, see [host scheduling](docs/HOST-SCHEDULING.md) and
+[credentials](docs/CREDENTIALS.md). Search existing issues, then choose a
+[question, bug report, or feature request](https://github.com/clockgrove/factory/issues/new/choose).
 
 Include Factory and Node.js versions, installation method, Linux environment, repository visibility,
 the command or chat operation, expected/actual behavior, and the smallest sanitized diagnostic. Do

@@ -67,9 +67,9 @@ body:
         - codex-cli/local-worktree
         - codex-cli/daytona
         - github-copilot/github-managed
-        - openai-codex/github-managed
+        - openai-codex/github-managed (unavailable)
         - Vercel Sandbox (Labs)
-        - Codex App Server (Labs)
+        - Codex App Server (local)
         - Not backend-specific
   - type: checkboxes
     id: checks

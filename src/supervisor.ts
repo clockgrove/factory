@@ -1154,11 +1154,8 @@ export class FactorySupervisor {
   readonly #modelInvocations = new ModelInvocationScopes();
   #integrationTail: Promise<void> = Promise.resolve();
   // Scheduling hints only: never reuse authority or mutable GitHub evidence.
-  // Lost on restart; every due observation repeats the normal integration fences.
-  #integrationWaits = new Map<
-    number,
-    { until: number; delay: number; reason: string; evidence?: IntegrationWait }
-  >();
+  // Lost on restart; every observation repeats the normal integration fences.
+  #integrationWaits = new Map<number, { reason: string; evidence?: IntegrationWait }>();
   // One bounded opportunity per confirmed local ref write; never reconstructed as authority.
   #integrationWrites = new Map<
     number,
@@ -1169,7 +1166,6 @@ export class FactorySupervisor {
       writeCompletedAt: number;
       firstObservedAt?: number;
       probes: number;
-      nextProbeAt: number;
     }
   >();
   readonly #retryArtifacts = new RetryArtifactCache();
@@ -1797,9 +1793,6 @@ export class FactorySupervisor {
           Date.now() >= deadline
         )
           throw error;
-        await sleep(
-          Math.max(1, Math.min(this.#options.pollIntervalMs ?? 2_000, deadline - Date.now())),
-        );
         await this.#lease.assert();
         snapshot = await this.#reader.readObjective(snapshot.number);
         this.#fenceSnapshot(snapshot);
@@ -5157,11 +5150,6 @@ export class FactorySupervisor {
               // and let the host scheduler resume from the immutable graph after
               // connectivity returns instead of mutating under an expired lease.
               throw error;
-            } else {
-              // A mutation response can be lost after GitHub commits the write.
-              // Give the relationship snapshot a moment to become observable
-              // before deciding that no idempotent repair is possible.
-              await sleep(1_000, this.#options.signal);
             }
             snapshot = await this.#reader.readObjective(snapshot.number);
             const recovered = inspectObjectiveGraphInput(snapshot);
@@ -5463,9 +5451,10 @@ export class FactorySupervisor {
             await this.#recoverInterrupted(item, deadline, objective.items);
           continue;
         }
-        const adoptedPublication =
+        const deferredAdoptions = new Set<number>();
+        const adoptedPublications =
           this.#recoveryRuntime &&
-          objective.items.find((item) => {
+          objective.items.filter((item) => {
             const planned = this.#recoveryRuntime!.planRecord.plan.items.find(
               (entry) => entry.workItem === item.number,
             );
@@ -5473,8 +5462,7 @@ export class FactorySupervisor {
               !planned?.source ||
               planned.action === "execute" ||
               planned.action === "reconcile" ||
-              item.state !== "for_review" ||
-              !this.#integrationDue(item.number)
+              item.state !== "for_review"
             )
               return false;
             if (planned.action === "integrated") return true;
@@ -5499,9 +5487,9 @@ export class FactorySupervisor {
               )
             );
           });
-        if (adoptedPublication) {
-          await this.#resumeAdoptedSource(adoptedPublication);
-          continue;
+        for (const item of adoptedPublications || []) {
+          if (await this.#resumeAdoptedSource(item)) continue runLoop;
+          deferredAdoptions.add(item.number);
         }
         if (
           await this.#repairReservationReceipts(
@@ -5668,7 +5656,7 @@ export class FactorySupervisor {
           (item) =>
             item.state === "for_review" &&
             !activeExecutions.has(item.number) &&
-            this.#integrationDue(item.number),
+            !deferredAdoptions.has(item.number),
         );
         if (reviews.length > 0) {
           if (this.#deliverySelection.selected !== "native-stacks") {
@@ -5695,8 +5683,10 @@ export class FactorySupervisor {
             if (
               !typedMembers.every((member) => new Set(["for_review", "done"]).has(member.state)) ||
               !typedMembers.some((member) => member.state === "for_review") ||
-              typedMembers.some((member) => activeExecutions.has(member.number)) ||
-              typedMembers.some((member) => !this.#integrationDue(member.number))
+              typedMembers.some(
+                (member) =>
+                  activeExecutions.has(member.number) || deferredAdoptions.has(member.number),
+              )
             ) {
               continue;
             }
@@ -10739,7 +10729,6 @@ export class FactorySupervisor {
         (candidate) => candidate.reservation.oid === reservation.oid,
       );
       if (entry?.disposition === "released") return;
-      if (observation < 2) await sleep(this.#options.pollIntervalMs ?? 2_000);
     }
     throw new ArtifactCompletionUnavailableError();
   }
@@ -11129,7 +11118,6 @@ export class FactorySupervisor {
     items: DerivedWorkItem[],
     deadline: number,
   ): Promise<boolean> {
-    if (items.some((item) => !this.#integrationDue(item.number))) return false;
     const ordered = [...items].sort((left, right) => {
       const leftId = parseGraphItemMetadata(left.body ?? "").id;
       const rightId = parseGraphItemMetadata(right.body ?? "").id;
@@ -12871,7 +12859,6 @@ export class FactorySupervisor {
             expectedHead: pinned.plannedHeadSha,
             writeCompletedAt,
             probes: 0,
-            nextProbeAt: writeCompletedAt + 1_000,
           });
           this.#integrationWriteTelemetry(item.number, "write-completed");
         }
@@ -14405,15 +14392,18 @@ export class FactorySupervisor {
     return true;
   }
 
-  async #resumeAdoptedSource(item: DerivedWorkItem): Promise<void> {
+  async #resumeAdoptedSource(item: DerivedWorkItem): Promise<boolean> {
     try {
-      await this.#resumeAdoptedSourceNow(item);
+      const progressed = await this.#resumeAdoptedSourceNow(item);
+      if (!progressed && !this.#integrationWaits.has(item.number))
+        return this.#deferIntegration(item.number, "waiting for adopted integration prerequisites");
+      return progressed;
     } catch (error) {
       if (
         error instanceof SiblingRefreshTargetAdvancedError ||
         error instanceof SiblingRefreshObservationPendingError
       ) {
-        this.#deferIntegration(
+        return this.#deferIntegration(
           item.number,
           error.message,
           error instanceof SiblingRefreshObservationPendingError
@@ -14426,17 +14416,16 @@ export class FactorySupervisor {
               }
             : undefined,
         );
-        return;
       }
       throw error;
     }
   }
 
-  async #resumeAdoptedSourceNow(item: DerivedWorkItem): Promise<void> {
+  async #resumeAdoptedSourceNow(item: DerivedWorkItem): Promise<boolean> {
     return withArtifactContentScope(() => this.#resumeAdoptedSourceWithArtifactContent(item));
   }
 
-  async #resumeAdoptedSourceWithArtifactContent(item: DerivedWorkItem): Promise<void> {
+  async #resumeAdoptedSourceWithArtifactContent(item: DerivedWorkItem): Promise<boolean> {
     let runtime = this.#recoveryRuntime!;
     const planItem = runtime.planRecord.plan.items.find((entry) => entry.workItem === item.number)!;
     const source = planItem.source!;
@@ -14496,7 +14485,7 @@ export class FactorySupervisor {
     if (existingOutcome) {
       await this.#lease.assertGeneration("integration");
       if (!item.closed) await this.#store.closeIssue(item.number);
-      return;
+      return true;
     }
     if (source.priorDelivery) {
       await this.#externalAdmission(async () => {});
@@ -14533,7 +14522,7 @@ export class FactorySupervisor {
       await this.#lease.assertGeneration("integration");
       await this.#appendSuccessorEvent(item.id, outcome);
       if (!item.closed) await this.#store.closeIssue(item.number);
-      return;
+      return true;
     }
     const reserved = (await this.#attempts.list(this.#run.objective, item.number)).find(
       (entry) => entry.runId === source.runId && entry.attempt === source.attempt,
@@ -14604,7 +14593,7 @@ export class FactorySupervisor {
       this.#deliverySelection.selected === "native-stacks" &&
       !(await this.#linkRecoveryNativeUnit(item))
     )
-      return;
+      return false;
     const target = observed.merged
       ? (await this.#store.readCommit(observed.mergeCommitSha!)).parentOids[0]!
       : await this.#store.getBranchHeadOid(this.#baseBranch);
@@ -14748,7 +14737,7 @@ export class FactorySupervisor {
           runStartSequence: this.#runStartSequence,
         }).cloudPaused
       )
-        return;
+        return false;
       if (
         !observed.merged &&
         requiresIsolatedCandidate &&
@@ -14904,7 +14893,7 @@ export class FactorySupervisor {
           authority: runtime.objectiveAuthority,
         });
         if (!prior.candidate) throw new Error("accepted prior sibling candidate is unavailable");
-        await this.#integrate(
+        return await this.#integrate(
           item,
           reserved,
           pull,
@@ -14915,7 +14904,6 @@ export class FactorySupervisor {
           undefined,
           siblingRefresh,
         );
-        return;
       }
     }
     let deliveryHeadSha: string | undefined;
@@ -15173,7 +15161,7 @@ export class FactorySupervisor {
             isolated ? entry : undefined,
           );
       if (!candidate) {
-        if (isolated && !(await remoteAdmissionOpen())) return;
+        if (isolated && !(await remoteAdmissionOpen())) return false;
         if (isolated) adoptedValidator ??= await selectAdoptedValidator();
         const effective = normalizeSchedulingPolicy(this.#policy);
         const resource = !isolated
@@ -15190,7 +15178,7 @@ export class FactorySupervisor {
               effective.capacity.local.minimumFreeMemoryMb,
             ))
         )
-          return;
+          return false;
         const capacity: CapacityReservation = {
           key: capacityReservationKey({
             objective: this.#run.objective,
@@ -15226,7 +15214,7 @@ export class FactorySupervisor {
             ),
           ).reserved
         )
-          return;
+          return false;
         let validation: CleanValidationResult | undefined;
         let recorded = false;
         let validationLaunched = false;
@@ -15257,7 +15245,7 @@ export class FactorySupervisor {
           let validationDeadline = deadline;
           let sandboxAmount = 0;
           if (isolated) {
-            if (!(await remoteAdmissionOpen())) return;
+            if (!(await remoteAdmissionOpen())) return false;
             const available = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
             sandboxAmount = candidateTimeout();
             if (sandboxAmount <= 0 || available.sandboxMinutes * 60_000 < sandboxAmount)
@@ -15640,7 +15628,7 @@ export class FactorySupervisor {
       this.#fenceSnapshot(settled);
       await this.#resumeObservedRun(settled, new RunManager(this.#store));
     }
-    await this.#integrate(
+    return await this.#integrate(
       item,
       reserved,
       pull,
@@ -15653,29 +15641,27 @@ export class FactorySupervisor {
     );
   }
 
-  #integrationDue(workItem: number): boolean {
-    return (this.#integrationWaits.get(workItem)?.until ?? 0) <= Date.now();
-  }
-
   async #waitForProgress(
     activeExecutions: ContinuousExecutionPool<number>,
     executionRevision: number,
     fairnessRevision: number,
     objectiveDeadline: number,
   ): Promise<void> {
-    // Short probes remain inside this wait: they never reconstruct the Objective,
-    // hold integration admission, or replace the next iteration's full fences.
-    const now = Date.now();
-    // Retain the earliest eligible retry across probes. A slow read can cross it;
-    // recomputing only future hints afterward would lose that existing wake.
-    const externalDeadline = Math.min(
+    // Only unfinished external state needs periodic observation. Completion and
+    // fairness events immediately reconsider every item, with no eligibility gate.
+    const observationDeadline = Math.min(
       objectiveDeadline,
-      now + (this.#options.pollIntervalMs ?? 60_000),
-      ...[...this.#integrationWaits.values()]
-        .map((wait) => wait.until)
-        .filter((until) => until > now),
+      Date.now() +
+        (this.#options.pollIntervalMs ?? (this.#integrationWaits.size > 0 ? 2_000 : 60_000)),
     );
     for (;;) {
+      if (
+        activeExecutions.revision !== executionRevision ||
+        this.#fairness.revision !== fairnessRevision ||
+        this.#options.signal?.aborted ||
+        Date.now() >= observationDeadline
+      )
+        return;
       const probes = [...this.#integrationWrites.entries()].filter(
         ([item, write]) =>
           write.probes < 2 &&
@@ -15683,53 +15669,28 @@ export class FactorySupervisor {
           this.#integrationWaits.get(item)?.evidence?.code === "refreshed-head-pending" &&
           this.#integrationWaits.get(item)?.evidence?.headSha === write.expectedHead,
       );
-      const knownDeadline = Math.min(
-        externalDeadline,
-        ...[...this.#integrationWaits.values()]
-          .filter((wait) => wait.evidence?.code === "first-check-grace")
-          .map((wait) => wait.until),
-      );
-      const settled = await waitForProgress({
-        executions: activeExecutions,
-        executionRevision,
-        fairness: this.#fairness,
-        fairnessRevision,
-        maximumMs: Math.max(
-          1,
-          Math.min(knownDeadline, ...probes.map(([, write]) => write.nextProbeAt)) - Date.now(),
-        ),
-        retryDeadlines: [...this.#integrationWaits.values()].map((wait) => wait.until),
-        ...(this.#options.signal ? { signal: this.#options.signal } : {}),
-      });
-      if (settled?.error) throw new ClaimedExecutionFailure(settled);
-      if (
-        settled ||
-        activeExecutions.revision !== executionRevision ||
-        this.#fairness.revision !== fairnessRevision ||
-        this.#options.signal?.aborted ||
-        Date.now() >= knownDeadline
-      )
-        return;
-      let probed = false;
+      if (probes.length === 0) break;
       for (const [item, write] of probes) {
-        if (Date.now() < write.nextProbeAt) continue;
         this.#options.signal?.throwIfAborted();
         write.probes++;
-        probed = true;
         const pull = await this.#store.readPullRequest(write.pullRequest);
         if (pull.headSha !== write.oldHead || pull.merged || pull.state !== "open") {
           if (pull.headSha === write.expectedHead) write.firstObservedAt ??= Date.now();
           this.#integrationWriteTelemetry(item, "observation-changed");
-          // Any change is only a wake hint, including an unexpected head/closed PR.
-          // Normal current identity/ref/target/authority checks decide what it means.
-          this.#integrationWaits.get(item)!.until = Date.now();
           return;
         }
-        write.nextProbeAt = Date.now() + 2_000;
         if (write.probes === 2) this.#integrationWriteTelemetry(item, "probes-exhausted");
       }
-      if (!probed) return;
     }
+    const settled = await waitForProgress({
+      executions: activeExecutions,
+      executionRevision,
+      fairness: this.#fairness,
+      fairnessRevision,
+      maximumMs: Math.max(1, observationDeadline - Date.now()),
+      ...(this.#options.signal ? { signal: this.#options.signal } : {}),
+    });
+    if (settled?.error) throw new ClaimedExecutionFailure(settled);
   }
 
   #integrationWriteTelemetry(workItem: number, event: string): void {
@@ -15757,18 +15718,7 @@ export class FactorySupervisor {
 
   #deferIntegration(workItem: number, reason: string, evidence?: IntegrationWait): false {
     const previous = this.#integrationWaits.get(workItem);
-    const interval = Math.max(1, Math.min(this.#options.pollIntervalMs ?? 60_000, 60_000));
-    const unchanged =
-      previous?.reason === reason &&
-      previous.evidence?.code === evidence?.code &&
-      previous.evidence?.headSha === evidence?.headSha &&
-      previous.evidence?.baseSha === evidence?.baseSha;
-    const delay = Math.min(unchanged ? previous.delay * 2 : interval, interval * 5);
-    const deadline = this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000;
-    const until = Math.min(deadline, evidence?.notBefore ?? Date.now() + delay);
     this.#integrationWaits.set(workItem, {
-      until,
-      delay,
       reason,
       ...(evidence ? { evidence } : {}),
     });
@@ -16175,7 +16125,6 @@ export class FactorySupervisor {
   }
 
   async #resumeIntegrationWithArtifactContent(item: DerivedWorkItem): Promise<boolean> {
-    if (!this.#integrationDue(item.number)) return false;
     if (
       this.#deliverySelection.selected === "native-stacks" ||
       (item.factoryEvents ?? []).some(

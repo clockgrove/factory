@@ -138,16 +138,9 @@ export interface PublishedPullRequest {
 export interface IntegrationWait {
   state: "wait";
   reason: string;
-  code:
-    | "checks-pending"
-    | "checks-missing"
-    | "first-check-grace"
-    | "mergeability-pending"
-    | "refreshed-head-pending";
+  code: "checks-pending" | "checks-missing" | "mergeability-pending" | "refreshed-head-pending";
   headSha: string;
   baseSha: string;
-  /** A scheduling hint, never permission to merge. */
-  notBefore?: number;
 }
 
 export type IntegrationReadiness =
@@ -156,19 +149,8 @@ export type IntegrationReadiness =
   | { state: "failed"; reason: string }
   | { state: "integrated"; headSha: string };
 
-/**
- * GitHub creates a pull request before Actions necessarily attaches its first
- * check. Keep a freshly-created PR out of the merge path while that evidence
- * is still allowed to arrive. Repositories that demonstrably run PR CI remain
- * blocked without checks after this grace period; only a repository with a
- * negative CI probe may proceed once the ambiguity window has elapsed.
- */
-export const FIRST_CHECK_DISCOVERY_GRACE_MS = 60_000;
-
 export interface IntegrationReadinessOptions {
   ciExpected?: boolean | "unknown";
-  now?: Date;
-  firstCheckDiscoveryGraceMs?: number;
   /** Separate validation of this unchanged source PR against an advanced target branch. */
   mergeCandidateValidation?: MergeCandidateValidationEvidence;
   /** Observed native-stack rewrite; requires the original source-bound candidate proof. */
@@ -579,22 +561,6 @@ export async function integrationReadiness(
           ? "cannot determine whether repository CI is expected and no checks have appeared"
           : "repository CI is expected but no checks have appeared",
     };
-  }
-  // A false Actions-history hint does not prove that external CI is absent.
-  // Keep the discovery grace for this path as well as callers without a hint.
-  if (noChecksObserved && current.createdAt) {
-    const now = options.now ?? new Date();
-    const graceMs = options.firstCheckDiscoveryGraceMs ?? FIRST_CHECK_DISCOVERY_GRACE_MS;
-    if (now.getTime() - current.createdAt.getTime() < graceMs) {
-      return {
-        state: "wait",
-        code: "first-check-grace",
-        headSha: current.headSha,
-        baseSha: current.baseSha,
-        notBefore: current.createdAt.getTime() + graceMs,
-        reason: "waiting for the pull request's first checks to appear",
-      };
-    }
   }
   if (current.mergeable === null || current.mergeableState === "unknown") {
     return {

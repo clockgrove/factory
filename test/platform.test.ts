@@ -617,11 +617,11 @@ describe("ContentCreationPacer", () => {
     expect(p.waitMs(new Date(t0.getTime() + 60_001))).toBe(0);
   });
 
-  it("allows a bounded ordinary burst at the minimum gap", () => {
+  it("allows a bounded ordinary burst without a fixed gap", () => {
     const p = new ContentCreationPacer(80, 500, 0);
     const t0 = new Date("2026-01-01T00:00:00.000Z");
     p.recordCall(t0);
-    expect(p.waitMs(new Date(t0.getTime() + 1_000))).toBe(0);
+    expect(p.waitMs(t0)).toBe(0);
   });
 
   it("does not reserve unused allowance for hypothetical future work", () => {
@@ -648,22 +648,16 @@ describe("ContentCreationPacer", () => {
     });
   });
 
-  it.each([58, 242, 399, 499])(
-    "admits %s ready mutations at minimum spacing without future-quota smoothing",
-    (count) => {
-      const p = new ContentCreationPacer();
-      let now = new Date("2026-01-01T00:00:00Z");
-      const start = now.getTime();
-      for (let mutation = 0; mutation < count; mutation++) {
-        const delay = p.waitMs(now);
-        expect(delay).toBeLessThanOrEqual(1000);
-        now = new Date(now.getTime() + delay);
-        p.recordTransported(now);
-        p.recordSuccess();
-      }
-      expect(now.getTime() - start).toBe((count - 1) * 1000);
-    },
-  );
+  it.each([58, 79, 80])("admits %s ready mutations without fixed sleeps", (count) => {
+    const p = new ContentCreationPacer();
+    const now = new Date("2026-01-01T00:00:00Z");
+    for (let mutation = 0; mutation < count; mutation++) {
+      expect(p.waitMs(now)).toBe(0);
+      p.recordTransported(now);
+      p.recordSuccess();
+    }
+    if (count === 80) expect(p.wait(now)).toEqual({ ms: 60_000, reason: "rolling-minute" });
+  });
 
   it("prices sustained competing traffic against the same actual rolling history", () => {
     const p = new ContentCreationPacer();

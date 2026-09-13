@@ -39,15 +39,14 @@ export const GITHUB_SECONDARY_LIMITS = {
  * Factory's local pacing policy. The content limits are GitHub's documented
  * outer bounds rather than a second, arbitrary hourly quota. Admission is
  * bounded by rolling windows and adapts downward after an observed secondary refusal.
- * "Avoid concurrent requests... make requests serially" and "wait at least
- * one second between" mutative requests (docs.github.com/en/rest/using-the-
- * rest-api/best-practices-for-using-the-rest-api).
+ * Ready mutations have no fixed spacing floor. Admission through transport start
+ * remains serialized; occupied rolling windows and server refusals still defer work.
  */
 export const FACTORY_PACING = {
   maxConcurrentRequests: 5,
   maxContentCreatingPerMinute: GITHUB_SECONDARY_LIMITS.maxContentCreatingPerMinute,
   maxContentCreatingPerHour: GITHUB_SECONDARY_LIMITS.maxContentCreatingPerHour,
-  minMsBetweenMutations: 1_000,
+  minMsBetweenMutations: 0,
 } as const;
 
 export interface PrimaryRateLimitObservation {
@@ -666,9 +665,8 @@ export class CircuitBreaker {
 }
 
 /**
- * Paces content-creating calls (issues, comments, PRs, assignments) well
- * under GitHub's documented 80/min, 500/hour secondary limits, and enforces
- * the "wait at least one second between mutative requests" best practice.
+ * Bounds transported mutations by locally observed rolling windows. Production
+ * uses no fixed gap; an injected gap remains available for controlled test schedules.
  */
 export class ContentCreationPacer {
   #minute: number[] = [];

@@ -70,7 +70,18 @@ const SECRET_PATTERNS = [
   /\bBearer\s+\S+/gi,
 ];
 
-export function safeDiagnosticMessage(error: unknown): string {
+export function safeDiagnosticMessage(error: unknown, options: { causes?: boolean } = {}): string {
+  if (options.causes) {
+    const messages: string[] = [];
+    const seen = new Set<unknown>();
+    let current: unknown = error;
+    while (current !== undefined && messages.length < 5 && !seen.has(current)) {
+      seen.add(current);
+      messages.push(safeDiagnosticMessage(current));
+      current = current instanceof Error ? current.cause : undefined;
+    }
+    return messages.join("; caused by: ") || "diagnostic failed";
+  }
   let message = error instanceof Error ? error.message : String(error);
   for (const pattern of SECRET_PATTERNS) message = message.replace(pattern, "[REDACTED]");
   return message.replace(/[\r\n]+/g, " ").slice(0, 800) || "diagnostic failed";

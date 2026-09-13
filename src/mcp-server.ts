@@ -1,3 +1,4 @@
+import { safeDiagnosticMessage } from "./application/doctor.js";
 /**
  * Factory's bundled MCP server (docs/DESIGN.md §11.2/§11.3).
  *
@@ -372,7 +373,7 @@ function textResult(value: unknown) {
 }
 
 function errorResult(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = safeDiagnosticMessage(error, { causes: true });
   return {
     content: [{ type: "text" as const, text: message }],
     isError: true,

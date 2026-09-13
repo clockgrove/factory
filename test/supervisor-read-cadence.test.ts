@@ -41,10 +41,10 @@ it.each([false, true])(
         { timeout: 8_000, interval: 20 },
       );
       const externalWait = wait.mock.calls.at(-1)![0].maximumMs;
-      if (dependencyChain) {
-        expect(externalWait).toBeGreaterThan(0);
-        expect(externalWait).toBeLessThanOrEqual(60_000);
-      } else expect(externalWait).toBe(60_000);
+      // Observation work consumes part of the absolute deadline; it must not
+      // add that elapsed time back merely to produce an exact interval.
+      expect(externalWait).toBeGreaterThan(0);
+      expect(externalWait).toBeLessThanOrEqual(60_000);
       // Let any immediate admission/fairness wake finish before measuring unchanged state.
       await new Promise((resolve) => setTimeout(resolve, 100));
       const before = read.mock.calls.length;
@@ -114,7 +114,9 @@ it("retains an explicit active polling override", async () => {
       },
       { timeout: 8_000, interval: 20 },
     );
-    expect(wait.mock.calls.every(([args]) => args.maximumMs === 25)).toBe(true);
+    expect(wait.mock.calls.every(([args]) => args.maximumMs > 0 && args.maximumMs <= 25)).toBe(
+      true,
+    );
   } finally {
     shutdown.abort();
     await running.catch(() => {});

@@ -25,10 +25,11 @@ permission to start unselected work. Closing an implementation issue does not im
 qualification: put any remaining required scenario in a concrete linked issue before closing.
 Assignees identify people actually owning work; do not invent agent identities or owner fields.
 
-The former #69 summary is historical. Bounded parent issues may group a coherent feature, but must
-not become another project-wide backlog. Repository documents describe contracts and procedures;
-PRs and issues retain checks and relevant evidence. Publication is deferred in #88 until a release
-is selected; #89 verifies its published artifacts afterward.
+Bounded parent issues may group a coherent feature, but must not become another project-wide backlog. Repository documents describe contracts and procedures;
+PRs and issues retain concise checks and investigation results. Keep raw release observations in
+ignored `release/evidence/`; attach only sanitized final verification and distribution metadata to
+releases. [#88](https://github.com/clockgrove/factory/issues/88) tracks publication and
+[#89](https://github.com/clockgrove/factory/issues/89) verifies published artifacts afterward.
 
 Use GitHub's native UI/API for updates. No polling controller, custom synchronization workflow,
 second database or new tracking service is needed. If Project permissions are missing, continue

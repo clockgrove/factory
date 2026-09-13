@@ -1,8 +1,9 @@
 # Factory — Design
 
 This document describes Factory's architecture, execution model, and safety boundaries.
-See the [delivery plan](DELIVERY-PLAN.md) for implementation tasks and
-[`CONFORMANCE.md`](CONFORMANCE.md) for verification results and remaining gaps.
+See [release delivery](DELIVERY-PLAN.md) for publication procedures and
+[release verification](CONFORMANCE.md) for qualification requirements. Current work is tracked in
+the [Factory Project](https://github.com/orgs/clockgrove/projects/1).
 
 ## Product contract
 
@@ -155,8 +156,8 @@ wake itself. The supported lifecycle uses a user-authorized `systemd` service in
 WSL2 or a Linux guest on macOS. Native `launchd` and Windows Task Scheduler lifecycle adapters are
 out of scope. A new process reconstructs everything durable from GitHub.
 
-The detailed implementation tasks are in
-[`INDIE-FACTORY-IMPLEMENTATION-PLAN.md`](INDIE-FACTORY-IMPLEMENTATION-PLAN.md).
+For installation and lifecycle commands, see [host scheduling](HOST-SCHEDULING.md).
+Application-level acceptance is described in [application qualification](APPLICATION-QUALIFICATION.md).
 
 ## GitHub quota discipline
 
@@ -1188,7 +1189,7 @@ native-unit budget, repository concurrency, egress, trust, and TTL gates all pas
 remote work is recorded separately from overflow burst. Independent validation is pinned and
 budgeted in the same admission plan, but occupies its own phase reservation. The detailed invariants
 and remaining live-provider gates are in
-[`ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md`](ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md).
+[`ADAPTIVE-SCHEDULING.md`](ADAPTIVE-SCHEDULING.md).
 
 When `economics.minCloudTimeSavedMinutes` is nonzero, overflow burst also requires an explicit
 `requirements.estimatedDurationMinutes` value on the Work Packet at or above that threshold. Factory uses

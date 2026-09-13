@@ -1,6 +1,7 @@
 # Continuing an escalated Objective
 
-Current status: [Factory Project](https://github.com/orgs/clockgrove/projects/1).
+This reference describes recovery authorization, resource reconciliation, and qualification.
+For the operator commands, see [continuing after escalation](setup/unattended.md#continue-after-terminal-escalation).
 
 ## Available inspection
 
@@ -51,7 +52,7 @@ automatic redispatch of the same immutable invocation. Current-head, current-tru
 semantic acceptance, and post-squash proof gates still apply. These are implementation contracts;
 simulated-provider regressions do not claim live paid-provider qualification.
 
-## Implemented authorization foundations
+## Authorization and accounting
 
 The immutable recovery-plan document binds the proposed successor, exact predecessor terminal,
 source-history prefix, graph/projection, item evidence, accepted policy, explicit allowance
@@ -79,7 +80,7 @@ reservation, validation, review, and publication identities. It keeps source att
 from the controlling run and observes changed heads/bases without rewriting historical receipts.
 Even verified source bindings do not prove resource cleanup or authorize execution.
 
-The internal adoption coordinator now composes the immutable loaders, exact-prefix inspection,
+The internal adoption coordinator composes the immutable loaders, exact-prefix inspection,
 chain verifier, source resolver, cumulative accounting gate, and resource observations. It checks
 both repository and Objective leases before every mutation and reloads prerequisites between
 adoption steps. Lost responses are reconciled against the exact persisted envelopes. A changed
@@ -150,7 +151,7 @@ actual merge read-only. Only the leased reconciliation stage may append its real
 re-reads between layers and must pass full runtime verification before any worker, review or merge;
 it does not synthesize history, close issues, or treat merge observation as execution authority.
 
-## Outcome and observed gap
+## Continuation boundary
 
 An operator can resolve an escalation and explicitly continue the same Objective, retaining its
 Work Items, valid artifacts, PRs, and complete accounting. Factory then runs unattended to closure
@@ -162,13 +163,12 @@ ordinary activation is not evidence-preserving continuation of executed work. Le
 receipts without sufficient resource ownership remain ineligible for automatic replacement even
 when their artifacts are valid. The installed qualification must demonstrate these boundaries.
 
-The containment change rejects that activation before creating its run/budget ledger. It checks
+The activation guard rejects that request before creating its run/budget ledger. It checks
 Objective and child receipts, existing PRs, completed issues, managed-agent assignment history,
 and reservation refs whose comments may be missing. It repeats inspection under the lease to
 catch changed startup state, including a formerly active run becoming terminal. Apparent fresh
 Objectives are inspected too: a deleted start can hide its authenticated comments without removing
-its reservation refs. Graph-only retries without execution remain possible. This guard
-does not implement adoption or close the recovery gate.
+its reservation refs. Graph-only retries without execution remain possible. This guard does not replace authorized adoption or close the recovery gate.
 
 ## Boundaries
 
@@ -185,11 +185,11 @@ does not implement adoption or close the recovery gate.
 - Changed heads/bases invalidate affected validation and semantic review. Every merge rechecks
   current branch policy, checks, mergeability, topology, and leases.
 
-## Implementation tasks
+## Verification requirements
 
-### 1. Read-only recovery assessment
+### Read-only recovery assessment
 
-Implement a shared bounded assessment for chat/MCP and CLI inspection. Classify each Work Item:
+Verify the shared bounded assessment for chat/MCP and CLI inspection. Classify each Work Item:
 already integrated, reusable publication, recoverable artifact, unfinished, resources requiring
 reconciliation, or blocked with a precise reason. Assessment grants no execution authority.
 
@@ -206,9 +206,9 @@ Acceptance: fixtures cover every classification, removed/replaced children, forg
 missing refs, changed heads/bases, executed runs followed by empty failures, and unknown resources.
 No writes or model calls are allowed.
 
-### 2. Successor authority and cumulative accounting
+### Successor authority and cumulative accounting
 
-Define a versioned immutable recovery plan and authenticated request naming the predecessor and
+Verify the versioned immutable recovery plan and authenticated request naming the predecessor and
 terminal-event identity, plan digest, expected base, graph/projection digests, accepted policy,
 request ID, and activating actor. Changed assessment requires a new acknowledgement. Reusing a
 request ID with different semantics fails closed.
@@ -224,7 +224,7 @@ Acceptance: exhaustion blocks the next invocation; concurrent in-flight usage re
 repeated requests and multi-successor chains cannot multiply allowance. Test old records with absent
 breakdowns without inventing zeros, and reject ambiguous or cyclic predecessor chains.
 
-### 3. Fenced adoption transaction and shared evidence resolution
+### Fenced adoption transaction and shared evidence resolution
 
 Under repository and Objective leases, re-read the request, terminal predecessor, graph, current
 heads, policy, and remaining allowance. Stale plans require acknowledgement, not automatic replans.
@@ -233,14 +233,14 @@ request retries find that successor.
 
 Persist the immutable plan before execution. Adoption receipts reference source run, attempt,
 reservation, artifact, validation, and publication identities without changing source records.
-Implement one evidence-resolution layer shared by state derivation, publication, ordinary/native
+Verify the evidence-resolution layer shared by state derivation, publication, ordinary/native
 stack integration, summaries, and replay. Do not scatter permissive cross-run searches across them.
 
 Acceptance: inject lost responses and process death around every plan/ref/request/start/adoption
 write. Restart reconstructs identical bindings, creates no duplicate attempt or PR, and admits
 nothing until adoption and accounting agree. Test competing controllers and recovery requests.
 
-### 4. Resource and delivery reconciliation
+### Resource and delivery reconciliation
 
 Find predecessor local process groups and provider resources through authenticated deterministic
 identities. Confirm terminal/cleanup state before replacement or capacity release. Cancellation
@@ -257,11 +257,10 @@ Acceptance: ordinary and native-stack fixtures cover partial publication, merged
 work, stale descendants, vanished resources, cancellation, failed checks, conflict, and external
 edits. Cleanup is bounded and cannot target another run's or operator's resources.
 
-### 5. Installed-product qualification
+### Installed-product qualification
 
 Build and install through the documented plugin flow, then use the supported recovery command on
-the private disposable Objective. Do not imitate the missing command with hand-written GitHub
-mutations. Obtain explicit additional allowance before exceeding the accepted ceiling; fixing
+a private disposable Objective. Do not substitute hand-written GitHub mutations for the command. Obtain explicit additional allowance before exceeding the accepted ceiling; fixing
 provider access alone does not authorize another invocation.
 
 Prove existing publications are reconciled without duplicate implementation, the dependent join
@@ -273,19 +272,9 @@ Sanitize evidence and bind it to the exact installed commit/bundle digests. Reco
 available input/cache/output breakdowns, model-call counts, attempts, elapsed execution, and
 validation/integration time. Compare reuse against observed prior evidence, not estimated savings.
 
-## Parallel execution and completion
 
-Assessment and accounting fixtures may proceed independently after agreeing the request/plan
-contract. Transaction and evidence-resolution changes share that contract and integrate together.
-Resource reconciliation and delivery tests can then run in parallel. Installed live qualification
-follows deterministic and fault tests.
-
-This closes only the terminal-recovery portion of the [delivery plan](DELIVERY-PLAN.md).
-Daytona burst, native-stack/host and adversarial matrices, publication, and published installation
-remain obligations in [CONFORMANCE.md](CONFORMANCE.md). The **Managed-provider capability boundaries**
-row requires evidence for each provider's claimed behavior and explicit limits for unsupported
-interfaces, not successful execution by both managed agents. Copilot's limited automation and Codex's
-currently unavailable managed interface do not become global product blockers. Provider billing
-settlement finality is not required; users retain their direct billing relationship. Unknown active
+These requirements cover terminal recovery. The host, native-stack, paid-provider and adversarial
+matrices remain separate obligations in [release qualification](CONFORMANCE.md). Managed-provider
+claims require evidence for each supported capability; an unavailable third-party interface is an
+explicit integration boundary. Provider billing settlement finality is not required. Unknown active
 compute, resource ownership, cleanup or required usage still blocks unsafe recovery and replacement.
-Historical failed runs and qualification records are unchanged.

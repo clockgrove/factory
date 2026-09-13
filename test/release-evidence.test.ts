@@ -7,6 +7,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -70,20 +71,36 @@ describe("release evidence and publication boundary", () => {
       encoding: "utf8",
     });
   const evidence = (index: number) =>
-    JSON.parse(readFileSync(join(root, `docs/release-evidence/${index}.json`), "utf8"));
+    JSON.parse(readFileSync(join(root, `release/evidence/${index}.json`), "utf8"));
+  const refreshIndex = () =>
+    write(
+      "release/evidence/index.json",
+      JSON.stringify({
+        schema: 1,
+        commit: testedCommit,
+        releaseManifestSha256: evidence(0).releaseManifestSha256,
+        gates: gates.map((gate, index) => ({
+          gate,
+          path: `${index}.json`,
+          sha256: hash(readFileSync(join(root, `release/evidence/${index}.json`))),
+        })),
+      }),
+    );
   const changeProvider = (index: number, change: (record: ManagedObservation) => void) => {
     const gate = evidence(4);
     const descriptor = gate.managedProviders[index].evidence;
-    const observed = JSON.parse(readFileSync(join(root, descriptor.path), "utf8"));
+    const observed = JSON.parse(
+      readFileSync(join(root, "release/evidence", descriptor.path), "utf8"),
+    );
     change(observed);
     const bytes = JSON.stringify(observed);
-    write(descriptor.path, bytes);
+    write(`release/evidence/${descriptor.path}`, bytes);
     gate.artifacts.find(
       (artifact: ArtifactDescriptor) => artifact.path === descriptor.path,
     ).sha256 = hash(bytes);
     descriptor.sha256 = hash(bytes);
-    write("docs/release-evidence/4.json", JSON.stringify(gate));
-    commit();
+    write("release/evidence/4.json", JSON.stringify(gate));
+    refreshIndex();
   };
 
   const installedObservation = () => {
@@ -234,15 +251,19 @@ describe("release evidence and publication boundary", () => {
   ) => {
     const gate = evidence(4);
     const descriptor = gate.managedProviders[0].evidence;
-    const provider = JSON.parse(readFileSync(join(root, descriptor.path), "utf8"));
+    const provider = JSON.parse(
+      readFileSync(join(root, "release/evidence", descriptor.path), "utf8"),
+    );
     const claim = provider.supportedClaims[0].evidence;
-    const qualification = JSON.parse(readFileSync(join(root, claim.path), "utf8"));
+    const qualification = JSON.parse(
+      readFileSync(join(root, "release/evidence", claim.path), "utf8"),
+    );
     change(qualification);
     const bytes = JSON.stringify(qualification);
-    write(claim.path, bytes);
+    write(`release/evidence/${claim.path}`, bytes);
     gate.artifacts.find((artifact: ArtifactDescriptor) => artifact.path === claim.path).sha256 =
       hash(bytes);
-    write("docs/release-evidence/4.json", JSON.stringify(gate));
+    write("release/evidence/4.json", JSON.stringify(gate));
     changeProvider(0, (observed) => {
       observed.supportedClaims[0]!.evidence.sha256 = hash(bytes);
     });
@@ -280,24 +301,24 @@ describe("release evidence and publication boundary", () => {
       copyFileSync(new URL(`../scripts/${name}`, import.meta.url), join(root, "scripts", name));
     }
     testedCommit = commit();
-    write("docs/release-evidence/run.txt", "sanitized test output\n");
+    stageArtifacts(testedCommit);
+    write("release/evidence/run.txt", "sanitized test output\n");
     gates.forEach((gate, index) =>
       write(
-        `docs/release-evidence/${index}.json`,
+        `release/evidence/${index}.json`,
         JSON.stringify({
           schema: 2,
           gate,
           status: "passed",
           commit: testedCommit,
+          releaseManifestSha256: hash(readFileSync(join(root, "release/release-manifest.json"))),
           recordedAt: "2026-09-04T00:00:00Z",
           commands: ["fixture-live-matrix"],
           subjects: subjects.map((path) => ({
             path,
             sha256: hash(readFileSync(join(root, path))),
           })),
-          artifacts: [
-            { path: "docs/release-evidence/run.txt", sha256: hash("sanitized test output\n") },
-          ],
+          artifacts: [{ path: "run.txt", sha256: hash("sanitized test output\n") }],
         }),
       ),
     );
@@ -305,7 +326,7 @@ describe("release evidence and publication boundary", () => {
     managed.managedProviders = ["github-copilot/github-managed", "openai-codex/github-managed"].map(
       (backendId, index) => {
         const available = index === 0;
-        const claimPath = `docs/release-evidence/provider-${index}-objective.json`;
+        const claimPath = `provider-${index}-objective.json`;
         const claimBytes = JSON.stringify({
           schema: 1,
           kind: "installed-provider-objective-qualification",
@@ -317,10 +338,10 @@ describe("release evidence and publication boundary", () => {
         });
         const claim = { path: claimPath, sha256: hash(claimBytes) };
         if (available) {
-          write(claimPath, claimBytes);
+          write(`release/evidence/${claimPath}`, claimBytes);
           managed.artifacts.push(claim);
         }
-        const path = `docs/release-evidence/provider-${index}.json`;
+        const path = `provider-${index}.json`;
         const bytes = JSON.stringify({
           schema: 1,
           kind: "managed-provider-capability",
@@ -353,7 +374,7 @@ describe("release evidence and publication boundary", () => {
               ],
           supportedClaims: available ? [{ capability: "objective-delivery", evidence: claim }] : [],
         });
-        write(path, bytes);
+        write(`release/evidence/${path}`, bytes);
         const descriptor = { path, sha256: hash(bytes) };
         managed.artifacts.push(descriptor);
         return {
@@ -363,19 +384,16 @@ describe("release evidence and publication boundary", () => {
         };
       },
     );
-    write("docs/release-evidence/4.json", JSON.stringify(managed));
-    write(
-      "docs/CONFORMANCE.md",
-      `## Verification required before publication\n\n| Gate | Status | Evidence |\n|---|---|---|\n${gates.map((gate, index) => `| ${gate} | Passed | [record](release-evidence/${index}.json) |`).join("\n")}\n`,
-    );
-    commit();
+    write("release/evidence/4.json", JSON.stringify(managed));
+    refreshIndex();
     git("tag", "v2.0.26");
   });
 
   afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-  it("accepts an evidence-only descendant without requiring a self-referencing commit", () => {
-    expect(testedCommit).not.toBe(git("rev-parse", "HEAD"));
+  it("accepts ignored evidence for exact HEAD without repository documentation", () => {
+    expect(testedCommit).toBe(git("rev-parse", "HEAD"));
+    expect(git("status", "--porcelain")).toBe("");
     const result = verify();
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
@@ -439,17 +457,20 @@ describe("release evidence and publication boundary", () => {
   it("rejects new supported claim labels without an applicable release assessor", () => {
     const gate = evidence(4);
     const provider = JSON.parse(
-      readFileSync(join(root, gate.managedProviders[0].evidence.path), "utf8"),
+      readFileSync(join(root, "release/evidence", gate.managedProviders[0].evidence.path), "utf8"),
     );
     const original = JSON.parse(
-      readFileSync(join(root, provider.supportedClaims[0].evidence.path), "utf8"),
+      readFileSync(
+        join(root, "release/evidence", provider.supportedClaims[0].evidence.path),
+        "utf8",
+      ),
     );
-    const path = "docs/release-evidence/unsupported-claim.json";
+    const path = "unsupported-claim.json";
     const bytes = JSON.stringify({ ...original, capability: "automatic-cancellation" });
-    write(path, bytes);
+    write(`release/evidence/${path}`, bytes);
     const descriptor = { path, sha256: hash(bytes) };
     gate.artifacts.push(descriptor);
-    write("docs/release-evidence/4.json", JSON.stringify(gate));
+    write("release/evidence/4.json", JSON.stringify(gate));
     changeProvider(0, (observed) => {
       observed.supportedClaims.push({ capability: "automatic-cancellation", evidence: descriptor });
     });
@@ -459,24 +480,24 @@ describe("release evidence and publication boundary", () => {
   it("rejects missing managed-provider declarations instead of treating them as N/A", () => {
     const record = evidence(4);
     delete record.managedProviders;
-    write("docs/release-evidence/4.json", JSON.stringify(record));
-    commit();
+    write("release/evidence/4.json", JSON.stringify(record));
+    refreshIndex();
     expect(verify().stderr).toContain("requires both exact provider declarations");
   });
 
   it("rejects a duplicate profile in place of Codex", () => {
     const record = evidence(4);
     record.managedProviders[1] = record.managedProviders[0];
-    write("docs/release-evidence/4.json", JSON.stringify(record));
-    commit();
+    write("release/evidence/4.json", JSON.stringify(record));
+    refreshIndex();
     expect(verify().stderr).toContain("exactly once");
   });
 
   it("rejects arbitrary N/A status", () => {
     const record = evidence(4);
     record.managedProviders[1].availability = "N/A";
-    write("docs/release-evidence/4.json", JSON.stringify(record));
-    commit();
+    write("release/evidence/4.json", JSON.stringify(record));
+    refreshIndex();
     expect(verify().stderr).toContain("exact-candidate installed capability observation");
   });
 
@@ -530,7 +551,7 @@ describe("release evidence and publication boundary", () => {
   it("rejects qualification evidence for a different provider or candidate", () => {
     const gate = evidence(4);
     const provider = JSON.parse(
-      readFileSync(join(root, gate.managedProviders[0].evidence.path), "utf8"),
+      readFileSync(join(root, "release/evidence", gate.managedProviders[0].evidence.path), "utf8"),
     );
     const claim = provider.supportedClaims[0].evidence;
     const bytes = JSON.stringify({
@@ -539,10 +560,10 @@ describe("release evidence and publication boundary", () => {
       capability: "objective-delivery",
       status: "passed",
     });
-    write(claim.path, bytes);
+    write(`release/evidence/${claim.path}`, bytes);
     gate.artifacts.find((artifact: ArtifactDescriptor) => artifact.path === claim.path).sha256 =
       hash(bytes);
-    write("docs/release-evidence/4.json", JSON.stringify(gate));
+    write("release/evidence/4.json", JSON.stringify(gate));
     changeProvider(0, (observed) => {
       observed.supportedClaims[0]!.evidence.sha256 = hash(bytes);
     });
@@ -552,29 +573,101 @@ describe("release evidence and publication boundary", () => {
   it("invalidates every gate after any non-evidence source change", () => {
     write("README.md", "changed installation instructions\n");
     commit();
-    expect(verify().stderr).toContain("outside evidence: README.md");
+    expect(verify().stderr).toContain("exact current commit");
   });
 
   it("rejects a mismatched tested bundle digest", () => {
     const record = evidence(0);
     record.subjects[0].sha256 = "0".repeat(64);
-    write("docs/release-evidence/0.json", JSON.stringify(record));
-    commit();
+    write("release/evidence/0.json", JSON.stringify(record));
+    refreshIndex();
     expect(verify().stderr).toContain("differs from the tested release subject");
   });
 
-  it("rejects modified evidence artifacts even in an evidence-only commit", () => {
-    write("docs/release-evidence/run.txt", "different output\n");
-    commit();
+  it("rejects modified evidence artifacts", () => {
+    write("release/evidence/run.txt", "different output\n");
+    refreshIndex();
     expect(verify().stderr).toContain("does not match its recorded SHA-256 digest");
   });
 
-  it("rejects uncommitted evidence and missing release tags", () => {
-    write("docs/release-evidence/uncommitted.txt", "not committed\n");
+  it("rejects a dirty source tree and missing release tags", () => {
+    write("uncommitted.txt", "not committed\n");
     expect(verify().stderr).toContain("requires a clean Git worktree");
-    commit();
+    rmSync(join(root, "uncommitted.txt"));
     git("tag", "-d", "v2.0.26");
     expect(verify().stderr).toContain("requires immutable tag v2.0.26");
+  });
+
+  it.each(["missing", "duplicate", "extra"])("rejects %s gates in the index", (fault) => {
+    const path = "release/evidence/index.json";
+    const index = JSON.parse(readFileSync(join(root, path), "utf8"));
+    if (fault === "missing") index.gates.pop();
+    if (fault === "duplicate") index.gates[5] = index.gates[0];
+    if (fault === "extra")
+      index.gates.push({ gate: "invented", path: "0.json", sha256: "0".repeat(64) });
+    write(path, JSON.stringify(index));
+    expect(verify().status).not.toBe(0);
+  });
+
+  it.each(["escape", "absolute", "symlink", "directory"])("rejects %s evidence paths", (fault) => {
+    const index = JSON.parse(readFileSync(join(root, "release/evidence/index.json"), "utf8"));
+    if (fault === "escape") index.gates[0].path = "../release-manifest.json";
+    if (fault === "absolute") index.gates[0].path = join(root, "release/evidence/0.json");
+    if (fault === "symlink") {
+      symlinkSync(join(root, "release/evidence/0.json"), join(root, "release/evidence/link.json"));
+      index.gates[0].path = "link.json";
+    }
+    if (fault === "directory") {
+      mkdirSync(join(root, "release/evidence/directory"));
+      index.gates[0].path = "directory";
+    }
+    write("release/evidence/index.json", JSON.stringify(index));
+    expect(verify().status).not.toBe(0);
+  });
+
+  it("rejects evidence for another manifest even when the index is rebound", () => {
+    const path = "release/release-manifest.json";
+    write(path, readFileSync(join(root, path), "utf8") + "\n");
+    const index = JSON.parse(readFileSync(join(root, "release/evidence/index.json"), "utf8"));
+    index.releaseManifestSha256 = hash(readFileSync(join(root, path)));
+    write("release/evidence/index.json", JSON.stringify(index));
+    expect(verify().stderr).toContain("not a complete release-evidence record");
+  });
+
+  it("rejects tampering with the prebuilt tarball", () => {
+    write("release/factory.tgz", "modified");
+    expect(verify().stderr).toContain("does not match its verified SHA-256 digest");
+    expect(publish().stdout).not.toContain("npm-stub");
+  });
+
+  it("rejects symlinked release artifacts", () => {
+    rmSync(join(root, "release/factory.tgz"));
+    symlinkSync(join(root, "release/factory.cdx.json"), join(root, "release/factory.tgz"));
+    expect(verify().stderr).toContain("regular files without symlinks");
+  });
+
+  it("repeated readiness checks preserve prebuilt artifacts and invoke no npm commands", () => {
+    const files = [
+      "release-manifest.json",
+      "factory.tgz",
+      "factory.cdx.json",
+      "factory.provenance.json",
+      "evidence/index.json",
+    ];
+    const snapshot = () =>
+      files.map((file) => ({
+        bytes: hash(readFileSync(join(root, "release", file))),
+        modified: statSync(join(root, "release", file)).mtimeMs,
+      }));
+    const before = snapshot();
+    expect(verify().status).toBe(0);
+    expect(verify().status).toBe(0);
+    expect(snapshot()).toEqual(before);
+    const scripts = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ).scripts;
+    expect(scripts["verify:publish"]).toBe("node scripts/verify-publish-readiness.mjs");
+    expect(scripts["release:publish"]).toBe("node scripts/publish-release.mjs");
   });
 
   const stageArtifacts = (sourceCommit: string) => {
@@ -630,22 +723,41 @@ describe("release evidence and publication boundary", () => {
 
   it("rechecks live gates even when the publisher is invoked directly", () => {
     stageArtifacts(git("rev-parse", "HEAD"));
-    const ledger = readFileSync(join(root, "docs/CONFORMANCE.md"), "utf8").replace(
-      "| Passed |",
-      "| Open |",
-    );
-    write("docs/CONFORMANCE.md", ledger);
-    commit();
+    const record = evidence(0);
+    record.status = "open";
+    write("release/evidence/0.json", JSON.stringify(record));
+    refreshIndex();
     const result = publish();
-    expect(result.stderr).toContain("blocked by open conformance gates");
+    expect(result.stderr).toContain("not a complete release-evidence record");
     expect(result.stdout).not.toContain("npm-stub");
   });
 
-  it("rejects artifacts from the tested ancestor instead of the final release commit", () => {
-    stageArtifacts(testedCommit);
+  it("rejects artifacts from a different commit", () => {
+    stageArtifacts("0".repeat(40));
     const result = publish();
-    expect(result.stderr).toContain("not generated from the current clean release commit");
+    expect(result.stderr).toContain("release manifest digest");
     expect(result.stdout).not.toContain("npm-stub");
+  });
+
+  it("publishes the verifier snapshot without rereading substituted manifest fields", () => {
+    // Isolate the publisher handoff: the verifier returns an approved path, then the
+    // manifest on disk changes before the publisher consumes the result.
+    write(
+      "scripts/verify-publish-readiness.mjs",
+      `
+      import { writeFileSync } from "node:fs";
+      export async function verifyPublishReadiness() {
+        writeFileSync(new URL("../release/release-manifest.json", import.meta.url),
+          JSON.stringify({ tarball: { file: "../unverified.tgz" }, distTag: "unverified" }));
+        return { tarball: ${JSON.stringify(join(root, "release/factory.tgz"))}, access: "public", distTag: "latest" };
+      }
+    `,
+    );
+    const result = publish();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(join(root, "release/factory.tgz"));
+    expect(result.stdout).toContain("--tag latest");
+    expect(result.stdout).not.toContain("unverified");
   });
 
   it("publishes only the final provenance-bound tarball after all checks", () => {

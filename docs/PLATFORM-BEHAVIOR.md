@@ -71,7 +71,7 @@ rejection. This establishes exact compare-and-swap behavior, not merely fast-for
 The probe changed no default branch, Objective, or PR and invoked no model. Its one temporary branch
 was removed only at its independently observed exact head; subsequent reads confirmed branch absence
 and an unchanged default branch. The sanitized
-[component record](release-evidence/sibling-branch-cas-component-2026-09-05.json) binds the source and
+[component record](https://github.com/clockgrove/factory/blob/c6ba58c04d05154ad71ebe218132a1250e4687ae/docs/release-evidence/sibling-branch-cas-component-2026-09-05.json) binds the source and
 retained observation hashes. This is **not** a completed installed native Objective, a measurement
 of PR-preview regeneration, or evidence of changed-head validation or semantic review.
 

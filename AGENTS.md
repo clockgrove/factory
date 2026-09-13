@@ -13,7 +13,8 @@ scope, acceptance, dependencies and evidence; PRs own implementation and review.
 issue to the Project once and update its fields when work starts, blocks, is deferred or finishes.
 Do not maintain #69, release issues, Project descriptions or repository documents as duplicate
 status boards. See [CONTRIBUTING.md](CONTRIBUTING.md#tracking-work) for field meanings.
-Repository documents retain contracts, procedures and historical evidence. Distinguish implemented,
+Repository documents retain contracts and procedures. Issues and PRs retain concise verification
+results; raw release observations belong in ignored `release/evidence/`, not Git. Distinguish implemented,
 integrated and qualified in the relevant issue's evidence, not additional tracking fields.
 
 ## Pragmatic solutions for every coding task

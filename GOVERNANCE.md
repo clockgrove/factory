@@ -29,7 +29,10 @@ Maintainers publish releases from reviewed commits only after the gates in
 [docs/DELIVERY-PLAN.md](docs/DELIVERY-PLAN.md) and
 [docs/CONFORMANCE.md](docs/CONFORMANCE.md) are satisfied for the claim being made. Plugin, npm,
 changelog, tag, provenance, and release notes must identify the same source version. No release
-process grants a runtime permission that an operator did not explicitly authorize.
+process grants a runtime permission that an operator did not explicitly authorize. Qualification
+binds the exact source and package before publication; tags are immutable. Publish sanitized
+verification summaries and distribution metadata as release attachments, keeping raw observations
+out of the repository.
 
 ## Security and conduct
 

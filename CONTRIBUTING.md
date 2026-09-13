@@ -86,7 +86,8 @@ Live checks that mutate repositories or use paid providers require explicit auth
 
 Maintainers coordinate release qualification using
 [docs/CONFORMANCE.md](docs/CONFORMANCE.md#release-verification-procedure). A routine contributor PR
-does not require publishing, installing the plugin, or running the full release gate.
+does not require publishing, installing the plugin, or running the full release gate. Keep concise
+verification results in the PR; generated release observations belong in ignored `release/evidence/`.
 
 ## Submit a pull request
 

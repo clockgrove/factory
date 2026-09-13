@@ -3,6 +3,7 @@ import { expect, it, vi } from "vitest";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { GitHubReader } from "../src/github.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
+import * as publication from "../src/publication/publisher.js";
 import * as progress from "../src/scheduling/progress-wake.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
@@ -154,6 +155,69 @@ it("schedules first-check grace expiry without an additional external poll", asy
       expect(Math.abs(wait.maximum - Math.max(1, wait.remaining))).toBeLessThan(50);
     }
   } finally {
+    await f.dispose();
+    vi.restoreAllMocks();
+  }
+}, 20_000);
+
+it("retires a native member's expired grace when a later member still waits", async () => {
+  const shutdown = new AbortController();
+  const f = await providerSupervisorFixture("daytona-burst", { nativeStack: true });
+  const originalReadiness = publication.integrationReadiness;
+  let firstGrace: number | undefined;
+  let laterMemberPending = false;
+  vi.spyOn(publication, "integrationReadiness").mockImplementation(async (...args) => {
+    const readiness = await originalReadiness(...args);
+    if (readiness.state !== "ready") return readiness;
+    if (args[1].number === 108 && firstGrace === undefined) {
+      // Model the grace expiring while the current observation is in flight.
+      firstGrace = Date.now() - 1;
+      return {
+        state: "wait",
+        code: "first-check-grace",
+        headSha: args[1].commitSha,
+        baseSha: args[2]!,
+        notBefore: firstGrace,
+        reason: "waiting for the pull request's first checks to appear",
+      };
+    }
+    if (args[1].number === 109) {
+      laterMemberPending = true;
+      return {
+        state: "wait",
+        code: "checks-pending",
+        headSha: args[1].commitSha,
+        baseSha: args[2]!,
+        reason: "checks pending: later-member",
+      };
+    }
+    return readiness;
+  });
+  const originalWait = progress.waitForProgress;
+  let expiredGraceWait: number | undefined;
+  let laterWait: Parameters<typeof progress.waitForProgress>[0] | undefined;
+  vi.spyOn(progress, "waitForProgress").mockImplementation(async (args) => {
+    if (
+      !laterMemberPending &&
+      firstGrace !== undefined &&
+      args.retryDeadlines?.includes(firstGrace)
+    )
+      expiredGraceWait = args.maximumMs;
+    if (laterMemberPending) {
+      laterWait = args;
+      shutdown.abort();
+    }
+    return originalWait(args);
+  });
+  try {
+    await f.run(shutdown.signal, null).catch(() => undefined);
+    expect(firstGrace).toBeDefined();
+    expect(expiredGraceWait).toBe(1);
+    expect(laterWait).toBeDefined();
+    expect(laterWait!.retryDeadlines).not.toContain(firstGrace);
+    expect(laterWait!.maximumMs).toBe(60_000);
+  } finally {
+    shutdown.abort();
     await f.dispose();
     vi.restoreAllMocks();
   }

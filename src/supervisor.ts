@@ -11072,8 +11072,10 @@ export class FactorySupervisor {
       // A retained member keeps its ORIGINAL exact-head proof even when GitHub
       // rebased it before the successor integrated it. The verified successor
       // outcome, not relabelling that proof, accounts for its delivered head.
-      if (member.reservation.runId !== this.#run.runId && ordered[index]!.state === "done")
+      if (member.reservation.runId !== this.#run.runId && ordered[index]!.state === "done") {
+        this.#integrationWaits.delete(member.receipt.workItem);
         continue;
+      }
       const current = await this.#store.readPullRequest(member.pull.number);
       if (current.headSha !== member.pull.commitSha) {
         throw new Error(`stack Work Item ${member.receipt.itemId} changed after validation`);
@@ -11087,8 +11089,12 @@ export class FactorySupervisor {
           `stack Work Item ${member.receipt.itemId} targets ${current.baseRef}, expected ${expectedBaseBranch}`,
         );
       }
-      if (ordered[index]!.state === "done" && !remaining.includes(ordered[index]!)) continue;
+      if (ordered[index]!.state === "done" && !remaining.includes(ordered[index]!)) {
+        this.#integrationWaits.delete(member.receipt.workItem);
+        continue;
+      }
       if (current.merged) {
+        this.#integrationWaits.delete(member.receipt.workItem);
         mergedDuringRecovery.push(member);
         continue;
       }
@@ -11112,6 +11118,9 @@ export class FactorySupervisor {
             : `stack member ${member.receipt.itemId} was already integrated unexpectedly`,
         );
       }
+      // This member's current observation supersedes its previous wait. A later
+      // member may still defer the stack, so retire the hint before advancing.
+      this.#integrationWaits.delete(member.receipt.workItem);
     }
     if (mergedDuringRecovery.length > 0) {
       await completeIntegrated(mergedDuringRecovery);

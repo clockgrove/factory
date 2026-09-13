@@ -649,6 +649,11 @@ async function fixture(
   vi.spyOn(GitHubControlStore.prototype, "listRefs").mockImplementation(async (prefix) =>
     [...refs].filter(([ref]) => ref.startsWith(prefix)).map(([ref, id]) => ({ ref, oid: id })),
   );
+  vi.spyOn(GitHubControlStore.prototype, "deleteExactDiscoveryRef").mockImplementation(
+    async (ref) => {
+      refs.delete(ref);
+    },
+  );
   vi.spyOn(GitHubControlStore.prototype, "serverTime").mockImplementation(async () => new Date());
   vi.spyOn(GitHubControlStore.prototype, "getRepositoryFacts").mockResolvedValue({
     fullName: "o/r",
@@ -669,12 +674,9 @@ async function fixture(
   vi.spyOn(GitHubControlStore.prototype, "getBranchHead").mockImplementation(async () =>
     readCommit(git("rev-parse", "main")),
   );
-  vi.spyOn(GitHubControlStore.prototype, "getBranchHeadOid").mockImplementation(async function (
-    this: GitHubControlStore,
-    branch,
-  ) {
-    return (await this.getBranchHead(branch)).oid;
-  });
+  vi.spyOn(GitHubControlStore.prototype, "getBranchHeadOid").mockImplementation(async () =>
+    git("rev-parse", "main"),
+  );
   let lostIntegrationReceipt = false;
   let lostArtifactConsumerSuccessResponse = false;
   vi.spyOn(GitHubControlStore.prototype, "addIssueComment").mockImplementation(
@@ -2879,6 +2881,7 @@ describe("Supervisor adopted isolated candidate validation", () => {
           ...previousHead,
           oid: unavailableHead,
         });
+        vi.mocked(GitHubControlStore.prototype.getBranchHeadOid).mockResolvedValue(unavailableHead);
       }
       const refreshesBeforeRestart = f.refresh.mock.calls.length;
       // The failed result is a separate durable rejection, never a successful

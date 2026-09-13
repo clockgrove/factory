@@ -1,0 +1,106 @@
+{
+  "scope": "synthetic process-local discovery; bytes count serialized response records, not HTTP payload headers; no GitHub issues or model work",
+  "history": {
+    "commentBodyBytes": 1536,
+    "activeCommentsPerObjective": 240,
+    "settledCommentsPerObjective": 400,
+    "inactiveCommentsPerObjective": 120,
+    "historyConstruction": "only metadata for settled historical Objectives is allocated; comments generated transiently when requested",
+    "commentRequestAccounting": "ceil(commentCount / 100)"
+  },
+  "samples": [
+    {
+      "settledObjectives": 100,
+      "activeObjectives": 5,
+      "openInactiveObjectives": 0,
+      "cold": {
+        "cycles": 1,
+        "requests": 19,
+        "bytes": 2031580,
+        "commentRequests": 15,
+        "classifications": 5,
+        "retained": 5,
+        "retainedComments": 0,
+        "retainedBytes": 2265,
+        "historiesRead": 5
+      },
+      "warm": {
+        "cycles": 1,
+        "requests": 8,
+        "bytes": 531,
+        "commentRequests": 0,
+        "classifications": 0,
+        "retained": 5,
+        "retainedComments": 0,
+        "retainedBytes": 2395,
+        "historiesRead": 0
+      }
+    },
+    {
+      "settledObjectives": 100000,
+      "activeObjectives": 5,
+      "openInactiveObjectives": 0,
+      "cold": {
+        "cycles": 1,
+        "requests": 19,
+        "bytes": 2031580,
+        "commentRequests": 15,
+        "classifications": 5,
+        "retained": 5,
+        "retainedComments": 0,
+        "retainedBytes": 2265,
+        "historiesRead": 5
+      },
+      "warm": {
+        "cycles": 1,
+        "requests": 8,
+        "bytes": 531,
+        "commentRequests": 0,
+        "classifications": 0,
+        "retained": 5,
+        "retainedComments": 0,
+        "retainedBytes": 2395,
+        "historiesRead": 0
+      }
+    },
+    {
+      "settledObjectives": 100000,
+      "activeObjectives": 5,
+      "openInactiveObjectives": 200,
+      "cold": {
+        "cycles": 9,
+        "requests": 477,
+        "bytes": 42739596,
+        "commentRequests": 415,
+        "classifications": 205,
+        "retained": 205,
+        "retainedComments": 0,
+        "retainedBytes": 37599,
+        "historiesRead": 205
+      },
+      "warm": {
+        "cycles": 1,
+        "requests": 8,
+        "bytes": 531,
+        "commentRequests": 0,
+        "classifications": 0,
+        "retained": 205,
+        "retainedComments": 0,
+        "retainedBytes": 37599,
+        "historiesRead": 0
+      }
+    }
+  ],
+  "fixtureDisposition": "in-memory synthetic fixtures only; test namespace retired by test cleanup; local metrics retained as implementation evidence",
+  "sourceBaseline": "53956bacab38e72fd6cb1f97ba98ec781a407079",
+  "candidateBinding": "Source fixtures and implementation in the containing PR; exact reviewed/tested head recorded in PR evidence.",
+  "scopeLimitations": [
+    "Synthetic serialized records, not live GitHub HTTP/header or primary-quota measurement.",
+    "No installed model-backed cumulative foundation/extension/restart/regression qualification.",
+    "No shared plugin replacement, Desktop restart, package publication or historical data deletion."
+  ],
+  "originalFailures": [
+    "Pre-implementation: cold bootstrap hydrates lifetime closed history and retains global comment maps; aggregate limits can stop unrelated active work.",
+    "During implementation: invalid page was retained before validation, allowing retry to bypass validation; fixed by validate-before-commit and regression."
+  ]
+}

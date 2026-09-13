@@ -1,3 +1,4 @@
+import { captureGitHubTransportObservation } from "./control/mutation-observation.js";
 import { isKnownPrimaryQuotaRefusal } from "./platform.js";
 import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "./platform.js";
 /**
@@ -66,7 +67,6 @@ import {
 } from "./platform.js";
 import type { FactoryEvent } from "./protocol/events.js";
 import { isManagedAgentBackendId } from "./protocol/policy.js";
-import { observeGitHubTransport } from "./control/mutation-observation.js";
 import { normalizeIssueFieldValues } from "./scheduling/github-priority.js";
 
 /** A workflow run parked in `action_required`, awaiting a maintainer's approval. */
@@ -152,7 +152,13 @@ interface GitHubTransportCallbacks {
 
 const githubTransportCallbacks = new AsyncLocalStorage<GitHubTransportCallbacks>();
 const TRANSPORT_OBSERVER_HEADER = "x-clockgrove-factory-transport-observer";
-const transportObservers = new Map<string, GitHubTransportCallbacks>();
+const transportObservers = new Map<
+  string,
+  {
+    callbacks: GitHubTransportCallbacks | undefined;
+    observe: ReturnType<typeof captureGitHubTransportObservation>;
+  }
+>();
 let transportObserverSequence = 0;
 
 function registerTransportObserver(): {
@@ -160,12 +166,13 @@ function registerTransportObserver(): {
   release(): void;
 } {
   const callbacks = githubTransportCallbacks.getStore();
-  if (!callbacks) return { release: () => {} };
+  const observe = captureGitHubTransportObservation();
+  if (!callbacks && !observe) return { release: () => {} };
   if (transportObservers.size >= 1_024) {
     throw new Error("Factory supports at most 1,024 simultaneous GitHub transport observers");
   }
   const id = String(++transportObserverSequence);
-  transportObservers.set(id, callbacks);
+  transportObservers.set(id, { callbacks, observe });
   return { id, release: () => transportObservers.delete(id) };
 }
 
@@ -955,15 +962,17 @@ export function createOctokit(opts: GitHubOptions): Octokit {
         const observerId = headers.get(TRANSPORT_OBSERVER_HEADER);
         headers.delete(TRANSPORT_OBSERVER_HEADER);
         const transportInit = { ...init, headers };
-        (observerId ? transportObservers.get(observerId) : undefined)?.onTransported();
+        const observer = observerId ? transportObservers.get(observerId) : undefined;
+        observer?.callbacks?.onTransported();
         githubTransportCallbacks.getStore()?.onTransported();
-        observeGitHubTransport(input, transportInit);
-        return observeGitHubRequestTransport(
-          opts.token,
-          input,
-          transportInit,
-          opts.requestFetch ?? globalThis.fetch,
-        );
+        const send = () =>
+          observeGitHubRequestTransport(
+            opts.token,
+            input,
+            transportInit,
+            opts.requestFetch ?? globalThis.fetch,
+          );
+        return observer?.observe ? observer.observe(send) : send();
       }) as typeof globalThis.fetch,
     },
     // A mutation permit prices one transport. Hidden library retries would

@@ -1,6 +1,9 @@
+import { observeGitHubRequestTransport } from "../src/platform.js";
 import { describe, expect, it } from "vitest";
 import {
   observeGitHubTransport,
+  observeGitHubTransportTrace,
+  type GitHubTransportAttempt,
   observeGitHubTransportPhase,
   observeMutationFence,
   observeMutationOperation,
@@ -10,6 +13,90 @@ import {
 } from "../src/control/mutation-observation.js";
 
 describe("controller phase observations", () => {
+  it("reconciles actual attempts outside operations, refusals, 304s and transport failures", async () => {
+    const attempts: GitHubTransportAttempt[] = [];
+    const phases: GitHubTransportObservation[] = [];
+    await observeGitHubTransportTrace(
+      (attempt) => attempts.push(attempt),
+      async () => {
+        const send = (status: number) =>
+          observeGitHubRequestTransport(
+            "trace-test",
+            "https://api.github.com/repos/private/repository",
+            undefined,
+            (async () =>
+              new Response(null, { status, headers: { "content-length": "0" } })) as typeof fetch,
+          );
+        await send(304);
+        await observeGitHubTransportPhase(
+          "root",
+          (value) => phases.push(value),
+          async () => {
+            await observeMutationOperation(
+              "receipt",
+              "objective-publication",
+              "objective:1",
+              () => {},
+              async () => {
+                await observeMutationFence(async () => {
+                  await send(403);
+                });
+                await expect(
+                  observeGitHubRequestTransport(
+                    "trace-test",
+                    "https://api.github.com/graphql",
+                    { method: "POST", body: '{"query":"mutation { secret }"}' },
+                    (async () => {
+                      throw new Error("lost response");
+                    }) as typeof fetch,
+                  ),
+                ).rejects.toThrow("lost response");
+              },
+            );
+          },
+        );
+      },
+    );
+    expect(attempts).toHaveLength(3);
+    expect(attempts[0]).toMatchObject({
+      operation: "outside-operation",
+      phase: "outside-phase",
+      reason: "outside-operation",
+      kind: "read",
+      status: 304,
+      responseBytes: 0,
+    });
+    expect(attempts[1]).toMatchObject({
+      operation: "other-operation",
+      phase: "other-phase",
+      reason: "fence",
+      status: 403,
+    });
+    expect(attempts[2]).toMatchObject({
+      kind: "write",
+      reason: "operation",
+      outcome: "transport-error",
+      requestBytes: 31,
+    });
+    expect(phases[0]).toMatchObject({ readRequests: 1, mutationRequests: 1 });
+    expect(JSON.stringify(attempts)).not.toMatch(/private|secret/);
+    expect(attempts.every((attempt) => /^[a-f0-9]{64}$/.test(attempt.objectIdentity))).toBe(true);
+    await expect(
+      observeGitHubTransportTrace(
+        () => {
+          throw new Error("sink");
+        },
+        () =>
+          observeGitHubRequestTransport(
+            "trace-test",
+            "https://api.github.com/graphql",
+            undefined,
+            (async () => new Response(null, { status: 200 })) as typeof fetch,
+          ),
+      ),
+    ).resolves.toBeInstanceOf(Response);
+  });
+
   it("exports bounded route labels and separated scheduler waits without leaking paths", async () => {
     const phases: GitHubTransportObservation[] = [];
     await observeGitHubTransportPhase(

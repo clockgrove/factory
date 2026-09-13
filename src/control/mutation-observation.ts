@@ -1,6 +1,6 @@
 import type { MutationWaitReasons } from "../platform.js";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 
 export interface MutationOperationObservation {
@@ -36,7 +36,7 @@ interface Context {
   fencing: boolean;
 }
 
-const current = new AsyncLocalStorage<Context>();
+const current = new AsyncLocalStorage<Context | undefined>();
 
 /** Inclusive of nested phases. Counts and aggregate times are not additive across phases. */
 export interface GitHubTransportObservation {
@@ -63,7 +63,7 @@ interface PhaseContext {
   parent: PhaseContext | undefined;
 }
 
-const transportObservation = new AsyncLocalStorage<PhaseContext>();
+const transportObservation = new AsyncLocalStorage<PhaseContext | undefined>();
 
 /** Parent phases include child work; phase totals must not be added together. */
 function observePhases(observe: (observation: GitHubTransportObservation) => void): void {
@@ -174,6 +174,166 @@ export function observeGitHubTransport(
   }
   observeControlTransport(true);
   observePhases((observation) => observation.mutationRequests++);
+}
+
+/** One record per attempted HTTP transport; scopes and nested phases are not summed. */
+export interface GitHubTransportAttempt {
+  measurementScope: "process-local-http-attempt";
+  operation: string;
+  phase: string;
+  route: GitHubRouteFamily;
+  kind: "read" | "write" | "unclassified";
+  reason: "fence" | "operation" | "outside-operation";
+  objectIdentity: string;
+  requestBytes?: number;
+  responseBytes?: number;
+  status?: number;
+  outcome: "response" | "transport-error";
+}
+
+const traceOperations = new Set([
+  "createCommit",
+  "createRef",
+  "compareAndSwapRef",
+  "addIssueComment",
+  "createDiscoveryLabel",
+  "labelObjective",
+  "createBlob",
+  "createTree",
+  "createPullRequest",
+  "mergePullRequest",
+  "closePullRequest",
+  "closeIssue",
+  "assignIssue",
+  "dispatch-write",
+  "graph-write",
+  "normal-mutation",
+  "lease-mutation",
+  "cleanup-mutation",
+]);
+const tracePhases = new Set([
+  "objective",
+  "compilation",
+  "validation",
+  "review",
+  "integration",
+  "activation-discovery",
+  "repository-facts",
+  "default-branch-head",
+  "repository-lease-acquisition",
+  "shared-capacity",
+]);
+
+function tracePhase(phase: string | undefined): string {
+  if (phase === undefined) return "outside-phase";
+  if (/^work-item-\d+$/.test(phase)) return "work-item";
+  return tracePhases.has(phase) ? phase : "other-phase";
+}
+
+const attemptTrace = new AsyncLocalStorage<
+  ((attempt: GitHubTransportAttempt) => void) | undefined
+>();
+
+/** The caller owns bounded retention; no bodies, credentials or raw URLs leave this boundary. */
+export function observeGitHubTransportTrace<T>(
+  report: (attempt: GitHubTransportAttempt) => void,
+  work: () => Promise<T>,
+): Promise<T> {
+  return attemptTrace.run(report, work);
+}
+
+/** Carry only diagnostic context across Octokit's scheduler, which can resume
+ * under another async resource. Authority/quota contexts are deliberately excluded. */
+export function captureGitHubTransportObservation(): (<T>(work: () => T) => T) | undefined {
+  const operation = current.getStore();
+  const phase = transportObservation.getStore();
+  const trace = attemptTrace.getStore();
+  if (!operation && !phase && !trace) return undefined;
+  return (work) =>
+    current.run(operation, () =>
+      transportObservation.run(phase, () => attemptTrace.run(trace, work)),
+    );
+}
+
+/** Called after admission, immediately before fetch. Returns an observation-only completion hook. */
+export function beginGitHubTransportAttempt(
+  input: Parameters<typeof globalThis.fetch>[0],
+  init?: RequestInit,
+): (response?: Response) => void {
+  observeGitHubTransport(input, init);
+  const report = attemptTrace.getStore();
+  if (!report) return () => {};
+  const context = current.getStore();
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+  const route = routeFamily(url);
+  let kind: GitHubTransportAttempt["kind"] =
+    method === "GET" || method === "HEAD" ? "read" : "write";
+  if (route === "graphql" && kind === "write") {
+    kind = "unclassified";
+    try {
+      const query: unknown = JSON.parse(String(init?.body)).query;
+      if (typeof query === "string") {
+        const normalized = query.replace(/#[^\n]*/g, "").trimStart();
+        if (/^(?:query\b|\{)/.test(normalized)) kind = "read";
+        else if (/^mutation\b/.test(normalized)) kind = "write";
+      }
+    } catch {
+      // Unknown bodies remain unknown; never read a stream for diagnostics.
+    }
+  }
+  const body = init?.body;
+  const requestBytes =
+    typeof body === "string"
+      ? Buffer.byteLength(body)
+      : body instanceof ArrayBuffer
+        ? body.byteLength
+        : ArrayBuffer.isView(body)
+          ? body.byteLength
+          : body === undefined || body === null
+            ? input instanceof Request
+              ? undefined
+              : 0
+            : undefined;
+  const attempt = {
+    measurementScope: "process-local-http-attempt" as const,
+    operation: !context
+      ? "outside-operation"
+      : traceOperations.has(context.observation.operation)
+        ? context.observation.operation
+        : "other-operation",
+    phase: tracePhase(transportObservation.getStore()?.observation.phase),
+    route,
+    kind,
+    reason: context?.fencing
+      ? ("fence" as const)
+      : context
+        ? ("operation" as const)
+        : ("outside-operation" as const),
+    objectIdentity: createHash("sha256").update(url).digest("hex"),
+    ...(requestBytes === undefined ? {} : { requestBytes }),
+  };
+  let completed = false;
+  return (response) => {
+    if (completed) return;
+    completed = true;
+    const length = response?.headers.get("content-length");
+    const responseBytes = length && /^\d+$/.test(length) ? Number(length) : undefined;
+    try {
+      report(
+        Object.freeze({
+          ...attempt,
+          ...(response ? { status: response.status } : {}),
+          ...(responseBytes !== undefined && Number.isSafeInteger(responseBytes)
+            ? { responseBytes }
+            : {}),
+          outcome: response ? "response" : "transport-error",
+        }),
+      );
+    } catch {
+      // A rejected diagnostic sink cannot change a completed remote effect.
+    }
+  };
 }
 
 /** Process-local request accounting only; never a durable authority or quota grant. */

@@ -1,3 +1,4 @@
+import { beginGitHubTransportAttempt } from "./control/mutation-observation.js";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -400,10 +401,23 @@ export function observeGitHubRequestTransport(
   const endpoint = requestEndpoint(url);
   const governor = requestGovernorForCredential(token);
   governor.transported(endpoint);
-  return transport(input, init).then((response) => {
-    governor.completed(endpoint, response.status);
-    return response;
-  });
+  const completed = beginGitHubTransportAttempt(input, init);
+  try {
+    return transport(input, init).then(
+      (response) => {
+        governor.completed(endpoint, response.status);
+        completed(response);
+        return response;
+      },
+      (error: unknown) => {
+        completed();
+        throw error;
+      },
+    );
+  } catch (error) {
+    completed();
+    throw error;
+  }
 }
 
 /** Process-local credential sharing; the token never appears in telemetry. */

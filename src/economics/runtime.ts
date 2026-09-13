@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isModelInvocationMarker, unresolvedModelInvocations } from "../control/budget.js";
 import { deduplicateFactoryEvents } from "../control/receipts.js";
 import { queuedReasonCode } from "../explanations/index.js";
 import type { FactoryEvent } from "../protocol/events.js";
@@ -467,7 +468,12 @@ export function summarizeRuntimeEconomics(
     JSON.stringify([key(event), event.phase, event.unit, event.usageId ?? "default"]);
   const usageReservations = new Set<string>();
   for (const event of events)
-    if (event.kind === "budget" && event.event === "BudgetReserved" && event.phase !== "management")
+    if (
+      event.kind === "budget" &&
+      event.event === "BudgetReserved" &&
+      event.phase !== "management" &&
+      !isModelInvocationMarker(event)
+    )
       usageReservations.add(usageKey(event));
   for (const event of events)
     if (
@@ -670,9 +676,9 @@ export function summarizeRuntimeEconomics(
     nativeUsageCoverage: {
       attemptsWithReceipt: attemptsWithUsage,
       attemptsWithoutReceipt: attempts.size - attemptsWithUsage,
-      reservedUsageIdentitiesWithoutReconciliation: [...usageReservations].filter(
-        (identity) => !usage.has(identity),
-      ).length,
+      reservedUsageIdentitiesWithoutReconciliation:
+        [...usageReservations].filter((identity) => !usage.has(identity)).length +
+        unresolvedModelInvocations(events).filter((event) => event.phase !== "management").length,
     },
     interventions: interventionEvents.length
       ? observed(

@@ -11,6 +11,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
   outstanding obligations after closure or restart; labels still grant no execution authority.
   ([#349](https://github.com/clockgrove/factory/issues/349))
 
+- Observe confirmed sibling ref writes with a bounded targeted PR check before ordinary integration
+  backoff, retaining exact-head authority and the external-CI discovery grace. Record write,
+  observation and next-action timing without treating observation hints as merge permission.
+  ([#347](https://github.com/clockgrove/factory/issues/347))
+
 - Remove Octokit's hidden fixed write/notification/GraphQL pacing; Factory remains the owner
   of admission and reactive retries. Preserve HTTP-200 GraphQL refusal and partial-effect
   handling, and distinguish client pretransport from fetch-response diagnostic time.

@@ -138,7 +138,12 @@ export interface PublishedPullRequest {
 export interface IntegrationWait {
   state: "wait";
   reason: string;
-  code: "checks-pending" | "checks-missing" | "first-check-grace" | "mergeability-pending";
+  code:
+    | "checks-pending"
+    | "checks-missing"
+    | "first-check-grace"
+    | "mergeability-pending"
+    | "refreshed-head-pending";
   headSha: string;
   baseSha: string;
   /** A scheduling hint, never permission to merge. */
@@ -473,6 +478,9 @@ export async function integrationReadiness(
         readRef: (ref) => store.readRef(ref),
         listRefs: (prefix) => store.listRefs!(prefix),
         readCommit: (oid) => store.readCommit(oid),
+        ...(store.readCommitContent
+          ? { readCommitContent: (oid: string) => store.readCommitContent!(oid) }
+          : {}),
         readTreeEntry: (tree, path) => store.readTreeEntry!(tree, path),
         readBlob: (oid) => store.readBlob!(oid),
       },
@@ -572,6 +580,8 @@ export async function integrationReadiness(
           : "repository CI is expected but no checks have appeared",
     };
   }
+  // A false Actions-history hint does not prove that external CI is absent.
+  // Keep the discovery grace for this path as well as callers without a hint.
   if (noChecksObserved && current.createdAt) {
     const now = options.now ?? new Date();
     const graceMs = options.firstCheckDiscoveryGraceMs ?? FIRST_CHECK_DISCOVERY_GRACE_MS;

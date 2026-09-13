@@ -21,6 +21,13 @@ describe("clean packaged plugin installation", () => {
       marketplace: "factory-install-test",
       plugin: "factory",
       controllerEntryPoint: "dist/factory.js",
+      cleanConfiguration: true,
+      missingLoginDiagnostics: ["doctor", "status"],
+      readOnlyInspectionStartedExecution: false,
+      authenticatedReadOnlyInspection: false,
+      doctorOverall: null,
+      doctorAttentionAreas: [],
+      statusRunState: null,
     });
     expect(result.mcpTools).toBeGreaterThan(20);
   });

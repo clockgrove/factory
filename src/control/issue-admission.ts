@@ -3,7 +3,7 @@ import { z } from "zod";
 import { ArtifactConsumerBindingSchema } from "../protocol/events.js";
 import { ManagedRuntimeActivationSchema } from "../protocol/worker-packet.js";
 import { gitSha } from "../protocol/limits.js";
-import type { GitCommitObject, LeaseStore } from "./lease.js";
+import type { GitCommitContent, LeaseStore } from "./lease.js";
 
 const text = z.string().min(1).max(1024);
 const positive = z.number().int().positive();
@@ -97,6 +97,7 @@ type Store = Pick<
   LeaseStore,
   | "readRef"
   | "readCommit"
+  | "readCommitContent"
   | "createCommit"
   | "createRef"
   | "compareAndSwapRef"
@@ -127,7 +128,7 @@ export class IssueAdmissionLedger {
     const ref = issueAdmissionRef(workItem);
     const oid = await this.store.readRef(ref);
     if (!oid) return null;
-    const commit = await this.store.readCommit(oid);
+    const commit = await (this.store.readCommitContent?.(oid) ?? this.store.readCommit(oid));
     if (commit.oid !== oid) throw Error("issue admission OID changed");
     return parseIssueAdmissionCommit(commit, workItem);
   }
@@ -456,7 +457,8 @@ export class IssueAdmissionLedger {
         throw Error("invalid imported admission history");
       attempt = entry.reservation.attempt;
     }
-    const base = await this.store.readCommit(first.reservation.baseSha);
+    const base = await (this.store.readCommitContent?.(first.reservation.baseSha) ??
+      this.store.readCommit(first.reservation.baseSha));
     if (base.oid !== first.reservation.baseSha) throw Error("admission base identity changed");
     await fence();
     const oid = await this.store.createCommit({
@@ -520,7 +522,7 @@ export class IssueAdmissionLedger {
 }
 
 export function parseIssueAdmissionCommit(
-  commit: GitCommitObject,
+  commit: GitCommitContent,
   workItem: number,
 ): IssueAdmissionRecord {
   const oid = commit.oid;

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CommentResultLocatorSchema } from "../protocol/result-locator.js";
 import { PlatformUnavailableError } from "../platform.js";
 import { z } from "zod";
 
@@ -132,8 +133,26 @@ const sourceSchema = z
       .strict()
       .nullable(),
     review: z
-      .object({ ref: reference, commitOid: sha, blobOid: sha, identityDigest: digest })
-      .strict()
+      .union([
+        z
+          .object({
+            ref: reference,
+            commitOid: sha,
+            blobOid: sha,
+            identityDigest: digest,
+            locator: z.never().optional(),
+          })
+          .strict(),
+        z
+          .object({
+            locator: CommentResultLocatorSchema,
+            identityDigest: digest,
+            ref: z.never().optional(),
+            commitOid: z.never().optional(),
+            blobOid: z.never().optional(),
+          })
+          .strict(),
+      ])
       .nullable(),
     publication: z
       .object({
@@ -594,7 +613,9 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
         "validation needs an artifact identity",
       );
       requirePlan(!source.review || source.validation !== null, "review needs validation identity");
-      if (source.review) {
+      // Comment locators are authenticated against the exact loaded source review by the evidence resolver.
+      // Only legacy Git receipts carry a ref whose lexical scope can be checked here.
+      if (source.review && !source.review.locator) {
         const prefix =
           `refs/clockgrove-factory/reviews/objective-${plan.objective}/` +
           `work-item-${item.workItem}/attempt-${source.attempt}/`;

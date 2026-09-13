@@ -41,6 +41,7 @@ const RunStarted = Common.extend({
   baseBranch: boundedText(500),
   policy: RunPolicySchema,
   policyDigest: sha256Digest,
+  recordProtocol: z.literal("clockgrove.factory/transition-receipt-v1").optional(),
   activationRequestId: safeId.optional(),
   baseSha: gitSha.optional(),
   recoveryRequestId: safeId.optional(),

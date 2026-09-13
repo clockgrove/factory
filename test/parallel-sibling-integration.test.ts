@@ -201,8 +201,10 @@ async function fixture(
     };
   };
   const storage: CompiledGraphStore = {
-    readRef: async (ref) => refs.get(ref) ?? null,
+    readRef: async (ref) =>
+      ref === "refs/heads/main" ? git("rev-parse", "main") : (refs.get(ref) ?? null),
     readCommit,
+    readCommitContent: readCommit,
     readBlob: async (id) => {
       const bytes = blobs.get(id);
       if (!bytes) throw new Error("missing blob");
@@ -782,6 +784,19 @@ async function fixture(
     // manager or Supervisor decision is mocked.
     vi.spyOn(GitHubControlStore.prototype, name).mockImplementation(storage[name] as never);
   }
+  // These scenarios resume explicitly seeded historical runs. A new selector
+  // needs its own result transport and must never silently downgrade here.
+  vi.spyOn(GitHubControlStore.prototype, "readResultReceipts").mockImplementation(async (scope) => {
+    const source = scope.objective === 6 ? peerSnapshot : snapshot;
+    const start = source?.factoryEvents?.find(
+      (event) => event.event === "FactoryRunStarted" && event.runId === scope.runId,
+    );
+    if (!start || start.kind !== "run" || start.event !== "FactoryRunStarted")
+      throw new Error("fixture result run not found");
+    if (start.recordProtocol)
+      throw new Error("fixture requires explicit consolidated result transport");
+    return { protocol: null, receipts: [] };
+  });
   vi.spyOn(GitHubControlStore.prototype, "listRefs").mockImplementation(async (prefix) =>
     [...refs].filter(([ref]) => ref.startsWith(prefix)).map(([ref, id]) => ({ ref, oid: id })),
   );

@@ -198,6 +198,8 @@ import {
 } from "./protocol/events.js";
 import { assertIsolatedCandidateFailureProof } from "./recovery/isolated-candidate.js";
 import { assertNoSecretMaterial, PROTOCOL_V2 } from "./protocol/limits.js";
+import { RESULT_RECORD_PROTOCOL } from "./control/result-receipts.js";
+import { writerAuthority } from "./control/authority.js";
 import {
   assertRequirementsWithinPolicy,
   isManagedAgentBackendId,
@@ -280,6 +282,7 @@ import {
   publishValidated,
   verifySquashIntegration,
   type PublishedPullRequest,
+  type IntegrationWait,
 } from "./publication/publisher.js";
 import { prepareSiblingRefreshTree } from "./publication/sibling-refresh-tree.js";
 import {
@@ -1141,7 +1144,10 @@ export class FactorySupervisor {
   #integrationTail: Promise<void> = Promise.resolve();
   // Scheduling hints only: never reuse authority or mutable GitHub evidence.
   // Lost on restart; every due observation repeats the normal integration fences.
-  #integrationWaits = new Map<number, { until: number; delay: number; reason: string }>();
+  #integrationWaits = new Map<
+    number,
+    { until: number; delay: number; reason: string; evidence?: IntegrationWait }
+  >();
   readonly #retryArtifacts = new RetryArtifactCache();
   #durablePackets = new Map<number, WorkerPacket>();
   #compiledGraph: CompiledObjective | null = null;
@@ -1198,11 +1204,12 @@ export class FactorySupervisor {
       },
       mutationScope: `objective:${options.objective}`,
     };
+    this.#store = new GitHubControlStore(controls);
     this.#reader = new GitHubReader({
       ...github,
+      onResultReceiptObservation: (observation) => this.#store.observeResultReceipts(observation),
       ...(options.recovery ? { recoveryInspection: true } : {}),
     });
-    this.#store = new GitHubControlStore(controls);
     this.#recoveryStore = recoveryReadPort(this.#store, options.owner, options.repo, (number) =>
       this.#reader.readObjective(number),
     );
@@ -1562,13 +1569,12 @@ export class FactorySupervisor {
       if (result.reserved) this.#sharedCapacityOwners.set(reservation.key, owner);
       return result;
     });
-    const snapshot = await this.#sharedCapacity.snapshot();
     return result.reserved
-      ? { reserved: true, reservation, generation: snapshot.generation }
+      ? { reserved: true, reservation, generation: result.generation }
       : {
           reserved: false,
           code: result.code === "released-reservation" ? "duplicate-reservation" : result.code,
-          generation: snapshot.generation,
+          generation: result.generation,
         };
   }
 
@@ -1595,13 +1601,12 @@ export class FactorySupervisor {
       }
       return result;
     });
-    const snapshot = await this.#sharedCapacity.snapshot();
     return result.reserved
-      ? { reserved: true, reservation, generation: snapshot.generation }
+      ? { reserved: true, reservation, generation: result.generation }
       : {
           reserved: false,
           code: result.code === "released-reservation" ? "duplicate-reservation" : result.code,
-          generation: snapshot.generation,
+          generation: result.generation,
         };
   }
 
@@ -4215,6 +4220,7 @@ export class FactorySupervisor {
       this.#run =
         currentRun ??
         (await runManager.start({
+          recordProtocol: RESULT_RECORD_PROTOCOL,
           objective: snapshot.number,
           objectiveNodeId: snapshot.id,
           repository: facts.fullName,
@@ -5227,6 +5233,8 @@ export class FactorySupervisor {
           this.#recoveryGraphBootstrap = null;
         }
       }
+      let externalObservationDue = 0;
+      let idleAdmissionRevision: number | undefined;
       runLoop: for (;;) {
         // Capture before any snapshot or admission work so a peer-capacity change during this
         // iteration cannot happen between our decision and listener registration unnoticed.
@@ -5235,7 +5243,27 @@ export class FactorySupervisor {
         if (heartbeatError) throw heartbeatError;
         activeExecutions.throwNextFailure();
         await this.#lease.renewIfNeeded();
+        // A capacity notification cannot unblock a graph dependency or advance an
+        // already-owned child. With no eligible local action, wait on completion
+        // or the original external-observation deadline instead of reconstructing
+        // the whole Objective merely to rediscover our acknowledged admissions.
+        if (
+          idleAdmissionRevision === executionRevision &&
+          activeExecutions.size > 0 &&
+          Date.now() < Math.min(deadline, externalObservationDue) &&
+          !this.#options.signal?.aborted
+        ) {
+          await this.#waitForProgress(
+            activeExecutions,
+            executionRevision,
+            fairnessRevision,
+            Math.min(deadline, externalObservationDue),
+          );
+          continue;
+        }
+        idleAdmissionRevision = undefined;
         snapshot = await this.#reader.readObjective(snapshot.number);
+        externalObservationDue = Date.now() + (this.#options.pollIntervalMs ?? 60_000);
         // A hold/cleanup failure can settle while the snapshot is in flight.
         // An absent active key must not turn that failure into same-process recovery.
         activeExecutions.throwNextFailure();
@@ -6261,6 +6289,16 @@ export class FactorySupervisor {
           this.#notify(`admitted: ${started.map((number) => `#${number}`).join(", ")}`);
         }
         if (capacityChanged) continue;
+        if (
+          activeExecutions.size > 0 &&
+          objective.items.every(
+            (item) =>
+              activeExecutions.has(item.number) ||
+              item.state === "blocked" ||
+              item.state === "done",
+          )
+        )
+          idleAdmissionRevision = activeExecutions.revision;
         await this.#waitForProgress(
           activeExecutions,
           executionRevision,
@@ -6802,34 +6840,42 @@ export class FactorySupervisor {
           });
           const reservedAmount =
             admission.reservedBudget.unit === "none" ? timeoutMs : admission.reservedBudget.amount;
-          const budgetEvent = await this.#recorder.budget({
-            lease,
-            workItemNodeId: item.id,
-            reservation,
-            sequence: this.#sequences.take(),
-            event: "BudgetReserved",
-            unit: budgetUnit,
-            amount: reservedAmount,
-          });
-          this.#budgetEvents.push(budgetEvent);
-          executionBudgetReserved = true;
-          if (
-            validator &&
-            admission.validation &&
-            admission.validation.reservedBudget.unit !== "none"
-          ) {
-            validationBudgetUnit = admission.validation.reservedBudget.unit;
-            const validationBudget = await this.#recorder.budget({
+          const reserveValidation =
+            validator && admission.validation && admission.validation.reservedBudget.unit !== "none"
+              ? {
+                  unit: admission.validation.reservedBudget.unit,
+                  amount: admission.validation.reservedBudget.amount,
+                }
+              : undefined;
+          const budgetEvents = await this.#recorder.budgetBatch([
+            {
               lease,
               workItemNodeId: item.id,
               reservation,
               sequence: this.#sequences.take(),
               event: "BudgetReserved",
-              unit: validationBudgetUnit,
-              phase: "validation",
-              amount: admission.validation.reservedBudget.amount,
-            });
-            this.#budgetEvents.push(validationBudget);
+              unit: budgetUnit,
+              amount: reservedAmount,
+            },
+            ...(reserveValidation
+              ? [
+                  {
+                    lease,
+                    workItemNodeId: item.id,
+                    reservation,
+                    sequence: this.#sequences.take(),
+                    event: "BudgetReserved" as const,
+                    unit: reserveValidation.unit,
+                    phase: "validation" as const,
+                    amount: reserveValidation.amount,
+                  },
+                ]
+              : []),
+          ]);
+          this.#budgetEvents.push(...budgetEvents);
+          executionBudgetReserved = true;
+          if (reserveValidation) {
+            validationBudgetUnit = reserveValidation.unit;
             validationBudgetReserved = true;
           }
         });
@@ -7519,20 +7565,13 @@ export class FactorySupervisor {
         ),
       );
       await this.#lease.use((lease) =>
-        this.#validations.persist({
+        this.#persistValidationResult(
           lease,
-          identity: this.#validationIdentity(reservation!, artifact!.digest),
-          evidence: validation!.evidence,
-        }),
-      );
-      await this.#lease.use((lease) =>
-        this.#recorder.validation({
-          lease,
-          workItemNodeId: item.id,
-          reservation: reservation!,
-          evidence: validation!.evidence,
-          sequence: this.#sequences.take(),
-        }),
+          reservation!,
+          artifact!.digest,
+          validation!.evidence,
+          item,
+        ),
       );
       await this.#lease.use(async (lease) => {
         await this.#attempts.recordCapacity({
@@ -7648,7 +7687,7 @@ export class FactorySupervisor {
         ...(invokeReview ? { invoke: invokeReview } : {}),
         persist: (result) =>
           this.#lease.use((lease) =>
-            this.#reviews.persist({ lease, identity: reviewIdentity, result }),
+            this.#persistReviewResult(lease, reviewIdentity, result, item, reservation!),
           ),
         recover: () => this.#reviews.load(reviewIdentity),
         recordFailureUsage: (usage) =>
@@ -7725,18 +7764,43 @@ export class FactorySupervisor {
       }
       if (!published) throw new Error("publication did not return a pull request");
       const publication = published;
-      await this.#lease.use((lease) =>
-        this.#attempts.record({
-          ...(recovered ? { allowRecovery: true } : {}),
-          lease,
-          workItemNodeId: item.id,
-          reservation: reservation!,
+      let publishedEvent: FactoryEvent | undefined;
+      await this.#lease.use(async (lease) => {
+        if (this.#run.recordProtocol !== RESULT_RECORD_PROTOCOL) {
+          await this.#attempts.record({
+            ...(recovered ? { allowRecovery: true } : {}),
+            lease,
+            workItemNodeId: item.id,
+            reservation: reservation!,
+            event: "AttemptPublished",
+            sequence: this.#sequences.take(),
+            artifactDigest: artifact.digest,
+            headSha: publication.commitSha,
+          });
+          return;
+        }
+        await this.#attempts.assertReservation(lease, reservation!, item.id);
+        const sequence = this.#sequences.take();
+        publishedEvent = parseFactoryEvent({
+          protocol: PROTOCOL_V2,
+          kind: "attempt",
           event: "AttemptPublished",
-          sequence: this.#sequences.take(),
+          ...writerAuthority(lease, sequence),
+          objective: reservation!.objective,
+          runId: reservation!.runId,
+          workItem: reservation!.workItem,
+          attempt: reservation!.attempt,
+          backend: reservation!.backend,
+          baseSha: reservation!.baseSha,
+          directorEpoch: reservation!.directorEpoch,
+          policyDigest: reservation!.policyDigest,
+          ...(reservation!.directorEpoch === lease.epoch ? {} : { recoveryEpoch: lease.epoch }),
+          sequence,
+          at: (await this.#store.serverTime()).toISOString(),
           artifactDigest: artifact.digest,
           headSha: publication.commitSha,
-        }),
-      );
+        });
+      });
       const metadata = parseGraphItemMetadata(item.body ?? "");
       const itemPlan = this.#deliveryPlan?.items.find(
         (candidate) => candidate.itemId === metadata.id,
@@ -7765,6 +7829,7 @@ export class FactorySupervisor {
       await this.#lease.use((lease) =>
         this.#recorder.publication({
           lease,
+          ...(publishedEvent ? { precedingEvents: [publishedEvent] } : {}),
           workItemNodeId: item.id,
           sequence: this.#sequences.take(),
           receipt,
@@ -8059,44 +8124,53 @@ export class FactorySupervisor {
               })
               .catch(() => {});
           }
-          if (executionBudgetReserved && !executionBudgetReconciled) {
+          const reconcileExecution = executionBudgetReserved && !executionBudgetReconciled;
+          const reconcileValidation =
+            validationBudgetReserved && !validationBudgetReconciled
+              ? validationBudgetUnit
+              : undefined;
+          if (reconcileExecution || reconcileValidation) {
             await this.#lease.use(async (lease) => {
-              const event = await this.#recorder.budget({
-                lease,
-                workItemNodeId: item.id,
-                reservation: reservation!,
-                sequence: this.#sequences.take(),
-                event: "BudgetReconciled",
-                unit: budgetUnit,
-                amount: backendLaunchAttempted
-                  ? budgetUnit === "managed_sessions"
-                    ? 1
-                    : Date.now() - started
-                  : 0,
-              });
-              this.#budgetEvents.push(event);
-              executionBudgetReconciled = true;
-            });
-          }
-          if (validationBudgetReserved && !validationBudgetReconciled && validationBudgetUnit) {
-            const unit = validationBudgetUnit;
-            await this.#lease.use(async (lease) => {
-              const event = await this.#recorder.budget({
-                lease,
-                workItemNodeId: item.id,
-                reservation: reservation!,
-                sequence: this.#sequences.take(),
-                event: "BudgetReconciled",
-                unit,
-                phase: "validation",
-                amount: validationStartedAt
-                  ? unit === "managed_sessions"
-                    ? 1
-                    : Date.now() - validationStartedAt
-                  : 0,
-              });
-              this.#budgetEvents.push(event);
-              validationBudgetReconciled = true;
+              const events = await this.#recorder.budgetBatch([
+                ...(reconcileExecution
+                  ? [
+                      {
+                        lease,
+                        workItemNodeId: item.id,
+                        reservation: reservation!,
+                        sequence: this.#sequences.take(),
+                        event: "BudgetReconciled" as const,
+                        unit: budgetUnit,
+                        amount: backendLaunchAttempted
+                          ? budgetUnit === "managed_sessions"
+                            ? 1
+                            : Date.now() - started
+                          : 0,
+                      },
+                    ]
+                  : []),
+                ...(reconcileValidation
+                  ? [
+                      {
+                        lease,
+                        workItemNodeId: item.id,
+                        reservation: reservation!,
+                        sequence: this.#sequences.take(),
+                        event: "BudgetReconciled" as const,
+                        unit: reconcileValidation,
+                        phase: "validation" as const,
+                        amount: validationStartedAt
+                          ? reconcileValidation === "managed_sessions"
+                            ? 1
+                            : Date.now() - validationStartedAt
+                          : 0,
+                      },
+                    ]
+                  : []),
+              ]);
+              this.#budgetEvents.push(...events);
+              if (reconcileExecution) executionBudgetReconciled = true;
+              if (reconcileValidation) validationBudgetReconciled = true;
             });
           }
           await this.#lease.use((lease) =>
@@ -9104,6 +9178,158 @@ export class FactorySupervisor {
     return `${prefix}-${record.identityDigest}`;
   }
 
+  async #persistReviewResult(
+    lease: LeaseState,
+    identity: ReviewIdentity,
+    result: ReviewResult,
+    item: DerivedWorkItem,
+    reservation?: AttemptReservation,
+  ): Promise<ReviewCheckpointRecord> {
+    if (this.#run.recordProtocol !== RESULT_RECORD_PROTOCOL)
+      return this.#reviews.persist({ lease, identity, result });
+    const prefix =
+      identity.kind === "integration-candidate"
+        ? "integration-review"
+        : identity.kind === "rebase"
+          ? "rebase-review"
+          : "review";
+    const usageId = `${prefix}-${reviewIdentityDigest(identity)}`;
+    const link = this.#modelInvocationLink(
+      usageId,
+      reservation,
+      reservation ? undefined : item.number,
+    );
+    if (!link.modelInvocationId || link.directorEpoch === undefined || !link.policyDigest)
+      throw new Error("review result lacks its exact durable invocation intent");
+    const invocationKey = modelInvocationKey({
+      objective: this.#run.objective,
+      runId: this.#run.runId,
+      workItem: item.number,
+      attempt: reservation?.attempt,
+      phase: "management",
+      modelInvocationId: usageId,
+    });
+    const invocation = this.#budgetEvents.find(
+      (event) => isModelInvocationMarker(event) && modelInvocationKey(event) === invocationKey,
+    );
+    if (!invocation) throw new Error("review result lacks its durable invocation marker");
+    const now = (await this.#store.serverTime("cleanup")).toISOString();
+    const sequence = this.#sequences.take();
+    const events: FactoryEvent[] = [
+      parseFactoryEvent({
+        protocol: PROTOCOL_V2,
+        kind: "budget",
+        event: "BudgetReconciled",
+        ...writerAuthority(lease, sequence),
+        objective: this.#run.objective,
+        runId: this.#run.runId,
+        workItem: item.number,
+        ...(reservation ? { attempt: reservation.attempt } : {}),
+        sequence,
+        at: now,
+        phase: "management",
+        unit: "model_tokens",
+        amount: result.usage.inputTokens + result.usage.outputTokens,
+        usageId,
+        ...link,
+        reportedModelUsage: reportedModelUsage(result.usage)!,
+      }),
+    ];
+    if (
+      identity.kind === "artifact" &&
+      reservation &&
+      result.review.accepted &&
+      result.review.unmetCriteria.length === 0
+    ) {
+      await this.#attempts.assertReservation(lease, reservation, item.id);
+      const acceptedSequence = this.#sequences.take();
+      events.push(
+        parseFactoryEvent({
+          protocol: PROTOCOL_V2,
+          kind: "attempt",
+          event: "AttemptValidated",
+          ...writerAuthority(lease, acceptedSequence),
+          objective: reservation.objective,
+          runId: reservation.runId,
+          workItem: reservation.workItem,
+          attempt: reservation.attempt,
+          backend: reservation.backend,
+          baseSha: reservation.baseSha,
+          directorEpoch: reservation.directorEpoch,
+          policyDigest: reservation.policyDigest,
+          ...(reservation.directorEpoch === lease.epoch ? {} : { recoveryEpoch: lease.epoch }),
+          sequence: acceptedSequence,
+          at: now,
+          artifactDigest: identity.artifactDigest,
+          reason: result.review.summary,
+        }),
+      );
+    }
+    const record = await this.#reviews.persist({
+      lease,
+      identity,
+      result,
+      transition: {
+        issueNodeId: item.id,
+        sequence: this.#sequences.take(),
+        at: now,
+        events,
+        invocation,
+      },
+    });
+    // Acknowledged accounting is working state, not authenticated snapshot membership.
+    this.#budgetEvents = deduplicateFactoryEvents([
+      ...this.#budgetEvents,
+      ...(record.resultEvents ?? []).filter((event) => event.kind === "budget"),
+    ]);
+    return record;
+  }
+
+  async #persistValidationResult(
+    lease: LeaseState,
+    reservation: AttemptReservation,
+    artifactDigest: string,
+    evidence: CleanValidationResult["evidence"],
+    item: DerivedWorkItem,
+  ): Promise<void> {
+    const identity = this.#validationIdentity(reservation, artifactDigest);
+    if (this.#run.recordProtocol !== RESULT_RECORD_PROTOCOL) {
+      await this.#validations.persist({ lease, identity, evidence });
+      await this.#recorder.validation({
+        lease,
+        reservation,
+        evidence,
+        workItemNodeId: item.id,
+        sequence: this.#sequences.take(),
+      });
+      return;
+    }
+    const at = (await this.#store.serverTime("cleanup")).toISOString();
+    const sequence = this.#sequences.take();
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "validation",
+      event: "ValidationRecorded",
+      ...writerAuthority(lease, sequence),
+      objective: reservation.objective,
+      runId: reservation.runId,
+      workItem: reservation.workItem,
+      attempt: reservation.attempt,
+      sequence,
+      at,
+      baseSha: evidence.baseSha,
+      outputTreeSha: evidence.outputTreeSha,
+      passed: evidence.passed,
+      evidenceDigest: evidence.digest,
+    });
+    await this.#validations.persist({
+      lease,
+      identity,
+      evidence,
+      transition: { issueNodeId: item.id, sequence: this.#sequences.take(), at, events: [event] },
+    });
+  }
+
   #assertManagementInvocationNotFailed(invocationId: string): void {
     assertManagementInvocationNotFailed(this.#budgetEvents, this.#run.runId, invocationId);
   }
@@ -9292,7 +9518,7 @@ export class FactorySupervisor {
       ...(invoke ? { invoke } : {}),
       persist: (result) =>
         this.#lease.use((lease) =>
-          this.#reviews.persist({ lease, identity: reviewIdentity, result }),
+          this.#persistReviewResult(lease, reviewIdentity, result, item, reservation),
         ),
       recover: () => this.#reviews.load(reviewIdentity),
       recordFailureUsage: (usage) =>
@@ -9781,11 +10007,21 @@ export class FactorySupervisor {
     item: DerivedWorkItem,
     reservation: AttemptReservation,
   ): Promise<void> {
-    if (!record.review.accepted) {
+    if (!record.review.accepted || record.review.unmetCriteria.length > 0) {
       throw new Error(
         `semantic review rejected: ${record.review.summary}; ${record.review.unmetCriteria.join("; ")}`,
       );
     }
+    if (
+      record.resultReceipt &&
+      (await this.#lease.use(
+        async (lease) =>
+          record.resultReceipt!.writerEpoch === lease.epoch &&
+          record.resultReceipt!.writerHolder === lease.holder &&
+          record.resultReceipt!.writerPolicyDigest === lease.policyDigest,
+      ))
+    )
+      return;
     const matches = (events: readonly FactoryEvent[]) =>
       events.some(
         (event) =>
@@ -9825,7 +10061,7 @@ export class FactorySupervisor {
     validation: Pick<CleanValidationResult, "evidence">,
     receipt: PublicationReceipt,
   ): Promise<void> {
-    if (!record.review.accepted) {
+    if (!record.review.accepted || record.review.unmetCriteria.length > 0) {
       throw new Error(
         `rebased semantic review rejected: ${record.review.summary}; ${record.review.unmetCriteria.join("; ")}`,
       );
@@ -11025,7 +11261,7 @@ export class FactorySupervisor {
             : members[index - 1]!.receipt.branch;
         const expectedBaseSha =
           index === 0 || ordered[index - 1]!.state === "done"
-            ? (await this.#store.getBranchHead(this.#baseBranch)).oid
+            ? await this.#store.getBranchHeadOid(this.#baseBranch)
             : members[index - 1]!.observedHeadSha;
         if (current.baseRef !== expectedBaseRef || current.baseSha !== expectedBaseSha) {
           // GitHub's server-side cascading rebase is still settling. The
@@ -11053,8 +11289,10 @@ export class FactorySupervisor {
       // A retained member keeps its ORIGINAL exact-head proof even when GitHub
       // rebased it before the successor integrated it. The verified successor
       // outcome, not relabelling that proof, accounts for its delivered head.
-      if (member.reservation.runId !== this.#run.runId && ordered[index]!.state === "done")
+      if (member.reservation.runId !== this.#run.runId && ordered[index]!.state === "done") {
+        this.#integrationWaits.delete(member.receipt.workItem);
         continue;
+      }
       const current = await this.#store.readPullRequest(member.pull.number);
       if (current.headSha !== member.pull.commitSha) {
         throw new Error(`stack Work Item ${member.receipt.itemId} changed after validation`);
@@ -11068,8 +11306,12 @@ export class FactorySupervisor {
           `stack Work Item ${member.receipt.itemId} targets ${current.baseRef}, expected ${expectedBaseBranch}`,
         );
       }
-      if (ordered[index]!.state === "done" && !remaining.includes(ordered[index]!)) continue;
+      if (ordered[index]!.state === "done" && !remaining.includes(ordered[index]!)) {
+        this.#integrationWaits.delete(member.receipt.workItem);
+        continue;
+      }
       if (current.merged) {
+        this.#integrationWaits.delete(member.receipt.workItem);
         mergedDuringRecovery.push(member);
         continue;
       }
@@ -11084,7 +11326,7 @@ export class FactorySupervisor {
         if (Date.now() >= deadline) {
           throw new Error(`stack integration timed out: ${readiness.reason}`);
         }
-        return this.#deferIntegration(member.receipt.workItem, readiness.reason);
+        return this.#deferIntegration(member.receipt.workItem, readiness.reason, readiness);
       }
       if (readiness.state !== "ready") {
         throw new Error(
@@ -11093,6 +11335,9 @@ export class FactorySupervisor {
             : `stack member ${member.receipt.itemId} was already integrated unexpectedly`,
         );
       }
+      // This member's current observation supersedes its previous wait. A later
+      // member may still defer the stack, so retire the hint before advancing.
+      this.#integrationWaits.delete(member.receipt.workItem);
     }
     if (mergedDuringRecovery.length > 0) {
       await completeIntegrated(mergedDuringRecovery);
@@ -11302,7 +11547,7 @@ export class FactorySupervisor {
             }
             const assertNativeMergeCurrent = async () => {
               if (
-                (await this.#store.getBranchHead(this.#baseBranch)).oid !==
+                (await this.#store.getBranchHeadOid(this.#baseBranch)) !==
                 integratingMembers[0]!.receipt.baseSha
               )
                 throw new Error("native integration base advanced before dispatch");
@@ -12124,7 +12369,7 @@ export class FactorySupervisor {
         ...(invokeReview ? { invoke: invokeReview } : {}),
         persist: (result) =>
           this.#lease.use((lease) =>
-            this.#reviews.persist({ lease, identity: reviewIdentity, result }),
+            this.#persistReviewResult(lease, reviewIdentity, result, item, member.reservation),
           ),
         recover: () => this.#reviews.load(reviewIdentity),
         recordUsage: (record) => this.#recordReviewUsage(record, item, member.reservation),
@@ -12405,7 +12650,7 @@ export class FactorySupervisor {
   }
 
   async #assertRefreshTarget(targetBaseSha: string, workItem: number): Promise<void> {
-    const current = (await this.#store.getBranchHead(this.#baseBranch)).oid;
+    const current = await this.#store.getBranchHeadOid(this.#baseBranch);
     if (current === targetBaseSha) return;
     await this.#assertOwnTrunkAdvance(targetBaseSha, current, workItem);
     throw new SiblingRefreshTargetAdvancedError(
@@ -13511,7 +13756,7 @@ export class FactorySupervisor {
       ...(invokeReview ? { invoke: invokeReview } : {}),
       persist: (result) =>
         this.#lease.use((lease) =>
-          this.#reviews.persist({ lease, identity: reviewIdentity, result }),
+          this.#persistReviewResult(lease, reviewIdentity, result, item, member.reservation),
         ),
       recover: () => this.#reviews.load(reviewIdentity),
       recordUsage: (review) => this.#recordReviewUsage(review, item, member.reservation),
@@ -14278,7 +14523,7 @@ export class FactorySupervisor {
       return;
     const target = observed.merged
       ? (await this.#store.readCommit(observed.mergeCommitSha!)).parentOids[0]!
-      : (await this.#store.getBranchHead(this.#baseBranch)).oid;
+      : await this.#store.getBranchHeadOid(this.#baseBranch);
     const unit = this.#deliveryPlan?.units.find((entry) =>
       entry.items.includes(planItem.compilerId),
     );
@@ -15266,7 +15511,7 @@ export class FactorySupervisor {
         ...(invoke ? { invoke } : {}),
         persist: (result) =>
           this.#lease.use((lease) =>
-            this.#reviews.persist({ lease, identity: reviewIdentity, result }),
+            this.#persistReviewResult(lease, reviewIdentity, result, item),
           ),
         recover: () => this.#reviews.load(reviewIdentity),
         recordUsage: (review) =>
@@ -15337,7 +15582,17 @@ export class FactorySupervisor {
     // Local execution/fairness revisions wake immediately. The timeout only
     // reconciles external changes; worker cancellation retains its separate poll.
     const normalMaximum = this.#options.pollIntervalMs ?? 60_000;
-    const maximumMs = Math.max(1, Math.min(normalMaximum, objectiveDeadline - Date.now()));
+    // Unlike generic retry hints, a known grace expiry must also wake when it
+    // elapsed during this iteration. Ignoring it here adds another full poll.
+    const knownGraceDeadline = Math.min(
+      ...[...this.#integrationWaits.values()]
+        .filter((wait) => wait.evidence?.code === "first-check-grace")
+        .map((wait) => wait.until),
+    );
+    const maximumMs = Math.max(
+      1,
+      Math.min(normalMaximum, objectiveDeadline - Date.now(), knownGraceDeadline - Date.now()),
+    );
     const settled = await waitForProgress({
       executions: activeExecutions,
       executionRevision,
@@ -15350,11 +15605,23 @@ export class FactorySupervisor {
     if (settled?.error) throw new ClaimedExecutionFailure(settled);
   }
 
-  #deferIntegration(workItem: number, reason: string): false {
+  #deferIntegration(workItem: number, reason: string, evidence?: IntegrationWait): false {
     const previous = this.#integrationWaits.get(workItem);
     const interval = Math.max(1, Math.min(this.#options.pollIntervalMs ?? 60_000, 60_000));
-    const delay = Math.min(previous ? previous.delay * 2 : interval, interval * 5);
-    this.#integrationWaits.set(workItem, { until: Date.now() + delay, delay, reason });
+    const unchanged =
+      previous?.reason === reason &&
+      previous.evidence?.code === evidence?.code &&
+      previous.evidence?.headSha === evidence?.headSha &&
+      previous.evidence?.baseSha === evidence?.baseSha;
+    const delay = Math.min(unchanged ? previous.delay * 2 : interval, interval * 5);
+    const deadline = this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000;
+    const until = Math.min(deadline, evidence?.notBefore ?? Date.now() + delay);
+    this.#integrationWaits.set(workItem, {
+      until,
+      delay,
+      reason,
+      ...(evidence ? { evidence } : {}),
+    });
     if (previous?.reason !== reason)
       this.#notify(`Work Item #${workItem} integration waiting: ${reason}`);
     return false;
@@ -15457,6 +15724,7 @@ export class FactorySupervisor {
       const validatedBase =
         candidate?.identity.targetBaseSha ??
         (adoptedSource ? pull.exactHeadValidation.baseSha : reservation.baseSha);
+      let waitEvidence: IntegrationWait | undefined;
       const readiness = await this.#serializeIntegration(async () => {
         // Cheap non-authoritative readiness avoids creating coordination records during
         // ordinary pending-check polls. All checks are repeated under the shared claim.
@@ -15489,6 +15757,7 @@ export class FactorySupervisor {
                 : {}),
           },
         );
+        if (observedReadiness.state === "wait") waitEvidence = observedReadiness;
         if (observedReadiness.state !== "ready") return observedReadiness;
         const controller = this.#lease;
         const capturedOwner = await controller.use(async (lease) => ({
@@ -15537,6 +15806,7 @@ export class FactorySupervisor {
                       : {}),
                 },
               );
+              if (current.state === "wait") waitEvidence = current;
               if (current.state !== "ready") return current;
               if (candidate) {
                 // REST mergeable/test-merge metadata can lag a trunk update. Check GitHub's
@@ -15746,7 +16016,7 @@ export class FactorySupervisor {
       // A pending check is controller state, not a worker-sized blocking task.
       // Return after one observation so stale resources, other reviews, and
       // newly-ready work can progress on the next snapshot.
-      return this.#deferIntegration(item.number, readiness.reason);
+      return this.#deferIntegration(item.number, readiness.reason, waitEvidence);
     }
   }
 
@@ -15781,7 +16051,7 @@ export class FactorySupervisor {
             throw new Error("merged sibling is not a squash commit");
           targetBaseSha = merge.parentOids[0]!;
         } else {
-          targetBaseSha = (await this.#store.getBranchHead(this.#baseBranch)).oid;
+          targetBaseSha = await this.#store.getBranchHeadOid(this.#baseBranch);
         }
         const refresh =
           targetBaseSha === member.pull.exactHeadValidation.baseSha ||
@@ -16018,7 +16288,7 @@ export class FactorySupervisor {
       throw new Error("completed ordinary integration lacks an exact squash parent");
     const targetBaseSha = merge
       ? merge.parentOids[0]!
-      : (await this.#store.getBranchHead(this.#baseBranch)).oid;
+      : await this.#store.getBranchHeadOid(this.#baseBranch);
     // Provider-managed branches remain provider-owned. Validate GitHub's exact
     // test-merge candidate under the independently authorized validator instead
     // of rewriting their head or bypassing stale-base checks.

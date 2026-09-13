@@ -1,53 +1,56 @@
+import type { FactoryEvent } from "../protocol/events.js";
 import { createHash } from "node:crypto";
 
-import { z } from "zod";
+import type { z } from "zod";
 
-import { gitSha, safeId, sha256Digest } from "../protocol/limits.js";
 import {
-  ValidationEvidenceSchema,
-  verifyValidationEvidence,
-  type ValidationEvidence,
-} from "../validation/evidence.js";
+  ValidationIdentitySchema,
+  ValidationCheckpointSchema,
+} from "../protocol/result-checkpoints.js";
+import { verifyValidationEvidence, type ValidationEvidence } from "../validation/evidence.js";
 import { gitBlobOid, type CompiledGraphReadStore, type CompiledGraphStore } from "./graphs.js";
 import type { LeaseManager, LeaseState } from "./lease.js";
+
+import {
+  canonicalResult,
+  persistResultCheckpoint,
+  readResultCheckpoint,
+  resultReadStore,
+  readResultSelection,
+  resultReceiptLocator,
+  type CommentResultLocator,
+  type ResultTransition,
+  type ResultReceipt,
+} from "./result-receipts.js";
 
 const CHECKPOINT_PATH = ".clockgrove-factory/control/validation.json";
 const MAX_CHECKPOINT_BYTES = 512 * 1024;
 
-const ValidationIdentitySchema = z
-  .object({
-    runId: safeId,
-    objective: z.number().int().positive(),
-    workItem: z.number().int().positive(),
-    attempt: z.number().int().positive(),
-    artifactDigest: sha256Digest,
-    baseSha: gitSha,
-    directorEpoch: z.number().int().positive(),
-    policyDigest: sha256Digest,
-  })
-  .strict();
-
-const ValidationCheckpointSchema = z
-  .object({
-    protocol: z.literal("clockgrove.factory/validation-checkpoint-v1"),
-    identityDigest: sha256Digest,
-    identity: ValidationIdentitySchema,
-    writerEpoch: z.number().int().positive(),
-    evidence: ValidationEvidenceSchema,
-  })
-  .strict();
-
 export type ValidationIdentity = z.infer<typeof ValidationIdentitySchema>;
 
-export interface ValidationCheckpointRecord {
-  ref: string;
-  commitOid: string;
-  blobOid: string;
+export type ValidationCheckpointRecord = (
+  | {
+      ref: string;
+      commitOid: string;
+      blobOid: string;
+      locator?: undefined;
+      resultReceipt?: undefined;
+      resultEvents?: undefined;
+    }
+  | {
+      locator: CommentResultLocator;
+      resultReceipt: ResultReceipt;
+      resultEvents: FactoryEvent[];
+      ref?: undefined;
+      commitOid?: undefined;
+      blobOid?: undefined;
+    }
+) & {
   identityDigest: string;
   identity: ValidationIdentity;
   writerEpoch: number;
   evidence: ValidationEvidence;
-}
+};
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -101,10 +104,61 @@ export async function loadValidationCheckpoint(
 ): Promise<ValidationCheckpointRecord | null> {
   const identity = ValidationIdentitySchema.parse(identityInput);
   const identityDigest = validationIdentityDigest(identity);
+  const receiptStore = resultReadStore(store);
+  if (receiptStore) {
+    const selected = await readResultSelection(receiptStore, {
+      objective: identity.objective,
+      runId: identity.runId,
+      workItem: identity.workItem,
+      kind: "validation",
+      identityDigest,
+    });
+    if (selected.protocol) {
+      let winner: ValidationCheckpointRecord | null = null;
+      for (const record of selected.receipts) {
+        const receipt = ValidationCheckpointSchema.parse(
+          await readResultCheckpoint(store, record, identity.baseSha, MAX_CHECKPOINT_BYTES),
+        );
+        if (
+          receipt.identityDigest !== identityDigest ||
+          canonicalResult(receipt.identity) !== canonicalResult(identity)
+        ) {
+          throw new Error("validation result has a different immutable identity");
+        }
+        assertBinding(identity, receipt.evidence, receipt.writerEpoch);
+        if (
+          receipt.writerEpoch !== record.receipt.writerEpoch ||
+          identity.policyDigest !== record.receipt.writerPolicyDigest
+        )
+          throw new Error("validation writer binding differs");
+        const candidate: ValidationCheckpointRecord = {
+          locator: resultReceiptLocator(record),
+          resultReceipt: record.receipt,
+          resultEvents: record.events,
+          identityDigest,
+          identity,
+          writerEpoch: receipt.writerEpoch,
+          evidence: receipt.evidence,
+        };
+        if (winner && canonicalResult(winner.evidence) !== canonicalResult(candidate.evidence)) {
+          throw new Error("conflicting authenticated validation checkpoints");
+        }
+
+        if (
+          winner?.locator &&
+          candidate.locator &&
+          winner.locator.receiptDigest !== candidate.locator.receiptDigest
+        )
+          throw new Error("conflicting authenticated result receipt identities");
+        winner ??= candidate;
+      }
+      return winner;
+    }
+  }
   const ref = validationCheckpointRef(identity);
   const commitOid = await store.readRef(ref);
   if (!commitOid) return null;
-  const commit = await store.readCommit(commitOid);
+  const commit = await (store.readCommitContent?.(commitOid) ?? store.readCommit(commitOid));
   if (
     commit.oid !== commitOid ||
     commit.parentOids.length !== 1 ||
@@ -151,6 +205,19 @@ export class ValidationCheckpointManager {
     lease: LeaseState;
     identity: ValidationIdentity;
     evidence: ValidationEvidence;
+    transition?: undefined;
+  }): Promise<Extract<ValidationCheckpointRecord, { ref: string }>>;
+  async persist(args: {
+    lease: LeaseState;
+    identity: ValidationIdentity;
+    evidence: ValidationEvidence;
+    transition: ResultTransition;
+  }): Promise<ValidationCheckpointRecord>;
+  async persist(args: {
+    lease: LeaseState;
+    identity: ValidationIdentity;
+    evidence: ValidationEvidence;
+    transition?: ResultTransition | undefined;
   }): Promise<ValidationCheckpointRecord> {
     await this.leases.assertMutationAuthorized(args.lease);
     const identity = ValidationIdentitySchema.parse(args.identity);
@@ -163,6 +230,50 @@ export class ValidationCheckpointManager {
       throw new Error("validation checkpoint identity is fenced from the current lease");
     }
     assertBinding(identity, args.evidence, args.lease.epoch);
+    if (args.transition) {
+      const identityDigest = validationIdentityDigest(identity);
+      const receipt = ValidationCheckpointSchema.parse({
+        protocol: "clockgrove.factory/validation-checkpoint-v1",
+        identityDigest,
+        identity,
+        writerEpoch: args.lease.epoch,
+        evidence: args.evidence,
+      });
+      const record = await persistResultCheckpoint({
+        store: this.store,
+        leases: this.leases,
+        lease: args.lease,
+        scope: {
+          objective: identity.objective,
+          runId: identity.runId,
+          workItem: identity.workItem,
+          kind: "validation",
+          identityDigest,
+        },
+        transition: args.transition,
+        checkpoint: receipt,
+        baseSha: identity.baseSha,
+        maxBytes: MAX_CHECKPOINT_BYTES,
+      });
+      return {
+        locator: resultReceiptLocator(record),
+        resultReceipt: record.receipt,
+        resultEvents: record.events,
+        identityDigest,
+        identity,
+        writerEpoch: record.receipt.writerEpoch,
+        evidence: args.evidence,
+      };
+    }
+    const selection = await resultReadStore(this.store)?.readResultReceipts({
+      objective: identity.objective,
+      runId: identity.runId,
+      workItem: identity.workItem,
+      kind: "validation",
+      identityDigest: validationIdentityDigest(identity),
+    });
+    if (selection?.protocol)
+      throw new Error("transition receipt run requires explicit result transition");
     const existing = await this.load(identity);
     if (existing) {
       if (!sameCheckpoint(existing, args.evidence)) {

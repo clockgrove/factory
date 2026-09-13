@@ -9,7 +9,7 @@ import {
   sha256,
   verifyMaterializedFiles,
 } from "../execution/artifact-content.js";
-import type { GitCommitObject } from "../control/lease.js";
+import type { GitCommitContent, GitCommitObject } from "../control/lease.js";
 import {
   verifyPlannedSiblingRefreshCommit,
   type SiblingRefreshRecord,
@@ -45,6 +45,7 @@ export interface PublicationStore {
   ): Promise<T>;
   readRef(ref: string): Promise<string | null>;
   readCommit(oid: string): Promise<GitCommitObject>;
+  readCommitContent?(oid: string): Promise<GitCommitContent>;
   /** Required only for independent immutable sibling-refresh verification. */
   readTreeEntry?(treeOid: string, path: string): Promise<string | null>;
   readBlob?(oid: string): Promise<Buffer>;
@@ -134,9 +135,19 @@ export interface PublishedPullRequest {
   exactHeadValidation: ExactHeadValidationEvidence;
 }
 
+export interface IntegrationWait {
+  state: "wait";
+  reason: string;
+  code: "checks-pending" | "checks-missing" | "first-check-grace" | "mergeability-pending";
+  headSha: string;
+  baseSha: string;
+  /** A scheduling hint, never permission to merge. */
+  notBefore?: number;
+}
+
 export type IntegrationReadiness =
   | { state: "ready"; headSha: string }
-  | { state: "wait"; reason: string }
+  | IntegrationWait
   | { state: "failed"; reason: string }
   | { state: "integrated"; headSha: string };
 
@@ -167,7 +178,8 @@ export async function verifySquashIntegration(
   mergeCommitSha: string,
   expectedBaseSha = pull.exactHeadValidation.baseSha,
 ): Promise<void> {
-  const commit = await store.readCommit(mergeCommitSha);
+  const commit = await (store.readCommitContent?.(mergeCommitSha) ??
+    store.readCommit(mergeCommitSha));
   if (
     commit.parentOids.length !== 1 ||
     commit.parentOids[0] !== expectedBaseSha ||
@@ -278,7 +290,8 @@ export async function publishValidated(args: {
   let commitSha = await args.store.readRef(`refs/heads/${branch}`);
   let treeOid: string;
   if (commitSha) {
-    const commit = await args.store.readCommit(commitSha);
+    const commit = await (args.store.readCommitContent?.(commitSha) ??
+      args.store.readCommit(commitSha));
     if (
       commit.treeOid !== args.validation.evidence.outputTreeSha ||
       commit.parentOids.length !== 1 ||
@@ -346,7 +359,8 @@ export async function publishValidated(args: {
     if (!branchCreated) {
       const recoveredSha = await args.store.readRef(`refs/heads/${branch}`);
       if (!recoveredSha) throw new Error(`publication branch ${branch} was not created`);
-      const recovered = await args.store.readCommit(recoveredSha);
+      const recovered = await (args.store.readCommitContent?.(recoveredSha) ??
+        args.store.readCommit(recoveredSha));
       if (
         recovered.treeOid !== treeOid ||
         recovered.parentOids.length !== 1 ||
@@ -475,7 +489,8 @@ export async function integrationReadiness(
   if (current.headSha !== (deliveryHeadSha ?? pull.commitSha))
     return { state: "failed", reason: "pull request head changed after validation" };
   if (deliveryHeadSha !== undefined && candidate && !refresh) {
-    const delivery = await store.readCommit(deliveryHeadSha);
+    const delivery = await (store.readCommitContent?.(deliveryHeadSha) ??
+      store.readCommit(deliveryHeadSha));
     if (
       delivery.oid !== deliveryHeadSha ||
       delivery.parentOids.length !== 1 ||
@@ -537,11 +552,20 @@ export async function integrationReadiness(
   if (checks.failed.length > 0)
     return { state: "failed", reason: `checks failed: ${checks.failed.join(", ")}` };
   if (checks.pending.length > 0)
-    return { state: "wait", reason: `checks pending: ${checks.pending.join(", ")}` };
+    return {
+      state: "wait",
+      code: "checks-pending",
+      headSha: current.headSha,
+      baseSha: current.baseSha,
+      reason: `checks pending: ${checks.pending.join(", ")}`,
+    };
   const noChecksObserved = (checks.observed?.length ?? 0) === 0;
   if (noChecksObserved && options.ciExpected !== false && options.ciExpected !== undefined) {
     return {
       state: "wait",
+      code: "checks-missing",
+      headSha: current.headSha,
+      baseSha: current.baseSha,
       reason:
         options.ciExpected === "unknown"
           ? "cannot determine whether repository CI is expected and no checks have appeared"
@@ -554,12 +578,22 @@ export async function integrationReadiness(
     if (now.getTime() - current.createdAt.getTime() < graceMs) {
       return {
         state: "wait",
+        code: "first-check-grace",
+        headSha: current.headSha,
+        baseSha: current.baseSha,
+        notBefore: current.createdAt.getTime() + graceMs,
         reason: "waiting for the pull request's first checks to appear",
       };
     }
   }
   if (current.mergeable === null || current.mergeableState === "unknown") {
-    return { state: "wait", reason: "GitHub is still computing mergeability" };
+    return {
+      state: "wait",
+      code: "mergeability-pending",
+      headSha: current.headSha,
+      baseSha: current.baseSha,
+      reason: "GitHub is still computing mergeability",
+    };
   }
   if (!current.mergeable || current.mergeableState === "dirty") {
     return { state: "failed", reason: "pull request conflicts with the base branch" };

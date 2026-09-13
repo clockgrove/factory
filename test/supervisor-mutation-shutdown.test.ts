@@ -39,6 +39,14 @@ it("the actual Supervisor drains and releases its owned lease after a queued rec
         }
       : null,
   );
+  // Shared capacity reads the fresh lease observation directly. Supply the
+  // same owner as the fixture's legacy read instead of crossing into transport.
+  vi.spyOn(LeaseManager.prototype, "readObserved").mockImplementation(async function (
+    this: LeaseManager,
+    objective,
+  ) {
+    return { lease: await this.read(objective), serverTime: new Date() };
+  });
   const shutdown = new AbortController();
   let reached!: () => void;
   const queued = new Promise<void>((resolve) => {

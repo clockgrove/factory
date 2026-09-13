@@ -1,3 +1,6 @@
+import { boundedReadStore } from "../src/recovery/runtime.js";
+import { resultReadStore, RESULT_RECORD_PROTOCOL } from "../src/control/result-receipts.js";
+import type { RecoveryReadStore } from "../src/recovery/assessment.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GitHubReader, cancellationRequestFromComments } from "../src/github.js";
 import { GitHubControlStore } from "../src/control/github-store.js";
@@ -586,7 +589,10 @@ describe("Supervisor activation withdrawal races", () => {
       planDigest: planRecord.digest,
       successorRunId: planRecord.plan.successorRunId,
     });
-    expect(resumed).toMatchObject({ status: "completed", runId: "greenfield-successor" });
+    expect(resumed, resumed.reason).toMatchObject({
+      status: "completed",
+      runId: "greenfield-successor",
+    });
     expect(f.compile).toHaveBeenCalledOnce();
     expect(
       f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.workItem),
@@ -1063,4 +1069,30 @@ describe("Supervisor activation withdrawal races", () => {
     expect(f.review).not.toHaveBeenCalled();
     expect(f.narrowRead).toHaveBeenCalledWith(7, f.runId, "operator", f.binding);
   });
+});
+
+it("preserves selected-result capabilities through the bounded recovery facade", async () => {
+  const readResultReceipts = vi.fn(async () => ({
+    protocol: RESULT_RECORD_PROTOCOL,
+    receipts: [],
+  }));
+  const port = boundedReadStore(
+    Object.freeze({ readResultReceipts }) as unknown as RecoveryReadStore,
+  );
+  const selected = resultReadStore(port);
+  expect(selected).not.toBeNull();
+  const scope = {
+    objective: 7,
+    runId: "source",
+    workItem: 8,
+    kind: "review" as const,
+    identityDigest: "a".repeat(64),
+  };
+  expect(await selected!.readResultReceipts(scope)).toEqual({
+    protocol: RESULT_RECORD_PROTOCOL,
+    receipts: [],
+  });
+  await selected!.readResultReceipts(scope);
+  expect(readResultReceipts).toHaveBeenCalledOnce();
+  expect(resultReadStore(boundedReadStore(Object.freeze({}) as RecoveryReadStore))).toBeNull();
 });

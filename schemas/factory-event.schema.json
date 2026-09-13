@@ -313,6 +313,7 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$"
     },
+    "recordProtocol": { "enum": ["clockgrove.factory/transition-receipt-v1"] },
     "policyDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
     "recoveryRequestId": { "$ref": "#/definitions/safeId" },
     "recoveryPlanDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },

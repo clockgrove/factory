@@ -95,6 +95,42 @@ function fixture() {
   return { ledger, store, refs, commits, identity, assertCurrent, proof, transition };
 }
 describe("issue scoped admission CAS", () => {
+  it("reuses immutable ledger content but reads the current ref and honors a new revision", async () => {
+    const f = fixture();
+    await f.ledger.admit({ ...f.identity, assertCurrent: f.assertCurrent });
+    const cache = new Map<string, Omit<GitCommitObject, "serverTime">>();
+    let refs = 0;
+    let transports = 0;
+    const reader = new IssueAdmissionLedger({
+      ...f.store,
+      readRef: async (ref) => {
+        refs++;
+        return f.store.readRef(ref);
+      },
+      readCommit: async () => {
+        throw Error("unexpected clock-bearing read");
+      },
+      readCommitContent: async (oid) => {
+        let value = cache.get(oid);
+        if (!value) {
+          transports++;
+          const { serverTime: _time, ...content } = await f.store.readCommit(oid);
+          value = content;
+          cache.set(oid, value);
+        }
+        return structuredClone(value);
+      },
+    });
+    expect((await reader.read(10))!.history[0]!.disposition).toBe("prepared");
+    expect((await reader.read(10))!.history[0]!.disposition).toBe("prepared");
+    expect({ refs, transports }).toEqual({ refs: 2, transports: 1 });
+    await f.transition("dispatching");
+    expect((await reader.read(10))!.history[0]!.disposition).toBe("dispatching");
+    expect({ refs, transports }).toEqual({ refs: 3, transports: 2 });
+    cache.clear();
+    expect((await reader.read(10))!.history[0]!.disposition).toBe("dispatching");
+    expect({ refs, transports }).toEqual({ refs: 4, transports: 3 });
+  });
   it.each([true, false])("one winner across simultaneous same/cross objective=%s", async (same) => {
     const f = fixture();
     const other = {

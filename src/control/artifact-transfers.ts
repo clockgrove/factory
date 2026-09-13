@@ -18,7 +18,7 @@ import {
   retainCurrentArtifactPayload,
 } from "../execution/artifact-content.js";
 import { assertNoSecretMaterial, gitSha, sha256Digest } from "../protocol/limits.js";
-import type { GitCommitObject } from "./lease.js";
+import type { GitCommitContent, GitCommitObject } from "./lease.js";
 
 const IdentitySchema = z
   .object({
@@ -47,7 +47,10 @@ export interface ArtifactTransferIntentCheckpoint {
 }
 const DescriptorSchema = z
   .object({
-    protocol: z.literal("clockgrove.factory/artifact-transfer-v1"),
+    protocol: z.enum([
+      "clockgrove.factory/artifact-transfer-v1",
+      "clockgrove.factory/artifact-transfer-v2",
+    ]),
     identity: IdentitySchema,
     artifact: NormalizedArtifactSchema,
     retention: z.literal("repository-audit"),
@@ -72,12 +75,19 @@ type Descriptor = z.infer<typeof DescriptorSchema>;
 export interface ArtifactTransferStore {
   readRef(ref: string): Promise<string | null>;
   readCommit(oid: string): Promise<GitCommitObject>;
+  readCommitContent?(oid: string): Promise<GitCommitContent>;
   readTreeEntry(treeOid: string, path: string): Promise<string | null>;
   readBlob(oid: string): Promise<Buffer>;
   createBlob(content: Buffer): Promise<string>;
   createTree(args: {
     baseTreeOid?: string;
-    entries: Array<{ path: string; mode: "100644"; type: "blob"; sha: string }>;
+    entries: Array<
+      {
+        path: string;
+        mode: "100644";
+        type: "blob";
+      } & ({ sha: string; content?: never } | { content: string; sha?: never })
+    >;
   }): Promise<string>;
   createCommit(args: { treeOid: string; parentOids: string[]; message: string }): Promise<string>;
   createRef(ref: string, oid: string): Promise<boolean>;
@@ -361,7 +371,7 @@ async function readDescriptor(
   const ref = `${artifactTransferRef(identity)}/${phase}`;
   const oid = await store.readRef(ref);
   if (!oid) return null;
-  const commit = await store.readCommit(oid);
+  const commit = await (store.readCommitContent?.(oid) ?? store.readCommit(oid));
   if (commit.oid !== oid || (phase === "intent" && commit.parentOids.length !== 0))
     throw new Error("artifact transfer commit identity mismatch");
   const descriptorOid = await store.readTreeEntry(commit.treeOid, "artifact-transfer.json");
@@ -377,6 +387,14 @@ async function readDescriptor(
     descriptor.artifact.baseSha !== identity.baseSha
   )
     throw new Error("artifact transfer provenance mismatch");
+  if (
+    descriptor.protocol === "clockgrove.factory/artifact-transfer-v2" &&
+    (phase !== "ready" ||
+      descriptor.artifact.payload !== undefined ||
+      descriptor.chunks.length !== 0 ||
+      commit.parentOids.length !== 0)
+  )
+    throw new Error("direct retained transfer must have no payload, intent, or parents");
   const payload = descriptor.artifact.payload;
   if (
     JSON.stringify(descriptor.chunks.map(({ digest, bytes }) => ({ digest, bytes }))) !==
@@ -404,7 +422,9 @@ export async function recoverArtifactTransfer(args: {
     if (intent) throw new ArtifactTransferIncompleteError(intent.ref);
     return null;
   }
-  if (
+  if (ready.descriptor.protocol === "clockgrove.factory/artifact-transfer-v2") {
+    if (intent) throw new Error("direct retained transfer conflicts with an upload intent");
+  } else if (
     !intent ||
     ready.commit.parentOids.length !== 1 ||
     ready.commit.parentOids[0] !== intent.oid ||
@@ -506,8 +526,20 @@ export async function persistArtifactTransfer(args: {
     for (const chunk of artifact.payload.chunks)
       chunks.push({ ...chunk, oid: gitBlobOid(await readContentChunk(chunk)) });
   }
+  // Existing intent or private pre-publication v1 bytes retain their original
+  // protocol. No historical descriptor is re-encoded as a direct completion.
+  const legacyIntent = artifact.payload
+    ? null
+    : await readDescriptor(args.store, identity, "intent");
+  const retained = artifact.payload ? null : await readLocalDescriptor(identity);
+  const direct =
+    !artifact.payload &&
+    !legacyIntent &&
+    retained?.protocol !== "clockgrove.factory/artifact-transfer-v1";
   const descriptor: Descriptor = {
-    protocol: "clockgrove.factory/artifact-transfer-v1",
+    protocol: direct
+      ? "clockgrove.factory/artifact-transfer-v2"
+      : "clockgrove.factory/artifact-transfer-v1",
     identity,
     artifact,
     retention: "repository-audit",
@@ -531,15 +563,16 @@ export async function persistArtifactTransfer(args: {
         throw new Error("artifact transfer identity already binds different content");
       return existing;
     }
-    const descriptorOid =
-      reusableDescriptorOid ?? (await mutation(() => args.store.createBlob(bytes)));
+    const descriptorOid = direct
+      ? gitBlobOid(bytes)
+      : (reusableDescriptorOid ?? (await mutation(() => args.store.createBlob(bytes))));
     if (descriptorOid !== gitBlobOid(bytes)) throw new Error("uploaded descriptor OID mismatch");
     const entries = [
       {
         path: "artifact-transfer.json",
         mode: "100644" as const,
         type: "blob" as const,
-        sha: descriptorOid,
+        ...(direct ? { content: bytes.toString("utf8") } : { sha: descriptorOid }),
       },
       ...(phase === "ready"
         ? [...new Map(chunks.map((chunk) => [chunk.digest, chunk])).values()].map((chunk) => ({
@@ -582,6 +615,17 @@ export async function persistArtifactTransfer(args: {
       throw new Error("artifact transfer ref publication conflicted", { cause: publicationError });
     return observed;
   };
+  if (direct) {
+    const ready = await save("ready", []);
+    await assertLocalDescriptorRoot(localDescriptorRoot(identity));
+    await rm(localDescriptorRoot(identity), { recursive: true, force: true });
+    return {
+      ref: ready.ref,
+      commitSha: ready.oid,
+      artifactDigest: artifact.digest,
+      lifecycle: "retained",
+    };
+  }
   const intent = await save("intent", []);
   // Reuse only exact bytes verified through the published intent. Historical
   // descriptors may serialize differently; their ready message binds fresh bytes.

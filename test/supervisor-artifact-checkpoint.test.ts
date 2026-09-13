@@ -262,7 +262,7 @@ describe("Supervisor collected artifact durability", () => {
           }
           const intercepted = new Proxy(args.store, {
             get(target, key) {
-              if (key === "createBlob")
+              if (key === "createTree" || key === "createBlob")
                 return async () => {
                   throw new Error("fixture: first external transfer write unavailable");
                 };
@@ -402,6 +402,12 @@ describe("Supervisor collected artifact durability", () => {
       retained.push(worker);
       return worker;
     });
+    const persist = transfers.persistArtifactTransfer;
+    let transfer: Parameters<typeof persist>[0] | undefined;
+    vi.spyOn(transfers, "persistArtifactTransfer").mockImplementation(async (args) => {
+      transfer = args;
+      return persist(args);
+    });
     const writer = vi.mocked(GitHubControlStore.prototype.createRef);
     const original = writer.getMockImplementation()!;
     writer.mockImplementation(async (ref, oid) => {
@@ -419,7 +425,17 @@ describe("Supervisor collected artifact durability", () => {
           ["AttemptFailed", "AttemptDeferred", "FactoryRunCompleted"].includes(event.event),
         ),
     ).toBe(false);
-    expect([...f.refs.keys()].some((ref) => ref.endsWith("/intent"))).toBe(true);
+    expect(transfer).toBeDefined();
+    await expect(
+      transfers.artifactRecoveryCopyAvailable({
+        store: transfer!.store,
+        identity: transfer!.identity,
+        artifactDigest: transfer!.artifact.digest,
+      }),
+    ).resolves.toBe(true);
+    expect(
+      [...f.refs.keys()].some((ref) => ref.endsWith("/intent") || ref.endsWith("/ready")),
+    ).toBe(false);
     expect(retained.length).toBe(1);
     await expect(access(retained[0]!.path)).rejects.toMatchObject({ code: "ENOENT" });
     // Restore only the failed transport. Reuse the original exact output and

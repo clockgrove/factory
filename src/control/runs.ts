@@ -23,6 +23,7 @@ export interface RunEventStore {
 }
 
 export interface RunState {
+  recordProtocol?: "clockgrove.factory/transition-receipt-v1";
   objective: number;
   runId: string;
   sequence: number;
@@ -57,6 +58,7 @@ export class RunManager {
       policy: start.policy,
       policyDigest: start.policyDigest,
       startedAt: new Date(start.at),
+      ...(start.recordProtocol ? { recordProtocol: start.recordProtocol } : {}),
       ...(start.baseSha ? { baseSha: start.baseSha } : {}),
       repository: start.repository,
       baseBranch: start.baseBranch,
@@ -92,6 +94,7 @@ export class RunManager {
         policy: start.policy,
         policyDigest: start.policyDigest,
         startedAt: new Date(start.at),
+        ...(start.recordProtocol ? { recordProtocol: start.recordProtocol } : {}),
         ...(start.baseSha ? { baseSha: start.baseSha } : {}),
         ...(start.repository ? { repository: start.repository } : {}),
         ...(start.baseBranch ? { baseBranch: start.baseBranch } : {}),
@@ -127,6 +130,7 @@ export class RunManager {
       policy,
       policyDigest: digest,
       startedAt: new Date(active.at),
+      ...(active.recordProtocol ? { recordProtocol: active.recordProtocol } : {}),
       ...(active.activationRequestId ? { activationRequestId: active.activationRequestId } : {}),
       ...(active.baseSha ? { baseSha: active.baseSha } : {}),
       repository: active.repository,
@@ -150,6 +154,7 @@ export class RunManager {
     activationRequestId?: string;
     baseSha?: string;
     writer?: LeaseState;
+    recordProtocol?: "clockgrove.factory/transition-receipt-v1";
     authority?: ObjectiveAuthorityObservation | null | undefined;
   }): Promise<RunState> {
     const resumed = this.resume(args.existingEvents ?? [], args.authority);
@@ -167,6 +172,7 @@ export class RunManager {
       protocol: PROTOCOL_V2,
       kind: "run",
       event: "FactoryRunStarted",
+      ...(args.recordProtocol ? { recordProtocol: args.recordProtocol } : {}),
       ...(args.writer ? writerAuthority(args.writer, sequence) : {}),
       objective: args.objective,
       runId: args.runId ?? randomUUID(),
@@ -197,6 +203,7 @@ export class RunManager {
       policy,
       policyDigest: digest,
       startedAt: now,
+      ...(event.recordProtocol ? { recordProtocol: event.recordProtocol } : {}),
       ...(event.activationRequestId ? { activationRequestId: event.activationRequestId } : {}),
       ...(event.baseSha ? { baseSha: event.baseSha } : {}),
       repository: event.repository,

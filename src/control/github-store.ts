@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isKnownPrimaryQuotaRefusal } from "../platform.js";
 import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "../platform.js";
 import type { CompiledGraphStore } from "./graphs.js";
@@ -27,6 +28,7 @@ import {
   leaseRef,
   parseLeaseCommit,
   type GitCommitObject,
+  type GitCommitContent,
   type LeaseState,
   type LeaseStore,
 } from "./lease.js";
@@ -49,6 +51,14 @@ import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { parseRunPolicy, policyDigest } from "../protocol/policy.js";
 import { discoverRecoveryActivation } from "../recovery/discovery.js";
 import { activationCancellation } from "./activations.js";
+import {
+  RESULT_RECORD_PROTOCOL,
+  assertResultInvocationRecorded,
+  decodeResultReceiptComments,
+  type ResultReceiptObservation,
+  type ResultReceiptScope,
+  type AuthenticatedResultReceipt,
+} from "./result-receipts.js";
 import {
   DISCOVERY_SESSION_LIMITS,
   GitHubDiscoverySession,
@@ -217,7 +227,31 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   #droppedOperationObservations = 0;
   #repositoryId: string | null = null;
   readonly #discovery: GitHubDiscoverySession;
-  readonly #discoveryCommitCache = new Map<string, Omit<GitCommitObject, "serverTime">>();
+  #resultObservation: ResultReceiptObservation | undefined;
+  #resultObservationGeneration = 0;
+  readonly #commitContents = new Map<string, { value: GitCommitContent; bytes: number }>();
+  readonly #pendingCommitContents = new Map<string, Promise<GitCommitContent>>();
+  #commitContentBytes = 0;
+  readonly #blobContents = new Map<string, Buffer>();
+  readonly #pendingBlobContents = new Map<string, Promise<Buffer>>();
+  #blobContentBytes = 0;
+  readonly #treeContents = new Map<
+    string,
+    { entries: Array<{ path: string; type: string; sha: string }>; bytes: number }
+  >();
+  readonly #pendingTreeContents = new Map<
+    string,
+    Promise<Array<{ path: string; type: string; sha: string }>>
+  >();
+  #treeContentBytes = 0;
+  readonly #contentCounts = {
+    hits: 0,
+    misses: 0,
+    coalesced: 0,
+    evictions: 0,
+    peakBytes: 0,
+    peakEntries: 0,
+  };
 
   constructor(options: GitHubControlStoreOptions) {
     this.#octokit = createOctokit(options);
@@ -487,7 +521,13 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       };
     } catch (error) {
       if ((error as { status?: number }).status === 404) {
-        return { oid: null, serverTime: new Date() };
+        const response = (
+          error as { response?: { headers: Record<string, string | number | undefined> } }
+        ).response;
+        return {
+          oid: null,
+          serverTime: response?.headers.date ? responseDate(response) : await this.serverTime(),
+        };
       }
       throw error;
     }
@@ -505,6 +545,80 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       ref: item.ref,
       oid: item.object.sha,
     }));
+  }
+
+  /** Store identity includes its immutable authentication, host and repository context. */
+  commitContentTelemetry() {
+    return {
+      ...this.#contentCounts,
+      entries: this.#commitContents.size,
+      bytes: this.#commitContentBytes,
+    };
+  }
+
+  async readCommitContent(oid: string): Promise<GitCommitContent> {
+    if (!/^[a-f0-9]{40,64}$/.test(oid)) throw new Error("invalid immutable commit identity");
+    // The shared promise never waits under one owner's quota/cancellation scope.
+    // Each caller retries a definite refusal at its own existing outer boundary.
+    return retryGitHubQuota(async () => {
+      const cached = this.#commitContents.get(oid);
+      if (cached) {
+        this.#contentCounts.hits++;
+        this.#commitContents.delete(oid);
+        this.#commitContents.set(oid, cached);
+        return structuredClone(cached.value);
+      }
+      let pending = this.#pendingCommitContents.get(oid);
+      if (pending) this.#contentCounts.coalesced++;
+      else {
+        // Cache pressure does not reject a supported read. Overflow responses are
+        // validated but never retained, even if a slot opens before they arrive.
+        const retain = this.#pendingCommitContents.size < 256;
+        this.#contentCounts.misses++;
+        pending = this.readCommit(oid).then(({ serverTime: _time, ...content }) => {
+          if (
+            content.oid !== oid ||
+            !/^[a-f0-9]{40,64}$/.test(content.treeOid) ||
+            !Array.isArray(content.parentOids) ||
+            content.parentOids.some((parent) => !/^[a-f0-9]{40,64}$/.test(parent)) ||
+            typeof content.message !== "string"
+          )
+            throw new Error("immutable commit identity or shape mismatch");
+          const bytes = Buffer.byteLength(content.message) + content.parentOids.length * 64 + 256;
+          if (retain && bytes <= 8 * 1024 * 1024) {
+            while (
+              this.#commitContents.size >= 256 ||
+              this.#commitContentBytes + bytes > 8 * 1024 * 1024
+            ) {
+              const oldest = this.#commitContents.keys().next().value!;
+              this.#commitContentBytes -= this.#commitContents.get(oldest)!.bytes;
+              this.#commitContents.delete(oldest);
+              this.#contentCounts.evictions++;
+            }
+            this.#commitContents.set(oid, { value: structuredClone(content), bytes });
+            this.#commitContentBytes += bytes;
+            this.#contentCounts.peakBytes = Math.max(
+              this.#contentCounts.peakBytes,
+              this.#commitContentBytes,
+            );
+            this.#contentCounts.peakEntries = Math.max(
+              this.#contentCounts.peakEntries,
+              this.#commitContents.size,
+            );
+          }
+          return content;
+        });
+        if (retain) this.#pendingCommitContents.set(oid, pending);
+        const shared = pending;
+        void pending
+          .finally(() => {
+            if (this.#pendingCommitContents.get(oid) === shared)
+              this.#pendingCommitContents.delete(oid);
+          })
+          .catch(() => {});
+      }
+      return structuredClone(await pending);
+    });
   }
 
   async readCommit(oid: string): Promise<GitCommitObject> {
@@ -632,6 +746,167 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       mutationClass,
       "addIssueComment",
     );
+  }
+
+  /** Replace, never merge, membership from a completed authenticated snapshot.
+   * Acknowledged local publications intentionally do not enter this observation. */
+  observeResultReceipts(observation: ResultReceiptObservation): void {
+    if (observation.generation < this.#resultObservationGeneration) return;
+    this.#resultObservationGeneration = observation.generation;
+    this.#resultObservation =
+      Buffer.byteLength(JSON.stringify(observation)) <= 8 * 1024 * 1024
+        ? structuredClone(observation)
+        : undefined;
+  }
+
+  observedResultReceipts(scope: ResultReceiptScope) {
+    if (this.#resultObservation?.objective !== scope.objective) return undefined;
+    const receipts = this.#resultObservation.receipts.filter(
+      ({ receipt }) =>
+        receipt.objective === scope.objective &&
+        receipt.runId === scope.runId &&
+        receipt.workItem === scope.workItem &&
+        receipt.kind === scope.kind &&
+        receipt.identityDigest === scope.identityDigest,
+    );
+    return receipts.length
+      ? { protocol: RESULT_RECORD_PROTOCOL, receipts: structuredClone(receipts) }
+      : undefined;
+  }
+
+  /** Completed facts are authenticated by GitHub's comment actor, never Git author text.
+   * Read comments before the lease so a concurrent takeover can only attenuate evidence. */
+  async readResultReceipts(scope: ResultReceiptScope): Promise<{
+    protocol: typeof RESULT_RECORD_PROTOCOL | null;
+    receipts: AuthenticatedResultReceipt[];
+  }> {
+    const read = async (issue: number) => {
+      const comments: Array<{
+        id: string;
+        body: string;
+        authorLogin: string | null;
+        authorAssociation: string | null;
+      }> = [];
+      let bytes = 0;
+      for (let page = 1; page <= 20; page++) {
+        const response = await this.#call(() =>
+          this.#octokit.request("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
+            owner: this.#owner,
+            repo: this.#repo,
+            issue_number: issue,
+            per_page: 100,
+            page,
+          }),
+        );
+        for (const comment of response.data) {
+          bytes += Buffer.byteLength(comment.body ?? "");
+          if (bytes > 16 * 1024 * 1024)
+            throw new Error("result receipt history exceeds byte bound");
+          comments.push({
+            id: String(comment.id),
+            body: comment.body ?? "",
+            authorLogin: comment.user?.login ?? null,
+            authorAssociation: comment.author_association ?? null,
+          });
+        }
+        if (!response.headers.link?.includes('rel="next"')) return comments;
+      }
+      throw new Error("result receipt history exceeds complete pagination bound");
+    };
+    const objective = await read(scope.objective);
+    const comments = scope.workItem === scope.objective ? objective : await read(scope.workItem);
+    const observed = await this.readRefWithServerTime(leaseRef(scope.objective));
+    if (!observed.oid) throw new Error("result receipt has no Objective authority");
+    const lease = parseLeaseCommit(await this.readCommitContent(observed.oid));
+    if (lease.objective !== scope.objective)
+      throw new Error("result receipt authority scope changed");
+    const authority = objectiveAuthorityObservation(lease, observed.serverTime);
+    const events = authenticatedCommentEvents(objective, authority);
+    const starts = deduplicateFactoryEvents(events.map(({ event }) => event)).filter(
+      (event) =>
+        event.kind === "run" && event.event === "FactoryRunStarted" && event.runId === scope.runId,
+    );
+    const start = starts[0];
+    if (starts.length !== 1 || start?.kind !== "run" || start.event !== "FactoryRunStarted")
+      throw new Error("result receipt lacks a unique authenticated run start");
+    if (start.recordProtocol === undefined) return { protocol: null, receipts: [] };
+    if (start.recordProtocol !== RESULT_RECORD_PROTOCOL)
+      throw new Error("unsupported run record protocol");
+    const history = [
+      ...events.map(({ event }) => event),
+      ...comments.flatMap((comment) =>
+        comment.authorLogin?.toLowerCase() === start.actor.toLowerCase() &&
+        TRUSTED_CONTROL_ASSOCIATIONS.has(comment.authorAssociation ?? "")
+          ? decodeEventComments(comment.body)
+          : [],
+      ),
+    ];
+    const receipts: AuthenticatedResultReceipt[] = [];
+    for (const comment of comments) {
+      if (
+        comment.authorLogin?.toLowerCase() !== start.actor.toLowerCase() ||
+        !TRUSTED_CONTROL_ASSOCIATIONS.has(comment.authorAssociation ?? "")
+      )
+        continue;
+      for (const receipt of decodeResultReceiptComments(comment.body)) {
+        if (receipt.objective !== scope.objective || receipt.workItem !== scope.workItem)
+          throw new Error("authenticated result receipt names another issue");
+        if (
+          receipt.runId !== scope.runId ||
+          receipt.kind !== scope.kind ||
+          receipt.identityDigest !== scope.identityDigest
+        )
+          continue;
+        if (
+          receipt.writerPolicyDigest !== start.policyDigest ||
+          receipt.writerEpoch > lease.epoch ||
+          (receipt.writerEpoch === lease.epoch && receipt.writerHolder !== lease.holder)
+        )
+          throw new Error("result receipt writer differs from Objective authority");
+        assertResultInvocationRecorded(receipt, decodeEventComments(comment.body), history);
+        // Older generation facts retain accounting value, but cannot acquire current control authority.
+        receipts.push({
+          receipt,
+          commentId: comment.id,
+          events: decodeEventComments(comment.body),
+        });
+      }
+    }
+    return { protocol: RESULT_RECORD_PROTOCOL, receipts };
+  }
+
+  async publishResultReceipt(args: {
+    issueNodeId: string;
+    body: string;
+  }): Promise<{ commentId: string }> {
+    const receipts = decodeResultReceiptComments(args.body);
+    if (receipts.length !== 1)
+      throw new Error("result publication requires one transition receipt");
+    const receipt = receipts[0]!;
+    const events = decodeEventComments(args.body);
+    if (
+      events.some(
+        (event) =>
+          event.objective !== receipt.objective ||
+          event.runId !== receipt.runId ||
+          !("workItem" in event) ||
+          event.workItem !== receipt.workItem,
+      )
+    )
+      throw new Error("result publication event scope differs from checkpoint");
+    const response = await this.#call(
+      () =>
+        this.#octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", {
+          owner: this.#owner,
+          repo: this.#repo,
+          issue_number: receipt.workItem,
+          body: args.body,
+        }),
+      true,
+      "cleanup",
+      "publishResultReceipt",
+    );
+    return { commentId: String(response.data.id) };
   }
 
   async serverTime(mutationClass: MutationClass = "normal"): Promise<Date> {
@@ -1246,13 +1521,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   }
 
   async #readDiscoveryCommit(oid: string, serverTime: Date): Promise<GitCommitObject> {
-    const cached = this.#discoveryCommitCache.get(oid);
-    if (cached) return { ...cached, serverTime };
-    const commit = await withGitHubRequestPriority("normal", () => this.readCommit(oid));
-    const { serverTime: _observedAt, ...content } = commit;
-    if (this.#discoveryCommitCache.size === 256)
-      this.#discoveryCommitCache.delete(this.#discoveryCommitCache.keys().next().value!);
-    this.#discoveryCommitCache.set(oid, content);
+    const content = await withGitHubRequestPriority("normal", () => this.readCommitContent(oid));
     return { ...content, serverTime };
   }
 
@@ -1386,10 +1655,14 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     return rules;
   }
 
-  async getBranchHead(branch: string): Promise<GitCommitObject> {
+  async getBranchHeadOid(branch: string): Promise<string> {
     const oid = await this.readRef(`refs/heads/${branch}`);
     if (!oid) throw new Error(`branch ${branch} does not exist`);
-    return this.readCommit(oid);
+    return oid;
+  }
+
+  async getBranchHead(branch: string): Promise<GitCommitObject> {
+    return this.readCommit(await this.getBranchHeadOid(branch));
   }
 
   async createBlob(content: Buffer): Promise<string> {
@@ -1410,17 +1683,59 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   }
 
   async readBlob(oid: string): Promise<Buffer> {
-    const response = await this.#call(() =>
-      this.#octokit.request("GET /repos/{owner}/{repo}/git/blobs/{file_sha}", {
-        owner: this.#owner,
-        repo: this.#repo,
-        file_sha: oid,
-      }),
-    );
-    if (response.data.encoding !== "base64") {
-      throw new Error(`unsupported GitHub blob encoding ${response.data.encoding}`);
-    }
-    return Buffer.from(response.data.content.replace(/\s/g, ""), "base64");
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(oid))
+      throw new Error("invalid immutable blob identity");
+    return retryGitHubQuota(async () => {
+      const cached = this.#blobContents.get(oid);
+      if (cached) {
+        this.#blobContents.delete(oid);
+        this.#blobContents.set(oid, cached);
+        return Buffer.from(cached);
+      }
+      let pending = this.#pendingBlobContents.get(oid);
+      if (!pending) {
+        const retain = this.#pendingBlobContents.size < 256;
+        pending = this.#call(() =>
+          this.#octokit.request("GET /repos/{owner}/{repo}/git/blobs/{file_sha}", {
+            owner: this.#owner,
+            repo: this.#repo,
+            file_sha: oid,
+          }),
+        ).then((response) => {
+          if (response.data.encoding !== "base64")
+            throw new Error(`unsupported GitHub blob encoding ${response.data.encoding}`);
+          const bytes = Buffer.from(response.data.content.replace(/\s/g, ""), "base64");
+          const digest = createHash(oid.length === 40 ? "sha1" : "sha256")
+            .update(`blob ${bytes.length}\0`)
+            .update(bytes)
+            .digest("hex");
+          if (response.data.sha !== oid || digest !== oid)
+            throw new Error("immutable blob identity mismatch");
+          if (retain && bytes.length <= 8 * 1024 * 1024) {
+            while (
+              this.#blobContents.size >= 256 ||
+              this.#blobContentBytes + bytes.length > 8 * 1024 * 1024
+            ) {
+              const oldest = this.#blobContents.keys().next().value!;
+              this.#blobContentBytes -= this.#blobContents.get(oldest)!.length;
+              this.#blobContents.delete(oldest);
+            }
+            this.#blobContents.set(oid, Buffer.from(bytes));
+            this.#blobContentBytes += bytes.length;
+          }
+          return bytes;
+        });
+        if (retain) this.#pendingBlobContents.set(oid, pending);
+        const shared = pending;
+        void pending
+          .finally(() => {
+            if (this.#pendingBlobContents.get(oid) === shared)
+              this.#pendingBlobContents.delete(oid);
+          })
+          .catch(() => {});
+      }
+      return Buffer.from(await pending);
+    });
   }
 
   async createTree(args: Parameters<CompiledGraphStore["createTree"]>[0]): Promise<string> {
@@ -1441,22 +1756,70 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   }
 
   async readTreeEntry(treeOid: string, path: string): Promise<string | null> {
-    const response = await this.#call(() =>
-      this.#octokit.request("GET /repos/{owner}/{repo}/git/trees/{tree_sha}", {
-        owner: this.#owner,
-        repo: this.#repo,
-        tree_sha: treeOid,
-        recursive: "1",
-      }),
-    );
-    if (response.data.truncated) {
-      throw new Error("GitHub truncated the compiled graph control tree");
-    }
-    const entry = response.data.tree.find((candidate) => candidate.path === path);
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(treeOid))
+      throw new Error("invalid immutable tree identity");
+    const entries = await retryGitHubQuota(async () => {
+      const cached = this.#treeContents.get(treeOid);
+      if (cached) {
+        this.#treeContents.delete(treeOid);
+        this.#treeContents.set(treeOid, cached);
+        return cached.entries;
+      }
+      let pending = this.#pendingTreeContents.get(treeOid);
+      if (!pending) {
+        const retain = this.#pendingTreeContents.size < 256;
+        pending = this.#call(() =>
+          this.#octokit.request("GET /repos/{owner}/{repo}/git/trees/{tree_sha}", {
+            owner: this.#owner,
+            repo: this.#repo,
+            tree_sha: treeOid,
+            recursive: "1",
+          }),
+        ).then((response) => {
+          if (response.data.truncated)
+            throw new Error("GitHub truncated the compiled graph control tree");
+          if (response.data.sha !== treeOid) throw new Error("immutable tree identity mismatch");
+          const entries = response.data.tree.map((entry) => {
+            if (
+              typeof entry.path !== "string" ||
+              typeof entry.type !== "string" ||
+              !entry.sha ||
+              !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(entry.sha)
+            )
+              throw new Error("immutable tree entry shape mismatch");
+            return { path: entry.path, type: entry.type, sha: entry.sha };
+          });
+          if (new Set(entries.map((entry) => entry.path)).size !== entries.length)
+            throw new Error("immutable tree contains duplicate paths");
+          const bytes = Buffer.byteLength(JSON.stringify(entries));
+          if (retain && bytes <= 8 * 1024 * 1024) {
+            while (
+              this.#treeContents.size >= 256 ||
+              this.#treeContentBytes + bytes > 8 * 1024 * 1024
+            ) {
+              const oldest = this.#treeContents.keys().next().value!;
+              this.#treeContentBytes -= this.#treeContents.get(oldest)!.bytes;
+              this.#treeContents.delete(oldest);
+            }
+            this.#treeContents.set(treeOid, { entries, bytes });
+            this.#treeContentBytes += bytes;
+          }
+          return entries;
+        });
+        if (retain) this.#pendingTreeContents.set(treeOid, pending);
+        const shared = pending;
+        void pending
+          .finally(() => {
+            if (this.#pendingTreeContents.get(treeOid) === shared)
+              this.#pendingTreeContents.delete(treeOid);
+          })
+          .catch(() => {});
+      }
+      return pending;
+    });
+    const entry = entries.find((candidate) => candidate.path === path);
     if (!entry) return null;
-    if (entry.type !== "blob" || !entry.sha) {
-      throw new Error(`compiled graph tree entry ${path} is not a blob`);
-    }
+    if (entry.type !== "blob") throw new Error(`compiled graph tree entry ${path} is not a blob`);
     return entry.sha;
   }
 

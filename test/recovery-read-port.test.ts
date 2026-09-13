@@ -71,9 +71,17 @@ function fixture(headRepository?: Record<string, unknown> | null) {
           message: "fixture commit",
         };
       else if (path === `/git/blobs/${BLOB}`)
-        data = { encoding: "base64", content: Buffer.from("fixture blob").toString("base64") };
+        data = {
+          sha: BLOB,
+          encoding: "base64",
+          content: Buffer.from("fixture blob").toString("base64"),
+        };
       else if (path === `/git/trees/${TREE}`)
-        data = { truncated: false, tree: [{ path: "control.json", type: "blob", sha: BLOB }] };
+        data = {
+          sha: TREE,
+          truncated: false,
+          tree: [{ path: "control.json", type: "blob", sha: BLOB }],
+        };
       else if (path === "/rules/branches/main") data = [];
       else if (path === "/branches/main/protection") {
         status = 404;
@@ -137,6 +145,7 @@ describe("recovery GitHub read port", () => {
         "readCommit",
         "readBlob",
         "readTreeEntry",
+        "readResultReceipts",
         "listRefs",
         "readPullRequest",
         "getRepositoryFacts",

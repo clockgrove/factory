@@ -25,6 +25,7 @@ export function recoveryReadPort(
   );
   const objects = withImmutableRecoveryReads(store);
   return Object.freeze({
+    readResultReceipts: store.readResultReceipts.bind(store),
     readRef: store.readRef.bind(store),
     readCommit: objects.readCommit,
     readBlob: objects.readBlob,

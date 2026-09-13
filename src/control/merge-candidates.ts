@@ -154,7 +154,7 @@ export async function loadMergeCandidateCheckpoint(
   const commitOid = await store.readRef(ref);
   if (!commitOid) return null;
   gitSha.parse(commitOid);
-  const commit = await store.readCommit(commitOid);
+  const commit = await (store.readCommitContent?.(commitOid) ?? store.readCommit(commitOid));
   requireCheckpoint(
     commit.oid === commitOid &&
       commit.parentOids.length === 1 &&
@@ -227,7 +227,8 @@ export class MergeCandidateCheckpointStore {
     };
     const existing = await this.load(identity);
     if (existing) return winner(existing);
-    const base = await this.store.readCommit(identity.targetBaseSha);
+    const base = await (this.store.readCommitContent?.(identity.targetBaseSha) ??
+      this.store.readCommit(identity.targetBaseSha));
     requireCheckpoint(base.oid === identity.targetBaseSha, "target base unavailable");
     await this.leases.assertMutationAuthorized(args.lease);
     const blobOid = await this.store.createBlob(Buffer.from(JSON.stringify(value), "utf8"));

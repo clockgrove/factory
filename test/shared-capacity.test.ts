@@ -235,6 +235,36 @@ async function seedClaims(
 }
 
 describe("independent-session durable capacity", () => {
+  it("does not let returned reconciliation objects mutate acknowledged cached state", async () => {
+    const store = new Store(),
+      a = coordinator(store);
+    const one = await owner(store, 1),
+      item = reservation(1);
+    const result = await a.reconcile(one, [{ owner: one, reservation: item }]);
+    result[0]!.reservation.cpu = 999;
+    expect((await a.snapshot()).cpu).toBe(item.cpu);
+    expect((await coordinator(store).snapshot()).cpu).toBe(item.cpu);
+  });
+
+  it("returns the acknowledged generation without a readback and observes a peer before next admission", async () => {
+    const store = new Store();
+    const one = await owner(store, 1),
+      two = await owner(store, 2);
+    const a = coordinator(store),
+      b = coordinator(store);
+    await a.initialize();
+    const refReads = vi.spyOn(store, "readRef");
+    const item = reservation(1);
+    const acknowledged = await a.reserve(one, item, limits);
+    expect(acknowledged).toMatchObject({ reserved: true, generation: 2 });
+    expect(refReads.mock.calls.filter(([ref]) => ref === SHARED_CAPACITY_REF)).toHaveLength(1);
+    await b.reserve(two, reservation(2), limits);
+    const next = await a.reserve(one, reservation(1, { workItem: 99 }), limits);
+    expect(next).toMatchObject({ reserved: false, generation: 3 });
+    expect(acknowledged.generation).toBe(2);
+    expect((await coordinator(store).snapshot()).generation).toBe(3);
+  });
+
   it.each([25, 100])(
     "bounds unchanged reconciliation and scheduling reads independently of %i retained claims",
     async (count) => {
@@ -589,6 +619,7 @@ describe("independent-session durable capacity", () => {
     expect(await a.reserve(one, item, limits)).toEqual({
       reserved: false,
       code: "released-reservation",
+      generation: 3,
     });
   });
 
@@ -925,6 +956,7 @@ describe("independent-session durable capacity", () => {
     await expect(a.reserve(one, retired, limits)).resolves.toEqual({
       reserved: false,
       code: "released-reservation",
+      generation: 2,
     });
     await expect(a.reserve(one, { ...retired, cpu: 2 }, limits)).rejects.toThrow(
       "identity changed resources",
@@ -996,6 +1028,7 @@ describe("independent-session durable capacity", () => {
     await expect(a.reserve(one, reservation(1, { workItem: 1 }), limits)).resolves.toEqual({
       reserved: false,
       code: "released-reservation",
+      generation: 1,
     });
   });
 
@@ -1009,6 +1042,7 @@ describe("independent-session durable capacity", () => {
     await expect(a.reserve(one, reservation(1, { workItem: 1 }), limits)).resolves.toEqual({
       reserved: false,
       code: "released-reservation",
+      generation: 2,
     });
     store.now = new Date(store.now.getTime() + 20 * 60_000);
     await owner(store, 1, "replacement");

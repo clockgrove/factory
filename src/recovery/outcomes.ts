@@ -1,3 +1,4 @@
+import { sameReviewCheckpointLocation } from "../control/reviews.js";
 import { attemptRef, readAttemptReservationRef } from "../control/attempts.js";
 import { PlatformUnavailableError } from "../platform.js";
 import {
@@ -878,7 +879,7 @@ async function verifySourceProof(
         evidenceDigest: validation.evidenceDigest,
       };
       let review = await loadReviewCheckpoint(store, reviewIdentity);
-      if (review?.ref !== source.review!.ref)
+      if (!sameReviewCheckpointLocation(review, source.review!))
         review = await loadReviewCheckpoint(store, {
           ...reviewIdentity,
           kind: "rebase",
@@ -886,10 +887,7 @@ async function verifySourceProof(
         });
       requireOutcome(
         review &&
-          review.ref === source.review!.ref &&
-          review.commitOid === source.review!.commitOid &&
-          review.blobOid === source.review!.blobOid &&
-          review.identityDigest === source.review!.identityDigest &&
+          sameReviewCheckpointLocation(review, source.review!) &&
           review.review.accepted &&
           review.review.unmetCriteria.length === 0,
       );

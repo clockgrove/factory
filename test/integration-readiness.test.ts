@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   FIRST_CHECK_DISCOVERY_GRACE_MS,
   integrationReadiness,
+  verifySquashIntegration,
   type PublicationStore,
   type PublishedPullRequest,
 } from "../src/publication/publisher.js";
@@ -77,7 +78,13 @@ describe("integration check discovery", () => {
         "main",
         options,
       ),
-    ).resolves.toEqual({ state: "wait", reason: `checks pending: ${review}` });
+    ).resolves.toEqual({
+      state: "wait",
+      code: "checks-pending",
+      headSha: HEAD_SHA,
+      baseSha: BASE_SHA,
+      reason: `checks pending: ${review}`,
+    });
     await expect(
       integrationReadiness(
         store({ createdAt, observed: [review], failed: [review] }),
@@ -107,6 +114,10 @@ describe("integration check discovery", () => {
       }),
     ).resolves.toEqual({
       state: "wait",
+      code: "first-check-grace",
+      headSha: HEAD_SHA,
+      baseSha: BASE_SHA,
+      notBefore: createdAt.getTime() + FIRST_CHECK_DISCOVERY_GRACE_MS,
       reason: "waiting for the pull request's first checks to appear",
     });
 
@@ -136,6 +147,9 @@ describe("integration check discovery", () => {
       }),
     ).resolves.toEqual({
       state: "wait",
+      code: "checks-missing",
+      headSha: HEAD_SHA,
+      baseSha: BASE_SHA,
       reason: "repository CI is expected but no checks have appeared",
     });
     await expect(
@@ -145,7 +159,33 @@ describe("integration check discovery", () => {
       }),
     ).resolves.toEqual({
       state: "wait",
+      code: "checks-missing",
+      headSha: HEAD_SHA,
+      baseSha: BASE_SHA,
       reason: "cannot determine whether repository CI is expected and no checks have appeared",
     });
   });
+});
+
+it("verifies immutable squash content while retaining exact base and tree checks", async () => {
+  const readCommit = vi.fn().mockRejectedValue(new Error("fresh commit time is not consumed"));
+  const readCommitContent = vi.fn().mockResolvedValue({
+    oid: HEAD_SHA,
+    treeOid: "d".repeat(40),
+    parentOids: [BASE_SHA],
+    message: "squash",
+  });
+  const publication = { readCommit, readCommitContent } as unknown as PublicationStore;
+  await expect(verifySquashIntegration(publication, pull(), HEAD_SHA)).resolves.toBeUndefined();
+  expect(readCommit).not.toHaveBeenCalled();
+  expect(readCommitContent).toHaveBeenCalledWith(HEAD_SHA);
+  readCommitContent.mockResolvedValue({
+    oid: HEAD_SHA,
+    treeOid: "d".repeat(40),
+    parentOids: ["e".repeat(40)],
+    message: "squash",
+  });
+  await expect(verifySquashIntegration(publication, pull(), HEAD_SHA)).rejects.toThrow(
+    "expected base",
+  );
 });

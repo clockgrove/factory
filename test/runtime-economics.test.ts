@@ -394,6 +394,53 @@ describe("durable runtime economics", () => {
     expect(result.execution.startedAttempts).toMatchObject({ value: { total: 3 } });
   });
 
+  it("matches captured execution marker and actual usage by full invocation identity", () => {
+    const marker = budget(21, 8, 0, {
+      event: "BudgetReserved",
+      usageId: "invocation-worker-8-1",
+      modelInvocationId: "worker-8-1",
+    });
+    const actual = budget(22, 8, 150, {
+      usageId: "worker-8-1",
+      modelInvocationId: "worker-8-1",
+    });
+    expect(
+      summarize([marker, actual]).nativeUsageCoverage.reservedUsageIdentitiesWithoutReconciliation,
+    ).toBe(0);
+    expect(
+      summarize([marker]).nativeUsageCoverage.reservedUsageIdentitiesWithoutReconciliation,
+    ).toBe(1);
+    for (const change of [
+      { objective: 999 },
+      { runId: "another-run" },
+      { workItem: 9 },
+      { attempt: 2 },
+      { phase: "validation" },
+      { modelInvocationId: "another-invocation" },
+      { sequence: 20 },
+    ]) {
+      expect(
+        summarize([marker, { ...actual, ...change } as FactoryEvent]).nativeUsageCoverage
+          .reservedUsageIdentitiesWithoutReconciliation,
+      ).toBe(1);
+    }
+    for (const change of [{ policyDigest: "different" }, { directorEpoch: "different" }]) {
+      expect(() => summarize([marker, { ...actual, ...change } as FactoryEvent])).toThrow(
+        /conflicts with its dispatch binding/,
+      );
+    }
+    expect(() =>
+      summarize([
+        marker,
+        actual,
+        budget(23, 8, 151, {
+          usageId: "worker-8-1",
+          modelInvocationId: "worker-8-1",
+        }),
+      ]),
+    ).toThrow(/conflicting actual usage/);
+  });
+
   it("partitions known native consumption by exact run/attempt delivery without zero filling missing usage", () => {
     const values = concurrent().filter(
       (value) => !(value.event === "AttemptIntegrated" && value.workItem === 9),

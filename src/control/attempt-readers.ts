@@ -2,16 +2,16 @@ import { attemptRef, attemptRefPrefix, type AttemptStore } from "./attempts.js";
 import { isAdmissionBarrier } from "./admission-compatibility.js";
 import { issueAdmissionRef, parseIssueAdmissionCommit } from "./issue-admission.js";
 import { decodeEventTrailer } from "./receipts.js";
-import type { GitCommitObject } from "./lease.js";
+import type { GitCommitContent } from "./lease.js";
 
-type ReadStore = Pick<AttemptStore, "listRefs" | "readCommit">;
+type ReadStore = Pick<AttemptStore, "listRefs" | "readCommit" | "readCommitContent">;
 type Observation = { ref: string; oid: string };
 const LEDGER_PREFIX = "refs/clockgrove-factory/admission/work-item-";
 const MAX_OBSERVATIONS = 4096;
 function positive(value: number): void {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error("invalid reservation scope");
 }
-function reservation(observation: Observation, commit: GitCommitObject) {
+function reservation(observation: Observation, commit: GitCommitContent) {
   const event = decodeEventTrailer(commit.message);
   if (
     commit.oid !== observation.oid ||
@@ -54,7 +54,8 @@ export async function listAttemptReservationRefs(
   for (const observation of observations) {
     if (!observation.ref.startsWith(legacyPrefix))
       throw new Error("foreign legacy reservation scope");
-    const commit = await store.readCommit(observation.oid);
+    const commit = await (store.readCommitContent?.(observation.oid) ??
+      store.readCommit(observation.oid));
     if (commit.oid !== observation.oid) throw new Error("reservation commit identity changed");
     if (isAdmissionBarrier(observation.ref, commit)) continue;
     const event = reservation(observation, commit);
@@ -72,12 +73,14 @@ export async function listAttemptReservationRefs(
     if (!match || seenLedgers.has(observation.ref))
       throw new Error("invalid issue ledger observation");
     seenLedgers.add(observation.ref);
-    const commit = await store.readCommit(observation.oid);
+    const commit = await (store.readCommitContent?.(observation.oid) ??
+      store.readCommit(observation.oid));
     if (commit.oid !== observation.oid) throw new Error("issue ledger commit identity changed");
     const ledger = parseIssueAdmissionCommit(commit, Number(match[1]));
     for (const entry of ledger.history) {
       if (entry.objective !== objective) continue;
-      const metadata = await store.readCommit(entry.reservation.oid);
+      const metadata = await (store.readCommitContent?.(entry.reservation.oid) ??
+        store.readCommit(entry.reservation.oid));
       const event = reservation(entry.reservation, metadata);
       if (
         event.objective !== entry.objective ||

@@ -281,6 +281,43 @@ it.each([
     try {
       const result = await fixture.run();
       expect(result.status, result.reason).toBe(status);
+      const reservationComments = vi
+        .mocked(GitHubControlStore.prototype.addIssueComment)
+        .mock.calls.map(([, body]) => decodeEventComments(body))
+        .filter((events) =>
+          events.some(
+            (event) =>
+              event.kind === "budget" &&
+              event.event === "BudgetReserved" &&
+              event.workItem === 8 &&
+              event.phase === "validation" &&
+              !event.modelInvocationId,
+          ),
+        );
+      const pairedReservations = reservationComments.filter((events) =>
+        events.some(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReserved" &&
+            event.phase === "execution" &&
+            !event.modelInvocationId,
+        ),
+      );
+      expect(pairedReservations).toHaveLength(1);
+      expect(pairedReservations[0]).toEqual([
+        expect.objectContaining({
+          kind: "budget",
+          event: "BudgetReserved",
+          workItem: 8,
+          phase: "execution",
+        }),
+        expect.objectContaining({
+          kind: "budget",
+          event: "BudgetReserved",
+          workItem: 8,
+          phase: "validation",
+        }),
+      ]);
       expect(lag.lagCount()).toBe(1);
       const laggedWorkItem = lag.laggedWorkItem();
       expect(laggedWorkItem).toBeDefined();
@@ -539,3 +576,143 @@ it("does not treat another owner's claim as a live child's phase publication", a
     await fixture.dispose();
   }
 }, 30_000);
+
+it.each(["before", "rejected", "accepted-response-lost"] as const)(
+  "retains reservation batch liabilities without launching after %s",
+  async (failure) => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      dependencyChain: true,
+      maxParallel: 1,
+      isolatedValidationWorkItem: 8,
+      maxAttemptsPerItem: 1,
+    });
+    const addComment = vi.mocked(GitHubControlStore.prototype.addIssueComment);
+    const original = addComment.getMockImplementation()!;
+    let injected = 0;
+    addComment.mockImplementation(async (node, body, mutationClass) => {
+      const events = decodeEventComments(body);
+      if (
+        events.length === 2 &&
+        events.every(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReserved" &&
+            event.workItem === 8 &&
+            !event.modelInvocationId,
+        )
+      ) {
+        injected++;
+        if (failure === "accepted-response-lost") await original(node, body, mutationClass);
+        throw Object.assign(
+          new Error(`reservation batch ${failure}`),
+          failure === "rejected" ? { status: 403 } : {},
+        );
+      }
+      return original(node, body, mutationClass);
+    });
+    try {
+      await f.run().catch(() => undefined);
+      expect(injected).toBe(1);
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(0);
+      const reservations = f
+        .events()
+        .filter(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReserved" &&
+            event.workItem === 8 &&
+            !event.modelInvocationId,
+        );
+      expect(reservations).toHaveLength(failure === "accepted-response-lost" ? 2 : 0);
+      if (failure === "accepted-response-lost") {
+        expect(reservations).toEqual([
+          expect.objectContaining({ phase: "execution", amount: expect.any(Number) }),
+          expect.objectContaining({ phase: "validation", amount: expect.any(Number) }),
+        ]);
+        expect(reservations.every((event) => event.kind === "budget" && event.amount > 0)).toBe(
+          true,
+        );
+        expect(
+          f
+            .events()
+            .filter(
+              (event) =>
+                event.kind === "budget" &&
+                event.event === "BudgetReconciled" &&
+                event.workItem === 8 &&
+                !event.modelInvocationId,
+            ),
+        ).toHaveLength(0);
+      }
+    } finally {
+      await f.dispose();
+      vi.restoreAllMocks();
+    }
+  },
+  20_000,
+);
+
+it.each(["before", "rejected", "accepted-response-lost"] as const)(
+  "preserves the acknowledged reservations across cleanup batch %s",
+  async (failure) => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      dependencyChain: true,
+      maxParallel: 1,
+      isolatedValidationWorkItem: 8,
+      maxAttemptsPerItem: 1,
+    });
+    let failDispatchObservation = false;
+    const read = vi.mocked(GitHubControlStore.prototype.readRef);
+    const originalRead = read.getMockImplementation()!;
+    read.mockImplementation(async (...args) => {
+      if (failDispatchObservation && args[0].startsWith("refs/heads/")) {
+        failDispatchObservation = false;
+        throw new Error("scripted failure before backend dispatch");
+      }
+      return originalRead(...args);
+    });
+    const addComment = vi.mocked(GitHubControlStore.prototype.addIssueComment);
+    const original = addComment.getMockImplementation()!;
+    let injected = 0;
+    addComment.mockImplementation(async (node, body, mutationClass) => {
+      const events = decodeEventComments(body);
+      const compatiblePair =
+        events.length === 2 &&
+        events.every(
+          (event) => event.kind === "budget" && event.workItem === 8 && !event.modelInvocationId,
+        );
+      if (compatiblePair && events.every((event) => event.event === "BudgetReconciled")) {
+        injected++;
+        if (failure === "accepted-response-lost") await original(node, body, mutationClass);
+        throw Object.assign(
+          new Error(`cleanup batch ${failure}`),
+          failure === "rejected" ? { status: 403 } : {},
+        );
+      }
+      const result = await original(node, body, mutationClass);
+      if (compatiblePair && events.every((event) => event.event === "BudgetReserved"))
+        failDispatchObservation = true;
+      return result;
+    });
+    try {
+      await f.run().catch(() => undefined);
+      expect(injected).toBe(1);
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(0);
+      const nativeBudget = f
+        .events()
+        .filter(
+          (event) => event.kind === "budget" && event.workItem === 8 && !event.modelInvocationId,
+        );
+      expect(nativeBudget.filter((event) => event.event === "BudgetReserved")).toHaveLength(2);
+      const reconciled = nativeBudget.filter((event) => event.event === "BudgetReconciled");
+      expect(reconciled).toHaveLength(failure === "accepted-response-lost" ? 2 : 0);
+      // No launch was attempted, so these two acknowledged results are exact zero;
+      // failed/ambiguous publication never synthesizes an additional receipt.
+      expect(reconciled.every((event) => event.kind === "budget" && event.amount === 0)).toBe(true);
+    } finally {
+      await f.dispose();
+      vi.restoreAllMocks();
+    }
+  },
+  20_000,
+);

@@ -1,10 +1,20 @@
+import { assessRecoveryAccounting } from "../src/recovery/accounting.js";
+import { writerAuthority } from "../src/control/authority.js";
+import {
+  assertResultInvocationRecorded,
+  decodeResultReceiptComments,
+  encodeResultReceiptComment,
+  RESULT_RECORD_PROTOCOL,
+  resultEventsDigest,
+  type AuthenticatedResultReceipt,
+} from "../src/control/result-receipts.js";
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { FactoryReadSnapshot } from "../src/application/status.js";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "../src/control/lease.js";
-import { ReviewCheckpointManager } from "../src/control/reviews.js";
+import { loadReviewCheckpoint, ReviewCheckpointManager } from "../src/control/reviews.js";
 import { attemptRef } from "../src/control/attempts.js";
 import {
   decodeEventComments,
@@ -2118,5 +2128,160 @@ describe("bounded read-only immutable recovery proposals", () => {
       code: "historical-graph-bootstrap-unsupported",
       reason: expect.stringContaining("closed management usage"),
     });
+  });
+});
+
+describe("comment result locator recovery", () => {
+  it("proposes, persists, cold loads and resolves exact selected-run review comments", async () => {
+    const f = await fixture();
+    const receipts: AuthenticatedResultReceipt[] = [];
+    Object.assign(f.start, { recordProtocol: RESULT_RECORD_PROTOCOL });
+    for (const item of f.snapshot.workItems.slice(0, 2)) {
+      const validation = item.factoryEvents!.find((value) => value.kind === "validation");
+      const collected = item.factoryEvents!.find(
+        (value) => value.kind === "attempt" && value.event === "AttemptCollected",
+      );
+      const budget = item.factoryEvents!.find(
+        (value) => value.kind === "budget" && value.event === "BudgetReconciled",
+      );
+      const accepted = item.factoryEvents!.find(
+        (value) => value.kind === "attempt" && value.event === "AttemptValidated",
+      );
+      if (
+        validation?.kind !== "validation" ||
+        collected?.kind !== "attempt" ||
+        !collected.artifactDigest ||
+        budget?.kind !== "budget" ||
+        accepted?.kind !== "attempt"
+      )
+        throw new Error("fixture review evidence");
+      const identity = {
+        kind: "artifact" as const,
+        runId: "source",
+        objective: 7,
+        workItem: item.number,
+        attempt: 1,
+        artifactDigest: collected.artifactDigest,
+        baseSha: validation.baseSha,
+        outputTreeSha: validation.outputTreeSha,
+        evidenceDigest: validation.evidenceDigest,
+      };
+      const prior = await loadReviewCheckpoint(f.storage, identity);
+      if (!prior) throw new Error("fixture review missing");
+      const invocationId = `review-${prior.identityDigest}`;
+      const marker = f.event({
+        kind: "budget",
+        event: "BudgetReserved",
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        workItem: item.number,
+        attempt: 1,
+        modelInvocationId: invocationId,
+        usageId: `invocation-${invocationId}`,
+        directorEpoch: 1,
+        policyDigest: f.lease.policyDigest,
+        sequence: budget.sequence - 1,
+        ...writerAuthority(f.lease, budget.sequence - 1),
+      });
+      Object.assign(budget, {
+        modelInvocationId: invocationId,
+        directorEpoch: 1,
+        policyDigest: f.lease.policyDigest,
+        reportedModelUsage: prior.usage,
+        ...writerAuthority(f.lease, budget.sequence),
+      });
+      Object.assign(accepted, writerAuthority(f.lease, accepted.sequence));
+      const events = [budget, accepted];
+      const body = encodeResultReceiptComment(
+        "Retained review",
+        {
+          protocol: RESULT_RECORD_PROTOCOL,
+          kind: "review",
+          objective: 7,
+          workItem: item.number,
+          runId: "source",
+          identityDigest: prior.identityDigest,
+          baseSha: identity.baseSha,
+          sequence: budget.sequence,
+          at: budget.at,
+          ...writerAuthority(f.lease, budget.sequence),
+          eventsDigest: resultEventsDigest(events),
+          content: {
+            kind: "inline",
+            checkpoint: {
+              protocol: "clockgrove.factory/review-checkpoint-v1",
+              identityDigest: prior.identityDigest,
+              identity,
+              review: prior.review,
+              usage: prior.usage,
+            },
+          },
+        },
+        events,
+      );
+      item.factoryEvents!.push(marker);
+      receipts.push({
+        receipt: decodeResultReceiptComments(body)[0]!,
+        commentId: `review-comment-${item.number}`,
+        events: decodeEventComments(body),
+      });
+    }
+    const readResultReceipts: NonNullable<CompiledGraphStore["readResultReceipts"]> = async (
+      scope,
+    ) => {
+      const selected = receipts.filter(
+        ({ receipt }) =>
+          receipt.identityDigest === scope.identityDigest && receipt.kind === scope.kind,
+      );
+      const history = [
+        ...f.snapshot.factoryEvents!,
+        ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+      ];
+      for (const record of selected)
+        assertResultInvocationRecorded(record.receipt, record.events, history);
+      return { protocol: RESULT_RECORD_PROTOCOL, receipts: selected };
+    };
+    f.storage.readResultReceipts = readResultReceipts;
+    f.store.readResultReceipts = readResultReceipts;
+    expect(
+      assessRecoveryAccounting({
+        objective: 7,
+        repository: "o/r",
+        events: [
+          ...f.snapshot.factoryEvents!,
+          ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+        ],
+        runIds: ["source"],
+        policy,
+      }).blockers,
+    ).toEqual([]);
+    const proposed = await f.build();
+    expect(proposed.blockers).toEqual([]);
+    expect(proposed.plan!.items[1]!.source!.review).toMatchObject({
+      locator: { kind: "issue-comment", commentId: "review-comment-9" },
+    });
+    expect(proposed.plan!.items[1]!.source!.review).not.toHaveProperty("ref");
+    const saved = await new RecoveryPlanManager(f.storage, f.leases).persist({
+      lease: { ...f.lease, runId: "successor" },
+      plan: proposed.plan!,
+    });
+    const cold = await new RecoveryPlanManager(f.storage, f.leases).load(7, saved.digest);
+    expect(cold?.plan).toEqual(saved.plan);
+    const input = {
+      claim: null,
+      planRecord: cold!,
+      events: [
+        ...f.snapshot.factoryEvents!,
+        ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+      ],
+      snapshot: f.snapshot,
+      store: f.store,
+    };
+    const resolved = await resolveRecoveryEvidence(input);
+    expect(resolved.items.find((item) => item.workItem === 9)?.sourceBindings).toBe("verified");
+    receipts[1]!.commentId = "different-comment";
+    const changed = await resolveRecoveryEvidence(input);
+    expect(changed.items.find((item) => item.workItem === 9)?.sourceBindings).not.toBe("verified");
   });
 });

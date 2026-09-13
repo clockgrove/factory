@@ -86,6 +86,7 @@ export function recoveryAdoptionEvents(
     ...common,
     kind: "run",
     event: "FactoryRunStarted",
+    ...(predecessor.recordProtocol ? { recordProtocol: predecessor.recordProtocol } : {}),
     sequence: claim.transaction.startSequence,
     actor: predecessor.actor,
     repository: plan.repository,

@@ -445,7 +445,7 @@ describe("Supervisor repository-capability admission", () => {
       expect(result).toMatchObject({
         status: "escalated",
         reason: expect.stringMatching(
-          /provider root.*merge is not authenticated|prior integration lacks its authenticated accepted exact-head checkpoint/i,
+          /repository capability provider provider merge is not authenticated in the execution base|prior integration lacks its authenticated accepted exact-head checkpoint/i,
         ),
       });
       expect(
@@ -864,49 +864,69 @@ describe("Supervisor repository-capability admission", () => {
     }
   }, 60_000);
 
-  it("rejects provider-lineage mutation after reservation and before model launch", async () => {
-    const fixture = await providerSupervisorFixture("daytona-burst", {
-      localOnly: true,
-      localMaxParallel: 2,
-      capabilityAdmission: "valid",
-      capabilityProviderLineageMismatchAfterReservation: true,
-    });
-    fixtures.push(fixture);
-    const scoped = admitLocalValidation();
-    try {
-      const result = await fixture.run();
-      expect(result).toMatchObject({ status: "escalated" });
-      // Depending on sibling settlement order, the run can summarize the spent
-      // attempt limit. The original authority rejection must still be evidenced.
-      const rejection =
-        /provider root.*merge is not authenticated|authenticated accepted exact-head checkpoint/i;
-      expect(
-        rejection.test(result.reason ?? "") ||
+  it.each([false, true])(
+    "rejects provider-lineage mutation after reservation and before model launch (dependency chain %s)",
+    async (dependencyChain) => {
+      const fixture = await providerSupervisorFixture("daytona-burst", {
+        localOnly: true,
+        localMaxParallel: 2,
+        dependencyChain,
+        capabilityAdmission: "valid",
+        capabilityProviderLineageMismatchAfterReservation: true,
+      });
+      fixtures.push(fixture);
+      const scoped = admitLocalValidation();
+      try {
+        const result = await fixture.run();
+        expect(result).toMatchObject({ status: "escalated" });
+        // Depending on sibling settlement order, the run can summarize the spent
+        // attempt limit. The original authority rejection must still be evidenced.
+        // A dependency chain reaches the dispatch check directly. An independent
+        // sibling can trigger the ancestry checkpoint first during preparation.
+        const rejection = dependencyChain
+          ? /repository capability provider provider merge is not authenticated in the execution base/i
+          : /repository capability provider provider merge is not authenticated in the execution base|prior integration lacks its authenticated accepted exact-head checkpoint/i;
+        expect(
+          rejection.test(result.reason ?? "") ||
+            fixture
+              .events()
+              .some(
+                (event) =>
+                  event.kind === "attempt" &&
+                  event.event === "AttemptFailed" &&
+                  event.workItem === 9 &&
+                  rejection.test(event.reason ?? ""),
+              ),
+          JSON.stringify(
+            {
+              result,
+              attempts: fixture.events().filter((event) => event.kind === "attempt"),
+              activity: fixture.activity,
+              notifications: fixture.notifications,
+            },
+            null,
+            2,
+          ),
+        ).toBe(true);
+        expect(
           fixture
             .events()
             .some(
               (event) =>
                 event.kind === "attempt" &&
-                event.event === "AttemptFailed" &&
-                event.workItem === 9 &&
-                rejection.test(event.reason ?? ""),
+                event.event === "AttemptReserved" &&
+                event.workItem === 9,
             ),
-      ).toBe(true);
-      expect(
-        fixture
-          .events()
-          .some(
-            (event) =>
-              event.kind === "attempt" && event.event === "AttemptReserved" && event.workItem === 9,
-          ),
-      ).toBe(true);
-      expect(
-        fixture.activity.some((entry) => entry.workItem === 9 && entry.operation === "launch"),
-      ).toBe(false);
-    } finally {
-      scoped.mockRestore();
-    }
-  }, 60_000);
+        ).toBe(true);
+        expect(
+          fixture.activity.some((entry) => entry.workItem === 9 && entry.operation === "launch"),
+        ).toBe(false);
+      } finally {
+        scoped.mockRestore();
+      }
+    },
+    60_000,
+  );
 });
 
 describe("Supervisor workflow publication boundary", () => {

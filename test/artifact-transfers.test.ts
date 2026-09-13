@@ -66,7 +66,20 @@ function store() {
     createTree: async ({ entries }) => {
       write("tree");
       const id = createHash("sha1").update(JSON.stringify(entries)).digest("hex");
-      trees.set(id, new Map(entries.map((entry) => [entry.path, entry.sha])));
+      trees.set(
+        id,
+        new Map(
+          entries.map((entry) => {
+            if (entry.content !== undefined) {
+              const bytes = Buffer.from(entry.content);
+              const blobOid = oid(bytes);
+              blobs.set(blobOid, bytes);
+              return [entry.path, blobOid];
+            }
+            return [entry.path, entry.sha!];
+          }),
+        ),
+      );
       return id;
     },
     createCommit: async ({ treeOid, parentOids, message }) => {
@@ -166,9 +179,8 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
     expect(readCommit).not.toHaveBeenCalled();
     expect(readRef).toHaveBeenCalledTimes(2);
     const prefix = artifactTransferRef(id);
-    expect(memory.commits.get(memory.refs.get(`${prefix}/ready`)!)!.parentOids).toEqual([
-      memory.refs.get(`${prefix}/intent`),
-    ]);
+    expect(memory.commits.get(memory.refs.get(`${prefix}/ready`)!)!.parentOids).toEqual([]);
+    expect(memory.refs.has(`${prefix}/intent`)).toBe(false);
   });
 
   it("validates an ambiguous publication and rejects unavailable evidence without replaying it", async () => {
@@ -192,7 +204,7 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
         assertCurrent: async () => {},
       }),
     ).rejects.toMatchObject({
-      message: "artifact transfer intent publication is not yet observable",
+      message: "artifact transfer ready publication is not yet observable",
       cause: expect.objectContaining({ message: "response lost" }),
     });
     expect(createRef).toHaveBeenCalledTimes(1);
@@ -202,12 +214,7 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
   it("rebuilds the ready tree when an equivalent race winner uses different descriptor bytes", async () => {
     const memory = store(),
       id = identity();
-    const value = normalizeArtifact({
-      baseSha: id.baseSha,
-      patch: "inline",
-      changedPaths: ["asset.dat"],
-      outcome: "succeeded",
-    });
+    const value = await artifact(id.baseSha);
     const args = {
       store: memory.api,
       identity: id,
@@ -263,7 +270,10 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
       assertCurrent: async () => {},
     };
     await persistArtifactTransfer({ ...args, artifact: value("winner") });
-    vi.spyOn(memory.api, "readRef").mockResolvedValueOnce(null).mockImplementation(originalRead);
+    vi.spyOn(memory.api, "readRef")
+      .mockResolvedValueOnce(null) // No historical upload intent.
+      .mockResolvedValueOnce(null) // Concurrent ready publication is initially absent.
+      .mockImplementation(originalRead);
     const publish = vi.spyOn(memory.api, "createRef");
     await expect(persistArtifactTransfer({ ...args, artifact: value("loser") })).rejects.toThrow(
       "artifact transfer ref publication conflicted",
@@ -295,8 +305,8 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
         assertCurrent: async () => {},
       }),
     ).resolves.toMatchObject({ lifecycle: "retained" });
-    expect(readCommit).toHaveBeenCalledTimes(2);
-    expect(memory.refs.size).toBe(2);
+    expect(readCommit).toHaveBeenCalledTimes(1);
+    expect(memory.refs.size).toBe(1);
   });
 
   it("isolates transfers from an occupied external pending-artifact namespace", async () => {
@@ -550,7 +560,7 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
     await expect(resumeArtifactTransfer(options)).rejects.toThrow(/incomplete/i);
   });
 
-  it("publishes an inline transfer with one descriptor and tree while retaining both fenced checkpoints", async () => {
+  it("publishes an inline transfer with one fenced direct retained checkpoint", async () => {
     const memory = store(),
       id = identity();
     const value = normalizeArtifact({
@@ -569,17 +579,143 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
         fences++;
       },
     });
-    expect(memory.writes).toEqual(["blob", "tree", "commit", "ref", "commit", "ref"]);
-    expect(fences).toBe(6);
-    const intent = memory.commits.get(memory.refs.get(`${artifactTransferRef(id)}/intent`)!)!;
+    expect(memory.writes).toEqual(["tree", "commit", "ref"]);
+    expect(fences).toBe(3);
+    expect(memory.refs.has(`${artifactTransferRef(id)}/intent`)).toBe(false);
     const ready = memory.commits.get(result.commitSha)!;
-    expect(ready.treeOid).toBe(intent.treeOid);
-    expect(ready.parentOids).toEqual([intent.oid]);
+    expect(ready.parentOids).toEqual([]);
     expect((await recoverArtifactTransfer({ store: memory.api, identity: id }))?.digest).toBe(
       value.digest,
     );
   });
 
+  it.each([1, 2, 3])("resumes direct retention after interruption at write %s", async (failure) => {
+    const memory = store(),
+      id = identity();
+    const value = normalizeArtifact({
+      baseSha: id.baseSha,
+      patch: "inline",
+      changedPaths: ["asset.dat"],
+      outcome: "succeeded",
+    });
+    const args = {
+      store: memory.api,
+      identity: id,
+      artifact: value,
+      allowedPaths: ["asset.dat"],
+      assertCurrent: async () => {},
+    };
+    memory.fail(failure);
+    await expect(persistArtifactTransfer(args)).rejects.toThrow(
+      failure === 3 ? "not yet observable" : "interrupted",
+    );
+    expect(memory.refs.size).toBe(0);
+    await expect(recoverArtifactTransfer(args)).resolves.toBeNull();
+    memory.fail(0);
+    const recovered = await resumeArtifactTransfer(args);
+    expect(recovered).toEqual(value);
+    expect(memory.refs.size).toBe(1);
+    // Successful retention removes the only private descriptor: recovery is GitHub-only.
+    await expect(fs.stat(roots[roots.length - 1]!)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(recoverArtifactTransfer(args)).resolves.toEqual(value);
+  });
+
+  it.each([1, 2, 3])("rejects a stale owner at direct retention mutation %s", async (failure) => {
+    const memory = store(),
+      id = identity();
+    const value = normalizeArtifact({
+      baseSha: id.baseSha,
+      patch: "inline",
+      changedPaths: ["asset.dat"],
+      outcome: "succeeded",
+    });
+    let fences = 0;
+    await expect(
+      persistArtifactTransfer({
+        store: memory.api,
+        identity: id,
+        artifact: value,
+        allowedPaths: ["asset.dat"],
+        assertCurrent: async () => {
+          if (++fences === failure) throw new Error("writer replaced");
+        },
+      }),
+    ).rejects.toThrow(failure === 3 ? "not yet observable" : "writer replaced");
+    expect(memory.writes).toHaveLength(failure - 1);
+    expect(memory.refs.size).toBe(0);
+  });
+
+  it("retains exact v1 inline intent and ready semantics on cold recovery and resume", async () => {
+    const memory = store(),
+      id = identity();
+    const value = normalizeArtifact({
+      baseSha: id.baseSha,
+      patch: "inline",
+      changedPaths: ["asset.dat"],
+      outcome: "succeeded",
+    });
+    const bytes = Buffer.from(
+      JSON.stringify({
+        protocol: "clockgrove.factory/artifact-transfer-v1",
+        identity: id,
+        artifact: value,
+        retention: "repository-audit",
+        chunks: [],
+      }),
+    );
+    const blob = await memory.api.createBlob(bytes);
+    const treeOid = await memory.api.createTree({
+      entries: [{ path: "artifact-transfer.json", mode: "100644", type: "blob", sha: blob }],
+    });
+    const intentOid = await memory.api.createCommit({
+      treeOid,
+      parentOids: [],
+      message: `Factory artifact transfer intent\n\nFactory-Artifact: ${value.digest}\nFactory-Descriptor: ${sha256(bytes)}\nFactory-Retention: repository-audit`,
+    });
+    const prefix = artifactTransferRef(id);
+    await memory.api.createRef(`${prefix}/intent`, intentOid);
+    await expect(recoverArtifactTransfer({ store: memory.api, identity: id })).rejects.toThrow(
+      "incomplete",
+    );
+    const args = {
+      store: memory.api,
+      identity: id,
+      allowedPaths: ["asset.dat"],
+      assertCurrent: async () => {},
+    };
+    await expect(resumeArtifactTransfer(args)).resolves.toEqual(value);
+    expect(memory.refs.get(`${prefix}/intent`)).toBe(intentOid);
+    const ready = memory.commits.get(memory.refs.get(`${prefix}/ready`)!)!;
+    expect(ready.parentOids).toEqual([intentOid]);
+    await expect(recoverArtifactTransfer(args)).resolves.toEqual(value);
+    ready.parentOids = [];
+    await expect(recoverArtifactTransfer(args)).rejects.toThrow("immutable upload intent");
+  });
+
+  it("rejects parents and a transplanted intent on a direct v2 receipt", async () => {
+    const memory = store(),
+      id = identity();
+    const value = normalizeArtifact({
+      baseSha: id.baseSha,
+      patch: "inline",
+      changedPaths: ["asset.dat"],
+      outcome: "succeeded",
+    });
+    const args = {
+      store: memory.api,
+      identity: id,
+      artifact: value,
+      allowedPaths: ["asset.dat"],
+      assertCurrent: async () => {},
+    };
+    const result = await persistArtifactTransfer(args);
+    const ready = memory.commits.get(result.commitSha)!;
+    ready.parentOids = [id.baseSha];
+    await expect(recoverArtifactTransfer(args)).rejects.toThrow("no payload, intent, or parents");
+    ready.parentOids = [];
+    memory.refs.set(`${artifactTransferRef(id)}/intent`, result.commitSha);
+    await expect(recoverArtifactTransfer(args)).rejects.toThrow("no payload, intent, or parents");
+  });
   it("fences every mutation and recovers exact bytes only through intent-bound ready refs", async () => {
     const memory = store(),
       id = identity(),

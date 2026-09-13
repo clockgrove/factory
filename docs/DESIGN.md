@@ -166,6 +166,14 @@ dependency, pull-request, and event relationships must be read consistently. A p
 small cardinality preflight for an Objective and caches that bound; the detailed query detects a
 changed `totalCount` and refreshes the bound before it can return a partial graph.
 
+Exact immutable commit, complete tree, and verified blob content can be reused within one store and authentication context, with
+entry and byte bounds and coalesced identical reads. This content carries no current provider time.
+Fresh ref observations still establish the observed generation and time; a warm content hit cannot
+establish current ownership, permissions, graph membership, or admission authority. Discarding the
+cache reconstructs from GitHub. Transport diagnostics preserve their observation context across
+request scheduling and count each attempted transport, including traffic outside a mutation operation.
+Nested phase totals remain inclusive and are not additive.
+
 The detailed query also returns its own primary GraphQL cost, remaining balance, and reset time.
 The Supervisor admits ready work without reserving GitHub quota for a future worker wave, graph
 projection, or timeout interval. Other Objectives and external clients share that quota, so such
@@ -347,6 +355,51 @@ asserted from prompt changes alone.
 
 ## Versioned GitHub protocol
 
+### Consolidated completed-result records
+
+New foreground runs explicitly select `recordProtocol: clockgrove.factory/transition-receipt-v1`
+in their authenticated `FactoryRunStarted` receipt. Recovery successors preserve that selection.
+Runs without it retain their original Git-checkpoint readers and writers; historical records are
+never rewritten. Unknown selectors fail closed. Upgrade the controller and plugin together;
+downgrading an active selected run to an older controller is unsupported.
+
+For a selected run, completed independent validation is one authenticated issue comment containing
+its complete checkpoint and `ValidationRecorded` projection. Completed semantic review similarly
+contains the exact review, original invocation usage closure, and (for an accepted initial artifact)
+`AttemptValidated`. There is no additional ordinary checkpoint tree, commit or ref. The comment has
+a real GitHub comment locator and a canonical receipt digest; it never impersonates a Git OID.
+Each receipt binds base, semantic identity, writer operation/holder/epoch/policy and the exact adjacent
+event digest. Readers authenticate the actor through the run start and validate the projections
+against the checkpoint and its original durable model-dispatch marker, including phase, optional
+attempt and available token breakdown. Positive result records from a complete authenticated
+observation can serve later immutable-result loads; a newer observation replaces that membership.
+Missing results and ambiguous publication still require fresh reads. Conflicting receipts fail closed. A lost response is reconciled by exact
+identity without blindly repeating publication or model execution.
+
+The same record contract uses authenticated external Git content only when the complete result
+cannot fit the conservative 60,000-byte comment bound. Its reachable immutable content is retained
+before the comment, which binds the ref, commit, blob and SHA-256. Readers validate that content before
+exposing its event projections. Existing validation and review size limits remain supported.
+This content variant does not duplicate the result into both inline and external checkpoints.
+
+Dispatch intent remains durable before invocation; validation completion remains before review
+dispatch; review acceptance remains before publication. The receipt is a completed fact, never a
+CAS winner or proof of absence. Older writer results retain their original accounting but require
+current recovery authorization before a new control outcome. Acknowledged accounting is disposable
+working state and does not acquire authenticated snapshot membership.
+
+Post-PR `AttemptPublished` and `PublicationRecorded` facts share one comment on the selected ordinary
+path. Inline artifacts use a single v2 ready descriptor publication because no payload handoff lies
+between intent and completion; external payloads retain their separate intent and ready boundaries.
+An exact current dispatched issue owner remains non-replayable and occupied until evidence-backed
+release, so its execution outcome need not also publish a redundant terminal ledger revision.
+
+The ordinary scheduler does not reconstruct an Objective on a capacity-only wake when every remaining
+item is already active or dependency-blocked. It waits for a child completion or the original bounded
+external-observation deadline. Admission, recovery, integration and terminal decisions still obtain
+their required complete current observations. The following legacy Git-checkpoint descriptions apply
+to runs without the selected result-record protocol where they overlap this section.
+
 Every current machine-readable control record contains at least:
 
 ```json
@@ -453,6 +506,11 @@ lock. Normal issue, comment, receipt, projection and PR publication writes do no
 it. Independent sessions coordinate capacity using a short custom-ref CAS transaction, not an
 execution-long lease. One-time import of older resource reservations and explicit scheduler ceiling
 changes are genuine shared-state boundaries. See [the locking audit](OBJECTIVE-AUTHORITY.md).
+
+Shared-capacity transactions return the generation they acknowledged, or the generation observed
+for a rejection. Callers need no follow-on snapshot solely to rediscover that result. The coordinator
+may retain its acknowledged immutable state, but each subsequent capacity observation still reads
+the current ref and detects a peer generation change.
 
 The shared-capacity v2 snapshot retains every active or unresolved claim plus a bounded recent
 release journal. At 3,072 journal entries, a fenced capacity mutation moves explicit releases into
@@ -854,6 +912,12 @@ original evidence timestamps, and its paid review is accounted once. Completed v
 are preserved before rechecking mutable trunk. Another proved sibling integration creates a new
 linked refresh/validation/review identity; neither an old review nor an unexplained external advance
 authorizes the next head. Native linear-stack rebase proofs remain separate from sibling refreshes.
+
+Pending integration observations carry their exact head/base and a reason. The first-check discovery
+grace retains its 60-second safety interval and schedules its known expiry directly, bounded by the
+Objective deadline. Unknown readiness keeps the bounded polling cadence, reset when the observed
+head/base or reason changes. These are scheduling hints: integration still reacquires its required
+current authority, head, base and check evidence.
 
 Publication repair rereads authenticated history before writing a missing receipt. Equivalent
 receipts may still exist after response loss or delayed observation; Factory preserves every audit

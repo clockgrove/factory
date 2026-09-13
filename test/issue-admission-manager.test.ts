@@ -139,6 +139,105 @@ async function release(f: Awaited<ReturnType<typeof fixture>>, reservation: Atte
   });
 }
 describe("production issue admission manager", () => {
+  it("records a dispatched outcome once without a terminal projection and retains the slot until release", async () => {
+    const f = await fixture();
+    const reservation = await f.manager.reserve(f.args());
+    await f.manager.markDispatching(f.lease, reservation);
+    const priorOid = f.store.refs.get(issueAdmissionRef(12));
+    const commits = f.store.commits.size;
+    const comments = f.store.comments.length;
+    await f.manager.record({
+      lease: f.lease,
+      reservation,
+      workItemNodeId: "I_12",
+      event: "AttemptSucceeded",
+      sequence: 11,
+      artifactDigest: "c".repeat(64),
+    });
+    expect(f.store.commits.size).toBe(commits);
+    expect(f.store.comments.length).toBe(comments + 1);
+    expect(f.store.refs.get(issueAdmissionRef(12))).toBe(priorOid);
+    const restarted = new AttemptManager({
+      store: f.store,
+      leases: new LeaseManager({ store: f.store }),
+    });
+    await expect(restarted.markDispatching(f.lease, reservation)).rejects.toThrow(/replayed/);
+    await expect(restarted.reserve(f.args())).rejects.toThrow(/occupied/);
+    expect((await restarted.ledger.read(12))!.history[0]).toMatchObject({
+      disposition: "dispatching",
+      dispatchPossible: true,
+    });
+    await release(f, reservation);
+    expect((await restarted.reserve(f.args())).attempt).toBe(2);
+  });
+  it("never releases a dispatched liability when an outcome comment acknowledgment is lost", async () => {
+    const f = await fixture();
+    const reservation = await f.manager.reserve(f.args());
+    await f.manager.markDispatching(f.lease, reservation);
+    const add = f.store.addIssueComment.bind(f.store);
+    f.store.addIssueComment = async (node, body) => {
+      await add(node, body);
+      throw Error("lost outcome acknowledgment");
+    };
+    await expect(
+      f.manager.record({
+        lease: f.lease,
+        reservation,
+        workItemNodeId: "I_12",
+        event: "AttemptSucceeded",
+        sequence: 11,
+        artifactDigest: "c".repeat(64),
+      }),
+    ).rejects.toThrow("lost outcome acknowledgment");
+    const restarted = new AttemptManager({
+      store: f.store,
+      leases: new LeaseManager({ store: f.store }),
+    });
+    expect((await restarted.ledger.read(12))!.history[0]).toMatchObject({
+      disposition: "dispatching",
+      dispatchPossible: true,
+    });
+    await expect(restarted.markDispatching(f.lease, reservation)).rejects.toThrow(/replayed/);
+    await expect(restarted.reserve(f.args())).rejects.toThrow(/occupied/);
+  });
+  it("retains the terminal CAS when a successor writer records an original dispatched outcome", async () => {
+    const f = await fixture();
+    const reservation = await f.manager.reserve(f.args());
+    await f.manager.markDispatching(f.lease, reservation);
+    const priorOid = f.store.refs.get(issueAdmissionRef(12));
+    f.store.now = new Date(f.lease.expiresAt.getTime() + 1);
+    const leases = new LeaseManager({ store: f.store });
+    const lease = await leases.acquire(
+      {
+        objective: 7,
+        runId: f.lease.runId,
+        holder: "successor",
+        policyDigest: f.lease.policyDigest,
+      },
+      base,
+    );
+    const manager = new AttemptManager({ store: f.store, leases });
+    await manager.record({
+      lease,
+      reservation,
+      workItemNodeId: "I_12",
+      allowRecovery: true,
+      event: "AttemptSucceeded",
+      sequence: 11,
+      artifactDigest: "c".repeat(64),
+    });
+    expect(f.store.refs.get(issueAdmissionRef(12))).not.toBe(priorOid);
+    expect((await manager.ledger.read(12))!.history[0]).toMatchObject({
+      disposition: "terminal",
+      dispatchPossible: true,
+      writerEpoch: lease.epoch,
+      currentWriterHolder: lease.holder,
+      reservation: { oid: reservation.oid },
+    });
+    await expect(f.manager.markDispatching(f.lease, reservation)).rejects.toThrow();
+    await expect(manager.markDispatching(lease, reservation)).rejects.toThrow();
+    await expect(manager.reserve(f.args(lease))).rejects.toThrow(/occupied/);
+  });
   it.each([false, true])(
     "allows one concurrent reservation across same/different Objectives (%s)",
     async (different) => {

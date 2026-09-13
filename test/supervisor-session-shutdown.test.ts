@@ -221,6 +221,8 @@ describe("completed artifact shutdown before validation admission", () => {
       const holdFailure = new SafeArtifactCheckpointHeldError();
       const budget = LifecycleRecorder.prototype.budget;
       const throwNextFailure = ContinuousExecutionPool.prototype.throwNextFailure;
+      const takeCompleted = ContinuousExecutionPool.prototype.takeCompleted;
+      const hasExecution = ContinuousExecutionPool.prototype.has;
       const reportDemand = ObjectiveFairness.prototype.reportDemand;
       let commandRecorded = false;
       let claimAtOperationalGate = false;
@@ -274,6 +276,24 @@ describe("completed artifact shutdown before validation admission", () => {
         // fence. This deterministically models settlement after the preceding
         // scheduler checks, without weakening the real pool's claim behavior.
         if (claimAtOperationalGate) return throwNextFailure.call(this);
+      });
+
+      vi.spyOn(ContinuousExecutionPool.prototype, "has").mockImplementation(function (
+        this: ContinuousExecutionPool<unknown>,
+        key,
+      ) {
+        // Retain ownership until the targeted fence too: the deliberately delayed
+        // settlement must not invite same-process durable recovery before it.
+        return commandRecorded && !claimAtOperationalGate && key === 8
+          ? true
+          : hasExecution.call(this, key);
+      });
+      vi.spyOn(ContinuousExecutionPool.prototype, "takeCompleted").mockImplementation(function (
+        this: ContinuousExecutionPool<unknown>,
+      ) {
+        // A completion wake can claim the failure before the next graph read.
+        // Keep both claim paths queued until the acknowledgement fence under test.
+        return claimAtOperationalGate ? takeCompleted.call(this) : null;
       });
 
       await expect(f.run()).rejects.toBe(holdFailure);

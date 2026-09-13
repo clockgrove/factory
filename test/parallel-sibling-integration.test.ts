@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FactorySupervisor } from "../src/supervisor.js";
+import * as progress from "../src/scheduling/progress-wake.js";
 import * as localScopes from "../src/runtime/local-scope.js";
 import * as processGroup from "../src/runtime/process-group.js";
 import { GitHubReader } from "../src/github.js";
@@ -1503,6 +1504,9 @@ describe("Supervisor parallel independent sibling integration", () => {
       nextActionAt: string | null;
       targetedReads: number;
     }> = [];
+    const wait = vi.spyOn(progress, "waitForProgress");
+    let waitsAtWrite = 0;
+    let waitsAtObservation = 0;
     const f = await fixture({
       regular: true,
       staleRefreshedHeadReads: 1,
@@ -1512,6 +1516,9 @@ describe("Supervisor parallel independent sibling integration", () => {
         if (message.startsWith(prefix)) {
           const observation = JSON.parse(message.slice(prefix.length));
           observations.push(observation);
+          if (observation.event === "write-completed") waitsAtWrite = wait.mock.calls.length;
+          if (observation.event === "observation-changed")
+            waitsAtObservation = wait.mock.calls.length;
         }
       },
     });
@@ -1519,9 +1526,7 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(result, result.reason).toMatchObject({ status: "completed" });
     const action = observations.find((entry) => entry.event === "next-action")!;
     expect(action.targetedReads).toBe(1);
-    expect(Date.parse(action.firstObservedAt!) - Date.parse(action.writeCompletedAt)).toBeLessThan(
-      1_000,
-    );
+    expect(waitsAtObservation).toBe(waitsAtWrite);
     expect(Date.parse(action.nextActionAt!) - Date.parse(action.firstObservedAt!)).toBeLessThan(
       5_000,
     );
@@ -1895,6 +1900,40 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(f.review).toHaveBeenCalledOnce();
   });
 
+  it("yields pending adopted integration to progress without spinning snapshots", async () => {
+    let state: "stale-parents" | "fresh" = "stale-parents";
+    let waiting = false;
+    const f = await fixture({
+      previewState: () => state,
+      onStatus: (message) => {
+        if (message.includes("integration waiting:")) waiting = true;
+      },
+    });
+    const original = progress.waitForProgress;
+    let pendingWaits = 0;
+    vi.spyOn(progress, "waitForProgress").mockImplementation(async (args) => {
+      if (!waiting) return original(args);
+      pendingWaits++;
+      state = "fresh";
+      return null;
+    });
+    // Bound observations so a tight loop fails directly rather than starving the test timer.
+    const read = vi.mocked(GitHubReader.prototype.readObjective);
+    const originalRead = read.getMockImplementation()!;
+    let pendingSnapshots = 0;
+    read.mockImplementation(async (...args) => {
+      if (waiting && pendingWaits === 0 && ++pendingSnapshots > 3)
+        throw new Error("pending adopted integration spun without yielding");
+      return originalRead(...args);
+    });
+    const result = await f.run();
+    expect(result, result.reason).toMatchObject({ status: "completed" });
+    expect(pendingWaits).toBeGreaterThan(0);
+    expect(f.validate).toHaveBeenCalledOnce();
+    expect(f.review).toHaveBeenCalledOnce();
+    expect(f.merge).toHaveBeenCalledTimes(2);
+  });
+
   it("waits for a stale GitHub test-merge preview to refresh without repeating review", async () => {
     const f = await fixture({ stalePreviewOnce: true });
     const result = await f.run();
@@ -1929,13 +1968,12 @@ describe("Supervisor parallel independent sibling integration", () => {
       await waiting;
       await vi.advanceTimersByTimeAsync(0);
       const readsBefore = f.pullReads.mock.calls.length;
-      for (let minute = 0; minute < 7; minute++) await vi.advanceTimersByTimeAsync(60_000);
-      // Initial read, then 1m/3m/7m: not one full immutable-proof/API cycle per snapshot.
-      const readsWhileWaiting = f.pullReads.mock.calls.length - readsBefore;
-      expect(readsWhileWaiting).toBeGreaterThan(0);
-      // Each due observation now additionally rebinds the immutable refresh to
-      // current PR/ref/base; pacing still bounds reads independently of loop ticks.
-      expect(readsWhileWaiting).toBeLessThanOrEqual(40);
+      let previousReads = readsBefore;
+      for (let minute = 0; minute < 3; minute++) {
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(f.pullReads.mock.calls.length).toBeGreaterThan(previousReads);
+        previousReads = f.pullReads.mock.calls.length;
+      }
       expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
       expect(f.validate).toHaveBeenCalledOnce();
       expect(f.review).toHaveBeenCalledOnce();
@@ -1943,7 +1981,7 @@ describe("Supervisor parallel independent sibling integration", () => {
         1,
       );
       state = "fresh";
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       vi.useRealTimers();
       const result = await completion;
       expect(result, result.reason).toMatchObject({ status: "completed" });
@@ -1953,12 +1991,12 @@ describe("Supervisor parallel independent sibling integration", () => {
       expect(f.launch).not.toHaveBeenCalled();
       expect(f.renewLease).toHaveBeenCalled();
     },
-    // Includes real Git ancestry/import work around twelve simulated minutes.
+    // Includes real Git ancestry/import work around four simulated minutes.
     // Scheduling bounds remain the explicit read/review/validation assertions above.
     10_000,
   );
 
-  it("observes durable cancellation during preview backoff without another candidate or merge", async () => {
+  it("observes durable cancellation while preview evidence is pending without another candidate or merge", async () => {
     let observedWait!: () => void;
     const waiting = new Promise<void>((resolve) => {
       observedWait = resolve;

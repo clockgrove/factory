@@ -1147,7 +1147,7 @@ export class FactorySupervisor {
   readonly #modelInvocations = new ModelInvocationScopes();
   #integrationTail: Promise<void> = Promise.resolve();
   // Scheduling hints only: never reuse authority or mutable GitHub evidence.
-  // Lost on restart; every due observation repeats the normal integration fences.
+  // Lost on restart; every observation repeats the normal integration fences.
   #integrationWaits = new Map<number, { reason: string; evidence?: IntegrationWait }>();
   // One bounded opportunity per confirmed local ref write; never reconstructed as authority.
   #integrationWrites = new Map<
@@ -5411,9 +5411,10 @@ export class FactorySupervisor {
             await this.#recoverInterrupted(item, deadline, objective.items);
           continue;
         }
-        const adoptedPublication =
+        const deferredAdoptions = new Set<number>();
+        const adoptedPublications =
           this.#recoveryRuntime &&
-          objective.items.find((item) => {
+          objective.items.filter((item) => {
             const planned = this.#recoveryRuntime!.planRecord.plan.items.find(
               (entry) => entry.workItem === item.number,
             );
@@ -5446,9 +5447,9 @@ export class FactorySupervisor {
               )
             );
           });
-        if (adoptedPublication) {
-          await this.#resumeAdoptedSource(adoptedPublication);
-          continue;
+        for (const item of adoptedPublications || []) {
+          if (await this.#resumeAdoptedSource(item)) continue runLoop;
+          deferredAdoptions.add(item.number);
         }
         if (
           await this.#repairReservationReceipts(
@@ -5612,7 +5613,10 @@ export class FactorySupervisor {
         }
 
         const reviews = objective.items.filter(
-          (item) => item.state === "for_review" && !activeExecutions.has(item.number),
+          (item) =>
+            item.state === "for_review" &&
+            !activeExecutions.has(item.number) &&
+            !deferredAdoptions.has(item.number),
         );
         if (reviews.length > 0) {
           if (this.#deliverySelection.selected !== "native-stacks") {
@@ -5639,7 +5643,10 @@ export class FactorySupervisor {
             if (
               !typedMembers.every((member) => new Set(["for_review", "done"]).has(member.state)) ||
               !typedMembers.some((member) => member.state === "for_review") ||
-              typedMembers.some((member) => activeExecutions.has(member.number))
+              typedMembers.some(
+                (member) =>
+                  activeExecutions.has(member.number) || deferredAdoptions.has(member.number),
+              )
             ) {
               continue;
             }
@@ -14345,15 +14352,18 @@ export class FactorySupervisor {
     return true;
   }
 
-  async #resumeAdoptedSource(item: DerivedWorkItem): Promise<void> {
+  async #resumeAdoptedSource(item: DerivedWorkItem): Promise<boolean> {
     try {
-      await this.#resumeAdoptedSourceNow(item);
+      const progressed = await this.#resumeAdoptedSourceNow(item);
+      if (!progressed && !this.#integrationWaits.has(item.number))
+        return this.#deferIntegration(item.number, "waiting for adopted integration prerequisites");
+      return progressed;
     } catch (error) {
       if (
         error instanceof SiblingRefreshTargetAdvancedError ||
         error instanceof SiblingRefreshObservationPendingError
       ) {
-        this.#deferIntegration(
+        return this.#deferIntegration(
           item.number,
           error.message,
           error instanceof SiblingRefreshObservationPendingError
@@ -14366,17 +14376,16 @@ export class FactorySupervisor {
               }
             : undefined,
         );
-        return;
       }
       throw error;
     }
   }
 
-  async #resumeAdoptedSourceNow(item: DerivedWorkItem): Promise<void> {
+  async #resumeAdoptedSourceNow(item: DerivedWorkItem): Promise<boolean> {
     return withArtifactContentScope(() => this.#resumeAdoptedSourceWithArtifactContent(item));
   }
 
-  async #resumeAdoptedSourceWithArtifactContent(item: DerivedWorkItem): Promise<void> {
+  async #resumeAdoptedSourceWithArtifactContent(item: DerivedWorkItem): Promise<boolean> {
     let runtime = this.#recoveryRuntime!;
     const planItem = runtime.planRecord.plan.items.find((entry) => entry.workItem === item.number)!;
     const source = planItem.source!;
@@ -14436,7 +14445,7 @@ export class FactorySupervisor {
     if (existingOutcome) {
       await this.#lease.assertGeneration("integration");
       if (!item.closed) await this.#store.closeIssue(item.number);
-      return;
+      return true;
     }
     if (source.priorDelivery) {
       await this.#externalAdmission(async () => {});
@@ -14473,7 +14482,7 @@ export class FactorySupervisor {
       await this.#lease.assertGeneration("integration");
       await this.#appendSuccessorEvent(item.id, outcome);
       if (!item.closed) await this.#store.closeIssue(item.number);
-      return;
+      return true;
     }
     const reserved = (await this.#attempts.list(this.#run.objective, item.number)).find(
       (entry) => entry.runId === source.runId && entry.attempt === source.attempt,
@@ -14544,7 +14553,7 @@ export class FactorySupervisor {
       this.#deliverySelection.selected === "native-stacks" &&
       !(await this.#linkRecoveryNativeUnit(item))
     )
-      return;
+      return false;
     const target = observed.merged
       ? (await this.#store.readCommit(observed.mergeCommitSha!)).parentOids[0]!
       : await this.#store.getBranchHeadOid(this.#baseBranch);
@@ -14688,7 +14697,7 @@ export class FactorySupervisor {
           runStartSequence: this.#runStartSequence,
         }).cloudPaused
       )
-        return;
+        return false;
       if (
         !observed.merged &&
         requiresIsolatedCandidate &&
@@ -14844,7 +14853,7 @@ export class FactorySupervisor {
           authority: runtime.objectiveAuthority,
         });
         if (!prior.candidate) throw new Error("accepted prior sibling candidate is unavailable");
-        await this.#integrate(
+        return await this.#integrate(
           item,
           reserved,
           pull,
@@ -14855,7 +14864,6 @@ export class FactorySupervisor {
           undefined,
           siblingRefresh,
         );
-        return;
       }
     }
     let deliveryHeadSha: string | undefined;
@@ -15113,7 +15121,7 @@ export class FactorySupervisor {
             isolated ? entry : undefined,
           );
       if (!candidate) {
-        if (isolated && !(await remoteAdmissionOpen())) return;
+        if (isolated && !(await remoteAdmissionOpen())) return false;
         if (isolated) adoptedValidator ??= await selectAdoptedValidator();
         const effective = normalizeSchedulingPolicy(this.#policy);
         const resource = !isolated
@@ -15130,7 +15138,7 @@ export class FactorySupervisor {
               effective.capacity.local.minimumFreeMemoryMb,
             ))
         )
-          return;
+          return false;
         const capacity: CapacityReservation = {
           key: capacityReservationKey({
             objective: this.#run.objective,
@@ -15166,7 +15174,7 @@ export class FactorySupervisor {
             ),
           ).reserved
         )
-          return;
+          return false;
         let validation: CleanValidationResult | undefined;
         let recorded = false;
         let validationLaunched = false;
@@ -15197,7 +15205,7 @@ export class FactorySupervisor {
           let validationDeadline = deadline;
           let sandboxAmount = 0;
           if (isolated) {
-            if (!(await remoteAdmissionOpen())) return;
+            if (!(await remoteAdmissionOpen())) return false;
             const available = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
             sandboxAmount = candidateTimeout();
             if (sandboxAmount <= 0 || available.sandboxMinutes * 60_000 < sandboxAmount)
@@ -15580,7 +15588,7 @@ export class FactorySupervisor {
       this.#fenceSnapshot(settled);
       await this.#resumeObservedRun(settled, new RunManager(this.#store));
     }
-    await this.#integrate(
+    return await this.#integrate(
       item,
       reserved,
       pull,

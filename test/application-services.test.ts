@@ -141,6 +141,8 @@ describe("FactoryApplicationService", () => {
 
   it("returns useful secret-safe doctor diagnostics without control-plane writes", async () => {
     let writes = 0;
+    let controllerMutations = 0;
+    let compilations = 0;
     const service = new FactoryApplicationService({
       owner: "o",
       repo: "r",
@@ -179,16 +181,36 @@ describe("FactoryApplicationService", () => {
         resourceProbe: async () => ({ cpuCount: 8, freeMemoryMb: 4096 }),
         controller: {
           status: async () => ({ installed: true, active: true }),
-          start: async () => ({}),
-          stop: async () => ({}),
-          restart: async () => ({}),
-          install: async () => ({}),
-          uninstall: async () => ({}),
+          start: async () => {
+            controllerMutations += 1;
+          },
+          stop: async () => {
+            controllerMutations += 1;
+          },
+          restart: async () => {
+            controllerMutations += 1;
+          },
+          install: async () => {
+            controllerMutations += 1;
+          },
+          uninstall: async () => {
+            controllerMutations += 1;
+          },
         },
+      },
+      planning: {
+        management: {
+          id: "forbidden-setup-compiler",
+          compile: async () => {
+            compilations += 1;
+            throw new Error("setup inspection must not compile");
+          },
+        } as unknown as ManagementBackend,
       },
     });
 
     const report = await service.doctor(7, "/repo");
+    await service.inspect("status", 7);
     expect(report.activationAuthorized).toBe(false);
     expect(report.diagnostics.map((diagnostic) => diagnostic.area)).toEqual(
       expect.arrayContaining([
@@ -207,6 +229,8 @@ describe("FactoryApplicationService", () => {
       report.diagnostics.find((diagnostic) => diagnostic.area === "branch-rules")?.summary,
     ).toContain("1 supported");
     expect(writes).toBe(0);
+    expect(controllerMutations).toBe(0);
+    expect(compilations).toBe(0);
   });
 
   it("reports normal doctor failures without leaking credential-shaped text", async () => {

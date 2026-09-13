@@ -279,6 +279,15 @@ async function main() {
   if (mcpResult.serverInfo?.version !== manifest.version) {
     throw new Error("installed MCP server version differs from its manifest");
   }
+  for (const name of ["factory_doctor", "factory_status"]) {
+    const definition = (mcpResult.tools ?? []).find((tool) => tool.name === name);
+    if (
+      definition?.annotations?.readOnlyHint !== true ||
+      definition.annotations.destructiveHint !== false
+    ) {
+      throw new Error(`installed ${name} is not declared as a read-only MCP operation`);
+    }
+  }
   for (const [operation, result] of [
     ["doctor", mcpResult.missingLoginDoctor],
     ["status", mcpResult.missingLoginStatus],
@@ -310,7 +319,11 @@ async function main() {
       doctor.operation !== "doctor" ||
       doctor.activationAuthorized !== false ||
       status.operation !== "status" ||
-      status.objective?.number !== 345
+      status.objective?.number !== 345 ||
+      status.run?.state !== "not-started" ||
+      status.github?.admitted !== 0 ||
+      status.github?.transported !== 0 ||
+      status.github?.successful !== 0
     ) {
       throw new Error("authenticated installed doctor/status inspection did not stay read-only");
     }
@@ -330,6 +343,7 @@ async function main() {
       throw new Error(`read-only inspection created controller configuration: ${controllerFiles}`);
     }
   }
+  const controllerConfigCreated = existsSync(isolatedControllerConfig);
 
   const cliBundle = join(installedRoot, "dist", "factory.js");
   if (!existsSync(cliBundle) || !statSync(cliBundle).isFile()) {
@@ -374,7 +388,11 @@ async function main() {
       sdkLocalAvailable: true,
       cleanConfiguration: true,
       missingLoginDiagnostics: ["doctor", "status"],
-      readOnlyInspectionStartedExecution: false,
+      readOnlyInspection: {
+        toolsCalled: ["factory_doctor", "factory_status"],
+        annotationsVerified: true,
+        controllerConfigCreated,
+      },
       authenticatedReadOnlyInspection,
       doctorOverall,
       doctorAttentionAreas,

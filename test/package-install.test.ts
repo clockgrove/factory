@@ -23,7 +23,11 @@ describe("clean packaged plugin installation", () => {
       controllerEntryPoint: "dist/factory.js",
       cleanConfiguration: true,
       missingLoginDiagnostics: ["doctor", "status"],
-      readOnlyInspectionStartedExecution: false,
+      readOnlyInspection: {
+        toolsCalled: ["factory_doctor", "factory_status"],
+        annotationsVerified: true,
+        controllerConfigCreated: false,
+      },
       authenticatedReadOnlyInspection: false,
       doctorOverall: null,
       doctorAttentionAreas: [],

@@ -93,6 +93,9 @@ export function withImmutableRecoveryReads(store: RecoveryReadStore): RecoveryRe
     return entry.pending.then((value) => copy(value as T));
   };
   const port: RecoveryReadStore = {
+    ...(store.readResultReceipts
+      ? { readResultReceipts: store.readResultReceipts.bind(store) }
+      : {}),
     readRef: (ref) => store.readRef(ref),
     listRefs: (prefix) => store.listRefs(prefix),
     readPullRequest: (number) => store.readPullRequest(number),

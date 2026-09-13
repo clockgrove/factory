@@ -250,6 +250,7 @@ export class LifecycleRecorder {
   }
 
   async publication(args: {
+    precedingEvents?: readonly FactoryEvent[];
     lease: LeaseState;
     workItemNodeId: string;
     sequence: number;
@@ -271,6 +272,23 @@ export class LifecycleRecorder {
     if (args.receipt.runId !== args.lease.runId) {
       throw new Error("publication receipt belongs to another run");
     }
+    if (
+      args.precedingEvents?.some(
+        (event) =>
+          event.kind !== "attempt" ||
+          event.event !== "AttemptPublished" ||
+          event.objective !== args.lease.objective ||
+          event.runId !== args.lease.runId ||
+          event.workItem !== args.receipt.workItem ||
+          event.attempt !== args.receipt.attempt ||
+          event.headSha !== args.receipt.headSha ||
+          event.sequence >= args.sequence ||
+          event.writerEpoch !== args.lease.epoch ||
+          event.writerHolder !== args.lease.holder ||
+          event.writerPolicyDigest !== args.lease.policyDigest,
+      )
+    )
+      throw new Error("adjacent publication outcome differs from exact writer or head");
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
@@ -309,9 +327,9 @@ export class LifecycleRecorder {
     });
     await this.store.addIssueComment(
       args.workItemNodeId,
-      encodeEventComment(
+      encodeEventBatchComment(
         `Factory recorded ${args.event} for pull request #${args.receipt.pullRequest}.`,
-        event,
+        [...(args.precedingEvents ?? []), event],
       ),
     );
     return event;

@@ -1,8 +1,9 @@
+import type { FactoryEvent } from "../protocol/events.js";
 import { createHash } from "node:crypto";
 import { ManagementOutputError, ReviewCheckoutCleanupError } from "../management/backend.js";
 import { preserveProviderQuotaError, ProviderQuotaError } from "../providers/quota.js";
 
-import { z } from "zod";
+import type { z } from "zod";
 
 import type {
   ManagementUsage,
@@ -10,80 +11,50 @@ import type {
   ReviewResult,
   SemanticReview,
 } from "../management/backend.js";
-import { gitSha, sha256Digest } from "../protocol/limits.js";
+import { ReviewIdentitySchema, ReviewReceiptSchema } from "../protocol/result-checkpoints.js";
 import { gitBlobOid, type CompiledGraphReadStore, type CompiledGraphStore } from "./graphs.js";
 import type { LeaseManager, LeaseState } from "./lease.js";
 
+import {
+  canonicalResult,
+  persistResultCheckpoint,
+  readResultCheckpoint,
+  resultReadStore,
+  readResultSelection,
+  resultReceiptLocator,
+  type CommentResultLocator,
+  type ResultTransition,
+  type ResultReceipt,
+} from "./result-receipts.js";
+
 const REVIEW_PATH = ".clockgrove-factory/control/semantic-review.json";
-
-const ReviewIdentitySchema = z
-  .object({
-    kind: z.enum(["artifact", "rebase", "integration-candidate"]),
-    runId: z.string().min(1).max(200),
-    objective: z.number().int().positive(),
-    workItem: z.number().int().positive(),
-    attempt: z.number().int().positive(),
-    artifactDigest: sha256Digest,
-    baseSha: gitSha,
-    outputTreeSha: gitSha,
-    evidenceDigest: sha256Digest,
-    headSha: gitSha.optional(),
-  })
-  .strict()
-  .superRefine((value, issue) => {
-    if ((value.kind !== "artifact") !== Boolean(value.headSha)) {
-      issue.addIssue({
-        code: "custom",
-        path: ["headSha"],
-        message: "headSha is required for rebase and integration-candidate reviews only",
-      });
-    }
-  });
-
-const SemanticReviewSchema = z
-  .object({
-    accepted: z.boolean(),
-    summary: z.string().min(1).max(8_000),
-    unmetCriteria: z.array(z.string().max(2_000)).max(64),
-    risks: z.array(z.string().max(2_000)).max(64),
-  })
-  .strict();
-
-const UsageSchema = z
-  .object({
-    inputTokens: z.number().int().nonnegative(),
-    outputTokens: z.number().int().nonnegative(),
-    cachedInputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
-  })
-  .strict()
-  .refine(
-    (value) =>
-      value.cachedInputTokens === undefined || value.cachedInputTokens <= value.inputTokens,
-    { message: "cached input tokens cannot exceed input tokens", path: ["cachedInputTokens"] },
-  );
-
-const ReviewReceiptSchema = z
-  .object({
-    protocol: z.literal("clockgrove.factory/review-checkpoint-v1"),
-    identityDigest: sha256Digest,
-    identity: ReviewIdentitySchema,
-    review: SemanticReviewSchema,
-    usage: UsageSchema,
-  })
-  .strict();
 
 export type ReviewIdentity = z.infer<typeof ReviewIdentitySchema>;
 export type ReviewReceipt = z.infer<typeof ReviewReceiptSchema>;
 
-export interface ReviewCheckpointRecord {
-  ref: string;
-  commitOid: string;
-  blobOid: string;
+export type ReviewCheckpointRecord = (
+  | {
+      ref: string;
+      commitOid: string;
+      blobOid: string;
+      locator?: undefined;
+      resultReceipt?: undefined;
+      resultEvents?: undefined;
+    }
+  | {
+      locator: CommentResultLocator;
+      resultReceipt: ResultReceipt;
+      resultEvents: FactoryEvent[];
+      ref?: undefined;
+      commitOid?: undefined;
+      blobOid?: undefined;
+    }
+) & {
   identityDigest: string;
   identity: ReviewIdentity;
   review: SemanticReview;
   usage: ManagementUsage;
-}
+};
 
 export type ReviewFaultPoint =
   | "after-model-result"
@@ -189,10 +160,57 @@ export async function loadReviewCheckpoint(
 ): Promise<ReviewCheckpointRecord | null> {
   const identity = ReviewIdentitySchema.parse(identityInput);
   const identityDigest = reviewIdentityDigest(identity);
+  const receiptStore = resultReadStore(store);
+  if (receiptStore) {
+    const selected = await readResultSelection(receiptStore, {
+      objective: identity.objective,
+      runId: identity.runId,
+      workItem: identity.workItem,
+      kind: "review",
+      identityDigest,
+    });
+    if (selected.protocol) {
+      let winner: ReviewCheckpointRecord | null = null;
+      for (const record of selected.receipts) {
+        const receipt = ReviewReceiptSchema.parse(
+          await readResultCheckpoint(store, record, identity.baseSha, 64 * 1024),
+        );
+        if (
+          receipt.identityDigest !== identityDigest ||
+          canonicalResult(receipt.identity) !== canonicalResult(identity)
+        ) {
+          throw new Error("review result has a different immutable identity");
+        }
+
+        const candidate: ReviewCheckpointRecord = {
+          locator: resultReceiptLocator(record),
+          resultReceipt: record.receipt,
+          resultEvents: record.events,
+          identityDigest,
+          identity,
+          review: receipt.review,
+          usage: receipt.usage,
+        };
+        if (winner && canonicalResult(winner.review) !== canonicalResult(candidate.review)) {
+          throw new Error("conflicting authenticated review checkpoints");
+        }
+        if (winner && canonicalResult(winner.usage) !== canonicalResult(candidate.usage))
+          throw new Error("conflicting authenticated review usage");
+        if (
+          winner?.locator &&
+          candidate.locator &&
+          winner.locator.receiptDigest !== candidate.locator.receiptDigest
+        )
+          throw new Error("conflicting authenticated result receipt identities");
+        winner ??= candidate;
+      }
+      return winner;
+    }
+  }
   const ref = reviewCheckpointRef(identity);
   const commitOid = await store.readRef(ref);
   if (!commitOid) return null;
-  const commit = await store.readCommit(commitOid);
+  const commit = await (store.readCommitContent?.(commitOid) ?? store.readCommit(commitOid));
   const blobOid = await store.readTreeEntry(commit.treeOid, REVIEW_PATH);
   if (!blobOid) throw new Error(`${ref} has no semantic review receipt`);
   const bytes = await store.readBlob(blobOid);
@@ -231,6 +249,19 @@ export class ReviewCheckpointManager {
     lease: LeaseState;
     identity: ReviewIdentity;
     result: ReviewResult;
+    transition?: undefined;
+  }): Promise<Extract<ReviewCheckpointRecord, { ref: string }>>;
+  async persist(args: {
+    lease: LeaseState;
+    identity: ReviewIdentity;
+    result: ReviewResult;
+    transition: ResultTransition;
+  }): Promise<ReviewCheckpointRecord>;
+  async persist(args: {
+    lease: LeaseState;
+    identity: ReviewIdentity;
+    result: ReviewResult;
+    transition?: ResultTransition | undefined;
   }): Promise<ReviewCheckpointRecord> {
     await this.leases.assertMutationAuthorized(args.lease);
     const identity = ReviewIdentitySchema.parse(args.identity);
@@ -245,6 +276,42 @@ export class ReviewCheckpointManager {
       review: args.result.review,
       usage: args.result.usage,
     });
+    if (args.transition) {
+      const record = await persistResultCheckpoint({
+        store: this.store,
+        leases: this.leases,
+        lease: args.lease,
+        scope: {
+          objective: identity.objective,
+          runId: identity.runId,
+          workItem: identity.workItem,
+          kind: "review",
+          identityDigest,
+        },
+        transition: args.transition,
+        checkpoint: receipt,
+        baseSha: identity.baseSha,
+        maxBytes: 64 * 1024,
+      });
+      return {
+        locator: resultReceiptLocator(record),
+        resultReceipt: record.receipt,
+        resultEvents: record.events,
+        identityDigest,
+        identity,
+        review: receipt.review,
+        usage: receipt.usage,
+      };
+    }
+    const selection = await resultReadStore(this.store)?.readResultReceipts({
+      objective: identity.objective,
+      runId: identity.runId,
+      workItem: identity.workItem,
+      kind: "review",
+      identityDigest: identityDigest,
+    });
+    if (selection?.protocol)
+      throw new Error("transition receipt run requires explicit result transition");
     const existing = await this.load(identity);
     if (existing) {
       if (!sameResult(existing, receipt)) {
@@ -293,4 +360,46 @@ export class ReviewCheckpointManager {
       usage: receipt.usage,
     };
   }
+}
+
+export type ReviewCheckpointLocation = {
+  identityDigest: string;
+} & (
+  | { ref: string; commitOid: string; blobOid: string; locator?: undefined }
+  | { locator: CommentResultLocator; ref?: undefined; commitOid?: undefined; blobOid?: undefined }
+);
+
+export function reviewCheckpointLocation(record: ReviewCheckpointRecord): ReviewCheckpointLocation {
+  return record.locator
+    ? { locator: record.locator, identityDigest: record.identityDigest }
+    : {
+        ref: record.ref,
+        commitOid: record.commitOid,
+        blobOid: record.blobOid,
+        identityDigest: record.identityDigest,
+      };
+}
+
+export function sameReviewCheckpointLocation(
+  left: ReviewCheckpointLocation | null | undefined,
+  right: ReviewCheckpointLocation,
+): boolean {
+  return Boolean(
+    left &&
+      canonicalResult(reviewCheckpointLocation(left as ReviewCheckpointRecord)) ===
+        canonicalResult(reviewCheckpointLocation(right as ReviewCheckpointRecord)),
+  );
+}
+
+export async function assertReviewCheckpointBase(
+  store: Pick<CompiledGraphReadStore, "readCommit" | "readCommitContent">,
+  record: ReviewCheckpointRecord,
+  baseSha: string,
+): Promise<void> {
+  if (record.identity.baseSha !== baseSha) throw new Error("review checkpoint base differs");
+  if (record.locator) return; // The actor-authenticated comment binds the complete immutable identity.
+  const commit = await (store.readCommitContent?.(record.commitOid) ??
+    store.readCommit(record.commitOid));
+  if (commit.parentOids.length !== 1 || commit.parentOids[0] !== baseSha)
+    throw new Error("review commit base differs");
 }

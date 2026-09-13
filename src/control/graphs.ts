@@ -1,3 +1,4 @@
+import type { ResultReceiptReadStore } from "./result-receipts.js";
 import { createHash } from "node:crypto";
 
 import { z } from "zod";
@@ -9,7 +10,7 @@ import {
   validateGraph,
   type CompiledObjective,
 } from "../graph.js";
-import type { GitCommitObject, LeaseManager, LeaseState } from "./lease.js";
+import type { GitCommitContent, GitCommitObject, LeaseManager, LeaseState } from "./lease.js";
 
 const GRAPH_PATH = ".clockgrove-factory/control/compiled-objective.json";
 const COMPILATION_PATH = ".clockgrove-factory/control/compilation-receipt.json";
@@ -43,9 +44,10 @@ export function gitBlobOid(bytes: Buffer): string {
   return createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
 }
 
-export interface CompiledGraphStore {
+export interface CompiledGraphStore extends Partial<ResultReceiptReadStore> {
   readRef(ref: string): Promise<string | null>;
   readCommit(oid: string): Promise<GitCommitObject>;
+  readCommitContent?(oid: string): Promise<GitCommitContent>;
   createBlob(content: Buffer): Promise<string>;
   readBlob(oid: string): Promise<Buffer>;
   createTree(args: { baseTreeOid?: string; entries: CompiledGraphTreeEntry[] }): Promise<string>;
@@ -162,7 +164,13 @@ function canonicalProjection(
 /** Read-only control-store surface; graph inspection never needs a lease or write port. */
 export type CompiledGraphReadStore = Pick<
   CompiledGraphStore,
-  "readRef" | "readCommit" | "readTreeEntry" | "readBlob"
+  | "readRef"
+  | "readCommit"
+  | "readCommitContent"
+  | "readTreeEntry"
+  | "readBlob"
+  | "readResultReceipts"
+  | "observedResultReceipts"
 >;
 
 export async function loadCompiledGraph(
@@ -173,7 +181,7 @@ export async function loadCompiledGraph(
   const ref = compiledGraphRef(objective, runId);
   const commitOid = await store.readRef(ref);
   if (!commitOid) return null;
-  const commit = await store.readCommit(commitOid);
+  const commit = await (store.readCommitContent?.(commitOid) ?? store.readCommit(commitOid));
   const blobOid = await store.readTreeEntry(commit.treeOid, GRAPH_PATH);
   if (!blobOid) throw new Error(`${ref} has no compiled graph blob`);
   const bytes = await store.readBlob(blobOid);
@@ -214,7 +222,7 @@ export async function loadCompiledGraphProjection(
   const ref = compiledGraphProjectionRef(objective, runId);
   const commitOid = await store.readRef(ref);
   if (!commitOid) return null;
-  const commit = await store.readCommit(commitOid);
+  const commit = await (store.readCommitContent?.(commitOid) ?? store.readCommit(commitOid));
   if (commit.parentOids.length !== 1 || commit.parentOids[0] !== graph.commitOid) {
     throw new Error("compiled graph projection is not bound to its immutable graph commit");
   }

@@ -9,7 +9,7 @@ import type { ArtifactConsumerBinding } from "../protocol/events.js";
 import { assertNoSecretMaterial, PROTOCOL_V2 } from "../protocol/limits.js";
 import { decodeEventTrailer, encodeEventComment, encodeEventTrailer } from "./receipts.js";
 import { writerAuthority } from "./authority.js";
-import type { GitCommitObject, LeaseManager, LeaseState } from "./lease.js";
+import type { GitCommitContent, GitCommitObject, LeaseManager, LeaseState } from "./lease.js";
 import { ensureAdmissionCompatibility } from "./admission-compatibility.js";
 import {
   IssueAdmissionLedger,
@@ -31,6 +31,8 @@ export interface AttemptStore {
   compareAndSwapRef(args: { ref: string; beforeOid: string; afterOid: string }): Promise<boolean>;
   listRefs(prefix: string): Promise<Array<{ ref: string; oid: string }>>;
   readCommit(oid: string): Promise<GitCommitObject>;
+  /** Immutable metadata only; never supplies current authority or clock evidence. */
+  readCommitContent?(oid: string): Promise<GitCommitContent>;
   createCommit(args: { treeOid: string; parentOids: string[]; message: string }): Promise<string>;
   createRef(ref: string, oid: string): Promise<boolean>;
   addIssueComment(
@@ -160,7 +162,7 @@ export function attemptRef(objective: number, workItem: number, attempt: number)
   return `${attemptRefPrefix(objective, workItem)}attempt-${attempt}`;
 }
 
-function parseReservation(ref: string, commit: GitCommitObject): AttemptReservation {
+function parseReservation(ref: string, commit: GitCommitContent): AttemptReservation {
   const trailer = commit.message
     .split(/\r?\n/)
     .reverse()
@@ -232,7 +234,12 @@ export class AttemptManager {
   async list(objective: number, workItem: number): Promise<AttemptReservation[]> {
     const refs = await listAttemptReservationRefs(this.#store, objective, workItem);
     const attempts = await Promise.all(
-      refs.map(async ({ ref, oid }) => parseReservation(ref, await this.#store.readCommit(oid))),
+      refs.map(async ({ ref, oid }) =>
+        parseReservation(
+          ref,
+          await (this.#store.readCommitContent?.(oid) ?? this.#store.readCommit(oid)),
+        ),
+      ),
     );
     return attempts.sort((a, b) => a.attempt - b.attempt);
   }
@@ -242,7 +249,7 @@ export class AttemptManager {
     workItem: number;
     workItemNodeId: string;
     backend: string;
-    base: GitCommitObject;
+    base: GitCommitContent;
     sequence: number;
     admission?: AttemptAdmissionReceipt;
     prepareLocalScope?: (attempt: number, at: Date) => Promise<LocalScopeBatch | null>;
@@ -346,7 +353,7 @@ export class AttemptManager {
     lease: LeaseState,
     workItem: number,
     workItemNodeId: string,
-    base: GitCommitObject,
+    base: GitCommitContent,
   ) {
     const assertCurrent = () => this.#leases.assertCurrent(lease).then(() => {});
     const compatibility = await ensureAdmissionCompatibility(this.#store, {
@@ -370,7 +377,10 @@ export class AttemptManager {
         );
       const history: IssueAdmissionIdentity[] = [];
       for (const old of compatibility.legacy) {
-        const reservation = parseReservation(old.ref, await this.#store.readCommit(old.oid));
+        const reservation = parseReservation(
+          old.ref,
+          await (this.#store.readCommitContent?.(old.oid) ?? this.#store.readCommit(old.oid)),
+        );
         const binding = await this.#legacyBinding(reservation, workItemNodeId);
         history.push({
           ...binding,
@@ -418,7 +428,8 @@ export class AttemptManager {
         lease,
         reservation.workItem,
         workItemNodeId,
-        await this.#store.readCommit(reservation.baseSha),
+        await (this.#store.readCommitContent?.(reservation.baseSha) ??
+          this.#store.readCommit(reservation.baseSha)),
       );
       record = await this.ledger.read(reservation.workItem);
     }
@@ -451,7 +462,8 @@ export class AttemptManager {
       throw new Error("attempt receipt does not own the exact issue admission");
     const original = parseReservation(
       reservation.ref,
-      await this.#store.readCommit(reservation.oid),
+      await (this.#store.readCommitContent?.(reservation.oid) ??
+        this.#store.readCommit(reservation.oid)),
     );
     if (!isDeepStrictEqual(original, reservation))
       throw new Error("attempt reservation differs from its immutable metadata");
@@ -638,7 +650,16 @@ export class AttemptManager {
           "AttemptDeferred",
           "AttemptIntegrated",
         ].includes(args.event) &&
-        !["released", "reconciled", "terminal"].includes(admission.disposition)
+        !["released", "reconciled", "terminal"].includes(admission.disposition) &&
+        // A dispatched current writer already cannot dispatch twice or admit a
+        // replacement. The authenticated outcome suffices until exact settlement.
+        // Prepared withdrawal and takeover still need the terminal CAS fence.
+        !(
+          admission.disposition === "dispatching" &&
+          admission.dispatchPossible &&
+          admission.writerEpoch === args.lease.epoch &&
+          admission.currentWriterHolder === args.lease.holder
+        )
       ) {
         await this.ledger.transition({
           workItem: args.reservation.workItem,
@@ -672,7 +693,8 @@ export class AttemptManager {
       throw new Error("cannot repair a reservation from another run or policy");
     }
     await this.assertReservation(args.lease, args.reservation, args.workItemNodeId);
-    const commit = await this.#store.readCommit(args.reservation.oid);
+    const commit = await (this.#store.readCommitContent?.(args.reservation.oid) ??
+      this.#store.readCommit(args.reservation.oid));
     const event = decodeEventTrailer(commit.message);
     if (
       commit.oid !== args.reservation.oid ||

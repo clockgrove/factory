@@ -1,3 +1,4 @@
+import { assertReviewCheckpointBase, sameReviewCheckpointLocation } from "../control/reviews.js";
 import { createHash } from "node:crypto";
 import { PlatformUnavailableError } from "../platform.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
@@ -74,7 +75,7 @@ export interface ResolvedRecoveryItem {
     outputTreeSha: string;
     receipt: RecoveryReceiptIdentity;
   } | null;
-  review: { ref: string; commitOid: string; blobOid: string; identityDigest: string } | null;
+  review: import("../control/reviews.js").ReviewCheckpointLocation | null;
   publication: {
     pullRequest: number;
     branch: string;
@@ -185,6 +186,9 @@ export async function resolveRecoveryEvidence(input: {
     return promise;
   };
   const store: RecoveryReadStore = {
+    ...(input.store.readResultReceipts
+      ? { readResultReceipts: input.store.readResultReceipts.bind(input.store) }
+      : {}),
     readRef: (ref: string) => read(`ref:${ref}`, () => input.store.readRef(ref)),
     readCommit: (oid: string) => read(`commit:${oid}`, () => input.store.readCommit(oid)),
     readBlob: (oid: string) => read(`blob:${oid}`, () => input.store.readBlob(oid)),
@@ -767,31 +771,23 @@ export async function resolveRecoveryEvidence(input: {
             evidenceDigest: source.validation!.evidenceDigest,
           };
           const artifact = await loadReviewCheckpoint(store, baseIdentity);
-          const review =
-            artifact?.ref === source.review.ref
-              ? artifact
-              : source.publication
-                ? await loadReviewCheckpoint(store, {
-                    ...baseIdentity,
-                    kind: "rebase",
-                    headSha: source.publication.headSha,
-                  })
-                : null;
+          const review = sameReviewCheckpointLocation(artifact, source.review)
+            ? artifact
+            : source.publication
+              ? await loadReviewCheckpoint(store, {
+                  ...baseIdentity,
+                  kind: "rebase",
+                  headSha: source.publication.headSha,
+                })
+              : null;
           requireEvidence(
             review &&
-              review.ref === source.review.ref &&
-              review.commitOid === source.review.commitOid &&
-              review.blobOid === source.review.blobOid &&
-              review.identityDigest === source.review.identityDigest &&
+              sameReviewCheckpointLocation(review, source.review) &&
               review.review.accepted &&
               review.review.unmetCriteria.length === 0,
           );
           if (!review) throw new Error("review unavailable");
-          const reviewCommit = await store.readCommit(review.commitOid);
-          requireEvidence(
-            reviewCommit.parentOids.length === 1 &&
-              reviewCommit.parentOids[0] === source.validation!.baseSha,
-          );
+          await assertReviewCheckpointBase(store, review, source.validation!.baseSha);
           const accepted = sourceEvents.find(
             (event) =>
               event.kind === "attempt" &&

@@ -19,6 +19,10 @@ import { LeaseManager, type GitCommitObject, type LeaseState } from "../../src/c
 import { IssueAdmissionLedger } from "../../src/control/issue-admission.js";
 import { decodeEventComments } from "../../src/control/receipts.js";
 import {
+  decodeResultReceiptComments,
+  RESULT_RECORD_PROTOCOL,
+} from "../../src/control/result-receipts.js";
+import {
   DEFAULT_RUN_POLICY,
   parseRunPolicy,
   policyDigest,
@@ -59,6 +63,9 @@ const BUN_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(
 const UV_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "python-uv")!
   .runtimeRequirement!;
 export interface ProviderFaults {
+  recordProtocol?: typeof RESULT_RECORD_PROTOCOL;
+  loseResultReceiptResponse?: boolean;
+  reviewUnmetCriteria?: boolean;
   objectiveTimeoutMinutes?: number;
   workItemTimeoutMinutes?: number;
   onValidationDeadline?: (deadline: Date) => void;
@@ -837,6 +844,7 @@ wheels = [
         ...(faults.controllerActivation ? { activationRequestId: "fixture-activation" } : {}),
         policy,
         policyDigest: pd,
+        ...(faults.recordProtocol ? { recordProtocol: faults.recordProtocol } : {}),
       }),
       event({
         kind: "delivery",
@@ -895,6 +903,51 @@ wheels = [
     );
   for (const name of Object.keys(storage) as Array<keyof CompiledGraphStore>)
     vi.spyOn(GitHubControlStore.prototype, name).mockImplementation(storage[name] as never);
+  const publishedComments: Array<{ commentId: string; node: string; body: string }> = [];
+  let nextCommentId = 1;
+  // The default fixture is historical; opting in exercises the current checkpoint protocol.
+  vi.spyOn(GitHubControlStore.prototype, "readResultReceipts").mockImplementation(async (scope) => {
+    const start = snapshot.factoryEvents!.find(
+      (event) => event.event === "FactoryRunStarted" && event.runId === scope.runId,
+    );
+    if (!start || start.kind !== "run" || start.event !== "FactoryRunStarted")
+      throw Error("fixture result run not found");
+    if (!start.recordProtocol) return { protocol: null, receipts: [] };
+    return {
+      protocol: RESULT_RECORD_PROTOCOL,
+      receipts: publishedComments.flatMap((comment) =>
+        decodeResultReceiptComments(comment.body)
+          .filter(
+            (receipt) =>
+              receipt.objective === scope.objective &&
+              receipt.runId === scope.runId &&
+              receipt.workItem === scope.workItem &&
+              receipt.kind === scope.kind &&
+              receipt.identityDigest === scope.identityDigest,
+          )
+          .map((receipt) => ({
+            receipt,
+            commentId: comment.commentId,
+            events: decodeEventComments(comment.body),
+          })),
+      ),
+    };
+  });
+  vi.spyOn(GitHubControlStore.prototype, "publishResultReceipt").mockImplementation(async function (
+    this: GitHubControlStore,
+    args,
+  ) {
+    await this.addIssueComment(args.issueNodeId, args.body);
+    const comment = [...publishedComments]
+      .reverse()
+      .find((comment) => comment.node === args.issueNodeId && comment.body === args.body);
+    if (!comment) throw Error("fixture result publication not retained");
+    if (faults.loseResultReceiptResponse) {
+      faults.loseResultReceiptResponse = false;
+      throw new Error("simulated lost accepted result response");
+    }
+    return { commentId: comment.commentId };
+  });
   // Transport methods are fixture-owned below, so preserve the production
   // ordering contract explicitly: policy runs after dispatch admission and
   // immediately before the mocked visible effect.
@@ -995,6 +1048,7 @@ wheels = [
           : event,
       );
       target.factoryEvents!.push(...recordedReceipt);
+      publishedComments.push({ commentId: String(nextCommentId++), node, body });
       if (
         receipt.some(
           (event) =>
@@ -1631,7 +1685,7 @@ jobs:
             !(candidate && faults.candidateReviewRejects) &&
             !(nativeRebase && faults.nativeRebaseReviewRejects),
           summary: "Fixture semantic acceptance",
-          unmetCriteria: [],
+          unmetCriteria: faults.reviewUnmetCriteria ? ["Required behavior is missing"] : [],
           risks: [],
         },
         usage: { inputTokens: 4, outputTokens: 2 },
@@ -1662,6 +1716,7 @@ jobs:
   let disposal: Promise<void> | undefined;
   return {
     repository,
+    publishedComments,
     notifications,
     runId: lease.runId,
     graph,

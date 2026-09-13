@@ -101,6 +101,46 @@ function fixture() {
   };
 }
 describe("logical attempt reservation readers", () => {
+  it("caches only immutable content while enumerating current ledger refs each time", async () => {
+    const f = fixture();
+    f.publishLedger();
+    let enumerations = 0;
+    let transports = 0;
+    const cache = new Map<string, Omit<GitCommitObject, "serverTime">>();
+    const store = {
+      ...f.store,
+      listRefs: async (prefix: string) => {
+        enumerations++;
+        return f.store.listRefs(prefix);
+      },
+      readCommit: async (): Promise<GitCommitObject> => {
+        throw Error("current-time commit observation must not be requested");
+      },
+      readCommitContent: async (oid: string) => {
+        let value = cache.get(oid);
+        if (!value) {
+          transports++;
+          const { serverTime: _time, ...content } = await f.store.readCommit(oid);
+          value = content;
+          cache.set(oid, value);
+        }
+        return structuredClone(value);
+      },
+    };
+    expect(await listAttemptReservationRefs(store, 7)).toEqual([f.observation]);
+    expect(await listAttemptReservationRefs(store, 7)).toEqual([f.observation]);
+    expect({ enumerations, transports }).toEqual({ enumerations: 4, transports: 2 });
+    // A changed ref must observe and reject new invalid metadata, even warm.
+    const corrupt = sha("changed-ledger");
+    f.commits.set(corrupt, { ...f.ledger, oid: corrupt, message: "invalid" });
+    f.refs.set(issueAdmissionRef(12), corrupt);
+    await expect(listAttemptReservationRefs(store, 7)).rejects.toThrow();
+    expect(transports).toBe(3);
+    f.refs.set(issueAdmissionRef(12), f.ledger.oid);
+    cache.clear();
+    expect(await listAttemptReservationRefs(store, 7)).toEqual([f.observation]);
+    expect(transports).toBe(5);
+  });
   it("resolves ledger-only attempts to original immutable metadata", async () => {
     const f = fixture();
     f.publishLedger();

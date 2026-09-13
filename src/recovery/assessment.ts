@@ -1,3 +1,5 @@
+import type { ResultReceiptReadStore } from "../control/result-receipts.js";
+import { assertReviewCheckpointBase } from "../control/reviews.js";
 import {
   hasCurrentWriterAuthority,
   terminalRunEvidence,
@@ -41,13 +43,14 @@ export type RecoveryReadStore = Pick<
   | "getBranchHead"
   | "readBranchRules"
   | "readChecks"
-> & {
-  readStack?: (number: number) => Promise<GitHubStack>;
-  /** Exact-commit association hints only; never activation or integration authority. */
-  readCommitObjectiveCandidates?: (sha: string) => Promise<number[]>;
-  /** Complete GitHubReader-authenticated snapshot, not caller-supplied envelopes. */
-  readObjectiveSnapshot?: (objective: number) => Promise<FactoryReadSnapshot>;
-};
+> &
+  Partial<ResultReceiptReadStore> & {
+    readStack?: (number: number) => Promise<GitHubStack>;
+    /** Exact-commit association hints only; never activation or integration authority. */
+    readCommitObjectiveCandidates?: (sha: string) => Promise<number[]>;
+    /** Complete GitHubReader-authenticated snapshot, not caller-supplied envelopes. */
+    readObjectiveSnapshot?: (objective: number) => Promise<FactoryReadSnapshot>;
+  };
 
 export interface RecoveryBlocker {
   code: string;
@@ -167,6 +170,9 @@ export async function assessRecovery(input: {
     return result;
   };
   const port: RecoveryReadStore = {
+    ...(store.readResultReceipts
+      ? { readResultReceipts: store.readResultReceipts.bind(store) }
+      : {}),
     readRef: (ref) => read(`ref:${ref}`, () => store.readRef(ref)),
     readCommit: (oid) => read(`commit:${oid}`, () => store.readCommit(oid)),
     readBlob: (oid) => read(`blob:${oid}`, () => store.readBlob(oid)),
@@ -675,9 +681,7 @@ export async function assessRecovery(input: {
         throw new Error("semantic acceptance checkpoint");
       if (review.identity.kind === "artifact" && accepted.sequence <= validation.sequence)
         throw new Error("stale artifact acceptance");
-      const reviewCommit = await port.readCommit(review.commitOid);
-      if (reviewCommit.parentOids.length !== 1 || reviewCommit.parentOids[0] !== validation.baseSha)
-        throw new Error("review commit base");
+      await assertReviewCheckpointBase(port, review, validation.baseSha);
       const usageId = `${review.identity.kind === "rebase" ? "rebase-review" : "review"}-${review.identityDigest}`;
       const reviewUsage = sameAttempt.filter(
         (event) =>

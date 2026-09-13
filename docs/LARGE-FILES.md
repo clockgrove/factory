@@ -56,9 +56,14 @@ interfaces that return only inline patches do not acquire an invented large-obje
 `persistArtifactTransfer` takes exact repository/objective/work-item/attempt/run/epoch/policy/base
 identity, allowed paths and a fresh `assertCurrent` fence. It validates every byte and scans secrets
 before any external write, including the descriptor. It first retains private local descriptor/chunk
-bytes, then publishes immutable GitHub `/intent` and `/ready` refs under the hashed exact identity.
-Ready is a child of intent, contains reachable content blobs, and binds the same descriptor. Every
-store mutation uses the caller's paced GitHub store and fresh fence. No model call regenerates data.
+bytes, then publishes immutable GitHub refs under the hashed exact identity. Artifacts with payload
+chunks retain the v1 `/intent` -> upload -> `/ready` protocol: ready is a child of intent, contains
+reachable content blobs, and binds the same descriptor. New artifacts with no external payload use
+`clockgrove.factory/artifact-transfer-v2`: one `/ready` publication contains the inline descriptor,
+has no parents, and requires no payload or chunks. Existing v1 intents and interrupted private v1
+descriptors continue under v1 without rewriting their evidence. The reader accepts both versions
+with their respective exact parent/payload rules; older readers reject v2 explicitly. Every store
+mutation uses the caller's paced GitHub store and fresh fence. No model call regenerates data.
 
 Supervisor must persist before success/cleanup and call `resumeArtifactTransfer` before replacement
 execution. Resume uses exact retained local data or exact remote blob OIDs, rechecks fresh packet,

@@ -42,6 +42,25 @@ async function finish<T>(pending: Promise<T>): Promise<T> {
 }
 
 describe("immutable commit content transport", () => {
+  it("reads a current branch OID without fetching its commit, including advances and deletion", async () => {
+    let oid: string | null = OID;
+    const paths: string[] = [];
+    const port = store(async (input, init) => {
+      const path = new URL(new Request(input, init).url).pathname;
+      paths.push(path);
+      if (!path.includes("/git/ref/")) throw new Error("unexpected immutable commit fetch");
+      return oid
+        ? Response.json({ object: { sha: oid } }, { headers: { date: DATE } })
+        : Response.json({ message: "Not Found" }, { status: 404, headers: { date: DATE } });
+    });
+    expect(await port.getBranchHeadOid("main")).toBe(OID);
+    oid = TREE;
+    expect(await port.getBranchHeadOid("main")).toBe(TREE);
+    oid = null;
+    await expect(port.getBranchHeadOid("main")).rejects.toThrow("branch main does not exist");
+    expect(paths).toEqual(Array(3).fill("/repos/o/r/git/ref/heads%2Fmain"));
+  });
+
   it("observes current provider time and changed lease content through warm reads", async () => {
     vi.useFakeTimers();
     let date = DATE,

@@ -39,6 +39,15 @@ import { referencedSecretNames, triggersOnPullRequest, usesSelfHostedRunner } fr
 import { bindAuthenticatedRunActors } from "./control/authenticated-events.js";
 import { activationCancellation, type ActivationBinding } from "./control/activations.js";
 import {
+  decodeResultReceiptComments,
+  validateResultReceiptComment,
+  assertResultInvocationRecorded,
+  type ResultReceiptObservation,
+  type AuthenticatedResultReceipt,
+  RESULT_RECORD_PROTOCOL,
+} from "./control/result-receipts.js";
+import { GitHubControlStore } from "./control/github-store.js";
+import {
   decodeEventComments,
   deduplicateFactoryEvents,
   latestRunReceipts,
@@ -210,6 +219,8 @@ export interface GitHubOptions {
   primaryQuota?: GitHubPrimaryQuotaCache;
   /** Fail closed on incomplete/beyond-bound history during read-only recovery assessment. */
   recoveryInspection?: boolean;
+  /** Completed authenticated positive result membership; never local acknowledgments. */
+  onResultReceiptObservation?: (observation: ResultReceiptObservation) => void;
 }
 
 export const RECOVERY_READER_LIMITS = Object.freeze({
@@ -355,7 +366,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!, $subIssueCount: 
       authorAssociation
       comments(last: 100) {
         totalCount
-        nodes { body author { login } authorAssociation }
+        nodes { fullDatabaseId body author { login } authorAssociation }
       }
       subIssues(first: $subIssueCount) {
         totalCount
@@ -367,7 +378,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!, $subIssueCount: 
           state
           comments(last: 100) {
             totalCount
-            nodes { body author { login } authorAssociation }
+            nodes { fullDatabaseId body author { login } authorAssociation }
           }
           assignees(first: 10) { nodes { login } }
           labels(first: 20) { nodes { name } }
@@ -551,6 +562,7 @@ interface GqlWorkItem extends GqlIssueState {
 }
 
 interface GqlComment {
+  fullDatabaseId?: string | number;
   body: string;
   author?: { login?: string } | null;
   authorAssociation?: string;
@@ -873,6 +885,7 @@ function factoryEvents(
       return [];
     }
     const events = decodeEventComments(comment.body);
+    decodeResultReceiptComments(comment.body);
     if (events.length === 0) return [];
     for (const event of events) {
       if (
@@ -1257,6 +1270,9 @@ export interface RawDiffFile {
 }
 
 export class GitHubReader {
+  #resultObservationGeneration = 0;
+  readonly #resultContentStore: GitHubControlStore;
+  readonly #onResultReceiptObservation: GitHubOptions["onResultReceiptObservation"];
   readonly #octokit: Octokit;
   readonly #owner: string;
   readonly #repo: string;
@@ -1277,6 +1293,8 @@ export class GitHubReader {
   readonly #authorityCommits = new Map<string, LeaseState>();
 
   constructor(opts: GitHubOptions) {
+    this.#resultContentStore = new GitHubControlStore(opts);
+    this.#onResultReceiptObservation = opts.onResultReceiptObservation;
     this.#owner = opts.owner;
     this.#repo = opts.repo;
     this.#recoveryInspection = opts.recoveryInspection === true;
@@ -1757,6 +1775,7 @@ export class GitHubReader {
 
   /** Read one Objective and everything derivable about its Work Items. */
   async readObjective(number: number): Promise<ObjectiveSnapshot> {
+    const resultObservationGeneration = ++this.#resultObservationGeneration;
     const readCardinality = async () => {
       const cardinality = await this.#octokit.graphql<GqlObjectiveCardinality>(
         OBJECTIVE_CARDINALITY_QUERY,
@@ -1900,9 +1919,69 @@ export class GitHubReader {
           : [],
       ),
     );
+    const observedResults: AuthenticatedResultReceipt[] = [];
     const workItemEvents = new Map<number, FactoryEvent[]>();
     if (v2) {
       for (const workItem of issue.subIssues.nodes) {
+        for (const comment of workItem.comments?.nodes ?? []) {
+          if (!comment.author?.login || !TRUSTED_ASSOCIATIONS.has(comment.authorAssociation ?? ""))
+            continue;
+          const results = decodeResultReceiptComments(comment.body);
+          for (const result of results) {
+            if (actorsByRun.get(result.runId)?.toLowerCase() !== comment.author.login.toLowerCase())
+              continue;
+            const start = objectiveEvents.find(
+              (event) =>
+                event.kind === "run" &&
+                event.event === "FactoryRunStarted" &&
+                event.runId === result.runId,
+            );
+            if (
+              start?.kind !== "run" ||
+              start.event !== "FactoryRunStarted" ||
+              start.recordProtocol !== RESULT_RECORD_PROTOCOL
+            )
+              throw new Error("result receipt is not selected by its authenticated run");
+            if (result.objective !== issue.number || result.workItem !== workItem.number)
+              throw new Error("result receipt names another issue");
+            await validateResultReceiptComment(this.#resultContentStore, comment.body);
+            if (
+              !objectiveAuthority ||
+              result.writerPolicyDigest !== start.policyDigest ||
+              result.writerEpoch > objectiveAuthority.epoch ||
+              (result.writerEpoch === objectiveAuthority.epoch &&
+                result.writerHolder !== objectiveAuthority.holder)
+            )
+              throw new Error("result receipt writer differs from Objective authority");
+            const resultEvents = decodeEventComments(comment.body);
+            const authenticatedItemEvents = factoryEvents(
+              workItem.comments,
+              `Work Item #${workItem.number}`,
+              { objective: issue.number, workItem: workItem.number },
+              actorsByRun,
+              objectiveAuthority,
+            );
+            assertResultInvocationRecorded(result, resultEvents, [
+              ...objectiveEvents,
+              ...authenticatedItemEvents,
+            ]);
+            if (this.#onResultReceiptObservation) {
+              const commentId =
+                typeof comment.fullDatabaseId === "number"
+                  ? Number.isSafeInteger(comment.fullDatabaseId)
+                    ? String(comment.fullDatabaseId)
+                    : ""
+                  : (comment.fullDatabaseId ?? "");
+              if (!/^[1-9][0-9]{0,19}$/.test(commentId))
+                throw new Error("authenticated result comment lacks its GitHub database identity");
+              observedResults.push({
+                receipt: result,
+                events: resultEvents,
+                commentId,
+              });
+            }
+          }
+        }
         workItemEvents.set(
           workItem.number,
           factoryEvents(
@@ -1923,7 +2002,7 @@ export class GitHubReader {
       historyBudget,
     );
 
-    return {
+    const snapshot: ObjectiveSnapshot = {
       id: issue.id,
       number: issue.number,
       title: issue.title,
@@ -1958,6 +2037,12 @@ export class GitHubReader {
       ...(v2 ? { factoryEvents: objectiveEvents } : {}),
       ...(objectiveAuthority === undefined ? {} : { objectiveAuthority }),
     };
+    this.#onResultReceiptObservation?.({
+      generation: resultObservationGeneration,
+      objective: issue.number,
+      receipts: observedResults,
+    });
+    return snapshot;
   }
 
   /** Observe comments first and the authority ref second. A takeover between
@@ -2045,6 +2130,7 @@ export class GitHubReader {
       accountRecoveryRecords(budget, response.data);
       nodes.push(
         ...response.data.map((comment) => ({
+          fullDatabaseId: String(comment.id),
           body: comment.body ?? "",
           author: comment.user ? { login: comment.user.login } : null,
           authorAssociation: comment.author_association,

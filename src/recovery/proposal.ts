@@ -1,3 +1,4 @@
+import { assertReviewCheckpointBase, reviewCheckpointLocation } from "../control/reviews.js";
 import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
 import {
@@ -219,6 +220,9 @@ export async function buildRecoveryProposal(input: {
     return pending;
   };
   const port: RecoveryReadStore = {
+    ...(input.store.readResultReceipts
+      ? { readResultReceipts: input.store.readResultReceipts.bind(input.store) }
+      : {}),
     readRef: (ref) => read("ref", [ref], () => input.store.readRef(ref)),
     readCommit: (oid) => read("commit", [oid], () => input.store.readCommit(oid)),
     readBlob: (oid) => read("blob", [oid], () => input.store.readBlob(oid)),
@@ -975,10 +979,7 @@ export async function buildRecoveryProposal(input: {
           accepted.artifactDigest === source.artifactDigest &&
           (review.identity.kind === "rebase" || accepted.sequence > validation.sequence),
       );
-      const reviewCommit = await port.readCommit(review.commitOid);
-      require(
-        reviewCommit.parentOids.length === 1 && reviewCommit.parentOids[0] === validation.baseSha,
-      );
+      await assertReviewCheckpointBase(port, review, validation.baseSha);
       const usageId = `${review.identity.kind === "rebase" ? "rebase-review" : "review"}-${review.identityDigest}`;
       const usage = sourceEvents.filter(
         (event) =>
@@ -999,12 +1000,7 @@ export async function buildRecoveryProposal(input: {
                   : accepted.sequence),
           ),
       );
-      source.review = {
-        ref: review.ref,
-        commitOid: review.commitOid,
-        blobOid: review.blobOid,
-        identityDigest: review.identityDigest,
-      };
+      source.review = reviewCheckpointLocation(review);
       if (!reserved.backend.endsWith("/github-managed") && review.identity.kind !== "rebase")
         require(
           commit.message.split(/\r?\n/).includes(`Factory-Artifact: ${source.artifactDigest}`) &&

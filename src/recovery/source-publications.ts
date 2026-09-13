@@ -1,3 +1,4 @@
+import { sameReviewCheckpointLocation } from "../control/reviews.js";
 import { attemptRef, readAttemptReservationRef } from "../control/attempts.js";
 import { PlatformUnavailableError } from "../platform.js";
 import { decodeEventTrailer } from "../control/receipts.js";
@@ -288,10 +289,7 @@ export async function loadRecoverySourceArtifact(
   });
   requireEvidence(
     review &&
-      review.ref === source.review.ref &&
-      review.commitOid === source.review.commitOid &&
-      review.blobOid === source.review.blobOid &&
-      review.identityDigest === source.review.identityDigest &&
+      sameReviewCheckpointLocation(review, source.review) &&
       review.review.accepted &&
       !review.review.unmetCriteria.length,
   );

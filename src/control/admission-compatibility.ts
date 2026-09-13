@@ -1,10 +1,16 @@
-import type { GitCommitObject, LeaseStore } from "./lease.js";
+import type { GitCommitContent, LeaseStore } from "./lease.js";
 import { attemptRef, attemptRefPrefix } from "./attempts.js";
 import { parseFactoryEvent } from "../protocol/events.js";
 
 export type AdmissionCompatibilityStore = Pick<
   LeaseStore,
-  "readRef" | "readCommit" | "createCommit" | "createRef" | "compareAndSwapRef" | "serverTime"
+  | "readRef"
+  | "readCommit"
+  | "readCommitContent"
+  | "createCommit"
+  | "createRef"
+  | "compareAndSwapRef"
+  | "serverTime"
 > & { listRefs(prefix: string): Promise<Array<{ ref: string; oid: string }>> };
 
 const MARKER = "Factory-Admission-Compatibility: ";
@@ -15,7 +21,7 @@ interface Marker {
   workItemNodeId: string;
   legacy?: { objective: number; claimOid: string };
 }
-function trailer(commit: GitCommitObject, prefix: string): unknown {
+function trailer(commit: GitCommitContent, prefix: string): unknown {
   const line = commit.message
     .split(/\r?\n/)
     .reverse()
@@ -30,7 +36,7 @@ function encoded(prefix: string, value: unknown): string {
 function positive(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0;
 }
-function marker(commit: GitCommitObject): Marker | undefined {
+function marker(commit: GitCommitContent): Marker | undefined {
   const value = trailer(commit, MARKER) as Marker | undefined;
   if (!value) return undefined;
   if (
@@ -45,7 +51,7 @@ function marker(commit: GitCommitObject): Marker | undefined {
 }
 
 /** Only exact, supported barriers are excluded from historical attempt readers. */
-export function isAdmissionBarrier(ref: string, commit: GitCommitObject): boolean {
+export function isAdmissionBarrier(ref: string, commit: GitCommitContent): boolean {
   const value = trailer(commit, BARRIER) as
     | { protocol?: string; objective?: number; workItem?: number; attempt?: number }
     | undefined;
@@ -95,7 +101,7 @@ export async function ensureAdmissionCompatibility(
     workItem: number;
     workItemNodeId: string;
     objective: number;
-    base: GitCommitObject;
+    base: GitCommitContent;
     assertCurrent: () => Promise<void>;
   },
 ): Promise<{
@@ -112,7 +118,9 @@ export async function ensureAdmissionCompatibility(
   for (let retry = 0; retry < 32; retry++) {
     await args.assertCurrent();
     const before = await store.readRef(ref);
-    const commit = before ? await store.readCommit(before) : undefined;
+    const commit = before
+      ? await (store.readCommitContent?.(before) ?? store.readCommit(before))
+      : undefined;
     currentMarker = commit ? marker(commit) : undefined;
     if (currentMarker) {
       if (
@@ -127,7 +135,8 @@ export async function ensureAdmissionCompatibility(
         )
           throw new Error("compatibility marker lost original claim parent");
         const original = trailer(
-          await store.readCommit(currentMarker.legacy.claimOid),
+          await (store.readCommitContent?.(currentMarker.legacy.claimOid) ??
+            store.readCommit(currentMarker.legacy.claimOid)),
           "Factory-Repository-Claim: ",
         ) as { objective?: number; workItem?: number } | undefined;
         if (
@@ -201,7 +210,7 @@ export async function ensureAdmissionCompatibility(
     let barrierRef: string | undefined;
     let barrierAttempt: number | undefined;
     for (const entry of refs) {
-      const commit = await store.readCommit(entry.oid);
+      const commit = await (store.readCommitContent?.(entry.oid) ?? store.readCommit(entry.oid));
       if (isAdmissionBarrier(entry.ref, commit)) {
         if (commit.parentOids.length !== 1 || commit.parentOids[0] !== claimOid)
           throw new Error("admission compatibility barrier lost its claim binding");

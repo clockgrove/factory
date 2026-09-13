@@ -3,13 +3,13 @@
   "bundles": [
     {
       "file": "factory.js",
-      "bytes": 4114276,
-      "sha256": "411ee68384fa9a41259dad5d499c2fff33dcd69c93e87e7c3fac46787750b9c1"
+      "bytes": 4084434,
+      "sha256": "857f7330504a790ad57fcdb4197d471431e2a0b69485b00e178250b841f08c1e"
     },
     {
       "file": "mcp-server.js",
-      "bytes": 4229644,
-      "sha256": "2bc72cdc2df2201fa98a9ce80a30716a9c2265928187a528ce0219906bb7aa75"
+      "bytes": 4199799,
+      "sha256": "98b652dadce1c028d5ab2026866bc9cf976a5b765693b3b4f65848456d136edc"
     }
   ],
   "components": [
@@ -130,34 +130,6 @@
       "license": "MIT",
       "author": "Gregor Martynus (https://github.com/gr2m)",
       "repository": "github:octokit/graphql.js",
-      "bundles": [
-        "factory.js",
-        "mcp-server.js"
-      ],
-      "licenseFiles": [
-        "LICENSE"
-      ]
-    },
-    {
-      "name": "@octokit/plugin-retry",
-      "version": "7.2.1",
-      "license": "MIT",
-      "author": "Simon Grondin (http://github.com/SGrondin)",
-      "repository": "github:octokit/plugin-retry.js",
-      "bundles": [
-        "factory.js",
-        "mcp-server.js"
-      ],
-      "licenseFiles": [
-        "LICENSE"
-      ]
-    },
-    {
-      "name": "@octokit/plugin-throttling",
-      "version": "9.6.1",
-      "license": "MIT",
-      "author": "Simon Grondin (http://github.com/SGrondin)",
-      "repository": "github:octokit/plugin-throttling.js",
       "bundles": [
         "factory.js",
         "mcp-server.js"
@@ -382,20 +354,6 @@
       "license": "Apache-2.0",
       "author": "Gregor Martynus",
       "repository": "github:gr2m/before-after-hook",
-      "bundles": [
-        "factory.js",
-        "mcp-server.js"
-      ],
-      "licenseFiles": [
-        "LICENSE"
-      ]
-    },
-    {
-      "name": "bottleneck",
-      "version": "2.19.5",
-      "license": "MIT",
-      "author": "Simon Grondin",
-      "repository": "https://github.com/SGrondin/bottleneck",
       "bundles": [
         "factory.js",
         "mcp-server.js"

@@ -34,8 +34,7 @@ function deferred() {
 }
 
 async function advanceUntil(observed: () => boolean, maximumMs = 10_000) {
-  // Octokit's real throttling wrapper schedules several successive timers.
-  // Advance them only until the named boundary, never to the 42-minute reset.
+  // Advance Factory's timers only to the named boundary, never to the 42-minute reset.
   for (let elapsed = 0; elapsed < maximumMs && !observed(); elapsed += 100)
     await vi.advanceTimersByTimeAsync(100);
   expect(observed()).toBe(true);
@@ -247,7 +246,7 @@ it.each([false, true])(
     expect(f.release).not.toHaveBeenCalled();
     response.resolve();
     // The production Octokit retry plugin retains an already-dispatched 503
-    // operation for three retries: 1 + 4 + 9 seconds, plus throttling timers.
+    // operation for three retries: 1 + 4 + 9 seconds, plus admission timers.
     // This is one unresolved admission, not four new scheduler admissions.
     await advanceUntil(() => settled, refused ? 30_000 : 10_000);
     const failure = await outcome;

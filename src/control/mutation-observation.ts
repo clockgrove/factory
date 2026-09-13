@@ -13,7 +13,10 @@ export interface MutationOperationObservation {
   resourceScope: string;
   startedAt: string;
   elapsedMs: number;
+  /** Factory mutation admission only; excludes client hooks and HTTP. */
   queueWaitMs: number;
+  clientPreTransportMs: number;
+  fetchResponseMs: number;
   quotaWaitMs: number;
   waitReasonMs: MutationWaitReasons;
   fenceMs: number;
@@ -46,7 +49,10 @@ export interface GitHubTransportObservation {
   endedAt: string;
   elapsedMs: number;
   /** Summed operation time: concurrent waits/fences can overlap elapsed time. */
+  /** Factory mutation admission only; excludes client hooks and HTTP. */
   aggregateQueueWaitMs: number;
+  aggregateClientPreTransportMs: number;
+  aggregateFetchResponseMs: number;
   aggregateQuotaWaitMs: number;
   quotaWaitReasonMs: Partial<Record<"primary" | "local-window" | "server", number>>;
   aggregateFenceMs: number;
@@ -185,6 +191,8 @@ export interface GitHubTransportAttempt {
   kind: "read" | "write" | "unclassified";
   reason: "fence" | "operation" | "outside-operation";
   objectIdentity: string;
+  /** Fetch invocation to response headers/error; excludes body consumption. */
+  fetchResponseMs: number;
   requestBytes?: number;
   responseBytes?: number;
   status?: number;
@@ -262,7 +270,7 @@ export function beginGitHubTransportAttempt(
 ): (response?: Response) => void {
   observeGitHubTransport(input, init);
   const report = attemptTrace.getStore();
-  if (!report) return () => {};
+  const started = performance.now();
   const context = current.getStore();
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
@@ -317,12 +325,16 @@ export function beginGitHubTransportAttempt(
   return (response) => {
     if (completed) return;
     completed = true;
+    const fetchResponseMs = performance.now() - started;
+    if (context) context.observation.fetchResponseMs += fetchResponseMs;
+    observePhases((observation) => (observation.aggregateFetchResponseMs += fetchResponseMs));
     const length = response?.headers.get("content-length");
     const responseBytes = length && /^\d+$/.test(length) ? Number(length) : undefined;
     try {
-      report(
+      report?.(
         Object.freeze({
           ...attempt,
+          fetchResponseMs,
           ...(response ? { status: response.status } : {}),
           ...(responseBytes !== undefined && Number.isSafeInteger(responseBytes)
             ? { responseBytes }
@@ -350,6 +362,8 @@ export async function observeGitHubTransportPhase<T>(
     endedAt: "",
     elapsedMs: 0,
     aggregateQueueWaitMs: 0,
+    aggregateClientPreTransportMs: 0,
+    aggregateFetchResponseMs: 0,
     aggregateQuotaWaitMs: 0,
     quotaWaitReasonMs: {},
     aggregateFenceMs: 0,
@@ -437,6 +451,8 @@ export async function observeMutationOperation<T>(
     startedAt: new Date().toISOString(),
     elapsedMs: 0,
     queueWaitMs: 0,
+    clientPreTransportMs: 0,
+    fetchResponseMs: 0,
     quotaWaitMs: 0,
     waitReasonMs: {},
     fenceMs: 0,
@@ -475,4 +491,12 @@ export function observeReactiveQuotaWait(wait: {
     observation.quotaWaitReasonMs[wait.reason] =
       (observation.quotaWaitReasonMs[wait.reason] ?? 0) + wait.waitedMs;
   });
+}
+
+/** After client admission to fetch entry: serialization/hooks, not proven queue time.
+ * Excludes outer Factory waits/fences; those can contain nested requests. */
+export function observeGitHubClientDispatch(elapsedMs: number): void {
+  const context = current.getStore();
+  if (context) context.observation.clientPreTransportMs += elapsedMs;
+  observePhases((observation) => (observation.aggregateClientPreTransportMs += elapsedMs));
 }

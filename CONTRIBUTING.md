@@ -68,6 +68,14 @@ Build the committed distribution bundles when your change affects them:
 npm run build
 ```
 
+## Retire qualification fixtures
+
+Include the disposable repository and local checkout's retirement owner and authorization in the
+smoke plan. Finish every smoke with the [fixture retirement checklist](docs/LIVE-OBJECTIVE-HARNESS.md#fixture-retirement):
+record deletion, or a specific retention reason and expiry/review trigger. Preserve private evidence
+before disposal, and keep fixtures needed by concurrent tasks or unresolved accounting. Worker
+cleanup and a closed Objective do not by themselves authorize or prove repository retirement.
+
 ## Make a focused change
 
 Prefer the simplest solution that satisfies the current requirement. Consider deletion and reuse

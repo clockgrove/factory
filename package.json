@@ -86,8 +86,6 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@octokit/core": "^6.1.4",
     "@octokit/plugin-paginate-rest": "^11.4.0",
-    "@octokit/plugin-retry": "^7.1.2",
-    "@octokit/plugin-throttling": "^9.3.2",
     "@types/node": "^22.10.5",
     "@vercel/sandbox": "^3.2.1",
     "@vitest/coverage-v8": "4.1.11",

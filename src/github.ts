@@ -1,4 +1,7 @@
-import { captureGitHubTransportObservation } from "./control/mutation-observation.js";
+import {
+  captureGitHubTransportObservation,
+  observeGitHubClientDispatch,
+} from "./control/mutation-observation.js";
 import { isKnownPrimaryQuotaRefusal } from "./platform.js";
 import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "./platform.js";
 /**
@@ -10,14 +13,12 @@ import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "./platfo
  * any time.
  *
  * One GraphQL round trip per cycle where possible (§4.1). Naive polling can
- * trigger a client-side 429, so throttling and retry are configured rather than
- * optional.
+ * exhaust shared quota; Factory owns admission and reactive retry timing.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Octokit } from "@octokit/core";
-import { retry } from "@octokit/plugin-retry";
-import { throttling } from "@octokit/plugin-throttling";
+import { performance } from "node:perf_hooks";
 
 import type {
   AgentWorkEvent,
@@ -151,8 +152,6 @@ function agentTaskState(value: unknown, label: string): CopilotAgentTaskState {
   return value as CopilotAgentTaskState;
 }
 
-const FactoryOctokit = Octokit.plugin(retry, throttling);
-
 interface GitHubTransportCallbacks {
   onTransported(): void;
   /** The surrounding mutation/control wrapper records real platform refusals. */
@@ -164,6 +163,7 @@ const TRANSPORT_OBSERVER_HEADER = "x-clockgrove-factory-transport-observer";
 const transportObservers = new Map<
   string,
   {
+    started: number;
     callbacks: GitHubTransportCallbacks | undefined;
     observe: ReturnType<typeof captureGitHubTransportObservation>;
   }
@@ -181,7 +181,7 @@ function registerTransportObserver(): {
     throw new Error("Factory supports at most 1,024 simultaneous GitHub transport observers");
   }
   const id = String(++transportObserverSequence);
-  transportObservers.set(id, { callbacks, observe });
+  transportObservers.set(id, { started: performance.now(), callbacks, observe });
   return { id, release: () => transportObservers.delete(id) };
 }
 
@@ -930,7 +930,7 @@ function factoryEvents(
 
 /**
  * Shared low-level client construction. Exported so `dispatch.ts` can build
- * its own client for writes without duplicating the retry/throttle config —
+ * its own client for writes without duplicating Factory admission —
  * this is plumbing, not a reader method, so it does not compromise the "no
  * writes" contract above.
  */
@@ -954,11 +954,19 @@ export function createOctokit(opts: GitHubOptions): Octokit {
     const refusal = classifyRefusal(error);
     if (refusal.kind !== "not_refusal") {
       if (!refusalOwned && !isKnownPrimaryQuotaRefusal(error)) circuit.recordRefusal(refusal);
+      try {
+        notify(
+          `GitHub ${refusal.kind}; yielding to Factory for retry in ${refusal.retryAfterMs}ms`,
+        );
+      } catch {
+        // Diagnostics cannot alter refusal or retry semantics.
+      }
       throw new PlatformUnavailableError(refusal, error);
     }
     throw error;
   };
-  const octokit = new FactoryOctokit({
+  // No library scheduler or retry plugin: Factory owns every admission and retry.
+  const octokit = new Octokit({
     auth: opts.token,
     request: {
       fetch: ((input, init) => {
@@ -978,39 +986,31 @@ export function createOctokit(opts: GitHubOptions): Octokit {
         const observer = observerId ? transportObservers.get(observerId) : undefined;
         observer?.callbacks?.onTransported();
         githubTransportCallbacks.getStore()?.onTransported();
-        const send = () =>
-          observeGitHubRequestTransport(
+        const send = () => {
+          if (observer) observeGitHubClientDispatch(performance.now() - observer.started);
+          return observeGitHubRequestTransport(
             opts.token,
             input,
             transportInit,
             opts.requestFetch ?? globalThis.fetch,
           );
+        };
         return observer?.observe ? observer.observe(send) : send();
       }) as typeof globalThis.fetch,
     },
-    // A mutation permit prices one transport. Hidden library retries would
-    // bypass pacing and first-failure evidence, so Factory owns retry timing.
-    retry: { enabled: false },
-    throttle: {
-      onRateLimit: (after: number, o: { method: string; url: string }) => {
-        notify(`rate limit on ${o.method} ${o.url}; yielding to Factory for retry in ${after}s`);
-        return false;
-      },
-      onSecondaryRateLimit: (after: number, o: { method: string; url: string }) => {
-        notify(
-          `secondary limit on ${o.method} ${o.url}; yielding to Factory for retry in ${after}s`,
-        );
-        return false;
-      },
-    },
   });
-  octokit.hook.after("request", (response) => {
+  octokit.hook.after("request", (response, options) => {
     primaryQuota.observe(response.headers);
+    // Raw request(POST /graphql) does not raise GraphqlResponseError. Check
+    // before success and preserve the full envelope for partial-effect guards.
+    if (new URL(options.url, "https://api.github.com").pathname === "/graphql") {
+      const error = Object.assign(new Error("GraphQL quota refusal"), { response });
+      if (classifyRefusal(error).kind === "rate_limit") throw error;
+    }
     if (!githubTransportCallbacks.getStore()?.ownsRefusal) circuit.recordSuccess();
   });
-  // The throttling plugin's wrapper is outside Octokit's public hook chain, so
-  // wrap the public callables themselves. Proxying retains `.defaults` and
-  // `.endpoint`, which other Octokit helpers rely on.
+  // Wrap both public callables for quota admission and whole-operation retry.
+  // Proxying retains `.defaults` and `.endpoint`, used by Octokit helpers.
   octokit.request = new Proxy(octokit.request, {
     async apply(target, thisArg, args) {
       return retryGitHubQuota(async () => {

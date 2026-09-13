@@ -1191,7 +1191,7 @@ export function definiteGitHubQuotaRejection(error: unknown): boolean {
       response?: { data?: { data?: unknown; errors?: Array<{ type?: string; code?: string }> } };
     };
     if (value.status === 403 || value.status === 429) return true;
-    // Octokit's throttling hook also surfaces HTTP-200 GraphQL errors through
+    // The shared client hook surfaces HTTP-200 GraphQL errors through
     // response.data. Retain the no-partial-result requirement for both shapes.
     const envelope = value.name === "GraphqlResponseError" ? value : value.response?.data;
     if (envelope?.errors?.length)

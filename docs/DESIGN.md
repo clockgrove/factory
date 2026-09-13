@@ -173,6 +173,13 @@ establish current ownership, permissions, graph membership, or admission authori
 cache reconstructs from GitHub. Transport diagnostics preserve their observation context across
 request scheduling and count each attempted transport, including traffic outside a mutation operation.
 Nested phase totals remain inclusive and are not additive.
+Factory mutation queue counters cover only its own admission. Client pretransport elapsed time
+runs from admitted client invocation to fetch entry (serialization and hooks, not proven queue
+sleep); fetch-response time runs from fetch invocation to response headers or transport error,
+excluding response-body consumption. These diagnostic aggregates can overlap fencing and nested
+phase totals and cannot be subtracted from critical-path wall time. The configured Octokit client
+has no library throttling or retry scheduler. Factory classifies HTTP-200 GraphQL quota errors
+before success handling, preserving the full response for partial-effect replay guards.
 
 The detailed query also returns its own primary GraphQL cost, remaining balance, and reset time.
 The Supervisor admits ready work without reserving GitHub quota for a future worker wave, graph

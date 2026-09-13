@@ -6,6 +6,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Fixed
 
+- Remove Octokit's hidden fixed write/notification/GraphQL pacing; Factory remains the owner
+  of admission and reactive retries. Preserve HTTP-200 GraphQL refusal and partial-effect
+  handling, and distinguish client pretransport from fetch-response diagnostic time.
+  ([#341](https://github.com/clockgrove/factory/issues/341))
+
 - Reconstruct the built-in local validator with its original local capacity identity, avoiding
   foreground escalation during validation while preserving shared reservation checks.
   ([#319](https://github.com/clockgrove/factory/issues/319))

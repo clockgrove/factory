@@ -134,6 +134,77 @@ describe("Supervisor exact lifecycle discovery", () => {
     }
   });
 
+  it.each([false, true])(
+    "retires an acknowledged pause without retiring its live generation (retry=%s)",
+    async (failFirstDelete) => {
+      const f = await providerSupervisorFixture("daytona-burst", {
+        localOnly: true,
+        controllerActivation: true,
+      });
+      const pause = parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        kind: "run",
+        event: "RunPauseRequested",
+        objective: 7,
+        runId: f.runId,
+        sequence: Math.max(...f.events().map((event) => event.sequence)) + 1,
+        at: new Date().toISOString(),
+        requestedBy: "operator",
+        requestId: "pause-now",
+      });
+      f.snapshot.factoryEvents!.push(pause);
+      const pauseRef = discoveryLocatorRef({
+        kind: "request",
+        objective: 7,
+        requestId: "pause-now",
+      });
+      f.refs.set(pauseRef, f.baseSha);
+      const remove = vi
+        .mocked(GitHubControlStore.prototype.deleteExactDiscoveryRef)
+        .getMockImplementation()!;
+      let observed = false;
+      let deletionFailed = false;
+      vi.mocked(GitHubControlStore.prototype.deleteExactDiscoveryRef).mockImplementation(
+        async function (this: GitHubControlStore, ref) {
+          if (ref === pauseRef && !observed) {
+            expect(f.events().some((event) => event.event === "RunPauseAcknowledged")).toBe(true);
+            expect(locators(f).some((entry) => entry.includes("/run-"))).toBe(true);
+            if (failFirstDelete && !deletionFailed) {
+              deletionFailed = true;
+              throw new Error("simulated disposable-ref deletion failure");
+            }
+            observed = true;
+            f.snapshot.factoryEvents!.push(
+              parseFactoryEvent({
+                ...pause,
+                event: "RunResumeRequested",
+                requestId: "resume-next",
+                sequence: Math.max(...f.events().map((event) => event.sequence)) + 1,
+              }),
+            );
+            f.refs.set(
+              discoveryLocatorRef({ kind: "request", objective: 7, requestId: "resume-next" }),
+              f.baseSha,
+            );
+          }
+          await remove.call(this, ref);
+        },
+      );
+      try {
+        expect(await f.run()).toMatchObject({ status: "completed" });
+        expect(observed).toBe(true);
+        expect(deletionFailed).toBe(failFirstDelete);
+        expect(f.events().filter((event) => event.event === "RunPauseAcknowledged")).toHaveLength(
+          1,
+        );
+        expect(locators(f)).toEqual([]);
+        expect(f.resources.size).toBe(0);
+      } finally {
+        await f.dispose();
+      }
+    },
+  );
+
   it("retires a drained generation without losing a resume accepted after its acknowledgement", async () => {
     const f = await providerSupervisorFixture("daytona-burst", {
       localOnly: true,

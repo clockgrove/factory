@@ -1139,6 +1139,7 @@ export class FactorySupervisor {
   #run!: RunState;
   #runStartSequence = 0;
   #discoveryEpochs = new Set<number>();
+  #retiredOperationalRequest: string | undefined;
   #lastControllerObservationKey: string | undefined;
   #baseBranch = "main";
   #priorityFallbackReason: string | undefined;
@@ -2414,16 +2415,35 @@ export class FactorySupervisor {
         candidate.event === event &&
         candidate.commandRequestId === gate.requestId,
     );
-    if (recorded) return;
-    await this.#lease.use((lease) =>
-      this.#recorder.operationalGate({
-        lease,
-        objectiveNodeId: snapshot.id,
-        sequence: this.#sequences.take(),
-        event,
-        commandRequestId: gate.requestId,
-      }),
-    );
+    if (!recorded) {
+      await this.#lease.use((lease) =>
+        this.#recorder.operationalGate({
+          lease,
+          objectiveNodeId: snapshot.id,
+          sequence: this.#sequences.take(),
+          event,
+          commandRequestId: gate.requestId,
+        }),
+      );
+    }
+    // Acknowledgement settles this command, not the run. Retire only its
+    // immutable request scope, including recovery after an already-written ack.
+    // Keep the run locator for later resume or unresolved accounting.
+    if (this.#retiredOperationalRequest !== gate.requestId) {
+      await this.#lease.assert();
+      try {
+        await this.#store.retireDiscoveryLocator({
+          kind: "request",
+          objective: snapshot.number,
+          requestId: gate.requestId,
+        });
+        this.#retiredOperationalRequest = gate.requestId;
+      } catch {
+        this.#notify(
+          "Acknowledged command locator retirement could not be confirmed; its hint remains for reconciliation.",
+        );
+      }
+    }
   }
 
   /** A resume may cross only actual squash merges of this run's accepted heads.

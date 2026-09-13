@@ -434,7 +434,7 @@ export class LifecycleRecorder {
           ? first.event === "BudgetReserved" && first.modelInvocationId
             ? "Factory recorded model dispatch intent; token consumption is not yet known."
             : `Factory ${first.event === "BudgetReserved" ? "reserved" : "reconciled"} ${first.amount} ${first.unit}.`
-          : `Factory recorded ${events.length} adjacent budget reconciliations.`,
+          : `Factory recorded ${events.length} adjacent budget events.`,
         events,
       ),
       mutationClass,

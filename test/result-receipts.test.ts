@@ -8,13 +8,17 @@ import {
   assertResultInvocationRecorded,
   RESULT_RECORD_PROTOCOL,
   resultEventsDigest,
+  readResultSelection,
   validateResultReceiptComment,
   type ResultReceiptStore,
+  type ResultReceiptReadStore,
   type ResultTransition,
 } from "../src/control/result-receipts.js";
 import { ReviewCheckpointManager, reviewIdentityDigest } from "../src/control/reviews.js";
 import { ValidationCheckpointManager } from "../src/control/validation-checkpoints.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
+import type { RecoveryReadStore } from "../src/recovery/assessment.js";
+import { boundedReadStore } from "../src/recovery/runtime.js";
 import { createValidationEvidence } from "../src/validation/evidence.js";
 
 const lease = {
@@ -527,4 +531,35 @@ describe("authenticated consolidated result receipts", () => {
       decodeResultReceiptComments(f.comments[0]!.replace('"passed":true', '"passed":false')),
     ).toThrow();
   });
+});
+
+describe("result selection through bounded recovery reads", () => {
+  it.each([false, true])(
+    "falls back only when positive observation is absent (observed=%s)",
+    async (observed) => {
+      const f = fixture();
+      await new ReviewCheckpointManager(f.store, f.leases).persist({
+        lease,
+        identity,
+        result,
+        transition: reviewTransition(),
+      });
+      const scope = {
+        objective: 1,
+        runId: lease.runId,
+        workItem: 2,
+        kind: "review" as const,
+        identityDigest: reviewIdentityDigest(identity),
+      };
+      const selected = await f.store.readResultReceipts(scope);
+      expect(selected.receipts).toHaveLength(1);
+      const positive = { ...selected, protocol: RESULT_RECORD_PROTOCOL };
+      f.store.observedResultReceipts = vi.fn(() => (observed ? positive : undefined));
+      const durableRead = vi.spyOn(f.store, "readResultReceipts");
+      const bounded = boundedReadStore(f.store as unknown as RecoveryReadStore);
+      expect(await readResultSelection(bounded as ResultReceiptReadStore, scope)).toEqual(selected);
+      expect(f.store.observedResultReceipts).toHaveBeenCalledOnce();
+      expect(durableRead).toHaveBeenCalledTimes(observed ? 0 : 1);
+    },
+  );
 });

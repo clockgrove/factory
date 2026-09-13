@@ -74,13 +74,14 @@ export interface ResultReceiptObservation {
   objective: number;
   receipts: AuthenticatedResultReceipt[];
 }
+type ObservedResultSelection = {
+  protocol: typeof RESULT_RECORD_PROTOCOL;
+  receipts: AuthenticatedResultReceipt[];
+};
 export interface ResultReceiptReadStore {
-  observedResultReceipts?(scope: ResultReceiptScope):
-    | {
-        protocol: typeof RESULT_RECORD_PROTOCOL;
-        receipts: AuthenticatedResultReceipt[];
-      }
-    | undefined;
+  observedResultReceipts?(
+    scope: ResultReceiptScope,
+  ): ObservedResultSelection | undefined | Promise<ObservedResultSelection | undefined>;
   /** Selection and receipts come from authenticated GitHub history, never a local acknowledgment. */
   readResultReceipts(scope: ResultReceiptScope): Promise<{
     protocol: typeof RESULT_RECORD_PROTOCOL | null;
@@ -92,7 +93,7 @@ export async function readResultSelection(
   store: ResultReceiptReadStore,
   scope: ResultReceiptScope,
 ) {
-  return store.observedResultReceipts?.(scope) ?? (await store.readResultReceipts(scope));
+  return (await store.observedResultReceipts?.(scope)) ?? (await store.readResultReceipts(scope));
 }
 export interface ResultReceiptStore extends ResultReceiptReadStore {
   publishResultReceipt(args: { issueNodeId: string; body: string }): Promise<{ commentId: string }>;

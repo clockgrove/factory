@@ -4155,14 +4155,16 @@ describe("Supervisor authenticated successor execution", () => {
       ).toMatchObject({ status: "completed" });
       expect(f.launch).toHaveBeenCalledTimes(failC ? 2 : 1);
       expect(f.review).toHaveBeenCalledTimes(2);
-      expect(
-        await loadRecoveryRuntime({
-          objective: 7,
-          runId: "second-successor",
-          store: f.store,
-          readSnapshot: async () => ({ snapshot: f.snapshot, historyComplete: true }),
-        }),
-      ).toMatchObject({ status: "verified", usage: { modelTokens: failC ? 100 : 80 } });
+      const completedRuntime = await loadRecoveryRuntime({
+        objective: 7,
+        runId: "second-successor",
+        store: f.store,
+        readSnapshot: async () => ({ snapshot: f.snapshot, historyComplete: true }),
+      });
+      expect(completedRuntime, JSON.stringify(completedRuntime)).toMatchObject({
+        status: "verified",
+        usage: { modelTokens: failC ? 100 : 80 },
+      });
     },
     120_000,
   );

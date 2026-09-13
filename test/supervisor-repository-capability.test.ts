@@ -930,6 +930,51 @@ describe("Supervisor repository-capability admission", () => {
 });
 
 describe("Supervisor workflow publication boundary", () => {
+  it.each([false, true])(
+    "requires a stable workflow inspection base only for execution-authority changes (%s)",
+    async (workflow) => {
+      const fixture = await providerSupervisorFixture("daytona-burst", {
+        localOnly: true,
+        publicationBaseRace: true,
+        ...(workflow ? { workflowArtifact: "safe" as const } : {}),
+      });
+      fixtures.push(fixture);
+      const scoped = admitLocalValidation();
+      try {
+        const result = await fixture.run();
+        expect(fixture.refs.has("refs/heads/main")).toBe(true);
+        const published = fixture
+          .events()
+          .some((event) => event.event === "PublicationRecorded" && event.workItem === 8);
+        if (workflow) {
+          expect(result).toMatchObject({
+            status: "escalated",
+            reason: expect.stringContaining(
+              "publication base main changed during workflow inspection",
+            ),
+          });
+          expect(published).toBe(false);
+          expect(fixture.snapshot.workItems[0]!.linkedPullRequests).toEqual([]);
+          expect(
+            [...fixture.refs.keys()].some(
+              (ref) => ref.startsWith("refs/heads/") && ref.includes("work-item-8"),
+            ),
+          ).toBe(false);
+        } else {
+          expect(published).toBe(true);
+          expect(result.reason ?? "").not.toContain("pre-publication approval");
+          // This fixture does not supply authenticated peer lineage: publication
+          // does not authorize integrating an unexplained trunk advance.
+          expect(result.status).toBe("escalated");
+          expect(fixture.mergePull).not.toHaveBeenCalled();
+        }
+      } finally {
+        scoped.mockRestore();
+      }
+    },
+    60_000,
+  );
+
   it("publishes a protected-push-only workflow but leaves its merge human-authorized", async () => {
     const fixture = await providerSupervisorFixture("daytona-burst", {
       localOnly: true,

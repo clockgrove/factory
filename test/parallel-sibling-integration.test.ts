@@ -1495,6 +1495,109 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(f.merge).toHaveBeenCalledTimes(2);
   });
 
+  it("observes a completed ref write with one narrow read before the minute backoff", async () => {
+    const observations: Array<{
+      event: string;
+      writeCompletedAt: string;
+      firstObservedAt: string | null;
+      nextActionAt: string | null;
+      targetedReads: number;
+    }> = [];
+    const f = await fixture({
+      regular: true,
+      staleRefreshedHeadReads: 1,
+      pollIntervalMs: 60_000,
+      onStatus: (message) => {
+        const prefix = "Factory integration observation: ";
+        if (message.startsWith(prefix)) {
+          const observation = JSON.parse(message.slice(prefix.length));
+          observations.push(observation);
+        }
+      },
+    });
+    const result = await f.run();
+    expect(result, result.reason).toMatchObject({ status: "completed" });
+    const action = observations.find((entry) => entry.event === "next-action")!;
+    expect(action.targetedReads).toBe(1);
+    expect(Date.parse(action.firstObservedAt!) - Date.parse(action.writeCompletedAt)).toBeLessThan(
+      5_000,
+    );
+    expect(Date.parse(action.nextActionAt!) - Date.parse(action.firstObservedAt!)).toBeLessThan(
+      5_000,
+    );
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect(f.validate).toHaveBeenCalledOnce();
+    expect(f.review).toHaveBeenCalledOnce();
+    expect(f.merge).toHaveBeenCalledTimes(2);
+  }, 15_000);
+
+  it("exhausts two narrow reads without repeated Objective reads, then remains abortable", async () => {
+    let exhausted!: () => void;
+    const exhaustion = new Promise<void>((resolve) => {
+      exhausted = resolve;
+    });
+    const controller = new AbortController();
+    let waiting = false;
+    const snapshotsAtPull: number[] = [];
+    let atExhaustion = 0;
+    const f = await fixture({
+      regular: true,
+      staleRefreshedHeadReads: 1_000,
+      pollIntervalMs: 60_000,
+      signal: controller.signal,
+      onStatus: (message) => {
+        if (message.includes("integration waiting:")) waiting = true;
+        if (message.includes('"event":"probes-exhausted"')) {
+          atExhaustion = vi.mocked(GitHubReader.prototype.readObjective).mock.calls.length;
+          vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+          exhausted();
+        }
+      },
+    });
+    const readPull = f.pullReads.getMockImplementation()!;
+    f.pullReads.mockImplementation(async (number) => {
+      if (waiting)
+        snapshotsAtPull.push(vi.mocked(GitHubReader.prototype.readObjective).mock.calls.length);
+      return readPull(number);
+    });
+    const completion = f.run();
+    await exhaustion;
+    const beforePulls = f.pullReads.mock.calls.length;
+    expect(snapshotsAtPull.length).toBeGreaterThanOrEqual(2);
+    // These are the two narrow probes; preceding reconciliation may legitimately
+    // read a new snapshot in response to a completion/fairness notification.
+    expect(snapshotsAtPull.slice(-2)).toEqual([atExhaustion, atExhaustion]);
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(f.pullReads.mock.calls.length).toBe(beforePulls);
+    expect(vi.mocked(GitHubReader.prototype.readObjective).mock.calls.length).toBe(atExhaustion);
+    controller.abort();
+    vi.useRealTimers();
+    const result = await completion;
+    expect(result.status).toBe("cancelled");
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect(f.validate).not.toHaveBeenCalled();
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.merge).toHaveBeenCalledOnce();
+  }, 15_000);
+
+  it("rechecks branch ownership after the targeted head observation", async () => {
+    const f = await fixture({
+      regular: true,
+      staleRefreshedHeadReads: 1,
+      pollIntervalMs: 60_000,
+      onStatus: (message) => {
+        if (message.includes('"event":"observation-changed"'))
+          f.refs.set(`refs/heads/${publicationBranch(7, 9, 1)}`, f.baseSha);
+      },
+    });
+    const result = await f.run();
+    expect(result.status).toBe("escalated");
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect(f.validate).not.toHaveBeenCalled();
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.merge).toHaveBeenCalledOnce();
+  }, 15_000);
+
   it("replans after another sibling integration with a new changed-head validation and review identity", async () => {
     let state: "stale-parents" | "fresh" = "stale-parents";
     const f = await fixture({

@@ -129,7 +129,7 @@ describe("integration check discovery", () => {
     ).resolves.toEqual({ state: "ready", headSha: HEAD_SHA });
   });
 
-  it("allows a proven no-CI repository after grace but never treats expected or unknown CI as absent", async () => {
+  it("allows a negative Actions hint after grace but never treats expected or unknown CI as absent", async () => {
     const createdAt = new Date("2026-09-04T12:00:00.000Z");
     const now = new Date(createdAt.getTime() + FIRST_CHECK_DISCOVERY_GRACE_MS);
     const noChecks = store({ createdAt });

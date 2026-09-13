@@ -170,7 +170,10 @@ Exact immutable commit, complete tree, and verified blob content can be reused w
 entry and byte bounds and coalesced identical reads. This content carries no current provider time.
 Fresh ref observations still establish the observed generation and time; a warm content hit cannot
 establish current ownership, permissions, graph membership, or admission authority. Discarding the
-cache reconstructs from GitHub. Transport diagnostics preserve their observation context across
+cache reconstructs from GitHub. Sibling-refresh lineage validation uses this immutable content path
+for checkpoint, source, target and planned commits while observing checkpoint and reservation refs
+on every load. Stores without the optional content reader retain the uncached compatibility path.
+Transport diagnostics preserve their observation context across
 request scheduling and count each attempted transport, including traffic outside a mutation operation.
 Nested phase totals remain inclusive and are not additive.
 Factory mutation queue counters cover only its own admission. Client pretransport elapsed time
@@ -922,8 +925,21 @@ authorizes the next head. Native linear-stack rebase proofs remain separate from
 
 Pending integration observations carry their exact head/base and a reason. The first-check discovery
 grace retains its 60-second safety interval and schedules its known expiry directly, bounded by the
-Objective deadline. Unknown readiness keeps the bounded polling cadence, reset when the observed
-head/base or reason changes. These are scheduling hints: integration still reacquires its required
+Objective deadline. A negative Actions-history hint is not proof that external CI is absent,
+so it does not bypass that grace. Expected or unknown CI with no checks remains pending.
+After a confirmed local sibling-ref CAS, Factory allows at most two targeted PR observations
+(first eligible after one second, then two seconds after an unchanged observation). They run in
+the existing progress wait outside integration admission, without reconstructing the Objective.
+A changed PR wakes the ordinary full checks; unchanged state returns to the existing cadence.
+Restart, response-loss recovery without a confirmed local completion, and ordinary pending CI do
+not arm this opportunity. Local completion/fairness and deadline/shutdown wakes remain active.
+Bounded process-local diagnostics record write completion, first observed matching head and return
+to candidate preparation; unavailable milestones remain null. The first observed time is not the
+provider's actual ready time: its elapsed interval includes propagation and observation delay,
+while the following interval includes useful reconciliation. The targeted call count is separate
+from actual transport accounting, including quota retries.
+Unknown readiness keeps the bounded polling cadence, reset when the observed head/base or reason
+changes. These are scheduling hints: integration still reacquires its required
 current authority, head, base and check evidence.
 
 Publication repair rereads authenticated history before writing a missing receipt. Equivalent

@@ -923,14 +923,14 @@ are preserved before rechecking mutable trunk. Another proved sibling integratio
 linked refresh/validation/review identity; neither an old review nor an unexplained external advance
 authorizes the next head. Native linear-stack rebase proofs remain separate from sibling refreshes.
 
-Pending integration observations carry their exact head/base and a reason. The first-check discovery
-grace retains its 60-second safety interval and schedules its known expiry directly, bounded by the
-Objective deadline. A negative Actions-history hint is not proof that external CI is absent,
-so it does not bypass that grace. Expected or unknown CI with no checks remains pending.
-After a confirmed local sibling-ref CAS, Factory allows at most two targeted PR observations
-(first eligible after one second, then two seconds after an unchanged observation). They run in
-the existing progress wait outside integration admission, without reconstructing the Objective.
-A changed PR wakes the ordinary full checks; unchanged state returns to the existing cadence.
+Pending integration observations carry their exact head/base and a reason, without per-item
+eligibility timers or exponential backoff. Fresh PRs have no age-based check-discovery grace.
+Expected or unknown CI with no checks remains pending; observed pending or failed checks still gate
+integration. Actual pending external state uses the existing two-second worker observation cadence
+(or the explicit polling override), while completion/fairness events reconsider work immediately.
+After a confirmed local sibling-ref CAS, Factory allows at most two immediate targeted PR observations
+in the existing progress wait outside integration admission, without reconstructing the Objective.
+A changed PR wakes the ordinary full checks; unchanged state returns to pending observation cadence.
 Restart, response-loss recovery without a confirmed local completion, and ordinary pending CI do
 not arm this opportunity. Local completion/fairness and deadline/shutdown wakes remain active.
 Bounded process-local diagnostics record write completion, first observed matching head and return

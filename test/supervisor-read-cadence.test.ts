@@ -145,96 +145,56 @@ it("admits and completes ready work below the former speculative GraphQL reserve
   }
 });
 
-it("schedules first-check grace expiry without an additional external poll", async () => {
+it("integrates newly created no-check PRs without waiting for PR age", async () => {
   const f = await providerSupervisorFixture("daytona-burst", { localOnly: true });
   const readPull = vi.mocked(GitHubControlStore.prototype.readPullRequest);
   const original = readPull.getMockImplementation()!;
-  const deadlines = new Map<number, number>();
-  readPull.mockImplementation(async (number) => {
-    const current = await original(number);
-    if (!deadlines.has(number)) deadlines.set(number, Date.now() + 750);
-    return { ...current, createdAt: new Date(deadlines.get(number)! - 60_000) };
-  });
-  const waits: Array<{ maximum: number; remaining: number }> = [];
-  const originalWait = progress.waitForProgress;
-  vi.spyOn(progress, "waitForProgress").mockImplementation(async (args) => {
-    const deadline = args.retryDeadlines?.find((value) => [...deadlines.values()].includes(value));
-    if (deadline !== undefined)
-      waits.push({ maximum: args.maximumMs, remaining: deadline - Date.now() });
-    return originalWait(args);
-  });
+  readPull.mockImplementation(async (number) => ({
+    ...(await original(number)),
+    createdAt: new Date(),
+  }));
   try {
     await expect(f.run(undefined, null)).resolves.toMatchObject({ status: "completed" });
-    expect(waits.length).toBeGreaterThan(0);
-    for (const wait of waits) {
-      expect(wait.maximum).toBeLessThanOrEqual(750);
-      expect(Math.abs(wait.maximum - Math.max(1, wait.remaining))).toBeLessThan(50);
-    }
   } finally {
     await f.dispose();
     vi.restoreAllMocks();
   }
 }, 20_000);
 
-it("retires a native member's expired grace when a later member still waits", async () => {
+it("reconsiders pending native integration on each wake without growing a cooldown", async () => {
   const shutdown = new AbortController();
   const f = await providerSupervisorFixture("daytona-burst", { nativeStack: true });
   const originalReadiness = publication.integrationReadiness;
-  let firstGrace: number | undefined;
-  let laterMemberPending = false;
+  let pendingReads = 0;
   vi.spyOn(publication, "integrationReadiness").mockImplementation(async (...args) => {
     const readiness = await originalReadiness(...args);
-    if (readiness.state !== "ready") return readiness;
-    if (args[1].number === 108 && firstGrace === undefined) {
-      // Model the grace expiring while the current observation is in flight.
-      firstGrace = Date.now() - 1;
-      return {
-        state: "wait",
-        code: "first-check-grace",
-        headSha: args[1].commitSha,
-        baseSha: args[2]!,
-        notBefore: firstGrace,
-        reason: "waiting for the pull request's first checks to appear",
-      };
-    }
-    if (args[1].number === 109) {
-      laterMemberPending = true;
-      return {
-        state: "wait",
-        code: "checks-pending",
-        headSha: args[1].commitSha,
-        baseSha: args[2]!,
-        reason: "checks pending: later-member",
-      };
-    }
-    return readiness;
+    if (readiness.state !== "ready" || args[1].number !== 109) return readiness;
+    pendingReads++;
+    return {
+      state: "wait",
+      code: "checks-pending",
+      headSha: args[1].commitSha,
+      baseSha: args[2]!,
+      reason: "checks pending: later-member",
+    };
   });
+  const waits: number[] = [];
+  const observed: number[] = [];
   const originalWait = progress.waitForProgress;
-  let expiredGraceWait: number | undefined;
-  let laterWait: Parameters<typeof progress.waitForProgress>[0] | undefined;
   vi.spyOn(progress, "waitForProgress").mockImplementation(async (args) => {
-    if (
-      !laterMemberPending &&
-      firstGrace !== undefined &&
-      args.retryDeadlines?.includes(firstGrace)
-    )
-      expiredGraceWait = args.maximumMs;
-    if (laterMemberPending) {
-      laterWait = args;
-      shutdown.abort();
-    }
-    return originalWait(args);
+    if (pendingReads === 0) return originalWait(args);
+    waits.push(args.maximumMs);
+    observed.push(pendingReads);
+    // Simulate an immediate progress wake, without advancing the wall clock.
+    if (waits.length === 3) shutdown.abort();
+    return null;
   });
   try {
     await f.run(shutdown.signal, null).catch(() => undefined);
-    expect(firstGrace).toBeDefined();
-    expect(expiredGraceWait).toBe(1);
-    expect(laterWait).toBeDefined();
-    expect(laterWait!.retryDeadlines).not.toContain(firstGrace);
-    // The pending member's absolute retry deadline is retained across the wait;
-    // elapsed reconciliation time is not added back to its interval.
-    expect(laterWait!.maximumMs).toBeGreaterThan(59_000);
-    expect(laterWait!.maximumMs).toBeLessThanOrEqual(60_000);
+    expect(waits).toHaveLength(3);
+    expect(waits.every((ms) => ms > 0 && ms <= 2_000)).toBe(true);
+    expect(observed[1]).toBeGreaterThan(observed[0]!);
+    expect(observed[2]).toBeGreaterThan(observed[1]!);
   } finally {
     shutdown.abort();
     await f.dispose();

@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  FIRST_CHECK_DISCOVERY_GRACE_MS,
   integrationReadiness,
   verifySquashIntegration,
   type PublicationStore,
@@ -64,7 +63,6 @@ describe("integration check discovery", () => {
     const createdAt = new Date("2026-09-04T12:00:00.000Z");
     const options = {
       ciExpected: false as const,
-      now: new Date(createdAt.getTime() + FIRST_CHECK_DISCOVERY_GRACE_MS),
     };
     const review = "copilot-pull-request-reviewer";
     await expect(
@@ -105,45 +103,27 @@ describe("integration check discovery", () => {
     ).resolves.toEqual({ state: "ready", headSha: HEAD_SHA });
   });
 
-  it("waits for delayed first checks, then accepts the observed successful check", async () => {
-    const createdAt = new Date("2026-09-04T12:00:00.000Z");
-    await expect(
-      integrationReadiness(store({ createdAt }), pull(), BASE_SHA, "main", {
-        ciExpected: false,
-        now: new Date(createdAt.getTime() + FIRST_CHECK_DISCOVERY_GRACE_MS - 1),
-      }),
-    ).resolves.toEqual({
-      state: "wait",
-      code: "first-check-grace",
-      headSha: HEAD_SHA,
-      baseSha: BASE_SHA,
-      notBefore: createdAt.getTime() + FIRST_CHECK_DISCOVERY_GRACE_MS,
-      reason: "waiting for the pull request's first checks to appear",
-    });
-
-    await expect(
-      integrationReadiness(store({ createdAt, observed: ["test"] }), pull(), BASE_SHA, "main", {
-        ciExpected: false,
-        now: createdAt,
-      }),
-    ).resolves.toEqual({ state: "ready", headSha: HEAD_SHA });
+  it("allows a newly created ready PR immediately without a first-check age gate", async () => {
+    const createdAt = new Date();
+    for (const options of [{ ciExpected: false as const }, {}]) {
+      await expect(
+        integrationReadiness(store({ createdAt }), pull(), BASE_SHA, "main", options),
+      ).resolves.toEqual({ state: "ready", headSha: HEAD_SHA });
+    }
   });
 
-  it("allows a negative Actions hint after grace but never treats expected or unknown CI as absent", async () => {
+  it("never treats expected or unknown CI as absent", async () => {
     const createdAt = new Date("2026-09-04T12:00:00.000Z");
-    const now = new Date(createdAt.getTime() + FIRST_CHECK_DISCOVERY_GRACE_MS);
     const noChecks = store({ createdAt });
 
     await expect(
       integrationReadiness(noChecks, pull(), BASE_SHA, "main", {
         ciExpected: false,
-        now,
       }),
     ).resolves.toEqual({ state: "ready", headSha: HEAD_SHA });
     await expect(
       integrationReadiness(noChecks, pull(), BASE_SHA, "main", {
         ciExpected: true,
-        now,
       }),
     ).resolves.toEqual({
       state: "wait",
@@ -155,7 +135,6 @@ describe("integration check discovery", () => {
     await expect(
       integrationReadiness(noChecks, pull(), BASE_SHA, "main", {
         ciExpected: "unknown",
-        now,
       }),
     ).resolves.toEqual({
       state: "wait",

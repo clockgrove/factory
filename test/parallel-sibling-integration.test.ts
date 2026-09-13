@@ -1495,7 +1495,7 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(f.merge).toHaveBeenCalledTimes(2);
   });
 
-  it("observes a completed ref write with one narrow read before the minute backoff", async () => {
+  it("observes a completed ref write immediately without sleeping before the narrow read", async () => {
     const observations: Array<{
       event: string;
       writeCompletedAt: string;
@@ -1520,7 +1520,7 @@ describe("Supervisor parallel independent sibling integration", () => {
     const action = observations.find((entry) => entry.event === "next-action")!;
     expect(action.targetedReads).toBe(1);
     expect(Date.parse(action.firstObservedAt!) - Date.parse(action.writeCompletedAt)).toBeLessThan(
-      5_000,
+      1_000,
     );
     expect(Date.parse(action.nextActionAt!) - Date.parse(action.firstObservedAt!)).toBeLessThan(
       5_000,

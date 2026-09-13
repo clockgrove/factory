@@ -170,7 +170,10 @@ Exact immutable commit, complete tree, and verified blob content can be reused w
 entry and byte bounds and coalesced identical reads. This content carries no current provider time.
 Fresh ref observations still establish the observed generation and time; a warm content hit cannot
 establish current ownership, permissions, graph membership, or admission authority. Discarding the
-cache reconstructs from GitHub. Transport diagnostics preserve their observation context across
+cache reconstructs from GitHub. Sibling-refresh lineage validation uses this immutable content path
+for checkpoint, source, target and planned commits while observing checkpoint and reservation refs
+on every load. Stores without the optional content reader retain the uncached compatibility path.
+Transport diagnostics preserve their observation context across
 request scheduling and count each attempted transport, including traffic outside a mutation operation.
 Nested phase totals remain inclusive and are not additive.
 Factory mutation queue counters cover only its own admission. Client pretransport elapsed time

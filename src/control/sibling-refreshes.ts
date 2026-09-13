@@ -165,7 +165,7 @@ async function readRecord(
   const oid = await store.readRef(ref);
   if (!oid) return null;
   gitSha.parse(oid);
-  const commit = await store.readCommit(oid);
+  const commit = await (store.readCommitContent?.(oid) ?? store.readCommit(oid));
   requireProof(commit.oid === oid, "checkpoint commit mismatch");
   const blobOid = await store.readTreeEntry(commit.treeOid, PATH);
   requireProof(blobOid, "missing checkpoint document");
@@ -198,7 +198,8 @@ async function verifySource(
     )) === identity.reservationOid,
     "source reservation ref changed",
   );
-  const reservation = await store.readCommit(identity.reservationOid);
+  const reservation = await (store.readCommitContent?.(identity.reservationOid) ??
+    store.readCommit(identity.reservationOid));
   requireProof(reservation.oid === identity.reservationOid, "source reservation commit mismatch");
   const trailers = reservation.message
     .split(/\r?\n/)
@@ -227,7 +228,8 @@ async function verifySource(
       event.baseSha === source.baseSha,
     "source reservation identity mismatch",
   );
-  const base = await store.readCommit(source.baseSha);
+  const base = await (store.readCommitContent?.(source.baseSha) ??
+    store.readCommit(source.baseSha));
   requireProof(
     base.oid === source.baseSha &&
       reservation.treeOid === base.treeOid &&
@@ -235,7 +237,8 @@ async function verifySource(
       reservation.parentOids[0] === source.baseSha,
     "source reservation base mismatch",
   );
-  const head = await store.readCommit(identity.sourceHeadSha);
+  const head = await (store.readCommitContent?.(identity.sourceHeadSha) ??
+    store.readCommit(identity.sourceHeadSha));
   requireProof(
     head.oid === identity.sourceHeadSha &&
       head.treeOid === source.outputTreeSha &&
@@ -251,7 +254,8 @@ async function verifyCommit(
     "plannedHeadSha" | "outputTreeSha" | "expectedOldHeadSha" | "identity"
   >,
 ): Promise<void> {
-  const head = await store.readCommit(record.plannedHeadSha);
+  const head = await (store.readCommitContent?.(record.plannedHeadSha) ??
+    store.readCommit(record.plannedHeadSha));
   requireProof(
     head.oid === record.plannedHeadSha &&
       head.treeOid === record.outputTreeSha &&
@@ -405,7 +409,8 @@ export class SiblingRefreshStore {
     );
     // The provisional record is used only to verify the immutable original source.
     await verifySource(this.store, { identity, source });
-    const target = await this.store.readCommit(identity.targetBaseSha);
+    const target = await (this.store.readCommitContent?.(identity.targetBaseSha) ??
+      this.store.readCommit(identity.targetBaseSha));
     requireProof(target.oid === identity.targetBaseSha, "target base unavailable");
     assertNoSecretMaterial({ identity, source, previous }, "sibling-refresh intent");
     const identityDigest = siblingRefreshIdentityDigest(identity);

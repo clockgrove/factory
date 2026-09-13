@@ -116,6 +116,7 @@ export interface ProviderFaults {
   capabilitySourceRefRaceAfterReservation?: boolean;
   workflowArtifact?: "safe" | "unsafe";
   workflowPublicationCrash?: boolean;
+  publicationBaseRace?: boolean;
   capabilityConsumerPublicationCrash?: boolean;
   workflowLiveBaseUnsafe?: boolean | "create" | "push";
   afterWorkflowCandidatePreparedSnapshot?: () => Promise<void>;
@@ -311,6 +312,8 @@ wheels = [
   const pd = policyDigest(policy);
   const refs = new Map<string, string>();
   let workflowPublicationCrash = Boolean(faults.workflowPublicationCrash);
+  let publicationCandidatePrepared = false;
+  let publicationBaseRaced = false;
   let workflowCandidatePrepared = false;
   let workflowLiveBaseMutated = false;
   let capabilityProviderIntegrated = false;
@@ -363,6 +366,20 @@ wheels = [
         git("add", ".github/workflows/ci.yml");
         git("commit", "-qm", "simulate unsafe live workflow");
         current = git("rev-parse", "main");
+      }
+      if (
+        current &&
+        ref === "refs/heads/main" &&
+        faults.publicationBaseRace &&
+        publicationCandidatePrepared &&
+        !publicationBaseRaced
+      ) {
+        publicationBaseRaced = true;
+        const advanced = rawGit(
+          ["commit-tree", git("rev-parse", `${current}^{tree}`), "-p", current],
+          "simulate ordinary publication base movement",
+        ).trim();
+        refs.set(ref, advanced);
       }
       if (
         current &&
@@ -426,11 +443,13 @@ wheels = [
       await rm(index, { force: true });
       return oid;
     },
-    createCommit: async (input) =>
-      rawGit(
+    createCommit: async (input) => {
+      if (input.message.includes("Factory-Artifact:")) publicationCandidatePrepared = true;
+      return rawGit(
         ["commit-tree", input.treeOid, ...input.parentOids.flatMap((oid) => ["-p", oid])],
         input.message,
-      ).trim(),
+      ).trim();
+    },
     createRef: async (ref, oid) => {
       if (refs.has(ref)) return false;
       refs.set(ref, oid);

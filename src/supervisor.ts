@@ -2235,13 +2235,16 @@ export class FactorySupervisor {
     const sensitivePaths = args.artifact.changedPaths.filter(
       (path) => executionAffectingReason(path) !== null,
     );
+    const changedPackageScripts =
+      args.changedPackageScripts ??
+      (args.artifact.changedPaths.includes("package.json") ? ["<unknown>"] : []);
+    // Ordinary source publication carries no changed execution authority. Peer
+    // integrations may advance trunk; its lineage is checked before integration.
+    if (sensitivePaths.length === 0 && changedPackageScripts.length === 0) return;
     const workflowChange = sensitivePaths.some(isReviewOnlyWorkflowSurface);
     const actionsProfile = workflowChange
       ? await this.#reader.readWorkflowSafetyProfile(true)
       : undefined;
-    const changedPackageScripts =
-      args.changedPackageScripts ??
-      (args.artifact.changedPaths.includes("package.json") ? ["<unknown>"] : []);
     const assertAgainst = (baseWorkflows: ReadonlyMap<string, string>) =>
       assertReviewOnlyWorkflowArtifacts(
         args.candidateRoot,

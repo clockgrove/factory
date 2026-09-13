@@ -33,6 +33,7 @@ describe("distributed operator documentation", () => {
       "docs/LARGE-FILES.md",
       "docs/HOST-SCHEDULING.md",
       "docs/THREAT-MODEL.md",
+      "docs/OPERATING-REFERENCE.md",
     ]);
     const expand = (path: string): string[] => {
       const url = new URL(path, root);

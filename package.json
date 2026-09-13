@@ -1,11 +1,15 @@
 {
   "name": "@clockgrove/factory",
   "version": "2.0.26",
-  "description": "GitHub-backed, local-first unattended software factory.",
+  "description": "Coordinate local coding agents to turn GitHub issues into tested pull requests, with dependency-aware scheduling, validation, and restart recovery.",
   "keywords": [
     "ai-agents",
     "codex",
     "github",
+    "mcp",
+    "agent-orchestration",
+    "local-first",
+    "developer-tools",
     "software-factory"
   ],
   "homepage": "https://github.com/clockgrove/factory#readme",
@@ -44,6 +48,7 @@
     "docs/LARGE-FILES.md",
     "docs/HOST-SCHEDULING.md",
     "docs/THREAT-MODEL.md",
+    "docs/OPERATING-REFERENCE.md",
     "mcp.json",
     "plugin.json",
     "schemas/",

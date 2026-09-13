@@ -3,6 +3,14 @@
 Bug reports, documentation improvements, tests, and code contributions are welcome. You do not need
 Factory or a coding agent installed to contribute to the repository.
 
+Start with [development setup](#set-up-development), make a [focused change](#make-a-focused-change),
+[validate it](#validate-changes), and [submit a pull request](#submit-a-pull-request). Documentation
+fixes and clear bug reports are useful contributions too.
+
+Looking for a place to help? Browse [help-wanted issues](https://github.com/clockgrove/factory/issues?q=is%3Aissue%20is%3Aopen%20label%3A%22help%20wanted%22).
+Some need access to a specific Linux host environment; read the scope and coordinate in the issue
+before running live qualification. Small documentation fixes can go straight to a pull request.
+
 ## Before proposing a change
 
 Search the [existing issues](https://github.com/clockgrove/factory/issues) before opening a new one.
@@ -17,36 +25,6 @@ documentation improvements can go straight to a PR. The
 
 Report suspected vulnerabilities privately through [SECURITY.md](SECURITY.md), not a public issue.
 For usage questions, see [SUPPORT.md](SUPPORT.md).
-
-## Tracking work
-
-Use the [Factory Project](https://github.com/orgs/clockgrove/projects/1) for scheduling and progress.
-The Backlog view contains open work; the Now board shows the small set currently selected.
-Issues describe a concrete problem, scope, acceptance and evidence. Link implementation PRs to
-their issues. Use native issue dependencies for actual blockers and describe the clearing condition
-in the issue. A shared topic or possible future benefit is not a dependency.
-
-| Field | Meaning |
-| --- | --- |
-| Status | Backlog: unselected; Ready: selected next; In Progress: actively owned; Blocked: selected work waiting on a concrete prerequisite; Deferred: intentionally outside current work; Done: issue acceptance met and issue closed. |
-| Priority | Now: current committed work; Next: selected follow-on work; Later: unselected or deferred. |
-| Milestone | Use the native issue milestone only for a real delivery target. Do not invent release dates or create a duplicate Project field. |
-
-Add a work issue to the Project once. Update fields at meaningful transitions, including when a PR
-closes its issue; do not maintain a separate written status summary. Project membership is not
-permission to start unselected work. Closing an implementation issue does not imply broad installed
-qualification: put any remaining required scenario in a concrete linked issue before closing.
-Assignees identify people actually owning work; do not invent agent identities or owner fields.
-
-The former #69 summary is historical. Bounded parent issues may group a coherent feature, but must
-not become another project-wide backlog. Repository documents describe contracts and procedures;
-PRs and issues retain checks and relevant evidence. Publication is deferred in #88 until a release
-is selected; #89 verifies its published artifacts afterward.
-
-Use GitHub's native UI/API for updates. No polling controller, custom synchronization workflow,
-second database or new tracking service is needed. If Project permissions are missing, continue
-authorized work and report the specific pending update. Maintainers using `gh` need the `project`
-scope for writes; request it with `gh auth refresh -h github.com -s project` when needed.
 
 ## Set up development
 
@@ -67,14 +45,6 @@ Build the committed distribution bundles when your change affects them:
 ```sh
 npm run build
 ```
-
-## Retire qualification fixtures
-
-Include the disposable repository and local checkout's retirement owner and authorization in the
-smoke plan. Finish every smoke with the [fixture retirement checklist](docs/LIVE-OBJECTIVE-HARNESS.md#fixture-retirement):
-record deletion, or a specific retention reason and expiry/review trigger. Preserve private evidence
-before disposal, and keep fixtures needed by concurrent tasks or unresolved accounting. Worker
-cleanup and a closed Objective do not by themselves authorize or prove repository retirement.
 
 ## Make a focused change
 
@@ -130,6 +100,16 @@ Open a PR against `main` with one focused outcome. Use the PR template and inclu
 Do not include credentials, local Factory state, installation receipts, private fixtures, or
 unrelated generated changes. Maintainers handle project-status tracking, integration, and releases.
 See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.
+
+## Tracking work
+
+Maintainers use the [Factory Project](https://github.com/orgs/clockgrove/projects/1) to schedule work.
+See the [tracking procedure](docs/MAINTAINING.md#tracking-work) for field meanings and updates.
+Contributors without Project access can continue authorized work and note any pending update.
+
+If you run a live smoke or qualification scenario, follow the
+[fixture retirement procedure](docs/MAINTAINING.md#retire-qualification-fixtures). Every disposable
+fixture needs a recorded disposition, including after failure or cancellation.
 
 ## AI-assisted contributions and licensing
 

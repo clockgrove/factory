@@ -4,6 +4,18 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ## Unreleased
 
+The current `2.x` package and plugin manifest versions identify development snapshots;
+they do not by themselves indicate a published or fully qualified release. The historical
+`v1.0.0` and `v1.0.1` Git tags predate this development line. Consult
+[GitHub Releases](https://github.com/clockgrove/factory/releases) for published release notes
+and artifacts, and record the commit SHA when installing from source.
+
+### Documentation
+
+- Refresh the README, contributor guidance, issue forms, and package/plugin descriptions
+  for a clearer first-use experience and consistent positioning. Clarify development
+  versioning and keep detailed operator guidance available from the README.
+
 ### Fixed
 
 - Observe confirmed sibling ref writes with a bounded targeted PR check before ordinary integration

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { CapacityLedger } from "../src/scheduling/capacity-ledger.js";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { RepositoryLeaseManager } from "../src/controller/repository-lease.js";
 import { SharedCapacityCoordinator } from "../src/controller/shared-capacity.js";
@@ -18,6 +19,9 @@ vi.mock("../src/supervisor.js", async (original) => ({
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
   vi.spyOn(SharedCapacityCoordinator.prototype, "initialize").mockResolvedValue();
+  vi.spyOn(SharedCapacityCoordinator.prototype, "snapshot").mockResolvedValue(
+    new CapacityLedger().snapshot(),
+  );
   vi.spyOn(GitHubControlStore.prototype, "readRef").mockResolvedValue("c".repeat(40));
 });
 afterEach(() => {

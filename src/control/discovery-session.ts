@@ -1,27 +1,27 @@
 import type { DurableObjectiveActivation } from "./github-store.js";
 
 export const DISCOVERY_SESSION_LIMITS = Object.freeze({
+  pageSize: 100,
+  candidatesPerLane: 32,
+  summaries: 512,
+  summaryBytes: 4 * 1024 * 1024,
   pagesPerProbe: 100,
-  objectives: 10_000,
   commentsPerObjective: 10_000,
-  totalComments: 100_000,
   commentBytes: 64 * 1024 * 1024,
-  controlRefs: 10_000,
   telemetryCycles: 64,
-  overlapMs: 1_000,
+  overlapMs: 2 * 60_000,
+  closedLookbackMs: 7 * 24 * 60 * 60_000,
   backstopIntervalMs: 15 * 60_000,
 });
 
+/** Enumeration deliberately carries no issue body or comment history. */
 export interface DiscoveryIssue {
   number: number;
   state: "open" | "closed";
-  labels: string[];
-  title: string;
-  body: string;
-  pullRequest: boolean;
+  objectiveLabel: boolean;
   updatedAt: string;
+  comments: number;
 }
-
 export interface DiscoveryComment {
   id: string;
   issueNumber: number;
@@ -30,67 +30,68 @@ export interface DiscoveryComment {
   authorAssociation: string | null;
   updatedAt: string;
 }
-
 export interface DiscoveryControlRef {
-  kind: "lease" | "recovery-plan";
+  kind: "lease";
   objective: number;
   ref: string;
   oid: string;
   serverTime: Date;
 }
-
+export interface DiscoveryLocator {
+  objective: number;
+  ref: string;
+  oid: string;
+}
 export interface DiscoveryCollection<T> {
   items: T[];
   requests: number;
   notModified: boolean;
   etag?: string;
-  /** For a multi-page collection ordered by immutable creation identity, the
-   * first response's server time is the latest watermark known complete. */
-  safeThrough?: string;
+  returnedBytes?: number;
 }
-
-const partialDiscoveryRequests = new WeakMap<object, number>();
-
-/** Retain completed/transported pages when a paginated adapter fails before it
- * can return its collection. The original error identity remains intact so a
- * platform refusal is still classified and delayed by the controller. */
-export function recordPartialDiscoveryRequests(error: unknown, requests: number): void {
-  if ((typeof error !== "object" && typeof error !== "function") || error === null) return;
-  partialDiscoveryRequests.set(error, Math.max(0, Math.floor(requests)));
+export interface DiscoveryPage<T> {
+  items: T[];
+  cursor: string | null;
+  serverTime: string;
+  requests: number;
+  returnedBytes: number;
 }
-
-function recordedPartialDiscoveryRequests(error: unknown): number {
-  if ((typeof error !== "object" && typeof error !== "function") || error === null) return 0;
-  return partialDiscoveryRequests.get(error) ?? 0;
-}
-
 export interface DiscoveryClassification {
   activation: Omit<DurableObjectiveActivation, "discoveryRevision"> | null;
   writerBound: boolean;
   authorityOid: string | null;
   recoveryBound: boolean;
 }
-
 export interface GitHubDiscoveryPorts {
   authenticate(): Promise<{ login: string; serverTime: Date }>;
-  listLabelledIssues(etag?: string): Promise<DiscoveryCollection<DiscoveryIssue>>;
-  listIssueDelta(since: string, etag?: string): Promise<DiscoveryCollection<DiscoveryIssue>>;
-  listRepositoryComments(
-    since: string,
-    etag?: string,
-  ): Promise<DiscoveryCollection<DiscoveryComment>>;
+  listIssues(input: {
+    state: "open" | "closed";
+    since?: string;
+    cursor?: string;
+  }): Promise<DiscoveryPage<DiscoveryIssue>>;
+  listLocators(cursor?: string): Promise<DiscoveryPage<DiscoveryLocator>>;
+  readIssue(objective: number, etag?: string): Promise<DiscoveryCollection<DiscoveryIssue>>;
   listObjectiveComments(
     objective: number,
     etag?: string,
   ): Promise<DiscoveryCollection<DiscoveryComment>>;
-  listControlRefs(etag?: string): Promise<DiscoveryCollection<DiscoveryControlRef>>;
   classify(input: {
     login: string;
     issue: DiscoveryIssue;
     comments: DiscoveryComment[];
     revision: number;
-    authority?: DiscoveryControlRef | null;
   }): Promise<DiscoveryClassification>;
+}
+
+const partialDiscoveryRequests = new WeakMap<object, number>();
+export function recordPartialDiscoveryRequests(error: unknown, requests: number): void {
+  if ((typeof error === "object" && error !== null) || typeof error === "function")
+    partialDiscoveryRequests.set(error, Math.max(0, Math.floor(requests)));
+}
+function partialRequests(error: unknown): number {
+  return (typeof error === "object" && error !== null) || typeof error === "function"
+    ? (partialDiscoveryRequests.get(error) ?? 0)
+    : 0;
 }
 
 export interface DiscoveryCycleTelemetry {
@@ -111,704 +112,419 @@ export interface DiscoveryCycleTelemetry {
   };
   dirtyObjectives: number;
   returnedActivations: number;
+  returnedBytes?: number;
+  pendingCandidates?: number;
 }
-
 export interface DiscoverySessionTelemetry {
   measurementScope: "process-local-discovery-session";
   cycles: DiscoveryCycleTelemetry[];
   droppedCycles: number;
   cachedObjectives: number;
   cachedComments: number;
+  retainedSummaryBytes?: number;
+  evictedSummaries?: number;
+  incompleteScans?: number;
+  objectiveErrors?: { objective: number; reason: string }[];
 }
-
-interface CachedObjective {
+interface Summary {
   issue: DiscoveryIssue;
-  comments: Map<string, DiscoveryComment>;
-  revision: number;
-  writerBound: boolean;
-  authorityOid: string | null;
-  recoveryBound: boolean;
-  recoveryRefsFingerprint: string | null;
   activation: DurableObjectiveActivation | null;
+  revision: number;
+  classifiedAt: number;
+  issueEtag?: string;
+  commentEtag?: string;
+  locatorOid?: string;
+  error?: string;
 }
-
-interface SessionState {
-  login: string;
-  objectives: Map<number, CachedObjective>;
-  issueWatermark: number;
-  commentWatermark: number;
-  slowCommentWatermark: number;
-  issueDeltaEtag?: string;
-  commentDeltaEtag?: string;
-  labelledIssuesEtag?: string;
-  slowCommentsEtag?: string;
-  refsEtag?: string;
-  lastBackstopAt: number;
+interface Scan<T> {
+  cursor?: string;
+  since?: string;
+  full?: boolean;
+  startedAt?: number;
+  page?: DiscoveryPage<T> | undefined;
+  next: number;
 }
-
-interface BootstrapProgress {
-  identity: { login: string; serverTime: Date };
-  labelled: DiscoveryCollection<DiscoveryIssue>;
-  objectives: Map<number, CachedObjective>;
-  nextIssue: number;
-  comments: number;
-  commentBytes: number;
-  startedAt: number;
-}
-
-interface DeltaProgress {
-  base: SessionState;
-  startedAt: number;
-  backstop: boolean;
-  issues?: DiscoveryCollection<DiscoveryIssue>;
-  comments?: DiscoveryCollection<DiscoveryComment>;
-  labelled?: DiscoveryCollection<DiscoveryIssue>;
-  slowComments?: DiscoveryCollection<DiscoveryComment>;
-  refs?: DiscoveryCollection<DiscoveryControlRef>;
-  labelledDone: boolean;
-  slowCommentsDone: boolean;
-  refsDone: boolean;
-  objectives?: Map<number, CachedObjective>;
-  dirty?: Set<number>;
-  hydrate?: number[];
-  nextHydration: number;
-  classify?: number[];
-  nextClassification: number;
-  commentsCount: number;
-  commentBytes: number;
-  leaseRefsByObjective?: Map<number, DiscoveryControlRef>;
-  recoveryRefsByObjective?: Map<number, string>;
-}
-
-function timestamp(value: string, label: string): number {
-  const parsed = new Date(value).getTime();
-  if (!Number.isFinite(parsed)) throw new Error(`${label} has an invalid updated_at timestamp`);
+function time(value: string): number {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed))
+    throw new Error("discovery response has invalid server/update time");
   return parsed;
 }
-
-function since(watermark: number): string {
-  return new Date(Math.max(0, watermark - DISCOVERY_SESSION_LIMITS.overlapMs)).toISOString();
+function since(value: number): string {
+  return new Date(Math.max(0, value - DISCOVERY_SESSION_LIMITS.overlapMs)).toISOString();
+}
+function signature(issue: DiscoveryIssue): string {
+  return `${issue.state}:${issue.objectiveLabel}:${issue.updatedAt}:${issue.comments}`;
 }
 
-function maxWatermark<T>(
-  previous: number,
-  values: T[],
-  updatedAt: (value: T) => string,
-  label: string,
-): number {
-  return values.reduce(
-    (maximum, value) => Math.max(maximum, timestamp(updatedAt(value), label)),
-    previous,
-  );
-}
-
-function collectionWatermark<T>(
-  previous: number,
-  collection: DiscoveryCollection<T>,
-  updatedAt: (value: T) => string,
-  label: string,
-): number {
-  return collection.safeThrough
-    ? Math.max(previous, timestamp(collection.safeThrough, `${label} collection watermark`))
-    : maxWatermark(previous, collection.items, updatedAt, label);
-}
-
-function sameIssue(left: DiscoveryIssue, right: DiscoveryIssue): boolean {
-  return (
-    left.state === right.state &&
-    left.title === right.title &&
-    left.body === right.body &&
-    left.pullRequest === right.pullRequest &&
-    left.updatedAt === right.updatedAt &&
-    left.labels.length === right.labels.length &&
-    left.labels.every((label, index) => label === right.labels[index])
-  );
-}
-
-function sameIssueCollection(
-  left: DiscoveryCollection<DiscoveryIssue>,
-  right: DiscoveryCollection<DiscoveryIssue>,
-): boolean {
-  if (left.items.length !== right.items.length) return false;
-  const rightByNumber = new Map(right.items.map((issue) => [issue.number, issue]));
-  return left.items.every((issue) => {
-    const candidate = rightByNumber.get(issue.number);
-    return candidate !== undefined && sameIssue(issue, candidate);
-  });
-}
-
-function sameComment(left: DiscoveryComment, right: DiscoveryComment): boolean {
-  return (
-    left.issueNumber === right.issueNumber &&
-    left.body === right.body &&
-    left.authorLogin === right.authorLogin &&
-    left.authorAssociation === right.authorAssociation &&
-    left.updatedAt === right.updatedAt
-  );
-}
-
-function isObjective(issue: DiscoveryIssue): boolean {
-  return (
-    !issue.pullRequest && issue.labels.some((label) => label.toLowerCase() === "factory:objective")
-  );
-}
-
-function recoveryRefFingerprints(refs: DiscoveryControlRef[]): Map<number, string> {
-  const grouped = new Map<number, string[]>();
-  for (const ref of refs) {
-    if (ref.kind !== "recovery-plan") continue;
-    const values = grouped.get(ref.objective) ?? [];
-    values.push(`${ref.ref}:${ref.oid}`);
-    grouped.set(ref.objective, values);
-  }
-  return new Map([...grouped].map(([objective, values]) => [objective, values.sort().join("\n")]));
-}
-
-function emptyProbes(): DiscoveryCycleTelemetry["probes"] {
-  return {
-    authenticatedUser: 0,
-    issues: 0,
-    repositoryComments: 0,
-    objectiveComments: 0,
-    matchingRefs: 0,
-    classifications: 0,
-    notModified: 0,
-  };
-}
-
-/**
- * Process-local scheduling index. Every process bootstraps from complete
- * authenticated GitHub history. Warm state is committed only after every page
- * and classification succeeds; it is never mutation authority.
- */
+/** Disposable, bounded hints. Each lane streams pages; no lifetime history is
+ * accumulated and an incomplete scan never proves absence or advances time.
+ * Every emitted hint still requires the Supervisor's fresh authenticated reads. */
 export class GitHubDiscoverySession {
   readonly #ports: GitHubDiscoveryPorts;
   readonly #now: () => Date;
-  #state: SessionState | undefined;
-  #bootstrapProgress: BootstrapProgress | undefined;
-  #deltaProgress: DeltaProgress | undefined;
+  #login?: string;
+  #serverOffset = 0;
+  #openWatermark = 0;
+  #closedWatermark = 0;
+  #lastOpenBackstop = Number.NEGATIVE_INFINITY;
+  #open: Scan<DiscoveryIssue> | undefined;
+  #closed: Scan<DiscoveryIssue> | undefined;
+  #locators: Scan<DiscoveryLocator> | undefined;
+  readonly #summaries = new Map<number, Summary>();
+  #summaryBytes = 0;
+  #evicted = 0;
+  #sequence = 0;
+  #revision = 0;
   #cycles: DiscoveryCycleTelemetry[] = [];
   #droppedCycles = 0;
-  #sequence = 0;
 
   constructor(ports: GitHubDiscoveryPorts, now: () => Date = () => new Date()) {
     this.#ports = ports;
     this.#now = now;
   }
 
-  async discover(): Promise<DurableObjectiveActivation[]> {
+  async discover(knownObjectives: readonly number[] = []): Promise<DurableObjectiveActivation[]> {
     const startedAt = this.#now();
-    const probes = emptyProbes();
-    const mode = this.#state ? "delta" : "bootstrap";
+    const cycle: DiscoveryCycleTelemetry = {
+      sequence: ++this.#sequence,
+      mode: this.#login ? "delta" : "bootstrap",
+      startedAt: startedAt.toISOString(),
+      completedAt: startedAt.toISOString(),
+      outcome: "complete",
+      backstop: false,
+      probes: {
+        authenticatedUser: 0,
+        issues: 0,
+        repositoryComments: 0,
+        objectiveComments: 0,
+        matchingRefs: 0,
+        classifications: 0,
+        notModified: 0,
+      },
+      dirtyObjectives: 0,
+      returnedActivations: 0,
+      returnedBytes: 0,
+    };
+    const touched = new Set<number>();
     try {
-      const result =
-        mode === "delta"
-          ? await this.#delta(startedAt, probes)
-          : await this.#bootstrap(startedAt, probes);
-      this.#recordCycle({
-        sequence: ++this.#sequence,
-        mode,
-        startedAt: startedAt.toISOString(),
-        completedAt: this.#now().toISOString(),
-        outcome: "complete",
-        backstop: result.backstop,
-        probes,
-        dirtyObjectives: result.dirtyObjectives,
-        returnedActivations: result.activations.length,
-      });
-      return result.activations;
+      if (!this.#login) {
+        try {
+          const identity = await this.#ports.authenticate();
+          cycle.probes.authenticatedUser++;
+          this.#login = identity.login.toLowerCase();
+          this.#serverOffset = identity.serverTime.getTime() - startedAt.getTime();
+          if (!Number.isFinite(this.#serverOffset))
+            throw new Error("invalid authentication server time");
+        } catch (error) {
+          cycle.probes.authenticatedUser += partialRequests(error);
+          throw error;
+        }
+      }
+      const now = this.#now().getTime() + this.#serverOffset;
+      this.#open ??=
+        now - this.#lastOpenBackstop >= DISCOVERY_SESSION_LIMITS.backstopIntervalMs
+          ? { full: true, next: 0 }
+          : { since: since(this.#openWatermark), next: 0 };
+      this.#closed ??= {
+        since: since(
+          Math.max(this.#closedWatermark, now - DISCOVERY_SESSION_LIMITS.closedLookbackMs),
+        ),
+        next: 0,
+      };
+      this.#locators ??= { next: 0 };
+      cycle.backstop = this.#open.full === true;
+      // Exact known work is independent of filtered pagination or label edits.
+      for (const objective of new Set([
+        ...knownObjectives,
+        ...[...this.#summaries.values()]
+          .filter((summary) => summary.activation)
+          .map((summary) => summary.issue.number),
+      ]))
+        await this.#target(objective, cycle, touched);
+      await this.#issueLane("open", this.#open, cycle, touched);
+      await this.#issueLane("closed", this.#closed, cycle, touched);
+      await this.#locatorLane(this.#locators, cycle, touched);
+      const activations = [...this.#summaries.values()].flatMap((summary) =>
+        summary.activation ? [summary.activation] : [],
+      );
+      cycle.returnedActivations = activations.length;
+      return activations;
     } catch (error) {
-      const deltaProgress = mode === "delta" ? this.#deltaProgress : undefined;
-      this.#recordCycle({
-        sequence: ++this.#sequence,
-        mode,
-        startedAt: startedAt.toISOString(),
-        completedAt: this.#now().toISOString(),
-        outcome: "failed",
-        backstop: deltaProgress?.backstop ?? false,
-        probes,
-        dirtyObjectives: deltaProgress?.dirty?.size ?? 0,
-        returnedActivations: 0,
-      });
+      cycle.outcome = "failed";
+      throw error;
+    } finally {
+      cycle.completedAt = this.#now().toISOString();
+      cycle.pendingCandidates = this.#pending();
+      this.#cycles.push(cycle);
+      if (this.#cycles.length > DISCOVERY_SESSION_LIMITS.telemetryCycles) {
+        this.#cycles.shift();
+        this.#droppedCycles++;
+      }
+    }
+  }
+
+  async #probe<T extends { requests: number; returnedBytes?: number }>(
+    cycle: DiscoveryCycleTelemetry,
+    kind: "issues" | "objectiveComments" | "matchingRefs",
+    read: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      const result = await read();
+      cycle.probes[kind] += result.requests;
+      cycle.returnedBytes! += result.returnedBytes ?? 0;
+      if ("notModified" in result && result.notModified) cycle.probes.notModified++;
+      return result;
+    } catch (error) {
+      cycle.probes[kind] += partialRequests(error);
       throw error;
     }
   }
 
+  async #issueLane(
+    state: "open" | "closed",
+    scan: Scan<DiscoveryIssue>,
+    cycle: DiscoveryCycleTelemetry,
+    touched: Set<number>,
+  ): Promise<void> {
+    if (!scan.page) {
+      const page = await this.#probe(cycle, "issues", () =>
+        this.#ports.listIssues({
+          state,
+          ...(scan.since ? { since: scan.since } : {}),
+          ...(scan.cursor ? { cursor: scan.cursor } : {}),
+        }),
+      );
+      this.#validatePage(page, scan.cursor);
+      scan.page = page;
+      scan.startedAt ??= time(page.serverTime);
+    }
+    for (
+      let count = 0;
+      scan.next < scan.page.items.length && count < DISCOVERY_SESSION_LIMITS.candidatesPerLane;
+      count++, scan.next++
+    ) {
+      const issue = scan.page.items[scan.next]!;
+      if (touched.has(issue.number)) continue;
+      await this.#consider(issue, cycle, touched);
+    }
+    if (scan.next < scan.page.items.length) return;
+    const cursor = scan.page.cursor;
+    scan.page = undefined;
+    scan.next = 0;
+    if (cursor) {
+      scan.cursor = cursor;
+      return;
+    }
+    // Only complete relevant traversals advance a watermark. The initial server
+    // time (not the newest row) protects edits entering an already-read page.
+    if (state === "open") {
+      this.#openWatermark = Math.max(this.#openWatermark, scan.startedAt!);
+      if (scan.full) this.#lastOpenBackstop = scan.startedAt!;
+      this.#open = undefined;
+    } else {
+      this.#closedWatermark = Math.max(this.#closedWatermark, scan.startedAt!);
+      this.#closed = undefined;
+    }
+  }
+
+  async #locatorLane(
+    scan: Scan<DiscoveryLocator>,
+    cycle: DiscoveryCycleTelemetry,
+    touched: Set<number>,
+  ): Promise<void> {
+    if (!scan.page) {
+      const page = await this.#probe(cycle, "matchingRefs", () =>
+        this.#ports.listLocators(scan.cursor),
+      );
+      this.#validatePage(page, scan.cursor);
+      scan.page = page;
+    }
+    for (
+      let count = 0;
+      scan.next < scan.page.items.length && count < DISCOVERY_SESSION_LIMITS.candidatesPerLane;
+      count++, scan.next++
+    ) {
+      const locator = scan.page.items[scan.next]!;
+      // Different immutable scope names can share one Objective; hydrate at most
+      // once per cycle. A later sweep still sees any concurrently created scope.
+      if (!touched.has(locator.objective))
+        await this.#target(locator.objective, cycle, touched, locator.oid);
+    }
+    if (scan.next < scan.page.items.length) return;
+    const cursor = scan.page.cursor;
+    scan.page = undefined;
+    scan.next = 0;
+    if (cursor) scan.cursor = cursor;
+    else this.#locators = undefined;
+  }
+
+  #validatePage<T>(page: DiscoveryPage<T>, previous?: string): void {
+    time(page.serverTime);
+    if (
+      page.items.length > DISCOVERY_SESSION_LIMITS.pageSize ||
+      (page.cursor !== null && (!page.cursor || page.cursor === previous))
+    )
+      throw new Error("invalid bounded discovery page/cursor");
+  }
+
+  async #target(
+    objective: number,
+    cycle: DiscoveryCycleTelemetry,
+    touched: Set<number>,
+    locatorOid?: string,
+  ): Promise<void> {
+    const prior = this.#summaries.get(objective);
+    try {
+      const response = await this.#probe(cycle, "issues", () =>
+        this.#ports.readIssue(objective, prior?.issueEtag),
+      );
+      const issue = response.notModified ? prior?.issue : response.items[0];
+      if (!issue)
+        throw new Error(`exact Objective #${objective} is unavailable; absence is unproven`);
+      await this.#consider(issue, cycle, touched, { issueEtag: response.etag, locatorOid });
+    } catch (error) {
+      if (this.#platformError(error)) throw error;
+      touched.add(objective);
+      this.#retain(objective, {
+        issue: prior?.issue ?? {
+          number: objective,
+          state: "closed",
+          objectiveLabel: false,
+          updatedAt: this.#now().toISOString(),
+          comments: 0,
+        },
+        activation: null,
+        revision: ++this.#revision,
+        classifiedAt: this.#now().getTime() + this.#serverOffset,
+        error:
+          error instanceof Error
+            ? error.message.slice(0, 1000)
+            : "exact Objective unavailable; obligations retained",
+      });
+    }
+  }
+
+  async #consider(
+    issue: DiscoveryIssue,
+    cycle: DiscoveryCycleTelemetry,
+    touched: Set<number>,
+    exact?: { issueEtag?: string | undefined; locatorOid?: string | undefined },
+  ): Promise<void> {
+    touched.add(issue.number);
+    const prior = this.#summaries.get(issue.number);
+    const now = this.#now().getTime() + this.#serverOffset;
+    const unchanged =
+      prior &&
+      signature(prior.issue) === signature(issue) &&
+      (!exact?.locatorOid || prior.locatorOid === exact.locatorOid);
+    if (unchanged && now - prior.classifiedAt < DISCOVERY_SESSION_LIMITS.backstopIntervalMs) {
+      this.#retain(issue.number, {
+        ...prior,
+        ...(exact?.issueEtag ? { issueEtag: exact.issueEtag } : {}),
+      });
+      return;
+    }
+    const summary: Summary = {
+      issue,
+      activation: null,
+      revision: ++this.#revision,
+      classifiedAt: now,
+      ...(exact?.issueEtag ? { issueEtag: exact.issueEtag } : {}),
+      ...(exact?.locatorOid ? { locatorOid: exact.locatorOid } : {}),
+    };
+    try {
+      // A removed label is still reconciled when exact admitted/acknowledged work
+      // locates it. Filter membership itself grants no authority.
+      const comments =
+        issue.comments === 0
+          ? { items: [], requests: 0, notModified: false }
+          : await this.#probe(cycle, "objectiveComments", () =>
+              this.#ports.listObjectiveComments(issue.number),
+            );
+      if (comments.notModified)
+        throw new Error("history-free classification cannot accept 304 comments");
+      if (
+        comments.items.length > DISCOVERY_SESSION_LIMITS.commentsPerObjective ||
+        comments.items.reduce((bytes, comment) => bytes + Buffer.byteLength(comment.body), 0) >
+          DISCOVERY_SESSION_LIMITS.commentBytes
+      )
+        throw new Error(`Objective #${issue.number} exceeds its transient history bound`);
+      const classified = await this.#ports.classify({
+        login: this.#login!,
+        issue,
+        comments: comments.items,
+        revision: summary.revision,
+      });
+      cycle.probes.classifications++;
+      cycle.dirtyObjectives++;
+      summary.activation = classified.activation
+        ? { ...classified.activation, discoveryRevision: summary.revision }
+        : null;
+      if (!summary.activation && exact?.locatorOid)
+        summary.error =
+          "Outstanding discovery locator has no runnable activation; inspect the exact Objective's resource/accounting disposition. Terminal work is not restarted.";
+    } catch (error) {
+      // Platform waits preserve the lane cursor. Durable per-Objective errors are
+      // isolated diagnostics; they must not stop independent repository work.
+      if (this.#platformError(error)) throw error;
+      summary.error =
+        error instanceof Error ? error.message.slice(0, 1000) : "Objective classification failed";
+    }
+    this.#retain(issue.number, summary);
+  }
+
+  #platformError(error: unknown): boolean {
+    return (
+      error instanceof Error &&
+      (error.name === "PlatformUnavailableError" ||
+        error.name.includes("Quota") ||
+        error.name.includes("Abort"))
+    );
+  }
+
+  #retain(objective: number, summary: Summary): void {
+    this.#summaries.delete(objective);
+    if (summary.issue.state === "open" || summary.activation || summary.error)
+      this.#summaries.set(objective, summary);
+    this.#summaryBytes = [...this.#summaries.values()].reduce(
+      (total, value) => total + Buffer.byteLength(JSON.stringify(value)),
+      0,
+    );
+    while (
+      this.#summaries.size > DISCOVERY_SESSION_LIMITS.summaries ||
+      this.#summaryBytes > DISCOVERY_SESSION_LIMITS.summaryBytes
+    ) {
+      const oldest = this.#summaries.keys().next().value!;
+      this.#summaryBytes -= Buffer.byteLength(JSON.stringify(this.#summaries.get(oldest)));
+      this.#summaries.delete(oldest);
+      this.#evicted++;
+    }
+    // Eviction removes only disposable scheduling hints. Open scans and durable
+    // exact locators remain the discovery source; no liability is discharged.
+  }
+
+  #pending(): number {
+    return [this.#open, this.#closed, this.#locators].reduce(
+      (total, scan) => total + (scan?.page ? scan.page.items.length - scan.next : 0),
+      0,
+    );
+  }
   telemetry(): DiscoverySessionTelemetry {
-    const objectives =
-      this.#deltaProgress?.objectives ??
-      this.#state?.objectives ??
-      this.#bootstrapProgress?.objectives ??
-      new Map();
     return {
       measurementScope: "process-local-discovery-session",
       cycles: this.#cycles.map((cycle) => ({ ...cycle, probes: { ...cycle.probes } })),
       droppedCycles: this.#droppedCycles,
-      cachedObjectives: objectives.size,
-      cachedComments: [...objectives.values()].reduce(
-        (total, objective) => total + objective.comments.size,
-        0,
-      ),
-    };
-  }
-
-  async #bootstrap(
-    startedAt: Date,
-    probes: DiscoveryCycleTelemetry["probes"],
-  ): Promise<{
-    activations: DurableObjectiveActivation[];
-    dirtyObjectives: number;
-    backstop: boolean;
-  }> {
-    let progress = this.#bootstrapProgress;
-    if (!progress) {
-      let identity: { login: string; serverTime: Date };
-      try {
-        identity = await this.#ports.authenticate();
-        probes.authenticatedUser++;
-      } catch (error) {
-        probes.authenticatedUser += recordedPartialDiscoveryRequests(error);
-        throw error;
-      }
-      let labelled = await this.#collection(probes, "issues", () =>
-        this.#ports.listLabelledIssues(),
-      );
-      if (labelled.notModified) throw new Error("cold discovery cannot accept a 304 issue index");
-      if (labelled.requests > 1) {
-        let stable = false;
-        // A label removal can change live page membership even in immutable
-        // creation order. Cold start has no prior delta cache to protect a
-        // skipped row, so require two consecutive equal complete scans.
-        for (let verification = 0; verification < 2; verification++) {
-          const observed = await this.#collection(probes, "issues", () =>
-            this.#ports.listLabelledIssues(),
-          );
-          if (observed.notModified)
-            throw new Error("cold multi-page discovery cannot accept a 304 issue index");
-          if (sameIssueCollection(labelled, observed)) {
-            labelled = observed;
-            stable = true;
-            break;
-          }
-          labelled = observed;
-        }
-        if (!stable)
-          throw new Error("cold Objective label index changed during bounded pagination");
-      }
-      if (labelled.items.filter(isObjective).length > DISCOVERY_SESSION_LIMITS.objectives)
-        throw new Error("repository exceeds the controller's 10000-Objective discovery limit");
-      progress = {
-        identity,
-        labelled,
-        objectives: new Map(),
-        nextIssue: 0,
-        comments: 0,
-        commentBytes: 0,
-        startedAt: startedAt.getTime(),
-      };
-      this.#bootstrapProgress = progress;
-    }
-    for (; progress.nextIssue < progress.labelled.items.length; progress.nextIssue++) {
-      const issue = progress.labelled.items[progress.nextIssue]!;
-      if (!isObjective(issue)) continue;
-      const hydrated = await this.#collection(probes, "objectiveComments", () =>
-        this.#ports.listObjectiveComments(issue.number),
-      );
-      if (hydrated.notModified)
-        throw new Error(`cold Objective #${issue.number} hydration cannot accept 304`);
-      const comments = new Map(hydrated.items.map((comment) => [comment.id, comment]));
-      if (comments.size > DISCOVERY_SESSION_LIMITS.commentsPerObjective)
-        throw new Error(`Objective #${issue.number} exceeds the controller comment limit`);
-      const commentBytes = [...comments.values()].reduce(
-        (total, comment) => total + Buffer.byteLength(comment.body),
-        0,
-      );
-      if (
-        progress.comments + comments.size > DISCOVERY_SESSION_LIMITS.totalComments ||
-        progress.commentBytes + commentBytes > DISCOVERY_SESSION_LIMITS.commentBytes
-      )
-        throw new Error("repository exceeds the controller's aggregate comment discovery limit");
-      const objective: CachedObjective = {
-        issue,
-        comments,
-        revision: 1,
-        writerBound: false,
-        authorityOid: null,
-        recoveryBound: false,
-        recoveryRefsFingerprint: null,
-        activation: null,
-      };
-      const classified = await this.#ports.classify({
-        login: progress.identity.login,
-        issue: objective.issue,
-        comments: [...objective.comments.values()],
-        revision: objective.revision,
-      });
-      probes.classifications++;
-      objective.writerBound = classified.writerBound;
-      objective.authorityOid = classified.authorityOid;
-      objective.recoveryBound = classified.recoveryBound;
-      objective.activation = classified.activation
-        ? { ...classified.activation, discoveryRevision: objective.revision }
-        : null;
-      progress.objectives.set(issue.number, objective);
-      progress.comments += comments.size;
-      progress.commentBytes += commentBytes;
-    }
-    const watermark = progress.identity.serverTime.getTime();
-    if (!Number.isFinite(watermark)) throw new Error("authentication returned invalid server time");
-    this.#state = {
-      login: progress.identity.login.toLowerCase(),
-      objectives: progress.objectives,
-      issueWatermark: watermark,
-      commentWatermark: watermark,
-      slowCommentWatermark: watermark,
-      ...(progress.labelled.etag ? { labelledIssuesEtag: progress.labelled.etag } : {}),
-      lastBackstopAt: progress.startedAt,
-    };
-    this.#bootstrapProgress = undefined;
-    return {
-      activations: this.#activations(progress.objectives),
-      dirtyObjectives: progress.objectives.size,
-      backstop: false,
-    };
-  }
-
-  async #delta(
-    startedAt: Date,
-    probes: DiscoveryCycleTelemetry["probes"],
-  ): Promise<{
-    activations: DurableObjectiveActivation[];
-    dirtyObjectives: number;
-    backstop: boolean;
-  }> {
-    let progress = this.#deltaProgress;
-    if (!progress) {
-      const base = this.#state!;
-      const backstop =
-        startedAt.getTime() - base.lastBackstopAt >= DISCOVERY_SESSION_LIMITS.backstopIntervalMs;
-      progress = {
-        base,
-        startedAt: startedAt.getTime(),
-        backstop,
-        labelledDone: !backstop,
-        slowCommentsDone: !backstop,
-        refsDone: !backstop,
-        nextHydration: 0,
-        nextClassification: 0,
-        commentsCount: 0,
-        commentBytes: 0,
-      };
-      this.#deltaProgress = progress;
-    }
-    const current = progress.base;
-    progress.issues ??= await this.#collection(probes, "issues", () =>
-      this.#ports.listIssueDelta(since(current.issueWatermark), current.issueDeltaEtag),
-    );
-    progress.comments ??= await this.#collection(probes, "repositoryComments", () =>
-      this.#ports.listRepositoryComments(since(current.commentWatermark), current.commentDeltaEtag),
-    );
-    if (!progress.labelledDone) {
-      progress.labelled = await this.#collection(probes, "issues", () =>
-        this.#ports.listLabelledIssues(current.labelledIssuesEtag),
-      );
-      progress.labelledDone = true;
-    }
-    if (!progress.slowCommentsDone) {
-      progress.slowComments = await this.#collection(probes, "repositoryComments", () =>
-        this.#ports.listRepositoryComments(
-          since(current.slowCommentWatermark),
-          current.slowCommentsEtag,
-        ),
-      );
-      progress.slowCommentsDone = true;
-    }
-    if (!progress.refsDone) {
-      progress.refs = await this.#collection(probes, "matchingRefs", () =>
-        this.#ports.listControlRefs(current.refsEtag),
-      );
-      progress.refsDone = true;
-    }
-    if (!progress.objectives) this.#prepareDelta(progress);
-    const objectives = progress.objectives!;
-    const dirty = progress.dirty!;
-    const hydrate = progress.hydrate!;
-    for (; progress.nextHydration < hydrate.length; progress.nextHydration++) {
-      const number = hydrate[progress.nextHydration]!;
-      const hydrated = await this.#collection(probes, "objectiveComments", () =>
-        this.#ports.listObjectiveComments(number),
-      );
-      if (hydrated.notModified)
-        throw new Error(`new Objective #${number} hydration cannot accept 304`);
-      const hydratedComments = new Map(hydrated.items.map((comment) => [comment.id, comment]));
-      if (hydratedComments.size > DISCOVERY_SESSION_LIMITS.commentsPerObjective)
-        throw new Error(`Objective #${number} exceeds the controller comment limit`);
-      const hydratedBytes = [...hydratedComments.values()].reduce(
-        (total, comment) => total + Buffer.byteLength(comment.body),
-        0,
-      );
-      if (
-        progress.commentsCount + hydratedComments.size > DISCOVERY_SESSION_LIMITS.totalComments ||
-        progress.commentBytes + hydratedBytes > DISCOVERY_SESSION_LIMITS.commentBytes
-      )
-        throw new Error("repository exceeds the controller's aggregate comment discovery limit");
-      objectives.get(number)!.comments = hydratedComments;
-      progress.commentsCount += hydratedComments.size;
-      progress.commentBytes += hydratedBytes;
-    }
-    for (; progress.nextClassification < progress.classify!.length; progress.nextClassification++) {
-      const number = progress.classify![progress.nextClassification]!;
-      const objective = objectives.get(number);
-      if (!objective) continue;
-      const classified = await this.#ports.classify({
-        login: current.login,
-        issue: objective.issue,
-        comments: [...objective.comments.values()],
-        revision: objective.revision,
-        ...(progress.leaseRefsByObjective
-          ? { authority: progress.leaseRefsByObjective.get(number) ?? null }
-          : {}),
-      });
-      probes.classifications++;
-      objective.writerBound = classified.writerBound;
-      objective.authorityOid = classified.authorityOid;
-      objective.recoveryBound = classified.recoveryBound;
-      objective.recoveryRefsFingerprint = classified.recoveryBound
-        ? (progress.recoveryRefsByObjective?.get(number) ?? objective.recoveryRefsFingerprint)
-        : null;
-      objective.activation = classified.activation
-        ? { ...classified.activation, discoveryRevision: objective.revision }
-        : null;
-    }
-
-    const issues = progress.issues;
-    const comments = progress.comments;
-    const labelled = progress.labelled;
-    const slowComments = progress.slowComments;
-    const refs = progress.refs;
-    const backstop = progress.backstop;
-
-    const nextIssueWatermark = issues.notModified
-      ? current.issueWatermark
-      : collectionWatermark(current.issueWatermark, issues, (issue) => issue.updatedAt, "issue");
-    const nextCommentWatermark = comments.notModified
-      ? current.commentWatermark
-      : collectionWatermark(
-          current.commentWatermark,
-          comments,
-          (comment) => comment.updatedAt,
-          "comment",
-        );
-    const nextSlowCommentWatermark =
-      slowComments && !slowComments.notModified
-        ? collectionWatermark(
-            current.slowCommentWatermark,
-            slowComments,
-            (comment) => comment.updatedAt,
-            "comment",
-          )
-        : current.slowCommentWatermark;
-    const next: SessionState = {
-      ...current,
-      objectives,
-      issueWatermark: nextIssueWatermark,
-      commentWatermark: nextCommentWatermark,
-      slowCommentWatermark: nextSlowCommentWatermark,
-      ...(labelled?.etag ? { labelledIssuesEtag: labelled.etag } : {}),
-      ...(refs?.etag ? { refsEtag: refs.etag } : {}),
-      lastBackstopAt: backstop ? progress.startedAt : current.lastBackstopAt,
-    };
-    // A validator belongs to the exact URL, including its `since` query. If
-    // the watermark moved, make the next query unconditional once before
-    // retaining a validator for that new URL.
-    if (nextIssueWatermark === current.issueWatermark && issues.etag)
-      next.issueDeltaEtag = issues.etag;
-    else delete next.issueDeltaEtag;
-    if (nextCommentWatermark === current.commentWatermark && comments.etag)
-      next.commentDeltaEtag = comments.etag;
-    else delete next.commentDeltaEtag;
-    if (
-      slowComments &&
-      nextSlowCommentWatermark === current.slowCommentWatermark &&
-      slowComments.etag
-    )
-      next.slowCommentsEtag = slowComments.etag;
-    else if (slowComments) delete next.slowCommentsEtag;
-    this.#state = next;
-    this.#deltaProgress = undefined;
-    return {
-      activations: this.#activations(objectives),
-      dirtyObjectives: dirty.size,
-      backstop,
-    };
-  }
-
-  #prepareDelta(progress: DeltaProgress): void {
-    const current = progress.base;
-    const issues = progress.issues!;
-    const comments = progress.comments!;
-    const labelled = progress.labelled;
-    const slowComments = progress.slowComments;
-    const refs = progress.refs;
-    const objectives = new Map<number, CachedObjective>();
-    for (const [number, objective] of current.objectives) {
-      objectives.set(number, {
-        ...objective,
-        issue: { ...objective.issue, labels: [...objective.issue.labels] },
-        comments: new Map(objective.comments),
-        activation: objective.activation ? { ...objective.activation } : null,
-      });
-    }
-    const dirty = new Set<number>();
-    const hydrate = new Set<number>();
-    const applyIssue = (issue: DiscoveryIssue) => {
-      const prior = objectives.get(issue.number);
-      if (!isObjective(issue)) {
-        if (prior) objectives.delete(issue.number);
-        return;
-      }
-      if (!prior) {
-        objectives.set(issue.number, {
-          issue,
-          comments: new Map(),
-          revision: 1,
-          writerBound: false,
-          authorityOid: null,
-          recoveryBound: false,
-          recoveryRefsFingerprint: null,
-          activation: null,
-        });
-        hydrate.add(issue.number);
-        dirty.add(issue.number);
-      } else if (!sameIssue(prior.issue, issue)) {
-        prior.issue = issue;
-        dirty.add(issue.number);
-      }
-    };
-    if (!issues.notModified) for (const issue of issues.items) applyIssue(issue);
-    if (labelled && !labelled.notModified) {
-      // The change delta is the removal authority. A live page-number label
-      // scan is additive only, so a concurrent label removal cannot shift an
-      // unchanged Objective across a page boundary and transiently erase it.
-      for (const issue of labelled.items) applyIssue(issue);
-    }
-    // Reject objective growth before spending even one hydration request.
-    if (objectives.size > DISCOVERY_SESSION_LIMITS.objectives)
-      throw new Error("repository exceeds the controller's 10000-Objective discovery limit");
-    const applyComment = (comment: DiscoveryComment) => {
-      const objective = objectives.get(comment.issueNumber);
-      if (!objective || hydrate.has(comment.issueNumber)) return;
-      const prior = objective.comments.get(comment.id);
-      if (!prior || !sameComment(prior, comment)) {
-        objective.comments.set(comment.id, comment);
-        dirty.add(comment.issueNumber);
-      }
-    };
-    if (!comments.notModified) for (const comment of comments.items) applyComment(comment);
-    if (slowComments && !slowComments.notModified)
-      for (const comment of slowComments.items) applyComment(comment);
-
-    const leaseRefsByObjective =
-      refs && !refs.notModified
-        ? new Map(
-            refs.items.filter((ref) => ref.kind === "lease").map((ref) => [ref.objective, ref]),
-          )
-        : undefined;
-    const recoveryRefsByObjective =
-      refs && !refs.notModified ? recoveryRefFingerprints(refs.items) : undefined;
-    if (leaseRefsByObjective && recoveryRefsByObjective) {
-      for (const [number, objective] of objectives) {
-        if (
-          objective.writerBound &&
-          (leaseRefsByObjective.get(number)?.oid ?? null) !== objective.authorityOid
+      cachedObjectives: this.#summaries.size,
+      cachedComments: 0,
+      retainedSummaryBytes: this.#summaryBytes,
+      evictedSummaries: this.#evicted,
+      incompleteScans: [this.#open, this.#closed, this.#locators].filter(Boolean).length,
+      objectiveErrors: [...this.#summaries]
+        .flatMap(([objective, summary]) =>
+          summary.error ? [{ objective, reason: summary.error }] : [],
         )
-          dirty.add(number);
-        if (
-          objective.recoveryBound &&
-          (recoveryRefsByObjective.get(number) ?? "") !== objective.recoveryRefsFingerprint
-        )
-          dirty.add(number);
-      }
-    }
-    this.#assertBounds(objectives);
-    for (const number of dirty) {
-      const objective = objectives.get(number);
-      if (objective && current.objectives.has(number)) objective.revision++;
-    }
-    progress.objectives = objectives;
-    progress.dirty = dirty;
-    progress.hydrate = [...hydrate].sort((left, right) => left - right);
-    progress.classify = [...dirty].sort((left, right) => left - right);
-    progress.commentsCount = [...objectives.values()].reduce(
-      (total, objective) => total + objective.comments.size,
-      0,
-    );
-    progress.commentBytes = [...objectives.values()].reduce(
-      (total, objective) =>
-        total +
-        [...objective.comments.values()].reduce(
-          (objectiveTotal, comment) => objectiveTotal + Buffer.byteLength(comment.body),
-          0,
-        ),
-      0,
-    );
-    if (leaseRefsByObjective) progress.leaseRefsByObjective = leaseRefsByObjective;
-    if (recoveryRefsByObjective) progress.recoveryRefsByObjective = recoveryRefsByObjective;
-  }
-
-  async #collection<
-    K extends keyof Pick<
-      DiscoveryCycleTelemetry["probes"],
-      "issues" | "repositoryComments" | "objectiveComments" | "matchingRefs"
-    >,
-    T,
-  >(
-    probes: DiscoveryCycleTelemetry["probes"],
-    key: K,
-    operation: () => Promise<DiscoveryCollection<T>>,
-  ): Promise<DiscoveryCollection<T>> {
-    try {
-      const result = await operation();
-      probes[key] += result.requests;
-      if (result.notModified) probes.notModified++;
-      return result;
-    } catch (error) {
-      probes[key] += recordedPartialDiscoveryRequests(error);
-      throw error;
-    }
-  }
-
-  #activations(objectives: Map<number, CachedObjective>): DurableObjectiveActivation[] {
-    return [...objectives.values()]
-      .map((objective) => objective.activation)
-      .filter((activation): activation is DurableObjectiveActivation => activation !== null);
-  }
-
-  #assertBounds(objectives: Map<number, CachedObjective>): void {
-    if (objectives.size > DISCOVERY_SESSION_LIMITS.objectives)
-      throw new Error("repository exceeds the controller's 10000-Objective discovery limit");
-    let comments = 0;
-    let bytes = 0;
-    for (const objective of objectives.values()) {
-      if (objective.comments.size > DISCOVERY_SESSION_LIMITS.commentsPerObjective) {
-        throw new Error(
-          `Objective #${objective.issue.number} exceeds the controller comment limit`,
-        );
-      }
-      comments += objective.comments.size;
-      for (const comment of objective.comments.values()) bytes += Buffer.byteLength(comment.body);
-    }
-    if (comments > DISCOVERY_SESSION_LIMITS.totalComments)
-      throw new Error("repository exceeds the controller's total comment discovery limit");
-    if (bytes > DISCOVERY_SESSION_LIMITS.commentBytes)
-      throw new Error("repository exceeds the controller's comment byte discovery limit");
-  }
-
-  #recordCycle(cycle: DiscoveryCycleTelemetry): void {
-    if (this.#cycles.length === DISCOVERY_SESSION_LIMITS.telemetryCycles) {
-      this.#cycles.shift();
-      this.#droppedCycles++;
-    }
-    this.#cycles.push(Object.freeze({ ...cycle, probes: Object.freeze({ ...cycle.probes }) }));
+        .slice(-64),
+    };
   }
 }

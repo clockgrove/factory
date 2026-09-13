@@ -166,7 +166,9 @@ function interruptibleDelay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 export interface DurableActivationSource {
-  discoverObjectiveActivations(): Promise<DurableObjectiveActivation[]>;
+  discoverObjectiveActivations(
+    knownObjectives?: readonly number[],
+  ): Promise<DurableObjectiveActivation[]>;
   discoveryTelemetry?(): DiscoverySessionTelemetry;
 }
 
@@ -251,14 +253,21 @@ export class GitHubRepositoryController {
       this.#firstDiscovery = false;
       // Keep the retry boundary around the read only. Newly launched Supervisors
       // must not inherit a discovery retry owner that suppresses their own waits.
+      const discover = async () => {
+        const capacity = await this.#resources.sharedCapacity?.snapshot();
+        return this.#options.store.discoverObjectiveActivations([
+          ...this.#running.keys(),
+          ...(capacity?.reservations.map((reservation) => reservation.objective) ?? []),
+        ]);
+      };
       activations = await retryGitHubQuota(() =>
         firstDiscovery && this.#options.onFirstDiscoveryRequestAccounting
           ? observeGitHubTransportPhase(
               "activation-discovery",
               this.#options.onFirstDiscoveryRequestAccounting,
-              () => this.#options.store.discoverObjectiveActivations(),
+              discover,
             )
-          : this.#options.store.discoverObjectiveActivations(),
+          : discover(),
       );
     } catch (error) {
       this.#emitDiscoveryTelemetry();
@@ -1116,6 +1125,8 @@ function discoveryStatusLine(telemetry: RepositoryDiscoveryTelemetry): string {
     `refs:${probes.matchingRefs},classifications:${probes.classifications},304:${probes.notModified} ` +
     `dirty=${latest.dirtyObjectives} activations=${latest.returnedActivations} ` +
     `cached=${telemetry.discovery.cachedObjectives}/${telemetry.discovery.cachedComments} ` +
+    `bytes=${latest.returnedBytes ?? "unavailable"} summary-bytes=${telemetry.discovery.retainedSummaryBytes ?? "unavailable"} pending=${latest.pendingCandidates ?? 0} ` +
+    `objective-errors=${JSON.stringify(telemetry.discovery.objectiveErrors ?? [])} ` +
     `endpoints=${endpoints} primary=${primary} ` +
     `limiting=${requests?.limitingReason ?? "none"} next=${requests?.nextAdmissionAt ?? "none"}`
   );

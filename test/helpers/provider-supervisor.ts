@@ -957,6 +957,11 @@ wheels = [
       return operation();
     },
   );
+  vi.spyOn(GitHubControlStore.prototype, "deleteExactDiscoveryRef").mockImplementation(
+    async (ref) => {
+      refs.delete(ref);
+    },
+  );
   vi.spyOn(GitHubControlStore.prototype, "listRefs").mockImplementation(async (prefix) =>
     [...refs].filter(([ref]) => ref.startsWith(prefix)).map(([ref, oid]) => ({ ref, oid })),
   );

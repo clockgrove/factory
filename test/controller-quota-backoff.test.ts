@@ -1,3 +1,4 @@
+import { CapacityLedger } from "../src/scheduling/capacity-ledger.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import {
@@ -51,6 +52,9 @@ function ownershipMocks() {
   // These tests isolate election/backoff; real capacity CAS and migration have
   // independent contract tests. The production ledger is already initialized.
   vi.spyOn(SharedCapacityCoordinator.prototype, "initialize").mockResolvedValue();
+  vi.spyOn(SharedCapacityCoordinator.prototype, "snapshot").mockResolvedValue(
+    new CapacityLedger().snapshot(),
+  );
   vi.spyOn(GitHubControlStore.prototype, "readRef").mockResolvedValue("c".repeat(40));
   const facts = vi
     .spyOn(GitHubControlStore.prototype, "getRepositoryFacts")

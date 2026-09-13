@@ -18,6 +18,11 @@ and artifacts, and record the commit SHA when installing from source.
 
 ### Fixed
 
+- Discover open and recently changed closed Objectives through GitHub filters, with bounded
+  scheduling summaries instead of lifetime comment history. Exact request and run locators retain
+  outstanding obligations after closure or restart; labels still grant no execution authority.
+  ([#349](https://github.com/clockgrove/factory/issues/349))
+
 - Observe confirmed sibling ref writes with a bounded targeted PR check before ordinary integration
   backoff, retaining exact-head authority and the external-CI discovery grace. Record write,
   observation and next-action timing without treating observation hints as merge permission.

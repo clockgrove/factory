@@ -3,57 +3,66 @@ import { describe, expect, it } from "vitest";
 import {
   DISCOVERY_SESSION_LIMITS,
   GitHubDiscoverySession,
+  recordPartialDiscoveryRequests,
   type DiscoveryClassification,
   type DiscoveryCollection,
   type DiscoveryComment,
-  type DiscoveryControlRef,
   type DiscoveryIssue,
+  type DiscoveryLocator,
+  type DiscoveryPage,
   type GitHubDiscoveryPorts,
 } from "../src/control/discovery-session.js";
-import { GitHubControlStore } from "../src/control/github-store.js";
 
-const START = Date.parse("2026-01-01T00:00:00.000Z");
+const START = Date.parse("2026-09-13T00:00:00.000Z");
+const OLD = "2024-01-01T00:00:00.000Z";
+const iso = (value: number) => new Date(value).toISOString();
 
 function issue(number: number, overrides: Partial<DiscoveryIssue> = {}): DiscoveryIssue {
-  return {
-    number,
-    state: "closed",
-    labels: ["factory:objective"],
-    title: `Objective ${number}`,
-    body: "fixture",
-    pullRequest: false,
-    updatedAt: "2025-12-01T00:00:00.000Z",
-    ...overrides,
-  };
+  return { number, state: "open", objectiveLabel: true, updatedAt: OLD, comments: 3, ...overrides };
 }
 
-function comment(
-  objective: number,
-  id = String(objective),
-  overrides: Partial<DiscoveryComment> = {},
-): DiscoveryComment {
+function comment(objective: number, body: string, id = String(objective)): DiscoveryComment {
   return {
     id,
     issueNumber: objective,
-    body: "historical terminal receipt",
+    body,
     authorLogin: "factory-controller",
     authorAssociation: "OWNER",
-    updatedAt: "2025-12-01T00:00:00.000Z",
-    ...overrides,
+    updatedAt: OLD,
   };
 }
 
 function collection<T>(
   items: T[],
-  options: Partial<Omit<DiscoveryCollection<T>, "items">> = {},
+  options: Partial<DiscoveryCollection<T>> = {},
 ): DiscoveryCollection<T> {
-  return { items, requests: 1, notModified: false, ...options };
+  return {
+    items,
+    requests: 1,
+    notModified: false,
+    returnedBytes: Buffer.byteLength(JSON.stringify(items)),
+    ...options,
+  };
+}
+
+function page<T>(
+  items: T[],
+  cursor: string | null = null,
+  serverTime = iso(START),
+): DiscoveryPage<T> {
+  return {
+    items,
+    cursor,
+    serverTime,
+    requests: 1,
+    returnedBytes: Buffer.byteLength(JSON.stringify(items)),
+  };
 }
 
 function activation(objective: number) {
   return {
     objective,
-    activatedAt: "2025-12-01T00:00:00.000Z",
+    activatedAt: OLD,
     requestId: `request-${objective}`,
     policy: {},
     policyDigest: "c".repeat(64),
@@ -62,694 +71,532 @@ function activation(objective: number) {
   };
 }
 
-describe("GitHubDiscoverySession", () => {
-  it.each([
-    { objectiveCount: 1_000, labelledPageRequests: 10, discoveryRequests: 168 },
-    { objectiveCount: 10_000, labelledPageRequests: 100, discoveryRequests: 528 },
-  ])(
-    "keeps a $objectiveCount-Objective history within its $discoveryRequests-request idle budget",
-    async ({ objectiveCount, labelledPageRequests, discoveryRequests }) => {
-      let now = START;
-      const objectives = Array.from({ length: objectiveCount }, (_, index) => issue(index + 1));
-      const calls = {
-        authenticatedUser: 0,
-        issues: 0,
-        repositoryComments: 0,
-        objectiveComments: 0,
-        matchingRefs: 0,
-        classifications: 0,
-      };
-      let labelled = 0;
-      const ports: GitHubDiscoveryPorts = {
-        authenticate: async () => {
-          calls.authenticatedUser++;
-          return { login: "factory-controller", serverTime: new Date(now) };
-        },
-        listLabelledIssues: async (_etag) => {
-          calls.issues += labelledPageRequests;
-          labelled++;
-          return labelled === 1
-            ? collection(objectives, { requests: labelledPageRequests })
-            : collection(objectives, { requests: labelledPageRequests, notModified: false });
-        },
-        listIssueDelta: async (_since, etag) => {
-          calls.issues++;
-          return collection([], {
-            notModified: Boolean(etag),
-            etag: '"issue-delta"',
-          });
-        },
-        listRepositoryComments: async (_since, etag) => {
-          calls.repositoryComments++;
-          return collection([], {
-            notModified: Boolean(etag),
-            etag: '"comment-delta"',
-          });
-        },
-        listObjectiveComments: async (objective) => {
-          // Model a two-page historical hydration. Warm discovery must never
-          // repeat either page for unchanged terminal Objectives.
-          calls.objectiveComments += 2;
-          return collection([comment(objective)], { requests: 2 });
-        },
-        listControlRefs: async (etag) => {
-          calls.matchingRefs++;
-          return collection([], {
-            notModified: Boolean(etag),
-            etag: '"control-refs"',
-          });
-        },
-        classify: async () => {
-          calls.classifications++;
-          return {
-            activation: null,
-            writerBound: false,
-            authorityOid: null,
-            recoveryBound: false,
-          };
-        },
-      };
-      const session = new GitHubDiscoverySession(ports, () => new Date(now));
+function classified(objective?: number): DiscoveryClassification {
+  return {
+    activation: objective ? activation(objective) : null,
+    writerBound: false,
+    authorityOid: null,
+    recoveryBound: false,
+  };
+}
 
-      expect(await session.discover()).toEqual([]);
-      const afterBootstrap = { ...calls };
-      for (let cycle = 0; cycle < 60; cycle++) {
-        now += 60_000;
-        expect(await session.discover()).toEqual([]);
-      }
+function locator(objective: number): DiscoveryLocator {
+  return {
+    objective,
+    ref: `refs/clockgrove-factory/active/objective-${objective}/request-fixture`,
+    oid: "a".repeat(40),
+  };
+}
 
-      expect(calls.authenticatedUser - afterBootstrap.authenticatedUser).toBe(0);
-      expect(calls.objectiveComments - afterBootstrap.objectiveComments).toBe(0);
-      expect(calls.classifications - afterBootstrap.classifications).toBe(0);
-      expect(
-        calls.issues -
-          afterBootstrap.issues +
-          (calls.repositoryComments - afterBootstrap.repositoryComments) +
-          (calls.matchingRefs - afterBootstrap.matchingRefs),
-      ).toBe(discoveryRequests);
-      expect(session.telemetry()).toMatchObject({
-        cachedObjectives: objectiveCount,
-        cachedComments: objectiveCount,
-        droppedCycles: 0,
-      });
-      expect(
-        session
-          .telemetry()
-          .cycles.filter((cycle) => cycle.mode === "delta")
-          .reduce(
-            (total, cycle) =>
-              total +
-              cycle.probes.issues +
-              cycle.probes.repositoryComments +
-              cycle.probes.objectiveComments +
-              cycle.probes.matchingRefs,
-            0,
-          ),
-      ).toBe(discoveryRequests);
-
-      for (let cycle = 0; cycle < 10; cycle++) {
-        now += 60_000;
-        await session.discover();
-      }
-      expect(session.telemetry()).toMatchObject({
-        cycles: expect.arrayContaining([
-          expect.objectContaining({ mode: "delta", outcome: "complete" }),
-        ]),
-        droppedCycles: 7,
-      });
-      expect(session.telemetry().cycles).toHaveLength(DISCOVERY_SESSION_LIMITS.telemetryCycles);
-    },
-  );
-
-  it("resumes a failed cold bootstrap without repeating completed Objectives", async () => {
-    let authenticationCalls = 0;
-    let labelledCalls = 0;
-    const hydrated: number[] = [];
-    const classified: number[] = [];
-    let failSecond = true;
-    const ports: GitHubDiscoveryPorts = {
-      authenticate: async () => {
-        authenticationCalls++;
-        return { login: "factory-controller", serverTime: new Date(START) };
-      },
-      listLabelledIssues: async () => {
-        labelledCalls++;
-        return collection([issue(1), issue(2), issue(3)]);
-      },
-      listIssueDelta: async () => collection([]),
-      listRepositoryComments: async () => collection([]),
-      listObjectiveComments: async (objective) => {
-        hydrated.push(objective);
-        if (objective === 2 && failSecond) {
-          failSecond = false;
-          throw new Error("primary reserve reached during Objective #2");
-        }
-        return collection([comment(objective)]);
-      },
-      listControlRefs: async () => collection([]),
-      classify: async ({ issue: candidate }) => {
-        classified.push(candidate.number);
-        return {
-          activation: null,
-          writerBound: false,
-          authorityOid: null,
-          recoveryBound: false,
-        };
-      },
-    };
-    const session = new GitHubDiscoverySession(ports, () => new Date(START));
-
-    await expect(session.discover()).rejects.toThrow("primary reserve");
-    expect(session.telemetry()).toMatchObject({ cachedObjectives: 1, cachedComments: 1 });
-    expect(await session.discover()).toEqual([]);
-
-    expect(authenticationCalls).toBe(1);
-    expect(labelledCalls).toBe(1);
-    expect(hydrated).toEqual([1, 2, 2, 3]);
-    expect(classified).toEqual([1, 2, 3]);
-  });
-
-  it("resumes a 5,000-Objective warm delta across hydration and classification quota boundaries", async () => {
-    let now = START;
-    let deltaEnabled = false;
-    let issueDeltaCalls = 0;
-    let repositoryCommentCalls = 0;
-    let failHydration = true;
-    let failClassification = true;
-    const hydrated: number[] = [];
-    const classified: number[] = [];
-    const additions = Array.from({ length: 5_000 }, (_, index) =>
-      issue(index + 2, { updatedAt: "2026-01-01T00:01:00.000Z" }),
-    );
-    const ports: GitHubDiscoveryPorts = {
-      authenticate: async () => ({ login: "factory-controller", serverTime: new Date(now) }),
-      listLabelledIssues: async () => collection([issue(1)]),
-      listIssueDelta: async () => {
-        issueDeltaCalls++;
-        return collection(deltaEnabled ? additions : []);
-      },
-      listRepositoryComments: async () => {
-        repositoryCommentCalls++;
-        return collection([]);
-      },
-      listObjectiveComments: async (objective) => {
-        hydrated.push(objective);
-        if (deltaEnabled && objective === 2_500 && failHydration) {
-          failHydration = false;
-          throw new Error("hydration primary reserve");
-        }
-        return collection([]);
-      },
-      listControlRefs: async () => collection([]),
-      classify: async ({ issue: candidate }) => {
-        classified.push(candidate.number);
-        if (deltaEnabled && candidate.number === 4_000 && failClassification) {
-          failClassification = false;
-          throw new Error("classification primary reserve");
-        }
-        return {
-          activation: null,
-          writerBound: false,
-          authorityOid: null,
-          recoveryBound: false,
-        };
-      },
-    };
-    const session = new GitHubDiscoverySession(ports, () => new Date(now));
-    await session.discover();
-    hydrated.length = 0;
-    classified.length = 0;
-    deltaEnabled = true;
-    now += 60_000;
-
-    await expect(session.discover()).rejects.toThrow("hydration primary reserve");
-    await expect(session.discover()).rejects.toThrow("classification primary reserve");
-    await expect(session.discover()).resolves.toEqual([]);
-
-    expect(issueDeltaCalls).toBe(1);
-    expect(repositoryCommentCalls).toBe(1);
-    expect(hydrated).toHaveLength(5_001);
-    expect(hydrated.filter((number) => number === 2_500)).toHaveLength(2);
-    expect(classified).toHaveLength(5_001);
-    expect(classified.filter((number) => number === 4_000)).toHaveLength(2);
-    expect(session.telemetry()).toMatchObject({ cachedObjectives: 5_001 });
-  });
-
-  it("rejects warm Objective growth before hydrating any new Objective", async () => {
-    let deltaEnabled = false;
-    let warmHydrations = 0;
-    const session = new GitHubDiscoverySession({
-      authenticate: async () => ({ login: "factory-controller", serverTime: new Date(START) }),
-      listLabelledIssues: async () => collection([issue(1)]),
-      listIssueDelta: async () =>
-        collection(
-          deltaEnabled
-            ? Array.from({ length: DISCOVERY_SESSION_LIMITS.objectives }, (_, index) =>
-                issue(index + 2),
-              )
-            : [],
-        ),
-      listRepositoryComments: async () => collection([]),
-      listObjectiveComments: async () => {
-        if (deltaEnabled) warmHydrations++;
-        return collection([]);
-      },
-      listControlRefs: async () => collection([]),
-      classify: async () => ({
-        activation: null,
-        writerBound: false,
-        authorityOid: null,
-        recoveryBound: false,
-      }),
-    });
-    await session.discover();
-    deltaEnabled = true;
-
-    await expect(session.discover()).rejects.toThrow("10000-Objective discovery limit");
-    expect(warmHydrations).toBe(0);
-  });
-
-  it("fails closed before classifying an over-limit Objective history", async () => {
-    let classifications = 0;
-    const session = new GitHubDiscoverySession({
-      authenticate: async () => ({ login: "factory-controller", serverTime: new Date(START) }),
-      listLabelledIssues: async () => collection([issue(1)]),
-      listIssueDelta: async () => collection([]),
-      listRepositoryComments: async () => collection([]),
-      listObjectiveComments: async () =>
-        collection(
-          Array.from({ length: DISCOVERY_SESSION_LIMITS.commentsPerObjective + 1 }, (_, index) =>
-            comment(1, String(index + 1)),
-          ),
-        ),
-      listControlRefs: async () => collection([]),
-      classify: async () => {
-        classifications++;
-        return {
-          activation: null,
-          writerBound: false,
-          authorityOid: null,
-          recoveryBound: false,
-        };
-      },
-    });
-
-    await expect(session.discover()).rejects.toThrow("exceeds the controller comment limit");
-    expect(classifications).toBe(0);
-  });
-
-  it("advances revisions for same-timestamp issue/comment edits and recovery-ref movement", async () => {
-    let now = START;
-    let issueDelta: DiscoveryIssue[] = [];
-    let commentDelta: DiscoveryComment[] = [];
-    let refs: DiscoveryControlRef[] = [];
-    const revisions: number[] = [];
-    const firstIssue = issue(1, { state: "open", title: "first" });
-    const firstComment = comment(1, "1", { body: "first" });
-    const ports: GitHubDiscoveryPorts = {
-      authenticate: async () => ({ login: "factory-controller", serverTime: new Date(now) }),
-      listLabelledIssues: async (etag) =>
-        etag
-          ? collection([], { notModified: true, etag })
-          : collection([firstIssue], { etag: '"labelled"' }),
-      listIssueDelta: async () => collection(issueDelta),
-      listRepositoryComments: async () => collection(commentDelta),
-      listObjectiveComments: async () => collection([firstComment]),
-      listControlRefs: async () => collection(refs, { etag: `"refs-${refs[0]?.oid ?? "none"}"` }),
-      classify: async ({ issue: candidate, revision }) => {
-        revisions.push(revision);
-        return {
-          activation: activation(candidate.number),
-          writerBound: false,
-          authorityOid: null,
-          recoveryBound: true,
-        };
-      },
-    };
-    const session = new GitHubDiscoverySession(ports, () => new Date(now));
-
-    expect((await session.discover())[0]?.discoveryRevision).toBe(1);
-    issueDelta = [{ ...firstIssue, title: "edited at the same timestamp" }];
-    now += 60_000;
-    expect((await session.discover())[0]?.discoveryRevision).toBe(2);
-
-    issueDelta = [];
-    commentDelta = [{ ...firstComment, body: "edited at the same timestamp" }];
-    now += 60_000;
-    expect((await session.discover())[0]?.discoveryRevision).toBe(3);
-
-    commentDelta = [];
-    refs = [
-      {
-        kind: "recovery-plan",
-        objective: 1,
-        ref: `refs/clockgrove-factory/recovery-plans/objective-1/plan-${"a".repeat(64)}`,
-        oid: "1".repeat(40),
-        serverTime: new Date(now),
-      },
-    ];
-    now += DISCOVERY_SESSION_LIMITS.backstopIntervalMs;
-    expect((await session.discover())[0]?.discoveryRevision).toBe(4);
-    refs = [{ ...refs[0]!, oid: "2".repeat(40), serverTime: new Date(now) }];
-    now += DISCOVERY_SESSION_LIMITS.backstopIntervalMs;
-    expect((await session.discover())[0]?.discoveryRevision).toBe(5);
-    expect(revisions).toEqual([1, 2, 3, 4, 5]);
-  });
-
-  it("commits a changed cycle only after every classification succeeds", async () => {
-    let failChangedClassification = true;
-    const revisions: number[] = [];
-    const original = issue(1, { state: "open", title: "original" });
-    const changed = { ...original, title: "changed", updatedAt: "2026-01-01T00:01:00.000Z" };
-    const ports: GitHubDiscoveryPorts = {
-      authenticate: async () => ({ login: "factory-controller", serverTime: new Date(START) }),
-      listLabelledIssues: async () => collection([original]),
-      listIssueDelta: async () => collection([changed]),
-      listRepositoryComments: async () => collection([]),
-      listObjectiveComments: async () => collection([]),
-      listControlRefs: async () => collection([]),
-      classify: async ({ issue: candidate, revision }): Promise<DiscoveryClassification> => {
-        revisions.push(revision);
-        if (candidate.title === "changed" && failChangedClassification) {
-          failChangedClassification = false;
-          throw new Error("classification interrupted");
-        }
-        return {
-          activation: activation(candidate.number),
-          writerBound: false,
-          authorityOid: null,
-          recoveryBound: false,
-        };
-      },
-    };
-    let now = START;
-    const session = new GitHubDiscoverySession(ports, () => new Date(now));
-
-    expect((await session.discover())[0]?.discoveryRevision).toBe(1);
-    now += 60_000;
-    await expect(session.discover()).rejects.toThrow("classification interrupted");
-    now += 60_000;
-    expect((await session.discover())[0]?.discoveryRevision).toBe(2);
-    expect(revisions).toEqual([1, 2, 2]);
-  });
-
-  it("records a failed backstop as a backstop", async () => {
-    let now = START;
-    let failRefs = false;
-    const session = new GitHubDiscoverySession(
-      {
-        authenticate: async () => ({ login: "factory-controller", serverTime: new Date(now) }),
-        listLabelledIssues: async () => collection([issue(1)]),
-        listIssueDelta: async () => collection([]),
-        listRepositoryComments: async () => collection([]),
-        listObjectiveComments: async () => collection([]),
-        listControlRefs: async () => {
-          if (failRefs) throw new Error("control-ref probe failed");
-          return collection([]);
-        },
-        classify: async () => ({
-          activation: null,
-          writerBound: false,
-          authorityOid: null,
-          recoveryBound: false,
-        }),
-      },
-      () => new Date(now),
-    );
-    await session.discover();
-    failRefs = true;
-    now += DISCOVERY_SESSION_LIMITS.backstopIntervalMs;
-
-    await expect(session.discover()).rejects.toThrow("control-ref probe failed");
-    expect(session.telemetry().cycles.at(-1)).toMatchObject({
-      mode: "delta",
-      outcome: "failed",
-      backstop: true,
-    });
-  });
-});
-
-describe("GitHubControlStore discovery adapter", () => {
-  it("counts a transported page when response-record validation fails", async () => {
-    const store = new GitHubControlStore({
-      token: "discovery-response-validation-telemetry-test",
-      owner: "clockgrove",
-      repo: "factory",
-      requestFetch: async (input) => {
-        const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
-        if (url.pathname === "/user")
-          return new Response(JSON.stringify({ login: "factory-controller" }), {
-            status: 200,
-            headers: {
-              "content-type": "application/json",
-              date: new Date(START).toUTCString(),
-            },
-          });
-        if (url.pathname.endsWith("/issues"))
-          return new Response(
-            JSON.stringify([
-              {
-                number: 0,
-                state: "open",
-                labels: [{ name: "factory:objective" }],
-                title: "invalid",
-                body: "fixture",
-              },
-            ]),
-            {
-              status: 200,
-              headers: {
-                "content-type": "application/json",
-                date: new Date(START).toUTCString(),
-              },
-            },
-          );
-        throw new Error(`unexpected fixture request: ${url}`);
-      },
-    });
-
-    await expect(store.discoverObjectiveActivations()).rejects.toThrow("invalid issue number");
-    expect(store.discoveryTelemetry().cycles.at(-1)).toMatchObject({
-      outcome: "failed",
-      probes: { authenticatedUser: 1, issues: 1 },
-    });
-  });
-
-  it("retains transported pages in failed-cycle telemetry", async () => {
-    let issuePage = 0;
-    const store = new GitHubControlStore({
-      token: "discovery-partial-page-telemetry-test",
-      owner: "clockgrove",
-      repo: "factory",
-      requestFetch: async (input) => {
-        const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
-        if (url.pathname === "/user")
-          return new Response(JSON.stringify({ login: "factory-controller" }), {
-            status: 200,
-            headers: {
-              "content-type": "application/json",
-              date: new Date(START).toUTCString(),
-            },
-          });
-        if (url.pathname.endsWith("/issues")) {
-          issuePage++;
-          if (issuePage === 2)
-            return new Response(JSON.stringify({ message: "temporary" }), {
-              status: 500,
-              headers: { "content-type": "application/json" },
-            });
-          const next = new URL(url);
-          next.searchParams.set("page", "2");
-          return new Response(JSON.stringify([issue(1)]), {
-            status: 200,
-            headers: {
-              "content-type": "application/json",
-              date: new Date(START).toUTCString(),
-              link: `<${next.toString()}>; rel="next"`,
-            },
-          });
-        }
-        throw new Error(`unexpected fixture request: ${url}`);
-      },
-    });
-
-    await expect(store.discoverObjectiveActivations()).rejects.toThrow();
-    expect(store.discoveryTelemetry().cycles.at(-1)).toMatchObject({
-      outcome: "failed",
-      probes: { issues: 2 },
-    });
-  });
-
-  it("follows Link pagination without an unsafe page-one validator and reads all control refs once", async () => {
-    let now = START;
-    let warm = false;
-    const requests: Array<{ url: URL; headers: Headers }> = [];
-    const objective = (number: number) => ({
-      number,
-      state: "closed",
-      labels: [{ name: "factory:objective" }],
-      title: `Objective ${number}`,
-      body: "fixture",
-      updated_at: "2025-12-01T00:00:00.000Z",
-    });
-    const firstPage = [
-      objective(1),
-      ...Array.from({ length: 99 }, (_, index) => ({
-        ...objective(index + 2),
-        pull_request: { url: "https://api.github.com/pulls/fixture" },
-      })),
-    ];
-    const response = (data: unknown, headers: Record<string, string> = {}) =>
-      new Response(JSON.stringify(data), {
-        status: 200,
-        headers: {
-          "content-type": "application/json",
-          date: new Date(now).toUTCString(),
-          ...headers,
-        },
-      });
-    const requestFetch: typeof globalThis.fetch = async (input, init) => {
-      const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
-      const headers = new Headers(
-        init?.headers ?? (input instanceof Request ? input.headers : undefined),
+/** The provider owns historical data. Enumeration implements server-side label,
+ * state, and time filters; comments are generated only on an exact history read.
+ * Classification is injected: these tests measure discovery, not event authority. */
+function repository(
+  rows: DiscoveryIssue[],
+  active: ReadonlySet<number> = new Set(),
+  commentBodyBytes = 0,
+) {
+  let now = START;
+  let locators: DiscoveryLocator[] = [];
+  const enumerations: Array<Parameters<GitHubDiscoveryPorts["listIssues"]>[0]> = [];
+  const hydrated: number[] = [];
+  const exact: Array<{ objective: number; etag: string | undefined }> = [];
+  const classifications: Array<{ objective: number; revision: number; comments: number }> = [];
+  const ports: GitHubDiscoveryPorts = {
+    authenticate: async () => ({ login: "Factory-Controller", serverTime: new Date(now) }),
+    listIssues: async (input) => {
+      enumerations.push({ ...input });
+      const selected = rows.filter(
+        (row) =>
+          row.objectiveLabel &&
+          row.state === input.state &&
+          (!input.since || Date.parse(row.updatedAt) >= Date.parse(input.since)),
       );
-      requests.push({ url, headers });
-      const path = decodeURIComponent(url.pathname);
-      if (path === "/user") return response({ login: "factory-controller" });
-      if (path.endsWith("/git/matching-refs/clockgrove-factory/")) {
-        return response(
-          [
-            {
-              ref: "refs/clockgrove-factory/leases/objective-1",
-              object: { sha: "1".repeat(40) },
-            },
-            {
-              ref: `refs/clockgrove-factory/recovery-plans/objective-1/plan-${"a".repeat(64)}`,
-              object: { sha: "2".repeat(40) },
-            },
-          ],
-          { etag: '"control-refs"' },
-        );
-      }
-      if (/\/issues\/\d+\/comments$/.test(path)) return response([]);
-      if (path.endsWith("/issues/comments")) return response([], { etag: '"comments"' });
-      if (path.endsWith("/issues")) {
-        const page = Number(url.searchParams.get("page") ?? "1");
-        const labelled = url.searchParams.has("labels");
-        if (!labelled) return response([], { etag: '"issue-delta"' });
-        if (page === 2) return response(warm ? [objective(101)] : []);
-        const next = new URL(url);
-        next.searchParams.set("page", "2");
-        return response(firstPage, {
-          etag: '"unchanged-page-one"',
-          link: `<${next.toString()}>; rel="next"`,
-        });
-      }
-      throw new Error(`unexpected fixture request: ${url}`);
-    };
-    const store = new GitHubControlStore({
-      token: "discovery-adapter-pagination-test",
-      owner: "clockgrove",
-      repo: "factory",
-      requestFetch,
-      discoveryNow: () => new Date(now),
-    });
+      const offset = Number(input.cursor ?? 0);
+      const end = offset + DISCOVERY_SESSION_LIMITS.pageSize;
+      return page(
+        selected.slice(offset, end).map((row) => ({ ...row })),
+        end < selected.length ? String(end) : null,
+        iso(now),
+      );
+    },
+    listLocators: async (cursor) => {
+      const offset = Number(cursor ?? 0);
+      const end = offset + DISCOVERY_SESSION_LIMITS.pageSize;
+      return page(
+        locators.slice(offset, end),
+        end < locators.length ? String(end) : null,
+        iso(now),
+      );
+    },
+    readIssue: async (objective, etag) => {
+      exact.push({ objective, etag });
+      return collection(
+        rows.filter((row) => row.number === objective).map((row) => ({ ...row })),
+        { etag: `"issue-${objective}"` },
+      );
+    },
+    listObjectiveComments: async (objective) => {
+      hydrated.push(objective);
+      const row = rows.find((candidate) => candidate.number === objective)!;
+      const entries = Array.from({ length: row.comments }, (_, index) => {
+        const summary =
+          index === 0 && active.has(objective)
+            ? "authenticated activation request"
+            : row.state === "closed"
+              ? "settled run, exact accounting and cleanup receipt"
+              : "planning discussion; no activation authority";
+        const details = `\n\nWork item ${index + 1}: review the expected behavior, dependency evidence, validation results and remaining acceptance criteria. The recorded observation includes the candidate revision, ownership and the next concrete action. `;
+        const body = commentBodyBytes
+          ? (summary + details.repeat(Math.ceil(commentBodyBytes / details.length))).slice(
+              0,
+              commentBodyBytes,
+            )
+          : summary;
+        return comment(objective, body, `${objective}-${index}`);
+      });
+      return collection(entries, { requests: Math.ceil(row.comments / 100) });
+    },
+    classify: async ({ issue: candidate, comments, revision, login }) => {
+      expect(login).toBe("factory-controller");
+      classifications.push({ objective: candidate.number, revision, comments: comments.length });
+      return classified(
+        comments.some((entry) => entry.body.startsWith("authenticated activation request"))
+          ? candidate.number
+          : undefined,
+      );
+    },
+  };
+  return {
+    ports,
+    rows,
+    hydrated,
+    exact,
+    classifications,
+    enumerations,
+    now: () => new Date(now),
+    advance: (ms: number) => {
+      now += ms;
+    },
+    setLocators: (value: DiscoveryLocator[]) => {
+      locators = value;
+    },
+  };
+}
 
-    expect(await store.discoverObjectiveActivations()).toEqual([]);
-    expect(store.discoveryTelemetry()).toMatchObject({ cachedObjectives: 1 });
-    warm = true;
-    now += DISCOVERY_SESSION_LIMITS.backstopIntervalMs;
-    expect(await store.discoverObjectiveActivations()).toEqual([]);
-    expect(store.discoveryTelemetry()).toMatchObject({ cachedObjectives: 2 });
+async function finishScan(session: GitHubDiscoverySession, maximum = 100) {
+  for (let count = 0; count < maximum; count++) {
+    await session.discover();
+    if (session.telemetry().incompleteScans === 0) return;
+  }
+  throw new Error("synthetic discovery did not finish its bounded scan");
+}
 
-    const warmLabelled = requests.filter(
-      ({ url }) => warm && url.pathname.endsWith("/issues") && url.searchParams.has("labels"),
-    );
-    // Both bootstrap and warm requests are retained in `requests`; the final
-    // two are the warm page pair. A multi-page collection never supplied a
-    // page-one ETag to the backstop.
-    expect(warmLabelled.slice(-2)).toHaveLength(2);
-    expect(warmLabelled.slice(-2).map(({ headers }) => headers.get("if-none-match"))).toEqual([
-      null,
-      null,
-    ]);
-    const matchingRefs = requests.filter(({ url }) =>
-      decodeURIComponent(url.pathname).endsWith("/git/matching-refs/clockgrove-factory/"),
-    );
-    expect(matchingRefs).toHaveLength(1);
-    expect([...matchingRefs[0]!.url.searchParams.keys()]).toEqual([]);
+function measurement(session: GitHubDiscoverySession, fullScan = false) {
+  const telemetry = session.telemetry();
+  const cycles = fullScan ? telemetry.cycles : telemetry.cycles.slice(-1);
+  return {
+    cycles: cycles.length,
+    requests: cycles.reduce(
+      (total, { probes }) =>
+        total +
+        probes.authenticatedUser +
+        probes.issues +
+        probes.objectiveComments +
+        probes.matchingRefs,
+      0,
+    ),
+    bytes: cycles.reduce((total, cycle) => total + (cycle.returnedBytes ?? 0), 0),
+    commentRequests: cycles.reduce((total, { probes }) => total + probes.objectiveComments, 0),
+    classifications: cycles.reduce((total, { probes }) => total + probes.classifications, 0),
+    retained: telemetry.cachedObjectives,
+    retainedComments: telemetry.cachedComments,
+    retainedBytes: telemetry.retainedSummaryBytes,
+  };
+}
+
+describe("bounded active discovery", () => {
+  it("keeps cold and warm cost identical for five active Objectives behind 100 or 100,000 settled histories", async () => {
+    const evidence = [];
+    for (const settledCount of [100, 100_000]) {
+      const rows = [
+        ...Array.from({ length: 5 }, (_, index) => issue(index + 1, { comments: 240 })),
+        ...Array.from({ length: settledCount }, (_, index) =>
+          issue(index + 6, { state: "closed", comments: 400 }),
+        ),
+      ];
+      const fixture = repository(rows, new Set([1, 2, 3, 4, 5]), 1_536);
+      const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+      expect((await session.discover()).map((entry) => entry.objective)).toEqual([1, 2, 3, 4, 5]);
+      const cold = measurement(session);
+      fixture.advance(60_000);
+      expect(await session.discover()).toHaveLength(5);
+      const warm = measurement(session);
+      expect(fixture.hydrated).toEqual([1, 2, 3, 4, 5]);
+      expect(fixture.enumerations[0]).toEqual({ state: "open" });
+      expect(fixture.enumerations.find((entry) => entry.state === "closed")?.since).toBe(
+        iso(START - DISCOVERY_SESSION_LIMITS.closedLookbackMs - DISCOVERY_SESSION_LIMITS.overlapMs),
+      );
+      expect(cold).toMatchObject({
+        requests: 19,
+        commentRequests: 15,
+        classifications: 5,
+        retained: 5,
+        retainedComments: 0,
+      });
+      expect(warm).toMatchObject({
+        requests: 8,
+        commentRequests: 0,
+        classifications: 0,
+        retained: 5,
+        retainedComments: 0,
+      });
+      expect(cold.bytes).toBeGreaterThan(0);
+      expect(warm.bytes).toBeLessThan(cold.bytes!);
+      evidence.push({ cold: { ...cold, historiesRead: 5 }, warm: { ...warm, historiesRead: 0 } });
+    }
+    expect(evidence[1]).toEqual(evidence[0]);
   });
 
-  it("uses immutable creation order so an inter-page edit cannot skip an older delta row", async () => {
-    let now = START;
-    let bootstrap = true;
-    let deltaPage = 0;
-    const rawIssue = (number: number, title: string, updatedAt: string) => ({
-      number,
-      state: "closed",
-      labels: [{ name: "factory:objective" }],
-      title,
-      body: "fixture",
-      created_at: `2025-01-${String(number).padStart(2, "0")}T00:00:00.000Z`,
-      updated_at: updatedAt,
+  it("measures a bounded cold scan and warm polling with 200 realistic open inactive histories", async () => {
+    const rows = [
+      ...Array.from({ length: 5 }, (_, index) => issue(index + 1, { comments: 240 })),
+      ...Array.from({ length: 200 }, (_, index) => issue(index + 6, { comments: 120 })),
+      ...Array.from({ length: 100_000 }, (_, index) =>
+        issue(index + 206, { state: "closed", comments: 400 }),
+      ),
+    ];
+    const fixture = repository(rows, new Set([1, 2, 3, 4, 5]), 1_536);
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    await finishScan(session);
+    const cold = { ...measurement(session, true), historiesRead: fixture.hydrated.length };
+    expect(cold).toMatchObject({
+      cycles: 9,
+      commentRequests: 415,
+      classifications: 205,
+      historiesRead: 205,
+      retained: 205,
+      retainedComments: 0,
     });
-    const response = (data: unknown, headers: Record<string, string> = {}) =>
-      new Response(JSON.stringify(data), {
-        status: 200,
-        headers: {
-          "content-type": "application/json",
-          date: new Date(now).toUTCString(),
-          ...headers,
-        },
-      });
-    const store = new GitHubControlStore({
-      token: "discovery-immutable-pagination-test",
-      owner: "clockgrove",
-      repo: "factory",
-      discoveryNow: () => new Date(now),
-      requestFetch: async (input) => {
-        const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
-        const path = decodeURIComponent(url.pathname);
-        if (path === "/user") return response({ login: "factory-controller" });
-        if (/\/issues\/\d+\/comments$/.test(path)) return response([]);
-        if (path.endsWith("/issues/comments")) return response([]);
-        if (!path.endsWith("/issues")) throw new Error(`unexpected fixture request: ${url}`);
-        if (url.searchParams.has("labels")) {
-          return response(
-            bootstrap
-              ? [
-                  rawIssue(1, "old one", "2025-12-01T00:00:00.000Z"),
-                  rawIssue(2, "old two", "2025-12-01T00:00:00.000Z"),
-                ]
-              : [],
-          );
-        }
-        expect(url.searchParams.get("sort")).toBe("created");
-        const page = Number(url.searchParams.get("page") ?? "1");
-        deltaPage++;
-        if (page === 1) {
-          const next = new URL(url);
-          next.searchParams.set("page", "2");
-          return response([rawIssue(1, "changed one", "2026-01-01T00:00:01.000Z")], {
-            link: `<${next.toString()}>; rel="next"`,
-          });
-        }
-        // Issue #1 is edited again between requests. In mutable updated_at
-        // order it would move behind #2 and page 2 would repeat #1, skipping #2.
-        return response([rawIssue(2, "changed two", "2026-01-01T00:00:01.000Z")]);
-      },
+    expect(fixture.hydrated).toEqual(Array.from({ length: 205 }, (_, index) => index + 1));
+    expect(
+      session
+        .telemetry()
+        .cycles.every(
+          (cycle) => cycle.probes.classifications <= DISCOVERY_SESSION_LIMITS.candidatesPerLane,
+        ),
+    ).toBe(true);
+    expect(cold.retainedBytes).toBeLessThan(DISCOVERY_SESSION_LIMITS.summaryBytes);
+    fixture.advance(60_000);
+    await finishScan(session);
+    const warm = {
+      ...measurement(session),
+      historiesRead: fixture.hydrated.length - cold.historiesRead,
+    };
+    expect(warm).toMatchObject({
+      cycles: 1,
+      requests: 8,
+      commentRequests: 0,
+      classifications: 0,
+      historiesRead: 0,
+      retained: 205,
+      retainedComments: 0,
     });
+    expect(warm.bytes).toBeLessThan(cold.bytes / 1_000);
+  });
 
-    await store.discoverObjectiveActivations();
-    bootstrap = false;
-    now += 60_000;
-    await store.discoverObjectiveActivations();
+  it("reads nonempty open inactive histories instead of treating them as cheaply proven absence", async () => {
+    const fixture = repository(
+      Array.from({ length: 40 }, (_, index) => issue(index + 1, { comments: 8 })),
+    );
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    expect(await session.discover()).toEqual([]);
+    expect(fixture.hydrated).toHaveLength(DISCOVERY_SESSION_LIMITS.candidatesPerLane);
+    await finishScan(session);
+    expect(fixture.hydrated).toEqual(Array.from({ length: 40 }, (_, index) => index + 1));
+    expect(fixture.classifications.every((entry) => entry.comments === 8)).toBe(true);
+    expect(session.telemetry()).toMatchObject({ cachedComments: 0, cachedObjectives: 40 });
+  });
 
-    expect(deltaPage).toBe(2);
-    expect(store.discoveryTelemetry().cycles.at(-1)).toMatchObject({
-      outcome: "complete",
-      dirtyObjectives: 2,
-      probes: { issues: 2 },
+  it("discovers an old open request on cold start after arbitrarily long downtime", async () => {
+    const fixture = repository([issue(7, { updatedAt: "2009-01-01T00:00:00.000Z" })], new Set([7]));
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    expect(await session.discover()).toMatchObject([{ objective: 7 }]);
+    expect(fixture.enumerations[0]).not.toHaveProperty("since");
+  });
+
+  it("drops settled closed summaries while exact locators still inspect old unlabelled closed obligations", async () => {
+    const fixture = repository([
+      issue(1, { state: "closed", updatedAt: iso(START) }),
+      issue(2, { state: "closed", objectiveLabel: false }),
+    ]);
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    expect(await session.discover()).toEqual([]);
+    expect(session.telemetry().cachedObjectives).toBe(0);
+    fixture.advance(
+      DISCOVERY_SESSION_LIMITS.closedLookbackMs + DISCOVERY_SESSION_LIMITS.overlapMs + 1,
+    );
+    fixture.setLocators([locator(2)]);
+    expect(await session.discover()).toEqual([]);
+    expect(fixture.exact.map((entry) => entry.objective)).toEqual([2]);
+    expect(fixture.hydrated).toEqual([1, 2]);
+    // An unresolved locator is inspection scope; it creates no activation.
+    expect(fixture.classifications.find((entry) => entry.objective === 2)).toBeDefined();
+  });
+
+  it("continues bounded pages without replaying completed rows or advancing a partial scan watermark", async () => {
+    const fixture = repository(
+      Array.from({ length: 105 }, (_, index) => issue(index + 1, { comments: 1 })),
+      new Set([1, 105]),
+    );
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    expect(await session.discover()).toMatchObject([{ objective: 1 }]);
+    expect(fixture.hydrated).toHaveLength(32);
+    expect(session.telemetry()).toMatchObject({ incompleteScans: 1 });
+    fixture.advance(60_000);
+    await finishScan(session);
+    expect(fixture.hydrated).toHaveLength(105);
+    expect(new Set(fixture.hydrated).size).toBe(105);
+    expect(fixture.enumerations.filter((entry) => entry.state === "open")).toEqual([
+      { state: "open" },
+      { state: "open", cursor: "100" },
+    ]);
+    await session.discover();
+    expect(fixture.enumerations.filter((entry) => entry.state === "open").at(-1)).toEqual({
+      state: "open",
+      since: iso(START - DISCOVERY_SESSION_LIMITS.overlapMs),
     });
+    expect(await session.discover()).toMatchObject([{ objective: 1 }, { objective: 105 }]);
+  });
+
+  it("resumes a failed later page and preserves its initial server-time watermark", async () => {
+    const fixture = repository(
+      Array.from({ length: 101 }, (_, index) => issue(index + 1, { comments: 0 })),
+    );
+    const list = fixture.ports.listIssues;
+    const attempted: Array<Parameters<GitHubDiscoveryPorts["listIssues"]>[0]> = [];
+    let fail = true;
+    fixture.ports.listIssues = async (input) => {
+      attempted.push(input);
+      if (input.state === "open" && input.cursor && fail) {
+        fail = false;
+        const error = new Error("temporary second-page failure");
+        recordPartialDiscoveryRequests(error, 1);
+        throw error;
+      }
+      return list(input);
+    };
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    for (let index = 0; index < 4; index++) await session.discover();
+    fixture.advance(60_000);
+    await expect(session.discover()).rejects.toThrow("temporary second-page failure");
+    expect(session.telemetry().cycles.at(-1)).toMatchObject({
+      outcome: "failed",
+      probes: { issues: 1 },
+    });
+    await session.discover();
+    await session.discover();
+    expect(attempted.filter((entry) => entry.state === "open")).toEqual([
+      { state: "open" },
+      { state: "open", cursor: "100" },
+      { state: "open", cursor: "100" },
+      { state: "open", since: iso(START - DISCOVERY_SESSION_LIMITS.overlapMs) },
+    ]);
+    expect(fixture.classifications).toHaveLength(101);
+  });
+
+  it("retries the interrupted candidate after platform quota without replaying classified siblings", async () => {
+    const fixture = repository([issue(1), issue(2), issue(3)], new Set([1, 2, 3]));
+    const classify = fixture.ports.classify;
+    const attempts: number[] = [];
+    let fail = true;
+    fixture.ports.classify = async (input) => {
+      attempts.push(input.issue.number);
+      if (input.issue.number === 2 && fail) {
+        fail = false;
+        const error = new Error("primary quota exhausted");
+        error.name = "PlatformUnavailableError";
+        throw error;
+      }
+      return classify(input);
+    };
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    await expect(session.discover()).rejects.toThrow("primary quota exhausted");
+    fixture.advance(60_000);
+    expect((await session.discover()).map((entry) => entry.objective)).toEqual([1, 2, 3]);
+    expect(attempts).toEqual([1, 2, 2, 3]);
+    expect(fixture.enumerations.filter((entry) => entry.state === "open")).toHaveLength(1);
+    await session.discover();
+    expect(fixture.enumerations.filter((entry) => entry.state === "open").at(-1)?.since).toBe(
+      iso(START - DISCOVERY_SESSION_LIMITS.overlapMs),
+    );
+  });
+
+  it("isolates malformed histories and transient history bounds from independent Objectives", async () => {
+    const fixture = repository([issue(1), issue(2), issue(3)], new Set([3]));
+    const classify = fixture.ports.classify;
+    const comments = fixture.ports.listObjectiveComments;
+    fixture.ports.listObjectiveComments = async (objective) =>
+      objective === 2
+        ? collection(
+            Array.from({ length: DISCOVERY_SESSION_LIMITS.commentsPerObjective + 1 }, (_, index) =>
+              comment(2, "old receipt", String(index)),
+            ),
+          )
+        : comments(objective);
+    fixture.ports.classify = async (input) => {
+      if (input.issue.number === 1) throw new Error("malformed authenticated event");
+      return classify(input);
+    };
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    expect(await session.discover()).toMatchObject([{ objective: 3 }]);
+    expect(session.telemetry()).toMatchObject({
+      cachedComments: 0,
+      objectiveErrors: [
+        { objective: 1, reason: "malformed authenticated event" },
+        { objective: 2, reason: "Objective #2 exceeds its transient history bound" },
+      ],
+    });
+    expect(fixture.classifications.map((entry) => entry.objective)).toEqual([3]);
+  });
+
+  it("caps disposable summary memory across a large open inactive scan", async () => {
+    const count = DISCOVERY_SESSION_LIMITS.summaries * 3;
+    const fixture = repository(
+      Array.from({ length: count }, (_, index) => issue(index + 1, { comments: 1 })),
+    );
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    await finishScan(session);
+    expect(fixture.hydrated).toHaveLength(count);
+    expect(session.telemetry()).toMatchObject({
+      cachedObjectives: DISCOVERY_SESSION_LIMITS.summaries,
+      cachedComments: 0,
+      evictedSummaries: count - DISCOVERY_SESSION_LIMITS.summaries,
+    });
+    expect(session.telemetry().retainedSummaryBytes).toBeLessThanOrEqual(
+      DISCOVERY_SESSION_LIMITS.summaryBytes,
+    );
+    expect(
+      session
+        .telemetry()
+        .cycles.every(
+          (cycle) => cycle.probes.classifications <= DISCOVERY_SESSION_LIMITS.candidatesPerLane,
+        ),
+    ).toBe(true);
+  });
+
+  it("uses an exact issue 304 only with a previously observed issue", async () => {
+    const fixture = repository([issue(1)], new Set([1]));
+    fixture.setLocators([locator(1)]);
+    const original = fixture.ports.readIssue;
+    let reads = 0;
+    fixture.ports.readIssue = async (objective, etag) => {
+      reads++;
+      return reads === 1
+        ? original(objective, etag)
+        : collection([], { notModified: true, ...(etag ? { etag } : {}) });
+    };
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    await session.discover();
+    await session.discover([1]);
+    expect(await session.discover([1])).toMatchObject([{ objective: 1 }]);
+    expect(fixture.exact).toEqual([{ objective: 1, etag: undefined }]);
+    expect(session.telemetry().cycles.at(-1)?.probes.notModified).toBe(1);
+    const cold = repository([]);
+    cold.setLocators([locator(99)]);
+    cold.ports.readIssue = async () => collection([], { notModified: true });
+    const coldSession = new GitHubDiscoverySession(cold.ports, cold.now);
+    expect(await coldSession.discover()).toEqual([]);
+    expect(coldSession.telemetry().objectiveErrors).toEqual([
+      { objective: 99, reason: "exact Objective #99 is unavailable; absence is unproven" },
+    ]);
+    expect(cold.classifications).toEqual([]);
+  });
+
+  it("rehydrates metadata/comment changes and periodically rechecks same-timestamp edits without keeping comments", async () => {
+    const fixture = repository([issue(1, { updatedAt: iso(START) })], new Set([1]));
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    const first = (await session.discover())[0]!.discoveryRevision!;
+    fixture.rows[0]!.comments++;
+    fixture.advance(1_000);
+    const second = (await session.discover())[0]!.discoveryRevision!;
+    expect(second).toBeGreaterThan(first);
+    fixture.rows[0]!.objectiveLabel = false;
+    const third = (await session.discover([1]))[0]!.discoveryRevision!;
+    expect(third).toBeGreaterThan(second);
+    fixture.advance(DISCOVERY_SESSION_LIMITS.backstopIntervalMs);
+    const fourth = (await session.discover([1]))[0]!.discoveryRevision!;
+    expect(fourth).toBeGreaterThan(third);
+    expect(fixture.hydrated).toEqual([1, 1, 1, 1]);
+    expect(session.telemetry().cachedComments).toBe(0);
+  });
+
+  it("does not infer absence of already-known work from an incomplete filtered backstop", async () => {
+    const fixture = repository([issue(900)], new Set([900]));
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    await session.discover();
+    fixture.rows.unshift(
+      ...Array.from({ length: 100 }, (_, index) => issue(index + 1, { comments: 0 })),
+    );
+    fixture.advance(DISCOVERY_SESSION_LIMITS.backstopIntervalMs);
+    expect(await session.discover()).toMatchObject([{ objective: 900 }]);
+    expect(session.telemetry().incompleteScans).toBe(1);
+    expect(fixture.exact.at(-1)?.objective).toBe(900);
+  });
+  it("rechecks inactive history after metadata changes and same-timestamp edits at the backstop", async () => {
+    const active = new Set<number>();
+    const fixture = repository([issue(1, { updatedAt: iso(START) })], active);
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    expect(await session.discover()).toEqual([]);
+    fixture.rows[0]!.comments++;
+    fixture.advance(1_000);
+    expect(await session.discover()).toEqual([]);
+    expect(fixture.classifications).toHaveLength(2);
+    // Body edits with no changed metadata are bounded by the full backstop.
+    active.add(1);
+    fixture.advance(DISCOVERY_SESSION_LIMITS.backstopIntervalMs);
+    expect(await session.discover()).toMatchObject([{ objective: 1 }]);
+    expect(fixture.classifications).toHaveLength(3);
+    fixture.rows[0]!.objectiveLabel = false;
+    expect(await session.discover([1])).toMatchObject([{ objective: 1 }]);
+    expect(fixture.classifications).toHaveLength(4);
+    expect(session.telemetry().cachedComments).toBe(0);
+  });
+
+  it("enforces the byte bound before the summary-count bound", async () => {
+    const fixture = repository(
+      Array.from({ length: 12 }, (_, index) => issue(index + 1, { comments: 0 })),
+    );
+    fixture.ports.classify = async ({ issue: candidate }) => ({
+      ...classified(),
+      activation: { ...activation(candidate.number), policy: { fixture: "x".repeat(512 * 1024) } },
+    });
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    await session.discover();
+    expect(session.telemetry().cachedObjectives).toBeLessThan(12);
+    expect(session.telemetry().retainedSummaryBytes).toBeLessThanOrEqual(
+      DISCOVERY_SESSION_LIMITS.summaryBytes,
+    );
+    expect(session.telemetry().evictedSummaries).toBeGreaterThan(0);
+  });
+
+  it("does not accept a previously rejected malformed page on the next attempt", async () => {
+    const fixture = repository([]);
+    let reads = 0;
+    fixture.ports.listIssues = async ({ state }) => {
+      if (state === "closed") return page([]);
+      reads++;
+      return page(
+        Array.from({ length: DISCOVERY_SESSION_LIMITS.pageSize + 1 }, (_, index) =>
+          issue(index + 1, { comments: 0 }),
+        ),
+      );
+    };
+    const session = new GitHubDiscoverySession(fixture.ports, fixture.now);
+    await expect(session.discover()).rejects.toThrow("invalid bounded discovery page/cursor");
+    await expect(session.discover()).rejects.toThrow("invalid bounded discovery page/cursor");
+    expect(reads).toBe(2);
+    expect(fixture.classifications).toEqual([]);
+    expect(session.telemetry().cachedObjectives).toBe(0);
   });
 });

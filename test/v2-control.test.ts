@@ -1368,30 +1368,56 @@ describe("authenticated durable activation discovery", () => {
             { headers: { date: "Thu, 03 Sep 2026 00:00:03 GMT" } },
           );
         }
-        const repositoryComments = request.url.includes("/issues/comments");
-        const isComments = request.url.includes("/issues/14/comments");
-        if (!isComments && !repositoryComments) {
-          expect(new URL(request.url).searchParams.get("state")).toBe("all");
-        }
-        const data =
-          isComments || repositoryComments
-            ? comments.map((comment, index) => ({
-                id: index + 1,
-                body: comment.body,
-                issue_url: "https://api.github.com/repos/clockgrove/factory/issues/14",
-                created_at: `2026-09-03T00:00:${String(index).padStart(2, "0")}Z`,
-                updated_at: `2026-09-03T00:00:${String(index).padStart(2, "0")}Z`,
-                user: { login: comment.login },
-                author_association: comment.association,
-              }))
-            : [
+        const url = new URL(request.url);
+        const headers = { date: "Thu, 03 Sep 2026 00:00:03 GMT" };
+        const issue = {
+          number: 14,
+          state,
+          updated_at: "2026-09-03T00:00:03Z",
+          labels: [{ name: "factory:objective" }],
+          comments: comments.length,
+        };
+        if (url.pathname === "/graphql") {
+          const { query, variables } = (await request.json()) as {
+            query: string;
+            variables: { states?: string[]; prefix?: string };
+          };
+          const pageInfo = { endCursor: null, hasNextPage: false };
+          if (query.includes("refs(")) {
+            expect(variables.prefix).toBe("refs/clockgrove-factory/active/");
+            return Response.json(
+              { data: { repository: { refs: { nodes: [], pageInfo } } } },
+              { headers },
+            );
+          }
+          const nodes = variables.states?.includes(state.toUpperCase())
+            ? [
                 {
+                  __typename: "Issue",
                   number: 14,
-                  state,
-                  updated_at: "2026-09-03T00:00:03Z",
-                  labels: [{ name: "factory:objective" }],
+                  state: state.toUpperCase(),
+                  updatedAt: issue.updated_at,
+                  comments: { totalCount: comments.length },
                 },
-              ];
+              ]
+            : [];
+          return Response.json(
+            { data: { repository: { issues: { nodes, pageInfo } } } },
+            { headers },
+          );
+        }
+        const isComments = url.pathname.endsWith("/issues/14/comments");
+        expect(isComments || url.pathname.endsWith("/issues/14")).toBe(true);
+        const data = isComments
+          ? comments.map((comment, index) => ({
+              id: index + 1,
+              body: comment.body,
+              created_at: `2026-09-03T00:00:${String(index).padStart(2, "0")}Z`,
+              updated_at: `2026-09-03T00:00:${String(index).padStart(2, "0")}Z`,
+              user: { login: comment.login },
+              author_association: comment.association,
+            }))
+          : issue;
         return new Response(JSON.stringify(data), {
           status: 200,
           headers: {
@@ -1442,9 +1468,10 @@ describe("authenticated durable activation discovery", () => {
       })),
     );
 
-    await expect(store.discoverObjectiveActivations()).rejects.toThrow(
-      /conflicting Factory application requests/i,
-    );
+    await expect(store.discoverObjectiveActivations()).resolves.toEqual([]);
+    expect(store.discoveryTelemetry().objectiveErrors).toEqual([
+      { objective: 14, reason: expect.stringMatching(/conflicting Factory application requests/i) },
+    ]);
   });
 
   it("ignores outsider activations and collaborator comments with mismatched actors", async () => {
@@ -1515,9 +1542,10 @@ describe("authenticated durable activation discovery", () => {
         association: "COLLABORATOR",
       },
     ]);
-    await expect(store.discoverObjectiveActivations()).rejects.toThrow(
-      /conflicting authenticated actors/i,
-    );
+    await expect(store.discoverObjectiveActivations()).resolves.toEqual([]);
+    expect(store.discoveryTelemetry().objectiveErrors).toEqual([
+      { objective: 14, reason: expect.stringMatching(/conflicting authenticated actors/i) },
+    ]);
   });
 
   it("suppresses a completed activation only with its actor-bound run receipt", async () => {

@@ -11,6 +11,7 @@ import {
   type GitCommitObject,
   type LeaseStore,
 } from "../src/control/lease.js";
+import { CircuitBreaker } from "../src/platform.js";
 import { LifecycleRecorder } from "../src/control/events.js";
 import {
   decodeEventComments,
@@ -422,6 +423,87 @@ describe("Director lease", () => {
 });
 
 describe("attempt reservation", () => {
+  it.each(["BudgetReserved", "BudgetReconciled"] as const)(
+    "preserves both %s envelopes across publication outcomes",
+    async (event) => {
+      for (const outcome of ["before-send", "rejected", "accepted", "lost-response"] as const) {
+        const memory = new MemoryStore();
+        const leases = new LeaseManager({ store: memory, durationMs: 60_000 });
+        const base = await memory.readCommit(BASE_SHA);
+        const lease = await leases.acquire(identity, base);
+        const reservation = await new AttemptManager({ store: memory, leases }).reserve({
+          binding,
+          lease,
+          workItem: 43,
+          workItemNodeId: "I_43",
+          backend: "codex-cli/local-worktree",
+          base,
+          sequence: 2,
+        });
+        const durable: string[] = [];
+        let posts = 0;
+        const remote = new GitHubControlStore({
+          token: "recorder-fault-fixture",
+          circuitBreaker: new CircuitBreaker(),
+          owner: "o",
+          repo: "r",
+          mutationScheduler: { acquire: async () => ({ release() {}, waitedMs: 0 }) },
+          beforeMutation: async () => {
+            if (outcome === "before-send") throw new Error("before send");
+          },
+          requestFetch: async (input, init) => {
+            const request = new Request(input, init);
+            if (request.method === "GET")
+              return Response.json({}, { headers: { date: memory.now.toUTCString() } });
+            posts++;
+            if (outcome === "rejected")
+              return Response.json({ message: "invalid comment" }, { status: 422 });
+            durable.push(((await request.json()) as { body: string }).body);
+            if (outcome === "lost-response") throw new Error("response lost after acceptance");
+            return Response.json({ id: 1 }, { status: 201 });
+          },
+        });
+        const operation = new LifecycleRecorder(remote, leases).budgetBatch([
+          {
+            lease,
+            reservation,
+            workItemNodeId: "I_43",
+            sequence: 3,
+            event,
+            unit: "model_tokens",
+            phase: "execution",
+            amount: 12,
+          },
+          {
+            lease,
+            reservation,
+            workItemNodeId: "I_43",
+            sequence: 4,
+            event,
+            unit: "validation_milliseconds",
+            phase: "validation",
+            amount: 34,
+          },
+        ]);
+        if (outcome === "accepted") await operation;
+        else await expect(operation).rejects.toThrow();
+        expect(posts).toBe(outcome === "before-send" ? 0 : 1);
+        // Reconstruct only from the server's accepted comment after local results are discarded.
+        const recovered = durable.flatMap(decodeEventComments);
+        expect(recovered).toHaveLength(
+          outcome === "accepted" || outcome === "lost-response" ? 2 : 0,
+        );
+        if (recovered.length) {
+          expect(recovered.map((value) => value.sequence)).toEqual([3, 4]);
+          expect(recovered.map((value) => value.event)).toEqual([event, event]);
+          expect(
+            recovered.every((value) => value.runId === reservation.runId && value.objective === 42),
+          ).toBe(true);
+        }
+      }
+    },
+  );
+
   it("creates an immutable pre-PR receipt and audit comment", async () => {
     const store = new MemoryStore();
     const leases = new LeaseManager({ store, durationMs: 60_000 });

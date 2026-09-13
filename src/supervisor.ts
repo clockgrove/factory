@@ -280,6 +280,7 @@ import {
   publishValidated,
   verifySquashIntegration,
   type PublishedPullRequest,
+  type IntegrationWait,
 } from "./publication/publisher.js";
 import { prepareSiblingRefreshTree } from "./publication/sibling-refresh-tree.js";
 import {
@@ -1141,7 +1142,10 @@ export class FactorySupervisor {
   #integrationTail: Promise<void> = Promise.resolve();
   // Scheduling hints only: never reuse authority or mutable GitHub evidence.
   // Lost on restart; every due observation repeats the normal integration fences.
-  #integrationWaits = new Map<number, { until: number; delay: number; reason: string }>();
+  #integrationWaits = new Map<
+    number,
+    { until: number; delay: number; reason: string; evidence?: IntegrationWait }
+  >();
   readonly #retryArtifacts = new RetryArtifactCache();
   #durablePackets = new Map<number, WorkerPacket>();
   #compiledGraph: CompiledObjective | null = null;
@@ -1562,13 +1566,12 @@ export class FactorySupervisor {
       if (result.reserved) this.#sharedCapacityOwners.set(reservation.key, owner);
       return result;
     });
-    const snapshot = await this.#sharedCapacity.snapshot();
     return result.reserved
-      ? { reserved: true, reservation, generation: snapshot.generation }
+      ? { reserved: true, reservation, generation: result.generation }
       : {
           reserved: false,
           code: result.code === "released-reservation" ? "duplicate-reservation" : result.code,
-          generation: snapshot.generation,
+          generation: result.generation,
         };
   }
 
@@ -1595,13 +1598,12 @@ export class FactorySupervisor {
       }
       return result;
     });
-    const snapshot = await this.#sharedCapacity.snapshot();
     return result.reserved
-      ? { reserved: true, reservation, generation: snapshot.generation }
+      ? { reserved: true, reservation, generation: result.generation }
       : {
           reserved: false,
           code: result.code === "released-reservation" ? "duplicate-reservation" : result.code,
-          generation: snapshot.generation,
+          generation: result.generation,
         };
   }
 
@@ -6802,34 +6804,42 @@ export class FactorySupervisor {
           });
           const reservedAmount =
             admission.reservedBudget.unit === "none" ? timeoutMs : admission.reservedBudget.amount;
-          const budgetEvent = await this.#recorder.budget({
-            lease,
-            workItemNodeId: item.id,
-            reservation,
-            sequence: this.#sequences.take(),
-            event: "BudgetReserved",
-            unit: budgetUnit,
-            amount: reservedAmount,
-          });
-          this.#budgetEvents.push(budgetEvent);
-          executionBudgetReserved = true;
-          if (
-            validator &&
-            admission.validation &&
-            admission.validation.reservedBudget.unit !== "none"
-          ) {
-            validationBudgetUnit = admission.validation.reservedBudget.unit;
-            const validationBudget = await this.#recorder.budget({
+          const reserveValidation =
+            validator && admission.validation && admission.validation.reservedBudget.unit !== "none"
+              ? {
+                  unit: admission.validation.reservedBudget.unit,
+                  amount: admission.validation.reservedBudget.amount,
+                }
+              : undefined;
+          const budgetEvents = await this.#recorder.budgetBatch([
+            {
               lease,
               workItemNodeId: item.id,
               reservation,
               sequence: this.#sequences.take(),
               event: "BudgetReserved",
-              unit: validationBudgetUnit,
-              phase: "validation",
-              amount: admission.validation.reservedBudget.amount,
-            });
-            this.#budgetEvents.push(validationBudget);
+              unit: budgetUnit,
+              amount: reservedAmount,
+            },
+            ...(reserveValidation
+              ? [
+                  {
+                    lease,
+                    workItemNodeId: item.id,
+                    reservation,
+                    sequence: this.#sequences.take(),
+                    event: "BudgetReserved" as const,
+                    unit: reserveValidation.unit,
+                    phase: "validation" as const,
+                    amount: reserveValidation.amount,
+                  },
+                ]
+              : []),
+          ]);
+          this.#budgetEvents.push(...budgetEvents);
+          executionBudgetReserved = true;
+          if (reserveValidation) {
+            validationBudgetUnit = reserveValidation.unit;
             validationBudgetReserved = true;
           }
         });
@@ -8059,44 +8069,53 @@ export class FactorySupervisor {
               })
               .catch(() => {});
           }
-          if (executionBudgetReserved && !executionBudgetReconciled) {
+          const reconcileExecution = executionBudgetReserved && !executionBudgetReconciled;
+          const reconcileValidation =
+            validationBudgetReserved && !validationBudgetReconciled
+              ? validationBudgetUnit
+              : undefined;
+          if (reconcileExecution || reconcileValidation) {
             await this.#lease.use(async (lease) => {
-              const event = await this.#recorder.budget({
-                lease,
-                workItemNodeId: item.id,
-                reservation: reservation!,
-                sequence: this.#sequences.take(),
-                event: "BudgetReconciled",
-                unit: budgetUnit,
-                amount: backendLaunchAttempted
-                  ? budgetUnit === "managed_sessions"
-                    ? 1
-                    : Date.now() - started
-                  : 0,
-              });
-              this.#budgetEvents.push(event);
-              executionBudgetReconciled = true;
-            });
-          }
-          if (validationBudgetReserved && !validationBudgetReconciled && validationBudgetUnit) {
-            const unit = validationBudgetUnit;
-            await this.#lease.use(async (lease) => {
-              const event = await this.#recorder.budget({
-                lease,
-                workItemNodeId: item.id,
-                reservation: reservation!,
-                sequence: this.#sequences.take(),
-                event: "BudgetReconciled",
-                unit,
-                phase: "validation",
-                amount: validationStartedAt
-                  ? unit === "managed_sessions"
-                    ? 1
-                    : Date.now() - validationStartedAt
-                  : 0,
-              });
-              this.#budgetEvents.push(event);
-              validationBudgetReconciled = true;
+              const events = await this.#recorder.budgetBatch([
+                ...(reconcileExecution
+                  ? [
+                      {
+                        lease,
+                        workItemNodeId: item.id,
+                        reservation: reservation!,
+                        sequence: this.#sequences.take(),
+                        event: "BudgetReconciled" as const,
+                        unit: budgetUnit,
+                        amount: backendLaunchAttempted
+                          ? budgetUnit === "managed_sessions"
+                            ? 1
+                            : Date.now() - started
+                          : 0,
+                      },
+                    ]
+                  : []),
+                ...(reconcileValidation
+                  ? [
+                      {
+                        lease,
+                        workItemNodeId: item.id,
+                        reservation: reservation!,
+                        sequence: this.#sequences.take(),
+                        event: "BudgetReconciled" as const,
+                        unit: reconcileValidation,
+                        phase: "validation" as const,
+                        amount: validationStartedAt
+                          ? reconcileValidation === "managed_sessions"
+                            ? 1
+                            : Date.now() - validationStartedAt
+                          : 0,
+                      },
+                    ]
+                  : []),
+              ]);
+              this.#budgetEvents.push(...events);
+              if (reconcileExecution) executionBudgetReconciled = true;
+              if (reconcileValidation) validationBudgetReconciled = true;
             });
           }
           await this.#lease.use((lease) =>
@@ -11084,7 +11103,7 @@ export class FactorySupervisor {
         if (Date.now() >= deadline) {
           throw new Error(`stack integration timed out: ${readiness.reason}`);
         }
-        return this.#deferIntegration(member.receipt.workItem, readiness.reason);
+        return this.#deferIntegration(member.receipt.workItem, readiness.reason, readiness);
       }
       if (readiness.state !== "ready") {
         throw new Error(
@@ -15337,7 +15356,17 @@ export class FactorySupervisor {
     // Local execution/fairness revisions wake immediately. The timeout only
     // reconciles external changes; worker cancellation retains its separate poll.
     const normalMaximum = this.#options.pollIntervalMs ?? 60_000;
-    const maximumMs = Math.max(1, Math.min(normalMaximum, objectiveDeadline - Date.now()));
+    // Unlike generic retry hints, a known grace expiry must also wake when it
+    // elapsed during this iteration. Ignoring it here adds another full poll.
+    const knownGraceDeadline = Math.min(
+      ...[...this.#integrationWaits.values()]
+        .filter((wait) => wait.evidence?.code === "first-check-grace")
+        .map((wait) => wait.until),
+    );
+    const maximumMs = Math.max(
+      1,
+      Math.min(normalMaximum, objectiveDeadline - Date.now(), knownGraceDeadline - Date.now()),
+    );
     const settled = await waitForProgress({
       executions: activeExecutions,
       executionRevision,
@@ -15350,11 +15379,23 @@ export class FactorySupervisor {
     if (settled?.error) throw new ClaimedExecutionFailure(settled);
   }
 
-  #deferIntegration(workItem: number, reason: string): false {
+  #deferIntegration(workItem: number, reason: string, evidence?: IntegrationWait): false {
     const previous = this.#integrationWaits.get(workItem);
     const interval = Math.max(1, Math.min(this.#options.pollIntervalMs ?? 60_000, 60_000));
-    const delay = Math.min(previous ? previous.delay * 2 : interval, interval * 5);
-    this.#integrationWaits.set(workItem, { until: Date.now() + delay, delay, reason });
+    const unchanged =
+      previous?.reason === reason &&
+      previous.evidence?.code === evidence?.code &&
+      previous.evidence?.headSha === evidence?.headSha &&
+      previous.evidence?.baseSha === evidence?.baseSha;
+    const delay = Math.min(unchanged ? previous.delay * 2 : interval, interval * 5);
+    const deadline = this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000;
+    const until = Math.min(deadline, evidence?.notBefore ?? Date.now() + delay);
+    this.#integrationWaits.set(workItem, {
+      until,
+      delay,
+      reason,
+      ...(evidence ? { evidence } : {}),
+    });
     if (previous?.reason !== reason)
       this.#notify(`Work Item #${workItem} integration waiting: ${reason}`);
     return false;
@@ -15457,6 +15498,7 @@ export class FactorySupervisor {
       const validatedBase =
         candidate?.identity.targetBaseSha ??
         (adoptedSource ? pull.exactHeadValidation.baseSha : reservation.baseSha);
+      let waitEvidence: IntegrationWait | undefined;
       const readiness = await this.#serializeIntegration(async () => {
         // Cheap non-authoritative readiness avoids creating coordination records during
         // ordinary pending-check polls. All checks are repeated under the shared claim.
@@ -15489,6 +15531,7 @@ export class FactorySupervisor {
                 : {}),
           },
         );
+        if (observedReadiness.state === "wait") waitEvidence = observedReadiness;
         if (observedReadiness.state !== "ready") return observedReadiness;
         const controller = this.#lease;
         const capturedOwner = await controller.use(async (lease) => ({
@@ -15537,6 +15580,7 @@ export class FactorySupervisor {
                       : {}),
                 },
               );
+              if (current.state === "wait") waitEvidence = current;
               if (current.state !== "ready") return current;
               if (candidate) {
                 // REST mergeable/test-merge metadata can lag a trunk update. Check GitHub's
@@ -15746,7 +15790,7 @@ export class FactorySupervisor {
       // A pending check is controller state, not a worker-sized blocking task.
       // Return after one observation so stale resources, other reviews, and
       // newly-ready work can progress on the next snapshot.
-      return this.#deferIntegration(item.number, readiness.reason);
+      return this.#deferIntegration(item.number, readiness.reason, waitEvidence);
     }
   }
 

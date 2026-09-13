@@ -3,7 +3,7 @@ import { PROTOCOL_V2, gitSha } from "../protocol/limits.js";
 import { observeLeaseAssertion } from "./mutation-observation.js";
 import { retryGitHubQuota } from "../platform.js";
 
-export interface GitCommitObject {
+export interface GitCommitContent {
   oid: string;
   treeOid: string;
   parentOids: string[];
@@ -11,6 +11,9 @@ export interface GitCommitObject {
   /** Committer time when the provider exposes it; Factory-created control commits
    * use the provider-assigned value for legacy age recovery. */
   committedAt?: Date;
+}
+
+export interface GitCommitObject extends GitCommitContent {
   /** Authoritative provider time when this object was observed. */
   serverTime: Date;
 }
@@ -39,6 +42,8 @@ export interface LeaseStore {
   /** Optional single-call ref observation carrying authoritative server time. */
   readRefWithServerTime?(ref: string): Promise<{ oid: string | null; serverTime: Date }>;
   readCommit(oid: string): Promise<GitCommitObject>;
+  /** Exact immutable content, carrying no current-time evidence. */
+  readCommitContent?(oid: string): Promise<GitCommitContent>;
   createCommit(args: { treeOid: string; parentOids: string[]; message: string }): Promise<string>;
   createRef(ref: string, oid: string): Promise<boolean>;
   compareAndSwapRef(args: { ref: string; beforeOid: string; afterOid: string }): Promise<boolean>;
@@ -94,7 +99,7 @@ function leaseMessage(event: LeaseEvent): string {
   return `Factory lease ${event.event} for Objective #${event.objective}\n\nFactory-Event: ${encoded}`;
 }
 
-export function leaseEventFromCommit(commit: GitCommitObject): LeaseEvent {
+export function leaseEventFromCommit(commit: GitCommitContent): LeaseEvent {
   const trailer = commit.message
     .split(/\r?\n/)
     .reverse()
@@ -106,7 +111,7 @@ export function leaseEventFromCommit(commit: GitCommitObject): LeaseEvent {
   return parsed;
 }
 
-export function parseLeaseCommit(commit: GitCommitObject): LeaseState {
+export function parseLeaseCommit(commit: GitCommitContent): LeaseState {
   const parsed = leaseEventFromCommit(commit);
   gitSha.parse(commit.oid);
   return {
@@ -155,7 +160,28 @@ export class LeaseManager {
     return this.#withLeaseClass(async () => {
       const ref = leaseRef(objective);
       const oid = await this.#store.readRef(ref);
-      return oid ? parseLeaseCommit(await this.#store.readCommit(oid)) : null;
+      return oid
+        ? parseLeaseCommit(
+            await (this.#store.readCommitContent?.(oid) ?? this.#store.readCommit(oid)),
+          )
+        : null;
+    });
+  }
+
+  /** Current ref time belongs to this lease observation, never cached content. */
+  async readObserved(objective: number): Promise<{ lease: LeaseState | null; serverTime: Date }> {
+    return this.#withLeaseClass(async () => {
+      const ref = leaseRef(objective);
+      const observation = this.#store.readRefWithServerTime
+        ? await this.#store.readRefWithServerTime(ref)
+        : { oid: await this.#store.readRef(ref), serverTime: await this.#store.serverTime() };
+      const lease = observation.oid
+        ? parseLeaseCommit(
+            await (this.#store.readCommitContent?.(observation.oid) ??
+              this.#store.readCommit(observation.oid)),
+          )
+        : null;
+      return { lease, serverTime: observation.serverTime };
     });
   }
 
@@ -275,7 +301,7 @@ export class LeaseManager {
     if (lease.ref !== leaseRef(lease.objective)) throw new LeaseLostError();
     const oid = await this.#store.readRef(lease.ref);
     if (oid !== lease.oid) throw new LeaseLostError();
-    const commit = await this.#store.readCommit(oid);
+    const commit = await (this.#store.readCommitContent?.(oid) ?? this.#store.readCommit(oid));
     const current = parseLeaseCommit(commit);
     if (
       leaseEventFromCommit(commit).event === "LeaseReleased" ||
@@ -336,7 +362,11 @@ export class LeaseManager {
       const { oid } = observation;
       if (!oid) throw new LeaseLostError();
       const current =
-        oid === lease.oid ? lease : parseLeaseCommit(await this.#store.readCommit(oid));
+        oid === lease.oid
+          ? lease
+          : parseLeaseCommit(
+              await (this.#store.readCommitContent?.(oid) ?? this.#store.readCommit(oid)),
+            );
       if (
         current.objective !== lease.objective ||
         current.epoch !== lease.epoch ||

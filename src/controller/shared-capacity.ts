@@ -101,9 +101,10 @@ const stateSchema = z
   );
 type State = z.infer<typeof stateSchema>;
 type Claim = z.infer<typeof claimSchema>;
-export type SharedCapacityResult =
+type SharedCapacityDecision =
   | { reserved: true; claimId: string }
   | { reserved: false; code: CapacityRejectionCode | "released-reservation" };
+export type SharedCapacityResult = SharedCapacityDecision & { generation: number };
 export interface SharedCapacityRetentionStatus {
   journalClaims: number;
   activeClaims: number;
@@ -270,7 +271,8 @@ export class SharedCapacityCoordinator {
     const oid = await this.options.store.readRef(SHARED_CAPACITY_REF);
     if (!oid) return null;
     if (this.#cachedObservation?.oid === oid) return structuredClone(this.#cachedObservation);
-    const commit = await this.options.store.readCommit(oid);
+    const commit = await (this.options.store.readCommitContent?.(oid) ??
+      this.options.store.readCommit(oid));
     const encoded = commit.message
       .split("\n")
       .find((line) => line.startsWith(PREFIX))
@@ -315,7 +317,8 @@ export class SharedCapacityCoordinator {
     const current = await this.#read();
     if (current) return current;
     const imported = await this.options.assertLegacyCompatible();
-    const base = await this.options.store.readCommit(this.options.baseCommitSha);
+    const base = await (this.options.store.readCommitContent?.(this.options.baseCommitSha) ??
+      this.options.store.readCommit(this.options.baseCommitSha));
     const state: State = {
       protocol: "clockgrove.factory/shared-capacity-v2",
       repository: this.options.repository.toLowerCase(),
@@ -351,13 +354,13 @@ export class SharedCapacityCoordinator {
   async #assertOwner(owner: SharedCapacityOwner): Promise<void> {
     observeLeaseAssertion();
     ownerSchema.parse(owner);
-    const lease = await this.#leases.read(owner.objective);
+    const { lease, serverTime } = await this.#leases.readObserved(owner.objective);
     if (
       !lease ||
       lease.runId !== owner.runId ||
       lease.epoch !== owner.directorEpoch ||
       lease.policyDigest !== owner.policyDigest ||
-      lease.expiresAt <= (await this.options.store.serverTime())
+      lease.expiresAt <= serverTime
     )
       throw new Error("shared capacity Objective ownership is not current");
   }
@@ -368,7 +371,7 @@ export class SharedCapacityCoordinator {
       state: State,
       retiredDigest: (id: string) => Promise<string | null>,
     ) => Promise<{ value: T; changed: boolean }> | { value: T; changed: boolean },
-  ): Promise<T> {
+  ): Promise<{ value: T; generation: number }> {
     const captured = ownerSchema.parse(owner);
     if (this.options.store.withMutationFence)
       return this.options.store.withMutationFence(
@@ -385,7 +388,7 @@ export class SharedCapacityCoordinator {
       retiredDigest: (id: string) => Promise<string | null>,
     ) => Promise<{ value: T; changed: boolean }> | { value: T; changed: boolean },
     transportFenced: boolean,
-  ): Promise<T> {
+  ): Promise<{ value: T; generation: number }> {
     const initial = await this.#readOrInitialize();
     for (let attempt = 0; attempt < 16; attempt++) {
       // Reuse only this operation's initial observation; a contested CAS reads afresh.
@@ -405,7 +408,8 @@ export class SharedCapacityCoordinator {
         throw new Error(
           `shared capacity journal has ${next.claims.length} active or unresolved claims; reconcile and explicitly release settled claims before the ${SHARED_CAPACITY_HARD_LIMIT}-record safety bound`,
         );
-      if (!result.changed && !compacted) return result.value;
+      if (!result.changed && !compacted)
+        return { value: result.value, generation: current.state.generation };
       next.generation++;
       ledger(next);
       const oid = await this.#commit(next, treeOid, current.oid);
@@ -418,11 +422,15 @@ export class SharedCapacityCoordinator {
             afterOid: oid,
           });
         const updated = await compare();
-        if (updated) return result.value;
+        if (updated) {
+          this.#cachedObservation = structuredClone({ oid, treeOid, state: next });
+          return { value: result.value, generation: next.generation };
+        }
       } catch (error) {
         // Only reconcile an ambiguously accepted write; never replay uncertain work.
         const observed = await this.#read();
-        if (observed?.oid === oid) return result.value;
+        if (observed?.oid === oid)
+          return { value: result.value, generation: observed.state.generation };
         throw error;
       }
     }
@@ -574,37 +582,41 @@ export class SharedCapacityCoordinator {
     limits: CapacityLimits,
   ): Promise<SharedCapacityResult> {
     const claim = this.#claim(owner, reservation);
-    return this.#change<SharedCapacityResult>(owner, async (state, retiredDigest) => {
-      const existing = state.claims.find((row) => row.id === claim.id);
-      if (existing) {
-        if (canonical(existing.reservation) !== canonical(claim.reservation))
-          throw new Error("shared capacity identity changed resources");
-        return {
-          value: existing.released
-            ? { reserved: false, code: "released-reservation" }
-            : { reserved: true, claimId: claim.id },
-          changed: false,
-        };
-      }
-      const retired = await retiredDigest(claim.id);
-      if (retired) {
-        if (retired !== reservationDigest(claim.reservation))
-          throw new Error("shared capacity identity changed resources");
-        return {
-          value: { reserved: false, code: "released-reservation" },
-          changed: false,
-        };
-      }
-      const current = ledger(state);
-      const result = current.tryReserve(
-        state.generation,
-        claim.reservation,
-        effectiveLimits(state.limits, limits),
-      );
-      if (!result.reserved) return { value: result, changed: false };
-      state.claims.push(claim);
-      return { value: { reserved: true, claimId: claim.id }, changed: true };
-    });
+    const result = await this.#change<SharedCapacityDecision>(
+      owner,
+      async (state, retiredDigest) => {
+        const existing = state.claims.find((row) => row.id === claim.id);
+        if (existing) {
+          if (canonical(existing.reservation) !== canonical(claim.reservation))
+            throw new Error("shared capacity identity changed resources");
+          return {
+            value: existing.released
+              ? { reserved: false, code: "released-reservation" }
+              : { reserved: true, claimId: claim.id },
+            changed: false,
+          };
+        }
+        const retired = await retiredDigest(claim.id);
+        if (retired) {
+          if (retired !== reservationDigest(claim.reservation))
+            throw new Error("shared capacity identity changed resources");
+          return {
+            value: { reserved: false, code: "released-reservation" },
+            changed: false,
+          };
+        }
+        const current = ledger(state);
+        const result = current.tryReserve(
+          state.generation,
+          claim.reservation,
+          effectiveLimits(state.limits, limits),
+        );
+        if (!result.reserved) return { value: result, changed: false };
+        state.claims.push(claim);
+        return { value: { reserved: true, claimId: claim.id }, changed: true };
+      },
+    );
+    return { ...result.value, generation: result.generation };
   }
 
   /** Caller has independently proven exact cleanup/terminal accounting, not just expiry. */
@@ -673,7 +685,7 @@ export class SharedCapacityCoordinator {
       claims.set(claim.id, claim);
       claimsByKey.set(claim.reservation.key, claim.id);
     }
-    return this.#change(owner, async (state, retiredDigest) => {
+    const result = await this.#change(owner, async (state, retiredDigest) => {
       const lag: SharedCapacitySnapshotLagEvidence[] = [];
       const additions: Claim[] = [];
       const retained: SharedCapacityImport[] = [];
@@ -729,6 +741,7 @@ export class SharedCapacityCoordinator {
       state.claims.push(...additions);
       return { value: retained, changed: additions.length > 0 };
     });
+    return result.value;
   }
 
   async transition(
@@ -741,32 +754,36 @@ export class SharedCapacityCoordinator {
     if (fromOwner.objective !== owner.objective)
       throw new Error("capacity transition Objective mismatch");
     const claim = this.#claim(owner, next);
-    return this.#change<SharedCapacityResult>(owner, async (state, retiredDigest) => {
-      const priorId = sharedCapacityClaimId(fromOwner, fromKey);
-      const prior = state.claims.find((row) => row.id === priorId);
-      const existing = state.claims.find((row) => row.id === claim.id);
-      const priorRetired = prior ? null : await retiredDigest(priorId);
-      if (
-        existing &&
-        (prior?.released || priorRetired) &&
-        !existing.released &&
-        canonical(existing.reservation) === canonical(claim.reservation)
-      )
-        return { value: { reserved: true, claimId: claim.id }, changed: false };
-      const existingRetired = existing ? null : await retiredDigest(claim.id);
-      if (!prior || prior.released || existing || priorRetired || existingRetired)
-        throw new Error("shared capacity transition identity mismatch");
-      const current = ledger(state);
-      const result = current.transition(
-        state.generation,
-        fromKey,
-        claim.reservation,
-        effectiveLimits(state.limits, limits),
-      );
-      if (!result.reserved) return { value: result, changed: false };
-      prior.released = true;
-      state.claims.push(claim);
-      return { value: { reserved: true, claimId: claim.id }, changed: true };
-    });
+    const result = await this.#change<SharedCapacityDecision>(
+      owner,
+      async (state, retiredDigest) => {
+        const priorId = sharedCapacityClaimId(fromOwner, fromKey);
+        const prior = state.claims.find((row) => row.id === priorId);
+        const existing = state.claims.find((row) => row.id === claim.id);
+        const priorRetired = prior ? null : await retiredDigest(priorId);
+        if (
+          existing &&
+          (prior?.released || priorRetired) &&
+          !existing.released &&
+          canonical(existing.reservation) === canonical(claim.reservation)
+        )
+          return { value: { reserved: true, claimId: claim.id }, changed: false };
+        const existingRetired = existing ? null : await retiredDigest(claim.id);
+        if (!prior || prior.released || existing || priorRetired || existingRetired)
+          throw new Error("shared capacity transition identity mismatch");
+        const current = ledger(state);
+        const result = current.transition(
+          state.generation,
+          fromKey,
+          claim.reservation,
+          effectiveLimits(state.limits, limits),
+        );
+        if (!result.reserved) return { value: result, changed: false };
+        prior.released = true;
+        state.claims.push(claim);
+        return { value: { reserved: true, claimId: claim.id }, changed: true };
+      },
+    );
+    return { ...result.value, generation: result.generation };
   }
 }

@@ -27,6 +27,7 @@ import {
   leaseRef,
   parseLeaseCommit,
   type GitCommitObject,
+  type GitCommitContent,
   type LeaseState,
   type LeaseStore,
 } from "./lease.js";
@@ -217,7 +218,17 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   #droppedOperationObservations = 0;
   #repositoryId: string | null = null;
   readonly #discovery: GitHubDiscoverySession;
-  readonly #discoveryCommitCache = new Map<string, Omit<GitCommitObject, "serverTime">>();
+  readonly #commitContents = new Map<string, { value: GitCommitContent; bytes: number }>();
+  readonly #pendingCommitContents = new Map<string, Promise<GitCommitContent>>();
+  #commitContentBytes = 0;
+  readonly #contentCounts = {
+    hits: 0,
+    misses: 0,
+    coalesced: 0,
+    evictions: 0,
+    peakBytes: 0,
+    peakEntries: 0,
+  };
 
   constructor(options: GitHubControlStoreOptions) {
     this.#octokit = createOctokit(options);
@@ -487,7 +498,13 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       };
     } catch (error) {
       if ((error as { status?: number }).status === 404) {
-        return { oid: null, serverTime: new Date() };
+        const response = (
+          error as { response?: { headers: Record<string, string | number | undefined> } }
+        ).response;
+        return {
+          oid: null,
+          serverTime: response?.headers.date ? responseDate(response) : await this.serverTime(),
+        };
       }
       throw error;
     }
@@ -505,6 +522,80 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       ref: item.ref,
       oid: item.object.sha,
     }));
+  }
+
+  /** Store identity includes its immutable authentication, host and repository context. */
+  commitContentTelemetry() {
+    return {
+      ...this.#contentCounts,
+      entries: this.#commitContents.size,
+      bytes: this.#commitContentBytes,
+    };
+  }
+
+  async readCommitContent(oid: string): Promise<GitCommitContent> {
+    if (!/^[a-f0-9]{40,64}$/.test(oid)) throw new Error("invalid immutable commit identity");
+    // The shared promise never waits under one owner's quota/cancellation scope.
+    // Each caller retries a definite refusal at its own existing outer boundary.
+    return retryGitHubQuota(async () => {
+      const cached = this.#commitContents.get(oid);
+      if (cached) {
+        this.#contentCounts.hits++;
+        this.#commitContents.delete(oid);
+        this.#commitContents.set(oid, cached);
+        return structuredClone(cached.value);
+      }
+      let pending = this.#pendingCommitContents.get(oid);
+      if (pending) this.#contentCounts.coalesced++;
+      else {
+        // Cache pressure does not reject a supported read. Overflow responses are
+        // validated but never retained, even if a slot opens before they arrive.
+        const retain = this.#pendingCommitContents.size < 256;
+        this.#contentCounts.misses++;
+        pending = this.readCommit(oid).then(({ serverTime: _time, ...content }) => {
+          if (
+            content.oid !== oid ||
+            !/^[a-f0-9]{40,64}$/.test(content.treeOid) ||
+            !Array.isArray(content.parentOids) ||
+            content.parentOids.some((parent) => !/^[a-f0-9]{40,64}$/.test(parent)) ||
+            typeof content.message !== "string"
+          )
+            throw new Error("immutable commit identity or shape mismatch");
+          const bytes = Buffer.byteLength(content.message) + content.parentOids.length * 64 + 256;
+          if (retain && bytes <= 8 * 1024 * 1024) {
+            while (
+              this.#commitContents.size >= 256 ||
+              this.#commitContentBytes + bytes > 8 * 1024 * 1024
+            ) {
+              const oldest = this.#commitContents.keys().next().value!;
+              this.#commitContentBytes -= this.#commitContents.get(oldest)!.bytes;
+              this.#commitContents.delete(oldest);
+              this.#contentCounts.evictions++;
+            }
+            this.#commitContents.set(oid, { value: structuredClone(content), bytes });
+            this.#commitContentBytes += bytes;
+            this.#contentCounts.peakBytes = Math.max(
+              this.#contentCounts.peakBytes,
+              this.#commitContentBytes,
+            );
+            this.#contentCounts.peakEntries = Math.max(
+              this.#contentCounts.peakEntries,
+              this.#commitContents.size,
+            );
+          }
+          return content;
+        });
+        if (retain) this.#pendingCommitContents.set(oid, pending);
+        const shared = pending;
+        void pending
+          .finally(() => {
+            if (this.#pendingCommitContents.get(oid) === shared)
+              this.#pendingCommitContents.delete(oid);
+          })
+          .catch(() => {});
+      }
+      return structuredClone(await pending);
+    });
   }
 
   async readCommit(oid: string): Promise<GitCommitObject> {
@@ -1246,13 +1337,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   }
 
   async #readDiscoveryCommit(oid: string, serverTime: Date): Promise<GitCommitObject> {
-    const cached = this.#discoveryCommitCache.get(oid);
-    if (cached) return { ...cached, serverTime };
-    const commit = await withGitHubRequestPriority("normal", () => this.readCommit(oid));
-    const { serverTime: _observedAt, ...content } = commit;
-    if (this.#discoveryCommitCache.size === 256)
-      this.#discoveryCommitCache.delete(this.#discoveryCommitCache.keys().next().value!);
-    this.#discoveryCommitCache.set(oid, content);
+    const content = await withGitHubRequestPriority("normal", () => this.readCommitContent(oid));
     return { ...content, serverTime };
   }
 

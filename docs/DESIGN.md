@@ -166,6 +166,14 @@ dependency, pull-request, and event relationships must be read consistently. A p
 small cardinality preflight for an Objective and caches that bound; the detailed query detects a
 changed `totalCount` and refreshes the bound before it can return a partial graph.
 
+Exact immutable commit content can be reused within one store and authentication context, with
+entry and byte bounds and coalesced identical reads. This content carries no current provider time.
+Fresh ref observations still establish the observed generation and time; a warm content hit cannot
+establish current ownership, permissions, graph membership, or admission authority. Discarding the
+cache reconstructs from GitHub. Transport diagnostics preserve their observation context across
+request scheduling and count each attempted transport, including traffic outside a mutation operation.
+Nested phase totals remain inclusive and are not additive.
+
 The detailed query also returns its own primary GraphQL cost, remaining balance, and reset time.
 The Supervisor admits ready work without reserving GitHub quota for a future worker wave, graph
 projection, or timeout interval. Other Objectives and external clients share that quota, so such
@@ -453,6 +461,11 @@ lock. Normal issue, comment, receipt, projection and PR publication writes do no
 it. Independent sessions coordinate capacity using a short custom-ref CAS transaction, not an
 execution-long lease. One-time import of older resource reservations and explicit scheduler ceiling
 changes are genuine shared-state boundaries. See [the locking audit](OBJECTIVE-AUTHORITY.md).
+
+Shared-capacity transactions return the generation they acknowledged, or the generation observed
+for a rejection. Callers need no follow-on snapshot solely to rediscover that result. The coordinator
+may retain its acknowledged immutable state, but each subsequent capacity observation still reads
+the current ref and detects a peer generation change.
 
 The shared-capacity v2 snapshot retains every active or unresolved claim plus a bounded recent
 release journal. At 3,072 journal entries, a fenced capacity mutation moves explicit releases into
@@ -854,6 +867,12 @@ original evidence timestamps, and its paid review is accounted once. Completed v
 are preserved before rechecking mutable trunk. Another proved sibling integration creates a new
 linked refresh/validation/review identity; neither an old review nor an unexplained external advance
 authorizes the next head. Native linear-stack rebase proofs remain separate from sibling refreshes.
+
+Pending integration observations carry their exact head/base and a reason. The first-check discovery
+grace retains its 60-second safety interval and schedules its known expiry directly, bounded by the
+Objective deadline. Unknown readiness keeps the bounded polling cadence, reset when the observed
+head/base or reason changes. These are scheduling hints: integration still reacquires its required
+current authority, head, base and check evidence.
 
 Publication repair rereads authenticated history before writing a missing receipt. Equivalent
 receipts may still exist after response loss or delayed observation; Factory preserves every audit

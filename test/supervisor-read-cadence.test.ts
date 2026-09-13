@@ -1,5 +1,6 @@
 import { expect, it, vi } from "vitest";
 
+import { GitHubControlStore } from "../src/control/github-store.js";
 import { GitHubReader } from "../src/github.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import * as progress from "../src/scheduling/progress-wake.js";
@@ -126,3 +127,34 @@ it("admits and completes ready work below the former speculative GraphQL reserve
     await f.dispose();
   }
 });
+
+it("schedules first-check grace expiry without an additional external poll", async () => {
+  const f = await providerSupervisorFixture("daytona-burst", { localOnly: true });
+  const readPull = vi.mocked(GitHubControlStore.prototype.readPullRequest);
+  const original = readPull.getMockImplementation()!;
+  const deadlines = new Map<number, number>();
+  readPull.mockImplementation(async (number) => {
+    const current = await original(number);
+    if (!deadlines.has(number)) deadlines.set(number, Date.now() + 750);
+    return { ...current, createdAt: new Date(deadlines.get(number)! - 60_000) };
+  });
+  const waits: Array<{ maximum: number; remaining: number }> = [];
+  const originalWait = progress.waitForProgress;
+  vi.spyOn(progress, "waitForProgress").mockImplementation(async (args) => {
+    const deadline = args.retryDeadlines?.find((value) => [...deadlines.values()].includes(value));
+    if (deadline !== undefined)
+      waits.push({ maximum: args.maximumMs, remaining: deadline - Date.now() });
+    return originalWait(args);
+  });
+  try {
+    await expect(f.run(undefined, null)).resolves.toMatchObject({ status: "completed" });
+    expect(waits.length).toBeGreaterThan(0);
+    for (const wait of waits) {
+      expect(wait.maximum).toBeLessThanOrEqual(750);
+      expect(Math.abs(wait.maximum - Math.max(1, wait.remaining))).toBeLessThan(50);
+    }
+  } finally {
+    await f.dispose();
+    vi.restoreAllMocks();
+  }
+}, 20_000);

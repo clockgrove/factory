@@ -7,7 +7,11 @@ import { GitHubControlStore } from "../src/control/github-store.js";
 import { LeaseManager } from "../src/control/lease.js";
 import { LifecycleRecorder } from "../src/control/events.js";
 import { decodeEventComments } from "../src/control/receipts.js";
-import { observeGitHubTransportPhase } from "../src/control/mutation-observation.js";
+import {
+  observeGitHubTransportPhase,
+  observeGitHubTransportTrace,
+  type GitHubTransportAttempt,
+} from "../src/control/mutation-observation.js";
 import { SharedCapacityCoordinator } from "../src/controller/shared-capacity.js";
 import { capacityReservationKey } from "../src/scheduling/capacity-ledger.js";
 import type { CapacityReservation } from "../src/scheduling/capacity-ledger.js";
@@ -185,100 +189,118 @@ it("freezes real-transport lease/capacity/recorder component costs at 3/30/100 i
         server.resetRows();
         let observedCounts = { reads: 0, writes: 0, unclassified: 0 };
         const generations: number[] = [];
-        await observeGitHubTransportPhase(
-          "component-workload",
-          (row) => {
-            observedCounts = {
-              reads: row.readRequests,
-              writes: row.mutationRequests,
-              unclassified: row.unclassifiedRequests,
-            };
-          },
+        const trace: GitHubTransportAttempt[] = [];
+        await observeGitHubTransportTrace(
+          (attempt) => trace.push(attempt),
           async () => {
-            for (let index = 0; index < size; index++) {
-              const workItem = index + 100;
-              // Identity changes across repeated workloads; each mode creates genuine new history.
-              const attempt = mode === "cold" ? 1 : mode === "warm" ? 2 : 3;
-              server.phase = "current-owner";
-              await c.leases.assertCurrent(lease);
-              await c.leases.assertCurrent(lease);
-              const input = {
-                objective: 7,
-                workItem,
-                attempt,
-                phase: "execution" as const,
-                backendId: "fixture/local",
-                admissionClass: "local" as const,
-                local: true,
-                cpu: 1,
-                memoryMb: 128,
-                paidUnits: 0,
-                paths: [],
-                exclusiveResources: [],
-              };
-              const reservation: CapacityReservation = {
-                ...input,
-                key: capacityReservationKey(input),
-              };
-              server.phase = "admission-observation";
-              await c.capacity.snapshot();
-              server.phase = "capacity-reserve";
-              const result = await c.capacity.reserve(owner, reservation, limits);
-              expect(result.reserved).toBe(true);
-              server.phase = "acknowledgment-generation";
-              // Same logical consumer across baseline/candidate, with supported result reuse.
-              generations.push(
-                "generation" in result
-                  ? Number(result.generation)
-                  : (await c.capacity.snapshot()).generation,
-              );
-              server.phase = "accounting";
-              const durable = {
-                ref: "refs/fixture",
-                oid: BASE,
-                objective: 7,
-                workItem,
-                attempt,
-                backend: "fixture/local",
-                baseSha: BASE,
-                runId: "frozen-run",
-                directorEpoch: lease.epoch,
-                policyDigest: DIGEST,
-                sequence: 1,
-                receiptDigest: DIGEST,
-                createdAt: new Date(DATE),
-              };
-              await c.recorder.budgetBatch([
-                {
-                  lease,
-                  reservation: durable,
-                  workItemNodeId: `I_${workItem}`,
-                  sequence: attempt * 1000 + index * 2,
-                  event: "BudgetReconciled",
-                  unit: "local_milliseconds",
-                  amount: 10,
-                  usageId: `worker-${workItem}-${attempt}`,
-                },
-                {
-                  lease,
-                  reservation: durable,
-                  workItemNodeId: `I_${workItem}`,
-                  sequence: attempt * 1000 + index * 2 + 1,
-                  event: "BudgetReconciled",
-                  unit: "validation_milliseconds",
-                  amount: 5,
-                  usageId: `validation-${workItem}-${attempt}`,
-                },
-              ]);
-              server.phase = "capacity-release";
-              await c.capacity.release(owner, reservation.key);
-            }
+            await observeGitHubTransportPhase(
+              "component-workload",
+              (row) => {
+                observedCounts = {
+                  reads: row.readRequests,
+                  writes: row.mutationRequests,
+                  unclassified: row.unclassifiedRequests,
+                };
+              },
+              async () => {
+                for (let index = 0; index < size; index++) {
+                  const workItem = index + 100;
+                  // Identity changes across repeated workloads; each mode creates genuine new history.
+                  const attempt = mode === "cold" ? 1 : mode === "warm" ? 2 : 3;
+                  server.phase = "current-owner";
+                  await c.leases.assertCurrent(lease);
+                  await c.leases.assertCurrent(lease);
+                  const input = {
+                    objective: 7,
+                    workItem,
+                    attempt,
+                    phase: "execution" as const,
+                    backendId: "fixture/local",
+                    admissionClass: "local" as const,
+                    local: true,
+                    cpu: 1,
+                    memoryMb: 128,
+                    paidUnits: 0,
+                    paths: [],
+                    exclusiveResources: [],
+                  };
+                  const reservation: CapacityReservation = {
+                    ...input,
+                    key: capacityReservationKey(input),
+                  };
+                  server.phase = "admission-observation";
+                  await c.capacity.snapshot();
+                  server.phase = "capacity-reserve";
+                  const result = await c.capacity.reserve(owner, reservation, limits);
+                  expect(result.reserved).toBe(true);
+                  server.phase = "acknowledgment-generation";
+                  // Same logical consumer across baseline/candidate, with supported result reuse.
+                  generations.push(
+                    "generation" in result
+                      ? Number(result.generation)
+                      : (await c.capacity.snapshot()).generation,
+                  );
+                  server.phase = "accounting";
+                  const durable = {
+                    ref: "refs/fixture",
+                    oid: BASE,
+                    objective: 7,
+                    workItem,
+                    attempt,
+                    backend: "fixture/local",
+                    baseSha: BASE,
+                    runId: "frozen-run",
+                    directorEpoch: lease.epoch,
+                    policyDigest: DIGEST,
+                    sequence: 1,
+                    receiptDigest: DIGEST,
+                    createdAt: new Date(DATE),
+                  };
+                  await c.recorder.budgetBatch([
+                    {
+                      lease,
+                      reservation: durable,
+                      workItemNodeId: `I_${workItem}`,
+                      sequence: attempt * 1000 + index * 2,
+                      event: "BudgetReconciled",
+                      unit: "local_milliseconds",
+                      amount: 10,
+                      usageId: `worker-${workItem}-${attempt}`,
+                    },
+                    {
+                      lease,
+                      reservation: durable,
+                      workItemNodeId: `I_${workItem}`,
+                      sequence: attempt * 1000 + index * 2 + 1,
+                      event: "BudgetReconciled",
+                      unit: "validation_milliseconds",
+                      amount: 5,
+                      usageId: `validation-${workItem}-${attempt}`,
+                    },
+                  ]);
+                  server.phase = "capacity-release";
+                  await c.capacity.release(owner, reservation.key);
+                }
+              },
+            );
           },
         );
         const rows = rowsFor();
         const reads = rows.reduce((sum, row) => sum + row.reads, 0);
         const writes = rows.reduce((sum, row) => sum + row.writes, 0);
         expect(observedCounts).toEqual({ reads, writes, unclassified: 0 });
+        expect(trace).toHaveLength(reads + writes);
+        const traceRows = new Map<string, number>();
+        for (const attempt of trace) {
+          const key = [
+            attempt.phase,
+            attempt.operation,
+            attempt.reason,
+            attempt.route,
+            attempt.kind,
+          ].join("/");
+          traceRows.set(key, (traceRows.get(key) ?? 0) + 1);
+        }
         expect(generations.every((value, i) => i === 0 || value > generations[i - 1]!)).toBe(true);
         reports.push({
           size,
@@ -294,6 +316,20 @@ it("freezes real-transport lease/capacity/recorder component costs at 3/30/100 i
           }),
           gitTransfers: 0,
           nominalTransportCostUnits: reads + writes,
+          transportAttribution: {
+            rows: Object.fromEntries([...traceRows].sort()),
+            droppedRecords: 0,
+            unclassified: trace.filter((entry) => entry.kind === "unclassified").length,
+          },
+          contentCache:
+            (
+              c.store as GitHubControlStore & { commitContentTelemetry?: () => unknown }
+            ).commitContentTelemetry?.() ?? null,
+          history: {
+            commits: server.commits.size,
+            comments: server.comments.length,
+            commentBytes: Buffer.byteLength(server.comments.join("")),
+          },
           limitations:
             "Component workload only; no Supervisor, compilation, artifact, PR, readiness, topology scheduling, or model execution. Mutation scheduler is immediate; Octokit timers are simulated. Modes grow one history, not equal checkpoints. Warm mode includes new history; bootstrap reported separately. Cost units are request counts, not measured latency.",
         });

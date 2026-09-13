@@ -16,6 +16,7 @@ import { validationPlanFromPacket } from "../src/validation/plan.js";
 import { workerPacketPrompt } from "../src/backends/codex-cli-local.js";
 import type { AttemptContext } from "../src/execution/backend.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
+import { inferCriterionRisk } from "../src/compiler/validation-design.js";
 
 const sha = "a".repeat(40);
 const ordinaryRisks = (criteria: string[]) =>
@@ -400,6 +401,41 @@ describe("bounded objective compiler", () => {
         ],
       }),
     ).toThrow(/criterion risk is understated/);
+  });
+
+  it("accepts numeric safe-integer coverage without understating actual protected risks", () => {
+    const criterion =
+      "Focused node:test coverage verifies exact returned objects, zero and maximum safe integer quantities, invalid names, negative/fractional/unsafe and nonnumeric quantities, and existing ASCII, separator, digit, and non-ASCII slug behavior; npm test passes with all existing tests preserved.";
+    expect(() =>
+      compileObjective({
+        title: "Numeric catalog validation",
+        baseSha: sha,
+        repositoryFacts: facts,
+        workItems: [
+          {
+            ...base,
+            acceptance: [criterion],
+            criterionRisks: ordinaryRisks([criterion]),
+            validation: [
+              {
+                tier: "mechanical",
+                criteria: [criterion],
+                rationale: "Real numeric boundary tests establish these outcomes.",
+                evidenceCommands: ["npm test"],
+              },
+            ],
+          },
+        ],
+      }),
+    ).not.toThrow();
+    for (const numeric of ["safe integer", "safe integers", "safe-integer", "SAFE INTEGER"]) {
+      expect(inferCriterionRisk(`Reject values outside the ${numeric} range`)).toBe("ordinary");
+      expect(inferCriterionRisk(`Validate ${numeric} values and preserve safety interlocks`)).toBe(
+        "safety",
+      );
+    }
+    expect(inferCriterionRisk("The emergency stop is safe and operates safely")).toBe("safety");
+    expect(inferCriterionRisk("Safe integer values never expose a secret")).toBe("security");
   });
 
   it("does not treat overloaded nouns as protected actions without risk context", () => {

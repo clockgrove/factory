@@ -64,11 +64,39 @@ import {
   GitHubDiscoverySession,
   recordPartialDiscoveryRequests,
   type DiscoveryCollection,
+  type DiscoveryPage,
+  type DiscoveryLocator,
   type DiscoveryComment,
   type DiscoveryIssue,
   type DiscoveryControlRef,
   type DiscoverySessionTelemetry,
 } from "./discovery-session.js";
+
+import {
+  DISCOVERY_LOCATOR_PREFIX,
+  parseDiscoveryLocatorRef,
+  discoveryLocatorRef,
+  ensureDiscoveryLocator,
+  retireDiscoveryLocator,
+  type DiscoveryLocatorScope,
+} from "./discovery-locators.js";
+
+const DISCOVERY_ISSUES = `query FactoryDiscoveryIssues($owner:String!, $repo:String!, $states:[IssueState!]!, $since:DateTime, $cursor:String) {
+  repository(owner:$owner,name:$repo) {
+    issues(first:100,after:$cursor,labels:["factory:objective"],states:$states,filterBy:{since:$since},orderBy:{field:CREATED_AT,direction:ASC}) {
+      nodes { __typename number state updatedAt comments { totalCount } }
+      pageInfo { endCursor hasNextPage }
+    }
+  }
+}`;
+const DISCOVERY_LOCATORS = `query FactoryDiscoveryLocators($owner:String!, $repo:String!, $prefix:String!, $cursor:String) {
+  repository(owner:$owner,name:$repo) {
+    refs(refPrefix:$prefix,first:100,after:$cursor,orderBy:{field:ALPHABETICAL,direction:ASC}) {
+      nodes { name prefix target { oid } }
+      pageInfo { endCursor hasNextPage }
+    }
+  }
+}`;
 
 const UPDATE_REFS = `
 mutation FactoryUpdateRefs(
@@ -277,11 +305,10 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     this.#discovery = new GitHubDiscoverySession(
       {
         authenticate: () => this.#authenticateDiscovery(),
-        listLabelledIssues: (etag) => this.#listDiscoveryIssues("labelled", undefined, etag),
-        listIssueDelta: (since, etag) => this.#listDiscoveryIssues("delta", since, etag),
-        listRepositoryComments: (since, etag) => this.#listRepositoryDiscoveryComments(since, etag),
+        listIssues: (input) => this.#listDiscoveryIssues(input),
+        readIssue: (objective, etag) => this.#readDiscoveryIssue(objective, etag),
         listObjectiveComments: (objective) => this.#listObjectiveDiscoveryComments(objective),
-        listControlRefs: (etag) => this.#listDiscoveryControlRefs(etag),
+        listLocators: (cursor) => this.#listDiscoveryLocators(cursor),
         classify: (input) => this.#classifyDiscoveryObjective(input),
       },
       options.discoveryNow,
@@ -991,10 +1018,46 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     );
   }
 
-  /** Bootstrap once from complete authenticated history, then consume bounded
-   * conditional deltas. The session is a scheduling index, never authority. */
-  async discoverObjectiveActivations(): Promise<DurableObjectiveActivation[]> {
-    return this.#discovery.discover();
+  /** Stream filtered metadata and exact obligations; hints never grant authority. */
+  async discoverObjectiveActivations(
+    knownObjectives: readonly number[] = [],
+  ): Promise<DurableObjectiveActivation[]> {
+    return this.#discovery.discover(knownObjectives);
+  }
+
+  async ensureDiscoveryLocator(
+    scope: DiscoveryLocatorScope,
+    anchor?: { oid: string },
+  ): Promise<void> {
+    if (await this.readRef(discoveryLocatorRef(scope))) return;
+    const oid =
+      anchor?.oid ?? (await this.getBranchHeadOid((await this.getRepositoryFacts()).defaultBranch));
+    await ensureDiscoveryLocator(this, scope, oid);
+  }
+
+  async retireDiscoveryLocator(scope: DiscoveryLocatorScope): Promise<void> {
+    await retireDiscoveryLocator(this, scope);
+  }
+
+  async deleteExactDiscoveryRef(ref: string): Promise<void> {
+    if (!parseDiscoveryLocatorRef(ref))
+      throw new Error("only exact disposable discovery locators may be retired");
+    try {
+      await this.#call(
+        () =>
+          this.#octokit.request("DELETE /repos/{owner}/{repo}/git/refs/{ref}", {
+            owner: this.#owner,
+            repo: this.#repo,
+            ref: stripRefs(ref),
+          }),
+        true,
+        "cleanup",
+        "deleteExactDiscoveryRef",
+        "atomic-publication",
+      );
+    } catch (error) {
+      if (this.#status(error) !== 404) throw error;
+    }
   }
 
   async #authenticateDiscovery(): Promise<{ login: string; serverTime: Date }> {
@@ -1015,267 +1078,244 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     }
   }
 
-  async #listDiscoveryIssues(
-    mode: "labelled" | "delta",
-    since: string | undefined,
-    etag: string | undefined,
-  ): Promise<DiscoveryCollection<DiscoveryIssue>> {
-    const byNumber = new Map<number, DiscoveryIssue>();
-    let requests = 0;
-    let nextEtag: string | undefined;
-    let firstResponseAt: string | undefined;
-    for (let page = 1; page <= DISCOVERY_SESSION_LIMITS.pagesPerProbe; page++) {
-      let response;
-      let transported = false;
-      try {
-        response = await withGitHubTransportCallbacks(
-          { onTransported: () => (transported = true) },
-          () =>
-            withGitHubRequestPriority("normal", () =>
-              this.#call(() =>
-                this.#octokit.request("GET /repos/{owner}/{repo}/issues", {
-                  owner: this.#owner,
-                  repo: this.#repo,
-                  state: "all",
-                  // `since` still filters by updated_at. Immutable creation
-                  // order prevents an edit from moving a previously scanned
-                  // row across the next page offset.
-                  sort: "created",
-                  direction: "asc",
-                  per_page: 100,
-                  page,
-                  ...(mode === "labelled" ? { labels: "factory:objective" } : { since: since! }),
-                  ...(page === 1 && etag ? { headers: { "if-none-match": etag } } : {}),
-                }),
-              ),
-            ),
-        );
-      } catch (error) {
-        if (page === 1 && this.#status(error) === 304) {
-          return { items: [], requests: 1, notModified: true, ...(etag ? { etag } : {}) };
-        }
-        recordPartialDiscoveryRequests(error, requests + (transported ? 1 : 0));
-        throw error;
-      }
-      requests++;
-      try {
-        nextEtag ??= this.#etag(response.headers);
-        const observedAt = responseDate(response).toISOString();
-        firstResponseAt ??= observedAt;
-        for (const raw of response.data) {
-          if (!Number.isInteger(raw.number) || raw.number <= 0)
-            throw new Error("GitHub issue discovery returned an invalid issue number");
-          if (raw.state !== "open" && raw.state !== "closed")
-            throw new Error(`Objective #${raw.number} returned an invalid issue state`);
-          const labels = raw.labels
-            .map((label) => (typeof label === "string" ? label : label.name))
-            .filter((label): label is string => typeof label === "string")
-            .sort((left, right) => left.localeCompare(right));
-          if (mode === "labelled" && labels.length === 0) labels.push("factory:objective");
-          byNumber.set(raw.number, {
-            number: raw.number,
-            state: raw.state,
-            labels,
-            title: raw.title,
-            body: raw.body ?? "",
-            pullRequest: "pull_request" in raw,
-            updatedAt: raw.updated_at ?? observedAt,
-          });
-        }
-        if (!this.#hasNext(response.headers))
-          return {
-            items: [...byNumber.values()],
-            requests,
-            notModified: false,
-            ...(requests === 1 && response.data.length < 100 && nextEtag ? { etag: nextEtag } : {}),
-            ...(requests > 1 && firstResponseAt ? { safeThrough: firstResponseAt } : {}),
-          };
-      } catch (error) {
-        recordPartialDiscoveryRequests(error, requests);
-        throw error;
-      }
-    }
-    const error = new Error("repository issue discovery exceeds its page limit");
-    recordPartialDiscoveryRequests(error, requests);
-    throw error;
-  }
-
-  async #listRepositoryDiscoveryComments(
-    since: string,
-    etag?: string,
-  ): Promise<DiscoveryCollection<DiscoveryComment>> {
-    return this.#listDiscoveryComments({ since, ...(etag ? { etag } : {}) });
-  }
-
-  async #listObjectiveDiscoveryComments(
-    objective: number,
-  ): Promise<DiscoveryCollection<DiscoveryComment>> {
-    return this.#listDiscoveryComments({ objective });
-  }
-
-  async #listDiscoveryComments(input: {
-    objective?: number;
-    since?: string;
-    etag?: string;
-  }): Promise<DiscoveryCollection<DiscoveryComment>> {
-    const byId = new Map<string, DiscoveryComment>();
-    let requests = 0;
-    let nextEtag: string | undefined;
-    let firstResponseAt: string | undefined;
-    for (let page = 1; page <= DISCOVERY_SESSION_LIMITS.pagesPerProbe; page++) {
-      let response;
-      let transported = false;
-      try {
-        response = await withGitHubTransportCallbacks(
-          { onTransported: () => (transported = true) },
-          () =>
-            withGitHubRequestPriority("normal", () =>
-              this.#call(() =>
-                input.objective === undefined
-                  ? this.#octokit.request("GET /repos/{owner}/{repo}/issues/comments", {
-                      owner: this.#owner,
-                      repo: this.#repo,
-                      // The delta predicate remains updated_at-based, while
-                      // immutable creation order prevents edits from moving
-                      // rows across live page offsets.
-                      sort: "created",
-                      direction: "asc",
-                      since: input.since!,
-                      per_page: 100,
-                      page,
-                      ...(page === 1 && input.etag
-                        ? { headers: { "if-none-match": input.etag } }
-                        : {}),
-                    })
-                  : this.#octokit.request(
-                      "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
-                      {
-                        owner: this.#owner,
-                        repo: this.#repo,
-                        issue_number: input.objective,
-                        per_page: 100,
-                        page,
-                      },
-                    ),
-              ),
-            ),
-        );
-      } catch (error) {
-        if (page === 1 && input.etag && this.#status(error) === 304) {
-          return { items: [], requests: 1, notModified: true, etag: input.etag };
-        }
-        recordPartialDiscoveryRequests(error, requests + (transported ? 1 : 0));
-        throw error;
-      }
-      requests++;
-      try {
-        nextEtag ??= this.#etag(response.headers);
-        const observedAt = responseDate(response).toISOString();
-        firstResponseAt ??= observedAt;
-        for (const raw of response.data) {
-          const id = String(raw.id);
-          if (!/^\d+$/.test(id)) throw new Error("GitHub comment discovery returned an invalid ID");
-          const issueNumber = input.objective ?? this.#commentIssueNumber(raw.issue_url);
-          byId.set(id, {
-            id,
-            issueNumber,
-            body: raw.body ?? "",
-            authorLogin: raw.user?.login ?? null,
-            authorAssociation: raw.author_association ?? null,
-            updatedAt: raw.updated_at ?? raw.created_at ?? observedAt,
-          });
-        }
-        if (!this.#hasNext(response.headers))
-          return {
-            items: [...byId.values()],
-            requests,
-            notModified: false,
-            ...(requests === 1 && response.data.length < 100 && nextEtag ? { etag: nextEtag } : {}),
-            ...(input.objective === undefined && requests > 1 && firstResponseAt
-              ? { safeThrough: firstResponseAt }
-              : {}),
-          };
-      } catch (error) {
-        recordPartialDiscoveryRequests(error, requests);
-        throw error;
-      }
-    }
-    const error = new Error(
-      input.objective === undefined
-        ? "repository comment delta exceeds its page limit"
-        : `Objective #${input.objective} exceeds the controller comment limit`,
-    );
-    recordPartialDiscoveryRequests(error, requests);
-    throw error;
-  }
-
-  async #listDiscoveryControlRefs(
-    etag?: string,
-  ): Promise<DiscoveryCollection<DiscoveryControlRef>> {
-    let response;
+  async #discoveryGraphQL<T>(
+    query: string,
+    variables: Record<string, unknown>,
+  ): Promise<{ data: T; serverTime: string; requests: number; returnedBytes: number }> {
     let transported = false;
     try {
-      response = await withGitHubTransportCallbacks(
+      const response = await withGitHubTransportCallbacks(
         { onTransported: () => (transported = true) },
         () =>
           withGitHubRequestPriority("normal", () =>
-            this.#call(() =>
-              this.#octokit.request("GET /repos/{owner}/{repo}/git/matching-refs/{ref}", {
-                owner: this.#owner,
-                repo: this.#repo,
-                ref: "clockgrove-factory/",
-                ...(etag ? { headers: { "if-none-match": etag } } : {}),
-              }),
-            ),
+            this.#call(async () => {
+              const result = await this.#octokit.request("POST /graphql", { query, variables });
+              if (result.data.errors?.length)
+                throw Object.assign(new Error("incomplete GraphQL discovery response"), {
+                  response: result,
+                });
+              return result;
+            }),
           ),
       );
-    } catch (error) {
-      if (etag && this.#status(error) === 304)
-        return { items: [], requests: 1, notModified: true, etag };
-      recordPartialDiscoveryRequests(error, transported ? 1 : 0);
-      throw error;
-    }
-    try {
-      if (response.data.length > DISCOVERY_SESSION_LIMITS.controlRefs)
-        throw new Error("repository control-ref discovery exceeds its record limit");
-      const serverTime = responseDate(response);
-      const items: DiscoveryControlRef[] = [];
-      const seen = new Map<string, string>();
-      for (const raw of response.data) {
-        const lease = /^refs\/clockgrove-factory\/leases\/objective-(\d+)$/.exec(raw.ref);
-        const recovery =
-          /^refs\/clockgrove-factory\/recovery-plans\/objective-(\d+)\/plan-[a-f0-9]{64}$/.exec(
-            raw.ref,
-          );
-        const match = lease ?? recovery;
-        if (!match) continue;
-        const objective = Number(match[1]);
-        if (!Number.isInteger(objective) || objective <= 0)
-          throw new Error("GitHub control-ref discovery returned an invalid ref");
-        const prior = seen.get(raw.ref);
-        if (prior && prior !== raw.object.sha)
-          throw new Error(`GitHub returned conflicting values for control ref ${raw.ref}`);
-        if (prior) continue;
-        seen.set(raw.ref, raw.object.sha);
-        items.push({
-          kind: lease ? "lease" : "recovery-plan",
-          objective,
-          ref: raw.ref,
-          oid: raw.object.sha,
-          serverTime,
-        });
-      }
-      const responseEtag = this.#etag(response.headers);
       return {
-        items,
+        data: response.data.data as T,
+        serverTime: responseDate(response).toISOString(),
         requests: 1,
-        notModified: false,
-        ...(responseEtag ? { etag: responseEtag } : {}),
+        returnedBytes: Buffer.byteLength(JSON.stringify(response.data)),
       };
     } catch (error) {
       recordPartialDiscoveryRequests(error, transported ? 1 : 0);
       throw error;
     }
+  }
+
+  async #listDiscoveryIssues(input: {
+    state: "open" | "closed";
+    since?: string;
+    cursor?: string;
+  }): Promise<DiscoveryPage<DiscoveryIssue>> {
+    const response = await this.#discoveryGraphQL<{
+      repository: {
+        issues: {
+          nodes: {
+            __typename: string;
+            number: number;
+            state: string;
+            updatedAt: string;
+            comments: { totalCount: number };
+          }[];
+          pageInfo: { endCursor: string | null; hasNextPage: boolean };
+        };
+      };
+    }>(DISCOVERY_ISSUES, {
+      owner: this.#owner,
+      repo: this.#repo,
+      states: [input.state.toUpperCase()],
+      since: input.since ?? null,
+      cursor: input.cursor ?? null,
+    });
+    const connection = response.data?.repository?.issues;
+    if (!connection || !Array.isArray(connection.nodes) || !connection.pageInfo)
+      throw new Error("incomplete issue discovery page");
+    const items: DiscoveryIssue[] = [];
+    for (const raw of connection.nodes) {
+      if (raw.__typename !== "Issue") continue;
+      if (
+        !Number.isSafeInteger(raw.number) ||
+        raw.number <= 0 ||
+        !["OPEN", "CLOSED"].includes(raw.state) ||
+        !Number.isSafeInteger(raw.comments?.totalCount) ||
+        raw.comments.totalCount < 0 ||
+        !Number.isFinite(Date.parse(raw.updatedAt))
+      )
+        throw new Error("GitHub issue discovery returned invalid metadata");
+      items.push({
+        number: raw.number,
+        state: raw.state === "OPEN" ? "open" : "closed",
+        objectiveLabel: true,
+        updatedAt: raw.updatedAt,
+        comments: raw.comments.totalCount,
+      });
+    }
+    if (connection.pageInfo.hasNextPage && !connection.pageInfo.endCursor)
+      throw new Error("issue discovery page omitted its next cursor");
+    return {
+      items,
+      cursor: connection.pageInfo.hasNextPage ? connection.pageInfo.endCursor : null,
+      serverTime: response.serverTime,
+      requests: response.requests,
+      returnedBytes: response.returnedBytes,
+    };
+  }
+
+  async #listDiscoveryLocators(cursor?: string): Promise<DiscoveryPage<DiscoveryLocator>> {
+    const response = await this.#discoveryGraphQL<{
+      repository: {
+        refs: {
+          nodes: { name: string; prefix: string; target: { oid: string } }[];
+          pageInfo: { endCursor: string | null; hasNextPage: boolean };
+        };
+      };
+    }>(DISCOVERY_LOCATORS, {
+      owner: this.#owner,
+      repo: this.#repo,
+      prefix: DISCOVERY_LOCATOR_PREFIX,
+      cursor: cursor ?? null,
+    });
+    const connection = response.data?.repository?.refs;
+    if (!connection || !Array.isArray(connection.nodes) || !connection.pageInfo)
+      throw new Error("incomplete locator discovery page");
+    const items: DiscoveryLocator[] = [];
+    for (const raw of connection.nodes) {
+      const ref = `${raw.prefix}${raw.name}`;
+      const scope = parseDiscoveryLocatorRef(ref);
+      if (!scope || !/^[0-9a-f]{40,64}$/.test(raw.target?.oid))
+        throw new Error("invalid active discovery locator");
+      items.push({ objective: scope.objective, ref, oid: raw.target.oid });
+    }
+    if (connection.pageInfo.hasNextPage && !connection.pageInfo.endCursor)
+      throw new Error("locator page omitted its next cursor");
+    return {
+      items,
+      cursor: connection.pageInfo.hasNextPage ? connection.pageInfo.endCursor : null,
+      serverTime: response.serverTime,
+      requests: response.requests,
+      returnedBytes: response.returnedBytes,
+    };
+  }
+
+  async #readDiscoveryIssue(
+    objective: number,
+    etag?: string,
+  ): Promise<DiscoveryCollection<DiscoveryIssue>> {
+    let transported = false;
+    try {
+      const response = await withGitHubTransportCallbacks(
+        { onTransported: () => (transported = true) },
+        () =>
+          withGitHubRequestPriority("normal", () =>
+            this.#call(() =>
+              this.#octokit.request("GET /repos/{owner}/{repo}/issues/{issue_number}", {
+                owner: this.#owner,
+                repo: this.#repo,
+                issue_number: objective,
+                ...(etag ? { headers: { "if-none-match": etag } } : {}),
+              }),
+            ),
+          ),
+      );
+      const raw = response.data;
+      if (
+        raw.number !== objective ||
+        "pull_request" in raw ||
+        !["open", "closed"].includes(raw.state) ||
+        !Number.isFinite(Date.parse(raw.updated_at))
+      )
+        throw new Error(`invalid exact Objective #${objective}`);
+      return {
+        items: [
+          {
+            number: objective,
+            state: raw.state as "open" | "closed",
+            objectiveLabel: raw.labels.some(
+              (label) =>
+                (typeof label === "string" ? label : label.name)?.toLowerCase() ===
+                "factory:objective",
+            ),
+            updatedAt: raw.updated_at,
+            comments: raw.comments,
+          },
+        ],
+        requests: 1,
+        notModified: false,
+        ...(this.#etag(response.headers) ? { etag: this.#etag(response.headers)! } : {}),
+        returnedBytes: Buffer.byteLength(JSON.stringify(raw)),
+      };
+    } catch (error) {
+      if (etag && this.#status(error) === 304)
+        return { items: [], requests: 1, notModified: true, etag, returnedBytes: 0 };
+      recordPartialDiscoveryRequests(error, transported ? 1 : 0);
+      throw error;
+    }
+  }
+
+  async #listObjectiveDiscoveryComments(
+    objective: number,
+  ): Promise<DiscoveryCollection<DiscoveryComment>> {
+    const byId = new Map<string, DiscoveryComment>();
+    let requests = 0;
+    let returnedBytes = 0;
+    let bodyBytes = 0;
+    for (let page = 1; page <= DISCOVERY_SESSION_LIMITS.pagesPerProbe; page++) {
+      let transported = false;
+      try {
+        const response = await withGitHubTransportCallbacks(
+          { onTransported: () => (transported = true) },
+          () =>
+            withGitHubRequestPriority("normal", () =>
+              this.#call(() =>
+                this.#octokit.request("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
+                  owner: this.#owner,
+                  repo: this.#repo,
+                  issue_number: objective,
+                  per_page: 100,
+                  page,
+                }),
+              ),
+            ),
+        );
+        requests++;
+        returnedBytes += Buffer.byteLength(JSON.stringify(response.data));
+        for (const raw of response.data) {
+          const id = String(raw.id);
+          if (!/^\d+$/.test(id)) throw new Error(`Objective #${objective} comment has invalid ID`);
+          const body = raw.body ?? "";
+          bodyBytes += Buffer.byteLength(body) - Buffer.byteLength(byId.get(id)?.body ?? "");
+          byId.set(id, {
+            id,
+            issueNumber: objective,
+            body,
+            authorLogin: raw.user?.login ?? null,
+            authorAssociation: raw.author_association ?? null,
+            updatedAt: raw.updated_at ?? raw.created_at,
+          });
+          if (
+            bodyBytes > DISCOVERY_SESSION_LIMITS.commentBytes ||
+            byId.size > DISCOVERY_SESSION_LIMITS.commentsPerObjective
+          )
+            throw new Error(`Objective #${objective} exceeds its transient history bound`);
+        }
+        if (!this.#hasNext(response.headers))
+          return { items: [...byId.values()], requests, returnedBytes, notModified: false };
+      } catch (error) {
+        recordPartialDiscoveryRequests(error, requests + (transported && requests < page ? 1 : 0));
+        throw error;
+      }
+    }
+    const error = new Error(`Objective #${objective} exceeds its comment page limit`);
+    recordPartialDiscoveryRequests(error, requests);
+    throw error;
   }
 
   async #classifyDiscoveryObjective(input: {
@@ -1480,6 +1520,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       activationRequest &&
       !terminalAfterActivation &&
       !rejectionAfterActivation &&
+      (input.issue.state === "open" || currentRun) &&
       (currentRun || !withdrawal) &&
       (input.issue.state === "closed" || !operationallyStopped || withdrawal)
         ? {
@@ -1523,23 +1564,6 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   async #readDiscoveryCommit(oid: string, serverTime: Date): Promise<GitCommitObject> {
     const content = await withGitHubRequestPriority("normal", () => this.readCommitContent(oid));
     return { ...content, serverTime };
-  }
-
-  #commentIssueNumber(issueUrl: unknown): number {
-    if (typeof issueUrl !== "string")
-      throw new Error("repository comment delta omitted its issue URL");
-    const url = new URL(issueUrl);
-    const match = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/.exec(url.pathname);
-    if (
-      url.hostname.toLowerCase() !== "api.github.com" ||
-      match?.[1]?.toLowerCase() !== this.#owner.toLowerCase() ||
-      match?.[2]?.toLowerCase() !== this.#repo.toLowerCase()
-    )
-      throw new Error("repository comment delta returned another repository's issue URL");
-    const number = Number(match[3]);
-    if (!Number.isInteger(number) || number <= 0)
-      throw new Error("repository comment delta returned an invalid issue URL");
-    return number;
   }
 
   #etag(headers: Record<string, string | number | undefined>): string | undefined {

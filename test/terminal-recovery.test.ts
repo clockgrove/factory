@@ -243,6 +243,14 @@ describe("terminal-run recovery admission", () => {
       const assertCurrent = vi
         .spyOn(LeaseManager.prototype, "assertCurrent")
         .mockResolvedValue(undefined);
+      // This test owns startup authority, not the locator Git transport. Keep
+      // registration and disposal explicit so no fake credential leaves the fixture.
+      const registerLocator = vi
+        .spyOn(GitHubControlStore.prototype, "ensureDiscoveryLocator")
+        .mockResolvedValue();
+      const retireLocator = vi
+        .spyOn(GitHubControlStore.prototype, "retireDiscoveryLocator")
+        .mockResolvedValue();
       const release = vi
         .spyOn(LeaseManager.prototype, "release")
         .mockImplementation(async (lease) => lease);
@@ -317,7 +325,26 @@ describe("terminal-run recovery admission", () => {
           "resumed-author",
           "resumed-branch",
         ].includes(change);
-      expect(assertCurrent).toHaveBeenCalledTimes(reachesGraphPreflight ? 1 : 0);
+      const retiresFreshScope = !change.startsWith("resumed-");
+      expect(assertCurrent).toHaveBeenCalledTimes(
+        1 + (reachesGraphPreflight ? 1 : 0) + (retiresFreshScope ? 1 : 0),
+      );
+      expect(registerLocator).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ kind: "run", objective: 7, epoch: 2 }),
+        expect.objectContaining({ oid: "c".repeat(40), epoch: 2 }),
+      );
+      expect(registerLocator.mock.invocationCallOrder[0]).toBeLessThan(
+        read.mock.invocationCallOrder[1]!,
+      );
+      expect(retireLocator.mock.calls.filter(([scope]) => scope.kind === "run")).toHaveLength(
+        retiresFreshScope ? 1 : 0,
+      );
+      if (change === "controller-execution")
+        expect(retireLocator).toHaveBeenCalledWith({
+          kind: "request",
+          objective: 7,
+          requestId: "race-activation",
+        });
       if (reachesGraphPreflight) {
         expect(assertCurrent.mock.calls[0]![0]).toMatchObject({
           objective: 7,

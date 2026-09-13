@@ -212,39 +212,63 @@ plus loop/transport latency (quota admission or platform failures can delay it).
 already traversed page remains in the overlap for the following poll. These observations never
 replace fresh mutation fences. Isolated external comment deletion is outside delta-feed support.
 
-Repository discovery reconstructs complete authenticated Objective history once per controller
-process. It then keeps a process-local, non-authoritative scheduling index from an unfiltered issue
-delta and repository-comment delta each minute. A fifteen-minute backstop repeats the complete
-Objective-label index, a wider overlapping comment delta, and one aggregate
-`clockgrove-factory/` matching-ref read covering Objective leases and recovery plans. Issue/comment
-changes are therefore normally visible within 60 seconds; label-index and control-ref changes are
-visible within 15 minutes. Delta membership is filtered by `updated_at` but traversed in immutable
-creation order; a multi-page watermark advances only through the first response's server time, so
-an item entering an already-scanned page remains eligible on the next overlap. The warm label
-backstop adds candidates while the complete issue delta owns removals, preventing a live label
-removal from shifting and transiently erasing another cached Objective. Cold multi-page label
-discovery requires two consecutive identical scans before it hydrates any Objective. Every changed
-candidate is reclassified, and the Supervisor still
-performs its complete authority reads before a lease or mutation. Conditional responses, cursors,
-cached classifications and process-local revisions never establish absence, ownership, admission or
-execution authority. GitHub does not expose deleted issue comments in its delta feed, so an isolated
-comment deletion remains cached until process restart or until the Objective leaves and later
-re-enters the label index. Warm detection of an otherwise isolated comment deletion is unsupported.
+Repository discovery streams GitHub-filtered metadata rather than reconstructing lifetime
+Objective history. Direct GraphQL `repository.issues` queries select `factory:objective`, issue
+state, immutable creation order, and only number/state/update time/comment count. They exclude PRs
+by type. Open Objectives are scanned regardless of age on cold startup and at a fifteen-minute
+backstop; intervening open and closed scans filter by update time. Cold closed discovery looks back
+seven days, with a two-minute overlap on subsequent watermarks. These are implementation constants,
+not additional run-policy knobs. Full history is read transiently for selected classification;
+there is no repository comment feed, global historical comment map, or historical control-ref scan.
+See [the discovery decision](decisions/0004-bounded-objective-discovery.md) for API contracts and the
+lifecycle obligation audit.
 
-At one-page unchanged cardinality this costs at most 120 fast-delta REST transports plus 12
-backstop REST transports per idle hour. Ten label-index pages for 1,000 Objectives raise discovery
-to 168 transports; the supported 10,000-Objective maximum (100 pages) raises it to 528. Repository
-and Objective lease renewal adds at most 32 REST transports and about 8 GraphQL requests per hour
-under the default controller, so the corresponding pessimistic warm-idle totals are 164, 200 and
-560 REST transports respectively, plus one authenticated-user call per process bootstrap. Valid
-`304` responses do not consume GitHub primary quota, but remain counted in the transport ceiling;
-multi-page label indexes are deliberately unconditional because a page-one validator cannot prove
-later-page cardinality. Discovery fails closed above 10,000 Objectives, 10,000 comments on one
-Objective, 100,000 total retained comments, 64 MiB of retained comment bodies, or 10,000 Factory
-control refs. Primary-exhaustion waits retain completed bootstrap and warm-delta hydration or
-classification work in memory and resume the same transaction after reset; bounds are enforced
-before new-object hydration and incrementally during it. No partial result is dispatched, and a
-process restart reconstructs from GitHub.
+Closing an Objective removes it from ordinary scheduling. It does not prove completion, resource
+absence, or zero usage. Known admitted runs still receive targeted stop/reconciliation, independent
+of state, labels, age, or cache contents. Existing shared-capacity reservations also provide exact
+Objective IDs. Compilation and review can precede the first capacity claim or outlive the last one,
+so capacity alone is insufficient: narrow `refs/clockgrove-factory/active/` locator refs preserve
+pending requests and admitted writer epochs. A locator points at an existing commit and identifies
+an Objective to inspect; it contains no policy, usage, executable command, or duplicated history.
+Authenticated receipts and current leases remain the only execution authority.
+
+Application acceptance writes/reconciles the authenticated request comment, ensures its exact
+request-ID locator, then acknowledges. Exact replay repairs missing discoverability before success.
+Every admitted writer epoch registers its separate lifecycle locator under its Objective lease
+before model/resource effects, including foreground work. Settlement deletes only exact immutable
+request/run-epoch scopes after their own disposition is proven. Concurrent new requests or epochs
+have different names. Unknown resource or accounting ownership retains a locator even if the issue
+or run is terminal; discovery exposes an inspection diagnostic and does not revive terminal work.
+An externally closed run lacking general cleanup proof likewise stays indexed. A crash after clean
+terminal bookkeeping but before locator deletion may leave a conservative stale locator for explicit
+inspection; it does not authorize repeating work. Existing authority/graph/recovery refs are retained.
+
+Each open, closed, and locator lane retains at most one 100-row cursor page and processes at most
+32 candidates per discovery cycle. Large relevant sets progress over successive cycles rather than
+failing a lifetime cardinality ceiling. Failed pages and quota waits preserve completed page/candidate
+progress; only a complete relevant traversal advances its watermark, bounded by its first server
+response. No incomplete page or filter absence proves settlement. GitHub does not promise a frozen
+multi-page snapshot: state/label changes can alter membership, so overlap and repeated full-open and
+exact-locator sweeps provide convergence. New acknowledged requests remain independently located.
+Normal small sets are revisited on the existing minute cycle; larger sets and quota waits add scan
+latency. Long downtime repeats the all-age open scan and bounds closed metadata to the recent window;
+exact obligations do not expire. Reopening or explicit inspection targets old history without loading
+unrelated closed Objectives. Authorized recovery still verifies its exact recorded plan and allowance.
+
+The process retains at most 512 scheduling summaries and 4 MiB of serialized summary data. Eviction
+removes only disposable hints; it does not settle a durable locator or capacity claim. Settled closed
+summaries are released. Full comment hydration retains the existing per-Objective 10,000-comment,
+100-page and 64 MiB body bounds and releases those bodies after classification. Unrelated malformed
+Objective evidence produces a bounded per-Objective diagnostic; actual shared capacity/authority
+failures still fence the repository. Exact issue reads use REST conditional GETs only with a matching
+cached response; a cold 304 cannot manufacture a snapshot. Periodic reclassification reads full
+selected history, including comment edits/deletions not reflected in issue update metadata.
+
+Telemetry separately reports actual discovery transports, returned JSON bytes, retained summary
+bytes, pending candidates, bounded per-Objective diagnostics, and the latest 64 cycles. These counts
+are not primary-quota consumption: GraphQL has point costs, and correctly authenticated REST 304s
+consume a transport but no primary point. Synthetic 100 versus 100,000 old-history fixtures establish
+bounded source behavior only, not live GitHub scale or installed model-backed qualification.
 
 Primary quota observations come from GitHub's response headers and are cached per credential and
 resource; Factory does not poll `/rate_limit` to reconstruct a fresher-looking answer. GitHub does
@@ -924,14 +948,14 @@ are preserved before rechecking mutable trunk. Another proved sibling integratio
 linked refresh/validation/review identity; neither an old review nor an unexplained external advance
 authorizes the next head. Native linear-stack rebase proofs remain separate from sibling refreshes.
 
-Pending integration observations carry their exact head/base and a reason. The first-check discovery
-grace retains its 60-second safety interval and schedules its known expiry directly, bounded by the
-Objective deadline. A negative Actions-history hint is not proof that external CI is absent,
-so it does not bypass that grace. Expected or unknown CI with no checks remains pending.
-After a confirmed local sibling-ref CAS, Factory allows at most two targeted PR observations
-(first eligible after one second, then two seconds after an unchanged observation). They run in
-the existing progress wait outside integration admission, without reconstructing the Objective.
-A changed PR wakes the ordinary full checks; unchanged state returns to the existing cadence.
+Pending integration observations carry their exact head/base and a reason, without per-item
+eligibility timers or exponential backoff. Fresh PRs have no age-based check-discovery grace.
+Expected or unknown CI with no checks remains pending; observed pending or failed checks still gate
+integration. Actual pending external state uses the existing two-second worker observation cadence
+(or the explicit polling override), while completion/fairness events reconsider work immediately.
+After a confirmed local sibling-ref CAS, Factory allows at most two immediate targeted PR observations
+in the existing progress wait outside integration admission, without reconstructing the Objective.
+A changed PR wakes the ordinary full checks; unchanged state returns to pending observation cadence.
 Restart, response-loss recovery without a confirmed local completion, and ordinary pending CI do
 not arm this opportunity. Local completion/fairness and deadline/shutdown wakes remain active.
 Bounded process-local diagnostics record write completion, first observed matching head and return

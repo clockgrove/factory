@@ -172,3 +172,26 @@ Supervisor observes the cancellation receipt before resuming work.
 
 Host-native wrappers may start the supported Linux environment, but they are outside Factory's
 service contract. Once Linux is running, `systemd` owns the Factory controller lifecycle.
+
+
+## Discovery after long operation or downtime
+
+Controller startup reads all-age open Objective metadata, seven days of recent closed changes,
+and exact pending-request/run locator refs. It also targets existing shared-capacity reservations.
+Completed closed history is not loaded into scheduling memory. Three cursor lanes process bounded
+pages over successive cycles, with a two-minute overlap and a fifteen-minute filtered-open backstop;
+quota waits and large relevant sets add latency without converting incomplete scans into absence.
+No disposable local cache is required for recovery.
+
+Closing an Objective stops ordinary scheduling, but does not prove cleanup or accounting. Admitted
+work, compilation/review liabilities and pending acknowledgements retain exact GitHub locators
+regardless of age or labels. Only authenticated receipt and lease checks authorize reconciliation.
+Unknown terminal liabilities remain inspection diagnostics; the controller does not restart terminal
+model work. A crash between proven settlement and locator retirement may require targeted inspection
+of that stale hint. Reopen or explicitly inspect an old Objective to read its selected history;
+recovery still requires the existing digest-bound authorization and accounting gates.
+
+Discovery telemetry reports pending page work, returned JSON bytes, retained summary bytes and
+per-Objective diagnostics separately from platform primary-quota observations. A 304 saves primary
+quota but still uses a transport. Changing labels, dropping a process cache, closing issues, or
+restarting the host never settles a resource or assigns zero to unknown usage.

@@ -1,3 +1,4 @@
+import type { DiscoveryLocatorStore } from "../control/discovery-locators.js";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { FactoryReadSnapshot } from "../application/status.js";
@@ -6,6 +7,7 @@ import { LeaseManager, type LeaseStore } from "../control/lease.js";
 import {
   deduplicateFactoryEvents,
   encodeEventComment,
+  hasCurrentWriterAuthority,
   nextEventSequence,
 } from "../control/receipts.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
@@ -47,7 +49,8 @@ export interface RecoveryRequestPorts {
   ): Promise<{ snapshot: FactoryReadSnapshot; historyComplete: boolean }>;
   readStore: RecoveryReadStore;
   store: CompiledGraphStore &
-    LeaseStore & {
+    LeaseStore &
+    Partial<DiscoveryLocatorStore> & {
       getAuthenticatedLogin(): Promise<string>;
       addIssueComment(issueNodeId: string, body: string): Promise<void>;
       /** Structural discovery only, after exact accepted recovery authority is verified. */
@@ -128,6 +131,39 @@ export class RecoveryRequestService {
     return existing;
   }
 
+  private async repairDiscovery(snapshot: FactoryReadSnapshot, request: Request): Promise<void> {
+    const events = eventsOf(snapshot);
+    const start = events.find(
+      (event) =>
+        event.event === "FactoryRunStarted" &&
+        event.runId === request.successorRunId &&
+        event.recoveryRequestId === request.requestId &&
+        event.recoveryPlanDigest === request.planDigest &&
+        event.predecessorRunId === request.predecessorRunId,
+    );
+    const terminal =
+      start &&
+      events.some(
+        (event) =>
+          event.runId === start.runId &&
+          event.sequence > start.sequence &&
+          hasCurrentWriterAuthority(event, events, snapshot.objectiveAuthority) &&
+          ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
+            event.event,
+          ),
+      );
+    const scope = {
+      kind: "request" as const,
+      objective: request.objective,
+      requestId: request.requestId,
+    };
+    // Only the accepted request is disposed. A terminal successor may still
+    // have unknown usage or resources, whose run locator remains independent.
+    if (terminal) await this.ports.store.retireDiscoveryLocator?.(scope);
+    else await this.ports.store.ensureDiscoveryLocator?.(scope);
+    await this.ports.store.ensureObjectiveLabel(request.objective);
+  }
+
   private assertBinding(
     input: RecoveryRequestInput,
     record: RecoveryPlanRecord,
@@ -189,7 +225,7 @@ export class RecoveryRequestService {
     const prior = await this.existing(input, observed.snapshot, actor);
     if (prior) {
       // Repair discovery after an accepted request, never create a new activation or plan.
-      await this.ports.store.ensureObjectiveLabel(input.objective);
+      await this.repairDiscovery(observed.snapshot, prior);
       return prior;
     }
     const proposed = await this.proposal(input, observed);
@@ -226,7 +262,7 @@ export class RecoveryRequestService {
       const replay = await this.existing(input, observed.snapshot, actor);
       if (replay) {
         await leases.assertCurrent(lease);
-        await this.ports.store.ensureObjectiveLabel(input.objective);
+        await this.repairDiscovery(observed.snapshot, replay);
         return replay;
       }
       const refreshed = await this.proposal(input, observed);
@@ -279,7 +315,7 @@ export class RecoveryRequestService {
           const replay = await this.existing(input, after.snapshot, actor);
           if (replay) {
             await leases.assertCurrent(lease);
-            await this.ports.store.ensureObjectiveLabel(input.objective);
+            await this.repairDiscovery(after.snapshot, replay);
             return replay;
           }
         }
@@ -288,7 +324,7 @@ export class RecoveryRequestService {
         );
       }
       await leases.assertCurrent(lease);
-      await this.ports.store.ensureObjectiveLabel(input.objective);
+      await this.repairDiscovery(observed.snapshot, event);
       return event;
     } finally {
       // Failure to release cannot revoke a committed request or justify overwriting the lease.

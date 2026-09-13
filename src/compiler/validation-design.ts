@@ -23,7 +23,11 @@ export type CriterionRisk =
 export type CriterionRiskAssessment = { criterion: string; risk: CriterionRisk };
 
 const PROTECTED_RISK_PATTERNS: ReadonlyArray<[Exclude<CriterionRisk, "ordinary">, RegExp]> = [
-  ["safety", /\b(?:safe(?:ty|ly)?|hazard|injur(?:y|ies)|danger(?:ous)?|emergency)\b/i],
+  // "Safe integer" names a numeric range, not a safety-critical requirement.
+  [
+    "safety",
+    /\b(?:safe(?![\s-]+integers?\b)|safety|safely|hazard|injur(?:y|ies)|danger(?:ous)?|emergency)\b/i,
+  ],
   [
     "security",
     /\b(?:security|auth(?:entication|orization)?|permission|privilege|acl|access control|credential|secret|password|api[- ]?keys?|access[- ]?keys?|private[- ]?keys?|encrypt(?:ion|ed)?|decrypt(?:ion|ed)?|(?:expos(?:e[ds]?|ing)|leak(?:s|ed|ing)?|disclos(?:e[ds]?|ing)) (?:a |an |the )?(?:secret|credential|password|key|private|sensitive|user data|customer data))\b/i,

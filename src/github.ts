@@ -1,3 +1,5 @@
+import { isKnownPrimaryQuotaRefusal } from "./platform.js";
+import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "./platform.js";
 /**
  * GitHub reader (§2).
  *
@@ -931,7 +933,7 @@ export function createOctokit(opts: GitHubOptions): Octokit {
     if (error instanceof PlatformUnavailableError) throw error;
     const refusal = classifyRefusal(error);
     if (refusal.kind !== "not_refusal") {
-      if (!refusalOwned) circuit.recordRefusal(refusal);
+      if (!refusalOwned && !isKnownPrimaryQuotaRefusal(error)) circuit.recordRefusal(refusal);
       throw new PlatformUnavailableError(refusal, error);
     }
     throw error;
@@ -943,7 +945,7 @@ export function createOctokit(opts: GitHubOptions): Octokit {
         // Last check before any transport callback or charging. A peer may have
         // observed a refusal after this request's earlier quota admission.
         if (circuit.isOpen())
-          throw new PlatformUnavailableError(
+          throw new GitHubPreTransportQuotaDeferredError(
             { kind: "rate_limit", retryAfterMs: circuit.waitMs() },
             new Error("Factory credential GitHub circuit is open"),
           );
@@ -989,92 +991,96 @@ export function createOctokit(opts: GitHubOptions): Octokit {
   // `.endpoint`, which other Octokit helpers rely on.
   octokit.request = new Proxy(octokit.request, {
     async apply(target, thisArg, args) {
-      const refusalOwned = githubTransportCallbacks.getStore()?.ownsRefusal ?? false;
-      const endpoint = target.endpoint(...(args as Parameters<typeof target.endpoint>));
-      const release = admitGitHubRequest(opts.token, primaryQuota, endpoint.url, {
-        method: endpoint.method,
-        headers: endpoint.headers as Record<string, string>,
+      return retryGitHubQuota(async () => {
+        const refusalOwned = githubTransportCallbacks.getStore()?.ownsRefusal ?? false;
+        const endpoint = target.endpoint(...(args as Parameters<typeof target.endpoint>));
+        const release = admitGitHubRequest(opts.token, primaryQuota, endpoint.url, {
+          method: endpoint.method,
+          headers: endpoint.headers as Record<string, string>,
+        });
+        let observer: ReturnType<typeof registerTransportObserver> | undefined;
+        try {
+          observer = registerTransportObserver();
+          const first = args[0];
+          const parameters =
+            typeof args[1] === "object" && args[1] !== null
+              ? (args[1] as Record<string, unknown>)
+              : {};
+          const requestOptions =
+            typeof first === "object" && first !== null ? (first as Record<string, unknown>) : {};
+          const invokeArgs = !observer.id
+            ? args
+            : typeof first === "string"
+              ? [
+                  first,
+                  {
+                    ...parameters,
+                    headers: {
+                      ...((parameters.headers as Record<string, string> | undefined) ?? {}),
+                      [TRANSPORT_OBSERVER_HEADER]: observer.id,
+                    },
+                  },
+                ]
+              : [
+                  {
+                    ...requestOptions,
+                    headers: {
+                      ...((requestOptions.headers as Record<string, string> | undefined) ?? {}),
+                      [TRANSPORT_OBSERVER_HEADER]: observer.id,
+                    },
+                  },
+                ];
+          return await Reflect.apply(target, thisArg, invokeArgs);
+        } catch (error) {
+          surfacePlatformFailure(error, refusalOwned);
+        } finally {
+          observer?.release();
+          release();
+        }
       });
-      let observer: ReturnType<typeof registerTransportObserver> | undefined;
-      try {
-        observer = registerTransportObserver();
-        const first = args[0];
-        const parameters =
-          typeof args[1] === "object" && args[1] !== null
-            ? (args[1] as Record<string, unknown>)
-            : {};
-        const requestOptions =
-          typeof first === "object" && first !== null ? (first as Record<string, unknown>) : {};
-        const invokeArgs = !observer.id
-          ? args
-          : typeof first === "string"
-            ? [
-                first,
-                {
-                  ...parameters,
-                  headers: {
-                    ...((parameters.headers as Record<string, string> | undefined) ?? {}),
-                    [TRANSPORT_OBSERVER_HEADER]: observer.id,
-                  },
-                },
-              ]
-            : [
-                {
-                  ...requestOptions,
-                  headers: {
-                    ...((requestOptions.headers as Record<string, string> | undefined) ?? {}),
-                    [TRANSPORT_OBSERVER_HEADER]: observer.id,
-                  },
-                },
-              ];
-        return await Reflect.apply(target, thisArg, invokeArgs);
-      } catch (error) {
-        surfacePlatformFailure(error, refusalOwned);
-      } finally {
-        observer?.release();
-        release();
-      }
     },
   });
   octokit.graphql = new Proxy(octokit.graphql, {
     async apply(target, thisArg, args) {
-      const refusalOwned = githubTransportCallbacks.getStore()?.ownsRefusal ?? false;
-      const query = String(args[0] ?? "");
-      const mutation = /^\s*mutation\b/.test(query);
-      const release = admitGitHubRequest(
-        opts.token,
-        primaryQuota,
-        "https://api.github.com/graphql",
-        { method: "POST" },
-        "normal",
-        mutation ? 1 : GITHUB_GRAPHQL_NORMAL_REQUEST_ESTIMATE,
-      );
-      let observer: ReturnType<typeof registerTransportObserver> | undefined;
-      try {
-        observer = registerTransportObserver();
-        const variables =
-          typeof args[1] === "object" && args[1] !== null
-            ? (args[1] as Record<string, unknown>)
-            : {};
-        const invokeArgs = observer.id
-          ? [
-              args[0],
-              {
-                ...variables,
-                headers: {
-                  ...((variables.headers as Record<string, string> | undefined) ?? {}),
-                  [TRANSPORT_OBSERVER_HEADER]: observer.id,
+      return retryGitHubQuota(async () => {
+        const refusalOwned = githubTransportCallbacks.getStore()?.ownsRefusal ?? false;
+        const query = String(args[0] ?? "");
+        const mutation = /^\s*mutation\b/.test(query);
+        const release = admitGitHubRequest(
+          opts.token,
+          primaryQuota,
+          "https://api.github.com/graphql",
+          { method: "POST" },
+          "normal",
+          mutation ? 1 : GITHUB_GRAPHQL_NORMAL_REQUEST_ESTIMATE,
+        );
+        let observer: ReturnType<typeof registerTransportObserver> | undefined;
+        try {
+          observer = registerTransportObserver();
+          const variables =
+            typeof args[1] === "object" && args[1] !== null
+              ? (args[1] as Record<string, unknown>)
+              : {};
+          const invokeArgs = observer.id
+            ? [
+                args[0],
+                {
+                  ...variables,
+                  headers: {
+                    ...((variables.headers as Record<string, string> | undefined) ?? {}),
+                    [TRANSPORT_OBSERVER_HEADER]: observer.id,
+                  },
                 },
-              },
-            ]
-          : args;
-        return await Reflect.apply(target, thisArg, invokeArgs);
-      } catch (error) {
-        surfacePlatformFailure(error, refusalOwned);
-      } finally {
-        observer?.release();
-        release();
-      }
+              ]
+            : args;
+          return await Reflect.apply(target, thisArg, invokeArgs);
+        } catch (error) {
+          surfacePlatformFailure(error, refusalOwned);
+        } finally {
+          observer?.release();
+          release();
+        }
+      });
     },
   });
   return octokit;

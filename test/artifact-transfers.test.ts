@@ -143,6 +143,162 @@ async function artifact(baseSha: string, bytes = "safe retained transfer bytes")
 }
 
 describe("immutable GitHub artifact transfer lifecycle", () => {
+  it("uses acknowledged publication even when the new ref is not immediately readable", async () => {
+    const memory = store(),
+      id = identity();
+    const readRef = vi.spyOn(memory.api, "readRef").mockResolvedValue(null);
+    const readCommit = vi.spyOn(memory.api, "readCommit");
+    const value = normalizeArtifact({
+      baseSha: id.baseSha,
+      patch: "inline",
+      changedPaths: ["asset.dat"],
+      outcome: "succeeded",
+    });
+    await expect(
+      persistArtifactTransfer({
+        store: memory.api,
+        identity: id,
+        artifact: value,
+        allowedPaths: ["asset.dat"],
+        assertCurrent: async () => {},
+      }),
+    ).resolves.toMatchObject({ lifecycle: "retained" });
+    expect(readCommit).not.toHaveBeenCalled();
+    expect(readRef).toHaveBeenCalledTimes(2);
+    const prefix = artifactTransferRef(id);
+    expect(memory.commits.get(memory.refs.get(`${prefix}/ready`)!)!.parentOids).toEqual([
+      memory.refs.get(`${prefix}/intent`),
+    ]);
+  });
+
+  it("validates an ambiguous publication and rejects unavailable evidence without replaying it", async () => {
+    const memory = store(),
+      id = identity();
+    const createRef = vi
+      .spyOn(memory.api, "createRef")
+      .mockRejectedValue(new Error("response lost"));
+    const value = normalizeArtifact({
+      baseSha: id.baseSha,
+      patch: "inline",
+      changedPaths: ["asset.dat"],
+      outcome: "succeeded",
+    });
+    await expect(
+      persistArtifactTransfer({
+        store: memory.api,
+        identity: id,
+        artifact: value,
+        allowedPaths: ["asset.dat"],
+        assertCurrent: async () => {},
+      }),
+    ).rejects.toMatchObject({
+      message: "artifact transfer intent publication is not yet observable",
+      cause: expect.objectContaining({ message: "response lost" }),
+    });
+    expect(createRef).toHaveBeenCalledTimes(1);
+    expect(memory.refs.size).toBe(0);
+  });
+
+  it("rebuilds the ready tree when an equivalent race winner uses different descriptor bytes", async () => {
+    const memory = store(),
+      id = identity();
+    const value = normalizeArtifact({
+      baseSha: id.baseSha,
+      patch: "inline",
+      changedPaths: ["asset.dat"],
+      outcome: "succeeded",
+    });
+    const args = {
+      store: memory.api,
+      identity: id,
+      artifact: value,
+      allowedPaths: ["asset.dat"],
+      assertCurrent: async () => {},
+    };
+    await persistArtifactTransfer(args);
+    const prefix = artifactTransferRef(id);
+    const original = memory.commits.get(memory.refs.get(`${prefix}/intent`)!)!;
+    const descriptorOid = await memory.api.readTreeEntry(
+      original.treeOid,
+      "artifact-transfer.json",
+    );
+    const bytes = await memory.api.readBlob(descriptorOid!);
+    const historicalBytes = Buffer.from(JSON.stringify(JSON.parse(bytes.toString()), null, 2));
+    const historicalOid = await memory.api.createBlob(historicalBytes);
+    const treeOid = await memory.api.createTree({
+      entries: [
+        { path: "artifact-transfer.json", mode: "100644", type: "blob", sha: historicalOid },
+      ],
+    });
+    const intentOid = await memory.api.createCommit({
+      treeOid,
+      parentOids: [],
+      message: original.message.replace(sha256(bytes), sha256(historicalBytes)),
+    });
+    memory.refs.set(`${prefix}/intent`, intentOid);
+    memory.refs.delete(`${prefix}/ready`);
+    const readRef = memory.api.readRef;
+    vi.spyOn(memory.api, "readRef").mockResolvedValueOnce(null).mockImplementation(readRef);
+    await expect(persistArtifactTransfer(args)).resolves.toMatchObject({ lifecycle: "retained" });
+    await expect(
+      recoverArtifactTransfer({ store: memory.api, identity: id }),
+    ).resolves.toMatchObject({ digest: value.digest });
+  });
+
+  it("rejects a different valid winner when ref creation loses the race", async () => {
+    const memory = store(),
+      id = identity();
+    const originalRead = memory.api.readRef;
+    const value = (patch: string) =>
+      normalizeArtifact({
+        baseSha: id.baseSha,
+        patch,
+        changedPaths: ["asset.dat"],
+        outcome: "succeeded",
+      });
+    const args = {
+      store: memory.api,
+      identity: id,
+      allowedPaths: ["asset.dat"],
+      assertCurrent: async () => {},
+    };
+    await persistArtifactTransfer({ ...args, artifact: value("winner") });
+    vi.spyOn(memory.api, "readRef").mockResolvedValueOnce(null).mockImplementation(originalRead);
+    const publish = vi.spyOn(memory.api, "createRef");
+    await expect(persistArtifactTransfer({ ...args, artifact: value("loser") })).rejects.toThrow(
+      "artifact transfer ref publication conflicted",
+    );
+    expect(publish).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers an acknowledged but response-lost publication through full object validation", async () => {
+    const memory = store(),
+      id = identity();
+    const publish = memory.api.createRef;
+    vi.spyOn(memory.api, "createRef").mockImplementation(async (ref, oid) => {
+      await publish(ref, oid);
+      throw new Error("response lost");
+    });
+    const readCommit = vi.spyOn(memory.api, "readCommit");
+    const value = normalizeArtifact({
+      baseSha: id.baseSha,
+      patch: "inline",
+      changedPaths: ["asset.dat"],
+      outcome: "succeeded",
+    });
+    await expect(
+      persistArtifactTransfer({
+        store: memory.api,
+        identity: id,
+        artifact: value,
+        allowedPaths: ["asset.dat"],
+        assertCurrent: async () => {},
+      }),
+    ).resolves.toMatchObject({ lifecycle: "retained" });
+    expect(readCommit).toHaveBeenCalledTimes(2);
+    expect(memory.refs.size).toBe(2);
+  });
+
   it("isolates transfers from an occupied external pending-artifact namespace", async () => {
     const external = enterTemporaryNamespace();
     roots.push(external.root);
@@ -394,6 +550,36 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
     await expect(resumeArtifactTransfer(options)).rejects.toThrow(/incomplete/i);
   });
 
+  it("publishes an inline transfer with one descriptor and tree while retaining both fenced checkpoints", async () => {
+    const memory = store(),
+      id = identity();
+    const value = normalizeArtifact({
+      baseSha: id.baseSha,
+      patch: "",
+      changedPaths: [],
+      outcome: "succeeded",
+    });
+    let fences = 0;
+    const result = await persistArtifactTransfer({
+      store: memory.api,
+      identity: id,
+      artifact: value,
+      allowedPaths: [],
+      assertCurrent: async () => {
+        fences++;
+      },
+    });
+    expect(memory.writes).toEqual(["blob", "tree", "commit", "ref", "commit", "ref"]);
+    expect(fences).toBe(6);
+    const intent = memory.commits.get(memory.refs.get(`${artifactTransferRef(id)}/intent`)!)!;
+    const ready = memory.commits.get(result.commitSha)!;
+    expect(ready.treeOid).toBe(intent.treeOid);
+    expect(ready.parentOids).toEqual([intent.oid]);
+    expect((await recoverArtifactTransfer({ store: memory.api, identity: id }))?.digest).toBe(
+      value.digest,
+    );
+  });
+
   it("fences every mutation and recovers exact bytes only through intent-bound ready refs", async () => {
     const memory = store(),
       id = identity(),
@@ -409,6 +595,8 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
       },
     });
     expect(fences).toBe(memory.writes.length);
+    expect(memory.writes.filter((kind) => kind === "blob")).toHaveLength(2);
+    expect(memory.writes.filter((kind) => kind === "tree")).toHaveLength(2);
     expect(result.lifecycle).toBe("retained");
     expect(memory.refs.has(`${artifactTransferRef(id)}/intent`)).toBe(true);
     await releaseAllArtifactContent();

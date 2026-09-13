@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "../src/control/lease.js";
@@ -71,10 +72,17 @@ async function fixture(rebase = false) {
       return id;
     },
     createTree: async ({ entries }) => {
+      const materialized = entries.map((entry) => {
+        if (entry.content === undefined) return entry;
+        const bytes = Buffer.from(entry.content, "utf8");
+        const sha = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+        blobs.set(sha, bytes);
+        return { ...entry, sha };
+      });
       const id = oid();
       trees.set(
         id,
-        new Map(entries.filter((entry) => entry.sha).map((entry) => [entry.path, entry.sha!])),
+        new Map(materialized.filter((entry) => entry.sha).map((entry) => [entry.path, entry.sha!])),
       );
       return id;
     },

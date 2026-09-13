@@ -218,6 +218,37 @@ function installLaggingSharedCapacity(
   };
 }
 
+it("retains shared execution capacity through an artifact hold until exact recovery closes it", async () => {
+  const fixture = await providerSupervisorFixture("daytona-burst", {
+    localOnly: true,
+  });
+  // Exercise the journal's permanent released-claim fence without injecting
+  // snapshot lag: a premature release must make the continuation fail.
+  const capacity = installLaggingSharedCapacity(fixture, -1);
+  const createRef = vi.mocked(GitHubControlStore.prototype.createRef);
+  const original = createRef.getMockImplementation()!;
+  createRef.mockImplementation(async (ref, oid) => {
+    if (ref.includes("/artifact-transfers/") && ref.endsWith("/ready"))
+      throw new Error("fixture: ready publication unavailable");
+    return original(ref, oid);
+  });
+  try {
+    await expect(fixture.run()).rejects.toThrow(/artifact transfer recovery/);
+    expect(capacity.outstanding()).toMatchObject([{ workItem: 8, phase: "execution" }]);
+    expect(fixture.resources.size).toBe(0);
+    expect(fixture.events().some((event) => event.event === "FactoryRunCompleted")).toBe(false);
+    createRef.mockImplementation(original);
+    await expect(fixture.run()).resolves.toMatchObject({ status: "completed" });
+    expect(capacity.lagCount()).toBe(0);
+    expect(capacity.outstanding()).toEqual([]);
+    expect(
+      fixture.activity.filter((entry) => entry.operation === "launch" && entry.workItem === 8),
+    ).toHaveLength(1);
+  } finally {
+    await fixture.dispose();
+  }
+}, 30_000);
+
 it.each([
   {
     name: "failed validation",

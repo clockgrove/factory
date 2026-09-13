@@ -68,7 +68,7 @@ export interface ProviderFaults {
   controllerActivation?: boolean;
   afterControllerObservation?: () => void;
   afterIntegration?: () => void;
-  waitForSiblingLaunchBeforeIntegration?: boolean;
+  waitForSiblingCompletionBeforeIntegration?: boolean;
   holdSiblingDispatchUntilIntegrationFailure?: boolean;
   localOnly?: boolean;
   maxParallel?: 1 | 2;
@@ -309,9 +309,9 @@ wheels = [
   let capabilityProviderIntegrated = false;
   let capabilityConsumerReserved = false;
   let capabilitySourceRefReads = 0;
-  let releaseSiblingLaunch!: () => void;
-  const siblingLaunch = new Promise<void>((resolve) => {
-    releaseSiblingLaunch = resolve;
+  let releaseSiblingCompletion!: () => void;
+  const siblingCompletion = new Promise<void>((resolve) => {
+    releaseSiblingCompletion = resolve;
   });
   const readCommit = async (oid: string): Promise<GitCommitObject> => {
     // One fresh immutable read, not three subprocesses per ledger observation.
@@ -1040,6 +1040,17 @@ wheels = [
           }
         }
       }
+      if (
+        receipt.some(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReconciled" &&
+            event.workItem === 9 &&
+            event.phase === "execution" &&
+            event.unit === "local_milliseconds",
+        )
+      )
+        releaseSiblingCompletion();
       if (loss === "after") throw unavailable();
       if (integration) faults.afterIntegration?.();
     },
@@ -1228,8 +1239,8 @@ wheels = [
   const mergePull = vi
     .spyOn(GitHubControlStore.prototype, "mergePullRequest")
     .mockImplementation(async ({ number, headSha }) => {
-      if (faults.waitForSiblingLaunchBeforeIntegration && number === 108) {
-        await siblingLaunch;
+      if (faults.waitForSiblingCompletionBeforeIntegration && number === 108) {
+        await siblingCompletion;
       }
       git("merge", "--squash", headSha);
       git("commit", "-qm", `integrate ${number}`);
@@ -1367,7 +1378,6 @@ wheels = [
       }),
       launch: async (input) => {
         activity.push({ operation: "launch", backend: id, workItem: input.workItem });
-        if (input.workItem === 9) releaseSiblingLaunch();
         const resourceId = `${id}:${input.workItem}`;
         resources.add(resourceId);
         running.set(resourceId, input);
@@ -1664,7 +1674,7 @@ jobs:
     mergePull,
     events,
     refs,
-    run: (signal?: AbortSignal) => {
+    run: (signal?: AbortSignal, pollIntervalMs: number | null = 20) => {
       if (retirement.signal.aborted)
         return Promise.reject(new Error("provider Supervisor fixture is already retiring"));
       receiptTransportUnavailable = false;
@@ -1681,7 +1691,7 @@ jobs:
         backendRegistry: registry,
         repositoryResources: shared,
         ...(faults.repositoryFence ? { repositoryFence: faults.repositoryFence } : {}),
-        pollIntervalMs: 20,
+        ...(pollIntervalMs === null ? {} : { pollIntervalMs }),
         ...(faults.controllerActivation
           ? {
               activation: { requestId: "fixture-activation", baseSha },

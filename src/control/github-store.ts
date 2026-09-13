@@ -1,3 +1,5 @@
+import { isKnownPrimaryQuotaRefusal } from "../platform.js";
+import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "../platform.js";
 import type { CompiledGraphStore } from "./graphs.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createOctokit, withGitHubTransportCallbacks, type GitHubOptions } from "../github.js";
@@ -340,37 +342,28 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     operationName = `${mutationClass}-mutation`,
     authorityClass: MutationAuthorityClass = "objective-publication",
   ): Promise<T> {
-    const effectiveMutationClass = this.#mutationClassContext.getStore() ?? mutationClass;
-    const dispatch = () => {
+    const prepare = () => {
+      const effectiveMutationClass = this.#mutationClassContext.getStore() ?? mutationClass;
       if (mutating && this.#transportFenceContext.getStore())
         throw new Error("mutation dispatch is forbidden inside a transport fence");
-      // This callback runs synchronously inside the observation, before any
-      // queue await. Even a rejected capture is therefore measured.
       const authoritative = mutating && authorityClass !== "immutable-preparation";
-      const scopedFence = authoritative ? this.#scopedMutationFence.getStore() : undefined;
-      // Shared transactions bind an immutable owner; do not capture or recheck
-      // a second, configured Objective generation for the same operation.
       const fence =
-        scopedFence ??
+        (authoritative ? this.#scopedMutationFence.getStore() : undefined) ??
         (authoritative ? this.#captureMutationFence?.(effectiveMutationClass) : undefined);
       const publicationSafetyFence = authoritative
         ? this.#publicationSafetyFence.getStore()
         : undefined;
-      return this.#dispatch(
-        operation,
-        mutating,
-        effectiveMutationClass,
-        fence,
-        publicationSafetyFence,
+      return retryGitHubQuota(() =>
+        this.#dispatch(operation, mutating, effectiveMutationClass, fence, publicationSafetyFence),
       );
     };
-    if (!mutating) return dispatch();
+    if (!mutating) return prepare();
     return observeMutationOperation(
       operationName,
       authorityClass,
       this.#mutationScope,
       this.recordMutationOperation,
-      dispatch,
+      prepare,
     );
   }
 
@@ -382,7 +375,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     publicationSafetyFence?: () => Promise<void>,
   ): Promise<T> {
     if (this.#breaker.isOpen()) {
-      throw new PlatformUnavailableError(
+      throw new GitHubPreTransportQuotaDeferredError(
         { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
         new Error("Factory GitHub circuit is open"),
       );
@@ -396,13 +389,13 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     let attempted = false;
     try {
       if (this.#breaker.isOpen()) {
-        throw new PlatformUnavailableError(
+        throw new GitHubPreTransportQuotaDeferredError(
           { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
           new Error("Factory GitHub circuit opened while the request was queued"),
         );
       }
       if (mutationPermit) {
-        observeMutationQueue(mutationPermit.waitedMs);
+        observeMutationQueue(mutationPermit.waitedMs, mutationPermit.waitReasonMs);
         await withGitHubRequestPriority(
           mutationClass === "normal" ? "normal" : "protected",
           () =>
@@ -417,7 +410,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         );
       }
       if (this.#breaker.isOpen()) {
-        throw new PlatformUnavailableError(
+        throw new GitHubPreTransportQuotaDeferredError(
           { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
           new Error("Factory GitHub circuit opened during the mutation fence"),
         );
@@ -453,7 +446,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         error instanceof PlatformUnavailableError ? error.refusal : classifyRefusal(error);
       if (refusal.kind !== "not_refusal") {
         mutationPermit?.recordRefusal?.(isSecondaryRateLimitRefusal(error));
-        this.#breaker.recordRefusal(refusal);
+        if (!isKnownPrimaryQuotaRefusal(error)) this.#breaker.recordRefusal(refusal);
         throw new PlatformUnavailableError(refusal, error);
       }
       throw error;
@@ -607,7 +600,14 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       // GitHub's stale-beforeOid response is currently a generic GraphQL
       // execution error. Re-read: our unique child OID proves success even if
       // the response was lost; every other value proves we lost the fence.
-      const current = await this.readRef(args.ref);
+      let current: string | null;
+      try {
+        current = await this.readRef(args.ref);
+      } catch {
+        // A refused reconciliation read says nothing about the mutation's
+        // outcome. Preserve its original ambiguity for the logical retry owner.
+        throw error;
+      }
       if (current === args.afterOid) return true;
       if (current !== args.beforeOid) return false;
       throw error;

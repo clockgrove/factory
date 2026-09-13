@@ -231,6 +231,8 @@ function ledger(state: State): CapacityLedger {
 /** GitHub CAS serializes only reservation changes, never Objective execution or writes. */
 export class SharedCapacityCoordinator {
   readonly #leases: LeaseManager;
+  // One validated immutable Git object. The mutable ref is always read afresh.
+  #cachedObservation: { oid: string; treeOid: string; state: State } | undefined;
   constructor(
     private readonly options: {
       store: LeaseStore & {
@@ -267,6 +269,7 @@ export class SharedCapacityCoordinator {
   async #read(): Promise<{ oid: string; treeOid: string; state: State } | null> {
     const oid = await this.options.store.readRef(SHARED_CAPACITY_REF);
     if (!oid) return null;
+    if (this.#cachedObservation?.oid === oid) return structuredClone(this.#cachedObservation);
     const commit = await this.options.store.readCommit(oid);
     const encoded = commit.message
       .split("\n")
@@ -300,11 +303,17 @@ export class SharedCapacityCoordinator {
       ids.add(claim.id);
     }
     ledger(state);
-    return { oid, treeOid: commit.treeOid, state };
+    this.#cachedObservation = { oid, treeOid: commit.treeOid, state };
+    return structuredClone(this.#cachedObservation);
   }
 
   async initialize(): Promise<void> {
-    if (await this.#read()) return;
+    await this.#readOrInitialize();
+  }
+
+  async #readOrInitialize(): Promise<{ oid: string; treeOid: string; state: State }> {
+    const current = await this.#read();
+    if (current) return current;
     const imported = await this.options.assertLegacyCompatible();
     const base = await this.options.store.readCommit(this.options.baseCommitSha);
     const state: State = {
@@ -320,9 +329,13 @@ export class SharedCapacityCoordinator {
     try {
       await this.options.store.createRef(SHARED_CAPACITY_REF, oid);
     } catch (error) {
-      if (!(await this.#read())) throw error;
+      const observed = await this.#read();
+      if (!observed) throw error;
+      return observed;
     }
-    if (!(await this.#read())) throw new Error("shared capacity initialization was not observed");
+    const observed = await this.#read();
+    if (!observed) throw new Error("shared capacity initialization was not observed");
+    return observed;
   }
 
   async #commit(state: State, treeOid: string, parentOid: string): Promise<string> {
@@ -373,9 +386,10 @@ export class SharedCapacityCoordinator {
     ) => Promise<{ value: T; changed: boolean }> | { value: T; changed: boolean },
     transportFenced: boolean,
   ): Promise<T> {
-    await this.initialize();
+    const initial = await this.#readOrInitialize();
     for (let attempt = 0; attempt < 16; attempt++) {
-      const current = await this.#read();
+      // Reuse only this operation's initial observation; a contested CAS reads afresh.
+      const current = attempt === 0 ? initial : await this.#read();
       if (!current) throw new Error("shared capacity ref disappeared");
       await this.#assertOwner(owner);
       const next = structuredClone(current.state);
@@ -461,16 +475,12 @@ export class SharedCapacityCoordinator {
   }
 
   async snapshot(): Promise<CapacitySnapshot> {
-    await this.initialize();
-    const current = await this.#read();
-    if (!current) throw new Error("shared capacity ref disappeared");
+    const current = await this.#readOrInitialize();
     return ledger(current.state).snapshot();
   }
 
   async retentionStatus(): Promise<SharedCapacityRetentionStatus> {
-    await this.initialize();
-    const current = await this.#read();
-    if (!current) throw new Error("shared capacity ref disappeared");
+    const current = await this.#readOrInitialize();
     const activeClaims = current.state.claims.filter((claim) => !claim.released).length;
     const releasedClaims = current.state.claims.length - activeClaims;
     const status =

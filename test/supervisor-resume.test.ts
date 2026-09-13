@@ -4,6 +4,7 @@ import { GitHubControlStore } from "../src/control/github-store.js";
 import { IssueAdmissionLedger } from "../src/control/issue-admission.js";
 import { LeaseManager } from "../src/control/lease.js";
 import { PlatformUnavailableError } from "../src/platform.js";
+import { CachedResourceSampler } from "../src/scheduling/resource-sampler.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
 describe("same-run controller restart after integration", () => {
@@ -322,11 +323,31 @@ describe("same-run controller restart after integration", () => {
       const f = await providerSupervisorFixture("daytona-burst", {
         controllerActivation: true,
         localOnly: true,
-        waitForSiblingLaunchBeforeIntegration: true,
+        waitForSiblingCompletionBeforeIntegration: true,
         afterIntegration: () => shutdown.abort(),
       });
+      // Keep this restart scenario at the retained-execution boundary, independent
+      // of how quickly Git publication runs relative to sibling validation.
+      const sample = CachedResourceSampler.prototype.sample;
+      const heldValidation = vi
+        .spyOn(CachedResourceSampler.prototype, "sample")
+        .mockImplementation(async function (this: CachedResourceSampler, ...args) {
+          const result = await sample.apply(this, args);
+          const siblingCompleted = f
+            .events()
+            .some(
+              (event) =>
+                event.kind === "budget" &&
+                event.event === "BudgetReconciled" &&
+                event.workItem === 9 &&
+                event.phase === "execution" &&
+                event.unit === "local_milliseconds",
+            );
+          return siblingCompleted ? { ...result, availableMemoryMb: 0 } : result;
+        });
       try {
         const first = await f.run(shutdown.signal);
+        heldValidation.mockRestore();
         const sibling = f.events().filter((event) => "workItem" in event && event.workItem === 9);
         expect(
           sibling.filter(
@@ -336,7 +357,7 @@ describe("same-run controller restart after integration", () => {
           ),
         ).toEqual([]);
         expect(sibling.filter((event) => event.event === "AttemptSucceeded")).toHaveLength(1);
-        expect(sibling.some((event) => event.kind === "capacity")).toBe(false);
+        expect(sibling.filter((event) => event.kind === "capacity")).toEqual([]);
         const originalWorkerUsage = sibling.filter(
           (event) =>
             event.kind === "budget" &&

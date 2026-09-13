@@ -10,6 +10,32 @@ import {
 } from "../src/control/mutation-observation.js";
 
 describe("controller phase observations", () => {
+  it("exports bounded route labels and separated scheduler waits without leaking paths", async () => {
+    const phases: GitHubTransportObservation[] = [];
+    await observeGitHubTransportPhase(
+      "objective",
+      (value) => phases.push(value),
+      async () => {
+        observeGitHubTransport(
+          "https://api.github.com/repos/private/repository/git/ref/clockgrove-factory%2Fcoordination%2Fcapacity",
+        );
+        observeGitHubTransport(
+          "https://api.github.com/repos/private/repository/git/commits/secret-sha",
+        );
+        observeGitHubTransport(
+          "https://api.github.com/repos/private/repository/issues/123/comments?since=private",
+        );
+        observeMutationQueue(1200, { "mutation-spacing": 1000, "admission-contention": 200 });
+      },
+    );
+    expect(phases[0]).toMatchObject({
+      requestsByRoute: { "capacity-ref": 1, "git-commit": 1, "issue-comments": 1 },
+      mutationWaitReasonMs: { "mutation-spacing": 1000, "admission-contention": 200 },
+      aggregateQueueWaitMs: 1200,
+    });
+    expect(JSON.stringify(phases)).not.toMatch(/private|secret-sha|123/);
+  });
+
   it("includes concurrent child work in its parent while preserving each child's attribution", async () => {
     const phases: GitHubTransportObservation[] = [];
     const mutations: MutationOperationObservation[] = [];

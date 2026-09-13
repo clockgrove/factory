@@ -37,7 +37,7 @@ export const GITHUB_SECONDARY_LIMITS = {
 /**
  * Factory's local pacing policy. The content limits are GitHub's documented
  * outer bounds rather than a second, arbitrary hourly quota. Admission is
- * smoothed and adapts downward after an observed secondary refusal.
+ * bounded by rolling windows and adapts downward after an observed secondary refusal.
  * "Avoid concurrent requests... make requests serially" and "wait at least
  * one second between" mutative requests (docs.github.com/en/rest/using-the-
  * rest-api/best-practices-for-using-the-rest-api).
@@ -165,17 +165,9 @@ export interface GitHubRequestTelemetry {
   measurementScope: "process-local-credential";
   measurementWindow: { startedAt: string; observedAt: string };
   endpoints: GitHubEndpointRequestTelemetry[];
-  limitingReason: "primary-reserve" | "primary-exhausted" | null;
+  limitingReason: "primary-exhausted" | null;
   nextAdmissionAt: string | null;
 }
-
-/** Keep enough primary capacity for every maximum-sized (32 Objective) cohort
- * that can be admitted before one primary window resets. Eight waves times
- * three fenced REST operations per Objective, plus repository ownership and
- * bounded repair headroom, fits below 1,024. The equivalent GraphQL CAS/mutation
- * envelope fits below 512. Normal metadata waits before consuming either. */
-export const GITHUB_PRIMARY_PROTECTED_RESERVE = 1_024;
-export const GITHUB_GRAPHQL_PROTECTED_RESERVE = 512;
 
 /** GitHub's documented GraphQL cost calculation prices unique connections by
  * their possible parent cardinality, divided by 100. Factory's largest
@@ -241,25 +233,16 @@ class GitHubRequestGovernor {
       const resetAt = new Date(observed.resetAt);
       if (resetAt.getTime() > now.getTime()) {
         const effectiveRemaining = observed.remaining - (this.#inFlightCost.get(resource) ?? 0);
-        const reserve =
-          resource === "graphql"
-            ? GITHUB_GRAPHQL_PROTECTED_RESERVE
-            : GITHUB_PRIMARY_PROTECTED_RESERVE;
         const exhausted = effectiveRemaining < expectedCost;
-        const reserved = priority === "normal" && effectiveRemaining - expectedCost < reserve;
-        if (exhausted || reserved) {
-          this.#limitingReason = exhausted ? "primary-exhausted" : "primary-reserve";
+        if (exhausted) {
+          this.#limitingReason = "primary-exhausted";
           this.#nextAdmissionAt = resetAt.toISOString();
           throw new GitHubPrimaryAdmissionDeferredError(
             {
               kind: "rate_limit",
               retryAfterMs: Math.max(1_000, resetAt.getTime() - now.getTime() + 1_000),
             },
-            new Error(
-              exhausted
-                ? "GitHub primary quota is exhausted"
-                : "GitHub metadata reads reached Factory's protected primary reserve",
-            ),
+            new Error("GitHub primary quota is exhausted"),
           );
         }
       }
@@ -578,7 +561,9 @@ export class PlatformUnavailableError extends Error {
 
 /** Local primary-reserve admission refusal. No HTTP transport occurred, so it
  * must not trip the remote-refusal circuit breaker. */
-export class GitHubPrimaryAdmissionDeferredError extends PlatformUnavailableError {
+export class GitHubPreTransportQuotaDeferredError extends PlatformUnavailableError {}
+
+export class GitHubPrimaryAdmissionDeferredError extends GitHubPreTransportQuotaDeferredError {
   constructor(refusal: Extract<Refusal, { kind: "rate_limit" }>, cause: unknown) {
     super(refusal, cause);
     this.name = "GitHubPrimaryAdmissionDeferredError";
@@ -678,8 +663,6 @@ export class ContentCreationPacer {
   #adaptiveFactor = 1;
   #successfulSinceRefusal = 0;
   #secondaryRefusals = 0;
-  #credit = 60;
-  #creditAt: number | null = null;
 
   constructor(
     private readonly perMinute: number = FACTORY_PACING.maxContentCreatingPerMinute,
@@ -687,40 +670,48 @@ export class ContentCreationPacer {
     private readonly minGapMs: number = FACTORY_PACING.minMsBetweenMutations,
   ) {}
 
-  /**
-   * Ms to wait before the next content-creating call is safe to make. Calls
-   * A bounded ordinary burst avoids hourly spacing on small foreground runs.
-   * Sustained refill reserves that burst inside the hourly budget, so ordinary
-   * traffic cannot spend the entire hour's allowance in its first few minutes.
-   */
+  /** Local rolling bounds supplement server feedback; they do not allocate an
+   * hourly budget to each Objective or impose continuous hourly smoothing. */
   waitMs(now: Date = new Date(), options: { priority?: boolean } = {}): number {
+    return this.wait(now, options).ms;
+  }
+
+  wait(
+    now: Date = new Date(),
+    _options: { priority?: boolean } = {},
+  ): { ms: number; reason: MutationWaitReason } {
     const t = now.getTime();
     this.#prune(t);
     const effectiveHourly = Math.max(1, Math.floor((this.perHour - 1) / this.#adaptiveFactor));
-    const { refillPerMs } = this.#refill(t, effectiveHourly);
-    const gap = this.minGapMs;
-    const creditWait = options.priority
-      ? 0
-      : Math.ceil(Math.max(0, 1 - this.#credit) / refillPerMs);
-    const gapWait = this.#lastCallAt === null ? 0 : Math.max(0, this.#lastCallAt + gap - t);
-    const minuteWait =
-      this.#minute.length < this.perMinute
-        ? 0
-        : this.#minute[this.#minute.length - this.perMinute]! + 60_000 - t;
-    const hourWait =
-      this.#hour.length < effectiveHourly
-        ? 0
-        : this.#hour[this.#hour.length - effectiveHourly]! + 3_600_000 - t;
-    return Math.max(gapWait, creditWait, minuteWait, hourWait, 0);
+    const hourlyLimit = effectiveHourly;
+    const candidates: Array<{ ms: number; reason: MutationWaitReason }> = [
+      {
+        ms: this.#lastCallAt === null ? 0 : Math.max(0, this.#lastCallAt + this.minGapMs - t),
+        reason: "mutation-spacing",
+      },
+      {
+        ms:
+          this.#minute.length < this.perMinute
+            ? 0
+            : this.#minute[this.#minute.length - this.perMinute]! + 60_000 - t,
+        reason: "rolling-minute",
+      },
+      {
+        ms:
+          this.#hour.length < hourlyLimit
+            ? 0
+            : this.#hour[this.#hour.length - hourlyLimit]! + 3_600_000 - t,
+        reason: "rolling-hour",
+      },
+    ];
+    return candidates.reduce((longest, next) => (next.ms > longest.ms ? next : longest));
   }
 
   /** Record an actual transport attempt, immediately before invoking HTTP. */
   recordTransported(now: Date = new Date()): void {
     const t = now.getTime();
     this.#prune(t);
-    this.#refill(t, Math.max(1, Math.floor((this.perHour - 1) / this.#adaptiveFactor)));
-    // Priority traffic shares the same allowance; it cannot mint normal credit.
-    this.#credit = Math.max(0, this.#credit - 1);
+    // Priority traffic shares the same rolling allowance.
     this.#minute.push(t);
     this.#hour.push(t);
     this.#lastCallAt = t;
@@ -767,18 +758,6 @@ export class ContentCreationPacer {
       this.#hour.shift();
     }
   }
-
-  #refill(now: number, effectiveHourly: number): { refillPerMs: number } {
-    const capacity = Math.min(
-      Math.max(1, Math.floor(60 / this.#adaptiveFactor)),
-      Math.max(1, effectiveHourly - 1),
-    );
-    const refillPerMs = Math.max(1, effectiveHourly - capacity) / 3_600_000;
-    const elapsed = this.#creditAt === null ? 0 : Math.max(0, now - this.#creditAt);
-    this.#credit = Math.min(capacity, this.#credit + elapsed * refillPerMs);
-    this.#creditAt = now;
-    return { refillPerMs };
-  }
 }
 
 export interface LocalSecondaryQuotaEstimate {
@@ -802,8 +781,16 @@ export class MutationAdmissionStoppedError extends Error {
   }
 }
 
+export type MutationWaitReason =
+  | "mutation-spacing"
+  | "rolling-minute"
+  | "rolling-hour"
+  | "admission-contention";
+export type MutationWaitReasons = Partial<Record<MutationWaitReason, number>>;
+
 export interface MutationPermit {
   waitedMs: number;
+  waitReasonMs?: MutationWaitReasons;
   release(): void;
   /** Last synchronous check immediately before invoking transport. */
   assertDispatchAllowed?(): void;
@@ -928,13 +915,20 @@ export class MutationScheduler implements MutationAdmission {
   async acquire(kind: MutationClass = "normal"): Promise<MutationPermit> {
     const startedAt = this.#now().getTime();
     let pacedWaitMs = 0;
+    const waitReasonMs: MutationWaitReasons = {};
+    const addWait = (reason: MutationWaitReason, ms: number) => {
+      waitReasonMs[reason] = (waitReasonMs[reason] ?? 0) + ms;
+    };
     for (;;) {
+      const gateStarted = this.#now().getTime();
       const release = await this.#acquireGate(kind);
+      addWait("admission-contention", Math.max(0, this.#now().getTime() - gateStarted));
       const now = this.#now();
       let wait: number;
+      let reason: MutationWaitReason;
       try {
         this.#assertAdmissionOpen(kind);
-        wait = this.#pacer.waitMs(now, { priority: kind !== "normal" });
+        ({ ms: wait, reason } = this.#pacer.wait(now, { priority: kind !== "normal" }));
       } catch (error) {
         release();
         throw error;
@@ -944,6 +938,7 @@ export class MutationScheduler implements MutationAdmission {
         let transported = false;
         return {
           waitedMs: Math.max(pacedWaitMs, now.getTime() - startedAt),
+          waitReasonMs,
           release,
           assertDispatchAllowed: () => this.#assertAdmissionOpen(kind),
           recordTransported: () => {
@@ -966,6 +961,14 @@ export class MutationScheduler implements MutationAdmission {
         };
       }
       release();
+      // An occupied window is current quota exhaustion, not permission to hold
+      // a lease/worker holding permits until the next hour. The active owner
+      // releases resources, waits and retries this operation at its quota boundary.
+      if (reason === "rolling-minute" || reason === "rolling-hour")
+        throw new GitHubLocalAdmissionDeferredError(
+          { kind: "rate_limit", retryAfterMs: wait },
+          new Error(`Factory local ${reason} mutation window is occupied`),
+        );
       if (wait >= 5_000 && now.getTime() - this.#lastNoticeAt >= 60_000) {
         this.#lastNoticeAt = now.getTime();
         this.#notify(
@@ -974,8 +977,11 @@ export class MutationScheduler implements MutationAdmission {
             : `pacing a GitHub mutation for ${wait}ms; lease traffic retains priority`,
         );
       }
+      const sleepStarted = this.#now().getTime();
       await this.#sleep(wait, kind === "normal" ? this.#normalShutdown.signal : undefined);
-      pacedWaitMs += wait;
+      const elapsed = Math.max(0, this.#now().getTime() - sleepStarted);
+      addWait(reason, elapsed);
+      pacedWaitMs += elapsed;
     }
   }
 
@@ -1062,4 +1068,156 @@ export class ConcurrencyLimiter {
       this.#queue.shift()?.();
     };
   }
+}
+
+export class GitHubQuotaWaitDeadlineError extends Error {
+  constructor() {
+    super("Objective timeout exhausted");
+    this.name = "TimeoutError";
+  }
+}
+
+export interface GitHubQuotaWaitOptions {
+  /** Stops waiting/retrying; initial cleanup requests retain their own authority checks. */
+  signal?: AbortSignal;
+  /** Absolute owner deadline, resolved again as durable run identity becomes available. */
+  deadline?: () => number;
+  beforeRetry?: () => Promise<void>;
+  onWait?: (observation: {
+    reason: "primary" | "local-window" | "server";
+    waitedMs: number;
+  }) => void;
+  /** Deterministic clock seam; production uses an abortable timer. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+}
+const quotaWaitScope = new AsyncLocalStorage<GitHubQuotaWaitOptions>();
+const quotaRetryBoundary = new AsyncLocalStorage<boolean>();
+
+/** Active owners wait for quota; standalone inspection retains its existing errors. */
+export function withGitHubQuotaWait<T>(
+  options: GitHubQuotaWaitOptions,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return quotaRetryBoundary.run(false, () => quotaWaitScope.run(options, operation));
+}
+
+/** Retry only a definite quota refusal, after the complete operation has released
+ * permits. Nested transport/fence calls bubble to the outer operation so they
+ * cannot hold a mutation gate while waiting or reuse a pre-wait authority check. */
+export async function retryGitHubQuota<T>(
+  operation: (retried: boolean) => Promise<T>,
+  options: { refresh?: boolean } = {},
+): Promise<T> {
+  const scope = quotaWaitScope.getStore();
+  if (!scope || quotaRetryBoundary.getStore()) return operation(false);
+  const assertCanRetry = () => {
+    scope.signal?.throwIfAborted();
+    if (scope.deadline && Date.now() >= scope.deadline()) throw new GitHubQuotaWaitDeadlineError();
+  };
+  let retried = false;
+  for (;;) {
+    if (retried) assertCanRetry();
+    try {
+      return await quotaRetryBoundary.run(true, async () => {
+        if (retried && options.refresh !== false) await scope.beforeRetry?.();
+        if (retried) assertCanRetry();
+        return operation(retried);
+      });
+    } catch (error) {
+      if (
+        !(error instanceof PlatformUnavailableError) ||
+        error.refusal.kind !== "rate_limit" ||
+        !definiteGitHubQuotaRejection(error)
+      )
+        throw error;
+      assertCanRetry();
+      const reason =
+        error instanceof GitHubPrimaryAdmissionDeferredError || isKnownPrimaryQuotaRefusal(error)
+          ? "primary"
+          : error instanceof GitHubLocalAdmissionDeferredError
+            ? "local-window"
+            : "server";
+      const started = Date.now();
+      try {
+        const waitUntil = Date.now() + Math.max(1, error.refusal.retryAfterMs);
+        // Chunk long server waits without retrying HTTP early. The deadline can
+        // become shorter once a resumed run's durable start time is known.
+        do {
+          assertCanRetry();
+          const remaining = Math.min(waitUntil, scope.deadline?.() ?? Infinity) - Date.now();
+          await (scope.sleep ?? mutationDelay)(
+            scope.sleep ? Math.max(1, remaining) : Math.min(60_000, Math.max(1, remaining)),
+            scope.signal,
+          );
+        } while (Date.now() < waitUntil && !scope.sleep);
+        assertCanRetry();
+      } finally {
+        try {
+          scope.onWait?.({ reason, waitedMs: Math.max(0, Date.now() - started) });
+        } catch {
+          /* Diagnostic only. */
+        }
+      }
+      retried = true;
+    }
+  }
+}
+
+export class GitHubLocalAdmissionDeferredError extends GitHubPreTransportQuotaDeferredError {}
+
+/** A quota label alone does not prove a partially executed mutation is retryable. */
+export function definiteGitHubQuotaRejection(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth++) {
+    if (current instanceof GitHubPreTransportQuotaDeferredError) return true;
+    const value = current as {
+      status?: number;
+      name?: string;
+      data?: unknown;
+      cause?: unknown;
+      errors?: Array<{ type?: string; code?: string }>;
+      response?: { data?: { data?: unknown; errors?: Array<{ type?: string; code?: string }> } };
+    };
+    if (value.status === 403 || value.status === 429) return true;
+    // Octokit's throttling hook also surfaces HTTP-200 GraphQL errors through
+    // response.data. Retain the no-partial-result requirement for both shapes.
+    const envelope = value.name === "GraphqlResponseError" ? value : value.response?.data;
+    if (envelope?.errors?.length)
+      return (
+        envelope.data == null &&
+        envelope.errors.every(
+          (entry) =>
+            entry.type === "RATE_LIMITED" ||
+            entry.type === "RATE_LIMIT" ||
+            entry.code === "graphql_rate_limit",
+        )
+      );
+    current = value.cause;
+  }
+  return false;
+}
+
+/** A known primary resource shortage must not freeze the other API resource. */
+export function isKnownPrimaryQuotaRefusal(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth++) {
+    const value = current as {
+      headers?: Record<string, string | number | undefined>;
+      response?: { headers?: Record<string, string | number | undefined> };
+      cause?: unknown;
+      message?: string;
+    };
+    const headers = value.response?.headers ?? value.headers;
+    if (value.message?.toLowerCase().includes("secondary")) return false;
+    if (
+      headers &&
+      String(headers["x-ratelimit-remaining"]) === "0" &&
+      (headers["x-ratelimit-resource"] === "core" ||
+        headers["x-ratelimit-resource"] === "graphql") &&
+      Number.isFinite(Number(headers["x-ratelimit-reset"]))
+    )
+      return true;
+    current = value.cause;
+  }
+  return false;
 }

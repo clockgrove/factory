@@ -1,6 +1,7 @@
 import { type LeaseEvent, parseFactoryEvent } from "../protocol/events.js";
 import { PROTOCOL_V2, gitSha } from "../protocol/limits.js";
 import { observeLeaseAssertion } from "./mutation-observation.js";
+import { retryGitHubQuota } from "../platform.js";
 
 export interface GitCommitObject {
   oid: string;
@@ -163,95 +164,130 @@ export class LeaseManager {
     base: GitCommitObject,
     requestedSequence?: number,
   ): Promise<LeaseState> {
-    return this.#withLeaseClass(async () => {
-      const now = await this.#store.serverTime();
-      const ref = leaseRef(identity.objective);
-      const current = await this.read(identity.objective);
-      if (current && current.expiresAt.getTime() > now.getTime()) {
-        if (current.runId === identity.runId && current.holder === identity.holder) {
-          return this.renew(current);
-        }
-        throw new LeaseAcquisitionContendedError(
-          identity.objective,
-          current.expiresAt.getTime() - now.getTime(),
-          current.holder,
-        );
-      }
+    return retryGitHubQuota(
+      () =>
+        this.#withLeaseClass(async () => {
+          const now = await this.#store.serverTime();
+          const ref = leaseRef(identity.objective);
+          const current = await this.read(identity.objective);
+          if (current && current.expiresAt.getTime() > now.getTime()) {
+            if (current.runId === identity.runId && current.holder === identity.holder) {
+              return this.renew(current);
+            }
+            throw new LeaseAcquisitionContendedError(
+              identity.objective,
+              current.expiresAt.getTime() - now.getTime(),
+              current.holder,
+            );
+          }
 
-      const epoch = (current?.epoch ?? 0) + 1;
-      const sequence = requestedSequence ?? (current?.sequence ?? 0) + 1;
-      if (sequence <= (current?.sequence ?? 0)) {
-        throw new Error("lease sequence must advance");
-      }
-      const event: LeaseEvent = {
-        protocol: PROTOCOL_V2,
-        kind: "lease",
-        event: "LeaseAcquired",
-        objective: identity.objective,
-        runId: identity.runId,
-        sequence,
-        at: now.toISOString(),
-        holder: identity.holder,
-        epoch,
-        expiresAt: new Date(now.getTime() + this.#durationMs).toISOString(),
-        policyDigest: identity.policyDigest,
-        ...(current ? { previousOid: current.oid } : {}),
-      };
-      const parentOid = current?.oid ?? base.oid;
-      const treeOid = current?.treeOid ?? base.treeOid;
-      const oid = await this.#store.createCommit({
-        treeOid,
-        parentOids: [parentOid],
-        message: leaseMessage(event),
-      });
-      const won = current
-        ? await this.#store.compareAndSwapRef({ ref, beforeOid: current.oid, afterOid: oid })
-        : await this.#store.createRef(ref, oid);
-      if (!won) throw new LeaseLostError("another Director won lease acquisition");
-      return {
-        ...identity,
-        ref,
-        oid,
-        treeOid,
-        epoch,
-        sequence,
-        expiresAt: new Date(event.expiresAt),
-      };
-    });
+          const epoch = (current?.epoch ?? 0) + 1;
+          const sequence = requestedSequence ?? (current?.sequence ?? 0) + 1;
+          if (sequence <= (current?.sequence ?? 0)) {
+            throw new Error("lease sequence must advance");
+          }
+          const event: LeaseEvent = {
+            protocol: PROTOCOL_V2,
+            kind: "lease",
+            event: "LeaseAcquired",
+            objective: identity.objective,
+            runId: identity.runId,
+            sequence,
+            at: now.toISOString(),
+            holder: identity.holder,
+            epoch,
+            expiresAt: new Date(now.getTime() + this.#durationMs).toISOString(),
+            policyDigest: identity.policyDigest,
+            ...(current ? { previousOid: current.oid } : {}),
+          };
+          const parentOid = current?.oid ?? base.oid;
+          const treeOid = current?.treeOid ?? base.treeOid;
+          const oid = await this.#store.createCommit({
+            treeOid,
+            parentOids: [parentOid],
+            message: leaseMessage(event),
+          });
+          const won = current
+            ? await this.#store.compareAndSwapRef({ ref, beforeOid: current.oid, afterOid: oid })
+            : await this.#store.createRef(ref, oid);
+          if (!won) throw new LeaseLostError("another Director won lease acquisition");
+          return {
+            ...identity,
+            ref,
+            oid,
+            treeOid,
+            epoch,
+            sequence,
+            expiresAt: new Date(event.expiresAt),
+          };
+        }),
+      { refresh: false },
+    );
   }
 
-  async renew(lease: LeaseState, requestedSequence?: number): Promise<LeaseState> {
-    return this.#withLeaseClass(async () => {
-      await this.assertCurrent(lease);
-      const now = await this.#store.serverTime();
-      const event: LeaseEvent = {
-        protocol: PROTOCOL_V2,
-        kind: "lease",
-        event: "LeaseRenewed",
-        objective: lease.objective,
-        runId: lease.runId,
-        sequence: requestedSequence ?? lease.sequence + 1,
-        at: now.toISOString(),
-        holder: lease.holder,
-        epoch: lease.epoch,
-        expiresAt: new Date(now.getTime() + this.#durationMs).toISOString(),
-        policyDigest: lease.policyDigest,
-        previousOid: lease.oid,
-      };
-      if (event.sequence <= lease.sequence) throw new Error("lease sequence must advance");
-      const oid = await this.#store.createCommit({
-        treeOid: lease.treeOid,
-        parentOids: [lease.oid],
-        message: leaseMessage(event),
-      });
-      const won = await this.#store.compareAndSwapRef({
-        ref: lease.ref,
-        beforeOid: lease.oid,
-        afterOid: oid,
-      });
-      if (!won) throw new LeaseLostError("another Director advanced the lease");
-      return { ...lease, oid, sequence: event.sequence, expiresAt: new Date(event.expiresAt) };
-    });
+  async renew(
+    lease: LeaseState,
+    requestedSequence?: number,
+    options: { allowExpiredAfterQuota?: boolean } = {},
+  ): Promise<LeaseState> {
+    return retryGitHubQuota(
+      (retried) =>
+        this.#withLeaseClass(async () => {
+          if (retried || options.allowExpiredAfterQuota) await this.#assertQuotaRenewalOwner(lease);
+          else await this.assertCurrent(lease);
+          const now = await this.#store.serverTime();
+          const event: LeaseEvent = {
+            protocol: PROTOCOL_V2,
+            kind: "lease",
+            event: "LeaseRenewed",
+            objective: lease.objective,
+            runId: lease.runId,
+            sequence: requestedSequence ?? lease.sequence + 1,
+            at: now.toISOString(),
+            holder: lease.holder,
+            epoch: lease.epoch,
+            expiresAt: new Date(now.getTime() + this.#durationMs).toISOString(),
+            policyDigest: lease.policyDigest,
+            previousOid: lease.oid,
+          };
+          if (event.sequence <= lease.sequence) throw new Error("lease sequence must advance");
+          const oid = await this.#store.createCommit({
+            treeOid: lease.treeOid,
+            parentOids: [lease.oid],
+            message: leaseMessage(event),
+          });
+          const won = await this.#store.compareAndSwapRef({
+            ref: lease.ref,
+            beforeOid: lease.oid,
+            afterOid: oid,
+          });
+          if (!won) throw new LeaseLostError("another Director advanced the lease");
+          return { ...lease, oid, sequence: event.sequence, expiresAt: new Date(event.expiresAt) };
+        }),
+      { refresh: false },
+    );
+  }
+
+  /** Quota waiting may outlast expiry, but cannot revive a released lease or
+   * borrow another renewal/acquisition. The final CAS still owns the transition. */
+  async #assertQuotaRenewalOwner(lease: LeaseState): Promise<void> {
+    observeLeaseAssertion();
+    if (lease.ref !== leaseRef(lease.objective)) throw new LeaseLostError();
+    const oid = await this.#store.readRef(lease.ref);
+    if (oid !== lease.oid) throw new LeaseLostError();
+    const commit = await this.#store.readCommit(oid);
+    const current = parseLeaseCommit(commit);
+    if (
+      leaseEventFromCommit(commit).event === "LeaseReleased" ||
+      current.objective !== lease.objective ||
+      current.runId !== lease.runId ||
+      current.holder !== lease.holder ||
+      current.epoch !== lease.epoch ||
+      current.policyDigest !== lease.policyDigest ||
+      current.sequence !== lease.sequence ||
+      current.treeOid !== lease.treeOid
+    )
+      throw new LeaseLostError();
   }
 
   async release(lease: LeaseState, requestedSequence?: number): Promise<LeaseState> {

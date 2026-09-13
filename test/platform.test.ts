@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   CircuitBreaker,
@@ -7,8 +7,6 @@ import {
   GitHubPrimaryAdmissionDeferredError,
   GitHubPrimaryQuotaCache,
   GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST,
-  GITHUB_GRAPHQL_PROTECTED_RESERVE,
-  GITHUB_PRIMARY_PROTECTED_RESERVE,
   MutationScheduler,
   PlatformUnavailableError,
   classifyRefusal,
@@ -225,7 +223,7 @@ describe("GitHub client throttling", () => {
     ]);
   });
 
-  it("shares primary-reserve admission across clients using the same credential", async () => {
+  it("shares primary-exhausted admission across clients using the same credential", async () => {
     let transports = 0;
     const reset = Math.floor(Date.now() / 1_000) + 3_600;
     const requestFetch: typeof globalThis.fetch = async () => {
@@ -236,14 +234,14 @@ describe("GitHub client throttling", () => {
           "content-type": "application/json",
           "x-ratelimit-resource": "core",
           "x-ratelimit-limit": "5000",
-          "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
-          "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+          "x-ratelimit-remaining": String(0),
+          "x-ratelimit-used": String(5000 - 0),
           "x-ratelimit-reset": String(reset),
         },
       });
     };
     const options = {
-      token: "shared-primary-reserve-test",
+      token: "shared-primary-exhausted-test",
       owner: "clockgrove",
       repo: "factory",
       requestFetch,
@@ -266,14 +264,14 @@ describe("GitHub client throttling", () => {
     );
   });
 
-  it("reserves normal capacity while allowing explicit safety traffic until exhaustion", async () => {
+  it("uses available primary quota greedily for either request class until actual exhaustion", async () => {
     const quota = new GitHubPrimaryQuotaCache();
     const reset = Math.floor(Date.now() / 1_000) + 3_600;
     quota.observe({
       "x-ratelimit-resource": "core",
       "x-ratelimit-limit": "5000",
-      "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
-      "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-remaining": "1",
+      "x-ratelimit-used": "4999",
       "x-ratelimit-reset": String(reset),
     });
     let transports = 0;
@@ -291,11 +289,9 @@ describe("GitHub client throttling", () => {
       },
     });
 
-    await expect(octokit.request("GET /user")).rejects.toBeInstanceOf(
-      GitHubPrimaryAdmissionDeferredError,
-    );
+    await octokit.request("GET /user");
     await withGitHubRequestPriority("protected", () => octokit.request("GET /user"));
-    expect(transports).toBe(1);
+    expect(transports).toBe(2);
 
     quota.observe({
       "x-ratelimit-resource": "core",
@@ -307,7 +303,7 @@ describe("GitHub client throttling", () => {
     await expect(
       withGitHubRequestPriority("protected", () => octokit.request("GET /user")),
     ).rejects.toBeInstanceOf(GitHubPrimaryAdmissionDeferredError);
-    expect(transports).toBe(1);
+    expect(transports).toBe(2);
   });
 
   it("reserves the estimated GraphQL query cost before transport", async () => {
@@ -315,12 +311,8 @@ describe("GitHub client throttling", () => {
     quota.observe({
       "x-ratelimit-resource": "graphql",
       "x-ratelimit-limit": "5000",
-      "x-ratelimit-remaining": String(
-        GITHUB_GRAPHQL_PROTECTED_RESERVE + GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST - 1,
-      ),
-      "x-ratelimit-used": String(
-        5001 - GITHUB_GRAPHQL_PROTECTED_RESERVE - GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST,
-      ),
+      "x-ratelimit-remaining": String(0 + GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST - 1),
+      "x-ratelimit-used": String(5001 - 0 - GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST),
       "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
     });
     let transports = 0;
@@ -375,8 +367,8 @@ describe("GitHub client throttling", () => {
     quota.observe({
       "x-ratelimit-resource": "core",
       "x-ratelimit-limit": "5000",
-      "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
-      "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-remaining": String(0),
+      "x-ratelimit-used": String(5000 - 0),
       "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
     });
     const scheduler = new MutationScheduler({ primaryQuota: quota });
@@ -412,8 +404,8 @@ describe("GitHub client throttling", () => {
     quota.observe({
       "x-ratelimit-resource": "core",
       "x-ratelimit-limit": "5000",
-      "x-ratelimit-remaining": String(GITHUB_PRIMARY_PROTECTED_RESERVE),
-      "x-ratelimit-used": String(5000 - GITHUB_PRIMARY_PROTECTED_RESERVE),
+      "x-ratelimit-remaining": String(0),
+      "x-ratelimit-used": String(5000 - 0),
       "x-ratelimit-reset": String(Math.floor(Date.now() / 1_000) + 3_600),
     });
     const scheduler = new MutationScheduler({ primaryQuota: quota });
@@ -632,14 +624,14 @@ describe("ContentCreationPacer", () => {
     expect(p.waitMs(new Date(t0.getTime() + 1_000))).toBe(0);
   });
 
-  it("keeps lease priority while retaining the hard documented windows", () => {
-    const p = new ContentCreationPacer(40, 5, 0);
-    const t0 = new Date("2026-01-01T00:00:00.000Z");
-    p.recordCall(t0);
-    p.recordCall(t0);
-    p.recordCall(t0);
-    expect(p.waitMs(t0)).toBeGreaterThan(0);
-    expect(p.waitMs(t0, { priority: true })).toBe(0);
+  it("does not reserve unused allowance for hypothetical future work", () => {
+    const p = new ContentCreationPacer(80, 500, 0);
+    const now = new Date("2026-01-01T00:00:00Z");
+    for (let i = 0; i < 79; i++) p.recordTransported(now);
+    expect(p.waitMs(now)).toBe(0);
+    expect(p.waitMs(now, { priority: true })).toBe(0);
+    p.recordTransported(now);
+    expect(p.wait(now)).toEqual({ ms: 60_000, reason: "rolling-minute" });
   });
 
   it("adapts downward only after observed secondary feedback", () => {
@@ -656,75 +648,80 @@ describe("ContentCreationPacer", () => {
     });
   });
 
-  it("paces two small Objectives without an hourly-cliff stall", () => {
-    const p = new ContentCreationPacer();
-    let now = new Date("2026-01-01T00:00:00Z");
-    const start = now.getTime();
-    // The retained two-Objective trace contained 58 transported mutations.
-    for (let mutation = 0; mutation < 58; mutation += 1) {
-      now = new Date(now.getTime() + p.waitMs(now));
-      p.recordTransported(now);
-      p.recordSuccess();
-    }
-    expect(now.getTime() - start).toBe(57_000);
-  });
+  it.each([58, 242, 399, 499])(
+    "admits %s ready mutations at minimum spacing without future-quota smoothing",
+    (count) => {
+      const p = new ContentCreationPacer();
+      let now = new Date("2026-01-01T00:00:00Z");
+      const start = now.getTime();
+      for (let mutation = 0; mutation < count; mutation++) {
+        const delay = p.waitMs(now);
+        expect(delay).toBeLessThanOrEqual(1000);
+        now = new Date(now.getTime() + delay);
+        p.recordTransported(now);
+        p.recordSuccess();
+      }
+      expect(now.getTime() - start).toBe((count - 1) * 1000);
+    },
+  );
 
-  it("smooths sustained ordinary traffic without an hourly cliff", () => {
+  it("prices sustained competing traffic against the same actual rolling history", () => {
     const p = new ContentCreationPacer();
     let now = new Date("2026-01-01T00:00:00Z");
-    for (let mutation = 0; mutation < 1_100; mutation += 1) {
-      const wait = p.waitMs(now);
-      expect(wait).toBeLessThanOrEqual(8_201);
-      now = new Date(now.getTime() + wait);
+    for (let mutation = 0; mutation < 1100; mutation++) {
+      now = new Date(now.getTime() + p.waitMs(now, { priority: mutation % 3 === 0 }));
       expect(p.waitMs(now)).toBe(0);
       p.recordTransported(now);
+      const snapshot = p.snapshot(now);
+      expect(snapshot.transportedLastMinute).toBeLessThanOrEqual(80);
+      expect(snapshot.transportedLastHour).toBeLessThanOrEqual(499);
     }
   });
 
-  it("caps replenishment after idle time and retains the hard hourly limit for priority", () => {
-    const p = new ContentCreationPacer(1_000, 500, 0);
-    const start = new Date("2026-01-01T00:00:00Z");
-    for (let i = 0; i < 60; i++) p.recordTransported(start);
-    expect(p.waitMs(start)).toBeGreaterThan(0);
-    const later = new Date(start.getTime() + 3_600_000);
-    expect(p.waitMs(later)).toBe(0);
-    for (let i = 0; i < 60; i++) p.recordTransported(later);
-    expect(p.waitMs(later)).toBeGreaterThan(0);
-    expect(p.waitMs(later, { priority: true })).toBe(0);
-    for (let i = 60; i < 499; i++) p.recordTransported(later);
-    expect(p.waitMs(later, { priority: true })).toBe(3_600_000);
-  });
-
-  it("shares burst credit across callers of one pacer, not across independent instances", () => {
-    const shared = new ContentCreationPacer(1_000, 500, 0);
+  it("releases an occupied hourly window on expiry without exempting protected traffic", () => {
+    const p = new ContentCreationPacer(1000, 500, 0);
     const now = new Date("2026-01-01T00:00:00Z");
-    // Two Objectives in one controller consume one allowance.
-    for (let i = 0; i < 30; i++) {
-      shared.recordTransported(now);
-      shared.recordTransported(now);
-    }
-    expect(shared.waitMs(now)).toBeGreaterThan(0);
-    // A fresh foreground process cannot reconstruct secondary quota. This is
-    // explicitly a local estimate, never proof of remaining server capacity.
+    for (let i = 0; i < 499; i++) p.recordTransported(now);
+    expect(p.wait(now)).toEqual({ ms: 3_600_000, reason: "rolling-hour" });
+    expect(p.waitMs(now, { priority: true })).toBe(3_600_000);
+    expect(p.waitMs(new Date(now.getTime() + 3_600_000))).toBe(0);
+  });
+
+  it("shares current usage across callers, without pretending to know another process's usage", () => {
+    const p = new ContentCreationPacer(1000, 500, 0);
+    const now = new Date("2026-01-01T00:00:00Z");
+    for (let i = 0; i < 499; i++) p.recordTransported(now);
+    expect(p.waitMs(now)).toBeGreaterThan(0);
     expect(new ContentCreationPacer().waitMs(now)).toBe(0);
   });
 
-  it("shrinks burst credit after secondary refusal without exempting priority counts", () => {
-    const p = new ContentCreationPacer(1_000, 500, 0);
+  it("applies observed refusal reduction to normal and protected traffic equally", () => {
+    const p = new ContentCreationPacer(1000, 500, 0);
     const now = new Date("2026-01-01T00:00:00Z");
-    p.recordSecondaryRefusal();
-    p.recordSecondaryRefusal();
-    p.recordSecondaryRefusal();
-    for (let i = 0; i < 60; i++) p.recordTransported(now);
-    expect(p.waitMs(now)).toBeGreaterThan(0);
-    expect(p.waitMs(now, { priority: true })).toBe(0);
-    p.recordTransported(now);
-    p.recordTransported(now);
+    for (let i = 0; i < 3; i++) p.recordSecondaryRefusal();
+    for (let i = 0; i < 62; i++) p.recordTransported(now);
+    expect(p.waitMs(now)).toBe(3_600_000);
     expect(p.waitMs(now, { priority: true })).toBe(3_600_000);
   });
 });
 
 describe("MutationScheduler", () => {
+  it.each(["normal", "lease", "cleanup"] as const)(
+    "defers %s at an occupied window without sleeping through lease expiry",
+    async (kind) => {
+      const now = new Date("2026-01-01T00:00:00Z");
+      const pacer = new ContentCreationPacer(1000, 500, 0);
+      for (let i = 0; i < 499; i++) pacer.recordTransported(now);
+      const sleep = vi.fn();
+      const scheduler = new MutationScheduler({ pacer, now: () => now, sleep });
+      await expect(scheduler.acquire(kind)).rejects.toMatchObject({
+        refusal: { kind: "rate_limit", retryAfterMs: 3_600_000 },
+      });
+      expect(sleep).not.toHaveBeenCalled();
+      expect(scheduler.telemetry().transported).toBe(0);
+    },
+  );
+
   it("charges only transported writes and reports separate primary and secondary state", async () => {
     const t0 = new Date("2026-01-01T00:00:00.000Z");
     const now = t0;

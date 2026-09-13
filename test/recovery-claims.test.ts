@@ -171,10 +171,17 @@ class Store implements CompiledGraphStore {
     return oid;
   }
   async createTree(args: Parameters<CompiledGraphStore["createTree"]>[0]) {
+    const materialized = args.entries.map((entry) => {
+      if (entry.content === undefined) return entry;
+      const bytes = Buffer.from(entry.content, "utf8");
+      const sha = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+      this.blobs.set(sha, bytes);
+      return { ...entry, sha };
+    });
     const oid = this.write("tree");
     this.trees.set(
       oid,
-      new Map(args.entries.filter((entry) => entry.sha).map((entry) => [entry.path, entry.sha!])),
+      new Map(materialized.filter((entry) => entry.sha).map((entry) => [entry.path, entry.sha!])),
     );
     this.response("tree");
     return oid;

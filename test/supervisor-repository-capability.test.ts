@@ -875,12 +875,23 @@ describe("Supervisor repository-capability admission", () => {
     const scoped = admitLocalValidation();
     try {
       const result = await fixture.run();
-      expect(result).toMatchObject({
-        status: "escalated",
-        reason: expect.stringMatching(
-          /provider root.*merge is not authenticated|authenticated accepted exact-head checkpoint/i,
-        ),
-      });
+      expect(result).toMatchObject({ status: "escalated" });
+      // Depending on sibling settlement order, the run can summarize the spent
+      // attempt limit. The original authority rejection must still be evidenced.
+      const rejection =
+        /provider root.*merge is not authenticated|authenticated accepted exact-head checkpoint/i;
+      expect(
+        rejection.test(result.reason ?? "") ||
+          fixture
+            .events()
+            .some(
+              (event) =>
+                event.kind === "attempt" &&
+                event.event === "AttemptFailed" &&
+                event.workItem === 9 &&
+                rejection.test(event.reason ?? ""),
+            ),
+      ).toBe(true);
       expect(
         fixture
           .events()
@@ -1166,6 +1177,8 @@ describe("Supervisor workflow publication boundary", () => {
       localOnly: true,
       workflowArtifact: "unsafe",
       workflowPublicationCrash: true,
+      // Keep unrelated sibling attempts out of this publication-recovery scenario.
+      dependencyChain: true,
     });
     fixtures.push(fixture);
     const scoped = admitLocalValidation();

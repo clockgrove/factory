@@ -388,7 +388,7 @@ async function readDescriptor(
   const message = `Factory artifact transfer ${phase}\n\nFactory-Artifact: ${descriptor.artifact.digest}\nFactory-Descriptor: ${sha256(bytes)}\nFactory-Retention: repository-audit`;
   if (commit.message.trim() !== message)
     throw new Error("artifact transfer lifecycle message mismatch");
-  return { ref, oid, commit, descriptor };
+  return { ref, oid, commit, descriptor, descriptorOid };
 }
 
 /** No replacement work is authorized by an incomplete transfer or an unavailable chunk. */
@@ -519,6 +519,8 @@ export async function persistArtifactTransfer(args: {
     await args.assertCurrent();
     return operation();
   };
+  let reusableDescriptorOid: string | undefined;
+  let createdIntentTree: string | undefined;
   const save = async (phase: "intent" | "ready", parentOids: string[]) => {
     const existing = await readDescriptor(args.store, identity, phase);
     if (existing) {
@@ -529,7 +531,8 @@ export async function persistArtifactTransfer(args: {
         throw new Error("artifact transfer identity already binds different content");
       return existing;
     }
-    const descriptorOid = await mutation(() => args.store.createBlob(bytes));
+    const descriptorOid =
+      reusableDescriptorOid ?? (await mutation(() => args.store.createBlob(bytes)));
     if (descriptorOid !== gitBlobOid(bytes)) throw new Error("uploaded descriptor OID mismatch");
     const entries = [
       {
@@ -547,25 +550,42 @@ export async function persistArtifactTransfer(args: {
           }))
         : []),
     ];
-    const treeOid = await mutation(() => args.store.createTree({ entries }));
+    const treeOid =
+      phase === "ready" && chunks.length === 0 && createdIntentTree
+        ? createdIntentTree
+        : await mutation(() => args.store.createTree({ entries }));
     const message = `Factory artifact transfer ${phase}\n\nFactory-Artifact: ${artifact.digest}\nFactory-Descriptor: ${sha256(bytes)}\nFactory-Retention: repository-audit`;
     const oid = await mutation(() => args.store.createCommit({ treeOid, parentOids, message }));
     const ref = `${artifactTransferRef(identity)}/${phase}`;
+    let acknowledged = false;
+    let publicationError: unknown;
     try {
-      await mutation(() => args.store.createRef(ref, oid));
+      acknowledged = await mutation(() => args.store.createRef(ref, oid));
     } catch (error) {
-      if ((await args.store.readRef(ref)) !== oid) throw error;
+      publicationError = error;
+    }
+    // The successful create acknowledges these exact prepared objects. As with
+    // graph/review publication, reconstruct only an existing or uncertain winner.
+    if (acknowledged) {
+      if (phase === "intent") createdIntentTree = treeOid;
+      return { ref, oid, commit: { oid, treeOid, parentOids, message }, descriptor, descriptorOid };
     }
     const observed = await readDescriptor(args.store, identity, phase);
+    if (!observed)
+      throw new Error(`artifact transfer ${phase} publication is not yet observable`, {
+        cause: publicationError,
+      });
     if (
-      !observed ||
       JSON.stringify(observed.descriptor) !== JSON.stringify(descriptor) ||
       JSON.stringify(observed.commit.parentOids) !== JSON.stringify(parentOids)
     )
-      throw new Error("artifact transfer ref publication conflicted");
+      throw new Error("artifact transfer ref publication conflicted", { cause: publicationError });
     return observed;
   };
   const intent = await save("intent", []);
+  // Reuse only exact bytes verified through the published intent. Historical
+  // descriptors may serialize differently; their ready message binds fresh bytes.
+  if (intent.descriptorOid === gitBlobOid(bytes)) reusableDescriptorOid = intent.descriptorOid;
   if (artifact.payload && args.afterIntent)
     await args.afterIntent({
       identity,

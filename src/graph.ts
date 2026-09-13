@@ -1,3 +1,5 @@
+import { isKnownPrimaryQuotaRefusal } from "./platform.js";
+import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "./platform.js";
 /**
  * Graph application: apply a compiled Objective (`skills/objective-compilation`)
  * to GitHub as sub-issues plus native `blocked by` relationships (§3).
@@ -955,10 +957,6 @@ export class GithubOctokitGraphWriter implements GraphWriter {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export interface GraphApplierOptions {
   writer: GraphWriter;
   onThrottle?: (message: string) => void;
@@ -1236,7 +1234,7 @@ export class GraphApplier {
       "objective-publication",
       this.#mutationScope,
       this.#onMutationOperation,
-      () => this.#dispatchMutation(fn, fence),
+      () => retryGitHubQuota(() => this.#dispatchMutation(fn, fence)),
     );
   }
 
@@ -1247,7 +1245,10 @@ export class GraphApplier {
     if (this.#breaker.isOpen()) {
       const wait = this.#breaker.waitMs();
       this.#notify(`circuit open; waiting ${wait}ms before the next call`);
-      await sleep(wait);
+      throw new GitHubPreTransportQuotaDeferredError(
+        { kind: "rate_limit", retryAfterMs: wait },
+        new Error("GitHub circuit is open"),
+      );
     }
 
     const mutationPermit = await this.#mutations.acquire("normal");
@@ -1255,19 +1256,19 @@ export class GraphApplier {
     let attempted = false;
     try {
       if (this.#breaker.isOpen()) {
-        throw new PlatformUnavailableError(
+        throw new GitHubPreTransportQuotaDeferredError(
           { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
           new Error("Factory GitHub circuit opened while the graph write was queued"),
         );
       }
       return await withGitHubRequestPriority("normal", async () => {
-        observeMutationQueue(mutationPermit.waitedMs);
+        observeMutationQueue(mutationPermit.waitedMs, mutationPermit.waitReasonMs);
         await observeMutationFence(async () => {
           if (fence) await fence(mutationPermit.waitedMs);
           await this.#beforeMutation(mutationPermit.waitedMs);
         });
         if (this.#breaker.isOpen()) {
-          throw new PlatformUnavailableError(
+          throw new GitHubPreTransportQuotaDeferredError(
             { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
             new Error("Factory GitHub circuit opened during the graph mutation fence"),
           );
@@ -1298,7 +1299,7 @@ export class GraphApplier {
       const refusal = classifyRefusal(error);
       if (refusal.kind === "not_refusal") throw error;
       mutationPermit.recordRefusal?.(isSecondaryRateLimitRefusal(error));
-      this.#breaker.recordRefusal(refusal);
+      if (!isKnownPrimaryQuotaRefusal(error)) this.#breaker.recordRefusal(refusal);
       throw new PlatformUnavailableError(refusal, error);
     } finally {
       release();

@@ -1,224 +1,75 @@
-# Factory delivery plan
+# Release delivery
 
-Date: 2026-09-04
-
-The [Factory Project](https://github.com/orgs/clockgrove/projects/1) owns current status. This document retains the
-accepted product waves and final publication protocol, not a competing execution queue.
-
-## Goal
-
-Build an open-source Factory that an indie developer or small team can
-install, understand, secure, and run without Clockgrove infrastructure. The released product must
-turn a GitHub Objective into dependency-aware Work Items, use trusted local Linux compute first,
-burst within explicit cost authority, validate every artifact independently, and deliver regular or
-native stacked pull requests until the Objective ships or one evidenced human decision is required.
-
-The waves below group tasks by outcome. Independent tasks may run concurrently; each wave has
-explicit completion checks. Durable App Server sessions, same-host Objective sharing, concurrent
-regular PRs and large-file handling are included. Vercel Sandbox is an optional follow-on integration.
+Factory aims to provide an open-source, GitHub-native coding agent orchestrator that a developer
+or small team can install and operate without Clockgrove infrastructure. The
+[Factory Project](https://github.com/orgs/clockgrove/projects/1) owns priorities and progress;
+[the design](DESIGN.md) owns the product contract. This document covers release scope and delivery.
 
 ## Product outcome
 
-> Factory runs an unattended, GitHub-native software factory in one Linux environment, bursts
-> selected work to Daytona or GitHub-managed agents when authorized, and publishes dependency-aware
-> work through regular or native stacked pull requests.
+The release scope includes synchronized Agent Plugin and `@clockgrove/factory` npm packages;
+a CLI and explicitly installed repository controller; local Linux execution through Codex SDK,
+CLI fallback, and explicit App Server sessions; adaptive single-host admission; independent
+validation; regular and native stacked PR delivery; durable recovery, accounting, and cleanup.
+Supported environment shapes are native Linux, Windows WSL2, and a Linux guest on macOS.
+Qualification must exercise x64 and ARM64 where shipped Node.js/provider dependencies support them.
+Repositories and Factory state belong on the Linux filesystem.
 
-The scope includes:
+Optional provider routes retain explicit limits: Daytona needs bounded spending and resource
+controls; Copilot has operator-assisted lifecycle boundaries; managed Codex stays unavailable until
+its authoritative identity and lifecycle interfaces exist and are qualified. Missing provider
+interfaces do not prevent local-only operation. Vercel Sandbox and additional harness adapters
+remain Labs integrations.
 
-- synchronized Agent Plugin and `@clockgrove/factory` npm artifacts;
-- a `factory` CLI and explicitly installed repository controller;
-- native Linux, Windows WSL2, and Linux guest on macOS environments;
-- local Codex SDK workers, with Codex CLI fallback and adaptive CPU and memory admission;
-- optional GitHub-managed integrations, with qualified behavior and explicit limits per provider:
-  Copilot limited automation and Codex unavailable until its real identity/lifecycle interface exists;
-- Daytona sandbox burst with TTL, egress, secret, concurrency, budget, and cleanup controls;
-- GitHub issues, native sub-issues/dependencies, versioned refs/receipts, and no required private
-  state service;
-- native stacked pull requests and regular independent PR pipelines with exact-head validation,
-  restart recovery, concurrent execution, and serialized/revalidated integration;
-- chat/MCP and CLI control with no custom UI or required GitHub Action; and
-- public security, support, governance, contribution, release, and conformance documentation.
-
-## Task waves and completion checks
-
-### Wave 1 — Reproducible distribution
-
-- Package the CLI/controller as `@clockgrove/factory` with an executable `factory` binary, explicit
-  exports, type declarations for any public library surface, and a strict files allowlist.
-- Build plugin and npm artifacts from the same source and keep their package versions synchronized.
-- Ensure installation runs no lifecycle script and starts no controller.
-- Produce deterministic bundles, validated schemas, dependency audit output, an SBOM, checksums, and
-  package provenance appropriate to the publication path.
-- Pack and install the staged tarball in a clean environment; after publication, repeat from npm's
-  package and from the published Agent Plugin artifact.
-
-Acceptance: a clean user can install either artifact, run credential-free help/doctor/startup checks,
-authenticate deliberately, and start the same controller behavior without a source checkout.
-
-### Wave 2 — Execution backends
-
-- Make the official Codex SDK local worktree backend the default and preserve Codex CLI as the
-  supported portable fallback. Run both through the same Work Packet, sandbox, artifact, validation,
-  cancellation, and cleanup contract.
-- Qualify Daytona with one real multi-worker Objective, fresh-resource validation, forced
-  cancellation, restart reconciliation, hard TTL, restricted egress, named-secret brokerage, native-usage
-  reconciliation, and leak detection/cleanup.
-- Keep managed integrations behind exact capability, identity, artifact, independent-validation,
-  recovery and spending safeguards. Expose Copilot's operator-assisted termination boundary rather
-  than claiming an unavailable automated stop operation.
-- Keep Codex unavailable until authoritative identity and provider-specific lifecycle interfaces are
-  implemented and qualified; never infer authorization from a display name or borrow Copilot's API.
-- Qualify each provider before claiming its execution support, preserving evidence of unsupported
-  features and no implicit provider substitution. Missing provider APIs do not block all of Factory.
-
-Acceptance: local-only operation works with no cloud credential, and every paid launch is preceded by
-durable provider, budget, and concurrency authority.
-
-### Wave 3 — Linux environment verification
-
-- Run the controller, worktree, pressure, cancellation, restart, and service lifecycle matrices on
-  native Linux, Windows WSL2, and a Linux guest hosted by macOS.
-- Test x64 and ARM64 where the shipped Node.js/provider dependencies support them.
-- Document that repositories and Factory state belong on the Linux filesystem.
-- Fail clearly when invoked in native Win32 or Darwin rather than partially installing a service.
-
-Acceptance: all three environment shapes pass the same Linux contract. Native Win32/Darwin lifecycle
-and multiple-local-machine coordination remain out of scope.
-
-### Wave 4 — GitHub delivery verification
-
-- Run native stack create, extend, observe, lower-layer update, descendant invalidation,
-  revalidation, asynchronous merge, merge-queue, partial completion, restart, and cancellation cases
-  against a disposable repository.
-- Prove the configured regular-PR fallback before it can be selected.
-- Exercise branch rules, stale heads, conflicting work, and independent sibling delivery.
-
-Acceptance: Factory never integrates an unvalidated head, silently changes a published topology, or
-requires a Factory GitHub workflow.
-
-### Wave 5 — Security and open-source readiness
-
-- Keep `SECURITY.md`, `docs/THREAT-MODEL.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SUPPORT.md`,
-  issue/PR templates, changelog, license, and release notes complete and mutually consistent.
-- Add negative tests for credential stripping, path scope, sensitive files, network policy, budget
-  authority, lease loss, provider cleanup, stale validation, and package lifecycle behavior.
-- Run dependency, secret, license, and package-content checks over the artifact actually published.
-
-Acceptance: a new contributor can identify the trust boundary, report a vulnerability privately,
-reproduce validation, and understand what Factory supports without private context.
-
-### Wave 6 — Adversarial installed-product run and distribution
-
-- Complete [explicit successor-run recovery](TERMINAL-RECOVERY-IMPLEMENTATION-PLAN.md) so an
-  escalated Objective can retain its existing work and accounting under acknowledged authority.
-- From a clean staged candidate installation, execute a disposable multi-wave Objective that includes
-  independent work, a dependency chain, restart, cancellation, failed validation, conflict, budget
-  exhaustion, and final closure.
-- Reconstruct the run from GitHub in a fresh process and confirm that explanations and economics use
-  observed evidence rather than invented values.
-- Verify no orphan branch, attempt, process, sandbox, managed session, lease, secret, or paid
-  reservation remains.
-
-Acceptance: the Objective ends in validated merged work or a single specific, evidence-backed human
-decision, without manual per-Work-Item dispatch.
+These are implementation and qualification commitments, not claims that all live gates have passed.
+Use the [release verification contract](CONFORMANCE.md) for required acceptance and the
+[publication issue](https://github.com/clockgrove/factory/issues/88) and
+[published-artifact issue](https://github.com/clockgrove/factory/issues/89) for release work.
 
 ## Final completion sequence
 
-1. Finish and verify the intended protocol, package, policy, and backend interfaces.
-2. Pass deterministic tests, typecheck, package/plugin verification, audit, schema validation, and
-   artifact-content checks from a clean checkout.
-3. Complete the Linux, native-stack, Daytona and adversarial matrices and the **Managed-provider
-   capability boundaries** review against a clean tested commit. Keep all six conformance rows,
-   including published installation: record exact evidence for claimed managed behavior and explicit
-   unavailable/limited capabilities rather than requiring both providers to execute. Then commit only
-   evidence records and the [`CONFORMANCE.md`](CONFORMANCE.md) ledger. All other changes require the
-   affected candidate to be retested.
-4. Review the security boundary and public documentation before freezing that tested commit; verify
-   the final evidence-enriched package independently as described below.
-5. Create the immutable package tag on the evidence commit, then publish synchronized
-   artifacts through npm's normal `latest` channel and the matching plugin package.
-6. Clean-install what was published, repeat startup and one private-repository smoke Objective, and
-   verify the release checksum/provenance.
-7. Confirm the package tag still identifies the exact verified commit, record what shipped, and
-   keep the delivery plan and verification ledger accurate.
+Follow the single [release verification procedure](CONFORMANCE.md#release-verification-procedure).
+Freeze and review a candidate, pass integrated checks, build artifacts once, and run all six
+prepublication gates against that exact source and package. `npm run verify:publish` validates
+existing proof and artifacts without rebuilding or rerunning the suite. Authorized publication
+uses the same tarball, followed by the separate published-artifact installation gate.
 
-No live paid-provider gate runs merely because credentials are present. Each requires explicit
-authorization naming the provider, disposable target, maximum billable units, and cleanup boundary.
-Native-unit session/resource limits are not guaranteed dollar caps. The user owns provider billing;
-unknown costs stay unavailable, and invoice settlement finality is not a qualification requirement.
-None of this waives exact resource identity, active-compute reconciliation, cleanup or replacement
-safety. Historical failed exercises retain their original result and source binding.
+Review public installation, support, security, compatibility, and release notes before freezing
+the candidate. Versions must agree across the plugin, npm package, changelog, tag, and provenance.
+Installation must run no lifecycle script and start no controller without an explicit action.
 
 ## Recording evidence and publishing
 
-The live-tested commit and the release commit serve different purposes. Freeze and commit all code,
-bundles, manifests, tests, and public documentation first. Call that clean tested commit `S`. Build
-and install its staged artifact, run the full candidate matrices, and retain sanitized output. The
-adversarial candidate gate uses this staged installation; the published-install gate necessarily
-happens later.
+Store temporary gate records and observations under ignored `release/evidence/`, using the
+[index and record format](CONFORMANCE.md#recording-evidence). The source commit and
+`release/release-manifest.json` hash bind qualification to the exact artifacts. Do not commit
+logs, receipts, accounting dumps, evidence indexes, or follow-up evidence-only commits. Historical
+records remain available in Git history; new run investigations and concise verification results
+belong in the relevant issues and PRs.
 
-For each passed gate, create a schema-2 JSON record under `docs/release-evidence/` with these fields:
+Keep sensitive observations private. Retain raw output locally or as access-controlled build
+artifacts only as long as needed for review, unresolved accounting, or diagnosis. Before removing a
+fixture, follow [fixture retirement](LIVE-OBJECTIVE-HARNESS.md#fixture-retirement).
 
-```json
-{
-  "schema": 2,
-  "gate": "Linux environment matrix",
-  "status": "passed",
-  "commit": "FULL_40_CHARACTER_TESTED_COMMIT_S",
-  "recordedAt": "ISO_8601_TIMESTAMP",
-  "commands": ["EXACT_COMMANDS_RUN"],
-  "subjects": [
-    { "path": "dist/factory.js", "sha256": "SHA256_OF_TESTED_FILE" },
-    { "path": "dist/mcp-server.js", "sha256": "SHA256_OF_TESTED_FILE" },
-    { "path": "dist/bundle-inventory.json", "sha256": "SHA256_OF_TESTED_FILE" },
-    { "path": "package.json", "sha256": "SHA256_OF_TESTED_FILE" },
-    { "path": "package-lock.json", "sha256": "SHA256_OF_TESTED_FILE" },
-    { "path": ".codex-plugin/plugin.json", "sha256": "SHA256_OF_TESTED_FILE" }
-  ],
-  "artifacts": [
-    { "path": "docs/release-evidence/linux-output.txt", "sha256": "SHA256_OF_SANITIZED_OUTPUT" }
-  ]
-}
-```
+For an actual release, attach a small sanitized verification report identifying the version,
+source commit, artifact hashes, exercised environments/scenarios, results, and material limits.
+Attach the checksums, SBOM, and provenance too. Inspect all attachments for secrets and private
+repository or account details before uploading. This retention policy does not introduce an
+automatic export or upload step. The generated local provenance describes source and content; it
+is not a registry-issued or cryptographically signed npm provenance attestation.
 
-The placeholders above describe the format; they cannot pass verification. Record actual hashes,
-full commands, environment/provider identity, acceptance-case results, and cleanup outcomes. The
-verifier establishes content binding and required gate coverage; maintainers must still review that
-the attached observations prove each gate. A single provider smoke does not establish its full matrix.
-
-Change each proven ledger row to `Passed` and link its record relative to `CONFORMANCE.md`, for
-example `[record](release-evidence/linux.json)`. Commit the ledger and evidence as `R`. No other path
-may differ between `S` and `R`: the verifier checks Git ancestry and the complete tree diff, in
-addition to the explicit subject hashes. Evidence records and logs must be tracked regular files,
-not symlinks. Any code, bundle, package, test, or other documentation change requires new live
-evidence against the changed candidate.
-
-From a clean checkout of `R`, create the matching immutable `vVERSION` tag and run
-`npm run verify:publish`. This reruns the complete deterministic/package suite, checks every live
-gate, and creates `release/` artifacts with provenance naming `R`. The final tarball includes the
-ledger/evidence additions; it is independently packed and install-tested and is not claimed to be
-byte-identical to the earlier live-tested tarball. Its executable subjects and all other source are
-identical to `S`. Artifact generation from a dirty worktree is useful for inspection but records
-`sourceDirty: true` and cannot be published.
-
-Review the generated tarball, SBOM, checksums, and provenance. `npm run release:publish` repeats the
-verification before publishing that generated tarball with the `latest` dist-tag. Direct invocation
-of `scripts/publish-release.mjs` also rechecks the live ledger, clean tree, immutable tag, artifact
-digests, and provenance source commit. The local provenance JSON records source and content; it is
-not a registry-issued or cryptographically signed npm provenance attestation. Preserve the final
-release artifacts as versioned release attachments.
-
-Publish the matching plugin tag and perform the separate clean published-install gate. Record that
-result in a later documentation commit or release attachment bound to `R`, the unchanged version
-tag, and the registry/plugin digests. Never retag `vVERSION` to include post-publication evidence.
-If the gate fails, document the failure and prepare a new version rather than overwriting the release.
+The immutable `vVERSION` tag identifies the exact tested and published commit. The publisher checks
+that tag, clean tree, required gate proof, artifact digests, and provenance even when invoked
+directly. Publish synchronized artifacts through the normal npm `latest` channel and matching
+plugin tag only with explicit publication authority. Add the later published-install result as a
+release attachment bound to that unchanged tag and the registry/plugin digests. Never retag to add
+observations; a failed release needs a new version.
 
 ## Labs and non-goals
 
-Labs: Vercel Sandbox and additional provider/harness adapters. Their deterministic
-tests should stay green, but live evidence is not a release gate.
+Labs integrations retain deterministic tests but do not add live-provider gates to initial release
+scope. Paid Labs work still requires explicit provider, target, spending, and cleanup authority.
 
-Non-goals: a demo application, a custom Factory UI, GitHub Actions as Factory's scheduler, a
-Clockgrove account, a hosted control plane, enterprise policy administration, native Win32/Darwin
-lifecycle, multiple local worker computers, production deployment authority, or autonomous budget
-increases.
+Factory does not require a hosted control plane, Clockgrove account, custom UI, or GitHub Action.
+Native Win32/Darwin lifecycle, multiple local worker computers, enterprise policy administration,
+production deployment authority, and autonomous budget increases are outside this scope.

@@ -27,14 +27,6 @@ qualify worker execution, active-worker cancellation, queued admission recovery,
 failed tests, or full Objective completion. There are no merged-artifact tests
 because no worker or implementation artifact is allowed.
 
-## Recorded scope
-
-The [2026-09-05 component record](release-evidence/local-keyfree-finalization-component-2026-09-05.json)
-retains the original incomplete exercise at `2668f0b` and the separately assessed
-pre-projection refusal. It preserves the exact source/artifact and evidence hashes.
-That observation is not a successful execution of the corrected qualifier or a
-queue/cancellation pass. Preserve original results when a qualifier is corrected.
-
 ## Explicit prospective invocation
 
 Coordinate exclusive access to a private disposable repository and use a new

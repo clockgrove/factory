@@ -1,14 +1,8 @@
-# Adaptive priority and burst scheduling implementation plan
+# Adaptive priority and burst scheduling
 
-Current status: [Factory Project](https://github.com/orgs/clockgrove/projects/1).
-
-Date: 2026-09-03
-
-Scope: Factory repository controller, local Codex workers, and explicitly authorized paid
-backends. Implement and qualify priority ordering, measured local capacity, bounded burst admission,
-and recovery through the delivery waves below. Current evidence is tracked in
-[`CONFORMANCE.md`](CONFORMANCE.md). This is the scheduling sub-plan of
-[`INDIE-FACTORY-IMPLEMENTATION-PLAN.md`](INDIE-FACTORY-IMPLEMENTATION-PLAN.md).
+This reference describes priority ordering, measured local capacity, bounded burst admission,
+and recovery for the local repository controller. See [the design](DESIGN.md) for the product
+contract and [release qualification](CONFORMANCE.md) for required verification.
 
 ## Outcome
 
@@ -53,7 +47,7 @@ The deterministic admission controller evaluates four questions:
 
 ## Operator policy
 
-Add three optional blocks to `RunPolicySchema`. Lower priority ranks mean higher priority. Backend
+`RunPolicySchema` accepts three optional blocks. Lower priority ranks mean higher priority. Backend
 IDs and GitHub IDs are pinned values, not names discovered during a run.
 
 The following is an explicit adaptive policy with paid-backend authority, not the new-run default.
@@ -231,7 +225,7 @@ ID is found, verifies that it is a single-select field owned by that organizatio
 configured option ID. That definition is immutable run-policy preflight data; per-cycle reads only
 need the values attached to each issue.
 
-Add a read-only `factory priority-fields OWNER/REPO` CLI command and matching MCP inspection tool.
+The read-only `factory priority-fields OWNER/REPO` CLI command has a matching MCP inspection tool.
 It queries `Organization.issueFields`, prints the field node ID and each single-select option ID,
 name, and GitHub option position, and emits a ready-to-paste policy fragment. It never enables the
 feature or changes a value.
@@ -274,7 +268,7 @@ score that the Director actually observed, so the decision remains auditable aft
 
 ## Local capacity model
 
-Add `src/scheduling/resource-sampler.ts` with an injectable `ResourceSampler` interface and a
+`src/scheduling/resource-sampler.ts` supplies an injectable `ResourceSampler` interface and a
 supported-Linux implementation. One sample contains:
 
 ```ts
@@ -329,11 +323,11 @@ provider-enforced.
 
 ## Capacity and burst admission
 
-Add a `CapacityLedger` that derives durable active reservations from nonterminal attempts and keeps
+`CapacityLedger` derives durable active reservations from nonterminal attempts and keeps
 the current process's not-yet-visible planned reservations in memory. It exposes atomic
 `tryReserve`, `release`, and `reconcile` operations. It is not a second database.
 
-Add an `AdmissionController.plan()` pure boundary. Its inputs are the immutable policy, one complete
+`planAdmissions()` in `src/scheduling/admission.ts` is the pure admission boundary. Its inputs are the immutable policy, one complete
 Objective snapshot, derived DAG, backend capability/probe results, immutable budget/capacity state,
 one resource sample, and GitHub server time. Its output is a list of immutable admission proposals
 plus queued reasons:
@@ -403,7 +397,7 @@ rejection cannot become unhandled while the Supervisor is polling.
 
 ### Durable queue time
 
-Add a `WorkItemQueued` scheduling event. It is written once when a Work Item is first continuously
+The `WorkItemQueued` scheduling event is written once when a Work Item is first continuously
 dependency-ready but cannot be admitted. Its GitHub server timestamp is the queue-delay clock. A
 later `AttemptReserved` event or loss of readiness ends that queue episode; no separate dequeue
 write is needed. Repeated polling produces no new event.
@@ -448,12 +442,12 @@ Capacity reservations use the attempt identity and phase as their idempotency ke
 capacity is held from `AttemptReserved` until worker cleanup has completed and `AttemptCollected` is
 recorded, or until an earlier terminal event. If cleanup is ambiguous, capacity stays reserved for
 recovery. Fresh isolated validation acquires a separate backend-capacity reservation before it
-starts and releases it at `ValidationRecorded` or validation reconciliation. Add `CapacityReserved`
-and `CapacityReconciled` events for the validation phase; the execution reservation itself remains
+starts and releases it at `ValidationRecorded` or validation reconciliation. `CapacityReserved`
+and `CapacityReconciled` events track the validation phase; the execution reservation itself remains
 derivable from the attempt lifecycle. `AttemptDeferred` releases execution capacity and still does
 not burn retry budget.
 
-The new event shapes are deliberately small:
+The event shapes are bounded:
 
 ```text
 Scheduling/WorkItemQueued:
@@ -477,186 +471,7 @@ Budget reservation stays coupled to the attempt reservation under the same lease
 launches retain their reservation until observation/reconciliation proves the outcome. Capacity or
 budget exhaustion never widens policy and never silently switches providers.
 
-## File-level delivery waves
-
-### Wave 1 — Protocol and policy
-
-Modify:
-
-- `src/protocol/policy.ts`
-- `src/protocol/events.ts`
-- `src/protocol/worker-packet.ts`
-- `src/types.ts`
-
-Add strict schemas for `priority`, `capacity`, and `burst`; preserve the external policy shape for
-digest verification; normalize stored policies into a separate effective internal form; validate
-cross-field paid-backend invariants; add scheduling/capacity events and optional admission receipt
-fields; and expose normalized resource requests. Preserve safe reconstruction of stored
-`clockgrove.factory/v2` envelopes.
-
-Tests:
-
-- `test/policy.test.ts`
-- `test/v2-protocol.test.ts`
-- `test/worker-packet.test.ts`
-
-Acceptance: every invalid cross-field combination fails before `FactoryRunStarted`; stored
-policies and receipts still parse; a checked-in stored-policy fixture retains its exact pre-change
-digest; and policy digests remain stable for identical input.
-
-### Wave 2 — GitHub priority ingestion and inspection
-
-Modify:
-
-- `src/github.ts`
-- `src/cli.ts`
-- `src/mcp-server.ts`
-
-Add:
-
-- `src/scheduling/github-priority.ts`
-
-Extend the single GraphQL snapshot, enforce complete pagination bounds, normalize matching
-single-select values by field ID and option ID, capture sub-issue position, and add the read-only
-priority-field inspection command/tool.
-
-Tests:
-
-- GraphQL fixtures for no feature, unset value, expected value, unknown option, wrong data type,
-  truncated connections, and reordered sub-issues.
-
-Acceptance: a priority edit changes the next snapshot's ready ordering without any GitHub write from
-Factory; default sub-issue ordering works in a repository with no organization issue fields.
-
-### Wave 3 — Pure priority and graph scoring
-
-Add:
-
-- `src/scheduling/priority.ts`
-- `src/scheduling/graph-score.ts`
-
-Implement rank normalization, the exact comparator above, longest remaining DAG path, downstream
-count, and resource-fit bypass evidence. Keep these modules free of I/O and wall-clock reads.
-
-Tests:
-
-- Deterministic tie-breaking, diamond and disconnected DAGs, retries, closed descendants, explicit
-  priority overriding graph score, sub-issue reordering, and a large item not blocking smaller work.
-
-Acceptance: randomized input order produces identical output; blocked items can never appear in the
-ranked ready set.
-
-### Wave 4 — Linux resource sampling
-
-Add:
-
-- `src/scheduling/resource-sampler.ts`
-- `src/scheduling/cgroup.ts`
-
-Implement cgroup v2, cgroup v1, and host fallbacks behind injectable file and OS readers. All parsing
-is side-effect-free and unit-testable. Do not shell out during polling.
-
-Tests:
-
-- Quota `max`, fractional CPU quotas, finite and unlimited memory, malformed files, WSL-style host
-  fallback, pressure ceilings, cache expiry, and cooldown.
-
-Acceptance: the effective values always choose the tighter observable limit; malformed or missing
-measurements fail closed for new local admissions without terminating active work.
-
-### Wave 5 — Capacity ledger and backend candidates
-
-Add:
-
-- `src/scheduling/capacity-ledger.ts`
-
-Modify:
-
-- `src/execution/registry.ts`
-- `src/control/budget.ts`
-- `src/control/attempts.ts`
-
-Implement backend candidate evaluation, probe caching, global/per-backend/resource reservations, and
-idempotent reconstruction from attempt events. Distinguish permanent incompatibility from temporary
-capacity.
-
-Tests:
-
-- Concurrent reservations, release in every terminal state, restart reconstruction, stale provider
-  attempts, global and backend ceilings, no double spend, and probe-cache expiry.
-
-Acceptance: two concurrent commit attempts cannot both reserve the last slot; a proposal made from
-a stale capacity generation is rejected before launch; temporary saturation does not create an
-attempt or consume its retry budget.
-
-### Wave 6 — Admission controller
-
-Add:
-
-- `src/scheduling/admission.ts`
-
-Implement the full work-conserving scan, local-first selection, every burst mode, priority threshold,
-budget checks, and structured queued reasons. The core planner takes injected snapshots and returns
-data; it does not write GitHub or launch workers.
-
-Tests:
-
-- Table tests across priority, dependency, capacity, queue time, deadline, budget, trust, and
-  backend capability dimensions.
-- A fixture with eight ready items, three safe local slots, two cloud slots, and a zero-second burst
-  delay must admit the first three compatible items locally, the next two eligible items to cloud,
-  and leave the rest queued.
-- The same fixture with a 120-second delay must launch only local-compatible work until the durable
-  delay expires.
-
-Acceptance: no plan can exceed any hard ceiling; with burst disabled, the controller never returns a
-paid backend for a local-compatible item merely because local capacity is zero. Capability-required
-remote work still follows its explicit backend and budget policy.
-
-### Wave 7 — Supervisor integration and recovery
-
-Modify:
-
-- `src/supervisor.ts`
-- `src/control/v2-state.ts`
-- `src/control/receipts.ts`
-- `src/state.ts`
-
-Replace fixed waves with admission planning and a continuously refilled `activeExecutions` map.
-Write queue transitions only when state changes. Commit attempt and budget reservations under the
-lease before launch. Pass a pinned backend into execution instead of reselecting it. Release
-in-memory reservations in `finally`; rebuild durable state before new admissions after restart.
-
-Tests:
-
-- Lease loss between plan and commit, stale capacity generation, CAS collision, crash after attempt
-  reservation but before launch, ambiguous provider launch, cancellation, `AttemptDeferred`,
-  priority edit between cycles, local pressure rising after launch, and one straggler while other
-  slots repeatedly drain and refill.
-
-Acceptance: every launched worker has exactly one preceding durable reservation and every terminal
-attempt releases capacity exactly once.
-
-### Wave 8 — Status and operator documentation
-
-Modify:
-
-- `src/cli.ts`
-- `src/mcp-server.ts`
-- `README.md`
-- `docs/DESIGN.md`
-- `docs/CONFORMANCE.md`
-- `skills/director/SKILL.md`
-
-Status output must show the ready queue in effective order; configured and effective local capacity;
-active slots by backend; each queued reason and `queuedSince`; observed priority source; burst
-trigger state; and reserved/remaining paid budget. It must never expose credentials or dump provider
-responses.
-
-Acceptance: an operator can answer “why is #42 not running?” and “why did #43 use Daytona?” from one
-status call and the durable receipt.
-
-### Wave 9 — Live conformance and release qualification
+## Live qualification
 
 Run these gates in disposable repositories and paid provider accounts with explicit spend approval:
 
@@ -684,28 +499,9 @@ their original results remain unchanged. Explicit adaptive policies remain suppo
 retain their original policy and digest. Completing the prerequisite would not authorize paid
 execution: the default contains no paid backend and keeps `burst.mode: "never"`.
 
-## Implementation dependency graph
+## Acceptance requirements
 
-```text
-Policy/events ───────┬── GitHub priority ingestion ── Priority/graph scoring ──┐
-                     │                                                         │
-                     ├── Resource sampler ──────── Capacity ledger ────────────┤
-                     │                                                         ▼
-                     └── Backend candidate API ─────────────────────── Admission controller
-                                                                                 │
-                                                                                 ▼
-                                                                   Supervisor + recovery
-                                                                                 │
-                                                                                 ▼
-                                                                     Status + conformance
-```
-
-Work may proceed in parallel only where the graph permits, but the Supervisor integration does not
-start until the pure controller, capacity ledger, and receipt schemas are complete.
-
-## Definition of done
-
-This feature is done when all of the following are true:
+Qualification requires all of the following:
 
 - Dependency-ready work is deterministically ordered by configured GitHub priority with native
   sub-issue position as the zero-config fallback.
@@ -719,8 +515,8 @@ This feature is done when all of the following are true:
   real Daytona burst run passes.
 - `npm run typecheck`, the full test suite, package verification, production audit, and clean-install
   MCP startup pass.
-- The conformance document records measured evidence and Factory is not published until the
-  live gates are complete.
+- Candidate-bound evidence passes the publication verifier; Factory is not published until the
+  required live gates are complete.
 
 ## Explicitly out of scope
 

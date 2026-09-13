@@ -41,7 +41,7 @@ surfaces do not provide an equivalent final usage result. Factory drains the can
 observes any reported counters before cleanup. An interruption without those counters can therefore
 prove cancellation and resource absence while leaving accounting incomplete. Do not substitute a
 CLI account-wide usage percentage, guessed token count, or process absence for the missing worker
-receipt. See the retained [active-cancellation result](release-evidence/active-cancellation-incomplete-2026-09-06.json).
+receipt.
 The [official JSON event example](https://learn.chatgpt.com/docs/non-interactive-mode#make-output-machine-readable)
 also places usage on `turn.completed`; it does not establish a separate interrupted-usage retrieval
 contract. This limitation is not proof of a Factory implementation defect or a passed accounting gate.

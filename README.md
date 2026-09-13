@@ -16,7 +16,7 @@ GitHub Actions workflow, hosted service, or database is required.
 > `main`, not a published release tag. Manifest versions identify development builds; older Git tags
 > do not identify the current plugin. The npm CLI/controller is not yet a verified published install
 > path. Record your installed commit/version and read the
-> [verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md)
+> [release qualification](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md)
 > before authorizing unattended work.
 
 ## Install and activate
@@ -84,11 +84,6 @@ through pull requests. The run ends with a terminal status and recorded usage, o
 escalation explaining what needs your attention. See the
 [first-Objective walkthrough](docs/setup/local.md#a-small-first-objective) for expected evidence.
 
-**An observed result:** on September 5, 2026, a staged 2.0.26 artifact completed a serialized
-SDK-first run: three Work Items, three independently validated and merged PRs, and 30 passing tests
-in a fresh clone. The [evidence record](https://github.com/clockgrove/factory/blob/main/docs/release-evidence/regular-delivery-component-2026-09-05.json)
-identifies the exact candidate and scope; full release qualification remains in progress.
-
 ## What Factory handles
 
 - **Planning and scheduling:** acceptance criteria, native GitHub dependencies, ready-task ordering,
@@ -106,7 +101,7 @@ Factory executes on Linux. Native Windows/macOS execution, coordinating multiple
 and a custom UI are outside the current scope. Vercel Sandbox is a Labs adapter. Supported behavior
 and live qualification are distinct; consult the
 [operating scope](docs/OPERATING-REFERENCE.md#scope) and
-[verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md).
+[release qualification](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md).
 
 ## Safety and escalation
 

@@ -12,11 +12,17 @@ and artifacts, and record the commit SHA when installing from source.
 
 ### Documentation
 
+- Replace historical run ledgers with release procedures and supported-behavior guidance;
+  keep raw qualification output outside Git and retain sanitized summaries with releases.
+
 - Refresh the README, contributor guidance, issue forms, and package/plugin descriptions
   for a clearer first-use experience and consistent positioning. Clarify development
   versioning and keep detailed operator guidance available from the README.
 
 ### Fixed
+
+- Bind publication to the exact tested commit and prebuilt release manifest. Readiness checks and
+  direct publication validate ignored evidence without rebuilding or repacking the tested artifact.
 
 - Observe confirmed sibling ref writes with a bounded targeted PR check before ordinary integration
   backoff, retaining exact-head authority and the external-CI discovery grace. Record write,

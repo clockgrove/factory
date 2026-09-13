@@ -1319,7 +1319,7 @@ supplied untrusted code route to an explicitly permitted sandbox or escalation.
 All GitHub writes continue through the shared circuit breaker, mutation scheduler, content-creation
 pacer, and concurrency limiter. Mutations are issued serially; actual transport attempts, including
 failed HTTP requests, are priced, while a lease or shutdown fence that stops before transport is not.
-Ready traffic uses the one-second minimum spacing and shared rolling minute/hour bounds. All
+Ready traffic has no fixed minimum spacing; shared rolling minute/hour bounds still apply. All
 mutation kinds charge the same transported history, with no credit refill and no future quota
 reservation. Lease and cleanup traffic retain queue priority without bypassing an occupied window.
 At an occupied window, the active operation releases permits, waits until the observed local bound

@@ -365,9 +365,10 @@ Two cautions found while implementing this:
   must never consume an attempt or reach the replanner.
 - **Do not trust `/rate_limit` as a gate.** It reports full quota while refusing every call. Back off
   on wall-clock time and treat a successful request as the only clear signal.
-- **Pace well under the documented secondary limits, not up to them** (`src/platform.ts`,
-  `FACTORY_PACING`): cap concurrent in-flight calls to a handful, cap content-creating calls to
-  roughly half the documented allowance, and enforce a minimum 1 s gap between mutative calls.
+- **Bound observed traffic and react to server refusals** (`src/platform.ts`,
+  `FACTORY_PACING`): cap concurrent in-flight calls to a handful and retain shared rolling mutation bounds.
+  Ready mutations have no fixed one-second gap. Local estimates cannot observe competing processes;
+  server-directed backoff remains mandatory.
 - **Trip a wave-level circuit breaker on repeated refusals**, not just a per-call retry
   (`src/platform.ts`, `CircuitBreaker`): after a small number of consecutive refusals, pause *all*
   dispatch for a cooldown measured in minutes, growing on repeated trips, and surface for a human

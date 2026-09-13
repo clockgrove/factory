@@ -27,7 +27,7 @@ describe("credential-shared mutation quota with owner-local retirement", () => {
     expect(first.telemetry().transported).toBe(0);
     held.recordTransported!();
     const peer = await pending;
-    expect(now).toBe(1_000);
+    expect(now).toBe(0);
     peer.recordTransported!();
     expect(second.telemetry().localSecondaryEstimate.transportedLastHour).toBe(2);
     expect(first.telemetry().transported).toBe(1);
@@ -46,15 +46,15 @@ describe("credential-shared mutation quota with owner-local retirement", () => {
     const second = shared.fork();
     const timestamps: number[] = [];
     const run = async (owner: MutationScheduler) => {
-      for (let i = 0; i < 58; i++) {
+      for (let i = 0; i < 39; i++) {
         const permit = await owner.acquire();
         permit.recordTransported!();
         timestamps.push(now);
       }
     };
     await Promise.all([run(first), run(second)]);
-    expect(timestamps).toHaveLength(116);
-    expect(now).toBe(115_000);
+    expect(timestamps).toHaveLength(78);
+    expect(now).toBe(0);
     for (const at of timestamps)
       expect(timestamps.filter((t) => t > at - 60_000 && t <= at).length).toBeLessThanOrEqual(80);
     const held = await second.acquire();
@@ -68,7 +68,10 @@ describe("credential-shared mutation quota with owner-local retirement", () => {
     peer.recordTransported!();
     const cleanup = await first.acquire("cleanup");
     cleanup.recordTransported!();
-    expect(second.telemetry().transported).toBe(59);
+    expect(second.telemetry().transported).toBe(40);
+    await expect(second.acquire()).rejects.toMatchObject({
+      refusal: { kind: "rate_limit", retryAfterMs: 60_000 },
+    });
   });
 
   it("shares actual secondary refusal feedback across stores but isolates credentials", async () => {

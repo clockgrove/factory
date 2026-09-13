@@ -308,6 +308,30 @@ describe("read-only checkout preflight", () => {
       repositoryFacts: async () => ({ ...(await healthyChecks().repositoryFacts!()), fork: true }),
     });
     expect(forked.overall).toBe("attention-required");
+    expect(forked.diagnostics.find((entry) => entry.area === "repository")?.summary).toContain(
+      "use the intended non-fork repository",
+    );
+    const readOnly = await report({
+      ...healthyChecks(),
+      repositoryFacts: async () => ({
+        ...(await healthyChecks().repositoryFacts!()),
+        canPush: false,
+      }),
+    });
+    expect(readOnly.diagnostics.find((entry) => entry.area === "repository")?.summary).toContain(
+      "grant the Factory GitHub identity",
+    );
+    const missingToolchain = await report({
+      ...healthyChecks(),
+      toolchainProbe: async () => ({
+        platform: "linux",
+        commands: { git: { available: true }, npm: { available: false } },
+        validationCommands: ["npm test"],
+      }),
+    });
+    expect(missingToolchain.diagnostics.find((entry) => entry.area === "toolchain")?.summary).toBe(
+      "toolchain commands unavailable: npm; install them on the Factory host PATH or use a checkout with a supported validation recipe",
+    );
     const staleController = await report({
       ...healthyChecks(),
       controller: {

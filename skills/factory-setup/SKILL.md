@@ -1,0 +1,42 @@
+---
+name: factory-setup
+description: Sets up or troubleshoots the Factory plugin on its supported Linux hosts; use when Factory is not installed, is not loading, or a first read-only inspection is blocked. Do not use for starting or recovering Objectives.
+---
+
+# Factory setup
+
+Identify the environment before changing it: the agent client and version, Linux host type, user,
+`CODEX_HOME`, Factory installation source, target `OWNER/REPO#OBJECTIVE`, and the absolute Linux
+checkout. A terminal inside a desktop client is not necessarily the parent of its MCP process.
+
+Read the [local quick start](../../docs/setup/local.md) for the supported Codex install commands,
+prerequisites, GitHub permissions, first Objective, and success criteria. Use the
+[configuration reference](../../docs/setup/configuration.md) only when credentials, process
+placement, or an optional provider is relevant. Do not copy those changing facts into this skill.
+
+## Diagnose safely
+
+1. If the plugin is absent, follow the public install commands. If it is present but not loading,
+   inspect the installed plugin record and the actual client/MCP process environment; do not edit a
+   cache, marketplace file, client configuration, or credential file silently.
+2. Check only the prerequisites relevant to the selected local path. Confirm Linux, Node.js, Git,
+   GitHub CLI authentication, a compatible Codex executable/login, and the exact checkout. Never
+   print tokens, authentication files, or secret-valued environment variables.
+3. Once Factory's MCP tools load, call `factory_doctor` for the exact Objective and checkout. Use
+   `factory_status` only to inspect existing durable state. These are read-only; do not substitute
+   `factory_plan` with `compile: true`, controller lifecycle tools, activation, or `factory_run` as
+   a setup test.
+4. Report either a verified installed artifact plus the doctor/status result, or one specific
+   blocker and its next action. Treat missing optional-provider credentials and a stopped controller
+   as informational unless the user selected that provider or unattended mode.
+
+Installation does not authorize controller installation/start, model compilation, Objective
+activation, worker execution, cloud use, or spending. Route requests to start, stop, inspect the
+progress of, or recover an Objective to the `director` skill. Route requests to decompose or repair
+an Objective graph to `objective-compilation`.
+
+For missing runtime, login, repository permission, or repository/toolchain support, use the exact
+next actions in the [quick-start troubleshooting table](../../docs/setup/local.md#first-run-troubleshooting).
+Load [unattended setup](../../docs/setup/unattended.md) only after the user asks for durable
+background operation. Load a provider-specific guide from `docs/setup/` only after that provider is
+selected; successful authentication alone never authorizes a paid probe or run.

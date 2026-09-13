@@ -188,11 +188,21 @@ export async function buildDoctorReport(input: {
     }
     if (!input.checkout) throw new Error("repository identity requires a local checkout path");
     const checkout = await inspectLocalCheckout(input.checkout, input.repository);
+    const nextActions = [
+      ...(facts.fork
+        ? ["use the intended non-fork repository or explicitly supported fork path"]
+        : []),
+      ...(!facts.canPush
+        ? [
+            "grant the Factory GitHub identity the required issue, pull-request, content, and custom-ref writes",
+          ]
+        : []),
+      ...(snapshot.closed ? ["reopen the Objective or inspect a different open Objective"] : []),
+    ];
     return {
-      summary:
-        facts.fork || !facts.canPush || snapshot.closed
-          ? "repository identity is verified; fork status, push permission, or closed Objective requires attention before activation"
-          : `Objective #${snapshot.number} and repository identity are readable`,
+      summary: nextActions.length
+        ? `repository identity is verified; before activation, ${nextActions.join("; ")}`
+        : `Objective #${snapshot.number} and repository identity are readable`,
       details: {
         objectiveTitle: snapshot.title,
         objectiveDefaultBranch: snapshot.defaultBranch,
@@ -268,7 +278,7 @@ export async function buildDoctorReport(input: {
           : !grounded
             ? "no repository-grounded validation commands were observed; provide an observed validation recipe"
             : !coreReady || !runnable
-              ? `toolchain commands unavailable: ${missing.join(", ")}`
+              ? `toolchain commands unavailable: ${missing.join(", ")}; install them on the Factory host PATH or use a checkout with a supported validation recipe`
               : "repository validation runners are available; tool behavior and dependencies remain unverified",
         details,
         status:
@@ -312,7 +322,7 @@ export async function buildDoctorReport(input: {
       return {
         summary: localReady
           ? "at least one supported local execution backend is ready"
-          : "no supported local execution backend reported ready",
+          : "no supported local execution backend reported ready; make a compatible Codex executable and login visible to the Factory process",
         details,
         status: localReady ? ("pass" as const) : ("warning" as const),
       };

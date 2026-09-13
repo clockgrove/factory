@@ -4,13 +4,25 @@
 
 ## TL;DR
 
-1. Use a Linux checkout and Linux tools, including under WSL2 or a Linux guest on macOS.
-2. Install Factory through your agent client's plugin installer and restart the client. The plugin
-   includes Factory's runtime; npm/npx is not required. Check
+1. In Linux, including WSL2 or a Linux guest on macOS, install Node.js 20 or later, Git, GitHub CLI,
+   and Codex CLI 0.153.0 (the client version verified for this procedure). A later Codex version must
+   still expose the `plugin marketplace add`, `plugin add`, and `plugin list` commands shown below.
+   Factory's source checks use npm 11.19.0, but npm is not needed to run the plugin.
+2. Install Factory through Codex's real plugin marketplace entry point, then fully restart Codex:
+
+   ```bash
+   codex plugin marketplace add clockgrove/factory --ref main
+   codex plugin add factory@clockgrove-factory
+   codex plugin list
+   ```
+
+   The marketplace is currently sourced from reviewed repository snapshots rather than a published
+   release tag, so record the installed commit/version and check
    [verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md)
-   for current installation limitations.
-3. Make a compatible Codex CLI available to that Linux process and authenticate Codex there.
-   Authenticate GitHub as the same Linux user with `gh auth login`, or supply a host token.
+   before authorizing work. The plugin includes Factory's runtime; npm/npx is not required.
+3. In that same Linux user/process environment, run `codex login` and `gh auth login`. The GitHub
+   identity needs access to the target repository's issues, pull requests, contents, and custom Git
+   refs, including writes before execution can be authorized.
 4. Open your checkout and ask the agent: “Use Factory director to inspect OWNER/REPO#OBJECTIVE
    with checkout /absolute/linux/checkout. Check prerequisites before starting anything.”
 5. Review the reported gates, then explicitly authorize execution. Start local-only; no sandbox
@@ -44,15 +56,50 @@ npm install --global @clockgrove/factory
 factory --help
 ```
 
-Install the plugin using your Agent Plugins-compatible client, then restart the client so its skills
-and bundled MCP server are reloaded. Provider SDK code required by shipped adapters is included in
-the committed JavaScript bundle. The plugin artifact does not carry a platform-specific Codex
-executable: using the default local Codex SDK worker requires a compatible `codex` CLI on `PATH`.
-The npm artifact supplies the pinned Codex CLI transitively.
+The commands above select Codex as the supported first-run client and exercise its packaged
+marketplace, manifest, skills, and MCP launcher. `codex plugin list` should show `factory` installed
+from `clockgrove-factory`. Fully restart Codex so its skills and bundled MCP server are reloaded.
+Opening another chat is not a process restart. Provider SDK code required by shipped adapters is
+included in the committed JavaScript bundle. The plugin artifact does not carry a platform-specific
+Codex executable: using the default local Codex SDK worker requires a compatible `codex` CLI on
+`PATH`. The npm artifact supplies the pinned Codex CLI transitively.
 
 Authenticate GitHub on the host with `gh auth login`, or expose `GITHUB_TOKEN`/`GH_TOKEN` to the
-plugin process. Installing the plugin does not install a GitHub Action and does not activate any
-repository.
+plugin process. A fine-grained token must permit repository metadata reads plus issue, pull-request,
+content, and custom-ref access required by the selected operation; inspection can use read access,
+while activation and delivery require corresponding writes. Factory reports branch-policy or push
+gates rather than broadening permissions. Installing the plugin does not install a GitHub Action and
+does not activate any repository.
+
+### A small first Objective
+
+Use an existing trusted Node.js repository whose root has `package.json`, `package-lock.json`, a
+working `npm test` script, and a clean Linux checkout. Create one ordinary GitHub issue containing:
+
+```markdown
+## Outcome
+
+Add a `healthcheck` npm script that runs the existing fast test command.
+
+## Acceptance
+
+- `npm run healthcheck` exits successfully from a clean checkout.
+- Existing tests still pass.
+- Change only package metadata and a focused regression test if one is needed.
+
+## Boundaries
+
+Use the existing Node/npm toolchain. Do not add dependencies, services, secrets, network access,
+generated files, deployment, or release work.
+```
+
+Then use the inspect prompt from the TL;DR with that issue number. Expected inspection is a
+secret-safe doctor report with `activationAuthorized: false`, the exact checkout/repository match,
+GitHub access, at least one authenticated local backend, and repository-grounded validation. If you
+later authorize the local-only Objective, expect a small Work Item graph, tested PR delivery, a
+terminal status, and observed model usage. Both compilation and worker/reviewer turns consume the
+quota of the Codex account visible to the executing Linux process; local-only means no paid cloud
+worker, not zero model usage. Review the complete run policy before activation.
 
 Before adding any sandbox or managed agent, follow [shared provider configuration](configuration.md).
 Provider credentials, repository selection, and permission to spend are three separate settings.
@@ -132,3 +179,15 @@ can discover Factory's skills but its host process cannot start the sibling serv
 20 or later, make it available to the process that launches Codex, and fully restart Codex; opening
 a new chat or confirming Node in the integrated terminal does not change the existing host process.
 Never print authentication files to diagnose setup.
+
+## First-run troubleshooting
+
+| Observation | Specific next action |
+| --- | --- |
+| `node` is missing or older than 20 in the Codex host process | Install or upgrade Node.js in Linux, make it visible on that parent process's absolute `PATH`, and fully restart Codex. |
+| `GitHub authentication unavailable` | In the same Linux user/process environment, run `gh auth login` or expose `GITHUB_TOKEN`/`GH_TOKEN`; do not paste the token into chat or the repository. |
+| Repository reads work but doctor reports no push access, protected-branch incompatibility, or insufficient permissions | Grant only the missing issue, pull-request, content, or custom-ref permission, or adjust the repository rule through normal administration, then rerun doctor. Do not activate or retry writes while the gate remains. |
+| Doctor reports no repository-grounded validation commands | Use a supported checkout with an existing finite validation recipe (the first example requires committed npm metadata/lockfile and `npm test`), or add that recipe as ordinary repository work before Factory activation. Do not invent an ambient command. |
+| Factory skills appear but the MCP server is absent | Inspect `codex plugin list` and the Codex host logs, verify the installed manifest's bundled launcher, then fix that process's Node/PATH and restart. Do not add a handwritten MCP override. |
+| Local backend reports unauthenticated | Run `codex login` for the same Linux user and intentional `CODEX_HOME`, then restart the process that will execute Factory. |
+| Optional provider is unavailable or the controller is stopped | Ignore it for the foreground local quick start. Configure that provider or install/start a controller only after the user explicitly selects that mode. |

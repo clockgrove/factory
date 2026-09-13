@@ -935,7 +935,8 @@ to candidate preparation; unavailable milestones remain null. The first observed
 provider's actual ready time: its elapsed interval includes propagation and observation delay,
 while the following interval includes useful reconciliation. The targeted call count is separate
 from actual transport accounting, including quota retries.
-Unknown readiness keeps the bounded polling cadence, reset when the observed head/base or reason changes. These are scheduling hints: integration still reacquires its required
+Unknown readiness keeps the bounded polling cadence, reset when the observed head/base or reason
+changes. These are scheduling hints: integration still reacquires its required
 current authority, head, base and check evidence.
 
 Publication repair rereads authenticated history before writing a missing receipt. Equivalent

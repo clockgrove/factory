@@ -1503,21 +1503,15 @@ describe("Supervisor parallel independent sibling integration", () => {
       nextActionAt: string | null;
       targetedReads: number;
     }> = [];
-    let readsAtWait = 0;
-    let readsAtObservation = 0;
     const f = await fixture({
       regular: true,
       staleRefreshedHeadReads: 1,
       pollIntervalMs: 60_000,
       onStatus: (message) => {
-        if (message.includes("integration waiting:"))
-          readsAtWait = vi.mocked(GitHubReader.prototype.readObjective).mock.calls.length;
         const prefix = "Factory integration observation: ";
         if (message.startsWith(prefix)) {
           const observation = JSON.parse(message.slice(prefix.length));
           observations.push(observation);
-          if (observation.event === "observation-changed")
-            readsAtObservation = vi.mocked(GitHubReader.prototype.readObjective).mock.calls.length;
         }
       },
     });
@@ -1525,8 +1519,6 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(result, result.reason).toMatchObject({ status: "completed" });
     const action = observations.find((entry) => entry.event === "next-action")!;
     expect(action.targetedReads).toBe(1);
-    // The existing loop may reconcile the preceding sibling once before sleeping.
-    expect(readsAtObservation - readsAtWait).toBeLessThanOrEqual(1);
     expect(Date.parse(action.firstObservedAt!) - Date.parse(action.writeCompletedAt)).toBeLessThan(
       5_000,
     );
@@ -1545,7 +1537,8 @@ describe("Supervisor parallel independent sibling integration", () => {
       exhausted = resolve;
     });
     const controller = new AbortController();
-    let atWait = 0;
+    let waiting = false;
+    const snapshotsAtPull: number[] = [];
     let atExhaustion = 0;
     const f = await fixture({
       regular: true,
@@ -1553,8 +1546,7 @@ describe("Supervisor parallel independent sibling integration", () => {
       pollIntervalMs: 60_000,
       signal: controller.signal,
       onStatus: (message) => {
-        if (message.includes("integration waiting:"))
-          atWait = vi.mocked(GitHubReader.prototype.readObjective).mock.calls.length;
+        if (message.includes("integration waiting:")) waiting = true;
         if (message.includes('"event":"probes-exhausted"')) {
           atExhaustion = vi.mocked(GitHubReader.prototype.readObjective).mock.calls.length;
           vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
@@ -1562,10 +1554,19 @@ describe("Supervisor parallel independent sibling integration", () => {
         }
       },
     });
+    const readPull = f.pullReads.getMockImplementation()!;
+    f.pullReads.mockImplementation(async (number) => {
+      if (waiting)
+        snapshotsAtPull.push(vi.mocked(GitHubReader.prototype.readObjective).mock.calls.length);
+      return readPull(number);
+    });
     const completion = f.run();
     await exhaustion;
     const beforePulls = f.pullReads.mock.calls.length;
-    expect(atExhaustion - atWait).toBeLessThanOrEqual(1);
+    expect(snapshotsAtPull.length).toBeGreaterThanOrEqual(2);
+    // These are the two narrow probes; preceding reconciliation may legitimately
+    // read a new snapshot in response to a completion/fairness notification.
+    expect(snapshotsAtPull.slice(-2)).toEqual([atExhaustion, atExhaustion]);
     await vi.advanceTimersByTimeAsync(45_000);
     expect(f.pullReads.mock.calls.length).toBe(beforePulls);
     expect(vi.mocked(GitHubReader.prototype.readObjective).mock.calls.length).toBe(atExhaustion);

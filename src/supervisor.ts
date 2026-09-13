@@ -15625,9 +15625,15 @@ export class FactorySupervisor {
   ): Promise<void> {
     // Short probes remain inside this wait: they never reconstruct the Objective,
     // hold integration admission, or replace the next iteration's full fences.
+    const now = Date.now();
+    // Retain the earliest eligible retry across probes. A slow read can cross it;
+    // recomputing only future hints afterward would lose that existing wake.
     const externalDeadline = Math.min(
       objectiveDeadline,
-      Date.now() + (this.#options.pollIntervalMs ?? 60_000),
+      now + (this.#options.pollIntervalMs ?? 60_000),
+      ...[...this.#integrationWaits.values()]
+        .map((wait) => wait.until)
+        .filter((until) => until > now),
     );
     for (;;) {
       const probes = [...this.#integrationWrites.entries()].filter(

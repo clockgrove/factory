@@ -80,7 +80,7 @@ describe("plugin manifest consistency", () => {
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
       .sort();
-    expect(skills).toEqual(["director", "objective-compilation"]);
+    expect(skills).toEqual(["director", "factory-setup", "objective-compilation"]);
     expect(codex.skills).toBe("./skills/");
     for (const skill of skills) {
       expect(existsSync(new URL(`../skills/${skill}/SKILL.md`, import.meta.url))).toBe(true);

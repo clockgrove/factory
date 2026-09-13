@@ -300,7 +300,7 @@ for (const field of ["composerIcon", "logo"]) {
 
 console.log("\n# skills\n");
 
-for (const skill of ["director", "objective-compilation"]) {
+for (const skill of ["director", "factory-setup", "objective-compilation"]) {
   const path = resolve(root, "skills", skill, "SKILL.md");
   if (!existsSync(path)) {
     check(false, `skills/${skill}/SKILL.md exists`);

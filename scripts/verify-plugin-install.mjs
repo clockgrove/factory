@@ -10,6 +10,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -51,11 +52,18 @@ function cleanEnvironment() {
   const result = {};
   for (const [name, value] of Object.entries(process.env)) {
     if (/TOKEN|KEY|SECRET|CREDENTIAL|PASSWORD|COOKIE|AUTH/i.test(name)) continue;
+    if (/^FACTORY_/i.test(name)) continue;
     if (value !== undefined) result[name] = value;
   }
   return {
     ...result,
+    HOME: temporaryRoot,
     CODEX_HOME: codexHome,
+    GH_CONFIG_DIR: join(temporaryRoot, "gh-config"),
+    XDG_CACHE_HOME: join(temporaryRoot, "xdg-cache"),
+    XDG_CONFIG_HOME: join(temporaryRoot, "xdg-config"),
+    XDG_DATA_HOME: join(temporaryRoot, "xdg-data"),
+    XDG_STATE_HOME: join(temporaryRoot, "xdg-state"),
     GITHUB_TOKEN: "",
     GH_TOKEN: "",
     OPENAI_API_KEY: "",
@@ -101,10 +109,10 @@ function json(command, args, options) {
   }
 }
 
-async function listTools(command, args, cwd) {
+async function inspectMcp(command, args, cwd, options = {}) {
   const child = spawn(command, args, {
     cwd,
-    env: cleanEnvironment(),
+    env: options.env ?? cleanEnvironment(),
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stdout = "";
@@ -168,9 +176,24 @@ async function listTools(command, args, cwd) {
       `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`,
     );
     const listed = await request("tools/list", {});
+    const missingLoginDoctor = await request("tools/call", {
+      name: "factory_doctor",
+      arguments: {
+        owner: "clockgrove",
+        repo: "factory",
+        objectiveNumber: 345,
+        repository: options.repository ?? cwd,
+      },
+    });
+    const missingLoginStatus = await request("tools/call", {
+      name: "factory_status",
+      arguments: { owner: "clockgrove", repo: "factory", objectiveNumber: 345 },
+    });
     return {
       serverInfo: initialized.result?.serverInfo,
       tools: listed.result?.tools,
+      missingLoginDoctor: missingLoginDoctor.result,
+      missingLoginStatus: missingLoginStatus.result,
     };
   } finally {
     child.kill();
@@ -237,7 +260,7 @@ async function main() {
       `installed Factory MCP launcher did not diagnose a Node-less Codex host: ${nodeLess.stderr.trim()}`,
     );
   }
-  const mcpResult = await listTools(mcp.command, mcpArgs, installedRoot);
+  const mcpResult = await inspectMcp(mcp.command, mcpArgs, installedRoot);
   const toolNames = (mcpResult.tools ?? []).map((tool) => tool.name);
   for (const required of [
     "factory_run",
@@ -256,6 +279,71 @@ async function main() {
   if (mcpResult.serverInfo?.version !== manifest.version) {
     throw new Error("installed MCP server version differs from its manifest");
   }
+  for (const name of ["factory_doctor", "factory_status"]) {
+    const definition = (mcpResult.tools ?? []).find((tool) => tool.name === name);
+    if (
+      definition?.annotations?.readOnlyHint !== true ||
+      definition.annotations.destructiveHint !== false
+    ) {
+      throw new Error(`installed ${name} is not declared as a read-only MCP operation`);
+    }
+  }
+  for (const [operation, result] of [
+    ["doctor", mcpResult.missingLoginDoctor],
+    ["status", mcpResult.missingLoginStatus],
+  ]) {
+    const output = result?.content?.map((entry) => entry.text ?? "").join("\n") ?? "";
+    if (result?.isError !== true || !output.includes("GitHub authentication unavailable")) {
+      throw new Error(`installed ${operation} did not return the specific missing-login action`);
+    }
+  }
+  let authenticatedReadOnlyInspection = false;
+  let doctorOverall = null;
+  let doctorAttentionAreas = [];
+  let statusRunState = null;
+  const qualificationToken = process.env.FACTORY_PLUGIN_INSTALL_GITHUB_TOKEN?.trim();
+  if (qualificationToken) {
+    const authenticated = await inspectMcp(mcp.command, mcpArgs, installedRoot, {
+      env: { ...cleanEnvironment(), GITHUB_TOKEN: qualificationToken },
+      repository: sourceRoot,
+    });
+    const doctorText =
+      authenticated.missingLoginDoctor?.content?.map((entry) => entry.text ?? "").join("\n") ?? "";
+    const statusText =
+      authenticated.missingLoginStatus?.content?.map((entry) => entry.text ?? "").join("\n") ?? "";
+    const doctor = JSON.parse(doctorText);
+    const status = JSON.parse(statusText);
+    if (
+      authenticated.missingLoginDoctor?.isError === true ||
+      authenticated.missingLoginStatus?.isError === true ||
+      doctor.operation !== "doctor" ||
+      doctor.activationAuthorized !== false ||
+      status.operation !== "status" ||
+      status.objective?.number !== 345 ||
+      status.run?.state !== "not-started" ||
+      status.github?.admitted !== 0 ||
+      status.github?.transported !== 0 ||
+      status.github?.successful !== 0
+    ) {
+      throw new Error("authenticated installed doctor/status inspection did not stay read-only");
+    }
+    authenticatedReadOnlyInspection = true;
+    doctorOverall = doctor.overall;
+    doctorAttentionAreas = doctor.diagnostics
+      .filter((diagnostic) => diagnostic.status !== "pass")
+      .map((diagnostic) => diagnostic.area);
+    statusRunState = status.run?.state ?? null;
+  }
+  const isolatedControllerConfig = join(temporaryRoot, "xdg-config", "systemd", "user");
+  if (existsSync(isolatedControllerConfig)) {
+    const controllerFiles = readdirSync(isolatedControllerConfig).filter((entry) =>
+      entry.includes("factory"),
+    );
+    if (controllerFiles.length > 0) {
+      throw new Error(`read-only inspection created controller configuration: ${controllerFiles}`);
+    }
+  }
+  const controllerConfigCreated = existsSync(isolatedControllerConfig);
 
   const cliBundle = join(installedRoot, "dist", "factory.js");
   if (!existsSync(cliBundle) || !statSync(cliBundle).isFile()) {
@@ -298,6 +386,17 @@ async function main() {
       mcpTools: toolNames.length,
       controllerEntryPoint: "dist/factory.js",
       sdkLocalAvailable: true,
+      cleanConfiguration: true,
+      missingLoginDiagnostics: ["doctor", "status"],
+      readOnlyInspection: {
+        toolsCalled: ["factory_doctor", "factory_status"],
+        annotationsVerified: true,
+        controllerConfigCreated,
+      },
+      authenticatedReadOnlyInspection,
+      doctorOverall,
+      doctorAttentionAreas,
+      statusRunState,
     }),
   );
 }

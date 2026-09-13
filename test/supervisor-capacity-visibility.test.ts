@@ -218,6 +218,61 @@ function installLaggingSharedCapacity(
   };
 }
 
+it.each(["regular", "native-isolated"] as const)(
+  "reserves and settles %s candidate validation through the shared controller ledger",
+  async (delivery) => {
+    const fixture = await providerSupervisorFixture("daytona-burst", {
+      controllerActivation: true,
+      ...(delivery === "regular"
+        ? { localOnly: true, independentRoots: true }
+        : { nativeStack: true }),
+    });
+    // Separate ledgers expose accidental process-local admission followed by a
+    // shared release; the same-ledger foreground fixture cannot detect that leak.
+    const capacity = installLaggingSharedCapacity(fixture, -1);
+    if (delivery === "regular") {
+      expect(fixture.policy.maxParallel).toBe(1);
+      const readPull = vi.mocked(GitHubControlStore.prototype.readPullRequest);
+      const original = readPull.getMockImplementation()!;
+      readPull.mockImplementation(async (number) => {
+        const pull = await original(number);
+        // Publish all independent roots against their original base before
+        // merging any, so the later two need successive candidate validation.
+        return fixture.snapshot.workItems.every((item) => item.linkedPullRequests.length > 0)
+          ? pull
+          : { ...pull, mergeable: null };
+      });
+    }
+    vi.spyOn(fixture.repositoryResources.capacityLedger, "tryReserve").mockImplementation(() => {
+      throw new Error("validation bypassed the repository shared-capacity owner");
+    });
+    const shared = fixture.repositoryResources.sharedCapacity!;
+    const reserve = vi.spyOn(shared, "reserve");
+    const release = shared.release.bind(shared);
+    const settled: string[] = [];
+    vi.spyOn(shared, "release").mockImplementation(async (owner, key, originalOwner) => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await release(owner, key, originalOwner);
+      settled.push(key);
+    });
+    try {
+      const result = await fixture.run();
+      expect(result, result.reason).toMatchObject({ status: "completed" });
+      const candidates = reserve.mock.calls
+        .map(([, reservation]) => reservation)
+        .filter((reservation) => reservation.backendId.startsWith("factory/integration-"));
+      expect(candidates.length).toBeGreaterThanOrEqual(delivery === "regular" ? 2 : 1);
+      for (const candidate of candidates) expect(settled).toContain(candidate.key);
+      expect(capacity.outstanding()).toEqual([]);
+      expect(fixture.repositoryResources.capacityLedger.snapshot().reservations).toEqual([]);
+      expect(fixture.resources.size).toBe(0);
+    } finally {
+      await fixture.dispose();
+    }
+  },
+  60_000,
+);
+
 it("retains shared execution capacity through an artifact hold until exact recovery closes it", async () => {
   const fixture = await providerSupervisorFixture("daytona-burst", {
     localOnly: true,

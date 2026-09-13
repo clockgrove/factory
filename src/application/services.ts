@@ -1,13 +1,19 @@
+import type { DiscoveryLocatorStore } from "../control/discovery-locators.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { implicitRestartBlocker } from "../control/recovery.js";
-import { latestActivation } from "../control/activations.js";
+import {
+  activationCancellation,
+  activationRejection,
+  latestActivation,
+} from "../control/activations.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../protocol/policy.js";
 import { assertNewRunBudgetIntent } from "../protocol/budget-intent.js";
 import {
   deduplicateFactoryEvents,
   encodeEventComment,
   latestSupportedRun,
+  hasCurrentWriterAuthority,
   nextEventSequence,
 } from "../control/receipts.js";
 import { buildExplanationReport } from "./explain.js";
@@ -59,7 +65,7 @@ export interface ApplicationReader {
   readObjective(number: number): Promise<ApplicationSnapshot>;
 }
 
-export interface ApplicationCommandStore {
+export interface ApplicationCommandStore extends Partial<DiscoveryLocatorStore> {
   /** Required for activation; other command-only ports may omit discovery repair. */
   ensureObjectiveLabel?(objective: number): Promise<void>;
   addIssueComment(issueNodeId: string, body: string): Promise<void>;
@@ -550,6 +556,7 @@ export class FactoryApplicationService {
       );
       if (conflict)
         throw new Error(`idempotency key ${requestId} was already used for a different request`);
+      await this.reconcileRequestDiscovery(snapshot, existing);
       if (fields.event === "ActivationRequested")
         await store.ensureObjectiveLabel!(snapshot.number);
       return existing;
@@ -611,8 +618,88 @@ export class FactoryApplicationService {
       snapshot.id,
       encodeEventComment(`Factory accepted ${String(fields.event)} from ${actor}.`, event),
     );
+    await this.reconcileRequestDiscovery(snapshot, event);
     if (fields.event === "ActivationRequested") await store.ensureObjectiveLabel!(snapshot.number);
     return event;
+  }
+
+  /** A request disposition retires only request retrieval hints. It never
+   * certifies resource/accounting settlement or deletes a run generation. */
+  private async reconcileRequestDiscovery(
+    snapshot: ApplicationSnapshot,
+    request: FactoryEvent,
+  ): Promise<void> {
+    if (!("requestId" in request) || typeof request.requestId !== "string") return;
+    const store = this.context.store!;
+    const events = deduplicateFactoryEvents([...this.allEvents(snapshot), request]);
+    const activation =
+      request.event === "ActivationRequested"
+        ? request
+        : request.event === "ActivationCancellationRequested"
+          ? events.find(
+              (event) =>
+                event.event === "ActivationRequested" &&
+                event.requestId === request.activationRequestId,
+            )
+          : undefined;
+    const start = events.find(
+      (event) =>
+        event.event === "FactoryRunStarted" &&
+        (activation?.event === "ActivationRequested"
+          ? event.activationRequestId === activation.requestId &&
+            event.baseSha === activation.baseSha &&
+            event.policyDigest === activation.policyDigest &&
+            event.actor.toLowerCase() === activation.requestedBy.toLowerCase()
+          : event.runId === request.runId),
+    );
+    if (activation?.event === "ActivationRequested" && !start) {
+      const binding = {
+        objective: activation.objective,
+        requestId: activation.requestId,
+        requestedBy: activation.requestedBy,
+        repository: activation.repository,
+        baseSha: activation.baseSha,
+        policyDigest: activation.policyDigest,
+      };
+      const withdrawal = activationCancellation(events, binding);
+      if (withdrawal || activationRejection(events, binding)) {
+        for (const requestId of new Set([
+          activation.requestId,
+          ...(withdrawal ? [withdrawal.requestId] : []),
+        ]))
+          await store.retireDiscoveryLocator?.({
+            kind: "request",
+            objective: snapshot.number,
+            requestId,
+          });
+        return;
+      }
+    }
+    const disposed = events.some(
+      (event) =>
+        start !== undefined &&
+        event.runId === start.runId &&
+        event.sequence > start.sequence &&
+        hasCurrentWriterAuthority(event, events, snapshot.objectiveAuthority) &&
+        (["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
+          event.event,
+        ) ||
+          ((event.event === "RunPauseAcknowledged" || event.event === "RunDrainCompleted") &&
+            event.commandRequestId === request.requestId &&
+            event.sequence > request.sequence)),
+    );
+    if (disposed)
+      await store.retireDiscoveryLocator?.({
+        kind: "request",
+        objective: snapshot.number,
+        requestId: request.requestId,
+      });
+    else
+      await store.ensureDiscoveryLocator?.({
+        kind: "request",
+        objective: snapshot.number,
+        requestId: request.requestId,
+      });
   }
 
   private static readonly queues = new Map<string, Promise<void>>();

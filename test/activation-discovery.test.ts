@@ -16,6 +16,7 @@ function fixture(fault?: "comment-response" | "label-before" | "label-response")
   const repositoryLabels = new Set<string>();
   const comments: string[] = [];
   const writes: string[] = [];
+  const refs = new Map<string, string>();
   let faultUsed = false;
   let defaultBase = "a".repeat(40);
   let actor = "operator";
@@ -34,8 +35,12 @@ function fixture(fault?: "comment-response" | "label-before" | "label-response")
         body: string;
         name: string;
         labels: string[];
+        ref: string;
+        sha: string;
+        query: string;
+        variables: { states?: string[] };
       };
-      if (request.method === "POST") writes.push(route);
+      if (request.method === "POST" && route !== "POST /graphql") writes.push(route);
       const response = (value: unknown, status = 200) =>
         Response.json(value, { status, headers: { date: "Sat, 05 Sep 2026 10:00:00 GMT" } });
       const issue = {
@@ -43,9 +48,59 @@ function fixture(fault?: "comment-response" | "label-before" | "label-response")
         state: "open",
         updated_at: "2026-09-05T10:00:00Z",
         labels: [...labels].map((name) => ({ name })),
+        comments: comments.length,
       };
       if (route === "GET /user") return response({ login: actor });
-      if (route === "GET /repos/fixture/activation") return response({});
+      if (route === "GET /repos/fixture/activation") return response({ default_branch: "main" });
+      if (route === "POST /graphql") {
+        if (data.query.includes("FactoryDiscoveryIssues"))
+          return response({
+            data: {
+              repository: {
+                issues: {
+                  nodes:
+                    labels.has("factory:objective") && data.variables.states?.includes("OPEN")
+                      ? [
+                          {
+                            __typename: "Issue",
+                            number: 7,
+                            state: "OPEN",
+                            updatedAt: issue.updated_at,
+                            comments: { totalCount: comments.length },
+                          },
+                        ]
+                      : [],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          });
+        if (data.query.includes("FactoryDiscoveryLocators"))
+          return response({
+            data: {
+              repository: {
+                refs: {
+                  nodes: [...refs]
+                    .filter(([ref]) => ref.startsWith("refs/clockgrove-factory/active/"))
+                    .map(([ref, oid]) => ({
+                      name: ref.slice("refs/clockgrove-factory/active/".length),
+                      prefix: "refs/clockgrove-factory/active/",
+                      target: { oid },
+                    })),
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          });
+      }
+      if (route === "POST /repos/fixture/activation/git/refs") {
+        refs.set(data.ref, data.sha);
+        return response({});
+      }
+      if (route.startsWith("DELETE /repos/fixture/activation/git/refs/")) {
+        refs.delete(`refs/${decodeURIComponent(url.pathname.split("/git/refs/")[1]!)}`);
+        return response({});
+      }
       if (route === "GET /repos/fixture/activation/issues")
         return response(
           !url.searchParams.get("labels") || labels.has(url.searchParams.get("labels")!)
@@ -77,6 +132,12 @@ function fixture(fault?: "comment-response" | "label-before" | "label-response")
           })),
         );
       if (route.startsWith("GET /repos/fixture/activation/git/ref/")) {
+        const ref = `refs/${decodeURIComponent(url.pathname.split("/git/ref/")[1]!)}`;
+        if (ref === "refs/heads/main") return response({ object: { sha: defaultBase } });
+        if (ref.startsWith("refs/clockgrove-factory/active/"))
+          return refs.has(ref)
+            ? response({ object: { sha: refs.get(ref) } })
+            : response({ message: "Not Found" }, 404);
         if (!authorityLease) return response({ message: "Not Found" }, 404);
         return response({ object: { sha: authorityLease.oid } });
       }
@@ -315,7 +376,7 @@ describe("plain issue activation discovery", { timeout: 15_000 }, () => {
       event: "ActivationCancellationRequested",
       runId: f.activation.requestId,
     });
-    expect(f.writes).toEqual(writes);
+    expect(f.writes).toEqual([...writes, "POST /repos/fixture/activation/git/refs"]);
     expect(await f.store.discoverObjectiveActivations()).toHaveLength(1);
     expect(await f.service().status(7)).toMatchObject({
       activation: { state: "cancellation-requested" },
@@ -526,6 +587,8 @@ describe("plain issue activation discovery", { timeout: 15_000 }, () => {
       f.service().activate({ ...f.activation, baseSha: "b".repeat(40) }),
     ).rejects.toThrow(/idempotency key/);
     expect(f.writes).toEqual(completedWrites);
-    expect(await f.store.discoverObjectiveActivations()).toEqual([]);
+    expect(await f.store.discoverObjectiveActivations()).toMatchObject([
+      { requestId: f.activation.requestId },
+    ]);
   });
 });

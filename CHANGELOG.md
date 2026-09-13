@@ -6,6 +6,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Fixed
 
+- Discover open and recently changed closed Objectives through GitHub filters, with bounded
+  scheduling summaries instead of lifetime comment history. Exact request and run locators retain
+  outstanding obligations after closure or restart; labels still grant no execution authority.
+  ([#349](https://github.com/clockgrove/factory/issues/349))
+
 - Remove Octokit's hidden fixed write/notification/GraphQL pacing; Factory remains the owner
   of admission and reactive retries. Preserve HTTP-200 GraphQL refusal and partial-effect
   handling, and distinguish client pretransport from fetch-response diagnostic time.

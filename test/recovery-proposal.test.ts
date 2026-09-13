@@ -1,3 +1,9 @@
+import {
+  DISCOVERY_LOCATOR_PREFIX,
+  discoveryLocatorRef,
+  ensureDiscoveryLocator,
+  type DiscoveryLocatorScope,
+} from "../src/control/discovery-locators.js";
 import { assessRecoveryAccounting } from "../src/recovery/accounting.js";
 import { writerAuthority } from "../src/control/authority.js";
 import {
@@ -1094,30 +1100,48 @@ describe("explicit recovery request application", () => {
           body: "",
           updated_at: now.toISOString(),
           labels: [...labels].map((name) => ({ name })),
+          comments: f.snapshot.factoryEvents!.length,
         };
         if (route === "GET /user") return response({ login: actor });
-        if (route === "GET /repos/o/r/issues") {
-          if (url.searchParams.has("since")) {
-            expect(url.searchParams.get("labels")).toBeNull();
-            expect(url.searchParams.get("sort")).toBe("created");
-            return response([issue]);
+        if (route === "POST /graphql") {
+          const { query, variables } = (await request.json()) as {
+            query: string;
+            variables: { states?: string[]; prefix?: string };
+          };
+          const pageInfo = { endCursor: null, hasNextPage: false };
+          if (query.includes("refs(")) {
+            expect(variables.prefix).toBe(DISCOVERY_LOCATOR_PREFIX);
+            const nodes = [...f.refs]
+              .filter(([ref]) => ref.startsWith(DISCOVERY_LOCATOR_PREFIX))
+              .map(([ref, oid]) => ({
+                name: ref.slice(DISCOVERY_LOCATOR_PREFIX.length),
+                prefix: DISCOVERY_LOCATOR_PREFIX,
+                target: { oid },
+              }));
+            return response({ data: { repository: { refs: { nodes, pageInfo } } } });
           }
-          expect(url.searchParams.get("labels")).toBe("factory:objective");
-          return response(labels.has("factory:objective") ? [issue] : []);
+          const nodes =
+            labels.has("factory:objective") && variables.states?.includes("OPEN")
+              ? [
+                  {
+                    __typename: "Issue",
+                    number: 7,
+                    state: "OPEN",
+                    updatedAt: issue.updated_at,
+                    comments: { totalCount: issue.comments },
+                  },
+                ]
+              : [];
+          return response({ data: { repository: { issues: { nodes, pageInfo } } } });
         }
         if (route === "GET /repos/o/r/issues/7") return response(issue);
-        if (route === "GET /repos/o/r/issues/comments")
-          return response(
-            comments.map((event, index) => ({
-              id: 10_000 + index,
-              issue_url: "https://api.github.com/repos/o/r/issues/7",
-              body: encodeEventComment("fixture", event),
-              user: { login: "operator" },
-              author_association: "OWNER",
-              created_at: now.toISOString(),
-              updated_at: now.toISOString(),
-            })),
-          );
+        if (
+          request.method === "DELETE" &&
+          url.pathname.startsWith("/repos/o/r/git/refs/clockgrove-factory/active/")
+        ) {
+          f.refs.delete(`refs/${decodeURIComponent(url.pathname.split("/git/refs/")[1]!)}`);
+          return new Response(null, { status: 204, headers: { date: now.toUTCString() } });
+        }
         if (route === "GET /repos/o/r/issues/7/comments")
           return response(
             f.snapshot.factoryEvents!.map((event, index) => ({
@@ -1146,14 +1170,20 @@ describe("explicit recovery request application", () => {
         throw new Error(`unexpected recovery discovery route ${route}`);
       },
     });
-    // Keep the existing real immutable-plan fixture; exercise actual REST issue
-    // listing, comments authentication and structural label writes end to end.
+    // Keep the real immutable-plan fixture; exercise filtered GraphQL metadata,
+    // exact comments authentication and structural label writes together.
     vi.spyOn(discoveryStore, "readRef").mockImplementation(f.store.readRef);
     vi.spyOn(discoveryStore, "readCommit").mockImplementation(f.store.readCommit);
     vi.spyOn(discoveryStore, "readBlob").mockImplementation(f.store.readBlob);
     vi.spyOn(discoveryStore, "readTreeEntry").mockImplementation(f.store.readTreeEntry);
     const store = {
       ...f.storage,
+      ensureDiscoveryLocator: vi.fn((scope: DiscoveryLocatorScope) =>
+        ensureDiscoveryLocator(f.storage, scope, f.base.oid),
+      ),
+      retireDiscoveryLocator: vi.fn(async (scope: DiscoveryLocatorScope) => {
+        f.refs.delete(discoveryLocatorRef(scope));
+      }),
       ensureObjectiveLabel: vi.fn((objective: number) =>
         discoveryStore.ensureObjectiveLabel(objective),
       ),
@@ -1348,6 +1378,44 @@ describe("explicit recovery request application", () => {
       }),
     );
     expect(await discover()).toBeNull();
+  });
+
+  it("does not recreate a disposed recovery request on terminal successor replay", async () => {
+    const f = await requests();
+    const proposal = await f.service.propose({ objective: 7, requestId: "request" });
+    const input = { objective: 7, requestId: "request", planDigest: proposal.planDigest! };
+    const request = await f.service.request(input);
+    f.snapshot.factoryEvents!.push(
+      parseFactoryEvent({
+        ...f.start,
+        runId: request.successorRunId,
+        sequence: request.sequence + 1,
+        recoveryRequestId: request.requestId,
+        recoveryPlanDigest: request.planDigest,
+        predecessorRunId: request.predecessorRunId,
+        baseSha: request.baseSha,
+      }),
+      f.event({
+        kind: "run",
+        event: "FactoryRunCompleted",
+        runId: request.successorRunId,
+        sequence: request.sequence + 2,
+      }),
+    );
+    const runRef = discoveryLocatorRef({
+      kind: "run",
+      objective: 7,
+      runId: request.successorRunId,
+      epoch: 2,
+    });
+    f.refs.set(runRef, f.base.oid);
+    expect(await f.service.request(input)).toEqual(request);
+    expect(
+      f.refs.has(
+        discoveryLocatorRef({ kind: "request", objective: 7, requestId: request.requestId }),
+      ),
+    ).toBe(false);
+    expect(f.refs.has(runRef)).toBe(true);
   });
 
   it("rejects foreign discovery identity and competing predecessor requests", async () => {

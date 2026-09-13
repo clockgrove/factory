@@ -206,6 +206,7 @@ const traceOperations = new Set([
   "addIssueComment",
   "createDiscoveryLabel",
   "labelObjective",
+  "deleteExactDiscoveryRef",
   "createBlob",
   "createTree",
   "createPullRequest",

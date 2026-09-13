@@ -1,3 +1,4 @@
+import type { DiscoveryLocatorScope } from "./control/discovery-locators.js";
 import { observeReactiveQuotaWait } from "./control/mutation-observation.js";
 import { GitHubQuotaWaitDeadlineError, retryGitHubQuota, withGitHubQuotaWait } from "./platform.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -56,7 +57,11 @@ import {
   type ArtifactTransferIdentity,
   type ArtifactTransferIntentCheckpoint,
 } from "./control/artifact-transfers.js";
-import { activationCancellation, type ActivationBinding } from "./control/activations.js";
+import {
+  activationCancellation,
+  activationRejection,
+  type ActivationBinding,
+} from "./control/activations.js";
 import {
   deriveBudgetUsage,
   remainingBudget,
@@ -1133,6 +1138,7 @@ export class FactorySupervisor {
   #lease!: LeaseController;
   #run!: RunState;
   #runStartSequence = 0;
+  #discoveryEpochs = new Set<number>();
   #lastControllerObservationKey: string | undefined;
   #baseBranch = "main";
   #priorityFallbackReason: string | undefined;
@@ -3348,6 +3354,7 @@ export class FactorySupervisor {
       return current;
     };
     try {
+      await this.#registerDiscovery(acquired, priorLease);
       snapshot = await assertCurrent();
       const graphs = new CompiledGraphManager(this.#store, this.#leases);
       const graph = await graphs.load(run.objective, run.runId);
@@ -3787,6 +3794,7 @@ export class FactorySupervisor {
     this.#compiledGraph = null;
     this.#compiledProjection = null;
     this.#durablePackets.clear();
+    this.#discoveryEpochs.clear();
     await verifyLocalRepository(this.#options.repository, this.#options.owner, this.#options.repo);
     let snapshot = await this.#reader.readObjective(this.#options.objective);
     this.#ciExpectedOnPullRequests = snapshot.ciExpectedOnPullRequests;
@@ -3928,12 +3936,14 @@ export class FactorySupervisor {
       );
       this.#lease = new LeaseController(this.#leases, acquired, this.#sequences);
       this.#run = resumedRun;
+      await this.#registerDiscovery(acquired, closedLease);
       const completed = allDone(this.#deriveObjective(snapshot));
       return this.#terminal(
         runManager,
         snapshot,
         completed ? "FactoryRunCompleted" : "FactoryRunEscalated",
         completed ? undefined : "Objective was closed externally before all Work Items completed",
+        false,
       );
     }
     const recoveryBlocker = await inspectImplicitRestart(snapshot, () =>
@@ -4100,7 +4110,9 @@ export class FactorySupervisor {
       this.#sequences.take(),
     );
     this.#lease = new LeaseController(this.#leases, acquired, this.#sequences);
+    let runStartAttempted = false;
     try {
+      await this.#registerDiscovery(acquired, previousLease);
       // Preflight is not a lock: the previous holder may have finished or spent
       // more budget before this lease was acquired. Refresh both new and resumed runs.
       let current = await this.#reader.readObjective(snapshot.number);
@@ -4118,6 +4130,7 @@ export class FactorySupervisor {
         expiredResume ? "inspect" : "repair",
       );
       if (!currentRun && this.#withdrawnActivation(current, actor, facts.fullName)) {
+        await this.#retireUnstartedDiscovery(acquired);
         await this.#lease.release();
         return {
           status: "cancelled",
@@ -4142,6 +4155,7 @@ export class FactorySupervisor {
         } catch (error) {
           const reason = `Objective graph preflight failed: ${error instanceof Error ? error.message : String(error)}`;
           const rejected = await this.#startlessEscalation(reason, current, actor);
+          await this.#retireUnstartedDiscovery(acquired);
           await this.#lease.release();
           return rejected;
         }
@@ -4175,6 +4189,7 @@ export class FactorySupervisor {
         );
         if (blocker) {
           const rejected = await this.#startlessEscalation(blocker, current, actor);
+          await this.#retireUnstartedDiscovery(acquired);
           await this.#lease.release();
           return rejected;
         }
@@ -4217,6 +4232,7 @@ export class FactorySupervisor {
         if (recordedActivation) assertSupportedModelTokenBudgetIntent(this.#policy);
         else assertNewRunBudgetIntent(this.#policy);
       }
+      runStartAttempted = !currentRun;
       this.#run =
         currentRun ??
         (await runManager.start({
@@ -4250,6 +4266,10 @@ export class FactorySupervisor {
       this.#runStartSequence = durableRunStart?.sequence ?? this.#run.sequence;
       if (!expiredResume) await this.#recordControllerObservation(snapshot);
     } catch (error) {
+      // Fresh startup refusal has not admitted a run or model/resource effect.
+      // An attempted start may have persisted despite response loss and remains indexed.
+      if (!resumedRun && !this.#options.recovery && !runStartAttempted)
+        await this.#retireUnstartedDiscovery(acquired).catch(() => {});
       await this.#lease.release().catch(() => {});
       throw error;
     }
@@ -17865,13 +17885,92 @@ export class FactorySupervisor {
     );
   }
 
+  async #registerDiscovery(lease: LeaseState, previous: LeaseState | null): Promise<void> {
+    await this.#leases.assertCurrent(lease);
+    await this.#store.ensureDiscoveryLocator(
+      { kind: "run", objective: lease.objective, runId: lease.runId, epoch: lease.epoch },
+      lease,
+    );
+    this.#discoveryEpochs.add(lease.epoch);
+    if (previous?.runId === lease.runId) this.#discoveryEpochs.add(previous.epoch);
+  }
+
+  async #retireUnstartedDiscovery(lease: LeaseState): Promise<void> {
+    await this.#lease.assert();
+    await this.#store.retireDiscoveryLocator({
+      kind: "run",
+      objective: lease.objective,
+      runId: lease.runId,
+      epoch: lease.epoch,
+    });
+  }
+
+  /** Called only after admitted work has stopped. The complete accounting and
+   * capacity journals must independently prove absence, including compilation
+   * before the first worker claim and review after the last claim was released.
+   * Unknown usage retains the exact hint even when the run is terminal. */
+  async #retireSettledDiscovery(
+    snapshot: Snapshot,
+    requestCutoff = Number.MAX_SAFE_INTEGER,
+  ): Promise<void> {
+    const events = deduplicateFactoryEvents([
+      ...snapshotEvents(snapshot),
+      ...this.#budgetEvents,
+    ]).filter((event) => event.runId === this.#run.runId);
+    const scheduling = normalizeSchedulingPolicy(this.#policy);
+    if (
+      unreconciledBudgetReservations(events).length ||
+      unreconciledCapacityReservations(events).length ||
+      deriveCapacityReservations(
+        snapshot.workItems.map((item) => ({
+          objective: snapshot.number,
+          workItem: item.number,
+          events,
+          defaultCpu: scheduling.capacity.local.defaultCpu,
+          defaultMemoryMb: scheduling.capacity.local.defaultMemoryMb,
+        })),
+      ).length
+    )
+      return;
+    const scopes: DiscoveryLocatorScope[] = [];
+    for (const event of snapshotEvents(snapshot)) {
+      if (event.runId === this.#run.runId) {
+        if ("writerEpoch" in event && typeof event.writerEpoch === "number")
+          this.#discoveryEpochs.add(event.writerEpoch);
+        if ("directorEpoch" in event && typeof event.directorEpoch === "number")
+          this.#discoveryEpochs.add(event.directorEpoch);
+      }
+      if (
+        event.sequence <= requestCutoff &&
+        "requestId" in event &&
+        typeof event.requestId === "string" &&
+        ((event.runId === this.#run.runId && event.event !== "RecoveryRequested") ||
+          (event.event === "ActivationRequested" &&
+            event.requestId === this.#run.activationRequestId) ||
+          (event.event === "ActivationCancellationRequested" &&
+            event.activationRequestId === this.#run.activationRequestId) ||
+          (event.event === "RecoveryRequested" && event.successorRunId === this.#run.runId))
+      )
+        scopes.push({ kind: "request", objective: snapshot.number, requestId: event.requestId });
+    }
+    for (const epoch of this.#discoveryEpochs)
+      scopes.push({ kind: "run", objective: snapshot.number, runId: this.#run.runId, epoch });
+    for (const scope of scopes) {
+      await this.#lease.assert();
+      await this.#store.retireDiscoveryLocator(scope);
+    }
+  }
+
   async #terminal(
     runManager: RunManager,
     snapshot: Snapshot,
     event: "FactoryRunCompleted" | "FactoryRunCancelled" | "FactoryRunEscalated",
     reason?: string,
+    lifecycleStopped = true,
   ): Promise<SupervisorResult> {
     await this.#lease.assert();
+    snapshot = await this.#reader.readObjective(snapshot.number);
+    this.#sequences.observe(snapshotEvents(snapshot));
     snapshot = await this.#observeCapacity(
       snapshot,
       this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
@@ -17890,6 +17989,12 @@ export class FactorySupervisor {
         ...(reason ? { reason } : {}),
       }),
     );
+    if (lifecycleStopped)
+      await this.#retireSettledDiscovery(snapshot).catch(() => {
+        this.#notify(
+          "Discovery locator retirement could not be confirmed; exact remaining hints need inspection.",
+        );
+      });
     await this.#lease.release();
     return {
       status:
@@ -17915,6 +18020,33 @@ export class FactorySupervisor {
   }
 
   async #releaseForDrain(snapshot: Snapshot): Promise<SupervisorResult> {
+    // The caller has synchronously joined every admitted execution. Re-read the
+    // journal after the final usage/cleanup receipts before disposing hints.
+    snapshot = await this.#reader.readObjective(snapshot.number);
+    const writerEpoch = await this.#lease.use(async (lease) => lease.epoch);
+    const acknowledgement = (snapshot.factoryEvents ?? [])
+      .filter(
+        (event) =>
+          event.event === "RunDrainCompleted" &&
+          event.runId === this.#run.runId &&
+          event.writerEpoch === writerEpoch,
+      )
+      .sort((left, right) => right.sequence - left.sequence)[0];
+    const request =
+      acknowledgement?.event === "RunDrainCompleted" &&
+      (snapshot.factoryEvents ?? []).find(
+        (event) =>
+          event.event === "RunDrainRequested" &&
+          event.requestId === acknowledgement.commandRequestId &&
+          event.runId === this.#run.runId,
+      );
+    // A concurrently accepted resume is a different pending obligation. Only
+    // requests through the acknowledged drain can be permanently settled here.
+    await this.#retireSettledDiscovery(snapshot, request ? request.sequence : 0).catch(() => {
+      this.#notify(
+        "Discovery locator retirement could not be confirmed; exact remaining hints need inspection.",
+      );
+    });
     await this.#lease.release();
     return {
       status: "drained",
@@ -17977,7 +18109,32 @@ export class FactorySupervisor {
           ),
         );
       } else if (prior?.event === "ActivationRejected") {
+        activationRejection(events, {
+          objective: snapshot.number,
+          requestId: activation.requestId,
+          requestedBy: actor,
+          repository: `${this.#options.owner}/${this.#options.repo}`,
+          baseSha: activation.baseSha,
+          policyDigest: policyDigest(this.#policy),
+        });
         durableReason = prior.reason;
+      }
+      if (!linkedStart) {
+        const retire = () =>
+          this.#store.retireDiscoveryLocator({
+            kind: "request",
+            objective: snapshot.number,
+            requestId: activation.requestId,
+          });
+        if (this.#lease) await retire();
+        else
+          await retire().catch(() => {
+            // Pre-lease rejection has no writer fence to lend a cleanup operation.
+            // Exact application replay may dispose the hint; this path proves no cleanup.
+            this.#notify(
+              "Pre-start rejection is recorded; discovery locator retirement remains unconfirmed.",
+            );
+          });
       }
     }
     return {

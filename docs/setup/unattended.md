@@ -16,6 +16,20 @@
 Objective is recorded in GitHub. Chat can disconnect without being the scheduler. This is a lifecycle
 choice, not another worker provider: it can schedule local, sandbox, or managed work.
 
+## Closed Objectives and long downtime
+
+The controller discovers open authorized work regardless of age. It scans only seven days of recent
+closed changes and retains exact pending-request and admitted-run locators independently of that
+window. Closing an Objective removes ordinary scheduling; it does not certify cleanup, completion
+or zero usage. Unknown resources/accounting remain visible for targeted inspection even after a
+cacheless restart. Terminal work is not automatically rerun.
+
+Old settled closed Objectives stay out of routine discovery. Reopen or explicitly inspect the selected
+Objective when its history is needed; use the existing authorized recovery flow for a terminal run.
+A diagnostic for a retained locator can require inspection after interrupted bookkeeping. Do not
+remove control refs or relabel uncertain work as settled to clear it. Large relevant sets progress
+in bounded pages; pending-page telemetry and GitHub quota waits can explain discovery latency.
+
 ## Detailed service configuration
 
 

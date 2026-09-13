@@ -245,9 +245,8 @@ it.each([false, true])(
     expect(settled).toBe(false);
     expect(f.release).not.toHaveBeenCalled();
     response.resolve();
-    // The production Octokit retry plugin retains an already-dispatched 503
-    // operation for three retries: 1 + 4 + 9 seconds, plus admission timers.
-    // This is one unresolved admission, not four new scheduler admissions.
+    // Shutdown waits for the in-flight response; the client cannot replay an
+    // uncertain 503 effect. Factory then surfaces the unresolved refusal.
     await advanceUntil(() => settled, refused ? 30_000 : 10_000);
     const failure = await outcome;
     if (refused)

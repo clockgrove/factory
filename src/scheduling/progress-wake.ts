@@ -1,3 +1,4 @@
+import type { WakeSignal } from "./wake-signal.js";
 import type { ContinuousExecutionPool, ExecutionSettlement } from "./continuous-refill.js";
 import type { ObjectiveFairness } from "./fairness.js";
 
@@ -24,6 +25,8 @@ export async function waitForProgress<Key>(args: {
   executionRevision?: number;
   fairness: ObjectiveFairness;
   fairnessRevision: number;
+  commands?: WakeSignal;
+  commandRevision?: number;
   maximumMs: number;
   retryDeadlines?: readonly number[];
   signal?: AbortSignal;
@@ -43,11 +46,13 @@ export async function waitForProgress<Key>(args: {
   const fairness = args.fairness
     .waitForChange(timeoutMs, controller.signal, args.fairnessRevision)
     .then(() => null);
+  const command = args.commands?.waitForChange(timeoutMs, controller.signal, args.commandRevision);
+  const pending = command ? [execution, fairness, command] : [execution, fairness];
   try {
-    await Promise.race([execution, fairness]);
+    await Promise.race(pending);
   } finally {
     controller.abort();
-    await Promise.allSettled([execution, fairness]);
+    await Promise.allSettled(pending);
     args.signal?.removeEventListener("abort", aborted);
   }
   return args.executions.takeCompleted();

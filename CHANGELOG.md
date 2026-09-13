@@ -21,6 +21,11 @@ and artifacts, and record the commit SHA when installing from source.
 
 ### Fixed
 
+- Wake local repository discovery, active Supervisor commands, capacity admission and backend
+  completion observation after their producers make progress. Preserve authenticated reads,
+  quota/backoff and bounded cross-host polling without increasing idle GitHub traffic.
+  ([#361](https://github.com/clockgrove/factory/issues/361))
+
 - Bind publication to the exact tested commit and prebuilt release manifest. Readiness checks and
   direct publication validate ignored evidence without rebuilding or repacking the tested artifact.
 

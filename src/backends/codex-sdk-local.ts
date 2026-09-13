@@ -655,6 +655,10 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     }
   }
 
+  waitForTerminal(handle: BackendHandle): Promise<void> {
+    return this.#require(handle).terminal;
+  }
+
   async observe(handle: BackendHandle): Promise<BackendObservation> {
     const running = this.#require(handle);
     const state =

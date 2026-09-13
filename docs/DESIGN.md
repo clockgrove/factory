@@ -156,6 +156,33 @@ wake itself. The supported lifecycle uses a user-authorized `systemd` service in
 WSL2 or a Linux guest on macOS. Native `launchd` and Windows Task Scheduler lifecycle adapters are
 out of scope. A new process reconstructs everything durable from GitHub.
 
+Successfully persisted local activation and accepted recovery publication/replay repair notify the
+matching repository discovery loop. Persisted operational commands also notify each active local
+Supervisor for that Objective, including foreground sessions and sessions draining after discovery
+election retirement. Notifications are hints to perform normal authenticated observation; they
+never supply command, lease, capacity, accounting, or execution authority. Publication and discovery
+repair finish before notification. Each consumer captures a local revision before observation so
+notifications during reads or entry to waiting remain visible; bursts coalesce into reconsideration.
+Command hints force an authoritative refresh even when admission state is otherwise unchanged.
+
+The same-user Linux fast path uses ephemeral Unix sockets in a private `/tmp` directory, addressed
+by canonical repository identity and optionally Objective number. It needs no broker or durable
+message store. Each receiver owns its endpoint; completed scopes close it, and publication removes
+socket addresses whose named process is proven absent. Delivery is bounded and best effort. Missing
+or unsupported transport, different users/hosts or isolated `/tmp`/PID namespaces, and service
+restart retain the existing minute-scale GitHub discovery/command backstop. Separate successful
+publication/replay calls can each prompt an observation. Unchanged idle repositories retain the
+same polling cadence; no five-second global GitHub poll is added. Wake hints never interrupt quota
+or lease retry delays. Controller diagnostics distinguish publication completion, wake receipt,
+scan start/end and Objective dispatch; Supervisor phase telemetry separately records phase start.
+
+Objective settlement directly wakes pending repository admission. Successful execution-to-validation
+capacity transitions notify peer schedulers through the existing fairness revision, and blocked
+validation admission consumes capacity changes while retaining timed pressure/cooldown resampling.
+Local App Server, CLI and SDK terminal hints wake worker observation once per attempt; normal
+observation, terminal journaling, usage settlement, physical scope absence and cleanup still decide
+the outcome. Unsupported backend hints retain the bounded observation timer.
+
 For installation and lifecycle commands, see [host scheduling](HOST-SCHEDULING.md).
 Application-level acceptance is described in [application qualification](APPLICATION-QUALIFICATION.md).
 

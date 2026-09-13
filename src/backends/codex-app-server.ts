@@ -585,6 +585,10 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     }
   }
 
+  waitForTerminal(handle: BackendHandle): Promise<void> {
+    return this.#require(handle).terminal;
+  }
+
   async observe(handle: BackendHandle): Promise<BackendObservation> {
     const attempt = this.#require(handle);
     if (

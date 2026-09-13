@@ -1,3 +1,4 @@
+import * as localWake from "../src/control/local-wake.js";
 import {
   DISCOVERY_LOCATOR_PREFIX,
   discoveryLocatorRef,
@@ -1244,6 +1245,29 @@ describe("explicit recovery request application", () => {
       },
     };
   }
+
+  it("wakes discovery only after accepted recovery or replay repair, never proposal or failed repair", async () => {
+    const wake = vi.spyOn(localWake, "publishLocalWake").mockResolvedValue();
+    try {
+      const f = await requests();
+      const proposal = await f.service.propose({ objective: 7, requestId: "request" });
+      expect(wake).not.toHaveBeenCalled();
+      const input = { objective: 7, requestId: "request", planDigest: proposal.planDigest! };
+      f.failLabel("before");
+      await expect(f.service.request(input)).rejects.toThrow();
+      expect(wake).not.toHaveBeenCalled();
+      await f.service.request(input);
+      expect(wake).toHaveBeenCalledExactlyOnceWith({ repository: "o/r" }, "request");
+      await f.service.request(input);
+      expect(wake).toHaveBeenCalledTimes(2);
+      wake.mockClear();
+      f.setActor("someone-else");
+      await expect(f.service.request(input)).rejects.toThrow("authority");
+      expect(wake).not.toHaveBeenCalled();
+    } finally {
+      wake.mockRestore();
+    }
+  });
 
   it("makes an unlabeled foreground Objective discoverable only after exact recovery acceptance", async () => {
     const f = await requests();

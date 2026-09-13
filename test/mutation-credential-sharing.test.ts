@@ -54,7 +54,7 @@ describe("credential-shared mutation quota with owner-local retirement", () => {
     };
     await Promise.all([run(first), run(second)]);
     expect(timestamps).toHaveLength(116);
-    expect(now).toBeGreaterThan(116_000);
+    expect(now).toBe(115_000);
     for (const at of timestamps)
       expect(timestamps.filter((t) => t > at - 60_000 && t <= at).length).toBeLessThanOrEqual(80);
     const held = await second.acquire();

@@ -122,12 +122,15 @@ class MemoryGraphStore implements LeaseStore, CompiledGraphStore {
       path: string;
       mode: "100644" | "100755" | "120000";
       type: "blob";
-      sha: string | null;
+      sha?: string | null;
+      content?: string;
     }>;
   }): Promise<string> {
     const tree = new Map(args.baseTreeOid ? (this.trees.get(args.baseTreeOid) ?? []) : []);
     for (const entry of args.entries) {
-      if (entry.sha) tree.set(entry.path, entry.sha);
+      if (entry.content !== undefined)
+        tree.set(entry.path, await this.createBlob(Buffer.from(entry.content)));
+      else if (entry.sha) tree.set(entry.path, entry.sha);
       else tree.delete(entry.path);
     }
     const oid = this.#oid();

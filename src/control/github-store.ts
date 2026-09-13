@@ -600,7 +600,14 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       // GitHub's stale-beforeOid response is currently a generic GraphQL
       // execution error. Re-read: our unique child OID proves success even if
       // the response was lost; every other value proves we lost the fence.
-      const current = await this.readRef(args.ref);
+      let current: string | null;
+      try {
+        current = await this.readRef(args.ref);
+      } catch {
+        // A refused reconciliation read says nothing about the mutation's
+        // outcome. Preserve its original ambiguity for the logical retry owner.
+        throw error;
+      }
       if (current === args.afterOid) return true;
       if (current !== args.beforeOid) return false;
       throw error;

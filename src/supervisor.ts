@@ -649,7 +649,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     }, ms);
     const abort = () => {
       clearTimeout(timer);
-      reject(new Error("Factory run cancelled"));
+      reject(signal?.reason);
     };
     if (signal?.aborted) abort();
     else signal?.addEventListener("abort", abort, { once: true });
@@ -6242,9 +6242,14 @@ export class FactorySupervisor {
                   activatedPackets.get(item.number),
                   managedRuntimeActivations.get(item.number),
                 );
-              } finally {
-                await releaseExecutionCapacity();
+              } catch (error) {
+                // A durability/cleanup hold retains its original obligation.
+                // Releasing it here would make the journal contradict the
+                // receipts and prevent the exact attempt from resuming.
+                if (!terminalizationVeto(error)) await releaseExecutionCapacity();
+                throw error;
               }
+              await releaseExecutionCapacity();
             },
             () => {
               if (executionClaim) activeExecutionClaims.delete(executionClaim);

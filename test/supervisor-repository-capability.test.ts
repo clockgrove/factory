@@ -1166,6 +1166,8 @@ describe("Supervisor workflow publication boundary", () => {
       localOnly: true,
       workflowArtifact: "unsafe",
       workflowPublicationCrash: true,
+      // Keep unrelated sibling attempts out of this publication-recovery scenario.
+      dependencyChain: true,
     });
     fixtures.push(fixture);
     const scoped = admitLocalValidation();

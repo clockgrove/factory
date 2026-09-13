@@ -557,19 +557,29 @@ export async function persistArtifactTransfer(args: {
     const message = `Factory artifact transfer ${phase}\n\nFactory-Artifact: ${artifact.digest}\nFactory-Descriptor: ${sha256(bytes)}\nFactory-Retention: repository-audit`;
     const oid = await mutation(() => args.store.createCommit({ treeOid, parentOids, message }));
     const ref = `${artifactTransferRef(identity)}/${phase}`;
+    let acknowledged = false;
+    let publicationError: unknown;
     try {
-      await mutation(() => args.store.createRef(ref, oid));
+      acknowledged = await mutation(() => args.store.createRef(ref, oid));
     } catch (error) {
-      if ((await args.store.readRef(ref)) !== oid) throw error;
+      publicationError = error;
+    }
+    // The successful create acknowledges these exact prepared objects. As with
+    // graph/review publication, reconstruct only an existing or uncertain winner.
+    if (acknowledged) {
+      if (phase === "intent") createdIntentTree = treeOid;
+      return { ref, oid, commit: { oid, treeOid, parentOids, message }, descriptor, descriptorOid };
     }
     const observed = await readDescriptor(args.store, identity, phase);
+    if (!observed)
+      throw new Error(`artifact transfer ${phase} publication is not yet observable`, {
+        cause: publicationError,
+      });
     if (
-      !observed ||
       JSON.stringify(observed.descriptor) !== JSON.stringify(descriptor) ||
       JSON.stringify(observed.commit.parentOids) !== JSON.stringify(parentOids)
     )
-      throw new Error("artifact transfer ref publication conflicted");
-    if (phase === "intent") createdIntentTree = observed.commit.treeOid;
+      throw new Error("artifact transfer ref publication conflicted", { cause: publicationError });
     return observed;
   };
   const intent = await save("intent", []);

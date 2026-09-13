@@ -71,11 +71,20 @@ async function fixture(sameObjective = false, peerNonhost = false) {
       return oid;
     },
     createTree: async ({ entries }) => {
+      const materialized = entries.map((entry) => {
+        if (entry.content === undefined) return entry;
+        const bytes = Buffer.from(entry.content, "utf8");
+        const sha = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+        blobs.set(sha, bytes);
+        return { ...entry, sha };
+      });
       const oid = sha(`tree-${counter++}`);
       trees.set(
         oid,
         new Map(
-          entries.filter((entry) => entry.sha !== null).map((entry) => [entry.path, entry.sha!]),
+          materialized
+            .filter((entry) => entry.sha !== null)
+            .map((entry) => [entry.path, entry.sha!]),
         ),
       );
       return oid;

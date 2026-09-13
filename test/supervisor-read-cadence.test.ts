@@ -231,7 +231,10 @@ it("retires a native member's expired grace when a later member still waits", as
     expect(expiredGraceWait).toBe(1);
     expect(laterWait).toBeDefined();
     expect(laterWait!.retryDeadlines).not.toContain(firstGrace);
-    expect(laterWait!.maximumMs).toBe(60_000);
+    // The pending member's absolute retry deadline is retained across the wait;
+    // elapsed reconciliation time is not added back to its interval.
+    expect(laterWait!.maximumMs).toBeGreaterThan(59_000);
+    expect(laterWait!.maximumMs).toBeLessThanOrEqual(60_000);
   } finally {
     shutdown.abort();
     await f.dispose();

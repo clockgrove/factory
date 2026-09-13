@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { GitHubControlStore } from "../src/control/github-store.js";
 import type { CompiledGraphStore } from "../src/control/graphs.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "../src/control/lease.js";
 import {
@@ -14,6 +15,9 @@ import {
   type SiblingRefreshIdentity,
   type SiblingRefreshRecord,
 } from "../src/control/sibling-refreshes.js";
+import { bindMergeCandidateValidation } from "../src/publication/merge-candidate.js";
+import { integrationReadiness, type PublicationStore } from "../src/publication/publisher.js";
+import { createValidationEvidence } from "../src/validation/evidence.js";
 import { bindValidationToPublishedHead } from "../src/validation/plan.js";
 
 const sha = (value: string) => createHash("sha1").update(value).digest("hex");
@@ -239,6 +243,100 @@ function mutateDocument(
 }
 
 describe("immutable native sibling refresh intent", () => {
+  it("reuses immutable lineage content while rereading checkpoint and reservation refs", async () => {
+    const f = fixture();
+    const record = await f.manager.persist(f.args);
+    const commits: string[] = [];
+    const github = new GitHubControlStore({
+      token: "sibling-content-fixture",
+      owner: "example",
+      repo: "disposable",
+      requestFetch: async (input, init) => {
+        const path = new URL(new Request(input, init).url).pathname;
+        if (!path.includes("/git/commits/")) throw new Error(`unexpected request: ${path}`);
+        const oid = path.split("/").at(-1)!;
+        commits.push(oid);
+        const commit = await f.store.readCommit(oid);
+        return Response.json(
+          {
+            sha: commit.oid,
+            tree: { sha: commit.treeOid },
+            parents: commit.parentOids.map((sha) => ({ sha })),
+            message: commit.message,
+          },
+          { headers: { date: now.toUTCString() } },
+        );
+      },
+    });
+    const port = {
+      readRef: vi.fn(f.store.readRef.bind(f.store)),
+      listRefs: vi.fn(f.store.listRefs.bind(f.store)),
+      readBlob: f.store.readBlob.bind(f.store),
+      readTreeEntry: f.store.readTreeEntry.bind(f.store),
+      readCommit: github.readCommit.bind(github),
+    };
+    // Legacy stores remain supported; count the previous uncached call path.
+    expect(await loadSiblingRefresh(port, record.identity)).toEqual(record);
+    expect(commits).toHaveLength(7);
+    expect(new Set(commits).size).toBe(5);
+    commits.length = 0;
+    const cached = { ...port, readCommitContent: github.readCommitContent.bind(github) };
+    expect(await loadSiblingRefresh(cached, record.identity)).toEqual(record);
+    expect(commits).toHaveLength(5);
+    expect(new Set(commits).size).toBe(5);
+    port.readRef.mockClear();
+    port.listRefs.mockClear();
+    commits.length = 0;
+    expect(await loadSiblingRefresh(cached, record.identity)).toEqual(record);
+    expect(commits).toHaveLength(0);
+    expect(port.readRef).toHaveBeenCalledTimes(2);
+    expect(port.listRefs).toHaveBeenCalledTimes(2);
+    const readPullRequest = vi.fn(async () => ({ headSha: sha("external-advance") }));
+    expect(
+      await integrationReadiness(
+        { ...cached, readPullRequest } as unknown as PublicationStore,
+        {
+          branch: record.identity.branch,
+          commitSha: record.identity.sourceHeadSha,
+          number: record.identity.pullRequest,
+          htmlUrl: "https://example.invalid/pull/9",
+          exactHeadValidation: record.source,
+        },
+        record.identity.targetBaseSha,
+        "main",
+        {
+          siblingRefresh: record,
+          mergeCandidateValidation: bindMergeCandidateValidation({
+            source: record.source,
+            validation: createValidationEvidence({
+              protocol: "clockgrove.factory/validation-v1",
+              artifactDigest: digest("candidate"),
+              baseSha: record.identity.targetBaseSha,
+              outputTreeSha: record.outputTreeSha,
+              commands: [{ command: "npm test", exitCode: 0, durationMs: 5 }],
+              passed: true,
+              startedAt: now.toISOString(),
+              completedAt: now.toISOString(),
+            }),
+          }),
+        },
+      ),
+    ).toEqual({ state: "failed", reason: "pull request head changed after validation" });
+    expect(readPullRequest).toHaveBeenCalledTimes(1);
+    expect(commits).toHaveLength(0);
+    // Warm content cannot conceal lost reservation ownership or checkpoint replacement.
+    f.store.refs.delete(record.identity.reservationRef);
+    await expect(loadSiblingRefresh(cached, record.identity)).rejects.toThrow(
+      "source reservation ref changed",
+    );
+    f.store.refs.set(record.identity.reservationRef, record.identity.reservationOid);
+    f.store.refs.set(record.ref, record.identity.sourceHeadSha);
+    await expect(loadSiblingRefreshLineage(cached, record)).rejects.toThrow(
+      "missing checkpoint document",
+    );
+    expect(commits).toHaveLength(0);
+  });
+
   it("writes a planned exact two-parent head before the immutable intent, without branch mutation", async () => {
     const f = fixture();
     const original = structuredClone(f.args);

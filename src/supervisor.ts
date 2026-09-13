@@ -551,7 +551,11 @@ interface CollectedAttemptContinuation {
 }
 
 class SiblingRefreshTargetAdvancedError extends Error {}
-class SiblingRefreshObservationPendingError extends Error {}
+class SiblingRefreshObservationPendingError extends Error {
+  constructor(readonly record: SiblingRefreshRecord) {
+    super("waiting for GitHub PR metadata to observe the exact refreshed head");
+  }
+}
 
 class ArtifactCollectionCheckpointError extends Error {
   constructor(cause: unknown) {
@@ -1147,6 +1151,19 @@ export class FactorySupervisor {
   #integrationWaits = new Map<
     number,
     { until: number; delay: number; reason: string; evidence?: IntegrationWait }
+  >();
+  // One bounded opportunity per confirmed local ref write; never reconstructed as authority.
+  #integrationWrites = new Map<
+    number,
+    {
+      pullRequest: number;
+      oldHead: string;
+      expectedHead: string;
+      writeCompletedAt: number;
+      firstObservedAt?: number;
+      probes: number;
+      nextProbeAt: number;
+    }
   >();
   readonly #retryArtifacts = new RetryArtifactCache();
   #durablePackets = new Map<number, WorkerPacket>();
@@ -12633,11 +12650,12 @@ export class FactorySupervisor {
         (await this.#store.readRef(`refs/heads/${record.identity.branch}`)) ===
           record.plannedHeadSha
       )
-        throw new SiblingRefreshObservationPendingError(
-          "waiting for GitHub PR metadata to observe the exact refreshed head",
-        );
+        throw new SiblingRefreshObservationPendingError(record);
       throw new Error("sibling refresh current PR head differs from its immutable intent");
     }
+    const write = this.#integrationWrites.get(member.reservation.workItem);
+    if (write?.expectedHead === pull.headSha && write.firstObservedAt === undefined)
+      write.firstObservedAt = Date.now();
     if (!pull.merged) {
       if (
         (await this.#store.readRef(`refs/heads/${record.identity.branch}`)) !==
@@ -12698,6 +12716,10 @@ export class FactorySupervisor {
     if (previous?.identity.targetBaseSha === targetBaseSha) {
       if (record && previous.commitOid !== record.commitOid)
         throw new Error("sibling refresh intent conflicts with observed head");
+      const write = this.#integrationWrites.get(item.number);
+      if (write?.expectedHead === observed.headSha) write.firstObservedAt ??= Date.now();
+      this.#integrationWriteTelemetry(item.number, "next-action");
+      this.#integrationWrites.delete(item.number);
       return previous;
     }
     if (merged) throw new Error("merged sibling lacks its pre-merge refresh intent");
@@ -12773,9 +12795,7 @@ export class FactorySupervisor {
           await this.#assertRefreshTarget(targetBaseSha, item.number);
           const branchHead = await this.#store.readRef(`refs/heads/${identity.branch}`);
           if (branchHead === pinned.plannedHeadSha && current.headSha === pinned.expectedOldHeadSha)
-            throw new SiblingRefreshObservationPendingError(
-              "waiting for GitHub PR metadata to observe the exact refreshed head",
-            );
+            throw new SiblingRefreshObservationPendingError(pinned);
           if (
             current.headSha !== branchHead ||
             (branchHead !== pinned.expectedOldHeadSha && branchHead !== pinned.plannedHeadSha)
@@ -12804,10 +12824,22 @@ export class FactorySupervisor {
             )
               throw new Error("sibling refresh exact branch CAS lost ownership");
           });
+          const writeCompletedAt = Date.now();
+          this.#integrationWrites.set(item.number, {
+            pullRequest: member.pull.number,
+            oldHead: pinned.expectedOldHeadSha,
+            expectedHead: pinned.plannedHeadSha,
+            writeCompletedAt,
+            probes: 0,
+            nextProbeAt: writeCompletedAt + 1_000,
+          });
+          this.#integrationWriteTelemetry(item.number, "write-completed");
         }
         await this.#assertSiblingRefreshCurrent(member, pinned);
       }),
     );
+    this.#integrationWriteTelemetry(item.number, "next-action");
+    this.#integrationWrites.delete(item.number);
     return pinned;
   }
 
@@ -14341,7 +14373,19 @@ export class FactorySupervisor {
         error instanceof SiblingRefreshTargetAdvancedError ||
         error instanceof SiblingRefreshObservationPendingError
       ) {
-        this.#deferIntegration(item.number, error.message);
+        this.#deferIntegration(
+          item.number,
+          error.message,
+          error instanceof SiblingRefreshObservationPendingError
+            ? {
+                state: "wait",
+                code: "refreshed-head-pending",
+                reason: error.message,
+                headSha: error.record.plannedHeadSha,
+                baseSha: error.record.identity.targetBaseSha,
+              }
+            : undefined,
+        );
         return;
       }
       throw error;
@@ -15579,30 +15623,90 @@ export class FactorySupervisor {
     fairnessRevision: number,
     objectiveDeadline: number,
   ): Promise<void> {
-    // Local execution/fairness revisions wake immediately. The timeout only
-    // reconciles external changes; worker cancellation retains its separate poll.
-    const normalMaximum = this.#options.pollIntervalMs ?? 60_000;
-    // Unlike generic retry hints, a known grace expiry must also wake when it
-    // elapsed during this iteration. Ignoring it here adds another full poll.
-    const knownGraceDeadline = Math.min(
-      ...[...this.#integrationWaits.values()]
-        .filter((wait) => wait.evidence?.code === "first-check-grace")
-        .map((wait) => wait.until),
+    // Short probes remain inside this wait: they never reconstruct the Objective,
+    // hold integration admission, or replace the next iteration's full fences.
+    const externalDeadline = Math.min(
+      objectiveDeadline,
+      Date.now() + (this.#options.pollIntervalMs ?? 60_000),
     );
-    const maximumMs = Math.max(
-      1,
-      Math.min(normalMaximum, objectiveDeadline - Date.now(), knownGraceDeadline - Date.now()),
-    );
-    const settled = await waitForProgress({
-      executions: activeExecutions,
-      executionRevision,
-      fairness: this.#fairness,
-      fairnessRevision,
-      maximumMs,
-      retryDeadlines: [...this.#integrationWaits.values()].map((wait) => wait.until),
-      ...(this.#options.signal ? { signal: this.#options.signal } : {}),
-    });
-    if (settled?.error) throw new ClaimedExecutionFailure(settled);
+    for (;;) {
+      const probes = [...this.#integrationWrites.entries()].filter(
+        ([item, write]) =>
+          write.probes < 2 &&
+          write.firstObservedAt === undefined &&
+          this.#integrationWaits.get(item)?.evidence?.code === "refreshed-head-pending" &&
+          this.#integrationWaits.get(item)?.evidence?.headSha === write.expectedHead,
+      );
+      const knownDeadline = Math.min(
+        externalDeadline,
+        ...[...this.#integrationWaits.values()]
+          .filter((wait) => wait.evidence?.code === "first-check-grace")
+          .map((wait) => wait.until),
+      );
+      const settled = await waitForProgress({
+        executions: activeExecutions,
+        executionRevision,
+        fairness: this.#fairness,
+        fairnessRevision,
+        maximumMs: Math.max(
+          1,
+          Math.min(knownDeadline, ...probes.map(([, write]) => write.nextProbeAt)) - Date.now(),
+        ),
+        retryDeadlines: [...this.#integrationWaits.values()].map((wait) => wait.until),
+        ...(this.#options.signal ? { signal: this.#options.signal } : {}),
+      });
+      if (settled?.error) throw new ClaimedExecutionFailure(settled);
+      if (
+        settled ||
+        activeExecutions.revision !== executionRevision ||
+        this.#fairness.revision !== fairnessRevision ||
+        this.#options.signal?.aborted ||
+        Date.now() >= knownDeadline
+      )
+        return;
+      let probed = false;
+      for (const [item, write] of probes) {
+        if (Date.now() < write.nextProbeAt) continue;
+        this.#options.signal?.throwIfAborted();
+        write.probes++;
+        probed = true;
+        const pull = await this.#store.readPullRequest(write.pullRequest);
+        if (pull.headSha !== write.oldHead || pull.merged || pull.state !== "open") {
+          if (pull.headSha === write.expectedHead) write.firstObservedAt ??= Date.now();
+          this.#integrationWriteTelemetry(item, "observation-changed");
+          // Any change is only a wake hint, including an unexpected head/closed PR.
+          // Normal current identity/ref/target/authority checks decide what it means.
+          this.#integrationWaits.get(item)!.until = Date.now();
+          return;
+        }
+        write.nextProbeAt = Date.now() + 2_000;
+        if (write.probes === 2) this.#integrationWriteTelemetry(item, "probes-exhausted");
+      }
+      if (!probed) return;
+    }
+  }
+
+  #integrationWriteTelemetry(workItem: number, event: string): void {
+    const write = this.#integrationWrites.get(workItem);
+    if (!write) return;
+    try {
+      this.#notify(
+        `Factory integration observation: ${JSON.stringify({
+          measurementScope: "process-local-own-write-observation",
+          event,
+          workItem,
+          writeCompletedAt: new Date(write.writeCompletedAt).toISOString(),
+          firstObservedAt:
+            write.firstObservedAt === undefined
+              ? null
+              : new Date(write.firstObservedAt).toISOString(),
+          nextActionAt: event === "next-action" ? new Date().toISOString() : null,
+          targetedReads: write.probes,
+        })}`,
+      );
+    } catch {
+      /* Diagnostics never determine progress or authority. */
+    }
   }
 
   #deferIntegration(workItem: number, reason: string, evidence?: IntegrationWait): false {
@@ -16092,7 +16196,19 @@ export class FactorySupervisor {
           error instanceof SiblingRefreshTargetAdvancedError ||
           error instanceof SiblingRefreshObservationPendingError
         )
-          return this.#deferIntegration(item.number, error.message);
+          return this.#deferIntegration(
+            item.number,
+            error.message,
+            error instanceof SiblingRefreshObservationPendingError
+              ? {
+                  state: "wait",
+                  code: "refreshed-head-pending",
+                  reason: error.message,
+                  headSha: error.record.plannedHeadSha,
+                  baseSha: error.record.identity.targetBaseSha,
+                }
+              : undefined,
+          );
         throw error;
       }
     }

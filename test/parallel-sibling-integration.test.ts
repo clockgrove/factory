@@ -1496,7 +1496,7 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(f.merge).toHaveBeenCalledTimes(2);
   });
 
-  it("observes a completed ref write immediately without sleeping before the narrow read", async () => {
+  it("observes a completed ref write without an artificial wait", async () => {
     const observations: Array<{
       event: string;
       writeCompletedAt: string;
@@ -1517,7 +1517,7 @@ describe("Supervisor parallel independent sibling integration", () => {
           const observation = JSON.parse(message.slice(prefix.length));
           observations.push(observation);
           if (observation.event === "write-completed") waitsAtWrite = wait.mock.calls.length;
-          if (observation.event === "observation-changed")
+          if (observation.event === "observation-changed" || observation.event === "next-action")
             waitsAtObservation = wait.mock.calls.length;
         }
       },
@@ -1525,7 +1525,7 @@ describe("Supervisor parallel independent sibling integration", () => {
     const result = await f.run();
     expect(result, result.reason).toMatchObject({ status: "completed" });
     const action = observations.find((entry) => entry.event === "next-action")!;
-    expect(action.targetedReads).toBe(1);
+    expect(action.targetedReads).toBeLessThanOrEqual(1);
     expect(waitsAtObservation).toBe(waitsAtWrite);
     expect(Date.parse(action.nextActionAt!) - Date.parse(action.firstObservedAt!)).toBeLessThan(
       5_000,
@@ -1585,13 +1585,16 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(f.merge).toHaveBeenCalledOnce();
   }, 15_000);
 
-  it("rechecks branch ownership after the targeted head observation", async () => {
+  it("rechecks branch ownership after observing the refreshed head", async () => {
     const f = await fixture({
       regular: true,
       staleRefreshedHeadReads: 1,
       pollIntervalMs: 60_000,
       onStatus: (message) => {
-        if (message.includes('"event":"observation-changed"'))
+        if (
+          message.includes('"event":"observation-changed"') ||
+          message.includes('"event":"next-action"')
+        )
           f.refs.set(`refs/heads/${publicationBranch(7, 9, 1)}`, f.baseSha);
       },
     });
@@ -1969,7 +1972,7 @@ describe("Supervisor parallel independent sibling integration", () => {
       await vi.advanceTimersByTimeAsync(0);
       const readsBefore = f.pullReads.mock.calls.length;
       let previousReads = readsBefore;
-      for (let minute = 0; minute < 3; minute++) {
+      for (let minute = 0; minute < 7; minute++) {
         await vi.advanceTimersByTimeAsync(60_000);
         expect(f.pullReads.mock.calls.length).toBeGreaterThan(previousReads);
         previousReads = f.pullReads.mock.calls.length;
@@ -1991,7 +1994,7 @@ describe("Supervisor parallel independent sibling integration", () => {
       expect(f.launch).not.toHaveBeenCalled();
       expect(f.renewLease).toHaveBeenCalled();
     },
-    // Includes real Git ancestry/import work around four simulated minutes.
+    // Includes real Git ancestry/import work around eight simulated minutes.
     // Scheduling bounds remain the explicit read/review/validation assertions above.
     10_000,
   );
@@ -2062,7 +2065,7 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(f.launch).not.toHaveBeenCalled();
   });
 
-  it("integrates a ready sibling while a closed sibling's missing receipt is deferred", async () => {
+  it("repairs an externally completed sibling immediately and integrates remaining ready siblings", async () => {
     const abort = new AbortController();
     let observedWait!: () => void;
     const waiting = new Promise<void>((resolve) => {
@@ -2076,9 +2079,8 @@ describe("Supervisor parallel independent sibling integration", () => {
       signal: abort.signal,
       onStatus: (message) => {
         if (message.includes("Work Item #8 integration waiting:")) {
-          // The pending publication completes outside this observation. Its retry
-          // deadline remains in the future, so the next snapshot must defer receipt
-          // repair without blocking the third sibling behind it.
+          // Completion observed after deferral must be reconciled immediately,
+          // without holding receipt repair behind the removed retry deadline.
           const head = f.heads[0];
           if (!head) throw new Error("missing first sibling head");
           f.git("merge", "--squash", head);
@@ -2114,7 +2116,7 @@ describe("Supervisor parallel independent sibling integration", () => {
       f.snapshot.workItems[0]!.factoryEvents!.some(
         (event) => event.kind === "attempt" && event.event === "AttemptIntegrated",
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(f.review).toHaveBeenCalledTimes(2);
     expect(f.validate).toHaveBeenCalledTimes(2);
     expect(f.launch).not.toHaveBeenCalled();

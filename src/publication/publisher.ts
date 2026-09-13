@@ -473,6 +473,9 @@ export async function integrationReadiness(
         readRef: (ref) => store.readRef(ref),
         listRefs: (prefix) => store.listRefs!(prefix),
         readCommit: (oid) => store.readCommit(oid),
+        ...(store.readCommitContent
+          ? { readCommitContent: (oid: string) => store.readCommitContent!(oid) }
+          : {}),
         readTreeEntry: (tree, path) => store.readTreeEntry!(tree, path),
         readBlob: (oid) => store.readBlob!(oid),
       },

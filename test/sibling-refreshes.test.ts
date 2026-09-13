@@ -15,6 +15,9 @@ import {
   type SiblingRefreshIdentity,
   type SiblingRefreshRecord,
 } from "../src/control/sibling-refreshes.js";
+import { bindMergeCandidateValidation } from "../src/publication/merge-candidate.js";
+import { integrationReadiness, type PublicationStore } from "../src/publication/publisher.js";
+import { createValidationEvidence } from "../src/validation/evidence.js";
 import { bindValidationToPublishedHead } from "../src/validation/plan.js";
 
 const sha = (value: string) => createHash("sha1").update(value).digest("hex");
@@ -288,6 +291,39 @@ describe("immutable native sibling refresh intent", () => {
     expect(commits).toHaveLength(0);
     expect(port.readRef).toHaveBeenCalledTimes(2);
     expect(port.listRefs).toHaveBeenCalledTimes(2);
+    const readPullRequest = vi.fn(async () => ({ headSha: sha("external-advance") }));
+    expect(
+      await integrationReadiness(
+        { ...cached, readPullRequest } as unknown as PublicationStore,
+        {
+          branch: record.identity.branch,
+          commitSha: record.identity.sourceHeadSha,
+          number: record.identity.pullRequest,
+          htmlUrl: "https://example.invalid/pull/9",
+          exactHeadValidation: record.source,
+        },
+        record.identity.targetBaseSha,
+        "main",
+        {
+          siblingRefresh: record,
+          mergeCandidateValidation: bindMergeCandidateValidation({
+            source: record.source,
+            validation: createValidationEvidence({
+              protocol: "clockgrove.factory/validation-v1",
+              artifactDigest: digest("candidate"),
+              baseSha: record.identity.targetBaseSha,
+              outputTreeSha: record.outputTreeSha,
+              commands: [{ command: "npm test", exitCode: 0, durationMs: 5 }],
+              passed: true,
+              startedAt: now.toISOString(),
+              completedAt: now.toISOString(),
+            }),
+          }),
+        },
+      ),
+    ).toEqual({ state: "failed", reason: "pull request head changed after validation" });
+    expect(readPullRequest).toHaveBeenCalledTimes(1);
+    expect(commits).toHaveLength(0);
     // Warm content cannot conceal lost reservation ownership or checkpoint replacement.
     f.store.refs.delete(record.identity.reservationRef);
     await expect(loadSiblingRefresh(cached, record.identity)).rejects.toThrow(

@@ -1,3 +1,9 @@
+import {
+  assertResultInvocationRecorded,
+  decodeResultReceiptComments,
+  RESULT_RECORD_PROTOCOL,
+  validateResultReceiptComment,
+} from "../src/control/result-receipts.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -261,6 +267,10 @@ async function fixture(
   const storage: CompiledGraphStore = {
     readRef: async (ref) => refs.get(ref) ?? null,
     readCommit,
+    readCommitContent: async (id) => {
+      const { serverTime: _serverTime, ...content } = await readCommit(id);
+      return content;
+    },
     readBlob: async (id) => {
       const bytes = blobs.get(id);
       if (!bytes) throw new Error("missing blob");
@@ -592,6 +602,50 @@ async function fixture(
     // manager or Supervisor decision is mocked.
     vi.spyOn(GitHubControlStore.prototype, name).mockImplementation(storage[name] as never);
   }
+  const retainedComments: Array<{ commentId: string; node: string; body: string }> = [];
+  vi.spyOn(GitHubControlStore.prototype, "readResultReceipts").mockImplementation(async (scope) => {
+    const start = snapshot.factoryEvents!.find(
+      (event) => event.event === "FactoryRunStarted" && event.runId === scope.runId,
+    );
+    if (start?.kind !== "run" || start.event !== "FactoryRunStarted")
+      throw new Error("fixture result run not found");
+    if (start.recordProtocol === undefined) return { protocol: null, receipts: [] };
+    if (start.recordProtocol !== RESULT_RECORD_PROTOCOL)
+      throw new Error("unsupported fixture run record protocol");
+    const history = [
+      ...snapshot.factoryEvents!,
+      ...snapshot.workItems.flatMap((item) => item.factoryEvents!),
+    ];
+    const receipts = [];
+    for (const comment of retainedComments) {
+      const events = decodeEventComments(comment.body);
+      for (const receipt of decodeResultReceiptComments(comment.body)) {
+        if (
+          receipt.objective !== scope.objective ||
+          receipt.runId !== scope.runId ||
+          receipt.workItem !== scope.workItem ||
+          receipt.kind !== scope.kind ||
+          receipt.identityDigest !== scope.identityDigest
+        )
+          continue;
+        await validateResultReceiptComment(storage, comment.body);
+        assertResultInvocationRecorded(receipt, events, history);
+        receipts.push({ receipt, commentId: comment.commentId, events });
+      }
+    }
+    return { protocol: RESULT_RECORD_PROTOCOL, receipts };
+  });
+  vi.spyOn(GitHubControlStore.prototype, "publishResultReceipt").mockImplementation(async function (
+    this: GitHubControlStore,
+    args,
+  ) {
+    await this.addIssueComment(args.issueNodeId, args.body);
+    const comment = [...retainedComments]
+      .reverse()
+      .find((comment) => comment.node === args.issueNodeId && comment.body === args.body);
+    if (!comment) throw new Error("fixture result publication not retained");
+    return { commentId: comment.commentId };
+  });
   vi.spyOn(GitHubControlStore.prototype, "listRefs").mockImplementation(async (prefix) =>
     [...refs].filter(([ref]) => ref.startsWith(prefix)).map(([ref, id]) => ({ ref, oid: id })),
   );
@@ -615,6 +669,12 @@ async function fixture(
   vi.spyOn(GitHubControlStore.prototype, "getBranchHead").mockImplementation(async () =>
     readCommit(git("rev-parse", "main")),
   );
+  vi.spyOn(GitHubControlStore.prototype, "getBranchHeadOid").mockImplementation(async function (
+    this: GitHubControlStore,
+    branch,
+  ) {
+    return (await this.getBranchHead(branch)).oid;
+  });
   let lostIntegrationReceipt = false;
   let lostArtifactConsumerSuccessResponse = false;
   vi.spyOn(GitHubControlStore.prototype, "addIssueComment").mockImplementation(
@@ -637,6 +697,7 @@ async function fixture(
       const target =
         node === snapshot.id ? snapshot : snapshot.workItems.find((item) => item.id === node)!;
       target.factoryEvents!.push(...events);
+      retainedComments.push({ commentId: String(retainedComments.length + 1), node, body });
       if (
         options.loseArtifactConsumerSuccessResponse &&
         !lostArtifactConsumerSuccessResponse &&
@@ -2836,7 +2897,10 @@ describe("Supervisor adopted isolated candidate validation", () => {
       expect(f.refresh).toHaveBeenCalledTimes(refreshesBeforeRestart);
       if (unavailableTarget)
         expect(
-          vi.mocked(GitHubControlStore.prototype.readCommit).mock.calls.map(([oid]) => oid),
+          [
+            ...vi.mocked(GitHubControlStore.prototype.readCommit).mock.calls,
+            ...vi.mocked(GitHubControlStore.prototype.readCommitContent).mock.calls,
+          ].map(([oid]) => oid),
         ).not.toContain(unavailableHead);
       const current = f.snapshot.workItems[1]!.factoryEvents!;
       expect(current).toContainEqual(immutableCompletion);

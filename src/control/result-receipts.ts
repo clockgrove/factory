@@ -340,7 +340,7 @@ export function decodeResultReceiptComments(body: string): ResultReceipt[] {
 }
 
 export function resultReadStore(store: object): ResultReceiptReadStore | null {
-  return "readResultReceipts" in store && typeof store.readResultReceipts === "function"
+  return typeof (store as Partial<ResultReceiptReadStore>).readResultReceipts === "function"
     ? (store as ResultReceiptReadStore)
     : null;
 }

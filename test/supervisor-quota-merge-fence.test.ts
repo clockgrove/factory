@@ -44,13 +44,23 @@ describe.each([false, true])("actual Supervisor merge transport (native=%s)", (n
         }
         return result;
       });
-      const branch = vi.mocked(GitHubControlStore.prototype.getBranchHead);
-      const readBranch = branch.getMockImplementation()!;
-      branch.mockImplementation(async function (this: GitHubControlStore, name) {
-        const result = await readBranch.call(this, name);
+      const branchCommit = vi.mocked(GitHubControlStore.prototype.getBranchHead);
+      const readBranchCommit = branchCommit.getMockImplementation()!;
+      branchCommit.mockImplementation(async function (this: GitHubControlStore, name) {
+        const result = await readBranchCommit.call(this, name);
         if (refused && changed === "base" && name === "main") {
           changedReads++;
           return { ...result, oid: "c".repeat(40) };
+        }
+        return result;
+      });
+      const branch = vi.mocked(GitHubControlStore.prototype.readRef);
+      const readBranch = branch.getMockImplementation()!;
+      branch.mockImplementation(async function (this: GitHubControlStore, ref) {
+        const result = await readBranch.call(this, ref);
+        if (refused && changed === "base" && ref === "refs/heads/main") {
+          changedReads++;
+          return "c".repeat(40);
         }
         return result;
       });

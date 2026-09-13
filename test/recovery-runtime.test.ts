@@ -1,3 +1,4 @@
+import type { ResultReceiptScope } from "../src/control/result-receipts.js";
 import { createHash } from "node:crypto";
 import { PlatformUnavailableError } from "../src/platform.js";
 import { describe, expect, it, vi } from "vitest";
@@ -75,6 +76,21 @@ class MemoryStore implements CompiledGraphStore, RecoveryReadStore {
   trace: string[] = [];
   writes: string[] = [];
   comments: FactoryEvent[] = [];
+  runHistory: () => readonly FactoryEvent[] = () => this.comments;
+  async readResultReceipts(scope: ResultReceiptScope) {
+    const start = this.runHistory().find(
+      (event) =>
+        event.kind === "run" &&
+        event.event === "FactoryRunStarted" &&
+        event.objective === scope.objective &&
+        event.runId === scope.runId,
+    );
+    if (start?.kind !== "run" || start.event !== "FactoryRunStarted")
+      throw new Error("fixture result run not found");
+    if (start.recordProtocol !== undefined)
+      throw new Error("runtime fixture has no selected result receipts");
+    return { protocol: null, receipts: [] };
+  }
   enforce = false;
   objectiveValid = true;
   repositoryValid = true;
@@ -504,6 +520,7 @@ async function fixture(
       },
     ],
   };
+  store.runHistory = () => snapshot.factoryEvents ?? [];
   const predecessor = {
     runId: "source",
     startDigest: recoveryEventDigest(start),

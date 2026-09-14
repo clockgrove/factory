@@ -17,6 +17,12 @@ Git parents, so message pointers are not their only reachability. Its bounded
 This is not a general event database. Authenticated comments remain the lifecycle,
 accounting and command journals.
 
+Execution records its durable issue-admission intent before committing shared capacity.
+Dispatch requires both records. A failure between those writes leaves an undispatched
+intent that the existing issue CAS can close on recovery, rather than an unrecorded
+capacity liability. This ordering does not authorize releasing historical unmatched
+claims from elapsed time or missing receipts.
+
 | Disposition | Meaning |
 | --- | --- |
 | prepared | Durable intent; backend dispatch has not been permitted. |

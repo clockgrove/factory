@@ -143,6 +143,39 @@ function afterReceipt(eventName: FactoryEvent["event"], action: () => void) {
 }
 
 describe("Supervisor activation withdrawal races", () => {
+  it("rejects an unexplained fresh activation base with a startless peer diagnostic", async () => {
+    const f = await fixture();
+    const base = await GitHubControlStore.prototype.getBranchHead("main");
+    const advanced = "f".repeat(40);
+    expect(advanced).not.toBe(f.binding.baseSha);
+    vi.mocked(GitHubControlStore.prototype.getBranchHead).mockResolvedValue({
+      ...base,
+      oid: advanced,
+    });
+    vi.mocked(GitHubControlStore.prototype.readCommitObjectiveCandidates).mockResolvedValue([]);
+    const result = await f.run();
+    expect(result).toMatchObject({ status: "escalated" });
+    expect(result.reason).toContain("reactivate against the new head");
+    const diagnostic = f.notifications.find((message) =>
+      message.startsWith("Factory peer integration proof: "),
+    );
+    expect(diagnostic).toBeDefined();
+    const report = JSON.parse(diagnostic!.slice("Factory peer integration proof: ".length));
+    expect(report).toMatchObject({
+      receiverObjective: 7,
+      targetBaseSha: advanced,
+      candidateObjectives: [],
+      outcome: "not-proven",
+      rejections: [{ stage: "no-objective-hints" }],
+      omittedRejections: 0,
+    });
+    expect(report).not.toHaveProperty("receiverRunId");
+    expect(f.events().some((event) => event.event === "FactoryRunStarted")).toBe(false);
+    expect(f.compile).not.toHaveBeenCalled();
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.activity).toEqual([]);
+  });
+
   it("rejects malformed pre-existing Work Items before starting a run", async () => {
     const f = await fixture(true);
     f.snapshot.workItems = [

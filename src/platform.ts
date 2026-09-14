@@ -410,16 +410,45 @@ interface GraphQlErrorLike {
   message?: string;
 }
 
-const DEFAULT_BACKOFF_MS = 60_000;
+const DEFAULT_RATE_LIMIT_BACKOFF_MS = 60_000;
+// A short engineering default for transient server failures, not a quota reset.
+const DEFAULT_SERVER_ERROR_BACKOFF_MS = 5_000;
+
+function headerValue(
+  headers: Record<string, string | number | undefined> | undefined,
+  name: string,
+): string | number | undefined {
+  return (
+    headers?.[name] ??
+    Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === name)?.[1]
+  );
+}
 
 function headerNumber(
   headers: Record<string, string | number | undefined> | undefined,
   name: string,
 ): number | null {
-  const raw = headers?.[name];
-  if (raw === undefined) return null;
+  const raw = headerValue(headers, name);
+  if (raw === undefined || String(raw).trim() === "") return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
+}
+
+/** Retry-After may be delay-seconds or an HTTP date. Expired valid dates need no wait. */
+function retryAfterMs(
+  headers: Record<string, string | number | undefined> | undefined,
+): number | null {
+  const raw = headerValue(headers, "retry-after");
+  if (raw === undefined) return null;
+  const value = String(raw).trim();
+  if (/^\d+(?:\.\d+)?$/.test(value)) {
+    const ms = Number(value) * 1_000;
+    return Number.isFinite(ms) ? ms : null;
+  }
+  // Do not let Date.parse reinterpret malformed numeric delays as calendar dates.
+  if (!/[a-z]/i.test(value)) return null;
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : null;
 }
 
 /**
@@ -462,7 +491,10 @@ export function classifyRefusal(error: unknown): Refusal {
   }
 
   if (typeof status === "number" && status >= 500 && status < 600) {
-    return { kind: "server_error", retryAfterMs: DEFAULT_BACKOFF_MS };
+    return {
+      kind: "server_error",
+      retryAfterMs: retryAfterMs(headers) ?? DEFAULT_SERVER_ERROR_BACKOFF_MS,
+    };
   }
 
   const looksLikeRateLimit =
@@ -471,22 +503,19 @@ export function classifyRefusal(error: unknown): Refusal {
     message.includes("abuse detection");
 
   if (graphQlRateLimited || status === 429 || (status === 403 && looksLikeRateLimit)) {
-    const retryAfter = headerNumber(headers, "retry-after");
-    if (retryAfter !== null && retryAfter >= 0) {
-      return { kind: "rate_limit", retryAfterMs: retryAfter * 1000 };
-    }
+    const retryAfter = retryAfterMs(headers);
 
     // `x-ratelimit-reset` is only meaningful when the quota is actually spent.
     // Plane 3 reports a full budget while refusing, so a reset time in that
     // case describes a window we are not in — fall back to fixed backoff.
     const remaining = headerNumber(headers, "x-ratelimit-remaining");
     const reset = headerNumber(headers, "x-ratelimit-reset");
-    if ((remaining === 0 || graphQlRateLimited) && reset !== null) {
+    if ((remaining === 0 || (graphQlRateLimited && retryAfter === null)) && reset !== null) {
       const ms = reset * 1000 - Date.now();
-      if (ms > 0) return { kind: "rate_limit", retryAfterMs: ms };
+      if (ms > 0) return { kind: "rate_limit", retryAfterMs: Math.max(ms, retryAfter ?? 0) };
     }
 
-    return { kind: "rate_limit", retryAfterMs: DEFAULT_BACKOFF_MS };
+    return { kind: "rate_limit", retryAfterMs: retryAfter ?? DEFAULT_RATE_LIMIT_BACKOFF_MS };
   }
 
   // A 403 without rate-limit wording is a genuine permission problem, and
@@ -543,7 +572,7 @@ export interface CircuitBreakerOptions {
 
 const DEFAULT_CIRCUIT_OPTS: Required<CircuitBreakerOptions> = {
   openAfterConsecutiveRefusals: 3,
-  baseCooldownMs: 5 * 60_000,
+  baseCooldownMs: 60_000,
   maxCooldownMs: 10 * 60_000,
   maxOpens: 5,
 };
@@ -590,6 +619,8 @@ export class CircuitBreaker {
   /** The only trustworthy evidence plane 3 has cleared is a successful request. */
   recordSuccess(): void {
     this.#consecutiveRefusals = 0;
+    this.#opens = 0;
+    // An in-flight peer success must not cancel a newer refusal deadline.
   }
 
   /** Trips the circuit once enough consecutive refusals accumulate. */
@@ -606,7 +637,10 @@ export class CircuitBreaker {
     this.#consecutiveRefusals = 0;
     // Exponentially increasing cooldown per the same GitHub guidance, capped
     // so a stuck breaker does not stall the loop indefinitely on its own.
-    const cooldown = Math.min(this.#opts.baseCooldownMs * this.#opens, this.#opts.maxCooldownMs);
+    const cooldown = Math.min(
+      this.#opts.baseCooldownMs * 2 ** (this.#opens - 1),
+      this.#opts.maxCooldownMs,
+    );
     this.#openUntil = Math.max(this.#openUntil, now.getTime() + cooldown);
   }
 }

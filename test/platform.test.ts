@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   CircuitBreaker,
@@ -132,6 +132,96 @@ describe("classifyRefusal", () => {
   it("classifies 502 and 503 as server errors", () => {
     expect(classifyRefusal(err(502)).kind).toBe("server_error");
     expect(classifyRefusal(err(503)).kind).toBe("server_error");
+  });
+
+  it.each([500, 502, 503, 504])("uses a five-second fallback for isolated HTTP %s", (status) => {
+    expect(classifyRefusal(err(status))).toEqual({ kind: "server_error", retryAfterMs: 5_000 });
+  });
+
+  it.each([403, 429])("retains the one-minute no-header rate-limit fallback for %s", (status) => {
+    expect(classifyRefusal(err(status, "secondary rate limit"))).toEqual({
+      kind: "rate_limit",
+      retryAfterMs: 60_000,
+    });
+  });
+
+  it.each([503, 429])(
+    "honors seconds and HTTP dates for %s, without capping long server waits",
+    (status) => {
+      const now = Date.parse("2026-09-14T00:00:00Z");
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+      try {
+        const kind = status === 503 ? "server_error" : "rate_limit";
+        for (const value of ["172800", new Date(now + 172_800_000).toUTCString()]) {
+          expect(classifyRefusal(err(status, "", { "Retry-After": value }))).toEqual({
+            kind,
+            retryAfterMs: 172_800_000,
+          });
+        }
+        expect(
+          classifyRefusal(err(status, "", { "retry-after": new Date(now - 1_000).toUTCString() })),
+        ).toEqual({ kind, retryAfterMs: 0 });
+        expect(classifyRefusal(err(status, "", { "retry-after": "0" }))).toEqual({
+          kind,
+          retryAfterMs: 0,
+        });
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+
+  it.each([503, 429])("ignores malformed Retry-After values for %s", (status) => {
+    for (const value of ["", "-1", "not a date", "Infinity", "1e999", "9".repeat(400)]) {
+      expect(classifyRefusal(err(status, "", { "retry-after": value }))).toEqual({
+        kind: status === 503 ? "server_error" : "rate_limit",
+        retryAfterMs: status === 503 ? 5_000 : 60_000,
+      });
+    }
+  });
+
+  it("honors GraphQL secondary Retry-After while positive primary quota remains", () => {
+    const now = Date.parse("2026-09-14T00:00:00Z");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      for (const retryAfter of ["120", new Date(now + 120_000).toUTCString()]) {
+        expect(
+          classifyRefusal({
+            errors: [{ type: "RATE_LIMITED" }],
+            headers: {
+              "retry-after": retryAfter,
+              "x-ratelimit-remaining": "5000",
+              "x-ratelimit-reset": String(now / 1_000 + 3600),
+            },
+          }),
+        ).toEqual({ kind: "rate_limit", retryAfterMs: 120_000 });
+      }
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("honors the later primary reset or Retry-After when both are supplied", () => {
+    const now = Date.parse("2026-09-14T00:00:00Z");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      for (const [retryAfter, expected] of [
+        ["5", 120_000],
+        ["180", 180_000],
+      ] as const) {
+        expect(
+          classifyRefusal(
+            err(403, "rate limit", {
+              "retry-after": retryAfter,
+              "x-ratelimit-remaining": "0",
+              "x-ratelimit-reset": String(now / 1_000 + 120),
+            }),
+          ),
+        ).toEqual({ kind: "rate_limit", retryAfterMs: expected });
+      }
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("does NOT treat a permissions 403 as a refusal", () => {
@@ -569,6 +659,38 @@ describe("CircuitBreaker", () => {
     const afterFirst = new Date(t0.getTime() + 60_001);
     cb.recordRefusal(refusal, afterFirst); // opens #2: min(120_000, 90_000)
     expect(cb.waitMs(afterFirst)).toBe(90_000);
+  });
+
+  it("grows default threshold trips exponentially through one, two, four, eight and ten minutes", () => {
+    const cb = new CircuitBreaker();
+    let now = t0;
+    for (const minutes of [1, 2, 4, 8, 10]) {
+      for (let refusalIndex = 0; refusalIndex < 3; refusalIndex++) {
+        cb.recordRefusal({ kind: "server_error", retryAfterMs: 5_000 }, now);
+        if (refusalIndex < 2) now = new Date(now.getTime() + cb.waitMs(now));
+      }
+      expect(cb.waitMs(now)).toBe(minutes * 60_000);
+      expect(cb.exhausted()).toBe(minutes === 10);
+      now = new Date(now.getTime() + cb.waitMs(now));
+    }
+  });
+
+  it("resets escalation after successful traffic without shortening a newer refusal deadline", () => {
+    const cb = new CircuitBreaker({ openAfterConsecutiveRefusals: 1, maxOpens: 2 });
+    cb.recordRefusal(refusal, t0);
+    let now = new Date(t0.getTime() + 60_000);
+    cb.recordRefusal(refusal, now);
+    expect(cb.exhausted()).toBe(true);
+    now = new Date(now.getTime() + cb.waitMs(now));
+    cb.recordSuccess();
+    expect(cb.exhausted()).toBe(false);
+    cb.recordRefusal({ kind: "server_error", retryAfterMs: 900_000 }, now);
+    cb.recordSuccess(); // A response to a previously in-flight peer request.
+    expect(cb.waitMs(now)).toBe(900_000);
+    expect(cb.isOpen(new Date(now.getTime() + 899_999))).toBe(true);
+    now = new Date(now.getTime() + 900_000);
+    cb.recordRefusal(refusal, now);
+    expect(cb.waitMs(now)).toBe(60_000);
   });
 
   it("reports exhausted once maxOpens trips have occurred", () => {

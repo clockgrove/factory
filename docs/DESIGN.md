@@ -239,7 +239,15 @@ plus loop/transport latency (quota admission or platform failures can delay it).
 already traversed page remains in the overlap for the following poll. These observations never
 replace fresh mutation fences. Isolated external comment deletion is outside delta-feed support.
 
-Repository discovery streams GitHub-filtered metadata rather than reconstructing lifetime
+Agent-facing candidate discovery is a separate bounded, read-only operation for natural-language
+requests that identify a repository but omit an Objective number. It scans at most five 100-issue
+pages of open issues and returns candidates carrying `factory:objective` or the canonical
+`Objective:` title prefix. The result states whether the scan was complete; an incomplete result
+cannot establish a unique target. Candidate discovery reads no issue bodies, creates no labels or
+issues, invokes no model, and grants no activation authority. After Director resolves one exact
+Objective, the ordinary status, doctor, activation, compilation, and recovery boundaries apply.
+
+Repository controller discovery streams GitHub-filtered metadata rather than reconstructing lifetime
 Objective history. Direct GraphQL `repository.issues` queries select `factory:objective`, issue
 state, immutable creation order, and only number/state/update time/comment count. They exclude PRs
 by type. Open Objectives are scanned regardless of age on cold startup and at a fifteen-minute

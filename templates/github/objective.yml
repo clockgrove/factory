@@ -1,13 +1,13 @@
 name: Factory Objective
 description: Describe a product outcome for Factory to plan into validated Work Items
-title: "objective: "
+title: "Objective: "
 body:
   - type: markdown
     attributes:
       value: |
         Describe the outcome in your own words. A teammate should understand what success looks like without first reading every linked document.
 
-        Factory will design the smallest complete Work Item graph after you explicitly ask it to plan or run this Objective. Creating this issue does not activate Factory, authorize execution or spending, approve a deployment, or grant permission to file other issues. Factory adds the `factory:objective` discovery label only after an authenticated activation or recovery request.
+        Keep the generated `Objective:` title prefix so Factory can discover this issue when a teammate asks it to work in the repository without knowing the issue number. Factory will design the smallest complete Work Item graph after that teammate asks it to plan or run the work. The title is only a retrieval hint: creating this issue does not activate Factory, authorize execution or spending, approve a deployment, or grant permission to file other issues. Factory adds the `factory:objective` discovery label only after an authenticated activation or recovery request.
   - type: textarea
     id: outcome
     attributes:

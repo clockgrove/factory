@@ -223,6 +223,33 @@ export interface GitHubOptions {
   onResultReceiptObservation?: (observation: ResultReceiptObservation) => void;
 }
 
+export const OBJECTIVE_CANDIDATE_SCAN_LIMITS = Object.freeze({
+  pages: 5,
+  issuesPerPage: 100,
+});
+
+export interface ObjectiveCandidate {
+  number: number;
+  title: string;
+  matchedBy: {
+    objectiveLabel: boolean;
+    canonicalTitle: boolean;
+  };
+}
+
+export interface ObjectiveCandidateDiscovery {
+  repository: string;
+  activationAuthorized: false;
+  candidates: ObjectiveCandidate[];
+  scan: {
+    complete: boolean;
+    scannedOpenIssues: number;
+    totalOpenIssues: number;
+    pageLimit: number;
+    issuesPerPage: number;
+  };
+}
+
 export const RECOVERY_READER_LIMITS = Object.freeze({
   hydrationRequests: 128,
   hydratedRecords: 10_000,
@@ -318,6 +345,21 @@ query ObjectiveCardinality($owner: String!, $repo: String!, $number: Int!) {
     owner { __typename }
     issue(number: $number) {
       subIssues(first: 1) { totalCount }
+    }
+  }
+}`;
+
+const OBJECTIVE_CANDIDATES_QUERY = `
+query ObjectiveCandidates($owner: String!, $repo: String!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    issues(first: 100, after: $after, states: [OPEN], orderBy: { field: CREATED_AT, direction: DESC }) {
+      totalCount
+      nodes {
+        number
+        title
+        labels(first: 100) { totalCount nodes { name } }
+      }
+      pageInfo { endCursor hasNextPage }
     }
   }
 }`;
@@ -577,6 +619,20 @@ interface GqlSuggestedActor {
   __typename: string;
   login: string;
   id?: string;
+}
+
+interface GqlObjectiveCandidateConnection {
+  totalCount: number;
+  nodes: Array<{
+    number: number;
+    title: string;
+    labels: { totalCount: number; nodes: Array<{ name: string } | null> };
+  } | null>;
+  pageInfo: { endCursor: string | null; hasNextPage: boolean };
+}
+
+interface GqlObjectiveCandidates {
+  repository: { issues: GqlObjectiveCandidateConnection } | null;
 }
 
 interface GqlResponse {
@@ -1468,6 +1524,97 @@ export class GitHubReader {
     }
     this.#authenticatedUserId = response.data.id;
     return this.#authenticatedUserId;
+  }
+
+  /**
+   * Find open Objective candidates when a natural-language request identifies
+   * the repository but not an issue number. This is advisory discovery only:
+   * the exact Objective read and normal activation boundary still decide what
+   * can run.
+   */
+  async discoverObjectiveCandidates(): Promise<ObjectiveCandidateDiscovery> {
+    const candidates = new Map<number, ObjectiveCandidate>();
+    let after: string | null = null;
+    let complete = false;
+    let labelsComplete = true;
+    let scannedOpenIssues = 0;
+    let totalOpenIssues = 0;
+
+    for (let page = 1; page <= OBJECTIVE_CANDIDATE_SCAN_LIMITS.pages; page++) {
+      const data: GqlObjectiveCandidates = await this.#octokit.graphql<GqlObjectiveCandidates>(
+        OBJECTIVE_CANDIDATES_QUERY,
+        {
+          owner: this.#owner,
+          repo: this.#repo,
+          after,
+        },
+      );
+      const issues: GqlObjectiveCandidateConnection | undefined = data.repository?.issues;
+      if (
+        !issues ||
+        !Number.isSafeInteger(issues.totalCount) ||
+        issues.totalCount < 0 ||
+        !Array.isArray(issues.nodes) ||
+        !issues.pageInfo ||
+        typeof issues.pageInfo.hasNextPage !== "boolean" ||
+        (issues.pageInfo.endCursor !== null && typeof issues.pageInfo.endCursor !== "string")
+      ) {
+        throw new Error("GitHub returned an incomplete Objective candidate page");
+      }
+      totalOpenIssues = Math.max(totalOpenIssues, issues.totalCount);
+      scannedOpenIssues += issues.nodes.length;
+
+      for (const issue of issues.nodes) {
+        if (
+          !issue ||
+          !Number.isSafeInteger(issue.number) ||
+          issue.number <= 0 ||
+          typeof issue.title !== "string" ||
+          !issue.title.trim() ||
+          !issue.labels ||
+          !Number.isSafeInteger(issue.labels.totalCount) ||
+          issue.labels.totalCount < 0 ||
+          !Array.isArray(issue.labels.nodes) ||
+          issue.labels.nodes.some(
+            (label) => !label || typeof label.name !== "string" || !label.name,
+          )
+        ) {
+          throw new Error("GitHub returned an invalid Objective candidate");
+        }
+        const labels = issue.labels.nodes.map((label) => label!.name);
+        if (labels.length !== issue.labels.totalCount) labelsComplete = false;
+        const objectiveLabel = labels.some((label) => label.toLowerCase() === "factory:objective");
+        const canonicalTitle = /^objective\s*:/i.test(issue.title.trimStart());
+        if (!objectiveLabel && !canonicalTitle) continue;
+        candidates.set(issue.number, {
+          number: issue.number,
+          title: issue.title,
+          matchedBy: { objectiveLabel, canonicalTitle },
+        });
+      }
+
+      if (!issues.pageInfo.hasNextPage) {
+        complete = labelsComplete && scannedOpenIssues >= totalOpenIssues;
+        break;
+      }
+      if (!issues.pageInfo.endCursor) {
+        throw new Error("Objective candidate pagination omitted its next cursor");
+      }
+      after = issues.pageInfo.endCursor;
+    }
+
+    return {
+      repository: `${this.#owner}/${this.#repo}`,
+      activationAuthorized: false,
+      candidates: [...candidates.values()],
+      scan: {
+        complete,
+        scannedOpenIssues,
+        totalOpenIssues,
+        pageLimit: OBJECTIVE_CANDIDATE_SCAN_LIMITS.pages,
+        issuesPerPage: OBJECTIVE_CANDIDATE_SCAN_LIMITS.issuesPerPage,
+      },
+    };
   }
 
   /** Read-only organization issue-field discovery for immutable run policy. */

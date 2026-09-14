@@ -9,7 +9,16 @@
   "homepage": "https://github.com/clockgrove/factory",
   "repository": "https://github.com/clockgrove/factory",
   "license": "MIT",
-  "keywords": ["ai-agents", "codex", "github", "mcp", "agent-orchestration", "local-first", "developer-tools", "software-factory"],
+  "keywords": [
+    "ai-agents",
+    "codex",
+    "github",
+    "mcp",
+    "agent-orchestration",
+    "local-first",
+    "developer-tools",
+    "software-factory"
+  ],
   "skills": "./skills/",
   "mcpServers": {
     "factory": {
@@ -34,9 +43,9 @@
       "Track execution usage and spending policy"
     ],
     "defaultPrompt": [
-      "Run Factory for OWNER/REPO#OBJECTIVE using this checkout.",
-      "Show Factory status and explain what is blocking the Objective.",
-      "Plan an Objective into cost-aware, dependency-safe Work Items."
+      "Use Factory to continue the work in this repository.",
+      "Inspect this repository's Factory Objectives and prerequisites without starting work.",
+      "Plan this repository's Objective into dependency-safe Work Items without starting execution."
     ],
     "websiteURL": "https://github.com/clockgrove/factory",
     "composerIcon": "./assets/logos/clockgrove-mark.png",

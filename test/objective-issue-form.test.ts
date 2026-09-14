@@ -13,6 +13,7 @@ describe("human Objective issue form", () => {
     const form = document.toJS() as {
       name?: string;
       description?: string;
+      title?: string;
       labels?: string[];
       body?: Array<{
         type?: string;
@@ -24,6 +25,7 @@ describe("human Objective issue form", () => {
 
     expect(form.name).toBe("Factory Objective");
     expect(form.description).toMatch(/product outcome/);
+    expect(form.title).toBe("Objective: ");
     expect(form.labels).toBeUndefined();
     expect(Array.isArray(form.body)).toBe(true);
 
@@ -31,6 +33,7 @@ describe("human Objective issue form", () => {
     expect(introduction).toContain(
       "Factory adds the `factory:objective` discovery label only after an authenticated activation or recovery request.",
     );
+    expect(introduction).toContain("Factory can discover this issue");
 
     const fields = new Map(
       form.body?.filter((entry) => entry.id).map((entry) => [entry.id, entry]) ?? [],

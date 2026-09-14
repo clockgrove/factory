@@ -21,6 +21,12 @@ and artifacts, and record the commit SHA when installing from source.
 
 ### Fixed
 
+- Let Director resolve natural-language Factory requests through bounded, read-only discovery of
+  labelled or canonically titled open Objectives. Users no longer need an Objective number or MCP
+  command name when one complete repository scan identifies the existing work unambiguously.
+  Document direct installation of Factory's public skills with `npx skills add clockgrove/factory`.
+  ([#387](https://github.com/clockgrove/factory/issues/387))
+
 - Use a portable bare shell command in MCP manifests so Agent Plugins loaders accept
   the bundled server instead of exposing only Factory skills. Preserve the startup launcher
   and its missing-Node diagnostic.

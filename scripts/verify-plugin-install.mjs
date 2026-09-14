@@ -61,6 +61,7 @@ function cleanEnvironment() {
     ...result,
     HOME: temporaryRoot,
     CODEX_HOME: codexHome,
+    CODEX_SQLITE_HOME: join(temporaryRoot, "codex-sqlite"),
     GH_CONFIG_DIR: join(temporaryRoot, "gh-config"),
     XDG_CACHE_HOME: join(temporaryRoot, "xdg-cache"),
     XDG_CONFIG_HOME: join(temporaryRoot, "xdg-config"),
@@ -310,6 +311,7 @@ async function main() {
   if (toolNames.some((name) => !codexMcp.tools[name]))
     throw new Error("Codex plugin discovery omitted an installed Factory MCP tool");
   for (const required of [
+    "factory_discover_objectives",
     "factory_run",
     "factory_status",
     "factory_explain",
@@ -326,7 +328,7 @@ async function main() {
   if (mcpResult.serverInfo?.version !== manifest.version) {
     throw new Error("installed MCP server version differs from its manifest");
   }
-  for (const name of ["factory_doctor", "factory_status"]) {
+  for (const name of ["factory_discover_objectives", "factory_doctor", "factory_status"]) {
     const definition = (mcpResult.tools ?? []).find((tool) => tool.name === name);
     if (
       definition?.annotations?.readOnlyHint !== true ||

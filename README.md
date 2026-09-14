@@ -27,7 +27,20 @@ Start in **Linux, Windows WSL2, or a Linux guest on macOS** with Node.js 20+, Gi
 Codex CLI. The installation procedure is verified with Codex CLI 0.153.0; newer clients must expose
 the same plugin commands. Keep your target checkout and credentials inside the Linux environment.
 
-1. Install the plugin:
+For the portable prompt layer, install Factory's three public skills directly from this repository:
+
+```bash
+npx skills add clockgrove/factory
+```
+
+The Skills CLI finds `director`, `factory-setup`, and `objective-compilation` and lets you select the
+agents and project or global scope. This is an ordinary third-party skill installation. It does not
+register the current repository with Factory, install a controller, or start work. Skills alone do
+not supply Factory's MCP execution tools.
+
+For Codex execution, install the full plugin instead of keeping a second copy of the same skills:
+
+1. Install the plugin, which bundles those skills and Factory's MCP server:
 
    ```bash
    codex plugin marketplace add clockgrove/factory --ref main
@@ -45,16 +58,20 @@ the same plugin commands. Keep your target checkout and credentials inside the L
 3. **Fully restart Codex** to load Factory's skills and bundled MCP server. Open your target
    repository's checkout and ask:
 
-   > Use Factory director to inspect OWNER/REPO#OBJECTIVE with checkout /absolute/linux/checkout.
-   > Check prerequisites before starting anything.
+   > Use Factory to inspect this repository for existing Objectives and prerequisites. Do not
+   > start work.
 
-Replace the placeholders with an existing Objective issue and its clean checkout. Inspection checks
-repository identity, access, branch rules, local runners, validation tools, and resource headroom.
-Success means the plugin loads, an authenticated local backend is available, and the exact Objective
-and checkout are accessible. **Inspection does not start workers.** Review the reported gates and
-run policy, then explicitly authorize local-only execution.
+Factory performs bounded read-only discovery when the repository is known but the Objective number
+is not. A complete result with one candidate selects it; ambiguous or incomplete results ask you to
+choose. Inspection checks repository identity, access, branch rules, local runners, validation tools,
+and resource headroom. Success means the plugin loads, an authenticated local backend is available,
+and the selected Objective and checkout are accessible. **Inspection does not start workers.** When
+ready, ask in ordinary language—for example, “Use Factory to build this repository; reuse its
+existing Objective.” Factory maps that execution request to its internal activation and compilation
+operations.
 
-The plugin bundles Factory's runtime; npm/npx and a sandbox account are not needed for this path.
+The full plugin bundles Factory's runtime; a separate Skills CLI install and a sandbox account are
+not needed for this path.
 Local workers use the Codex SDK by default, with Codex CLI fallback. Local-only work still consumes
 your model account's quota. Follow the [local quick start](docs/setup/local.md) for permissions,
 activation, troubleshooting, and the source-checkout CLI path.
@@ -89,9 +106,10 @@ Use the existing Node/npm toolchain. Do not add dependencies, services,
 secrets, network access, generated files, deployment, or release work.
 ```
 
-Use its issue number in the inspection prompt above. After authorization, Factory compiles a Work
-Item graph, runs workers, independently validates their artifacts, and delivers tested changes
-through pull requests. The run ends with a terminal status and recorded usage, or a specific
+Keep the `Objective:` title prefix used by the canonical form. You can use the inspection prompt
+above without knowing the issue number. After an execution request, Factory compiles a missing Work
+Item graph automatically, runs workers, independently validates their artifacts, and delivers tested
+changes through pull requests. The run ends with a terminal status and recorded usage, or a specific
 escalation explaining what needs your attention. See the
 [first-Objective walkthrough](docs/setup/local.md#a-small-first-objective) for expected evidence.
 

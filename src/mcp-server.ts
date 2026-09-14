@@ -563,6 +563,23 @@ server.registerTool(
 );
 
 server.registerTool(
+  "factory_discover_objectives",
+  {
+    title: "Discover Factory Objectives",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    description:
+      "Find bounded open Objective candidates when the repository is known but the user did not " +
+      "supply an issue number. Matches the factory:objective discovery label or the canonical " +
+      "Objective: title prefix and reports whether the scan was complete. Read-only: does not " +
+      "activate, compile, label, create issues, start a controller, or run a model.",
+    inputSchema: RepoShape,
+  },
+  tool(async ({ owner, repo }: { owner: string; repo: string }) => {
+    return readerFor(owner, repo).discoverObjectiveCandidates();
+  }),
+);
+
+server.registerTool(
   "evaluate_mechanical",
   {
     title: "Evaluate mechanical checks",

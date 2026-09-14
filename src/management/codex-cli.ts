@@ -804,6 +804,7 @@ export interface CodexManagementOptions {
 }
 
 const LEGACY_MANAGEMENT_INVOCATION_TIMEOUT_MS = 30 * 60_000;
+const MANAGEMENT_PROMPT_MAX_BYTES = 1024 * 1024;
 
 function compilationInvocationTimeout(context: CompilationContext): number {
   const policyLimit = context.runPolicy.workItemTimeoutMinutes * 60_000;
@@ -1495,6 +1496,8 @@ export class CodexCliManagementBackend implements ManagementBackend {
     invocationTimeoutMs?: number,
     beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<{ value: T; usage: ManagementUsage }> {
+    assertWithinBytes(prompt, MANAGEMENT_PROMPT_MAX_BYTES, "management prompt");
+    assertNoSecretMaterial(prompt, "management prompt");
     if (
       invocationTimeoutMs !== undefined &&
       (!Number.isFinite(invocationTimeoutMs) || invocationTimeoutMs <= 0)
@@ -1560,7 +1563,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       if (modelSelection?.reasoning) {
         args.push("-c", `model_reasoning_effort=${JSON.stringify(modelSelection.reasoning)}`);
       }
-      args.push(prompt);
+      args.push("-");
       const target = await resolveCodexCommand(this.#options.command);
       const environment = sanitizedWorkerEnvironment(
         { ...process.env, FACTORY_SUPERVISED: "1" },
@@ -1580,6 +1583,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
         args: invocationArgs,
         cwd,
         env: invocationEnvironment,
+        stdin: { text: prompt, maxBytes: MANAGEMENT_PROMPT_MAX_BYTES },
         timeoutMs: effectiveInvocationTimeout(admittedTimeoutMs, invocationTimeoutMs),
         maxOutputBytes: 2 * 1024 * 1024,
       });

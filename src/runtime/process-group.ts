@@ -114,6 +114,11 @@ export interface StartProcessOptions {
   args?: string[];
   cwd: string;
   env?: NodeJS.ProcessEnv;
+  /** Bounded text delivered through the child's stdin, never argv or the environment. */
+  stdin?: {
+    text: string;
+    maxBytes: number;
+  };
   timeoutMs: number;
   maxOutputBytes?: number;
   cancellationGraceMs?: number;
@@ -338,6 +343,13 @@ async function terminateGroup(
 
 export function startContainedProcess(options: StartProcessOptions): ContainedProcess {
   assertContainedProcessTimeout(options.timeoutMs);
+  if (options.stdin) {
+    if (!Number.isSafeInteger(options.stdin.maxBytes) || options.stdin.maxBytes < 0)
+      throw new Error("contained process stdin bound must be a non-negative safe integer");
+    if (Buffer.byteLength(options.stdin.text, "utf8") > options.stdin.maxBytes)
+      throw new Error("contained process stdin exceeds byte bound");
+    assertNoSecretMaterial(options.stdin.text, "stdin input");
+  }
   installExitHook();
   const startedAt = Date.now();
   const command = process.platform === "win32" ? options.command : "/bin/sh";
@@ -356,7 +368,7 @@ export function startContainedProcess(options: StartProcessOptions): ContainedPr
     cwd: options.cwd,
     env: options.env,
     detached: process.platform !== "win32",
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: [options.stdin ? "pipe" : "ignore", "pipe", "pipe"],
   });
   if (!child.pid) throw new Error(`failed to launch ${options.command}`);
   const pid = child.pid;
@@ -367,6 +379,7 @@ export function startContainedProcess(options: StartProcessOptions): ContainedPr
   let stderr = "";
   let timedOut = false;
   let outputViolation: string | null = null;
+  let inputViolation: string | null = null;
   const scanTails = { stdout: "", stderr: "" };
   let groupTermination: Promise<void> | null = null;
   const terminateOnce = (signal: NodeJS.Signals): Promise<void> => {
@@ -405,6 +418,36 @@ export function startContainedProcess(options: StartProcessOptions): ContainedPr
     if (scan("stderr", chunk)) stderr = boundedAppend(stderr, chunk, maxOutput);
   });
 
+  let writeInput = () => {};
+  const inputClosed = new Promise<void>((resolveClosed) => {
+    if (!options.stdin) {
+      resolveClosed();
+      return;
+    }
+    if (!child.stdin) {
+      inputViolation = "stdin transport unavailable";
+      resolveClosed();
+      return;
+    }
+    let settled = false;
+    const settleInput = () => {
+      if (settled) return;
+      settled = true;
+      resolveClosed();
+    };
+    child.stdin.once("finish", settleInput);
+    child.stdin.once("error", (error: NodeJS.ErrnoException) => {
+      inputViolation = `stdin transport failed${error.code ? `: ${error.code}` : ""}`;
+      settleInput();
+    });
+    child.stdin.once("close", () => {
+      if (!child.stdin?.writableFinished && !inputViolation)
+        inputViolation = "stdin transport closed before completion";
+      settleInput();
+    });
+    writeInput = () => child.stdin!.end(options.stdin!.text, "utf8");
+  });
+
   let settle: ((result: ProcessResult) => void) | null = null;
   const completed = new Promise<ProcessResult>((resolve, reject) => {
     settle = resolve;
@@ -422,14 +465,15 @@ export function startContainedProcess(options: StartProcessOptions): ContainedPr
 
   child.once("exit", (exitCode, signal) => {
     cancelTimeout();
-    void Promise.all([terminateOnce("SIGTERM"), streamsClosed])
+    void Promise.all([terminateOnce("SIGTERM"), streamsClosed, inputClosed])
       .then(() => {
         activeGroups.delete(pid);
+        const transportViolation = outputViolation ?? inputViolation;
         settle?.({
-          exitCode: outputViolation ? 1 : exitCode,
+          exitCode: transportViolation ? 1 : exitCode,
           signal,
-          stdout: outputViolation ? "" : stdout,
-          stderr: outputViolation ?? stderr,
+          stdout: transportViolation ? "" : stdout,
+          stderr: transportViolation ?? stderr,
           durationMs: Date.now() - startedAt,
           timedOut,
         });
@@ -451,6 +495,8 @@ export function startContainedProcess(options: StartProcessOptions): ContainedPr
         });
       });
   });
+  // Install every completion/error handler before a fast child can react to stdin.
+  writeInput();
 
   return {
     pid,

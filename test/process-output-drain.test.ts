@@ -43,3 +43,35 @@ it("waits for buffered output after exit before reporting a successful command",
     stderr: "diagnostic\n",
   });
 });
+
+it("fails when a child closes stdin before the bounded input is flushed", async () => {
+  const stdin = Object.assign(new EventEmitter(), {
+    writableFinished: false,
+    end: vi.fn(() => stdin.emit("close")),
+  });
+  const child = Object.assign(new EventEmitter(), {
+    pid: 2_147_483_001,
+    stdin,
+    stdout: new EventEmitter(),
+    stderr: new EventEmitter(),
+  });
+  mocks.spawn.mockReturnValue(child);
+  vi.spyOn(process, "kill").mockImplementation(() => {
+    throw Object.assign(new Error("process group already gone"), { code: "ESRCH" });
+  });
+  const processHandle = startContainedProcess({
+    command: "codex",
+    args: ["exec", "-"],
+    cwd: "/tmp",
+    stdin: { text: "complete bounded prompt", maxBytes: 1024 },
+    timeoutMs: 1_000,
+  });
+  child.emit("exit", 0, null);
+  child.emit("close", 0, null);
+  await expect(processHandle.completed).resolves.toMatchObject({
+    exitCode: 1,
+    stdout: "",
+    stderr: "stdin transport closed before completion",
+  });
+  expect(stdin.end).toHaveBeenCalledExactlyOnceWith("complete bounded prompt", "utf8");
+});

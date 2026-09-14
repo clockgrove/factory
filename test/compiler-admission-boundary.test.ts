@@ -453,6 +453,11 @@ describe("compiler dispatch admission", () => {
   });
   it("reserves only at actual dispatch and applies the remaining deadline to the process timeout", async () => {
     const f = await fixture();
+    f.context.objective.body = `Implement core behavior\n${"bounded context ".repeat(12_000)}`;
+    f.context.repositoryEvidence = compilerObligationEvidence(f.context);
+    f.inventory.objectiveDigest = compilerEvalDigest(f.context.objective);
+    f.inventory.evidence = f.context.repositoryEvidence;
+    f.binding.inputDigest = f.inventory.objectiveDigest;
     let clock = Date.now();
     const start = clock;
     vi.spyOn(Date, "now").mockImplementation(() => clock);
@@ -470,24 +475,35 @@ describe("compiler dispatch admission", () => {
       expect(mocks.environment).toHaveBeenCalled();
       expect(f.records.at(-1)?.kind).toBe("invocation");
     });
-    mocks.run.mockImplementation(async (args: { timeoutMs: number }) => {
-      expect(admit).toHaveBeenCalled();
-      expect(args.timeoutMs).toBe(8000);
-      return {
-        exitCode: 0,
-        stderr: "",
-        stdout: [
-          JSON.stringify({
-            type: "item.completed",
-            item: { type: "agent_message", text: JSON.stringify(f.inventory) },
-          }),
-          JSON.stringify({
-            type: "turn.completed",
-            usage: { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens },
-          }),
-        ].join("\n"),
-      };
-    });
+    mocks.run.mockImplementation(
+      async (args: {
+        args: string[];
+        stdin: { text: string; maxBytes: number };
+        timeoutMs: number;
+      }) => {
+        expect(admit).toHaveBeenCalled();
+        expect(args.timeoutMs).toBe(8000);
+        expect(args.args.at(-1)).toBe("-");
+        expect(args.args).not.toContain(args.stdin.text);
+        expect(args.stdin.maxBytes).toBe(1024 * 1024);
+        expect(args.stdin.text).toContain("bounded context");
+        expect(Buffer.byteLength(args.stdin.text, "utf8")).toBeGreaterThan(128 * 1024);
+        return {
+          exitCode: 0,
+          stderr: "",
+          stdout: [
+            JSON.stringify({
+              type: "item.completed",
+              item: { type: "agent_message", text: JSON.stringify(f.inventory) },
+            }),
+            JSON.stringify({
+              type: "turn.completed",
+              usage: { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens },
+            }),
+          ].join("\n"),
+        };
+      },
+    );
     // Stop after the first known provider call: cancellation at the next phase must not launch again.
     const args = {
       ...f,

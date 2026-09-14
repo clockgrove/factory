@@ -397,11 +397,12 @@ describe("Codex CLI local backend", () => {
       },
     };
     const handle = await backend.launch(context);
-    let observed = await backend.observe(handle);
-    for (let i = 0; i < 20 && observed.state === "running"; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      observed = await backend.observe(handle);
-    }
+    const terminal = backend.waitForTerminal(handle);
+    await terminal;
+    // Completion remains observable when the consumer registers afterward.
+    expect(backend.waitForTerminal(handle)).toBe(terminal);
+    await backend.waitForTerminal(handle);
+    const observed = await backend.observe(handle);
     expect(observed.state).toBe("succeeded");
     const args = await readFile(join(handle.metadata!.codexHome!, "args"), "utf8");
     expect(args).toContain("--model\ngpt-5");
@@ -412,6 +413,33 @@ describe("Codex CLI local backend", () => {
     expect(artifact.patch).toContain("changed");
     await backend.cleanup(handle);
     await cleanupLocalWorktree(worktree);
+  });
+
+  it("wakes on cancelled process completion without inventing usage", async () => {
+    const source = await fixture();
+    await writeFile(source.fakeCodex, "#!/bin/sh\nsleep 60\n");
+    const backend = new CodexCliLocalBackend({
+      command: source.fakeCodex,
+      authFile: source.authFile,
+      createCodexHome: async () => mkdtemp(join(source.repository, "cancel-home-")),
+    });
+    const handle = await backend.launch(attemptContext(source.repository, source.baseSha));
+    try {
+      const notified = vi.fn();
+      const terminal = backend.waitForTerminal(handle).then(notified);
+      await Promise.resolve();
+      expect(notified).not.toHaveBeenCalled();
+      await backend.cancel(handle);
+      await terminal;
+      expect(notified).toHaveBeenCalledOnce();
+      expect(await backend.observe(handle)).toMatchObject({
+        state: "cancelled",
+        usage: { inputTokens: null, outputTokens: null, cachedInputTokens: null },
+      });
+    } finally {
+      await backend.cleanup(handle);
+      await rm(source.repository, { recursive: true, force: true });
+    }
   });
 
   it("keeps a captured provider refusal nonterminal until its durable checkpoint completes", async () => {
@@ -453,15 +481,17 @@ describe("Codex CLI local backend", () => {
     const handle = await backend.launch(context);
     for (let check = 0; check < 20 && checkpointProviderRefusal.mock.calls.length === 0; check += 1)
       await new Promise((resolve) => setTimeout(resolve, 10));
+    const terminalHint = vi.fn();
+    const terminal = backend.waitForTerminal(handle).then(terminalHint);
+    await Promise.resolve();
+    expect(terminalHint).not.toHaveBeenCalled();
     expect(checkpointProviderRefusal).toHaveBeenCalledOnce();
     expect(await backend.observe(handle)).toMatchObject({ state: "running" });
     expect(await backend.observe(handle)).not.toHaveProperty("providerQuotaGate");
     releaseCheckpoint();
-    let observation = await backend.observe(handle);
-    for (let check = 0; check < 20 && observation.state === "running"; check += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      observation = await backend.observe(handle);
-    }
+    await terminal;
+    expect(terminalHint).toHaveBeenCalledOnce();
+    const observation = await backend.observe(handle);
     expect(checkpointProviderRefusal).toHaveBeenCalledWith(
       expect.objectContaining({
         gate: expect.objectContaining({

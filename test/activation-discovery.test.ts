@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import * as localWake from "../src/control/local-wake.js";
 import {
   FactoryApplicationService,
   type ApplicationSnapshot,
@@ -591,4 +592,28 @@ describe("plain issue activation discovery", { timeout: 15_000 }, () => {
       { requestId: f.activation.requestId },
     ]);
   });
+});
+
+it("notifies only after accepted activation and replay discovery repairs succeed", async () => {
+  const wake = vi.spyOn(localWake, "publishLocalWake").mockResolvedValue();
+  try {
+    const f = fixture("label-before");
+    await expect(f.service().activate(f.activation)).rejects.toThrow();
+    expect(wake).not.toHaveBeenCalled();
+    await f.service().activate(f.activation);
+    expect(wake).toHaveBeenCalledExactlyOnceWith(
+      { repository: "fixture/activation" },
+      f.activation.requestId,
+      expect.any(Number),
+    );
+    wake.mockClear();
+    await expect(
+      f.service().activate({ ...f.activation, baseSha: "b".repeat(40) }),
+    ).rejects.toThrow();
+    expect(wake).not.toHaveBeenCalled();
+    await f.service().activate(f.activation);
+    expect(wake).toHaveBeenCalledTimes(1);
+  } finally {
+    wake.mockRestore();
+  }
 });

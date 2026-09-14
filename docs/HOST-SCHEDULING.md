@@ -195,3 +195,19 @@ Discovery telemetry reports pending page work, returned JSON bytes, retained sum
 per-Objective diagnostics separately from platform primary-quota observations. A 304 saves primary
 quota but still uses a transport. Changing labels, dropping a process cache, closing issues, or
 restarting the host never settles a resource or assigns zero to unknown usage.
+
+
+### Local wake-up responsiveness
+
+After GitHub publication and discovery repair succeed, local activation and accepted recovery
+requests wake matching repository discovery. Operational commands also wake active Supervisors,
+including paused runs and independent foreground sessions. The Linux fast path is scoped to the
+same OS user, repository identity and shared `/tmp`/PID namespace; it uses short-lived Unix sockets
+without another service. Hints trigger authenticated reads and do not authorize execution.
+
+Healthy idle consumers normally begin observation promptly rather than waiting for the default
+minute cycle. An active scan, lease acquisition, enforced quota backoff or platform transport can
+still delay phase start. The controller's `Factory controller wake` diagnostics report publication,
+wake, scan and dispatch timing; Objective phase telemetry reports the separate phase boundary.
+Cross-host requests and missed/unsupported notifications continue through the unchanged bounded
+polling fallback. No model call or additional steady idle GitHub polling is needed for local hints.

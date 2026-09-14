@@ -134,7 +134,13 @@ describe("Codex SDK local backend", () => {
       });
       const handle = await backend.launch(context(fixture.repository, fixture.baseSha));
       try {
+        const terminalHint = vi.fn();
+        const terminal = backend.waitForTerminal(handle).then(terminalHint);
+        await Promise.resolve();
+        expect(terminalHint).not.toHaveBeenCalled();
         await backend.cancel(handle);
+        await terminal;
+        expect(terminalHint).toHaveBeenCalledOnce();
         expect(await backend.observe(handle)).toMatchObject({
           state: "cancelled",
           usage: reported
@@ -311,11 +317,11 @@ describe("Codex SDK local backend", () => {
       authenticated: true,
     });
     const handle = await backend.launch(attemptContext);
-    let observation = await backend.observe(handle);
-    for (let check = 0; check < 20 && observation.state === "running"; check += 1) {
-      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
-      observation = await backend.observe(handle);
-    }
+    const terminal = backend.waitForTerminal(handle);
+    await terminal;
+    expect(backend.waitForTerminal(handle)).toBe(terminal);
+    await backend.waitForTerminal(handle);
+    const observation = await backend.observe(handle);
     expect(observation).toMatchObject({
       state: "succeeded",
       usage: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2 },

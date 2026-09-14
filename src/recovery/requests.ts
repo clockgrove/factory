@@ -1,3 +1,4 @@
+import { publishLocalWake } from "../control/local-wake.js";
 import type { DiscoveryLocatorStore } from "../control/discovery-locators.js";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -217,6 +218,13 @@ export class RecoveryRequestService {
   }
 
   async request(raw: RecoveryRequestInput): Promise<Request> {
+    const request = await this.persistRequest(raw);
+    // Release the temporary proposal lease before waking successor acquisition.
+    await publishLocalWake({ repository: this.ports.repository }, request.requestId);
+    return request;
+  }
+
+  private async persistRequest(raw: RecoveryRequestInput): Promise<Request> {
     const input = RecoveryRequestInputSchema.parse(raw);
     const actor = await this.ports.store.getAuthenticatedLogin();
     let observed = await this.ports.readSnapshot(input.objective);

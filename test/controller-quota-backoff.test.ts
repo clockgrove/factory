@@ -20,6 +20,12 @@ import {
 } from "../src/platform.js";
 import { verifyLocalRepository } from "../src/supervisor.js";
 
+// Keep election/backoff time deterministic: real socket registration involves
+// filesystem I/O outside the fake clock. Cross-process delivery has its own tests.
+vi.mock("../src/control/local-wake.js", () => ({
+  subscribeLocalWake: vi.fn(async () => async () => {}),
+}));
+
 vi.mock("../src/supervisor.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/supervisor.js")>()),
   verifyLocalRepository: vi.fn(async () => {}),

@@ -1,3 +1,6 @@
+import { createBackendObservationWake } from "./execution/terminal-wake.js";
+import { subscribeLocalWake } from "./control/local-wake.js";
+import { WakeSignal } from "./scheduling/wake-signal.js";
 import type { DiscoveryLocatorScope } from "./control/discovery-locators.js";
 import { observeReactiveQuotaWait } from "./control/mutation-observation.js";
 import { GitHubQuotaWaitDeadlineError, retryGitHubQuota, withGitHubQuotaWait } from "./platform.js";
@@ -1134,6 +1137,8 @@ export class FactorySupervisor {
   readonly #sharedCapacityOwners = new Map<string, SharedCapacityOwner>();
   readonly #resourceSampler: CachedResourceSampler;
   readonly #fairness: ObjectiveFairness;
+  readonly #commands = new WakeSignal();
+  #commandWake: { publishedAt: number; receivedAt: number } | undefined;
   readonly #controllerLimits: {
     maxLocalWorkers: number;
     maxPaidWorkers: number;
@@ -1604,8 +1609,11 @@ export class FactorySupervisor {
     reservation: CapacityReservation,
     limits: CapacityLimits,
   ): Promise<CapacityReservationResult> {
-    if (!this.#sharedCapacity)
-      return this.#capacity.transition(expectedGeneration, fromKey, reservation, limits);
+    if (!this.#sharedCapacity) {
+      const result = this.#capacity.transition(expectedGeneration, fromKey, reservation, limits);
+      if (result.reserved) this.#fairness.changed();
+      return result;
+    }
     const result = await this.#lease.use(async (lease) => {
       const owner = this.#capacityOwner(lease);
       const result = await this.#sharedCapacity!.transition(
@@ -1618,6 +1626,7 @@ export class FactorySupervisor {
       if (result.reserved) {
         this.#sharedCapacityOwners.delete(fromKey);
         this.#sharedCapacityOwners.set(reservation.key, owner);
+        this.#fairness.changed();
       }
       return result;
     });
@@ -3197,6 +3206,16 @@ export class FactorySupervisor {
 
   async run(): Promise<SupervisorResult> {
     const stopped = new AbortController();
+    const unsubscribe = await subscribeLocalWake(
+      {
+        repository: `${this.#options.owner}/${this.#options.repo}`,
+        objective: this.#options.objective,
+      },
+      (observation) => {
+        this.#commandWake = observation;
+        this.#commands.changed();
+      },
+    ).catch(() => async () => {});
     try {
       const startedAt = Date.now();
       const signal = this.#options.signal
@@ -3223,6 +3242,7 @@ export class FactorySupervisor {
       );
     } finally {
       stopped.abort(new Error("Objective scope finished"));
+      await unsubscribe().catch(() => {});
       await this.#retryArtifacts.clear();
     }
   }
@@ -5283,10 +5303,14 @@ export class FactorySupervisor {
       }
       let externalObservationDue = 0;
       let idleAdmissionRevision: number | undefined;
+      let consumedCommandRevision = -1;
       runLoop: for (;;) {
         // Capture before any snapshot or admission work so a peer-capacity change during this
         // iteration cannot happen between our decision and listener registration unnoticed.
         const fairnessRevision = this.#fairness.revision;
+        const commandRevision = this.#commands.revision;
+        const commandWake =
+          consumedCommandRevision === commandRevision ? undefined : this.#commandWake;
         const executionRevision = activeExecutions.revision;
         if (heartbeatError) throw heartbeatError;
         activeExecutions.throwNextFailure();
@@ -5296,6 +5320,7 @@ export class FactorySupervisor {
         // or the original external-observation deadline instead of reconstructing
         // the whole Objective merely to rediscover our acknowledged admissions.
         if (
+          consumedCommandRevision === commandRevision &&
           idleAdmissionRevision === executionRevision &&
           activeExecutions.size > 0 &&
           Date.now() < Math.min(deadline, externalObservationDue) &&
@@ -5305,12 +5330,25 @@ export class FactorySupervisor {
             activeExecutions,
             executionRevision,
             fairnessRevision,
+            commandRevision,
             Math.min(deadline, externalObservationDue),
           );
           continue;
         }
         idleAdmissionRevision = undefined;
+        const snapshotStartedAt = Date.now();
         snapshot = await this.#reader.readObjective(snapshot.number);
+        if (commandWake)
+          this.#notify(
+            `Factory command wake: ${JSON.stringify({
+              objective: snapshot.number,
+              commandRevision,
+              ...commandWake,
+              snapshotStartedAt,
+              snapshotCompletedAt: Date.now(),
+            })}`,
+          );
+        consumedCommandRevision = commandRevision;
         externalObservationDue = Date.now() + (this.#options.pollIntervalMs ?? 60_000);
         // A hold/cleanup failure can settle while the snapshot is in flight.
         // An absent active key must not turn that failure into same-process recovery.
@@ -5331,11 +5369,13 @@ export class FactorySupervisor {
           // A live child may still be publishing its validation receipt after
           // the shared phase transition. Retire this observation; never schedule
           // or recover from it, and never cancel that child merely to reread it.
-          const settled = await activeExecutions.waitForChange(
-            Math.max(1, Math.min(this.#options.pollIntervalMs ?? 2_000, deadline - Date.now())),
-            this.#options.signal,
+          await this.#waitForProgress(
+            activeExecutions,
+            activeExecutions.revision,
+            this.#fairness.revision,
+            commandRevision,
+            Math.min(deadline, Date.now() + (this.#options.pollIntervalMs ?? 2_000)),
           );
-          if (settled?.error) throw new ClaimedExecutionFailure(settled);
           continue;
         }
         activeExecutions.throwNextFailure();
@@ -5429,9 +5469,12 @@ export class FactorySupervisor {
         // before any member of the starting cohort may acquire fresh capacity.
         this.#fairness.markReconciled(objective.number);
         if (!this.#fairness.reconciled && !durableProviderGate) {
-          await this.#fairness.waitForChange(
-            this.#options.pollIntervalMs ?? 60_000,
-            this.#options.signal,
+          await this.#waitForProgress(
+            activeExecutions,
+            executionRevision,
+            this.#fairness.revision,
+            commandRevision,
+            deadline,
           );
           continue;
         }
@@ -5716,13 +5759,19 @@ export class FactorySupervisor {
             if (commandState.draining) {
               return await releaseCommandAfterDrain();
             }
-            await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
-          } else {
-            const settled = await activeExecutions.waitForChange(
+            await this.#commands.waitForChange(
               Math.max(1, Math.min(this.#options.pollIntervalMs ?? 60_000, deadline - Date.now())),
               this.#options.signal,
+              commandRevision,
             );
-            if (settled?.error) throw new ClaimedExecutionFailure(settled);
+          } else {
+            await this.#waitForProgress(
+              activeExecutions,
+              executionRevision,
+              fairnessRevision,
+              commandRevision,
+              deadline,
+            );
           }
           continue;
         }
@@ -6353,6 +6402,7 @@ export class FactorySupervisor {
           activeExecutions,
           executionRevision,
           fairnessRevision,
+          commandRevision,
           deadline,
         );
       }
@@ -7124,176 +7174,195 @@ export class FactorySupervisor {
         let lastCancellationCheck = 0;
         let pendingCancellation: Promise<void> | undefined;
         let observationFailure: unknown;
-        for (;;) {
-          executionSignal?.throwIfAborted();
-          if (observationFailure) throw observationFailure;
-          // Quota can delay GitHub observation; it must not block local model
-          // observation or owner cancellation. Each background check is single-flight.
-          void this.#lease.renewIfNeeded().catch((error) => {
-            observationFailure = error;
-          });
-          if (!pendingCancellation && Date.now() - lastCancellationCheck >= 10_000) {
-            lastCancellationCheck = Date.now();
-            pendingCancellation = this.#reader
-              .readRunCancellationRequest(
-                this.#run.objective,
-                this.#run.runId,
-                this.#run.actor,
-                this.#activationBinding(),
-              )
-              .then((cancellation) => {
-                if (cancellation) {
-                  this.#sequences.observe([cancellation]);
-                  observationFailure = new RunCancellationRequestedError(
-                    "operator requested cancellation through GitHub",
-                  );
-                }
-              })
-              .catch((error) => {
-                observationFailure = error;
-              })
-              .finally(() => {
-                pendingCancellation = undefined;
-              });
-          }
-          let observation: BackendObservation;
-          try {
-            observation = await selected.observe(handle);
-          } catch (error) {
-            if (!(error instanceof ProviderQuotaError)) throw error;
-            if (!selected.capabilities.reportsModelUsage)
-              throw new Error(
-                `backend ${selected.capabilities.id} emitted a provider quota failure without declaring model-usage reporting`,
-                { cause: error },
-              );
-            executionTerminalObserved = true;
-            const invocationId = `worker-${item.number}-${reservation!.attempt}`;
-            error.bindInvocation(invocationId);
-            terminalModelUsage = reportedModelUsage(error.usage);
-            terminalModelTokens = error.usage
-              ? error.usage.inputTokens + error.usage.outputTokens
-              : undefined;
-            try {
-              await this.#recordProviderQuotaGate(
-                error,
-                item.id,
-                "execution",
-                selected.capabilities.id,
-                reservation!,
-              );
-            } catch (checkpointError) {
-              throw preserveProviderQuotaError(
-                error,
-                checkpointError,
-                "worker provider-refusal adapter and Supervisor checkpoints both failed",
-              );
+        const observationWake = createBackendObservationWake(selected, handle);
+        try {
+          for (;;) {
+            const observationRevision = observationWake.revision;
+            executionSignal?.throwIfAborted();
+            if (observationFailure) throw observationFailure;
+            // Quota can delay GitHub observation; it must not block local model
+            // observation or owner cancellation. Each background check is single-flight.
+            void this.#lease.renewIfNeeded().catch((error) => {
+              observationFailure = error;
+            });
+            if (!pendingCancellation && Date.now() - lastCancellationCheck >= 10_000) {
+              lastCancellationCheck = Date.now();
+              pendingCancellation = this.#reader
+                .readRunCancellationRequest(
+                  this.#run.objective,
+                  this.#run.runId,
+                  this.#run.actor,
+                  this.#activationBinding(),
+                )
+                .then((cancellation) => {
+                  if (cancellation) {
+                    this.#sequences.observe([cancellation]);
+                    observationFailure = new RunCancellationRequestedError(
+                      "operator requested cancellation through GitHub",
+                    );
+                  }
+                })
+                .catch((error) => {
+                  observationFailure = error;
+                })
+                .finally(() => {
+                  pendingCancellation = undefined;
+                });
             }
-            throw error;
-          }
-          if (
-            selected.capabilities.id === "codex-app-server/local-worktree" &&
-            observation.state === "unknown"
-          )
-            throw new Error(
-              "App Server outcome is unknown; automated replacement is blocked pending exact session recovery",
-            );
-          if (["succeeded", "failed", "cancelled"].includes(observation.state)) {
-            executionTerminalObserved = true;
-            terminalModelUsage = reportedModelUsage(observation.usage);
-            const observedTokens = reportedModelTokens(observation.usage);
-            if (observation.providerQuotaGate) {
+            let observation: BackendObservation;
+            try {
+              observation = await selected.observe(handle);
+            } catch (error) {
+              if (!(error instanceof ProviderQuotaError)) throw error;
               if (!selected.capabilities.reportsModelUsage)
                 throw new Error(
-                  `backend ${selected.capabilities.id} emitted a provider quota gate without declaring model-usage reporting`,
+                  `backend ${selected.capabilities.id} emitted a provider quota failure without declaring model-usage reporting`,
+                  { cause: error },
                 );
-              if (observedTokens === null && selected.capabilities.reportsModelUsage) {
-                const invocationKey = modelInvocationKey({
-                  objective: reservation!.objective,
-                  runId: reservation!.runId,
-                  workItem: item.number,
-                  attempt: reservation!.attempt,
-                  phase: "execution",
-                  modelInvocationId: `worker-${item.number}-${reservation!.attempt}`,
-                });
-                if (this.#modelInvocations.active.has(invocationKey))
-                  this.#modelInvocations.retire(invocationKey);
+              executionTerminalObserved = true;
+              const invocationId = `worker-${item.number}-${reservation!.attempt}`;
+              error.bindInvocation(invocationId);
+              terminalModelUsage = reportedModelUsage(error.usage);
+              terminalModelTokens = error.usage
+                ? error.usage.inputTokens + error.usage.outputTokens
+                : undefined;
+              try {
+                await this.#recordProviderQuotaGate(
+                  error,
+                  item.id,
+                  "execution",
+                  selected.capabilities.id,
+                  reservation!,
+                );
+              } catch (checkpointError) {
+                throw preserveProviderQuotaError(
+                  error,
+                  checkpointError,
+                  "worker provider-refusal adapter and Supervisor checkpoints both failed",
+                );
               }
-              const quotaError = new ProviderQuotaError(observation.providerQuotaGate, {
-                invocationId: `worker-${item.number}-${reservation!.attempt}`,
-                ...(observedTokens !== null
-                  ? {
-                      usage: {
-                        inputTokens: observation.usage!.inputTokens!,
-                        outputTokens: observation.usage!.outputTokens!,
-                        ...(typeof observation.usage?.cachedInputTokens === "number"
-                          ? { cachedInputTokens: observation.usage.cachedInputTokens }
-                          : {}),
-                      },
-                    }
-                  : {}),
-              });
-              await this.#recordProviderQuotaGate(
-                quotaError,
-                item.id,
-                "execution",
-                selected.capabilities.id,
-                reservation!,
-              );
-              terminalModelTokens = observedTokens ?? undefined;
-              throw quotaError;
+              throw error;
             }
-            if (observedTokens !== null) {
-              terminalModelTokens = observedTokens;
-              await this.#lease.use(async (lease) => {
-                const event = await this.#recorder.budget({
-                  lease,
-                  workItemNodeId: item.id,
-                  reservation: reservation!,
-                  sequence: this.#sequences.take(),
-                  event: "BudgetReconciled",
-                  unit: "model_tokens",
-                  phase: "execution",
-                  amount: observedTokens,
-                  usageId: `worker-${item.number}-${reservation!.attempt}`,
-                  ...this.#modelInvocationLink(
-                    `worker-${item.number}-${reservation!.attempt}`,
-                    reservation!,
-                    undefined,
-                    "execution",
-                  ),
-                  ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
-                });
-                this.#budgetEvents.push(event);
-              });
-            } else if (selected.capabilities.reportsModelUsage) {
-              this.#modelInvocations.retire(
-                modelInvocationKey({
-                  objective: reservation!.objective,
-                  runId: reservation!.runId,
-                  workItem: item.number,
-                  attempt: reservation!.attempt,
-                  phase: "execution",
-                  modelInvocationId: `worker-${item.number}-${reservation!.attempt}`,
-                }),
-              );
-              if (selected.capabilities.id === "codex-app-server/local-worktree")
-                throw new Error(
-                  "App Server final model usage is unavailable; automated replacement is blocked",
-                );
+            if (
+              selected.capabilities.id === "codex-app-server/local-worktree" &&
+              observation.state === "unknown"
+            )
               throw new Error(
-                `backend ${selected.capabilities.id} omitted terminal model-token usage; consumption remains unknown`,
+                "App Server outcome is unknown; automated replacement is blocked pending exact session recovery",
               );
+            if (["succeeded", "failed", "cancelled"].includes(observation.state)) {
+              executionTerminalObserved = true;
+              terminalModelUsage = reportedModelUsage(observation.usage);
+              const observedTokens = reportedModelTokens(observation.usage);
+              if (observation.providerQuotaGate) {
+                if (!selected.capabilities.reportsModelUsage)
+                  throw new Error(
+                    `backend ${selected.capabilities.id} emitted a provider quota gate without declaring model-usage reporting`,
+                  );
+                if (observedTokens === null && selected.capabilities.reportsModelUsage) {
+                  const invocationKey = modelInvocationKey({
+                    objective: reservation!.objective,
+                    runId: reservation!.runId,
+                    workItem: item.number,
+                    attempt: reservation!.attempt,
+                    phase: "execution",
+                    modelInvocationId: `worker-${item.number}-${reservation!.attempt}`,
+                  });
+                  if (this.#modelInvocations.active.has(invocationKey))
+                    this.#modelInvocations.retire(invocationKey);
+                }
+                const quotaError = new ProviderQuotaError(observation.providerQuotaGate, {
+                  invocationId: `worker-${item.number}-${reservation!.attempt}`,
+                  ...(observedTokens !== null
+                    ? {
+                        usage: {
+                          inputTokens: observation.usage!.inputTokens!,
+                          outputTokens: observation.usage!.outputTokens!,
+                          ...(typeof observation.usage?.cachedInputTokens === "number"
+                            ? { cachedInputTokens: observation.usage.cachedInputTokens }
+                            : {}),
+                        },
+                      }
+                    : {}),
+                });
+                await this.#recordProviderQuotaGate(
+                  quotaError,
+                  item.id,
+                  "execution",
+                  selected.capabilities.id,
+                  reservation!,
+                );
+                terminalModelTokens = observedTokens ?? undefined;
+                throw quotaError;
+              }
+              if (observedTokens !== null) {
+                terminalModelTokens = observedTokens;
+                await this.#lease.use(async (lease) => {
+                  const event = await this.#recorder.budget({
+                    lease,
+                    workItemNodeId: item.id,
+                    reservation: reservation!,
+                    sequence: this.#sequences.take(),
+                    event: "BudgetReconciled",
+                    unit: "model_tokens",
+                    phase: "execution",
+                    amount: observedTokens,
+                    usageId: `worker-${item.number}-${reservation!.attempt}`,
+                    ...this.#modelInvocationLink(
+                      `worker-${item.number}-${reservation!.attempt}`,
+                      reservation!,
+                      undefined,
+                      "execution",
+                    ),
+                    ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
+                  });
+                  this.#budgetEvents.push(event);
+                });
+              } else if (selected.capabilities.reportsModelUsage) {
+                this.#modelInvocations.retire(
+                  modelInvocationKey({
+                    objective: reservation!.objective,
+                    runId: reservation!.runId,
+                    workItem: item.number,
+                    attempt: reservation!.attempt,
+                    phase: "execution",
+                    modelInvocationId: `worker-${item.number}-${reservation!.attempt}`,
+                  }),
+                );
+                if (selected.capabilities.id === "codex-app-server/local-worktree")
+                  throw new Error(
+                    "App Server final model usage is unavailable; automated replacement is blocked",
+                  );
+                throw new Error(
+                  `backend ${selected.capabilities.id} omitted terminal model-token usage; consumption remains unknown`,
+                );
+              }
+              if (observation.state !== "succeeded") {
+                throw new Error(observation.reason ?? `worker ${observation.state}`);
+              }
+              break;
             }
-            if (observation.state !== "succeeded") {
-              throw new Error(observation.reason ?? `worker ${observation.state}`);
+            if (observationFailure) throw observationFailure;
+            const waitAbort = new AbortController();
+            const waitSignal = executionSignal
+              ? AbortSignal.any([executionSignal, waitAbort.signal])
+              : waitAbort.signal;
+            const nextObservation = observationWake.waitForChange(
+              this.#options.pollIntervalMs ?? 2_000,
+              waitSignal,
+              observationRevision,
+            );
+            try {
+              await (pendingCancellation
+                ? Promise.race([nextObservation, pendingCancellation])
+                : nextObservation);
+            } finally {
+              waitAbort.abort();
+              await nextObservation;
             }
-            break;
           }
-          if (observationFailure) throw observationFailure;
-          const nextObservation = sleep(this.#options.pollIntervalMs ?? 2_000, executionSignal);
-          await (pendingCancellation
-            ? Promise.race([nextObservation, pendingCancellation])
-            : nextObservation);
+        } finally {
+          observationWake.dispose();
         }
       }
       let artifact = recovered?.artifact ?? (await selected.collect(handle!));
@@ -7476,6 +7545,7 @@ export class FactorySupervisor {
         exclusiveResources: admission.reservation.exclusiveResources,
       };
       for (;;) {
+        const fairnessRevision = this.#fairness.revision;
         executionSignal?.throwIfAborted();
         await this.#lease.renewIfNeeded();
         if (Date.now() >= objectiveDeadline) {
@@ -7529,7 +7599,11 @@ export class FactorySupervisor {
         if (transitioned.code === "duplicate-reservation") {
           throw new Error("execution capacity disappeared before validation transition");
         }
-        await sleep(this.#options.pollIntervalMs ?? 2_000, executionSignal);
+        await this.#fairness.waitForChange(
+          this.#options.pollIntervalMs ?? 2_000,
+          executionSignal,
+          fairnessRevision,
+        );
       }
       await releaseExecutionCapacity(!recovered);
       const scopedValidation = validator
@@ -15660,6 +15734,7 @@ export class FactorySupervisor {
     activeExecutions: ContinuousExecutionPool<number>,
     executionRevision: number,
     fairnessRevision: number,
+    commandRevision: number,
     objectiveDeadline: number,
   ): Promise<void> {
     // Only unfinished external state needs periodic observation. Completion and
@@ -15673,6 +15748,7 @@ export class FactorySupervisor {
       if (
         activeExecutions.revision !== executionRevision ||
         this.#fairness.revision !== fairnessRevision ||
+        this.#commands.revision !== commandRevision ||
         this.#options.signal?.aborted ||
         Date.now() >= observationDeadline
       )
@@ -15702,6 +15778,8 @@ export class FactorySupervisor {
       executionRevision,
       fairness: this.#fairness,
       fairnessRevision,
+      commands: this.#commands,
+      commandRevision,
       maximumMs: Math.max(1, observationDeadline - Date.now()),
       ...(this.#options.signal ? { signal: this.#options.signal } : {}),
     });

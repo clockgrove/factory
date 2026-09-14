@@ -229,6 +229,12 @@ export interface ExecutionBackend {
   probe(requirements?: ExecutionRequirements): Promise<BackendProbe>;
   launch(context: AttemptContext): Promise<BackendHandle>;
   observe(handle: BackendHandle): Promise<BackendObservation>;
+  /**
+   * Sticky local completion hint, including completion before registration.
+   * Register once per handle; still call observe for authoritative state and
+   * accounting, and retain bounded polling when absent or after consuming it.
+   */
+  waitForTerminal?(handle: BackendHandle): Promise<void>;
   cancel(handle: BackendHandle): Promise<void>;
   collect(handle: BackendHandle): Promise<NormalizedArtifact>;
   cleanup(handle: BackendHandle): Promise<void>;

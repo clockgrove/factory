@@ -1,3 +1,5 @@
+import { subscribeLocalWake } from "../control/local-wake.js";
+import { WakeSignal } from "../scheduling/wake-signal.js";
 import { randomUUID } from "node:crypto";
 
 import type { RepositoryAdmission } from "./repository-controls.js";
@@ -178,6 +180,14 @@ export interface RepositoryDiscoveryTelemetry {
 }
 
 export interface GitHubRepositoryControllerOptions {
+  /** Canonical GitHub slug for same-host publication hints. */
+  repositoryIdentity?: string;
+  onWakeObservation?: (observation: {
+    event: string;
+    at: number;
+    publishedAt?: number;
+    objective?: number;
+  }) => void;
   store: DurableActivationSource;
   reconcileObjective: (
     activation: DurableObjectiveActivation,
@@ -220,6 +230,20 @@ export class GitHubRepositoryController {
   #platformFailure: PlatformUnavailableError | undefined;
   #fatalFailure: unknown;
   #firstDiscovery = true;
+  readonly #wake = new WakeSignal();
+
+  /** Hint only: the next pass still observes GitHub and existing admission fences. */
+  wake(): void {
+    this.#wake.changed();
+  }
+
+  #observeWake(event: string, fields: { publishedAt?: number; objective?: number } = {}): void {
+    try {
+      this.#options.onWakeObservation?.({ event, at: Date.now(), ...fields });
+    } catch {
+      /* Diagnostic only. */
+    }
+  }
 
   constructor(options: GitHubRepositoryControllerOptions) {
     this.#options = options;
@@ -340,6 +364,7 @@ export class GitHubRepositoryController {
       const task = Promise.resolve()
         .then(() => {
           this.#discoverySignal.throwIfAborted();
+          this.#observeWake("objective-dispatch", { objective: activation.objective });
           return this.#options.reconcileObjective(activation, signal, this.#resources);
         })
         .then(() => {
@@ -388,6 +413,8 @@ export class GitHubRepositoryController {
         .finally(() => {
           this.#running.delete(activation.objective);
           this.#resources.fairness.unregister(activation.objective);
+          this.#observeWake("objective-slot-released", { objective: activation.objective });
+          this.wake();
         });
       this.#running.set(activation.objective, task);
       started += 1;
@@ -406,10 +433,25 @@ export class GitHubRepositoryController {
 
   async run(): Promise<void> {
     let loopFailure: unknown;
+    const dispose = this.#options.repositoryIdentity
+      ? await subscribeLocalWake(
+          { repository: this.#options.repositoryIdentity },
+          (observation) => {
+            this.#observeWake("publication-wake", { publishedAt: observation.publishedAt });
+            this.wake();
+          },
+        )
+      : async () => {};
     try {
       while (!this.#discoverySignal.aborted) {
+        const revision = this.#wake.revision;
         try {
-          await this.reconcileOnce();
+          this.#observeWake("scan-start");
+          try {
+            await this.reconcileOnce();
+          } finally {
+            this.#observeWake("scan-end");
+          }
         } catch (error) {
           if (
             !(error instanceof PlatformUnavailableError) ||
@@ -420,7 +462,11 @@ export class GitHubRepositoryController {
           await interruptibleDelay(error.retryAfterMs, this.#discoverySignal);
           continue;
         }
-        await interruptibleDelay(this.#options.pollIntervalMs ?? 60_000, this.#discoverySignal);
+        await this.#wake.waitForChange(
+          this.#options.pollIntervalMs ?? 60_000,
+          this.#discoverySignal,
+          revision,
+        );
       }
     } catch (error) {
       loopFailure = error;
@@ -428,6 +474,7 @@ export class GitHubRepositoryController {
       // safety propagation. Election-only retirement never reaches this path.
       this.#failureStop.abort(error);
     } finally {
+      await dispose();
       await this.settle();
     }
     if (this.#fatalFailure && !(this.#fatalFailure instanceof LeaseAcquisitionContendedError))
@@ -516,6 +563,9 @@ export function createGitHubRepositoryController(
       ...(options.onStatus ? { onThrottle: options.onStatus } : {}),
     });
   return new GitHubRepositoryController({
+    repositoryIdentity: `${options.owner}/${options.repo}`,
+    onWakeObservation: (observation) =>
+      options.onStatus?.(`Factory controller wake: ${JSON.stringify(observation)}`),
     store,
     resources,
     ...(options.capacity === undefined ? {} : { capacity: options.capacity }),

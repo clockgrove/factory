@@ -1,3 +1,4 @@
+import { publishLocalWake } from "../control/local-wake.js";
 import type { DiscoveryLocatorStore } from "../control/discovery-locators.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
@@ -559,6 +560,7 @@ export class FactoryApplicationService {
       await this.reconcileRequestDiscovery(snapshot, existing);
       if (fields.event === "ActivationRequested")
         await store.ensureObjectiveLabel!(snapshot.number);
+      await this.notifyRequest(existing);
       return existing;
     }
     if (fields.event === "ActivationRequested") {
@@ -620,7 +622,22 @@ export class FactoryApplicationService {
     );
     await this.reconcileRequestDiscovery(snapshot, event);
     if (fields.event === "ActivationRequested") await store.ensureObjectiveLabel!(snapshot.number);
+    await this.notifyRequest(event);
     return event;
+  }
+
+  private async notifyRequest(event: FactoryEvent): Promise<void> {
+    if (!("requestId" in event) || typeof event.requestId !== "string") return;
+    const repository = `${this.context.owner}/${this.context.repo}`;
+    const publishedAt = Date.now();
+    // Discovery also observes commands for runs with no active local Supervisor.
+    await publishLocalWake({ repository }, event.requestId, publishedAt);
+    if (event.event !== "ActivationRequested" && event.event !== "ActivationCancellationRequested")
+      await publishLocalWake(
+        { repository, objective: event.objective },
+        event.requestId,
+        publishedAt,
+      );
   }
 
   /** A request disposition retires only request retrieval hints. It never

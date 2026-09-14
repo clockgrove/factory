@@ -525,6 +525,33 @@ describe("Codex App Server local backend", () => {
     await Promise.all([backend.cleanup(ha), backend.cleanup(hb)]);
   });
 
+  it("wakes only the matching terminal turn and retains completion before registration", async () => {
+    const connections = new Map<string, FakeConnection>();
+    const backend = factory(join(suiteRoot, "terminal-wake"), connections);
+    const ctx = await context(102);
+    const handle = await backend.launch(ctx);
+    const connection = connections.get(handle.metadata!.codexHome!)!;
+    const terminal = backend.waitForTerminal(handle);
+    const notified = vi.fn();
+    void terminal.then(notified);
+    connection.emit("turn/completed", {
+      threadId: "unrelated-thread",
+      turn: { id: "unrelated-turn", status: "completed" },
+    });
+    await Promise.resolve();
+    expect(notified).not.toHaveBeenCalled();
+    finish(connection, handle, { outcome: "succeeded", summary: "done" });
+    await terminal;
+    expect(notified).toHaveBeenCalledOnce();
+    expect(backend.waitForTerminal(handle)).toBe(terminal);
+    await backend.waitForTerminal(handle);
+    // The hint does not replace observe's authoritative terminal checkpoint.
+    expect(await ctx.sessionJournal!.load("terminal")).toBeNull();
+    expect(await backend.observe(handle)).toMatchObject({ state: "succeeded" });
+    expect(await ctx.sessionJournal!.load("terminal")).not.toBeNull();
+    await backend.cleanup(handle);
+  });
+
   it("resumes the fenced durable turn after an adapter restart without launching duplicate work", async () => {
     const root = join(suiteRoot, "resume");
     const firstConnections = new Map<string, FakeConnection>();
@@ -576,7 +603,9 @@ describe("Codex App Server local backend", () => {
     const ctx = await context(5);
     const handle = await backend.launch(ctx);
     const connection = connections.get(handle.metadata!.codexHome!)!;
+    const terminal = backend.waitForTerminal(handle);
     await backend.cancel(handle);
+    await terminal;
     expect(connection.calls.filter((call) => call.method === "turn/interrupt")).toHaveLength(1);
     expect(connection.closedByClient).toBe(true);
     expect(await backend.observe(handle)).toMatchObject({ state: "cancelled" });

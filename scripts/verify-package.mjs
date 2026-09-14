@@ -280,6 +280,11 @@ if (existsSync(objectiveFormPath)) {
       objectiveForm.includes("does not prescribe a Work Item graph"),
     "the human Objective issue form preserves activation and graph boundaries",
   );
+  check(
+    !/^labels:/m.test(objectiveForm) &&
+      objectiveForm.includes("discovery label only after an authenticated activation"),
+    "the human Objective issue form does not make an unactivated issue discoverable",
+  );
 }
 
 // Codex resolves every component and asset path from the plugin root, not from

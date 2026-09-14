@@ -254,7 +254,8 @@ async function main() {
     !objectiveForm.includes("name: Factory Objective") ||
     !objectiveForm.includes("factory:objective") ||
     !objectiveForm.includes("id: outcome") ||
-    !objectiveForm.includes("id: authority")
+    !objectiveForm.includes("id: authority") ||
+    /^labels:/m.test(objectiveForm)
   ) {
     throw new Error("installed Factory plugin has no canonical human Objective issue form");
   }

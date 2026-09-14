@@ -24,8 +24,13 @@ describe("human Objective issue form", () => {
 
     expect(form.name).toBe("Factory Objective");
     expect(form.description).toMatch(/product outcome/);
-    expect(form.labels).toContain("factory:objective");
+    expect(form.labels).toBeUndefined();
     expect(Array.isArray(form.body)).toBe(true);
+
+    const introduction = form.body?.find((entry) => entry.type === "markdown")?.attributes?.value;
+    expect(introduction).toContain(
+      "Factory adds the `factory:objective` discovery label only after an authenticated activation or recovery request.",
+    );
 
     const fields = new Map(
       form.body?.filter((entry) => entry.id).map((entry) => [entry.id, entry]) ?? [],

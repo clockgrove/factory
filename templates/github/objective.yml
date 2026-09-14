@@ -1,15 +1,13 @@
 name: Factory Objective
 description: Describe a product outcome for Factory to plan into validated Work Items
 title: "objective: "
-labels:
-  - factory:objective
 body:
   - type: markdown
     attributes:
       value: |
         Describe the outcome in your own words. A teammate should understand what success looks like without first reading every linked document.
 
-        Factory will design the smallest complete Work Item graph after you explicitly ask it to plan or run this Objective. Creating this issue does not activate Factory, authorize execution or spending, approve a deployment, or grant permission to file other issues.
+        Factory will design the smallest complete Work Item graph after you explicitly ask it to plan or run this Objective. Creating this issue does not activate Factory, authorize execution or spending, approve a deployment, or grant permission to file other issues. Factory adds the `factory:objective` discovery label only after an authenticated activation or recovery request.
   - type: textarea
     id: outcome
     attributes:
@@ -48,8 +46,8 @@ body:
   - type: textarea
     id: authority
     attributes:
-      label: Execution authority
-      description: State what Factory may change or use, including repositories, local or cloud workers, network/services, spending, environments, deployments, and evidence-backed issue filing.
+      label: Requested execution authority
+      description: Describe the authority you expect to approve when activating Factory, including repositories, local or cloud workers, network/services, spending, environments, deployments, and evidence-backed issue filing.
       placeholder: Local workers and this repository only. No paid cloud, external services, deployment, or cross-repository writes. Factory may prepare issue-ready defect reports but may not file them.
     validations:
       required: true

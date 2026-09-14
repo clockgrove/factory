@@ -113,6 +113,12 @@ changes through pull requests. The run ends with a terminal status and recorded 
 escalation explaining what needs your attention. See the
 [first-Objective walkthrough](docs/setup/local.md#a-small-first-objective) for expected evidence.
 
+When opt-in compiler evaluation uses `maxRepairs`, that number is one shared correction budget for
+obligation-inventory regeneration and graph repair. For example, one inventory correction under
+`maxRepairs: 2` leaves at most one graph correction. Report-only evaluation and `maxRepairs: 0` keep
+the inventory single-shot; invocation, time, observed-token, accounting, and input fences still
+apply before every model call.
+
 ## What Factory handles
 
 - **Planning and scheduling:** acceptance criteria, native GitHub dependencies, ready-task ordering,

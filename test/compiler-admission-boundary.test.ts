@@ -494,7 +494,13 @@ describe("compiler dispatch admission", () => {
           stdout: [
             JSON.stringify({
               type: "item.completed",
-              item: { type: "agent_message", text: JSON.stringify(f.inventory) },
+              item: {
+                type: "agent_message",
+                text: JSON.stringify({
+                  version: f.inventory.version,
+                  obligations: f.inventory.obligations,
+                }),
+              },
             }),
             JSON.stringify({
               type: "turn.completed",

@@ -374,6 +374,198 @@ describe("compiler draft durable repair", () => {
       result.records.filter((r) => r.kind === "validation" && r.payload.valid === false),
     ).toHaveLength(2);
   });
+  it("repairs a known-accounted invalid inventory and replays its valid successor", async () => {
+    const args = await setup();
+    const invoke = vi.fn(async (request: Parameters<CompilerDraftCallbacks["invoke"]>[0]) => {
+      const usage = { inputTokens: 2, outputTokens: 1 };
+      if (request.stage === "inventory" && request.revision === 0)
+        throw Object.assign(new Error("unknown obligation citation"), {
+          usage,
+          proposal: {
+            rawProposal: { version: 1, obligations: [] },
+            normalizationTrace: ["Factory rejected malformed obligation claims"],
+          },
+        });
+      return {
+        value:
+          request.stage === "inventory"
+            ? { obligations: ["grounded"] }
+            : request.stage === "judge"
+              ? { accepted: request.revision === 1 }
+              : objective(`revision ${request.revision}`),
+        usage,
+      };
+    });
+    args.callbacks.invoke = invoke;
+
+    const result = await runCompilerDraftLoop(args);
+    expect(result.status).toBe("accepted");
+    expect(
+      invoke.mock.calls
+        .map(([request]) => request)
+        .filter((request) => request.stage === "inventory")
+        .map((request) => ({ revision: request.revision, failure: request.failure })),
+    ).toEqual([
+      { revision: 0, failure: null },
+      {
+        revision: 1,
+        failure: {
+          error: "unknown obligation citation",
+          proposal: {
+            rawProposal: { version: 1, obligations: [] },
+            normalizationTrace: ["Factory rejected malformed obligation claims"],
+          },
+        },
+      },
+    ]);
+    expect(result.records.filter((record) => record.kind === "invocation")).toHaveLength(6);
+    expect(args.callbacks.recordUsage).toHaveBeenCalledTimes(6);
+
+    const calls = invoke.mock.calls.length;
+    expect((await runCompilerDraftLoop(args)).status).toBe("accepted");
+    expect(invoke).toHaveBeenCalledTimes(calls);
+  });
+
+  it("shares repair capacity between inventory regeneration and graph correction", async () => {
+    const args = await setup();
+    args.callbacks.invoke = vi.fn(async (request) => {
+      const usage = { inputTokens: 2, outputTokens: 1 };
+      if (request.stage === "inventory" && request.revision === 0)
+        throw Object.assign(new Error("unknown obligation citation"), { usage });
+      return {
+        value:
+          request.stage === "inventory"
+            ? {}
+            : request.stage === "judge"
+              ? { accepted: false }
+              : objective(`revision ${request.revision}`),
+        usage,
+      };
+    });
+
+    const result = await runCompilerDraftLoop(args);
+    expect(result).toMatchObject({ status: "stopped", reason: "repair-limit-unresolved" });
+    expect(
+      result.records.filter(
+        (record) => record.kind === "invocation" && record.payload.stage === "inventory",
+      ),
+    ).toHaveLength(2);
+    expect(
+      result.records.filter(
+        (record) => record.kind === "invocation" && record.payload.stage === "repair",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it.each([
+    { maxRepairs: 0, attempts: 1 },
+    { maxRepairs: 2, attempts: 3 },
+  ])("stops invalid inventory after its shared repair allowance %#", async (limits) => {
+    const args = await setup();
+    args.callbacks.invoke = vi.fn(async (request) => {
+      if (request.stage !== "inventory") throw new Error("unexpected graph invocation");
+      throw Object.assign(new Error("unknown obligation citation"), {
+        usage: { inputTokens: 2, outputTokens: 1 },
+      });
+    });
+
+    const result = await runCompilerDraftLoop({
+      ...args,
+      limits: { maxRepairs: limits.maxRepairs },
+    });
+    expect(result).toMatchObject({
+      status: "stopped",
+      reason: "invalid-inventory: unknown obligation citation",
+    });
+    expect(args.callbacks.invoke).toHaveBeenCalledTimes(limits.attempts);
+    expect(args.callbacks.recordUsage).toHaveBeenCalledTimes(limits.attempts);
+  });
+
+  it("resumes at the next inventory revision after a completed failed result", async () => {
+    const args = await setup();
+    const limits = {
+      maxRepairs: 2,
+      maxInvocations: 7,
+      maxObservedTokens: Number.MAX_SAFE_INTEGER,
+      deadlineMs: 600_000,
+    };
+    await args.manager.append(args.lease, args.binding, 0, "started", {
+      limits,
+      startedAt: Date.now(),
+    });
+    const invocationId = `compiler-${draftDigest({
+      binding: args.binding,
+      stage: "inventory",
+      revision: 0,
+    })}`;
+    await args.manager.append(args.lease, args.binding, 1, "invocation", {
+      invocationId,
+      stage: "inventory",
+      revision: 0,
+      inputDigest: draftDigest({ inventory: null, previous: null, failure: null }),
+    });
+    await args.manager.append(args.lease, args.binding, 2, "result", {
+      invocationId,
+      stage: "inventory",
+      revision: 0,
+      value: null,
+      usage: { inputTokens: 2, outputTokens: 1 },
+      error: "unknown obligation citation",
+      proposal: { rawProposal: { version: 1, obligations: [] } },
+    });
+    const invoke = vi.mocked(args.callbacks.invoke);
+
+    expect((await runCompilerDraftLoop(args)).status).toBe("accepted");
+    expect(
+      invoke.mock.calls
+        .map(([request]) => request)
+        .filter((request) => request.stage === "inventory")
+        .map((request) => request.revision),
+    ).toEqual([1]);
+    expect(args.callbacks.recordUsage).toHaveBeenCalledWith(
+      invocationId,
+      "inventory",
+      expect.objectContaining({ inputTokens: 2, outputTokens: 1 }),
+    );
+  });
+  it.each([
+    { limits: { maxRepairs: 2, maxInvocations: 1 }, reason: "invocation-limit" },
+    { limits: { maxRepairs: 2, maxObservedTokens: 3 }, reason: "observed-token-limit" },
+  ])("checks $reason before dispatching an inventory retry", async ({ limits, reason }) => {
+    const args = await setup();
+    args.callbacks.invoke = vi.fn(async () => {
+      throw Object.assign(new Error("unknown obligation citation"), {
+        usage: { inputTokens: 2, outputTokens: 1 },
+      });
+    });
+
+    expect(await runCompilerDraftLoop({ ...args, limits })).toMatchObject({
+      status: "stopped",
+      reason,
+    });
+    expect(args.callbacks.invoke).toHaveBeenCalledOnce();
+    expect(args.callbacks.recordUsage).toHaveBeenCalledOnce();
+  });
+
+  it("checks the durable deadline before dispatching an inventory retry", async () => {
+    const args = await setup();
+    let now = 0;
+    args.callbacks.invoke = vi.fn(async () => {
+      throw Object.assign(new Error("unknown obligation citation"), {
+        usage: { inputTokens: 2, outputTokens: 1 },
+      });
+    });
+
+    expect(
+      await runCompilerDraftLoop({
+        ...args,
+        startedAt: 0,
+        now: () => (now += 100),
+        limits: { maxRepairs: 2, deadlineMs: 250 },
+      }),
+    ).toMatchObject({ status: "stopped", reason: "deadline-exhausted" });
+    expect(args.callbacks.invoke).toHaveBeenCalledOnce();
+  });
   it("detects unchanged graph cycles and enforces observed usage and deadline", async () => {
     const args = await setup();
     args.callbacks.invoke = vi.fn(async (request) => ({

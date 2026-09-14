@@ -6,7 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
 import { LeaseManager, type GitCommitObject, type LeaseStore } from "../src/control/lease.js";
 import { CompilerDraftManager } from "../src/control/compiler-drafts.js";
-import { compileEvaluatedDraft } from "../src/management/draft-compilation.js";
+import {
+  assertCompilerDraftSelection,
+  compileEvaluatedDraft,
+} from "../src/management/draft-compilation.js";
 import {
   CodexCliManagementBackend,
   compilerObligationEvidence,
@@ -187,6 +190,8 @@ async function setup(
     reportOnly?: boolean;
     abstain?: boolean;
     advisoryOnlyRepair?: boolean;
+    invalidInventoryOnce?: boolean;
+    unsafeInventory?: boolean;
   } = {},
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-draft-integration-"));
@@ -223,16 +228,40 @@ async function setup(
       },
     ],
   };
+  const claims = { version: 1 as const, obligations: inventory.obligations };
   const stages: string[] = [];
   const prompts: string[] = [];
   let repairs = 0;
+  let inventories = 0;
   const runStructured = vi.fn(async (_cwd: string, _schema: unknown, prompt: string) => {
     prompts.push(prompt);
     const usage = { inputTokens: 11, outputTokens: 3, cachedInputTokens: 4 };
     if (prompt.includes("independent obligation extractor")) {
       stages.push("inventory");
       expect(prompt).not.toContain('"workItems"');
-      return { value: inventory, usage };
+      inventories += 1;
+      if (options.unsafeInventory)
+        return {
+          value: {
+            ...claims,
+            obligations: [
+              {
+                ...claims.obligations[0],
+                acceptanceEvidence: `unsafe ghp_${"a".repeat(24)}`,
+              },
+            ],
+          },
+          usage,
+        };
+      if (options.invalidInventoryOnce && inventories === 1)
+        return {
+          value: {
+            ...claims,
+            obligations: [{ ...claims.obligations[0], evidenceIds: ["foreign"] }],
+          },
+          usage,
+        };
+      return { value: claims, usage };
     }
     if (prompt.includes("independent compiler judge")) {
       stages.push("judge");
@@ -426,6 +455,97 @@ describe("production compiler draft adapter", () => {
         }),
       ]),
     );
+  });
+  it("repairs an invalid canonical evidence ID before compiling and shares accounting", async () => {
+    const f = await setup({ invalidInventoryOnce: true });
+    const result = await compileEvaluatedDraft(f.args);
+
+    expect(result.status).toBe("accepted");
+    if (result.status !== "accepted") throw new Error("accepted graph required");
+    expect(() => assertCompilerDraftSelection(result.records, result.graph)).not.toThrow();
+    expect(f.stages).toEqual(["inventory", "inventory", "compile", "judge", "repair", "judge"]);
+    expect(f.accounting.size).toBe(6);
+    expect(f.args.admit).toHaveBeenCalledTimes(6);
+    expect(f.prompts[1]).toContain("priorInventoryFailure");
+    expect(f.prompts[1]).toContain("unknown obligation citation");
+    const rejected = result.records.find(
+      (record) =>
+        record.kind === "result" &&
+        record.payload.stage === "inventory" &&
+        record.payload.revision === 0,
+    );
+    expect(rejected?.payload).toMatchObject({
+      error: "unknown obligation citation",
+      usage: { inputTokens: 11, outputTokens: 3, cachedInputTokens: 4 },
+      proposal: {
+        rawProposal: {
+          version: 1,
+          obligations: [expect.objectContaining({ evidenceIds: ["foreign"] })],
+        },
+        normalizationTrace: [
+          "Factory attached the frozen objective digest",
+          "Factory attached the frozen base SHA",
+          "Factory attached the exact frozen evidence records",
+        ],
+      },
+    });
+    expect((await compileEvaluatedDraft(f.args)).status).toBe("accepted");
+    expect(f.runStructured).toHaveBeenCalledTimes(6);
+
+    const ambiguous = structuredClone(result.records);
+    const firstInventory = ambiguous.find(
+      (record) => record.kind === "result" && record.payload.stage === "inventory",
+    )!;
+    const validInventory = ambiguous.find(
+      (record) =>
+        record.kind === "result" && record.payload.stage === "inventory" && !record.payload.error,
+    )!;
+    delete firstInventory.payload.error;
+    firstInventory.payload.value = validInventory.payload.value;
+    expect(() => assertCompilerDraftSelection(ambiguous, result.graph)).toThrow(
+      "ambiguous inventories",
+    );
+  });
+  it("keeps report-only invalid inventory single-shot", async () => {
+    const f = await setup({ invalidInventoryOnce: true, reportOnly: true });
+    const result = await compileEvaluatedDraft(f.args);
+
+    expect(result).toMatchObject({
+      status: "stopped",
+      reason: "invalid-inventory: unknown obligation citation",
+    });
+    expect(f.stages).toEqual(["inventory"]);
+    expect(f.accounting.size).toBe(1);
+  });
+  it("does not retry unsafe inventory output even with known usage", async () => {
+    const f = await setup({ unsafeInventory: true });
+    const result = await compileEvaluatedDraft(f.args);
+
+    expect(result).toMatchObject({
+      status: "stopped",
+      reason: "obligation claims output contains suspected GitHub token",
+    });
+    expect(f.stages).toEqual(["inventory"]);
+    expect(f.accounting.size).toBe(1);
+    expect(result.records.find((record) => record.kind === "result")?.payload).toMatchObject({
+      usage: { inputTokens: 11, outputTokens: 3, cachedInputTokens: 4 },
+      stopReason: "obligation claims output contains suspected GitHub token",
+    });
+  });
+  it("rechecks frozen inputs before an inventory retry without reserving another call", async () => {
+    const f = await setup({ invalidInventoryOnce: true });
+    f.args.assertInputs
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("Objective changed during inventory repair"));
+
+    await expect(compileEvaluatedDraft(f.args)).rejects.toThrow(
+      "Objective changed during inventory repair",
+    );
+    expect(f.stages).toEqual(["inventory"]);
+    expect(f.args.admit).toHaveBeenCalledOnce();
+    expect(
+      (await f.args.manager.load(f.args.binding)).filter((record) => record.kind === "invocation"),
+    ).toHaveLength(1);
   });
   it("stops material ambiguity at the first judge without speculative repair", async () => {
     const f = await setup({ abstain: true });

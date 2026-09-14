@@ -8,6 +8,7 @@ import {
   compilerObligationEvidence,
   readCompilerObligationEvidence,
   validateCompilerDraft,
+  CODEX_OBLIGATION_SCHEMA,
   CODEX_PLAN_JUDGE_SCHEMA,
 } from "../src/management/codex-cli.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
@@ -57,6 +58,7 @@ async function fixture() {
       },
     ],
   };
+  const claims = { version: 1 as const, obligations: inventory.obligations };
   const proposal = {
     title: "Test",
     workItems: [
@@ -99,7 +101,7 @@ async function fixture() {
       },
     ],
   };
-  return { context, inventory, proposal };
+  return { context, inventory, claims, proposal };
 }
 function verdict(
   inventory: ObligationInventory,
@@ -158,14 +160,15 @@ describe("independent compiler management boundaries", () => {
   });
 
   it("extracts obligations without a graph and durably checkpoints before returning", async () => {
-    const { context, inventory } = await fixture();
+    const { context, inventory, claims } = await fixture();
     const calls: string[] = [];
     const backend = new CodexCliManagementBackend({
       runStructured: async (_cwd, _schema, prompt) => {
         calls.push("invoke");
         expect(prompt).toContain("No compiled plan is available");
         expect(prompt).not.toContain('"workItems"');
-        return { value: inventory, usage };
+        expect(prompt).toContain("do not return or rewrite that trusted envelope");
+        return { value: claims, usage };
       },
     });
     const result = await backend.extractObligations(context, async () => {
@@ -179,6 +182,35 @@ describe("independent compiler management boundaries", () => {
         throw new Error("checkpoint unavailable");
       }),
     ).rejects.toMatchObject({ usage, message: "checkpoint unavailable" });
+  });
+
+  it("hydrates canonical evidence and gives a bounded invalid claim to one repair", async () => {
+    const { context, inventory, claims } = await fixture();
+    const prompts: string[] = [];
+    const backend = new CodexCliManagementBackend({
+      runStructured: async (_cwd, schema, prompt) => {
+        expect(schema).toEqual(CODEX_OBLIGATION_SCHEMA);
+        prompts.push(prompt);
+        return { value: claims, usage };
+      },
+    });
+    const result = await backend.extractObligations(context, async () => {}, undefined, {
+      revision: 1,
+      validationFailure: "unknown obligation citation",
+      previousProposal: {
+        rawProposal: {
+          version: 1,
+          obligations: [{ ...claims.obligations[0], evidenceIds: ["foreign"] }],
+        },
+        normalizationTrace: ["Factory attached the exact frozen evidence records"],
+      },
+    });
+
+    expect(result.inventory).toEqual(inventory);
+    expect(result.inventory.evidence).toEqual(context.repositoryEvidence);
+    expect(prompts[0]).toContain("priorInventoryFailure");
+    expect(prompts[0]).toContain("unknown obligation citation");
+    expect(prompts[0]).toContain('"foreign"');
   });
 
   it("passes the final admitted Objective remainder without a legacy 30-minute cap", async () => {

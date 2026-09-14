@@ -494,6 +494,22 @@ export async function inspectCompilerEvaluation(args: {
       record.kind === "terminal-conflict" ||
       record.kind === "stopped",
   }));
+  const configuredMaxRepairs = records[0]?.payload.limits;
+  const maxRepairs =
+    configuredMaxRepairs &&
+    typeof configuredMaxRepairs === "object" &&
+    "maxRepairs" in configuredMaxRepairs &&
+    typeof configuredMaxRepairs.maxRepairs === "number"
+      ? configuredMaxRepairs.maxRepairs
+      : null;
+  const correctionBudget = {
+    semantics: "shared across inventory regeneration and graph repair" as const,
+    maxRepairs,
+    inventoryRepairs: invocations.filter(
+      ({ invocation }) => invocation.stage === "inventory" && invocation.revision > 0,
+    ).length,
+    graphRepairs: invocations.filter(({ invocation }) => invocation.stage === "repair").length,
+  };
   const runtimeEconomics = summarizeRun(events, run.start.policy, args.snapshot.objectiveAuthority);
   const runtimeAccounting = runtimeEconomics
     ? [
@@ -523,6 +539,7 @@ export async function inspectCompilerEvaluation(args: {
     runtimeEvidence,
     annotations: annotations ?? null,
     usage,
+    correctionBudget,
     unresolvedInvocations,
     graphDigest: graph?.graphDigest ?? null,
     runtimeEconomics,
@@ -534,6 +551,7 @@ export async function inspectCompilerEvaluation(args: {
       "# Compiler draft history",
       "",
       `Run: ${run.runId}`,
+      `Correction budget: maxRepairs is shared across inventory regeneration and graph repair; configured ${correctionBudget.maxRepairs ?? "unavailable"}, inventory repairs ${correctionBudget.inventoryRepairs}, graph repairs ${correctionBudget.graphRepairs}.`,
       ...missingEvidence.map((item) => `- ${item}`),
       "",
       ...history.map(

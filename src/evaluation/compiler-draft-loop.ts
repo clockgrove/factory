@@ -305,9 +305,11 @@ export async function runCompilerDraftLoop(args: {
     };
   }
   if (terminal?.kind === "selection") {
-    const inventoryResult = records.find(
-      (item) => item.kind === "result" && item.payload.stage === "inventory",
+    const inventoryResults = records.filter(
+      (item) => item.kind === "result" && item.payload.stage === "inventory" && !item.payload.error,
     );
+    if (inventoryResults.length !== 1) throw new Error("compiler selection inventory is ambiguous");
+    const inventoryResult = inventoryResults[0];
     const proposal = records.find(
       (item) =>
         item.kind === "result" &&
@@ -615,15 +617,50 @@ export async function runCompilerDraftLoop(args: {
     return result.value;
   };
   try {
-    const inventory = await callbacks.validateInventory(
-      await invoke("inventory", 0, null, null, null),
-    );
+    let inventory: unknown;
+    let inventoryRepairs = 0;
+    let inventoryFailure: unknown = null;
+    for (let revision = 0; ; revision++) {
+      try {
+        const value = await invoke("inventory", revision, null, null, inventoryFailure);
+        inventory = await callbacks.validateInventory(value);
+        break;
+      } catch (error) {
+        if (
+          error instanceof CompilerDraftStopError ||
+          error instanceof CompilerDraftReservationConflictError ||
+          error instanceof CompilerDraftAccountingError ||
+          error instanceof CompilerDraftAdmissionError ||
+          error instanceof ProviderQuotaError
+        )
+          throw error;
+        const failed = records.find(
+          (item) =>
+            item.kind === "result" &&
+            item.payload.stage === "inventory" &&
+            item.payload.revision === revision &&
+            item.payload.error &&
+            item.payload.usage !== null,
+        );
+        // A backend success that no longer validates is changed grounding, not
+        // authority to issue a second paid call.
+        if (!failed) throw error;
+        inventoryFailure = {
+          error: diagnostic(error),
+          ...safeProposal(error),
+        };
+        if (inventoryRepairs >= limits.maxRepairs)
+          return await stop(`invalid-inventory: ${diagnostic(error)}`);
+        inventoryRepairs += 1;
+      }
+    }
     let previous: CompiledObjective | null = null;
     let failure: unknown = null;
     let reviewEvidence: unknown = null;
     const seen = new Set<string>();
     const blockerSets = new Set<string>();
-    for (let revision = 0; revision <= limits.maxRepairs; revision++) {
+    const graphRepairs = limits.maxRepairs - inventoryRepairs;
+    for (let revision = 0; revision <= graphRepairs; revision++) {
       let graph: CompiledObjective;
       let candidate: unknown;
       try {

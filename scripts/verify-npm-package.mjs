@@ -136,6 +136,7 @@ try {
     "plugin.json",
     "schemas/objective.schema.json",
     "skills/director/SKILL.md",
+    "templates/github/objective.yml",
   ]) {
     if (!paths.has(required)) throw new Error(`npm package is missing ${required}`);
   }

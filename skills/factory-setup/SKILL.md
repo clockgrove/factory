@@ -1,6 +1,6 @@
 ---
 name: factory-setup
-description: Sets up or troubleshoots the Factory plugin on its supported Linux hosts; use when Factory is not installed, is not loading, or a first read-only inspection is blocked. Do not use for starting or recovering Objectives.
+description: Sets up or troubleshoots the Factory plugin on its supported Linux hosts, and handles explicit requests to add its human Objective issue form to a selected repository. Use when Factory is not installed, is not loading, or a first read-only inspection is blocked. Do not use for starting or recovering Objectives.
 ---
 
 # Factory setup
@@ -13,6 +13,21 @@ Read the [local quick start](../../docs/setup/local.md) for the supported Codex 
 prerequisites, GitHub permissions, first Objective, and success criteria. Use the
 [configuration reference](../../docs/setup/configuration.md) only when credentials, process
 placement, or an optional provider is relevant. Do not copy those changing facts into this skill.
+
+## Optional human Objective form
+
+Global plugin installation has no destination-repository argument and never changes a repository.
+Never add the form automatically when Factory loads, a session starts, or the user asks only to
+install the plugin.
+
+When the user explicitly asks to add Factory's human Objective form to an exact repository, read
+the shipped [canonical form](../../templates/github/objective.yml). Inspect the destination's
+`AGENTS.md` and existing `.github/ISSUE_TEMPLATE/` files first. Add the canonical content at
+`.github/ISSUE_TEMPLATE/objective.yml` as an ordinary reviewable repository change, preserving
+unrelated templates and repository policy. If that path or a semantically equivalent Objective
+form already exists, compare it and report the existing or proposed state rather than overwriting
+adopter-owned content. Validate the YAML and the required GitHub issue-form fields. Do not add a
+human Work Item template: Factory generates Work Items from the accepted graph.
 
 ## Diagnose safely
 

@@ -52,7 +52,8 @@
     "mcp.json",
     "plugin.json",
     "schemas/",
-    "skills/"
+    "skills/",
+    "templates/"
   ],
   "engines": {
     "node": ">=20"

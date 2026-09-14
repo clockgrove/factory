@@ -47,6 +47,7 @@ const shippedEntries = [
   "plugin.json",
   "schemas",
   "skills",
+  "templates",
 ];
 
 function cleanEnvironment() {
@@ -245,6 +246,28 @@ async function main() {
   const installedRoot = installedPluginRoot(listed, codexHome, version);
   if (installedRoot === sourceRoot || installedRoot.startsWith(`${sourceRoot}${sep}`)) {
     throw new Error("clean install resolved back to the development worktree");
+  }
+
+  const objectiveFormPath = join(installedRoot, "templates", "github", "objective.yml");
+  const objectiveForm = readFileSync(objectiveFormPath, "utf8");
+  if (
+    !objectiveForm.includes("name: Factory Objective") ||
+    !objectiveForm.includes("factory:objective") ||
+    !objectiveForm.includes("id: outcome") ||
+    !objectiveForm.includes("id: authority") ||
+    /^labels:/m.test(objectiveForm)
+  ) {
+    throw new Error("installed Factory plugin has no canonical human Objective issue form");
+  }
+  const setupSkill = readFileSync(
+    join(installedRoot, "skills", "factory-setup", "SKILL.md"),
+    "utf8",
+  );
+  if (
+    !setupSkill.includes("templates/github/objective.yml") ||
+    !setupSkill.includes("Never add the form automatically")
+  ) {
+    throw new Error("installed Factory setup guidance omits the Objective form boundary");
   }
 
   const manifest = JSON.parse(

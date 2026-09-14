@@ -11952,8 +11952,8 @@ export class FactorySupervisor {
         paths: packet.allowedPaths,
         exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
       };
-      const current = this.#capacity.snapshot();
-      const admitted = this.#capacity.tryReserve(
+      const current = await this.#capacitySnapshot();
+      const admitted = await this.#reserveCapacity(
         current.generation,
         capacity,
         admissionCapacityLimits(
@@ -12104,7 +12104,8 @@ export class FactorySupervisor {
           if (capacityRecorded && (record || !providerStarted))
             await reconcile(capacity.cpu, capacity.memoryMb);
         } finally {
-          if (!capacityRecorded || record || !providerStarted) this.#releaseCapacity(capacity.key);
+          if (!capacityRecorded || record || !providerStarted)
+            await this.#releaseCapacity(capacity.key);
         }
       }
     }
@@ -12239,17 +12240,23 @@ export class FactorySupervisor {
         !localMemoryFits(resource, capacity.memoryMb, scheduling.capacity.local.minimumFreeMemoryMb)
       )
         throw new Error("local capacity pressure blocks native-rebase validation");
+      const current = await this.#capacitySnapshot();
       if (
-        !this.#capacity.tryReserve(
-          this.#capacity.snapshot().generation,
-          capacity,
-          admissionCapacityLimits(
-            this.#policy,
-            resource,
-            this.#run.objective,
-            Math.min(scheduling.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers),
-            this.#controllerLimits,
-          ),
+        !(
+          await this.#reserveCapacity(
+            current.generation,
+            capacity,
+            admissionCapacityLimits(
+              this.#policy,
+              resource,
+              this.#run.objective,
+              Math.min(
+                scheduling.capacity.local.maxWorkers,
+                this.#controllerLimits.maxLocalWorkers,
+              ),
+              this.#controllerLimits,
+            ),
+          )
         ).reserved
       )
         throw new Error("local capacity unavailable for native-rebase validation");
@@ -12293,7 +12300,7 @@ export class FactorySupervisor {
         );
       } catch (error) {
         if (pendingValidation) await discardValidationResult(pendingValidation);
-        if (!capacityRecorded) this.#releaseCapacity(capacity.key);
+        if (!capacityRecorded) await this.#releaseCapacity(capacity.key);
         throw error;
       }
       const releaseCapacity = () => this.#releaseCapacity(capacity.key);
@@ -12303,7 +12310,7 @@ export class FactorySupervisor {
           await discardValidationResult(validation);
           if (recorded) {
             await recordCapacity("CapacityReconciled");
-            releaseCapacity();
+            await releaseCapacity();
           }
         },
       };
@@ -13553,8 +13560,8 @@ export class FactorySupervisor {
         paths: packet.allowedPaths,
         exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
       };
-      const current = this.#capacity.snapshot();
-      const admitted = this.#capacity.tryReserve(
+      const current = await this.#capacitySnapshot();
+      const admitted = await this.#reserveCapacity(
         current.generation,
         capacity,
         admissionCapacityLimits(
@@ -13739,7 +13746,7 @@ export class FactorySupervisor {
             await reconcileCapacity(capacity.cpu, capacity.memoryMb);
         } finally {
           if (!capacityRecorded || record || !validationLaunched)
-            this.#releaseCapacity(capacity.key);
+            await this.#releaseCapacity(capacity.key);
         }
       }
     }
@@ -15203,18 +15210,23 @@ export class FactorySupervisor {
           paths: packet.allowedPaths,
           exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
         };
-        const state = this.#capacity.snapshot();
+        const state = await this.#capacitySnapshot();
         if (
-          !this.#capacity.tryReserve(
-            state.generation,
-            capacity,
-            admissionCapacityLimits(
-              this.#policy,
-              resource,
-              this.#run.objective,
-              Math.min(effective.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers),
-              this.#controllerLimits,
-            ),
+          !(
+            await this.#reserveCapacity(
+              state.generation,
+              capacity,
+              admissionCapacityLimits(
+                this.#policy,
+                resource,
+                this.#run.objective,
+                Math.min(
+                  effective.capacity.local.maxWorkers,
+                  this.#controllerLimits.maxLocalWorkers,
+                ),
+                this.#controllerLimits,
+              ),
+            )
           ).reserved
         )
           return false;
@@ -15510,7 +15522,7 @@ export class FactorySupervisor {
               );
           } finally {
             if (!recorded || candidate || failureRecorded || !validationLaunched)
-              this.#releaseCapacity(capacity.key);
+              await this.#releaseCapacity(capacity.key);
           }
         }
       }

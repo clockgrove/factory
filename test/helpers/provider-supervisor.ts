@@ -83,6 +83,7 @@ export interface ProviderFaults {
   maxAttemptsPerItem?: number;
   noModelTokenBudget?: boolean;
   dependencyChain?: boolean;
+  independentRoots?: boolean;
   adaptiveLocal?: boolean;
   localMaxParallel?: 2;
   loseIntegrationReceipt?: "before" | "after";
@@ -493,8 +494,9 @@ wheels = [
       preconditions: [],
       outOfScope: [],
       conventions: [],
-      dependsOn:
-        index === 2
+      dependsOn: faults.independentRoots
+        ? []
+        : index === 2
           ? ["a", "b"]
           : (faults.nativeStack || faults.dependencyChain) && index === 1
             ? ["a"]
@@ -522,7 +524,7 @@ wheels = [
           : {
               group: id,
               relationship:
-                index === 2
+                index === 2 && !faults.independentRoots
                   ? "join-after-merge"
                   : faults.dependencyChain && index === 1
                     ? "sibling"

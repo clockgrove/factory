@@ -2481,8 +2481,13 @@ export class FactorySupervisor {
     completedMergeOids?: Set<string>,
     stopBaseSha = run.baseSha,
     peerProof = false,
+    onRejection?: (stage: string) => void,
   ): Promise<boolean> {
-    if (snapshot.number !== run.objective) return false;
+    const reject = (stage: string): false => {
+      onRejection?.(stage);
+      return false;
+    };
+    if (snapshot.number !== run.objective) return reject("run-objective");
     if (!run.baseSha) {
       // Foreground starts deliberately have no activation/base envelope. Their
       // initial base is the authenticated immutable compilation, never today's
@@ -2522,7 +2527,7 @@ export class FactorySupervisor {
         receipt.event !== "GraphCompiled" ||
         receipt.sequence <= start.sequence
       )
-        return false;
+        return reject("foreground-start");
       const graph = await loadCompiledGraph(this.#recoveryStore, run.objective, run.runId);
       if (
         !graph ||
@@ -2532,21 +2537,21 @@ export class FactorySupervisor {
         graph.graphSize !== receipt.graphSize ||
         !graph.objective.workItems.every((item) => item.baseSha === receipt.baseSha)
       )
-        return false;
+        return reject("compiled-graph");
       const commit = await this.#recoveryStore.readCommit(graph.commitOid);
       if (
         commit.oid !== graph.commitOid ||
         commit.parentOids.length !== 1 ||
         commit.parentOids[0] !== receipt.baseSha
       )
-        return false;
+        return reject("compiled-parent");
       const projection = await loadCompiledGraphProjection(
         this.#recoveryStore,
         run.objective,
         run.runId,
         graph,
       );
-      if (!projection) return false;
+      if (!projection) return reject("graph-projection");
       assertAuthenticatedGraphProjection(events, run.objective, run.runId, projection);
       assertSnapshotMatchesCompiledGraph(graph.objective, snapshot, projection.bindings);
       stopBaseSha ??= receipt.baseSha;
@@ -2558,7 +2563,7 @@ export class FactorySupervisor {
     let cursor = targetBaseSha;
     const visited = new Set<string>();
     while (cursor !== stopBaseSha) {
-      if (visited.has(cursor) || visited.size >= 3200) return false;
+      if (visited.has(cursor) || visited.size >= 3200) return reject("ancestry-bound");
       visited.add(cursor);
       const matches = [];
       if (completionDeadline !== undefined) {
@@ -2578,14 +2583,27 @@ export class FactorySupervisor {
             event.runId === run.runId && "workItem" in event && event.workItem === item.number,
         );
         for (const linked of item.linkedPullRequests) {
-          if (linked.state !== "MERGED") continue;
+          // Linked issue metadata is a discovery hint; the exact PR response
+          // below decides whether this authenticated publication was merged.
+          if (
+            !events.some(
+              (event) =>
+                event.kind === "publication" &&
+                event.event === "PublicationRecorded" &&
+                event.pullRequest === linked.number,
+            )
+          )
+            continue;
           let pull = observations.get(linked.number);
           if (!pull) {
-            if (observations.size >= 1000) return false;
+            if (observations.size >= 1000) return reject("pull-bound");
             pull = await this.#store.readPullRequest(linked.number);
             observations.set(linked.number, pull);
           }
-          if (!pull.merged || pull.mergeCommitSha !== cursor) continue;
+          if (!pull.merged || pull.mergeCommitSha !== cursor) {
+            onRejection?.("pull-not-exact-merge");
+            continue;
+          }
           if (completionDeadline !== undefined) {
             const integrated = events.filter((event) => event.event === "AttemptIntegrated");
             if (
@@ -2594,7 +2612,7 @@ export class FactorySupervisor {
               integrated[0].headSha !== cursor ||
               Date.parse(integrated[0].at) > completionDeadline
             )
-              return false;
+              return reject("completion-receipt");
           }
           const publication = [...events]
             .reverse()
@@ -2604,7 +2622,7 @@ export class FactorySupervisor {
                 event.event === "PublicationRecorded" &&
                 event.pullRequest === linked.number,
             );
-          if (publication?.kind !== "publication") return false;
+          if (publication?.kind !== "publication") return reject("publication-record");
           selectEquivalentPublicationRecord(
             events.filter(
               (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
@@ -2623,7 +2641,8 @@ export class FactorySupervisor {
               event.attempt === publication.attempt &&
               event.policyDigest === run.policyDigest,
           );
-          if (published?.kind !== "attempt" || !published.artifactDigest) return false;
+          if (published?.kind !== "attempt" || !published.artifactDigest)
+            return reject("published-artifact");
           const validation = [...events]
             .reverse()
             .find(
@@ -2647,7 +2666,7 @@ export class FactorySupervisor {
                 event.sequence < published.sequence,
             )
           )
-            return false;
+            return reject("artifact-validation");
           const reservation = (await this.#attempts.list(run.objective, item.number)).find(
             (entry) => entry.runId === run.runId && entry.attempt === published.attempt,
           );
@@ -2666,7 +2685,7 @@ export class FactorySupervisor {
             pull.baseRepository?.toLowerCase() !== run.repository?.toLowerCase() ||
             pull.headRepository?.toLowerCase() !== run.repository?.toLowerCase()
           )
-            return false;
+            return reject("reservation-or-pull-binding");
           if (completionDeadline !== undefined || peerProof) {
             const review = await this.#reviews.load({
               kind: validation.baseSha === reservation.baseSha ? "artifact" : "rebase",
@@ -2689,7 +2708,7 @@ export class FactorySupervisor {
                 completionDeadline ?? Infinity,
               )
             )
-              return false;
+              return reject("original-review-accounting");
           }
           const head = await this.#store.readCommit(publication.headSha);
           if (
@@ -2697,7 +2716,7 @@ export class FactorySupervisor {
             head.parentOids.length !== 1 ||
             head.parentOids[0] !== validation.baseSha
           )
-            return false;
+            return reject("publication-parent");
           const exactHeadValidation = bindValidationToPublishedHead({
             validation: {
               passed: true,
@@ -2710,7 +2729,8 @@ export class FactorySupervisor {
             publishedBaseSha: validation.baseSha,
           });
           const commit = await this.#store.readCommit(cursor);
-          if (commit.oid !== cursor || commit.parentOids.length !== 1) return false;
+          if (commit.oid !== cursor || commit.parentOids.length !== 1)
+            return reject("squash-parent");
           const parent = commit.parentOids[0]!;
           const publishedPull: PublishedPullRequest = {
             number: linked.number,
@@ -2725,9 +2745,9 @@ export class FactorySupervisor {
             pull.headSha,
             run,
           );
-          if (refresh && refresh.identity.targetBaseSha !== parent) return false;
+          if (refresh && refresh.identity.targetBaseSha !== parent) return reject("refresh-parent");
           if (parent === validation.baseSha) {
-            if (refresh) return false;
+            if (refresh) return reject("unexpected-refresh");
             await verifySquashIntegration(this.#store, publishedPull, cursor, parent);
           } else {
             const candidate = await this.#mergeCandidates.load({
@@ -2750,7 +2770,7 @@ export class FactorySupervisor {
               review.review.unmetCriteria.length ||
               (refresh && candidate.validation.outputTreeSha !== refresh.outputTreeSha)
             )
-              return false;
+              return reject("candidate-acceptance");
             if (
               completionDeadline !== undefined &&
               (!this.#completedReviewAccounted(
@@ -2760,7 +2780,7 @@ export class FactorySupervisor {
               ) ||
                 Date.parse(candidate.validation.completedAt) > completionDeadline)
             )
-              return false;
+              return reject("candidate-completion-accounting");
             completedCandidates?.set(mergeCandidateIdentityDigest(candidate.identity), candidate);
             await verifyMergeCandidateSquash(
               this.#store,
@@ -2776,7 +2796,7 @@ export class FactorySupervisor {
         const peer = await this.#peerTrunkIntegration(cursor, snapshot, run);
         if (peer) matches.push(peer.parent);
       }
-      if (matches.length !== 1) return false;
+      if (matches.length !== 1) return reject("integration-match");
       completedMergeOids?.add(cursor);
       cursor = matches[0]!;
     }
@@ -12992,6 +13012,33 @@ export class FactorySupervisor {
       requiresIsolation: boolean;
       executionRequiresIsolation: boolean;
     } | null = null;
+    const rejections: {
+      stage: string;
+      objective: number | undefined;
+      runId: string | undefined;
+    }[] = [];
+    let omittedRejections = 0;
+    const reject = (stage: string, objective?: number, runId?: string) => {
+      if (rejections.length < 8) rejections.push({ stage, objective, runId });
+      else omittedRejections += 1;
+    };
+    const finish = () => {
+      if (!proof)
+        this.#notify(
+          `Factory peer integration proof: ${JSON.stringify({
+            measurementScope: "process-local-peer-proof",
+            receiverObjective: receiver.number,
+            receiverRunId: (receiverRun ?? this.#run)?.runId,
+            targetBaseSha: mergeSha,
+            candidateObjectives: objectives,
+            outcome: "not-proven",
+            rejections,
+            omittedRejections,
+          })}`,
+        );
+      return proof;
+    };
+    if (!objectives.length) reject("no-objective-hints");
     let proofObjective: number | undefined;
     let priorRequiresIsolation = false;
     let priorExecutionRequiresIsolation = false;
@@ -13005,6 +13052,7 @@ export class FactorySupervisor {
       const starts = (snapshot.factoryEvents ?? []).filter(
         (event) => event.kind === "run" && event.event === "FactoryRunStarted",
       );
+      if (!starts.length) reject("peer-run-unavailable", number);
       for (const start of starts) {
         if (
           start.kind !== "run" ||
@@ -13016,8 +13064,10 @@ export class FactorySupervisor {
           start.baseBranch !== receiver.defaultBranch ||
           start.actor.toLowerCase() !== (receiverRun ?? this.#run).actor.toLowerCase() ||
           start.objectiveAuthor.toLowerCase() !== snapshot.authorLogin?.toLowerCase()
-        )
+        ) {
+          reject("peer-run-binding", number, start.runId);
           continue;
+        }
         const events = snapshotEvents(snapshot).filter((event) => event.runId === start.runId);
         if (
           !events.some(
@@ -13027,29 +13077,45 @@ export class FactorySupervisor {
               Number.isFinite(Date.parse(event.at)) &&
               Date.parse(event.at) >= Date.parse(start.at),
           )
-        )
+        ) {
+          reject("peer-controller-observation", number, start.runId);
           continue;
+        }
         // Do not read every PR in every peer unless authenticated publication history
-        // and the observed linked merge identify a possible source for this exact commit.
-        const mergedItems = snapshot.workItems.filter(
-          (item) =>
-            item.linkedPullRequests.some((pull) => pull.state === "MERGED") &&
+        // and linked PR identity identify a possible source for this exact commit.
+        const publishedItems = snapshot.workItems.filter((item) =>
+          (item.factoryEvents ?? []).some(
+            (event) =>
+              event.kind === "publication" &&
+              (event.runId === start.runId || Boolean(start.recoveryRequestId)) &&
+              event.event === "PublicationRecorded" &&
+              item.linkedPullRequests.some((pull) => pull.number === event.pullRequest),
+          ),
+        );
+        if (!publishedItems.length) {
+          reject("peer-publication-unavailable", number, start.runId);
+          continue;
+        }
+        const exactItems: typeof publishedItems = [];
+        for (const item of publishedItems) {
+          for (const linked of item.linkedPullRequests.filter((pull) =>
             (item.factoryEvents ?? []).some(
               (event) =>
                 event.kind === "publication" &&
+                event.event === "PublicationRecorded" &&
                 (event.runId === start.runId || Boolean(start.recoveryRequestId)) &&
-                event.event === "PublicationRecorded",
+                event.pullRequest === pull.number,
             ),
-        );
-        if (!mergedItems.length) continue;
-        let exactAssociation = false;
-        for (const item of mergedItems) {
-          for (const linked of item.linkedPullRequests.filter((pull) => pull.state === "MERGED")) {
+          )) {
             const pull = await this.#store.readPullRequest(linked.number);
-            if (pull.merged && pull.mergeCommitSha === mergeSha) exactAssociation = true;
+            if (pull.merged && pull.mergeCommitSha === mergeSha && !exactItems.includes(item))
+              exactItems.push(item);
           }
         }
-        if (!exactAssociation) continue;
+        if (!exactItems.length) {
+          reject("peer-merge-association", number, start.runId);
+          continue;
+        }
         const policy = parseRunPolicy(start.policy);
         if (policyDigest(policy) !== start.policyDigest)
           throw new Error("peer run policy digest changed");
@@ -13101,7 +13167,11 @@ export class FactorySupervisor {
           fork: start.fork,
         };
         const commit = await this.#store.readCommit(mergeSha);
-        if (commit.parentOids.length !== 1) return null;
+        if (commit.parentOids.length !== 1) {
+          reject("peer-squash-parent", number, start.runId);
+          proof = null;
+          return finish();
+        }
         const adopted =
           recovery?.sourceIntegrations.filter(
             (source) => source.outcome.mergeCommitSha === mergeSha,
@@ -13124,12 +13194,13 @@ export class FactorySupervisor {
             undefined,
             commit.parentOids[0],
             true,
+            (stage) => reject(stage, number, start.runId),
           ))
         )
           continue;
         if (proof && proofObjective !== number)
           throw new Error("trunk commit has ambiguous cross-Objective ownership");
-        const matched = mergedItems.filter((item) =>
+        const matched = exactItems.filter((item) =>
           (item.factoryEvents ?? []).some(
             (event) =>
               event.kind === "attempt" &&
@@ -13141,7 +13212,7 @@ export class FactorySupervisor {
         // A lost final integration receipt is allowed only because the helper above
         // proved the real squash and pre-merge accepted checkpoints. Conservatively
         // propagate isolation from every candidate source if its exact item is unknown.
-        const sources = matched.length ? matched : mergedItems;
+        const sources = matched.length ? matched : exactItems;
         const adoptedIsolation = adopted.some((source) => {
           const original = recovery?.events.find(
             (event) =>
@@ -13200,7 +13271,7 @@ export class FactorySupervisor {
         proofObjective = number;
       }
     }
-    return proof;
+    return finish();
   }
 
   /** External trunk changes never acquire execution authority from being cleanly applicable. */

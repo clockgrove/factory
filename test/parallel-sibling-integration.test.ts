@@ -62,6 +62,10 @@ async function fixture(
     foreignPeerGeneration?: boolean;
     foreignPeerActor?: boolean;
     missingPeerReview?: boolean;
+    missingPeerAccounting?: boolean;
+    stalePeerSnapshot?: boolean;
+    missingPeerHints?: boolean;
+    peerPullFault?: "unmerged" | "different-merge";
     peerIsolated?: boolean;
     externalAdvance?: boolean;
     rejectReview?: boolean;
@@ -688,6 +692,10 @@ async function fixture(
           : {}),
       }),
     );
+    if (options.missingPeerAccounting)
+      item.factoryEvents = item.factoryEvents.filter(
+        (entry) => !(entry.kind === "budget" && entry.phase === "management"),
+      );
     const reserved = item.factoryEvents.find((entry) => entry.event === "AttemptReserved")!;
     const reservedOid = oid();
     refs.set(attemptRef(6, 88, 1), reservedOid);
@@ -802,7 +810,7 @@ async function fixture(
     [...refs].filter(([ref]) => ref.startsWith(prefix)).map(([ref, id]) => ({ ref, oid: id })),
   );
   vi.spyOn(GitHubControlStore.prototype, "readCommitObjectiveCandidates").mockImplementation(
-    async (sha) => (sha === peerMergeSha ? [6] : []),
+    async (sha) => (sha === peerMergeSha && !options.missingPeerHints ? [6] : []),
   );
   vi.spyOn(GitHubControlStore.prototype, "serverTime").mockImplementation(async () => new Date());
   vi.spyOn(GitHubControlStore.prototype, "getRepositoryFacts").mockResolvedValue({
@@ -854,7 +862,14 @@ async function fixture(
   vi.spyOn(GitHubControlStore.prototype, "assignIssue").mockResolvedValue(undefined);
   let reads = 0;
   vi.spyOn(GitHubReader.prototype, "readObjective").mockImplementation(async (number) => {
-    if (number === 6 && peerSnapshot) return structuredClone(peerSnapshot);
+    if (number === 6 && peerSnapshot) {
+      const observed = structuredClone(peerSnapshot);
+      // Snapshot linkage is advisory; the exact REST PR observation remains merged.
+      if (options.stalePeerSnapshot)
+        for (const item of observed.workItems)
+          for (const pull of item.linkedPullRequests) pull.state = "OPEN";
+      return observed;
+    }
     // Concurrent Git and validation work can require more than 80 observations
     // under the full coverage matrix. Keep a finite runaway fence aligned with
     // the provider Supervisor fixture instead of racing normal slow progress.
@@ -1005,13 +1020,18 @@ async function fixture(
         headRef: number === 88 ? publicationBranch(6, 88, 1) : publicationBranch(7, number - 10, 1),
         state: pull.state === "OPEN" ? "open" : "closed",
         draft: false,
-        merged: pull.state === "MERGED",
+        merged: pull.state === "MERGED" && !(number === 88 && options.peerPullFault === "unmerged"),
         mergeable: true,
         mergeableState: "clean",
         headSha: observedHead,
         baseRef: "main",
         baseSha: previewState === "stale-base" ? baseSha : currentBase,
-        mergeCommitSha: previewState === "absent" ? null : (mergeShas.get(number) ?? preview),
+        mergeCommitSha:
+          number === 88 && options.peerPullFault === "different-merge"
+            ? baseSha
+            : previewState === "absent"
+              ? null
+              : (mergeShas.get(number) ?? preview),
         createdAt: new Date(now.getTime() - 120_000),
       };
     });
@@ -1164,19 +1184,100 @@ describe("Supervisor parallel independent sibling integration", () => {
     15000,
   );
 
-  it.each(["foreignPeerActor", "missingPeerReview"] as const)(
+  it.each([false, true])(
+    "verifies an exact peer merge despite an OPEN linked-PR snapshot (regular=%s)",
+    async (regular) => {
+      const notices: string[] = [];
+      const f = await fixture({
+        regular,
+        peerAdvance: true,
+        stalePeerSnapshot: true,
+        onStatus: (message) => notices.push(message),
+      });
+      const originalPeer = structuredClone(f.peerSnapshot);
+      const result = await f.run();
+      expect(result, result.reason).toMatchObject({ status: "completed" });
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18, 19]);
+      expect(f.peerSnapshot).toEqual(originalPeer);
+      expect(f.git("show", "HEAD:peer.txt")).toBe("peer");
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(
+        notices.filter((message) => message.startsWith("Factory peer integration proof: ")),
+      ).toEqual([]);
+    },
+    15000,
+  );
+
+  it.each(["missing-hints", "unmerged", "different-merge"] as const)(
+    "does not infer peer integration from incomplete or contrary evidence: %s",
+    async (fault) => {
+      const notices: string[] = [];
+      const f = await fixture({
+        regular: true,
+        peerAdvance: true,
+        stalePeerSnapshot: true,
+        ...(fault === "missing-hints" ? { missingPeerHints: true } : { peerPullFault: fault }),
+        onStatus: (message) => notices.push(message),
+      });
+      expect(await f.run()).toMatchObject({ status: "escalated" });
+      expect(f.merge).not.toHaveBeenCalled();
+      expect(f.review).not.toHaveBeenCalled();
+      expect(f.validate).not.toHaveBeenCalled();
+      expect(f.launch).not.toHaveBeenCalled();
+      if (fault !== "missing-hints") expect(f.pullReads).toHaveBeenCalledWith(88);
+      const reports = notices
+        .filter((message) => message.startsWith("Factory peer integration proof: "))
+        .map((message) => JSON.parse(message.slice("Factory peer integration proof: ".length)));
+      expect(reports.length).toBeGreaterThan(0);
+      for (const report of reports) {
+        expect(report).toMatchObject({
+          measurementScope: "process-local-peer-proof",
+          receiverObjective: 7,
+          receiverRunId: "parallel",
+          targetBaseSha: f.peerMergeSha,
+          candidateObjectives: fault === "missing-hints" ? [] : [6],
+          outcome: "not-proven",
+          omittedRejections: 0,
+          rejections: expect.arrayContaining([
+            expect.objectContaining({
+              stage: fault === "missing-hints" ? "no-objective-hints" : "peer-merge-association",
+            }),
+          ]),
+        });
+        expect(report.rejections.length).toBeLessThanOrEqual(8);
+      }
+    },
+  );
+
+  it.each(["foreignPeerActor", "missingPeerReview", "missingPeerAccounting"] as const)(
     "rejects peer history with %s before any merge or paid candidate review",
     async (fault) => {
-      const f = await fixture({ regular: true, peerAdvance: true, [fault]: true });
+      const notices: string[] = [];
+      const f = await fixture({
+        regular: true,
+        peerAdvance: true,
+        stalePeerSnapshot: true,
+        [fault]: true,
+        onStatus: (message) => notices.push(message),
+      });
       expect(await f.run()).toMatchObject({ status: "escalated" });
       expect(f.merge).not.toHaveBeenCalled();
       expect(f.review).not.toHaveBeenCalled();
       expect(f.launch).not.toHaveBeenCalled();
+      if (fault !== "foreignPeerActor")
+        expect(
+          notices.some((message) => message.includes('"stage":"original-review-accounting"')),
+        ).toBe(true);
     },
   );
 
   it("does not turn isolated peer code into host validation or infer paid-validator authority", async () => {
-    const f = await fixture({ regular: true, peerAdvance: true, peerIsolated: true });
+    const f = await fixture({
+      regular: true,
+      peerAdvance: true,
+      stalePeerSnapshot: true,
+      peerIsolated: true,
+    });
     expect(await f.run()).toMatchObject({ status: "escalated" });
     expect(f.merge).not.toHaveBeenCalled();
     expect(f.review).not.toHaveBeenCalled();

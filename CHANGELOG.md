@@ -21,6 +21,10 @@ and artifacts, and record the commit SHA when installing from source.
 
 ### Fixed
 
+- Use a portable bare shell command in MCP manifests so Agent Plugins loaders accept
+  the bundled server instead of exposing only Factory skills. Preserve the startup launcher
+  and its missing-Node diagnostic.
+
 - Remove speculative minute/hour GitHub mutation quotas that could delay completion and
   cancellation without a GitHub refusal. Concurrent Objectives retain shared request admission,
   concurrency and server-directed backoff. ([#373](https://github.com/clockgrove/factory/issues/373))

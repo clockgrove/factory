@@ -112,12 +112,12 @@ describe("controller phase observations", () => {
         observeGitHubTransport(
           "https://api.github.com/repos/private/repository/issues/123/comments?since=private",
         );
-        observeMutationQueue(1200, { "mutation-spacing": 1000, "admission-contention": 200 });
+        observeMutationQueue(1200, { "admission-contention": 1200 });
       },
     );
     expect(phases[0]).toMatchObject({
       requestsByRoute: { "capacity-ref": 1, "git-commit": 1, "issue-comments": 1 },
-      mutationWaitReasonMs: { "mutation-spacing": 1000, "admission-contention": 200 },
+      mutationWaitReasonMs: { "admission-contention": 1200 },
       aggregateQueueWaitMs: 1200,
     });
     expect(JSON.stringify(phases)).not.toMatch(/private|secret-sha|123/);

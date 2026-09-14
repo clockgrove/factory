@@ -10,9 +10,8 @@ import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "./platfo
  *     derived Work Item and the snapshot's `now` and return what to do. No
  *     I/O, so the decision boundaries are unit-tested without a network.
  *   - `Dispatcher` performs the GitHub writes those decisions call for. Every
- *     one is routed through `platform.ts`'s `CircuitBreaker`,
- *     `ContentCreationPacer`, and `ConcurrencyLimiter` (GitHub's own
- *     rate-limit guidance) — no call site may reach the network directly.
+ *     one is routed through the circuit breaker, mutation admission gate, and
+ *     concurrency limiter — no call site may reach the network directly.
  *
  * Nothing here stores a retry count. §4.2's "on second confirm failure,
  * escalate" is answered by `confirmFailureStreak` (state.ts), recomputed
@@ -70,11 +69,9 @@ export interface ApprovalOutcome {
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
-  ContentCreationPacer,
   MutationScheduler,
   PlatformUnavailableError,
   classifyRefusal,
-  isSecondaryRateLimitRefusal,
   withGitHubRequestPriority,
   type MutationAdmission,
 } from "./platform.js";
@@ -497,7 +494,6 @@ export interface DispatcherOptions {
   escalateToId: string;
   onThrottle?: (message: string) => void;
   circuitBreaker?: CircuitBreaker;
-  pacer?: ContentCreationPacer;
   concurrency?: ConcurrencyLimiter;
   mutationScheduler?: MutationAdmission;
   beforeMutation?: (waitedMs: number) => Promise<void>;
@@ -514,7 +510,6 @@ export class Dispatcher {
   readonly #escalateToId: string;
   readonly #notify: (message: string) => void;
   readonly #breaker: CircuitBreaker;
-  readonly #pacer: ContentCreationPacer;
   readonly #concurrency: ConcurrencyLimiter;
   readonly #mutations: MutationAdmission;
   readonly #beforeMutation: (waitedMs: number) => Promise<void>;
@@ -534,14 +529,8 @@ export class Dispatcher {
     this.#escalateToId = opts.escalateToId;
     this.#notify = opts.onThrottle ?? (() => {});
     this.#breaker = opts.circuitBreaker ?? new CircuitBreaker();
-    this.#pacer = opts.pacer ?? new ContentCreationPacer();
     this.#concurrency = opts.concurrency ?? new ConcurrencyLimiter();
-    this.#mutations =
-      opts.mutationScheduler ??
-      new MutationScheduler({
-        pacer: this.#pacer,
-        onThrottle: this.#notify,
-      });
+    this.#mutations = opts.mutationScheduler ?? new MutationScheduler();
     this.#beforeMutation = opts.beforeMutation ?? (async () => {});
     this.#captureMutationFence = opts.captureMutationFence;
     this.#mutationScope = opts.mutationScope ?? "dispatcher";
@@ -876,7 +865,7 @@ export class Dispatcher {
   /**
    * §4: close the Objective issue once `allDone()` (state.ts) confirms every
    * Work Item is `done`. Routed through `#call` like every other write here
-   * — same breaker/pacer/concurrency discipline, no special case.
+   * — same breaker/admission/concurrency discipline, no special case.
    */
   async closeObjective(objectiveId: string): Promise<void> {
     await this.#call(() => this.#writer.closeIssue(objectiveId));
@@ -1111,7 +1100,7 @@ export class Dispatcher {
   }
 
   /**
-   * Routes one mutating call through the breaker, pacer, and concurrency
+   * Routes one mutating call through the breaker, admission gate, and concurrency
    * limiter (Finding 4) — the same discipline for every write this class
    * makes, so no call site can bypass it by accident.
    */
@@ -1190,7 +1179,6 @@ export class Dispatcher {
       if (!attempted) throw error;
       const refusal = classifyRefusal(error);
       if (refusal.kind === "not_refusal") throw error;
-      mutationPermit.recordRefusal?.(isSecondaryRateLimitRefusal(error));
       if (!isKnownPrimaryQuotaRefusal(error)) this.#breaker.recordRefusal(refusal);
       throw new PlatformUnavailableError(refusal, error);
     } finally {

@@ -21,6 +21,10 @@ and artifacts, and record the commit SHA when installing from source.
 
 ### Fixed
 
+- Remove speculative minute/hour GitHub mutation quotas that could delay completion and
+  cancellation without a GitHub refusal. Concurrent Objectives retain shared request admission,
+  concurrency and server-directed backoff. ([#373](https://github.com/clockgrove/factory/issues/373))
+
 - Wake local repository discovery, active Supervisor commands, capacity admission and backend
   completion observation after their producers make progress. Preserve authenticated reads,
   quota/backoff and bounded cross-host polling without increasing idle GitHub traffic.

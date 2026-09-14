@@ -4,7 +4,7 @@ import { LeaseManager } from "../src/control/lease.js";
 import { decodeEventComments } from "../src/control/receipts.js";
 import { RepositoryLeaseManager } from "../src/controller/repository-lease.js";
 import { runGitHubRepositoryController } from "../src/controller/repository-controller.js";
-import { ContentCreationPacer, MutationScheduler } from "../src/platform.js";
+import { MutationScheduler } from "../src/platform.js";
 import { policyDigest } from "../src/protocol/policy.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
@@ -52,17 +52,8 @@ it("the actual Supervisor drains and releases its owned lease after a queued rec
   const queued = new Promise<void>((resolve) => {
     reached = resolve;
   });
-  const pacer = new ContentCreationPacer(40, 6, 0);
-  // Test interruption at a synthetic spacing delay, independently of the
-  // shared rolling-window limits that also apply to lease retirement.
-  vi.spyOn(pacer, "wait").mockImplementation((_now, options) => ({
-    ms: options?.priority ? 0 : 12 * 60_000,
-    reason: "mutation-spacing",
-  }));
-  const scheduler = new MutationScheduler({
-    pacer,
-    onThrottle: () => reached(),
-  });
+  const scheduler = new MutationScheduler();
+  const held = await scheduler.acquire("lease");
   f.repositoryResources.mutationScheduler = scheduler;
   // Physical headroom forces the real planner's queued receipt before any
   // execution admission. Do not substitute a fake Supervisor catch handler.
@@ -84,7 +75,9 @@ it("the actual Supervisor drains and releases its owned lease after a queued rec
   addComment.mockImplementation(async function (this: GitHubControlStore, node, body) {
     if (!decodeEventComments(body).some((event) => event.event === "WorkItemQueued"))
       return persist.call(this, node, body);
-    const permit = await scheduler.acquire("normal");
+    const pending = scheduler.acquire("normal");
+    reached();
+    const permit = await pending;
     try {
       permit.assertDispatchAllowed?.();
       normalDispatched++;
@@ -161,8 +154,8 @@ it("the actual Supervisor drains and releases its owned lease after a queued rec
       throw error ?? new Error("controller returned before the queued receipt boundary");
     }),
   ]);
-  expect(pacer.waitMs(new Date())).toBeGreaterThan(11 * 60_000);
   shutdown.abort();
+  held.release();
   expect(await outcome).toBeUndefined();
   expect(retired).toEqual(["objective", "repository"]);
   expect(objectiveRelease).toHaveBeenCalledTimes(1);

@@ -7,13 +7,10 @@ import { createOctokit, withGitHubTransportCallbacks, type GitHubOptions } from 
 import {
   type CircuitBreaker,
   type ConcurrencyLimiter,
-  type ContentCreationPacer,
   createGitHubMutationScope,
   GitHubPrimaryAdmissionDeferredError,
-  MutationScheduler,
   PlatformUnavailableError,
   classifyRefusal,
-  isSecondaryRateLimitRefusal,
   withGitHubRequestPriority,
   type MutationAdmission,
   type MutationClass,
@@ -169,7 +166,6 @@ function isUnavailablePrivateRepositoryRuleFeature(error: unknown, documentation
 
 export interface GitHubControlStoreOptions extends GitHubOptions {
   circuitBreaker?: CircuitBreaker;
-  pacer?: ContentCreationPacer;
   concurrency?: ConcurrencyLimiter;
   mutationScheduler?: MutationAdmission;
   beforeMutation?: (kind: MutationClass, waitedMs: number) => Promise<void>;
@@ -239,7 +235,6 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   readonly #owner: string;
   readonly #repo: string;
   readonly #breaker: CircuitBreaker;
-  readonly #pacer: ContentCreationPacer;
   readonly #concurrency: ConcurrencyLimiter;
   readonly #mutations: MutationAdmission;
   readonly #beforeMutation: (kind: MutationClass, waitedMs: number) => Promise<void>;
@@ -285,18 +280,10 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     this.#octokit = createOctokit(options);
     this.#owner = options.owner;
     this.#repo = options.repo;
-    const scope = createGitHubMutationScope(options.token, options.onThrottle);
+    const scope = createGitHubMutationScope(options.token);
     this.#breaker = options.circuitBreaker ?? scope.circuitBreaker;
-    this.#pacer = options.pacer ?? scope.pacer;
     this.#concurrency = options.concurrency ?? scope.concurrency;
-    this.#mutations =
-      options.mutationScheduler ??
-      (options.pacer
-        ? new MutationScheduler({
-            pacer: options.pacer,
-            ...(options.onThrottle ? { onThrottle: options.onThrottle } : {}),
-          })
-        : scope.mutationScheduler);
+    this.#mutations = options.mutationScheduler ?? scope.mutationScheduler;
     this.#beforeMutation = options.beforeMutation ?? (async () => {});
     this.#captureMutationFence = options.captureMutationFence;
     this.#assertMutationIdentity = options.assertMutationIdentity;
@@ -506,7 +493,6 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       const refusal =
         error instanceof PlatformUnavailableError ? error.refusal : classifyRefusal(error);
       if (refusal.kind !== "not_refusal") {
-        mutationPermit?.recordRefusal?.(isSecondaryRateLimitRefusal(error));
         if (!isKnownPrimaryQuotaRefusal(error)) this.#breaker.recordRefusal(refusal);
         throw new PlatformUnavailableError(refusal, error);
       }

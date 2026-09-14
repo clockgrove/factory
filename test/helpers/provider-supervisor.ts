@@ -1720,7 +1720,7 @@ jobs:
       return result;
     },
   };
-  const shared = createRepositorySupervisorResources(undefined, {
+  const shared = createRepositorySupervisorResources({
     maxLocalWorkers: 1,
     maxPaidWorkers: 2,
   });

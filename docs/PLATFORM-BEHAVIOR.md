@@ -264,8 +264,10 @@ The documented secondary-limit triggers, any one of which is sufficient:
 | Content-creating requests | > 80/minute or > 500/hour (issues, comments, pull requests, assignments) |
 | OAuth token requests | > 2,000/hour |
 
-A 26-issue burst in ~35 s sits directly on the concurrent-request and content-creation triggers. This
-is a consequence of wave shape, not a platform anomaly.
+A 26-issue burst in ~35 s can involve many more API requests than issues. The issue count alone
+does not identify which secondary trigger refused it. Factory keeps shared request concurrency
+and responds to actual GitHub rate-limit signals; it does not reconstruct a remaining secondary
+allowance from local mutation counts. Other Objectives, processes and clients share that capacity.
 
 ## Finding 5 — the agent *does* publish an outcome signal, on the pull request timeline
 

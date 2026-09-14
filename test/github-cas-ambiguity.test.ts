@@ -20,11 +20,7 @@ function response(data: unknown, status = 200, headers: Record<string, string> =
   return Response.json(data, { status, headers });
 }
 function scheduler() {
-  return new MutationScheduler({
-    sleep: async (ms) => {
-      advance(ms);
-    },
-  });
+  return new MutationScheduler();
 }
 
 beforeEach(() => {

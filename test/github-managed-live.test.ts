@@ -15,12 +15,7 @@ import type { AttemptContext, BackendHandle } from "../src/execution/backend.js"
 import { assertArtifactScope, verifyArtifact } from "../src/execution/artifacts.js";
 import { GraphApplier, GithubOctokitGraphWriter, type CompiledObjective } from "../src/graph.js";
 import { GitHubReader } from "../src/github.js";
-import {
-  CircuitBreaker,
-  ConcurrencyLimiter,
-  ContentCreationPacer,
-  MutationScheduler,
-} from "../src/platform.js";
+import { CircuitBreaker, ConcurrencyLimiter, MutationScheduler } from "../src/platform.js";
 import { verifyLocalRepository } from "../src/supervisor.js";
 
 const LIVE = process.env.FACTORY_LIVE_GITHUB_MANAGED === "1";
@@ -123,13 +118,11 @@ describe.skipIf(!LIVE)("live GitHub managed-agent plus isolated-validator smoke"
 
       const token = required("GITHUB_TOKEN");
       const breaker = new CircuitBreaker();
-      const pacer = new ContentCreationPacer();
       const concurrency = new ConcurrencyLimiter();
-      const mutations = new MutationScheduler({ pacer });
+      const mutations = new MutationScheduler();
       const github = { token, ...target };
       const controls = {
         circuitBreaker: breaker,
-        pacer,
         concurrency,
         mutationScheduler: mutations,
       };

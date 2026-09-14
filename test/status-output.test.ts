@@ -192,15 +192,6 @@ function processTelemetry(
         observedAt: "2026-09-04T12:05:00.000Z",
       },
     ],
-    localSecondaryEstimate: {
-      transportedLastMinute: counts.transported === 0 ? 0 : 2,
-      transportedLastHour: counts.transported,
-      estimatedHourlyCapacity: 499,
-      confidence: "low",
-      secondaryRefusals: 0,
-      limitingReason: "local-secondary-estimate",
-      nextAdmissionAt: "2026-09-04T12:05:07.215Z",
-    },
   };
 }
 

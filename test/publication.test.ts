@@ -581,20 +581,32 @@ describe("host-owned publication", () => {
       false,
     );
 
-    const pullRaceStore = new GitObjectStore(repository, base.oid);
-    await expect(
-      publishValidated({
+    for (const observedHead of [null, "8".repeat(40)]) {
+      const pullRaceStore = new GitObjectStore(repository, base.oid);
+      let expectedHead: string | undefined;
+      let publicationRef: string | undefined;
+      const createPull = vi.spyOn(pullRaceStore, "createPullRequest");
+      const publication = publishValidated({
         ...args,
         store: pullRaceStore,
         beforePullRequestMutation: async () => {
-          const branch = [...pullRaceStore.refs.keys()].find((ref) => ref !== "refs/heads/main");
-          if (!branch) throw new Error("publication branch was not created");
-          pullRaceStore.refs.set(branch, "8".repeat(40));
+          publicationRef = [...pullRaceStore.refs.keys()].find((ref) => ref !== "refs/heads/main");
+          if (!publicationRef) throw new Error("publication branch was not created");
+          expectedHead = pullRaceStore.refs.get(publicationRef);
+          if (observedHead === null) pullRaceStore.refs.delete(publicationRef);
+          else pullRaceStore.refs.set(publicationRef, observedHead);
         },
-      }),
-    ).rejects.toThrow(/publication branch .* changed after policy admission/i);
-    expect(pullRaceStore.pull).toBeNull();
-    expect([...pullRaceStore.refs.keys()].some((ref) => ref !== "refs/heads/main")).toBe(true);
+      });
+      await expect(publication).rejects.toThrow(/changed after policy admission/);
+      await expect(publication).rejects.toThrow(
+        `publication branch ${publicationRef!.replace(/^refs\/heads\//, "")} changed after policy admission ` +
+          `(stage=before-pull-request expected=${expectedHead} observed=${observedHead ?? "absent"})`,
+      );
+      expect(expectedHead).toMatch(/^[a-f0-9]{40}$/);
+      expect(pullRaceStore.refs.get(publicationRef!)).toBe(observedHead ?? undefined);
+      expect(createPull).not.toHaveBeenCalled();
+      expect(pullRaceStore.pull).toBeNull();
+    }
 
     const refAuthorityRaceStore = new GitObjectStore(repository, base.oid);
     let commitPrepared = false;

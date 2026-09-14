@@ -221,7 +221,7 @@ describe("exact semantic review materialization", () => {
     await discardValidationResult(validation);
     const command = join(input.repository, "fixture-review-command.cjs");
     // Disposable protocol stand-in, not a model or semantic qualification. This
-    // exercises the real argv/environment/process path after actual validation.
+    // exercises the real stdin/argv/environment/process path after actual validation.
     await writeFile(
       command,
       `#!${process.execPath}
@@ -229,7 +229,9 @@ const assert = require('node:assert/strict');
 const {readFileSync, existsSync} = require('node:fs');
 const {execFileSync} = require('node:child_process');
 const args = process.argv.slice(2);
-const context = JSON.parse(args.at(-1).split('\\n\\n').at(-1));
+assert.equal(args.at(-1), '-');
+const prompt = readFileSync(0, 'utf8');
+const context = JSON.parse(prompt.split('\\n\\n').at(-1));
 assert.equal(args[args.indexOf('-C') + 1], process.cwd());
 assert.equal(process.env.GIT_WORK_TREE, undefined);
 assert.equal(process.env.GIT_INDEX_FILE, undefined);

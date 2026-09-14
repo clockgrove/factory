@@ -27,6 +27,10 @@ and artifacts, and record the commit SHA when installing from source.
   Document direct installation of Factory's public skills with `npx skills add clockgrove/factory`.
   ([#387](https://github.com/clockgrove/factory/issues/387))
 
+- Stream bounded management prompts to Codex CLI stdin instead of placing them in the process
+  argument vector, so documentation-rich compilation and repair inputs do not fail with Linux
+  `E2BIG`. ([#392](https://github.com/clockgrove/factory/issues/392))
+
 - Use a portable bare shell command in MCP manifests so Agent Plugins loaders accept
   the bundled server instead of exposing only Factory skills. Preserve the startup launcher
   and its missing-Node diagnostic.

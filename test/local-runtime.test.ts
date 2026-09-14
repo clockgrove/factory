@@ -11,6 +11,7 @@ import {
   processGroupExists,
   runContainedProcess,
   sanitizedWorkerEnvironment,
+  startContainedProcess,
   terminateProcessGroup,
 } from "../src/runtime/process-group.js";
 import {
@@ -101,6 +102,99 @@ describe("contained processes", () => {
     expect(result.timedOut).toBe(true);
     expect(Buffer.byteLength(result.stdout)).toBeLessThanOrEqual(512);
     expect(result.stdout).toContain("output truncated");
+  });
+
+  it("delivers large bounded text through stdin without placing it in argv", async () => {
+    const suffix = "\nterminal marker";
+    const input = `${"x".repeat(1024 * 1024 - Buffer.byteLength(suffix))}${suffix}`;
+    expect(Buffer.byteLength(input, "utf8")).toBe(1024 * 1024);
+    const result = await runContainedProcess({
+      command: process.execPath,
+      args: [
+        "-e",
+        "let value = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk => value += chunk); process.stdin.on('end', () => process.stdout.write(JSON.stringify({ bytes: Buffer.byteLength(value), suffix: value.endsWith('terminal marker') })));",
+      ],
+      cwd: tmpdir(),
+      env: sanitizedWorkerEnvironment(process.env),
+      stdin: { text: input, maxBytes: 1024 * 1024 },
+      timeoutMs: 10_000,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      bytes: Buffer.byteLength(input),
+      suffix: true,
+    });
+  });
+
+  it.each(["", "Clock🌳\nsecond line"])(
+    "delivers empty and structured Unicode input at its exact byte bound",
+    async (input) => {
+      const bytes = Buffer.byteLength(input, "utf8");
+      const result = await runContainedProcess({
+        command: process.execPath,
+        args: [
+          "-e",
+          "let value = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk => value += chunk); process.stdin.on('end', () => process.stdout.write(JSON.stringify({ value, bytes: Buffer.byteLength(value) })));",
+        ],
+        cwd: tmpdir(),
+        env: sanitizedWorkerEnvironment(process.env),
+        stdin: { text: input, maxBytes: bytes },
+        timeoutMs: 10_000,
+      });
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ value: input, bytes });
+    },
+  );
+
+  it("terminates without hanging when a timed-out child does not consume stdin", async () => {
+    const result = await runContainedProcess({
+      command: process.execPath,
+      args: ["-e", "setInterval(() => {}, 1000)"],
+      cwd: tmpdir(),
+      env: sanitizedWorkerEnvironment(process.env),
+      stdin: { text: "x".repeat(1024 * 1024), maxBytes: 1024 * 1024 },
+      timeoutMs: 50,
+      cancellationGraceMs: 20,
+    });
+    expect(result.timedOut).toBe(true);
+  });
+
+  it("cancels without hanging while a child is not consuming stdin", async () => {
+    const processHandle = startContainedProcess({
+      command: process.execPath,
+      args: ["-e", "setInterval(() => {}, 1000)"],
+      cwd: tmpdir(),
+      env: sanitizedWorkerEnvironment(process.env),
+      stdin: { text: "x".repeat(1024 * 1024), maxBytes: 1024 * 1024 },
+      timeoutMs: 10_000,
+      cancellationGraceMs: 20,
+    });
+    await processHandle.cancel();
+    await expect(processHandle.completed).resolves.toMatchObject({ timedOut: false });
+  });
+
+  it("rejects stdin above its declared bound before launching the child", async () => {
+    await expect(
+      runContainedProcess({
+        command: process.execPath,
+        args: ["-e", "process.exit(0)"],
+        cwd: tmpdir(),
+        stdin: { text: "too large", maxBytes: 3 },
+        timeoutMs: 10_000,
+      }),
+    ).rejects.toThrow("stdin exceeds byte bound");
+  });
+
+  it("rejects secret material before opening a child stdin pipe", async () => {
+    await expect(
+      runContainedProcess({
+        command: process.execPath,
+        args: ["-e", "process.exit(0)"],
+        cwd: tmpdir(),
+        stdin: { text: `authorization: bearer ghp_${"x".repeat(40)}`, maxBytes: 1024 },
+        timeoutMs: 10_000,
+      }),
+    ).rejects.toThrow("stdin input contains suspected GitHub token");
   });
 
   it("treats EPERM as a present process group and fails closed on termination", async () => {

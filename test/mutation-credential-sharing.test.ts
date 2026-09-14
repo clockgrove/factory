@@ -97,6 +97,49 @@ describe("credential-shared mutation quota with owner-local retirement", () => {
     }
   });
 
+  it("blocks same-credential peers for an isolated server failure's five-second fallback", async () => {
+    let now = Date.parse("2026-09-14T00:00:00Z");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    const token = "shared-short-server-failure";
+    const firstRequest = vi.fn(async () =>
+      Response.json({ message: "Service unavailable" }, { status: 503 }),
+    );
+    const peerRequest = vi.fn(async () => Response.json({ sha: "a".repeat(40) }));
+    const first = new GitHubControlStore({
+      token,
+      owner: "o",
+      repo: "first",
+      requestFetch: firstRequest,
+    });
+    const peer = new GitHubControlStore({
+      token,
+      owner: "o",
+      repo: "peer",
+      requestFetch: peerRequest,
+    });
+    try {
+      await expect(first.createBlob(Buffer.from("first"))).rejects.toMatchObject({
+        retryAfterMs: 5_000,
+      });
+      const breaker = createGitHubMutationScope(token).circuitBreaker;
+      expect(breaker.waitMs(new Date(now))).toBe(5_000);
+      // A previously in-flight successful response cannot clear this refusal.
+      breaker.recordSuccess();
+      now += 4_999;
+      vi.setSystemTime(now);
+      await expect(peer.createBlob(Buffer.from("peer"))).rejects.toThrow("platform unavailable");
+      expect(peerRequest).not.toHaveBeenCalled();
+      now += 1;
+      vi.setSystemTime(now);
+      await expect(peer.createBlob(Buffer.from("peer"))).resolves.toBe("a".repeat(40));
+      expect(firstRequest).toHaveBeenCalledTimes(1);
+      expect(peerRequest).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shares actual secondary refusal feedback across stores but isolates credentials", async () => {
     let firstRequests = 0;
     let peerRequests = 0;

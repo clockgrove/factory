@@ -304,6 +304,13 @@ allowance from its own mutation count or impose local minute/hour content ceilin
 Objectives, processes and GitHub clients can consume the same capacity. Actual primary responses
 and secondary refusals govern admission and backoff. Octokit's internal retries are disabled so
 every retry returns through Factory's shared admission and circuit controls.
+Without usable server timing, HTTP 5xx failures use a 5-second fallback and rate-limit
+refusals use 60 seconds. Valid Retry-After seconds or HTTP dates apply to both; primary
+reset deadlines remain binding. Three consecutive refusals trip the shared circuit, whose
+additional cooldown grows through 1, 2, 4, 8 and 10 minutes across unresolved trips.
+Successful traffic resets that escalation history without clearing an existing refusal deadline.
+These delays govern admission; they do not authorize replay of ambiguous mutations or bypass
+ownership expiry after a Supervisor retires.
 Process-local mutation counters include their scheduler-lifetime measurement window and remain
 outside durable run economics. A reader process cannot attribute its own counters to a reconstructed
 run; without durable run-bound evidence, that historical measurement is explicitly unavailable.

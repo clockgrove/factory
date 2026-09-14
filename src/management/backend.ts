@@ -52,6 +52,12 @@ export interface CompilationContext {
   repositoryEvidence?: CompilerEvidence[];
   /** Authenticated pre-v2 issue core. The compiler may enrich, never decompose or rewrite it. */
   legacyGraphConstraints?: LegacyGraphConstraints;
+  /** Authenticated predecessor terminal diagnostic for a graphless compilation recovery.
+   * The predecessor proposal is deliberately unavailable and grants no graph authority. */
+  priorCompilationFailure?: {
+    reason: string;
+    rawProposalAvailable: false;
+  };
   /** Read-only trusted observations after grounding; omitted callers retain explicit unknowns. */
   economicEvidence?: (items: readonly CompilerWorkItem[]) => Promise<DecompositionEvidence>;
 }

@@ -194,8 +194,16 @@ describe("durable compilation transaction", () => {
 
   it("replays failed usage once and refuses the same paid invocation across restart", () => {
     const invocationId = `compile-${"a".repeat(40)}`;
-    const receipt = { ...budgetEvent(1), usageId: `failed-${invocationId}` };
-    const events = [receipt, { ...receipt, sequence: 2 }];
+    const receipt = {
+      ...budgetEvent(2),
+      usageId: `failed-${invocationId}`,
+      modelInvocationId: invocationId,
+      directorEpoch: 4,
+      policyDigest: policy,
+      reportedModelUsage: { inputTokens: 11, outputTokens: 19 },
+      reason: "compiled Objective has 16 deterministic violations",
+    };
+    const events = [compilationCheckpointEvents()[0]!, receipt, { ...receipt }];
     const usage = deriveBudgetUsage(events);
     expect(usage.modelTokens).toBe(30);
     expect(
@@ -208,7 +216,7 @@ describe("durable compilation transaction", () => {
       ).modelTokens,
     ).toBe(0);
     expect(() => assertManagementInvocationNotFailed(events, "run-test", invocationId)).toThrow(
-      /refusing replay/,
+      "compiled Objective has 16 deterministic violations",
     );
     expect(() =>
       assertManagementInvocationNotFailed(events, "new-run", invocationId),
@@ -216,6 +224,18 @@ describe("durable compilation transaction", () => {
     expect(() =>
       assertManagementInvocationNotFailed(events, "run-test", "another-call"),
     ).not.toThrow();
+  });
+
+  it("does not grant an unlinked failed-usage receipt diagnostic authority", () => {
+    const invocationId = `compile-${"a".repeat(40)}`;
+    const receipt = {
+      ...budgetEvent(1),
+      usageId: `failed-${invocationId}`,
+      reason: "unlinked diagnostic must not become the terminal reason",
+    };
+    expect(() => assertManagementInvocationNotFailed([receipt], "run-test", invocationId)).toThrow(
+      "management invocation already failed or is provider-gated; refusing replay",
+    );
   });
 
   it("records rejected compiler usage before propagating its error", async () => {
@@ -236,9 +256,33 @@ describe("durable compilation transaction", () => {
         preflight: async () => {},
       }),
     ).rejects.toBe(error);
-    expect(recordFailureUsage).toHaveBeenCalledExactlyOnceWith(compilation.usage);
+    expect(recordFailureUsage).toHaveBeenCalledExactlyOnceWith(compilation.usage, "invalid graph");
     expect(recordUsage).not.toHaveBeenCalled();
     expect(persist).not.toHaveBeenCalled();
+  });
+
+  it("uses one bounded diagnostic for the durable receipt and live failure", async () => {
+    const recordFailureUsage = vi.fn();
+    const diagnostic = "x".repeat(5_000);
+    const error = new ManagementOutputError(new Error(diagnostic), compilation.usage);
+    await expect(
+      runDurableCompilationTransaction({
+        existing: null,
+        invoke: async () => {
+          throw error;
+        },
+        persist: async () => record(),
+        recover: async () => null,
+        recordUsage: async () => {},
+        recordFailureUsage,
+        preflight: async () => {},
+      }),
+    ).rejects.toBe(error);
+    expect(error.message).toBe(diagnostic.slice(0, 4_000));
+    expect(recordFailureUsage).toHaveBeenCalledExactlyOnceWith(
+      compilation.usage,
+      diagnostic.slice(0, 4_000),
+    );
   });
 
   it("delegates exact usage and provider metadata to one atomic gate callback", async () => {

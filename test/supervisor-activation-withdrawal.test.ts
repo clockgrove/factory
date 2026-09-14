@@ -21,6 +21,7 @@ import { CompiledGraphManager } from "../src/control/graphs.js";
 import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
 import { preserveProviderQuotaError, ProviderQuotaError } from "../src/providers/quota.js";
 import { PlatformUnavailableError } from "../src/platform.js";
+import { ManagementOutputError } from "../src/management/backend.js";
 
 const fixtures: Awaited<ReturnType<typeof providerSupervisorFixture>>[] = [];
 afterEach(async () => {
@@ -778,6 +779,114 @@ describe("Supervisor activation withdrawal races", () => {
     expect(f.activity).toEqual([]);
     expect(f.events().some((event) => event.event === "GraphCompiled")).toBe(false);
   });
+
+  it.each([
+    { restartTiming: "before the Objective deadline", expired: false },
+    { restartTiming: "after the Objective deadline", expired: true },
+  ])(
+    "retains a paid compiler failure reason across shutdown and restart $restartTiming",
+    async ({ expired }) => {
+      const f = await fixture(true);
+      Object.assign(f.management, { supportsCompilerAdmission: true });
+      const reason = "compiled Objective has 16 deterministic violations: fixture";
+      const usage = { inputTokens: 120, outputTokens: 30 };
+      f.compile.mockImplementation(async (_context, _checkpoint, beforeModelInvocation) => {
+        const admission = await beforeModelInvocation?.();
+        if (!admission || typeof admission === "number")
+          throw new Error("missing compiler admission");
+        throw new ManagementOutputError(new Error(reason), usage);
+      });
+      const shutdown = new AbortController();
+      afterReceipt("BudgetReconciled", () => shutdown.abort());
+
+      const interrupted = await f.run(shutdown.signal);
+      expect(interrupted).toMatchObject({
+        status: "cancelled",
+        reason: "repository controller stopped; durable run remains active",
+      });
+      const marker = f
+        .events()
+        .find(
+          (event) =>
+            isModelInvocationMarker(event) &&
+            event.runId === interrupted.runId &&
+            event.modelInvocationId === `compile-${f.binding.baseSha}`,
+        );
+      const failures = f
+        .events()
+        .filter(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReconciled" &&
+            event.runId === interrupted.runId &&
+            event.usageId === `failed-compile-${f.binding.baseSha}`,
+        );
+      expect(marker).toBeDefined();
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toMatchObject({
+        phase: "management",
+        unit: "model_tokens",
+        amount: 150,
+        modelInvocationId: `compile-${f.binding.baseSha}`,
+        directorEpoch: marker!.directorEpoch,
+        policyDigest: marker!.policyDigest,
+        reportedModelUsage: usage,
+        reason,
+      });
+      expect(failures[0]!.sequence).toBeGreaterThan(marker!.sequence);
+      expect(
+        f
+          .events()
+          .filter(
+            (event) =>
+              event.kind === "run" &&
+              event.event === "FactoryRunEscalated" &&
+              event.runId === interrupted.runId,
+          ),
+      ).toHaveLength(0);
+
+      const start = f
+        .events()
+        .find(
+          (event) =>
+            event.kind === "run" &&
+            event.event === "FactoryRunStarted" &&
+            event.runId === interrupted.runId,
+        );
+      if (start?.kind !== "run" || start.event !== "FactoryRunStarted")
+        throw new Error("fixture run start unavailable");
+      if (expired) {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(Date.parse(start.at) + f.policy.objectiveTimeoutMinutes * 60_000 + 60_000);
+      }
+      let restarted: Awaited<ReturnType<typeof f.run>>;
+      try {
+        restarted = await f.run();
+      } finally {
+        if (expired) vi.useRealTimers();
+      }
+      expect(restarted).toMatchObject({
+        status: "escalated",
+        runId: interrupted.runId,
+        reason,
+      });
+      expect(f.compile).toHaveBeenCalledOnce();
+      expect(
+        f
+          .events()
+          .filter(
+            (event) =>
+              event.kind === "run" &&
+              event.event === "FactoryRunEscalated" &&
+              event.runId === interrupted.runId,
+          ),
+      ).toEqual([expect.objectContaining({ reason })]);
+      expect(f.snapshot.workItems).toEqual([]);
+      expect(f.events().some((event) => event.event === "GraphCompiled")).toBe(false);
+      expect(f.events().some((event) => event.event === "GraphProjected")).toBe(false);
+      expect(f.activity).toEqual([]);
+    },
+  );
 
   it("does not generic-terminalize an admitted compiler refusal while every gate receipt fails", async () => {
     const f = await fixture(true);

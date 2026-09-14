@@ -90,6 +90,8 @@ import { LifecycleRecorder } from "./control/events.js";
 import { observeGitHubTransportPhase } from "./control/mutation-observation.js";
 import {
   CompiledGraphManager,
+  compiledGraphProjectionRef,
+  compiledGraphRef,
   loadCompiledGraph,
   loadCompiledGraphProjection,
   type CompiledGraphProjectionRecord,
@@ -135,6 +137,7 @@ import { assertAuthenticatedCompilationCheckpoint } from "./control/compilation-
 import { inspectObjectiveGraphInput } from "./control/objective-graph-input.js";
 import { RunManager, type RunState } from "./control/runs.js";
 import {
+  effectiveAuthorizedRecoveryItems,
   loadRecoveryRuntime,
   type RecoveryGraphBootstrapRuntime,
   type RecoveryRuntime,
@@ -224,7 +227,7 @@ import {
   type WorkerPacket,
 } from "./protocol/worker-packet.js";
 import { recoveryEventDigest } from "./recovery/identity.js";
-import { isRecoveryAdoptionGraph } from "./recovery/plan.js";
+import { isRecoveryAdoptionGraph, isRecoveryCompileObjectiveGraph } from "./recovery/plan.js";
 import {
   BackendRegistry,
   NoExecutionBackendError,
@@ -675,27 +678,74 @@ export function reportedModelTokens(usage?: ExecutionUsage): number | null {
   return usage.inputTokens + usage.outputTokens;
 }
 
+function managementInvocationFailureReason(
+  events: readonly FactoryEvent[],
+  runId: string,
+  invocationId: string,
+): string | null {
+  const canonical = deduplicateFactoryEvents([...events]);
+  const recordedFailures = canonical.filter(
+    (event): event is Extract<FactoryEvent, { kind: "budget" }> =>
+      event.runId === runId &&
+      event.kind === "budget" &&
+      event.event === "BudgetReconciled" &&
+      event.phase === "management" &&
+      event.unit === "model_tokens" &&
+      event.usageId === `failed-${invocationId}`,
+  );
+  const generic = "management invocation already failed or is provider-gated; refusing replay";
+  if (recordedFailures.length) {
+    const failure = recordedFailures[0]!;
+    const markers = canonical.filter(
+      (event): event is Extract<FactoryEvent, { kind: "budget" }> =>
+        event.runId === runId &&
+        event.kind === "budget" &&
+        event.event === "BudgetReserved" &&
+        event.phase === "management" &&
+        event.unit === "model_tokens" &&
+        event.workItem === failure.workItem &&
+        event.attempt === failure.attempt &&
+        event.modelInvocationId === invocationId,
+    );
+    const marker = markers[0];
+    const usage = failure.reportedModelUsage;
+    if (
+      recordedFailures.length === 1 &&
+      markers.length === 1 &&
+      marker?.amount === 0 &&
+      marker.usageId === `invocation-${invocationId}` &&
+      marker.directorEpoch !== undefined &&
+      marker.directorEpoch === failure.directorEpoch &&
+      marker.policyDigest !== undefined &&
+      marker.policyDigest === failure.policyDigest &&
+      marker.sequence < failure.sequence &&
+      usage?.inputTokens !== undefined &&
+      usage.outputTokens !== undefined &&
+      usage.inputTokens + usage.outputTokens === failure.amount &&
+      typeof failure.reason === "string" &&
+      failure.reason
+    )
+      return failure.reason;
+    return generic;
+  }
+  const providerGate = canonical.find(
+    (event) =>
+      event.runId === runId &&
+      event.kind === "provider" &&
+      event.event === "ProviderQuotaBlocked" &&
+      event.phase === "management" &&
+      event.modelInvocationId === invocationId,
+  );
+  return providerGate ? generic : null;
+}
+
 export function assertManagementInvocationNotFailed(
   events: readonly FactoryEvent[],
   runId: string,
   invocationId: string,
 ): void {
-  if (
-    events.some(
-      (event) =>
-        event.runId === runId &&
-        ((event.kind === "budget" &&
-          event.event === "BudgetReconciled" &&
-          event.phase === "management" &&
-          event.unit === "model_tokens" &&
-          event.usageId === `failed-${invocationId}`) ||
-          (event.kind === "provider" &&
-            event.event === "ProviderQuotaBlocked" &&
-            event.phase === "management" &&
-            event.modelInvocationId === invocationId)),
-    )
-  )
-    throw new Error("management invocation already failed or is provider-gated; refusing replay");
+  const reason = managementInvocationFailureReason(events, runId, invocationId);
+  if (reason) throw new Error(reason);
 }
 
 /** Report-only runs finish their evaluation purpose without committing an execution graph. */
@@ -718,7 +768,7 @@ export async function runDurableCompilationTransaction(args: {
   persist: (result: CompilationResult) => Promise<CompiledGraphRecord>;
   recover: () => Promise<CompiledGraphRecord | null>;
   recordUsage: (record: CompiledGraphRecord) => Promise<void>;
-  recordFailureUsage?: (usage: ManagementUsage) => Promise<void>;
+  recordFailureUsage?: (usage: ManagementUsage, reason: string) => Promise<void>;
   recordProviderGate?: (error: ProviderQuotaError) => Promise<void>;
   preflight: (objective: CompiledObjective) => Promise<void>;
   fault?: (point: CompilationFaultPoint) => Promise<void> | void;
@@ -738,7 +788,11 @@ export async function runDurableCompilationTransaction(args: {
     } catch (error) {
       record = await args.recover();
       if (!record) {
-        if (error instanceof ManagementOutputError) await args.recordFailureUsage?.(error.usage);
+        if (error instanceof ManagementOutputError) {
+          const reason = error.message.slice(0, 4_000);
+          error.message = reason;
+          await args.recordFailureUsage?.(error.usage, reason);
+        }
         if (error instanceof ProviderQuotaError) {
           try {
             await args.recordProviderGate?.(error);
@@ -1691,7 +1745,7 @@ export class FactorySupervisor {
           const item = items.find(
             (candidate) => candidate.number === imported.reservation.workItem,
           );
-          const planned = this.#recoveryRuntime!.planRecord.plan.items.find(
+          const planned = this.#authorizedRecoveryItems(this.#recoveryRuntime).find(
             (entry) => entry.workItem === imported.reservation.workItem,
           );
           if (
@@ -1811,7 +1865,7 @@ export class FactorySupervisor {
     return {
       ...objective,
       items: objective.items.map((item) => {
-        const planned = this.#recoveryRuntime!.planRecord.plan.items.find(
+        const planned = this.#authorizedRecoveryItems(this.#recoveryRuntime).find(
           (entry) => entry.workItem === item.number,
         );
         const count =
@@ -1825,7 +1879,7 @@ export class FactorySupervisor {
         const parentId = this.#deliveryPlan?.items.find(
           (entry) => entry.itemId === planned.compilerId,
         )?.parentItemId;
-        const parentNumber = this.#recoveryRuntime!.planRecord.plan.items.find(
+        const parentNumber = this.#authorizedRecoveryItems(this.#recoveryRuntime).find(
           (entry) => entry.compilerId === parentId,
         )?.workItem;
         const nativeParentOnly =
@@ -1854,17 +1908,21 @@ export class FactorySupervisor {
     };
   }
 
+  #authorizedRecoveryItems(
+    runtime: RecoveryRuntime | RecoveryGraphBootstrapRuntime | null = this.#recoveryRuntime,
+  ) {
+    return runtime ? effectiveAuthorizedRecoveryItems(runtime) : [];
+  }
+
   #plannedRecoveryItem(workItem: number) {
-    return this.#recoveryRuntime?.planRecord.plan.items.find(
-      (entry) => entry.workItem === workItem,
-    );
+    return this.#authorizedRecoveryItems().find((entry) => entry.workItem === workItem);
   }
 
   async #prepareRecoveryGraph(snapshot: Snapshot): Promise<void> {
     const runtime = this.#recoveryRuntime!;
     const compiled = runtime.graph.objective;
     if (
-      runtime.planRecord.plan.items.some(
+      this.#authorizedRecoveryItems(runtime).some(
         (item) =>
           item.action !== "execute" &&
           !item.source?.publication &&
@@ -2875,7 +2933,7 @@ export class FactorySupervisor {
               runtime!.events,
               deadline,
               proof.candidate.identity.runId !==
-                runtime!.planRecord.plan.items.find(
+                this.#authorizedRecoveryItems(runtime).find(
                   (item) => item.workItem === proof.outcome.workItem,
                 )?.source?.runId,
             ))
@@ -2889,7 +2947,7 @@ export class FactorySupervisor {
       }
       // An acknowledged already-integrated predecessor retains its ORIGINAL
       // receipt. Never manufacture a successor outcome to make closure possible.
-      for (const item of runtime?.planRecord.plan.items ?? []) {
+      for (const item of this.#authorizedRecoveryItems(runtime)) {
         if (item.action !== "integrated" || !item.source || completedSources.has(item.workItem))
           continue;
         const source = item.source;
@@ -3061,8 +3119,9 @@ export class FactorySupervisor {
       if (
         runtime?.sourceIntegrations.some(
           (proof) =>
-            runtime.planRecord.plan.items.find((item) => item.workItem === proof.outcome.workItem)
-              ?.action !== "integrated" && !merged.has(proof.outcome.mergeCommitSha),
+            this.#authorizedRecoveryItems(runtime).find(
+              (item) => item.workItem === proof.outcome.workItem,
+            )?.action !== "integrated" && !merged.has(proof.outcome.mergeCommitSha),
         )
       )
         return false;
@@ -4515,10 +4574,37 @@ export class FactorySupervisor {
       );
       const startupProviderGate = startupProviderGateState?.gate;
       const startupProviderAccounting = startupProviderGateState?.accounting ?? "unknown";
+      const startupCompilerFailure = this.#budgetEvents.find(
+        (event): event is Extract<FactoryEvent, { kind: "budget" }> & { usageId: string } =>
+          event.kind === "budget" &&
+          event.runId === this.#run.runId &&
+          event.event === "BudgetReconciled" &&
+          event.phase === "management" &&
+          event.unit === "model_tokens" &&
+          event.workItem === undefined &&
+          event.attempt === undefined &&
+          typeof event.usageId === "string" &&
+          /^failed-compile-[0-9a-f]{40}$/.test(event.usageId),
+      );
+      const startupCompilerFailureReason = startupCompilerFailure?.usageId
+        ? managementInvocationFailureReason(
+            this.#budgetEvents,
+            this.#run.runId,
+            startupCompilerFailure.usageId.slice("failed-".length),
+          )
+        : null;
       // An expired run normally cannot repair graph/publication/checkpoint state. A
       // work-item provider gate is different: its already-admitted durable attempt
       // must reach the reconciliation path below before any terminal receipt can be
       // written, even when the controller restarts after the deadline.
+      if (
+        Date.now() >= deadline &&
+        startupProviderGate?.workItem === undefined &&
+        startupCompilerFailureReason &&
+        !hasCancellationRequest(snapshot, this.#run.runId) &&
+        !this.#options.signal?.aborted
+      )
+        return await terminalAfterDrain("FactoryRunEscalated", startupCompilerFailureReason);
       if (Date.now() >= deadline && startupProviderGate?.workItem === undefined)
         return await finishExpired();
       if (startupProviderGate?.kind === "provider" && startupProviderGate.workItem === undefined) {
@@ -4625,26 +4711,78 @@ export class FactorySupervisor {
       } else {
         const observedGraph = inspectObjectiveGraphInput(snapshot);
         const legacyGraphConstraints = observedGraph.legacyGraphConstraints;
+        const objectiveInputDigest = compilerEvalDigest({
+          number: snapshot.number,
+          title: snapshot.title,
+          body: snapshot.body,
+        });
         const legacyConstraintDigest = legacyGraphConstraints
           ? legacyGraphConstraintsDigest(legacyGraphConstraints)
           : null;
-        const legacyObjectiveInputDigest = legacyGraphConstraints
-          ? compilerEvalDigest({
-              number: snapshot.number,
-              title: snapshot.title,
-              body: snapshot.body,
-            })
-          : null;
+        const legacyObjectiveInputDigest = legacyGraphConstraints ? objectiveInputDigest : null;
+        const recoveryCompilationGraph =
+          this.#recoveryGraphBootstrap &&
+          isRecoveryCompileObjectiveGraph(this.#recoveryGraphBootstrap.planRecord.plan.graph)
+            ? this.#recoveryGraphBootstrap.planRecord.plan.graph
+            : null;
+        const refreshRecoveryCompilationBoundary = async (reason: string) => {
+          if (!recoveryCompilationGraph || !this.#recoveryGraphBootstrap) return;
+          const fresh = await this.#reader.readObjective(snapshot.number);
+          this.#fenceSnapshot(fresh);
+          const [currentBase, predecessorGraph, predecessorProjection] = await Promise.all([
+            this.#store.getBranchHead(fresh.defaultBranch),
+            this.#store.readRef(
+              compiledGraphRef(
+                fresh.number,
+                this.#recoveryGraphBootstrap.planRecord.plan.predecessor.runId,
+              ),
+            ),
+            this.#store.readRef(
+              compiledGraphProjectionRef(
+                fresh.number,
+                this.#recoveryGraphBootstrap.planRecord.plan.predecessor.runId,
+              ),
+            ),
+          ]);
+          if (
+            compilerEvalDigest({
+              number: fresh.number,
+              title: fresh.title,
+              body: fresh.body,
+            }) !== recoveryCompilationGraph.objectiveInputDigest ||
+            fresh.defaultBranch !== this.#recoveryGraphBootstrap.planRecord.plan.baseBranch ||
+            currentBase.oid !== recoveryCompilationGraph.sourceBaseSha ||
+            predecessorGraph !== null ||
+            predecessorProjection !== null
+          )
+            throw new Error(`recovered Objective compilation boundary changed ${reason}`);
+          snapshot = fresh;
+          this.#sequences.observe(snapshotEvents(snapshot));
+        };
         if (this.#recoveryGraphBootstrap) {
           const authorized = this.#recoveryGraphBootstrap.planRecord.plan.graph;
-          if (
-            !isRecoveryAdoptionGraph(authorized) ||
-            authorized.sourceRunId !== this.#run.runId ||
-            legacyObjectiveInputDigest !== authorized.objectiveInputDigest ||
-            legacyConstraintDigest !== authorized.constraintDigest
-          )
-            throw new Error("successor legacy graph constraints changed after acknowledgement");
+          if (isRecoveryAdoptionGraph(authorized)) {
+            if (
+              authorized.sourceRunId !== this.#run.runId ||
+              legacyObjectiveInputDigest !== authorized.objectiveInputDigest ||
+              legacyConstraintDigest !== authorized.constraintDigest
+            )
+              throw new Error("successor legacy graph constraints changed after acknowledgement");
+          } else if (isRecoveryCompileObjectiveGraph(authorized)) {
+            if (
+              authorized.sourceRunId !== this.#run.runId ||
+              objectiveInputDigest !== authorized.objectiveInputDigest ||
+              base.oid !== authorized.sourceBaseSha ||
+              (legacyGraphConstraints && observedGraph.receiptRunId !== this.#run.runId) ||
+              this.#policy.compilerEvaluation?.mode !== "auto-repair" ||
+              !this.#recoveryGraphBootstrap.priorCompilationFailure
+            )
+              throw new Error(
+                "successor Objective compilation inputs changed after acknowledgement",
+              );
+          } else throw new Error("successor graph-bootstrap mode is unsupported");
         }
+        await refreshRecoveryCompilationBoundary("before successor compilation");
         const graphManager = new CompiledGraphManager(this.#store, this.#leases);
         let durableGraph = await graphManager.load(snapshot.number, this.#run.runId);
         const receiptGraph = observedGraph.receiptRunId
@@ -4664,6 +4802,17 @@ export class FactorySupervisor {
         }
         if (observedGraph.expectedDigest && !receiptGraph)
           throw new Error("authenticated compiled graph record is unavailable");
+        if (recoveryCompilationGraph && snapshot.workItems.length > 0) {
+          if (
+            !durableGraph ||
+            observedGraph.receiptRunId !== this.#run.runId ||
+            observedGraph.existing.length !== snapshot.workItems.length
+          )
+            throw new Error(
+              "recovered Objective contains Work Items outside its successor graph receipt",
+            );
+          assertExistingGraphWorkItemsMatchCompiled(durableGraph.objective, observedGraph.existing);
+        }
         if (durableGraph && observedGraph.receiptRunId !== this.#run.runId) {
           const commit = await this.#store.readCommit(durableGraph.commitOid);
           if (receiptGraph) {
@@ -4770,6 +4919,12 @@ export class FactorySupervisor {
                     body: snapshot.body,
                   },
                   ...(legacyGraphConstraints ? { legacyGraphConstraints } : {}),
+                  ...(recoveryCompilationGraph
+                    ? {
+                        priorCompilationFailure:
+                          this.#recoveryGraphBootstrap!.priorCompilationFailure!,
+                      }
+                    : {}),
                   defaultBranch: snapshot.defaultBranch,
                   baseSha: base.oid,
                   repositoryFiles: tree.files,
@@ -4835,7 +4990,11 @@ export class FactorySupervisor {
                     );
                   if (Date.now() >= deadline)
                     throw new Error("Objective deadline exhausted during draft compilation");
-                  const fresh = await this.#reader.readObjective(snapshot.number);
+                  if (recoveryCompilationGraph)
+                    await refreshRecoveryCompilationBoundary("during draft evaluation");
+                  const fresh = recoveryCompilationGraph
+                    ? snapshot
+                    : await this.#reader.readObjective(snapshot.number);
                   this.#fenceSnapshot(fresh);
                   if (
                     compilerEvalDigest({
@@ -4938,8 +5097,9 @@ export class FactorySupervisor {
           existing: durableGraph,
           ...(invokeCompilation ? { invoke: invokeCompilation } : {}),
           persist: (result) =>
-            this.#lease.use((lease) =>
-              graphManager.persist({
+            this.#lease.use(async (lease) => {
+              await refreshRecoveryCompilationBoundary("before graph persistence");
+              return graphManager.persist({
                 lease,
                 base,
                 objective: result.objective,
@@ -4955,11 +5115,18 @@ export class FactorySupervisor {
                           : { cachedInputTokens: result.usage.cachedInputTokens }),
                       },
                     }),
-              }),
-            ),
+              });
+            }),
           recover: () => graphManager.load(snapshot.number, this.#run.runId),
-          recordFailureUsage: (usage) =>
-            this.#recordManagementUsage(compilationInvocationId, usage, snapshot.id),
+          recordFailureUsage: (usage, reason) =>
+            this.#recordManagementUsage(
+              compilationInvocationId,
+              usage,
+              snapshot.id,
+              undefined,
+              `failed-${compilationInvocationId}`,
+              reason,
+            ),
           recordProviderGate: (error) =>
             this.#recordProviderQuotaGate(error, snapshot.id, "management", this.#management.id),
           recordUsage: async (record) => {
@@ -5055,18 +5222,27 @@ export class FactorySupervisor {
         });
         const compiled = durableGraph.objective;
         const refreshLegacySnapshot = async (reason: string) => {
-          if (!legacyGraphConstraints) return;
-          const fresh = await this.#reader.readObjective(snapshot.number);
+          if (!legacyGraphConstraints && !recoveryCompilationGraph) return;
+          if (recoveryCompilationGraph) await refreshRecoveryCompilationBoundary(reason);
+          const fresh = recoveryCompilationGraph
+            ? snapshot
+            : await this.#reader.readObjective(snapshot.number);
           const current = inspectObjectiveGraphInput(fresh);
-          if (
-            legacyObjectiveInputDigest !==
-              compilerEvalDigest({ number: fresh.number, title: fresh.title, body: fresh.body }) ||
-            legacyConstraintDigest !==
-              (current.legacyGraphConstraints
-                ? legacyGraphConstraintsDigest(current.legacyGraphConstraints)
-                : null)
-          )
-            throw new Error(`legacy Work Item constraints changed ${reason}`);
+          const freshObjectiveInputDigest = compilerEvalDigest({
+            number: fresh.number,
+            title: fresh.title,
+            body: fresh.body,
+          });
+          if (legacyGraphConstraints) {
+            if (
+              legacyObjectiveInputDigest !== freshObjectiveInputDigest ||
+              legacyConstraintDigest !==
+                (current.legacyGraphConstraints
+                  ? legacyGraphConstraintsDigest(current.legacyGraphConstraints)
+                  : null)
+            )
+              throw new Error(`legacy Work Item constraints changed ${reason}`);
+          }
           assertExistingGraphWorkItemsMatchCompiled(compiled, current.existing);
           snapshot = fresh;
           this.#sequences.observe(snapshotEvents(snapshot));
@@ -5124,8 +5300,9 @@ export class FactorySupervisor {
               compilerEvalDigest({ number: fresh.number, title: fresh.title, body: fresh.body }),
             );
           }
-          await this.#lease.use((lease) =>
-            this.#recorder.graph({
+          await this.#lease.use(async (lease) => {
+            await refreshLegacySnapshot("before the compiled-graph receipt");
+            return this.#recorder.graph({
               lease,
               objectiveNodeId: snapshot.id,
               sequence: this.#sequences.take(),
@@ -5134,8 +5311,8 @@ export class FactorySupervisor {
               baseSha: base.oid,
               graphRef: durableGraph!.ref,
               graphBlobSha: durableGraph!.blobOid,
-            }),
-          );
+            });
+          });
         }
         // Authenticate the immutable graph before checking transient runtime
         // availability. A missing backend/tool must not orphan a paid compiler
@@ -5228,13 +5405,14 @@ export class FactorySupervisor {
             issueNumber: issue.number,
           };
         });
-        const stagedProjection = await this.#lease.use((lease) =>
-          graphManager.stageProjection({
+        const stagedProjection = await this.#lease.use(async (lease) => {
+          await refreshLegacySnapshot("immediately before staging graph projection");
+          return graphManager.stageProjection({
             lease,
             graph: durableGraph!,
             bindings: projectionBindings,
-          }),
-        );
+          });
+        });
         let projectionReceiptEvents: readonly FactoryEvent[] = snapshotEvents(snapshot);
         const authenticateProjection = () =>
           assertAuthenticatedGraphProjection(
@@ -5253,8 +5431,9 @@ export class FactorySupervisor {
           authenticateProjection();
         } else {
           try {
-            const projectionEvent = await this.#lease.use((lease) =>
-              this.#recorder.graphProjection({
+            const projectionEvent = await this.#lease.use(async (lease) => {
+              await refreshLegacySnapshot("immediately before the graph-projection receipt");
+              return this.#recorder.graphProjection({
                 lease,
                 objectiveNodeId: snapshot.id,
                 sequence: this.#sequences.take(),
@@ -5262,8 +5441,8 @@ export class FactorySupervisor {
                 graphSize: stagedProjection.graphSize,
                 projectionRef: stagedProjection.ref,
                 projectionBlobSha: stagedProjection.blobOid,
-              }),
-            );
+              });
+            });
             projectionReceiptEvents = [projectionEvent];
             authenticateProjection();
           } catch (error) {
@@ -5278,14 +5457,15 @@ export class FactorySupervisor {
             }
           }
         }
-        durableProjection = await this.#lease.use((lease) =>
-          graphManager.persistProjection({
+        durableProjection = await this.#lease.use(async (lease) => {
+          await refreshLegacySnapshot("immediately before graph-projection persistence");
+          return graphManager.persistProjection({
             lease,
             graph: durableGraph!,
             bindings: projectionBindings,
             expectedBlobOid: stagedProjection.blobOid,
-          }),
-        );
+          });
+        });
         assertAuthenticatedGraphProjection(
           projectionReceiptEvents,
           snapshot.number,
@@ -5513,7 +5693,7 @@ export class FactorySupervisor {
         const adoptedPublications =
           this.#recoveryRuntime &&
           objective.items.filter((item) => {
-            const planned = this.#recoveryRuntime!.planRecord.plan.items.find(
+            const planned = this.#authorizedRecoveryItems(this.#recoveryRuntime).find(
               (entry) => entry.workItem === item.number,
             );
             if (
@@ -5855,7 +6035,7 @@ export class FactorySupervisor {
                 const sourcePublication = this.#recoveryRuntime?.sourcePublications.find(
                   (proof) => proof.publication.workItem === parent.number,
                 );
-                const original = this.#recoveryRuntime?.planRecord.plan.items.find(
+                const original = this.#authorizedRecoveryItems().find(
                   (entry) => entry.workItem === parent.number && entry.action !== "execute",
                 )?.source?.publication;
                 if (sourcePublication || original) {
@@ -5888,7 +6068,7 @@ export class FactorySupervisor {
         const runnable = [...ready(objective), ...stackReady, ...commandedRetries].filter(
           (item, index, all) =>
             (!this.#recoveryRuntime ||
-              this.#recoveryRuntime.planRecord.plan.items.some(
+              this.#authorizedRecoveryItems(this.#recoveryRuntime).some(
                 (planned) => planned.workItem === item.number && planned.action === "execute",
               )) &&
             !activeExecutions.has(item.number) &&
@@ -5969,7 +6149,7 @@ export class FactorySupervisor {
               const adopted = this.#recoveryRuntime?.sourcePublications.find(
                 (proof) => proof.publication.workItem === root.number,
               );
-              const recoveryRoot = this.#recoveryRuntime?.planRecord.plan.items.find(
+              const recoveryRoot = this.#authorizedRecoveryItems().find(
                 (entry) => entry.workItem === root.number,
               );
               const originalSource = recoveryRoot?.source?.publication;
@@ -6008,7 +6188,7 @@ export class FactorySupervisor {
                 if (!ancestor) throw new Error("stack execution lacks an immutable ancestor");
                 inheritedIsolation ||=
                   this.#packetFor(ancestor.number).requirements.trust !== "trusted_local";
-                const retained = this.#recoveryRuntime?.planRecord.plan.items.find(
+                const retained = this.#authorizedRecoveryItems().find(
                   (entry) => entry.workItem === ancestor.number,
                 );
                 if (this.#recoveryRuntime && !retained)
@@ -6567,7 +6747,7 @@ export class FactorySupervisor {
     if (
       this.#recoveryRuntime &&
       !recovered?.adoptedSource &&
-      !this.#recoveryRuntime.planRecord.plan.items.some(
+      !this.#authorizedRecoveryItems(this.#recoveryRuntime).some(
         (planned) => planned.workItem === item.number && planned.action === "execute",
       )
     )
@@ -9862,6 +10042,7 @@ export class FactorySupervisor {
     nodeId: string,
     reservation?: AttemptReservation,
     usageId = `failed-${invocationId}`,
+    reason?: string,
   ): Promise<void> {
     const link = this.#modelInvocationLink(invocationId, reservation);
     const amount = usage.inputTokens + usage.outputTokens;
@@ -9878,7 +10059,11 @@ export class FactorySupervisor {
           event.attempt === reservation?.attempt,
       );
     const existing = matches(this.#budgetEvents);
-    if (existing.some((event) => event.amount !== amount)) {
+    if (
+      existing.some(
+        (event) => event.amount !== amount || (reason !== undefined && event.reason !== reason),
+      )
+    ) {
       throw new Error("failed management usage conflicts with its budget receipt");
     }
     if (this.#hasModelUsageLink(existing, link)) return;
@@ -9892,6 +10077,7 @@ export class FactorySupervisor {
           amount,
           usageId,
           ...link,
+          ...(reason ? { reason } : {}),
           reportedModelUsage: reportedModelUsage(usage)!,
         };
         return reservation
@@ -9903,7 +10089,11 @@ export class FactorySupervisor {
       const snapshot = await this.#reader.readObjective(this.#run.objective);
       this.#fenceSnapshot(snapshot);
       const recovered = matches(snapshotEvents(snapshot));
-      if (recovered.some((event) => event.amount !== amount)) {
+      if (
+        recovered.some(
+          (event) => event.amount !== amount || (reason !== undefined && event.reason !== reason),
+        )
+      ) {
         throw new Error("failed management usage conflicts with its recovered receipt");
       }
       if (!this.#hasModelUsageLink(recovered, link)) throw error;
@@ -10930,7 +11120,9 @@ export class FactorySupervisor {
     requireRecordedPublication = false,
   ): Promise<NativeStackMember> {
     const runtime = this.#recoveryRuntime;
-    const planned = runtime?.planRecord.plan.items.find((entry) => entry.workItem === item.number);
+    const planned = this.#authorizedRecoveryItems(runtime).find(
+      (entry) => entry.workItem === item.number,
+    );
     if (
       runtime &&
       planned?.source &&
@@ -12704,7 +12896,7 @@ export class FactorySupervisor {
     if (headSha === member.pull.commitSha) return null;
     const runtime = this.#recoveryRuntime;
     if (runtime && member.reservation.runId !== run.runId) {
-      const source = runtime.planRecord.plan.items.find(
+      const source = this.#authorizedRecoveryItems(runtime).find(
         (entry) => entry.workItem === item.number,
       )?.source;
       const restored = runtime.sourcePublications.find(
@@ -14175,7 +14367,9 @@ export class FactorySupervisor {
     const artifacts: RecoverySourceArtifactProof[] = [];
     const existingMembers: RecoveryNativeExistingMember[] = [];
     for (const compilerId of unit.items) {
-      const item = runtime.planRecord.plan.items.find((entry) => entry.compilerId === compilerId)!;
+      const item = this.#authorizedRecoveryItems(runtime).find(
+        (entry) => entry.compilerId === compilerId,
+      )!;
       const source = item.source;
       if (item.action === "execute") continue;
       if (!source || !source.validation)
@@ -14218,7 +14412,7 @@ export class FactorySupervisor {
     const pullRequests: Array<{ workItem: number; number: number; nodeId: string }> = [];
     for (const artifact of artifacts.sort((a, b) => a.delivery.position - b.delivery.position)) {
       const parent = artifact.delivery.parentItemId
-        ? runtime.planRecord.plan.items.find(
+        ? this.#authorizedRecoveryItems(runtime).find(
             (entry) => entry.compilerId === artifact.delivery.parentItemId,
           )?.source
         : null;
@@ -14339,7 +14533,7 @@ export class FactorySupervisor {
       });
       if (proof.status !== "verified")
         throw new Error("native source publication proof unavailable");
-      const item = runtime.planRecord.plan.items.find(
+      const item = this.#authorizedRecoveryItems(runtime).find(
         (entry) => entry.workItem === artifact.workItem,
       )!;
       await this.#appendSuccessorEvent(item.issueNodeId, publication);
@@ -14603,7 +14797,9 @@ export class FactorySupervisor {
 
   async #resumeAdoptedSourceWithArtifactContent(item: DerivedWorkItem): Promise<boolean> {
     let runtime = this.#recoveryRuntime!;
-    const planItem = runtime.planRecord.plan.items.find((entry) => entry.workItem === item.number)!;
+    const planItem = this.#authorizedRecoveryItems(runtime).find(
+      (entry) => entry.workItem === item.number,
+    )!;
     const source = planItem.source!;
     if (this.#deliverySelection.selected === "native-stacks") {
       const unit = this.#deliveryPlan?.units.find((entry) =>
@@ -14611,7 +14807,7 @@ export class FactorySupervisor {
       );
       const missing =
         unit?.kind === "stack"
-          ? runtime.planRecord.plan.items.find(
+          ? this.#authorizedRecoveryItems(runtime).find(
               (entry) =>
                 unit.items.includes(entry.compilerId) &&
                 entry.action !== "execute" &&
@@ -14841,7 +15037,7 @@ export class FactorySupervisor {
         const position = unit.items.indexOf(planItem.compilerId);
         if (position < 0) throw new Error("adopted native candidate lacks its graph position");
         for (const compilerId of unit.items.slice(0, position)) {
-          const ancestor = runtime.planRecord.plan.items.find(
+          const ancestor = this.#authorizedRecoveryItems(runtime).find(
             (entry) => entry.compilerId === compilerId,
           );
           if (!ancestor) throw new Error("adopted native candidate lacks ancestor provenance");
@@ -16718,7 +16914,9 @@ export class FactorySupervisor {
    * validation, review and publication that follow. */
   async #recoverAdoptedRetainedArtifact(item: DerivedWorkItem, deadline: number): Promise<void> {
     const runtime = this.#recoveryRuntime!;
-    const planned = runtime.planRecord.plan.items.find((entry) => entry.workItem === item.number);
+    const planned = this.#authorizedRecoveryItems(runtime).find(
+      (entry) => entry.workItem === item.number,
+    );
     const source = planned?.source;
     if (planned?.action !== "reconcile" || !source?.artifactDigest)
       throw new Error("retained artifact reconciliation is absent from the accepted plan");
@@ -17831,7 +18029,7 @@ export class FactorySupervisor {
     }
 
     if (await this.#recoverRetainedArtifact(item, reservation, events, backend, deadline)) return;
-    const recoveryAction = this.#recoveryRuntime?.planRecord.plan.items.find(
+    const recoveryAction = this.#authorizedRecoveryItems().find(
       (planned) => planned.workItem === item.number,
     );
     if (recoveryAction?.action === "reconcile" && recoveryAction.source?.artifactDigest)

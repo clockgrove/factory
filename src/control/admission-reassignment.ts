@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto";
 import { assertCompiledObjectiveAdoptsLegacyConstraints } from "../graph.js";
 import type { RecoveryReadStore } from "../recovery/assessment.js";
-import { isRecoveryAdoptionGraph, recoveryPlanBindingDigest } from "../recovery/plan.js";
-import type { RecoveryRuntime } from "../recovery/runtime.js";
+import {
+  isRecoveryAdoptionGraph,
+  isRecoveryCompileObjectiveGraph,
+  recoveryPlanBindingDigest,
+} from "../recovery/plan.js";
+import { effectiveAuthorizedRecoveryItems, type RecoveryRuntime } from "../recovery/runtime.js";
 import { verifyRecoveryResources } from "../recovery/resources.js";
 import {
   buildAdmissionSettlementEvidence,
@@ -19,7 +23,7 @@ function hasAcceptedRetainedArtifactProducerCompletion(
   entry: IssueAdmissionEntry,
   runtime: RecoveryRuntime,
 ): boolean {
-  const item = runtime.planRecord.plan.items.find(
+  const item = effectiveAuthorizedRecoveryItems(runtime).find(
     (candidate) => candidate.workItem === entry.workItem,
   );
   const source = item?.source;
@@ -100,6 +104,7 @@ async function reconcile(args: {
   )
     return undefined;
   const plan = runtime.planRecord.plan;
+  const authorizedItems = effectiveAuthorizedRecoveryItems(runtime);
   if (
     runtime.status !== "verified" ||
     !runtime.adoptionVerified ||
@@ -124,22 +129,34 @@ async function reconcile(args: {
       (binding) =>
         binding.issueNumber === args.workItem && binding.issueNodeId === args.workItemNodeId,
     ).length !== 1 ||
-    plan.items.filter(
+    authorizedItems.filter(
       (item) => item.workItem === args.workItem && item.issueNodeId === args.workItemNodeId,
     ).length !== 1 ||
     runtime.graph.ref !== plan.graph.ref ||
     runtime.projection.ref !== plan.graph.projection.ref ||
-    recoveryPlanBindingDigest(
-      runtime.projection.bindings.map((binding) => ({
-        compilerId: binding.compilerId,
-        issueNodeId: binding.issueNodeId,
-        workItem: binding.issueNumber,
-      })),
-    ) !== plan.graph.projection.bindingDigest
+    (!isRecoveryCompileObjectiveGraph(plan.graph) &&
+      recoveryPlanBindingDigest(
+        runtime.projection.bindings.map((binding) => ({
+          compilerId: binding.compilerId,
+          issueNodeId: binding.issueNodeId,
+          workItem: binding.issueNumber,
+        })),
+      ) !== plan.graph.projection.bindingDigest)
   )
     throw Error("issue reassignment graph projection changed");
   if (isRecoveryAdoptionGraph(plan.graph)) {
     assertCompiledObjectiveAdoptsLegacyConstraints(runtime.graph.objective, plan.graph.constraints);
+  } else if (isRecoveryCompileObjectiveGraph(plan.graph)) {
+    const sourceBaseSha = plan.graph.sourceBaseSha;
+    const graphCommit = await store.readCommit(runtime.graph.commitOid);
+    if (
+      runtime.controllingRun.baseSha !== sourceBaseSha ||
+      graphCommit.oid !== runtime.graph.commitOid ||
+      graphCommit.parentOids.length !== 1 ||
+      graphCommit.parentOids[0] !== sourceBaseSha ||
+      runtime.graph.objective.workItems.some((item) => item.baseSha !== sourceBaseSha)
+    )
+      throw Error("issue reassignment compiled graph source base changed");
   } else if (
     runtime.graph.commitOid !== plan.graph.commitOid ||
     runtime.graph.blobOid !== plan.graph.blobOid ||

@@ -20,9 +20,23 @@ import {
   unresolvedModelInvocations,
   type BudgetUsage,
 } from "../control/budget.js";
-import type { CompiledGraphRecord, CompiledGraphProjectionRecord } from "../control/graphs.js";
+import {
+  compiledGraphProjectionRef,
+  compiledGraphRef,
+  loadCompiledGraph,
+  loadStagedCompiledGraphProjection,
+  type CompiledGraphRecord,
+  type CompiledGraphProjectionRecord,
+} from "../control/graphs.js";
+import {
+  assertAuthenticatedGraphProjection,
+  assertSnapshotMatchesCompiledGraph,
+} from "../control/graph-evidence.js";
 import { decodeEventTrailer } from "../control/receipts.js";
 import type { FactoryEvent } from "../protocol/events.js";
+import { compilerEvalDigest } from "../evaluation/compiler-eval.js";
+import { assertExistingGraphWorkItemsMatchCompiled } from "../graph.js";
+import { inspectObjectiveGraphInput } from "../control/objective-graph-input.js";
 import type { RecoveryAccountingAssessment } from "./accounting.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { verifyRecoveryChain } from "./chain.js";
@@ -37,8 +51,11 @@ import {
 } from "./identity.js";
 import {
   isRecoveryAdoptionGraph,
+  isRecoveryCompileObjectiveGraph,
   loadRecoveryPlan,
   loadRecoveryPlanGraph,
+  type RecoveryPlan,
+  type RecoveryPlanItem,
   type RecoveryPlanRecord,
 } from "./plan.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
@@ -102,6 +119,12 @@ interface RecoveryRuntimeCommon {
    * management compilation/review calls that do not belong to a worker attempt. */
   currentUnknownManagementInvocations: string[];
   currentUnknownModelUsageCount: number;
+  /** Exact authenticated predecessor diagnostic for compile-objective recovery.
+   * No prior proposal bytes survive this authority boundary. */
+  priorCompilationFailure?: {
+    reason: string;
+    rawProposalAvailable: false;
+  };
 }
 export interface RecoveryRuntime extends RecoveryRuntimeCommon {
   status: "verified";
@@ -123,6 +146,11 @@ export type RecoveryRuntimeResult =
       blockers: string[];
     };
 
+type ResolvedRecoveryGraph = {
+  graph: CompiledGraphRecord;
+  projection: CompiledGraphProjectionRecord;
+} | null;
+
 class RuntimeBindingError extends Error {
   constructor(readonly code: string) {
     super(code);
@@ -130,6 +158,70 @@ class RuntimeBindingError extends Error {
 }
 function requireRuntime(condition: unknown, code: string): asserts condition {
   if (!condition) throw new RuntimeBindingError(code);
+}
+
+function requiresProjectedWorkItemAuthority(event: FactoryEvent): boolean {
+  return (
+    ["attempt", "scheduling", "capacity", "validation", "publication"].includes(event.kind) ||
+    event.event === "RecoverySourceIntegrated" ||
+    event.event === "RecoverySourcePublished" ||
+    (event.kind === "budget" &&
+      (event.phase !== "management" ||
+        event.unit !== "model_tokens" ||
+        event.workItem !== undefined ||
+        event.attempt !== undefined))
+  );
+}
+
+function deriveEffectiveAuthorizedRecoveryItems(
+  plan: RecoveryPlan,
+  resolvedGraph: ResolvedRecoveryGraph,
+): readonly RecoveryPlanItem[] {
+  if (!isRecoveryCompileObjectiveGraph(plan.graph)) return plan.items;
+  requireRuntime(plan.items.length === 0, "compile-objective-plan-items-present");
+  if (!resolvedGraph) return [];
+  const bindings = new Map(
+    resolvedGraph.projection.bindings.map((binding) => [binding.compilerId, binding]),
+  );
+  requireRuntime(
+    resolvedGraph.graph.objective.workItems.length > 0 &&
+      resolvedGraph.graph.objective.workItems.length <= 100 &&
+      bindings.size === resolvedGraph.projection.bindings.length &&
+      bindings.size === resolvedGraph.graph.objective.workItems.length,
+    "compile-objective-projection-mismatch",
+  );
+  const workItems = new Set<number>();
+  const issueNodeIds = new Set<string>();
+  return resolvedGraph.graph.objective.workItems.map((item) => {
+    const binding = bindings.get(item.id);
+    requireRuntime(
+      binding && !workItems.has(binding.issueNumber) && !issueNodeIds.has(binding.issueNodeId),
+      "compile-objective-projection-mismatch",
+    );
+    workItems.add(binding.issueNumber);
+    issueNodeIds.add(binding.issueNodeId);
+    return {
+      workItem: binding.issueNumber,
+      issueNodeId: binding.issueNodeId,
+      compilerId: item.id,
+      action: "execute" as const,
+      source: null,
+      observedPullRequest: null,
+      resources: { state: "not-required" as const, receiptDigest: null, identities: [] },
+    };
+  });
+}
+
+/** Effective in-memory execution authority for a verified recovery runtime.
+ * Compile-objective plans persist no Work Items; only their successor's authenticated
+ * graph and projection may derive transient execute-only items. */
+export function effectiveAuthorizedRecoveryItems(
+  runtime: RecoveryRuntime | RecoveryGraphBootstrapRuntime,
+): readonly RecoveryPlanItem[] {
+  return deriveEffectiveAuthorizedRecoveryItems(
+    runtime.planRecord.plan,
+    runtime.status === "verified" ? { graph: runtime.graph, projection: runtime.projection } : null,
+  );
 }
 
 export function boundedReadStore(store: RecoveryReadStore): RecoveryReadStore {
@@ -241,6 +333,16 @@ export async function loadRecoveryRuntime(input: {
         snapshot.defaultBranch === plan.baseBranch,
       "scope-binding-mismatch",
     );
+    if (isRecoveryCompileObjectiveGraph(plan.graph))
+      requireRuntime(
+        (
+          await Promise.all([
+            input.store.readRef(compiledGraphRef(plan.objective, plan.predecessor.runId)),
+            input.store.readRef(compiledGraphProjectionRef(plan.objective, plan.predecessor.runId)),
+          ])
+        ).every((ref) => ref === null),
+        "compile-objective-predecessor-graph-present",
+      );
     const sourceRunIds = plan.history.map((entry) => entry.runId);
     const sourceIds = new Set(sourceRunIds);
     const activations = recoveryRunHistoryActivations(plan, observation);
@@ -264,6 +366,26 @@ export async function loadRecoveryRuntime(input: {
         event.event === "FactoryRunStarted" && event.runId === plan.predecessor.runId,
     );
     requireRuntime(requests.length === 1 && predecessor, "authority-unavailable");
+    const predecessorTerminal = isRecoveryCompileObjectiveGraph(plan.graph)
+      ? observation.findByDigest(plan.predecessor.terminalDigest)
+      : undefined;
+    if (isRecoveryCompileObjectiveGraph(plan.graph))
+      requireRuntime(
+        predecessorTerminal?.runId === plan.predecessor.runId &&
+          predecessorTerminal.event === "FactoryRunEscalated" &&
+          typeof predecessorTerminal.reason === "string" &&
+          predecessorTerminal.reason.length > 0 &&
+          predecessorTerminal.reason.length <= 8_000 &&
+          predecessor.baseSha === plan.graph.sourceBaseSha &&
+          plan.expectedBaseSha === plan.graph.sourceBaseSha &&
+          controllingRun.baseSha === plan.graph.sourceBaseSha &&
+          compilerEvalDigest({
+            number: snapshot.number,
+            title: snapshot.title,
+            body: snapshot.body,
+          }) === plan.graph.objectiveInputDigest,
+        "prior-compilation-failure-unavailable",
+      );
     const plans: Record<string, RecoveryPlanRecord> = { [record.digest]: record };
     let prior = plan.priorPlanDigest;
     while (prior !== null) {
@@ -336,7 +458,170 @@ export async function loadRecoveryRuntime(input: {
     const currentEvents = events.filter((event) => event.runId === input.runId);
     const suffix = currentEvents.filter((event) => event.sequence > completedSequence);
     requireRuntime(currentEvents.length === suffix.length + 3, "successor-effect-before-adoption");
-    const items = new Map(plan.items.map((item) => [item.workItem, item]));
+    let resolvedGraph: ResolvedRecoveryGraph = isRecoveryCompileObjectiveGraph(plan.graph)
+      ? await loadRecoveryPlanGraph(input.store, plan, events)
+      : null;
+    if (isRecoveryCompileObjectiveGraph(plan.graph))
+      requireRuntime(
+        resolvedGraph || plan.graph.sourceRunId === input.runId,
+        "graph-observation-changed",
+      );
+    const bootstrapGraph =
+      !resolvedGraph && isRecoveryCompileObjectiveGraph(plan.graph)
+        ? await loadCompiledGraph(input.store, plan.objective, plan.graph.sourceRunId)
+        : null;
+    if (bootstrapGraph && isRecoveryCompileObjectiveGraph(plan.graph)) {
+      const compileGraph = plan.graph;
+      const commit = await input.store.readCommit(bootstrapGraph.commitOid);
+      requireRuntime(
+        bootstrapGraph.ref === compileGraph.ref &&
+          commit.oid === bootstrapGraph.commitOid &&
+          commit.parentOids.length === 1 &&
+          commit.parentOids[0] === compileGraph.sourceBaseSha &&
+          bootstrapGraph.objective.workItems.every(
+            (item) => item.baseSha === compileGraph.sourceBaseSha,
+          ),
+        "compile-objective-graph-mismatch",
+      );
+      const compiled = suffix.filter(
+        (event): event is Extract<FactoryEvent, { kind: "graph"; event: "GraphCompiled" }> =>
+          event.kind === "graph" && event.event === "GraphCompiled",
+      );
+      requireRuntime(
+        compiled.length <= 1 &&
+          (!compiled.length ||
+            (compiled[0]!.graphRef === bootstrapGraph.ref &&
+              compiled[0]!.graphBlobSha === bootstrapGraph.blobOid &&
+              compiled[0]!.graphDigest === bootstrapGraph.graphDigest &&
+              compiled[0]!.graphSize === bootstrapGraph.graphSize &&
+              compiled[0]!.baseSha === compileGraph.sourceBaseSha)),
+        "compile-objective-graph-mismatch",
+      );
+      const projected = suffix.filter(
+        (event): event is Extract<FactoryEvent, { kind: "graph"; event: "GraphProjected" }> =>
+          event.kind === "graph" && event.event === "GraphProjected",
+      );
+      requireRuntime(
+        projected.length <= 1 &&
+          (!projected.length ||
+            (compiled.length === 1 && projected[0]!.sequence > compiled[0]!.sequence)),
+        "compile-objective-projection-mismatch",
+      );
+      if (projected[0]) {
+        try {
+          const staged = await loadStagedCompiledGraphProjection(
+            input.store,
+            plan.objective,
+            compileGraph.sourceRunId,
+            bootstrapGraph,
+            projected[0].projectionBlobSha,
+          );
+          requireRuntime(
+            staged.ref === compileGraph.projection.ref,
+            "compile-objective-projection-mismatch",
+          );
+          assertAuthenticatedGraphProjection(
+            events,
+            plan.objective,
+            compileGraph.sourceRunId,
+            staged,
+          );
+          requireRuntime(
+            snapshot.workItems.every(
+              (item) =>
+                typeof item.id === "string" &&
+                typeof item.title === "string" &&
+                Array.isArray(item.blockedBy),
+            ),
+            "compile-objective-snapshot-mismatch",
+          );
+          assertSnapshotMatchesCompiledGraph(
+            bootstrapGraph.objective,
+            {
+              workItems: snapshot.workItems.map((item) => ({
+                id: item.id!,
+                number: item.number,
+                title: item.title!,
+                body: item.body ?? null,
+                blockedBy: item.blockedBy!,
+              })),
+            },
+            staged.bindings,
+          );
+        } catch (error) {
+          if (error instanceof RuntimeBindingError) throw error;
+          throw new RuntimeBindingError("compile-objective-projection-mismatch");
+        }
+      }
+    }
+    const authorizedItems = deriveEffectiveAuthorizedRecoveryItems(plan, resolvedGraph);
+    const resolvedProjection = resolvedGraph?.projection;
+    const compileProjectionSequence =
+      isRecoveryCompileObjectiveGraph(plan.graph) && resolvedProjection
+        ? suffix.filter(
+            (event) =>
+              event.kind === "graph" &&
+              event.event === "GraphProjected" &&
+              event.projectionRef === resolvedProjection.ref &&
+              event.projectionBlobSha === resolvedProjection.blobOid,
+          )
+        : [];
+    if (isRecoveryCompileObjectiveGraph(plan.graph) && resolvedGraph)
+      requireRuntime(
+        compileProjectionSequence.length === 1,
+        "compile-objective-projection-mismatch",
+      );
+    if (isRecoveryCompileObjectiveGraph(plan.graph)) {
+      if (!resolvedGraph) {
+        if (!bootstrapGraph)
+          requireRuntime(
+            snapshot.workItems.length === 0 && !suffix.some((event) => event.kind === "graph"),
+            "compile-objective-snapshot-mismatch",
+          );
+        else {
+          const current = inspectObjectiveGraphInput(snapshot);
+          requireRuntime(
+            snapshot.workItems.length === 0 ||
+              (current.receiptRunId === plan.graph.sourceRunId &&
+                current.existing.length === snapshot.workItems.length),
+            "compile-objective-snapshot-mismatch",
+          );
+          try {
+            assertExistingGraphWorkItemsMatchCompiled(bootstrapGraph.objective, current.existing);
+          } catch {
+            throw new RuntimeBindingError("compile-objective-snapshot-mismatch");
+          }
+        }
+      } else {
+        requireRuntime(
+          snapshot.workItems.every(
+            (item) =>
+              typeof item.id === "string" &&
+              typeof item.title === "string" &&
+              Array.isArray(item.blockedBy),
+          ),
+          "compile-objective-snapshot-mismatch",
+        );
+        try {
+          assertSnapshotMatchesCompiledGraph(
+            resolvedGraph.graph.objective,
+            {
+              workItems: snapshot.workItems.map((item) => ({
+                id: item.id!,
+                number: item.number,
+                title: item.title!,
+                body: item.body ?? null,
+                blockedBy: item.blockedBy!,
+              })),
+            },
+            resolvedGraph.projection.bindings,
+          );
+        } catch {
+          throw new RuntimeBindingError("compile-objective-snapshot-mismatch");
+        }
+      }
+    }
+    const items = new Map(authorizedItems.map((item) => [item.workItem, item]));
     requireRuntime(
       suffix.every(
         (event) =>
@@ -344,11 +629,16 @@ export async function loadRecoveryRuntime(input: {
             event.event === "RecoverySourceIntegrated" ||
             event.event === "RecoverySourcePublished") &&
           (event.kind !== "graph" ||
-            (isRecoveryAdoptionGraph(plan.graph) && plan.graph.sourceRunId === input.runId)) &&
+            ((isRecoveryAdoptionGraph(plan.graph) || isRecoveryCompileObjectiveGraph(plan.graph)) &&
+              plan.graph.sourceRunId === input.runId)) &&
           event.event !== "FactoryRunStarted" &&
           event.event !== "ActivationRequested" &&
           event.event !== "ActivationRejected" &&
           (!("policyDigest" in event) || event.policyDigest === plan.policyDigest) &&
+          (!isRecoveryCompileObjectiveGraph(plan.graph) ||
+            !requiresProjectedWorkItemAuthority(event) ||
+            (compileProjectionSequence.length === 1 &&
+              event.sequence > compileProjectionSequence[0]!.sequence)) &&
           (!("workItem" in event) ||
             event.workItem === undefined ||
             (typeof event.workItem === "number" && items.has(event.workItem))),
@@ -725,7 +1015,7 @@ export async function loadRecoveryRuntime(input: {
     // This partition is historical assessment only, after the full current suffix was validated above.
     const sourceObservation = observation.select((event) => sourceIds.has(event.runId));
     const sourceEvents = sourceObservation.events;
-    for (const item of plan.items)
+    for (const item of authorizedItems)
       if (item.source === null)
         requireRuntime(
           !sourceEvents.some(
@@ -777,12 +1067,14 @@ export async function loadRecoveryRuntime(input: {
       ),
       "source-bindings-unavailable",
     );
-    const resolvedGraph = await loadRecoveryPlanGraph(input.store, plan, events);
-    requireRuntime(
-      resolvedGraph ||
-        (isRecoveryAdoptionGraph(plan.graph) && plan.graph.sourceRunId === input.runId),
-      "graph-observation-changed",
-    );
+    if (!isRecoveryCompileObjectiveGraph(plan.graph)) {
+      resolvedGraph = await loadRecoveryPlanGraph(input.store, plan, events);
+      requireRuntime(
+        resolvedGraph ||
+          (isRecoveryAdoptionGraph(plan.graph) && plan.graph.sourceRunId === input.runId),
+        "graph-observation-changed",
+      );
+    }
     if (!resolvedGraph)
       requireRuntime(
         suffix.every(
@@ -931,6 +1223,14 @@ export async function loadRecoveryRuntime(input: {
       currentUnknownModelUsage: unknown.slice(0, 100),
       currentUnknownManagementInvocations: unknownManagementInvocations.slice(0, 100),
       currentUnknownModelUsageCount: unknown.length + unknownManagementInvocations.length,
+      ...(predecessorTerminal && typeof predecessorTerminal.reason === "string"
+        ? {
+            priorCompilationFailure: {
+              reason: predecessorTerminal.reason,
+              rawProposalAvailable: false as const,
+            },
+          }
+        : {}),
     };
     return resolvedGraph
       ? {

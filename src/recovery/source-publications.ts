@@ -15,6 +15,7 @@ import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import {
   loadRecoveryPlan,
   loadRecoveryPlanGraph,
+  isRecoveryCompileObjectiveGraph,
   recoveryPlanDigest,
   recoveryPlanBindingDigest,
   type RecoveryPlanRecord,
@@ -103,6 +104,8 @@ export async function loadRecoverySourceArtifact(
       record.ref === input.planRecord.ref,
   );
   const plan = record.plan;
+  if (isRecoveryCompileObjectiveGraph(plan.graph))
+    throw new Error("compile-objective recovery has no source artifact publication");
   const claim = await loadRecoveryClaim(input.store, plan.objective, plan.predecessor.runId);
   requireEvidence(
     claim &&

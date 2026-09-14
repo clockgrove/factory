@@ -552,6 +552,94 @@ function makeLegacyGraphless(f: Awaited<ReturnType<typeof fixture>>): void {
     item.body = renderLegacyWorkItemCore(f.graph.objective.workItems[index]!);
 }
 
+function makeFailedCompilerGraphless(f: Awaited<ReturnType<typeof fixture>>): void {
+  f.refs.clear();
+  if (f.start.event !== "FactoryRunStarted") throw new Error("fixture start");
+  const sourcePolicy = structuredClone(f.start.policy);
+  delete sourcePolicy.economics;
+  const policyDigestValue = policyDigest(sourcePolicy);
+  const start = f.event({
+    ...f.start,
+    sequence: 1,
+    policy: sourcePolicy,
+    policyDigest: policyDigestValue,
+  });
+  const invocationId = `compile-${f.base.oid}`;
+  f.snapshot.workItems = [];
+  f.snapshot.factoryEvents = [
+    start,
+    f.event({
+      kind: "delivery",
+      event: "DeliverySelected",
+      sequence: 2,
+      requested: "regular-prs",
+      selected: "regular-prs",
+      capabilityVersion: "2026-03-10",
+      reason: "run policy selected regular pull requests",
+    }),
+    f.event({
+      kind: "budget",
+      event: "BudgetReserved",
+      sequence: 3,
+      phase: "management",
+      usageId: `invocation-${invocationId}`,
+      modelInvocationId: invocationId,
+      unit: "model_tokens",
+      amount: 0,
+      directorEpoch: 1,
+      policyDigest: policyDigestValue,
+    }),
+    f.event({
+      kind: "budget",
+      event: "BudgetReconciled",
+      sequence: 4,
+      phase: "management",
+      usageId: `failed-compile-${f.base.oid}`,
+      modelInvocationId: invocationId,
+      unit: "model_tokens",
+      amount: 161_754,
+      directorEpoch: 1,
+      policyDigest: policyDigestValue,
+      reportedModelUsage: {
+        inputTokens: 152_986,
+        outputTokens: 8_768,
+        cachedInputTokens: 107_904,
+      },
+    }),
+    f.event({
+      kind: "run",
+      event: "FactoryRunEscalated",
+      sequence: 5,
+      reason: "compiled Objective has 16 deterministic violations:\n- fixture violation",
+    }),
+  ];
+}
+
+function setGraphlessCompilerModelAllowance(
+  f: Awaited<ReturnType<typeof fixture>>,
+  maxModelTokens: number,
+): void {
+  const start = f.snapshot.factoryEvents![0];
+  if (start?.event !== "FactoryRunStarted") throw new Error("fixture source start");
+  const sourcePolicy = {
+    ...start.policy,
+    economics: {
+      maxModelTokens,
+      maxSandboxMinutes: 0,
+      maxManagedSessions: 0,
+      minCloudTimeSavedMinutes: 0,
+    },
+  };
+  const sourcePolicyDigest = policyDigest(sourcePolicy);
+  f.snapshot.factoryEvents = f.snapshot.factoryEvents!.map((event) =>
+    parseFactoryEvent({
+      ...event,
+      ...(event.event === "FactoryRunStarted" ? { policy: sourcePolicy } : {}),
+      ...("policyDigest" in event ? { policyDigest: sourcePolicyDigest } : {}),
+    }),
+  );
+}
+
 async function refreshedSiblingFixture() {
   const f = await fixture(true, "siblings");
   const originalPlan = (await f.build()).plan!;
@@ -1074,8 +1162,9 @@ describe("explicit recovery request application", () => {
     ).toBe(false);
   });
 
-  async function requests() {
-    const f = await fixture();
+  async function requests(graphlessCompilerFailure = false) {
+    const f = await fixture(!graphlessCompilerFailure);
+    if (graphlessCompilerFailure) makeFailedCompilerGraphless(f);
     let actor = "operator";
     let loseCommentResponse = false;
     let beforeRead: (() => void) | undefined;
@@ -1543,9 +1632,91 @@ describe("explicit recovery request application", () => {
         ...input,
         allowanceIncrement: { ...allowanceIncrement, modelTokens: 200 },
       }),
-    ).rejects.toThrow("allowance");
+    ).rejects.toThrow("request input binding changed");
     await expect(f.service.request({ ...input, policy: {} } as typeof input)).rejects.toThrow();
     expect(f.comments).toHaveLength(1);
+  });
+
+  it("persists and replays graphless compiler recovery only with the exact proposed repair policy", async () => {
+    const f = await requests(true);
+    const compilerEvaluation = {
+      mode: "auto-repair" as const,
+      maxRepairs: 2,
+      maxInvocations: 7,
+      timeoutSeconds: 600,
+      maxObservedTokens: 500_000,
+    };
+    const proposal = await f.service.propose({
+      objective: 7,
+      requestId: "compiler-recovery",
+      compilerEvaluation,
+    });
+    expect(proposal.status, JSON.stringify(proposal.blockers)).toBe("proposed");
+    expect(proposal.operatorAction).toMatchObject({
+      code: "submit-recovery-request",
+      evidence: {
+        planDigest: proposal.planDigest,
+        acceptedPolicyDigest: proposal.plan!.policyDigest,
+        compilerEvaluation,
+        allowance: proposal.plan!.allowance,
+      },
+    });
+    await expect(
+      f.service.request({
+        objective: 7,
+        requestId: "compiler-recovery",
+        planDigest: proposal.planDigest!,
+      }),
+    ).rejects.toThrow("proposal changed");
+
+    const exact = {
+      objective: 7,
+      requestId: "compiler-recovery",
+      planDigest: proposal.planDigest!,
+      compilerEvaluation,
+    };
+    const accepted = await f.service.request(exact);
+    expect(accepted).toMatchObject({
+      event: "RecoveryRequested",
+      runId: "source",
+      successorRunId: proposal.plan!.successorRunId,
+      policyDigest: proposal.plan!.policyDigest,
+    });
+    expect((await f.service.request(exact)).successorRunId).toBe(accepted.successorRunId);
+    await expect(
+      f.service.request({
+        ...exact,
+        compilerEvaluation: { ...compilerEvaluation, maxInvocations: 6 },
+      }),
+    ).rejects.toThrow("request input binding changed");
+    expect(f.comments.map((event) => event.event)).toEqual(["RecoveryRequested"]);
+    const stored = await new RecoveryPlanManager(f.storage, f.leases).load(7, proposal.planDigest!);
+    expect(stored!.plan).toMatchObject({
+      protocol: "clockgrove.factory/recovery-plan-v2",
+      acceptedPolicy: { compilerEvaluation },
+      graph: { mode: "compile-objective", sourceRunId: accepted.successorRunId },
+      items: [],
+    });
+  });
+
+  it("rejects compiler repair authority for an ordinary recovery before advertising a request", async () => {
+    const f = await requests();
+    const proposal = await f.service.propose({
+      objective: 7,
+      requestId: "ordinary-with-compiler-policy",
+      compilerEvaluation: {
+        mode: "auto-repair",
+        maxRepairs: 2,
+        maxInvocations: 7,
+        timeoutSeconds: 600,
+        maxObservedTokens: 500_000,
+      },
+    });
+    expect(proposal.status).toBe("blocked");
+    expect(proposal.blockers).toEqual([
+      expect.objectContaining({ code: "compiler-evaluation-not-applicable" }),
+    ]);
+    expect(f.comments).toEqual([]);
   });
 
   it("rechecks source history under the lease and leaves no authority when it changes", async () => {
@@ -1564,6 +1735,176 @@ describe("explicit recovery request application", () => {
 });
 
 describe("bounded read-only immutable recovery proposals", () => {
+  it("proposes one bounded auto-repair successor for the exact reconciled pre-graph failure", async () => {
+    const f = await fixture(false);
+    makeFailedCompilerGraphless(f);
+    const compilerEvaluation = {
+      mode: "auto-repair" as const,
+      maxRepairs: 2,
+      maxInvocations: 7,
+      timeoutSeconds: 600,
+      maxObservedTokens: 500_000,
+    };
+
+    const result = await f.build({ compilerEvaluation });
+
+    expect(result.status, JSON.stringify(result.blockers)).toBe("proposed");
+    expect(result.blockers).toEqual([]);
+    expect(result.unknownUsageDigest).toBeNull();
+    expect(result.plan).toMatchObject({
+      protocol: "clockgrove.factory/recovery-plan-v2",
+      graph: {
+        mode: "compile-objective",
+        sourceRunId: "successor",
+        sourceBaseSha: f.base.oid,
+      },
+      acceptedPolicy: { compilerEvaluation },
+      allowance: {
+        before: { modelTokens: null },
+        increment: {
+          modelTokens: 0,
+          sandboxMinutes: 0,
+          managedSessions: 0,
+          implementationAttemptsPerItem: 0,
+        },
+        after: { modelTokens: null },
+      },
+      items: [],
+    });
+    expect(result.operatorAction).toMatchObject({
+      code: "submit-recovery-request",
+      evidence: {
+        planDigest: result.planDigest,
+        acceptedPolicyDigest: result.plan!.policyDigest,
+        compilerEvaluation,
+        allowance: result.plan!.allowance,
+      },
+    });
+    expect(result.plan!.acceptedPolicy.compilerEvaluation).toEqual(compilerEvaluation);
+    expect(parseRecoveryPlan(result.plan)).toEqual(result.plan);
+    expect(f.mutations.createRef).not.toHaveBeenCalled();
+    expect(f.mutations.createCommit).not.toHaveBeenCalled();
+  });
+
+  it("requires the exact failed-compiler receipt and enforces its optional terminal reason", async () => {
+    const compilerEvaluation = {
+      mode: "auto-repair" as const,
+      maxRepairs: 2,
+      maxInvocations: 7,
+      timeoutSeconds: 600,
+      maxObservedTokens: 500_000,
+    };
+    const legacy = await fixture(false);
+    makeFailedCompilerGraphless(legacy);
+    legacy.snapshot.factoryEvents = legacy.snapshot
+      .factoryEvents!.filter(
+        (event) =>
+          event.kind !== "budget" ||
+          (!event.usageId?.startsWith("invocation-") &&
+            !event.usageId?.startsWith("failed-compile-")),
+      )
+      .concat(
+        legacy.event({
+          kind: "budget",
+          event: "BudgetReconciled",
+          sequence: 4,
+          phase: "management",
+          unit: "model_tokens",
+          amount: 161_754,
+          usageId: `compile-${"c".repeat(64)}`,
+        }),
+      );
+    const legacyResult = await legacy.build({ compilerEvaluation });
+    expect(legacyResult.blockers).toEqual([
+      expect.objectContaining({ code: "compile-objective-failure-accounting" }),
+    ]);
+
+    const matching = await fixture(false);
+    makeFailedCompilerGraphless(matching);
+    const matchingTerminal = matching.snapshot.factoryEvents!.find(
+      (event) => event.event === "FactoryRunEscalated",
+    )!;
+    Object.assign(
+      matching.snapshot.factoryEvents!.find(
+        (event) => event.kind === "budget" && event.usageId?.startsWith("failed-compile-"),
+      )!,
+      { reason: matchingTerminal.reason },
+    );
+    expect((await matching.build({ compilerEvaluation })).status).toBe("proposed");
+
+    const mismatched = await fixture(false);
+    makeFailedCompilerGraphless(mismatched);
+    Object.assign(
+      mismatched.snapshot.factoryEvents!.find(
+        (event) => event.kind === "budget" && event.usageId?.startsWith("failed-compile-"),
+      )!,
+      { reason: "a different compiler failure" },
+    );
+    expect((await mismatched.build({ compilerEvaluation })).blockers).toEqual([
+      expect.objectContaining({ code: "compile-objective-failure-accounting" }),
+    ]);
+  });
+
+  it("fails closed when pre-graph recovery omits repair authority or observes a moved base", async () => {
+    const f = await fixture(false);
+    makeFailedCompilerGraphless(f);
+    expect((await f.build()).blockers.map((blocker) => blocker.code)).toContain(
+      "compile-objective-policy-delta",
+    );
+
+    f.store.getBranchHead = async () => ({
+      oid: sha("9"),
+      treeOid: sha("8"),
+      parentOids: [f.base.oid],
+      message: "moved",
+      serverTime: now,
+    });
+    f.commits.set(sha("9"), await f.store.getBranchHead("main"));
+    const moved = await f.build({
+      compilerEvaluation: {
+        mode: "auto-repair",
+        maxRepairs: 2,
+        maxInvocations: 7,
+        timeoutSeconds: 600,
+        maxObservedTokens: 500_000,
+      },
+    });
+    expect(moved.blockers.map((blocker) => blocker.code)).toContain(
+      "compile-objective-base-changed",
+    );
+  });
+
+  it("does not offer an unrunnable compiler successor when cumulative model allowance is exhausted", async () => {
+    const f = await fixture(false);
+    makeFailedCompilerGraphless(f);
+    setGraphlessCompilerModelAllowance(f, 161_754);
+    const compilerEvaluation = {
+      mode: "auto-repair" as const,
+      maxRepairs: 2,
+      maxInvocations: 7,
+      timeoutSeconds: 600,
+      maxObservedTokens: 500_000,
+    };
+    const blocked = await f.build({ compilerEvaluation });
+    expect(blocked.blockers.map((blocker) => blocker.code)).toContain(
+      "compile-objective-model-allowance-exhausted",
+    );
+    expect(blocked.historicalAccounting?.usage?.modelTokens).toBe(161_754);
+    expect(blocked.historicalAccounting?.remaining?.modelTokens).toBe(0);
+
+    const proposed = await f.build({
+      compilerEvaluation,
+      allowanceIncrement: {
+        modelTokens: 1,
+        sandboxMinutes: 0,
+        managedSessions: 0,
+        implementationAttemptsPerItem: 0,
+      },
+    });
+    expect(proposed.status, JSON.stringify(proposed.blockers)).toBe("proposed");
+    expect(proposed.historicalAccounting?.remaining?.modelTokens).toBe(1);
+  });
+
   it("proposes an exact graph bootstrap for untouched legacy Work Items and exposes unknown usage", async () => {
     const f = await fixture(false);
     makeLegacyGraphless(f);

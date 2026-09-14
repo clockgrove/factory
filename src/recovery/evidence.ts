@@ -4,12 +4,15 @@ import { PlatformUnavailableError } from "../platform.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
 import { attemptRef, readAttemptReservationRef } from "../control/attempts.js";
 import { assertAuthenticatedCompilationCheckpoint } from "../control/compilation-checkpoint.js";
+import { inspectObjectiveGraphInput } from "../control/objective-graph-input.js";
 import { observeRecoverySiblingRefresh, recoverySiblingRefreshBinding } from "./sibling-refresh.js";
 import {
   assertAuthenticatedGraphProjection,
   assertSnapshotMatchesCompiledGraph,
 } from "../control/graph-evidence.js";
 import {
+  compiledGraphProjectionRef,
+  compiledGraphRef,
   loadCompiledGraph,
   loadCompiledGraphProjection,
   loadStagedCompiledGraphProjection,
@@ -21,6 +24,7 @@ import { policyDigest } from "../protocol/policy.js";
 import { compilerEvalDigest } from "../evaluation/compiler-eval.js";
 import {
   assertCompiledObjectiveAdoptsLegacyConstraints,
+  assertExistingGraphWorkItemsMatchCompiled,
   legacyGraphConstraintsDigest,
   parseLegacyGraphConstraintsSnapshot,
 } from "../graph.js";
@@ -39,6 +43,7 @@ import { recoveryAdoptionEvents } from "./transaction.js";
 import {
   loadRecoveryPlan,
   isRecoveryAdoptionGraph,
+  isRecoveryCompileObjectiveGraph,
   isRecoveryPersistedGraph,
   parseRecoveryPlan,
   recoveryGraphIdentity,
@@ -245,7 +250,8 @@ export async function resolveRecoveryEvidence(input: {
         snapshot.id === plan.objectiveNodeId &&
         snapshot.repositoryId === plan.repositoryId &&
         snapshot.defaultBranch === plan.baseBranch &&
-        snapshot.workItems.length === plan.items.length,
+        (isRecoveryCompileObjectiveGraph(plan.graph) ||
+          snapshot.workItems.length === plan.items.length),
     );
     requireEvidence(
       Array.isArray(snapshot.factoryEvents) &&
@@ -302,9 +308,18 @@ export async function resolveRecoveryEvidence(input: {
           controllingStart.policyDigest === plan.policyDigest,
       );
     const planGraph = plan.graph;
+    if (isRecoveryCompileObjectiveGraph(planGraph))
+      requireEvidence(
+        (
+          await Promise.all([
+            store.readRef(compiledGraphRef(plan.objective, plan.predecessor.runId)),
+            store.readRef(compiledGraphProjectionRef(plan.objective, plan.predecessor.runId)),
+          ])
+        ).every((ref) => ref === null),
+      );
     const requireBootstrapObjectiveInput = () => {
       requireEvidence(
-        isRecoveryAdoptionGraph(planGraph) &&
+        (isRecoveryAdoptionGraph(planGraph) || isRecoveryCompileObjectiveGraph(planGraph)) &&
           compilerEvalDigest({
             number: snapshot.number,
             title: snapshot.title,
@@ -330,8 +345,19 @@ export async function resolveRecoveryEvidence(input: {
       const promise = (async () => {
         const graph = await loadCompiledGraph(store, plan.objective, runId);
         if (!graph) {
-          if (isRecoveryAdoptionGraph(planGraph) && runId === planGraph.sourceRunId) {
+          if (
+            (isRecoveryAdoptionGraph(planGraph) || isRecoveryCompileObjectiveGraph(planGraph)) &&
+            runId === planGraph.sourceRunId
+          ) {
             requireBootstrapObjectiveInput();
+            if (isRecoveryCompileObjectiveGraph(planGraph)) {
+              requireEvidence(
+                snapshot.workItems.length === 0 &&
+                  (await store.readRef(planGraph.projection.ref)) === null &&
+                  !events.some((event) => event.runId === runId && event.kind === "graph"),
+              );
+              return;
+            }
             requireBootstrapItemState();
             const current = parseLegacyGraphConstraintsSnapshot({
               objectiveTitle: snapshot.title,
@@ -392,6 +418,116 @@ export async function resolveRecoveryEvidence(input: {
               .every((expectedDigest) => observation.findByDigest(expectedDigest)),
           );
           await verifyGraph(adopted!.plan.graph.sourceRunId);
+          return;
+        }
+        if (isRecoveryCompileObjectiveGraph(planGraph)) {
+          const compileGraph = planGraph;
+          const sourceBaseSha = compileGraph.sourceBaseSha;
+          requireBootstrapObjectiveInput();
+          const graphCommit = await store.readCommit(graph.commitOid);
+          requireEvidence(
+            runId === plan.successorRunId &&
+              graph.ref === compileGraph.ref &&
+              graph.graphSize === graph.objective.workItems.length &&
+              graphCommit.oid === graph.commitOid &&
+              graphCommit.parentOids.length === 1 &&
+              graphCommit.parentOids[0] === sourceBaseSha &&
+              graph.objective.workItems.every((item) => item.baseSha === sourceBaseSha),
+          );
+          const compiled = events.filter(
+            (event): event is Extract<FactoryEvent, { kind: "graph"; event: "GraphCompiled" }> =>
+              event.kind === "graph" && event.event === "GraphCompiled" && event.runId === runId,
+          );
+          const projected = events.filter(
+            (event): event is Extract<FactoryEvent, { kind: "graph"; event: "GraphProjected" }> =>
+              event.kind === "graph" && event.event === "GraphProjected" && event.runId === runId,
+          );
+          const projection = await loadCompiledGraphProjection(store, plan.objective, runId, graph);
+          requireEvidence(
+            compiled.length <= 1 &&
+              projected.length <= 1 &&
+              (!compiled.length ||
+                (compiled[0]!.graphRef === graph.ref &&
+                  compiled[0]!.graphBlobSha === graph.blobOid &&
+                  compiled[0]!.graphDigest === graph.graphDigest &&
+                  compiled[0]!.graphSize === graph.graphSize &&
+                  compiled[0]!.baseSha === sourceBaseSha)) &&
+              (!projected.length ||
+                (compiled.length === 1 && projected[0]!.sequence > compiled[0]!.sequence)),
+          );
+          const verifyPartialSnapshot = () => {
+            const current = inspectObjectiveGraphInput(snapshot);
+            requireEvidence(
+              current.receiptRunId === runId &&
+                current.existing.length === snapshot.workItems.length,
+            );
+            assertExistingGraphWorkItemsMatchCompiled(graph.objective, current.existing);
+          };
+          if (!compiled.length) {
+            requireEvidence(
+              projection === null &&
+                snapshot.workItems.length === 0 &&
+                !events.some((event) => event.runId === runId && event.kind === "graph"),
+            );
+            return;
+          }
+          if (!projection) {
+            if (!projected.length) {
+              verifyPartialSnapshot();
+              return;
+            }
+            const staged = await loadStagedCompiledGraphProjection(
+              store,
+              plan.objective,
+              runId,
+              graph,
+              projected[0]!.projectionBlobSha,
+            );
+            requireEvidence(staged.ref === compileGraph.projection.ref);
+            assertAuthenticatedGraphProjection(events, plan.objective, runId, staged);
+            assertSnapshotMatchesCompiledGraph(
+              graph.objective,
+              {
+                workItems: snapshot.workItems.map((item) => {
+                  requireEvidence(
+                    item.id &&
+                      item.title &&
+                      item.body !== undefined &&
+                      item.blockedBy !== undefined,
+                  );
+                  return {
+                    id: item.id!,
+                    number: item.number,
+                    title: item.title!,
+                    body: item.body ?? null,
+                    blockedBy: item.blockedBy!,
+                  };
+                }),
+              },
+              staged.bindings,
+            );
+            return;
+          }
+          requireEvidence(projection.ref === compileGraph.projection.ref);
+          assertAuthenticatedGraphProjection(events, plan.objective, runId, projection);
+          assertSnapshotMatchesCompiledGraph(
+            graph.objective,
+            {
+              workItems: snapshot.workItems.map((item) => {
+                requireEvidence(
+                  item.id && item.title && item.body !== undefined && item.blockedBy !== undefined,
+                );
+                return {
+                  id: item.id!,
+                  number: item.number,
+                  title: item.title!,
+                  body: item.body ?? null,
+                  blockedBy: item.blockedBy!,
+                };
+              }),
+            },
+            projection.bindings,
+          );
           return;
         }
         requireEvidence(graph.graphSize === plan.items.length);
@@ -529,15 +665,16 @@ export async function resolveRecoveryEvidence(input: {
         requireEvidence(projection);
         if (!projection) throw new Error("missing projection");
         assertAuthenticatedGraphProjection(events, plan.objective, runId, projection);
-        requireEvidence(
-          recoveryPlanBindingDigest(
-            projection.bindings.map((binding) => ({
-              compilerId: binding.compilerId,
-              issueNodeId: binding.issueNodeId,
-              workItem: binding.issueNumber,
-            })),
-          ) === planGraph.projection.bindingDigest,
-        );
+        if (!isRecoveryCompileObjectiveGraph(planGraph))
+          requireEvidence(
+            recoveryPlanBindingDigest(
+              projection.bindings.map((binding) => ({
+                compilerId: binding.compilerId,
+                issueNodeId: binding.issueNodeId,
+                workItem: binding.issueNumber,
+              })),
+            ) === planGraph.projection.bindingDigest,
+          );
         assertSnapshotMatchesCompiledGraph(
           graph.objective,
           {

@@ -145,6 +145,10 @@ Restarting the controller resumes eligible non-terminal work; it does not revive
 cancelled run. For an escalated Objective, ask the Director to inspect `factory_recovery_plan`,
 then propose a successor with `factory_recovery_propose`. The proposal is read-only and binds the
 existing graph, issues, source artifacts, historical usage, and continuation actions to a digest.
+If a reconciled one-shot compiler failed before it created a graph or Work Items, the proposal can
+instead bind one successor compilation of the unchanged Objective and base. That proposal requires
+an explicit auto-repair envelope; it creates no placeholder Work Items, and the successor cannot
+launch workers until its compiled graph and GitHub projection authenticate.
 `factory_status.operatorAction.monitoring: "stop"` means no Factory work is active: pause or delete
 any attached recurring monitor and report the returned next action once. Do not keep polling a
 terminal run, rejected activation, acknowledged deliberate pause, or recovery authority gate.
@@ -161,6 +165,11 @@ The npm CLI equivalents are:
 factory recovery-propose OWNER/REPO#NUMBER --request-id UNIQUE_STABLE_ID
 factory recovery-request OWNER/REPO#NUMBER --request-id UNIQUE_STABLE_ID --plan-digest PROPOSED_DIGEST
 ```
+
+For the pre-graph compiler case, pass the same JSON file to both commands with
+`--compiler-evaluation FILE`. It must specify `mode`, `maxRepairs`, `maxInvocations`,
+`timeoutSeconds`, and `maxObservedTokens`. The last field stops evaluation after observed usage; it
+is not an enforceable provider token cap or an increase to the cumulative model-token allowance.
 
 With a plugin-only installation, use the installed CLI path described above. Substitute the
 proposal's exact digest, not a locally invented value. Retry an uncertain request response with

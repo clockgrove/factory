@@ -1425,6 +1425,7 @@ type ApplicationToolInput = {
   compile?: boolean;
   planDigest?: string;
   allowanceIncrement?: RecoveryProposalInput["allowanceIncrement"];
+  compilerEvaluation?: RecoveryProposalInput["compilerEvaluation"];
   unknownUsageAcknowledgementDigest?: string | null;
   pinnedAdmissionSnapshots?: unknown;
   annotations?: unknown;
@@ -1473,6 +1474,7 @@ function registerApplicationTool(
       ? {
           ...RequestToolShape,
           allowanceIncrement: RecoveryProposalInputSchema.shape.allowanceIncrement,
+          compilerEvaluation: RecoveryProposalInputSchema.shape.compilerEvaluation,
           unknownUsageAcknowledgementDigest:
             RecoveryProposalInputSchema.shape.unknownUsageAcknowledgementDigest,
           ...(operation === "recovery-request"
@@ -1570,9 +1572,9 @@ function registerApplicationTool(
               : operation === "recovery-plan"
                 ? "Read-only assessment of historical work, graph and PR evidence, and cumulative usage. Does not authorize successor execution, reset budgets, or modify GitHub."
                 : operation === "recovery-propose"
-                  ? "Read-only proposal of an exact successor plan for explicit approval. Default allowance increments are zero. Unknown usage acknowledgement and any extra allowance must be explicitly supplied; this tool writes nothing and starts no work."
+                  ? "Read-only proposal of an exact successor plan for explicit approval. Default allowance increments are zero. Terminal pre-graph compilation may receive only a fully explicit successor compiler-evaluation auto-repair policy. Unknown usage acknowledgement and any extra allowance must be explicitly supplied; this tool writes nothing and starts no work."
                   : operation === "recovery-request"
-                    ? "Persist and acknowledge the exact inspected successor plan digest. Retains predecessor terminal history and cumulative allowance; changed evidence requires a newly acknowledged plan. The controller must independently reconcile resources and adopt before execution."
+                    ? "Persist and acknowledge the exact inspected successor plan digest, including any explicitly supplied successor compiler-evaluation policy. Retains predecessor terminal history and cumulative allowance; changed evidence requires a newly acknowledged plan. The controller must independently reconcile resources and adopt before execution."
                     : `${operation} through Factory's shared application-service boundary.`,
       inputSchema,
       annotations,
@@ -1592,6 +1594,7 @@ function registerApplicationTool(
           objective: input.objectiveNumber!,
           requestId: input.requestId,
           ...(input.allowanceIncrement ? { allowanceIncrement: input.allowanceIncrement } : {}),
+          ...(input.compilerEvaluation ? { compilerEvaluation: input.compilerEvaluation } : {}),
           ...(input.unknownUsageAcknowledgementDigest !== undefined
             ? { unknownUsageAcknowledgementDigest: input.unknownUsageAcknowledgementDigest }
             : {}),

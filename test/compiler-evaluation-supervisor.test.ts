@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
-import { CompiledGraphManager } from "../src/control/graphs.js";
+import { CompiledGraphManager, compiledGraphProjectionRef } from "../src/control/graphs.js";
 import { GitHubReader, cancellationRequestFromComments } from "../src/github.js";
-import { encodeEventComment } from "../src/control/receipts.js";
+import { decodeEventComments, encodeEventComment } from "../src/control/receipts.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
+import { policyDigest } from "../src/protocol/policy.js";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { PlatformUnavailableError } from "../src/platform.js";
 import { compileObjective } from "../src/compiler/index.js";
@@ -15,7 +16,12 @@ import {
   type CompilerJudgeVerdict,
   type ObligationInventory,
 } from "../src/evaluation/compiler-eval.js";
-import { compiledGraphDigest } from "../src/graph.js";
+import { GithubOctokitGraphWriter, compiledGraphDigest } from "../src/graph.js";
+import { buildRecoveryProposal } from "../src/recovery/proposal.js";
+import { recoveryReadPort } from "../src/recovery/github-read-port.js";
+import { RecoveryPlanManager } from "../src/recovery/plan.js";
+import { RecoveryClaimManager } from "../src/recovery/claims.js";
+import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
 
 const usage = { inputTokens: 20, outputTokens: 10, cachedInputTokens: 4 };
 type Fixture = Awaited<ReturnType<typeof providerSupervisorFixture>>;
@@ -176,6 +182,192 @@ function assertNoProjection(f: Fixture) {
   expect(f.snapshot.closed).toBe(false);
 }
 
+const recoveryCompilerEvaluation = {
+  mode: "auto-repair" as const,
+  maxRepairs: 2,
+  maxInvocations: 7,
+  timeoutSeconds: 600,
+  maxObservedTokens: 500_000,
+};
+
+async function graphlessCompilerRecoveryFixture() {
+  const f = await providerSupervisorFixture("daytona-burst", {
+    localOnly: true,
+    compilerEvaluation: recoveryCompilerEvaluation,
+  });
+  freshObjective(f);
+  const calls = configureCompiler(f);
+  const sourcePolicy = structuredClone(f.policy);
+  delete sourcePolicy.compilerEvaluation;
+  const sourcePolicyDigest = policyDigest(sourcePolicy);
+  const sourceRunId = "failed-compiler-source";
+  const successorRunId = "compiler-recovery-successor";
+  const at = new Date().toISOString();
+  const sourceEvent = (fields: Record<string, unknown>) =>
+    parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      objective: 7,
+      runId: sourceRunId,
+      at,
+      ...fields,
+    });
+  const terminalReason = "compiled Objective has 16 deterministic violations: fixture";
+  const invocationId = `compile-${f.baseSha}`;
+  const predecessorStart = sourceEvent({
+    kind: "run",
+    event: "FactoryRunStarted",
+    sequence: 1,
+    actor: "operator",
+    repository: "fixture/provider-qualification",
+    objectiveAuthor: "operator",
+    fork: false,
+    baseBranch: "main",
+    baseSha: f.baseSha,
+    policy: sourcePolicy,
+    policyDigest: sourcePolicyDigest,
+  });
+  if (predecessorStart.event !== "FactoryRunStarted") throw new Error("fixture predecessor start");
+  f.snapshot.factoryEvents = [
+    predecessorStart,
+    sourceEvent({
+      kind: "delivery",
+      event: "DeliverySelected",
+      sequence: 2,
+      requested: "regular-prs",
+      selected: "regular-prs",
+      capabilityVersion: "2026-03-10",
+      reason: "fixture delivery selection",
+    }),
+    sourceEvent({
+      kind: "budget",
+      event: "BudgetReserved",
+      sequence: 3,
+      phase: "management",
+      unit: "model_tokens",
+      amount: 0,
+      usageId: `invocation-${invocationId}`,
+      modelInvocationId: invocationId,
+      directorEpoch: 1,
+      policyDigest: sourcePolicyDigest,
+    }),
+    sourceEvent({
+      kind: "budget",
+      event: "BudgetReconciled",
+      sequence: 4,
+      phase: "management",
+      unit: "model_tokens",
+      amount: usage.inputTokens + usage.outputTokens,
+      usageId: `failed-${invocationId}`,
+      modelInvocationId: invocationId,
+      directorEpoch: 1,
+      policyDigest: sourcePolicyDigest,
+      reportedModelUsage: usage,
+      reason: terminalReason,
+    }),
+    sourceEvent({
+      kind: "run",
+      event: "FactoryRunEscalated",
+      sequence: 5,
+      reason: terminalReason,
+    }),
+  ];
+
+  const store = new GitHubControlStore({
+    token: "fixture-only",
+    owner: "fixture",
+    repo: "provider-qualification",
+  });
+  const proposal = await buildRecoveryProposal({
+    repository: "fixture/provider-qualification",
+    snapshot: f.snapshot,
+    historyComplete: true,
+    store: recoveryReadPort(store, "fixture", "provider-qualification"),
+    requestId: "compiler-recovery-request",
+    successorRunId,
+    compilerEvaluation: recoveryCompilerEvaluation,
+  });
+  expect(proposal.status, JSON.stringify(proposal.blockers)).toBe("proposed");
+  if (!proposal.plan) throw new Error("fixture recovery plan");
+  const successorLease = {
+    ...f.lease,
+    runId: successorRunId,
+    policyDigest: proposal.plan.policyDigest,
+  };
+  const planRecord = await new RecoveryPlanManager(f.storage, f.leases).persist({
+    lease: successorLease,
+    plan: proposal.plan,
+  });
+  const request = sourceEvent({
+    kind: "recovery",
+    event: "RecoveryRequested",
+    sequence: 6,
+    requestedBy: "operator",
+    requestId: proposal.plan.requestId,
+    repository: "fixture/provider-qualification",
+    planDigest: planRecord.digest,
+    predecessorRunId: sourceRunId,
+    predecessorTerminalDigest: proposal.plan.predecessor.terminalDigest,
+    successorRunId,
+    policyDigest: proposal.plan.policyDigest,
+    baseSha: proposal.plan.expectedBaseSha,
+  });
+  if (request.event !== "RecoveryRequested") throw new Error("fixture recovery request");
+  f.snapshot.factoryEvents.push(request);
+  const claim = await new RecoveryClaimManager(f.storage, f.leases).claim({
+    lease: successorLease,
+    planRecord,
+    authenticatedRequest: request,
+    transaction: {
+      at,
+      startSequence: 7,
+      evidenceDigest: "1".repeat(64),
+      accountingDigest: "2".repeat(64),
+      resourceEvidenceDigest: "3".repeat(64),
+    },
+  });
+  f.snapshot.factoryEvents.push(
+    ...recoveryAdoptionEvents({
+      planRecord,
+      claim,
+      authenticatedRequest: request,
+      predecessorStart,
+    }),
+  );
+
+  let nextIssue = 8;
+  vi.spyOn(GithubOctokitGraphWriter.prototype, "createWorkItemIssue").mockImplementation(
+    async ({ title, body }) => {
+      const number = nextIssue++;
+      const id = `I_${number}`;
+      f.snapshot.workItems.push({
+        id,
+        number,
+        title,
+        body,
+        closed: false,
+        assignees: [],
+        labels: ["factory:work-item"],
+        blockedBy: [],
+        linkedPullRequests: [],
+        copilotAssignments: [],
+        factoryEvents: [],
+      });
+      return { id, number };
+    },
+  );
+  vi.spyOn(GithubOctokitGraphWriter.prototype, "addBlockedBy").mockResolvedValue(undefined);
+  return {
+    f,
+    calls,
+    planRecord,
+    recovery: {
+      requestId: proposal.plan.requestId,
+      planDigest: planRecord.digest,
+      successorRunId,
+    },
+  };
+}
+
 describe("Supervisor compiler evaluation activation boundary", () => {
   it.each(["accept", "repair"] as const)(
     "report-only %s writes evaluation evidence without activating work",
@@ -283,6 +475,113 @@ describe("Supervisor compiler evaluation activation boundary", () => {
       await f.dispose();
     }
   }, 30_000);
+
+  it.each([
+    "after-evaluation",
+    "after-graph-persistence",
+    "after-work-item-creation",
+    "after-staged-projection",
+    "after-projection-receipt",
+  ] as const)(
+    "rechecks graphless recovery authority %s before the next durable mutation",
+    async (boundary) => {
+      const { f, calls, planRecord, recovery } = await graphlessCompilerRecoveryFixture();
+      try {
+        const changeObjective = () => {
+          f.snapshot.body += ` Concurrent change ${boundary}.`;
+        };
+        if (boundary === "after-evaluation") {
+          const compile = f.management.compile;
+          f.management.compile = async (context, checkpoint, beforeModelInvocation) => {
+            const result = await compile(context, checkpoint, beforeModelInvocation);
+            changeObjective();
+            return result;
+          };
+        } else if (boundary === "after-graph-persistence") {
+          const persist = CompiledGraphManager.prototype.persist;
+          vi.spyOn(CompiledGraphManager.prototype, "persist").mockImplementation(async function (
+            this: CompiledGraphManager,
+            ...args
+          ) {
+            const result = await persist.apply(this, args);
+            vi.mocked(GitHubControlStore.prototype.getBranchHead).mockResolvedValue({
+              oid: "f".repeat(40),
+              treeOid: "e".repeat(40),
+              parentOids: [f.baseSha],
+              message: "concurrent base advance",
+              serverTime: new Date(),
+            });
+            return result;
+          });
+        } else if (boundary === "after-work-item-creation") {
+          const create = vi
+            .mocked(GithubOctokitGraphWriter.prototype.createWorkItemIssue)
+            .getMockImplementation()!;
+          vi.mocked(GithubOctokitGraphWriter.prototype.createWorkItemIssue).mockImplementation(
+            async (...args) => {
+              const result = await create(...args);
+              changeObjective();
+              return result;
+            },
+          );
+        } else if (boundary === "after-staged-projection") {
+          const stage = CompiledGraphManager.prototype.stageProjection;
+          vi.spyOn(CompiledGraphManager.prototype, "stageProjection").mockImplementation(
+            async function (this: CompiledGraphManager, ...args) {
+              const result = await stage.apply(this, args);
+              changeObjective();
+              return result;
+            },
+          );
+        } else {
+          const addComment = vi
+            .mocked(GitHubControlStore.prototype.addIssueComment)
+            .getMockImplementation()!;
+          vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+            async (node, body) => {
+              await addComment(node, body);
+              if (
+                decodeEventComments(body).some(
+                  (event) =>
+                    event.event === "GraphProjected" && event.runId === recovery.successorRunId,
+                )
+              )
+                changeObjective();
+            },
+          );
+        }
+
+        const result = await f.runRecovery(recovery);
+        expect(result).toMatchObject({
+          status: "escalated",
+          runId: recovery.successorRunId,
+          reason: expect.stringMatching(
+            /recovered Objective compilation boundary changed|successor graph-bootstrap authority changed/,
+          ),
+        });
+        expect(calls.slice(0, 2)).toEqual(["inventory", "compile"]);
+        expect(
+          f.events().filter((event) => event.kind === "attempt" || event.kind === "scheduling"),
+        ).toEqual([]);
+        expect(f.activity.filter((entry) => entry.operation === "launch")).toEqual([]);
+        expect(f.refs.has(compiledGraphProjectionRef(7, recovery.successorRunId))).toBe(false);
+        expect(
+          f
+            .events()
+            .some(
+              (event) =>
+                event.event === "GraphProjected" && event.runId === recovery.successorRunId,
+            ),
+        ).toBe(boundary === "after-projection-receipt");
+        expect("mode" in planRecord.plan.graph && planRecord.plan.graph.mode).toBe(
+          "compile-objective",
+        );
+      } finally {
+        await f.dispose();
+      }
+    },
+    60_000,
+  );
 });
 
 it("honors activation cancellation after inventory before any further model admission", async () => {

@@ -14,9 +14,12 @@ import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
 import {
   loadRecoveryPlan,
+  isRecoveryAdoptionGraph,
+  isRecoveryCompileObjectiveGraph,
   MAX_RECOVERY_PLAN_BYTES,
   parseRecoveryPlan,
   RECOVERY_PLAN_PROTOCOL,
+  RECOVERY_PLAN_PROTOCOL_V2,
   recoveryHistoryDigest,
   recoveryPlanBindingDigest,
   recoveryPlanDigest,
@@ -202,6 +205,35 @@ function adoptionProposal(): RecoveryPlan {
   return plan;
 }
 
+function compileObjectiveProposal(): RecoveryPlan {
+  const original = proposal();
+  const compilerEvaluation = {
+    mode: "auto-repair" as const,
+    maxRepairs: 2,
+    maxInvocations: 7,
+    timeoutSeconds: 600,
+    maxObservedTokens: 500_000,
+  };
+  const acceptedPolicy = { ...original.acceptedPolicy, compilerEvaluation };
+  return {
+    ...original,
+    protocol: RECOVERY_PLAN_PROTOCOL_V2,
+    graph: {
+      mode: "compile-objective",
+      sourceRunId: original.successorRunId,
+      ref: compiledGraphRef(original.objective, original.successorRunId),
+      objectiveInputDigest: digest("9"),
+      sourceBaseSha: original.expectedBaseSha,
+      projection: {
+        ref: compiledGraphProjectionRef(original.objective, original.successorRunId),
+      },
+    },
+    acceptedPolicy,
+    policyDigest: policyDigest(acceptedPolicy),
+    items: [],
+  };
+}
+
 class Store implements CompiledGraphStore {
   refs = new Map<string, string>();
   commits = new Map<string, GitCommitObject>();
@@ -317,11 +349,96 @@ function lease(plan: RecoveryPlan): LeaseState {
 }
 
 describe("immutable recovery proposal", () => {
+  it("persists and binds a v2 compile-objective bootstrap without inventing Work Item identities", async () => {
+    const plan = compileObjectiveProposal();
+    expect(parseRecoveryPlan(plan)).toEqual(plan);
+    expect(plan.items).toEqual([]);
+    const store = new Store();
+    const saved = await new RecoveryPlanManager(store, store).persist({ lease: lease(plan), plan });
+    expect(await loadRecoveryPlan(store.readPort(), 7, saved.digest)).toEqual(saved);
+
+    const movedBase = structuredClone(plan);
+    if (!isRecoveryCompileObjectiveGraph(movedBase.graph)) throw new Error("fixture graph");
+    movedBase.graph.sourceBaseSha = sha("9");
+    expect(() => parseRecoveryPlan(movedBase)).toThrow(/base/i);
+
+    const inventedItem = structuredClone(plan);
+    inventedItem.items.push(proposal().items[0]!);
+    expect(() => parseRecoveryPlan(inventedItem)).toThrow();
+
+    const foreignSuccessor = structuredClone(plan);
+    foreignSuccessor.graph.sourceRunId = "other-successor";
+    expect(() => parseRecoveryPlan(foreignSuccessor)).toThrow(/successor|graph source/i);
+
+    const movedProjection = structuredClone(plan);
+    movedProjection.graph.projection.ref = compiledGraphProjectionRef(7, "other-successor");
+    expect(() => parseRecoveryPlan(movedProjection)).toThrow(/projection reference/i);
+
+    const changedInput = structuredClone(plan);
+    if (!isRecoveryCompileObjectiveGraph(changedInput.graph)) throw new Error("fixture graph");
+    changedInput.graph.objectiveInputDigest = digest("8");
+    expect(recoveryPlanDigest(parseRecoveryPlan(changedInput))).not.toBe(saved.digest);
+
+    const changedPolicy = structuredClone(plan);
+    changedPolicy.acceptedPolicy.compilerEvaluation!.maxInvocations = 6;
+    expect(() => parseRecoveryPlan(changedPolicy)).toThrow(/policy digest/i);
+  });
+
+  it("limits v2 authority to one root source and the exact compiler-policy addition", () => {
+    const plan = compileObjectiveProposal();
+
+    const linked = structuredClone(plan);
+    linked.priorPlanDigest = digest("7");
+    expect(() => parseRecoveryPlan(linked)).toThrow(/root recovery/i);
+
+    const extraHistory = structuredClone(plan);
+    extraHistory.history.unshift({
+      runId: "older-source",
+      startDigest: digest("1"),
+      terminalDigest: digest("2"),
+      terminalEvent: "FactoryRunEscalated",
+      terminalSequence: 9,
+      policyDigest: plan.history[0]!.policyDigest,
+    });
+    extraHistory.historyDigest = recoveryHistoryDigest(extraHistory.history);
+    expect(() => parseRecoveryPlan(extraHistory)).toThrow(/exactly one original run/i);
+
+    const sourceAlreadyHadCompilerPolicy = structuredClone(plan);
+    sourceAlreadyHadCompilerPolicy.history[0]!.policyDigest = policyDigest(
+      sourceAlreadyHadCompilerPolicy.acceptedPolicy,
+    );
+    sourceAlreadyHadCompilerPolicy.historyDigest = recoveryHistoryDigest(
+      sourceAlreadyHadCompilerPolicy.history,
+    );
+    expect(() => parseRecoveryPlan(sourceAlreadyHadCompilerPolicy)).toThrow(
+      /differs from the source policy/i,
+    );
+
+    const changedAcceptedPolicy = structuredClone(plan);
+    changedAcceptedPolicy.acceptedPolicy.maxParallel = 3;
+    changedAcceptedPolicy.policyDigest = policyDigest(changedAcceptedPolicy.acceptedPolicy);
+    expect(() => parseRecoveryPlan(changedAcceptedPolicy)).toThrow(
+      /differs from the source policy/i,
+    );
+
+    const incompleteCompilerPolicy = structuredClone(plan);
+    delete incompleteCompilerPolicy.acceptedPolicy.compilerEvaluation!.maxRepairs;
+    incompleteCompilerPolicy.policyDigest = policyDigest(incompleteCompilerPolicy.acceptedPolicy);
+    expect(() => parseRecoveryPlan(incompleteCompilerPolicy)).toThrow(/fully explicit/i);
+
+    const sandboxIncrement = structuredClone(plan);
+    sandboxIncrement.allowance.increment.sandboxMinutes = 1;
+    sandboxIncrement.allowance.after.sandboxMinutes = 1;
+    sandboxIncrement.acceptedPolicy.maxSandboxMinutes = 1;
+    sandboxIncrement.policyDigest = policyDigest(sandboxIncrement.acceptedPolicy);
+    expect(() => parseRecoveryPlan(sandboxIncrement)).toThrow(/only the model-token allowance/i);
+  });
+
   it("binds a graph bootstrap to the exact legacy issue core and successor", () => {
     const plan = adoptionProposal();
     expect(parseRecoveryPlan(plan)).toEqual(plan);
     const changedCore = structuredClone(plan);
-    if ("mode" in changedCore.graph)
+    if (isRecoveryAdoptionGraph(changedCore.graph))
       changedCore.graph.constraints.workItems[0]!.goal = "Changed after acknowledgement";
     expect(() => parseRecoveryPlan(changedCore)).toThrow(/constraint digest/i);
     const changedIdentity = structuredClone(plan);
@@ -539,6 +656,7 @@ describe("immutable recovery proposal", () => {
     [
       "binding digest",
       (plan: RecoveryPlan) => {
+        if (!("bindingDigest" in plan.graph.projection)) throw new Error("fixture graph");
         plan.graph.projection.bindingDigest = digest("f");
       },
     ],

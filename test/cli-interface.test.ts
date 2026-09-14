@@ -22,6 +22,7 @@ describe("packaged CLI interface", () => {
     expect(result.stdout).toContain("factory recovery-plan OWNER/REPO#NUMBER");
     expect(result.stdout).toContain("factory recovery-propose OWNER/REPO#NUMBER");
     expect(result.stdout).toContain("factory recovery-request OWNER/REPO#NUMBER");
+    expect(result.stdout).toContain("--compiler-evaluation FILE");
     expect(result.stdout).toContain("factory replay OWNER/REPO#NUMBER [--snapshots FILE]");
   });
 

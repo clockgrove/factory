@@ -19,7 +19,15 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -128,7 +136,7 @@ const bundle = arg?.replace("${PLUGIN_ROOT}", root);
 check(Boolean(bundle) && existsSync(bundle), `the path in mcp.json exists: ${arg}`);
 const launcherArg = (server?.args ?? []).find((a) => a.endsWith("/bin/factory-mcp"));
 const launcher = launcherArg?.replace("${PLUGIN_ROOT}", root);
-check(server?.command === "/bin/sh", "mcp.json uses the supported Linux shell entry point");
+check(server?.command === "sh", "mcp.json uses a bare shell executable accepted by Agent Plugins");
 check(
   Boolean(launcher),
   "mcp.json addresses the startup diagnostic launcher through ${PLUGIN_ROOT}",
@@ -268,7 +276,7 @@ const codexLauncherArg = (codexServer?.args ?? []).find((value) =>
   value.endsWith("/bin/factory-mcp"),
 );
 check(
-  codexServer?.type === "stdio" && codexServer?.command === "/bin/sh",
+  codexServer?.type === "stdio" && codexServer?.command === "sh",
   "the Codex manifest declares the Factory stdio server inline",
 );
 check(
@@ -389,12 +397,20 @@ for (const field of [
 
 console.log("\n# the bundle actually runs\n");
 
-const nodeLess = spawnSync(launchCommand, launchArgs, {
-  cwd: root,
-  env: { PATH: resolve(root, ".factory-path-without-node") },
-  encoding: "utf8",
-  timeout: 5_000,
-});
+const nodeLessPath = mkdtempSync(resolve(tmpdir(), "factory-shell-without-node-"));
+let nodeLess;
+try {
+  // Keep the bare shell resolvable while testing the launcher's missing-Node diagnostic.
+  symlinkSync("/bin/sh", resolve(nodeLessPath, "sh"));
+  nodeLess = spawnSync(launchCommand, launchArgs, {
+    cwd: root,
+    env: { PATH: nodeLessPath },
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+} finally {
+  rmSync(nodeLessPath, { recursive: true, force: true });
+}
 check(
   nodeLess.status === 127 &&
     nodeLess.stderr.includes("the Codex host process cannot resolve 'node' on PATH") &&

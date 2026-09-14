@@ -41,12 +41,12 @@ describe("plugin manifest consistency", () => {
   it("declares the same bundled MCP executable for Agent Plugins, Codex, and Claude", () => {
     expect(mcp.mcpServers.factory).toMatchObject({
       type: "stdio",
-      command: "/bin/sh",
+      command: "sh",
       args: ["${PLUGIN_ROOT}/bin/factory-mcp", "${PLUGIN_ROOT}/dist/mcp-server.js"],
     });
     expect(codex.mcpServers.factory).toEqual(mcp.mcpServers.factory);
     expect(claudeMcp.mcpServers.factory).toMatchObject({
-      command: "/bin/sh",
+      command: "sh",
       args: ["${CLAUDE_PLUGIN_ROOT}/bin/factory-mcp", "${CLAUDE_PLUGIN_ROOT}/dist/mcp-server.js"],
     });
     expect(

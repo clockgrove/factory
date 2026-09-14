@@ -13,6 +13,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -167,6 +168,22 @@ async function inspectMcp(command, args, cwd, options = {}) {
     ]);
   };
   try {
+    if (options.codexLoader) {
+      const initialized = await request("initialize", {
+        capabilities: { experimentalApi: true },
+        clientInfo: { name: "factory-clean-install", version: "1" },
+      });
+      if (initialized.error) throw new Error(JSON.stringify(initialized.error));
+      child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
+      const status = await request("mcpServerStatus/list", {});
+      if (status.error) throw new Error(JSON.stringify(status.error));
+      const factory = status.result?.data?.find((server) => server.name.includes("factory"));
+      if (!factory?.tools?.factory_run)
+        throw new Error(
+          `Codex did not discover the installed Factory MCP tools: ${JSON.stringify(status.result)} ${stderr.trim()}`,
+        );
+      return factory;
+    }
     const initialized = await request("initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
@@ -236,7 +253,7 @@ async function main() {
   const mcp = manifest.mcpServers?.factory;
   const mcpArgs = (mcp?.args ?? []).map((value) => value.replace("${PLUGIN_ROOT}", installedRoot));
   if (
-    mcp?.command !== "/bin/sh" ||
+    mcp?.command !== "sh" ||
     mcpArgs.length !== 2 ||
     mcpArgs[0] !== join(installedRoot, "bin", "factory-mcp") ||
     mcpArgs[1] !== join(installedRoot, "dist", "mcp-server.js")
@@ -245,6 +262,8 @@ async function main() {
   }
   const nodeLessPath = join(temporaryRoot, "path-without-node");
   mkdirSync(nodeLessPath);
+  // The portable manifest resolves the POSIX shell on PATH; isolate only Node.
+  symlinkSync("/bin/sh", join(nodeLessPath, "sh"));
   const nodeLess = spawnSync(mcp.command, mcpArgs, {
     cwd: installedRoot,
     env: { ...cleanEnvironment(), PATH: nodeLessPath },
@@ -260,8 +279,13 @@ async function main() {
       `installed Factory MCP launcher did not diagnose a Node-less Codex host: ${nodeLess.stderr.trim()}`,
     );
   }
+  const codexMcp = await inspectMcp(codexCommand, ["app-server", "--stdio"], installedRoot, {
+    codexLoader: true,
+  });
   const mcpResult = await inspectMcp(mcp.command, mcpArgs, installedRoot);
   const toolNames = (mcpResult.tools ?? []).map((tool) => tool.name);
+  if (toolNames.some((name) => !codexMcp.tools[name]))
+    throw new Error("Codex plugin discovery omitted an installed Factory MCP tool");
   for (const required of [
     "factory_run",
     "factory_status",
@@ -384,6 +408,7 @@ async function main() {
       plugin: "factory",
       version: manifest.version,
       mcpTools: toolNames.length,
+      codexDiscoveredMcpTools: Object.keys(codexMcp.tools).length,
       controllerEntryPoint: "dist/factory.js",
       sdkLocalAvailable: true,
       cleanConfiguration: true,

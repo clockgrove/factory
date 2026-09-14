@@ -11,13 +11,33 @@ Factory's Supervisor owns the loop. Do not reproduce scheduling with repeated mo
 not mutate GitHub with raw `gh`, REST, or GraphQL calls. The bundled MCP tools are the authorized
 surface.
 
+## Resolve the target and request
+
+Use the repository and Objective selected by the user. If the target is ambiguous, ask which
+repository and Objective they mean before querying candidate targets or starting work. Do not
+inspect guessed candidates to resolve a request such as "start that other Objective" unless the
+user asked you to discover or compare candidates.
+
+For an existing-plan request, including "does this Objective have a plan?", use `factory_plan`
+with `compile` omitted or `false`. Status and Work Item counts are not a substitute for inspecting
+the existing graph. Report a missing graph or unverified graph authority as returned; do not
+compile a replacement unless explicitly authorized.
+
+For read-only plan inspection, omit the optional local `repository` argument. Never fill a checkout
+argument with the current directory merely because it is available. When compilation, preflight
+or execution requires a checkout, use an absolute checkout verified to belong to the selected
+repository; ask for missing context rather than guessing.
+
+If the required tool is unavailable, explain which operation cannot be performed and what setup
+is needed. Do not claim to have inspected a plan or started work through a different operation.
+
 ## Choose the execution mode
 
 Collect:
 
 - `owner` and `repo`;
 - the Objective issue number;
-- an absolute local checkout of that exact repository;
+- an absolute local checkout of that exact repository for operations requiring one;
 - an optional complete run policy.
 
 If no policy was supplied, use Factory's fixed local-only default (up to two workers, further

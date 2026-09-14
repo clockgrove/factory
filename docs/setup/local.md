@@ -51,7 +51,7 @@ selected repository by asking:
 > Add Factory's shipped human Objective issue form to this repository. Preserve its existing issue
 > templates and make the form an ordinary reviewable repository change.
 
-The setup skill uses the [form packaged with Factory](../../templates/github/objective.yml) and
+The setup skill uses the [form packaged with Factory](../../assets/templates/github/objective.yml) and
 places it at `.github/ISSUE_TEMPLATE/objective.yml` under the destination repository's normal
 review policy. As a manual fallback, review and copy that same file to the destination path. The
 form is optional; do not add a human Work Item form because Factory generates Work Items from the

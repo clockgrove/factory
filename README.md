@@ -59,6 +59,17 @@ Local workers use the Codex SDK by default, with Codex CLI fallback. Local-only 
 your model account's quota. Follow the [local quick start](docs/setup/local.md) for permissions,
 activation, troubleshooting, and the source-checkout CLI path.
 
+Plugin installation is global and has no destination-repository argument, so it does not add files
+to the repository you have open. To give human authors a guided Objective form, open the chosen
+checkout after restarting Codex and ask:
+
+> Add Factory's shipped human Objective issue form to this repository. Preserve its existing issue
+> templates and make the form an ordinary reviewable repository change.
+
+Factory ships the [canonical form](templates/github/objective.yml) for that explicit request. You
+can also review and copy it manually to `.github/ISSUE_TEMPLATE/objective.yml`. It is optional and
+does not change Factory's activation or execution authority.
+
 ## Try a small Objective
 
 In a trusted Node.js repository with committed npm metadata, a lockfile, and a working `npm test`,

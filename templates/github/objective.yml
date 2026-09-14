@@ -1,0 +1,76 @@
+name: Factory Objective
+description: Describe a product outcome for Factory to plan into validated Work Items
+title: "objective: "
+labels:
+  - factory:objective
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the outcome in your own words. A teammate should understand what success looks like without first reading every linked document.
+
+        Factory will design the smallest complete Work Item graph after you explicitly ask it to plan or run this Objective. Creating this issue does not activate Factory, authorize execution or spending, approve a deployment, or grant permission to file other issues.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: What should exist or work when this Objective is complete?
+      placeholder: Explain the result as you would to a developer joining the project today.
+    validations:
+      required: true
+  - type: textarea
+    id: experience
+    attributes:
+      label: Completion experience
+      description: Who should be able to do what, and what should they observe?
+      placeholder: A new contributor can clone the repository, run ..., and observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: What must be true
+      description: List observable acceptance criteria. Include tests, evidence, or operating behavior that would prove the outcome.
+      placeholder: |
+        - The supported workflow completes from a clean checkout.
+        - Existing behavior remains covered by the repository checks.
+        - The README explains how to use and verify the result.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Boundaries and non-goals
+      description: Name what must stay unchanged and what related work is outside this Objective.
+      placeholder: Do not implement later product features, change the public architecture, deploy production, or commit credentials.
+    validations:
+      required: true
+  - type: textarea
+    id: authority
+    attributes:
+      label: Execution authority
+      description: State what Factory may change or use, including repositories, local or cloud workers, network/services, spending, environments, deployments, and evidence-backed issue filing.
+      placeholder: Local workers and this repository only. No paid cloud, external services, deployment, or cross-repository writes. Factory may prepare issue-ready defect reports but may not file them.
+    validations:
+      required: true
+  - type: textarea
+    id: sources
+    attributes:
+      label: Canonical sources
+      description: Link the specifications or repository documents Factory should treat as authoritative. Keep the outcome and acceptance understandable in this issue.
+      placeholder: README.md and docs/architecture.md define the current product and architecture.
+  - type: textarea
+    id: unknowns
+    attributes:
+      label: Known unknowns
+      description: Record real decisions or missing evidence that Factory may need to surface. Leave implementation choices to the compiler.
+      placeholder: We have not selected ..., and staging access may be unavailable.
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Objective boundary
+      options:
+        - label: This issue describes an outcome and its constraints; it does not prescribe a Work Item graph.
+          required: true
+        - label: I understand that creating this issue does not start Factory or authorize execution, spending, deployment, or additional issue creation.
+          required: true

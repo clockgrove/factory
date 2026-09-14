@@ -39,6 +39,24 @@ If you have only an idea, ask the Director to help prepare an Objective first an
 writes separately. Do not substitute the Factory source checkout for the repository you want built.
 Keep WSL work under a Linux path such as /home/you/src/project, not /mnt/c.
 
+### Optional Objective issue form
+
+The Codex plugin is installed for the user, not into the checkout, and `codex plugin add` receives
+no destination repository. Factory therefore never changes a repository merely because the plugin
+was installed or loaded.
+
+After restarting Codex, you can deliberately add Factory's human-authored Objective form to the
+selected repository by asking:
+
+> Add Factory's shipped human Objective issue form to this repository. Preserve its existing issue
+> templates and make the form an ordinary reviewable repository change.
+
+The setup skill uses the [form packaged with Factory](../../templates/github/objective.yml) and
+places it at `.github/ISSUE_TEMPLATE/objective.yml` under the destination repository's normal
+review policy. As a manual fallback, review and copy that same file to the destination path. The
+form is optional; do not add a human Work Item form because Factory generates Work Items from the
+accepted graph.
+
 ## Detailed installation and activation
 
 Factory has two distribution artifacts built from the same source: the Agent Plugins package from

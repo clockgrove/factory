@@ -259,6 +259,29 @@ check(
   "the package ships no Factory GitHub Actions workflows",
 );
 
+const objectiveFormPath = resolve(root, "templates", "github", "objective.yml");
+check(existsSync(objectiveFormPath), "the package ships the human Objective issue form");
+if (existsSync(objectiveFormPath)) {
+  const objectiveForm = readFileSync(objectiveFormPath, "utf8");
+  for (const required of [
+    "name: Factory Objective",
+    "factory:objective",
+    "id: outcome",
+    "id: acceptance",
+    "id: boundaries",
+    "id: authority",
+    "id: sources",
+    "id: unknowns",
+  ]) {
+    check(objectiveForm.includes(required), `the human Objective issue form contains ${required}`);
+  }
+  check(
+    objectiveForm.includes("does not start Factory") &&
+      objectiveForm.includes("does not prescribe a Work Item graph"),
+    "the human Objective issue form preserves activation and graph boundaries",
+  );
+}
+
 // Codex resolves every component and asset path from the plugin root, not from
 // the .codex-plugin directory that contains its manifest.
 const codex = readJson(".codex-plugin/plugin.json");

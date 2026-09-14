@@ -86,6 +86,10 @@ and artifacts, and record the commit SHA when installing from source.
 
 ### Added
 
+- Ship a canonical GitHub issue form for human-authored Objectives and document the explicit,
+  repository-scoped request for adding it. Global plugin installation remains repository-neutral
+  and does not install templates or hooks into arbitrary checkouts. ([#383](https://github.com/clockgrove/factory/issues/383))
+
 - Change-sensitive repository discovery now reconstructs authenticated history once, consumes
   bounded issue/comment deltas with a control-ref backstop, reserves credential-shared GitHub quota
   for lease and cleanup traffic, and exposes bounded request/cycle telemetry. The default unchanged

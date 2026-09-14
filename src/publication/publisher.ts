@@ -389,8 +389,15 @@ export async function publishValidated(args: {
       assertCurrent: args.assertLease,
       assertSafety: async () => {
         await args.beforePullRequestMutation?.();
-        if ((await args.store.readRef(`refs/heads/${branch}`)) !== commitSha) {
-          throw new Error(`publication branch ${branch} changed after policy admission`);
+        const observedHead = await args.store.readRef(`refs/heads/${branch}`);
+        if (observedHead !== commitSha) {
+          // Keep absence distinct from contradictory identity. A later compatible
+          // ref cannot establish what this dispatch fence actually observed.
+          const observed = observedHead === null ? "absent" : gitSha.parse(observedHead);
+          throw new Error(
+            `publication branch ${branch} changed after policy admission ` +
+              `(stage=before-pull-request expected=${commitSha} observed=${observed})`,
+          );
         }
       },
       mutate: () =>

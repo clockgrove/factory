@@ -17,38 +17,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
  *   - client-side `429` from naive polling
  */
 
-/**
- * Documented GitHub secondary rate limit thresholds
- * (docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
- * "There is not a way to check the status of your secondary rate limit" (same
- * page): the only signal a limit is close is a refusal, by which point the
- * request has already counted against it. Factory uses these published ceilings
- * as the outer boundary of a locally observed, adaptive guardrail.
- */
-export const GITHUB_SECONDARY_LIMITS = {
-  /** Shared across REST + GraphQL. */
-  maxConcurrentRequests: 100,
-  maxRestPointsPerMinute: 900,
-  maxGraphQlPointsPerMinute: 2000,
-  /** Issues, comments, PRs, assignments, and their REST/GraphQL/web equivalents. */
-  maxContentCreatingPerMinute: 80,
-  maxContentCreatingPerHour: 500,
-} as const;
-
-/**
- * Factory's local pacing policy. The content limits are GitHub's documented
- * outer bounds rather than a second, arbitrary hourly quota. Admission is
- * bounded by rolling windows and adapts downward after an observed secondary refusal.
- * Ready mutations have no fixed spacing floor. Admission through transport start
- * remains serialized; occupied rolling windows and server refusals still defer work.
- */
-export const FACTORY_PACING = {
-  maxConcurrentRequests: 5,
-  maxContentCreatingPerMinute: GITHUB_SECONDARY_LIMITS.maxContentCreatingPerMinute,
-  maxContentCreatingPerHour: GITHUB_SECONDARY_LIMITS.maxContentCreatingPerHour,
-  minMsBetweenMutations: 0,
-} as const;
-
 export interface PrimaryRateLimitObservation {
   resource: string;
   limit: number;
@@ -305,7 +273,6 @@ const stateByCredential = new Map<
     governor: GitHubRequestGovernor;
     primaryQuota: GitHubPrimaryQuotaCache;
     mutations: MutationScheduler;
-    pacer: ContentCreationPacer;
     circuitBreaker: CircuitBreaker;
     concurrency: ConcurrencyLimiter;
   }
@@ -321,12 +288,10 @@ function stateForCredential(token: string) {
         "Factory supports at most 16 distinct GitHub credentials per process; reuse an existing credential or restart the process before using a new credential",
       );
     }
-    const pacer = new ContentCreationPacer();
     state = {
       governor: new GitHubRequestGovernor(),
       primaryQuota: new GitHubPrimaryQuotaCache(),
-      pacer,
-      mutations: new MutationScheduler({ pacer }),
+      mutations: new MutationScheduler(),
       circuitBreaker: new CircuitBreaker(),
       concurrency: new ConcurrencyLimiter(),
     };
@@ -348,14 +313,12 @@ export function githubCircuitForCredential(token: string): CircuitBreaker {
 }
 
 /** Shared credential quota, with a separate shutdown/counter owner for each caller. */
-export function createGitHubMutationScope(token: string, onThrottle?: (message: string) => void) {
+export function createGitHubMutationScope(token: string) {
   const state = stateForCredential(token);
   return {
-    pacer: state.pacer,
     circuitBreaker: state.circuitBreaker,
     concurrency: state.concurrency,
     mutationScheduler: state.mutations.fork({
-      ...(onThrottle ? { onThrottle } : {}),
       primaryQuota: state.primaryQuota,
       requestTelemetry: () => state.governor.telemetry(),
     }),
@@ -457,22 +420,6 @@ function headerNumber(
   if (raw === undefined) return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
-}
-
-function refusalHeaders(error: unknown): Record<string, string | number | undefined> | undefined {
-  const value =
-    error instanceof PlatformUnavailableError
-      ? (error.cause as HttpErrorLike)
-      : (error as HttpErrorLike);
-  return value?.response?.headers ?? value?.headers;
-}
-
-/** Primary exhaustion reports zero remaining; other 403/429 rate refusals are
- * the only feedback GitHub provides for the invisible secondary plane. */
-export function isSecondaryRateLimitRefusal(error: unknown): boolean {
-  const refusal = classifyRefusal(error);
-  if (refusal.kind !== "rate_limit") return false;
-  return headerNumber(refusalHeaders(error), "x-ratelimit-remaining") !== 0;
 }
 
 /**
@@ -664,124 +611,6 @@ export class CircuitBreaker {
   }
 }
 
-/**
- * Bounds transported mutations by locally observed rolling windows. Production
- * uses no fixed gap; an injected gap remains available for controlled test schedules.
- */
-export class ContentCreationPacer {
-  #minute: number[] = [];
-  #hour: number[] = [];
-  #lastCallAt: number | null = null;
-  #adaptiveFactor = 1;
-  #successfulSinceRefusal = 0;
-  #secondaryRefusals = 0;
-
-  constructor(
-    private readonly perMinute: number = FACTORY_PACING.maxContentCreatingPerMinute,
-    private readonly perHour: number = FACTORY_PACING.maxContentCreatingPerHour,
-    private readonly minGapMs: number = FACTORY_PACING.minMsBetweenMutations,
-  ) {}
-
-  /** Local rolling bounds supplement server feedback; they do not allocate an
-   * hourly budget to each Objective or impose continuous hourly smoothing. */
-  waitMs(now: Date = new Date(), options: { priority?: boolean } = {}): number {
-    return this.wait(now, options).ms;
-  }
-
-  wait(
-    now: Date = new Date(),
-    _options: { priority?: boolean } = {},
-  ): { ms: number; reason: MutationWaitReason } {
-    const t = now.getTime();
-    this.#prune(t);
-    const effectiveHourly = Math.max(1, Math.floor((this.perHour - 1) / this.#adaptiveFactor));
-    const hourlyLimit = effectiveHourly;
-    const candidates: Array<{ ms: number; reason: MutationWaitReason }> = [
-      {
-        ms: this.#lastCallAt === null ? 0 : Math.max(0, this.#lastCallAt + this.minGapMs - t),
-        reason: "mutation-spacing",
-      },
-      {
-        ms:
-          this.#minute.length < this.perMinute
-            ? 0
-            : this.#minute[this.#minute.length - this.perMinute]! + 60_000 - t,
-        reason: "rolling-minute",
-      },
-      {
-        ms:
-          this.#hour.length < hourlyLimit
-            ? 0
-            : this.#hour[this.#hour.length - hourlyLimit]! + 3_600_000 - t,
-        reason: "rolling-hour",
-      },
-    ];
-    return candidates.reduce((longest, next) => (next.ms > longest.ms ? next : longest));
-  }
-
-  /** Record an actual transport attempt, immediately before invoking HTTP. */
-  recordTransported(now: Date = new Date()): void {
-    const t = now.getTime();
-    this.#prune(t);
-    // Priority traffic shares the same rolling allowance.
-    this.#minute.push(t);
-    this.#hour.push(t);
-    this.#lastCallAt = t;
-  }
-
-  recordCall(now: Date = new Date()): void {
-    this.recordTransported(now);
-  }
-
-  recordSuccess(): void {
-    this.#successfulSinceRefusal += 1;
-    if (this.#adaptiveFactor > 1 && this.#successfulSinceRefusal >= 20) {
-      this.#adaptiveFactor = Math.max(1, this.#adaptiveFactor - 0.1);
-      this.#successfulSinceRefusal = 0;
-    }
-  }
-
-  recordSecondaryRefusal(): void {
-    this.#secondaryRefusals += 1;
-    this.#successfulSinceRefusal = 0;
-    this.#adaptiveFactor = Math.min(8, this.#adaptiveFactor * 2);
-  }
-
-  snapshot(now: Date = new Date()): LocalSecondaryQuotaEstimate {
-    const t = now.getTime();
-    this.#prune(t);
-    const wait = this.waitMs(now);
-    return {
-      transportedLastMinute: this.#minute.length,
-      transportedLastHour: this.#hour.length,
-      estimatedHourlyCapacity: Math.max(1, Math.floor((this.perHour - 1) / this.#adaptiveFactor)),
-      confidence: this.#secondaryRefusals > 0 ? "high" : this.#hour.length >= 20 ? "medium" : "low",
-      secondaryRefusals: this.#secondaryRefusals,
-      limitingReason: wait > 0 ? "local-secondary-estimate" : null,
-      nextAdmissionAt: new Date(t + wait).toISOString(),
-    };
-  }
-
-  #prune(now: number): void {
-    while (this.#minute.length > 0 && this.#minute[0]! <= now - 60_000) {
-      this.#minute.shift();
-    }
-    while (this.#hour.length > 0 && this.#hour[0]! <= now - 3_600_000) {
-      this.#hour.shift();
-    }
-  }
-}
-
-export interface LocalSecondaryQuotaEstimate {
-  transportedLastMinute: number;
-  transportedLastHour: number;
-  estimatedHourlyCapacity: number;
-  confidence: "low" | "medium" | "high";
-  secondaryRefusals: number;
-  limitingReason: "local-secondary-estimate" | null;
-  nextAdmissionAt: string;
-}
-
 export type MutationClass = "normal" | "lease" | "cleanup";
 
 /** No transport was invoked for this mutation. Never used to classify a
@@ -793,11 +622,7 @@ export class MutationAdmissionStoppedError extends Error {
   }
 }
 
-export type MutationWaitReason =
-  | "mutation-spacing"
-  | "rolling-minute"
-  | "rolling-hour"
-  | "admission-contention";
+export type MutationWaitReason = "admission-contention";
 export type MutationWaitReasons = Partial<Record<MutationWaitReason, number>>;
 
 export interface MutationPermit {
@@ -809,7 +634,6 @@ export interface MutationPermit {
   /** Called adjacent to the sole HTTP attempt; internal retries are disabled. */
   recordTransported?(): void;
   recordSuccess?(): void;
-  recordRefusal?(secondary: boolean): void;
 }
 
 export interface MutationAdmission {
@@ -817,10 +641,7 @@ export interface MutationAdmission {
 }
 
 export interface MutationSchedulerOptions {
-  pacer?: ContentCreationPacer;
-  onThrottle?: (message: string) => void;
   now?: () => Date;
-  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   primaryQuota?: GitHubPrimaryQuotaCache;
   requestTelemetry?: () => GitHubRequestTelemetry;
 }
@@ -836,28 +657,23 @@ export interface GitHubMutationTelemetry {
   transported: number;
   successful: number;
   serverPrimaryQuota: PrimaryRateLimitObservation[];
-  localSecondaryEstimate: LocalSecondaryQuotaEstimate;
   requestTelemetry?: GitHubRequestTelemetry;
 }
 
 /**
  * Serializes quota admission, not remote mutation completion. Once transport
  * starts, an unrelated admitted operation may proceed within the shared request
- * limiter. Lease traffic can pass callers waiting on content pacing. Actual
- * transports, including failed attempts, are still priced exactly once.
+ * limiter. Lease traffic has priority over queued normal admissions. Actual
+ * transports, including failed attempts, are counted exactly once.
  */
 export class MutationScheduler implements MutationAdmission {
-  readonly #pacer: ContentCreationPacer;
-  readonly #notify: (message: string) => void;
   readonly #now: () => Date;
-  readonly #sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   readonly #normalShutdown = new AbortController();
   #gate = {
     active: false,
     leaseQueue: [] as Array<() => void>,
     normalQueue: [] as Array<() => void>,
   };
-  #lastNoticeAt = 0;
   #primaryQuota: GitHubPrimaryQuotaCache | undefined;
   #requestTelemetry: (() => GitHubRequestTelemetry) | undefined;
   readonly #startedAt: string;
@@ -866,10 +682,7 @@ export class MutationScheduler implements MutationAdmission {
   #successful = 0;
 
   constructor(options: MutationSchedulerOptions = {}) {
-    this.#pacer = options.pacer ?? new ContentCreationPacer();
-    this.#notify = options.onThrottle ?? (() => {});
     this.#now = options.now ?? (() => new Date());
-    this.#sleep = options.sleep ?? mutationDelay;
     this.#primaryQuota = options.primaryQuota;
     this.#requestTelemetry = options.requestTelemetry;
     this.#startedAt = this.#now().toISOString();
@@ -877,12 +690,10 @@ export class MutationScheduler implements MutationAdmission {
 
   /** Quota and the gate through transport start are shared. Shutdown, reporting
    * and counters belong to the returned owner, never its peers. */
-  fork(options: Omit<MutationSchedulerOptions, "pacer"> = {}): MutationScheduler {
+  fork(options: MutationSchedulerOptions = {}): MutationScheduler {
     const owner = new MutationScheduler({
       now: this.#now,
-      sleep: this.#sleep,
       ...options,
-      pacer: this.#pacer,
     });
     owner.#gate = this.#gate;
     return owner;
@@ -908,7 +719,6 @@ export class MutationScheduler implements MutationAdmission {
       transported: this.#transported,
       successful: this.#successful,
       serverPrimaryQuota: this.#primaryQuota?.snapshot() ?? [],
-      localSecondaryEstimate: this.#pacer.snapshot(observedAt),
       ...(this.#requestTelemetry ? { requestTelemetry: this.#requestTelemetry() } : {}),
     };
   }
@@ -926,75 +736,33 @@ export class MutationScheduler implements MutationAdmission {
 
   async acquire(kind: MutationClass = "normal"): Promise<MutationPermit> {
     const startedAt = this.#now().getTime();
-    let pacedWaitMs = 0;
-    const waitReasonMs: MutationWaitReasons = {};
-    const addWait = (reason: MutationWaitReason, ms: number) => {
-      waitReasonMs[reason] = (waitReasonMs[reason] ?? 0) + ms;
-    };
-    for (;;) {
-      const gateStarted = this.#now().getTime();
-      const release = await this.#acquireGate(kind);
-      addWait("admission-contention", Math.max(0, this.#now().getTime() - gateStarted));
-      const now = this.#now();
-      let wait: number;
-      let reason: MutationWaitReason;
-      try {
-        this.#assertAdmissionOpen(kind);
-        ({ ms: wait, reason } = this.#pacer.wait(now, { priority: kind !== "normal" }));
-      } catch (error) {
-        release();
-        throw error;
-      }
-      if (wait === 0) {
-        this.#admitted += 1;
-        let transported = false;
-        return {
-          waitedMs: Math.max(pacedWaitMs, now.getTime() - startedAt),
-          waitReasonMs,
-          release,
-          assertDispatchAllowed: () => this.#assertAdmissionOpen(kind),
-          recordTransported: () => {
-            if (transported) return;
-            transported = true;
-            this.#transported += 1;
-            this.#pacer.recordTransported(this.#now());
-            // The rate-limit gate is not a repository data lock. Resource-specific
-            // CAS/Objective fences protect correctness after dispatch.
-            release();
-          },
-          recordSuccess: () => {
-            if (!transported) return;
-            this.#successful += 1;
-            this.#pacer.recordSuccess();
-          },
-          recordRefusal: (secondary) => {
-            if (transported && secondary) this.#pacer.recordSecondaryRefusal();
-          },
-        };
-      }
+    const release = await this.#acquireGate(kind);
+    try {
+      this.#assertAdmissionOpen(kind);
+    } catch (error) {
       release();
-      // An occupied window is current quota exhaustion, not permission to hold
-      // a lease/worker holding permits until the next hour. The active owner
-      // releases resources, waits and retries this operation at its quota boundary.
-      if (reason === "rolling-minute" || reason === "rolling-hour")
-        throw new GitHubLocalAdmissionDeferredError(
-          { kind: "rate_limit", retryAfterMs: wait },
-          new Error(`Factory local ${reason} mutation window is occupied`),
-        );
-      if (wait >= 5_000 && now.getTime() - this.#lastNoticeAt >= 60_000) {
-        this.#lastNoticeAt = now.getTime();
-        this.#notify(
-          kind !== "normal"
-            ? `pacing a ${kind} mutation for ${wait}ms`
-            : `pacing a GitHub mutation for ${wait}ms; lease traffic retains priority`,
-        );
-      }
-      const sleepStarted = this.#now().getTime();
-      await this.#sleep(wait, kind === "normal" ? this.#normalShutdown.signal : undefined);
-      const elapsed = Math.max(0, this.#now().getTime() - sleepStarted);
-      addWait(reason, elapsed);
-      pacedWaitMs += elapsed;
+      throw error;
     }
+    const waitedMs = Math.max(0, this.#now().getTime() - startedAt);
+    this.#admitted += 1;
+    let transported = false;
+    return {
+      waitedMs,
+      waitReasonMs: { "admission-contention": waitedMs },
+      release,
+      assertDispatchAllowed: () => this.#assertAdmissionOpen(kind),
+      recordTransported: () => {
+        if (transported) return;
+        transported = true;
+        this.#transported += 1;
+        // The admission gate is not a repository data lock. Resource-specific
+        // CAS/Objective fences protect correctness after dispatch.
+        release();
+      },
+      recordSuccess: () => {
+        if (transported) this.#successful += 1;
+      },
+    };
   }
 
   async #acquireGate(kind: MutationClass): Promise<() => void> {
@@ -1058,13 +826,13 @@ function mutationDelay(ms: number, signal?: AbortSignal): Promise<void> {
  * Caps concurrent in-flight GitHub calls well under the documented 100
  * (shared REST + GraphQL) secondary limit. GitHub's stronger guidance —
  * "avoid concurrent requests... make requests serially" — is why the
- * default (`FACTORY_PACING.maxConcurrentRequests`) is a handful, not 99.
+ * default is a handful, not 99.
  */
 export class ConcurrencyLimiter {
   #inFlight = 0;
   #queue: Array<() => void> = [];
 
-  constructor(private readonly limit: number = FACTORY_PACING.maxConcurrentRequests) {}
+  constructor(private readonly limit: number = 5) {}
 
   /** Resolves once a slot is free; call the returned function to release it. */
   async acquire(): Promise<() => void> {
@@ -1095,10 +863,7 @@ export interface GitHubQuotaWaitOptions {
   /** Absolute owner deadline, resolved again as durable run identity becomes available. */
   deadline?: () => number;
   beforeRetry?: () => Promise<void>;
-  onWait?: (observation: {
-    reason: "primary" | "local-window" | "server";
-    waitedMs: number;
-  }) => void;
+  onWait?: (observation: { reason: "primary" | "server"; waitedMs: number }) => void;
   /** Deterministic clock seam; production uses an abortable timer. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
@@ -1146,9 +911,7 @@ export async function retryGitHubQuota<T>(
       const reason =
         error instanceof GitHubPrimaryAdmissionDeferredError || isKnownPrimaryQuotaRefusal(error)
           ? "primary"
-          : error instanceof GitHubLocalAdmissionDeferredError
-            ? "local-window"
-            : "server";
+          : "server";
       const started = Date.now();
       try {
         const waitUntil = Date.now() + Math.max(1, error.refusal.retryAfterMs);
@@ -1174,8 +937,6 @@ export async function retryGitHubQuota<T>(
     }
   }
 }
-
-export class GitHubLocalAdmissionDeferredError extends GitHubPreTransportQuotaDeferredError {}
 
 /** A quota label alone does not prove a partially executed mutation is retryable. */
 export function definiteGitHubQuotaRejection(error: unknown): boolean {

@@ -5,11 +5,7 @@ import { RepositoryLeaseManager } from "../src/controller/repository-lease.js";
 import { SharedCapacityCoordinator } from "../src/controller/shared-capacity.js";
 import { runGitHubRepositoryController } from "../src/controller/repository-controller.js";
 import { createRepositorySupervisorResources } from "../src/supervisor.js";
-import {
-  ContentCreationPacer,
-  MutationAdmissionStoppedError,
-  MutationScheduler,
-} from "../src/platform.js";
+import { MutationAdmissionStoppedError, MutationScheduler } from "../src/platform.js";
 
 vi.mock("../src/supervisor.js", async (original) => ({
   ...(await original<typeof import("../src/supervisor.js")>()),
@@ -38,7 +34,7 @@ function deferred() {
 }
 
 async function advanceUntil(observed: () => boolean, maximumMs = 10_000) {
-  // Advance Factory's timers only to the named boundary, never to the 42-minute reset.
+  // Advance Factory's timers only to the named boundary.
   for (let elapsed = 0; elapsed < maximumMs && !observed(); elapsed += 100)
     await vi.advanceTimersByTimeAsync(100);
   expect(observed()).toBe(true);
@@ -46,25 +42,20 @@ async function advanceUntil(observed: () => boolean, maximumMs = 10_000) {
 
 let fixtureSequence = 0;
 
-function setup(input: { paced?: boolean; fetch?: typeof globalThis.fetch } = {}) {
+function setup(input: { queued?: boolean; fetch?: typeof globalThis.fetch } = {}) {
   const abort = new AbortController();
   const token = `fixture-controller-shutdown-${++fixtureSequence}`;
   const resources = createRepositorySupervisorResources();
-  const pacer = new ContentCreationPacer(40, 6, 0);
-  // Hold ordinary admissions at a synthetic spacing delay. This tests owner
-  // shutdown independently of shared rolling-window exhaustion.
-  if (input.paced)
-    vi.spyOn(pacer, "wait").mockImplementation((_now, options) => ({
-      ms: options?.priority ? 0 : 12 * 60_000,
-      reason: "mutation-spacing",
-    }));
-  const recordCall = vi.spyOn(pacer, "recordTransported");
-  let pacingObserved = false;
-  resources.mutationScheduler = new MutationScheduler({
-    pacer,
-    onThrottle: () => {
-      pacingObserved = true;
-    },
+  resources.mutationScheduler = new MutationScheduler();
+  // Hold the actual pretransport gate; stopping this owner must remove only its
+  // queued normal work, while cleanup proceeds once the holder releases.
+  const held = input.queued ? resources.mutationScheduler.acquire("lease") : undefined;
+  let queueObserved = false;
+  const acquirePermit = resources.mutationScheduler.acquire.bind(resources.mutationScheduler);
+  vi.spyOn(resources.mutationScheduler, "acquire").mockImplementation((kind) => {
+    const permit = acquirePermit(kind);
+    if (kind === undefined || kind === "normal") queueObserved = true;
+    return permit;
   });
   const request = vi.fn(
     input.fetch ??
@@ -152,20 +143,19 @@ function setup(input: { paced?: boolean; fetch?: typeof globalThis.fetch } = {})
     token,
     abort,
     resources,
-    pacer,
-    recordCall,
+    releaseGate: async () => (await held)?.release(),
     request,
     store,
     acquire,
     release,
     run,
     normal,
-    pacingObserved: () => pacingObserved,
+    queueObserved: () => queueObserved,
   };
 }
 
-it("stops a queued normal pacing wait, settles priority cleanup, and never dispatches it later", async () => {
-  const f = setup({ paced: true });
+it("stops a queued normal admission wait, settles priority cleanup, and never dispatches it later", async () => {
+  const f = setup({ queued: true });
   let cleanupProved = false;
   const task = f.run(async () => {
     try {
@@ -181,16 +171,14 @@ it("stops a queued normal pacing wait, settles priority cleanup, and never dispa
       cleanupProved = true;
     }
   });
-  await advanceUntil(f.pacingObserved);
+  await advanceUntil(f.queueObserved);
   expect(f.request).not.toHaveBeenCalled();
-  expect(f.pacer.waitMs(new Date())).toBeGreaterThan(11 * 60_000);
-  const pendingLease = await f.resources.mutationScheduler.acquire("lease");
-  pendingLease.release();
   let settled = false;
   const outcome = task.finally(() => {
     settled = true;
   });
   f.abort.abort();
+  await f.releaseGate();
   await advanceUntil(() => settled);
   await outcome;
   expect(cleanupProved).toBe(true);
@@ -202,7 +190,7 @@ it("stops a queued normal pacing wait, settles priority cleanup, and never dispa
   await vi.advanceTimersByTimeAsync(3_600_001);
   await expect(f.normal()).rejects.toBeInstanceOf(MutationAdmissionStoppedError);
   expect(f.request).toHaveBeenCalledTimes(2);
-  expect(f.recordCall).toHaveBeenCalledTimes(2);
+  expect(f.resources.mutationScheduler.telemetry().transported).toBe(2);
 });
 
 it.each([false, true])(
@@ -262,14 +250,14 @@ it.each([false, true])(
     // deliberate stop does not claim that this ownership was durably retired.
     expect(f.release).toHaveBeenCalledTimes(refused ? 0 : 1);
     expect(f.request).toHaveBeenCalledTimes(refused ? 1 : 2);
-    expect(f.recordCall).toHaveBeenCalledTimes(refused ? 1 : 2);
+    expect(f.resources.mutationScheduler.telemetry().transported).toBe(refused ? 1 : 2);
     expect(f.resources.circuitBreaker.isOpen()).toBe(refused);
     expect(f.acquire).toHaveBeenCalledTimes(1);
   },
 );
 
 it("does not hide unresolved cleanup behind a pre-dispatch cancellation", async () => {
-  const f = setup({ paced: true });
+  const f = setup({ queued: true });
   const task = f.run(async () => {
     try {
       await f.normal();
@@ -285,8 +273,9 @@ it("does not hide unresolved cleanup behind a pre-dispatch cancellation", async 
     .finally(() => {
       settled = true;
     });
-  await advanceUntil(f.pacingObserved);
+  await advanceUntil(f.queueObserved);
   f.abort.abort();
+  await f.releaseGate();
   await advanceUntil(() => settled);
   expect(await outcome).toMatchObject({
     code: "controller-internal-invariant",
@@ -319,7 +308,7 @@ it("rechecks the permit after an awaited mutation fence and releases it for leas
   const lease = await f.resources.mutationScheduler.acquire("lease");
   lease.assertDispatchAllowed?.();
   lease.release();
-  expect(f.recordCall).toHaveBeenCalledTimes(0); // Neither permit reached transport.
+  expect(f.resources.mutationScheduler.telemetry().transported).toBe(0); // Neither permit reached transport.
 });
 
 it("removes only queued normal admissions while an in-flight holder still serializes pending lease traffic", async () => {
@@ -335,11 +324,11 @@ it("removes only queued normal admissions while an in-flight holder still serial
   f.resources.mutationScheduler.stopNormalAdmission();
   expect(await refusal).toBeInstanceOf(MutationAdmissionStoppedError);
   expect(leaseAdmitted).toBe(false);
-  expect(f.recordCall).toHaveBeenCalledTimes(0);
+  expect(f.resources.mutationScheduler.telemetry().transported).toBe(0);
   active.release();
   (await lease).release();
   expect(leaseAdmitted).toBe(true);
-  expect(f.recordCall).toHaveBeenCalledTimes(0);
+  expect(f.resources.mutationScheduler.telemetry().transported).toBe(0);
   expect(vi.getTimerCount()).toBe(0);
 });
 

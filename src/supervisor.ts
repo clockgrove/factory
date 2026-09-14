@@ -401,7 +401,6 @@ import type { ValidationEvidence } from "./validation/evidence.js";
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
-  ContentCreationPacer,
   MutationScheduler,
   PlatformUnavailableError,
   githubRequestTelemetryForCredential,
@@ -476,7 +475,6 @@ export interface ControllerObservation {
 }
 
 export interface RepositorySupervisorResources {
-  pacer: ContentCreationPacer;
   circuitBreaker: CircuitBreaker;
   concurrency: ConcurrencyLimiter;
   mutationScheduler: MutationScheduler;
@@ -489,21 +487,18 @@ export interface RepositorySupervisorResources {
 }
 
 export function createRepositorySupervisorResources(
-  onThrottle: (message: string) => void = () => {},
   controllerLimits: {
     maxLocalWorkers: number;
     maxPaidWorkers: number;
   } = { maxLocalWorkers: 8, maxPaidWorkers: 0 },
   token?: string,
 ): RepositorySupervisorResources {
-  const quota = token === undefined ? undefined : createGitHubMutationScope(token, onThrottle);
-  const pacer = quota?.pacer ?? new ContentCreationPacer();
+  const quota = token === undefined ? undefined : createGitHubMutationScope(token);
   let integrationTail = Promise.resolve();
   return {
-    pacer,
     circuitBreaker: quota?.circuitBreaker ?? new CircuitBreaker(),
     concurrency: quota?.concurrency ?? new ConcurrencyLimiter(),
-    mutationScheduler: quota?.mutationScheduler ?? new MutationScheduler({ pacer, onThrottle }),
+    mutationScheduler: quota?.mutationScheduler ?? new MutationScheduler(),
     capacityLedger: new CapacityLedger(),
     resourceSampler: new LinuxResourceSampler(),
     fairness: new ObjectiveFairness(),
@@ -1128,7 +1123,6 @@ export class FactorySupervisor {
   #management: ManagementBackend;
   readonly #managementOverride: boolean;
   readonly #registry: BackendRegistry;
-  readonly #pacer: ContentCreationPacer;
   readonly #breaker: CircuitBreaker;
   readonly #concurrency: ConcurrencyLimiter;
   readonly #mutations: MutationScheduler;
@@ -1186,8 +1180,7 @@ export class FactorySupervisor {
     this.#policy = parseRunPolicy(options.policy);
     this.#notify = options.onStatus ?? (() => {});
     const shared = options.repositoryResources;
-    const quota = shared ?? createGitHubMutationScope(options.token, this.#notify);
-    this.#pacer = quota.pacer;
+    const quota = shared ?? createGitHubMutationScope(options.token);
     this.#breaker = quota.circuitBreaker;
     this.#concurrency = quota.concurrency;
     this.#mutations = quota.mutationScheduler;
@@ -1218,7 +1211,6 @@ export class FactorySupervisor {
     const controls = {
       ...github,
       circuitBreaker: this.#breaker,
-      pacer: this.#pacer,
       concurrency: this.#concurrency,
       mutationScheduler: this.#mutations,
       captureMutationFence: (kind: "normal" | "lease" | "cleanup") =>
@@ -4085,7 +4077,6 @@ export class FactorySupervisor {
               escalateToId: actorId,
               onThrottle: this.#notify,
               circuitBreaker: this.#breaker,
-              pacer: this.#pacer,
               concurrency: this.#concurrency,
               mutationScheduler: this.#mutations,
               captureMutationFence: () => this.#captureMutationFence(),
@@ -5157,7 +5148,6 @@ export class FactorySupervisor {
             onThrottle: this.#notify,
           }),
           circuitBreaker: this.#breaker,
-          pacer: this.#pacer,
           concurrency: this.#concurrency,
           mutationScheduler: this.#mutations,
           beforeMutation: () => refreshLegacySnapshot("before a graph adoption write"),

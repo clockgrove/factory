@@ -25,7 +25,7 @@ import {
   MutationScheduler,
   PlatformUnavailableError,
 } from "../src/platform.js";
-import { advancingMutationScheduler } from "./helpers/mutation-scheduler.js";
+import { fixedClockMutationScheduler } from "./helpers/mutation-scheduler.js";
 import { attemptCount, deriveState, DISPATCH_CONFIRM_WINDOW_MS } from "../src/state.js";
 import type { DerivedWorkItem } from "../src/state.js";
 import {
@@ -177,7 +177,7 @@ function makeDispatcher(
     copilotBotId: "BOT_1",
     defaultBranch: "main",
     escalateToId: "U_human",
-    mutationScheduler: advancingMutationScheduler(),
+    mutationScheduler: fixedClockMutationScheduler(),
     ...overrides,
   });
 }

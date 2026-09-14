@@ -1,9 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
-  ContentCreationPacer,
   GitHubPrimaryAdmissionDeferredError,
   GitHubPrimaryQuotaCache,
   GITHUB_GRAPHQL_OBJECTIVE_QUERY_MAX_COST,
@@ -158,12 +157,9 @@ describe("classifyRefusal", () => {
 describe("GitHub client throttling", () => {
   it("disables hidden Octokit retries so one admitted mutation has one transport", async () => {
     let attempts = 0;
-    let now = Date.parse("2026-01-01T00:00:00Z");
+    const now = Date.parse("2026-01-01T00:00:00Z");
     const scheduler = new MutationScheduler({
       now: () => new Date(now),
-      sleep: async (milliseconds) => {
-        now += milliseconds;
-      },
     });
     const store = new GitHubControlStore({
       token: "mutation-retry-test",
@@ -589,139 +585,11 @@ describe("CircuitBreaker", () => {
   });
 });
 
-describe("ContentCreationPacer", () => {
-  it("allows the first call immediately", () => {
-    const p = new ContentCreationPacer(40, 250, 1_000);
-    expect(p.waitMs(new Date("2026-01-01T00:00:00Z"))).toBe(0);
-  });
-
-  it("enforces the minimum gap between mutative calls", () => {
-    const p = new ContentCreationPacer(40, 100_000, 1_000);
-    const t0 = new Date("2026-01-01T00:00:00.000Z");
-    p.recordCall(t0);
-    expect(p.waitMs(new Date(t0.getTime() + 200))).toBe(800);
-  });
-
-  it("blocks once the per-minute budget is spent", () => {
-    const p = new ContentCreationPacer(2, 250, 0);
-    const t0 = new Date("2026-01-01T00:00:00.000Z");
-    p.recordCall(t0);
-    p.recordCall(new Date(t0.getTime() + 10));
-    expect(p.waitMs(new Date(t0.getTime() + 20))).toBeGreaterThan(0);
-  });
-
-  it("frees up the per-minute budget once the window slides past", () => {
-    const p = new ContentCreationPacer(1, 250, 0);
-    const t0 = new Date("2026-01-01T00:00:00.000Z");
-    p.recordCall(t0);
-    expect(p.waitMs(new Date(t0.getTime() + 60_001))).toBe(0);
-  });
-
-  it("allows a bounded ordinary burst without a fixed gap", () => {
-    const p = new ContentCreationPacer(80, 500, 0);
-    const t0 = new Date("2026-01-01T00:00:00.000Z");
-    p.recordCall(t0);
-    expect(p.waitMs(t0)).toBe(0);
-  });
-
-  it("does not reserve unused allowance for hypothetical future work", () => {
-    const p = new ContentCreationPacer(80, 500, 0);
-    const now = new Date("2026-01-01T00:00:00Z");
-    for (let i = 0; i < 79; i++) p.recordTransported(now);
-    expect(p.waitMs(now)).toBe(0);
-    expect(p.waitMs(now, { priority: true })).toBe(0);
-    p.recordTransported(now);
-    expect(p.wait(now)).toEqual({ ms: 60_000, reason: "rolling-minute" });
-  });
-
-  it("adapts downward only after observed secondary feedback", () => {
-    const p = new ContentCreationPacer(80, 500, 0);
-    expect(p.snapshot(new Date("2026-01-01T00:00:00Z"))).toMatchObject({
-      estimatedHourlyCapacity: 499,
-      confidence: "low",
-    });
-    p.recordSecondaryRefusal();
-    expect(p.snapshot(new Date("2026-01-01T00:00:00Z"))).toMatchObject({
-      estimatedHourlyCapacity: 249,
-      confidence: "high",
-      secondaryRefusals: 1,
-    });
-  });
-
-  it.each([58, 79, 80])("admits %s ready mutations without fixed sleeps", (count) => {
-    const p = new ContentCreationPacer();
-    const now = new Date("2026-01-01T00:00:00Z");
-    for (let mutation = 0; mutation < count; mutation++) {
-      expect(p.waitMs(now)).toBe(0);
-      p.recordTransported(now);
-      p.recordSuccess();
-    }
-    if (count === 80) expect(p.wait(now)).toEqual({ ms: 60_000, reason: "rolling-minute" });
-  });
-
-  it("prices sustained competing traffic against the same actual rolling history", () => {
-    const p = new ContentCreationPacer();
-    let now = new Date("2026-01-01T00:00:00Z");
-    for (let mutation = 0; mutation < 1100; mutation++) {
-      now = new Date(now.getTime() + p.waitMs(now, { priority: mutation % 3 === 0 }));
-      expect(p.waitMs(now)).toBe(0);
-      p.recordTransported(now);
-      const snapshot = p.snapshot(now);
-      expect(snapshot.transportedLastMinute).toBeLessThanOrEqual(80);
-      expect(snapshot.transportedLastHour).toBeLessThanOrEqual(499);
-    }
-  });
-
-  it("releases an occupied hourly window on expiry without exempting protected traffic", () => {
-    const p = new ContentCreationPacer(1000, 500, 0);
-    const now = new Date("2026-01-01T00:00:00Z");
-    for (let i = 0; i < 499; i++) p.recordTransported(now);
-    expect(p.wait(now)).toEqual({ ms: 3_600_000, reason: "rolling-hour" });
-    expect(p.waitMs(now, { priority: true })).toBe(3_600_000);
-    expect(p.waitMs(new Date(now.getTime() + 3_600_000))).toBe(0);
-  });
-
-  it("shares current usage across callers, without pretending to know another process's usage", () => {
-    const p = new ContentCreationPacer(1000, 500, 0);
-    const now = new Date("2026-01-01T00:00:00Z");
-    for (let i = 0; i < 499; i++) p.recordTransported(now);
-    expect(p.waitMs(now)).toBeGreaterThan(0);
-    expect(new ContentCreationPacer().waitMs(now)).toBe(0);
-  });
-
-  it("applies observed refusal reduction to normal and protected traffic equally", () => {
-    const p = new ContentCreationPacer(1000, 500, 0);
-    const now = new Date("2026-01-01T00:00:00Z");
-    for (let i = 0; i < 3; i++) p.recordSecondaryRefusal();
-    for (let i = 0; i < 62; i++) p.recordTransported(now);
-    expect(p.waitMs(now)).toBe(3_600_000);
-    expect(p.waitMs(now, { priority: true })).toBe(3_600_000);
-  });
-});
-
 describe("MutationScheduler", () => {
-  it.each(["normal", "lease", "cleanup"] as const)(
-    "defers %s at an occupied window without sleeping through lease expiry",
-    async (kind) => {
-      const now = new Date("2026-01-01T00:00:00Z");
-      const pacer = new ContentCreationPacer(1000, 500, 0);
-      for (let i = 0; i < 499; i++) pacer.recordTransported(now);
-      const sleep = vi.fn();
-      const scheduler = new MutationScheduler({ pacer, now: () => now, sleep });
-      await expect(scheduler.acquire(kind)).rejects.toMatchObject({
-        refusal: { kind: "rate_limit", retryAfterMs: 3_600_000 },
-      });
-      expect(sleep).not.toHaveBeenCalled();
-      expect(scheduler.telemetry().transported).toBe(0);
-    },
-  );
-
-  it("charges only transported writes and reports separate primary and secondary state", async () => {
+  it("counts only transported writes and reports observed primary state", async () => {
     const t0 = new Date("2026-01-01T00:00:00.000Z");
     const now = t0;
-    const pacer = new ContentCreationPacer(40, 100_000, 0);
     const scheduler = new MutationScheduler({
-      pacer,
       now: () => now,
     });
     const fenced = await scheduler.acquire("normal");
@@ -741,7 +609,6 @@ describe("MutationScheduler", () => {
       transported: 1,
       successful: 1,
       serverPrimaryQuota: [],
-      localSecondaryEstimate: { transportedLastHour: 1, confidence: "low" },
     });
   });
 });

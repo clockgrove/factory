@@ -224,8 +224,8 @@ whose destination issue number is derived from the validated Factory event envel
 fencing remains on GraphQL `updateRefs` because the REST ref API does not provide equivalent CAS.
 Already-adjacent budget reconciliations for one lease, attempt, and destination may share one comment;
 each retained envelope keeps its exact sequence and idempotency identity.
-Both API surfaces still share Factory's circuit breaker, concurrency limiter, content-creation pacer,
-and secondary-rate-limit handling. Unchanged idle state is polled no more often than once per minute
+Both API surfaces share Factory's circuit breaker, concurrency limiter, mutation admission
+and server-directed rate-limit handling. Unchanged idle state is polled no more often than once per minute
 by default, while active local-worker cancellation uses the cheaper REST comments path.
 Active-run cancellation initially reads the complete bounded issue-comment history (at most
 2,000 comments / 20 pages). After a complete negative check, the reader retains one process-local
@@ -299,12 +299,11 @@ bounded source behavior only, not live GitHub scale or installed model-backed qu
 
 Primary quota observations come from GitHub's response headers and are cached per credential and
 resource; Factory does not poll `/rate_limit` to reconstruct a fresher-looking answer. GitHub does
-not expose remaining secondary content-generation quota, so that plane is reported separately as a
-local estimate with explicit confidence. The estimate counts only actual transport attempts,
-greedily admits ready mutations at the minimum spacing within the rolling minute/hour ceilings,
-reduces the local ceiling after real secondary feedback, and recovers gradually after successful
-transports. There is no token-bucket refill or speculative reservation for future Objectives. Octokit's internal retries
-are disabled so every retry returns through Factory's shared pacing and circuit controls.
+not expose remaining secondary content-generation quota. Factory does not infer an available
+allowance from its own mutation count or impose local minute/hour content ceilings. Other
+Objectives, processes and GitHub clients can consume the same capacity. Actual primary responses
+and secondary refusals govern admission and backoff. Octokit's internal retries are disabled so
+every retry returns through Factory's shared admission and circuit controls.
 Process-local mutation counters include their scheduler-lifetime measurement window and remain
 outside durable run economics. A reader process cannot attribute its own counters to a reconstructed
 run; without durable run-bound evidence, that historical measurement is explicitly unavailable.
@@ -1002,7 +1001,7 @@ exact receipt digest, even when another equivalent envelope is later observed. C
 or ambiguous intent bindings fail closed; independently proved linear-head revisions remain separate.
 
 Publication separates unreachable Git object preparation from authoritative effects. Creating a
-bounded, secret-scanned blob, tree or commit still uses the shared mutation scheduler, pacer,
+bounded, secret-scanned blob, tree or commit still uses the shared mutation scheduler,
 concurrency limiter, circuit breaker and cancellation checks, but does not read an Objective lease
 per object. The object grants no authority until an owned ref create/CAS or another authoritative
 record publishes it. Ref, comment, issue and pull-request effects capture the Objective generation
@@ -1391,25 +1390,21 @@ Local execution requires trusted repository and Objective provenance. External f
 authors, install-script changes, unrestricted network, secret-requiring tasks, and tests of newly
 supplied untrusted code route to an explicitly permitted sandbox or escalation.
 
-All GitHub writes continue through the shared circuit breaker, mutation scheduler, content-creation
-pacer, and concurrency limiter. Mutations are issued serially; actual transport attempts, including
-failed HTTP requests, are priced, while a lease or shutdown fence that stops before transport is not.
-Ready traffic has no fixed minimum spacing; shared rolling minute/hour bounds still apply. All
-mutation kinds charge the same transported history, with no credit refill and no future quota
-reservation. Lease and cleanup traffic retain queue priority without bypassing an occupied window.
-At an occupied window, the active operation releases permits, waits until the observed local bound
-can admit again, then rechecks it. This is a local estimate, not an entitlement from GitHub.
-The existing bounded credential registry shares pacing, admission through transport start,
-concurrency and circuit/refusal state across foreground and controller instances in one process.
-Schedulers retain owner-local shutdown, notifications and counters; stopping one owner cannot
-retire a peer, and resource capacity, fairness and integration ownership remain repository-scoped.
-Primary quota is also credential-shared within the process. Process restarts start a new estimate;
-secondary capacity used by other processes or GitHub clients is unknown. Server-directed backoff
-and open-circuit protection remain required. No Git-object or ref mutation is exempted based on
-an assumed content-generation classification. Definite quota rejection keeps the same operation
-pending rather than recording an attempt failure or starting replacement work. Ownership loss,
-authorization expiry and ambiguous effects still retain their existing safety boundaries. A durable
-failed validation remains a real attempt failure.
+All GitHub writes continue through the shared circuit breaker, mutation scheduler and concurrency
+limiter. Admission is serialized through transport start; remote completion can overlap within the
+request concurrency limit. Actual transport attempts, including failed HTTP requests, are counted;
+a lease or shutdown fence that stops before transport is not. Lease and cleanup traffic retain
+queue priority. There are no locally inferred minute/hour content quotas, adaptive capacity
+estimates or reservations for future work.
+The existing bounded credential registry shares admission through transport start, concurrency,
+primary response observations and circuit/refusal state across foreground and controller instances
+in one process. Schedulers retain owner-local shutdown and counters; stopping one owner cannot
+retire a peer. Resource capacity, fairness and integration ownership remain repository-scoped.
+Other processes and GitHub clients are outside that local coordination. Server-directed backoff
+and open-circuit protection remain required for every mutation, including Git objects and refs.
+Definite quota rejection keeps the same operation pending rather than recording an attempt failure
+or starting replacement work. Ownership loss, authorization expiry and ambiguous effects retain
+their existing safety boundaries. A durable failed validation remains a real attempt failure.
 
 Immediately before each authoritative publication, the Director re-observes the lease ref and GitHub
 server time in one REST request. An unchanged OID reuses the already-validated lease payload; only a

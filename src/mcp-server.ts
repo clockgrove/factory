@@ -45,10 +45,9 @@ import { safeDiagnosticMessage } from "./application/doctor.js";
  * per-cycle snapshot (§4.1), which is an acceptable trade against the
  * alternative: asking a model to faithfully echo back a large, date-bearing
  * JSON object it does not own, across turns, with no penalty for getting it
- * subtly wrong. Reads are cheap and unmetered against the content-creation
- * limits (`platform.ts`'s `FACTORY_PACING`) that actually matter here.
+ * subtly wrong. Reads and writes honor observed GitHub quota responses.
  *
- * Credential-scoped pacing, breaker and concurrency state is resolved lazily
+ * Credential-scoped admission, breaker and concurrency state is resolved lazily
  * when a tool uses its credential. Each caller owns its mutation scheduler;
  * credential sharing must not couple caller shutdown or local telemetry.
  */
@@ -162,7 +161,7 @@ function applicationFor(
   checkout = process.cwd(),
 ): FactoryApplicationService {
   const token = getToken();
-  const scope = createGitHubMutationScope(token, log);
+  const scope = createGitHubMutationScope(token);
   const mutations = scope.mutationScheduler;
   const store = new GitHubControlStore({
     token,
@@ -336,7 +335,7 @@ async function dispatcherFor(
   }
   const escalateToId = await resolveUserIdCached(reader, escalateTo);
   const token = getToken();
-  const scope = createGitHubMutationScope(token, log);
+  const scope = createGitHubMutationScope(token);
   return new Dispatcher({
     writer: new GithubOctokitWriter({
       token,
@@ -556,7 +555,7 @@ server.registerTool(
       return {
         objective: serializeObjective(objective, minimal ?? false),
         ready: ready(objective).map((i) => i.number),
-        platformExhausted: createGitHubMutationScope(getToken(), log).circuitBreaker.exhausted(),
+        platformExhausted: createGitHubMutationScope(getToken()).circuitBreaker.exhausted(),
         ...(escalation ? { escalateTo: escalation } : {}),
       };
     },
@@ -1232,7 +1231,7 @@ server.registerTool(
         };
       });
       const token = getToken();
-      const scope = createGitHubMutationScope(token, log);
+      const scope = createGitHubMutationScope(token);
       const applier = new GraphApplier({
         writer: new GithubOctokitGraphWriter({
           token,

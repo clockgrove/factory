@@ -132,11 +132,7 @@ async function processContext(server: Server, label: string, objective: number) 
   const { LeaseManager } = await import("../src/control/lease.js");
   const { SharedCapacityCoordinator } = await import("../src/controller/shared-capacity.js");
   const token = "same-server-credential";
-  const scheduler = new platform.MutationScheduler({
-    sleep: async (ms) => {
-      vi.setSystemTime(Date.now() + ms);
-    },
-  });
+  const scheduler = new platform.MutationScheduler();
   const store = new GitHubControlStore({
     token,
     owner: "fixture",

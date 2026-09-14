@@ -54,7 +54,7 @@ export interface GitHubTransportObservation {
   aggregateClientPreTransportMs: number;
   aggregateFetchResponseMs: number;
   aggregateQuotaWaitMs: number;
-  quotaWaitReasonMs: Partial<Record<"primary" | "local-window" | "server", number>>;
+  quotaWaitReasonMs: Partial<Record<"primary" | "server", number>>;
   aggregateFenceMs: number;
   mutationWaitReasonMs: MutationWaitReasons;
   requestsByRoute: Partial<Record<GitHubRouteFamily, number>>;
@@ -416,12 +416,7 @@ export function observeMutationQueue(waitedMs: number, reasons: MutationWaitReas
   const context = current.getStore();
   if (context) context.observation.queueWaitMs += waitedMs;
   observePhases((observation) => (observation.aggregateQueueWaitMs += waitedMs));
-  for (const key of [
-    "mutation-spacing",
-    "rolling-minute",
-    "rolling-hour",
-    "admission-contention",
-  ] as const) {
+  for (const key of ["admission-contention"] as const) {
     const ms = reasons[key];
     if (ms === undefined) continue;
     if (context)
@@ -482,7 +477,7 @@ export async function observeMutationOperation<T>(
 }
 
 export function observeReactiveQuotaWait(wait: {
-  reason: "primary" | "local-window" | "server";
+  reason: "primary" | "server";
   waitedMs: number;
 }): void {
   const context = current.getStore();

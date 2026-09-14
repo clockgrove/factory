@@ -26,7 +26,7 @@ import {
   MutationScheduler,
   PlatformUnavailableError,
 } from "../src/platform.js";
-import { advancingMutationScheduler } from "./helpers/mutation-scheduler.js";
+import { fixedClockMutationScheduler } from "./helpers/mutation-scheduler.js";
 
 const NOW = new Date("2026-01-01T00:00:00Z");
 
@@ -473,7 +473,7 @@ describe("GraphApplier.apply", () => {
     const historical = objective([workItem({ id: "a" })]);
     delete historical.deferredCapabilityAdapters;
     const writer = new FakeGraphWriter();
-    const applier = new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() });
+    const applier = new GraphApplier({ writer, mutationScheduler: fixedClockMutationScheduler() });
 
     await expect(applier.apply(historical, ctx)).rejects.toThrow(
       /lacks deferred capability adapter disposition/,
@@ -490,7 +490,7 @@ describe("GraphApplier.apply", () => {
 
   it("creates every Work Item as a sub-issue of the Objective", async () => {
     const writer = new FakeGraphWriter();
-    const applier = new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() });
+    const applier = new GraphApplier({ writer, mutationScheduler: fixedClockMutationScheduler() });
 
     const created = await applier.apply(
       objective([
@@ -510,7 +510,7 @@ describe("GraphApplier.apply", () => {
 
   it("wires dependsOn edges via addBlockedBy after every issue exists", async () => {
     const writer = new FakeGraphWriter();
-    const applier = new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() });
+    const applier = new GraphApplier({ writer, mutationScheduler: fixedClockMutationScheduler() });
 
     const created = await applier.apply(
       objective([workItem({ id: "a" }), workItem({ id: "b", dependsOn: ["a"] })]),
@@ -528,7 +528,7 @@ describe("GraphApplier.apply", () => {
 
   it("repairs a partial graph without duplicating issues or dependency edges", async () => {
     const writer = new FakeGraphWriter();
-    const applier = new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() });
+    const applier = new GraphApplier({ writer, mutationScheduler: fixedClockMutationScheduler() });
     const graph = objective([workItem({ id: "a" }), workItem({ id: "b", dependsOn: ["a"] })]);
     const digest = compiledGraphDigest(graph);
     const created = await applier.apply(graph, {
@@ -545,7 +545,7 @@ describe("GraphApplier.apply", () => {
     const noWrites = new FakeGraphWriter();
     await new GraphApplier({
       writer: noWrites,
-      mutationScheduler: advancingMutationScheduler(),
+      mutationScheduler: fixedClockMutationScheduler(),
     }).apply(graph, {
       ...ctx,
       existingWorkItems: [existingItem(graph, 0, 90), existingItem(graph, 1, 91, [90])],
@@ -604,7 +604,7 @@ describe("GraphApplier.apply", () => {
     const writer = new FakeGraphWriter();
     const applied = await new GraphApplier({
       writer,
-      mutationScheduler: advancingMutationScheduler(),
+      mutationScheduler: fixedClockMutationScheduler(),
     }).apply(graph, { ...ctx, legacyGraphConstraints: legacy });
 
     expect(writer.calls).toEqual(["updateWorkItemIssue:I_8", "updateWorkItemIssue:I_9"]);
@@ -618,7 +618,7 @@ describe("GraphApplier.apply", () => {
     const replayWriter = new FakeGraphWriter();
     const replayed = await new GraphApplier({
       writer: replayWriter,
-      mutationScheduler: advancingMutationScheduler(),
+      mutationScheduler: fixedClockMutationScheduler(),
     }).apply(graph, {
       ...ctx,
       legacyGraphConstraints: legacy,
@@ -667,7 +667,7 @@ describe("GraphApplier.apply", () => {
     const writer = new FakeGraphWriter();
     legacy.workItems[0]!.blockedByNumbers = [9];
     await expect(
-      new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() }).apply(graph, {
+      new GraphApplier({ writer, mutationScheduler: fixedClockMutationScheduler() }).apply(graph, {
         ...ctx,
         legacyGraphConstraints: legacy,
       }),
@@ -683,7 +683,7 @@ describe("GraphApplier.apply", () => {
     const changed = { ...existingItem(graph, 0, 90), title: "Edited by hand" };
     const writer = new FakeGraphWriter();
     await expect(
-      new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() }).apply(graph, {
+      new GraphApplier({ writer, mutationScheduler: fixedClockMutationScheduler() }).apply(graph, {
         ...ctx,
         existingWorkItems: [changed],
       }),
@@ -693,7 +693,7 @@ describe("GraphApplier.apply", () => {
 
   it("applies the optional Work Item label to every created issue", async () => {
     const writer = new FakeGraphWriter();
-    const applier = new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() });
+    const applier = new GraphApplier({ writer, mutationScheduler: fixedClockMutationScheduler() });
     let seenLabelIds: string[] | undefined;
     const originalCreate = writer.createWorkItemIssue.bind(writer);
     writer.createWorkItemIssue = async (args) => {
@@ -711,7 +711,7 @@ describe("GraphApplier.apply", () => {
 
   it("rejects an invalid graph before making any write", async () => {
     const writer = new FakeGraphWriter();
-    const applier = new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() });
+    const applier = new GraphApplier({ writer, mutationScheduler: fixedClockMutationScheduler() });
 
     await expect(
       applier.apply(objective([workItem({ id: "a", dependsOn: ["ghost"] })]), ctx),
@@ -721,7 +721,7 @@ describe("GraphApplier.apply", () => {
 
   it("wraps a secondary-rate-limit refusal in PlatformUnavailableError", async () => {
     const writer = new FakeGraphWriter({ createWorkItemIssue: rateLimitError() });
-    const applier = new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() });
+    const applier = new GraphApplier({ writer, mutationScheduler: fixedClockMutationScheduler() });
 
     await expect(applier.apply(objective([workItem({ id: "a" })]), ctx)).rejects.toBeInstanceOf(
       PlatformUnavailableError,
@@ -742,7 +742,7 @@ describe("GraphApplier.apply", () => {
     const applier = new GraphApplier({
       writer,
       circuitBreaker: breaker,
-      mutationScheduler: advancingMutationScheduler(),
+      mutationScheduler: fixedClockMutationScheduler(),
     });
 
     await expect(applier.apply(objective([workItem({ id: "a" })]), ctx)).rejects.toBeInstanceOf(

@@ -538,7 +538,6 @@ export function createGitHubRepositoryController(
   const resources =
     options.resources ??
     createRepositorySupervisorResources(
-      options.onStatus,
       {
         maxLocalWorkers: options.maxLocalWorkers ?? DEFAULT_CONTROLLER_POLICY.maxLocalWorkers,
         maxPaidWorkers: options.maxPaidWorkers ?? DEFAULT_CONTROLLER_POLICY.maxPaidWorkers,
@@ -556,7 +555,6 @@ export function createGitHubRepositoryController(
       token: options.token,
       owner: options.owner,
       repo: options.repo,
-      pacer: resources.pacer,
       circuitBreaker: resources.circuitBreaker,
       concurrency: resources.concurrency,
       mutationScheduler: resources.mutationScheduler,
@@ -659,7 +657,6 @@ export async function runGitHubRepositoryController(
   const resources =
     options.resources ??
     createRepositorySupervisorResources(
-      options.onStatus,
       {
         maxLocalWorkers: policy.maxLocalWorkers,
         maxPaidWorkers: policy.maxPaidWorkers,
@@ -783,7 +780,6 @@ export async function runForegroundObjective(
   const resources =
     options.repositoryResources ??
     createRepositorySupervisorResources(
-      options.onStatus,
       {
         maxLocalWorkers: policy.maxLocalWorkers,
         maxPaidWorkers: policy.maxPaidWorkers,
@@ -816,7 +812,6 @@ async function attachSharedCapacity(
     token: options.token,
     owner: options.owner,
     repo: options.repo,
-    pacer: resources.pacer,
     circuitBreaker: resources.circuitBreaker,
     concurrency: resources.concurrency,
     mutationScheduler: resources.mutationScheduler,
@@ -935,7 +930,6 @@ async function withRepositoryOwnership<T>(
     token: options.token,
     owner: options.owner,
     repo: options.repo,
-    pacer: options.resources.pacer,
     circuitBreaker: options.resources.circuitBreaker,
     concurrency: options.resources.concurrency,
     mutationScheduler: options.resources.mutationScheduler,

@@ -66,11 +66,9 @@ import {
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
-  ContentCreationPacer,
   MutationScheduler,
   PlatformUnavailableError,
   classifyRefusal,
-  isSecondaryRateLimitRefusal,
   withGitHubRequestPriority,
   type MutationAdmission,
 } from "./platform.js";
@@ -961,7 +959,6 @@ export interface GraphApplierOptions {
   writer: GraphWriter;
   onThrottle?: (message: string) => void;
   circuitBreaker?: CircuitBreaker;
-  pacer?: ContentCreationPacer;
   concurrency?: ConcurrencyLimiter;
   mutationScheduler?: MutationAdmission;
   beforeMutation?: (waitedMs: number) => Promise<void>;
@@ -1025,7 +1022,7 @@ export function assertExistingGraphWorkItemsMatchCompiled(
 
 /**
  * Applies a validated compiled Objective to GitHub, routing every write
- * through the same breaker/pacer/concurrency discipline as `Dispatcher`
+ * through the same breaker/admission/concurrency discipline as `Dispatcher`
  * (Finding 4) — a class, not a bare function, so a caller driving both an
  * Objective's initial graph application and its ongoing dispatch loop can
  * share one `CircuitBreaker` instance across both if it chooses to (e.g. a
@@ -1036,7 +1033,6 @@ export class GraphApplier {
   readonly #writer: GraphWriter;
   readonly #notify: (message: string) => void;
   readonly #breaker: CircuitBreaker;
-  readonly #pacer: ContentCreationPacer;
   readonly #concurrency: ConcurrencyLimiter;
   readonly #mutations: MutationAdmission;
   readonly #beforeMutation: (waitedMs: number) => Promise<void>;
@@ -1048,14 +1044,8 @@ export class GraphApplier {
     this.#writer = opts.writer;
     this.#notify = opts.onThrottle ?? (() => {});
     this.#breaker = opts.circuitBreaker ?? new CircuitBreaker();
-    this.#pacer = opts.pacer ?? new ContentCreationPacer();
     this.#concurrency = opts.concurrency ?? new ConcurrencyLimiter();
-    this.#mutations =
-      opts.mutationScheduler ??
-      new MutationScheduler({
-        pacer: this.#pacer,
-        onThrottle: this.#notify,
-      });
+    this.#mutations = opts.mutationScheduler ?? new MutationScheduler();
     this.#beforeMutation = opts.beforeMutation ?? (async () => {});
     this.#captureMutationFence = opts.captureMutationFence;
     this.#mutationScope = opts.mutationScope ?? "graph-applier";
@@ -1221,7 +1211,7 @@ export class GraphApplier {
   }
 
   /**
-   * Routes one mutating call through the breaker, pacer, and concurrency
+   * Routes one mutating call through the breaker, admission gate, and concurrency
    * limiter (Finding 4) — identical discipline to `Dispatcher.#call`, kept
    * as a separate copy rather than a shared helper because the two classes'
    * constructor/option shapes are otherwise independent and neither should
@@ -1298,7 +1288,6 @@ export class GraphApplier {
       if (!attempted) throw error;
       const refusal = classifyRefusal(error);
       if (refusal.kind === "not_refusal") throw error;
-      mutationPermit.recordRefusal?.(isSecondaryRateLimitRefusal(error));
       if (!isKnownPrimaryQuotaRefusal(error)) this.#breaker.recordRefusal(refusal);
       throw new PlatformUnavailableError(refusal, error);
     } finally {

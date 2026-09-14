@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { LeaseManager, type LeaseState } from "../src/control/lease.js";
 import { observeLeaseAssertion } from "../src/control/mutation-observation.js";
-import { ConcurrencyLimiter, ContentCreationPacer, MutationScheduler } from "../src/platform.js";
+import { ConcurrencyLimiter, MutationScheduler } from "../src/platform.js";
 
 function deferred() {
   let resolve!: () => void;
@@ -13,13 +13,9 @@ function deferred() {
 }
 
 function scheduler() {
-  let now = Date.parse("2026-01-01T00:00:00Z");
+  const now = Date.parse("2026-01-01T00:00:00Z");
   return new MutationScheduler({
-    pacer: new ContentCreationPacer(80, 500, 0),
     now: () => new Date(now),
-    sleep: async (milliseconds) => {
-      now += milliseconds;
-    },
   });
 }
 

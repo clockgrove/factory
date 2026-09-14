@@ -8,7 +8,11 @@
    and Codex CLI 0.153.0 (the client version verified for this procedure). A later Codex version must
    still expose the `plugin marketplace add`, `plugin add`, and `plugin list` commands shown below.
    Factory's source checks use npm 11.19.0, but npm is not needed to run the plugin.
-2. Install Factory through Codex's real plugin marketplace entry point, then fully restart Codex:
+2. For a portable skill-only introduction in any target repository, run
+   `npx skills add clockgrove/factory`. It discovers Factory's three public skills and asks which
+   agents and scope to use. This standard third-party install does not register the repository or
+   provide the MCP execution tools. For Codex execution, install the full plugin instead of keeping
+   a duplicate Skills CLI copy, then fully restart Codex:
 
    ```bash
    codex plugin marketplace add clockgrove/factory --ref main
@@ -23,10 +27,12 @@
 3. In that same Linux user/process environment, run `codex login` and `gh auth login`. The GitHub
    identity needs access to the target repository's issues, pull requests, contents, and custom Git
    refs, including writes before execution can be authorized.
-4. Open your checkout and ask the agent: “Use Factory director to inspect OWNER/REPO#OBJECTIVE
-   with checkout /absolute/linux/checkout. Check prerequisites before starting anything.”
-5. Review the reported gates, then explicitly authorize execution. Start local-only; no sandbox
-   account, cloud key, Factory workflow, or paid-cloud policy is needed.
+4. Open your checkout and ask the agent: “Use Factory to inspect this repository for existing
+   Objectives and prerequisites. Do not start work.”
+5. Review the reported gates, then ask in ordinary language to build or continue the repository.
+   Factory reuses one unambiguous existing Objective and maps that request to its internal activation
+   and compilation operations. Start local-only; no sandbox account, cloud key, Factory workflow, or
+   paid-cloud policy is needed.
 
 **Success looks like:** the plugin loads, the local backend reports available, and the exact GitHub
 Objective and checkout are accessible. Inspection alone does not start work. Local-only excludes
@@ -34,10 +40,11 @@ paid cloud workers, not the cost or quota of your existing model account.
 
 ## Before you begin
 
-You need an existing checkout and Objective issue for the inspect example; replace every placeholder.
-If you have only an idea, ask the Director to help prepare an Objective first and approve the GitHub
-writes separately. Do not substitute the Factory source checkout for the repository you want built.
-Keep WSL work under a Linux path such as /home/you/src/project, not /mnt/c.
+You need an existing checkout and Objective issue for the inspect example. The Objective number may
+be omitted: Factory performs bounded read-only discovery and asks only when the result is ambiguous
+or incomplete. If you have only an idea, ask the Director to help prepare an Objective first and
+approve the GitHub writes separately. Do not substitute the Factory source checkout for the
+repository you want built. Keep WSL work under a Linux path such as /home/you/src/project, not /mnt/c.
 
 ### Optional Objective issue form
 
@@ -111,13 +118,14 @@ Use the existing Node/npm toolchain. Do not add dependencies, services, secrets,
 generated files, deployment, or release work.
 ```
 
-Then use the inspect prompt from the TL;DR with that issue number. Expected inspection is a
-secret-safe doctor report with `activationAuthorized: false`, the exact checkout/repository match,
-GitHub access, at least one authenticated local backend, and repository-grounded validation. If you
-later authorize the local-only Objective, expect a small Work Item graph, tested PR delivery, a
-terminal status, and observed model usage. Both compilation and worker/reviewer turns consume the
-quota of the Codex account visible to the executing Linux process; local-only means no paid cloud
-worker, not zero model usage. Review the complete run policy before activation.
+Give the issue an `Objective:` title, then use the inspect prompt from the TL;DR without needing its
+number. Expected inspection is a secret-safe doctor report with `activationAuthorized: false`, the
+exact checkout/repository match, GitHub access, at least one authenticated local backend, and
+repository-grounded validation. If you later ask Factory to execute the local-only Objective, expect
+a missing Work Item graph to be compiled automatically, followed by tested PR delivery, a terminal
+status, and observed model usage. Both compilation and worker/reviewer turns consume the quota of the
+Codex account visible to the executing Linux process; local-only means no paid cloud worker, not zero
+model usage. Review the complete run policy before asking Factory to execute.
 
 Before adding any sandbox or managed agent, follow [shared provider configuration](configuration.md).
 Provider credentials, repository selection, and permission to spend are three separate settings.

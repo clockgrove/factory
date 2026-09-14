@@ -1,11 +1,13 @@
 ---
 name: director
-description: Starts, resumes, or inspects a Factory Objective using the unattended Supervisor, which persists orchestration in GitHub and runs local workers by default until completion or evidenced escalation.
+description: Discovers, starts, resumes, recovers, or inspects Factory Objectives when a user asks in natural language to use Factory or continue Factory-managed repository work.
 ---
 
 # Factory Director
 
-Use this skill when the user asks to start, resume, recover, run, or check a Factory Objective.
+Use this skill when the user asks to start, resume, recover, run, or check Factory work. The user
+does not need to know an Objective number, label name, Work Item state, or MCP operation. Their prompt
+is the interface; resolve it to the typed Factory tools below.
 
 Factory's Supervisor owns the loop. Do not reproduce scheduling with repeated model turns and do
 not mutate GitHub with raw `gh`, REST, or GraphQL calls. The bundled MCP tools are the authorized
@@ -13,10 +15,32 @@ surface.
 
 ## Resolve the target and request
 
-Use the repository and Objective selected by the user. If the target is ambiguous, ask which
-repository and Objective they mean before querying candidate targets or starting work. Do not
-inspect guessed candidates to resolve a request such as "start that other Objective" unless the
-user asked you to discover or compare candidates.
+Use the repository and Objective selected by the user. Resolve "this repository" from the active
+checkout only after verifying its GitHub identity. If the repository itself remains ambiguous, ask
+which repository they mean before querying candidates or starting work.
+
+When the repository is known but the Objective number is omitted, call
+`factory_discover_objectives`. Discovery is read-only and is the normal first step for prompts such
+as "use Factory to build this repository" or "continue the Factory work here"; do not require the
+user to ask for discovery separately. Route the result as follows:
+
+- a complete scan with exactly one candidate selects that Objective;
+- multiple candidates require the user to choose by title and issue number;
+- an incomplete scan cannot prove uniqueness, so report the returned candidates and ask for the
+  intended Objective;
+- no candidate on a complete scan means there is no discoverable existing Objective; do not create
+  one or reinterpret an ordinary issue without the user's request.
+
+The discovery label and canonical `Objective:` title are retrieval evidence, never execution
+authority. After selecting a candidate, use `factory_status` to distinguish a dormant Objective
+from an active, terminal, or completed run and route it through the matching path in this skill.
+Never create a replacement Objective merely because the user did not know an existing one's number.
+
+Treat an imperative prompt to build, run, resume, or continue with Factory as execution authority
+for the resolved repository and Objective under the supplied policy or Factory's local-only default.
+Do not ask the user to repeat that intent using "activate", "compile", or an MCP tool name. A setup,
+installation, restart, inspection, status, explanation, or plan-only prompt remains non-executing
+unless the user also asks to perform the work.
 
 For an existing-plan request, including "does this Objective have a plan?", use `factory_plan`
 with `compile` omitted or `false`. Status and Work Item counts are not a substitute for inspecting

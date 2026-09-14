@@ -41,6 +41,9 @@ For operating boundaries, see [host scheduling](HOST-SCHEDULING.md) and the
 
 The Director skill uses bounded, read-only operations when the user is inspecting a run:
 
+- `factory_discover_objectives` finds open Objective candidates when the repository is known but
+  the issue number is omitted. It reports whether its fixed scan was complete and never reads issue
+  bodies, invokes a model, changes GitHub, or grants execution authority.
 - `factory_doctor` checks the requested repository and checkout, GitHub access and branch rules,
   available runners, repository-specific validation tools, and measured Linux resource headroom.
 - `factory_plan` inspects existing Work Items without model execution. Explicit `compile: true`

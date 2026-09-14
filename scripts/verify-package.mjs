@@ -59,6 +59,7 @@ const EXPECTED_TOOLS = [
   "factory_controller_status",
   "factory_controller_stop",
   "factory_controller_uninstall",
+  "factory_discover_objectives",
   "factory_doctor",
   "factory_drain",
   "factory_explain",
@@ -319,7 +320,9 @@ check(
   Array.isArray(codex.interface?.defaultPrompt) &&
     codex.interface.defaultPrompt.length > 0 &&
     codex.interface.defaultPrompt.length <= 3 &&
-    codex.interface.defaultPrompt.every((prompt) => prompt.length <= 128),
+    codex.interface.defaultPrompt.every((prompt) => prompt.length <= 128) &&
+    codex.interface.defaultPrompt.some((prompt) => /this repository/i.test(prompt)) &&
+    codex.interface.defaultPrompt.every((prompt) => !/OWNER\/REPO|#OBJECTIVE/.test(prompt)),
   "the Codex manifest exposes bounded starter prompts",
 );
 for (const field of ["composerIcon", "logo"]) {
@@ -476,9 +479,18 @@ if (tools) {
   check(extra.length === 0, `no undocumented tool is exposed`, `unexpected: ${extra.join(", ")}`);
 
   const replayTool = tools.find((tool) => tool.name === "factory_replay");
+  const discoveryTool = tools.find((tool) => tool.name === "factory_discover_objectives");
   const recoveryTool = tools.find((tool) => tool.name === "factory_recovery_plan");
   const recoveryProposal = tools.find((tool) => tool.name === "factory_recovery_propose");
   const recoveryRequest = tools.find((tool) => tool.name === "factory_recovery_request");
+  check(
+    discoveryTool?.annotations?.readOnlyHint === true &&
+      discoveryTool?.annotations?.destructiveHint === false &&
+      discoveryTool?.inputSchema?.required?.includes("owner") &&
+      discoveryTool?.inputSchema?.required?.includes("repo") &&
+      !discoveryTool?.inputSchema?.properties?.number,
+    "factory_discover_objectives is a repository-scoped read-only operation",
+  );
   check(
     recoveryTool?.annotations?.readOnlyHint === true &&
       recoveryTool?.annotations?.destructiveHint === false &&

@@ -6,13 +6,19 @@ description: Sets up or troubleshoots the Factory plugin on its supported Linux 
 # Factory setup
 
 Identify the environment before changing it: the agent client and version, Linux host type, user,
-`CODEX_HOME`, Factory installation source, target `OWNER/REPO#OBJECTIVE`, and the absolute Linux
-checkout. A terminal inside a desktop client is not necessarily the parent of its MCP process.
+`CODEX_HOME`, Factory installation source, target `OWNER/REPO` (plus the Objective number when the
+user supplied one), and the absolute Linux checkout. A terminal inside a desktop client is not
+necessarily the parent of its MCP process.
 
 Read the [local quick start](../../docs/setup/local.md) for the supported Codex install commands,
 prerequisites, GitHub permissions, first Objective, and success criteria. Use the
 [configuration reference](../../docs/setup/configuration.md) only when credentials, process
 placement, or an optional provider is relevant. Do not copy those changing facts into this skill.
+
+For a user who asks only to install Factory's public skills, direct them to
+`npx skills add clockgrove/factory`. That portable third-party install supplies this skill, Director,
+and Objective compilation, but no MCP runtime. Do not describe it as repository registration or as
+an execution-capable Factory installation.
 
 ## Optional human Objective form
 
@@ -37,10 +43,11 @@ human Work Item template: Factory generates Work Items from the accepted graph.
 2. Check only the prerequisites relevant to the selected local path. Confirm Linux, Node.js, Git,
    GitHub CLI authentication, a compatible Codex executable/login, and the exact checkout. Never
    print tokens, authentication files, or secret-valued environment variables.
-3. Once Factory's MCP tools load, call `factory_doctor` for the exact Objective and checkout. Use
-   `factory_status` only to inspect existing durable state. These are read-only; do not substitute
-   `factory_plan` with `compile: true`, controller lifecycle tools, activation, or `factory_run` as
-   a setup test.
+3. Once Factory's MCP tools load, route an omitted Objective number to the `director` skill's
+   read-only discovery step. After it resolves an exact Objective, call `factory_doctor` for that
+   Objective and checkout. Use `factory_status` only to inspect existing durable state. These are
+   read-only; do not substitute `factory_plan` with `compile: true`, controller lifecycle tools,
+   activation, or `factory_run` as a setup test.
 4. Report either a verified installed artifact plus the doctor/status result, or one specific
    blocker and its next action. Treat missing optional-provider credentials and a stopped controller
    as informational unless the user selected that provider or unattended mode.

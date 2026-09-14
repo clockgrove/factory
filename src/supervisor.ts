@@ -439,6 +439,8 @@ class ExecutionSourceAdvancedBeforeDispatchError extends Error {
   }
 }
 
+class ExecutionCapacityUnavailableBeforeDispatchError extends Error {}
+
 export interface SupervisorOptions {
   token: string;
   owner: string;
@@ -5665,6 +5667,7 @@ export class FactorySupervisor {
             (item) =>
               item.state === "failed" &&
               !activeExecutions.has(item.number) &&
+              !this.#hasUnfinishedAttempt(item) &&
               item.attempts >= this.#policy.maxAttemptsPerItem &&
               !durableProviderGates.some(
                 (gate) => gate.workItem === item.number && gate.attempt !== undefined,
@@ -6337,20 +6340,14 @@ export class FactorySupervisor {
           )!;
           activeExecutions.throwNextFailure();
           this.#options.signal?.throwIfAborted();
-          const committed = await this.#reserveCapacity(
-            expectedCapacityGeneration,
-            admission.reservation,
-            limits,
-          );
-          if (!committed.reserved) {
-            this.#notify(`Work Item #${item.number} returned to queue: ${committed.code}`);
-            capacityChanged = true;
-            break;
-          }
-          expectedCapacityGeneration = committed.generation;
-          if (admission.reservation.local) this.#fairness.noteAdmission(objective.number);
-          started.push(item.number);
-          let executionCapacityReleased = false;
+          // Preparation must durably bind the issue intent before acquiring
+          // shared capacity. Wait for that admission boundary before replanning;
+          // execution remains concurrent once the capacity claim commits.
+          let admissionReady!: () => void;
+          const admissionPending = new Promise<void>((resolve) => {
+            admissionReady = resolve;
+          });
+          let executionCapacityReleased = true;
           const releaseExecutionCapacity = async (alreadyReleased = false) => {
             if (executionCapacityReleased) return;
             if (alreadyReleased) {
@@ -6360,11 +6357,31 @@ export class FactorySupervisor {
             await this.#releaseCapacity(admission.reservation.key);
             executionCapacityReleased = true;
           };
-          const capacityOwner = this.#sharedCapacityOwners.get(admission.reservation.key);
-          const executionClaim = capacityOwner
-            ? sharedCapacityClaimId(capacityOwner, admission.reservation.key)
-            : undefined;
-          if (executionClaim) activeExecutionClaims.add(executionClaim);
+          let executionClaim: string | undefined;
+          const commitExecutionCapacity = async () => {
+            // A lost acknowledgement can leave this exact claim committed.
+            // Its durable issue intent now supplies the takeover identity.
+            executionCapacityReleased = false;
+            const committed = await this.#reserveCapacity(
+              expectedCapacityGeneration,
+              admission.reservation,
+              limits,
+            );
+            if (!committed.reserved) {
+              executionCapacityReleased = true;
+              capacityChanged = true;
+              throw new ExecutionCapacityUnavailableBeforeDispatchError(committed.code);
+            }
+            expectedCapacityGeneration = committed.generation;
+            const capacityOwner = this.#sharedCapacityOwners.get(admission.reservation.key);
+            executionClaim = capacityOwner
+              ? sharedCapacityClaimId(capacityOwner, admission.reservation.key)
+              : undefined;
+            if (executionClaim) activeExecutionClaims.add(executionClaim);
+            if (admission.reservation.local) this.#fairness.noteAdmission(objective.number);
+            started.push(item.number);
+            admissionReady();
+          };
           activeExecutions.start(
             item.number,
             async () => {
@@ -6379,6 +6396,8 @@ export class FactorySupervisor {
                   repositoryCapabilityProofs.get(item.number) ?? [],
                   activatedPackets.get(item.number),
                   managedRuntimeActivations.get(item.number),
+                  undefined,
+                  commitExecutionCapacity,
                 );
               } catch (error) {
                 // A durability/cleanup hold retains its original obligation.
@@ -6391,8 +6410,14 @@ export class FactorySupervisor {
             },
             () => {
               if (executionClaim) activeExecutionClaims.delete(executionClaim);
+              // The pool records this settlement synchronously before the
+              // resumed scheduler can observe a preparation failure.
+              admissionReady();
             },
           );
+          await admissionPending;
+          activeExecutions.throwNextFailure();
+          if (capacityChanged) break;
         }
         if (started.length > 0) {
           this.#notify(`admitted: ${started.map((number) => `#${number}`).join(", ")}`);
@@ -6503,6 +6528,7 @@ export class FactorySupervisor {
     activatedPacket?: WorkerPacket,
     managedRuntimeActivation?: ManagedRuntimeActivation,
     recovered?: CollectedAttemptContinuation,
+    commitExecutionCapacity?: () => Promise<void>,
   ): Promise<void> {
     const execute = () =>
       withArtifactContentScope(() =>
@@ -6517,6 +6543,7 @@ export class FactorySupervisor {
           activatedPacket,
           managedRuntimeActivation,
           recovered,
+          commitExecutionCapacity,
         ),
       );
     return this.#observePhase(`work-item-${item.number}`, () =>
@@ -6535,6 +6562,7 @@ export class FactorySupervisor {
     activatedPacket?: WorkerPacket,
     managedRuntimeActivation?: ManagedRuntimeActivation,
     recovered?: CollectedAttemptContinuation,
+    commitExecutionCapacity?: () => Promise<void>,
   ): Promise<void> {
     if (
       this.#recoveryRuntime &&
@@ -6948,6 +6976,7 @@ export class FactorySupervisor {
               ...(admission.economics ?? {}),
             },
           });
+          await commitExecutionCapacity?.();
           const reservedAmount =
             admission.reservedBudget.unit === "none" ? timeoutMs : admission.reservedBudget.amount;
           const reserveValidation =
@@ -8187,7 +8216,9 @@ export class FactorySupervisor {
         if (cancelledUsageWriteFailure) throw cancelledUsageWriteFailure.error;
         const reason = error instanceof Error ? error.message : String(error);
         const deferredBeforeDispatch =
-          error instanceof ExecutionSourceAdvancedBeforeDispatchError && !backendLaunchAttempted;
+          (error instanceof ExecutionSourceAdvancedBeforeDispatchError ||
+            error instanceof ExecutionCapacityUnavailableBeforeDispatchError) &&
+          !backendLaunchAttempted;
         if (error instanceof PrepublicationApprovalRequiredError) {
           if (!reservation || !retryableArtifact || !completedArtifactRetained)
             throw new Error("pre-publication hold lacks a durable completed artifact", {

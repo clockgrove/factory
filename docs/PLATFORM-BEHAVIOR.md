@@ -367,10 +367,10 @@ Two cautions found while implementing this:
   must never consume an attempt or reach the replanner.
 - **Do not trust `/rate_limit` as a gate.** It reports full quota while refusing every call. Back off
   on wall-clock time and treat a successful request as the only clear signal.
-- **Bound observed traffic and react to server refusals** (`src/platform.ts`,
-  `FACTORY_PACING`): cap concurrent in-flight calls to a handful and retain shared rolling mutation bounds.
-  Ready mutations have no fixed one-second gap. Local estimates cannot observe competing processes;
-  server-directed backoff remains mandatory.
+- **Coordinate requests and react to server refusals** (`src/platform.ts`): share mutation
+  admission, bounded request concurrency and server-directed backoff across credential peers.
+  Local traffic counts cannot establish remaining secondary quota when other processes and
+  clients use GitHub; do not impose speculative minute/hour mutation limits.
 - **Trip a wave-level circuit breaker on repeated refusals**, not just a per-call retry
   (`src/platform.ts`, `CircuitBreaker`): after a small number of consecutive refusals, pause *all*
   dispatch for a cooldown measured in minutes, growing on repeated trips, and surface for a human

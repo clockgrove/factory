@@ -259,7 +259,7 @@ check(
   "the package ships no Factory GitHub Actions workflows",
 );
 
-const objectiveFormPath = resolve(root, "templates", "github", "objective.yml");
+const objectiveFormPath = resolve(root, "assets", "templates", "github", "objective.yml");
 check(existsSync(objectiveFormPath), "the package ships the human Objective issue form");
 if (existsSync(objectiveFormPath)) {
   const objectiveForm = readFileSync(objectiveFormPath, "utf8");

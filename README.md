@@ -66,7 +66,7 @@ checkout after restarting Codex and ask:
 > Add Factory's shipped human Objective issue form to this repository. Preserve its existing issue
 > templates and make the form an ordinary reviewable repository change.
 
-Factory ships the [canonical form](templates/github/objective.yml) for that explicit request. You
+Factory ships the [canonical form](assets/templates/github/objective.yml) for that explicit request. You
 can also review and copy it manually to `.github/ISSUE_TEMPLATE/objective.yml`. It is optional and
 does not change Factory's activation or execution authority.
 

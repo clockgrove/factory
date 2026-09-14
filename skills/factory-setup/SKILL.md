@@ -21,7 +21,7 @@ Never add the form automatically when Factory loads, a session starts, or the us
 install the plugin.
 
 When the user explicitly asks to add Factory's human Objective form to an exact repository, read
-the shipped [canonical form](../../templates/github/objective.yml). Inspect the destination's
+the shipped [canonical form](../../assets/templates/github/objective.yml). Inspect the destination's
 `AGENTS.md` and existing `.github/ISSUE_TEMPLATE/` files first. Add the canonical content at
 `.github/ISSUE_TEMPLATE/objective.yml` as an ordinary reviewable repository change, preserving
 unrelated templates and repository policy. If that path or a semantically equivalent Objective

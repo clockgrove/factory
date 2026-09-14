@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parseDocument } from "yaml";
 
-const path = fileURLToPath(new URL("../templates/github/objective.yml", import.meta.url));
+const path = fileURLToPath(new URL("../assets/templates/github/objective.yml", import.meta.url));
 
 describe("human Objective issue form", () => {
   it("is valid YAML with the fields needed to compile a bounded Objective", () => {

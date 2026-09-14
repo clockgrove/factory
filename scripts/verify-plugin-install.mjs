@@ -28,6 +28,11 @@ const marketplaceRoot = join(temporaryRoot, "marketplace");
 const stagedRoot = join(marketplaceRoot, "plugins", "factory");
 const codexHome = join(temporaryRoot, "codex-home");
 
+// Supported Codex Git marketplace installations may use a cone-mode sparse
+// checkout: root files remain, while plugin directories must be one of the
+// selected component roots below. Keep this staged install aligned with that
+// path so arbitrary top-level directories cannot pass verification and then
+// disappear from a sparse installation.
 const shippedEntries = [
   ".agents",
   ".claude-plugin",
@@ -47,7 +52,6 @@ const shippedEntries = [
   "plugin.json",
   "schemas",
   "skills",
-  "templates",
 ];
 
 function cleanEnvironment() {
@@ -249,7 +253,7 @@ async function main() {
     throw new Error("clean install resolved back to the development worktree");
   }
 
-  const objectiveFormPath = join(installedRoot, "templates", "github", "objective.yml");
+  const objectiveFormPath = join(installedRoot, "assets", "templates", "github", "objective.yml");
   const objectiveForm = readFileSync(objectiveFormPath, "utf8");
   if (
     !objectiveForm.includes("name: Factory Objective") ||
@@ -265,7 +269,7 @@ async function main() {
     "utf8",
   );
   if (
-    !setupSkill.includes("templates/github/objective.yml") ||
+    !setupSkill.includes("assets/templates/github/objective.yml") ||
     !setupSkill.includes("Never add the form automatically")
   ) {
     throw new Error("installed Factory setup guidance omits the Objective form boundary");

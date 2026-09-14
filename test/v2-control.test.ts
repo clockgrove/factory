@@ -612,6 +612,7 @@ describe("attempt reservation", () => {
       unit: "model_tokens",
       amount: 150,
       usageId: "failed-compile",
+      reason: "compiled Objective has deterministic violations",
       reportedModelUsage: { inputTokens: 120, outputTokens: 30, cachedInputTokens: 0 },
     });
     expect(store.comments.length - writesBefore).toBe(2);
@@ -625,6 +626,7 @@ describe("attempt reservation", () => {
       outputTokens: 30,
       cachedInputTokens: 0,
     });
+    expect(failedManagement.reason).toBe("compiled Objective has deterministic violations");
     const writesBeforeProviderGate = store.comments.length;
     const providerEvents = await recorder.providerQuotaBlocked({
       lease,

@@ -14,6 +14,9 @@ import {
 } from "../src/recovery/chain.js";
 import {
   RECOVERY_PLAN_PROTOCOL,
+  RECOVERY_PLAN_PROTOCOL_V2,
+  isRecoveryAdoptionGraph,
+  parseRecoveryPlan,
   recoveryPlanDigest,
   recoveryPlanRef,
   recoveryHistoryDigest,
@@ -70,6 +73,44 @@ function history(runId = "source", offset = 0, acceptedPolicy = policy): Factory
       usageId: `compile-${digest("c")}`,
     }),
     event({ kind: "run", event: "FactoryRunEscalated", runId, sequence: offset + 10 }),
+  ];
+}
+function failedCompilationUsage(
+  runId: string,
+  markerSequence: number,
+  reconciliationSequence: number,
+  amount = 30,
+  acceptedPolicy: RunPolicy = policy,
+): FactoryEvent[] {
+  const invocationId = `compile-${sha("a")}`;
+  return [
+    event({
+      kind: "budget",
+      event: "BudgetReserved",
+      runId,
+      sequence: markerSequence,
+      phase: "management",
+      unit: "model_tokens",
+      amount: 0,
+      usageId: `invocation-${invocationId}`,
+      modelInvocationId: invocationId,
+      directorEpoch: 1,
+      policyDigest: policyDigest(acceptedPolicy),
+    }),
+    event({
+      kind: "budget",
+      event: "BudgetReconciled",
+      runId,
+      sequence: reconciliationSequence,
+      phase: "management",
+      unit: "model_tokens",
+      amount,
+      usageId: `failed-${invocationId}`,
+      modelInvocationId: invocationId,
+      directorEpoch: 1,
+      policyDigest: policyDigest(acceptedPolicy),
+      reportedModelUsage: { inputTokens: amount - 10, outputTokens: 10 },
+    }),
   ];
 }
 function proposal(
@@ -312,10 +353,119 @@ function graphBootstrapSuccessorFixture(extraEvents: FactoryEvent[] = []) {
   value.candidatePlan = bindGraphBootstrap(proposal(value.events, "third", first), "third");
   return value;
 }
+const compilerEvaluation = {
+  mode: "auto-repair" as const,
+  maxRepairs: 2,
+  maxInvocations: 7,
+  timeoutSeconds: 600,
+  maxObservedTokens: 500_000,
+};
+function compileObjectiveCandidateFixture() {
+  const value = fixture();
+  const bootstrap = value.candidatePlan;
+  const acceptedPolicy = { ...bootstrap.acceptedPolicy, compilerEvaluation };
+  value.candidatePlan = parseRecoveryPlan({
+    ...bootstrap,
+    protocol: RECOVERY_PLAN_PROTOCOL_V2,
+    graph: {
+      mode: "compile-objective",
+      sourceRunId: bootstrap.successorRunId,
+      ref: compiledGraphRef(7, bootstrap.successorRunId),
+      objectiveInputDigest: compilerEvalDigest({
+        number: 7,
+        title: "Objective",
+        body: undefined,
+      }),
+      sourceBaseSha: bootstrap.expectedBaseSha,
+      projection: { ref: compiledGraphProjectionRef(7, bootstrap.successorRunId) },
+    },
+    acceptedPolicy,
+    policyDigest: policyDigest(acceptedPolicy),
+    items: [],
+  });
+  return value;
+}
+function compiledObjectiveSuccessorFixture() {
+  const value = compileObjectiveCandidateFixture();
+  const first = value.candidatePlan;
+  const admission = admitted(first);
+  value.events.push(...admission.events);
+  value.plansByDigest[recoveryPlanDigest(first)] = record(first);
+  value.claims.push(admission.claim);
+  const graph = {
+    sourceRunId: first.successorRunId,
+    ref: compiledGraphRef(7, first.successorRunId),
+    commitOid: sha("9"),
+    blobOid: sha("8"),
+    digest: digest("7"),
+    projection: {
+      ref: compiledGraphProjectionRef(7, first.successorRunId),
+      commitOid: sha("6"),
+      blobOid: sha("5"),
+    },
+  };
+  value.events.push(
+    event({
+      kind: "graph",
+      event: "GraphCompiled",
+      runId: first.successorRunId,
+      sequence: 16,
+      graphDigest: graph.digest,
+      graphSize: 1,
+      baseSha: first.expectedBaseSha,
+      graphRef: graph.ref,
+      graphBlobSha: graph.blobOid,
+    }),
+    event({
+      kind: "graph",
+      event: "GraphProjected",
+      runId: first.successorRunId,
+      sequence: 17,
+      graphDigest: graph.digest,
+      graphSize: 1,
+      projectionRef: graph.projection.ref,
+      projectionBlobSha: graph.projection.blobOid,
+    }),
+  );
+  const candidate = proposal(value.events, "third", first);
+  candidate.graph = {
+    ...graph,
+    projection: {
+      ...graph.projection,
+      bindingDigest: recoveryPlanBindingDigest(candidate.items),
+    },
+  };
+  value.candidatePlan = parseRecoveryPlan(candidate);
+  return value;
+}
 const codes = (value: ReturnType<typeof verifyRecoveryChain>) =>
   value.blockers.map((blocker) => blocker.code);
 
 describe("pure authenticated recovery chain verification", () => {
+  it("binds compile-objective authority to the original source policy", () => {
+    const value = compileObjectiveCandidateFixture();
+    expect(verifyRecoveryChain(value).status).toBe("verified");
+
+    const start = value.events.find(
+      (event) => event.event === "FactoryRunStarted" && event.runId === "source",
+    );
+    if (start?.event !== "FactoryRunStarted") throw new Error("fixture source start");
+    start.policy = { ...start.policy, compilerEvaluation };
+    start.policyDigest = policyDigest(start.policy);
+    const historyEntry = value.candidatePlan.history[0]!;
+    historyEntry.startDigest = recoveryEventDigest(start);
+    historyEntry.policyDigest = start.policyDigest;
+    value.candidatePlan.predecessor.startDigest = historyEntry.startDigest;
+    value.candidatePlan.historyDigest = recoveryHistoryDigest(value.candidatePlan.history);
+    value.candidatePlan.sourceEventsDigest = recoverySourceEventsDigest({
+      objective: value.objective,
+      runIds: [start.runId],
+      events: value.events,
+      maxSequence: value.candidatePlan.sourceEventMaxSequence,
+    });
+    expect(verifyRecoveryChain(value).status).toBe("blocked");
+  });
+
   it.each(["complete", "missing-adoption", "conflicting-claim"])(
     "accounts reused-graph successor history without inventing a compiler charge: %s",
     (mode) => {
@@ -386,7 +536,8 @@ describe("pure authenticated recovery chain verification", () => {
     expect(result.accounting?.usage?.modelTokens).toBe(20);
 
     const changedConstraints = structuredClone(value);
-    if (!("mode" in changedConstraints.candidatePlan.graph)) throw new Error("fixture graph");
+    if (!isRecoveryAdoptionGraph(changedConstraints.candidatePlan.graph))
+      throw new Error("fixture graph");
     changedConstraints.candidatePlan.graph.constraints.workItems[0]!.goal = "changed";
     changedConstraints.candidatePlan.graph.constraintDigest = legacyGraphConstraintsDigest(
       changedConstraints.candidatePlan.graph.constraints,
@@ -425,6 +576,36 @@ describe("pure authenticated recovery chain verification", () => {
       }),
     ]);
     expect(codes(verifyRecoveryChain(unresolvedUsage))).toContain("predecessor-chain-mismatch");
+  });
+  it("moves a projected compile-objective successor into ordinary immutable graph recovery", () => {
+    const value = compiledObjectiveSuccessorFixture();
+    expect(verifyRecoveryChain(value).status).toBe("verified");
+
+    const missingProjection = structuredClone(value);
+    missingProjection.events = missingProjection.events.filter(
+      (event) => event.event !== "GraphProjected",
+    );
+    expect(codes(verifyRecoveryChain(missingProjection))).toContain("source-fence-mismatch");
+
+    const changedProjection = structuredClone(value);
+    if ("mode" in changedProjection.candidatePlan.graph)
+      throw new Error("fixture persisted graph unavailable");
+    changedProjection.candidatePlan.graph.projection.blobOid = sha("4");
+    expect(codes(verifyRecoveryChain(changedProjection))).toContain("predecessor-chain-mismatch");
+
+    const changedBase = compiledObjectiveSuccessorFixture();
+    const compiled = changedBase.events.find(
+      (event) => event.event === "GraphCompiled" && event.runId === "successor",
+    );
+    if (compiled?.event !== "GraphCompiled") throw new Error("fixture compiled receipt");
+    compiled.baseSha = sha("f");
+    changedBase.candidatePlan.sourceEventsDigest = recoverySourceEventsDigest({
+      objective: changedBase.objective,
+      runIds: changedBase.candidatePlan.history.map((entry) => entry.runId),
+      events: changedBase.events,
+      maxSequence: changedBase.candidatePlan.sourceEventMaxSequence,
+    });
+    expect(codes(verifyRecoveryChain(changedBase))).toContain("predecessor-chain-mismatch");
   });
   it("retains graph-only failed runs in bootstrap accounting", () => {
     const value = fixture();
@@ -561,35 +742,18 @@ describe("pure authenticated recovery chain verification", () => {
   });
   it("rejects newly observed source charges until a new candidate fence is acknowledged", () => {
     const value = fixture();
-    value.events.push(
-      event({
-        kind: "budget",
-        event: "BudgetReconciled",
-        sequence: 11,
-        phase: "management",
-        unit: "model_tokens",
-        amount: 30,
-        usageId: `failed-compile-${sha("a")}`,
-      }),
-    );
+    const [marker, reconciliation] = failedCompilationUsage("source", 3, 11);
+    value.events.push(marker!);
+    value.candidatePlan = proposal(value.events);
+    value.events.push(reconciliation!);
     expect(codes(verifyRecoveryChain(value))).toContain("candidate-source-advanced");
     value.candidatePlan = proposal(value.events);
     expect(verifyRecoveryChain(value).accounting?.usage?.modelTokens).toBe(40);
   });
   it("keeps an admitted prior prefix valid while carrying later source reconciliation into current totals", () => {
     const value = successorFixture();
-    value.events.push(
-      event({
-        kind: "budget",
-        event: "BudgetReconciled",
-        sequence: 30,
-        phase: "management",
-        unit: "model_tokens",
-        amount: 30,
-        usageId: `failed-compile-${sha("a")}`,
-      }),
-    );
     const prior = Object.values(value.plansByDigest)[0]!.plan;
+    value.events.push(...failedCompilationUsage("successor", 16, 30, 30, prior.acceptedPolicy));
     value.candidatePlan = proposal(value.events, "third", prior);
     const result = verifyRecoveryChain(value);
     expect(result.status).toBe("verified");

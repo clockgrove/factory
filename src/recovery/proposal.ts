@@ -19,7 +19,7 @@ import {
 import { decodeEventTrailer } from "../control/receipts.js";
 import { loadReviewCheckpoint, type ReviewIdentity } from "../control/reviews.js";
 import type { FactoryEvent } from "../protocol/events.js";
-import { parseRunPolicy, policyDigest } from "../protocol/policy.js";
+import { parseRunPolicy, policyDigest, type RunPolicy } from "../protocol/policy.js";
 import { planDelivery } from "../publication/delivery.js";
 import { branchRuleBlockers, missingRequiredChecks } from "../publication/branch-policy.js";
 import { publicationBranch } from "../publication/publisher.js";
@@ -30,7 +30,11 @@ import {
   parseLegacyGraphConstraints,
   type LegacyGraphConstraints,
 } from "../graph.js";
-import { assessRecoveryAccounting } from "./accounting.js";
+import {
+  assessRecoveryAccounting,
+  hasExactFailedCompilationUsage,
+  type RecoveryAccountingAssessment,
+} from "./accounting.js";
 import type { RecoveryBlocker, RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import { recoveryUnknownUsageDigest, verifyRecoveryChain } from "./chain.js";
@@ -59,6 +63,7 @@ import {
 import { verifyRecoveryProposalResources } from "./resources.js";
 import {
   RECOVERY_PLAN_PROTOCOL,
+  RECOVERY_PLAN_PROTOCOL_V2,
   isRecoveryAdoptionGraph,
   loadRecoveryPlan,
   parseRecoveryPlan,
@@ -74,6 +79,31 @@ import {
 } from "./plan.js";
 
 export const RECOVERY_PROPOSAL_READ_LIMIT = 512;
+export type RecoveryProposalHistoricalAccounting = Pick<
+  RecoveryAccountingAssessment,
+  | "scope"
+  | "runIds"
+  | "usage"
+  | "remaining"
+  | "unreconciledReservationCount"
+  | "attemptCount"
+  | "unknownModelUsageCount"
+>;
+
+function summarizeRecoveryAccounting(
+  assessment: RecoveryAccountingAssessment,
+): RecoveryProposalHistoricalAccounting {
+  return {
+    scope: assessment.scope,
+    runIds: assessment.runIds,
+    usage: assessment.usage,
+    remaining: assessment.remaining,
+    unreconciledReservationCount: assessment.unreconciledReservationCount,
+    attemptCount: assessment.attemptCount,
+    unknownModelUsageCount: assessment.unknownModelUsageCount,
+  };
+}
+
 export interface RecoveryProposalResult {
   status: "proposed" | "blocked";
   executionAuthorized: false;
@@ -81,6 +111,7 @@ export interface RecoveryProposalResult {
   planDigest: string | null;
   /** An observed acknowledgement identity, never an automatic acknowledgement. */
   unknownUsageDigest: string | null;
+  historicalAccounting: RecoveryProposalHistoricalAccounting | null;
   operatorAction: {
     required: true;
     monitoring: "stop";
@@ -102,7 +133,12 @@ function withRecoveryOperatorAction(result: RecoveryProposalResult): RecoveryPro
       summary: "No Factory work is active and this recovery proposal is blocked.",
       requiredAction:
         "Resolve the returned evidence blockers, then build a new read-only proposal. Do not poll the terminal source run.",
-      evidence: { blockerCount: result.blockers.length },
+      evidence: {
+        blockerCount: result.blockers.length,
+        ...(result.historicalAccounting
+          ? { historicalAccounting: result.historicalAccounting }
+          : {}),
+      },
     };
     return result;
   }
@@ -135,6 +171,19 @@ function withRecoveryOperatorAction(result: RecoveryProposalResult): RecoveryPro
     evidence: {
       planDigest: result.planDigest,
       unknownUsageAcknowledged: Boolean(result.unknownUsageDigest),
+      ...(result.plan
+        ? {
+            acceptedPolicyDigest: result.plan.policyDigest,
+            sourceEventsDigest: result.plan.sourceEventsDigest,
+            allowance: result.plan.allowance,
+            ...(result.historicalAccounting
+              ? { historicalAccounting: result.historicalAccounting }
+              : {}),
+            ...(result.plan.acceptedPolicy.compilerEvaluation
+              ? { compilerEvaluation: result.plan.acceptedPolicy.compilerEvaluation }
+              : {}),
+          }
+        : {}),
     },
   };
   return result;
@@ -169,6 +218,7 @@ export async function buildRecoveryProposal(input: {
   requestId: string;
   successorRunId: string;
   allowanceIncrement?: RecoveryAllowanceIncrement;
+  compilerEvaluation?: NonNullable<RunPolicy["compilerEvaluation"]>;
   unknownUsageAcknowledgementDigest?: string | null;
   signal?: AbortSignal;
 }): Promise<RecoveryProposalResult> {
@@ -178,6 +228,7 @@ export async function buildRecoveryProposal(input: {
     plan: null,
     planDigest: null,
     unknownUsageDigest: null,
+    historicalAccounting: null,
     operatorAction: {
       required: true,
       monitoring: "stop",
@@ -195,6 +246,10 @@ export async function buildRecoveryProposal(input: {
   function require(condition: unknown): asserts condition {
     if (!condition) throw new Error("unavailable evidence");
   }
+  const refuse = (code: string, reason: string, runId?: string): RecoveryProposalResult => {
+    result.blockers.push({ code, reason, ...(runId ? { runId } : {}) });
+    return withRecoveryOperatorAction(result);
+  };
   const cache = new Map<string, Promise<unknown>>();
   let bytesRead = 0;
   const read = <T>(name: string, args: unknown[], operation: () => Promise<T>): Promise<T> => {
@@ -264,7 +319,6 @@ export async function buildRecoveryProposal(input: {
         !snapshot.closed &&
         Array.isArray(snapshot.factoryEvents) &&
         Array.isArray(snapshot.workItems) &&
-        snapshot.workItems.length > 0 &&
         snapshot.workItems.length <= 100,
     );
     for (const item of snapshot.workItems)
@@ -492,6 +546,300 @@ export async function buildRecoveryProposal(input: {
       );
       graphs.set(start.runId, { graph, projection });
     }
+    if (snapshot.workItems.length === 0) {
+      const sourceEvents = events.filter((event) => event.runId === predecessorStart.runId);
+      const terminal = sourceEvents.find(
+        (event) =>
+          event.event === "FactoryRunEscalated" &&
+          hasCurrentWriterAuthority(event, events, snapshot.objectiveAuthority),
+      );
+      if (
+        starts.length !== 1 ||
+        priorDigest !== null ||
+        predecessorStart.recoveryRequestId !== undefined ||
+        predecessorStart.recoveryPlanDigest !== undefined ||
+        predecessorStart.predecessorRunId !== undefined ||
+        historicalRuntimes.size !== 0
+      )
+        return refuse(
+          "compile-objective-source-run",
+          "Graphless compilation recovery requires one original activated source run; a recovery generation or ambiguous run history cannot be reclassified as that boundary.",
+          predecessorStart.runId,
+        );
+      if (terminal?.event !== "FactoryRunEscalated")
+        return refuse(
+          "compile-objective-terminal-authority",
+          "The original graphless run requires one current-writer FactoryRunEscalated receipt before a successor can be proposed.",
+          predecessorStart.runId,
+        );
+      if (!terminal.reason)
+        return refuse(
+          "compile-objective-failure-evidence",
+          "The authoritative escalation has no bounded terminal reason to carry into successor planning; the unavailable raw compiler proposal cannot be reconstructed.",
+          predecessorStart.runId,
+        );
+      if (!hasExactFailedCompilationUsage(sourceEvents, predecessorStart, terminal))
+        return refuse(
+          "compile-objective-failure-accounting",
+          "Graphless compilation recovery requires the exact failed compiler dispatch and actual-usage reconciliation bound to this source base, policy, terminal window, and terminal reason when recorded.",
+          predecessorStart.runId,
+        );
+      if (
+        !snapshot.authorLogin ||
+        predecessorStart.objectiveAuthor.toLowerCase() !== snapshot.authorLogin.toLowerCase()
+      )
+        return refuse(
+          "compile-objective-author-binding",
+          "The current Objective author does not match the original activation binding.",
+          predecessorStart.runId,
+        );
+      if (!predecessorStart.baseSha || predecessorStart.baseSha !== base.oid)
+        return refuse(
+          "compile-objective-base-changed",
+          "The default-branch head differs from the original activation base; graphless recovery cannot move the compilation input to a different base.",
+          predecessorStart.runId,
+        );
+
+      stage = "compile-objective-graph-absence";
+      const graphRefs = await Promise.all([
+        port.readRef(compiledGraphRef(snapshot.number, predecessorStart.runId)),
+        port.readRef(compiledGraphProjectionRef(snapshot.number, predecessorStart.runId)),
+        port.readRef(compiledGraphRef(snapshot.number, input.successorRunId)),
+        port.readRef(compiledGraphProjectionRef(snapshot.number, input.successorRunId)),
+      ]);
+      if (
+        graphs.size !== 0 ||
+        graphRefs.some((ref) => ref !== null) ||
+        events.some((event) => event.kind === "graph")
+      )
+        return refuse(
+          "compile-objective-graph-present",
+          "A graph, projection, graph receipt, or deterministic graph ref already exists; this boundary only supports a source that stopped before graph persistence.",
+          predecessorStart.runId,
+        );
+      const effect = events.find((event) =>
+        ["attempt", "scheduling", "capacity", "validation", "publication"].includes(event.kind),
+      );
+      if (effect)
+        return refuse(
+          "compile-objective-execution-effects",
+          `Graphless compilation recovery cannot adopt the observed ${effect.kind} effect.`,
+          effect.runId,
+        );
+      const deliveryPolicy = predecessorStart.policy.delivery ?? {
+        mode: "regular-prs" as const,
+        onUnavailable: "regular-prs" as const,
+      };
+      const deliverySelections = events.filter((event) => event.kind === "delivery");
+      const deliverySelection = deliverySelections[0];
+      if (
+        deliverySelections.length !== 1 ||
+        deliverySelection?.runId !== predecessorStart.runId ||
+        deliverySelection.sequence <= predecessorStart.sequence ||
+        deliverySelection.sequence >= terminal.sequence ||
+        deliverySelection.requested !== deliveryPolicy.mode ||
+        deliverySelection.selected === "escalate" ||
+        (deliveryPolicy.mode === "regular-prs" && deliverySelection.selected !== "regular-prs") ||
+        (deliveryPolicy.mode === "stacked-prs" &&
+          deliverySelection.selected === "regular-prs" &&
+          deliveryPolicy.onUnavailable !== "regular-prs")
+      )
+        return refuse(
+          "compile-objective-delivery-selection",
+          "Graphless compilation recovery requires the one durable pre-compilation delivery selection to match the original run policy and name an executable delivery mode.",
+          predecessorStart.runId,
+        );
+      const unsupportedBudget = events.find(
+        (event) =>
+          event.kind === "budget" &&
+          (event.phase !== "management" ||
+            event.unit !== "model_tokens" ||
+            event.workItem !== undefined ||
+            event.attempt !== undefined),
+      );
+      if (unsupportedBudget)
+        return refuse(
+          "compile-objective-non-management-budget",
+          "Graphless compilation recovery supports only Objective-scoped management model-token accounting; execution, validation, item, or attempt budget effects were observed.",
+          unsupportedBudget.runId,
+        );
+      stage = "compile-objective-reservations";
+      const reservationRefs = await listAttemptReservationRefs(port, snapshot.number);
+      if (reservationRefs.length !== 0)
+        return refuse(
+          "compile-objective-reservation-present",
+          "An attempt reservation ref exists for an Objective with no projected Work Items; reconcile that conflicting durable effect before recovery.",
+          predecessorStart.runId,
+        );
+
+      const compilerEvaluation = input.compilerEvaluation;
+      if (
+        !compilerEvaluation ||
+        predecessorStart.policy.compilerEvaluation !== undefined ||
+        compilerEvaluation.mode !== "auto-repair" ||
+        Object.keys(compilerEvaluation).length !== 5 ||
+        compilerEvaluation.maxRepairs === undefined ||
+        compilerEvaluation.maxInvocations === undefined ||
+        compilerEvaluation.timeoutSeconds === undefined ||
+        compilerEvaluation.maxObservedTokens === undefined
+      )
+        return refuse(
+          "compile-objective-policy-delta",
+          "Graphless recovery requires one fully explicit successor-only compilerEvaluation auto-repair addition to the historical one-shot compiler policy.",
+          predecessorStart.runId,
+        );
+
+      stage = "compile-objective-allowance";
+      const before = allowanceFor(predecessorStart);
+      const increment = input.allowanceIncrement ?? ZERO_INCREMENT;
+      if (
+        Object.keys(increment).length !== 4 ||
+        Object.values(increment).some((value) => !Number.isSafeInteger(value) || value < 0) ||
+        increment.sandboxMinutes !== 0 ||
+        increment.managedSessions !== 0 ||
+        increment.implementationAttemptsPerItem !== 0 ||
+        (before.modelTokens === null && increment.modelTokens !== 0)
+      )
+        return refuse(
+          "compile-objective-allowance",
+          "This successor can add only an explicit model-token allowance. It cannot gain worker attempts, sandbox minutes, or managed sessions before a graph exists.",
+          predecessorStart.runId,
+        );
+      const after: RecoveryAllowance = {
+        modelTokens:
+          before.modelTokens === null ? null : before.modelTokens + increment.modelTokens,
+        sandboxMinutes: before.sandboxMinutes,
+        managedSessions: before.managedSessions,
+        implementationAttemptsPerItem: before.implementationAttemptsPerItem,
+      };
+      if (after.modelTokens !== null && !Number.isSafeInteger(after.modelTokens))
+        return refuse(
+          "compile-objective-allowance",
+          "The cumulative model-token allowance exceeds safe integer arithmetic.",
+          predecessorStart.runId,
+        );
+      const acceptedPolicy = parseRunPolicy({
+        ...predecessorStart.policy,
+        ...(after.modelTokens === null
+          ? {}
+          : {
+              economics: {
+                ...predecessorStart.policy.economics,
+                maxModelTokens: after.modelTokens,
+              },
+            }),
+        ...(compilerEvaluation ? { compilerEvaluation } : {}),
+      });
+      const runIds = [predecessorStart.runId];
+      const sourceEventMaxSequence = sourceEvents
+        .filter((event) => event.kind !== "recovery")
+        .reduce((maximum, event) => Math.max(maximum, event.sequence), 0);
+      const sourceEventsDigest = recoverySourceEventsDigest({
+        objective: snapshot.number,
+        runIds,
+        events: observation,
+        maxSequence: sourceEventMaxSequence,
+      });
+      const accounting = assessRecoveryAccounting({
+        objective: snapshot.number,
+        repository,
+        events: observation,
+        runIds,
+        policy: acceptedPolicy,
+        authority: snapshot.objectiveAuthority,
+      });
+      result.historicalAccounting = summarizeRecoveryAccounting(accounting);
+      if (
+        accounting.usage === null ||
+        accounting.unreconciledReservationCount !== 0 ||
+        accounting.unknownModelUsageCount !== 0 ||
+        accounting.attemptCount !== 0
+      )
+        return refuse(
+          "compile-objective-accounting-unreconciled",
+          "The source compilation does not have complete Objective-scoped management usage reconciliation; unknown or unresolved model consumption cannot be acknowledged into this recovery boundary.",
+          predecessorStart.runId,
+        );
+      if (
+        accounting.remaining === null ||
+        (accounting.remaining.modelTokens !== null && accounting.remaining.modelTokens <= 0)
+      )
+        return refuse(
+          "compile-objective-model-allowance-exhausted",
+          "The cumulative model-token allowance has no remaining capacity for compiler recovery; propose an explicit model-token increment before requesting this successor.",
+          predecessorStart.runId,
+        );
+      if (input.unknownUsageAcknowledgementDigest != null)
+        return refuse(
+          "unknown-usage-acknowledgement-mismatch",
+          "No unknown source usage exists at this boundary, so an unknown-usage acknowledgement digest must not be supplied.",
+          predecessorStart.runId,
+        );
+
+      const plan = parseRecoveryPlan({
+        protocol: RECOVERY_PLAN_PROTOCOL_V2,
+        repository,
+        repositoryId: snapshot.repositoryId,
+        objective: snapshot.number,
+        objectiveNodeId: snapshot.id,
+        requestId: input.requestId,
+        successorRunId: input.successorRunId,
+        predecessor,
+        history,
+        historyDigest: recoveryHistoryDigest(history),
+        sourceEventsDigest,
+        sourceEventMaxSequence,
+        priorPlanDigest: null,
+        expectedBaseSha: base.oid,
+        baseBranch: snapshot.defaultBranch,
+        graph: {
+          mode: "compile-objective",
+          sourceRunId: input.successorRunId,
+          ref: compiledGraphRef(snapshot.number, input.successorRunId),
+          objectiveInputDigest: compilerEvalDigest({
+            number: snapshot.number,
+            title: snapshot.title,
+            body: snapshot.body,
+          }),
+          sourceBaseSha: predecessorStart.baseSha,
+          projection: {
+            ref: compiledGraphProjectionRef(snapshot.number, input.successorRunId),
+          },
+        },
+        acceptedPolicy,
+        policyDigest: policyDigest(acceptedPolicy),
+        allowance: { before, increment, after },
+        unknownUsageAcknowledgementDigest: null,
+        items: [],
+      });
+      stage = "compile-objective-chain";
+      const chain = verifyRecoveryChain({
+        repository,
+        repositoryId: snapshot.repositoryId,
+        objective: snapshot.number,
+        objectiveNodeId: snapshot.id,
+        historyComplete: true,
+        events: observation,
+        plansByDigest: priorPlans,
+        claims,
+        candidatePlan: plan,
+        authority: snapshot.objectiveAuthority,
+      });
+      if (chain.status !== "verified") {
+        result.blockers.push(...chain.blockers);
+        return withRecoveryOperatorAction(result);
+      }
+      result.status = "proposed";
+      result.plan = plan;
+      result.planDigest = recoveryPlanDigest(plan);
+      return withRecoveryOperatorAction(result);
+    }
+    if (input.compilerEvaluation)
+      return refuse(
+        "compiler-evaluation-not-applicable",
+        "A recovery compiler-evaluation policy is supported only for an original terminal compiler failure with no graph or Work Items.",
+        predecessorStart.runId,
+      );
     const priorAdoptionGraph =
       priorDigest && isRecoveryAdoptionGraph(priorPlans[priorDigest]!.plan.graph)
         ? priorPlans[priorDigest]!.plan.graph
@@ -1350,6 +1698,7 @@ export async function buildRecoveryProposal(input: {
       policy,
       authority: snapshot.objectiveAuthority,
     });
+    result.historicalAccounting = summarizeRecoveryAccounting(accounting);
     require(accounting.usage !== null);
     for (const workItem of failedRetries)
       if (

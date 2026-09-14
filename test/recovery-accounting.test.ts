@@ -33,6 +33,7 @@ function history(runId: string, offset = 0): FactoryEvent[] {
       objectiveAuthor: "owner",
       fork: false,
       baseBranch: "main",
+      baseSha: "a".repeat(40),
       policy,
       policyDigest: digest,
     },
@@ -80,8 +81,18 @@ function worker(runId: string, offset = 0, tokens = 20): FactoryEvent[] {
     { ...attempt, sequence: offset + 4, event: "AttemptSucceeded", reportedModelTokens: tokens },
   ];
 }
-const assess = (events = history("one"), runIds = ["one"]) =>
-  assessRecoveryAccounting({ objective: 1, repository: "example/fixture", events, runIds, policy });
+const assess = (
+  events = history("one"),
+  runIds = ["one"],
+  candidatePolicy: Parameters<typeof assessRecoveryAccounting>[0]["policy"] = policy,
+) =>
+  assessRecoveryAccounting({
+    objective: 1,
+    repository: "example/fixture",
+    events,
+    runIds,
+    policy: candidatePolicy,
+  });
 const codes = (result: ReturnType<typeof assess>) => result.blockers.map((blocker) => blocker.code);
 
 describe("historical successor accounting assessment", () => {
@@ -337,12 +348,147 @@ describe("historical successor accounting assessment", () => {
     expect(result.unknownModelUsageCount).toBe(1);
     expect(result.unknownModelUsage[0]?.reason).toContain("compilation");
   });
-  it("recognizes Objective-scoped failed compilation counters including observed zero", () => {
+  it("requires an exact dispatch, base, policy, and provider counter binding for failed compilation", () => {
     const events = history("one");
-    Object.assign(events[1]!, { usageId: `failed-compile-${"a".repeat(40)}`, amount: 0 });
-    const result = assess(events);
+    const invocationId = `compile-${"a".repeat(40)}`;
+    Object.assign(events[1]!, {
+      sequence: 2,
+      usageId: `failed-${invocationId}`,
+      amount: 0,
+      modelInvocationId: invocationId,
+      directorEpoch: 1,
+      policyDigest: digest,
+      reportedModelUsage: { inputTokens: 0, outputTokens: 0 },
+    });
+    expect(assess(events).unknownModelUsageCount).toBe(1);
+    const marker = parseFactoryEvent({
+      ...common("one", 1),
+      kind: "budget",
+      event: "BudgetReserved",
+      phase: "management",
+      unit: "model_tokens",
+      amount: 0,
+      usageId: `invocation-${invocationId}`,
+      modelInvocationId: invocationId,
+      directorEpoch: 1,
+      policyDigest: digest,
+    });
+    const result = assess([...events, marker]);
     expect(result.usage?.modelTokens).toBe(0);
     expect(result.unknownModelUsageCount).toBe(0);
+    Object.assign(events[1]!, { reason: "bounded fixture" });
+    expect(assess([...events, marker]).unknownModelUsageCount).toBe(0);
+    Object.assign(events[1]!, { reason: "different failure" });
+    expect(assess([...events, marker]).unknownModelUsageCount).toBe(1);
+    Reflect.deleteProperty(events[1]!, "reason");
+    expect(assess([...events, marker, marker]).unknownModelUsageCount).toBe(0);
+    expect(
+      codes(assess([...events, marker, { ...marker, sequence: 3 } as FactoryEvent])),
+    ).toContain("unknown-model-usage");
+    expect(
+      codes(assess([...events, marker, { ...events[1]!, sequence: 3 } as FactoryEvent])),
+    ).toContain("unknown-model-usage");
+    for (const change of [
+      { modelInvocationId: `compile-${"b".repeat(40)}` },
+      { policyDigest: "b".repeat(64) },
+      { reportedModelUsage: { inputTokens: 1, outputTokens: 0 } },
+    ]) {
+      const tampered = events.map((event) =>
+        event.event === "BudgetReconciled" ? ({ ...event, ...change } as FactoryEvent) : event,
+      );
+      expect(assess([...tampered, marker]).blockers.length).toBeGreaterThan(0);
+    }
+  });
+  it("counts exact evaluated-compiler draft usage once and leaves malformed draft usage unknown", () => {
+    const evaluatedPolicy = {
+      ...policy,
+      compilerEvaluation: {
+        mode: "auto-repair" as const,
+        maxRepairs: 2,
+        maxInvocations: 7,
+        timeoutSeconds: 600,
+        maxObservedTokens: 500_000,
+      },
+    };
+    const evaluatedDigest = policyDigest(evaluatedPolicy);
+    const invocationId = "compiler-inventory-1";
+    const events = history("one");
+    Object.assign(events[0]!, { policy: evaluatedPolicy, policyDigest: evaluatedDigest });
+    events.splice(
+      1,
+      1,
+      parseFactoryEvent({
+        ...common("one", 1),
+        kind: "budget",
+        event: "BudgetReserved",
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: `invocation-${invocationId}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: evaluatedDigest,
+      }),
+      parseFactoryEvent({
+        ...common("one", 2),
+        kind: "budget",
+        event: "BudgetReconciled",
+        phase: "management",
+        unit: "model_tokens",
+        amount: 7,
+        usageId: `draft-${invocationId}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: evaluatedDigest,
+        reportedModelUsage: { inputTokens: 5, outputTokens: 2 },
+      }),
+    );
+
+    const exact = assess([...events, events[2]!], ["one"], evaluatedPolicy);
+    expect(exact.usage?.modelTokens).toBe(7);
+    expect(exact.unknownModelUsageCount).toBe(0);
+    expect(exact.unreconciledReservationCount).toBe(0);
+
+    const unlinked = assess(
+      events.filter((event) => event.event !== "BudgetReserved"),
+      ["one"],
+      evaluatedPolicy,
+    );
+    expect(unlinked.usage?.modelTokens).toBe(7);
+    expect(unlinked.unknownModelUsageCount).toBe(1);
+    expect(unlinked.unknownModelUsage[0]?.reason).toContain("compiler draft");
+
+    const tampered = events.map((event) =>
+      event.event === "BudgetReconciled"
+        ? ({ ...event, usageId: "draft-another-invocation" } as FactoryEvent)
+        : event,
+    );
+    const tamperedResult = assess(tampered, ["one"], evaluatedPolicy);
+    expect(tamperedResult.usage?.modelTokens).toBe(7);
+    expect(tamperedResult.unreconciledReservationCount).toBe(0);
+    expect(tamperedResult.unknownModelUsageCount).toBe(1);
+  });
+  it("does not treat a legacy compiler receipt as coverage for an evaluated compiler run", () => {
+    const evaluatedPolicy = {
+      ...policy,
+      compilerEvaluation: {
+        mode: "auto-repair" as const,
+        maxRepairs: 2,
+        maxInvocations: 7,
+        timeoutSeconds: 600,
+        maxObservedTokens: 500_000,
+      },
+    };
+    const evaluatedDigest = policyDigest(evaluatedPolicy);
+    const events = history("one");
+    Object.assign(events[0]!, { policy: evaluatedPolicy, policyDigest: evaluatedDigest });
+
+    const result = assess(events, ["one"], evaluatedPolicy);
+
+    expect(result.usage?.modelTokens).toBe(10);
+    expect(result.unknownModelUsageCount).toBe(1);
+    expect(result.unknownModelUsage[0]?.reason).toContain("compilation");
+    expect(codes(result)).toContain("unknown-model-usage");
   });
   it("bounds reservation details but retains every original liability in totals and count", () => {
     const events = history("one");

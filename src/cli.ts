@@ -71,8 +71,8 @@ const USAGE = [
   "  factory status|explain OWNER/REPO#NUMBER [--work-item NUMBER]",
   "  factory replay OWNER/REPO#NUMBER [--snapshots FILE]  (caller-supplied simulations; read-only)",
   "  factory recovery-plan OWNER/REPO#NUMBER  (read-only; does not authorize execution)",
-  "  factory recovery-propose OWNER/REPO#NUMBER --request-id ID [--allowance-increment FILE] [--acknowledge-unknown-usage DIGEST]",
-  "  factory recovery-request OWNER/REPO#NUMBER --request-id ID --plan-digest DIGEST [--allowance-increment FILE] [--acknowledge-unknown-usage DIGEST]",
+  "  factory recovery-propose OWNER/REPO#NUMBER --request-id ID [--allowance-increment FILE] [--compiler-evaluation FILE] [--acknowledge-unknown-usage DIGEST]",
+  "  factory recovery-request OWNER/REPO#NUMBER --request-id ID --plan-digest DIGEST [--allowance-increment FILE] [--compiler-evaluation FILE] [--acknowledge-unknown-usage DIGEST]",
   "  factory pause|resume|drain|pause-cloud|cancel OWNER/REPO#NUMBER --request-id ID [--reason TEXT]",
   "  factory retry OWNER/REPO#NUMBER --request-id ID --work-item NUMBER [--reason TEXT]",
   "  factory priority OWNER/REPO#NUMBER --request-id ID --work-item NUMBER --priority RANK",
@@ -266,12 +266,16 @@ async function applicationCommand(command: string, args: string[]): Promise<void
     const requestId = option(args, "--request-id");
     if (!requestId) fail(`${command} requires --request-id ID`);
     const incrementPath = option(args, "--allowance-increment");
+    const compilerEvaluationPath = option(args, "--compiler-evaluation");
     const acknowledgement = option(args, "--acknowledge-unknown-usage");
     const input = {
       objective: target.objective,
       requestId,
       ...(incrementPath
         ? { allowanceIncrement: JSON.parse(await readFile(incrementPath, "utf8")) }
+        : {}),
+      ...(compilerEvaluationPath
+        ? { compilerEvaluation: JSON.parse(await readFile(compilerEvaluationPath, "utf8")) }
         : {}),
       ...(acknowledgement ? { unknownUsageAcknowledgementDigest: acknowledgement } : {}),
     };

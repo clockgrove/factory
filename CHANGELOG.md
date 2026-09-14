@@ -21,6 +21,11 @@ and artifacts, and record the commit SHA when installing from source.
 
 ### Fixed
 
+- Recover an unchanged Objective whose original, fully accounted compiler run stopped before graph
+  or Work Item projection. An explicitly bounded auto-repair successor carries the prior failure,
+  authenticates its new graph before deriving execute-only Work Item authority, and preserves the
+  predecessor terminal and cumulative accounting. ([#390](https://github.com/clockgrove/factory/issues/390))
+
 - Let Director resolve natural-language Factory requests through bounded, read-only discovery of
   labelled or canonically titled open Objectives. Users no longer need an Objective number or MCP
   command name when one complete repository scan identifies the existing work unambiguously.

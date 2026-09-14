@@ -472,6 +472,7 @@ export class LifecycleRecorder {
     modelInvocationId?: string;
     directorEpoch?: number;
     policyDigest?: string;
+    reason?: string;
     reportedModelUsage?: ReportedModelUsage;
   }): Promise<FactoryEvent> {
     const mutationClass = args.event === "BudgetReconciled" ? "cleanup" : "normal";
@@ -503,6 +504,7 @@ export class LifecycleRecorder {
       ...(args.modelInvocationId
         ? { directorEpoch: args.directorEpoch, policyDigest: args.policyDigest }
         : {}),
+      ...(args.reason ? { reason: args.reason } : {}),
       ...(args.reportedModelUsage ? { reportedModelUsage: args.reportedModelUsage } : {}),
     });
     await this.store.addIssueComment(

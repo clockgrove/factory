@@ -17,6 +17,11 @@ import {
 
 type BudgetEvent = Extract<FactoryEvent, { kind: "budget" }>;
 type AttemptEvent = Extract<FactoryEvent, { kind: "attempt" }>;
+type RunStartedEvent = Extract<FactoryEvent, { kind: "run"; event: "FactoryRunStarted" }>;
+type RunTerminalEvent = Extract<
+  FactoryEvent,
+  { kind: "run"; event: "FactoryRunCompleted" | "FactoryRunCancelled" | "FactoryRunEscalated" }
+>;
 type Source = { runId: string; workItem?: number; attempt?: number };
 export interface RecoveryAccountingAssessment {
   scope: "historical-assessment";
@@ -64,13 +69,100 @@ const identity = (event: BudgetEvent) =>
   ]);
 const safe = (value: number) =>
   Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
-const compilationUsage = (event: BudgetEvent) =>
+const objectiveCompilationReconciliation = (event: BudgetEvent) =>
   event.event === "BudgetReconciled" &&
   event.phase === "management" &&
   event.unit === "model_tokens" &&
   event.workItem === undefined &&
-  event.attempt === undefined &&
-  /^(?:compile-[0-9a-f]{64}|failed-compile-[0-9a-f]{40})$/.test(event.usageId ?? "");
+  event.attempt === undefined;
+
+function exactCompilationInvocation(
+  event: BudgetEvent,
+  runEvents: readonly FactoryEvent[],
+  start: RunStartedEvent,
+  terminal: RunTerminalEvent,
+  kind: "failed" | "draft",
+): boolean {
+  if (!objectiveCompilationReconciliation(event) || !event.modelInvocationId) return false;
+  const invocationId =
+    kind === "failed" && start.baseSha ? `compile-${start.baseSha}` : event.modelInvocationId;
+  if (
+    (kind === "failed" &&
+      (event.modelInvocationId !== invocationId || event.usageId !== `failed-${invocationId}`)) ||
+    (kind === "draft" &&
+      (!start.policy.compilerEvaluation || event.usageId !== `draft-${invocationId}`)) ||
+    event.directorEpoch === undefined ||
+    event.policyDigest !== start.policyDigest ||
+    event.reportedModelUsage?.inputTokens === undefined ||
+    event.reportedModelUsage.outputTokens === undefined ||
+    event.reportedModelUsage.inputTokens + event.reportedModelUsage.outputTokens !== event.amount ||
+    event.sequence <= start.sequence ||
+    event.sequence >= terminal.sequence ||
+    (kind === "failed" && event.reason !== undefined && event.reason !== terminal.reason)
+  )
+    return false;
+  const reconciliations = runEvents.filter(
+    (candidate): candidate is BudgetEvent =>
+      candidate.kind === "budget" &&
+      objectiveCompilationReconciliation(candidate) &&
+      candidate.usageId === event.usageId,
+  );
+  const markers = runEvents.filter(
+    (candidate): candidate is BudgetEvent =>
+      candidate.kind === "budget" &&
+      candidate.event === "BudgetReserved" &&
+      candidate.phase === "management" &&
+      candidate.unit === "model_tokens" &&
+      candidate.workItem === undefined &&
+      candidate.attempt === undefined &&
+      candidate.modelInvocationId === invocationId,
+  );
+  const marker = markers[0];
+  return (
+    reconciliations.length === 1 &&
+    markers.length === 1 &&
+    marker?.amount === 0 &&
+    marker.usageId === `invocation-${invocationId}` &&
+    marker.directorEpoch === event.directorEpoch &&
+    marker.policyDigest === start.policyDigest &&
+    marker.sequence > start.sequence &&
+    marker.sequence < terminal.sequence &&
+    marker.sequence < event.sequence
+  );
+}
+
+export function hasExactFailedCompilationUsage(
+  events: readonly FactoryEvent[],
+  start: RunStartedEvent,
+  terminal: RunTerminalEvent,
+): boolean {
+  return events.some(
+    (event) =>
+      event.kind === "budget" &&
+      exactCompilationInvocation(event, events, start, terminal, "failed"),
+  );
+}
+
+function compilationUsage(
+  event: BudgetEvent,
+  runEvents: readonly FactoryEvent[],
+  start: RunStartedEvent,
+  terminal: RunTerminalEvent,
+): boolean {
+  if (!objectiveCompilationReconciliation(event)) return false;
+  // Successful compiler receipts predate invocation-linked accounting and remain
+  // valid historical coverage. Failed compilation is the new recovery authority,
+  // so require its complete dispatch, policy, base, and provider-counter binding.
+  if (
+    start.policy.compilerEvaluation === undefined &&
+    /^compile-[0-9a-f]{64}$/.test(event.usageId ?? "")
+  )
+    return true;
+  return (
+    exactCompilationInvocation(event, runEvents, start, terminal, "failed") ||
+    exactCompilationInvocation(event, runEvents, start, terminal, "draft")
+  );
+}
 
 /** Exact authenticated adoption declares graph reuse, not a zero-cost compiler invocation.
  * This remains accounting coverage only: the chain verifier independently loads the plan/claim. */
@@ -273,6 +365,36 @@ export function assessRecoveryAccounting(input: {
   }
 
   const budgets = events.filter((event): event is BudgetEvent => event.kind === "budget");
+  const invalidDraftRuns = new Set<string>();
+  for (const runId of input.runIds) {
+    const runEvents = events.filter((event) => event.runId === runId);
+    const start = runEvents.find(
+      (event): event is RunStartedEvent =>
+        event.kind === "run" && event.event === "FactoryRunStarted",
+    )!;
+    const terminal = runEvents.find(
+      (event): event is RunTerminalEvent =>
+        event.kind === "run" &&
+        terminalRuns.has(event.event) &&
+        hasCurrentWriterAuthority(event, runEvents, input.authority),
+    )!;
+    for (const event of runEvents) {
+      if (
+        event.kind !== "budget" ||
+        !objectiveCompilationReconciliation(event) ||
+        !event.usageId?.startsWith("draft-") ||
+        exactCompilationInvocation(event, runEvents, start, terminal, "draft")
+      )
+        continue;
+      invalidDraftRuns.add(runId);
+      unknown({
+        runId,
+        phase: "management",
+        reason:
+          "A compiler draft usage receipt lacks its exact Objective-scoped dispatch, policy, epoch, provider-counter, or terminal-window binding.",
+      });
+    }
+  }
   const ledger = new Map<
     string,
     { reserved: number; reconciled?: number; unit: BudgetEvent["unit"] }
@@ -431,8 +553,24 @@ export function assessRecoveryAccounting(input: {
     }
   }
   for (const runId of input.runIds) {
+    const runEvents = events.filter((event) => event.runId === runId);
+    const start = runEvents.find(
+      (event): event is RunStartedEvent =>
+        event.kind === "run" && event.event === "FactoryRunStarted",
+    );
+    const terminal = runEvents.find(
+      (event): event is RunTerminalEvent =>
+        event.kind === "run" &&
+        terminalRuns.has(event.event) &&
+        hasCurrentWriterAuthority(event, runEvents, input.authority),
+    );
     if (
-      !budgets.some((event) => event.runId === runId && compilationUsage(event)) &&
+      !invalidDraftRuns.has(runId) &&
+      (!start ||
+        !terminal ||
+        !budgets.some(
+          (event) => event.runId === runId && compilationUsage(event, runEvents, start, terminal),
+        )) &&
       !adoptedGraphReuse(events, runId)
     ) {
       unknown({

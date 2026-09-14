@@ -13,12 +13,39 @@ import {
 } from "../control/receipts.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import { PROTOCOL_V2, safeId, sha256Digest } from "../protocol/limits.js";
+import {
+  CompilerEvaluationPolicySchema,
+  parseRunPolicy,
+  policyDigest,
+} from "../protocol/policy.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { recoveryEventDigest } from "./identity.js";
-import { loadRecoveryPlan, RecoveryPlanManager, type RecoveryPlanRecord } from "./plan.js";
+import {
+  isRecoveryCompileObjectiveGraph,
+  loadRecoveryPlan,
+  RecoveryPlanManager,
+  type RecoveryPlanRecord,
+} from "./plan.js";
 import { buildRecoveryProposal, type RecoveryProposalResult } from "./proposal.js";
 
 const amount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const recoveryCompilerEvaluationSchema = CompilerEvaluationPolicySchema.required()
+  .extend({ mode: z.literal("auto-repair") })
+  .strict();
+type RecoveryCompilerEvaluation = z.infer<typeof recoveryCompilerEvaluationSchema>;
+
+function sameCompilerEvaluation(
+  left: ReturnType<typeof parseRunPolicy>["compilerEvaluation"],
+  right: RecoveryCompilerEvaluation,
+): boolean {
+  return (
+    left?.mode === right.mode &&
+    left.maxRepairs === right.maxRepairs &&
+    left.maxInvocations === right.maxInvocations &&
+    left.timeoutSeconds === right.timeoutSeconds &&
+    left.maxObservedTokens === right.maxObservedTokens
+  );
+}
 export const RecoveryProposalInputSchema = z
   .object({
     objective: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
@@ -32,6 +59,11 @@ export const RecoveryProposalInputSchema = z
       })
       .strict()
       .optional(),
+    compilerEvaluation: recoveryCompilerEvaluationSchema
+      .optional()
+      .describe(
+        "Fully explicit successor-only compiler auto-repair policy for a terminal pre-graph Objective",
+      ),
     unknownUsageAcknowledgementDigest: sha256Digest.nullable().optional(),
   })
   .strict();
@@ -105,6 +137,7 @@ export class RecoveryRequestService {
         input.requestId,
       ),
       ...(input.allowanceIncrement ? { allowanceIncrement: input.allowanceIncrement } : {}),
+      ...(input.compilerEvaluation ? { compilerEvaluation: input.compilerEvaluation } : {}),
       ...(input.unknownUsageAcknowledgementDigest !== undefined
         ? { unknownUsageAcknowledgementDigest: input.unknownUsageAcknowledgementDigest }
         : {}),
@@ -185,6 +218,26 @@ export class RecoveryRequestService {
     const terminal = eventsOf(snapshot).find(
       (event) => recoveryEventDigest(event) === plan.predecessor.terminalDigest,
     );
+    const startPolicy = start ? parseRunPolicy(start.policy) : null;
+    const expectedPolicyDigest = startPolicy
+      ? policyDigest(
+          parseRunPolicy({
+            ...startPolicy,
+            maxSandboxMinutes: plan.allowance.after.sandboxMinutes,
+            maxManagedAgentSessions: plan.allowance.after.managedSessions,
+            maxAttemptsPerItem: plan.allowance.after.implementationAttemptsPerItem,
+            ...(plan.allowance.after.modelTokens === null
+              ? {}
+              : {
+                  economics: {
+                    ...startPolicy.economics,
+                    maxModelTokens: plan.allowance.after.modelTokens,
+                  },
+                }),
+            ...(input.compilerEvaluation ? { compilerEvaluation: input.compilerEvaluation } : {}),
+          }),
+        )
+      : null;
     if (
       record.digest !== input.planDigest ||
       plan.requestId !== input.requestId ||
@@ -195,6 +248,11 @@ export class RecoveryRequestService {
       plan.repository.toLowerCase() !== this.ports.repository.toLowerCase() ||
       plan.successorRunId !==
         recoverySuccessorRunId(this.ports.repository, input.objective, input.requestId) ||
+      (input.compilerEvaluation !== undefined && !isRecoveryCompileObjectiveGraph(plan.graph)) ||
+      (input.compilerEvaluation !== undefined &&
+        startPolicy?.compilerEvaluation !== undefined &&
+        !sameCompilerEvaluation(startPolicy.compilerEvaluation, input.compilerEvaluation)) ||
+      expectedPolicyDigest !== plan.policyDigest ||
       plan.unknownUsageAcknowledgementDigest !==
         (input.unknownUsageAcknowledgementDigest ?? null) ||
       Object.entries(increments).some(
@@ -214,7 +272,7 @@ export class RecoveryRequestService {
           request.policyDigest !== plan.policyDigest ||
           request.baseSha !== plan.expectedBaseSha))
     )
-      throw new Error("Recovery plan, actor, or explicit allowance binding changed");
+      throw new Error("Recovery plan, actor, or explicit request input binding changed");
   }
 
   async request(raw: RecoveryRequestInput): Promise<Request> {

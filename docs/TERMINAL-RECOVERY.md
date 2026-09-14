@@ -6,10 +6,11 @@ For the operator commands, see [continuing after escalation](setup/unattended.md
 ## Available inspection
 
 Use `factory_recovery_plan` through MCP or `factory recovery-plan OWNER/REPO#NUMBER` through the
-CLI to inspect graph/projection bindings, attempt reservations, observed PR identities, and
-historical accounting. This is a bounded read-only assessment, not an immutable approved recovery
-plan. It grants no execution authority. Missing source identity, changed evidence, and unavailable
-observations remain blockers; provider resource cleanup is not inferred from terminal receipts.
+CLI to inspect graph/projection bindings or their authenticated absence, attempt reservations,
+observed PR identities, and historical accounting. This is a bounded read-only assessment, not an
+immutable approved recovery plan. It grants no execution authority. Missing source identity,
+changed evidence, and unavailable observations remain blockers; provider resource cleanup is not
+inferred from terminal receipts.
 
 The assessment aggregates the explicitly inspected history, not an authorized predecessor chain.
 It retains source run/usage identities and distinguishes recorded subtotals from unknown usage.
@@ -55,9 +56,20 @@ simulated-provider regressions do not claim live paid-provider qualification.
 ## Authorization and accounting
 
 The immutable recovery-plan document binds the proposed successor, exact predecessor terminal,
-source-history prefix, graph/projection, item evidence, accepted policy, explicit allowance
-increments, and any unknown-usage acknowledgement. Its content-addressed ref is a durable proposal,
-not execution authority. Changed source evidence requires a different acknowledged plan.
+source-history prefix, accepted policy, explicit allowance increments, and any unknown-usage
+acknowledgement. An ordinary recovery also binds its existing graph/projection and item evidence. A
+version 2 pre-graph compiler recovery instead binds the unchanged Objective input and source base,
+authenticated graph absence, and the successor's deterministic future graph/projection refs. It
+contains no Work Item identities. Its content-addressed ref is a durable proposal, not execution
+authority. Changed source evidence requires a different acknowledged plan.
+
+A pre-graph compiler recovery is available only for one original, authoritatively escalated run
+whose Objective-scoped compilation usage is fully reconciled and which produced no graph, Work
+Items, execution effects, or attempt reservations. The successor adds a fully explicit bounded
+`compilerEvaluation: auto-repair` policy; all other policy and cumulative allowance fields are
+preserved unless the operator explicitly approves a model-token increment. The authenticated prior
+terminal reason is diagnostic input. No unavailable raw proposal, graph authority, or execution
+authority is reconstructed from it.
 
 `RecoveryRequested`, `RecoveryConsumed`, and `RecoveryAdoptionCompleted` have a separate event kind. Successor start records name
 the exact request, plan digest, and predecessor; authenticated reader bindings reject a changed
@@ -75,10 +87,13 @@ a restart. A pure replay inspector accepts only an exact ordered transaction pre
 earlier receipts, conflicting retries, late source receipts, or unexpected successor effects block
 replay. Its next-event result is descriptive, never permission to write or launch.
 
-A read-only evidence resolver independently reloads plan, graph/projection, claim, original
-reservation, validation, review, and publication identities. It keeps source attempts separate
-from the controlling run and observes changed heads/bases without rewriting historical receipts.
-Even verified source bindings do not prove resource cleanup or authorize execution.
+A read-only evidence resolver independently reloads the plan and the evidence required by its mode.
+Ordinary recovery loads graph/projection, claim, original reservation, validation, review, and
+publication identities. Pre-graph recovery proves the graphless source boundary and then recognizes
+the successor's graph persistence and projection transaction across restart windows. It keeps source
+attempts separate from the controlling run and observes changed heads/bases without rewriting
+historical receipts. Even verified source bindings do not prove resource cleanup or authorize
+execution.
 
 The internal adoption coordinator composes the immutable loaders, exact-prefix inspection,
 chain verifier, source resolver, cumulative accounting gate, and resource observations. It checks
@@ -177,8 +192,9 @@ its reservation refs. Graph-only retries without execution remain possible. This
 - Require an authenticated operator request; repaired checks or available credentials are not
   authority. No automatic budget increases, model changes, or paid-provider selection.
 - Never rewrite source run IDs or fabricate successor attempts from predecessor receipts.
-- Bind repository, Objective, terminal receipt, graph/projection, policy, resource identities,
-  artifact, and current PR head/base before admitting work.
+- Bind repository, Objective, terminal receipt, policy, and either the existing graph/projection or
+  the pre-graph compiler input, source base, and successor graph/projection refs. Bind resource
+  identities, artifact, and current PR head/base before admitting affected work.
 - Reconstruct everything authoritative from GitHub. Local caches remain optional.
 - Retain prior observed usage and unavailable-usage boundaries. Empty successor ledgers do not
   imply unspent Objective allowance.
@@ -209,8 +225,11 @@ No writes or model calls are allowed.
 ### Successor authority and cumulative accounting
 
 Verify the versioned immutable recovery plan and authenticated request naming the predecessor and
-terminal-event identity, plan digest, expected base, graph/projection digests, accepted policy,
-request ID, and activating actor. Changed assessment requires a new acknowledgement. Reusing a
+terminal-event identity, plan digest, expected base, accepted policy, request ID, and activating
+actor. Ordinary recovery binds existing graph/projection digests. Pre-graph compiler recovery binds
+authenticated absence, the unchanged Objective input, source base, successor graph/projection refs,
+and exact compiler-evaluation limits; its later graph/projection identities come only from the
+authenticated successor transaction. Changed assessment requires a new acknowledgement. Reusing a
 request ID with different semantics fails closed.
 
 Use cumulative Objective allowances across the acknowledged predecessor chain. Carry observed
@@ -226,10 +245,12 @@ breakdowns without inventing zeros, and reject ambiguous or cyclic predecessor c
 
 ### Fenced adoption transaction and shared evidence resolution
 
-Under repository and Objective leases, re-read the request, terminal predecessor, graph, current
-heads, policy, and remaining allowance. Stale plans require acknowledgement, not automatic replans.
-Fence competing requests so exactly one successor consumes the acknowledged predecessor and
-request retries find that successor.
+Under repository and Objective leases, re-read the request, terminal predecessor, current heads,
+policy, and remaining allowance. Re-read the existing graph for ordinary recovery; for pre-graph
+compiler recovery, recheck graph absence plus the bound Objective input and base before every model
+or graph mutation. Stale plans require acknowledgement, not automatic replans. Fence competing
+requests so exactly one successor consumes the acknowledged predecessor and request retries find
+that successor.
 
 Persist the immutable plan before execution. Adoption receipts reference source run, attempt,
 reservation, artifact, validation, and publication identities without changing source records.
@@ -238,7 +259,10 @@ stack integration, summaries, and replay. Do not scatter permissive cross-run se
 
 Acceptance: inject lost responses and process death around every plan/ref/request/start/adoption
 write. Restart reconstructs identical bindings, creates no duplicate attempt or PR, and admits
-nothing until adoption and accounting agree. Test competing controllers and recovery requests.
+nothing until adoption and accounting agree. For pre-graph recovery, also inject interruption before
+and after graph persistence, partial Work Item projection, the projection receipt, and projection-ref
+commit; no worker effect is permitted until both graph and projection authenticate. Test competing
+controllers and recovery requests.
 
 ### Resource and delivery reconciliation
 

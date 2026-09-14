@@ -44,6 +44,8 @@ import { recoveryUnknownUsageDigest } from "../src/recovery/chain.js";
 import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
 import {
   RECOVERY_PLAN_PROTOCOL,
+  RECOVERY_PLAN_PROTOCOL_V2,
+  parseRecoveryPlan,
   RecoveryPlanManager,
   recoveryHistoryDigest,
   recoveryPlanBindingDigest,
@@ -239,6 +241,7 @@ async function fixture(
     activated?: boolean;
     controllerObservation?: boolean;
     graphless?: boolean;
+    compileFailure?: boolean;
   } = {},
 ) {
   const store = new MemoryStore();
@@ -252,6 +255,18 @@ async function fixture(
       maxManagedSessions: 0,
       minCloudTimeSavedMinutes: 0,
     };
+  const acceptedPolicy = options.compileFailure
+    ? {
+        ...policy,
+        compilerEvaluation: {
+          mode: "auto-repair" as const,
+          maxRepairs: 2,
+          maxInvocations: 7,
+          timeoutSeconds: 600,
+          maxObservedTokens: 500_000,
+        },
+      }
+    : policy;
   let resourceReads = 0;
   const resourceState = { unavailable: false };
   const resourceReader: LocalResourceReader = {
@@ -356,32 +371,35 @@ async function fixture(
     kind: "run",
     event: "FactoryRunEscalated",
     sequence: 10,
-    reason: options.graphless
-      ? "Objective has Work Items but no authenticated v2 graph receipt"
-      : "paused",
+    reason: options.compileFailure
+      ? "compiled Objective has 16 deterministic violations: fixture"
+      : options.graphless
+        ? "Objective has Work Items but no authenticated v2 graph receipt"
+        : "paused",
   });
-  const events = options.graphless
-    ? [start, terminal]
-    : [
+  const events = options.compileFailure
+    ? [
         start,
         event({
-          kind: "graph",
-          event: "GraphCompiled",
+          kind: "delivery",
+          event: "DeliverySelected",
           sequence: 2,
-          graphDigest: graph.graphDigest,
-          graphSize: 1,
-          baseSha: base.oid,
-          graphRef: graph.ref,
-          graphBlobSha: graph.blobOid,
+          requested: "regular-prs",
+          selected: "regular-prs",
+          capabilityVersion: "2026-03-10",
+          reason: "run policy selected regular pull requests",
         }),
         event({
-          kind: "graph",
-          event: "GraphProjected",
+          kind: "budget",
+          event: "BudgetReserved",
           sequence: 3,
-          graphDigest: graph.graphDigest,
-          graphSize: 1,
-          projectionRef: projection.ref,
-          projectionBlobSha: projection.blobOid,
+          phase: "management",
+          unit: "model_tokens",
+          amount: 0,
+          usageId: `invocation-compile-${base.oid}`,
+          modelInvocationId: `compile-${base.oid}`,
+          directorEpoch: 1,
+          policyDigest: policyDigest(policy),
         }),
         event({
           kind: "budget",
@@ -389,11 +407,49 @@ async function fixture(
           sequence: 4,
           phase: "management",
           unit: "model_tokens",
-          amount: 10,
-          usageId: `compile-${graph.graphDigest}`,
+          amount: 30,
+          usageId: `failed-compile-${base.oid}`,
+          modelInvocationId: `compile-${base.oid}`,
+          directorEpoch: 1,
+          policyDigest: policyDigest(policy),
+          reportedModelUsage: { inputTokens: 11, outputTokens: 19 },
         }),
         terminal,
-      ];
+      ]
+    : options.graphless
+      ? [start, terminal]
+      : [
+          start,
+          event({
+            kind: "graph",
+            event: "GraphCompiled",
+            sequence: 2,
+            graphDigest: graph.graphDigest,
+            graphSize: 1,
+            baseSha: base.oid,
+            graphRef: graph.ref,
+            graphBlobSha: graph.blobOid,
+          }),
+          event({
+            kind: "graph",
+            event: "GraphProjected",
+            sequence: 3,
+            graphDigest: graph.graphDigest,
+            graphSize: 1,
+            projectionRef: projection.ref,
+            projectionBlobSha: projection.blobOid,
+          }),
+          event({
+            kind: "budget",
+            event: "BudgetReconciled",
+            sequence: 4,
+            phase: "management",
+            unit: "model_tokens",
+            amount: 10,
+            usageId: `compile-${graph.graphDigest}`,
+          }),
+          terminal,
+        ];
   if (options.missingCompileUsage && !options.graphless) events.splice(3, 1);
   if (options.controllerObservation)
     events.push(
@@ -495,30 +551,32 @@ async function fixture(
     defaultBranch: "main",
     closed: false,
     factoryEvents: events,
-    workItems: [
-      {
-        id: "issue-8",
-        number: 8,
-        title: "Feature",
-        body: options.graphless
-          ? renderLegacyWorkItemCore(graphInput.workItems[0]!)
-          : renderWorkPacket(graphInput.workItems[0]!, {
-              protocol: "clockgrove.factory/graph-v1",
-              id: "feature",
-              graphDigest: graph.graphDigest,
-              graphSize: 1,
-              index: 0,
-              dependsOn: [],
-              deferredCapabilityAdapters: graphInput.deferredCapabilityAdapters,
-            }),
-        closed: false,
-        assignees: [],
-        blockedBy: [],
-        linkedPullRequests: [],
-        copilotAssignments: [],
-        factoryEvents: [],
-      },
-    ],
+    workItems: options.compileFailure
+      ? []
+      : [
+          {
+            id: "issue-8",
+            number: 8,
+            title: "Feature",
+            body: options.graphless
+              ? renderLegacyWorkItemCore(graphInput.workItems[0]!)
+              : renderWorkPacket(graphInput.workItems[0]!, {
+                  protocol: "clockgrove.factory/graph-v1",
+                  id: "feature",
+                  graphDigest: graph.graphDigest,
+                  graphSize: 1,
+                  index: 0,
+                  dependsOn: [],
+                  deferredCapabilityAdapters: graphInput.deferredCapabilityAdapters,
+                }),
+            closed: false,
+            assignees: [],
+            blockedBy: [],
+            linkedPullRequests: [],
+            copilotAssignments: [],
+            factoryEvents: [],
+          },
+        ],
   };
   store.runHistory = () => snapshot.factoryEvents ?? [];
   const predecessor = {
@@ -529,21 +587,23 @@ async function fixture(
     terminalSequence: 10,
   };
   const history = [{ ...predecessor, policyDigest: policyDigest(policy) }];
-  const items: RecoveryPlan["items"] = [
-    {
-      workItem: 8,
-      issueNodeId: "issue-8",
-      compilerId: options.graphless ? "adopted-8" : "feature",
-      action: "execute",
-      source,
-      observedPullRequest: null,
-      resources: {
-        state: source ? "unknown" : "not-required",
-        receiptDigest: null,
-        identities: [],
-      },
-    },
-  ];
+  const items: RecoveryPlan["items"] = options.compileFailure
+    ? []
+    : [
+        {
+          workItem: 8,
+          issueNodeId: "issue-8",
+          compilerId: options.graphless ? "adopted-8" : "feature",
+          action: "execute",
+          source,
+          observedPullRequest: null,
+          resources: {
+            state: source ? "unknown" : "not-required",
+            receiptDigest: null,
+            identities: [],
+          },
+        },
+      ];
   const allowance = {
     modelTokens: policy.economics?.maxModelTokens ?? null,
     sandboxMinutes: policy.maxSandboxMinutes,
@@ -570,8 +630,8 @@ async function fixture(
     events,
     maxSequence: 10,
   });
-  const plan: RecoveryPlan = {
-    protocol: RECOVERY_PLAN_PROTOCOL,
+  const plan = parseRecoveryPlan({
+    protocol: options.compileFailure ? RECOVERY_PLAN_PROTOCOL_V2 : RECOVERY_PLAN_PROTOCOL,
     repository: "o/r",
     repositoryId: "repo-1",
     objective: 7,
@@ -586,9 +646,9 @@ async function fixture(
     priorPlanDigest: null,
     expectedBaseSha: base.oid,
     baseBranch: "main",
-    graph: legacyConstraints
+    graph: options.compileFailure
       ? {
-          mode: "adopt-existing",
+          mode: "compile-objective",
           sourceRunId: "successor",
           ref: compiledGraphRef(7, "successor"),
           objectiveInputDigest: compilerEvalDigest({
@@ -596,28 +656,41 @@ async function fixture(
             title: graphInput.title,
             body: undefined,
           }),
-          constraintDigest: legacyGraphConstraintsDigest(legacyConstraints),
-          constraints: legacyConstraints,
-          projection: {
-            ref: compiledGraphProjectionRef(7, "successor"),
-            bindingDigest: recoveryPlanBindingDigest(items),
-          },
+          sourceBaseSha: base.oid,
+          projection: { ref: compiledGraphProjectionRef(7, "successor") },
         }
-      : {
-          sourceRunId: "source",
-          ref: graph.ref,
-          commitOid: graph.commitOid,
-          blobOid: graph.blobOid,
-          digest: graph.graphDigest,
-          projection: {
-            ref: projection.ref,
-            commitOid: projection.commitOid,
-            blobOid: projection.blobOid,
-            bindingDigest: recoveryPlanBindingDigest(items),
+      : legacyConstraints
+        ? {
+            mode: "adopt-existing",
+            sourceRunId: "successor",
+            ref: compiledGraphRef(7, "successor"),
+            objectiveInputDigest: compilerEvalDigest({
+              number: 7,
+              title: graphInput.title,
+              body: undefined,
+            }),
+            constraintDigest: legacyGraphConstraintsDigest(legacyConstraints),
+            constraints: legacyConstraints,
+            projection: {
+              ref: compiledGraphProjectionRef(7, "successor"),
+              bindingDigest: recoveryPlanBindingDigest(items),
+            },
+          }
+        : {
+            sourceRunId: "source",
+            ref: graph.ref,
+            commitOid: graph.commitOid,
+            blobOid: graph.blobOid,
+            digest: graph.graphDigest,
+            projection: {
+              ref: projection.ref,
+              commitOid: projection.commitOid,
+              blobOid: projection.blobOid,
+              bindingDigest: recoveryPlanBindingDigest(items),
+            },
           },
-        },
-    acceptedPolicy: policy,
-    policyDigest: policyDigest(policy),
+    acceptedPolicy,
+    policyDigest: policyDigest(acceptedPolicy),
     allowance: {
       before: { ...allowance },
       increment: {
@@ -630,7 +703,7 @@ async function fixture(
     },
     unknownUsageAcknowledgementDigest: null,
     items,
-  };
+  });
   if (options.graphless) {
     const accounting = assessRecoveryAccounting({
       objective: 7,
@@ -646,7 +719,12 @@ async function fixture(
     store.refs.delete(graph.ref);
     store.refs.delete(projection.ref);
   }
+  if (options.compileFailure) {
+    store.refs.delete(graph.ref);
+    store.refs.delete(projection.ref);
+  }
   objectiveLease.runId = "successor";
+  objectiveLease.policyDigest = plan.policyDigest;
   const planRecord = await new RecoveryPlanManager(store, {
     assertCurrent: async () => {},
   }).persist({ lease: objectiveLease, plan });
@@ -707,7 +785,11 @@ async function fixture(
 }
 
 // Real immutable graph/plan/claim fixtures above intentionally exercise the actual loaders.
-import { loadRecoveryRuntime } from "../src/recovery/runtime.js";
+import {
+  effectiveAuthorizedRecoveryItems,
+  loadRecoveryRuntime,
+  type RecoveryRuntime,
+} from "../src/recovery/runtime.js";
 
 async function adopted(options: Parameters<typeof fixture>[0] = {}) {
   const f = await fixture(options);
@@ -755,6 +837,222 @@ async function addAttempt(f: Awaited<ReturnType<typeof adopted>>, attempt = 1) {
 }
 
 describe("verified successor runtime loader", () => {
+  it.each(["graph", "projection"] as const)(
+    "blocks adoption when the predecessor %s ref appears after the recovery request",
+    async (kind) => {
+      const f = await fixture({ compileFailure: true });
+      const writes = [...f.store.writes];
+      const ref =
+        kind === "graph" ? compiledGraphRef(7, "source") : compiledGraphProjectionRef(7, "source");
+      f.store.refs.set(ref, sha("f"));
+
+      expect(await f.make().adopt(f.args)).toEqual({
+        status: "blocked",
+        executionAuthorized: false,
+        successorRunId: null,
+        claimOid: null,
+        blockers: ["source-evidence-blocked"],
+      });
+      expect(f.store.writes).toEqual(writes);
+    },
+  );
+
+  it.each(["graph", "projection"] as const)(
+    "blocks runtime when the predecessor %s ref appears after adoption",
+    async (kind) => {
+      const f = await adopted({ compileFailure: true });
+      const ref =
+        kind === "graph" ? compiledGraphRef(7, "source") : compiledGraphProjectionRef(7, "source");
+      f.store.refs.set(ref, sha("f"));
+
+      expect(await f.read()).toEqual({
+        status: "blocked",
+        adoptionVerified: false,
+        executionAuthorized: false,
+        blockers: ["compile-objective-predecessor-graph-present"],
+      });
+    },
+  );
+
+  it("keeps persisted v2 compiler recovery graphless through restart windows and rejects retroactive work", async () => {
+    const f = await adopted({ compileFailure: true });
+    const first = await f.read();
+    expect(first).toMatchObject({
+      status: "graph-bootstrap",
+      graph: null,
+      projection: null,
+      priorCompilationFailure: {
+        reason: "compiled Objective has 16 deterministic violations: fixture",
+        rawProposalAvailable: false,
+      },
+    });
+    if (first.status !== "graph-bootstrap") throw new Error("expected compile bootstrap");
+    expect(effectiveAuthorizedRecoveryItems(first)).toEqual([]);
+
+    const successorGraph = await f.graphManager.persist({
+      lease: f.args.objectiveLease,
+      base,
+      objective: f.graphInput,
+    });
+    expect(await f.read()).toMatchObject({ status: "graph-bootstrap" });
+
+    const adoptionMax = Math.max(...f.snapshot.factoryEvents!.map((entry) => entry.sequence));
+    const retroactiveSequence = adoptionMax + 1;
+    let sequence = adoptionMax + 2;
+    f.snapshot.factoryEvents!.push(
+      event({
+        kind: "graph",
+        event: "GraphCompiled",
+        runId: "successor",
+        sequence: sequence++,
+        graphDigest: successorGraph.graphDigest,
+        graphSize: successorGraph.graphSize,
+        baseSha: base.oid,
+        graphRef: successorGraph.ref,
+        graphBlobSha: successorGraph.blobOid,
+      }),
+    );
+    expect(await f.read()).toMatchObject({ status: "graph-bootstrap" });
+
+    f.snapshot.workItems.push({
+      id: "issue-8",
+      number: 8,
+      title: "Feature",
+      body: renderWorkPacket(f.graphInput.workItems[0]!, {
+        protocol: "clockgrove.factory/graph-v1",
+        id: "feature",
+        graphDigest: successorGraph.graphDigest,
+        graphSize: successorGraph.graphSize,
+        index: 0,
+        dependsOn: [],
+        deferredCapabilityAdapters: f.graphInput.deferredCapabilityAdapters,
+      }),
+      closed: false,
+      assignees: [],
+      blockedBy: [],
+      linkedPullRequests: [],
+      copilotAssignments: [],
+      factoryEvents: [],
+    });
+    expect(await f.read()).toMatchObject({ status: "graph-bootstrap" });
+
+    const bindings = [{ compilerId: "feature", issueNodeId: "issue-8", issueNumber: 8 }];
+    const staged = await f.graphManager.stageProjection({
+      lease: f.args.objectiveLease,
+      graph: successorGraph,
+      bindings,
+    });
+    f.snapshot.factoryEvents!.push(
+      event({
+        kind: "graph",
+        event: "GraphProjected",
+        runId: "successor",
+        sequence: sequence++,
+        graphDigest: successorGraph.graphDigest,
+        graphSize: successorGraph.graphSize,
+        projectionRef: staged.ref,
+        projectionBlobSha: staged.blobOid,
+      }),
+    );
+    expect(await f.read()).toMatchObject({ status: "graph-bootstrap" });
+
+    await f.graphManager.persistProjection({
+      lease: f.args.objectiveLease,
+      graph: successorGraph,
+      bindings,
+      expectedBlobOid: staged.blobOid,
+    });
+    const verified = await f.read();
+    expect(verified).toMatchObject({ status: "verified" });
+    if (verified.status !== "verified") throw new Error("expected compile recovery runtime");
+    expect(effectiveAuthorizedRecoveryItems(verified)).toMatchObject([
+      { workItem: 8, issueNodeId: "issue-8", compilerId: "feature", action: "execute" },
+    ]);
+
+    f.snapshot.workItems[0]!.factoryEvents!.push(
+      event({
+        kind: "attempt",
+        event: "AttemptReserved",
+        runId: "successor",
+        sequence: retroactiveSequence,
+        workItem: 8,
+        attempt: 1,
+        backend: "codex-sdk/local-worktree",
+        baseSha: base.oid,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+      }),
+    );
+    expect(await f.read()).toEqual({
+      status: "blocked",
+      adoptionVerified: false,
+      executionAuthorized: false,
+      blockers: ["successor-effect-binding-invalid"],
+    });
+  });
+
+  it("derives compile-objective execution authority only from its authenticated projection", async () => {
+    const f = await adopted();
+    const existing = await f.read();
+    if (existing.status !== "verified") throw new Error("fixture runtime");
+    const compilePlan: RecoveryPlan = {
+      ...existing.planRecord.plan,
+      protocol: "clockgrove.factory/recovery-plan-v2",
+      graph: {
+        mode: "compile-objective",
+        sourceRunId: existing.controllingRun.runId,
+        ref: existing.graph.ref,
+        objectiveInputDigest: compilerEvalDigest({
+          number: f.snapshot.number,
+          title: f.snapshot.title,
+          body: f.snapshot.body,
+        }),
+        sourceBaseSha: base.oid,
+        projection: { ref: existing.projection.ref },
+      },
+      acceptedPolicy: {
+        ...existing.planRecord.plan.acceptedPolicy,
+        compilerEvaluation: {
+          mode: "auto-repair",
+          maxRepairs: 2,
+          maxInvocations: 7,
+          timeoutSeconds: 600,
+          maxObservedTokens: 500_000,
+        },
+      },
+      items: [],
+    };
+    compilePlan.policyDigest = policyDigest(compilePlan.acceptedPolicy);
+    const runtime = {
+      ...existing,
+      planRecord: { ...existing.planRecord, plan: compilePlan },
+    } as RecoveryRuntime;
+
+    expect(effectiveAuthorizedRecoveryItems(runtime)).toEqual([
+      {
+        workItem: 8,
+        issueNodeId: "issue-8",
+        compilerId: "feature",
+        action: "execute",
+        source: null,
+        observedPullRequest: null,
+        resources: { state: "not-required", receiptDigest: null, identities: [] },
+      },
+    ]);
+
+    const conflicting = {
+      ...runtime,
+      projection: {
+        ...runtime.projection,
+        bindings: [
+          ...runtime.projection.bindings,
+          { compilerId: "foreign", issueNodeId: "issue-99", issueNumber: 99 },
+        ],
+      },
+    };
+    expect(() => effectiveAuthorizedRecoveryItems(conflicting)).toThrow(/projection-mismatch/);
+  });
+
   it("shares one authenticated event observation across successor verification stages beyond 512 inputs", async () => {
     const f = await adopted();
     const duplicate = f.snapshot.factoryEvents![0]!;

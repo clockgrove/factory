@@ -140,6 +140,12 @@ The assessment is not execution authority. For an explicitly authorized continua
 
 1. Call `factory_recovery_propose` with a unique, stable `requestId`. Omit `allowanceIncrement`
    unless the user explicitly authorized additional amounts; the default increment is zero.
+   When the source terminally failed after a reconciled one-shot compilation but before creating
+   any Work Items or graph, include a fully explicit successor-only `compilerEvaluation` object
+   with `mode: "auto-repair"`, `maxRepairs`, `maxInvocations`, `timeoutSeconds`, and
+   `maxObservedTokens`. This is a policy change, so present the exact limits and added invocation
+   exposure for authorization. `maxObservedTokens` is an observed evaluation stop, not a hard
+   provider token cap; the cumulative economics policy remains the spending boundary.
    Report the proposed reuse, required fresh validation, cumulative usage, and blockers. A blocked
    proposal is not a runnable plan.
 2. Resolve any missing authority before writing: an exhausted allowance needs an explicit increment;
@@ -151,9 +157,10 @@ The assessment is not execution authority. For an explicitly authorized continua
    poll status or leave a heartbeat active. Neither a quota reset nor a repaired check or credential
    grants extra Factory allowance.
 3. Call `factory_recovery_request` with the exact proposed `planDigest`, the same `requestId`, and
-   the same increment/acknowledgement inputs. This writes a digest-bound successor request, not a
-   revival of the terminal run. After an uncertain response, retry those exact inputs with the same
-   ID; do not generate a replacement request. A changed plan needs authorization for that plan.
+   the same compiler-evaluation, increment, and acknowledgement inputs. This writes a digest-bound
+   successor request, not a revival of the terminal run. After an uncertain response, retry those
+   exact inputs with the same ID; do not generate a replacement request. A changed plan needs
+   authorization for that plan.
 4. The repository controller discovers the request and verifies leases, source evidence, resource
    absence, and cumulative accounting before adoption and execution. Use `factory_status` to inspect
    progress. If the controller is stopped or absent, starting/installing it requires the same host

@@ -1,7 +1,7 @@
 import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import { createHash } from "node:crypto";
 import type { FactoryEvent } from "../protocol/events.js";
-import { type RunPolicy, policyDigest } from "../protocol/policy.js";
+import { parseRunPolicy, type RunPolicy, policyDigest } from "../protocol/policy.js";
 import { unresolvedModelInvocations } from "../control/budget.js";
 import { assessRecoveryAccounting, type RecoveryAccountingAssessment } from "./accounting.js";
 import {
@@ -13,6 +13,8 @@ import {
 import {
   parseRecoveryPlan,
   isRecoveryAdoptionGraph,
+  isRecoveryCompileObjectiveGraph,
+  isRecoveryPersistedGraph,
   recoveryGraphIdentity,
   recoveryHistoryDigest,
   recoveryPlanDigest,
@@ -76,6 +78,44 @@ function continuesGraphAuthority(
   events: readonly FactoryEvent[],
 ): boolean {
   if (recoveryGraphIdentity(current.graph) === recoveryGraphIdentity(previous.graph)) return true;
+  if (isRecoveryCompileObjectiveGraph(previous.graph) && isRecoveryPersistedGraph(current.graph)) {
+    const previousGraph = previous.graph;
+    const currentGraph = current.graph;
+    if (
+      previousGraph.sourceRunId !== previous.successorRunId ||
+      currentGraph.sourceRunId !== previousGraph.sourceRunId ||
+      currentGraph.ref !== previousGraph.ref ||
+      currentGraph.projection.ref !== previousGraph.projection.ref
+    )
+      return false;
+    const graphEvents = events.filter(
+      (event) => event.kind === "graph" && event.runId === previousGraph.sourceRunId,
+    );
+    const compiled = graphEvents.filter(
+      (event) =>
+        event.event === "GraphCompiled" &&
+        event.graphRef === currentGraph.ref &&
+        event.graphBlobSha === currentGraph.blobOid &&
+        event.graphDigest === currentGraph.digest &&
+        event.graphSize === current.items.length &&
+        event.baseSha === previousGraph.sourceBaseSha,
+    );
+    const projected = graphEvents.filter(
+      (event) =>
+        event.event === "GraphProjected" &&
+        event.projectionRef === currentGraph.projection.ref &&
+        event.projectionBlobSha === currentGraph.projection.blobOid &&
+        event.graphDigest === currentGraph.digest &&
+        event.graphSize === current.items.length,
+    );
+    return (
+      graphEvents.filter((event) => event.event === "GraphCompiled").length === 1 &&
+      graphEvents.filter((event) => event.event === "GraphProjected").length === 1 &&
+      compiled.length === 1 &&
+      projected.length === 1 &&
+      projected[0]!.sequence > compiled[0]!.sequence
+    );
+  }
   if (!isRecoveryAdoptionGraph(previous.graph) || !isRecoveryAdoptionGraph(current.graph))
     return false;
   if (
@@ -345,6 +385,37 @@ export function verifyRecoveryChain(input: {
         ), "candidate-source-advanced", "New source receipts require a new candidate plan and acknowledgement.");
       const predecessor = starts.get(plan.predecessor.runId)!;
       const previous = chain[index - 1];
+      if (isRecoveryCompileObjectiveGraph(plan.graph)) {
+        const compilerEvaluation = plan.acceptedPolicy.compilerEvaluation;
+        const expectedPolicy = parseRunPolicy({
+          ...predecessor.policy,
+          ...(plan.allowance.after.modelTokens === null
+            ? {}
+            : {
+                economics: {
+                  ...predecessor.policy.economics,
+                  maxModelTokens: plan.allowance.after.modelTokens,
+                },
+              }),
+          compilerEvaluation,
+        });
+        require(plan.priorPlanDigest === null &&
+          plan.history.length === 1 &&
+          plan.history[0]!.runId === predecessor.runId &&
+          predecessor.policy.compilerEvaluation === undefined &&
+          compilerEvaluation?.mode === "auto-repair" &&
+          Object.keys(compilerEvaluation).length === 5 &&
+          compilerEvaluation.maxRepairs !== undefined &&
+          compilerEvaluation.maxInvocations !== undefined &&
+          compilerEvaluation.timeoutSeconds !== undefined &&
+          compilerEvaluation.maxObservedTokens !== undefined &&
+          sameAllowance(plan.allowance.before, allowanceFor(predecessor.policy)) &&
+          plan.allowance.increment.sandboxMinutes === 0 &&
+          plan.allowance.increment.managedSessions === 0 &&
+          plan.allowance.increment.implementationAttemptsPerItem === 0 &&
+          policyDigest(expectedPolicy) ===
+            plan.policyDigest, "compile-objective-authority-mismatch", "Compile-objective recovery must be the root successor of one original run and may add only its exact compiler auto-repair policy and explicit model-token allowance.");
+      }
       require(sameAllowance(
         plan.allowance.before,
         previous ? previous.plan.allowance.after : allowanceFor(predecessor.policy),

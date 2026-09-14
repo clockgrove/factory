@@ -29,7 +29,10 @@ import { assertAuthenticatedGraphProjection } from "../control/graph-evidence.js
 import type { FactoryEvent } from "../protocol/events.js";
 import { deduplicateFactoryEvents } from "../control/receipts.js";
 
-export const RECOVERY_PLAN_PROTOCOL = "clockgrove.factory/recovery-plan-v1" as const;
+export const RECOVERY_PLAN_PROTOCOL_V1 = "clockgrove.factory/recovery-plan-v1" as const;
+export const RECOVERY_PLAN_PROTOCOL_V2 = "clockgrove.factory/recovery-plan-v2" as const;
+/** Existing proposal builders retain v1 unless they explicitly emit a v2-only graph mode. */
+export const RECOVERY_PLAN_PROTOCOL = RECOVERY_PLAN_PROTOCOL_V1;
 export const MAX_RECOVERY_PLAN_BYTES = 256 * 1024;
 const PLAN_PATH = ".clockgrove-factory/control/recovery-plan.json";
 const identifier = z
@@ -270,9 +273,19 @@ const adoptionGraphSchema = z
   })
   .strict();
 
-const planSchema = z
+const compileObjectiveGraphSchema = z
   .object({
-    protocol: z.literal(RECOVERY_PLAN_PROTOCOL),
+    mode: z.literal("compile-objective"),
+    sourceRunId: identifier,
+    ref: reference,
+    objectiveInputDigest: digest,
+    sourceBaseSha: sha,
+    projection: z.object({ ref: reference }).strict(),
+  })
+  .strict();
+
+const planCoreSchema = z
+  .object({
     repository,
     repositoryId: identifier,
     objective: positive,
@@ -287,28 +300,50 @@ const planSchema = z
     priorPlanDigest: digest.nullable(),
     expectedBaseSha: sha,
     baseBranch: branch,
-    graph: z.union([persistedGraphSchema, adoptionGraphSchema]),
     acceptedPolicy: RunPolicySchema.strict(),
     policyDigest: digest,
     allowance: z
       .object({ before: allowanceSchema, increment: incrementSchema, after: allowanceSchema })
       .strict(),
     unknownUsageAcknowledgementDigest: digest.nullable(),
+  })
+  .strict();
+
+const planV1Schema = planCoreSchema
+  .extend({
+    protocol: z.literal(RECOVERY_PLAN_PROTOCOL_V1),
+    graph: z.union([persistedGraphSchema, adoptionGraphSchema]),
     items: z.array(itemSchema).min(1).max(100),
   })
   .strict();
+
+const planV2Schema = planCoreSchema
+  .extend({
+    protocol: z.literal(RECOVERY_PLAN_PROTOCOL_V2),
+    graph: compileObjectiveGraphSchema,
+    items: z.array(itemSchema).length(0),
+  })
+  .strict();
+
+const planSchema = z.discriminatedUnion("protocol", [planV1Schema, planV2Schema]);
 
 /** Immutable proposal only. Neither this document nor its ref authorizes execution. */
 export type RecoveryPlan = z.infer<typeof planSchema>;
 export type RecoveryPlanGraph = RecoveryPlan["graph"];
 export type RecoveryAdoptionGraph = z.infer<typeof adoptionGraphSchema>;
+export type RecoveryCompileObjectiveGraph = z.infer<typeof compileObjectiveGraphSchema>;
 export function isRecoveryAdoptionGraph(graph: RecoveryPlanGraph): graph is RecoveryAdoptionGraph {
   return "mode" in graph && graph.mode === "adopt-existing";
+}
+export function isRecoveryCompileObjectiveGraph(
+  graph: RecoveryPlanGraph,
+): graph is RecoveryCompileObjectiveGraph {
+  return "mode" in graph && graph.mode === "compile-objective";
 }
 export function isRecoveryPersistedGraph(
   graph: RecoveryPlanGraph,
 ): graph is z.infer<typeof persistedGraphSchema> {
-  return !isRecoveryAdoptionGraph(graph);
+  return !("mode" in graph);
 }
 
 export function recoveryGraphIdentity(graph: RecoveryPlanGraph): string {
@@ -321,12 +356,19 @@ export function recoveryGraphIdentity(graph: RecoveryPlanGraph): string {
           constraintDigest: graph.constraintDigest,
           bindingDigest: graph.projection.bindingDigest,
         }
-      : {
-          mode: "persisted",
-          sourceRunId: graph.sourceRunId,
-          digest: graph.digest,
-          bindingDigest: graph.projection.bindingDigest,
-        },
+      : isRecoveryCompileObjectiveGraph(graph)
+        ? {
+            mode: graph.mode,
+            sourceRunId: graph.sourceRunId,
+            objectiveInputDigest: graph.objectiveInputDigest,
+            sourceBaseSha: graph.sourceBaseSha,
+          }
+        : {
+            mode: "persisted",
+            sourceRunId: graph.sourceRunId,
+            digest: graph.digest,
+            bindingDigest: graph.projection.bindingDigest,
+          },
   );
 }
 
@@ -355,17 +397,17 @@ export async function loadRecoveryPlanGraph(
     graph,
   );
   if (!projection) return null;
+  if (graph.ref !== plan.graph.ref || projection.ref !== plan.graph.projection.ref) return null;
   if (
-    graph.ref !== plan.graph.ref ||
-    projection.ref !== plan.graph.projection.ref ||
-    projection.bindings.length !== plan.items.length ||
-    recoveryPlanBindingDigest(
-      projection.bindings.map((binding) => ({
-        compilerId: binding.compilerId,
-        issueNodeId: binding.issueNodeId,
-        workItem: binding.issueNumber,
-      })),
-    ) !== plan.graph.projection.bindingDigest
+    !isRecoveryCompileObjectiveGraph(plan.graph) &&
+    (projection.bindings.length !== plan.items.length ||
+      recoveryPlanBindingDigest(
+        projection.bindings.map((binding) => ({
+          compilerId: binding.compilerId,
+          issueNodeId: binding.issueNodeId,
+          workItem: binding.issueNumber,
+        })),
+      ) !== plan.graph.projection.bindingDigest)
   )
     return null;
   if (isRecoveryPersistedGraph(plan.graph)) {
@@ -377,13 +419,22 @@ export async function loadRecoveryPlanGraph(
       projection.blobOid !== plan.graph.projection.blobOid
     )
       return null;
-  } else {
+  } else if (isRecoveryAdoptionGraph(plan.graph)) {
     try {
       assertCompiledObjectiveAdoptsLegacyConstraints(graph.objective, plan.graph.constraints);
     } catch {
       return null;
     }
-  }
+  } else if (isRecoveryCompileObjectiveGraph(plan.graph)) {
+    const graphCommit = await store.readCommit(graph.commitOid);
+    const sourceBaseSha = plan.graph.sourceBaseSha;
+    if (
+      graphCommit.parentOids.length !== 1 ||
+      graphCommit.parentOids[0] !== sourceBaseSha ||
+      graph.objective.workItems.some((item) => item.baseSha !== sourceBaseSha)
+    )
+      return null;
+  } else return null;
   const compiled = uniqueEvents.filter(
     (event) =>
       event.kind === "graph" &&
@@ -491,8 +542,9 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
   );
   requirePlan(
     runIds.has(plan.graph.sourceRunId) ||
-      (isRecoveryAdoptionGraph(plan.graph) && plan.graph.sourceRunId === plan.successorRunId),
-    "graph source is outside history or the bound adoption successor",
+      ((isRecoveryAdoptionGraph(plan.graph) || isRecoveryCompileObjectiveGraph(plan.graph)) &&
+        plan.graph.sourceRunId === plan.successorRunId),
+    "graph source is outside history or the bound compilation successor",
   );
   requirePlan(
     plan.graph.ref === compiledGraphRef(plan.objective, plan.graph.sourceRunId),
@@ -503,10 +555,21 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
       compiledGraphProjectionRef(plan.objective, plan.graph.sourceRunId),
     "projection reference scope mismatch",
   );
-  requirePlan(
-    plan.graph.projection.bindingDigest === recoveryPlanBindingDigest(plan.items),
-    "projection binding digest mismatch",
-  );
+  if (isRecoveryCompileObjectiveGraph(plan.graph)) {
+    requirePlan(plan.protocol === RECOVERY_PLAN_PROTOCOL_V2, "compile-objective requires v2");
+    requirePlan(
+      plan.graph.sourceRunId === plan.successorRunId,
+      "compile-objective graph must belong to the successor",
+    );
+    requirePlan(
+      plan.graph.sourceBaseSha === plan.expectedBaseSha,
+      "compile-objective source base must match the recovery base",
+    );
+  } else
+    requirePlan(
+      plan.graph.projection.bindingDigest === recoveryPlanBindingDigest(plan.items),
+      "projection binding digest mismatch",
+    );
   if (isRecoveryAdoptionGraph(plan.graph)) {
     const constraints = parseLegacyGraphConstraints({
       objectiveTitle: plan.graph.constraints.objectiveTitle,
@@ -583,6 +646,52 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
       after.implementationAttemptsPerItem === policy.maxAttemptsPerItem,
     "resulting allowance differs from accepted policy",
   );
+  if (isRecoveryCompileObjectiveGraph(plan.graph)) {
+    requirePlan(
+      plan.priorPlanDigest === null && plan.history.length === 1,
+      "compile-objective must be the root recovery of exactly one original run",
+    );
+    const compilerEvaluation = policy.compilerEvaluation;
+    requirePlan(
+      compilerEvaluation?.mode === "auto-repair" &&
+        Object.keys(compilerEvaluation).length === 5 &&
+        compilerEvaluation.maxRepairs !== undefined &&
+        compilerEvaluation.maxInvocations !== undefined &&
+        compilerEvaluation.timeoutSeconds !== undefined &&
+        compilerEvaluation.maxObservedTokens !== undefined,
+      "compile-objective requires one fully explicit auto-repair compiler policy",
+    );
+    requirePlan(
+      increment.sandboxMinutes === 0 &&
+        increment.managedSessions === 0 &&
+        increment.implementationAttemptsPerItem === 0,
+      "compile-objective can increment only the model-token allowance",
+    );
+    const sourcePolicyInput = structuredClone(policy);
+    delete sourcePolicyInput.compilerEvaluation;
+    if (before.modelTokens !== null) {
+      requirePlan(
+        sourcePolicyInput.economics !== undefined,
+        "compile-objective finite source model allowance requires economics policy",
+      );
+      sourcePolicyInput.economics = {
+        ...sourcePolicyInput.economics,
+        maxModelTokens: before.modelTokens,
+      };
+    }
+    const sourcePolicy = parseRunPolicy(sourcePolicyInput);
+    requirePlan(
+      policyDigest(sourcePolicy) === plan.history[0]!.policyDigest,
+      "compile-objective accepted policy differs from the source policy beyond its explicit compiler and model-token authority",
+    );
+    requirePlan(
+      before.modelTokens === (sourcePolicy.economics?.maxModelTokens ?? null) &&
+        before.sandboxMinutes === sourcePolicy.maxSandboxMinutes &&
+        before.managedSessions === sourcePolicy.maxManagedAgentSessions &&
+        before.implementationAttemptsPerItem === sourcePolicy.maxAttemptsPerItem,
+      "compile-objective allowance before does not match the source policy",
+    );
+  }
   for (const item of plan.items) {
     requirePlan(
       item.workItem !== plan.objective && item.issueNodeId !== plan.objectiveNodeId,

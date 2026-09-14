@@ -44,6 +44,9 @@ it.each([false, true])(
         observe: async (handle) => {
           observations++;
           if (complete || shutdown.signal.aborted) return backend.observe(handle);
+          // The fixture cancellation query resolves immediately. Let its whole
+          // promise chain settle so it cannot independently wake this observation.
+          await new Promise<void>((resolve) => setImmediate(resolve));
           // Return the already-captured nonterminal state even if the hint arrives
           // before observe resolves; the Supervisor must retain that wake revision.
           if (duringObservation) publish();

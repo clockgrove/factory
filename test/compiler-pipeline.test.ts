@@ -6,10 +6,6 @@ import {
   validateCompiledObjective,
   type CompilerWorkItem,
 } from "../src/compiler/index.js";
-import {
-  CodexCliManagementBackend,
-  parseManagementCompilerOutput,
-} from "../src/management/codex-cli.js";
 import { renderWorkPacket, validateGraph, workerPacketFromCompiled } from "../src/graph.js";
 import { semanticReviewCriteria } from "../src/protocol/worker-packet.js";
 import { validationPlanFromPacket } from "../src/validation/plan.js";
@@ -156,77 +152,6 @@ describe("compiled worker navigation context", () => {
     expect(prompt).toContain("frozen install only from that registry with scripts disabled");
   });
 });
-
-function providerWorkItem(id: string, dependsOn: string[], scope: string[]) {
-  return {
-    id,
-    title: `Implement ${id}`,
-    goal: `Implement ${id}`,
-    acceptance: ["Tests pass"],
-    scope,
-    preconditions: [],
-    outOfScope: [],
-    conventions: ["Use TypeScript"],
-    dependsOn,
-    baseSha: sha,
-    validationCommands: ["npm test"],
-    validation: [
-      {
-        tier: "mechanical" as const,
-        criteria: ["Tests pass"],
-        rationale: "The repository test command directly reports test success.",
-        evidenceCommands: ["npm test"],
-      },
-    ],
-    criterionRisks: [{ criterion: "Tests pass", risk: "ordinary" as const }],
-    requirements: {
-      os: ["linux"],
-      architecture: ["x64"],
-      cpu: 1,
-      memoryMb: 2_048,
-      diskMb: 1_024,
-      timeoutMinutes: 30,
-      estimatedDurationMinutes: 10,
-      tools: ["node", "npm"],
-      services: [],
-      networkDestinations: [],
-      permittedSecretNames: [],
-      trust: "trusted_local",
-    },
-    artifactContract: "clockgrove.factory/artifact-v1" as const,
-  };
-}
-
-async function compileProviderOutput(
-  title: string,
-  workItems: ReturnType<typeof providerWorkItem>[],
-) {
-  const backend = new CodexCliManagementBackend({
-    runStructured: async () => ({
-      value: { title, workItems },
-      usage: { inputTokens: 10, outputTokens: 20 },
-    }),
-  });
-  return backend.compile(
-    {
-      repository: process.cwd(),
-      objective: { number: 1, title, body: title },
-      defaultBranch: "main",
-      baseSha: sha,
-      repositoryFiles: [
-        "package.json",
-        "src/shared.ts",
-        "src/a.ts",
-        "src/b.ts",
-        "src/c.ts",
-        "src/d.ts",
-      ],
-      allowedNetworkDestinations: [],
-      runPolicy: DEFAULT_RUN_POLICY,
-    },
-    async () => {},
-  );
-}
 
 describe("bounded objective compiler", () => {
   const validationFixtures = JSON.parse(
@@ -1232,113 +1157,6 @@ describe("bounded objective compiler", () => {
         workItems: [incomplete as CompilerWorkItem],
       }),
     ).toThrow(/missing compiler analysis/);
-  });
-  it("rejects malformed and unbounded management output before compilation", () => {
-    const raw = { ...base };
-    for (const key of [
-      "context",
-      "changeSurface",
-      "validation",
-      "delivery",
-      "economicReview",
-    ] as const)
-      delete (raw as Record<string, unknown>)[key];
-    expect(() =>
-      parseManagementCompilerOutput({
-        title: "x",
-        workItems: [{ ...raw, unexpected: true }],
-      }),
-    ).toThrow();
-    expect(() =>
-      parseManagementCompilerOutput({
-        title: "x",
-        workItems: Array.from({ length: 101 }, (_, i) => ({
-          ...raw,
-          id: `item-${i}`,
-        })),
-      }),
-    ).toThrow();
-  });
-  it("makes the management backend reject malformed provider output before compiling", async () => {
-    let observedModel: unknown;
-    const backend = new CodexCliManagementBackend({
-      runStructured: async (_cwd, _schema, _prompt, modelSelection) => {
-        observedModel = modelSelection;
-        return {
-          value: { title: "x", workItems: [{ id: "bad", unexpected: true }] },
-          usage: { inputTokens: 1, outputTokens: 1 },
-        };
-      },
-    });
-    await expect(
-      backend.compile(
-        {
-          repository: process.cwd(),
-          objective: { number: 1, title: "x", body: "x" },
-          defaultBranch: "main",
-          baseSha: sha,
-          repositoryFiles: ["package.json", "src/a.ts"],
-          allowedNetworkDestinations: [],
-          runPolicy: DEFAULT_RUN_POLICY,
-          modelSelection: {
-            profile: "frontier",
-            model: "gpt-5",
-            reasoning: "high",
-          },
-        },
-        async () => {},
-      ),
-    ).rejects.toThrow();
-    expect(observedModel).toEqual({
-      profile: "frontier",
-      model: "gpt-5",
-      reasoning: "high",
-    });
-  });
-  it("repairs unordered overlapping scopes before strict compiler validation", async () => {
-    const { objective } = await compileProviderOutput("Shared scope", [
-      providerWorkItem("first", [], ["src/shared.ts"]),
-      providerWorkItem("second", [], ["src/shared.ts"]),
-    ]);
-
-    expect(objective.workItems).toMatchObject([
-      {
-        id: "first",
-        dependsOn: [],
-        delivery: { group: "first", relationship: "root" },
-      },
-      {
-        id: "second",
-        dependsOn: ["first"],
-        delivery: {
-          group: "first",
-          relationship: "continue-stack",
-          parentWorkItem: "first",
-        },
-      },
-    ]);
-  });
-  it("turns provider diamond fan-out children into distinct delivery groups", async () => {
-    // Deliberately not topologically ordered: dependencies move ahead of
-    // dependents while the provider's peer order remains native priority.
-    const { objective } = await compileProviderOutput("Diamond", [
-      providerWorkItem("d", ["b", "c"], ["src/d.ts"]),
-      providerWorkItem("c", ["a"], ["src/c.ts"]),
-      providerWorkItem("a", [], ["src/a.ts"]),
-      providerWorkItem("b", ["a"], ["src/b.ts"]),
-    ]);
-
-    expect(
-      objective.workItems.map((item) => ({
-        id: item.id,
-        delivery: item.delivery,
-      })),
-    ).toEqual([
-      { id: "a", delivery: { group: "a", relationship: "root" } },
-      { id: "c", delivery: { group: "c", relationship: "sibling" } },
-      { id: "b", delivery: { group: "b", relationship: "sibling" } },
-      { id: "d", delivery: { group: "d", relationship: "join-after-merge" } },
-    ]);
   });
   it("rejects order-sensitive facts and impossible delivery groups", () => {
     const conflicting = {

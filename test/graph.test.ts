@@ -184,6 +184,14 @@ describe("validateGraph", () => {
     );
   });
 
+  it("rejects duplicate dependency edges", () => {
+    expect(() =>
+      validateGraph(
+        objective([workItem({ id: "a" }), workItem({ id: "b", dependsOn: ["a", "a"] })]),
+      ),
+    ).toThrow(/duplicate dependency/i);
+  });
+
   it("rejects a dependency cycle", () => {
     expect(() =>
       validateGraph(

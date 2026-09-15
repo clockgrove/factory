@@ -1335,7 +1335,7 @@ part of the protocol; it is not accepted as an inert field.
 ## Management backends
 
 An explicit immutable `compilerEvaluation` policy adds an obligation-first draft stage before
-the existing graph commitment. `mode: "auto-repair"` runs extraction, initial compilation,
+the existing graph commitment. `mode: "auto-repair"` runs extraction, initial semantic proposal,
 mechanical grounding, and independent whole-Objective judgment; it permits at most two repairs
 by default. The default envelope is seven model invocations and 600 seconds. Optional
 `maxRepairs` (0–2), `maxInvocations` (1–7), `timeoutSeconds` (1–3600), and
@@ -1354,22 +1354,45 @@ Reports are available through `factory compiler-eval OWNER/REPO#NUMBER [--markdo
 allowances. Existing activated graphs are immutable; the source-only fixed-graph evaluation
 adapter requires a fresh report-only envelope and cannot authorize issue or worker dispatch.
 
-Draft records use `clockgrove.factory/compiler-draft-v1` in bounded immutable Git objects under
-per-Objective/run sequence refs. They retain frozen source evidence, invocation intents,
-provider proposals and normalization traces, usage, failed validation, every verdict, lineage,
-and the exact final selection. Lease-fenced create-if-absent publication admits one invocation
+Draft records use the replacement `clockgrove.factory/compiler-draft` protocol in bounded immutable
+Git objects under per-Objective/run sequence refs. There is no compatibility alias or parallel reader
+for the retired draft format. Records retain frozen source evidence, invocation intents, semantic
+proposals, closed validation reports, deterministic projection traces, usage, failed validation,
+every verdict, and the exact final selection. Lease-fenced create-if-absent publication admits one invocation
 winner. Missing terminal evidence is unknown accounting and forbids replay; completed results
 repair their own idempotent accounting before another call. Contradictory terminal responses,
 changed inputs, cycling drafts, repeated blockers, exhausted bounds, and material ambiguity
 fail closed. Malformed repair output consumes its attempt. Revisions never emit `GraphCompiled`;
 only an accepted exact selection reaches the existing graph commitment/projection transaction.
 Changing an Objective before that commitment invalidates its assessment, including on restart.
-The model emits obligation claims and canonical evidence IDs. Factory attaches the frozen Objective
-digest, base SHA, and exact evidence records before strict validation, so model formatting cannot
-rewrite trusted evidence. Only a completed response that fails deterministic claims schema or
-evidence-grounding validation may consume the next shared correction. Exact usage alone does not
-authorize a retry; provider, process, persistence, unsafe-output, and exhausted-bound failures remain
-terminal.
+The model emits only semantic Work Item intent: obligation mappings, acceptance criteria, validation
+intent references, scopes, dependency intent, risk classifications, exclusive resources, estimated
+duration, trust, and non-derivable tool, service, and network needs. Factory derives adapter-owned
+requirements and execution sizing, and rejects proposal needs that exceed the accepted policy.
+It cannot emit shell commands, adapter internals, runtime pins, provider provisioning plans, compiled
+graph envelopes, or durability state. Factory attaches the frozen Objective digest, base SHA, and
+exact evidence records before strict validation, so model formatting cannot rewrite trusted evidence.
+Initial and repair turns both call `proposePlan` with the same strict `CompilerRequest` and
+`CompilerProposal` schemas; repairs receive the previous proposal and structured closed-set violations
+instead of a separate repair protocol. Only a completed response that fails deterministic claims
+schema or evidence-grounding validation may consume the next shared correction. Exact usage alone
+does not authorize a retry; provider, process, persistence, unsafe-output, and exhausted-bound failures
+remain terminal.
+Runs without `compilerEvaluation` retain one paid proposal call. That call receives a lossless bounded
+Objective source-coverage inventory so every source segment remains structurally visible, but Factory
+does not claim those syntactic boundaries are independently extracted semantic obligations. Only the
+explicit evaluation path adds the separately dispatched obligation extraction and independent judge.
+
+Before dispatch, Factory reads immutable compiler facts from the exact base tree. The request names
+only adapter-resolved validation recipes and capability records. npm, pnpm, Bun, and uv adapters can
+advertise observed or eligible deferred authority, including manifest/lock/runtime pins and the one
+bounded provider operation they own. Partial, mixed, policy-blocked, or unsupported states fail closed;
+Cargo, Go, and ambient Python do not gain inferred bootstrap authority. The model-facing prompt contains
+no hard-coded toolchain rules. Deterministic projection resolves every accepted validation intent,
+adds only required scope/resource serialization and provider-ancestor edges, combines validated
+semantic needs with adapter and policy-derived execution requirements, and records a digest-bound trace
+of adapter bindings, added edges, and risk elevations. The existing graph validators and this projection share dependency, overlap, and exclusive-
+resource analysis so they cannot silently implement different graph semantics.
 
 This is an opt-in policy extension, not a change to existing immutable policies or the current
 release candidate's defaults. Runs without the field retain their original compilation path.
@@ -1381,9 +1404,10 @@ they cannot reconstruct absent evidence or revive a terminal run. See
 [the evaluation contract](EVALUATION-CORPUS.md#independent-draft-review-and-post-mortems).
 
 Mechanical scheduling never calls a model. A Management Backend receives narrow evidence and a
-strict output schema for initial compilation and criterion-specific independent semantic review.
-The management compiler explicitly classifies each criterion's risk, routes it to the least expensive
-sufficient tier, and binds deterministic claims to repository-observed commands. Deterministic
+strict semantic schema for initial compilation, bounded repair, and criterion-specific independent
+semantic review. The management compiler explicitly classifies each criterion's risk, routes it to
+the least expensive sufficient tier, and binds deterministic claims to repository-observed validation
+intent IDs. Deterministic
 post-validation rejects
 unknown commands, unsupported specialized tiers, incomplete criterion coverage, and protected-risk
 criteria without a deterministic gate or understated protected risk; absent, incomplete, or

@@ -12,7 +12,8 @@ import {
   runDurableCompilationTransaction,
   type CompilationFaultPoint,
 } from "../src/supervisor.js";
-import type { CompilationCheckpoint, CompilationResult } from "../src/management/backend.js";
+import type { ManagementUsage } from "../src/management/backend.js";
+import type { CompiledObjective } from "../src/graph.js";
 import { ProviderQuotaError } from "../src/providers/quota.js";
 import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
 
@@ -47,7 +48,10 @@ const objective = {
   ],
 };
 
-const compilation: CompilationResult = {
+type DurableResult = { objective: CompiledObjective; usage: ManagementUsage };
+type DurableCheckpoint = (result: DurableResult) => Promise<void>;
+
+const compilation: DurableResult = {
   objective,
   usage: { inputTokens: 11, outputTokens: 19 },
 };
@@ -403,7 +407,7 @@ describe("durable compilation transaction", () => {
     let faultArmed = true;
     const budgetEvents: FactoryEvent[] = [];
 
-    const invoke = async (checkpoint: CompilationCheckpoint) => {
+    const invoke = async (checkpoint: DurableCheckpoint) => {
       invocations += 1;
       await checkpoint(compilation);
       return compilation;

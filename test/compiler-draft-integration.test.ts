@@ -22,7 +22,8 @@ import {
   type CompilerJudgeVerdict,
   type ObligationInventory,
 } from "../src/evaluation/compiler-eval.js";
-import type { CompiledObjective } from "../src/graph.js";
+import type { CompilerRequest } from "../src/compiler/contracts.js";
+import { pinFixtureRepository } from "./helpers/compiler-proposal.js";
 const BASE_SHA = "a".repeat(40);
 const BASE_TREE = "b".repeat(40);
 
@@ -34,9 +35,9 @@ class MemoryGraphStore implements LeaseStore, CompiledGraphStore {
   trees = new Map<string, Map<string, string>>();
   next = 1;
 
-  constructor() {
-    this.commits.set(BASE_SHA, {
-      oid: BASE_SHA,
+  constructor(baseSha = BASE_SHA) {
+    this.commits.set(baseSha, {
+      oid: baseSha,
       treeOid: BASE_TREE,
       parentOids: [],
       message: "base",
@@ -135,49 +136,45 @@ const temporary: string[] = [];
 afterEach(async () => {
   await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
-function proposal(repaired = false) {
+function proposal(request: CompilerRequest, repaired = false) {
   const criterion = repaired
     ? "Feature handles positive and negative values."
     : "Feature handles positive values.";
+  const recipe = request.repository.validationRecipes[0]!;
   return {
-    title: "Test",
+    protocol: "clockgrove.factory/compiler-proposal" as const,
     workItems: [
       {
         id: "feature",
         title: "Implement feature",
         goal: "Implement feature",
-        acceptance: [criterion],
-        criterionRisks: [{ criterion, risk: "ordinary" }],
+        obligationIds: ["values"],
+        criteria: [
+          {
+            id: "values-work",
+            text: criterion,
+            risk: "ordinary" as const,
+            validation: [
+              {
+                tier: "mechanical" as const,
+                evidence: [{ kind: "observed" as const, recipeId: recipe.id }],
+              },
+            ],
+          },
+        ],
         scope: ["src/feature.ts"],
         preconditions: [],
         outOfScope: [],
         conventions: [],
         dependsOn: [],
-        baseSha: BASE_SHA,
-        validationCommands: ["npm test"],
-        validation: [
-          {
-            tier: "semantic",
-            criteria: [criterion],
-            rationale: "Review changed behavior",
-            evidenceCommands: [],
-          },
-        ],
-        requirements: {
-          os: ["linux"],
-          architecture: ["x64"],
-          cpu: 1,
-          memoryMb: 2048,
-          diskMb: 1024,
-          timeoutMinutes: 30,
+        exclusiveResources: [],
+        executionIntent: {
           estimatedDurationMinutes: 10,
-          tools: ["node", "npm"],
+          additionalTools: [],
           services: [],
-          networkDestinations: [],
-          permittedSecretNames: [],
-          trust: "trusted_local",
+          additionalNetworkDestinations: [],
+          trust: "isolated",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
       },
     ],
   };
@@ -192,6 +189,9 @@ async function setup(
     advisoryOnlyRepair?: boolean;
     invalidInventoryOnce?: boolean;
     unsafeInventory?: boolean;
+    mechanicallyInvalidFirst?: boolean;
+    schemaInvalidFirst?: boolean;
+    acceptFirst?: boolean;
   } = {},
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-draft-integration-"));
@@ -200,12 +200,17 @@ async function setup(
     join(repository, "package.json"),
     JSON.stringify({ scripts: { test: "node --test" } }),
   );
+  await writeFile(
+    join(repository, "package-lock.json"),
+    JSON.stringify({ name: "draft-integration-fixture", lockfileVersion: 3, packages: {} }),
+  );
+  const baseSha = pinFixtureRepository(repository);
   const context: CompilationContext = {
     repository,
     objective: { number: 42, title: "Test", body: "Implement positive and negative values." },
     defaultBranch: "main",
-    baseSha: BASE_SHA,
-    repositoryFiles: ["package.json", "src/feature.ts"],
+    baseSha,
+    repositoryFiles: ["package-lock.json", "package.json", "src/feature.ts"],
     allowedNetworkDestinations: [],
     runPolicy: {
       ...DEFAULT_RUN_POLICY,
@@ -216,7 +221,7 @@ async function setup(
   const inventory: ObligationInventory = {
     version: 1,
     objectiveDigest: compilerEvalDigest(context.objective),
-    baseSha: BASE_SHA,
+    baseSha,
     evidence: context.repositoryEvidence,
     obligations: [
       {
@@ -266,11 +271,11 @@ async function setup(
     if (prompt.includes("independent compiler judge")) {
       stages.push("judge");
       const source = JSON.parse(prompt.split("\n\n").at(-1)!) as {
-        graph: CompiledObjective;
+        proposal: { workItems: Array<{ id: string; criteria: Array<{ id: string }> }> };
         draftDigest: string;
         inventoryDigest: string;
       };
-      const accept = repairs > 0 && !options.rejectAll;
+      const accept = (options.acceptFirst === true || repairs > 0) && !options.rejectAll;
       const verdict: CompilerJudgeVerdict = {
         version: 1,
         rubricVersion: 1,
@@ -282,7 +287,7 @@ async function setup(
             status: accept ? "covered" : "partial",
             itemIds: ["feature"],
             acceptanceBindings: [
-              { itemId: "feature", criterion: source.graph.workItems[0]!.acceptance[0]! },
+              { itemId: "feature", criterionId: source.proposal.workItems[0]!.criteria[0]!.id },
             ],
             evidenceIds: ["objective"],
             reason: accept ? "Both cases specified" : "Negative case missing",
@@ -331,40 +336,28 @@ async function setup(
       }
       return { value: verdict, usage };
     }
-    if (prompt.includes("Repair the draft")) {
+    if (prompt.includes("This is a repair")) {
       stages.push("repair");
       repairs++;
       if (options.malformedRepair) return { value: { malformed: "preserve this proposal" }, usage };
-      return {
-        value: {
-          objective: proposal(true),
-          summary: {
-            changeSummary: "Cover negative behavior",
-            lineage: [{ itemId: "feature", previousItemIds: ["feature"] }],
-            findingDispositions: [
-              {
-                findingId: "missing-negative",
-                disposition: "addressed",
-                reason: "Added behavior",
-                evidenceIds: ["objective"],
-              },
-            ],
-          },
-        },
-        usage,
-      };
+      const request = JSON.parse(prompt.split("\n\n").at(-1)!) as CompilerRequest;
+      return { value: proposal(request, true), usage };
     }
     stages.push("compile");
     if (options.missingAccounting) throw new Error("transport outcome unknown");
-    return { value: proposal(), usage };
+    const request = JSON.parse(prompt.split("\n\n").at(-1)!) as CompilerRequest;
+    if (options.schemaInvalidFirst) return { value: { unexpected: true }, usage };
+    const initial = proposal(request);
+    if (options.mechanicallyInvalidFirst) initial.workItems[0]!.obligationIds = [];
+    return { value: initial, usage };
   });
   const backend = new CodexCliManagementBackend({ runStructured });
-  const store = new MemoryGraphStore();
+  const store = new MemoryGraphStore(baseSha);
   const leases = new LeaseManager({ store });
   const pd = policyDigest(context.runPolicy);
   const lease = await leases.acquire(
     { objective: 42, runId: "integrated", holder: "director", policyDigest: pd },
-    await store.readCommit(BASE_SHA),
+    await store.readCommit(baseSha),
   );
   const manager = new CompilerDraftManager(store, leases);
   const accounting = new Map<string, unknown>();
@@ -379,7 +372,7 @@ async function setup(
       objective: 42,
       runId: lease.runId,
       policyDigest: pd,
-      baseSha: BASE_SHA,
+      baseSha,
       inputDigest: compilerEvalDigest(context.objective),
     },
     admit,
@@ -395,6 +388,43 @@ async function setup(
   return { args, stages, prompts, runStructured, accounting, store, leases };
 }
 describe("production compiler draft adapter", () => {
+  it("repairs a known-accounted mechanically invalid initial production proposal", async () => {
+    const f = await setup({ mechanicallyInvalidFirst: true });
+    const result = await compileEvaluatedDraft(f.args);
+    expect(result.status).toBe("accepted");
+    expect(f.stages).toEqual(["inventory", "compile", "repair", "judge"]);
+    expect(f.accounting.size).toBe(4);
+    expect(
+      result.records.find(
+        (record) => record.kind === "result" && record.payload.stage === "compile",
+      ),
+    ).toMatchObject({
+      payload: {
+        validationReport: {
+          phase: "proposal",
+          status: "repairable",
+          violations: [expect.objectContaining({ code: "unmapped-obligation" })],
+        },
+      },
+    });
+  });
+
+  it("repairs known-accounted schema-invalid output with the same proposal schema", async () => {
+    const f = await setup({ schemaInvalidFirst: true });
+    const result = await compileEvaluatedDraft(f.args);
+    expect(result.status).toBe("accepted");
+    expect(f.stages).toEqual(["inventory", "compile", "repair", "judge"]);
+    const repairRequest = JSON.parse(f.prompts[2]!.split("\n\n").at(-1)!) as CompilerRequest;
+    expect(repairRequest).toMatchObject({
+      revision: 1,
+      previousProposal: null,
+      validationReport: {
+        status: "repairable",
+        violations: expect.arrayContaining([expect.objectContaining({ code: "schema-invalid" })]),
+      },
+    });
+  });
+
   it("extracts obligations first, grounds every revision, accounts phases and commits only accepted selection", async () => {
     const f = await setup();
     const graphs = new CompiledGraphManager(f.store, f.leases);
@@ -413,7 +443,7 @@ describe("production compiler draft adapter", () => {
     expect(result.records.at(-1)?.kind).toBe("selection");
     const args = {
       lease: f.args.lease,
-      base: await f.store.readCommit(BASE_SHA),
+      base: await f.store.readCommit(f.args.context.baseSha),
       objective: result.graph,
     };
     const saved = await graphs.persist(args);
@@ -425,7 +455,51 @@ describe("production compiler draft adapter", () => {
     expect(
       result.records.filter((r) => r.kind === "result" && r.payload.stage === "compile")[0]?.payload
         .value,
-    ).toMatchObject({ provenance: { rawProposal: proposal(), baseSha: BASE_SHA } });
+    ).toMatchObject({
+      request: { protocol: "clockgrove.factory/compiler-request", revision: 0 },
+      proposal: { protocol: "clockgrove.factory/compiler-proposal" },
+      provenance: { baseSha: f.args.context.baseSha },
+    });
+    const firstJudgeSource = JSON.parse(
+      f.prompts
+        .find((prompt) => prompt.includes("independent compiler judge"))!
+        .split("\n\n")
+        .at(-1)!,
+    ) as { projectionTrace: { requestDigest: string; proposalDigest: string } };
+    expect(firstJudgeSource.projectionTrace.requestDigest).not.toBe("0".repeat(64));
+    expect(firstJudgeSource.projectionTrace.proposalDigest).toMatch(/^[a-f0-9]{64}$/);
+
+    const tampered = structuredClone(result.records);
+    const acceptedProposal = tampered.find(
+      (record) =>
+        record.kind === "result" &&
+        (record.payload.stage === "compile" || record.payload.stage === "repair") &&
+        record.payload.revision === result.revision &&
+        !record.payload.error,
+    )!;
+    const persisted = acceptedProposal.payload.value as { request: { revision: number } };
+    persisted.request.revision += 1;
+    expect(() => assertCompilerDraftSelection(tampered, result.graph)).toThrow(
+      "request digest differs",
+    );
+
+    const changedReservation = structuredClone(result.records);
+    const acceptedResult = changedReservation.find(
+      (record) =>
+        record.kind === "result" &&
+        (record.payload.stage === "compile" || record.payload.stage === "repair") &&
+        record.payload.revision === result.revision &&
+        !record.payload.error,
+    )!;
+    const acceptedInvocation = changedReservation.find(
+      (record) =>
+        record.kind === "invocation" &&
+        record.payload.invocationId === acceptedResult.payload.invocationId,
+    )!;
+    acceptedInvocation.payload.compilerRequestDigest = "f".repeat(64);
+    expect(() => assertCompilerDraftSelection(changedReservation, result.graph)).toThrow(
+      "reserved request binding",
+    );
   });
   it("never produces accepted projection authority for report-only rejected plans", async () => {
     const f = await setup({ reportOnly: true });
@@ -437,24 +511,49 @@ describe("production compiler draft adapter", () => {
       await new CompiledGraphManager(f.store, f.leases).load(42, f.args.lease.runId),
     ).toBeNull();
   });
+  it("judges a fixed graph whose derived resource is outside the semantic resource ID domain", async () => {
+    const source = await setup({ acceptFirst: true });
+    const compiled = await compileEvaluatedDraft(source.args);
+    expect(compiled.status).toBe("accepted");
+    if (compiled.status !== "accepted") throw new Error("accepted graph required");
+    const f = await setup({ reportOnly: true, acceptFirst: true });
+    const fixedGraph = structuredClone(compiled.graph);
+    for (const item of fixedGraph.workItems) item.baseSha = f.args.context.baseSha;
+    fixedGraph.workItems[0]!.changeSurface = {
+      mergeClass: "large-binary",
+      exclusiveResources: ["Assets/Image.PNG"],
+    };
+
+    const result = await compileEvaluatedDraft({ ...f.args, fixedGraph });
+
+    expect(result).toMatchObject({ status: "accepted", revision: 0 });
+    expect(f.stages).toEqual(["inventory", "judge"]);
+  });
   it("retains malformed repair proposal and observed usage through bounded retries", async () => {
     const f = await setup({ malformedRepair: true });
     const result = await compileEvaluatedDraft(f.args);
-    expect(result.status).toBe("stopped");
+    expect(result).toMatchObject({
+      status: "stopped",
+      reason: "compiler repair repeated the unchanged invalid proposal",
+    });
     expect(f.stages.filter((stage) => stage === "repair")).toHaveLength(2);
     expect(f.accounting.size).toBe(5);
     expect(
       result.records.filter((r) => r.kind === "result" && r.payload.stage === "repair"),
-    ).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          payload: expect.objectContaining({
-            proposal: { malformed: "preserve this proposal" },
-            usage: { inputTokens: 11, outputTokens: 3, cachedInputTokens: 4 },
-          }),
+    ).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          proposal: { malformed: "preserve this proposal" },
+          usage: { inputTokens: 11, outputTokens: 3, cachedInputTokens: 4 },
         }),
-      ]),
-    );
+      }),
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          proposal: { malformed: "preserve this proposal" },
+          usage: { inputTokens: 11, outputTokens: 3, cachedInputTokens: 4 },
+        }),
+      }),
+    ]);
   });
   it("repairs an invalid canonical evidence ID before compiling and shares accounting", async () => {
     const f = await setup({ invalidInventoryOnce: true });
@@ -467,7 +566,7 @@ describe("production compiler draft adapter", () => {
     expect(f.accounting.size).toBe(6);
     expect(f.args.admit).toHaveBeenCalledTimes(6);
     expect(f.prompts[1]).toContain("priorInventoryFailure");
-    expect(f.prompts[1]).toContain("unknown obligation citation");
+    expect(f.prompts[1]).toContain('"code":"schema-invalid"');
     const rejected = result.records.find(
       (record) =>
         record.kind === "result" &&
@@ -482,15 +581,8 @@ describe("production compiler draft adapter", () => {
         proposalDigest: draftDigest(rejected?.payload.proposal),
       },
       proposal: {
-        rawProposal: {
-          version: 1,
-          obligations: [expect.objectContaining({ evidenceIds: ["foreign"] })],
-        },
-        normalizationTrace: [
-          "Factory attached the frozen objective digest",
-          "Factory attached the frozen base SHA",
-          "Factory attached the exact frozen evidence records",
-        ],
+        version: 1,
+        obligations: [expect.objectContaining({ evidenceIds: ["foreign"] })],
       },
     });
     expect((await compileEvaluatedDraft(f.args)).status).toBe("accepted");
@@ -507,7 +599,7 @@ describe("production compiler draft adapter", () => {
     delete firstInventory.payload.error;
     firstInventory.payload.value = validInventory.payload.value;
     expect(() => assertCompilerDraftSelection(ambiguous, result.graph)).toThrow(
-      "ambiguous inventories",
+      "no unambiguous accepted assessment",
     );
   });
   it("keeps report-only invalid inventory single-shot", async () => {

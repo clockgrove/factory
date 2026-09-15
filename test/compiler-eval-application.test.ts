@@ -23,6 +23,7 @@ import {
 } from "../src/evaluation/compiler-eval.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import type { ApplicationSnapshot } from "../src/application/services.js";
+import { CompilerProposalSchema, CompilerRequestSchema } from "../src/compiler/contracts.js";
 vi.mock("../src/control/compiler-drafts.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/control/compiler-drafts.js")>()),
   loadCompilerDrafts: vi.fn(),
@@ -36,13 +37,14 @@ vi.mock("../src/control/receipts.js", async (importOriginal) => ({
   latestRunReceipts: vi.fn(),
 }));
 vi.mock("../src/economics/index.js", () => ({ summarizeRun: vi.fn() }));
+const objective = { number: 236, title: "Objective", body: "Deliver change" };
 const binding = {
   repository: "clockgrove/factory",
   objective: 236,
   runId: "run",
   policyDigest: "policy",
   baseSha: "a".repeat(40),
-  inputDigest: "c".repeat(64),
+  inputDigest: compilerEvalDigest(objective),
 };
 const snapshot: ApplicationSnapshot = {
   id: "objective",
@@ -54,7 +56,7 @@ const snapshot: ApplicationSnapshot = {
 const store = {} as CompiledGraphReadStore;
 const inventory: ObligationInventory = {
   version: 1,
-  objectiveDigest: "b".repeat(64),
+  objectiveDigest: binding.inputDigest,
   baseSha: binding.baseSha,
   evidence: [
     { id: "objective", kind: "objective", identity: "original", excerpt: "Deliver change" },
@@ -73,19 +75,126 @@ const golden = JSON.parse(
   await readFile(new URL("./fixtures/compiler/golden-objective.json", import.meta.url), "utf8"),
 );
 const graph = parsePersistedCompiledObjective({ title: golden.title, workItems: golden.workItems });
+const proposal = CompilerProposalSchema.parse({
+  protocol: "clockgrove.factory/compiler-proposal",
+  workItems: graph.workItems.map((item, itemIndex) => ({
+    id: item.id,
+    title: item.title,
+    goal: item.goal,
+    obligationIds: itemIndex === 0 ? ["change"] : [],
+    criteria: item.acceptance.map((text, criterionIndex) => ({
+      id: `${item.id}-criterion-${criterionIndex + 1}`,
+      text,
+      risk: "ordinary",
+      validation: [
+        {
+          tier: "mechanical",
+          evidence: [{ kind: "observed", recipeId: "recipe-test" }],
+        },
+      ],
+    })),
+    scope: item.scope,
+    preconditions: item.preconditions,
+    outOfScope: item.outOfScope,
+    conventions: item.conventions,
+    dependsOn: item.dependsOn,
+    exclusiveResources: item.changeSurface?.exclusiveResources ?? [],
+    executionIntent: {
+      estimatedDurationMinutes: 30,
+      additionalTools: [],
+      services: [],
+      additionalNetworkDestinations: [],
+      trust: "isolated",
+    },
+  })),
+});
+const proposalRequest = CompilerRequestSchema.parse({
+  protocol: "clockgrove.factory/compiler-request",
+  revision: 1,
+  objective: { ...objective, digest: binding.inputDigest },
+  baseSha: binding.baseSha,
+  inventory,
+  inventorySource: "independent-extraction",
+  repository: {
+    manifests: ["package.json"],
+    requiredTools: [],
+    validationRecipes: [
+      {
+        id: "recipe-test",
+        command: "npm test",
+        adapterId: "node-npm",
+        requiredTools: ["node", "npm"],
+        networkDestinations: [],
+      },
+    ],
+    toolchains: [],
+    validationSurfaces: {
+      deterministicSimulation: [],
+      visual: [],
+      python: [],
+      rust: [],
+      go: [],
+    },
+    pathCount: 1,
+  },
+  constraints: {
+    maxWorkItems: 100,
+    maxDependenciesPerItem: 50,
+    allowedNetworkDestinations: [],
+    workItemTimeoutMinutes: 30,
+  },
+  previousProposal: null,
+  validationReport: {
+    protocol: "clockgrove.factory/compiler-validation",
+    phase: "proposal",
+    status: "repairable",
+    violations: [
+      {
+        code: "schema-invalid",
+        itemId: null,
+        field: "",
+        expected: "valid proposal",
+        observed: null,
+      },
+    ],
+  },
+  semanticFindings: [],
+  challenges: [],
+});
+const projectionTrace = {
+  protocol: "clockgrove.factory/compiler-projection",
+  requestDigest: compilerEvalDigest(proposalRequest),
+  proposalDigest: compilerEvalDigest(proposal),
+  graphDigest: compiledGraphDigest(graph),
+  addedEdges: [],
+  adapterBindings: [],
+  riskElevations: [],
+};
 function history() {
   const records: CompilerDraftRecord[] = [];
   const add = (kind: CompilerDraftRecord["kind"], payload: Record<string, unknown>) =>
     records.push({
-      protocol: "clockgrove.factory/compiler-draft-v1",
+      protocol: "clockgrove.factory/compiler-draft",
       binding,
       sequence: records.length,
       kind,
       payload,
     });
-  const call = (stage: string, revision: number, value: unknown, error?: string) => {
+  const call = (
+    stage: string,
+    revision: number,
+    value: unknown,
+    error?: string,
+    invocationEvidence: Record<string, unknown> = {},
+  ) => {
     const invocationId = `${stage}-${revision}`;
-    add("invocation", { invocationId, stage, revision });
+    add("invocation", {
+      invocationId,
+      stage,
+      revision,
+      inputDigest: "0".repeat(64),
+      ...invocationEvidence,
+    });
     add("result", {
       invocationId,
       stage,
@@ -96,10 +205,35 @@ function history() {
     });
   };
   add("started", {});
-  call("inventory", 0, inventory);
+  call("inventory", 0, structuredClone(inventory));
   call("compile", 0, null, "secret-api-key=do-not-display");
-  call("repair", 1, { objective: graph });
-  add("validation", { revision: 1, valid: true, graph, graphDigest: compiledGraphDigest(graph) });
+  call(
+    "repair",
+    1,
+    {
+      request: structuredClone(proposalRequest),
+      proposal: structuredClone(proposal),
+      report: {
+        protocol: "clockgrove.factory/compiler-validation",
+        phase: "proposal",
+        status: "valid",
+        violations: [],
+      },
+      provenance: { requestDigest: projectionTrace.requestDigest },
+    },
+    undefined,
+    { compilerRequestDigest: projectionTrace.requestDigest },
+  );
+  add("validation", {
+    revision: 1,
+    valid: true,
+    graph,
+    graphDigest: compiledGraphDigest(graph),
+    proposalDigest: draftDigest(proposal),
+    traceDigest: draftDigest(projectionTrace),
+    projectionTrace: structuredClone(projectionTrace),
+    requestDigest: projectionTrace.requestDigest,
+  });
   const verdict = {
     version: 1,
     rubricVersion: 1,
@@ -111,7 +245,7 @@ function history() {
         status: "covered",
         itemIds: [graph.workItems[0]!.id],
         acceptanceBindings: [
-          { itemId: graph.workItems[0]!.id, criterion: graph.workItems[0]!.acceptance[0]! },
+          { itemId: graph.workItems[0]!.id, criterionId: proposal.workItems[0]!.criteria[0]!.id },
         ],
         evidenceIds: ["objective"],
         reason: "Mapped acceptance",
@@ -141,12 +275,22 @@ function history() {
     uncertainty: [],
     decision: "accept",
   };
-  call("judge", 1, verdict);
+  call("judge", 1, verdict, undefined, {
+    inputDigest: draftDigest({
+      inventory,
+      previous: proposal,
+      projection: projectionTrace,
+      failure: null,
+    }),
+  });
   add("selection", {
     revision: 1,
     graphDigest: compiledGraphDigest(graph),
     inventoryDigest: draftDigest(inventory),
     verdictDigest: draftDigest(verdict),
+    proposalDigest: draftDigest(proposal),
+    requestDigest: projectionTrace.requestDigest,
+    traceDigest: draftDigest(projectionTrace),
   });
   return records;
 }
@@ -193,11 +337,16 @@ describe("read-only compiler evaluation", () => {
     const records = history();
     records.pop();
     records.push({
-      protocol: "clockgrove.factory/compiler-draft-v1",
+      protocol: "clockgrove.factory/compiler-draft",
       binding,
       sequence: records.length,
       kind: "invocation",
-      payload: { stage: "repair", revision: 2, invocationId: "uncertain" },
+      payload: {
+        stage: "repair",
+        revision: 2,
+        invocationId: "uncertain",
+        inputDigest: "0".repeat(64),
+      },
     });
     vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
     const result = await inspectCompilerEvaluation({
@@ -226,6 +375,75 @@ describe("read-only compiler evaluation", () => {
       inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
     ).rejects.toThrow("exact accepted");
   });
+  it.each(["proposalDigest", "traceDigest", "requestDigest"])(
+    "rejects a selection with a mismatched %s",
+    async (field) => {
+      const records = history();
+      records.at(-1)!.payload[field] = "f".repeat(64);
+      vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+      await expect(
+        inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+      ).rejects.toThrow(/exact (?:accepted|proposal|compiler request)/);
+    },
+  );
+  it.each(["proposalDigest", "requestDigest", "graphDigest"])(
+    "rejects a self-digested trace with a mismatched %s",
+    async (field) => {
+      const records = history();
+      const validation = records.find((record) => record.kind === "validation")!;
+      const trace = validation.payload.projectionTrace as Record<string, unknown>;
+      trace[field] = "f".repeat(64);
+      validation.payload.traceDigest = draftDigest(trace);
+      records.at(-1)!.payload.traceDigest = validation.payload.traceDigest;
+      vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+      await expect(
+        inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+      ).rejects.toThrow(/projection trace|exact accepted/);
+    },
+  );
+  it("rejects a proposal result whose reserved compiler request digest changed", async () => {
+    const records = history();
+    const repair = records.find(
+      (record) => record.kind === "invocation" && record.payload.stage === "repair",
+    )!;
+    repair.payload.compilerRequestDigest = "f".repeat(64);
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+
+    await expect(
+      inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+    ).rejects.toThrow("exact compiler request");
+  });
+  it("retains but never reports a judge result whose full invocation digest changed", async () => {
+    const records = history();
+    records.pop();
+    const judge = records.find(
+      (record) => record.kind === "invocation" && record.payload.stage === "judge",
+    )!;
+    judge.payload.inputDigest = "f".repeat(64);
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+
+    const result = await inspectCompilerEvaluation({
+      repository: binding.repository,
+      snapshot,
+      store,
+    });
+    expect(result.reports).toEqual([]);
+    expect(result.markdown).toContain("Invalid historical judge results retained");
+  });
+  it("rejects an inventory that is not bound to the Objective input digest", async () => {
+    const records = history();
+    const inventoryResult = records.find(
+      (record) => record.kind === "result" && record.payload.stage === "inventory",
+    )!;
+    inventoryResult.payload.value = {
+      ...(inventoryResult.payload.value as object),
+      objectiveDigest: "f".repeat(64),
+    };
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+    await expect(
+      inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+    ).rejects.toThrow("inventory repository identity mismatch");
+  });
   it("retains malformed historical judge evidence without accepting or leaking it", async () => {
     const records = history();
     records.pop();
@@ -253,7 +471,7 @@ describe("read-only compiler evaluation", () => {
     )!;
     judge.payload.value = "malformed historical judge output";
     records.push({
-      protocol: "clockgrove.factory/compiler-draft-v1",
+      protocol: "clockgrove.factory/compiler-draft",
       binding,
       sequence: records.length,
       kind: "accounting-failure",
@@ -545,7 +763,7 @@ it("reports disputed terminal usage as unknown while retaining the original fail
   const records = history();
   records.pop();
   records.push({
-    protocol: "clockgrove.factory/compiler-draft-v1",
+    protocol: "clockgrove.factory/compiler-draft",
     binding,
     sequence: records.length,
     kind: "terminal-conflict",

@@ -22,6 +22,7 @@ import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quot
 import { preserveProviderQuotaError, ProviderQuotaError } from "../src/providers/quota.js";
 import { PlatformUnavailableError } from "../src/platform.js";
 import { ManagementOutputError } from "../src/management/backend.js";
+import { adaptFixtureCompiler, type LegacyFixtureCompiler } from "./helpers/compiler-proposal.js";
 
 const fixtures: Awaited<ReturnType<typeof providerSupervisorFixture>>[] = [];
 afterEach(async () => {
@@ -40,12 +41,17 @@ async function fixture(
     greenfieldBootstrap,
     greenfieldLifecycle,
     pnpmUnavailable,
+    compilerNpmAuthority: !greenfieldBootstrap && !greenfieldLifecycle,
   });
   fixtures.push(f);
+  const repositoryFiles =
+    greenfieldBootstrap || greenfieldLifecycle
+      ? ["README.md"]
+      : ["README.md", "package-lock.json", "package.json"];
   vi.spyOn(GitHubReader.prototype, "readRepositoryLayout").mockResolvedValue({
     defaultBranch: "main",
-    files: ["README.md"],
-    totalFiles: 1,
+    files: repositoryFiles,
+    totalFiles: repositoryFiles.length,
     truncated: false,
     treeTruncatedByGitHub: false,
   });
@@ -88,8 +94,9 @@ async function fixture(
     ];
   }
   const compile = vi
-    .spyOn(f.management, "compile")
+    .fn<LegacyFixtureCompiler>()
     .mockRejectedValue(new Error("fixture reached uncancelled compilation"));
+  f.management.proposePlan = adaptFixtureCompiler(compile);
   const review = vi.spyOn(f.management, "review");
   const withdraw = (overrides: Record<string, unknown> = {}) => {
     const cancellation = parseFactoryEvent({
@@ -419,7 +426,20 @@ describe("Supervisor activation withdrawal races", () => {
     expect(f.compile).toHaveBeenCalledOnce();
     const persisted = await new CompiledGraphManager(f.storage, f.leases).load(7, first.runId);
     expect(persisted).not.toBeNull();
-    expect(persisted?.objective).toEqual(f.graph);
+    expect(persisted?.objective).toMatchObject({
+      title: f.graph.title,
+      deferredCapabilityAdapters: ["node-pnpm"],
+      workItems: [
+        expect.objectContaining({
+          id: f.graph.workItems[0]!.id,
+          title: f.graph.workItems[0]!.title,
+          goal: f.graph.workItems[0]!.goal,
+          acceptance: f.graph.workItems[0]!.acceptance,
+          scope: f.graph.workItems[0]!.scope,
+          validationCommands: ["pnpm run check"],
+        }),
+      ],
+    });
     expect(
       f
         .events()
@@ -450,7 +470,7 @@ describe("Supervisor activation withdrawal races", () => {
     );
     expect(
       (await new CompiledGraphManager(f.storage, f.leases).load(7, restarted.runId))?.objective,
-    ).toEqual(f.graph);
+    ).toEqual(persisted?.objective);
     expect(f.activity).toEqual([]);
   }, 30_000);
 
@@ -1100,7 +1120,7 @@ describe("Supervisor activation withdrawal races", () => {
       if (!f.policy.economics) throw new Error("fixture needs a token threshold");
       if (mode === "hard") f.policy.economics.modelTokenBudgetMode = "hard";
       else delete f.policy.economics.modelTokenBudgetMode;
-      const compile = vi.spyOn(f.management, "compile");
+      const compile = vi.spyOn(f.management, "proposePlan");
       const review = vi.spyOn(f.management, "review");
       // Refusal precedes run creation, so there is no run to escalate.
       await expect(f.run()).rejects.toThrow(

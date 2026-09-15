@@ -95,13 +95,16 @@ assessment, and every dependency has a cited reason. All rubric dimensions are a
 explicitly unavailable/not applicable. Blocking coverage, feasibility and material efficiency
 findings cannot be averaged away; uncertain minor preferences remain advisory.
 
-The optional management methods `extractObligations`, `judgePlan`, and `repairPlan` reuse the
-Codex management backend and its strict structured outputs. Repairs return a complete candidate,
-change summary, explicit ID lineage and finding dispositions. The same mechanical grounding and
-full independent coverage review run again after each revision. Compiler self-assessment never
-establishes that a correction succeeded. `compileEvaluatedDraft` connects these methods to
-`runCompilerDraftLoop`, the Git draft journal, and existing invocation admission/accounting.
-No new model selection or provider spending authority is introduced.
+The optional management methods `extractObligations` and `judgePlan` reuse the Codex management
+backend and its strict structured outputs. Initial compilation and repairs both call the required
+`proposePlan` method with the same `CompilerRequest` / `CompilerProposal` schema. A repair request
+contains the complete prior semantic proposal, bounded closed-set validation violations, independent
+semantic findings, and cited challenges; its response is a complete replacement semantic proposal.
+The same pinned-fact validation, deterministic projection, and full independent coverage review run
+again after each revision. Compiler self-assessment never establishes that a correction succeeded.
+`compileEvaluatedDraft` connects these methods to `runCompilerDraftLoop`, the Git draft journal, and
+existing invocation admission/accounting. No new model selection or provider spending authority is
+introduced.
 
 An operator enables the integrated flow with a complete normal run policy containing:
 
@@ -118,11 +121,22 @@ An operator enables the integrated flow with a complete normal run policy contai
 ```
 
 The number above is an illustrative operator-selected observed threshold, not a measured optimal
-allowance or a hard token cap. Omitting the entire field preserves the legacy path; omitting the
-individual limits uses the bounded defaults documented in `DESIGN.md`. Report-only mode permits
+allowance or a hard token cap. Omitting the entire field preserves the ordinary single-proposal path;
+both paths use the semantic compiler and deterministic projection. Omitting the individual limits
+uses the bounded defaults documented in `DESIGN.md`. Report-only mode permits
 no repairs and no execution graph projection. The existing write-free `factory plan --compile`
 entry point remains a single response-only compilation; it does not create a durable evaluated
 run. Draft evaluation requires its explicit immutable run envelope.
+
+Deterministic regression coverage includes an explicit semantic matrix across supported and
+unsupported toolchain states; missing, partial, and mixed toolchain evidence; manifest and lockfile
+presence; runtime pins; observed and deferred validation; dependency, scope-overlap, and exclusive-
+resource graph shapes; protected risks; offline/network policy; generated and binary/LFS ownership;
+and report-only versus auto-repair modes. The checked-in pairwise corpus names every dimension, while
+focused tests exercise the associated adapter, validator, projection, recovery, and public-report
+boundaries. Model-backed qualification evidence must separately report the exact candidate, model,
+reasoning effort, calls, stages, token accounting, elapsed time, terminal result, and whether repair
+was actually observed; an initially complete proposal must never be described as naturally repaired.
 
 `factory compiler-eval OWNER/REPO#NUMBER` / `factory_compiler_eval` load existing authenticated
 run and draft evidence without writes or model calls. The JSON includes per-revision reports,

@@ -7,7 +7,11 @@ import { draftDigest, loadCompilerDrafts } from "../control/compiler-drafts.js";
 import { loadCompiledGraph, type CompiledGraphReadStore } from "../control/graphs.js";
 import { latestRunReceipts } from "../control/receipts.js";
 import { summarizeRun } from "../economics/index.js";
-import { compiledGraphDigest, parsePersistedCompiledObjective } from "../graph.js";
+import {
+  CompilerProposalSchema,
+  CompilerRequestSchema,
+  CompilerValidationReportSchema,
+} from "../compiler/contracts.js";
 import {
   ObligationInventorySchema,
   createCompilerEvalReport,
@@ -21,6 +25,17 @@ import type { ApplicationSnapshot } from "./services.js";
 export const MAX_COMPILER_ANNOTATION_BYTES = 256 * 1024;
 const AnnotationId = z.string().min(1).max(160);
 const AnnotationText = z.string().min(1).max(4000);
+const ProjectionTrace = z
+  .object({
+    protocol: z.literal("clockgrove.factory/compiler-projection"),
+    requestDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    proposalDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    graphDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    addedEdges: z.array(z.object({ itemId: z.string(), dependsOn: z.string() }).passthrough()),
+    adapterBindings: z.array(z.record(z.unknown())),
+    riskElevations: z.array(z.record(z.unknown())),
+  })
+  .strict();
 /** These are caller assertions with mechanically checked citations, never authenticated causal authority. */
 export const CompilerCausalAnnotationsSchema = z
   .object({
@@ -170,6 +185,11 @@ const Invocation = z.object({
   invocationId: z.string().min(1).max(200),
   stage: z.enum(["inventory", "compile", "repair", "judge"]),
   revision: z.number().int().min(0),
+  inputDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  compilerRequestDigest: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
 });
 const Usage = z.object({
   inputTokens: z.number().int().nonnegative().safe(),
@@ -230,7 +250,11 @@ export async function inspectCompilerEvaluation(args: {
   const inventory = inventoryResults[0]
     ? ObligationInventorySchema.parse(inventoryResults[0].payload.value)
     : null;
-  if (inventory && binding && inventory.baseSha !== binding.baseSha)
+  if (
+    inventory &&
+    binding &&
+    (inventory.baseSha !== binding.baseSha || inventory.objectiveDigest !== binding.inputDigest)
+  )
     throw new Error("inventory repository identity mismatch");
   const invocations = records
     .filter((record) => record.kind === "invocation")
@@ -330,6 +354,10 @@ export async function inspectCompilerEvaluation(args: {
       "Compiler usage checkpoint exists but accounting reconciliation failed; ledger completeness is unavailable",
     );
   const invalidReviews: Array<{ sequence: number; evidenceDigest: string }> = [];
+  const reportBindings = new Map<
+    number,
+    { proposalDigest: string; traceDigest: string; requestDigest: string }
+  >();
   const reports = inventory
     ? results
         .filter((record) => record.payload.stage === "judge" && !record.payload.error)
@@ -342,22 +370,67 @@ export async function inspectCompilerEvaluation(args: {
               item.sequence < record.sequence,
           );
           if (!validated) throw new Error("judge result has no mechanically validated draft");
-          const objective = parsePersistedCompiledObjective(validated.payload.graph);
-          const digest = compiledGraphDigest(objective);
-          if (digest !== validated.payload.graphDigest)
-            throw new Error("mechanical validation digest mismatch");
+          const proposalResult = results.find(
+            (item) =>
+              item.payload.revision === record.payload.revision &&
+              (item.payload.stage === "compile" || item.payload.stage === "repair") &&
+              !item.payload.error,
+          );
+          if (
+            !proposalResult ||
+            !proposalResult.payload.value ||
+            typeof proposalResult.payload.value !== "object"
+          )
+            throw new Error("judge result has no semantic proposal");
+          const persisted = proposalResult.payload.value as Record<string, unknown>;
+          const request = CompilerRequestSchema.parse(persisted.request);
+          const proposal = CompilerProposalSchema.parse(persisted.proposal);
+          const proposalReport = CompilerValidationReportSchema.parse(persisted.report);
+          const provenance = persisted.provenance as Record<string, unknown> | undefined;
+          const proposalInvocation = invocations.find(
+            (entry) => entry.invocation.invocationId === proposalResult.payload.invocationId,
+          );
+          if (
+            proposalReport.status !== "valid" ||
+            request.revision !== record.payload.revision ||
+            draftDigest(request.inventory) !== draftDigest(inventory) ||
+            provenance?.requestDigest !== draftDigest(request) ||
+            proposalInvocation?.invocation.compilerRequestDigest !== draftDigest(request)
+          )
+            throw new Error("proposal result is not bound to its exact compiler request");
+          const trace = ProjectionTrace.parse(validated.payload.projectionTrace);
+          const digest = String(validated.payload.graphDigest);
+          if (
+            validated.payload.proposalDigest !== draftDigest(proposal) ||
+            validated.payload.traceDigest !== draftDigest(trace) ||
+            validated.payload.requestDigest !== draftDigest(request) ||
+            trace.proposalDigest !== draftDigest(proposal) ||
+            trace.requestDigest !== draftDigest(request) ||
+            trace.graphDigest !== digest
+          )
+            throw new Error("projection trace is not bound to its exact proposal and request");
           try {
             const judgeInvocation = invocations.find(
               (entry) => entry.invocation.invocationId === record.payload.invocationId,
             )!;
-            const challenges = validateCompilerInferenceChallenges(
-              judgeInvocation.record.payload.reviewEvidence ?? [],
-              inventory,
-            );
+            const reviewEvidence = judgeInvocation.record.payload.reviewEvidence ?? null;
+            const challenges = validateCompilerInferenceChallenges(reviewEvidence ?? [], inventory);
+            if (
+              judgeInvocation.invocation.inputDigest !==
+              draftDigest({
+                inventory,
+                previous: proposal,
+                projection: trace,
+                failure: reviewEvidence,
+                ...(reviewEvidence === null ? {} : { reviewEvidence }),
+              })
+            )
+              throw new Error("judge result is not bound to its exact invocation input");
             const report = createCompilerEvalReport({
               inventory,
               challenges,
-              graph: objective,
+              graph: proposal,
+              addedEdges: trace.addedEdges,
               verdict: record.payload.value as Parameters<
                 typeof createCompilerEvalReport
               >[0]["verdict"],
@@ -369,6 +442,11 @@ export async function inspectCompilerEvaluation(args: {
               notInvokedPhases: records.some((item) => item.payload.stage === "repair")
                 ? []
                 : ["repair"],
+            });
+            reportBindings.set(request.revision, {
+              proposalDigest: draftDigest(proposal),
+              traceDigest: draftDigest(trace),
+              requestDigest: draftDigest(request),
             });
             return [
               { ...report, revision: record.payload.revision, resultSequence: record.sequence },
@@ -384,14 +462,20 @@ export async function inspectCompilerEvaluation(args: {
       `Invalid historical judge results retained: ${invalidReviews.map((item) => item.sequence).join(", ")}`,
     );
   if (selection) {
-    const accepted = reports.find((report) => report.revision === selection.payload.revision);
+    const selectedRevision = Number(selection.payload.revision);
+    const accepted = reports.find((report) => report.revision === selectedRevision);
+    const acceptedBinding = reportBindings.get(selectedRevision);
     if (
       !accepted ||
+      !acceptedBinding ||
       accepted.verdict.decision !== "accept" ||
       accepted.draftDigest !== selection.payload.graphDigest ||
       draftDigest(accepted.inventory) !== selection.payload.inventoryDigest ||
       draftDigest(accepted.verdict) !== selection.payload.verdictDigest ||
-      draftDigest(accepted.challenges) !== draftDigest(selection.payload.reviewEvidence ?? [])
+      draftDigest(accepted.challenges) !== draftDigest(selection.payload.reviewEvidence ?? []) ||
+      acceptedBinding.proposalDigest !== selection.payload.proposalDigest ||
+      acceptedBinding.traceDigest !== selection.payload.traceDigest ||
+      acceptedBinding.requestDigest !== selection.payload.requestDigest
     )
       throw new Error("selection has no exact accepted judgment");
   }
@@ -403,18 +487,21 @@ export async function inspectCompilerEvaluation(args: {
     );
     if (!original)
       throw new Error("Compiler causal annotations name a stale or unavailable draft revision");
-    const itemIds = new Set(
-      records
-        .filter(
-          (record) =>
-            record.kind === "validation" &&
-            record.payload.revision === annotations.revision &&
-            record.payload.valid === true,
-        )
-        .flatMap((record) =>
-          parsePersistedCompiledObjective(record.payload.graph).workItems.map((item) => item.id),
-        ),
+    const annotatedProposalResult = results.find(
+      (record) =>
+        record.payload.revision === annotations.revision &&
+        (record.payload.stage === "compile" || record.payload.stage === "repair") &&
+        !record.payload.error,
     );
+    if (
+      !annotatedProposalResult?.payload.value ||
+      typeof annotatedProposalResult.payload.value !== "object"
+    )
+      throw new Error("Compiler causal annotations have no semantic proposal");
+    const annotatedProposal = CompilerProposalSchema.parse(
+      (annotatedProposalResult.payload.value as Record<string, unknown>).proposal,
+    );
+    const itemIds = new Set(annotatedProposal.workItems.map((item) => item.id));
     const findingIds = new Set(original.verdict.findings.map((finding) => finding.id));
     const causeIds = new Set<string>();
     for (const cause of annotations.causes) {
@@ -461,7 +548,12 @@ export async function inspectCompilerEvaluation(args: {
     const annotated = createCompilerEvalReport({
       inventory: original.inventory,
       challenges: original.challenges,
-      graph: parsePersistedCompiledObjective(validation.payload.graph),
+      graph: annotatedProposal,
+      addedEdges: (
+        validation.payload.projectionTrace as {
+          addedEdges: Array<{ itemId: string; dependsOn: string }>;
+        }
+      ).addedEdges,
       verdict: original.verdict,
       draftDigest: original.draftDigest,
       mode: original.mode,

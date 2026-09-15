@@ -289,7 +289,13 @@ describe("sandbox bootstrap contracts", () => {
       .map((file) => file.content.toString("utf8"))
       .join("\n");
     const managed = files.find((file) => file.path.endsWith("/pnpm.asset"));
-    expect(managed?.content.byteLength).toBeGreaterThan(100);
+    const managedConfiguration = config.managedToolchain.assets.find(({ path }) =>
+      path.endsWith("/pnpm.asset"),
+    );
+    expect(managed?.content.byteLength).toBeGreaterThan(0);
+    expect(createHash("sha256").update(managed!.content).digest("hex")).toBe(
+      managedConfiguration?.sha256,
+    );
     expect(config.managedToolchain.tool).toBe("pnpm");
     expect(config.managedToolchain.assets.map(({ path }) => path)).toEqual(
       expect.arrayContaining([

@@ -120,6 +120,14 @@ the inventory single-shot; invocation, time, observed-token, accounting, and inp
 apply before every model call. Exact usage alone never authorizes an inventory retry: only a retained,
 bounded response that fails deterministic claims schema or evidence-grounding validation is repairable.
 
+For local compiler debugging, set `FACTORY_MANAGEMENT_TRANSCRIPT_DIR` to an absolute Linux path
+before launching Factory or installing its unattended controller. Factory then writes private,
+bounded JSON records containing the exact prompt and schema it supplied, every assistant message and
+provider event visible through the Codex CLI boundary, timing, outcome, and the input/output/cached
+token split. Provider-owned system and developer messages are recorded as unavailable because Codex
+CLI does not expose them. These files stay on the host and never become GitHub evidence or recovery
+state. See [local management transcripts](docs/setup/configuration.md#local-management-transcripts).
+
 ## What Factory handles
 
 - **Planning and scheduling:** acceptance criteria, native GitHub dependencies, ready-task ordering,

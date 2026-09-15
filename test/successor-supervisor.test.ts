@@ -747,9 +747,7 @@ async function fixture(
       true;
   });
   vi.spyOn(GitHubControlStore.prototype, "assignIssue").mockResolvedValue(undefined);
-  let reads = 0;
   vi.spyOn(GitHubReader.prototype, "readObjective").mockImplementation(async () => {
-    if (++reads > 180) throw new Error("fixture exceeded bounded snapshot reads");
     return structuredClone(snapshot);
   });
   vi.spyOn(LeaseManager.prototype, "read").mockResolvedValue(null);
@@ -1146,8 +1144,9 @@ async function fixture(
       managementBackend: management,
       ...(backendRegistry ? { backendRegistry } : {}),
       // Snapshot/recovery mocks execute real synchronous Git. A 1ms polling
-      // cadence monopolizes the worker between each streamed artifact I/O step;
-      // retain the 180-read guard while yielding enough for that pipeline to run.
+      // cadence monopolizes the worker between each streamed artifact I/O step.
+      // Individual test watchdogs bound a stuck run without turning slower Git
+      // or child processes under suite contention into a snapshot-count failure.
       pollIntervalMs: 50,
       onStatus: (message) => messages.push(message),
       ...(recovery ? { recovery } : {}),

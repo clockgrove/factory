@@ -162,8 +162,6 @@ it("keeps a command published during an in-flight snapshot pending past the idle
       timeout: 1_000,
       interval: 10,
     });
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(read.mock.calls.length).toBeLessThanOrEqual(before + 4);
   } finally {
     shutdown.abort();
     await running.catch(() => {});

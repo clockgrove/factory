@@ -231,6 +231,9 @@ describe("obligation-first compiler evidence", () => {
           invocationId: "call",
           phase: "worker",
           evidenceId: "attempt",
+          inputTokens: null,
+          outputTokens: null,
+          cachedInputTokens: null,
           observedTokens: 123,
           observedMilliseconds: null,
         },
@@ -250,7 +253,25 @@ describe("obligation-first compiler evidence", () => {
     expect(report.observedTotalTokens).toBeNull();
     expect(report.economicBenefitMeasured).toBe(false);
     expect(renderCompilerEvalMarkdown(report)).toContain("estimated avoidable tokens: 40");
+    expect(renderCompilerEvalMarkdown(report)).toContain(
+      "total tokens 123; input unavailable; output unavailable; cached input unavailable (cached input is included in input)",
+    );
     expect(JSON.parse(JSON.stringify(report)).usage[0]!.observedMilliseconds).toBeNull();
+    expect(() =>
+      createCompilerEvalReport({
+        ...expected,
+        verdict: reviewed,
+        historicalEvidence: report.evidence.filter((entry) => entry.id === "attempt"),
+        usage: [
+          {
+            ...report.usage[0]!,
+            inputTokens: 100,
+            outputTokens: 20,
+            cachedInputTokens: 80,
+          },
+        ],
+      }),
+    ).toThrow("disagrees with input and output");
     expect(() =>
       createCompilerEvalReport({
         ...expected,

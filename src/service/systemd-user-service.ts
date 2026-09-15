@@ -24,6 +24,7 @@ const SYSTEM_COMMAND_DIRECTORIES = [
 type CommandEnvironment = Readonly<{
   PATH?: string | undefined;
   FACTORY_CODEX_PATH?: string | undefined;
+  FACTORY_MANAGEMENT_TRANSCRIPT_DIR?: string | undefined;
 }>;
 export interface SystemdServiceInput {
   repository: string;
@@ -390,6 +391,13 @@ export class SystemdUserService {
     const assignments = [`PATH=${[...new Set(directories)].join(":")}`];
     // A custom basename or explicit pinned launcher cannot be represented by PATH alone.
     if (configured && codex) assignments.push(`FACTORY_CODEX_PATH=${codex}`);
+    const transcriptDirectory = environment.FACTORY_MANAGEMENT_TRANSCRIPT_DIR?.trim();
+    if (transcriptDirectory) {
+      if (!isAbsolute(transcriptDirectory) || unsafeEnvironmentValue(transcriptDirectory)) {
+        throw new Error("management transcript directory must be a safe absolute path");
+      }
+      assignments.push(`FACTORY_MANAGEMENT_TRANSCRIPT_DIR=${resolve(transcriptDirectory)}`);
+    }
     return assignments.map((assignment) => `Environment=${systemdQuote(assignment)}\n`);
   }
   #unit(

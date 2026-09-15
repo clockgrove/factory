@@ -621,6 +621,12 @@ describe("attempt reservation", () => {
       validationEvent,
     ]);
     expect(decodeEventComments(store.comments.at(-1)!.body)).toEqual([failedManagement]);
+    expect(store.comments.at(-2)!.body).toContain(
+      "Factory reconciled model_tokens for execution: total 321; input 300; output 21; cached input 200 (cached input is included in input).",
+    );
+    expect(store.comments.at(-1)!.body).toContain(
+      "Factory reconciled model_tokens for management: total 150; input 120; output 30; cached input 0 (cached input is included in input).",
+    );
     expect(failedManagement.reportedModelUsage).toEqual({
       inputTokens: 120,
       outputTokens: 30,
@@ -656,6 +662,9 @@ describe("attempt reservation", () => {
     ]);
     expect(store.comments.at(-1)!.body).toContain(
       "Restore provider quota for future model work. Recovery eligibility is determined only from the complete run history after Factory has reconciled admitted work and written a terminal receipt.",
+    );
+    expect(store.comments.at(-1)!.body).toContain(
+      "Factory reconciled model_tokens for execution: total 9; input 7; output 2; cached input unavailable (cached input is included in input).",
     );
     expect(store.comments.at(-1)!.body).not.toContain("explicitly requesting recovery");
     expect(store.comments.at(-1)!.body).not.toContain("cannot currently be recovered");

@@ -44,6 +44,19 @@ export interface BudgetEventArgs {
   reportedModelUsage?: ReportedModelUsage;
 }
 
+function reconciledModelTokenSummary(event: FactoryEvent): string | null {
+  if (
+    event.kind !== "budget" ||
+    event.event !== "BudgetReconciled" ||
+    event.unit !== "model_tokens"
+  )
+    return null;
+  const input = event.reportedModelUsage?.inputTokens ?? "unavailable";
+  const output = event.reportedModelUsage?.outputTokens ?? "unavailable";
+  const cached = event.reportedModelUsage?.cachedInputTokens ?? "unavailable";
+  return `Factory reconciled model_tokens for ${event.phase}: total ${event.amount}; input ${input}; output ${output}; cached input ${cached} (cached input is included in input).`;
+}
+
 function assertReservationLease(reservation: AttemptReservation, lease: LeaseState): void {
   if (
     reservation.objective !== lease.objective ||
@@ -451,8 +464,15 @@ export class LifecycleRecorder {
         events.length === 1
           ? first.event === "BudgetReserved" && first.modelInvocationId
             ? "Factory recorded model dispatch intent; token consumption is not yet known."
-            : `Factory ${first.event === "BudgetReserved" ? "reserved" : "reconciled"} ${first.amount} ${first.unit}.`
-          : `Factory recorded ${events.length} adjacent budget events.`,
+            : (reconciledModelTokenSummary(events[0]!) ??
+              `Factory ${first.event === "BudgetReserved" ? "reserved" : "reconciled"} ${first.amount} ${first.unit}.`)
+          : [
+              `Factory recorded ${events.length} adjacent budget events.`,
+              ...events.flatMap((event) => {
+                const summary = reconciledModelTokenSummary(event);
+                return summary ? [summary] : [];
+              }),
+            ].join(" "),
         events,
       ),
       mutationClass,
@@ -512,7 +532,8 @@ export class LifecycleRecorder {
       encodeEventComment(
         args.event === "BudgetReserved" && args.modelInvocationId
           ? "Factory recorded model dispatch intent; token consumption is not yet known."
-          : `Factory recorded ${args.amount} ${args.unit} for management.`,
+          : (reconciledModelTokenSummary(event) ??
+              `Factory recorded ${args.amount} ${args.unit} for management.`),
         event,
       ),
       mutationClass,
@@ -607,7 +628,10 @@ export class LifecycleRecorder {
     await this.store.addIssueComment(
       args.issueNodeId,
       encodeEventBatchComment(
-        `Factory stopped at a non-retryable ${args.providerMessage}. ${recoveryGuidance}`,
+        [
+          `Factory stopped at a non-retryable ${args.providerMessage}. ${recoveryGuidance}`,
+          ...(usage ? [reconciledModelTokenSummary(usage)!] : []),
+        ].join(" "),
         events,
       ),
     );

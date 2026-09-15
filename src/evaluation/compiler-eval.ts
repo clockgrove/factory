@@ -397,6 +397,9 @@ export interface CompilerEvalUsage {
   invocationId: string;
   phase: "obligations" | "compile" | "judge" | "repair" | "worker" | "validation";
   evidenceId: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
   observedTokens: number | null;
   observedMilliseconds: number | null;
 }
@@ -443,9 +446,27 @@ export function createCompilerEvalReport(input: {
   );
   for (const entry of usage) {
     references([entry.evidenceId], evidenceIds, "usage evidence");
-    for (const value of [entry.observedTokens, entry.observedMilliseconds])
+    for (const value of [
+      entry.inputTokens,
+      entry.outputTokens,
+      entry.cachedInputTokens,
+      entry.observedTokens,
+      entry.observedMilliseconds,
+    ])
       if (value !== null && (!Number.isFinite(value) || value < 0))
         throw new Error("invalid observed usage");
+    if (
+      entry.inputTokens !== null &&
+      entry.outputTokens !== null &&
+      entry.observedTokens !== entry.inputTokens + entry.outputTokens
+    )
+      throw new Error("observed token total disagrees with input and output");
+    if (
+      entry.cachedInputTokens !== null &&
+      entry.inputTokens !== null &&
+      entry.cachedInputTokens > entry.inputTokens
+    )
+      throw new Error("cached input exceeds input tokens");
   }
   for (const entry of causes) {
     references(
@@ -561,7 +582,7 @@ export function renderCompilerEvalMarkdown(report: CompilerEvalReport): string {
     "",
     ...report.usage.map(
       (entry) =>
-        `- ${clean(entry.invocationId)} (${entry.phase}): observed tokens ${entry.observedTokens ?? "unknown"}, milliseconds ${entry.observedMilliseconds ?? "unknown"}; evidence: ${clean(entry.evidenceId)}`,
+        `- ${clean(entry.invocationId)} (${entry.phase}): total tokens ${entry.observedTokens ?? "unavailable"}; input ${entry.inputTokens ?? "unavailable"}; output ${entry.outputTokens ?? "unavailable"}; cached input ${entry.cachedInputTokens ?? "unavailable"} (cached input is included in input); milliseconds ${entry.observedMilliseconds ?? "unknown"}; evidence: ${clean(entry.evidenceId)}`,
     ),
     "",
     "## Accounting and limitations",

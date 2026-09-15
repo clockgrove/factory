@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FactorySupervisor } from "../src/supervisor.js";
 import * as progress from "../src/scheduling/progress-wake.js";
@@ -89,17 +91,121 @@ async function fixture(
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-sibling-integration-"));
   directories.push(repository);
-  const git = (...args: string[]) =>
-    execFileSync("git", args, {
+  let currentBranch: string | undefined;
+  let mainHead: string | undefined;
+  const git = (...args: string[]) => {
+    const output = execFileSync("git", args, {
       cwd: repository,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "Fixture",
+        GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+        GIT_COMMITTER_NAME: "Fixture",
+        GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+      },
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
     }).trim();
+    if (args[0] === "init") currentBranch = args[args.indexOf("-b") + 1];
+    if (args[0] === "checkout") {
+      const branchIndex = args.indexOf("-b");
+      currentBranch = branchIndex >= 0 ? args[branchIndex + 1] : args.at(-1);
+    }
+    if (
+      args[0] === "rev-parse" &&
+      (args[1] === "main" || (args[1] === "HEAD" && currentBranch === "main"))
+    )
+      mainHead = output;
+    return output;
+  };
+  const writeGitObject = (type: "blob" | "tree" | "commit", content: Buffer) => {
+    const object = Buffer.concat([Buffer.from(`${type} ${content.length}\0`), content]);
+    const id = createHash("sha1").update(object).digest("hex");
+    const objectDirectory = join(repository, ".git", "objects", id.slice(0, 2));
+    mkdirSync(objectDirectory, { recursive: true });
+    try {
+      writeFileSync(join(objectDirectory, id.slice(2)), deflateSync(object), { flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    return id;
+  };
+  type FixtureTreeEntry = {
+    path: string;
+    mode: string;
+    type: "blob" | "tree";
+    sha?: string | null;
+  };
+  const writeGitTree = (entries: FixtureTreeEntry[]): string => {
+    const direct: Array<{ name: string; mode: string; type: "blob" | "tree"; sha: string }> = [];
+    const nested = new Map<string, FixtureTreeEntry[]>();
+    for (const entry of entries) {
+      if (!entry.sha) continue;
+      const separator = entry.path.indexOf("/");
+      if (separator < 0) {
+        direct.push({ name: entry.path, mode: entry.mode, type: entry.type, sha: entry.sha });
+        continue;
+      }
+      const directory = entry.path.slice(0, separator);
+      const children = nested.get(directory) ?? [];
+      children.push({ ...entry, path: entry.path.slice(separator + 1) });
+      nested.set(directory, children);
+    }
+    for (const [name, children] of nested)
+      direct.push({ name, mode: "40000", type: "tree", sha: writeGitTree(children) });
+    direct.sort((left, right) =>
+      Buffer.compare(
+        Buffer.from(left.type === "tree" ? `${left.name}/` : left.name),
+        Buffer.from(right.type === "tree" ? `${right.name}/` : right.name),
+      ),
+    );
+    return writeGitObject(
+      "tree",
+      Buffer.concat(
+        direct.map((entry) =>
+          Buffer.concat([
+            Buffer.from(`${entry.mode} ${entry.name}\0`),
+            Buffer.from(entry.sha, "hex"),
+          ]),
+        ),
+      ),
+    );
+  };
+  const writeGitCommit = (args: { treeOid: string; parentOids: string[]; message: string }) => {
+    const actor = "Fixture <fixture@example.invalid> 1700000000 +0000";
+    return writeGitObject(
+      "commit",
+      Buffer.from(
+        `tree ${args.treeOid}\n${args.parentOids.map((parent) => `parent ${parent}\n`).join("")}` +
+          `author ${actor}\ncommitter ${actor}\n\n${args.message}\n`,
+      ),
+    );
+  };
+  const seededCommits = new Map<string, GitCommitObject>();
+  const immutableGitResults = new Map<
+    string,
+    Awaited<ReturnType<typeof processGroup.runContainedProcess>>
+  >();
   vi.spyOn(processGroup, "runContainedProcess").mockImplementation(async (input) => {
     if (input.command !== "git" || input.cwd !== repository) return runContainedProcess(input);
+    const args = input.args ?? [];
+    const exactObject = /^[0-9a-f]{40}\^\{(?:blob|commit|tree)\}$/;
+    const exactDiff =
+      args[0] === "diff" &&
+      !args.includes("--cached") &&
+      args.filter((arg) => /^[0-9a-f]{40}$/.test(arg)).length >= 2;
+    const cacheable =
+      (args[0] === "cat-file" && args[1] === "-e" && exactObject.test(args[2] ?? "")) ||
+      (args[0] === "rev-parse" && exactObject.test(args[1] ?? "")) ||
+      (args[0] === "rev-parse" && args[1] === "--show-toplevel") ||
+      (args[0] === "remote" && args[1] === "get-url" && args[2] === "origin") ||
+      exactDiff;
+    const cacheKey = cacheable ? JSON.stringify(args) : "";
+    const cached = immutableGitResults.get(cacheKey);
+    if (cached) return { ...cached, durationMs: 0 };
     const startedAt = Date.now();
     try {
-      const stdout = execFileSync("git", input.args ?? [], {
+      const stdout = execFileSync("git", args, {
         cwd: input.cwd,
         env: input.env,
         encoding: "utf8",
@@ -107,14 +213,16 @@ async function fixture(
         timeout: input.timeoutMs,
         maxBuffer: input.maxOutputBytes,
       });
-      return {
+      const result = {
         exitCode: 0,
-        signal: null,
+        signal: null as NodeJS.Signals | null,
         stdout,
         stderr: "",
         durationMs: Date.now() - startedAt,
         timedOut: false,
       };
+      if (cacheable) immutableGitResults.set(cacheKey, result);
+      return result;
     } catch (error) {
       const failure = error as {
         status?: number | null;
@@ -133,28 +241,62 @@ async function fixture(
     }
   });
   git("init", "-q", "-b", "main");
-  git("config", "user.name", "Fixture");
-  git("config", "user.email", "fixture@example.invalid");
   git("remote", "add", "origin", "https://github.com/o/r.git");
-  await writeFile(join(repository, "README.md"), "Fixture\n");
+  const baseEntries: FixtureTreeEntry[] = [
+    {
+      path: "README.md",
+      mode: "100644",
+      type: "blob",
+      sha: writeGitObject("blob", Buffer.from("Fixture\n")),
+    },
+  ];
   if (options.failCombinedTests)
-    await writeFile(
-      join(repository, "combined.test.mjs"),
-      'import { existsSync } from "node:fs";\nif (existsSync("a.txt") && existsSync("b.txt")) throw new Error("combined regression");\n',
-    );
-  git("add", ".");
-  git("commit", "-qm", "base");
-  const baseSha = git("rev-parse", "HEAD");
+    baseEntries.push({
+      path: "combined.test.mjs",
+      mode: "100644",
+      type: "blob",
+      sha: writeGitObject(
+        "blob",
+        Buffer.from(
+          'import { existsSync } from "node:fs";\nif (existsSync("a.txt") && existsSync("b.txt")) throw new Error("combined regression");\n',
+        ),
+      ),
+    });
+  const baseTree = writeGitTree(baseEntries);
+  const baseSha = writeGitCommit({
+    treeOid: baseTree,
+    parentOids: [],
+    message: "base",
+  });
+  seededCommits.set(baseSha, {
+    oid: baseSha,
+    treeOid: baseTree,
+    parentOids: [],
+    message: "base",
+    serverTime: new Date(),
+  });
+  writeFileSync(join(repository, ".git", "refs", "heads", "main"), `${baseSha}\n`);
+  git("reset", "-q", "--hard", baseSha);
+  mainHead = baseSha;
+  const readMainHead = () => mainHead ?? git("rev-parse", "main");
   const heads: string[] = [];
   const names = options.thirdSibling ? ["a", "b", "c"] : ["a", "b"];
   for (const name of names) {
-    git("checkout", "-q", "-b", name, baseSha);
-    await writeFile(join(repository, `${name}.txt`), `${name}\n`);
-    git("add", ".");
-    git("commit", "-qm", name);
-    heads.push(git("rev-parse", "HEAD"));
+    const blob = writeGitObject("blob", Buffer.from(`${name}\n`));
+    const tree = writeGitTree([
+      ...baseEntries,
+      { path: `${name}.txt`, mode: "100644", type: "blob", sha: blob },
+    ]);
+    const head = writeGitCommit({ treeOid: tree, parentOids: [baseSha], message: name });
+    heads.push(head);
+    seededCommits.set(head, {
+      oid: head,
+      treeOid: tree,
+      parentOids: [baseSha],
+      message: name,
+      serverTime: new Date(),
+    });
   }
-  git("checkout", "-q", "main");
   const now = new Date();
   const policy = parseRunPolicy({
     ...DEFAULT_RUN_POLICY,
@@ -178,6 +320,7 @@ async function fixture(
     });
   const refs = new Map<string, string>();
   const commits = new Map<string, GitCommitObject>();
+  const observedCommits = new Map(seededCommits);
   const blobs = new Map<string, Buffer>();
   const trees = new Map<string, Map<string, string>>();
   let stalePreviewServed = false;
@@ -186,15 +329,15 @@ async function fixture(
   const oid = () => createHash("sha1").update(`metadata-${counter++}`).digest("hex");
   const readCommit = async (id: string): Promise<GitCommitObject> => {
     if (id === stalePreviewOid) stalePreviewServed = true;
-    const synthetic = commits.get(id);
-    if (synthetic) return synthetic;
-    // Read fresh immutable metadata in one subprocess; do not cache observations
-    // or spend three Git startups on every admission/recovery proof read.
+    const cached = commits.get(id) ?? observedCommits.get(id);
+    if (cached) return cached;
+    // Commit objects are immutable by OID. Cache fixture reads so the parallel
+    // suite does not turn repeated proof checks into hundreds of Git startups.
     const output = git("show", "-s", "--format=%T%x00%P%x00%B", id);
     const treeEnd = output.indexOf("\0");
     const parentsEnd = output.indexOf("\0", treeEnd + 1);
     if (treeEnd < 0 || parentsEnd < 0) throw new Error("malformed fixture Git commit");
-    return {
+    const commit = {
       oid: id,
       treeOid: output.slice(0, treeEnd),
       parentOids: output
@@ -204,10 +347,11 @@ async function fixture(
       message: output.slice(parentsEnd + 1).trim(),
       serverTime: new Date(),
     };
+    observedCommits.set(id, commit);
+    return commit;
   };
   const storage: CompiledGraphStore = {
-    readRef: async (ref) =>
-      ref === "refs/heads/main" ? git("rev-parse", "main") : (refs.get(ref) ?? null),
+    readRef: async (ref) => (ref === "refs/heads/main" ? readMainHead() : (refs.get(ref) ?? null)),
     readCommit,
     readCommitContent: readCommit,
     readBlob: async (id) => {
@@ -217,11 +361,7 @@ async function fixture(
     },
     readTreeEntry: async (id, path) => trees.get(id)?.get(path) ?? null,
     createBlob: async (bytes) => {
-      const id = execFileSync("git", ["hash-object", "-w", "--stdin"], {
-        cwd: repository,
-        input: bytes,
-        encoding: "utf8",
-      }).trim();
+      const id = writeGitObject("blob", bytes);
       blobs.set(id, bytes);
       return id;
     },
@@ -229,43 +369,45 @@ async function fixture(
       entries = entries.map((entry) => {
         if (entry.content === undefined) return entry;
         const bytes = Buffer.from(entry.content, "utf8");
-        const sha = execFileSync("git", ["hash-object", "-w", "--stdin"], {
-          cwd: repository,
-          input: bytes,
-          encoding: "utf8",
-        }).trim();
+        const sha = writeGitObject("blob", bytes);
         blobs.set(sha, bytes);
         return { path: entry.path, mode: entry.mode, type: entry.type, sha };
       });
-      const env = { ...process.env, GIT_INDEX_FILE: join(repository, ".git", "upload-index") };
-      execFileSync("git", ["read-tree", baseTreeOid ?? "--empty"], { cwd: repository, env });
-      execFileSync("git", ["update-index", "--index-info"], {
-        cwd: repository,
-        env,
-        input: entries
-          .map(
-            (entry) =>
-              `${entry.sha ? entry.mode : "0"} ${entry.sha ?? "0".repeat(40)}\t${entry.path}\n`,
-          )
-          .join(""),
-      });
-      const id = execFileSync("git", ["write-tree"], {
-        cwd: repository,
-        env,
-        encoding: "utf8",
-      }).trim();
-      trees.set(
-        id,
-        new Map(entries.filter((entry) => entry.sha).map((entry) => [entry.path, entry.sha!])),
-      );
+      let id: string;
+      if (baseTreeOid) {
+        // Sibling refresh trees are production artifacts and keep real Git
+        // materialization. Metadata-only checkpoint trees have no base and can
+        // stay in the immutable fixture store without spawning Git.
+        const env = { ...process.env, GIT_INDEX_FILE: join(repository, ".git", "upload-index") };
+        execFileSync("git", ["read-tree", baseTreeOid], { cwd: repository, env });
+        execFileSync("git", ["update-index", "--index-info"], {
+          cwd: repository,
+          env,
+          input: entries
+            .map(
+              (entry) =>
+                `${entry.sha ? entry.mode : "0"} ${entry.sha ?? "0".repeat(40)}\t${entry.path}\n`,
+            )
+            .join(""),
+        });
+        id = execFileSync("git", ["write-tree"], {
+          cwd: repository,
+          env,
+          encoding: "utf8",
+        }).trim();
+      } else {
+        id = writeGitTree(entries);
+      }
+      const tree = new Map(baseTreeOid ? trees.get(baseTreeOid) : undefined);
+      for (const entry of entries) {
+        if (entry.sha) tree.set(entry.path, entry.sha);
+        else tree.delete(entry.path);
+      }
+      trees.set(id, tree);
       return id;
     },
     createCommit: async (args) => {
-      const id = execFileSync(
-        "git",
-        ["commit-tree", args.treeOid, ...args.parentOids.flatMap((parent) => ["-p", parent])],
-        { cwd: repository, input: args.message, encoding: "utf8" },
-      ).trim();
+      const id = writeGitCommit(args);
       commits.set(id, { ...args, oid: id, serverTime: new Date() });
       return id;
     },
@@ -582,6 +724,7 @@ async function fixture(
     git("merge", "--squash", peerHead);
     git("commit", "-qm", "peer squash");
     peerMergeSha = git("rev-parse", "HEAD");
+    mainHead = peerMergeSha;
     const peerTree = (await readCommit(peerHead)).treeOid;
     const peerLease = { ...lease, objective: 6, runId: "peer" };
     const peerItem = {
@@ -830,7 +973,7 @@ async function fixture(
     observedChecks: [],
   });
   vi.spyOn(GitHubControlStore.prototype, "getBranchHead").mockImplementation(async () =>
-    readCommit(git("rev-parse", "main")),
+    readCommit(readMainHead()),
   );
   let lostIntegrationReceipt = false;
   vi.spyOn(GitHubControlStore.prototype, "addIssueComment").mockImplementation(
@@ -860,7 +1003,6 @@ async function fixture(
       true;
   });
   vi.spyOn(GitHubControlStore.prototype, "assignIssue").mockResolvedValue(undefined);
-  let reads = 0;
   vi.spyOn(GitHubReader.prototype, "readObjective").mockImplementation(async (number) => {
     if (number === 6 && peerSnapshot) {
       const observed = structuredClone(peerSnapshot);
@@ -870,10 +1012,6 @@ async function fixture(
           for (const pull of item.linkedPullRequests) pull.state = "OPEN";
       return observed;
     }
-    // Concurrent Git and validation work can require more than 80 observations
-    // under the full coverage matrix. Keep a finite runaway fence aligned with
-    // the provider Supervisor fixture instead of racing normal slow progress.
-    if (++reads > 500) throw new Error("fixture exceeded bounded snapshot reads");
     return structuredClone(snapshot);
   });
   vi.spyOn(GitHubReader.prototype, "readRunCancellationRequest").mockResolvedValue(null);
@@ -977,32 +1115,46 @@ async function fixture(
       };
     },
   );
+  const previewTrees = new Map<string, string>();
+  const previewCommits = new Map<string, string>();
   const pullReads = vi
     .spyOn(GitHubControlStore.prototype, "readPullRequest")
     .mockImplementation(async (number) => {
       const pull = findPull(number);
       const lag = staleRefreshHeads.get(number);
       const observedHead = lag && lag.remaining-- > 0 ? lag.head : pull.headSha;
-      const currentBase = git("rev-parse", "main");
+      const currentBase = readMainHead();
       const previewState = number === 19 ? options.previewState?.() : "fresh";
       const oneShotStaleParents =
         options.stalePreviewOnce &&
         !stalePreviewServed &&
         number === 19 &&
         [...refs.keys()].filter((ref) => ref.includes("/reviews/")).length > names.length;
-      const previewTree =
-        options.wrongPreviewTree && number === 19
-          ? git("rev-parse", `${heads[number - 18]}^{tree}`)
-          : git("merge-tree", "--write-tree", currentBase, pull.headSha).split("\n")[0]!;
+      const previewTreeKey = `${currentBase}:${pull.headSha}:${
+        options.wrongPreviewTree && number === 19 ? "wrong" : "merge"
+      }`;
+      let previewTree = previewTrees.get(previewTreeKey);
+      if (!previewTree) {
+        previewTree =
+          options.wrongPreviewTree && number === 19
+            ? git("rev-parse", `${heads[number - 18]}^{tree}`)
+            : git("merge-tree", "--write-tree", currentBase, pull.headSha).split("\n")[0]!;
+        previewTrees.set(previewTreeKey, previewTree);
+      }
       const previewParents = [
         oneShotStaleParents || previewState === "stale-parents" ? baseSha : currentBase,
         pull.headSha,
       ];
-      const preview = execFileSync(
-        "git",
-        ["commit-tree", previewTree, ...previewParents.flatMap((parent) => ["-p", parent])],
-        { cwd: repository, input: "GitHub test merge", encoding: "utf8" },
-      ).trim();
+      const previewKey = `${previewTree}:${previewParents.join(":")}`;
+      let preview = previewCommits.get(previewKey);
+      if (!preview) {
+        preview = writeGitCommit({
+          treeOid: previewTree,
+          parentOids: previewParents,
+          message: "GitHub test merge",
+        });
+        previewCommits.set(previewKey, preview);
+      }
       if (pull.state === "OPEN")
         commits.set(preview, {
           oid: preview,
@@ -1053,7 +1205,7 @@ async function fixture(
           runId: "parallel",
           pullRequest: number,
           headSha,
-          baseSha: git("rev-parse", "main"),
+          baseSha: readMainHead(),
         },
       });
       if (number === 19 && options.rejectMergeOnce && !mergeRejected) {
@@ -1063,6 +1215,7 @@ async function fixture(
       git("merge", "--squash", headSha);
       git("commit", "-qm", `merge PR ${number}`);
       const merged = git("rev-parse", "HEAD");
+      mainHead = merged;
       mergeShas.set(number, merged);
       findPull(number).state = "MERGED";
       if (number === 19 && options.loseMergeResponse && !responseLost) {
@@ -1076,6 +1229,7 @@ async function fixture(
         await writeFile(join(repository, "external.txt"), "outside this run\n");
         git("add", ".");
         git("commit", "-qm", "external advance");
+        mainHead = git("rev-parse", "HEAD");
       }
       options.afterMerge?.(number);
       return merged;
@@ -1119,7 +1273,10 @@ async function fixture(
       policy,
       managementBackend: management,
       ...(options.peerAdvance ? { controllerObservation: () => controller } : {}),
-      pollIntervalMs: options.pollIntervalMs ?? 1,
+      // The mocked snapshot transport returns immediately while validation
+      // still uses real child processes. Use a realistic observation cadence
+      // so a contended suite cannot spin snapshots while those children run.
+      pollIntervalMs: options.pollIntervalMs ?? 50,
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.onStatus ? { onStatus: options.onStatus } : {}),
     }).run();

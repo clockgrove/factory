@@ -10,6 +10,7 @@ import { assertNoSecretMaterial, assertWithinBytes } from "../protocol/limits.js
 import { RepositoryScopePathSchema, semanticReviewCriteria } from "../protocol/worker-packet.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
 import { pinnedGitEnvironment } from "../runtime/pinned-git-environment.js";
+import { assertPinnedCompilationTreeProof } from "../execution/pinned-compilation-tree.js";
 import { withVerifiedReviewCheckout } from "./review-checkout.js";
 import {
   createIsolatedCodexHome,
@@ -592,6 +593,17 @@ export class CodexCliManagementBackend implements ManagementBackend {
     }
   }
 
+  #assertCompilerContext(context: CompilationContext | undefined): void {
+    // runStructured is an injected test boundary and never launches Codex in the supplied cwd.
+    if (this.#options.runStructured) return;
+    if (!context) throw new Error("management model requires an exact-base compilation context");
+    assertPinnedCompilationTreeProof(context.pinnedCompilationTree, {
+      repository: context.repository,
+      baseSha: context.baseSha,
+      files: context.repositoryFiles,
+    });
+  }
+
   async probe(): Promise<{ available: boolean; authenticated: boolean; reason?: string }> {
     const target = await resolveCodexCommand(this.#options.command);
     const result = await runContainedProcess({
@@ -640,6 +652,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
     beforeModelInvocation?: CompilerModelAdmission,
     execution?: CompilationContext,
   ): Promise<CompilerProposalResult> {
+    this.#assertCompilerContext(execution);
     const request = CompilerRequestSchema.parse(requestInput);
     const requestReport = validateCompilerRequest(request);
     if (requestReport.status !== "valid") throw new CompilerRequestValidationError(requestReport);
@@ -704,6 +717,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
     context: CompilerCaseLabelContext,
     checkpoint: CompilerCaseLabelCheckpoint,
   ): Promise<CompilerCaseLabelResult> {
+    this.#assertCompilerContext(context.compilation);
     if (context.pass === "blinded" && context.priorLabel)
       throw new Error("blinded label must not see prior labels");
     const evidence = await readCompilerObligationEvidence(context.compilation);
@@ -792,6 +806,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
     beforeModelInvocation?: CompilerModelAdmission,
     repair?: ObligationRepairContext,
   ): Promise<ObligationResult> {
+    this.#assertCompilerContext(context);
     assertWithinBytes(context, 512 * 1024, "obligation context");
     assertNoSecretMaterial(context, "obligation context");
     const evidence = await readCompilerObligationEvidence(context);
@@ -855,6 +870,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
     checkpoint: PlanJudgeCheckpoint,
     beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<PlanJudgeResult> {
+    this.#assertCompilerContext(context.compilation);
     const { compilation, inventory, proposal, projectionTrace, graphDigest } = context;
     const challenges = validateCompilerInferenceChallenges(context.challenges ?? [], inventory);
     parseObligationInventory(inventory, {

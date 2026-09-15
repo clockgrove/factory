@@ -317,6 +317,13 @@ export async function prepareCompilerRequest(input: {
             /(?:screenshot|snapshot|visual|storybook)/.test(path.toLowerCase()) ||
             /\.(?:png|jpe?g|webp)$/i.test(path),
         ),
+        python: pinnedFacts.relevantPaths.filter(
+          (path) => path === "pyproject.toml" || path.endsWith(".py"),
+        ),
+        rust: pinnedFacts.relevantPaths.filter(
+          (path) => path === "Cargo.toml" || path.endsWith(".rs"),
+        ),
+        go: pinnedFacts.relevantPaths.filter((path) => path === "go.mod" || path.endsWith(".go")),
       },
       pathCount: pinnedFacts.relevantPaths.length,
     },
@@ -421,6 +428,63 @@ export function parseAndValidateCompilerProposal(
     operation: { kind: string; key: string };
   }> = [];
   for (const [itemIndex, item] of proposal.workItems.entries()) {
+    const ownsLanguageSurface = (
+      paths: readonly string[],
+      extension: RegExp,
+      manifests: readonly string[],
+    ) =>
+      paths.some((path) => scopeOwnsPath(item.scope, path)) ||
+      item.scope.some((path) => extension.test(path) || manifests.includes(path));
+    const pythonScope = ownsLanguageSurface(
+      request.repository.validationSurfaces.python,
+      /\.py$/i,
+      ["pyproject.toml"],
+    );
+    const rustScope = ownsLanguageSurface(request.repository.validationSurfaces.rust, /\.rs$/i, [
+      "Cargo.toml",
+    ]);
+    const goScope = ownsLanguageSurface(request.repository.validationSurfaces.go, /\.go$/i, [
+      "go.mod",
+    ]);
+    for (const language of [...(rustScope ? ["rust"] : []), ...(goScope ? ["go"] : [])])
+      violations.push(
+        violation(
+          "unsupported-toolchain",
+          pointer("workItems", itemIndex, "scope"),
+          `compiler-supported ${language} validation authority`,
+          item.scope,
+          item.id,
+        ),
+      );
+    if (pythonScope) {
+      const pythonAuthority = request.repository.toolchains.find(
+        (toolchain) => toolchain.adapterId === "python-uv",
+      );
+      const authorityAvailable =
+        pythonAuthority?.state === "observed" || pythonAuthority?.state === "eligible-deferred";
+      const hasPythonValidation = item.criteria.some((criterion) =>
+        criterion.validation.some((validation) =>
+          validation.evidence.some((reference) =>
+            reference.kind === "observed"
+              ? recipes.get(reference.recipeId)?.adapterId === "python-uv"
+              : reference.kind === "deferred" && reference.adapterId === "python-uv",
+          ),
+        ),
+      );
+      if (!authorityAvailable || !hasPythonValidation)
+        violations.push(
+          violation(
+            authorityAvailable ? "uncovered-criterion" : "unsupported-toolchain",
+            pointer("workItems", itemIndex, "scope"),
+            "python-uv validation authority bound to this Work Item",
+            {
+              state: pythonAuthority?.state ?? "unsupported",
+              scope: item.scope,
+            },
+            item.id,
+          ),
+        );
+    }
     const seenDependencies = new Set<string>();
     for (const dependency of item.dependsOn) {
       if (seenDependencies.has(dependency))

@@ -187,6 +187,7 @@ async function setup(
     unsafeInventory?: boolean;
     mechanicallyInvalidFirst?: boolean;
     schemaInvalidFirst?: boolean;
+    acceptFirst?: boolean;
   } = {},
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-draft-integration-"));
@@ -270,7 +271,7 @@ async function setup(
         draftDigest: string;
         inventoryDigest: string;
       };
-      const accept = repairs > 0 && !options.rejectAll;
+      const accept = (options.acceptFirst === true || repairs > 0) && !options.rejectAll;
       const verdict: CompilerJudgeVerdict = {
         version: 1,
         rubricVersion: 1,
@@ -477,6 +478,24 @@ describe("production compiler draft adapter", () => {
     expect(() => assertCompilerDraftSelection(tampered, result.graph)).toThrow(
       "request digest differs",
     );
+
+    const changedReservation = structuredClone(result.records);
+    const acceptedResult = changedReservation.find(
+      (record) =>
+        record.kind === "result" &&
+        (record.payload.stage === "compile" || record.payload.stage === "repair") &&
+        record.payload.revision === result.revision &&
+        !record.payload.error,
+    )!;
+    const acceptedInvocation = changedReservation.find(
+      (record) =>
+        record.kind === "invocation" &&
+        record.payload.invocationId === acceptedResult.payload.invocationId,
+    )!;
+    acceptedInvocation.payload.compilerRequestDigest = "f".repeat(64);
+    expect(() => assertCompilerDraftSelection(changedReservation, result.graph)).toThrow(
+      "reserved request binding",
+    );
   });
   it("never produces accepted projection authority for report-only rejected plans", async () => {
     const f = await setup({ reportOnly: true });
@@ -487,6 +506,24 @@ describe("production compiler draft adapter", () => {
     expect(
       await new CompiledGraphManager(f.store, f.leases).load(42, f.args.lease.runId),
     ).toBeNull();
+  });
+  it("judges a fixed graph whose derived resource is outside the semantic resource ID domain", async () => {
+    const source = await setup({ acceptFirst: true });
+    const compiled = await compileEvaluatedDraft(source.args);
+    expect(compiled.status).toBe("accepted");
+    if (compiled.status !== "accepted") throw new Error("accepted graph required");
+    const f = await setup({ reportOnly: true, acceptFirst: true });
+    const fixedGraph = structuredClone(compiled.graph);
+    for (const item of fixedGraph.workItems) item.baseSha = f.args.context.baseSha;
+    fixedGraph.workItems[0]!.changeSurface = {
+      mergeClass: "large-binary",
+      exclusiveResources: ["Assets/Image.PNG"],
+    };
+
+    const result = await compileEvaluatedDraft({ ...f.args, fixedGraph });
+
+    expect(result).toMatchObject({ status: "accepted", revision: 0 });
+    expect(f.stages).toEqual(["inventory", "judge"]);
   });
   it("retains malformed repair proposal and observed usage through bounded retries", async () => {
     const f = await setup({ malformedRepair: true });

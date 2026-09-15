@@ -69,6 +69,17 @@ export const COMPILER_VIOLATION_CODES = [
 export const CompilerViolationCodeSchema = z.enum(COMPILER_VIOLATION_CODES);
 export type CompilerViolationCode = z.infer<typeof CompilerViolationCodeSchema>;
 
+export const COMPILER_TERMINAL_VIOLATION_PHASES: Readonly<
+  Partial<Record<CompilerViolationCode, readonly ["request"]>>
+> = {
+  "schema-invalid": ["request"],
+  "partial-toolchain-authority": ["request"],
+  "mixed-toolchain-authority": ["request"],
+  "unsupported-toolchain": ["request"],
+  "no-validation-capability": ["request"],
+  "denied-network-destination": ["request"],
+};
+
 export const CompilerViolationSchema = z
   .object({
     code: CompilerViolationCodeSchema,
@@ -90,7 +101,27 @@ export const CompilerValidationReportSchema = z
     status: z.enum(["valid", "repairable", "unsatisfiable"]),
     violations: z.array(CompilerViolationSchema).max(128),
   })
-  .strict();
+  .strict()
+  .superRefine((report, context) => {
+    const terminal = report.violations.some((violation) =>
+      COMPILER_TERMINAL_VIOLATION_PHASES[violation.code]?.some((phase) => phase === report.phase),
+    );
+    const truncated = report.violations.some((violation) => violation.code === "report-truncated");
+    const canonical =
+      report.violations.length === 0
+        ? "valid"
+        : terminal
+          ? "unsatisfiable"
+          : report.status === "unsatisfiable" && truncated
+            ? "unsatisfiable"
+            : "repairable";
+    if (report.status !== canonical)
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["status"],
+        message: `status must be ${canonical} for its phase and violations`,
+      });
+  });
 export type CompilerValidationReport = z.infer<typeof CompilerValidationReportSchema>;
 
 export const RepositoryCapabilityOperationSchema = z
@@ -265,6 +296,9 @@ export const CompilerRequestSchema = z
           .object({
             deterministicSimulation: z.array(RepositoryScopePathSchema).max(256),
             visual: z.array(RepositoryScopePathSchema).max(256),
+            python: z.array(RepositoryScopePathSchema).max(5_000),
+            rust: z.array(RepositoryScopePathSchema).max(5_000),
+            go: z.array(RepositoryScopePathSchema).max(5_000),
           })
           .strict(),
         pathCount: z.number().int().min(0).max(10_000),
@@ -557,6 +591,9 @@ export const COMPILER_REQUEST_JSON_SCHEMA = {
       validationSurfaces: strictObject({
         deterministicSimulation: stringArray(256, jsonScopePath),
         visual: stringArray(256, jsonScopePath),
+        python: stringArray(5_000, jsonScopePath),
+        rust: stringArray(5_000, jsonScopePath),
+        go: stringArray(5_000, jsonScopePath),
       }),
       pathCount: { type: "integer", minimum: 0, maximum: 10_000 },
     }),

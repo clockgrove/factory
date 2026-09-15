@@ -122,7 +122,13 @@ const proposalRequest = CompilerRequestSchema.parse({
       },
     ],
     toolchains: [],
-    validationSurfaces: { deterministicSimulation: [], visual: [] },
+    validationSurfaces: {
+      deterministicSimulation: [],
+      visual: [],
+      python: [],
+      rust: [],
+      go: [],
+    },
     pathCount: 1,
   },
   constraints: {
@@ -168,9 +174,21 @@ function history() {
       kind,
       payload,
     });
-  const call = (stage: string, revision: number, value: unknown, error?: string) => {
+  const call = (
+    stage: string,
+    revision: number,
+    value: unknown,
+    error?: string,
+    invocationEvidence: Record<string, unknown> = {},
+  ) => {
     const invocationId = `${stage}-${revision}`;
-    add("invocation", { invocationId, stage, revision });
+    add("invocation", {
+      invocationId,
+      stage,
+      revision,
+      inputDigest: "0".repeat(64),
+      ...invocationEvidence,
+    });
     add("result", {
       invocationId,
       stage,
@@ -183,17 +201,23 @@ function history() {
   add("started", {});
   call("inventory", 0, structuredClone(inventory));
   call("compile", 0, null, "secret-api-key=do-not-display");
-  call("repair", 1, {
-    request: structuredClone(proposalRequest),
-    proposal: structuredClone(proposal),
-    report: {
-      protocol: "clockgrove.factory/compiler-validation",
-      phase: "proposal",
-      status: "valid",
-      violations: [],
+  call(
+    "repair",
+    1,
+    {
+      request: structuredClone(proposalRequest),
+      proposal: structuredClone(proposal),
+      report: {
+        protocol: "clockgrove.factory/compiler-validation",
+        phase: "proposal",
+        status: "valid",
+        violations: [],
+      },
+      provenance: { requestDigest: projectionTrace.requestDigest },
     },
-    provenance: { requestDigest: projectionTrace.requestDigest },
-  });
+    undefined,
+    { compilerRequestDigest: projectionTrace.requestDigest },
+  );
   add("validation", {
     revision: 1,
     valid: true,
@@ -245,7 +269,14 @@ function history() {
     uncertainty: [],
     decision: "accept",
   };
-  call("judge", 1, verdict);
+  call("judge", 1, verdict, undefined, {
+    inputDigest: draftDigest({
+      inventory,
+      previous: proposal,
+      projection: projectionTrace,
+      failure: null,
+    }),
+  });
   add("selection", {
     revision: 1,
     graphDigest: compiledGraphDigest(graph),
@@ -304,7 +335,12 @@ describe("read-only compiler evaluation", () => {
       binding,
       sequence: records.length,
       kind: "invocation",
-      payload: { stage: "repair", revision: 2, invocationId: "uncertain" },
+      payload: {
+        stage: "repair",
+        revision: 2,
+        invocationId: "uncertain",
+        inputDigest: "0".repeat(64),
+      },
     });
     vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
     const result = await inspectCompilerEvaluation({
@@ -359,6 +395,35 @@ describe("read-only compiler evaluation", () => {
       ).rejects.toThrow(/projection trace|exact accepted/);
     },
   );
+  it("rejects a proposal result whose reserved compiler request digest changed", async () => {
+    const records = history();
+    const repair = records.find(
+      (record) => record.kind === "invocation" && record.payload.stage === "repair",
+    )!;
+    repair.payload.compilerRequestDigest = "f".repeat(64);
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+
+    await expect(
+      inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+    ).rejects.toThrow("exact compiler request");
+  });
+  it("retains but never reports a judge result whose full invocation digest changed", async () => {
+    const records = history();
+    records.pop();
+    const judge = records.find(
+      (record) => record.kind === "invocation" && record.payload.stage === "judge",
+    )!;
+    judge.payload.inputDigest = "f".repeat(64);
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+
+    const result = await inspectCompilerEvaluation({
+      repository: binding.repository,
+      snapshot,
+      store,
+    });
+    expect(result.reports).toEqual([]);
+    expect(result.markdown).toContain("Invalid historical judge results retained");
+  });
   it("rejects an inventory that is not bound to the Objective input digest", async () => {
     const records = history();
     const inventoryResult = records.find(

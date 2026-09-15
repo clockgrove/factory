@@ -10,6 +10,7 @@ import {
   COMPILER_REQUEST_JSON_SCHEMA,
   CompilerProposalSchema,
   CompilerRequestSchema,
+  CompilerValidationReportSchema,
   type CompilerViolation,
 } from "../src/compiler/contracts.js";
 import {
@@ -184,6 +185,28 @@ describe("strict semantic compiler contracts", () => {
   const ajv = new Ajv2020({ strict: false, allowUnionTypes: true });
   const jsonProposal = ajv.compile(COMPILER_PROPOSAL_JSON_SCHEMA);
   const jsonRequest = ajv.compile(COMPILER_REQUEST_JSON_SCHEMA);
+
+  it.each([
+    { status: "valid", violations: [{ code: "unknown-dependency" }] },
+    { status: "repairable", violations: [] },
+    { status: "unsatisfiable", violations: [] },
+    { status: "repairable", violations: [{ code: "unsupported-toolchain" }] },
+  ])("rejects non-canonical validation report %#", ({ status, violations }) => {
+    expect(
+      CompilerValidationReportSchema.safeParse({
+        protocol: "clockgrove.factory/compiler-validation",
+        phase: "request",
+        status,
+        violations: violations.map(({ code }) => ({
+          code,
+          itemId: null,
+          field: "/repository",
+          expected: "supported",
+          observed: "unsupported",
+        })),
+      }).success,
+    ).toBe(false);
+  });
 
   it("keeps strict Zod and JSON schemas in parity for valid and invalid boundaries", () => {
     const request = semanticRequest();

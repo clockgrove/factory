@@ -22,6 +22,28 @@ const options = [
   "credential.helper=",
 ];
 
+export interface PinnedCompilationTreeProof {
+  readonly repository: string;
+  readonly baseSha: string;
+  readonly files: readonly string[];
+}
+
+const activePinnedCompilationTrees = new WeakSet<PinnedCompilationTreeProof>();
+
+export function assertPinnedCompilationTreeProof(
+  proof: PinnedCompilationTreeProof | undefined,
+  expected: { repository: string; baseSha: string; files: readonly string[] },
+): void {
+  if (
+    !proof ||
+    !activePinnedCompilationTrees.has(proof) ||
+    proof.repository !== resolve(expected.repository) ||
+    proof.baseSha !== expected.baseSha ||
+    JSON.stringify(proof.files) !== JSON.stringify([...expected.files].sort())
+  )
+    throw new Error("management model context is not an active exact-base compilation tree");
+}
+
 async function readPinnedGit(
   cwd: string,
   args: string[],
@@ -271,12 +293,22 @@ export async function materializePinnedCompilationTree(
     // application recognizes the exact raw files without a prior `git status`.
     await git(checkout, ["update-index", "--refresh"]);
     await git(checkout, ["update-ref", "--no-deref", "HEAD", baseSha]);
+    const proof = Object.freeze({
+      repository: resolve(checkout),
+      baseSha,
+      files: Object.freeze([...files].sort()),
+    });
+    activePinnedCompilationTrees.add(proof);
     return {
       path: checkout,
       root,
       files: files.sort(),
       baseSha,
-      dispose: () => rm(root, { recursive: true, force: true }),
+      proof,
+      dispose: () => {
+        activePinnedCompilationTrees.delete(proof);
+        return rm(root, { recursive: true, force: true });
+      },
     };
   } catch (error) {
     await rm(root, { recursive: true, force: true });

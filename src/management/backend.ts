@@ -18,6 +18,7 @@ import type { ValidationEvidence } from "../validation/evidence.js";
 import type { ModelSelection, RunPolicy } from "../protocol/policy.js";
 import type { CompilerWorkItem, DecompositionEvidence } from "../compiler/index.js";
 import type { PinnedLfsFacts } from "../repository-profiles/git-lfs.js";
+import type { PinnedCompilationTreeProof } from "../execution/pinned-compilation-tree.js";
 import type { ProviderQuotaCheckpoint } from "../providers/quota.js";
 
 export interface ManagementUsage {
@@ -46,6 +47,8 @@ export interface CompilationContext {
   defaultBranch: string;
   baseSha: string;
   repositoryFiles: string[];
+  /** Unforgeable in-process proof that repository is an active Factory-owned exact-base tree. */
+  pinnedCompilationTree?: PinnedCompilationTreeProof;
   repositoryLfs?: PinnedLfsFacts;
   allowedNetworkDestinations: string[];
   /** Exact immutable policy activated for this compilation. */

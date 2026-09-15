@@ -26,6 +26,7 @@ import { ProviderQuotaError } from "../src/providers/quota.js";
 import { pinFixtureRepository, proposalFromCompiledFixture } from "./helpers/compiler-proposal.js";
 import { semanticRequest } from "./helpers/semantic-compiler.js";
 import { createCompilerValidationReport } from "../src/compiler/violations.js";
+import { materializePinnedCompilationTree } from "../src/execution/pinned-compilation-tree.js";
 const mocks = vi.hoisted(() => ({ resolve: vi.fn(), run: vi.fn(), environment: vi.fn() }));
 vi.mock("../src/runtime/codex-command.js", () => ({ resolveCodexCommand: mocks.resolve }));
 vi.mock("../src/runtime/process-group.js", async (original) => {
@@ -41,6 +42,7 @@ vi.mock("../src/runtime/codex-home.js", async (original) => ({
   isolateCodexEnvironment: mocks.environment,
 }));
 const directories: string[] = [];
+const disposePinnedTrees: Array<() => Promise<void>> = [];
 beforeEach(() => {
   mocks.resolve.mockReset().mockResolvedValue({ command: "fixture-codex", args: [] });
   mocks.run.mockReset();
@@ -48,6 +50,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   vi.restoreAllMocks();
+  await Promise.all(disposePinnedTrees.splice(0).map((dispose) => dispose()));
   await Promise.all(
     directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
@@ -67,15 +70,15 @@ async function fixture() {
     JSON.stringify({ name: "compiler-admission-fixture", lockfileVersion: 3, packages: {} }),
   );
   const baseSha = pinFixtureRepository(directory);
+  const tree = await materializePinnedCompilationTree(directory, baseSha);
+  disposePinnedTrees.push(tree.dispose);
   const context: CompilationContext = {
-    repository: directory,
+    repository: tree.path,
     objective: { number: 42, title: golden.title, body: "Implement core behavior and tests" },
     baseSha,
     defaultBranch: "main",
-    repositoryFiles: [
-      "package-lock.json",
-      ...golden.repositoryFacts.files.map((file: { path: string }) => file.path),
-    ],
+    repositoryFiles: tree.files,
+    pinnedCompilationTree: tree.proof,
     allowedNetworkDestinations: [],
     runPolicy: { ...DEFAULT_RUN_POLICY, compilerEvaluation: { mode: "report-only" } },
   };
@@ -203,6 +206,21 @@ async function home() {
 }
 const usage = { inputTokens: 4, outputTokens: 2 };
 describe("compiler dispatch admission", () => {
+  it("rejects a mutable compiler cwd before an external model can inspect it", async () => {
+    const f = await fixture();
+    await writeFile(join(f.directory, "transient-secret.txt"), "must remain invisible\n");
+    const backend = new CodexCliManagementBackend({ authFile: join(f.directory, "no-auth") });
+    const { pinnedCompilationTree: _proof, ...mutableContext } = f.context;
+    Object.assign(mutableContext, {
+      repository: f.directory,
+    });
+
+    await expect(backend.extractObligations(mutableContext, async () => {})).rejects.toThrow(
+      "active exact-base compilation tree",
+    );
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
   it("fails management readiness when its durable isolated home is unavailable", async () => {
     const f = await fixture();
     const authFile = join(f.directory, "auth.json");

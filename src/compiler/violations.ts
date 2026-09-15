@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import {
+  COMPILER_TERMINAL_VIOLATION_PHASES,
   CompilerValidationReportSchema,
   CompilerViolationSchema,
   type CompilerDiagnosticValue,
@@ -16,16 +17,14 @@ export interface CompilerRule {
   terminalPhases: readonly CompilerValidationReport["phase"][];
 }
 
-const rule = (
-  code: CompilerViolationCode,
-  summary: string,
-  terminalPhases: readonly CompilerValidationReport["phase"][] = [],
-): CompilerRule => ({ code, summary, terminalPhases });
+const rule = (code: CompilerViolationCode, summary: string): CompilerRule => ({
+  code,
+  summary,
+  terminalPhases: COMPILER_TERMINAL_VIOLATION_PHASES[code] ?? [],
+});
 
 export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule>> = {
-  "schema-invalid": rule("schema-invalid", "The value does not match the compiler contract.", [
-    "request",
-  ]),
+  "schema-invalid": rule("schema-invalid", "The value does not match the compiler contract."),
   "work-item-count": rule("work-item-count", "The Work Item count is outside the accepted bound."),
   "duplicate-item-id": rule("duplicate-item-id", "A Work Item identifier is duplicated."),
   "duplicate-dependency": rule(
@@ -69,22 +68,18 @@ export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule
   "partial-toolchain-authority": rule(
     "partial-toolchain-authority",
     "The pinned repository contains partial toolchain authority.",
-    ["request"],
   ),
   "mixed-toolchain-authority": rule(
     "mixed-toolchain-authority",
     "The pinned repository contains mixed toolchain authority.",
-    ["request"],
   ),
   "unsupported-toolchain": rule(
     "unsupported-toolchain",
     "The pinned repository has no supported compiler toolchain.",
-    ["request"],
   ),
   "no-validation-capability": rule(
     "no-validation-capability",
     "No observed or eligible validation capability exists.",
-    ["request"],
   ),
   "missing-capability-provider": rule(
     "missing-capability-provider",
@@ -105,7 +100,6 @@ export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule
   "denied-network-destination": rule(
     "denied-network-destination",
     "A required network destination is denied by policy.",
-    ["request"],
   ),
   "legacy-constraint-mismatch": rule(
     "legacy-constraint-mismatch",

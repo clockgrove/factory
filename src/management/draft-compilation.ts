@@ -57,6 +57,13 @@ interface PersistedProposalResult {
   provenance: { requestDigest: string };
 }
 
+function fixedGraphResource(resource: string): string {
+  return /^[a-z0-9][a-z0-9:._/-]{0,159}$/.test(resource) &&
+    !resource.split("/").some((part) => part === "." || part === ".." || part === "")
+    ? resource
+    : `fixed-resource-${draftDigest(resource)}`;
+}
+
 function persistedProposalResult(value: unknown): PersistedProposalResult {
   if (!value || typeof value !== "object") throw new Error("compiler result is not an object");
   const candidate = value as Record<string, unknown>;
@@ -94,7 +101,7 @@ function proposalFromFixedGraph(graph: CompiledObjective): CompilerProposal {
       outOfScope: item.outOfScope,
       conventions: item.conventions,
       dependsOn: item.dependsOn,
-      exclusiveResources: item.changeSurface?.exclusiveResources ?? [],
+      exclusiveResources: (item.changeSurface?.exclusiveResources ?? []).map(fixedGraphResource),
       executionIntent: {
         estimatedDurationMinutes: item.requirements?.estimatedDurationMinutes ?? 30,
       },
@@ -164,6 +171,13 @@ export function assertCompilerDraftSelection(
   if (!proposalResult || !validation || !verdictResult)
     throw new Error("compiler selection lacks proposal, projection, or judgment evidence");
   const persisted = persistedProposalResult(proposalResult.payload.value);
+  const proposalIntent = records.find(
+    (record) =>
+      record.kind === "invocation" &&
+      record.payload.invocationId === proposalResult.payload.invocationId,
+  );
+  if (proposalIntent?.payload.compilerRequestDigest !== persisted.provenance.requestDigest)
+    throw new Error("compiler proposal differs from its reserved request binding");
   const trace = validation.payload.projectionTrace as CompilerProjectionTrace;
   if (draftDigest(trace) !== validation.payload.traceDigest)
     throw new Error("compiler projection trace changed");
@@ -301,7 +315,11 @@ export async function compileEvaluatedDraft(args: {
       reserveAtDispatch: true,
       recordUsage: args.recordUsage,
       validateInventory: inventory,
-      validate: async (value, revision): Promise<ValidatedCompilerDraft> => {
+      validate: async (
+        value,
+        revision,
+        expectedCompilerRequestDigest,
+      ): Promise<ValidatedCompilerDraft> => {
         if (!activeInventory) throw new Error("draft validation has no obligation inventory");
         if (value && typeof value === "object" && "fixedGraph" in value) {
           const objective = parsePersistedCompiledObjective(value.fixedGraph);
@@ -317,6 +335,10 @@ export async function compileEvaluatedDraft(args: {
           };
         }
         const persisted = persistedProposalResult(value);
+        if (!expectedCompilerRequestDigest)
+          throw new Error("compiler proposal has no reserved request binding");
+        if (persisted.provenance.requestDigest !== expectedCompilerRequestDigest)
+          throw new Error("persisted compiler request differs from its reserved invocation");
         if (persisted.request.revision !== revision)
           throw new Error("persisted compiler request revision differs from its invocation");
         const prepared = await prepareCompilerRequest({
@@ -390,6 +412,7 @@ export async function compileEvaluatedDraft(args: {
       ) => {
         let dispatched = false;
         let dispatchRequested = false;
+        let compilerRequestDigest: string | undefined;
         frozenContext.invocationTimeoutMs = deadlineAt - Date.now();
         const beforeModelInvocation = async () => {
           if (dispatchRequested)
@@ -402,7 +425,7 @@ export async function compileEvaluatedDraft(args: {
             const remainingMs = deadlineAt - Date.now();
             if (remainingMs <= 0) throw new Error("compiler evaluation deadline exhausted");
             frozenContext.invocationTimeoutMs = remainingMs;
-            await reserve();
+            await reserve(compilerRequestDigest ? { compilerRequestDigest } : undefined);
             await args.admit(request.invocationId);
             const dispatchTimeoutMs = deadlineAt - Date.now();
             if (dispatchTimeoutMs <= 0) throw new Error("compiler evaluation deadline exhausted");
@@ -484,6 +507,7 @@ export async function compileEvaluatedDraft(args: {
             throw Object.assign(new CompilerDraftStopError("compiler request is unsatisfiable"), {
               validationReport: prepared.report,
             });
+          compilerRequestDigest = compilerEvalDigest(prepared.request);
           const result = await backend.proposePlan(
             prepared.request,
             async (result) =>

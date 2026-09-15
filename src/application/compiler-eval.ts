@@ -185,6 +185,11 @@ const Invocation = z.object({
   invocationId: z.string().min(1).max(200),
   stage: z.enum(["inventory", "compile", "repair", "judge"]),
   revision: z.number().int().min(0),
+  inputDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  compilerRequestDigest: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
 });
 const Usage = z.object({
   inputTokens: z.number().int().nonnegative().safe(),
@@ -382,11 +387,15 @@ export async function inspectCompilerEvaluation(args: {
           const proposal = CompilerProposalSchema.parse(persisted.proposal);
           const proposalReport = CompilerValidationReportSchema.parse(persisted.report);
           const provenance = persisted.provenance as Record<string, unknown> | undefined;
+          const proposalInvocation = invocations.find(
+            (entry) => entry.invocation.invocationId === proposalResult.payload.invocationId,
+          );
           if (
             proposalReport.status !== "valid" ||
             request.revision !== record.payload.revision ||
             draftDigest(request.inventory) !== draftDigest(inventory) ||
-            provenance?.requestDigest !== draftDigest(request)
+            provenance?.requestDigest !== draftDigest(request) ||
+            proposalInvocation?.invocation.compilerRequestDigest !== draftDigest(request)
           )
             throw new Error("proposal result is not bound to its exact compiler request");
           const trace = ProjectionTrace.parse(validated.payload.projectionTrace);
@@ -404,10 +413,19 @@ export async function inspectCompilerEvaluation(args: {
             const judgeInvocation = invocations.find(
               (entry) => entry.invocation.invocationId === record.payload.invocationId,
             )!;
-            const challenges = validateCompilerInferenceChallenges(
-              judgeInvocation.record.payload.reviewEvidence ?? [],
-              inventory,
-            );
+            const reviewEvidence = judgeInvocation.record.payload.reviewEvidence ?? null;
+            const challenges = validateCompilerInferenceChallenges(reviewEvidence ?? [], inventory);
+            if (
+              judgeInvocation.invocation.inputDigest !==
+              draftDigest({
+                inventory,
+                previous: proposal,
+                projection: trace,
+                failure: reviewEvidence,
+                ...(reviewEvidence === null ? {} : { reviewEvidence }),
+              })
+            )
+              throw new Error("judge result is not bound to its exact invocation input");
             const report = createCompilerEvalReport({
               inventory,
               challenges,

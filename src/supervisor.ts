@@ -5159,6 +5159,7 @@ export class FactorySupervisor {
                   defaultBranch: snapshot.defaultBranch,
                   baseSha: base.oid,
                   repositoryFiles: tree.files,
+                  pinnedCompilationTree: tree.proof,
                   repositoryLfs,
                   allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
                   runPolicy: this.#policy,

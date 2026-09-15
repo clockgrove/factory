@@ -303,6 +303,7 @@ export async function buildPlanReport(input: {
         // The earlier layout port proves completeness; only the actual pinned tree supplies
         // compiler facts and cwd. A mutable caller inventory cannot replace that evidence.
         repositoryFiles: tree.files,
+        pinnedCompilationTree: tree.proof,
         repositoryLfs,
         allowedNetworkDestinations: policy.allowedNetworkDestinations,
         runPolicy: policy,

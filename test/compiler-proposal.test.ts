@@ -200,6 +200,42 @@ describe("semantic proposal validation", () => {
       );
     },
   );
+
+  it.each([
+    ["Rust", "src/lib.rs", "unsupported-toolchain"],
+    ["Go", "src/main.go", "unsupported-toolchain"],
+    ["ambient Python", "src/app.py", "uncovered-criterion"],
+  ])(
+    "does not let an observed npm recipe validate %s work in a polyglot repository",
+    (_language, scope, expectedCode) => {
+      const pinned = semanticPinnedFacts({
+        paths: [
+          "package.json",
+          "package-lock.json",
+          "src/index.ts",
+          "src/lib.rs",
+          "src/main.go",
+          "src/app.py",
+        ],
+        scripts: { test: "node --test" },
+      });
+      const request = semanticRequest(pinned, [
+        "files.pythonhosted.org",
+        "pypi.org",
+        "registry.npmjs.org",
+      ]);
+      const proposal = semanticProposal(request);
+      proposal.workItems[0]!.scope = [scope];
+
+      expect(codes(request, proposal)).toContainEqual(
+        expect.objectContaining({
+          code: expectedCode,
+          itemId: "item-1",
+          field: "/workItems/0/scope",
+        }),
+      );
+    },
+  );
 });
 
 function deferredFixture() {

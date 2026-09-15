@@ -81,6 +81,11 @@ export function semanticRequest(
             /(?:screenshot|snapshot|visual|storybook)/.test(path.toLowerCase()) ||
             /\.(?:png|jpe?g|webp)$/i.test(path),
         ),
+        python: pinned.relevantPaths.filter(
+          (path) => path === "pyproject.toml" || path.endsWith(".py"),
+        ),
+        rust: pinned.relevantPaths.filter((path) => path === "Cargo.toml" || path.endsWith(".rs")),
+        go: pinned.relevantPaths.filter((path) => path === "go.mod" || path.endsWith(".go")),
       },
       pathCount: pinned.relevantPaths.length,
     },

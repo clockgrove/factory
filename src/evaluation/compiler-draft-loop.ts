@@ -142,7 +142,7 @@ export interface CompilerDraftCallbacks {
   invoke(
     request: DraftInvocation,
     checkpoint: (result: DraftInvocationResult) => Promise<void>,
-    reserve?: () => Promise<void>,
+    reserve?: (evidence?: { compilerRequestDigest?: string }) => Promise<void>,
     checkpointProviderRefusal?: (error: ProviderQuotaError) => Promise<void>,
   ): Promise<DraftInvocationResult>;
   /** Prepare locally before recording a possible paid invocation. */
@@ -154,6 +154,7 @@ export interface CompilerDraftCallbacks {
   validate(
     value: unknown,
     revision: number,
+    compilerRequestDigest?: string,
   ): ValidatedCompilerDraft | Promise<ValidatedCompilerDraft>;
   /** Parse full-coverage judge evidence and enforce its exact graph/inventory binding. */
   accept(
@@ -375,9 +376,19 @@ export async function runCompilerDraftLoop(args: {
     )
       throw new Error("compiler selection lacks known invocation evidence");
     const inventory = await callbacks.validateInventory(inventoryResult.payload.value);
+    const proposalInvocation = proposal
+      ? records.find(
+          (item) =>
+            item.kind === "invocation" &&
+            item.payload.invocationId === proposal.payload.invocationId,
+        )
+      : undefined;
     const draft = await callbacks.validate(
       fixedGraph ? { fixedGraph } : proposal!.payload.value,
       Number(terminal.payload.revision),
+      typeof proposalInvocation?.payload.compilerRequestDigest === "string"
+        ? proposalInvocation.payload.compilerRequestDigest
+        : undefined,
     );
     const graph = draft.objective;
     const reviewEvidence = terminal.payload.reviewEvidence ?? null;
@@ -479,7 +490,7 @@ export async function runCompilerDraftLoop(args: {
       throw new Stop("invocation-limit");
     let invocationStartedAt: number | null = null;
     let reserving = false;
-    const reserve = async () => {
+    const reserve = async (evidence?: { compilerRequestDigest?: string }) => {
       if (reserving)
         throw new CompilerDraftAdmissionError(new Error("compiler dispatch already reserved"));
       reserving = true;
@@ -496,6 +507,9 @@ export async function runCompilerDraftLoop(args: {
           failure,
           ...(reviewEvidence === null ? {} : { reviewEvidence }),
         }),
+        ...(evidence?.compilerRequestDigest
+          ? { compilerRequestDigest: evidence.compilerRequestDigest }
+          : {}),
         ...(reviewEvidence === null ? {} : { reviewEvidence }),
       });
       invocationStartedAt = startedAt;
@@ -757,7 +771,19 @@ export async function runCompilerDraftLoop(args: {
               reviewEvidence,
             );
         candidate = value;
-        draft = await callbacks.validate(value, revision);
+        const proposalInvocation = records.find(
+          (item) =>
+            item.kind === "invocation" &&
+            item.payload.stage === (revision === 0 ? "compile" : "repair") &&
+            item.payload.revision === revision,
+        );
+        draft = await callbacks.validate(
+          value,
+          revision,
+          typeof proposalInvocation?.payload.compilerRequestDigest === "string"
+            ? proposalInvocation.payload.compilerRequestDigest
+            : undefined,
+        );
         graph = draft.objective;
       } catch (error) {
         if (

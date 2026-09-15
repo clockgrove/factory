@@ -62,7 +62,7 @@ export const RecoveryProposalInputSchema = z
     compilerEvaluation: recoveryCompilerEvaluationSchema
       .optional()
       .describe(
-        "Fully explicit successor-only compiler auto-repair policy for a terminal pre-graph Objective",
+        "Fully explicit compiler auto-repair policy matching the original terminal pre-graph Objective",
       ),
     unknownUsageAcknowledgementDigest: sha256Digest.nullable().optional(),
   })
@@ -248,10 +248,11 @@ export class RecoveryRequestService {
       plan.repository.toLowerCase() !== this.ports.repository.toLowerCase() ||
       plan.successorRunId !==
         recoverySuccessorRunId(this.ports.repository, input.objective, input.requestId) ||
+      (isRecoveryCompileObjectiveGraph(plan.graph) &&
+        (!input.compilerEvaluation ||
+          !startPolicy?.compilerEvaluation ||
+          !sameCompilerEvaluation(startPolicy.compilerEvaluation, input.compilerEvaluation))) ||
       (input.compilerEvaluation !== undefined && !isRecoveryCompileObjectiveGraph(plan.graph)) ||
-      (input.compilerEvaluation !== undefined &&
-        startPolicy?.compilerEvaluation !== undefined &&
-        !sameCompilerEvaluation(startPolicy.compilerEvaluation, input.compilerEvaluation)) ||
       expectedPolicyDigest !== plan.policyDigest ||
       plan.unknownUsageAcknowledgementDigest !==
         (input.unknownUsageAcknowledgementDigest ?? null) ||

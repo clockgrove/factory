@@ -75,43 +75,21 @@ function history(runId = "source", offset = 0, acceptedPolicy = policy): Factory
     event({ kind: "run", event: "FactoryRunEscalated", runId, sequence: offset + 10 }),
   ];
 }
-function failedCompilationUsage(
+function compilationUsage(
   runId: string,
-  markerSequence: number,
   reconciliationSequence: number,
   amount = 30,
-  acceptedPolicy: RunPolicy = policy,
-): FactoryEvent[] {
-  const invocationId = `compile-${sha("a")}`;
-  return [
-    event({
-      kind: "budget",
-      event: "BudgetReserved",
-      runId,
-      sequence: markerSequence,
-      phase: "management",
-      unit: "model_tokens",
-      amount: 0,
-      usageId: `invocation-${invocationId}`,
-      modelInvocationId: invocationId,
-      directorEpoch: 1,
-      policyDigest: policyDigest(acceptedPolicy),
-    }),
-    event({
-      kind: "budget",
-      event: "BudgetReconciled",
-      runId,
-      sequence: reconciliationSequence,
-      phase: "management",
-      unit: "model_tokens",
-      amount,
-      usageId: `failed-${invocationId}`,
-      modelInvocationId: invocationId,
-      directorEpoch: 1,
-      policyDigest: policyDigest(acceptedPolicy),
-      reportedModelUsage: { inputTokens: amount - 10, outputTokens: 10 },
-    }),
-  ];
+): FactoryEvent {
+  return event({
+    kind: "budget",
+    event: "BudgetReconciled",
+    runId,
+    sequence: reconciliationSequence,
+    phase: "management",
+    unit: "model_tokens",
+    amount,
+    usageId: `compile-${digest("d")}`,
+  });
 }
 function proposal(
   events: FactoryEvent[],
@@ -361,9 +339,14 @@ const compilerEvaluation = {
   maxObservedTokens: 500_000,
 };
 function compileObjectiveCandidateFixture() {
-  const value = fixture();
+  const acceptedPolicy = { ...policy, compilerEvaluation };
+  const events = history("source", 0, acceptedPolicy);
+  const value = {
+    ...fixture(),
+    events,
+    candidatePlan: proposal(events),
+  };
   const bootstrap = value.candidatePlan;
-  const acceptedPolicy = { ...bootstrap.acceptedPolicy, compilerEvaluation };
   value.candidatePlan = parseRecoveryPlan({
     ...bootstrap,
     protocol: RECOVERY_PLAN_PROTOCOL_V2,
@@ -450,7 +433,10 @@ describe("pure authenticated recovery chain verification", () => {
       (event) => event.event === "FactoryRunStarted" && event.runId === "source",
     );
     if (start?.event !== "FactoryRunStarted") throw new Error("fixture source start");
-    start.policy = { ...start.policy, compilerEvaluation };
+    start.policy = {
+      ...start.policy,
+      compilerEvaluation: { ...compilerEvaluation, maxRepairs: 1 },
+    };
     start.policyDigest = policyDigest(start.policy);
     const historyEntry = value.candidatePlan.history[0]!;
     historyEntry.startDigest = recoveryEventDigest(start);
@@ -742,10 +728,9 @@ describe("pure authenticated recovery chain verification", () => {
   });
   it("rejects newly observed source charges until a new candidate fence is acknowledged", () => {
     const value = fixture();
-    const [marker, reconciliation] = failedCompilationUsage("source", 3, 11);
-    value.events.push(marker!);
+    const reconciliation = compilationUsage("source", 11);
     value.candidatePlan = proposal(value.events);
-    value.events.push(reconciliation!);
+    value.events.push(reconciliation);
     expect(codes(verifyRecoveryChain(value))).toContain("candidate-source-advanced");
     value.candidatePlan = proposal(value.events);
     expect(verifyRecoveryChain(value).accounting?.usage?.modelTokens).toBe(40);
@@ -753,7 +738,7 @@ describe("pure authenticated recovery chain verification", () => {
   it("keeps an admitted prior prefix valid while carrying later source reconciliation into current totals", () => {
     const value = successorFixture();
     const prior = Object.values(value.plansByDigest)[0]!.plan;
-    value.events.push(...failedCompilationUsage("successor", 16, 30, 30, prior.acceptedPolicy));
+    value.events.push(compilationUsage("successor", 30));
     value.candidatePlan = proposal(value.events, "third", prior);
     const result = verifyRecoveryChain(value);
     expect(result.status).toBe("verified");

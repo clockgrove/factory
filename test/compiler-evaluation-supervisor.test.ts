@@ -198,7 +198,6 @@ async function graphlessCompilerRecoveryFixture() {
   freshObjective(f);
   const calls = configureCompiler(f);
   const sourcePolicy = structuredClone(f.policy);
-  delete sourcePolicy.compilerEvaluation;
   const sourcePolicyDigest = policyDigest(sourcePolicy);
   const sourceRunId = "failed-compiler-source";
   const successorRunId = "compiler-recovery-successor";
@@ -212,7 +211,7 @@ async function graphlessCompilerRecoveryFixture() {
       ...fields,
     });
   const terminalReason = "compiled Objective has 16 deterministic violations: fixture";
-  const invocationId = `compile-${f.baseSha}`;
+  const invocationId = "compiler-inventory-1";
   const predecessorStart = sourceEvent({
     kind: "run",
     event: "FactoryRunStarted",
@@ -257,12 +256,11 @@ async function graphlessCompilerRecoveryFixture() {
       phase: "management",
       unit: "model_tokens",
       amount: usage.inputTokens + usage.outputTokens,
-      usageId: `failed-${invocationId}`,
+      usageId: `draft-${invocationId}`,
       modelInvocationId: invocationId,
       directorEpoch: 1,
       policyDigest: sourcePolicyDigest,
       reportedModelUsage: usage,
-      reason: terminalReason,
     }),
     sourceEvent({
       kind: "run",

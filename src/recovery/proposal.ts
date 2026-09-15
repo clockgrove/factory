@@ -32,7 +32,7 @@ import {
 } from "../graph.js";
 import {
   assessRecoveryAccounting,
-  hasExactFailedCompilationUsage,
+  hasExactDraftCompilationUsage,
   type RecoveryAccountingAssessment,
 } from "./accounting.js";
 import type { RecoveryBlocker, RecoveryReadStore } from "./assessment.js";
@@ -578,10 +578,10 @@ export async function buildRecoveryProposal(input: {
           "The authoritative escalation has no bounded terminal reason to carry into successor planning; the unavailable raw compiler proposal cannot be reconstructed.",
           predecessorStart.runId,
         );
-      if (!hasExactFailedCompilationUsage(sourceEvents, predecessorStart, terminal))
+      if (!hasExactDraftCompilationUsage(sourceEvents, predecessorStart, terminal))
         return refuse(
           "compile-objective-failure-accounting",
-          "Graphless compilation recovery requires the exact failed compiler dispatch and actual-usage reconciliation bound to this source base, policy, terminal window, and terminal reason when recorded.",
+          "Graphless compilation recovery requires exact evaluated-compiler draft dispatch and actual-usage reconciliation bound to the source policy, epoch, provider counters, and terminal window.",
           predecessorStart.runId,
         );
       if (
@@ -673,19 +673,29 @@ export async function buildRecoveryProposal(input: {
         );
 
       const compilerEvaluation = input.compilerEvaluation;
+      const sourceCompilerEvaluation = predecessorStart.policy.compilerEvaluation;
       if (
         !compilerEvaluation ||
-        predecessorStart.policy.compilerEvaluation !== undefined ||
+        sourceCompilerEvaluation?.mode !== "auto-repair" ||
+        Object.keys(sourceCompilerEvaluation).length !== 5 ||
+        sourceCompilerEvaluation.maxRepairs === undefined ||
+        sourceCompilerEvaluation.maxInvocations === undefined ||
+        sourceCompilerEvaluation.timeoutSeconds === undefined ||
+        sourceCompilerEvaluation.maxObservedTokens === undefined ||
         compilerEvaluation.mode !== "auto-repair" ||
         Object.keys(compilerEvaluation).length !== 5 ||
         compilerEvaluation.maxRepairs === undefined ||
         compilerEvaluation.maxInvocations === undefined ||
         compilerEvaluation.timeoutSeconds === undefined ||
-        compilerEvaluation.maxObservedTokens === undefined
+        compilerEvaluation.maxObservedTokens === undefined ||
+        compilerEvaluation.maxRepairs !== sourceCompilerEvaluation.maxRepairs ||
+        compilerEvaluation.maxInvocations !== sourceCompilerEvaluation.maxInvocations ||
+        compilerEvaluation.timeoutSeconds !== sourceCompilerEvaluation.timeoutSeconds ||
+        compilerEvaluation.maxObservedTokens !== sourceCompilerEvaluation.maxObservedTokens
       )
         return refuse(
           "compile-objective-policy-delta",
-          "Graphless recovery requires one fully explicit successor-only compilerEvaluation auto-repair addition to the historical one-shot compiler policy.",
+          "Graphless recovery requires the source and requested successor to carry the same fully explicit five-field compilerEvaluation auto-repair policy.",
           predecessorStart.runId,
         );
 
@@ -837,7 +847,7 @@ export async function buildRecoveryProposal(input: {
     if (input.compilerEvaluation)
       return refuse(
         "compiler-evaluation-not-applicable",
-        "A recovery compiler-evaluation policy is supported only for an original terminal compiler failure with no graph or Work Items.",
+        "A recovery compiler-evaluation policy is supported only for an original evaluated-compiler terminal failure with no graph or Work Items.",
         predecessorStart.runId,
       );
     const priorAdoptionGraph =

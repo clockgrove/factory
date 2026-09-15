@@ -73,9 +73,11 @@ The Director skill uses bounded, read-only operations when the user is inspectin
 - `factory_recovery_propose` builds a read-only, digest-bound successor plan. With explicit user
   authorization, `factory_recovery_request` records that exact plan for controller adoption;
   it preserves the original issues and cumulative allowance. Resource and evidence checks still
-  gate execution. A reconciled terminal compiler failure before graph projection may use one
-  explicitly bounded `compilerEvaluation: auto-repair` successor; its plan contains no invented
-  Work Items, and authenticated projection supplies execution identities only after compilation.
+  gate execution. An evaluated compiler that exhausted its fully explicit auto-repair envelope
+  before graph projection may use one successor with the exact same five-field
+  `compilerEvaluation` policy. Its plan contains no invented Work Items, and authenticated
+  projection supplies execution identities only after compilation. Factory does not translate an
+  older compiler receipt or add a missing compiler policy during recovery.
   The proposal's `operatorAction` distinguishes evidence blockers, exact unknown
   usage acknowledgement, and a ready-but-unauthorized request; none is active work to poll. See
   [terminal recovery](setup/unattended.md#continue-after-terminal-escalation).

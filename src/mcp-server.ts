@@ -1572,9 +1572,9 @@ function registerApplicationTool(
               : operation === "recovery-plan"
                 ? "Read-only assessment of historical work, graph and PR evidence, and cumulative usage. Does not authorize successor execution, reset budgets, or modify GitHub."
                 : operation === "recovery-propose"
-                  ? "Read-only proposal of an exact successor plan for explicit approval. Default allowance increments are zero. Terminal pre-graph compilation may receive only a fully explicit successor compiler-evaluation auto-repair policy. Unknown usage acknowledgement and any extra allowance must be explicitly supplied; this tool writes nothing and starts no work."
+                  ? "Read-only proposal of an exact successor plan for explicit approval. Default allowance increments are zero. A terminal pre-graph evaluated compilation requires the same fully explicit five-field compiler-evaluation auto-repair policy recorded by the source. Unknown usage acknowledgement and any extra allowance must be explicitly supplied; this tool writes nothing and starts no work."
                   : operation === "recovery-request"
-                    ? "Persist and acknowledge the exact inspected successor plan digest, including any explicitly supplied successor compiler-evaluation policy. Retains predecessor terminal history and cumulative allowance; changed evidence requires a newly acknowledged plan. The controller must independently reconcile resources and adopt before execution."
+                    ? "Persist and acknowledge the exact inspected successor plan digest. For pre-graph evaluated compilation, the supplied five-field compiler-evaluation policy must exactly match the source and proposal. Retains predecessor terminal history and cumulative allowance; changed evidence requires a newly acknowledged plan. The controller must independently reconcile resources and adopt before execution."
                     : `${operation} through Factory's shared application-service boundary.`,
       inputSchema,
       annotations,

@@ -397,12 +397,18 @@ export function verifyRecoveryChain(input: {
                   maxModelTokens: plan.allowance.after.modelTokens,
                 },
               }),
-          compilerEvaluation,
         });
         require(plan.priorPlanDigest === null &&
           plan.history.length === 1 &&
           plan.history[0]!.runId === predecessor.runId &&
-          predecessor.policy.compilerEvaluation === undefined &&
+          predecessor.policy.compilerEvaluation?.mode === "auto-repair" &&
+          predecessor.policy.compilerEvaluation.maxRepairs === compilerEvaluation?.maxRepairs &&
+          predecessor.policy.compilerEvaluation.maxInvocations ===
+            compilerEvaluation?.maxInvocations &&
+          predecessor.policy.compilerEvaluation.timeoutSeconds ===
+            compilerEvaluation?.timeoutSeconds &&
+          predecessor.policy.compilerEvaluation.maxObservedTokens ===
+            compilerEvaluation?.maxObservedTokens &&
           compilerEvaluation?.mode === "auto-repair" &&
           Object.keys(compilerEvaluation).length === 5 &&
           compilerEvaluation.maxRepairs !== undefined &&
@@ -414,7 +420,7 @@ export function verifyRecoveryChain(input: {
           plan.allowance.increment.managedSessions === 0 &&
           plan.allowance.increment.implementationAttemptsPerItem === 0 &&
           policyDigest(expectedPolicy) ===
-            plan.policyDigest, "compile-objective-authority-mismatch", "Compile-objective recovery must be the root successor of one original run and may add only its exact compiler auto-repair policy and explicit model-token allowance.");
+            plan.policyDigest, "compile-objective-authority-mismatch", "Compile-objective recovery must be the root successor of one original evaluated-compiler run and preserve its exact compiler auto-repair policy while allowing only an explicit model-token allowance increment.");
       }
       require(sameAllowance(
         plan.allowance.before,

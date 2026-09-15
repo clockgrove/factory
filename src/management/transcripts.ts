@@ -1,0 +1,295 @@
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
+import type { ManagementUsage } from "./backend.js";
+
+export const MANAGEMENT_TRANSCRIPT_DIRECTORY_ENV = "FACTORY_MANAGEMENT_TRANSCRIPT_DIR";
+export const MAX_MANAGEMENT_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
+export const MAX_MANAGEMENT_TRANSCRIPT_ARCHIVE_BYTES = 512 * 1024 * 1024;
+export const MAX_MANAGEMENT_TRANSCRIPT_RECORDS = 1_000;
+
+export interface ManagementTranscriptStart {
+  cwd: string;
+  modelInvocationId?: string | undefined;
+  prompt: string;
+  schema: unknown;
+  model: string | null;
+  reasoning: string | null;
+  transport: "codex-cli-jsonl" | "structured-adapter";
+}
+
+export interface ManagementTranscriptOutcome {
+  state: "succeeded" | "provider-failed" | "invalid-response";
+  stdout?: string | undefined;
+  stderr?: string | undefined;
+  exitCode?: number | null | undefined;
+  signal?: NodeJS.Signals | null | undefined;
+  timedOut?: boolean | undefined;
+  durationMs?: number | undefined;
+  parsedResponse?: unknown;
+  usage?: ManagementUsage | undefined;
+  error?: string | undefined;
+}
+
+export interface ManagementTranscriptSession {
+  finish(outcome: ManagementTranscriptOutcome): Promise<void>;
+}
+
+export interface ManagementTranscriptRecorder {
+  begin(input: ManagementTranscriptStart): Promise<ManagementTranscriptSession>;
+}
+
+interface TranscriptLimits {
+  maxRecordBytes?: number;
+  maxArchiveBytes?: number;
+  maxRecords?: number;
+}
+
+function digest(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function serialized(value: unknown): string {
+  return JSON.stringify(value);
+}
+
+function unavailable(role: "system" | "developer") {
+  return {
+    role,
+    availability: "unavailable" as const,
+    reason: "provider-managed-not-exposed",
+  };
+}
+
+function assistantMessages(stdout: string | undefined) {
+  if (stdout === undefined) return [];
+  const messages: Array<{
+    role: "assistant";
+    availability: "observed";
+    content: string;
+    finalStructuredResponse: boolean;
+  }> = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    try {
+      const event = JSON.parse(line) as {
+        type?: string;
+        item?: { type?: string; text?: unknown };
+      };
+      if (
+        event.type === "item.completed" &&
+        event.item?.type === "agent_message" &&
+        typeof event.item.text === "string"
+      ) {
+        messages.push({
+          role: "assistant",
+          availability: "observed",
+          content: event.item.text,
+          finalStructuredResponse: false,
+        });
+      }
+    } catch {
+      // The raw stream remains available below even when an interleaved line is not JSON.
+    }
+  }
+  if (messages.length > 0) messages.at(-1)!.finalStructuredResponse = true;
+  return messages;
+}
+
+function stream(value: string | undefined, label: string) {
+  if (value === undefined)
+    return {
+      availability: "unavailable" as const,
+      reason: `${label}-not-exposed-by-transport`,
+    };
+  return {
+    availability: "observed" as const,
+    content: value,
+    sha256: digest(value),
+    truncatedByFactory:
+      value.startsWith("[output truncated to ") || value.includes("\n[output truncated to "),
+  };
+}
+
+function safeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export class LocalManagementTranscriptRecorder implements ManagementTranscriptRecorder {
+  readonly #root: string;
+  readonly #maxRecordBytes: number;
+  readonly #maxArchiveBytes: number;
+  readonly #maxRecords: number;
+
+  constructor(directory: string, limits: TranscriptLimits = {}) {
+    if (!directory.trim() || !isAbsolute(directory)) {
+      throw new Error("management transcript directory must be an absolute path");
+    }
+    this.#root = resolve(directory);
+    this.#maxRecordBytes = limits.maxRecordBytes ?? MAX_MANAGEMENT_TRANSCRIPT_BYTES;
+    this.#maxArchiveBytes = limits.maxArchiveBytes ?? MAX_MANAGEMENT_TRANSCRIPT_ARCHIVE_BYTES;
+    this.#maxRecords = limits.maxRecords ?? MAX_MANAGEMENT_TRANSCRIPT_RECORDS;
+    if (
+      !Number.isSafeInteger(this.#maxRecordBytes) ||
+      !Number.isSafeInteger(this.#maxArchiveBytes) ||
+      !Number.isSafeInteger(this.#maxRecords) ||
+      this.#maxRecordBytes <= 0 ||
+      this.#maxArchiveBytes < this.#maxRecordBytes ||
+      this.#maxRecords <= 0
+    ) {
+      throw new Error("invalid management transcript retention limits");
+    }
+  }
+
+  async begin(input: ManagementTranscriptStart): Promise<ManagementTranscriptSession> {
+    const startedAt = new Date().toISOString();
+    const recordingId = input.modelInvocationId ?? `local-${randomUUID()}`;
+    const filename = `${startedAt.replaceAll(":", "-")}-${digest(recordingId).slice(0, 16)}.json`;
+    const path = join(this.#root, filename);
+    const base = {
+      protocol: "clockgrove.factory/local-management-transcript-v1" as const,
+      recordingId,
+      modelInvocationId: input.modelInvocationId ?? null,
+      invocationIdentity: input.modelInvocationId
+        ? ("factory-durable" as const)
+        : ("local-only" as const),
+      authority: "diagnostic-only" as const,
+      startedAt,
+      request: {
+        cwd: resolve(input.cwd),
+        transport: input.transport,
+        requestedModel: input.model,
+        requestedReasoning: input.reasoning,
+        schema: input.schema,
+        schemaSha256: digest(serialized(input.schema)),
+        messages: [
+          unavailable("system"),
+          unavailable("developer"),
+          {
+            role: "user" as const,
+            availability: "observed" as const,
+            content: input.prompt,
+            sha256: digest(input.prompt),
+          },
+        ],
+      },
+      response: {
+        state: "pending" as const,
+        availability: "pending" as const,
+      },
+    };
+    await this.#write(path, base);
+    let finished = false;
+    return {
+      finish: async (outcome) => {
+        if (finished) return;
+        finished = true;
+        const assistant = assistantMessages(outcome.stdout);
+        if (assistant.length === 0 && Object.hasOwn(outcome, "parsedResponse")) {
+          const content = serialized(outcome.parsedResponse);
+          assistant.push({
+            role: "assistant",
+            availability: "observed",
+            content,
+            finalStructuredResponse: true,
+          });
+        }
+        const completedAt = new Date().toISOString();
+        const usage = outcome.usage
+          ? {
+              inputTokens: outcome.usage.inputTokens,
+              outputTokens: outcome.usage.outputTokens,
+              cachedInputTokens: outcome.usage.cachedInputTokens ?? null,
+              totalTokens: outcome.usage.inputTokens + outcome.usage.outputTokens,
+              cachedInputIsIncludedInInput: true as const,
+            }
+          : null;
+        await this.#write(path, {
+          ...base,
+          completedAt,
+          response: {
+            state: outcome.state,
+            availability:
+              assistant.length > 0 || outcome.stdout !== undefined
+                ? ("observed" as const)
+                : ("unavailable" as const),
+            messages: assistant,
+            stdout: stream(outcome.stdout, "stdout"),
+            stderr: stream(outcome.stderr, "stderr"),
+            parsedResponse: Object.hasOwn(outcome, "parsedResponse")
+              ? { availability: "observed" as const, value: outcome.parsedResponse }
+              : { availability: "unavailable" as const, reason: "no-valid-structured-response" },
+            process: {
+              exitCode: outcome.exitCode ?? null,
+              signal: outcome.signal ?? null,
+              timedOut: outcome.timedOut ?? false,
+              durationMs:
+                outcome.durationMs ?? Math.max(0, Date.parse(completedAt) - Date.parse(startedAt)),
+            },
+            usage,
+            ...(outcome.error ? { error: outcome.error } : {}),
+          },
+        });
+      },
+    };
+  }
+
+  async #write(path: string, value: unknown): Promise<void> {
+    const body = `${JSON.stringify(value, null, 2)}\n`;
+    const bytes = Buffer.byteLength(body, "utf8");
+    if (bytes > this.#maxRecordBytes) {
+      throw new Error(
+        `management transcript is ${bytes} bytes; maximum is ${this.#maxRecordBytes}`,
+      );
+    }
+    await mkdir(this.#root, { recursive: true, mode: 0o700 });
+    await chmod(this.#root, 0o700);
+    const temporary = join(this.#root, `.${randomUUID()}.tmp`);
+    try {
+      await writeFile(temporary, body, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      await rename(temporary, path);
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => {});
+      throw error;
+    }
+    await this.#prune();
+  }
+
+  async #prune(): Promise<void> {
+    const files = [];
+    for (const entry of await readdir(this.#root, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const path = join(this.#root, entry.name);
+      try {
+        const details = await stat(path);
+        files.push({ path, name: entry.name, bytes: details.size, modified: details.mtimeMs });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    files.sort(
+      (left, right) => left.modified - right.modified || left.name.localeCompare(right.name),
+    );
+    let total = files.reduce((sum, file) => sum + file.bytes, 0);
+    while (files.length > this.#maxRecords || total > this.#maxArchiveBytes) {
+      const oldest = files.shift();
+      if (!oldest) break;
+      try {
+        await rm(oldest.path);
+        total -= oldest.bytes;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+  }
+}
+
+export function localManagementTranscriptRecorderFromEnvironment(
+  environment: NodeJS.ProcessEnv = process.env,
+): ManagementTranscriptRecorder | undefined {
+  const directory = environment[MANAGEMENT_TRANSCRIPT_DIRECTORY_ENV]?.trim();
+  return directory ? new LocalManagementTranscriptRecorder(directory) : undefined;
+}
+
+export function transcriptDiagnostic(error: unknown): string {
+  return `management transcript unavailable: ${safeError(error)}`;
+}

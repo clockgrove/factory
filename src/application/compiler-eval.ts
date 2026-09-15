@@ -295,6 +295,9 @@ export async function inspectCompilerEvaluation(args: {
       invocationId: invocation.invocationId,
       phase: invocation.stage === "inventory" ? "obligations" : invocation.stage,
       evidenceId: `draft-invocation-${record.sequence}`,
+      inputTokens: counters?.inputTokens ?? null,
+      outputTokens: counters?.outputTokens ?? null,
+      cachedInputTokens: counters?.cachedInputTokens ?? null,
       observedTokens: counters ? counters.inputTokens + counters.outputTokens : null,
       observedMilliseconds:
         typeof result?.payload.observedMilliseconds === "number"

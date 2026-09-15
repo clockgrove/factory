@@ -116,6 +116,33 @@ describe("systemd installed command discovery", () => {
     expect(await readFile(service.unitPath(f.input), "utf8")).toBe(unit);
   });
 
+  it("persists an explicitly selected private management transcript directory", async () => {
+    const f = await commandFixture();
+    const codex = await f.executable("codex-bin", "codex");
+    const transcriptDirectory = join(f.root, "private transcripts");
+    const service = f.create(() => ({
+      PATH: dirname(codex),
+      FACTORY_MANAGEMENT_TRANSCRIPT_DIR: transcriptDirectory,
+    }));
+    await service.install(f.input);
+    const environment = unitEnvironment(await readFile(service.unitPath(f.input), "utf8"));
+    expect(environment.FACTORY_MANAGEMENT_TRANSCRIPT_DIR).toBe(transcriptDirectory);
+  });
+
+  it.each(["relative/transcripts", "/private/transcripts\nEnvironment=BAD=value"])(
+    "rejects unsafe management transcript directory %j",
+    async (transcriptDirectory) => {
+      const f = await commandFixture();
+      const codex = await f.executable("codex-bin", "codex");
+      const service = f.create(() => ({
+        PATH: dirname(codex),
+        FACTORY_MANAGEMENT_TRANSCRIPT_DIR: transcriptDirectory,
+      }));
+      await expect(service.install(f.input)).rejects.toThrow("safe absolute path");
+      await expect(readFile(service.unitPath(f.input))).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
   it.each(["basename", "absolute"])(
     "preserves an explicitly selected custom Codex %s",
     async (kind) => {

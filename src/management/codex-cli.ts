@@ -79,6 +79,13 @@ import { ManagementOutputError } from "./backend.js";
 import { preserveProviderQuotaError, ProviderQuotaError } from "../providers/quota.js";
 import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
 import { discoverValidationCommands, readRepositoryFacts } from "../repository-profiles/index.js";
+import {
+  localManagementTranscriptRecorderFromEnvironment,
+  transcriptDiagnostic,
+  type ManagementTranscriptOutcome,
+  type ManagementTranscriptRecorder,
+  type ManagementTranscriptSession,
+} from "./transcripts.js";
 
 async function propagateProviderQuotaFailure(
   error: ProviderQuotaError,
@@ -861,6 +868,8 @@ export interface CodexManagementOptions {
   permittedModelCredentials?: string[];
   createCodexHome?: CodexHomeFactory;
   removeCodexHome?: (path: string) => Promise<void>;
+  /** Local diagnostic sink only. Null explicitly disables the environment-configured sink. */
+  transcriptRecorder?: ManagementTranscriptRecorder | null;
   /** Testable provider boundary; production leaves this unset. */
   runStructured?: (
     cwd: string,
@@ -1022,9 +1031,20 @@ export class CodexCliManagementBackend implements ManagementBackend {
   readonly id = "codex-cli/local";
   readonly supportsCompilerAdmission = true as const;
   readonly #options: CodexManagementOptions;
+  readonly #transcriptRecorder: ManagementTranscriptRecorder | undefined;
 
   constructor(options: CodexManagementOptions = {}) {
     this.#options = options;
+    if (options.transcriptRecorder !== undefined) {
+      this.#transcriptRecorder = options.transcriptRecorder ?? undefined;
+    } else {
+      try {
+        this.#transcriptRecorder = localManagementTranscriptRecorderFromEnvironment();
+      } catch (error) {
+        console.error(`[factory-debug] ${transcriptDiagnostic(error)}`);
+        this.#transcriptRecorder = undefined;
+      }
+    }
   }
 
   async probe(): Promise<{ available: boolean; authenticated: boolean; reason?: string }> {
@@ -1587,6 +1607,41 @@ export class CodexCliManagementBackend implements ManagementBackend {
     return result;
   }
 
+  async #beginTranscript(input: {
+    cwd: string;
+    schema: unknown;
+    prompt: string;
+    modelSelection?: CompilationContext["modelSelection"];
+    modelInvocationId?: string | undefined;
+    transport: "codex-cli-jsonl" | "structured-adapter";
+  }): Promise<ManagementTranscriptSession | undefined> {
+    try {
+      return await this.#transcriptRecorder?.begin({
+        cwd: input.cwd,
+        schema: input.schema,
+        prompt: input.prompt,
+        modelInvocationId: input.modelInvocationId,
+        model: input.modelSelection?.model ?? this.#options.model ?? null,
+        reasoning: input.modelSelection?.reasoning ?? null,
+        transport: input.transport,
+      });
+    } catch (error) {
+      console.error(`[factory-debug] ${transcriptDiagnostic(error)}`);
+      return undefined;
+    }
+  }
+
+  async #finishTranscript(
+    session: ManagementTranscriptSession | undefined,
+    outcome: ManagementTranscriptOutcome,
+  ): Promise<void> {
+    try {
+      await session?.finish(outcome);
+    } catch (error) {
+      console.error(`[factory-debug] ${transcriptDiagnostic(error)}`);
+    }
+  }
+
   async #run<T>(
     cwd: string,
     schema: unknown,
@@ -1609,6 +1664,15 @@ export class CodexCliManagementBackend implements ManagementBackend {
       const effectiveTimeoutMs = effectiveInvocationTimeout(admittedTimeoutMs, invocationTimeoutMs);
       if (!Number.isFinite(effectiveTimeoutMs) || effectiveTimeoutMs <= 0)
         throw new Error("compiler invocation deadline exhausted");
+      const transcript = await this.#beginTranscript({
+        cwd,
+        schema,
+        prompt,
+        modelSelection,
+        modelInvocationId:
+          admission && typeof admission === "object" ? admission.modelInvocationId : undefined,
+        transport: "structured-adapter",
+      });
       try {
         const result = await this.#options.runStructured(
           cwd,
@@ -1617,11 +1681,24 @@ export class CodexCliManagementBackend implements ManagementBackend {
           modelSelection,
           effectiveTimeoutMs,
         );
+        const usage = assertManagementUsage(result.usage);
+        await this.#finishTranscript(transcript, {
+          state: "succeeded",
+          parsedResponse: result.value,
+          usage,
+        });
         return {
           value: result.value as T,
-          usage: assertManagementUsage(result.usage),
+          usage,
         };
       } catch (error) {
+        await this.#finishTranscript(transcript, {
+          state: error instanceof ManagementOutputError ? "invalid-response" : "provider-failed",
+          ...(error instanceof ManagementOutputError || error instanceof ProviderQuotaError
+            ? { usage: error.usage }
+            : {}),
+          error: error instanceof Error ? error.message : String(error),
+        });
         if (error instanceof ProviderQuotaError)
           await propagateProviderQuotaFailure(error, admission);
         throw error;
@@ -1678,16 +1755,45 @@ export class CodexCliManagementBackend implements ManagementBackend {
       const admittedTimeoutMs = typeof admission === "number" ? admission : admission?.timeoutMs;
       const invocationId =
         admission && typeof admission === "object" ? admission.modelInvocationId : undefined;
-      const result = await runContainedProcess({
-        command: target.command,
-        args: invocationArgs,
+      const transcript = await this.#beginTranscript({
         cwd,
-        env: invocationEnvironment,
-        stdin: { text: prompt, maxBytes: MANAGEMENT_PROMPT_MAX_BYTES },
-        timeoutMs: effectiveInvocationTimeout(admittedTimeoutMs, invocationTimeoutMs),
-        maxOutputBytes: 2 * 1024 * 1024,
+        schema,
+        prompt,
+        modelSelection,
+        modelInvocationId: invocationId,
+        transport: "codex-cli-jsonl",
       });
+      let result: Awaited<ReturnType<typeof runContainedProcess>>;
+      try {
+        result = await runContainedProcess({
+          command: target.command,
+          args: invocationArgs,
+          cwd,
+          env: invocationEnvironment,
+          stdin: { text: prompt, maxBytes: MANAGEMENT_PROMPT_MAX_BYTES },
+          timeoutMs: effectiveInvocationTimeout(admittedTimeoutMs, invocationTimeoutMs),
+          maxOutputBytes: 2 * 1024 * 1024,
+        });
+      } catch (error) {
+        await this.#finishTranscript(transcript, {
+          state: "provider-failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
       if (result.exitCode !== 0) {
+        const observedUsage = observedCompletionUsage(result.stdout);
+        await this.#finishTranscript(transcript, {
+          state: "provider-failed",
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          signal: result.signal,
+          timedOut: result.timedOut,
+          durationMs: result.durationMs,
+          ...(observedUsage ? { usage: observedUsage } : {}),
+          error: `Codex CLI exited with status ${result.exitCode ?? "unknown"}`,
+        });
         let quotaError: ProviderQuotaError | undefined;
         for (const line of result.stdout.split(/\r?\n/)) {
           try {
@@ -1717,17 +1823,41 @@ export class CodexCliManagementBackend implements ManagementBackend {
         const error = new Error(
           `management backend failed: ${diagnostic || "Codex CLI exited without diagnostics"}`,
         );
-        const usage = observedCompletionUsage(result.stdout);
+        const usage = observedUsage;
         if (usage) throw new ManagementOutputError(error, usage);
         throw error;
       }
       try {
         output = parseManagementJsonlOutput<T>(result.stdout);
       } catch (error) {
+        await this.#finishTranscript(transcript, {
+          state: error instanceof ProviderQuotaError ? "provider-failed" : "invalid-response",
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          signal: result.signal,
+          timedOut: result.timedOut,
+          durationMs: result.durationMs,
+          ...(error instanceof ManagementOutputError || error instanceof ProviderQuotaError
+            ? { usage: error.usage }
+            : {}),
+          error: error instanceof Error ? error.message : String(error),
+        });
         if (error instanceof ProviderQuotaError)
           await propagateProviderQuotaFailure(error, admission);
         throw error;
       }
+      await this.#finishTranscript(transcript, {
+        state: "succeeded",
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        timedOut: result.timedOut,
+        durationMs: result.durationMs,
+        parsedResponse: output.value,
+        usage: output.usage,
+      });
     } catch (error) {
       failed = true;
       primaryError = error;

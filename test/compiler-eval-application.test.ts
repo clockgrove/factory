@@ -91,7 +91,7 @@ function history() {
       stage,
       revision,
       value,
-      usage: { inputTokens: 10, outputTokens: 2 },
+      usage: { inputTokens: 10, outputTokens: 2, cachedInputTokens: 7 },
       ...(error ? { error } : {}),
     });
   };
@@ -168,6 +168,15 @@ describe("read-only compiler evaluation", () => {
     });
     expect(result.reports).toHaveLength(1);
     expect(result.reports[0]!.observedTotalTokens).toBe(48);
+    expect(result.usage![0]).toMatchObject({
+      inputTokens: 10,
+      outputTokens: 2,
+      cachedInputTokens: 7,
+      observedTokens: 12,
+    });
+    expect(result.markdown).toContain(
+      "total tokens 12; input 10; output 2; cached input 7 (cached input is included in input)",
+    );
     expect(result.markdown).toContain("original failure retained");
     expect(result.markdown).toContain(
       "maxRepairs is shared across inventory regeneration and graph repair",
@@ -199,6 +208,12 @@ describe("read-only compiler evaluation", () => {
     expect(result.reports[0]!.observedTotalTokens).toBeNull();
     expect(result.markdown).toContain("uncertain");
     expect(result.reports[0]!.observedTokenSubtotal).toBe(48);
+    expect(result.usage!.at(-1)).toMatchObject({
+      inputTokens: null,
+      outputTokens: null,
+      cachedInputTokens: null,
+      observedTokens: null,
+    });
   });
   it("rejects mismatched authenticated run and selected judgment identities", async () => {
     await expect(

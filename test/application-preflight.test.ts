@@ -366,6 +366,24 @@ describe("read-only checkout preflight", () => {
       status: "fail",
       summary: expect.stringContaining("controller-user-manager-unavailable"),
     });
+    const unsettledController = await report({
+      ...healthyChecks(),
+      controller: {
+        status: async () => {
+          throw new Error(
+            "controller-lifecycle-outcome-unknown: systemd reports ActiveState=activating",
+          );
+        },
+      } as unknown as NonNullable<DoctorChecks["controller"]>,
+    });
+    expect(
+      unsettledController.diagnostics.find((entry) => entry.area === "controller"),
+    ).toMatchObject({
+      status: "fail",
+      summary: expect.stringContaining(
+        "controller-lifecycle-outcome-unknown: systemd reports ActiveState=activating",
+      ),
+    });
     const fusedController = await report({
       ...healthyChecks(),
       controller: {

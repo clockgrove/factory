@@ -101,6 +101,15 @@ interface UnitManagerState {
   restartCount: number | null;
 }
 
+type ActiveStateClassification = "active" | "stopped" | "unsettled";
+type UnitFileStateClassification =
+  | "enabled"
+  | "runtime-enabled"
+  | "linked"
+  | "alias"
+  | "disabled"
+  | "unknown";
+
 interface InstalledLauncher {
   command: readonly [string, ...string[]];
   executableIdentity: string;
@@ -174,11 +183,18 @@ export class SystemdUserService {
     }
     const manager = await this.#connectUserManager("install", input);
     const before = await this.#managerState(input, manager, "install");
+    const beforeActiveState = classifyActiveState(before.activeState);
+    const beforeUnitFileState = classifyUnitFileState(before.unitFileState);
+    if (beforeActiveState === "unsettled" || beforeUnitFileState === "unknown") {
+      throw new Error(
+        `controller-lifecycle-outcome-unknown: install cannot safely mutate ${this.unitName(input)} while systemd reports ActiveState=${before.activeState} and UnitFileState=${before.unitFileState || "(empty)"}; ${this.#inspectionAction(input)}`,
+      );
+    }
     if (
       old === undefined &&
       (before.loadState !== "not-found" ||
-        enabledUnitFileState(before.unitFileState) ||
-        before.activeState === "active")
+        beforeUnitFileState !== "disabled" ||
+        beforeActiveState === "active")
     ) {
       throw new Error(
         `controller-unit-unmanaged: ${this.unitName(input)} has manager state without an owned unit file; ${this.#inspectionAction(input)}`,
@@ -249,20 +265,20 @@ export class SystemdUserService {
       readOptionalFile(this.unitPath(input)),
       this.#managerState(input, manager, "stop"),
     ]);
-    const before = await this.#statusFrom(input, beforeBody, beforeState);
-    if (settledStoppedActiveState(beforeState.activeState)) return before;
+    if (classifyActiveState(beforeState.activeState) === "stopped") {
+      return this.#statusFrom(input, beforeBody, beforeState);
+    }
     await this.#systemctl(["stop", this.unitName(input)], manager);
     const [body, state] = await Promise.all([
       readOptionalFile(this.unitPath(input)),
       this.#managerState(input, manager, "stop verification"),
     ]);
-    const status = await this.#statusFrom(input, body, state);
-    if (!settledStoppedActiveState(state.activeState)) {
+    if (classifyActiveState(state.activeState) !== "stopped") {
       throw new Error(
-        `controller-lifecycle-outcome-unknown: stop did not settle ${status.unit} (systemd reports ${state.activeState}); ${this.#inspectionAction(input)}`,
+        `controller-lifecycle-outcome-unknown: stop did not settle ${this.unitName(input)} (systemd reports ActiveState=${state.activeState}); ${this.#inspectionAction(input)}`,
       );
     }
-    return status;
+    return this.#statusFrom(input, body, state);
   }
   async restart(input: SystemdServiceInput): Promise<SystemdStatus> {
     validateInput(input);
@@ -287,18 +303,23 @@ export class SystemdUserService {
     }
     const manager = await this.#connectUserManager("uninstall", input);
     const beforeState = await this.#managerState(input, manager, "uninstall");
+    const beforeActiveState = classifyActiveState(beforeState.activeState);
+    const beforeUnitFileState = classifyUnitFileState(beforeState.unitFileState);
+    if (beforeActiveState === "unsettled") {
+      throw new Error(
+        `controller-lifecycle-busy: ${unit} cannot be uninstalled while systemd reports ActiveState=${beforeState.activeState}; ${this.#inspectionAction(input)}`,
+      );
+    }
     const before = await this.#statusFrom(input, old, beforeState);
-    if (!old && (before.enabled || before.active || beforeState.loadState !== "not-found")) {
+    if (
+      !old &&
+      (beforeUnitFileState !== "disabled" || before.active || beforeState.loadState !== "not-found")
+    ) {
       throw new Error(
         `controller-unit-unmanaged: ${unit} has manager state without an owned unit file; ${this.#inspectionAction(input)}`,
       );
     }
     if (!old && !before.enabled && !before.active) return before;
-    if (!["active", "inactive", "failed"].includes(beforeState.activeState)) {
-      throw new Error(
-        `controller-lifecycle-busy: ${unit} cannot be uninstalled while systemd reports ${beforeState.activeState}; ${this.#inspectionAction(input)}`,
-      );
-    }
     let mutationAttempted = false;
     let runtimeContinuityLost = false;
     try {
@@ -307,9 +328,10 @@ export class SystemdUserService {
         runtimeContinuityLost = true;
         await this.#systemctl(["stop", unit], manager);
       }
-      if (before.enabled) {
+      const disableArguments = disableUnitFileStateArguments(beforeState.unitFileState, unit);
+      if (disableArguments) {
         mutationAttempted = true;
-        await this.#systemctl(["disable", unit], manager);
+        await this.#systemctl(disableArguments, manager);
       }
       mutationAttempted = true;
       await rm(path, { force: true });
@@ -364,10 +386,18 @@ export class SystemdUserService {
     body: string | undefined,
     runtime: UnitManagerState,
   ): Promise<SystemdStatus> {
+    const activeState = classifyActiveState(runtime.activeState);
+    const unitFileState = classifyUnitFileState(runtime.unitFileState);
+    if (activeState === "unsettled" || unitFileState === "unknown") {
+      throw new Error(
+        `controller-lifecycle-outcome-unknown: systemd reports ActiveState=${runtime.activeState} and UnitFileState=${runtime.unitFileState || "(empty)"} for ${this.unitName(input)}; ${this.#inspectionAction(input)}`,
+      );
+    }
     const installed = body !== undefined;
-    const enabled = enabledUnitFileState(runtime.unitFileState);
-    const active = runtime.activeState === "active";
-    const managerStatePresent = runtime.loadState !== "not-found" || enabled || active;
+    const enabled = unitFileState === "enabled" || unitFileState === "runtime-enabled";
+    const active = activeState === "active";
+    const managerStatePresent =
+      runtime.loadState !== "not-found" || unitFileState !== "disabled" || active;
     const managed = body?.startsWith(FACTORY_UNIT_MARKER) ?? false;
     const executableIdentity = installedExecutableIdentity(body);
     const currentExecutableIdentity = await controllerExecutableIdentity(this.#artifactPath());
@@ -891,20 +921,40 @@ async function atomicWrite(path: string, body: string): Promise<void> {
   }
 }
 
+function classifyActiveState(state: string): ActiveStateClassification {
+  if (state === "active") return "active";
+  if (state === "inactive" || state === "failed") return "stopped";
+  return "unsettled";
+}
+
+function classifyUnitFileState(state: string): UnitFileStateClassification {
+  if (state === "enabled") return "enabled";
+  if (state === "enabled-runtime") return "runtime-enabled";
+  if (state === "linked" || state === "linked-runtime") return "linked";
+  if (state === "alias") return "alias";
+  if (state === "disabled" || state === "") return "disabled";
+  return "unknown";
+}
+
 function enabledUnitFileState(state: string): boolean {
-  return ["enabled", "enabled-runtime", "linked", "linked-runtime", "alias"].includes(state);
+  const classification = classifyUnitFileState(state);
+  return classification === "enabled" || classification === "runtime-enabled";
 }
 
 function persistentlyEnabledUnitFileState(state: string): boolean {
-  return state === "enabled";
+  return classifyUnitFileState(state) === "enabled";
 }
 
 function runtimeEnabledUnitFileState(state: string): boolean {
-  return state === "enabled-runtime" || state === "linked-runtime";
+  return classifyUnitFileState(state) === "runtime-enabled";
 }
 
-function settledStoppedActiveState(state: string): boolean {
-  return state === "inactive" || state === "failed";
+function disableUnitFileStateArguments(state: string, unit: string): readonly string[] | undefined {
+  if (state === "enabled-runtime" || state === "linked-runtime") {
+    return ["disable", "--runtime", unit];
+  }
+  if (state === "enabled" || state === "linked") return ["disable", unit];
+  return undefined;
 }
 
 function hasOutputText(value: unknown): boolean {

@@ -6,15 +6,16 @@ import { afterEach, expect, it, vi } from "vitest";
 import { SystemdUserService } from "../src/service/systemd-user-service.js";
 
 const roots: string[] = [];
+const testUid = process.getuid?.() ?? 1000;
 const currentUserManager = async () => ({
-  uid: 1000,
-  runtimeDirectory: "/run/user/1000",
+  uid: testUid,
+  runtimeDirectory: `/run/user/${testUid}`,
   environment: {
     LANG: "C",
     LC_ALL: "C",
     PATH: "/usr/bin:/bin",
-    XDG_RUNTIME_DIR: "/run/user/1000",
-    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+    XDG_RUNTIME_DIR: `/run/user/${testUid}`,
+    DBUS_SESSION_BUS_ADDRESS: `unix:path=/run/user/${testUid}/bus`,
   },
 });
 function isVersionProbe(args: readonly string[]): boolean {

@@ -6,15 +6,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SystemdUserService } from "../src/service/systemd-user-service.js";
 
 const commandFixtures: string[] = [];
+const testUid = process.getuid?.() ?? 1000;
 const currentUserManager = async () => ({
-  uid: 1000,
-  runtimeDirectory: "/run/user/1000",
+  uid: testUid,
+  runtimeDirectory: `/run/user/${testUid}`,
   environment: {
     LANG: "C",
     LC_ALL: "C",
     PATH: "/usr/bin:/bin",
-    XDG_RUNTIME_DIR: "/run/user/1000",
-    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+    XDG_RUNTIME_DIR: `/run/user/${testUid}`,
+    DBUS_SESSION_BUS_ADDRESS: `unix:path=/run/user/${testUid}/bus`,
   },
 });
 afterEach(async () => {
@@ -416,6 +417,47 @@ describe("systemd user service lifecycle", () => {
     await expect(readFile(service.unitPath(input))).rejects.toMatchObject({ code: "ENOENT" });
     expect(enabled).toBe(false);
     expect(reloads).toBe(2);
+  });
+
+  it("accepts an already-unloaded failed unit as a complete uninstall", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-unloaded-failure-"));
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let enabled = false;
+    let resetFailedCalls = 0;
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "enable") enabled = true;
+      if (args[0] === "disable") enabled = false;
+      if (args[0] === "reset-failed") {
+        resetFailedCalls += 1;
+        throw new Error(`Unit ${args[1]} not loaded`);
+      }
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled: installed && enabled,
+          result: installed ? "exec-condition" : "success",
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+
+    expect(await service.uninstall(input)).toMatchObject({
+      installed: false,
+      enabled: false,
+      active: false,
+      reasonCode: "controller-not-installed",
+    });
+    expect(resetFailedCalls).toBe(0);
   });
 
   it("does not translate a user-manager transport failure into disabled and inactive", async () => {

@@ -296,17 +296,17 @@ export class SystemdUserService {
       mutationAttempted = true;
       await rm(path, { force: true });
       await this.#systemctl(["daemon-reload"], manager);
+      let afterState = await this.#managerState(input, manager, "uninstall");
       if (
-        beforeState.activeState === "failed" ||
-        (beforeState.result !== null && beforeState.result !== "success")
+        afterState.loadState !== "not-found" &&
+        (beforeState.activeState === "failed" ||
+          (beforeState.result !== null && beforeState.result !== "success"))
       ) {
         await this.#systemctl(["reset-failed", unit], manager);
         await this.#systemctl(["daemon-reload"], manager);
+        afterState = await this.#managerState(input, manager, "uninstall");
       }
-      const [body, afterState] = await Promise.all([
-        readOptionalFile(path),
-        this.#managerState(input, manager, "uninstall"),
-      ]);
+      const body = await readOptionalFile(path);
       const status = await this.#statusFrom(input, body, afterState);
       if (
         status.installed ||

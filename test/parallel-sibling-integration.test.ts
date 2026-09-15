@@ -182,11 +182,30 @@ async function fixture(
     );
   };
   const seededCommits = new Map<string, GitCommitObject>();
+  const immutableGitResults = new Map<
+    string,
+    Awaited<ReturnType<typeof processGroup.runContainedProcess>>
+  >();
   vi.spyOn(processGroup, "runContainedProcess").mockImplementation(async (input) => {
     if (input.command !== "git" || input.cwd !== repository) return runContainedProcess(input);
+    const args = input.args ?? [];
+    const exactObject = /^[0-9a-f]{40}\^\{(?:blob|commit|tree)\}$/;
+    const exactDiff =
+      args[0] === "diff" &&
+      !args.includes("--cached") &&
+      args.filter((arg) => /^[0-9a-f]{40}$/.test(arg)).length >= 2;
+    const cacheable =
+      (args[0] === "cat-file" && args[1] === "-e" && exactObject.test(args[2] ?? "")) ||
+      (args[0] === "rev-parse" && exactObject.test(args[1] ?? "")) ||
+      (args[0] === "rev-parse" && args[1] === "--show-toplevel") ||
+      (args[0] === "remote" && args[1] === "get-url" && args[2] === "origin") ||
+      exactDiff;
+    const cacheKey = cacheable ? JSON.stringify(args) : "";
+    const cached = immutableGitResults.get(cacheKey);
+    if (cached) return { ...cached, durationMs: 0 };
     const startedAt = Date.now();
     try {
-      const stdout = execFileSync("git", input.args ?? [], {
+      const stdout = execFileSync("git", args, {
         cwd: input.cwd,
         env: input.env,
         encoding: "utf8",
@@ -194,14 +213,16 @@ async function fixture(
         timeout: input.timeoutMs,
         maxBuffer: input.maxOutputBytes,
       });
-      return {
+      const result = {
         exitCode: 0,
-        signal: null,
+        signal: null as NodeJS.Signals | null,
         stdout,
         stderr: "",
         durationMs: Date.now() - startedAt,
         timedOut: false,
       };
+      if (cacheable) immutableGitResults.set(cacheKey, result);
+      return result;
     } catch (error) {
       const failure = error as {
         status?: number | null;

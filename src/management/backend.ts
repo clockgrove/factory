@@ -77,6 +77,11 @@ export interface ObligationResult {
   usage: ManagementUsage;
 }
 export type ObligationCheckpoint = (result: ObligationResult) => Promise<void>;
+export interface ObligationRepairContext {
+  revision: number;
+  validationFailure: string;
+  previousProposal: unknown;
+}
 export interface PlanJudgeContext {
   challenges?: CompilerInferenceChallenge[];
   compilation: CompilationContext;
@@ -210,6 +215,7 @@ export interface ManagementBackend {
     context: CompilationContext,
     checkpoint: ObligationCheckpoint,
     beforeModelInvocation?: CompilerModelAdmission,
+    repair?: ObligationRepairContext,
   ): Promise<ObligationResult>;
   judgePlan?(
     context: PlanJudgeContext,

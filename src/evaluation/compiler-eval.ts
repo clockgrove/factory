@@ -40,26 +40,30 @@ export const CompilerEvidenceSchema = z
   })
   .strict();
 export type CompilerEvidence = z.infer<typeof CompilerEvidenceSchema>;
+const ObligationSchema = z
+  .object({
+    id: Id,
+    text: Text,
+    kind: z.enum(["explicit", "prerequisite", "ambiguity"]),
+    evidenceIds: Refs.min(1),
+    acceptanceEvidence: Text,
+  })
+  .strict();
+/** Model-owned claims only. Factory attaches the frozen evidence envelope. */
+export const ObligationClaimsSchema = z
+  .object({
+    version: z.literal(1),
+    obligations: z.array(ObligationSchema).min(1).max(128),
+  })
+  .strict();
+export type ObligationClaims = z.infer<typeof ObligationClaimsSchema>;
 export const ObligationInventorySchema = z
   .object({
     version: z.literal(1),
     objectiveDigest: Digest,
     baseSha: z.string().regex(/^[a-f0-9]{40,64}$/),
     evidence: z.array(CompilerEvidenceSchema).min(1).max(128),
-    obligations: z
-      .array(
-        z
-          .object({
-            id: Id,
-            text: Text,
-            kind: z.enum(["explicit", "prerequisite", "ambiguity"]),
-            evidenceIds: Refs.min(1),
-            acceptanceEvidence: Text,
-          })
-          .strict(),
-      )
-      .min(1)
-      .max(128),
+    obligations: z.array(ObligationSchema).min(1).max(128),
   })
   .strict();
 export type ObligationInventory = z.infer<typeof ObligationInventorySchema>;
@@ -224,6 +228,28 @@ export function parseObligationInventory(
   if (!inventory.evidence.some((entry) => entry.kind === "objective"))
     throw new Error("inventory requires original Objective evidence");
   return inventory;
+}
+
+/** Attach Factory-owned source identity without accepting a model-authored evidence envelope. */
+export function hydrateObligationInventory(
+  value: unknown,
+  expected: {
+    objectiveDigest: string;
+    baseSha: string;
+    evidence: readonly CompilerEvidence[];
+  },
+): ObligationInventory {
+  const claims = ObligationClaimsSchema.parse(value);
+  return parseObligationInventory(
+    {
+      version: claims.version,
+      objectiveDigest: expected.objectiveDigest,
+      baseSha: expected.baseSha,
+      evidence: expected.evidence,
+      obligations: claims.obligations,
+    },
+    expected,
+  );
 }
 
 export function validateCompilerJudgeVerdict(

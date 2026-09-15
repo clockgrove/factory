@@ -169,6 +169,14 @@ describe("read-only compiler evaluation", () => {
     expect(result.reports).toHaveLength(1);
     expect(result.reports[0]!.observedTotalTokens).toBe(48);
     expect(result.markdown).toContain("original failure retained");
+    expect(result.markdown).toContain(
+      "maxRepairs is shared across inventory regeneration and graph repair",
+    );
+    expect(result.correctionBudget).toMatchObject({
+      semantics: "shared across inventory regeneration and graph repair",
+      inventoryRepairs: 0,
+      graphRepairs: 1,
+    });
     expect(JSON.stringify(result)).not.toContain("do-not-display");
     expect(result.modelInvoked).toBe(false);
   });

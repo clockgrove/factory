@@ -48,9 +48,12 @@ export function assertCompilerDraftSelection(
   if (!binding || (inputDigest !== undefined && binding.inputDigest !== inputDigest))
     throw new Error("compiler assessment inputs changed before graph projection");
   const selected = records.find((record) => record.kind === "selection");
-  const inventoryResult = records.find(
-    (record) => record.kind === "result" && record.payload.stage === "inventory",
+  const inventoryResults = records.filter(
+    (record) =>
+      record.kind === "result" && record.payload.stage === "inventory" && !record.payload.error,
   );
+  if (inventoryResults.length > 1) throw new Error("compiled graph has ambiguous inventories");
+  const inventoryResult = inventoryResults[0];
   const verdictResult =
     selected &&
     records.find(
@@ -283,12 +286,27 @@ export async function compileEvaluatedDraft(args: {
         };
         try {
           if (request.stage === "inventory") {
+            const failure =
+              request.revision > 0 &&
+              request.failure &&
+              typeof request.failure === "object" &&
+              "error" in request.failure &&
+              "proposal" in request.failure
+                ? {
+                    revision: request.revision,
+                    validationFailure: String(request.failure.error),
+                    previousProposal: request.failure.proposal,
+                  }
+                : undefined;
+            if (request.revision > 0 && !failure)
+              throw new Error("inventory repair has no prior validation failure");
             const result = await backend.extractObligations!(
               frozenContext,
               async (result) => {
                 await checkpoint({ value: result.inventory, usage: result.usage });
               },
               beforeModelInvocation,
+              failure,
             );
             return { value: result.inventory, usage: result.usage };
           }

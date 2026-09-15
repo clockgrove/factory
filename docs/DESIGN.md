@@ -1336,6 +1336,9 @@ by default. The default envelope is seven model invocations and 600 seconds. Opt
 `maxObservedTokens` configure that bounded envelope. The normal run deadline and observed-token admission
 remain additional limits. Observed tokens are not a provider-enforced hard cap. Every phase
 uses the already selected compilation model; the judge receives no compiler private reasoning.
+`maxRepairs` is one correction budget shared by obligation-inventory regeneration and graph repair;
+an inventory retry leaves one fewer graph repair. Report-only evaluation and `maxRepairs: 0` make
+the inventory single-shot.
 
 `mode: "report-only"` uses the same independently judged draft with no repair and never commits
 or projects an execution graph. A completed report-only run means its evaluation purpose ended;
@@ -1355,6 +1358,12 @@ changed inputs, cycling drafts, repeated blockers, exhausted bounds, and materia
 fail closed. Malformed repair output consumes its attempt. Revisions never emit `GraphCompiled`;
 only an accepted exact selection reaches the existing graph commitment/projection transaction.
 Changing an Objective before that commitment invalidates its assessment, including on restart.
+The model emits obligation claims and canonical evidence IDs. Factory attaches the frozen Objective
+digest, base SHA, and exact evidence records before strict validation, so model formatting cannot
+rewrite trusted evidence. Only a completed response that fails deterministic claims schema or
+evidence-grounding validation may consume the next shared correction. Exact usage alone does not
+authorize a retry; provider, process, persistence, unsafe-output, and exhausted-bound failures remain
+terminal.
 
 This is an opt-in policy extension, not a change to existing immutable policies or the current
 release candidate's defaults. Runs without the field retain their original compilation path.

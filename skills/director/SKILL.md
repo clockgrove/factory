@@ -145,7 +145,12 @@ The assessment is not execution authority. For an explicitly authorized continua
    with `mode: "auto-repair"`, `maxRepairs`, `maxInvocations`, `timeoutSeconds`, and
    `maxObservedTokens`. Present the exact retained limits and added invocation exposure for
    authorization. `maxObservedTokens` is an observed evaluation stop, not a hard
-   provider token cap; the cumulative economics policy remains the spending boundary.
+   provider token cap; the cumulative economics policy remains the spending boundary. Explain that
+   `maxRepairs` is one shared correction budget across obligation-inventory regeneration and graph
+   repair: each inventory correction leaves one fewer graph correction. Report-only evaluation and
+   `maxRepairs: 0` leave inventory extraction single-shot. Exact usage alone does not authorize an
+   inventory retry; Factory retries only a retained, bounded response that failed deterministic
+   claims schema or evidence-grounding validation.
    Report the proposed reuse, required fresh validation, cumulative usage, and blockers. A blocked
    proposal is not a runnable plan.
 2. Resolve any missing authority before writing: an exhausted allowance needs an explicit increment;

@@ -7,6 +7,7 @@ import {
   createCompilerEvalReport,
   measureCompilerCalibration,
   measureCompilerRepairComparison,
+  hydrateObligationInventory,
   parseObligationInventory,
   renderCompilerEvalMarkdown,
   validateCompilerJudgeVerdict,
@@ -85,6 +86,33 @@ describe("obligation-first compiler evidence", () => {
     changed.evidence[0]!.excerpt = evidence[0]!.excerpt;
     changed.baseSha = "d".repeat(40);
     expect(() => parseObligationInventory(changed, inventory)).toThrow("identity mismatch");
+  });
+  it("hydrates only model-owned claims with Factory's canonical evidence envelope", () => {
+    const claims = { version: 1 as const, obligations: inventory.obligations };
+    expect(hydrateObligationInventory(claims, inventory)).toEqual(inventory);
+
+    const unknown = structuredClone(claims);
+    unknown.obligations[0]!.evidenceIds = ["invented"];
+    expect(() => hydrateObligationInventory(unknown, inventory)).toThrow(
+      "unknown obligation citation",
+    );
+    expect(() => hydrateObligationInventory(inventory, inventory)).toThrow();
+
+    const duplicated = structuredClone(claims);
+    duplicated.obligations.push({ ...duplicated.obligations[0]! });
+    expect(() => hydrateObligationInventory(duplicated, inventory)).toThrow(
+      "duplicate obligation identity",
+    );
+
+    const missing = structuredClone(claims);
+    missing.obligations[0]!.evidenceIds = [];
+    expect(() => hydrateObligationInventory(missing, inventory)).toThrow();
+    expect(() =>
+      hydrateObligationInventory(claims, {
+        ...inventory,
+        evidence: [...evidence, { ...evidence[0]! }],
+      }),
+    ).toThrow("duplicate trusted evidence identity");
   });
   it("does not replace Objective coverage with individually successful packets", () => {
     const partial = verdict();

@@ -397,8 +397,9 @@ describe("local management transcripts", () => {
       removeCodexHome: async () => {},
       transcriptRecorder: new LocalManagementTranscriptRecorder(directory),
     });
-    await expect(
-      backend.compile(
+    let failure: unknown;
+    try {
+      await backend.compile(
         {
           repository,
           objective: { number: 1, title: "Test", body: "Implement the requested behavior." },
@@ -409,8 +410,13 @@ describe("local management transcripts", () => {
           runPolicy: DEFAULT_RUN_POLICY,
         },
         async () => {},
-      ),
-    ).rejects.toThrow();
+      );
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("invalid structured JSON");
+    expect((failure as Error).message).not.toContain("not valid structured json");
     const [name] = await readdir(directory);
     const record = JSON.parse(await readFile(join(directory, name!), "utf8"));
     expect(record.response).toMatchObject({

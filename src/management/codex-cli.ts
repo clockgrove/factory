@@ -1024,7 +1024,11 @@ function parseManagementJsonlResult<T>(stdout: string): { value: T; usage: Manag
     throw new Error("management backend stream ended without turn.completed");
   }
   if (!usage) throw new Error("management backend returned no model-token usage");
-  return { value: JSON.parse(finalResponse) as T, usage };
+  try {
+    return { value: JSON.parse(finalResponse) as T, usage };
+  } catch {
+    throw new Error("management backend returned invalid structured JSON");
+  }
 }
 
 export class CodexCliManagementBackend implements ManagementBackend {

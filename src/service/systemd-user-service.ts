@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, lstat, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, open, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -190,6 +190,11 @@ export class SystemdUserService {
         `controller-lifecycle-outcome-unknown: install cannot safely mutate ${this.unitName(input)} while systemd reports ActiveState=${before.activeState} and UnitFileState=${before.unitFileState || "(empty)"}; ${this.#inspectionAction(input)}`,
       );
     }
+    if (unmanagedUnitFileState(beforeUnitFileState)) {
+      throw new Error(
+        `controller-unit-unmanaged: ${this.unitName(input)} has UnitFileState=${before.unitFileState}, which Factory never creates or owns; ${this.#inspectionAction(input)}`,
+      );
+    }
     if (
       old === undefined &&
       (before.loadState !== "not-found" ||
@@ -265,6 +270,17 @@ export class SystemdUserService {
       readOptionalFile(this.unitPath(input)),
       this.#managerState(input, manager, "stop"),
     ]);
+    const beforeUnitFileState = classifyUnitFileState(beforeState.unitFileState);
+    if (unmanagedUnitFileState(beforeUnitFileState)) {
+      throw new Error(
+        `controller-unit-unmanaged: ${this.unitName(input)} has UnitFileState=${beforeState.unitFileState}, which Factory never creates or owns; ${this.#inspectionAction(input)}`,
+      );
+    }
+    if (beforeUnitFileState === "unknown") {
+      throw new Error(
+        `controller-lifecycle-outcome-unknown: stop cannot safely mutate ${this.unitName(input)} while systemd reports UnitFileState=${beforeState.unitFileState || "(empty)"}; ${this.#inspectionAction(input)}`,
+      );
+    }
     if (classifyActiveState(beforeState.activeState) === "stopped") {
       return this.#statusFrom(input, beforeBody, beforeState);
     }
@@ -308,6 +324,11 @@ export class SystemdUserService {
     if (beforeActiveState === "unsettled") {
       throw new Error(
         `controller-lifecycle-busy: ${unit} cannot be uninstalled while systemd reports ActiveState=${beforeState.activeState}; ${this.#inspectionAction(input)}`,
+      );
+    }
+    if (unmanagedUnitFileState(beforeUnitFileState)) {
+      throw new Error(
+        `controller-unit-unmanaged: ${unit} has UnitFileState=${beforeState.unitFileState}, which Factory never creates or owns; ${this.#inspectionAction(input)}`,
       );
     }
     const before = await this.#statusFrom(input, old, beforeState);
@@ -398,7 +419,8 @@ export class SystemdUserService {
     const active = activeState === "active";
     const managerStatePresent =
       runtime.loadState !== "not-found" || unitFileState !== "disabled" || active;
-    const managed = body?.startsWith(FACTORY_UNIT_MARKER) ?? false;
+    const managed =
+      !unmanagedUnitFileState(unitFileState) && (body?.startsWith(FACTORY_UNIT_MARKER) ?? false);
     const executableIdentity = installedExecutableIdentity(body);
     const currentExecutableIdentity = await controllerExecutableIdentity(this.#artifactPath());
     const installedLauncher = managed && body ? await this.#installedLauncher(input, body) : null;
@@ -478,6 +500,10 @@ export class SystemdUserService {
     if (!status.launcherCurrent)
       throw new Error(
         `${status.reasonCode ?? "controller-launcher-stale"}: ${status.unit}; ${status.action ?? "refresh the installed controller"}`,
+      );
+    if (!status.enabled)
+      throw new Error(
+        `${status.reasonCode ?? "controller-disabled"}: ${status.unit}; ${status.action ?? "enable the installed controller"}`,
       );
   }
   async #connectUserManager(
@@ -900,11 +926,37 @@ function managerEnvironment(uid: number): NodeJS.ProcessEnv {
 }
 
 async function readOptionalFile(path: string): Promise<string | undefined> {
+  let facts;
   try {
-    return await readFile(path, "utf8");
+    facts = await lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
+  }
+  if (!facts.isFile()) {
+    throw new Error(
+      `controller-unit-unmanaged: refusing to follow or replace non-regular unit path ${path}`,
+    );
+  }
+  let handle;
+  try {
+    handle = await open(
+      path,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+    );
+    if (!(await handle.stat()).isFile()) {
+      throw new Error(`controller-unit-unmanaged: refusing to read non-regular unit path ${path}`);
+    }
+    return await handle.readFile("utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return undefined;
+    if (code === "ELOOP") {
+      throw new Error(`controller-unit-unmanaged: refusing to follow symbolic unit path ${path}`);
+    }
+    throw error;
+  } finally {
+    await handle?.close();
   }
 }
 
@@ -949,11 +1001,13 @@ function runtimeEnabledUnitFileState(state: string): boolean {
   return classifyUnitFileState(state) === "runtime-enabled";
 }
 
+function unmanagedUnitFileState(state: UnitFileStateClassification): boolean {
+  return state === "linked" || state === "alias";
+}
+
 function disableUnitFileStateArguments(state: string, unit: string): readonly string[] | undefined {
-  if (state === "enabled-runtime" || state === "linked-runtime") {
-    return ["disable", "--runtime", unit];
-  }
-  if (state === "enabled" || state === "linked") return ["disable", unit];
+  if (state === "enabled-runtime") return ["disable", "--runtime", unit];
+  if (state === "enabled") return ["disable", unit];
   return undefined;
 }
 

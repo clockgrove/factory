@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FactorySupervisor } from "../src/supervisor.js";
 import * as progress from "../src/scheduling/progress-wake.js";
@@ -94,6 +96,13 @@ async function fixture(
   const git = (...args: string[]) => {
     const output = execFileSync("git", args, {
       cwd: repository,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "Fixture",
+        GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+        GIT_COMMITTER_NAME: "Fixture",
+        GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+      },
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
     }).trim();
@@ -109,6 +118,70 @@ async function fixture(
       mainHead = output;
     return output;
   };
+  const writeGitObject = (type: "blob" | "tree" | "commit", content: Buffer) => {
+    const object = Buffer.concat([Buffer.from(`${type} ${content.length}\0`), content]);
+    const id = createHash("sha1").update(object).digest("hex");
+    const objectDirectory = join(repository, ".git", "objects", id.slice(0, 2));
+    mkdirSync(objectDirectory, { recursive: true });
+    try {
+      writeFileSync(join(objectDirectory, id.slice(2)), deflateSync(object), { flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    return id;
+  };
+  type FixtureTreeEntry = {
+    path: string;
+    mode: string;
+    type: "blob" | "tree";
+    sha?: string | null;
+  };
+  const writeGitTree = (entries: FixtureTreeEntry[]): string => {
+    const direct: Array<{ name: string; mode: string; type: "blob" | "tree"; sha: string }> = [];
+    const nested = new Map<string, FixtureTreeEntry[]>();
+    for (const entry of entries) {
+      if (!entry.sha) continue;
+      const separator = entry.path.indexOf("/");
+      if (separator < 0) {
+        direct.push({ name: entry.path, mode: entry.mode, type: entry.type, sha: entry.sha });
+        continue;
+      }
+      const directory = entry.path.slice(0, separator);
+      const children = nested.get(directory) ?? [];
+      children.push({ ...entry, path: entry.path.slice(separator + 1) });
+      nested.set(directory, children);
+    }
+    for (const [name, children] of nested)
+      direct.push({ name, mode: "40000", type: "tree", sha: writeGitTree(children) });
+    direct.sort((left, right) =>
+      Buffer.compare(
+        Buffer.from(left.type === "tree" ? `${left.name}/` : left.name),
+        Buffer.from(right.type === "tree" ? `${right.name}/` : right.name),
+      ),
+    );
+    return writeGitObject(
+      "tree",
+      Buffer.concat(
+        direct.map((entry) =>
+          Buffer.concat([
+            Buffer.from(`${entry.mode} ${entry.name}\0`),
+            Buffer.from(entry.sha, "hex"),
+          ]),
+        ),
+      ),
+    );
+  };
+  const writeGitCommit = (args: { treeOid: string; parentOids: string[]; message: string }) => {
+    const actor = "Fixture <fixture@example.invalid> 1700000000 +0000";
+    return writeGitObject(
+      "commit",
+      Buffer.from(
+        `tree ${args.treeOid}\n${args.parentOids.map((parent) => `parent ${parent}\n`).join("")}` +
+          `author ${actor}\ncommitter ${actor}\n\n${args.message}\n`,
+      ),
+    );
+  };
+  const seededCommits = new Map<string, GitCommitObject>();
   vi.spyOn(processGroup, "runContainedProcess").mockImplementation(async (input) => {
     if (input.command !== "git" || input.cwd !== repository) return runContainedProcess(input);
     const startedAt = Date.now();
@@ -147,30 +220,62 @@ async function fixture(
     }
   });
   git("init", "-q", "-b", "main");
-  git("config", "user.name", "Fixture");
-  git("config", "user.email", "fixture@example.invalid");
   git("remote", "add", "origin", "https://github.com/o/r.git");
-  await writeFile(join(repository, "README.md"), "Fixture\n");
+  const baseEntries: FixtureTreeEntry[] = [
+    {
+      path: "README.md",
+      mode: "100644",
+      type: "blob",
+      sha: writeGitObject("blob", Buffer.from("Fixture\n")),
+    },
+  ];
   if (options.failCombinedTests)
-    await writeFile(
-      join(repository, "combined.test.mjs"),
-      'import { existsSync } from "node:fs";\nif (existsSync("a.txt") && existsSync("b.txt")) throw new Error("combined regression");\n',
-    );
-  git("add", ".");
-  git("commit", "-qm", "base");
-  const baseSha = git("rev-parse", "HEAD");
+    baseEntries.push({
+      path: "combined.test.mjs",
+      mode: "100644",
+      type: "blob",
+      sha: writeGitObject(
+        "blob",
+        Buffer.from(
+          'import { existsSync } from "node:fs";\nif (existsSync("a.txt") && existsSync("b.txt")) throw new Error("combined regression");\n',
+        ),
+      ),
+    });
+  const baseTree = writeGitTree(baseEntries);
+  const baseSha = writeGitCommit({
+    treeOid: baseTree,
+    parentOids: [],
+    message: "base",
+  });
+  seededCommits.set(baseSha, {
+    oid: baseSha,
+    treeOid: baseTree,
+    parentOids: [],
+    message: "base",
+    serverTime: new Date(),
+  });
+  writeFileSync(join(repository, ".git", "refs", "heads", "main"), `${baseSha}\n`);
+  git("reset", "-q", "--hard", baseSha);
   mainHead = baseSha;
   const readMainHead = () => mainHead ?? git("rev-parse", "main");
   const heads: string[] = [];
   const names = options.thirdSibling ? ["a", "b", "c"] : ["a", "b"];
   for (const name of names) {
-    git("checkout", "-q", "-b", name, baseSha);
-    await writeFile(join(repository, `${name}.txt`), `${name}\n`);
-    git("add", ".");
-    git("commit", "-qm", name);
-    heads.push(git("rev-parse", "HEAD"));
+    const blob = writeGitObject("blob", Buffer.from(`${name}\n`));
+    const tree = writeGitTree([
+      ...baseEntries,
+      { path: `${name}.txt`, mode: "100644", type: "blob", sha: blob },
+    ]);
+    const head = writeGitCommit({ treeOid: tree, parentOids: [baseSha], message: name });
+    heads.push(head);
+    seededCommits.set(head, {
+      oid: head,
+      treeOid: tree,
+      parentOids: [baseSha],
+      message: name,
+      serverTime: new Date(),
+    });
   }
-  git("checkout", "-q", "main");
   const now = new Date();
   const policy = parseRunPolicy({
     ...DEFAULT_RUN_POLICY,
@@ -194,7 +299,7 @@ async function fixture(
     });
   const refs = new Map<string, string>();
   const commits = new Map<string, GitCommitObject>();
-  const observedCommits = new Map<string, GitCommitObject>();
+  const observedCommits = new Map(seededCommits);
   const blobs = new Map<string, Buffer>();
   const trees = new Map<string, Map<string, string>>();
   let stalePreviewServed = false;
@@ -235,11 +340,7 @@ async function fixture(
     },
     readTreeEntry: async (id, path) => trees.get(id)?.get(path) ?? null,
     createBlob: async (bytes) => {
-      const id = execFileSync("git", ["hash-object", "-w", "--stdin"], {
-        cwd: repository,
-        input: bytes,
-        encoding: "utf8",
-      }).trim();
+      const id = writeGitObject("blob", bytes);
       blobs.set(id, bytes);
       return id;
     },
@@ -247,43 +348,45 @@ async function fixture(
       entries = entries.map((entry) => {
         if (entry.content === undefined) return entry;
         const bytes = Buffer.from(entry.content, "utf8");
-        const sha = execFileSync("git", ["hash-object", "-w", "--stdin"], {
-          cwd: repository,
-          input: bytes,
-          encoding: "utf8",
-        }).trim();
+        const sha = writeGitObject("blob", bytes);
         blobs.set(sha, bytes);
         return { path: entry.path, mode: entry.mode, type: entry.type, sha };
       });
-      const env = { ...process.env, GIT_INDEX_FILE: join(repository, ".git", "upload-index") };
-      execFileSync("git", ["read-tree", baseTreeOid ?? "--empty"], { cwd: repository, env });
-      execFileSync("git", ["update-index", "--index-info"], {
-        cwd: repository,
-        env,
-        input: entries
-          .map(
-            (entry) =>
-              `${entry.sha ? entry.mode : "0"} ${entry.sha ?? "0".repeat(40)}\t${entry.path}\n`,
-          )
-          .join(""),
-      });
-      const id = execFileSync("git", ["write-tree"], {
-        cwd: repository,
-        env,
-        encoding: "utf8",
-      }).trim();
-      trees.set(
-        id,
-        new Map(entries.filter((entry) => entry.sha).map((entry) => [entry.path, entry.sha!])),
-      );
+      let id: string;
+      if (baseTreeOid) {
+        // Sibling refresh trees are production artifacts and keep real Git
+        // materialization. Metadata-only checkpoint trees have no base and can
+        // stay in the immutable fixture store without spawning Git.
+        const env = { ...process.env, GIT_INDEX_FILE: join(repository, ".git", "upload-index") };
+        execFileSync("git", ["read-tree", baseTreeOid], { cwd: repository, env });
+        execFileSync("git", ["update-index", "--index-info"], {
+          cwd: repository,
+          env,
+          input: entries
+            .map(
+              (entry) =>
+                `${entry.sha ? entry.mode : "0"} ${entry.sha ?? "0".repeat(40)}\t${entry.path}\n`,
+            )
+            .join(""),
+        });
+        id = execFileSync("git", ["write-tree"], {
+          cwd: repository,
+          env,
+          encoding: "utf8",
+        }).trim();
+      } else {
+        id = writeGitTree(entries);
+      }
+      const tree = new Map(baseTreeOid ? trees.get(baseTreeOid) : undefined);
+      for (const entry of entries) {
+        if (entry.sha) tree.set(entry.path, entry.sha);
+        else tree.delete(entry.path);
+      }
+      trees.set(id, tree);
       return id;
     },
     createCommit: async (args) => {
-      const id = execFileSync(
-        "git",
-        ["commit-tree", args.treeOid, ...args.parentOids.flatMap((parent) => ["-p", parent])],
-        { cwd: repository, input: args.message, encoding: "utf8" },
-      ).trim();
+      const id = writeGitCommit(args);
       commits.set(id, { ...args, oid: id, serverTime: new Date() });
       return id;
     },
@@ -1024,11 +1127,11 @@ async function fixture(
       const previewKey = `${previewTree}:${previewParents.join(":")}`;
       let preview = previewCommits.get(previewKey);
       if (!preview) {
-        preview = execFileSync(
-          "git",
-          ["commit-tree", previewTree, ...previewParents.flatMap((parent) => ["-p", parent])],
-          { cwd: repository, input: "GitHub test merge", encoding: "utf8" },
-        ).trim();
+        preview = writeGitCommit({
+          treeOid: previewTree,
+          parentOids: previewParents,
+          message: "GitHub test merge",
+        });
         previewCommits.set(previewKey, preview);
       }
       if (pull.state === "OPEN")

@@ -419,6 +419,91 @@ describe("systemd user service lifecycle", () => {
     expect(reloads).toBe(2);
   });
 
+  it("reports an unknown install outcome when rollback cannot reload the restored definition", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-install-reload-unknown-"));
+    commandFixtures.push(directory);
+    const bundle = join(directory, "factory.js");
+    const units = join(directory, "units");
+    await writeFile(bundle, "// controller fixture\n");
+    let reloads = 0;
+    let enabled = false;
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "daemon-reload") {
+        reloads += 1;
+        throw new Error("fixture reload failure");
+      }
+      if (args[0] === "enable") enabled = true;
+      if (args[0] === "disable") enabled = false;
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(units, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled,
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: units,
+      commandEnvironment: () => ({ PATH: "" }),
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+
+    await expect(service.install(input)).rejects.toThrow(
+      /controller-lifecycle-outcome-unknown: install failed.*rollback could not be verified.*fixture reload failure/,
+    );
+    await expect(readFile(service.unitPath(input))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(enabled).toBe(false);
+    expect(reloads).toBe(2);
+  });
+
+  it("reports an unknown uninstall outcome when rollback cannot reload the restored definition", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-uninstall-reload-unknown-"));
+    commandFixtures.push(directory);
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let enabled = false;
+    let failReload = false;
+    let failedReloads = 0;
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "daemon-reload" && failReload) {
+        failedReloads += 1;
+        throw new Error("fixture rollback reload failure");
+      }
+      if (args[0] === "enable") enabled = true;
+      if (args[0] === "disable") enabled = false;
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled: installed && enabled,
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+    failReload = true;
+
+    await expect(service.uninstall(input)).rejects.toThrow(
+      /controller-lifecycle-outcome-unknown: uninstall failed.*rollback could not be verified.*fixture rollback reload failure/,
+    );
+    expect(await readFile(service.unitPath(input), "utf8")).toContain(
+      "# Managed by Clockgrove Factory v2",
+    );
+    expect(enabled).toBe(true);
+    expect(failedReloads).toBe(2);
+  });
+
   it("accepts an already-unloaded failed unit as a complete uninstall", async () => {
     const directory = await mkdtemp(join(tmpdir(), "factory-systemd-unloaded-failure-"));
     const bundle = join(directory, "factory.js");

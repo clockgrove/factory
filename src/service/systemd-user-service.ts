@@ -626,7 +626,7 @@ export class SystemdUserService {
     } catch (error) {
       repairErrors.push(errorMessage(error));
     }
-    if (!restored) {
+    if (!restored || repairErrors.length > 0) {
       throw new Error(
         `controller-lifecycle-outcome-unknown: install failed (${errorMessage(cause)}) and rollback could not be verified${repairErrors.length ? ` (${repairErrors.join("; ")})` : ""}; ${this.#inspectionAction(input)}`,
       );
@@ -675,9 +675,9 @@ export class SystemdUserService {
     } catch (error) {
       repairErrors.push(errorMessage(error));
     }
-    if (!restored || runtimeContinuityLost) {
+    if (!restored || repairErrors.length > 0 || runtimeContinuityLost) {
       throw new Error(
-        `controller-lifecycle-outcome-unknown: uninstall failed (${errorMessage(cause)}) and ${runtimeContinuityLost ? "the original controller process or failure state cannot be restored" : "rollback could not be verified"}${restored ? "; unit file, enablement, and active-state repair was verified" : ""}${repairErrors.length ? ` (${repairErrors.join("; ")})` : ""}; ${this.#inspectionAction(input)}`,
+        `controller-lifecycle-outcome-unknown: uninstall failed (${errorMessage(cause)}) and ${runtimeContinuityLost ? "the original controller process or failure state cannot be restored" : "rollback could not be verified"}${restored && repairErrors.length === 0 ? "; unit file, enablement, and active-state repair was verified" : ""}${repairErrors.length ? ` (${repairErrors.join("; ")})` : ""}; ${this.#inspectionAction(input)}`,
       );
     }
     throw new Error(

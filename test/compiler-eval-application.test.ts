@@ -241,6 +241,8 @@ describe("read-only compiler evaluation", () => {
     });
     expect(result.reports).toHaveLength(0);
     expect(result.markdown).toContain("Invalid historical judge results retained");
+    expect(result.markdown).toContain("## Compiler invocation accounting");
+    expect(result.markdown).toContain("input 10; output 2; cached input unavailable");
     expect(JSON.stringify(result)).not.toContain("provider-secret");
   });
   it("reports absent history without reusing historical authority", async () => {

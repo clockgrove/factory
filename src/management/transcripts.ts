@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import type { ManagementUsage } from "./backend.js";
 
@@ -7,12 +7,14 @@ export const MANAGEMENT_TRANSCRIPT_DIRECTORY_ENV = "FACTORY_MANAGEMENT_TRANSCRIP
 export const MAX_MANAGEMENT_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
 export const MAX_MANAGEMENT_TRANSCRIPT_ARCHIVE_BYTES = 512 * 1024 * 1024;
 export const MAX_MANAGEMENT_TRANSCRIPT_RECORDS = 1_000;
+export const MANAGEMENT_TRANSCRIPT_FILENAME_PREFIX = "factory-management-";
 
 export interface ManagementTranscriptStart {
   cwd: string;
   modelInvocationId?: string | undefined;
   prompt: string;
   schema: unknown;
+  profile: string | null;
   model: string | null;
   reasoning: string | null;
   transport: "codex-cli-jsonl" | "structured-adapter";
@@ -61,7 +63,7 @@ function unavailable(role: "system" | "developer") {
   };
 }
 
-function assistantMessages(stdout: string | undefined) {
+function assistantMessages(stdout: string | undefined, hasFinalStructuredResponse: boolean) {
   if (stdout === undefined) return [];
   const messages: Array<{
     role: "assistant";
@@ -91,8 +93,15 @@ function assistantMessages(stdout: string | undefined) {
       // The raw stream remains available below even when an interleaved line is not JSON.
     }
   }
-  if (messages.length > 0) messages.at(-1)!.finalStructuredResponse = true;
+  if (hasFinalStructuredResponse && messages.length > 0)
+    messages.at(-1)!.finalStructuredResponse = true;
   return messages;
+}
+
+function selected(value: string | null, unavailableReason: string) {
+  return value === null
+    ? { availability: "unavailable" as const, reason: unavailableReason }
+    : { availability: "observed" as const, value };
 }
 
 function stream(value: string | undefined, label: string) {
@@ -119,6 +128,7 @@ export class LocalManagementTranscriptRecorder implements ManagementTranscriptRe
   readonly #maxRecordBytes: number;
   readonly #maxArchiveBytes: number;
   readonly #maxRecords: number;
+  #operations: Promise<void> = Promise.resolve();
 
   constructor(directory: string, limits: TranscriptLimits = {}) {
     if (!directory.trim() || !isAbsolute(directory)) {
@@ -143,7 +153,7 @@ export class LocalManagementTranscriptRecorder implements ManagementTranscriptRe
   async begin(input: ManagementTranscriptStart): Promise<ManagementTranscriptSession> {
     const startedAt = new Date().toISOString();
     const recordingId = input.modelInvocationId ?? `local-${randomUUID()}`;
-    const filename = `${startedAt.replaceAll(":", "-")}-${digest(recordingId).slice(0, 16)}.json`;
+    const filename = `${MANAGEMENT_TRANSCRIPT_FILENAME_PREFIX}${startedAt.replaceAll(":", "-")}-${digest(recordingId).slice(0, 16)}.json`;
     const path = join(this.#root, filename);
     const base = {
       protocol: "clockgrove.factory/local-management-transcript-v1" as const,
@@ -157,8 +167,24 @@ export class LocalManagementTranscriptRecorder implements ManagementTranscriptRe
       request: {
         cwd: resolve(input.cwd),
         transport: input.transport,
+        requestedProfile: input.profile,
         requestedModel: input.model,
         requestedReasoning: input.reasoning,
+        selection: {
+          profile: selected(input.profile, "no-profile-requested"),
+          model: selected(
+            input.model,
+            input.profile
+              ? "profile-resolved-model-not-exposed"
+              : "provider-default-model-not-exposed",
+          ),
+          reasoning: selected(
+            input.reasoning,
+            input.profile
+              ? "profile-resolved-reasoning-not-exposed"
+              : "provider-default-reasoning-not-exposed",
+          ),
+        },
         schema: input.schema,
         schemaSha256: digest(serialized(input.schema)),
         messages: [
@@ -177,13 +203,16 @@ export class LocalManagementTranscriptRecorder implements ManagementTranscriptRe
         availability: "pending" as const,
       },
     };
-    await this.#write(path, base);
+    await this.#serialize(() => this.#write(path, base));
     let finished = false;
     return {
       finish: async (outcome) => {
         if (finished) return;
         finished = true;
-        const assistant = assistantMessages(outcome.stdout);
+        const assistant = assistantMessages(
+          outcome.stdout,
+          outcome.state === "succeeded" && Object.hasOwn(outcome, "parsedResponse"),
+        );
         if (assistant.length === 0 && Object.hasOwn(outcome, "parsedResponse")) {
           const content = serialized(outcome.parsedResponse);
           assistant.push({
@@ -203,34 +232,46 @@ export class LocalManagementTranscriptRecorder implements ManagementTranscriptRe
               cachedInputIsIncludedInInput: true as const,
             }
           : null;
-        await this.#write(path, {
-          ...base,
-          completedAt,
-          response: {
-            state: outcome.state,
-            availability:
-              assistant.length > 0 || outcome.stdout !== undefined
-                ? ("observed" as const)
-                : ("unavailable" as const),
-            messages: assistant,
-            stdout: stream(outcome.stdout, "stdout"),
-            stderr: stream(outcome.stderr, "stderr"),
-            parsedResponse: Object.hasOwn(outcome, "parsedResponse")
-              ? { availability: "observed" as const, value: outcome.parsedResponse }
-              : { availability: "unavailable" as const, reason: "no-valid-structured-response" },
-            process: {
-              exitCode: outcome.exitCode ?? null,
-              signal: outcome.signal ?? null,
-              timedOut: outcome.timedOut ?? false,
-              durationMs:
-                outcome.durationMs ?? Math.max(0, Date.parse(completedAt) - Date.parse(startedAt)),
+        await this.#serialize(() =>
+          this.#write(path, {
+            ...base,
+            completedAt,
+            response: {
+              state: outcome.state,
+              availability:
+                assistant.length > 0 || outcome.stdout !== undefined
+                  ? ("observed" as const)
+                  : ("unavailable" as const),
+              messages: assistant,
+              stdout: stream(outcome.stdout, "stdout"),
+              stderr: stream(outcome.stderr, "stderr"),
+              parsedResponse: Object.hasOwn(outcome, "parsedResponse")
+                ? { availability: "observed" as const, value: outcome.parsedResponse }
+                : { availability: "unavailable" as const, reason: "no-valid-structured-response" },
+              process: {
+                exitCode: outcome.exitCode ?? null,
+                signal: outcome.signal ?? null,
+                timedOut: outcome.timedOut ?? false,
+                durationMs:
+                  outcome.durationMs ??
+                  Math.max(0, Date.parse(completedAt) - Date.parse(startedAt)),
+              },
+              usage,
+              ...(outcome.error ? { error: outcome.error } : {}),
             },
-            usage,
-            ...(outcome.error ? { error: outcome.error } : {}),
-          },
-        });
+          }),
+        );
       },
     };
+  }
+
+  #serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#operations.then(operation, operation);
+    this.#operations = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   async #write(path: string, value: unknown): Promise<void> {
@@ -241,9 +282,12 @@ export class LocalManagementTranscriptRecorder implements ManagementTranscriptRe
         `management transcript is ${bytes} bytes; maximum is ${this.#maxRecordBytes}`,
       );
     }
-    await mkdir(this.#root, { recursive: true, mode: 0o700 });
-    await chmod(this.#root, 0o700);
-    const temporary = join(this.#root, `.${randomUUID()}.tmp`);
+    await this.#prepareRoot();
+    await this.#pruneFor(path, bytes);
+    const temporary = join(
+      this.#root,
+      `.${MANAGEMENT_TRANSCRIPT_FILENAME_PREFIX}${randomUUID()}.tmp`,
+    );
     try {
       await writeFile(temporary, body, { encoding: "utf8", mode: 0o600, flag: "wx" });
       await rename(temporary, path);
@@ -251,14 +295,27 @@ export class LocalManagementTranscriptRecorder implements ManagementTranscriptRe
       await rm(temporary, { force: true }).catch(() => {});
       throw error;
     }
-    await this.#prune();
   }
 
-  async #prune(): Promise<void> {
+  async #prepareRoot(): Promise<void> {
+    await mkdir(this.#root, { recursive: true, mode: 0o700 });
+    const details = await lstat(this.#root);
+    if (details.isSymbolicLink() || !details.isDirectory())
+      throw new Error("management transcript directory must be a real directory, not a symlink");
+    await chmod(this.#root, 0o700);
+  }
+
+  async #pruneFor(target: string, replacementBytes: number): Promise<void> {
     const files = [];
     for (const entry of await readdir(this.#root, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      if (
+        !entry.isFile() ||
+        !entry.name.startsWith(MANAGEMENT_TRANSCRIPT_FILENAME_PREFIX) ||
+        !entry.name.endsWith(".json")
+      )
+        continue;
       const path = join(this.#root, entry.name);
+      if (path === target) continue;
       try {
         const details = await stat(path);
         files.push({ path, name: entry.name, bytes: details.size, modified: details.mtimeMs });
@@ -270,15 +327,18 @@ export class LocalManagementTranscriptRecorder implements ManagementTranscriptRe
       (left, right) => left.modified - right.modified || left.name.localeCompare(right.name),
     );
     let total = files.reduce((sum, file) => sum + file.bytes, 0);
-    while (files.length > this.#maxRecords || total > this.#maxArchiveBytes) {
+    while (
+      files.length + 1 > this.#maxRecords ||
+      total + replacementBytes > this.#maxArchiveBytes
+    ) {
       const oldest = files.shift();
       if (!oldest) break;
       try {
         await rm(oldest.path);
-        total -= oldest.bytes;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
+      total -= oldest.bytes;
     }
   }
 }

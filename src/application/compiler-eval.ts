@@ -514,6 +514,27 @@ export async function inspectCompilerEvaluation(args: {
     graphRepairs: invocations.filter(({ invocation }) => invocation.stage === "repair").length,
   };
   const runtimeEconomics = summarizeRun(events, run.start.policy, args.snapshot.objectiveAuthority);
+  const observedCompilerTokenSubtotal = usage.reduce(
+    (sum, invocation) => sum + (invocation.observedTokens ?? 0),
+    0,
+  );
+  const observedCompilerTokenTotal =
+    usage.length > 0 && usage.every((invocation) => invocation.observedTokens !== null)
+      ? observedCompilerTokenSubtotal
+      : null;
+  const compilerInvocationAccounting = [
+    "## Compiler invocation accounting",
+    "",
+    ...(usage.length > 0
+      ? usage.map(
+          (invocation) =>
+            `- ${invocation.invocationId} (${invocation.phase}): total tokens ${invocation.observedTokens ?? "unavailable"}; input ${invocation.inputTokens ?? "unavailable"}; output ${invocation.outputTokens ?? "unavailable"}; cached input ${invocation.cachedInputTokens ?? "unavailable"} (cached input is included in input); milliseconds ${invocation.observedMilliseconds ?? "unknown"}; evidence: ${invocation.evidenceId}`,
+        )
+      : ["- No compiler invocation records are available."]),
+    "",
+    `Observed compiler token subtotal: ${observedCompilerTokenSubtotal}; complete total: ${observedCompilerTokenTotal ?? "unavailable"}.`,
+    "",
+  ];
   const runtimeAccounting = runtimeEconomics
     ? [
         "## Runtime accounting",
@@ -562,6 +583,7 @@ export async function inspectCompilerEvaluation(args: {
           `- Record ${record.sequence}: ${record.kind}${record.failed ? " (original failure retained)" : ""}; evidence ${record.evidenceDigest}`,
       ),
       "",
+      ...compilerInvocationAccounting,
       ...reports.map(renderCompilerEvalMarkdown),
       ...(annotations
         ? [

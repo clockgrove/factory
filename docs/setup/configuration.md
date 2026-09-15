@@ -66,23 +66,28 @@ private absolute path in the Linux user's retained state directory:
 ```bash
 export FACTORY_MANAGEMENT_TRANSCRIPT_DIR="$HOME/.local/state/clockgrove-factory/model-transcripts"
 factory controller install OWNER/REPO --repo /home/you/src/repo
+factory controller restart OWNER/REPO --repo /home/you/src/repo
 ```
 
 The controller installer validates and persists this one setting in its generated user service.
 Set it in the parent process for foreground CLI or plugin MCP calls. With the variable absent,
 Factory performs no transcript filesystem writes. A shell export made after a controller or MCP
-process starts does not change that process; reinstall the service or restart the parent as
+process starts does not change that process. Reinstalling persists the setting, and the explicit
+controller restart above starts the installed unit with it. Restart an existing MCP parent as
 appropriate.
 
-Each JSON record contains the exact user prompt and output schema Factory supplied, requested model
-and reasoning, all assistant messages emitted by Codex CLI, the bounded stdout/stderr visible at the
+Each Factory-owned JSON record contains the exact user prompt and output schema Factory supplied,
+requested profile/model/reasoning (with provider-resolved values marked unavailable when they are
+not exposed), all assistant messages emitted by Codex CLI, the bounded stdout/stderr visible at the
 process boundary, parse/process outcome, duration, and reported token counters. System and developer
 messages owned by the provider are marked `provider-managed-not-exposed`; Factory does not invent
 them. A supervised call carries its durable Factory model-invocation ID. An unsupervised local call,
 such as `plan --compile`, carries a clearly labeled local-only recording ID.
 
-The directory is mode `0700` and files are mode `0600`. One record is capped at 8 MiB; the archive is
-capped at 1,000 records and 512 MiB, with oldest records pruned first. Codex process output remains
+The directory must be a real directory rather than a symlink; it is mode `0700` and files are mode
+`0600`. Factory prunes only records with its `factory-management-` filename prefix. One record is
+capped at 8 MiB; the archive is capped at 1,000 records and 512 MiB, with oldest records pruned first.
+Codex process output remains
 subject to its existing 2 MiB capture ceiling, and a retained truncation marker is reported in the
 record. Transcript failures are written only to local diagnostics and never change provider results,
 accounting, or retry behavior.

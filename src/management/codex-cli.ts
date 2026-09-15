@@ -1621,6 +1621,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
         schema: input.schema,
         prompt: input.prompt,
         modelInvocationId: input.modelInvocationId,
+        profile: this.#options.profile ?? null,
         model: input.modelSelection?.model ?? this.#options.model ?? null,
         reasoning: input.modelSelection?.reasoning ?? null,
         transport: input.transport,
@@ -1812,16 +1813,8 @@ export class CodexCliManagementBackend implements ManagementBackend {
         if (quotaError) {
           await propagateProviderQuotaFailure(quotaError, admission);
         }
-        const streams = [
-          result.stderr.trim() ? `stderr:\n${result.stderr.trim()}` : "",
-          result.stdout.trim() ? `stdout:\n${result.stdout.trim()}` : "",
-        ]
-          .filter(Boolean)
-          .join("\n");
-        const diagnostic =
-          streams.length <= 7_000 ? streams : `[diagnostic truncated]\n${streams.slice(-6_900)}`;
         const error = new Error(
-          `management backend failed: ${diagnostic || "Codex CLI exited without diagnostics"}`,
+          `management backend failed: Codex CLI exited with status ${result.exitCode ?? "unknown"}${result.timedOut ? " after timeout" : ""}; inspect the local management transcript when enabled`,
         );
         const usage = observedUsage;
         if (usage) throw new ManagementOutputError(error, usage);

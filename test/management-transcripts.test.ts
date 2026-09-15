@@ -1,4 +1,15 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -48,6 +59,7 @@ describe("local management transcripts", () => {
       modelInvocationId: "compiler-exact",
       prompt,
       schema,
+      profile: "production-profile",
       model: "gpt-test",
       reasoning: "high",
       transport: "codex-cli-jsonl",
@@ -77,6 +89,12 @@ describe("local management transcripts", () => {
       request: {
         requestedModel: "gpt-test",
         requestedReasoning: "high",
+        requestedProfile: "production-profile",
+        selection: {
+          profile: { availability: "observed", value: "production-profile" },
+          model: { availability: "observed", value: "gpt-test" },
+          reasoning: { availability: "observed", value: "high" },
+        },
         schema,
       },
       response: {
@@ -142,6 +160,7 @@ describe("local management transcripts", () => {
         modelInvocationId,
         prompt: modelInvocationId,
         schema: {},
+        profile: null,
         model: null,
         reasoning: null,
         transport: "structured-adapter",
@@ -159,6 +178,199 @@ describe("local management transcripts", () => {
       ),
     );
     expect(records.map((record) => record.recordingId).sort()).toEqual(["three", "two"]);
+  });
+
+  it("prunes only Factory-owned records and serializes concurrent retention", async () => {
+    const directory = join(await root(), "archive");
+    await mkdir(directory);
+    const recorder = new LocalManagementTranscriptRecorder(directory, {
+      maxRecordBytes: 16 * 1024,
+      maxArchiveBytes: 32 * 1024,
+      maxRecords: 2,
+    });
+    await writeFile(join(directory, "user-settings.json"), '{"keep":true}\n');
+    const sessions = await Promise.all(
+      ["one", "two", "three", "four"].map((modelInvocationId) =>
+        recorder.begin({
+          cwd: directory,
+          modelInvocationId,
+          prompt: modelInvocationId,
+          schema: {},
+          profile: null,
+          model: null,
+          reasoning: null,
+          transport: "structured-adapter",
+        }),
+      ),
+    );
+    await Promise.all(
+      sessions.map((session, index) =>
+        session.finish({ state: "succeeded", parsedResponse: { index } }),
+      ),
+    );
+    const names = await readdir(directory);
+    expect(names).toContain("user-settings.json");
+    expect(JSON.parse(await readFile(join(directory, "user-settings.json"), "utf8"))).toEqual({
+      keep: true,
+    });
+    expect(names.filter((name) => name.startsWith("factory-management-")).length).toBe(2);
+  });
+
+  it("rejects a symlink archive root without touching its target", async () => {
+    const base = await root();
+    const linked = join(base, "linked");
+    const sessionDirectory = join(base, "real");
+    const setup = new LocalManagementTranscriptRecorder(sessionDirectory);
+    const session = await setup.begin({
+      cwd: base,
+      prompt: "setup",
+      schema: {},
+      profile: null,
+      model: null,
+      reasoning: null,
+      transport: "structured-adapter",
+    });
+    await session.finish({ state: "succeeded", parsedResponse: { ok: true } });
+    await symlink(sessionDirectory, linked);
+    const originalMode = (await stat(sessionDirectory)).mode & 0o777;
+    await expect(
+      new LocalManagementTranscriptRecorder(linked).begin({
+        cwd: base,
+        prompt: "must fail",
+        schema: {},
+        profile: null,
+        model: null,
+        reasoning: null,
+        transport: "structured-adapter",
+      }),
+    ).rejects.toThrow("not a symlink");
+    expect((await stat(sessionDirectory)).mode & 0o777).toBe(originalMode);
+  });
+
+  it("does not label progress as a final response when the provider fails", async () => {
+    const directory = join(await root(), "archive");
+    const recorder = new LocalManagementTranscriptRecorder(directory);
+    const session = await recorder.begin({
+      cwd: directory,
+      prompt: "fail after progress",
+      schema: {},
+      profile: null,
+      model: null,
+      reasoning: null,
+      transport: "codex-cli-jsonl",
+    });
+    await session.finish({
+      state: "provider-failed",
+      stdout: JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "Still working" },
+      }),
+      exitCode: 7,
+    });
+    const [name] = await readdir(directory);
+    const record = JSON.parse(await readFile(join(directory, name!), "utf8"));
+    expect(record.response.messages).toEqual([
+      expect.objectContaining({ content: "Still working", finalStructuredResponse: false }),
+    ]);
+  });
+
+  it("keeps actual failed CLI streams only in the local transcript", async () => {
+    const repository = await root();
+    const directory = join(repository, "archive");
+    const fakeCodex = join(repository, "fake-codex");
+    const codexHome = join(repository, "codex-home");
+    await writeFile(
+      join(repository, "package.json"),
+      JSON.stringify({ scripts: { test: "node --test" } }),
+    );
+    await writeFile(
+      fakeCodex,
+      [
+        "#!/bin/sh",
+        'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"private assistant progress"}}\'',
+        "printf '%s\\n' 'private repository stderr' >&2",
+        "exit 7",
+      ].join("\n"),
+    );
+    await chmod(fakeCodex, 0o700);
+    const backend = new CodexCliManagementBackend({
+      command: fakeCodex,
+      authFile: join(repository, "missing-auth.json"),
+      createCodexHome: async () => {
+        await mkdir(codexHome);
+        return codexHome;
+      },
+      removeCodexHome: async () => {},
+      transcriptRecorder: new LocalManagementTranscriptRecorder(directory),
+    });
+    let failure: unknown;
+    try {
+      await backend.compile(
+        {
+          repository,
+          objective: { number: 1, title: "Test", body: "Implement the requested behavior." },
+          defaultBranch: "main",
+          baseSha: "a".repeat(40),
+          repositoryFiles: ["package.json"],
+          allowedNetworkDestinations: [],
+          runPolicy: DEFAULT_RUN_POLICY,
+        },
+        async () => {},
+      );
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("exited with status 7");
+    expect((failure as Error).message).not.toContain("private assistant progress");
+    expect((failure as Error).message).not.toContain("private repository stderr");
+    const [name] = await readdir(directory);
+    const record = JSON.parse(await readFile(join(directory, name!), "utf8"));
+    expect(record.response).toMatchObject({
+      state: "provider-failed",
+      stdout: { content: expect.stringContaining("private assistant progress") },
+      stderr: { content: expect.stringContaining("private repository stderr") },
+      messages: [
+        expect.objectContaining({
+          content: "private assistant progress",
+          finalStructuredResponse: false,
+        }),
+      ],
+    });
+  });
+
+  it("fails open when the real transcript root cannot be created", async () => {
+    const repository = await root();
+    const blocked = join(repository, "blocked");
+    await writeFile(blocked, "regular file");
+    await writeFile(join(repository, "package.json"), JSON.stringify({ scripts: {} }));
+    const provider = vi.fn(async () => {
+      throw new Error("provider primary failure");
+    });
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    const backend = new CodexCliManagementBackend({
+      runStructured: provider,
+      transcriptRecorder: new LocalManagementTranscriptRecorder(blocked),
+    });
+    await expect(
+      backend.compile(
+        {
+          repository,
+          objective: { number: 1, title: "Test", body: "Implement the requested behavior." },
+          defaultBranch: "main",
+          baseSha: "a".repeat(40),
+          repositoryFiles: ["package.json"],
+          allowedNetworkDestinations: [],
+          runPolicy: DEFAULT_RUN_POLICY,
+        },
+        async () => {},
+      ),
+    ).rejects.toThrow("provider primary failure");
+    expect(provider).toHaveBeenCalledOnce();
+    expect(diagnostic).toHaveBeenCalledWith(
+      expect.stringContaining("[factory-debug] management transcript unavailable:"),
+    );
+    await expect(access(blocked)).resolves.toBeUndefined();
   });
 
   it("keeps transcript failures from replacing the provider failure", async () => {

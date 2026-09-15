@@ -190,6 +190,7 @@ export interface ManagementBackend {
     checkpoint: CompilerProposalCheckpoint,
     beforeModelInvocation?: CompilerModelAdmission,
     execution?: CompilationContext,
+    projection?: import("../compiler/proposal.js").CompilerProjectionContext,
   ): Promise<CompilerProposalResult>;
   /** Draft-stage calls share the compile accounting/checkpoint boundary. Legacy backends
    * may omit them; callers must refuse judge-enabled compilation when unavailable. */

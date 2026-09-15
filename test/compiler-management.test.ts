@@ -7,7 +7,11 @@ import { CodexCliManagementBackend, compilerProposalPrompt } from "../src/manage
 import { structuralObjectiveInventory } from "../src/management/compile.js";
 import type { CompilationContext } from "../src/management/backend.js";
 import { parseAndValidateCompilerProposal } from "../src/compiler/proposal.js";
-import { semanticProposal, semanticRequest } from "./helpers/semantic-compiler.js";
+import {
+  semanticPinnedFacts,
+  semanticProposal,
+  semanticRequest,
+} from "./helpers/semantic-compiler.js";
 
 describe("single semantic management route", () => {
   it("carries lossless ordinary Objective source coverage and detects an omitted segment", () => {
@@ -108,6 +112,36 @@ describe("single semantic management route", () => {
     } as CompilationContext);
     request.inventorySource = "structural-source";
     expect(() => compilerProposalPrompt(request)).not.toThrow();
+  });
+
+  it("keeps a 10,000-path repository out of request, prompt, and draft-result byte envelopes", () => {
+    const hiddenPaths = Array.from(
+      { length: 9_998 },
+      (_, index) => `assets/${String(index).padStart(5, "0")}-${"x".repeat(480)}`,
+    );
+    const pinned = semanticPinnedFacts({
+      paths: ["package.json", "package-lock.json", ...hiddenPaths],
+    });
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request);
+    const report = parseAndValidateCompilerProposal(request, proposal).report;
+    const persistedResult = {
+      request,
+      proposal,
+      report,
+      provenance: {
+        promptDigest: compilerEvalDigest(compilerProposalPrompt(request)),
+        schemaDigest: compilerEvalDigest(COMPILER_PROPOSAL_JSON_SCHEMA),
+        requestDigest: compilerEvalDigest(request),
+        model: null,
+        reasoning: null,
+        baseSha: request.baseSha,
+      },
+    };
+    expect(request.repository.pathCount).toBe(10_000);
+    expect(JSON.stringify(request)).not.toContain(hiddenPaths[0]!);
+    expect(Buffer.byteLength(JSON.stringify(request))).toBeLessThanOrEqual(1024 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(persistedResult))).toBeLessThanOrEqual(2 * 1024 * 1024);
   });
 
   it("uses the identical proposal schema for initial and repair and includes inventory initially", async () => {

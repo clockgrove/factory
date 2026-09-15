@@ -1,12 +1,21 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  accessSync,
+  constants as fsConstants,
+  lstatSync,
+  mkdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
-import { CompilerDraftManager, type CompilerDraftRecord } from "../src/control/compiler-drafts.js";
+import { CompilerDraftManager } from "../src/control/compiler-drafts.js";
 import type { CompiledGraphStore } from "../src/control/graphs.js";
 import { LeaseManager, type GitCommitObject, type LeaseStore } from "../src/control/lease.js";
 import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
@@ -27,7 +36,10 @@ import {
   type CompilerProposalResult,
 } from "../src/management/backend.js";
 import type { CompilerRequest } from "../src/compiler/contracts.js";
-import { parseAndValidateCompilerProposal } from "../src/compiler/proposal.js";
+import {
+  parseAndValidateCompilerProposal,
+  type CompilerProjectionContext,
+} from "../src/compiler/proposal.js";
 import { renderCompilerValidationReport } from "../src/compiler/violations.js";
 import {
   materializePinnedCompilationTree,
@@ -36,7 +48,10 @@ import {
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { pinFixtureRepository } from "./helpers/compiler-proposal.js";
 import {
+  issue404AggregateTokenUsage,
   issue404LiveAuthority,
+  issue404TerminalTranscriptEvidence,
+  issue404TokenUsageByStage,
   type Issue404LiveAuthority,
 } from "./helpers/issue404-live-authority.js";
 
@@ -54,6 +69,22 @@ function inspectLiveCandidate(candidateSha: string) {
     headSha: git("rev-parse", "--verify", "HEAD"),
     worktreeStatus: git("status", "--porcelain", "--untracked-files=all"),
   };
+}
+
+function assertWritableTranscriptDirectory(directory: string) {
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const details = lstatSync(directory);
+  if (!details.isDirectory() || details.isSymbolicLink())
+    throw new Error("the live transcript archive must be a real directory");
+  accessSync(directory, fsConstants.R_OK | fsConstants.W_OK);
+  const marker = join(directory, `.factory-issue404-preflight-${process.pid}`);
+  try {
+    writeFileSync(marker, "write-probe\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
+  } finally {
+    try {
+      unlinkSync(marker);
+    } catch {}
+  }
 }
 
 function transcriptRecorder() {
@@ -163,14 +194,16 @@ class OmittedObligationBackend extends CodexCliManagementBackend {
     checkpoint: CompilerProposalCheckpoint,
     beforeModelInvocation?: CompilerModelAdmission,
     execution?: CompilationContext,
+    projection?: CompilerProjectionContext,
   ): Promise<CompilerProposalResult> {
     if (request.revision > 0)
-      return super.proposePlan(request, checkpoint, beforeModelInvocation, execution);
+      return super.proposePlan(request, checkpoint, beforeModelInvocation, execution, projection);
     const result = await super.proposePlan(
       request,
       async () => {},
       beforeModelInvocation,
       execution,
+      projection,
     );
     const explicit = request.inventory.obligations.filter((entry) => entry.kind === "explicit");
     const omitted = explicit.at(-1)?.id;
@@ -178,7 +211,7 @@ class OmittedObligationBackend extends CodexCliManagementBackend {
     const proposal = structuredClone(result.proposal);
     for (const item of proposal.workItems)
       item.obligationIds = item.obligationIds.filter((id) => id !== omitted);
-    const report = parseAndValidateCompilerProposal(request, proposal).report;
+    const report = parseAndValidateCompilerProposal(request, proposal, projection).report;
     if (!report.violations.some((entry) => entry.code === "unmapped-obligation"))
       throw new Error("qualification omission did not produce unmapped-obligation");
     this.injectedObligationId = omitted;
@@ -195,29 +228,38 @@ const temporary: string[] = [];
 const disposePinnedTrees: Array<() => Promise<void>> = [];
 const evidence: Array<Record<string, unknown>> = [];
 
-function tokenUsageByStage(records: readonly CompilerDraftRecord[]) {
-  return records
-    .filter((record) => record.kind === "result")
-    .map((record) => {
-      const usage = record.payload.usage as
-        | { inputTokens: number; outputTokens: number; cachedInputTokens?: number }
-        | null
-        | undefined;
-      return {
-        stage: record.payload.stage,
-        revision: record.payload.revision,
-        tokens: usage
-          ? {
-              availability: "observed",
-              inputTokens: usage.inputTokens,
-              outputTokens: usage.outputTokens,
-              cachedInputTokens: usage.cachedInputTokens ?? 0,
-              cachedInputIsIncludedInInput: true,
-              totalTokens: usage.inputTokens + usage.outputTokens,
-            }
-          : { availability: "unknown" },
-      };
-    });
+async function assertTerminalTranscripts(invocationIds: string[]) {
+  if (!authority) throw new Error("live compiler authority was not established");
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const files = (await readdir(authority.transcriptDirectory)).filter(
+      (file) => file.startsWith("factory-management-") && file.endsWith(".json"),
+    );
+    const records = await Promise.all(
+      files.map(async (file) => ({
+        file,
+        record: JSON.parse(await readFile(join(authority!.transcriptDirectory, file), "utf8")) as {
+          modelInvocationId?: unknown;
+          response?: { state?: unknown };
+        },
+      })),
+    );
+    const matched = issue404TerminalTranscriptEvidence(
+      records.map(({ file, record }) => ({
+        file,
+        modelInvocationId: record.modelInvocationId,
+        responseState: record.response?.state,
+      })),
+      invocationIds,
+    );
+    if (matched)
+      return matched.map((record) => ({
+        file: record.file,
+        modelInvocationId: record.modelInvocationId,
+        state: record.responseState,
+      }));
+    await delay(25);
+  }
+  throw new Error(`live transcript archive lacks terminal records for ${invocationIds.join(", ")}`);
 }
 
 afterEach(async () => {
@@ -229,6 +271,7 @@ afterAll(() => {
   console.log(
     `ISSUE404_LIVE_EVIDENCE=${JSON.stringify({
       candidateSha: authority?.candidateSha ?? null,
+      qualificationRunId: authority?.runId ?? null,
       model: "gpt-5.6-sol",
       reasoning: "xhigh",
       cases: evidence,
@@ -241,6 +284,7 @@ async function qualify(
   objective: { title: string; body: string },
   backend: CodexCliManagementBackend,
 ) {
+  if (!authority) throw new Error("live compiler authority was not established");
   const repository = await mkdtemp(join(tmpdir(), `factory-issue404-${name}-`));
   temporary.push(repository);
   await writeFile(
@@ -254,6 +298,10 @@ async function qualify(
   await writeFile(
     join(repository, "README.md"),
     "Qualification fixture. Source and test paths named by the Objective are intentionally new.\n",
+  );
+  await writeFile(
+    join(repository, ".factory-issue404-qualification.json"),
+    `${JSON.stringify({ candidateSha: authority.candidateSha, runId: authority.runId, case: name }, null, 2)}\n`,
   );
   const baseSha = pinFixtureRepository(repository);
   const tree = await materializePinnedCompilationTree(repository, baseSha);
@@ -292,7 +340,7 @@ async function qualify(
   const lease = await leases.acquire(
     {
       objective: context.objective.number,
-      runId: `issue404-${name}`,
+      runId: `${authority.runId}-${name}`,
       holder: "qualification",
       policyDigest: digest,
     },
@@ -320,12 +368,22 @@ async function qualify(
     deadlineAt: Date.now() + 60 * 60_000,
   });
   if (result.status !== "accepted") {
+    const invocationIds = result.records
+      .filter((record) => record.kind === "invocation")
+      .map((record) => String(record.payload.invocationId));
+    const transcripts = await assertTerminalTranscripts(invocationIds);
     const stopped = {
       name,
+      qualificationRunId: authority.runId,
+      candidateSha: authority.candidateSha,
+      sourceBaseSha: baseSha,
       status: result.status,
       reason: result.reason,
       elapsedMilliseconds: Date.now() - started,
-      tokenUsageByStage: tokenUsageByStage(result.records),
+      invocationIds,
+      transcripts,
+      tokenUsageByStage: issue404TokenUsageByStage(result.records),
+      usage: issue404AggregateTokenUsage(result.records),
       records: result.records.map((record) => ({
         kind: record.kind,
         sequence: record.sequence,
@@ -351,33 +409,22 @@ async function qualify(
   }
   expect(() => assertCompilerDraftSelection(result.records, result.graph)).not.toThrow();
   const invocations = result.records.filter((record) => record.kind === "invocation");
-  const results = result.records.filter((record) => record.kind === "result");
-  const usage = results.reduce(
-    (total, record) => {
-      const observed = record.payload.usage as {
-        inputTokens: number;
-        outputTokens: number;
-        cachedInputTokens?: number;
-      } | null;
-      if (observed) {
-        total.inputTokens += observed.inputTokens;
-        total.outputTokens += observed.outputTokens;
-        total.cachedInputTokens += observed.cachedInputTokens ?? 0;
-      }
-      return total;
-    },
-    { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
-  );
+  const invocationIds = invocations.map((record) => String(record.payload.invocationId));
+  const transcripts = await assertTerminalTranscripts(invocationIds);
   const summary = {
     name,
+    qualificationRunId: authority.runId,
+    candidateSha: authority.candidateSha,
     sourceBaseSha: baseSha,
     status: result.status,
     acceptedRevision: result.revision,
     graphDigest: result.graphDigest,
     calls: invocations.length,
+    invocationIds,
+    transcripts,
     stages: invocations.map((record) => `${record.payload.stage}:${record.payload.revision}`),
-    tokenUsageByStage: tokenUsageByStage(result.records),
-    usage: { ...usage, totalTokens: usage.inputTokens + usage.outputTokens },
+    tokenUsageByStage: issue404TokenUsageByStage(result.records),
+    usage: issue404AggregateTokenUsage(result.records),
     elapsedMilliseconds: Date.now() - started,
     terminalRecord: result.records.at(-1)?.kind,
   };
@@ -387,7 +434,12 @@ async function qualify(
 
 describe.skipIf(!LIVE).sequential("issue #404 live semantic compiler qualification", () => {
   beforeAll(() => {
-    authority = issue404LiveAuthority(process.env, REPOSITORY_ROOT, inspectLiveCandidate);
+    authority = issue404LiveAuthority(
+      process.env,
+      REPOSITORY_ROOT,
+      inspectLiveCandidate,
+      assertWritableTranscriptDirectory,
+    );
   });
   it(
     "accepts a mechanically valid first draft without repair",

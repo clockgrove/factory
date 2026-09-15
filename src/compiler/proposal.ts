@@ -1,7 +1,10 @@
 import {
   assertCompiledObjectiveAdoptsLegacyConstraints,
   compiledGraphDigest,
+  MAX_COMPILED_GRAPH_BYTES,
+  serializeCompiledObjective,
   validateGraph,
+  workerPacketFromCompiled,
   type CompiledObjective,
   type LegacyGraphConstraints,
 } from "../graph.js";
@@ -17,6 +20,7 @@ import {
   type RunPolicy,
 } from "../protocol/policy.js";
 import { RepositoryScopePathSchema } from "../protocol/worker-packet.js";
+import { MAX_WORKER_PACKET_BYTES } from "../protocol/limits.js";
 import {
   readPinnedCompilerFacts,
   scopedNodeTestCommand,
@@ -107,6 +111,35 @@ export interface PreparedCompilerRequest {
   legacyGraphConstraints?: LegacyGraphConstraints;
 }
 
+interface CompilerProjectionFacts {
+  files: Array<{ path: string; generated: boolean; binary: boolean }>;
+}
+
+export interface CompilerProjectionContext {
+  pinnedFacts: PinnedRepositoryFacts;
+  runPolicy: RunPolicy;
+}
+
+function normalizeCompilerProjectionFacts(
+  files: readonly { path: string; generated?: boolean; binary?: boolean }[],
+): CompilerProjectionFacts {
+  if (files.length > 10_000) throw new Error("compiler projection file inventory exceeds bound");
+  const paths = new Set<string>();
+  const normalized = files.map((file) => {
+    const path = RepositoryScopePathSchema.parse(file.path);
+    if (paths.has(path)) throw new Error(`duplicate compiler projection path: ${path}`);
+    paths.add(path);
+    return { path, generated: file.generated === true, binary: file.binary === true };
+  });
+  return { files: normalized.sort((left, right) => left.path.localeCompare(right.path)) };
+}
+
+function compilerProjectionFactsFromPinned(
+  pinnedFacts: PinnedRepositoryFacts,
+): CompilerProjectionFacts {
+  return normalizeCompilerProjectionFacts(pinnedFacts.repository.files);
+}
+
 const pointer = (...parts: Array<string | number>) =>
   parts.length
     ? `/${parts
@@ -150,6 +183,7 @@ function schemaViolations(
       typeof candidate === "object" &&
       "id" in candidate &&
       typeof candidate.id === "string" &&
+      candidate.id.length <= 64 &&
       /^[a-z0-9][a-z0-9-]*$/.test(candidate.id)
         ? candidate.id
         : null;
@@ -410,6 +444,33 @@ function resolvedExecutionRequirements(
   };
 }
 
+function resolvedExclusiveResources(
+  projectionFacts: CompilerProjectionFacts,
+  item: CompilerProposal["workItems"][number],
+): string[] {
+  const scopedFiles = projectionFacts.files.filter((file) =>
+    item.scope.some((path) =>
+      path.endsWith("/") ? file.path.startsWith(path) : file.path === path,
+    ),
+  );
+  const generated =
+    scopedFiles.some((file) => file.generated) ||
+    item.scope.some((path) => /(^|\/)(?:dist|build|generated)\//.test(path));
+  const binary =
+    scopedFiles.some((file) => file.binary) ||
+    item.scope.some((path) => /\.(?:png|jpe?g|zip|wasm|pdf)$/i.test(path));
+  return [
+    ...new Set([
+      ...item.exclusiveResources,
+      ...(generated || binary
+        ? scopedFiles.length
+          ? scopedFiles.map((file) => file.path)
+          : item.scope
+        : []),
+    ]),
+  ].sort();
+}
+
 function criterionHasDeterministicValidation(
   criterion: CompilerProposal["workItems"][number]["criteria"][number],
 ) {
@@ -421,6 +482,7 @@ function criterionHasDeterministicValidation(
 export function parseAndValidateCompilerProposal(
   requestInput: CompilerRequest,
   value: unknown,
+  projectionContext?: CompilerProjectionContext,
 ): { proposal?: CompilerProposal; report: CompilerValidationReport } {
   const requestReport = validateCompilerRequest(requestInput);
   if (requestReport.status !== "valid") return { report: requestReport };
@@ -432,6 +494,9 @@ export function parseAndValidateCompilerProposal(
     };
   const proposal = parsed.data;
   const violations: CompilerViolation[] = [];
+  const projectionFacts = projectionContext
+    ? compilerProjectionFactsFromPinned(projectionContext.pinnedFacts)
+    : undefined;
   if (proposal.workItems.length > request.constraints.maxWorkItems)
     violations.push(
       violation(
@@ -814,6 +879,30 @@ export function parseAndValidateCompilerProposal(
             item.id,
           ),
         );
+    const exclusiveResources = projectionFacts
+      ? resolvedExclusiveResources(projectionFacts, item)
+      : item.exclusiveResources;
+    if (projectionFacts && exclusiveResources.length > 64)
+      violations.push(
+        violation(
+          "exclusive-resource-limit",
+          pointer("workItems", itemIndex, "exclusiveResources"),
+          { maximumProjectedValues: 64 },
+          exclusiveResources.length,
+          item.id,
+        ),
+      );
+    const oversizedResource = exclusiveResources.find((resource) => resource.length > 200);
+    if (projectionFacts && oversizedResource)
+      violations.push(
+        violation(
+          "exclusive-resource-limit",
+          pointer("workItems", itemIndex, "exclusiveResources"),
+          { maximumProjectedLength: 200 },
+          oversizedResource.length,
+          item.id,
+        ),
+      );
     const denied = item.executionIntent.additionalNetworkDestinations.filter(
       (destination) =>
         !destinationAllowedByPolicy(destination, request.constraints.allowedNetworkDestinations),
@@ -978,6 +1067,8 @@ export function parseAndValidateCompilerProposal(
       );
     else economicContracts.set(digest, item.id);
   }
+  if (violations.length === 0 && projectionContext)
+    violations.push(...projectedEnvelopeViolations(request, proposal, projectionContext));
   const report = createCompilerValidationReport("proposal", violations);
   return { proposal, report };
 }
@@ -1077,6 +1168,97 @@ function semanticCompilerWorkItems(
   return proposal.workItems.map((item) => semanticWorkItem(request, item, runPolicy));
 }
 
+function projectedEnvelopeViolations(
+  request: CompilerRequest,
+  proposal: CompilerProposal,
+  projectionContext: CompilerProjectionContext,
+): CompilerViolation[] {
+  const { pinnedFacts, runPolicy } = projectionContext;
+  let projected: ReturnType<typeof compileObjective>;
+  try {
+    const workItems = semanticCompilerWorkItems(request, proposal, runPolicy);
+    projected = compileObjective({
+      title: request.objective.title,
+      baseSha: request.baseSha,
+      repositoryFacts: pinnedFacts.repository,
+      workItems,
+      validationCommands: [...new Set(workItems.flatMap((item) => item.validationCommands))],
+      runPolicy,
+    });
+  } catch (error) {
+    return [
+      violation(
+        "schema-invalid",
+        "/workItems",
+        "a deterministically projectable compiler proposal",
+        { error: error instanceof Error ? error.message : String(error) },
+      ),
+    ];
+  }
+
+  const violations: CompilerViolation[] = [];
+  for (const [itemIndex, item] of projected.workItems.entries()) {
+    if (item.dependsOn.length > request.constraints.maxDependenciesPerItem)
+      violations.push(
+        violation(
+          "dependency-limit",
+          pointer("workItems", itemIndex, "dependsOn"),
+          request.constraints.maxDependenciesPerItem,
+          item.dependsOn.length,
+          item.id,
+        ),
+      );
+    try {
+      workerPacketFromCompiled(item);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const bytes = /^Worker Packet is (\d+) bytes; maximum is \d+$/.exec(message)?.[1];
+      violations.push(
+        violation(
+          bytes ? "worker-packet-limit" : "schema-invalid",
+          pointer("workItems", itemIndex),
+          bytes
+            ? { maximumProjectedBytes: MAX_WORKER_PACKET_BYTES }
+            : "a valid projected Worker Packet",
+          bytes ? Number(bytes) : { error: message },
+          item.id,
+        ),
+      );
+    }
+  }
+  if (violations.length > 0) return violations;
+  const graphEnvelope = {
+    ...projected,
+    workItems: projected.workItems.map((item) => ({
+      ...item,
+      economicReview: {
+        ...item.economicReview,
+        // Economic evidence is optional during proposal validation and may later
+        // replace this rationale with any schema-valid value. Reserve its full
+        // bound so final projection cannot cross the persisted graph limit.
+        rationale: "x".repeat(2_000),
+      },
+    })),
+  };
+  try {
+    serializeCompiledObjective(graphEnvelope);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const bytes = /^compiled graph is (\d+) bytes; maximum is \d+$/.exec(message)?.[1];
+    violations.push(
+      violation(
+        bytes ? "compiled-graph-limit" : "schema-invalid",
+        "/workItems",
+        bytes
+          ? { maximumProjectedBytes: MAX_COMPILED_GRAPH_BYTES }
+          : "a persistable compiled graph",
+        bytes ? Number(bytes) : { error: message },
+      ),
+    );
+  }
+  return violations;
+}
+
 export function compilerWorkItemsForEconomics(
   request: CompilerRequest,
   proposal: CompilerProposal,
@@ -1102,7 +1284,10 @@ export function projectCompilerProposal(input: {
   economicEvidence?: DecompositionEvidence;
   legacyGraphConstraints?: LegacyGraphConstraints;
 }): { objective: CompiledObjective; trace: CompilerProjectionTrace } {
-  const validated = parseAndValidateCompilerProposal(input.request, input.proposal);
+  const validated = parseAndValidateCompilerProposal(input.request, input.proposal, {
+    pinnedFacts: input.pinnedFacts,
+    runPolicy: input.runPolicy,
+  });
   if (!validated.proposal || validated.report.status !== "valid")
     throw new CompilerInvariantError("projection received an invalid proposal");
   try {

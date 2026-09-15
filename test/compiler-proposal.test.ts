@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { CompilerProposal, CompilerRequest } from "../src/compiler/contracts.js";
+import type { PinnedRepositoryFacts } from "../src/repository-profiles/read.js";
 import {
   parseAndValidateCompilerProposal,
   projectCompilerProposal,
@@ -18,8 +19,12 @@ import {
   semanticRequest,
 } from "./helpers/semantic-compiler.js";
 
-function codes(request: CompilerRequest, proposal: unknown) {
-  return parseAndValidateCompilerProposal(request, proposal).report.violations.map((entry) => ({
+function codes(request: CompilerRequest, proposal: unknown, pinned?: PinnedRepositoryFacts) {
+  return parseAndValidateCompilerProposal(
+    request,
+    proposal,
+    pinned ? { pinnedFacts: pinned, runPolicy: DEFAULT_RUN_POLICY } : undefined,
+  ).report.violations.map((entry) => ({
     code: entry.code,
     itemId: entry.itemId,
     field: entry.field,
@@ -184,6 +189,26 @@ describe("semantic proposal validation", () => {
     expect(JSON.stringify(result.report)).not.toContain("../private");
   });
 
+  it("returns a structured schema violation for an overlong item ID", () => {
+    const request = semanticRequest();
+    const malformed = structuredClone(semanticProposal(request)) as unknown as {
+      workItems: Array<Record<string, unknown>>;
+    };
+    malformed.workItems[0]!.id = "a".repeat(65);
+    expect(() => parseAndValidateCompilerProposal(request, malformed)).not.toThrow();
+    expect(parseAndValidateCompilerProposal(request, malformed).report).toMatchObject({
+      phase: "proposal",
+      status: "repairable",
+      violations: [
+        expect.objectContaining({
+          code: "schema-invalid",
+          itemId: null,
+          field: "/workItems/0/id",
+        }),
+      ],
+    });
+  });
+
   it("reports projection preconditions through structured proposal violations", () => {
     const request = semanticRequest();
 
@@ -300,6 +325,213 @@ describe("semantic proposal validation", () => {
           observed: 65,
         }),
       ]),
+    });
+  });
+
+  it("counts Factory-derived generated resources at the exact 64-item boundary", () => {
+    const fixture = (count: number) => {
+      const pinned = semanticPinnedFacts({
+        paths: [
+          "package.json",
+          "package-lock.json",
+          ...Array.from({ length: count }, (_, index) => `dist/chunk-${index + 1}.js`),
+        ],
+      });
+      const request = semanticRequest(pinned);
+      const proposal = semanticProposal(request);
+      proposal.workItems[0]!.scope = ["dist/"];
+      return { pinned, request, proposal };
+    };
+    const boundary = fixture(64);
+    expect(
+      parseAndValidateCompilerProposal(boundary.request, boundary.proposal, {
+        pinnedFacts: boundary.pinned,
+        runPolicy: DEFAULT_RUN_POLICY,
+      }).report.status,
+    ).toBe("valid");
+    expect(
+      projectCompilerProposal({
+        request: boundary.request,
+        proposal: boundary.proposal,
+        pinnedFacts: boundary.pinned,
+        runPolicy: DEFAULT_RUN_POLICY,
+      }).objective.workItems[0]!.changeSurface?.exclusiveResources,
+    ).toHaveLength(64);
+
+    const overflow = fixture(65);
+    expect(codes(overflow.request, overflow.proposal, overflow.pinned)).toContainEqual(
+      expect.objectContaining({
+        code: "exclusive-resource-limit",
+        itemId: "item-1",
+        field: "/workItems/0/exclusiveResources",
+        expected: { maximumProjectedValues: 64 },
+        observed: 65,
+      }),
+    );
+  });
+
+  it("rejects an overlong Factory-derived resource before projection", () => {
+    const path = `dist/${"a".repeat(196)}.js`;
+    expect(path.length).toBeGreaterThan(200);
+    const pinned = semanticPinnedFacts({
+      paths: ["package.json", "package-lock.json", path],
+    });
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request);
+    proposal.workItems[0]!.scope = ["dist/"];
+    expect(codes(request, proposal, pinned)).toContainEqual(
+      expect.objectContaining({
+        code: "exclusive-resource-limit",
+        itemId: "item-1",
+        field: "/workItems/0/exclusiveResources",
+        expected: { maximumProjectedLength: 200 },
+        observed: path.length,
+      }),
+    );
+  });
+
+  it("counts scope-derived serialization edges at the exact dependency boundary", () => {
+    const fixture = (overlapCount: number) => {
+      const paths = Array.from(
+        { length: overlapCount },
+        (_, index) => `src/independent-${index + 1}.ts`,
+      );
+      const pinned = semanticPinnedFacts({
+        paths: ["package.json", "package-lock.json", ...paths],
+      });
+      const request = semanticRequest(pinned);
+      const proposal = semanticProposal(request, overlapCount + 1);
+      for (const [index, item] of proposal.workItems.entries()) {
+        item.dependsOn = [];
+        item.scope = index < overlapCount ? [paths[index]!] : paths;
+      }
+      return { pinned, request, proposal };
+    };
+    const boundary = fixture(50);
+    expect(
+      parseAndValidateCompilerProposal(boundary.request, boundary.proposal, {
+        pinnedFacts: boundary.pinned,
+        runPolicy: DEFAULT_RUN_POLICY,
+      }).report.status,
+    ).toBe("valid");
+    expect(
+      projectCompilerProposal({
+        request: boundary.request,
+        proposal: boundary.proposal,
+        pinnedFacts: boundary.pinned,
+        runPolicy: DEFAULT_RUN_POLICY,
+      }).objective.workItems.at(-1)!.dependsOn,
+    ).toHaveLength(50);
+
+    const overflow = fixture(51);
+    expect(codes(overflow.request, overflow.proposal, overflow.pinned)).toContainEqual(
+      expect.objectContaining({
+        code: "dependency-limit",
+        itemId: "item-52",
+        field: "/workItems/51/dependsOn",
+        expected: 50,
+        observed: 51,
+      }),
+    );
+  });
+
+  it("bounds the fully expanded Worker Packet before projection", () => {
+    const fixture = (count: number) => {
+      const pinned = semanticPinnedFacts();
+      const request = semanticRequest(pinned);
+      const proposal = semanticProposal(request);
+      const evidence = proposal.workItems[0]!.criteria[0]!.validation;
+      proposal.workItems[0]!.criteria = Array.from({ length: count }, (_, index) => ({
+        id: `criterion-${index + 1}`,
+        text: `Criterion ${index + 1} verifies ${"x".repeat(970)}.`,
+        risk: "ordinary" as const,
+        validation: structuredClone(evidence),
+      }));
+      return { pinned, request, proposal };
+    };
+    const boundary = fixture(40);
+    expect(
+      parseAndValidateCompilerProposal(boundary.request, boundary.proposal, {
+        pinnedFacts: boundary.pinned,
+        runPolicy: DEFAULT_RUN_POLICY,
+      }).report.status,
+    ).toBe("valid");
+
+    const overflow = fixture(50);
+    expect(codes(overflow.request, overflow.proposal, overflow.pinned)).toContainEqual(
+      expect.objectContaining({
+        code: "worker-packet-limit",
+        itemId: "item-1",
+        field: "/workItems/0",
+        expected: { maximumProjectedBytes: 128 * 1024 },
+        observed: expect.any(Number),
+      }),
+    );
+  });
+
+  it("reserves the maximum later economic rationale in the compiled graph envelope", () => {
+    const paths = Array.from(
+      { length: 64 },
+      (_, index) => `src/${index + 1}-${"x".repeat(260)}.ts`,
+    );
+    const pinned = semanticPinnedFacts({
+      paths: ["package.json", "package-lock.json", ...paths],
+    });
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request, 100);
+    for (const item of proposal.workItems) item.scope = ["src/"];
+    const graphViolation = codes(request, proposal, pinned).find(
+      (entry) => entry.code === "compiled-graph-limit",
+    );
+    expect(graphViolation).toEqual(
+      expect.objectContaining({
+        itemId: null,
+        field: "/workItems",
+        expected: { maximumProjectedBytes: 2 * 1024 * 1024 },
+        observed: expect.any(Number),
+      }),
+    );
+    expect(graphViolation!.observed).toEqual(expect.any(Number));
+    expect(graphViolation!.observed as number).toBeLessThan(2 * 1024 * 1024 + 200_000);
+  });
+
+  it("uses repository requirements and the exact run policy during envelope validation", () => {
+    const requirementsPath = ".factory/execution-requirements.json";
+    const pinned = semanticPinnedFacts({
+      paths: ["package.json", "package-lock.json", requirementsPath, "src/item-1.ts"],
+      documents: {
+        "package.json": JSON.stringify({ scripts: { test: "vitest run" } }),
+        [requirementsPath]: JSON.stringify({
+          version: 1,
+          scopes: [
+            { paths: ["src/"], requirements: { cpu: 2 } },
+            { paths: ["src/item-1.ts"], requirements: { cpu: 3 } },
+          ],
+        }),
+      },
+    });
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request);
+    const result = parseAndValidateCompilerProposal(request, proposal, {
+      pinnedFacts: pinned,
+      runPolicy: {
+        ...DEFAULT_RUN_POLICY,
+        workItemTimeoutMinutes: 7,
+      },
+    });
+    expect(result.report).toMatchObject({
+      phase: "proposal",
+      status: "repairable",
+      violations: [
+        expect.objectContaining({
+          code: "schema-invalid",
+          itemId: null,
+          field: "/workItems",
+          observed: {
+            error: expect.stringContaining("conflicting cpu repository evidence"),
+          },
+        }),
+      ],
     });
   });
 
@@ -550,6 +782,25 @@ describe("deferred capability provider validation", () => {
 });
 
 describe("deterministic semantic projection", () => {
+  it("validates and projects against the same policy-grounded execution envelope", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request);
+    const runPolicy = structuredClone(DEFAULT_RUN_POLICY);
+    runPolicy.workItemTimeoutMinutes = 7;
+    runPolicy.capacity!.local!.defaultCpu = 3;
+    runPolicy.capacity!.local!.defaultMemoryMb = 4_096;
+
+    expect(
+      parseAndValidateCompilerProposal(request, proposal, { pinnedFacts: pinned, runPolicy }).report
+        .status,
+    ).toBe("valid");
+    expect(
+      projectCompilerProposal({ request, proposal, pinnedFacts: pinned, runPolicy }).objective
+        .workItems[0]!.requirements,
+    ).toMatchObject({ cpu: 3, memoryMb: 4_096, timeoutMinutes: 7 });
+  });
+
   it("combines adapter requirements with model-owned non-derivable execution intent", () => {
     const pinned = semanticPinnedFacts();
     const request = semanticRequest(pinned, ["api.example.com"]);

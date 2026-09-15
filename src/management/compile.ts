@@ -126,6 +126,7 @@ export async function compilePlan(
     },
     beforeModelInvocation,
     context,
+    { pinnedFacts: prepared.pinnedFacts, runPolicy: context.runPolicy },
   );
   if (!projected)
     throw new Error(

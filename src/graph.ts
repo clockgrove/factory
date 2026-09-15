@@ -646,10 +646,12 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
+export const MAX_COMPILED_GRAPH_BYTES = 2 * 1024 * 1024;
+
 export function serializeCompiledObjective(objective: CompiledObjective): Buffer {
   const parsed = parsePersistedCompiledObjective(objective);
   const serialized = Buffer.from(canonical(parsed), "utf8");
-  assertWithinBytes(serialized.toString("utf8"), 2 * 1024 * 1024, "compiled graph");
+  assertWithinBytes(serialized.toString("utf8"), MAX_COMPILED_GRAPH_BYTES, "compiled graph");
   return serialized;
 }
 

@@ -67,6 +67,7 @@ import {
   type CompilerRequest,
 } from "../compiler/contracts.js";
 import {
+  type CompilerProjectionContext,
   CompilerRequestValidationError,
   parseAndValidateCompilerProposal,
   validateLegacyProposal,
@@ -653,6 +654,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
     checkpoint: CompilerProposalCheckpoint,
     beforeModelInvocation?: CompilerModelAdmission,
     execution?: CompilationContext,
+    projection?: CompilerProjectionContext,
   ): Promise<CompilerProposalResult> {
     await this.#assertCompilerContext(execution);
     const request = CompilerRequestSchema.parse(requestInput);
@@ -673,7 +675,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
     try {
       assertWithinBytes(value, 512 * 1024, "compiler proposal");
       assertNoSecretMaterial(value, "compiler proposal");
-      const checked = parseAndValidateCompilerProposal(request, value);
+      const checked = parseAndValidateCompilerProposal(request, value, projection);
       const legacy = checked.proposal
         ? validateLegacyProposal(checked.proposal, execution?.legacyGraphConstraints)
         : emptyCompilerValidationReport();

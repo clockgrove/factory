@@ -528,6 +528,7 @@ export async function compileEvaluatedDraft(args: {
               }),
             beforeModelInvocation,
             frozenContext,
+            { pinnedFacts, runPolicy: frozenContext.runPolicy },
           );
           return {
             value: {

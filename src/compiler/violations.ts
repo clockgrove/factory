@@ -109,6 +109,18 @@ export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule
     "execution-requirement-limit",
     "A Work Item exceeds a projected execution-requirement bound.",
   ),
+  "exclusive-resource-limit": rule(
+    "exclusive-resource-limit",
+    "A Work Item exceeds a projected exclusive-resource bound.",
+  ),
+  "worker-packet-limit": rule(
+    "worker-packet-limit",
+    "A projected Worker Packet exceeds its persisted byte bound.",
+  ),
+  "compiled-graph-limit": rule(
+    "compiled-graph-limit",
+    "The projected compiled graph exceeds its persisted byte bound.",
+  ),
   "denied-network-destination": rule(
     "denied-network-destination",
     "A required network destination is denied by policy.",

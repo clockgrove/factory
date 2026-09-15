@@ -71,6 +71,12 @@ const ProviderQuotaCheckpointSchema = z
       .optional(),
   })
   .strict();
+const RepairableInvalidClaimsSchema = z
+  .object({
+    kind: z.literal("deterministic-obligation-claims-validation-v1"),
+    proposalDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict();
 export type DraftUsage = z.infer<typeof UsageSchema>;
 export class CompilerDraftStopError extends Error {}
 /** Admission failed before provider dispatch; absence of provider usage is not a failed paid call. */
@@ -80,6 +86,26 @@ export class CompilerDraftAdmissionError extends Error {
   }
 }
 class CompilerDraftAccountingError extends Error {}
+
+export function repairableInvalidClaimsEvidence(proposal: unknown) {
+  return {
+    kind: "deterministic-obligation-claims-validation-v1" as const,
+    proposalDigest: draftDigest(proposal),
+  };
+}
+
+function retainedRepairableInvalidClaims(
+  payload: Record<string, unknown>,
+): z.infer<typeof RepairableInvalidClaimsSchema> | null {
+  const parsed = RepairableInvalidClaimsSchema.safeParse(payload.repairableInvalidClaims);
+  if (
+    !parsed.success ||
+    payload.proposal === undefined ||
+    parsed.data.proposalDigest !== draftDigest(payload.proposal)
+  )
+    return null;
+  return parsed.data;
+}
 
 export type DraftStage = "inventory" | "compile" | "repair" | "judge";
 export interface DraftInvocation {
@@ -409,6 +435,7 @@ export async function runCompilerDraftLoop(args: {
       if (completed.payload.error)
         throw Object.assign(new Error(String(completed.payload.error)), {
           proposal: completed.payload.proposal,
+          repairableInvalidClaims: completed.payload.repairableInvalidClaims,
         });
       return completed.payload.value;
     }
@@ -584,6 +611,18 @@ export async function runCompilerDraftLoop(args: {
           error instanceof ProviderQuotaError
             ? ProviderQuotaCheckpointSchema.parse(error.bindInvocation(invocationId).gate)
             : undefined;
+        const proposal = safeProposal(error);
+        const repairableInvalidClaims =
+          typeof error === "object" && error !== null && "repairableInvalidClaims" in error
+            ? RepairableInvalidClaimsSchema.safeParse(error.repairableInvalidClaims)
+            : null;
+        const retainedRepairability =
+          stage === "inventory" &&
+          repairableInvalidClaims?.success &&
+          proposal.proposal !== undefined &&
+          repairableInvalidClaims.data.proposalDigest === draftDigest(proposal.proposal)
+            ? { repairableInvalidClaims: repairableInvalidClaims.data }
+            : {};
         await append("result", {
           invocationId,
           stage,
@@ -591,7 +630,8 @@ export async function runCompilerDraftLoop(args: {
           value: null,
           usage,
           ...timing(),
-          ...safeProposal(error),
+          ...proposal,
+          ...retainedRepairability,
           error: diagnostic(error),
           ...(providerQuota ? { providerQuota } : {}),
           ...(stopCause ? { stopReason: diagnostic(stopCause) } : {}),
@@ -640,14 +680,15 @@ export async function runCompilerDraftLoop(args: {
             item.payload.stage === "inventory" &&
             item.payload.revision === revision &&
             item.payload.error &&
-            item.payload.usage !== null,
+            item.payload.usage !== null &&
+            retainedRepairableInvalidClaims(item.payload) !== null,
         );
         // A backend success that no longer validates is changed grounding, not
         // authority to issue a second paid call.
         if (!failed) throw error;
         inventoryFailure = {
-          error: diagnostic(error),
-          ...safeProposal(error),
+          error: String(failed.payload.error),
+          proposal: failed.payload.proposal,
         };
         if (inventoryRepairs >= limits.maxRepairs)
           return await stop(`invalid-inventory: ${diagnostic(error)}`);

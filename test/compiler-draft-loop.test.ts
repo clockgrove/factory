@@ -13,12 +13,27 @@ import {
 import {
   runCompilerDraftLoop,
   CompilerDraftStopError,
+  repairableInvalidClaimsEvidence,
   type CompilerDraftCallbacks,
 } from "../src/evaluation/compiler-draft-loop.js";
+import { ManagementOutputError, type ManagementUsage } from "../src/management/backend.js";
 import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
 import { ProviderQuotaError } from "../src/providers/quota.js";
 const BASE_SHA = "a".repeat(40);
 const BASE_TREE = "b".repeat(40);
+
+function repairableInventoryFailure(
+  usage: ManagementUsage,
+  proposal = {
+    rawProposal: { version: 1, obligations: [] },
+    normalizationTrace: ["Factory rejected malformed obligation claims"],
+  },
+) {
+  return Object.assign(
+    new ManagementOutputError(new Error("unknown obligation citation"), usage, proposal),
+    { repairableInvalidClaims: repairableInvalidClaimsEvidence(proposal) },
+  );
+}
 
 class MemoryGraphStore implements LeaseStore, CompiledGraphStore {
   now = new Date("2026-09-03T00:00:00.000Z");
@@ -379,13 +394,7 @@ describe("compiler draft durable repair", () => {
     const invoke = vi.fn(async (request: Parameters<CompilerDraftCallbacks["invoke"]>[0]) => {
       const usage = { inputTokens: 2, outputTokens: 1 };
       if (request.stage === "inventory" && request.revision === 0)
-        throw Object.assign(new Error("unknown obligation citation"), {
-          usage,
-          proposal: {
-            rawProposal: { version: 1, obligations: [] },
-            normalizationTrace: ["Factory rejected malformed obligation claims"],
-          },
-        });
+        throw repairableInventoryFailure(usage);
       return {
         value:
           request.stage === "inventory"
@@ -431,7 +440,7 @@ describe("compiler draft durable repair", () => {
     args.callbacks.invoke = vi.fn(async (request) => {
       const usage = { inputTokens: 2, outputTokens: 1 };
       if (request.stage === "inventory" && request.revision === 0)
-        throw Object.assign(new Error("unknown obligation citation"), { usage });
+        throw repairableInventoryFailure(usage);
       return {
         value:
           request.stage === "inventory"
@@ -464,9 +473,7 @@ describe("compiler draft durable repair", () => {
     const args = await setup();
     args.callbacks.invoke = vi.fn(async (request) => {
       if (request.stage !== "inventory") throw new Error("unexpected graph invocation");
-      throw Object.assign(new Error("unknown obligation citation"), {
-        usage: { inputTokens: 2, outputTokens: 1 },
-      });
+      throw repairableInventoryFailure({ inputTokens: 2, outputTokens: 1 });
     });
 
     const result = await runCompilerDraftLoop({
@@ -512,6 +519,9 @@ describe("compiler draft durable repair", () => {
       usage: { inputTokens: 2, outputTokens: 1 },
       error: "unknown obligation citation",
       proposal: { rawProposal: { version: 1, obligations: [] } },
+      repairableInvalidClaims: repairableInvalidClaimsEvidence({
+        rawProposal: { version: 1, obligations: [] },
+      }),
     });
     const invoke = vi.mocked(args.callbacks.invoke);
 
@@ -534,9 +544,7 @@ describe("compiler draft durable repair", () => {
   ])("checks $reason before dispatching an inventory retry", async ({ limits, reason }) => {
     const args = await setup();
     args.callbacks.invoke = vi.fn(async () => {
-      throw Object.assign(new Error("unknown obligation citation"), {
-        usage: { inputTokens: 2, outputTokens: 1 },
-      });
+      throw repairableInventoryFailure({ inputTokens: 2, outputTokens: 1 });
     });
 
     expect(await runCompilerDraftLoop({ ...args, limits })).toMatchObject({
@@ -551,9 +559,7 @@ describe("compiler draft durable repair", () => {
     const args = await setup();
     let now = 0;
     args.callbacks.invoke = vi.fn(async () => {
-      throw Object.assign(new Error("unknown obligation citation"), {
-        usage: { inputTokens: 2, outputTokens: 1 },
-      });
+      throw repairableInventoryFailure({ inputTokens: 2, outputTokens: 1 });
     });
 
     expect(
@@ -565,6 +571,41 @@ describe("compiler draft durable repair", () => {
       }),
     ).toMatchObject({ status: "stopped", reason: "deadline-exhausted" });
     expect(args.callbacks.invoke).toHaveBeenCalledOnce();
+  });
+  it("does not retry a known-accounted management process failure, including restart", async () => {
+    const args = await setup();
+    const proposal = {
+      rawProposal: { version: 1, obligations: [] },
+      normalizationTrace: ["untrusted provider process output"],
+    };
+    const invoke = vi.fn(async () => {
+      throw new ManagementOutputError(
+        new Error("Codex CLI process exited unsuccessfully"),
+        { inputTokens: 2, outputTokens: 1 },
+        proposal,
+      );
+    });
+    args.callbacks.invoke = invoke;
+
+    expect(await runCompilerDraftLoop(args)).toMatchObject({
+      status: "stopped",
+      reason: "invalid-inventory: Codex CLI process exited unsuccessfully",
+    });
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(args.callbacks.recordUsage).toHaveBeenCalledOnce();
+    expect(
+      (await args.manager.load(args.binding)).find((record) => record.kind === "result")?.payload,
+    ).not.toHaveProperty("repairableInvalidClaims");
+
+    const replayInvoke = vi.fn(async () => {
+      throw new Error("restart must not dispatch");
+    });
+    args.callbacks.invoke = replayInvoke;
+    expect(await runCompilerDraftLoop(args)).toMatchObject({
+      status: "stopped",
+      reason: "invalid-inventory: Codex CLI process exited unsuccessfully",
+    });
+    expect(replayInvoke).not.toHaveBeenCalled();
   });
   it("detects unchanged graph cycles and enforces observed usage and deadline", async () => {
     const args = await setup();

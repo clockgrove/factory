@@ -80,7 +80,7 @@ export type ObligationCheckpoint = (result: ObligationResult) => Promise<void>;
 export interface ObligationRepairContext {
   revision: number;
   validationFailure: string;
-  previousProposal?: unknown;
+  previousProposal: unknown;
 }
 export interface PlanJudgeContext {
   challenges?: CompilerInferenceChallenge[];

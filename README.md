@@ -117,7 +117,8 @@ When opt-in compiler evaluation uses `maxRepairs`, that number is one shared cor
 obligation-inventory regeneration and graph repair. For example, one inventory correction under
 `maxRepairs: 2` leaves at most one graph correction. Report-only evaluation and `maxRepairs: 0` keep
 the inventory single-shot; invocation, time, observed-token, accounting, and input fences still
-apply before every model call.
+apply before every model call. Exact usage alone never authorizes an inventory retry: only a retained,
+bounded response that fails deterministic claims schema or evidence-grounding validation is repairable.
 
 ## What Factory handles
 

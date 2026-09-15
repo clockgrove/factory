@@ -213,6 +213,48 @@ describe("independent compiler management boundaries", () => {
     expect(prompts[0]).toContain('"foreign"');
   });
 
+  it("rejects a 300 KiB obligation proposal instead of authorizing a seedless repair", async () => {
+    const { context, claims } = await fixture();
+    const oversized = {
+      ...claims,
+      padding: "x".repeat(300 * 1024),
+    };
+    const runStructured = vi.fn(async () => ({ value: oversized, usage }));
+    let observed: unknown;
+    try {
+      await new CodexCliManagementBackend({ runStructured }).extractObligations(
+        context,
+        async () => {},
+      );
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toMatchObject({
+      name: "ManagementOutputError",
+      usage,
+      proposal: undefined,
+    });
+    expect(observed).not.toHaveProperty("repairableInvalidClaims");
+
+    const repairRun = vi.fn(async () => ({ value: claims, usage }));
+    await expect(
+      new CodexCliManagementBackend({ runStructured: repairRun }).extractObligations(
+        context,
+        async () => {},
+        undefined,
+        {
+          revision: 1,
+          validationFailure: "prior claims invalid",
+          previousProposal: {
+            rawProposal: oversized,
+            normalizationTrace: ["Factory rejected oversized obligation claims"],
+          },
+        },
+      ),
+    ).rejects.toThrow("prior obligation proposal is");
+    expect(repairRun).not.toHaveBeenCalled();
+  });
+
   it("passes the final admitted Objective remainder without a legacy 30-minute cap", async () => {
     const { context, proposal } = await fixture();
     context.invocationTimeoutMs = 45 * 60_000;

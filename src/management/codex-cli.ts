@@ -69,8 +69,12 @@ import {
   CompilerEvidenceSchema,
   validateCompilerCaseLabel,
   type CompilerEvidence,
+  type ObligationInventory,
 } from "../evaluation/compiler-eval.js";
-import { CompilerDraftStopError } from "../evaluation/compiler-draft-loop.js";
+import {
+  CompilerDraftStopError,
+  repairableInvalidClaimsEvidence,
+} from "../evaluation/compiler-draft-loop.js";
 import { ManagementOutputError } from "./backend.js";
 import { preserveProviderQuotaError, ProviderQuotaError } from "../providers/quota.js";
 import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
@@ -103,13 +107,21 @@ function boundedPriorCompilationFailure(context: CompilationContext) {
   return failure;
 }
 
+const ObligationProposalEvidenceSchema = z
+  .object({
+    rawProposal: z.unknown(),
+    normalizationTrace: z.array(z.string().min(1).max(4_000)).min(1).max(4),
+  })
+  .strict()
+  .refine((value) => Object.hasOwn(value, "rawProposal"), "raw proposal is required");
 const ObligationRepairSchema = z
   .object({
     revision: z.number().int().min(1).max(2),
     validationFailure: z.string().min(1).max(4_000),
-    previousProposal: z.unknown().optional(),
+    previousProposal: ObligationProposalEvidenceSchema,
   })
   .strict();
+const MAX_OBLIGATION_REPAIR_PROPOSAL_BYTES = 256 * 1024;
 
 function boundedObligationRepair(
   repair: ObligationRepairContext | undefined,
@@ -119,29 +131,26 @@ function boundedObligationRepair(
   const result: ObligationRepairContext = {
     revision: parsed.revision,
     validationFailure: parsed.validationFailure,
+    previousProposal: parsed.previousProposal,
   };
-  if (parsed.previousProposal !== undefined) {
-    try {
-      assertWithinBytes(parsed.previousProposal, 256 * 1024, "prior obligation proposal");
-      assertNoSecretMaterial(parsed.previousProposal, "prior obligation proposal");
-      result.previousProposal = JSON.parse(JSON.stringify(parsed.previousProposal));
-    } catch {
-      // The bounded diagnostic remains enough to request a fresh inventory.
-    }
-  }
+  assertWithinBytes(
+    parsed.previousProposal,
+    MAX_OBLIGATION_REPAIR_PROPOSAL_BYTES,
+    "prior obligation proposal",
+  );
+  assertNoSecretMaterial(parsed.previousProposal, "prior obligation proposal");
+  result.previousProposal = JSON.parse(JSON.stringify(parsed.previousProposal));
   return result;
 }
 
-function obligationProposalEvidence(value: unknown): {
-  rawProposal: unknown;
-  normalizationTrace: string[];
-} {
-  // Leave enough room for the deterministic trace inside the draft result bound.
-  assertWithinBytes(value, 480 * 1024, "obligation claims output");
+function obligationProposalEvidence(
+  value: unknown,
+): z.infer<typeof ObligationProposalEvidenceSchema> {
+  assertWithinBytes(value, MAX_OBLIGATION_REPAIR_PROPOSAL_BYTES, "obligation claims output");
   assertNoSecretMaterial(value, "obligation claims output");
   const rawProposal = JSON.parse(JSON.stringify(value));
   const claims = ObligationClaimsSchema.safeParse(rawProposal);
-  return {
+  const proposal = {
     rawProposal,
     normalizationTrace: claims.success
       ? [
@@ -151,6 +160,8 @@ function obligationProposalEvidence(value: unknown): {
         ]
       : ["Factory rejected malformed obligation claims before trusted-envelope hydration"],
   };
+  assertWithinBytes(proposal, MAX_OBLIGATION_REPAIR_PROPOSAL_BYTES, "obligation proposal evidence");
+  return ObligationProposalEvidenceSchema.parse(proposal);
 }
 
 export const CODEX_COMPILED_OBJECTIVE_SCHEMA = {
@@ -1415,22 +1426,28 @@ export class CodexCliManagementBackend implements ManagementBackend {
       compilationInvocationTimeout(context),
       beforeModelInvocation,
     );
+    let proposal: ReturnType<typeof obligationProposalEvidence>;
     try {
-      const proposal = obligationProposalEvidence(value);
-      const inventory = hydrateObligationInventory(proposal.rawProposal, identity);
-      const result = { inventory, usage };
-      await checkpoint(result);
-      return result;
+      proposal = obligationProposalEvidence(value);
     } catch (error) {
-      let proposal: ReturnType<typeof obligationProposalEvidence> | undefined;
-      try {
-        proposal = obligationProposalEvidence(value);
-      } catch {
-        const reason = error instanceof Error ? error.message : String(error);
-        throw new ManagementOutputError(new CompilerDraftStopError(reason), usage);
-      }
-      throw new ManagementOutputError(error, usage, proposal);
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new ManagementOutputError(new CompilerDraftStopError(reason), usage);
     }
+    let inventory: ObligationInventory;
+    try {
+      inventory = hydrateObligationInventory(proposal.rawProposal, identity);
+    } catch (error) {
+      throw Object.assign(new ManagementOutputError(error, usage, proposal), {
+        repairableInvalidClaims: repairableInvalidClaimsEvidence(proposal),
+      });
+    }
+    const result = { inventory, usage };
+    try {
+      await checkpoint(result);
+    } catch (error) {
+      throw new ManagementOutputError(error, usage);
+    }
+    return result;
   }
 
   async judgePlan(

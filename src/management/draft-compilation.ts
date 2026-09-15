@@ -290,15 +290,12 @@ export async function compileEvaluatedDraft(args: {
               request.revision > 0 &&
               request.failure &&
               typeof request.failure === "object" &&
-              "error" in request.failure
+              "error" in request.failure &&
+              "proposal" in request.failure
                 ? {
                     revision: request.revision,
                     validationFailure: String(request.failure.error),
-                    ...(request.failure &&
-                    typeof request.failure === "object" &&
-                    "proposal" in request.failure
-                      ? { previousProposal: request.failure.proposal }
-                      : {}),
+                    previousProposal: request.failure.proposal,
                   }
                 : undefined;
             if (request.revision > 0 && !failure)

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
 import { LeaseManager, type GitCommitObject, type LeaseStore } from "../src/control/lease.js";
-import { CompilerDraftManager } from "../src/control/compiler-drafts.js";
+import { CompilerDraftManager, draftDigest } from "../src/control/compiler-drafts.js";
 import {
   assertCompilerDraftSelection,
   compileEvaluatedDraft,
@@ -477,6 +477,10 @@ describe("production compiler draft adapter", () => {
     expect(rejected?.payload).toMatchObject({
       error: "unknown obligation citation",
       usage: { inputTokens: 11, outputTokens: 3, cachedInputTokens: 4 },
+      repairableInvalidClaims: {
+        kind: "deterministic-obligation-claims-validation-v1",
+        proposalDigest: draftDigest(rejected?.payload.proposal),
+      },
       proposal: {
         rawProposal: {
           version: 1,

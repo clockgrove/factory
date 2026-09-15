@@ -1360,8 +1360,10 @@ only an accepted exact selection reaches the existing graph commitment/projectio
 Changing an Objective before that commitment invalidates its assessment, including on restart.
 The model emits obligation claims and canonical evidence IDs. Factory attaches the frozen Objective
 digest, base SHA, and exact evidence records before strict validation, so model formatting cannot
-rewrite trusted evidence. A known-accounted invalid claim set may consume the next shared correction;
-unknown accounting, unsafe output, and exhausted bounds remain terminal.
+rewrite trusted evidence. Only a completed response that fails deterministic claims schema or
+evidence-grounding validation may consume the next shared correction. Exact usage alone does not
+authorize a retry; provider, process, persistence, unsafe-output, and exhausted-bound failures remain
+terminal.
 
 This is an opt-in policy extension, not a change to existing immutable policies or the current
 release candidate's defaults. Runs without the field retain their original compilation path.

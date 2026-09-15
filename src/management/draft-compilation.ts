@@ -29,8 +29,10 @@ import {
 } from "../evaluation/compiler-eval.js";
 import {
   CompilerProposalSchema,
+  CompilerRequestSchema,
   CompilerValidationReportSchema,
   type CompilerProposal,
+  type CompilerRequest,
   type CompilerValidationReport,
 } from "../compiler/contracts.js";
 import {
@@ -49,6 +51,7 @@ import { readCompilerObligationEvidence } from "./codex-cli.js";
 import type { CompilationContext, ManagementBackend, ManagementUsage } from "./backend.js";
 
 interface PersistedProposalResult {
+  request: CompilerRequest;
   proposal: CompilerProposal;
   report: CompilerValidationReport;
   provenance: { requestDigest: string };
@@ -57,14 +60,17 @@ interface PersistedProposalResult {
 function persistedProposalResult(value: unknown): PersistedProposalResult {
   if (!value || typeof value !== "object") throw new Error("compiler result is not an object");
   const candidate = value as Record<string, unknown>;
+  const request = CompilerRequestSchema.parse(candidate.request);
   const proposal = CompilerProposalSchema.parse(candidate.proposal);
   const report = CompilerValidationReportSchema.parse(candidate.report);
   const provenance = candidate.provenance as Record<string, unknown> | undefined;
   const requestDigest = String(provenance?.requestDigest ?? "");
   if (!/^[a-f0-9]{64}$/.test(requestDigest))
     throw new Error("compiler result has no request digest");
+  if (compilerEvalDigest(request) !== requestDigest)
+    throw new Error("compiler result request digest differs from its request");
   if (report.status !== "valid") throw new Error("persisted compiler proposal is invalid");
-  return { proposal, report, provenance: { requestDigest } };
+  return { request, proposal, report, provenance: { requestDigest } };
 }
 
 function proposalFromFixedGraph(graph: CompiledObjective): CompilerProposal {
@@ -91,10 +97,6 @@ function proposalFromFixedGraph(graph: CompiledObjective): CompilerProposal {
       exclusiveResources: item.changeSurface?.exclusiveResources ?? [],
       executionIntent: {
         estimatedDurationMinutes: item.requirements?.estimatedDurationMinutes ?? 30,
-        additionalTools: item.requirements?.tools ?? [],
-        services: item.requirements?.services ?? [],
-        additionalNetworkDestinations: item.requirements?.networkDestinations ?? [],
-        trust: item.requirements?.trust ?? "trusted_local",
       },
     })),
   });
@@ -165,6 +167,15 @@ export function assertCompilerDraftSelection(
   const trace = validation.payload.projectionTrace as CompilerProjectionTrace;
   if (draftDigest(trace) !== validation.payload.traceDigest)
     throw new Error("compiler projection trace changed");
+  if (
+    validation.payload.proposalDigest !== draftDigest(persisted.proposal) ||
+    validation.payload.requestDigest !== draftDigest(persisted.request) ||
+    validation.payload.graphDigest !== compiledGraphDigest(graph) ||
+    trace.proposalDigest !== draftDigest(persisted.proposal) ||
+    trace.requestDigest !== draftDigest(persisted.request) ||
+    trace.graphDigest !== compiledGraphDigest(graph)
+  )
+    throw new Error("compiler projection trace differs from its exact request or proposal");
   const reviewEvidence = selected.payload.reviewEvidence ?? null;
   const challenges = validateCompilerInferenceChallenges(reviewEvidence ?? [], inventory);
   const judgeIntent = records.find(
@@ -172,19 +183,14 @@ export function assertCompilerDraftSelection(
       record.kind === "invocation" &&
       record.payload.invocationId === verdictResult.payload.invocationId,
   );
-  const projection = {
-    graphDigest: trace.graphDigest,
-    addedEdges: trace.addedEdges,
-    adapterBindings: trace.adapterBindings,
-    riskElevations: trace.riskElevations,
-  };
   if (
+    persisted.request.revision !== selected.payload.revision ||
     !judgeIntent ||
     judgeIntent.payload.inputDigest !==
       draftDigest({
         inventory,
         previous: persisted.proposal,
-        projection,
+        projection: trace,
         failure: reviewEvidence,
         ...(reviewEvidence === null ? {} : { reviewEvidence }),
       })
@@ -295,7 +301,7 @@ export async function compileEvaluatedDraft(args: {
       reserveAtDispatch: true,
       recordUsage: args.recordUsage,
       validateInventory: inventory,
-      validate: async (value): Promise<ValidatedCompilerDraft> => {
+      validate: async (value, revision): Promise<ValidatedCompilerDraft> => {
         if (!activeInventory) throw new Error("draft validation has no obligation inventory");
         if (value && typeof value === "object" && "fixedGraph" in value) {
           const objective = parsePersistedCompiledObjective(value.fixedGraph);
@@ -311,11 +317,20 @@ export async function compileEvaluatedDraft(args: {
           };
         }
         const persisted = persistedProposalResult(value);
+        if (persisted.request.revision !== revision)
+          throw new Error("persisted compiler request revision differs from its invocation");
         const prepared = await prepareCompilerRequest({
           context: frozenContext,
           inventory: activeInventory,
+          revision: persisted.request.revision,
+          previousProposal: persisted.request.previousProposal,
+          validationReport: persisted.request.validationReport,
+          semanticFindings: persisted.request.semanticFindings,
+          challenges: persisted.request.challenges,
           pinnedFacts,
         });
+        if (compilerEvalDigest(prepared.request) !== persisted.provenance.requestDigest)
+          throw new Error("persisted compiler request differs from pinned reconstruction");
         const economics = frozenContext.economicEvidence
           ? await frozenContext.economicEvidence(
               compilerWorkItemsForEconomics(
@@ -336,7 +351,6 @@ export async function compileEvaluatedDraft(args: {
             ? { legacyGraphConstraints: prepared.legacyGraphConstraints }
             : {}),
         });
-        projected.trace.requestDigest = persisted.provenance.requestDigest;
         await args.validate(projected.objective);
         return {
           proposal: persisted.proposal,
@@ -434,12 +448,7 @@ export async function compileEvaluatedDraft(args: {
                 compilation: frozenContext,
                 inventory: obligations,
                 proposal: request.previous,
-                projectionTrace: {
-                  protocol: "clockgrove.factory/compiler-projection",
-                  requestDigest: "0".repeat(64),
-                  proposalDigest: compilerEvalDigest(request.previous),
-                  ...request.projection,
-                },
+                projectionTrace: request.projection,
                 graphDigest: request.projection.graphDigest,
                 challenges: validateCompilerInferenceChallenges(
                   request.reviewEvidence ?? [],
@@ -480,6 +489,7 @@ export async function compileEvaluatedDraft(args: {
             async (result) =>
               checkpoint({
                 value: {
+                  request: result.request,
                   proposal: result.proposal,
                   report: result.report,
                   provenance: result.provenance,
@@ -491,6 +501,7 @@ export async function compileEvaluatedDraft(args: {
           );
           return {
             value: {
+              request: result.request,
               proposal: result.proposal,
               report: result.report,
               provenance: result.provenance,

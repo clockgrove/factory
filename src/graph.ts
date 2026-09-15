@@ -522,6 +522,8 @@ function validateGraphShape(
     ids.add(wi.id);
   }
   for (const wi of objective.workItems) {
+    if (new Set(wi.dependsOn).size !== wi.dependsOn.length)
+      throw new Error(`Work Item ${wi.id} contains a duplicate dependency`);
     for (const dep of wi.dependsOn) {
       if (!ids.has(dep)) {
         throw new Error(`Work Item ${wi.id} depends on unknown id ${dep}`);

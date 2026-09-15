@@ -23,7 +23,7 @@ import {
 } from "../src/evaluation/compiler-eval.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import type { ApplicationSnapshot } from "../src/application/services.js";
-import { CompilerProposalSchema } from "../src/compiler/contracts.js";
+import { CompilerProposalSchema, CompilerRequestSchema } from "../src/compiler/contracts.js";
 vi.mock("../src/control/compiler-drafts.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/control/compiler-drafts.js")>()),
   loadCompilerDrafts: vi.fn(),
@@ -37,13 +37,14 @@ vi.mock("../src/control/receipts.js", async (importOriginal) => ({
   latestRunReceipts: vi.fn(),
 }));
 vi.mock("../src/economics/index.js", () => ({ summarizeRun: vi.fn() }));
+const objective = { number: 236, title: "Objective", body: "Deliver change" };
 const binding = {
   repository: "clockgrove/factory",
   objective: 236,
   runId: "run",
   policyDigest: "policy",
   baseSha: "a".repeat(40),
-  inputDigest: "c".repeat(64),
+  inputDigest: compilerEvalDigest(objective),
 };
 const snapshot: ApplicationSnapshot = {
   id: "objective",
@@ -55,7 +56,7 @@ const snapshot: ApplicationSnapshot = {
 const store = {} as CompiledGraphReadStore;
 const inventory: ObligationInventory = {
   version: 1,
-  objectiveDigest: "b".repeat(64),
+  objectiveDigest: binding.inputDigest,
   baseSha: binding.baseSha,
   evidence: [
     { id: "objective", kind: "objective", identity: "original", excerpt: "Deliver change" },
@@ -100,16 +101,57 @@ const proposal = CompilerProposalSchema.parse({
     exclusiveResources: item.changeSurface?.exclusiveResources ?? [],
     executionIntent: {
       estimatedDurationMinutes: 30,
-      additionalTools: [],
-      services: [],
-      additionalNetworkDestinations: [],
-      trust: "trusted_local",
     },
   })),
 });
+const proposalRequest = CompilerRequestSchema.parse({
+  protocol: "clockgrove.factory/compiler-request",
+  revision: 1,
+  objective: { ...objective, digest: binding.inputDigest },
+  baseSha: binding.baseSha,
+  inventory,
+  repository: {
+    manifests: ["package.json"],
+    validationRecipes: [
+      {
+        id: "recipe-test",
+        command: "npm test",
+        adapterId: "node-npm",
+        requiredTools: ["node", "npm"],
+        networkDestinations: [],
+      },
+    ],
+    toolchains: [],
+    validationSurfaces: { deterministicSimulation: [], visual: [] },
+    pathCount: 1,
+  },
+  constraints: {
+    maxWorkItems: 100,
+    maxDependenciesPerItem: 50,
+    allowedNetworkDestinations: [],
+    workItemTimeoutMinutes: 30,
+  },
+  previousProposal: null,
+  validationReport: {
+    protocol: "clockgrove.factory/compiler-validation",
+    phase: "proposal",
+    status: "repairable",
+    violations: [
+      {
+        code: "schema-invalid",
+        itemId: null,
+        field: "",
+        expected: "valid proposal",
+        observed: null,
+      },
+    ],
+  },
+  semanticFindings: [],
+  challenges: [],
+});
 const projectionTrace = {
   protocol: "clockgrove.factory/compiler-projection",
-  requestDigest: "d".repeat(64),
+  requestDigest: compilerEvalDigest(proposalRequest),
   proposalDigest: compilerEvalDigest(proposal),
   graphDigest: compiledGraphDigest(graph),
   addedEdges: [],
@@ -139,10 +181,11 @@ function history() {
     });
   };
   add("started", {});
-  call("inventory", 0, inventory);
+  call("inventory", 0, structuredClone(inventory));
   call("compile", 0, null, "secret-api-key=do-not-display");
   call("repair", 1, {
-    proposal,
+    request: structuredClone(proposalRequest),
+    proposal: structuredClone(proposal),
     report: {
       protocol: "clockgrove.factory/compiler-validation",
       phase: "proposal",
@@ -158,7 +201,7 @@ function history() {
     graphDigest: compiledGraphDigest(graph),
     proposalDigest: draftDigest(proposal),
     traceDigest: draftDigest(projectionTrace),
-    projectionTrace,
+    projectionTrace: structuredClone(projectionTrace),
     requestDigest: projectionTrace.requestDigest,
   });
   const verdict = {
@@ -289,6 +332,46 @@ describe("read-only compiler evaluation", () => {
     await expect(
       inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
     ).rejects.toThrow("exact accepted");
+  });
+  it.each(["proposalDigest", "traceDigest", "requestDigest"])(
+    "rejects a selection with a mismatched %s",
+    async (field) => {
+      const records = history();
+      records.at(-1)!.payload[field] = "f".repeat(64);
+      vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+      await expect(
+        inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+      ).rejects.toThrow(/exact (?:accepted|proposal|compiler request)/);
+    },
+  );
+  it.each(["proposalDigest", "requestDigest", "graphDigest"])(
+    "rejects a self-digested trace with a mismatched %s",
+    async (field) => {
+      const records = history();
+      const validation = records.find((record) => record.kind === "validation")!;
+      const trace = validation.payload.projectionTrace as Record<string, unknown>;
+      trace[field] = "f".repeat(64);
+      validation.payload.traceDigest = draftDigest(trace);
+      records.at(-1)!.payload.traceDigest = validation.payload.traceDigest;
+      vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+      await expect(
+        inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+      ).rejects.toThrow(/projection trace|exact accepted/);
+    },
+  );
+  it("rejects an inventory that is not bound to the Objective input digest", async () => {
+    const records = history();
+    const inventoryResult = records.find(
+      (record) => record.kind === "result" && record.payload.stage === "inventory",
+    )!;
+    inventoryResult.payload.value = {
+      ...(inventoryResult.payload.value as object),
+      objectiveDigest: "f".repeat(64),
+    };
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+    await expect(
+      inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+    ).rejects.toThrow("inventory repository identity mismatch");
   });
   it("retains malformed historical judge evidence without accepting or leaking it", async () => {
     const records = history();

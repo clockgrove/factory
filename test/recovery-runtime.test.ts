@@ -374,6 +374,7 @@ async function fixture(
         ? "Objective has Work Items but no authenticated v2 graph receipt"
         : "paused",
   });
+  const evaluatedInvocationId = `compiler-${"e".repeat(64)}`;
   const events = options.compileFailure
     ? [
         start,
@@ -393,8 +394,8 @@ async function fixture(
           phase: "management",
           unit: "model_tokens",
           amount: 0,
-          usageId: `invocation-compile-${base.oid}`,
-          modelInvocationId: `compile-${base.oid}`,
+          usageId: `invocation-${evaluatedInvocationId}`,
+          modelInvocationId: evaluatedInvocationId,
           directorEpoch: 1,
           policyDigest: policyDigest(policy),
         }),
@@ -405,8 +406,8 @@ async function fixture(
           phase: "management",
           unit: "model_tokens",
           amount: 30,
-          usageId: `draft-compile-${base.oid}`,
-          modelInvocationId: `compile-${base.oid}`,
+          usageId: `draft-${evaluatedInvocationId}`,
+          modelInvocationId: evaluatedInvocationId,
           directorEpoch: 1,
           policyDigest: policyDigest(policy),
           reportedModelUsage: { inputTokens: 11, outputTokens: 19 },

@@ -40,7 +40,9 @@ export const COMPILER_VIOLATION_CODES = [
   "schema-invalid",
   "work-item-count",
   "duplicate-item-id",
+  "duplicate-dependency",
   "duplicate-criterion-id",
+  "duplicate-criterion-text",
   "unknown-obligation",
   "unmapped-obligation",
   "unknown-dependency",
@@ -51,6 +53,7 @@ export const COMPILER_VIOLATION_CODES = [
   "invalid-deferred-operation",
   "uncovered-criterion",
   "protected-risk-validation",
+  "ungrounded-validation-tier",
   "partial-toolchain-authority",
   "mixed-toolchain-authority",
   "unsupported-toolchain",
@@ -167,19 +170,6 @@ export const CompilerProposalSchema = z
             executionIntent: z
               .object({
                 estimatedDurationMinutes: z.number().int().min(1).max(1_440),
-                additionalTools: z.array(Id).max(64),
-                services: z.array(Id).max(64),
-                additionalNetworkDestinations: z
-                  .array(
-                    z
-                      .string()
-                      .max(253)
-                      .regex(
-                        /^(?:\*\.)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/,
-                      ),
-                  )
-                  .max(64),
-                trust: z.enum(["trusted_local", "isolated", "managed"]),
               })
               .strict(),
           })
@@ -271,6 +261,12 @@ export const CompilerRequestSchema = z
         manifests: z.array(RepositoryScopePathSchema).max(64),
         validationRecipes: z.array(CompilerValidationRecipeSchema).max(128),
         toolchains: z.array(CompilerToolchainCapabilitySchema).max(32),
+        validationSurfaces: z
+          .object({
+            deterministicSimulation: z.array(RepositoryScopePathSchema).max(256),
+            visual: z.array(RepositoryScopePathSchema).max(256),
+          })
+          .strict(),
         pathCount: z.number().int().min(0).max(10_000),
       })
       .strict(),
@@ -319,11 +315,6 @@ const jsonScopePath = {
   minLength: 1,
   maxLength: 500,
   pattern: "^(?!/)(?!.*\\\\)(?!.*//)(?!.*[*?\\[])(?!.*(?:^|/)\\.\\.?(?:/|$)).+$",
-};
-const jsonNetworkDestination = {
-  type: "string",
-  maxLength: 253,
-  pattern: "^(?:\\*\\.)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}$",
 };
 const jsonDiagnostic = {
   type: ["null", "boolean", "number", "string", "array", "object"],
@@ -406,10 +397,6 @@ const compilerProposalObjectSchema = strictObject({
       }),
       executionIntent: strictObject({
         estimatedDurationMinutes: { type: "integer", minimum: 1, maximum: 1_440 },
-        additionalTools: stringArray(64, jsonId),
-        services: stringArray(64, jsonId),
-        additionalNetworkDestinations: stringArray(64, jsonNetworkDestination),
-        trust: { enum: ["trusted_local", "isolated", "managed"] },
       }),
     }),
   },
@@ -567,6 +554,10 @@ export const COMPILER_REQUEST_JSON_SCHEMA = {
       manifests: stringArray(64, jsonScopePath),
       validationRecipes: { type: "array", maxItems: 128, items: jsonRecipe },
       toolchains: { type: "array", maxItems: 32, items: jsonToolchain },
+      validationSurfaces: strictObject({
+        deterministicSimulation: stringArray(256, jsonScopePath),
+        visual: stringArray(256, jsonScopePath),
+      }),
       pathCount: { type: "integer", minimum: 0, maximum: 10_000 },
     }),
     constraints: strictObject({

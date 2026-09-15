@@ -13,6 +13,7 @@ import {
   type PinnedRepositoryFacts,
 } from "../repository-profiles/index.js";
 import { scopeOwnsPath, type CapabilityOperation } from "../repository-capabilities/model.js";
+import { destinationAllowedByPolicy } from "../protocol/policy.js";
 import {
   TOOLCHAIN_AUTHORITY_ADAPTERS,
   toolchainAdapterById,
@@ -130,7 +131,7 @@ function supportedStates(
     } else {
       for (const adapter of adapters) {
         const denied = adapter.compiler!.networkDestinations.some(
-          (destination) => !allowedDestinations.has(destination),
+          (destination) => !destinationAllowedByPolicy(destination, [...allowedDestinations]),
         );
         result.set(adapter.id, denied ? "policy-blocked" : "eligible-deferred");
       }
@@ -144,7 +145,7 @@ function supportedStates(
     else if (present.length > 0) result.set(adapter.id, "partial");
     else {
       const denied = adapter.compiler!.networkDestinations.some(
-        (destination) => !allowedDestinations.has(destination),
+        (destination) => !destinationAllowedByPolicy(destination, [...allowedDestinations]),
       );
       result.set(adapter.id, denied ? "policy-blocked" : "eligible-deferred");
     }
@@ -201,7 +202,13 @@ function genericRecipes(pinned: PinnedRepositoryFacts): CompilerValidationRecipe
     ),
   );
   return discoverValidationCommands(pinned.repository)
-    .filter((command) => !adapterCommands.has(command))
+    .filter((command) => {
+      const runner = command.split(/\s+/)[0];
+      return (
+        !adapterCommands.has(command) &&
+        !["cargo", "go", "python", "python3", "pytest", "ruff", "mypy"].includes(runner ?? "")
+      );
+    })
     .map((command) =>
       CompilerValidationRecipeSchema.parse({
         id: recipeId(command),

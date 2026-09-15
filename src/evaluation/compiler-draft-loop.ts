@@ -129,10 +129,7 @@ export interface DraftInvocation {
   revision: number;
   inventory: unknown;
   previous: CompilerProposal | null;
-  projection: Pick<
-    CompilerProjectionTrace,
-    "graphDigest" | "addedEdges" | "adapterBindings" | "riskElevations"
-  > | null;
+  projection: CompilerProjectionTrace | null;
   failure: unknown;
   reviewEvidence?: unknown;
 }
@@ -154,7 +151,10 @@ export interface CompilerDraftCallbacks {
   recordUsage(invocationId: string, stage: DraftStage, usage: DraftUsage): Promise<void>;
   validateInventory(value: unknown): unknown | Promise<unknown>;
   /** Re-run mechanical grounding against the pinned context, even after restart. */
-  validate(value: unknown): ValidatedCompilerDraft | Promise<ValidatedCompilerDraft>;
+  validate(
+    value: unknown,
+    revision: number,
+  ): ValidatedCompilerDraft | Promise<ValidatedCompilerDraft>;
   /** Parse full-coverage judge evidence and enforce its exact graph/inventory binding. */
   accept(
     value: unknown,
@@ -375,7 +375,10 @@ export async function runCompilerDraftLoop(args: {
     )
       throw new Error("compiler selection lacks known invocation evidence");
     const inventory = await callbacks.validateInventory(inventoryResult.payload.value);
-    const draft = await callbacks.validate(fixedGraph ? { fixedGraph } : proposal!.payload.value);
+    const draft = await callbacks.validate(
+      fixedGraph ? { fixedGraph } : proposal!.payload.value,
+      Number(terminal.payload.revision),
+    );
     const graph = draft.objective;
     const reviewEvidence = terminal.payload.reviewEvidence ?? null;
     const judgeIntent = records.find(
@@ -389,12 +392,7 @@ export async function runCompilerDraftLoop(args: {
         draftDigest({
           inventory,
           previous: draft.proposal,
-          projection: {
-            graphDigest: draft.projectionTrace.graphDigest,
-            addedEdges: draft.projectionTrace.addedEdges,
-            adapterBindings: draft.projectionTrace.adapterBindings,
-            riskElevations: draft.projectionTrace.riskElevations,
-          },
+          projection: draft.projectionTrace,
           failure: reviewEvidence,
           ...(reviewEvidence === null ? {} : { reviewEvidence }),
         })
@@ -759,7 +757,7 @@ export async function runCompilerDraftLoop(args: {
               reviewEvidence,
             );
         candidate = value;
-        draft = await callbacks.validate(value);
+        draft = await callbacks.validate(value, revision);
         graph = draft.objective;
       } catch (error) {
         if (
@@ -838,12 +836,7 @@ export async function runCompilerDraftLoop(args: {
           draft.proposal,
           reviewEvidence,
           reviewEvidence,
-          {
-            graphDigest,
-            addedEdges: draft.projectionTrace.addedEdges,
-            adapterBindings: draft.projectionTrace.adapterBindings,
-            riskElevations: draft.projectionTrace.riskElevations,
-          },
+          draft.projectionTrace,
         );
         if (callbacks.accept(verdict, draft, inventory, reviewEvidence)) {
           if (tokens > limits.maxObservedTokens) throw new Stop("observed-token-limit");

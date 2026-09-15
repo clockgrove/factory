@@ -287,6 +287,31 @@ describe("explicit plan pinned LFS preflight", () => {
     },
   );
 
+  it("keeps model inspection on exact-base bytes during a transient planning-checkout change", async () => {
+    const f = await fixture();
+    const originalPackage = await readFile(join(f.repository, "package.json"));
+    const compile = vi.fn(async (context: CompilationContext, checkpoint) => {
+      await writeFile(join(f.repository, "package.json"), '{"scripts":{"test":"false"}}\n');
+      await writeFile(join(f.repository, "transient-secret.txt"), "must not be model-visible\n");
+      try {
+        expect(context.repository).not.toBe(f.repository);
+        expect(await readFile(join(context.repository, "package.json"), "utf8")).toBe(
+          originalPackage.toString("utf8"),
+        );
+        await expect(access(join(context.repository, "transient-secret.txt"))).rejects.toThrow();
+        const result = await resultFor(context);
+        await checkpoint(result);
+        return result;
+      } finally {
+        await writeFile(join(f.repository, "package.json"), originalPackage);
+        await rm(join(f.repository, "transient-secret.txt"));
+      }
+    });
+    const report = await plan(f, compile);
+    expect(report.compilation).toMatchObject({ result: "completed" });
+    expect(compile).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     "tool",
     "missing-object",

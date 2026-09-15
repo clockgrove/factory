@@ -147,7 +147,7 @@ const dependencyOrder = <T extends { id: string; dependsOn: string[] }>(items: T
 // placeholders; matching a vocabulary can never establish semantic acceptance.
 // The management compiler must formulate checkable criteria, and independent
 // semantic review must establish each one against authoritative validation evidence.
-const acceptanceTextProblem = (criterion: string): string | undefined => {
+export const acceptanceTextProblem = (criterion: string): string | undefined => {
   const text = criterion.trim();
   if (text.length === 0) return "criterion is blank";
   if (criterion.length > 2_000) return "criterion exceeds 2000 characters";

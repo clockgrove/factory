@@ -507,21 +507,16 @@ function runtimeContract(requirement: RuntimeBundleRequirement | undefined) {
   return contract;
 }
 
-const operationKeySchema: JsonSchema = {
-  type: "string",
-  minLength: 1,
-  maxLength: 160,
-};
-
 function compilerOperation(
   kind: string,
+  keySchema: JsonSchema,
   parse: (command: string) => RepositoryCapabilityRequirement["operation"] | null,
   format: (operation: RepositoryCapabilityRequirement["operation"]) => string | null,
   observed: (script: string) => RepositoryCapabilityRequirement["operation"] | null,
 ): NonNullable<ToolchainCompilerContract["operation"]> {
   return {
     kind,
-    keySchema: operationKeySchema,
+    keySchema,
     providerCommandCount: { min: 1, max: 1 },
     maxProvisionedOperations: 32,
     parse,
@@ -1375,6 +1370,13 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
       descendants: { allowed: true, requiresTransitiveProviderAncestor: true },
       operation: compilerOperation(
         "package-script",
+        {
+          type: "string",
+          minLength: 5,
+          maxLength: 160,
+          pattern:
+            "^[1-9][0-9]{0,2}:[A-Za-z0-9._/-]+:(?:typecheck|test|lint|check|verify|build)(?:[:._-][A-Za-z0-9][A-Za-z0-9:_.-]{0,111})?$",
+        },
         npmCompilerOperation,
         npmCommandForOperation,
         (script) => npmCapabilityOperation(`npm run ${script}`),
@@ -1414,6 +1416,13 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
       descendants: { allowed: true, requiresTransitiveProviderAncestor: true },
       operation: compilerOperation(
         "package-script",
+        {
+          type: "string",
+          minLength: 1,
+          maxLength: 128,
+          pattern:
+            "^(?:typecheck|test|lint|check|verify|build)(?:[:._-][A-Za-z0-9][A-Za-z0-9:_.-]{0,111})?$",
+        },
         pnpmOperation,
         pnpmCommandForOperation,
         (script) => pnpmOperation(`pnpm run ${script}`),
@@ -1450,6 +1459,12 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
       descendants: { allowed: true, requiresTransitiveProviderAncestor: true },
       operation: compilerOperation(
         "package-script",
+        {
+          type: "string",
+          minLength: 1,
+          maxLength: 160,
+          pattern: "^[A-Za-z0-9][A-Za-z0-9:._/-]{0,159}$",
+        },
         bunCapabilityOperation,
         bunCommandForOperation,
         (script) => bunCapabilityOperation(`bun run ${script}`),
@@ -1491,8 +1506,17 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
       ],
       mixedAuthority: "reject",
       descendants: { allowed: true, requiresTransitiveProviderAncestor: true },
-      operation: compilerOperation("python-test", uvPytestOperation, uvCommandForOperation, () =>
-        uvPytestOperation("uv run --locked --no-sync python -m pytest"),
+      operation: compilerOperation(
+        "python-test",
+        {
+          type: "string",
+          minLength: 1,
+          maxLength: 160,
+          pattern: "^(?:\\.|[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*)$",
+        },
+        uvPytestOperation,
+        uvCommandForOperation,
+        () => uvPytestOperation("uv run --locked --no-sync python -m pytest"),
       ),
     },
     setupCommands: [

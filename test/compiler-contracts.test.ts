@@ -136,6 +136,35 @@ describe("adapter-owned compiler capabilities", () => {
     expect(selected.toolchains.every((entry) => entry.state === "unsupported")).toBe(true);
   });
 
+  it("does not leak unsupported commands beside an observed supported adapter", () => {
+    const selected = compilerCapabilitiesForRepository(
+      semanticPinnedFacts({
+        paths: ["package.json", "package-lock.json", "Cargo.toml", "src/lib.rs", "README.md"],
+        scripts: { test: "node --test" },
+        documents: {
+          "package.json": JSON.stringify({ scripts: { test: "node --test" } }),
+          "README.md": "Run `cargo test`, `go test ./...`, or `python -m pytest`.",
+        },
+      }),
+      allToolchainDestinations,
+    );
+    expect(selected.validationRecipes.map((entry) => entry.command)).toEqual([
+      "npm run test",
+      "node --test",
+    ]);
+  });
+
+  it("uses the runtime policy matcher for wildcard and case-insensitive destinations", () => {
+    const selected = compilerCapabilitiesForRepository(
+      semanticPinnedFacts({ paths: ["README.md"], scripts: {} }),
+      ["*.NPMJS.ORG", "PYPI.ORG", "FILES.PYTHONHOSTED.ORG"],
+    );
+    expect(selected.toolchains.find((entry) => entry.adapterId === "node-npm")?.state).toBe(
+      "eligible-deferred",
+    );
+    expect(selected.toolchains.some((entry) => entry.state === "policy-blocked")).toBe(false);
+  });
+
   it("keeps the generic compiler prompt free of adapter implementation prose", () => {
     const prompt = compilerProposalPrompt.toString();
     for (const literal of [
@@ -242,6 +271,19 @@ describe("strict semantic compiler contracts", () => {
     shuffled.repository.toolchains.reverse();
     shuffled.constraints.allowedNetworkDestinations.reverse();
     expect(validateCompilerRequest(shuffled)).toEqual(report);
+  });
+
+  it.each([
+    ["partial", ["package.json"], "partial-toolchain-authority"],
+    ["mixed", ["package.json", "package-lock.json", "pnpm-lock.yaml"], "mixed-toolchain-authority"],
+  ] as const)("does not let another eligible adapter mask %s authority", (_name, paths, code) => {
+    const request = semanticRequest(
+      semanticPinnedFacts({ paths: [...paths], scripts: {} }),
+      allToolchainDestinations,
+    );
+    const report = validateCompilerRequest(request);
+    expect(report.status).toBe("unsatisfiable");
+    expect(report.violations).toContainEqual(expect.objectContaining({ code }));
   });
 });
 

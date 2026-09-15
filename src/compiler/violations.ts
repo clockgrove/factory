@@ -28,7 +28,15 @@ export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule
   ]),
   "work-item-count": rule("work-item-count", "The Work Item count is outside the accepted bound."),
   "duplicate-item-id": rule("duplicate-item-id", "A Work Item identifier is duplicated."),
+  "duplicate-dependency": rule(
+    "duplicate-dependency",
+    "A Work Item dependency identifier is duplicated.",
+  ),
   "duplicate-criterion-id": rule("duplicate-criterion-id", "A criterion identifier is duplicated."),
+  "duplicate-criterion-text": rule(
+    "duplicate-criterion-text",
+    "A Work Item repeats the same acceptance criterion text.",
+  ),
   "unknown-obligation": rule("unknown-obligation", "The proposal maps an unknown obligation."),
   "unmapped-obligation": rule(
     "unmapped-obligation",
@@ -53,6 +61,10 @@ export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule
   "protected-risk-validation": rule(
     "protected-risk-validation",
     "A protected criterion lacks sufficient deterministic validation.",
+  ),
+  "ungrounded-validation-tier": rule(
+    "ungrounded-validation-tier",
+    "A validation tier is not grounded by the pinned repository surface.",
   ),
   "partial-toolchain-authority": rule(
     "partial-toolchain-authority",

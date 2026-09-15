@@ -52,6 +52,19 @@ describe("semantic proposal validation", () => {
       },
     },
     {
+      name: "duplicate criterion text",
+      mutate(_request: CompilerRequest, proposal: CompilerProposal) {
+        const duplicate = structuredClone(proposal.workItems[0]!.criteria[0]!);
+        duplicate.id = "duplicated-text";
+        proposal.workItems[0]!.criteria.push(duplicate);
+      },
+      expected: {
+        code: "duplicate-criterion-text",
+        itemId: "item-1",
+        field: "/workItems/0/criteria/1/text",
+      },
+    },
+    {
       name: "unknown obligation",
       mutate(_request: CompilerRequest, proposal: CompilerProposal) {
         proposal.workItems[0]!.obligationIds.push("not-in-inventory");
@@ -89,6 +102,18 @@ describe("semantic proposal validation", () => {
       expected: { code: "dependency-cycle", itemId: null, field: "/workItems" },
     },
     {
+      name: "duplicate dependency",
+      count: 2,
+      mutate(_request: CompilerRequest, proposal: CompilerProposal) {
+        proposal.workItems[1]!.dependsOn = ["item-1", "item-1"];
+      },
+      expected: {
+        code: "duplicate-dependency",
+        itemId: "item-2",
+        field: "/workItems/1/dependsOn",
+      },
+    },
+    {
       name: "unknown observed recipe",
       mutate(_request: CompilerRequest, proposal: CompilerProposal) {
         const reference = proposal.workItems[0]!.criteria[0]!.validation[0]!.evidence[0]!;
@@ -114,14 +139,14 @@ describe("semantic proposal validation", () => {
       },
     },
     {
-      name: "denied destination",
+      name: "ungrounded visual tier",
       mutate(_request: CompilerRequest, proposal: CompilerProposal) {
-        proposal.workItems[0]!.executionIntent.additionalNetworkDestinations = ["api.example.com"];
+        proposal.workItems[0]!.criteria[0]!.validation[0]!.tier = "visual";
       },
       expected: {
-        code: "denied-network-destination",
+        code: "ungrounded-validation-tier",
         itemId: "item-1",
-        field: "/workItems/0/executionIntent/additionalNetworkDestinations",
+        field: "/workItems/0/criteria/0/validation/0/tier",
       },
     },
     {
@@ -158,6 +183,23 @@ describe("semantic proposal validation", () => {
     });
     expect(JSON.stringify(result.report)).not.toContain("../private");
   });
+
+  it.each(["trust", "additionalTools", "services", "additionalNetworkDestinations"])(
+    "rejects model-authored operational authority through %s",
+    (field) => {
+      const request = semanticRequest();
+      const proposal = structuredClone(semanticProposal(request)) as unknown as {
+        workItems: Array<{ executionIntent: Record<string, unknown> }>;
+      };
+      proposal.workItems[0]!.executionIntent[field] = field === "trust" ? "trusted_local" : [];
+      expect(codes(request, proposal)).toContainEqual(
+        expect.objectContaining({
+          code: "schema-invalid",
+          field: "/workItems/0/executionIntent",
+        }),
+      );
+    },
+  );
 });
 
 function deferredFixture() {
@@ -198,10 +240,6 @@ function deferredFixture() {
     exclusiveResources: [],
     executionIntent: {
       estimatedDurationMinutes: 10,
-      additionalTools: [],
-      services: [],
-      additionalNetworkDestinations: [],
-      trust: "trusted_local",
     },
   });
   return { request, pinned, adapter, evidence, item };
@@ -274,22 +312,32 @@ describe("deferred capability provider validation", () => {
     );
   });
 
-  it("accepts 32 finite operations and rejects the 33rd", () => {
-    const { request, item, evidence } = deferredFixture();
+  it("accepts 32 graph-wide finite operations and rejects the 33rd", () => {
+    const { request, pinned, item } = deferredFixture();
     const provider = item("provider", ["package.json", "package-lock.json"], []);
-    provider.criteria = Array.from({ length: 33 }, (_, index) => ({
-      id: `operation-${index + 1}`,
-      text: `Operation ${index + 1} is validated.`,
-      risk: "ordinary" as const,
-      validation: [{ tier: "mechanical" as const, evidence: [evidence(`check-${index + 1}`)] }],
-    }));
+    const consumers = Array.from({ length: 32 }, (_, index) =>
+      item(
+        `consumer-${index + 1}`,
+        [`src/consumer-${index + 1}.ts`],
+        ["provider"],
+        `check-${index + 2}`,
+      ),
+    );
     const proposal: CompilerProposal = {
       protocol: "clockgrove.factory/compiler-proposal",
-      workItems: [provider],
+      workItems: [provider, ...consumers],
     };
     const boundary = structuredClone(proposal);
-    boundary.workItems[0]!.criteria.pop();
+    boundary.workItems.pop();
     expect(parseAndValidateCompilerProposal(request, boundary).report.status).toBe("valid");
+    expect(() =>
+      projectCompilerProposal({
+        request,
+        proposal: boundary,
+        pinnedFacts: pinned,
+        runPolicy: DEFAULT_RUN_POLICY,
+      }),
+    ).not.toThrow();
     expect(codes(request, proposal)).toContainEqual(
       expect.objectContaining({
         code: "operation-count-limit",
@@ -299,9 +347,48 @@ describe("deferred capability provider validation", () => {
       }),
     );
   });
+
+  it("rejects more than one command on a selected provider before projection", () => {
+    const { request, item, evidence } = deferredFixture();
+    const provider = item("provider", ["package.json", "package-lock.json"], []);
+    provider.criteria.push({
+      id: "second-operation",
+      text: "A second provider operation is validated.",
+      risk: "ordinary",
+      validation: [{ tier: "mechanical", evidence: [evidence("check")] }],
+    });
+    expect(
+      codes(request, { protocol: "clockgrove.factory/compiler-proposal", workItems: [provider] }),
+    ).toContainEqual(
+      expect.objectContaining({
+        code: "operation-count-limit",
+        itemId: "provider",
+        expected: { min: 1, max: 1 },
+        observed: 2,
+      }),
+    );
+  });
 });
 
 describe("deterministic semantic projection", () => {
+  it("derives execution trust from policy and admits no model-authored tools or services", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request);
+    const projected = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      runPolicy: { ...DEFAULT_RUN_POLICY, trust: "sandbox_untrusted" },
+    });
+    expect(projected.objective.workItems[0]!.requirements).toMatchObject({
+      trust: "isolated",
+      tools: ["node", "npm"],
+      services: [],
+      networkDestinations: [],
+    });
+  });
+
   it("preserves semantic ownership while deriving mechanics and only adding serialization edges", () => {
     const pinned = semanticPinnedFacts({
       paths: ["package.json", "package-lock.json", "src/shared.ts", "src/other.ts"],

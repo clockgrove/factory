@@ -114,7 +114,8 @@ escalation explaining what needs your attention. See the
 [first-Objective walkthrough](docs/setup/local.md#a-small-first-objective) for expected evidence.
 
 Compilation gives the model a strict semantic request: the Objective, obligation inventory,
-validation intents, scope, dependency intent, risk, and execution intent. Repository commands,
+validation intents, scope, dependency intent, risk, exclusive resources, and estimated duration.
+Repository commands,
 toolchain authority, runtime pins, provider steps, policy limits, and graph serialization remain
 Factory-owned facts derived from the pinned base commit. Factory validates the semantic proposal,
 projects it deterministically into the execution graph, and records the request, proposal, validation,

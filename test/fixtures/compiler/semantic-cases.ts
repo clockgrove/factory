@@ -60,12 +60,22 @@ export const COMPILER_DIMENSIONS = {
 
 type Dimension = keyof typeof COMPILER_DIMENSIONS;
 type Tags = { [Key in Dimension]: Array<(typeof COMPILER_DIMENSIONS)[Key][number]> };
+export interface SemanticCompilerCase {
+  name: string;
+  tags: Tags;
+  /** Concrete Vitest source and case-name substring exercising this coverage bundle. */
+  tests: Array<`${string}.test.ts::${string}`>;
+}
 
 /** Minimal pairwise corpus plus focused boundary interactions. Each row points
  * to behavior exercised by the semantic compiler contract suites. */
-export const SEMANTIC_COMPILER_CASES: ReadonlyArray<{ name: string; tags: Tags }> = [
+export const SEMANTIC_COMPILER_CASES: ReadonlyArray<SemanticCompilerCase> = [
   {
     name: "observed npm valid linear",
+    tests: [
+      "compiler-contracts.test.ts::selects $name authority and formats only its observed recipes",
+      "compiler-proposal.test.ts::preserves semantic ownership while deriving mechanics",
+    ],
     tags: {
       repositoryState: ["observed"],
       pinnedEvidence: ["stable-manifest"],
@@ -80,6 +90,10 @@ export const SEMANTIC_COMPILER_CASES: ReadonlyArray<{ name: string; tags: Tags }
   },
   {
     name: "absent pnpm descendants and response loss",
+    tests: [
+      "compiler-proposal.test.ts::accepts one provider and transitive descendants",
+      "compiler-draft-lifecycle.test.ts::survives response loss after a durable result",
+    ],
     tags: {
       repositoryState: ["wholly-absent"],
       pinnedEvidence: ["cached-lfs"],
@@ -94,6 +108,10 @@ export const SEMANTIC_COMPILER_CASES: ReadonlyArray<{ name: string; tags: Tags }
   },
   {
     name: "partial Bun missing provider",
+    tests: [
+      "compiler-contracts.test.ts::does not let another eligible adapter mask %s authority",
+      "compiler-proposal.test.ts::classifies a $name provider exactly",
+    ],
     tags: {
       repositoryState: ["partial"],
       pinnedEvidence: ["missing-lfs-tool"],
@@ -107,11 +125,15 @@ export const SEMANTIC_COMPILER_CASES: ReadonlyArray<{ name: string; tags: Tags }
     },
   },
   {
-    name: "mixed uv ambiguous provider",
+    name: "mixed JavaScript ambiguous provider",
+    tests: [
+      "compiler-contracts.test.ts::does not let another eligible adapter mask %s authority",
+      "compiler-proposal.test.ts::classifies a $name provider exactly",
+    ],
     tags: {
       repositoryState: ["mixed"],
       pinnedEvidence: ["missing-lfs-object"],
-      toolchain: ["uv"],
+      toolchain: ["npm", "pnpm"],
       objectiveSize: ["80-100"],
       graphShape: ["join"],
       capability: ["ambiguous-provider"],
@@ -122,6 +144,10 @@ export const SEMANTIC_COMPILER_CASES: ReadonlyArray<{ name: string; tags: Tags }
   },
   {
     name: "policy-blocked deferred operation",
+    tests: [
+      "compiler-contracts.test.ts::returns exact terminal codes for $name",
+      "compiler-proposal.test.ts::classifies a $name provider exactly",
+    ],
     tags: {
       repositoryState: ["policy-blocked"],
       pinnedEvidence: ["mutable-checkout-disagreement"],
@@ -136,6 +162,10 @@ export const SEMANTIC_COMPILER_CASES: ReadonlyArray<{ name: string; tags: Tags }
   },
   {
     name: "unsupported Cargo contract",
+    tests: [
+      "compiler-contracts.test.ts::keeps %s outside bootstrap authority",
+      "compiler-draft-lifecycle.test.ts::persists one typed mechanical report",
+    ],
     tags: {
       repositoryState: ["unsupported"],
       pinnedEvidence: ["stable-manifest"],
@@ -150,6 +180,10 @@ export const SEMANTIC_COMPILER_CASES: ReadonlyArray<{ name: string; tags: Tags }
   },
   {
     name: "unsupported Go terminal request",
+    tests: [
+      "compiler-contracts.test.ts::keeps %s outside bootstrap authority",
+      "compiler-contracts.test.ts::rejects an unsatisfiable request before model dispatch",
+    ],
     tags: {
       repositoryState: ["unsupported"],
       pinnedEvidence: ["stable-manifest"],
@@ -164,6 +198,10 @@ export const SEMANTIC_COMPILER_CASES: ReadonlyArray<{ name: string; tags: Tags }
   },
   {
     name: "unsupported ambient Python",
+    tests: [
+      "compiler-contracts.test.ts::keeps %s outside bootstrap authority",
+      "compiler-draft-lifecycle.test.ts::consumes a malformed repair",
+    ],
     tags: {
       repositoryState: ["unsupported"],
       pinnedEvidence: ["mutable-checkout-disagreement"],
@@ -178,6 +216,10 @@ export const SEMANTIC_COMPILER_CASES: ReadonlyArray<{ name: string; tags: Tags }
   },
   {
     name: "later adapter generation semantic repair",
+    tests: [
+      "compiler-proposal.test.ts::accepts a later generation",
+      "compiler-draft-integration.test.ts::extracts obligations first, grounds every revision",
+    ],
     tags: {
       repositoryState: ["wholly-absent"],
       pinnedEvidence: ["cached-lfs"],
@@ -192,6 +234,10 @@ export const SEMANTIC_COMPILER_CASES: ReadonlyArray<{ name: string; tags: Tags }
   },
   {
     name: "finite operation boundary unchanged repair",
+    tests: [
+      "compiler-proposal.test.ts::accepts 32 graph-wide finite operations",
+      "compiler-management.test.ts::terminates an unchanged repair report",
+    ],
     tags: {
       repositoryState: ["wholly-absent"],
       pinnedEvidence: ["stable-manifest"],

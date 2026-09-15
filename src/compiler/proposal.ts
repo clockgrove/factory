@@ -31,6 +31,7 @@ import {
   type ObligationInventory,
 } from "../evaluation/compiler-eval.js";
 import {
+  acceptanceTextProblem,
   compileObjective,
   type DecompositionEvidence,
   type CompilerWorkItem,
@@ -117,9 +118,12 @@ const violation = (
   itemId: string | null = null,
 ): CompilerViolation => ({ code, itemId, field, expected, observed });
 
-function schemaViolations(error: {
-  issues: Array<{ path: PropertyKey[]; code: string; message: string }>;
-}) {
+function schemaViolations(
+  error: {
+    issues: Array<{ path: PropertyKey[]; code: string; message: string }>;
+  },
+  input?: unknown,
+) {
   return error.issues.map((issue) => {
     const path = issue.path.map(String);
     const code =
@@ -132,20 +136,26 @@ function schemaViolations(error: {
             : "schema-invalid";
     const itemIndex =
       path[0] === "workItems" && /^\d+$/.test(path[1] ?? "") ? Number(path[1]) : null;
-    return violation(
-      code,
-      pointer(...path),
-      { contract: "strict" },
-      { issue: issue.code },
-      itemIndex === null ? null : null,
-    );
+    const candidate =
+      itemIndex !== null && input && typeof input === "object" && "workItems" in input
+        ? (input as { workItems?: unknown[] }).workItems?.[itemIndex]
+        : null;
+    const itemId =
+      candidate &&
+      typeof candidate === "object" &&
+      "id" in candidate &&
+      typeof candidate.id === "string" &&
+      /^[a-z0-9][a-z0-9-]*$/.test(candidate.id)
+        ? candidate.id
+        : null;
+    return violation(code, pointer(...path), { contract: "strict" }, { issue: issue.code }, itemId);
   });
 }
 
 export function validateCompilerRequest(requestInput: unknown): CompilerValidationReport {
   const parsed = CompilerRequestSchema.safeParse(requestInput);
   if (!parsed.success)
-    return createCompilerValidationReport("request", schemaViolations(parsed.error));
+    return createCompilerValidationReport("request", schemaViolations(parsed.error, requestInput));
   const request = parsed.data;
   const violations: CompilerViolation[] = [];
   if (
@@ -193,13 +203,12 @@ export function validateCompilerRequest(requestInput: unknown): CompilerValidati
       ),
     );
   if (
-    (request.revision === 0 &&
-      (request.previousProposal !== null ||
-        request.validationReport.status !== "valid" ||
-        request.validationReport.violations.length !== 0 ||
-        request.semanticFindings.length !== 0 ||
-        request.challenges.length !== 0)) ||
-    (request.revision > 0 && request.previousProposal === null)
+    request.revision === 0 &&
+    (request.previousProposal !== null ||
+      request.validationReport.status !== "valid" ||
+      request.validationReport.violations.length !== 0 ||
+      request.semanticFindings.length !== 0 ||
+      request.challenges.length !== 0)
   )
     violations.push(
       violation(
@@ -213,26 +222,28 @@ export function validateCompilerRequest(requestInput: unknown): CompilerValidati
   const eligible = request.repository.toolchains.filter(
     (toolchain) => toolchain.state === "eligible-deferred",
   );
+  for (const toolchain of request.repository.toolchains) {
+    if (toolchain.state === "partial")
+      violations.push(
+        violation(
+          "partial-toolchain-authority",
+          "/repository/toolchains",
+          "observed or wholly absent authority",
+          toolchain.adapterId,
+        ),
+      );
+    if (toolchain.state === "mixed")
+      violations.push(
+        violation(
+          "mixed-toolchain-authority",
+          "/repository/toolchains",
+          "one authority owner",
+          toolchain.adapterId,
+        ),
+      );
+  }
   if (recipes.length === 0 && eligible.length === 0) {
     for (const toolchain of request.repository.toolchains) {
-      if (toolchain.state === "partial")
-        violations.push(
-          violation(
-            "partial-toolchain-authority",
-            "/repository/toolchains",
-            "observed or wholly absent authority",
-            toolchain.adapterId,
-          ),
-        );
-      if (toolchain.state === "mixed")
-        violations.push(
-          violation(
-            "mixed-toolchain-authority",
-            "/repository/toolchains",
-            "one authority owner",
-            toolchain.adapterId,
-          ),
-        );
       if (toolchain.state === "policy-blocked")
         violations.push(
           violation(
@@ -297,6 +308,16 @@ export async function prepareCompilerRequest(input: {
       manifests: pinnedFacts.manifests,
       validationRecipes: repository.validationRecipes,
       toolchains: repository.toolchains,
+      validationSurfaces: {
+        deterministicSimulation: pinnedFacts.relevantPaths.filter((path) =>
+          /(?:simulation|simulator|replay|seed)/.test(path.toLowerCase()),
+        ),
+        visual: pinnedFacts.relevantPaths.filter(
+          (path) =>
+            /(?:screenshot|snapshot|visual|storybook)/.test(path.toLowerCase()) ||
+            /\.(?:png|jpe?g|webp)$/i.test(path),
+        ),
+      },
       pathCount: pinnedFacts.relevantPaths.length,
     },
     constraints: {
@@ -351,7 +372,9 @@ export function parseAndValidateCompilerProposal(
   const request = CompilerRequestSchema.parse(requestInput);
   const parsed = CompilerProposalSchema.safeParse(value);
   if (!parsed.success)
-    return { report: createCompilerValidationReport("proposal", schemaViolations(parsed.error)) };
+    return {
+      report: createCompilerValidationReport("proposal", schemaViolations(parsed.error, value)),
+    };
   const proposal = parsed.data;
   const violations: CompilerViolation[] = [];
   if (proposal.workItems.length > request.constraints.maxWorkItems)
@@ -398,6 +421,20 @@ export function parseAndValidateCompilerProposal(
     operation: { kind: string; key: string };
   }> = [];
   for (const [itemIndex, item] of proposal.workItems.entries()) {
+    const seenDependencies = new Set<string>();
+    for (const dependency of item.dependsOn) {
+      if (seenDependencies.has(dependency))
+        violations.push(
+          violation(
+            "duplicate-dependency",
+            pointer("workItems", itemIndex, "dependsOn"),
+            "unique dependency IDs",
+            dependency,
+            item.id,
+          ),
+        );
+      seenDependencies.add(dependency);
+    }
     if (item.dependsOn.length > request.constraints.maxDependenciesPerItem)
       violations.push(
         violation(
@@ -434,6 +471,7 @@ export function parseAndValidateCompilerProposal(
       else mapped.add(id);
     }
     const criterionIds = new Set<string>();
+    const criterionTexts = new Set<string>();
     let itemEvidenceCount = 0;
     for (const [criterionIndex, criterion] of item.criteria.entries()) {
       if (criterionIds.has(criterion.id))
@@ -447,6 +485,28 @@ export function parseAndValidateCompilerProposal(
           ),
         );
       criterionIds.add(criterion.id);
+      if (criterionTexts.has(criterion.text))
+        violations.push(
+          violation(
+            "duplicate-criterion-text",
+            pointer("workItems", itemIndex, "criteria", criterionIndex, "text"),
+            "unique criterion text within Work Item",
+            criterion.text,
+            item.id,
+          ),
+        );
+      criterionTexts.add(criterion.text);
+      const acceptanceProblem = acceptanceTextProblem(criterion.text);
+      if (acceptanceProblem)
+        violations.push(
+          violation(
+            "uncovered-criterion",
+            pointer("workItems", itemIndex, "criteria", criterionIndex, "text"),
+            "concrete descriptive acceptance behavior",
+            { problem: acceptanceProblem },
+            item.id,
+          ),
+        );
       if (criterion.validation.length === 0)
         violations.push(
           violation(
@@ -472,6 +532,34 @@ export function parseAndValidateCompilerProposal(
           ),
         );
       for (const [validationIndex, validation] of criterion.validation.entries()) {
+        const groundedTier =
+          validation.tier === "deterministic-simulation"
+            ? request.repository.validationSurfaces.deterministicSimulation.some((path) =>
+                scopeOwnsPath(item.scope, path),
+              )
+            : validation.tier === "visual"
+              ? request.repository.validationSurfaces.visual.some((path) =>
+                  scopeOwnsPath(item.scope, path),
+                )
+              : true;
+        if (!groundedTier)
+          violations.push(
+            violation(
+              "ungrounded-validation-tier",
+              pointer(
+                "workItems",
+                itemIndex,
+                "criteria",
+                criterionIndex,
+                "validation",
+                validationIndex,
+                "tier",
+              ),
+              `pinned ${validation.tier} repository surface within Work Item scope`,
+              validation.tier,
+              item.id,
+            ),
+          );
         if (validation.tier !== "semantic" && validation.evidence.length === 0)
           violations.push(
             violation(
@@ -586,19 +674,6 @@ export function parseAndValidateCompilerProposal(
           item.id,
         ),
       );
-    const denied = item.executionIntent.additionalNetworkDestinations.filter(
-      (destination) => !request.constraints.allowedNetworkDestinations.includes(destination),
-    );
-    if (denied.length)
-      violations.push(
-        violation(
-          "denied-network-destination",
-          pointer("workItems", itemIndex, "executionIntent", "additionalNetworkDestinations"),
-          request.constraints.allowedNetworkDestinations,
-          denied,
-          item.id,
-        ),
-      );
   }
   for (const obligation of request.inventory.obligations.filter(
     (entry) => entry.kind === "explicit",
@@ -618,79 +693,102 @@ export function parseAndValidateCompilerProposal(
         violation("operation-count-limit", "/workItems", maximumOperations, operations.size),
       );
     if (!contract) continue;
-    for (const operationIdentity of [...operations].sort()) {
-      const [operationKind, operationKey] = operationIdentity.split("\0") as [string, string];
-      const declaresOperation = (candidate: CompilerProposal["workItems"][number]) =>
-        candidate.criteria.some((criterion) =>
-          criterion.validation.some((validation) =>
-            validation.evidence.some(
-              (reference) =>
-                reference.kind === "deferred" &&
-                reference.adapterId === adapterId &&
-                reference.operation.kind === operationKind &&
-                reference.operation.key === operationKey,
-            ),
+    const itemOperations = (item: CompilerProposal["workItems"][number]) =>
+      uses.filter((use) => use.item.id === item.id);
+    const rootOwners = proposal.workItems.filter(
+      (candidate) =>
+        contract.rootAuthorityPaths.every((path) => scopeOwnsPath(candidate.scope, path)) &&
+        itemOperations(candidate).length > 0,
+    );
+    const providers = new Set<string>();
+    for (const use of uses) {
+      const rootCandidates = rootOwners.filter((candidate) =>
+        analysis.hasPath(use.item.id, candidate.id),
+      );
+      const roots = rootCandidates.filter(
+        (candidate) =>
+          !rootCandidates.some(
+            (other) => other.id !== candidate.id && analysis.hasPath(other.id, candidate.id),
+          ),
+      );
+      if (roots.length === 0) {
+        violations.push(
+          violation(
+            rootOwners.length > 0
+              ? "non-ancestor-capability-provider"
+              : "missing-capability-provider",
+            "/workItems",
+            rootOwners.length > 0
+              ? { consumer: use.item.id, adapterId }
+              : [...contract.rootAuthorityPaths],
+            rootOwners.length > 0 ? rootOwners.map((entry) => entry.id).sort() : null,
+            use.item.id,
           ),
         );
-      const owners: CompilerProposal["workItems"][number][] = [];
-      const proposalById = new Map(proposal.workItems.map((item) => [item.id, item]));
-      for (const itemId of analysis.order) {
-        const candidate = proposalById.get(itemId);
-        if (!candidate || !declaresOperation(candidate)) continue;
-        const ownsRoot = contract.rootAuthorityPaths.every((path) =>
-          scopeOwnsPath(candidate.scope, path),
-        );
-        const ownsGeneration = contract.generationAuthorityPaths.every((path) =>
-          scopeOwnsPath(candidate.scope, path),
-        );
-        const extendsGeneration =
-          ownsGeneration && owners.some((owner) => analysis.hasPath(candidate.id, owner.id));
-        if (ownsRoot || extendsGeneration) owners.push(candidate);
+        continue;
       }
-      for (const use of uses.filter(
+      if (roots.length !== 1) {
+        violations.push(
+          violation(
+            "ambiguous-capability-provider",
+            "/workItems",
+            1,
+            roots.map((entry) => entry.id).sort(),
+            use.item.id,
+          ),
+        );
+        continue;
+      }
+      const root = roots[0]!;
+      const generationCandidates = proposal.workItems.filter(
         (candidate) =>
-          candidate.operation.kind === operationKind && candidate.operation.key === operationKey,
-      )) {
-        const ancestors = owners.filter((candidate) => analysis.hasPath(use.item.id, candidate.id));
-        if (owners.length > 0 && ancestors.length === 0)
-          violations.push(
-            violation(
-              "non-ancestor-capability-provider",
-              "/workItems",
-              { consumer: use.item.id, adapterId },
-              owners.map((entry) => entry.id).sort(),
-              use.item.id,
-            ),
-          );
-        else if (ancestors.length === 0)
-          violations.push(
-            violation(
-              "missing-capability-provider",
-              "/workItems",
-              [...contract.rootAuthorityPaths],
-              null,
-              use.item.id,
-            ),
-          );
-        else {
-          const nearest = ancestors.filter(
-            (candidate) =>
-              !ancestors.some(
-                (other) => other.id !== candidate.id && analysis.hasPath(other.id, candidate.id),
-              ),
-          );
-          if (nearest.length !== 1)
-            violations.push(
-              violation(
-                "ambiguous-capability-provider",
-                "/workItems",
-                1,
-                nearest.map((entry) => entry.id).sort(),
-                use.item.id,
-              ),
-            );
-        }
+          (candidate.id !== use.item.id || use.item.id === root.id) &&
+          analysis.hasPath(use.item.id, candidate.id) &&
+          analysis.hasPath(candidate.id, root.id) &&
+          (candidate.id === root.id ||
+            (contract.generationAuthorityPaths.every((path) =>
+              scopeOwnsPath(candidate.scope, path),
+            ) &&
+              itemOperations(candidate).some(
+                (candidateUse) =>
+                  candidateUse.operation.kind === use.operation.kind &&
+                  candidateUse.operation.key === use.operation.key,
+              ))),
+      );
+      const closest = generationCandidates.filter(
+        (candidate) =>
+          !generationCandidates.some(
+            (other) => other.id !== candidate.id && analysis.hasPath(other.id, candidate.id),
+          ),
+      );
+      if (closest.length !== 1) {
+        violations.push(
+          violation(
+            "ambiguous-capability-provider",
+            "/workItems",
+            1,
+            closest.map((entry) => entry.id).sort(),
+            use.item.id,
+          ),
+        );
+        continue;
       }
+      providers.add(closest[0]!.id);
+    }
+    for (const providerId of [...providers].sort()) {
+      const provider = proposal.workItems.find((item) => item.id === providerId)!;
+      const count = uniqueCommands(request, provider).length;
+      const expected = contract.operation?.providerCommandCount;
+      if (expected && (count < expected.min || count > expected.max))
+        violations.push(
+          violation(
+            "operation-count-limit",
+            "/workItems",
+            { min: expected.min, max: expected.max },
+            count,
+            provider.id,
+          ),
+        );
     }
   }
   const report = createCompilerValidationReport("proposal", violations);
@@ -791,19 +889,17 @@ function semanticWorkItem(
         ...new Set([
           ...recipes.flatMap((recipe) => recipe.requiredTools),
           ...deferred.flatMap((capability) => capability.requiredTools),
-          ...item.executionIntent.additionalTools,
         ]),
       ].sort(),
-      services: [...new Set(item.executionIntent.services)].sort(),
+      services: [],
       networkDestinations: [
         ...new Set([
           ...recipes.flatMap((recipe) => recipe.networkDestinations),
           ...deferred.flatMap((capability) => capability.networkDestinations),
-          ...item.executionIntent.additionalNetworkDestinations,
         ]),
       ].sort(),
       permittedSecretNames: [],
-      trust: item.executionIntent.trust,
+      trust: runPolicy.trust === "sandbox_untrusted" ? "isolated" : "trusted_local",
     },
     artifactContract: "clockgrove.factory/artifact-v1",
     exclusiveResources: [...item.exclusiveResources],
@@ -973,6 +1069,9 @@ export function validateLegacyProposal(
   if (!constraints) return emptyCompilerValidationReport();
   const violations: CompilerViolation[] = [];
   const expectedById = new Map(constraints.workItems.map((item) => [item.compilerId, item]));
+  const expectedIdByNumber = new Map(
+    constraints.workItems.map((item) => [item.issueNumber, item.compilerId]),
+  );
   if (proposal.workItems.length !== constraints.workItems.length)
     violations.push(
       violation(
@@ -982,10 +1081,14 @@ export function validateLegacyProposal(
         proposal.workItems.length,
       ),
     );
-  for (const item of proposal.workItems) {
+  for (const [index, item] of proposal.workItems.entries()) {
     const expected = expectedById.get(item.id);
+    const expectedAtIndex = constraints.workItems[index];
+    const expectedDependencies =
+      expected?.blockedByNumbers.map((number) => expectedIdByNumber.get(number)!) ?? [];
     if (
       !expected ||
+      expectedAtIndex?.compilerId !== item.id ||
       item.title !== expected.title ||
       item.goal !== expected.goal ||
       compilerEvalDigest(item.criteria.map((criterion) => criterion.text)) !==
@@ -993,7 +1096,8 @@ export function validateLegacyProposal(
       compilerEvalDigest(item.scope) !== compilerEvalDigest(expected.scope) ||
       compilerEvalDigest(item.preconditions) !== compilerEvalDigest(expected.preconditions) ||
       compilerEvalDigest(item.outOfScope) !== compilerEvalDigest(expected.outOfScope) ||
-      compilerEvalDigest(item.conventions) !== compilerEvalDigest(expected.conventions)
+      compilerEvalDigest(item.conventions) !== compilerEvalDigest(expected.conventions) ||
+      compilerEvalDigest(item.dependsOn) !== compilerEvalDigest(expectedDependencies)
     )
       violations.push(
         violation(

@@ -134,6 +134,51 @@ describe("generic repository command grounding", () => {
     });
   });
 
+  it("rejects reordered or dependency-mutated adopted Work Items before projection", () => {
+    const adopted = [
+      item("adopted-8", { title: "First adopted item" }),
+      item("adopted-9", { title: "Second adopted item", dependsOn: ["adopted-8"] }),
+    ];
+    const constraints = parseLegacyGraphConstraints({
+      objectiveTitle: "Generic",
+      workItems: adopted.map((entry, index) => ({
+        id: `I_${index + 8}`,
+        number: index + 8,
+        title: entry.title,
+        body: renderLegacyWorkItemCore(entry),
+        blockedByNumbers: index === 0 ? [] : [8],
+      })),
+    });
+    const request = semanticRequest();
+    const proposal = semanticProposal(request, 2);
+    proposal.workItems = proposal.workItems.map((entry, index) => ({
+      ...entry,
+      id: adopted[index]!.id,
+      title: adopted[index]!.title,
+      goal: adopted[index]!.goal,
+      criteria: entry.criteria.map((criterion) => ({
+        ...criterion,
+        text: adopted[index]!.acceptance[0]!,
+      })),
+      scope: adopted[index]!.scope,
+      preconditions: adopted[index]!.preconditions,
+      outOfScope: adopted[index]!.outOfScope,
+      conventions: adopted[index]!.conventions,
+      dependsOn: adopted[index]!.dependsOn,
+    }));
+    expect(validateLegacyProposal(proposal, constraints).status).toBe("valid");
+    const reordered = structuredClone(proposal);
+    reordered.workItems.reverse();
+    expect(validateLegacyProposal(reordered, constraints).violations).toContainEqual(
+      expect.objectContaining({ code: "legacy-constraint-mismatch" }),
+    );
+    const dependencyChanged = structuredClone(proposal);
+    dependencyChanged.workItems[1]!.dependsOn = [];
+    expect(validateLegacyProposal(dependencyChanged, constraints).violations).toContainEqual(
+      expect.objectContaining({ code: "legacy-constraint-mismatch", itemId: "adopted-9" }),
+    );
+  });
+
   it("preserves pinned LFS tooling and conservatively serializes asset scope", () => {
     const repositoryLfs = {
       baseSha: sha,

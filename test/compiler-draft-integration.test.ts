@@ -170,10 +170,6 @@ function proposal(request: CompilerRequest, repaired = false) {
         exclusiveResources: [],
         executionIntent: {
           estimatedDurationMinutes: 10,
-          additionalTools: [],
-          services: [],
-          additionalNetworkDestinations: [],
-          trust: "trusted_local",
         },
       },
     ],
@@ -189,6 +185,8 @@ async function setup(
     advisoryOnlyRepair?: boolean;
     invalidInventoryOnce?: boolean;
     unsafeInventory?: boolean;
+    mechanicallyInvalidFirst?: boolean;
+    schemaInvalidFirst?: boolean;
   } = {},
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-draft-integration-"));
@@ -343,7 +341,10 @@ async function setup(
     stages.push("compile");
     if (options.missingAccounting) throw new Error("transport outcome unknown");
     const request = JSON.parse(prompt.split("\n\n").at(-1)!) as CompilerRequest;
-    return { value: proposal(request), usage };
+    if (options.schemaInvalidFirst) return { value: { unexpected: true }, usage };
+    const initial = proposal(request);
+    if (options.mechanicallyInvalidFirst) initial.workItems[0]!.obligationIds = [];
+    return { value: initial, usage };
   });
   const backend = new CodexCliManagementBackend({ runStructured });
   const store = new MemoryGraphStore(baseSha);
@@ -382,6 +383,43 @@ async function setup(
   return { args, stages, prompts, runStructured, accounting, store, leases };
 }
 describe("production compiler draft adapter", () => {
+  it("repairs a known-accounted mechanically invalid initial production proposal", async () => {
+    const f = await setup({ mechanicallyInvalidFirst: true });
+    const result = await compileEvaluatedDraft(f.args);
+    expect(result.status).toBe("accepted");
+    expect(f.stages).toEqual(["inventory", "compile", "repair", "judge"]);
+    expect(f.accounting.size).toBe(4);
+    expect(
+      result.records.find(
+        (record) => record.kind === "result" && record.payload.stage === "compile",
+      ),
+    ).toMatchObject({
+      payload: {
+        validationReport: {
+          phase: "proposal",
+          status: "repairable",
+          violations: [expect.objectContaining({ code: "unmapped-obligation" })],
+        },
+      },
+    });
+  });
+
+  it("repairs known-accounted schema-invalid output with the same proposal schema", async () => {
+    const f = await setup({ schemaInvalidFirst: true });
+    const result = await compileEvaluatedDraft(f.args);
+    expect(result.status).toBe("accepted");
+    expect(f.stages).toEqual(["inventory", "compile", "repair", "judge"]);
+    const repairRequest = JSON.parse(f.prompts[2]!.split("\n\n").at(-1)!) as CompilerRequest;
+    expect(repairRequest).toMatchObject({
+      revision: 1,
+      previousProposal: null,
+      validationReport: {
+        status: "repairable",
+        violations: expect.arrayContaining([expect.objectContaining({ code: "schema-invalid" })]),
+      },
+    });
+  });
+
   it("extracts obligations first, grounds every revision, accounts phases and commits only accepted selection", async () => {
     const f = await setup();
     const graphs = new CompiledGraphManager(f.store, f.leases);
@@ -413,9 +451,32 @@ describe("production compiler draft adapter", () => {
       result.records.filter((r) => r.kind === "result" && r.payload.stage === "compile")[0]?.payload
         .value,
     ).toMatchObject({
+      request: { protocol: "clockgrove.factory/compiler-request", revision: 0 },
       proposal: { protocol: "clockgrove.factory/compiler-proposal" },
       provenance: { baseSha: f.args.context.baseSha },
     });
+    const firstJudgeSource = JSON.parse(
+      f.prompts
+        .find((prompt) => prompt.includes("independent compiler judge"))!
+        .split("\n\n")
+        .at(-1)!,
+    ) as { projectionTrace: { requestDigest: string; proposalDigest: string } };
+    expect(firstJudgeSource.projectionTrace.requestDigest).not.toBe("0".repeat(64));
+    expect(firstJudgeSource.projectionTrace.proposalDigest).toMatch(/^[a-f0-9]{64}$/);
+
+    const tampered = structuredClone(result.records);
+    const acceptedProposal = tampered.find(
+      (record) =>
+        record.kind === "result" &&
+        (record.payload.stage === "compile" || record.payload.stage === "repair") &&
+        record.payload.revision === result.revision &&
+        !record.payload.error,
+    )!;
+    const persisted = acceptedProposal.payload.value as { request: { revision: number } };
+    persisted.request.revision += 1;
+    expect(() => assertCompilerDraftSelection(tampered, result.graph)).toThrow(
+      "request digest differs",
+    );
   });
   it("never produces accepted projection authority for report-only rejected plans", async () => {
     const f = await setup({ reportOnly: true });
@@ -430,21 +491,28 @@ describe("production compiler draft adapter", () => {
   it("retains malformed repair proposal and observed usage through bounded retries", async () => {
     const f = await setup({ malformedRepair: true });
     const result = await compileEvaluatedDraft(f.args);
-    expect(result.status).toBe("stopped");
-    expect(f.stages.filter((stage) => stage === "repair")).toHaveLength(1);
-    expect(f.accounting.size).toBe(4);
+    expect(result).toMatchObject({
+      status: "stopped",
+      reason: "compiler repair repeated the unchanged invalid proposal",
+    });
+    expect(f.stages.filter((stage) => stage === "repair")).toHaveLength(2);
+    expect(f.accounting.size).toBe(5);
     expect(
       result.records.filter((r) => r.kind === "result" && r.payload.stage === "repair"),
-    ).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          payload: expect.objectContaining({
-            proposal: { malformed: "preserve this proposal" },
-            usage: { inputTokens: 11, outputTokens: 3, cachedInputTokens: 4 },
-          }),
+    ).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          proposal: { malformed: "preserve this proposal" },
+          usage: { inputTokens: 11, outputTokens: 3, cachedInputTokens: 4 },
         }),
-      ]),
-    );
+      }),
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          proposal: { malformed: "preserve this proposal" },
+          usage: { inputTokens: 11, outputTokens: 3, cachedInputTokens: 4 },
+        }),
+      }),
+    ]);
   });
   it("repairs an invalid canonical evidence ID before compiling and shares accounting", async () => {
     const f = await setup({ invalidInventoryOnce: true });

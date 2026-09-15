@@ -156,10 +156,6 @@ export function proposalFromCompiledFixture(
       ),
       executionIntent: {
         estimatedDurationMinutes: item.requirements?.estimatedDurationMinutes ?? 30,
-        additionalTools: item.requirements?.tools ?? [],
-        services: item.requirements?.services ?? [],
-        additionalNetworkDestinations: item.requirements?.networkDestinations ?? [],
-        trust: item.requirements?.trust ?? "trusted_local",
       },
     })),
   });
@@ -175,6 +171,7 @@ export function proposalResultFromCompiledFixture(
   if (report.status !== "valid")
     throw new Error(`fixture semantic proposal is invalid: ${JSON.stringify(report.violations)}`);
   return {
+    request,
     proposal,
     report,
     usage,

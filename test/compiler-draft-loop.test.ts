@@ -214,6 +214,7 @@ function validatedObjective(graph: CompiledObjective): ValidatedCompilerDraft {
           },
         ],
         toolchains: [],
+        validationSurfaces: { deterministicSimulation: [], visual: [] },
         pathCount: 1,
       },
       constraints: {

@@ -70,6 +70,11 @@ export async function compilePlan(
   const result = await backend.proposePlan(
     prepared.request,
     async (proposalResult) => {
+      if (
+        compilerEvalDigest(proposalResult.request) !== compilerEvalDigest(prepared.request) ||
+        proposalResult.provenance.requestDigest !== compilerEvalDigest(prepared.request)
+      )
+        throw new Error("management proposal differs from its exact compiler request");
       const economics = context.economicEvidence
         ? await context.economicEvidence(
             compilerWorkItemsForEconomics(

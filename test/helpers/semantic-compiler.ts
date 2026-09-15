@@ -72,6 +72,16 @@ export function semanticRequest(
       manifests: pinned.manifests,
       validationRecipes: capabilities.validationRecipes,
       toolchains: capabilities.toolchains,
+      validationSurfaces: {
+        deterministicSimulation: pinned.relevantPaths.filter((path) =>
+          /(?:simulation|simulator|replay|seed)/.test(path.toLowerCase()),
+        ),
+        visual: pinned.relevantPaths.filter(
+          (path) =>
+            /(?:screenshot|snapshot|visual|storybook)/.test(path.toLowerCase()) ||
+            /\.(?:png|jpe?g|webp)$/i.test(path),
+        ),
+      },
       pathCount: pinned.relevantPaths.length,
     },
     constraints: {
@@ -117,10 +127,6 @@ export function semanticProposal(request: CompilerRequest, count = 1): CompilerP
         exclusiveResources: [],
         executionIntent: {
           estimatedDurationMinutes: 15,
-          additionalTools: [],
-          services: [],
-          additionalNetworkDestinations: [],
-          trust: "trusted_local",
         },
       };
     }),

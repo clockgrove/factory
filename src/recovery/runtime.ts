@@ -37,7 +37,7 @@ import type { FactoryEvent } from "../protocol/events.js";
 import { compilerEvalDigest } from "../evaluation/compiler-eval.js";
 import { assertExistingGraphWorkItemsMatchCompiled } from "../graph.js";
 import { inspectObjectiveGraphInput } from "../control/objective-graph-input.js";
-import type { RecoveryAccountingAssessment } from "./accounting.js";
+import { hasExactDraftCompilationUsage, type RecoveryAccountingAssessment } from "./accounting.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { verifyRecoveryChain } from "./chain.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
@@ -374,17 +374,7 @@ export async function loadRecoveryRuntime(input: {
       ? observation.findByDigest(plan.predecessor.terminalDigest)
       : undefined;
     if (isRecoveryCompileObjectiveGraph(plan.graph)) {
-      const invocationId = `compile-${predecessor!.baseSha}`;
-      const failureReceipts = events.filter(
-        (event) =>
-          event.runId === predecessor!.runId &&
-          event.kind === "budget" &&
-          event.phase === "management" &&
-          event.unit === "model_tokens" &&
-          event.modelInvocationId === invocationId &&
-          event.sequence > predecessor!.sequence &&
-          event.sequence < (predecessorTerminal?.sequence ?? -1),
-      );
+      const predecessorEvents = events.filter((event) => event.runId === predecessor!.runId);
       requireRuntime(
         predecessorTerminal?.runId === plan.predecessor.runId &&
           predecessorTerminal.event === "FactoryRunEscalated" &&
@@ -394,10 +384,7 @@ export async function loadRecoveryRuntime(input: {
           predecessor.baseSha === plan.graph.sourceBaseSha &&
           plan.expectedBaseSha === plan.graph.sourceBaseSha &&
           controllingRun.baseSha === plan.graph.sourceBaseSha &&
-          failureReceipts.length === 2 &&
-          failureReceipts.filter((event) => event.event === "BudgetReserved").length === 1 &&
-          failureReceipts.filter((event) => event.event === "BudgetReconciled").length === 1 &&
-          failureReceipts.every((event) => event.policyDigest === predecessor.policyDigest) &&
+          hasExactDraftCompilationUsage(predecessorEvents, predecessor, predecessorTerminal) &&
           compilerEvalDigest({
             number: snapshot.number,
             title: snapshot.title,

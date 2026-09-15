@@ -7,7 +7,11 @@ import { draftDigest, loadCompilerDrafts } from "../control/compiler-drafts.js";
 import { loadCompiledGraph, type CompiledGraphReadStore } from "../control/graphs.js";
 import { latestRunReceipts } from "../control/receipts.js";
 import { summarizeRun } from "../economics/index.js";
-import { CompilerProposalSchema } from "../compiler/contracts.js";
+import {
+  CompilerProposalSchema,
+  CompilerRequestSchema,
+  CompilerValidationReportSchema,
+} from "../compiler/contracts.js";
 import {
   ObligationInventorySchema,
   createCompilerEvalReport,
@@ -21,6 +25,17 @@ import type { ApplicationSnapshot } from "./services.js";
 export const MAX_COMPILER_ANNOTATION_BYTES = 256 * 1024;
 const AnnotationId = z.string().min(1).max(160);
 const AnnotationText = z.string().min(1).max(4000);
+const ProjectionTrace = z
+  .object({
+    protocol: z.literal("clockgrove.factory/compiler-projection"),
+    requestDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    proposalDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    graphDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    addedEdges: z.array(z.object({ itemId: z.string(), dependsOn: z.string() }).passthrough()),
+    adapterBindings: z.array(z.record(z.unknown())),
+    riskElevations: z.array(z.record(z.unknown())),
+  })
+  .strict();
 /** These are caller assertions with mechanically checked citations, never authenticated causal authority. */
 export const CompilerCausalAnnotationsSchema = z
   .object({
@@ -230,7 +245,11 @@ export async function inspectCompilerEvaluation(args: {
   const inventory = inventoryResults[0]
     ? ObligationInventorySchema.parse(inventoryResults[0].payload.value)
     : null;
-  if (inventory && binding && inventory.baseSha !== binding.baseSha)
+  if (
+    inventory &&
+    binding &&
+    (inventory.baseSha !== binding.baseSha || inventory.objectiveDigest !== binding.inputDigest)
+  )
     throw new Error("inventory repository identity mismatch");
   const invocations = records
     .filter((record) => record.kind === "invocation")
@@ -330,6 +349,10 @@ export async function inspectCompilerEvaluation(args: {
       "Compiler usage checkpoint exists but accounting reconciliation failed; ledger completeness is unavailable",
     );
   const invalidReviews: Array<{ sequence: number; evidenceDigest: string }> = [];
+  const reportBindings = new Map<
+    number,
+    { proposalDigest: string; traceDigest: string; requestDigest: string }
+  >();
   const reports = inventory
     ? results
         .filter((record) => record.payload.stage === "judge" && !record.payload.error)
@@ -354,13 +377,29 @@ export async function inspectCompilerEvaluation(args: {
             typeof proposalResult.payload.value !== "object"
           )
             throw new Error("judge result has no semantic proposal");
-          const proposal = CompilerProposalSchema.parse(
-            (proposalResult.payload.value as Record<string, unknown>).proposal,
-          );
-          const trace = validated.payload.projectionTrace as {
-            addedEdges: Array<{ itemId: string; dependsOn: string }>;
-          };
+          const persisted = proposalResult.payload.value as Record<string, unknown>;
+          const request = CompilerRequestSchema.parse(persisted.request);
+          const proposal = CompilerProposalSchema.parse(persisted.proposal);
+          const proposalReport = CompilerValidationReportSchema.parse(persisted.report);
+          const provenance = persisted.provenance as Record<string, unknown> | undefined;
+          if (
+            proposalReport.status !== "valid" ||
+            request.revision !== record.payload.revision ||
+            draftDigest(request.inventory) !== draftDigest(inventory) ||
+            provenance?.requestDigest !== draftDigest(request)
+          )
+            throw new Error("proposal result is not bound to its exact compiler request");
+          const trace = ProjectionTrace.parse(validated.payload.projectionTrace);
           const digest = String(validated.payload.graphDigest);
+          if (
+            validated.payload.proposalDigest !== draftDigest(proposal) ||
+            validated.payload.traceDigest !== draftDigest(trace) ||
+            validated.payload.requestDigest !== draftDigest(request) ||
+            trace.proposalDigest !== draftDigest(proposal) ||
+            trace.requestDigest !== draftDigest(request) ||
+            trace.graphDigest !== digest
+          )
+            throw new Error("projection trace is not bound to its exact proposal and request");
           try {
             const judgeInvocation = invocations.find(
               (entry) => entry.invocation.invocationId === record.payload.invocationId,
@@ -386,6 +425,11 @@ export async function inspectCompilerEvaluation(args: {
                 ? []
                 : ["repair"],
             });
+            reportBindings.set(request.revision, {
+              proposalDigest: draftDigest(proposal),
+              traceDigest: draftDigest(trace),
+              requestDigest: draftDigest(request),
+            });
             return [
               { ...report, revision: record.payload.revision, resultSequence: record.sequence },
             ];
@@ -400,14 +444,20 @@ export async function inspectCompilerEvaluation(args: {
       `Invalid historical judge results retained: ${invalidReviews.map((item) => item.sequence).join(", ")}`,
     );
   if (selection) {
-    const accepted = reports.find((report) => report.revision === selection.payload.revision);
+    const selectedRevision = Number(selection.payload.revision);
+    const accepted = reports.find((report) => report.revision === selectedRevision);
+    const acceptedBinding = reportBindings.get(selectedRevision);
     if (
       !accepted ||
+      !acceptedBinding ||
       accepted.verdict.decision !== "accept" ||
       accepted.draftDigest !== selection.payload.graphDigest ||
       draftDigest(accepted.inventory) !== selection.payload.inventoryDigest ||
       draftDigest(accepted.verdict) !== selection.payload.verdictDigest ||
-      draftDigest(accepted.challenges) !== draftDigest(selection.payload.reviewEvidence ?? [])
+      draftDigest(accepted.challenges) !== draftDigest(selection.payload.reviewEvidence ?? []) ||
+      acceptedBinding.proposalDigest !== selection.payload.proposalDigest ||
+      acceptedBinding.traceDigest !== selection.payload.traceDigest ||
+      acceptedBinding.requestDigest !== selection.payload.requestDigest
     )
       throw new Error("selection has no exact accepted judgment");
   }

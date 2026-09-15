@@ -1366,7 +1366,8 @@ fail closed. Malformed repair output consumes its attempt. Revisions never emit 
 only an accepted exact selection reaches the existing graph commitment/projection transaction.
 Changing an Objective before that commitment invalidates its assessment, including on restart.
 The model emits only semantic Work Item intent: obligation mappings, acceptance criteria, validation
-intent references, scopes, dependency intent, risk classifications, resources, and execution intent.
+intent references, scopes, dependency intent, risk classifications, exclusive resources, and
+estimated duration. Trust, tools, services, and network destinations are policy/adapter-owned.
 It cannot emit shell commands, adapter internals, runtime pins, provider provisioning plans, compiled
 graph envelopes, or durability state. Factory attaches the frozen Objective digest, base SHA, and
 exact evidence records before strict validation, so model formatting cannot rewrite trusted evidence.

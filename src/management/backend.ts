@@ -78,6 +78,7 @@ export interface CompilerProposalProvenance {
 }
 
 export interface CompilerProposalResult {
+  request: CompilerRequest;
   proposal: CompilerProposal;
   report: CompilerValidationReport;
   provenance: CompilerProposalProvenance;

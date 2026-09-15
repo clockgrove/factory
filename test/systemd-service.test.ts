@@ -6,6 +6,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SystemdUserService } from "../src/service/systemd-user-service.js";
 
 const commandFixtures: string[] = [];
+const testUid = process.getuid?.() ?? 1000;
+const currentUserManager = async () => ({
+  uid: testUid,
+  runtimeDirectory: `/run/user/${testUid}`,
+  environment: {
+    LANG: "C",
+    LC_ALL: "C",
+    PATH: "/usr/bin:/bin",
+    XDG_RUNTIME_DIR: `/run/user/${testUid}`,
+    DBUS_SESSION_BUS_ADDRESS: `unix:path=/run/user/${testUid}/bus`,
+  },
+});
 afterEach(async () => {
   await Promise.all(
     commandFixtures.splice(0).map((path) => rm(path, { recursive: true, force: true })),
@@ -25,8 +37,25 @@ async function commandFixture() {
     return path;
   };
   const input = { repository: "Owner/Repo", checkout: root };
-  const run = vi.fn(async () => {});
   const factoryBundle = await executable("factory", "factory.js");
+  const unitDirectory = join(root, "units");
+  let enabled = false;
+  let active = false;
+  const run = vi.fn(async (args: readonly string[]) => {
+    if (isVersionProbe(args)) return { stdout: "259\n" };
+    if (args[0] === "enable") enabled = true;
+    if (args[0] === "disable") enabled = false;
+    if (["start", "restart"].includes(args[0]!)) active = true;
+    if (args[0] === "stop") active = false;
+    if (isUnitProbe(args)) {
+      const installed = await fileExists(join(unitDirectory, args[1]!));
+      return systemdState(args[1]!, {
+        loadState: installed ? "loaded" : "not-found",
+        enabled,
+        active,
+      });
+    }
+  });
   const create = (
     commandEnvironment: NonNullable<
       ConstructorParameters<typeof SystemdUserService>[0]["commandEnvironment"]
@@ -34,12 +63,54 @@ async function commandFixture() {
   ) =>
     new SystemdUserService({
       factoryCommand: [process.execPath, factoryBundle],
-      unitDirectory: join(root, "units"),
+      unitDirectory,
       run,
+      currentUserManager,
       commandEnvironment,
       startupHealthDelayMs: 0,
     });
   return { root, input, executable, factoryBundle, run, create };
+}
+function isVersionProbe(args: readonly string[]): boolean {
+  return args[0] === "show" && args[1] === "--property=Version";
+}
+function isUnitProbe(args: readonly string[]): boolean {
+  return args[0] === "show" && !args[1]?.startsWith("--");
+}
+function systemdState(
+  unit: string,
+  options: {
+    loadState?: string;
+    enabled?: boolean;
+    unitFileState?: string;
+    active?: boolean;
+    activeState?: string;
+    result?: string;
+    exitStatus?: number;
+    restarts?: number;
+  } = {},
+): { stdout: string } {
+  return {
+    stdout: [
+      `Id=${unit}`,
+      `LoadState=${options.loadState ?? "loaded"}`,
+      `UnitFileState=${options.unitFileState ?? (options.enabled ? "enabled" : "disabled")}`,
+      `ActiveState=${options.activeState ?? (options.active ? "active" : "inactive")}`,
+      `Result=${options.result ?? "success"}`,
+      `ExecMainStatus=${options.exitStatus ?? 0}`,
+      `NRestarts=${options.restarts ?? 0}`,
+      "",
+    ].join("\n"),
+  };
+}
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await readFile(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 function unitEnvironment(unit: string): Record<string, string> {
   return Object.fromEntries(
@@ -247,13 +318,21 @@ describe("systemd installed command discovery", () => {
       unitDirectory: join(f.root, "units"),
       commandEnvironment: environment,
       startupHealthDelayMs: 0,
+      currentUserManager,
       run: async (args) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
         if (args[0] === "enable") enabled = true;
         if (args[0] === "disable") enabled = false;
         if (["start", "restart"].includes(args[0]!)) active = true;
         if (args[0] === "stop") active = false;
-        if (args[0] === "is-enabled" && !enabled) throw new Error("disabled");
-        if (args[0] === "is-active" && !active) throw new Error("inactive");
+        if (isUnitProbe(args)) {
+          const installed = await fileExists(join(f.root, "units", args[1]!));
+          return systemdState(args[1]!, {
+            loadState: installed ? "loaded" : "not-found",
+            enabled,
+            active,
+          });
+        }
       },
     });
     expect(environment).not.toHaveBeenCalled();
@@ -272,27 +351,1047 @@ describe("systemd installed command discovery", () => {
 });
 
 describe("systemd user service lifecycle", () => {
+  it("fails before unit mutation when the current Linux user manager is unavailable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-no-user-bus-"));
+    const bundle = join(directory, "desktop-cache", "factory.js");
+    await mkdir(dirname(bundle), { recursive: true });
+    await writeFile(bundle, "// desktop controller fixture\n");
+    const run = vi.fn(async () => {});
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: join(directory, "units"),
+      commandEnvironment: () => ({ PATH: "" }),
+      currentUserManager: async () => {
+        throw new Error("XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS are unset");
+      },
+      run,
+    });
+    const input = {
+      repository: "Owner/Repo",
+      checkout: "/work/repo",
+      requestId: "desktop-mcp-install-1",
+    };
+
+    await expect(service.install(input)).rejects.toThrow(
+      /controller-user-manager-unavailable:.*same user.*controller.*install.*desktop-mcp-install-1/,
+    );
+    await expect(readFile(service.unitPath(input))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(run).not.toHaveBeenCalled();
+    await expect(service.status({ ...input, requestId: "desktop-mcp-status-1" })).rejects.toThrow(
+      /controller-user-manager-unavailable:.*controller.*status.*desktop-mcp-status-1/,
+    );
+  });
+
+  it.each(["activating", "deactivating", "reloading", "maintenance", "unknown"])(
+    "issues a real stop and verifies settlement from the %s state",
+    async (transitionalState) => {
+      const directory = await mkdtemp(join(tmpdir(), "factory-systemd-transitional-stop-"));
+      commandFixtures.push(directory);
+      const bundle = join(directory, "factory.js");
+      await writeFile(bundle, "// controller fixture\n");
+      let enabled = false;
+      let activeState = "inactive";
+      let stopCalls = 0;
+      const run = async (args: readonly string[]) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
+        if (args[0] === "enable") enabled = true;
+        if (args[0] === "disable") enabled = false;
+        if (args[0] === "stop") {
+          stopCalls += 1;
+          activeState = "inactive";
+        }
+        if (isUnitProbe(args)) {
+          const installed = await fileExists(join(directory, args[1]!));
+          return systemdState(args[1]!, {
+            loadState: installed ? "loaded" : "not-found",
+            enabled: installed && enabled,
+            activeState: installed ? activeState : "inactive",
+          });
+        }
+      };
+      const service = new SystemdUserService({
+        factoryCommand: [process.execPath, bundle],
+        unitDirectory: directory,
+        currentUserManager,
+        run,
+      });
+      const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+      await service.install(input);
+      activeState = transitionalState;
+
+      expect(await service.stop(input)).toMatchObject({ active: false });
+      expect(stopCalls).toBe(1);
+    },
+  );
+
+  it("reports an unknown stop outcome when activation does not settle", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-unsettled-stop-"));
+    commandFixtures.push(directory);
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let enabled = false;
+    let activeState = "inactive";
+    let stopCalls = 0;
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "enable") enabled = true;
+      if (args[0] === "stop") stopCalls += 1;
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled: installed && enabled,
+          activeState: installed ? activeState : "inactive",
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+    activeState = "activating";
+
+    await expect(service.stop(input)).rejects.toThrow(
+      /controller-lifecycle-outcome-unknown: stop did not settle.*activating/,
+    );
+    expect(stopCalls).toBe(1);
+  });
+
+  it.each([
+    { activeState: "activating", unitFileState: "enabled" },
+    { activeState: "deactivating", unitFileState: "enabled" },
+    { activeState: "reloading", unitFileState: "enabled" },
+    { activeState: "maintenance", unitFileState: "enabled" },
+    { activeState: "unknown", unitFileState: "enabled" },
+    { activeState: "inactive", unitFileState: "unexpected-state" },
+  ])(
+    "fails status closed for ActiveState=$activeState UnitFileState=$unitFileState",
+    async (observation) => {
+      const directory = await mkdtemp(join(tmpdir(), "factory-systemd-unknown-status-"));
+      commandFixtures.push(directory);
+      const bundle = join(directory, "factory.js");
+      await writeFile(bundle, "// controller fixture\n");
+      let activeState = "inactive";
+      let unitFileState = "disabled";
+      const run = async (args: readonly string[]) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
+        if (args[0] === "enable") unitFileState = "enabled";
+        if (isUnitProbe(args)) {
+          const installed = await fileExists(join(directory, args[1]!));
+          return systemdState(args[1]!, {
+            loadState: installed ? "loaded" : "not-found",
+            activeState: installed ? activeState : "inactive",
+            unitFileState: installed ? unitFileState : "disabled",
+          });
+        }
+      };
+      const service = new SystemdUserService({
+        factoryCommand: [process.execPath, bundle],
+        unitDirectory: directory,
+        currentUserManager,
+        run,
+      });
+      const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+      await service.install(input);
+      activeState = observation.activeState;
+      unitFileState = observation.unitFileState;
+
+      await expect(service.status(input)).rejects.toThrow(
+        new RegExp(
+          `controller-lifecycle-outcome-unknown:.*ActiveState=${observation.activeState}.*UnitFileState=${observation.unitFileState}`,
+        ),
+      );
+    },
+  );
+
+  it("refuses to uninstall an unsettled unit before any mutation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-unsettled-uninstall-"));
+    commandFixtures.push(directory);
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let activeState = "inactive";
+    let enabled = false;
+    const mutations: string[] = [];
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (["daemon-reload", "enable", "disable", "stop"].includes(args[0]!)) {
+        mutations.push(args[0]!);
+      }
+      if (args[0] === "enable") enabled = true;
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled: installed && enabled,
+          activeState: installed ? activeState : "inactive",
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+    activeState = "deactivating";
+    mutations.length = 0;
+
+    await expect(service.uninstall(input)).rejects.toThrow(
+      /controller-lifecycle-busy:.*ActiveState=deactivating/,
+    );
+    expect(mutations).toEqual([]);
+  });
+
+  it("refuses to stop a transitional unit with unknown unit-file state before mutation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-unknown-transitional-stop-"));
+    commandFixtures.push(directory);
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let activeState = "inactive";
+    let unitFileState = "disabled";
+    let stopCalls = 0;
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "enable") unitFileState = "enabled";
+      if (args[0] === "stop") stopCalls += 1;
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          activeState: installed ? activeState : "inactive",
+          unitFileState: installed ? unitFileState : "disabled",
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+    activeState = "activating";
+    unitFileState = "unexpected-state";
+
+    await expect(service.stop(input)).rejects.toThrow(
+      /controller-lifecycle-outcome-unknown: stop cannot safely mutate.*UnitFileState=unexpected-state/,
+    );
+    expect(stopCalls).toBe(0);
+  });
+
+  it.each(["unmarked-file", "no-file-manager-state"])(
+    "refuses to stop active unmanaged %s before mutation",
+    async (conflict) => {
+      const directory = await mkdtemp(join(tmpdir(), "factory-systemd-unmanaged-stop-"));
+      commandFixtures.push(directory);
+      const bundle = join(directory, "factory.js");
+      await writeFile(bundle, "// controller fixture\n");
+      let stopCalls = 0;
+      const run = async (args: readonly string[]) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
+        if (args[0] === "stop") stopCalls += 1;
+        if (isUnitProbe(args)) {
+          return systemdState(args[1]!, {
+            loadState: "loaded",
+            unitFileState: "enabled",
+            activeState: "active",
+          });
+        }
+      };
+      const service = new SystemdUserService({
+        factoryCommand: [process.execPath, bundle],
+        unitDirectory: directory,
+        currentUserManager,
+        run,
+      });
+      const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+      if (conflict === "unmarked-file") {
+        await writeFile(service.unitPath(input), "[Service]\nExecStart=/bin/false\n");
+      }
+
+      await expect(service.stop(input)).rejects.toThrow(/controller-unit-unmanaged/);
+      expect(stopCalls).toBe(0);
+    },
+  );
+
+  it.each(["disabled", "stale-launcher"])(
+    "stops an active owned unit even when its status is %s",
+    async (condition) => {
+      const directory = await mkdtemp(join(tmpdir(), "factory-systemd-owned-stop-"));
+      commandFixtures.push(directory);
+      const bundle = join(directory, "factory.js");
+      await writeFile(bundle, "// controller fixture\n");
+      let activeState = "inactive";
+      let unitFileState = "disabled";
+      let stopCalls = 0;
+      const run = async (args: readonly string[]) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
+        if (args[0] === "enable") unitFileState = "enabled";
+        if (args[0] === "stop") {
+          stopCalls += 1;
+          activeState = "inactive";
+        }
+        if (isUnitProbe(args)) {
+          const installed = await fileExists(join(directory, args[1]!));
+          return systemdState(args[1]!, {
+            loadState: installed ? "loaded" : "not-found",
+            unitFileState: installed ? unitFileState : "disabled",
+            activeState: installed ? activeState : "inactive",
+          });
+        }
+      };
+      const service = new SystemdUserService({
+        factoryCommand: [process.execPath, bundle],
+        unitDirectory: directory,
+        currentUserManager,
+        run,
+      });
+      const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+      await service.install(input);
+      activeState = "active";
+      if (condition === "disabled") unitFileState = "disabled";
+      else await writeFile(bundle, "// changed controller fixture\n");
+
+      expect(await service.stop(input)).toMatchObject({
+        active: false,
+        reasonCode: condition === "disabled" ? "controller-disabled" : "controller-launcher-stale",
+      });
+      expect(stopCalls).toBe(1);
+    },
+  );
+
+  it("converts runtime-only enablement into verified persistent enablement", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-runtime-enable-"));
+    commandFixtures.push(directory);
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let unitFileState = "disabled";
+    const calls: string[][] = [];
+    const run = async (args: readonly string[]) => {
+      calls.push([...args]);
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "enable") {
+        unitFileState = args.includes("--runtime") ? "enabled-runtime" : "enabled";
+      }
+      if (args[0] === "disable") unitFileState = "disabled";
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          unitFileState: installed ? unitFileState : "disabled",
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+    unitFileState = "enabled-runtime";
+    calls.length = 0;
+
+    expect(await service.install(input)).toMatchObject({ installed: true, enabled: true });
+    expect(unitFileState).toBe("enabled");
+    expect(calls.map((args) => args.slice(0, 2))).toContainEqual([
+      "enable",
+      service.unitName(input),
+    ]);
+  });
+
+  it("restores runtime-only enablement when persistent conversion fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-runtime-enable-rollback-"));
+    commandFixtures.push(directory);
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let unitFileState = "disabled";
+    let failPersistentEnable = false;
+    const calls: string[][] = [];
+    const run = async (args: readonly string[]) => {
+      calls.push([...args]);
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "enable") {
+        unitFileState = args.includes("--runtime") ? "enabled-runtime" : "enabled";
+        if (failPersistentEnable && !args.includes("--runtime")) {
+          throw new Error("fixture persistent enable failure");
+        }
+      }
+      if (args[0] === "disable") unitFileState = "disabled";
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          unitFileState: installed ? unitFileState : "disabled",
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+    unitFileState = "enabled-runtime";
+    failPersistentEnable = true;
+    calls.length = 0;
+
+    await expect(service.install(input)).rejects.toThrow(
+      /controller-install-failed: fixture persistent enable failure.*restored and verified/,
+    );
+    expect(unitFileState).toBe("enabled-runtime");
+    expect(calls.map((args) => args.slice(0, 3))).toContainEqual([
+      "enable",
+      "--runtime",
+      service.unitName(input),
+    ]);
+  });
+
+  it.each(["linked", "linked-runtime", "alias"])(
+    "treats the %s unit-file state as unmanaged rather than boot enablement",
+    async (unitFileState) => {
+      const directory = await mkdtemp(join(tmpdir(), "factory-systemd-non-enable-state-"));
+      commandFixtures.push(directory);
+      const bundle = join(directory, "factory.js");
+      await writeFile(bundle, "// controller fixture\n");
+      let state = "disabled";
+      const mutations: string[] = [];
+      const run = async (args: readonly string[]) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
+        if (["daemon-reload", "enable", "disable", "start", "restart", "stop"].includes(args[0]!)) {
+          mutations.push(args[0]!);
+        }
+        if (args[0] === "enable") state = "enabled";
+        if (isUnitProbe(args)) {
+          const installed = await fileExists(join(directory, args[1]!));
+          return systemdState(args[1]!, {
+            loadState: installed ? "loaded" : "not-found",
+            unitFileState: installed ? state : "disabled",
+          });
+        }
+      };
+      const service = new SystemdUserService({
+        factoryCommand: [process.execPath, bundle],
+        unitDirectory: directory,
+        currentUserManager,
+        run,
+      });
+      const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+      await service.install(input);
+      state = unitFileState;
+      mutations.length = 0;
+
+      expect(await service.status(input)).toMatchObject({
+        installed: true,
+        enabled: false,
+        reasonCode: "controller-unit-unmanaged",
+      });
+      for (const operation of ["install", "start", "restart", "stop", "uninstall"] as const) {
+        await expect(service[operation](input)).rejects.toThrow(/controller-unit-unmanaged/);
+      }
+      expect(mutations).toEqual([]);
+    },
+  );
+
+  it("never follows a marker-bearing symbolic unit path across lifecycle entrypoints", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-symbolic-unit-"));
+    commandFixtures.push(directory);
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let enabled = false;
+    let unitFileState = "disabled";
+    const mutations: string[] = [];
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (["daemon-reload", "enable", "disable", "start", "restart", "stop"].includes(args[0]!)) {
+        mutations.push(args[0]!);
+      }
+      if (args[0] === "enable") {
+        enabled = true;
+        unitFileState = "enabled";
+      }
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          unitFileState: installed ? unitFileState : "disabled",
+          enabled: installed && enabled,
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+    const path = service.unitPath(input);
+    const target = join(directory, "marker-bearing-alias-target.service");
+    const body = await readFile(path, "utf8");
+    await rm(path);
+    await writeFile(target, body);
+    await symlink(target, path);
+    unitFileState = "alias";
+    mutations.length = 0;
+
+    for (const operation of [
+      "status",
+      "install",
+      "start",
+      "restart",
+      "stop",
+      "uninstall",
+    ] as const) {
+      await expect(service[operation](input)).rejects.toThrow(
+        /controller-unit-unmanaged: refusing to follow or replace non-regular unit path/,
+      );
+    }
+    expect(mutations).toEqual([]);
+    expect(await readFile(target, "utf8")).toBe(body);
+  });
+
+  it.each(["disabled", "linked", "alias", "unexpected-state"])(
+    "refuses start and restart from the %s unit-file state before mutation",
+    async (unitFileState) => {
+      const directory = await mkdtemp(join(tmpdir(), "factory-systemd-disabled-start-"));
+      commandFixtures.push(directory);
+      const bundle = join(directory, "factory.js");
+      await writeFile(bundle, "// controller fixture\n");
+      let state = "disabled";
+      const startCalls: string[] = [];
+      const run = async (args: readonly string[]) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
+        if (args[0] === "enable") state = "enabled";
+        if (args[0] === "start" || args[0] === "restart") startCalls.push(args[0]);
+        if (isUnitProbe(args)) {
+          const installed = await fileExists(join(directory, args[1]!));
+          return systemdState(args[1]!, {
+            loadState: installed ? "loaded" : "not-found",
+            unitFileState: installed ? state : "disabled",
+            activeState: "inactive",
+          });
+        }
+      };
+      const service = new SystemdUserService({
+        factoryCommand: [process.execPath, bundle],
+        unitDirectory: directory,
+        currentUserManager,
+        run,
+      });
+      const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+      await service.install(input);
+      state = unitFileState;
+
+      for (const operation of ["start", "restart"] as const) {
+        await expect(service[operation](input)).rejects.toThrow(
+          unitFileState === "unexpected-state"
+            ? /controller-lifecycle-outcome-unknown/
+            : unitFileState === "disabled"
+              ? /controller-disabled/
+              : /controller-unit-unmanaged/,
+        );
+      }
+      expect(startCalls).toEqual([]);
+    },
+  );
+
+  it.each(["linked", "linked-runtime", "alias"])(
+    "rejects dangling %s manager state before install or uninstall mutation",
+    async (unitFileState) => {
+      const directory = await mkdtemp(join(tmpdir(), "factory-systemd-dangling-link-state-"));
+      commandFixtures.push(directory);
+      const bundle = join(directory, "factory.js");
+      await writeFile(bundle, "// controller fixture\n");
+      const mutations: string[] = [];
+      const run = async (args: readonly string[]) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
+        if (["daemon-reload", "enable", "disable", "stop"].includes(args[0]!)) {
+          mutations.push(args[0]!);
+        }
+        if (isUnitProbe(args)) {
+          return systemdState(args[1]!, {
+            loadState: "not-found",
+            unitFileState,
+            activeState: "inactive",
+          });
+        }
+      };
+      const service = new SystemdUserService({
+        factoryCommand: [process.execPath, bundle],
+        unitDirectory: directory,
+        currentUserManager,
+        run,
+      });
+      const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+
+      await expect(service.install(input)).rejects.toThrow(/controller-unit-unmanaged/);
+      await expect(service.uninstall(input)).rejects.toThrow(/controller-unit-unmanaged/);
+      expect(mutations).toEqual([]);
+    },
+  );
+
+  it("removes runtime-only enablement with a matching runtime disable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-runtime-disable-"));
+    commandFixtures.push(directory);
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let unitFileState = "disabled";
+    const calls: string[][] = [];
+    const run = async (args: readonly string[]) => {
+      calls.push([...args]);
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "enable") {
+        unitFileState = args.includes("--runtime") ? "enabled-runtime" : "enabled";
+      }
+      if (args[0] === "disable") unitFileState = "disabled";
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          unitFileState: installed ? unitFileState : "disabled",
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+    unitFileState = "enabled-runtime";
+    calls.length = 0;
+
+    expect(await service.uninstall(input)).toMatchObject({
+      installed: false,
+      enabled: false,
+      active: false,
+    });
+    expect(calls.map((args) => args.slice(0, 3))).toContainEqual([
+      "disable",
+      "--runtime",
+      service.unitName(input),
+    ]);
+  });
+
+  it("restores runtime-only enablement when uninstall reload fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-runtime-uninstall-rollback-"));
+    commandFixtures.push(directory);
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let unitFileState = "disabled";
+    let failNextReload = false;
+    const calls: string[][] = [];
+    const run = async (args: readonly string[]) => {
+      calls.push([...args]);
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "enable") {
+        unitFileState = args.includes("--runtime") ? "enabled-runtime" : "enabled";
+      }
+      if (args[0] === "disable") unitFileState = "disabled";
+      if (args[0] === "daemon-reload" && failNextReload) {
+        failNextReload = false;
+        throw new Error("fixture uninstall reload failure");
+      }
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          unitFileState: installed ? unitFileState : "disabled",
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+    unitFileState = "enabled-runtime";
+    failNextReload = true;
+    calls.length = 0;
+
+    await expect(service.uninstall(input)).rejects.toThrow(
+      /controller-uninstall-failed: fixture uninstall reload failure.*restored and verified/,
+    );
+    expect(unitFileState).toBe("enabled-runtime");
+    expect(calls.map((args) => args.slice(0, 3))).toEqual(
+      expect.arrayContaining([
+        ["disable", "--runtime", service.unitName(input)],
+        ["enable", "--runtime", service.unitName(input)],
+      ]),
+    );
+  });
+
+  it("rolls back a new unit when daemon reload fails after the atomic write", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-install-rollback-"));
+    const bundle = join(directory, "factory.js");
+    const units = join(directory, "units");
+    await writeFile(bundle, "// controller fixture\n");
+    let reloads = 0;
+    let enabled = false;
+    const run = vi.fn(async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "daemon-reload" && reloads++ === 0) {
+        throw new Error("fixture reload failure");
+      }
+      if (args[0] === "enable") enabled = true;
+      if (args[0] === "disable") enabled = false;
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(units, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled,
+        });
+      }
+    });
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: units,
+      commandEnvironment: () => ({ PATH: "" }),
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+
+    await expect(service.install(input)).rejects.toThrow(
+      /controller-install-failed:.*prior unit state was restored and verified/,
+    );
+    await expect(readFile(service.unitPath(input))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(enabled).toBe(false);
+    expect(reloads).toBe(2);
+  });
+
+  it("reports an unknown install outcome when rollback cannot reload the restored definition", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-install-reload-unknown-"));
+    commandFixtures.push(directory);
+    const bundle = join(directory, "factory.js");
+    const units = join(directory, "units");
+    await writeFile(bundle, "// controller fixture\n");
+    let reloads = 0;
+    let enabled = false;
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "daemon-reload") {
+        reloads += 1;
+        throw new Error("fixture reload failure");
+      }
+      if (args[0] === "enable") enabled = true;
+      if (args[0] === "disable") enabled = false;
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(units, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled,
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: units,
+      commandEnvironment: () => ({ PATH: "" }),
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+
+    await expect(service.install(input)).rejects.toThrow(
+      /controller-lifecycle-outcome-unknown: install failed.*rollback could not be verified.*fixture reload failure/,
+    );
+    await expect(readFile(service.unitPath(input))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(enabled).toBe(false);
+    expect(reloads).toBe(2);
+  });
+
+  it("reports an unknown uninstall outcome when rollback cannot reload the restored definition", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-uninstall-reload-unknown-"));
+    commandFixtures.push(directory);
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let enabled = false;
+    let failReload = false;
+    let failedReloads = 0;
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "daemon-reload" && failReload) {
+        failedReloads += 1;
+        throw new Error("fixture rollback reload failure");
+      }
+      if (args[0] === "enable") enabled = true;
+      if (args[0] === "disable") enabled = false;
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled: installed && enabled,
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+    failReload = true;
+
+    await expect(service.uninstall(input)).rejects.toThrow(
+      /controller-lifecycle-outcome-unknown: uninstall failed.*rollback could not be verified.*fixture rollback reload failure/,
+    );
+    expect(await readFile(service.unitPath(input), "utf8")).toContain(
+      "# Managed by Clockgrove Factory v2",
+    );
+    expect(enabled).toBe(true);
+    expect(failedReloads).toBe(2);
+  });
+
+  it("accepts an already-unloaded failed unit as a complete uninstall", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-unloaded-failure-"));
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let enabled = false;
+    let resetFailedCalls = 0;
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "enable") enabled = true;
+      if (args[0] === "disable") enabled = false;
+      if (args[0] === "reset-failed") {
+        resetFailedCalls += 1;
+        throw new Error(`Unit ${args[1]} not loaded`);
+      }
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled: installed && enabled,
+          result: installed ? "exec-condition" : "success",
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      currentUserManager,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+
+    expect(await service.uninstall(input)).toMatchObject({
+      installed: false,
+      enabled: false,
+      active: false,
+      reasonCode: "controller-not-installed",
+    });
+    expect(resetFailedCalls).toBe(0);
+  });
+
+  it("reports unknown outcome when rollback starts a replacement after stopping the original", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-post-stop-failure-"));
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let enabled = false;
+    let active = false;
+    let failDisable = false;
+    let startCalls = 0;
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "enable") enabled = true;
+      if (args[0] === "disable") {
+        if (failDisable) throw new Error("fixture failure after original stop");
+        enabled = false;
+      }
+      if (args[0] === "start") {
+        startCalls += 1;
+        active = true;
+      }
+      if (args[0] === "stop") active = false;
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled: installed && enabled,
+          active: installed && active,
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      currentUserManager,
+      startupHealthDelayMs: 0,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+    await service.start(input);
+    failDisable = true;
+
+    await expect(service.uninstall(input)).rejects.toThrow(
+      /controller-lifecycle-outcome-unknown:.*original controller process.*repair was verified/,
+    );
+    expect(await readFile(service.unitPath(input), "utf8")).toContain(
+      "# Managed by Clockgrove Factory v2",
+    );
+    expect(enabled).toBe(true);
+    expect(active).toBe(true);
+    expect(startCalls).toBe(2);
+  });
+
+  it("does not translate a user-manager transport failure into disabled and inactive", async () => {
+    const f = await commandFixture();
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, f.factoryBundle],
+      unitDirectory: join(f.root, "units"),
+      commandEnvironment: () => ({ PATH: "" }),
+      currentUserManager,
+      run: async (args) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
+        if (isUnitProbe(args)) throw new Error("Failed to connect to bus: Operation not permitted");
+      },
+    });
+
+    await expect(service.status(f.input)).rejects.toThrow(
+      /controller-user-manager-unavailable: status could not inspect.*Operation not permitted/,
+    );
+  });
+
+  it("discards arbitrary inherited bus and cross-user manager variables", async () => {
+    const f = await commandFixture();
+    const environments: NodeJS.ProcessEnv[] = [];
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, f.factoryBundle],
+      unitDirectory: join(f.root, "units"),
+      currentUserManager: async () => ({
+        uid: process.getuid!(),
+        runtimeDirectory: `/run/user/${process.getuid!()}`,
+        environment: {
+          XDG_RUNTIME_DIR: "/run/user/9999",
+          DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/arbitrary-bus",
+          SYSTEMD_BUS_ADDRESS: "unix:path=/tmp/cross-user-bus",
+        },
+      }),
+      run: async (args, environment) => {
+        environments.push(environment);
+        if (isVersionProbe(args)) return { stdout: "259\n" };
+        if (isUnitProbe(args)) return systemdState(args[1]!, { loadState: "not-found" });
+      },
+    });
+
+    expect(await service.status(f.input)).toMatchObject({
+      installed: false,
+      reasonCode: "controller-not-installed",
+    });
+    expect(environments).toHaveLength(2);
+    for (const environment of environments) {
+      expect(environment.XDG_RUNTIME_DIR).toBe(`/run/user/${process.getuid!()}`);
+      expect(environment.DBUS_SESSION_BUS_ADDRESS).toBe(
+        `unix:path=/run/user/${process.getuid!()}/bus`,
+      );
+      expect(environment.SYSTEMD_BUS_ADDRESS).toBeUndefined();
+    }
+  });
+
+  it("accepts and preserves a byte-identical retained Linux launcher", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-retained-launcher-"));
+    const retained = join(directory, "linux-cache", "factory.js");
+    const desktop = join(directory, "windows-cache", "factory.js");
+    const units = join(directory, "units");
+    await mkdir(dirname(retained), { recursive: true });
+    await mkdir(dirname(desktop), { recursive: true });
+    await writeFile(retained, "// byte-identical controller generation\n");
+    await writeFile(desktop, "// byte-identical controller generation\n");
+    let enabled = false;
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "enable") enabled = true;
+      if (args[0] === "disable") enabled = false;
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(units, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled,
+        });
+      }
+    };
+    const options = {
+      unitDirectory: units,
+      commandEnvironment: () => ({ PATH: "" }),
+      currentUserManager,
+      run,
+      startupHealthDelayMs: 0,
+    };
+    const retainedService = new SystemdUserService({
+      ...options,
+      factoryCommand: [process.execPath, retained],
+    });
+    const desktopService = new SystemdUserService({
+      ...options,
+      factoryCommand: [process.execPath, desktop],
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await retainedService.install(input);
+    const retainedUnit = await readFile(retainedService.unitPath(input), "utf8");
+
+    expect(await desktopService.status(input)).toMatchObject({
+      installed: true,
+      enabled: true,
+      launcherCurrent: true,
+      reasonCode: "controller-inactive",
+    });
+    await desktopService.install(input);
+    const afterDesktopInstall = await readFile(desktopService.unitPath(input), "utf8");
+    expect(afterDesktopInstall).toBe(retainedUnit);
+    expect(afterDesktopInstall).toContain(`"${retained}"`);
+    expect(afterDesktopInstall).not.toContain(`"${desktop}"`);
+  });
+
   it("is idempotent through install, start, stop, restart, status, and uninstall", async () => {
     const directory = await mkdtemp(join(tmpdir(), "factory-systemd-test-"));
     const bundle = join(directory, "factory.js");
     await writeFile(bundle, "// controller fixture\n");
     let enabled = false;
-    let active = true;
+    let active = false;
     const calls: string[][] = [];
     const run = async (args: readonly string[]) => {
       calls.push([...args]);
+      if (isVersionProbe(args)) return { stdout: "259\n" };
       const action = args[0];
       if (action === "enable") enabled = true;
       if (action === "disable") enabled = false;
       if (action === "start" || action === "restart") active = true;
       if (action === "stop") active = false;
-      if (action === "is-enabled" && !enabled) throw new Error("disabled");
-      if (action === "is-active" && !active) throw new Error("inactive");
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled,
+          active,
+        });
+      }
     };
     const service = new SystemdUserService({
       factoryCommand: [process.execPath, bundle],
       unitDirectory: directory,
       run,
+      currentUserManager,
       startupHealthDelayMs: 0,
     });
     const input = { repository: "Owner/Repo", checkout: "/work/repo" };
@@ -300,7 +1399,7 @@ describe("systemd user service lifecycle", () => {
     expect(await service.install(input)).toMatchObject({
       installed: true,
       enabled: true,
-      active: true,
+      active: false,
     });
     expect(await service.install(input)).toMatchObject({
       installed: true,
@@ -348,14 +1447,20 @@ describe("systemd user service lifecycle", () => {
       factoryCommand: [process.execPath, bundle],
       unitDirectory: directory,
       startupHealthDelayMs: 0,
+      currentUserManager,
       run: async (args) => {
         calls.push([...args]);
+        if (isVersionProbe(args)) return { stdout: "259\n" };
         if (args[0] === "enable") enabled = true;
         if (args[0] === "start") active = true;
-        if (args[0] === "is-enabled" && !enabled) throw new Error("disabled");
-        if (args[0] === "is-active" && !active) throw new Error("inactive");
-        if (args[0] === "show")
-          return { stdout: `ActiveState=${active ? "active" : "inactive"}\n` };
+        if (isUnitProbe(args)) {
+          const installed = await fileExists(join(directory, args[1]!));
+          return systemdState(args[1]!, {
+            loadState: installed ? "loaded" : "not-found",
+            enabled: installed && enabled,
+            active: installed && active,
+          });
+        }
       },
     });
     const input = { repository: "Owner/Repo", checkout: "/work/repo" };
@@ -395,7 +1500,9 @@ describe("systemd user service lifecycle", () => {
       factoryCommand: [process.execPath, bundle],
       unitDirectory: directory,
       startupHealthDelayMs: 10,
+      currentUserManager,
       run: async (args) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
         if (args[0] === "enable") enabled = true;
         if (args[0] === "start") {
           active = true;
@@ -403,8 +1510,14 @@ describe("systemd user service lifecycle", () => {
             active = false;
           }, 0);
         }
-        if (args[0] === "is-enabled" && !enabled) throw new Error("disabled");
-        if (args[0] === "is-active" && !active) throw new Error("inactive");
+        if (isUnitProbe(args)) {
+          const installed = await fileExists(join(directory, args[1]!));
+          return systemdState(args[1]!, {
+            loadState: installed ? "loaded" : "not-found",
+            enabled: installed && enabled,
+            active: installed && active,
+          });
+        }
       },
     });
     const input = { repository: "Owner/Repo", checkout: "/work/repo" };
@@ -436,14 +1549,19 @@ describe("systemd user service lifecycle", () => {
         unitDirectory: join(f.root, "units"),
         commandEnvironment: () => ({ PATH: "" }),
         startupHealthDelayMs: 0,
+        currentUserManager,
         run: async (args) => {
+          if (isVersionProbe(args)) return { stdout: "259\n" };
           if (args[0] === "enable") enabled = true;
-          if (args[0] === "is-enabled" && !enabled) throw new Error("disabled");
-          if (args[0] === "is-active") throw new Error("inactive");
-          if (args[0] === "show") {
-            return {
-              stdout: `Result=exit-code\nExecMainStatus=${exitStatus}\nNRestarts=3\n`,
-            };
+          if (isUnitProbe(args)) {
+            const installed = await fileExists(join(f.root, "units", args[1]!));
+            return systemdState(args[1]!, {
+              loadState: installed ? "loaded" : "not-found",
+              enabled: installed && enabled,
+              result: "exit-code",
+              exitStatus,
+              restarts: 3,
+            });
           }
         },
       });
@@ -470,10 +1588,18 @@ describe("systemd user service lifecycle", () => {
       unitDirectory: join(f.root, "units"),
       commandEnvironment: () => ({ PATH: "" }),
       startupHealthDelayMs: 0,
+      currentUserManager,
       run: async (args) => {
-        if (args[0] === "is-active") throw new Error("inactive");
-        if (args[0] === "show") {
-          return { stdout: "Result=signal\nExecMainStatus=9\nNRestarts=1\n" };
+        if (isVersionProbe(args)) return { stdout: "259\n" };
+        if (isUnitProbe(args)) {
+          const installed = await fileExists(join(f.root, "units", args[1]!));
+          return systemdState(args[1]!, {
+            loadState: installed ? "loaded" : "not-found",
+            enabled: installed,
+            result: "signal",
+            exitStatus: 9,
+            restarts: 1,
+          });
         }
       },
     });
@@ -495,16 +1621,22 @@ describe("systemd user service lifecycle", () => {
       unitDirectory: join(f.root, "units"),
       commandEnvironment: () => ({ PATH: "" }),
       startupHealthDelayMs: 0,
+      currentUserManager,
       run: async (args) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
         if (args[0] === "restart") {
           fatal = false;
           active = true;
         }
-        if (args[0] === "is-active" && !active) throw new Error("inactive");
-        if (args[0] === "show") {
-          return fatal
-            ? { stdout: "Result=exit-code\nExecMainStatus=72\nNRestarts=0\n" }
-            : { stdout: "Result=success\nExecMainStatus=0\nNRestarts=0\n" };
+        if (isUnitProbe(args)) {
+          const installed = await fileExists(join(f.root, "units", args[1]!));
+          return systemdState(args[1]!, {
+            loadState: installed ? "loaded" : "not-found",
+            enabled: installed,
+            active: installed && active,
+            result: fatal ? "exit-code" : "success",
+            exitStatus: fatal ? 72 : 0,
+          });
         }
       },
     });
@@ -528,11 +1660,18 @@ describe("systemd user service lifecycle", () => {
       unitDirectory: join(f.root, "units"),
       commandEnvironment: () => ({ PATH: "" }),
       startupHealthDelayMs: 0,
+      currentUserManager,
       run: async (args) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
         if (args[0] === "restart") active = true;
-        if (args[0] === "is-active" && !active) throw new Error("inactive");
-        if (args[0] === "show")
-          return { stdout: `ActiveState=${active ? "active" : "inactive"}\n` };
+        if (isUnitProbe(args)) {
+          const installed = await fileExists(join(f.root, "units", args[1]!));
+          return systemdState(args[1]!, {
+            loadState: installed ? "loaded" : "not-found",
+            enabled: installed,
+            active: installed && active,
+          });
+        }
       },
     });
     const installed = await service.install(f.input);
@@ -556,6 +1695,7 @@ describe("systemd user service lifecycle", () => {
       factoryExecutable: join(directory, "missing-factory"),
       unitDirectory: directory,
       commandEnvironment: () => ({ PATH: "" }),
+      currentUserManager,
       run,
     });
     const input = { repository: "Owner/Repo", checkout: "/work/repo" };
@@ -570,6 +1710,7 @@ describe("systemd user service lifecycle", () => {
     const service = new SystemdUserService({
       factoryExecutable: "/opt/factory/bin/factory",
       unitDirectory: directory,
+      currentUserManager,
       run: async () => {},
     });
     const input = { repository: "Owner/Repo", checkout: "/work/repo" };

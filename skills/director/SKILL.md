@@ -175,6 +175,9 @@ An owned Linux service may retire its current launcher generation before adoptin
 using its existing restart policy. This does not prove resource cleanup: the next generation must
 independently establish absence. Legacy unbound resources or missing evidence can still block
 adoption; report the gate instead of killing unrelated processes or inventing cleanup receipts.
+If lifecycle inspection returns `controller-user-manager-unavailable`, report and preserve its exact
+same-user Linux/WSL command. Do not interpret the failed observation as stopped, disabled, stale, or
+permission to install; do not redirect it to another bus or service manager.
 
 Preserve existing issues, PRs, and budget history. Do not use `factory_activate` or low-level
 dispatch to bypass recovery gates. Resume/retry applies to non-terminal runs, not terminal revival.

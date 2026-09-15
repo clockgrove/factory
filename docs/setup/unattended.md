@@ -44,6 +44,11 @@ the service separately even if a foreground plugin probe already works.
    Obtain the real installed path from the client; do not guess a cache version. Use the returned
    `unit` value, not a made-up service name. If no controller is installed, explicitly authorize
    its installation first; plugin installation alone does not create it.
+   Lifecycle calls do not trust a Desktop process's inherited user-bus variables. They verify the
+   effective Linux user's `/run/user/UID/bus` and systemd version before observing or changing the
+   unit. `controller-user-manager-unavailable` is not evidence that the service is disabled or
+   inactive: run the exact returned CLI command from a Linux/WSL terminal as the same user after the
+   included systemd probe succeeds. A failed preflight leaves the unit untouched.
    Treat `healthy: false` as an execution gate even when systemd transiently reports `active: true`.
    `controller-launcher-stale` means the managed unit no longer names an available exact Factory
    launcher or lacks the cache-eviction guard; follow the upgrade sequence below before refreshing it.
@@ -121,6 +126,10 @@ failure, but the next attempt checks the missing file again. Ordinary process cr
 retryable. A running process is not killed or redirected when its cache generation disappears;
 its normal lifecycle and ownership fences still apply. Status names the exact unit and reports
 `controller-launcher-stale`; no path search or automatic adoption of another generation occurs.
+When a Desktop-installed bundle and the retained Linux bundle live at different paths but have
+byte-identical SHA-256 identities, the retained unit remains current and its Linux path is
+preserved. Path spelling alone is not staleness, and matching a marker without matching the bytes
+at the retained path is not freshness.
 
 Previously installed units do **not** acquire the guard from a plugin update alone. Reinstall them
 explicitly before evicting their referenced generation. If eviction already happened, preserve the

@@ -128,6 +128,14 @@ Codex login, and the `gh` login. Do not put tokens in the unit. On WSL, systemd 
 for the distribution, and Windows must start that distribution before its user services can run.
 For a Linux guest on macOS, the guest must likewise be running before its user service can start.
 
+Every controller lifecycle operation first derives `/run/user/UID` from the process's effective
+Linux uid, verifies that the private runtime directory and its `bus` socket belong to that uid, and
+probes systemd 254 or newer through that exact bus. Inherited `XDG_RUNTIME_DIR` and
+`DBUS_SESSION_BUS_ADDRESS` values are not trusted. If a Desktop MCP process cannot reach the current
+Linux user's manager, Factory returns `controller-user-manager-unavailable` with the exact Linux CLI
+command to run as that same user. No unit file, enablement, or running state is changed. Status and
+doctor report this as an unavailable manager, never as a disabled or inactive controller.
+
 `Restart=on-failure` restarts unexpected process crashes and signals. Fatal controller exits are a
 different contract: durable-state incompatibility (65), internal invariant (70), discovery failure
 (72), local configuration (78), and launcher execution failure (203) trip the service fuse and do
@@ -141,6 +149,12 @@ or restart the unit. That operator action re-evaluates a tripped controller. Nev
 restart merely to pick up an upgrade while active work or resource cleanup is unresolved; drain and
 confirm the owned generation first. Factory reconstructs active state from GitHub after a restart;
 the unit does not carry orchestration authority.
+
+The installed unit is the source of truth for its retained launch path. A Desktop plugin path and a
+Linux CLI/cache path are equivalent only when the installed unit's recorded SHA-256 identity, the
+bytes at its retained path, and the caller's current bundle bytes all match. Status then reports the
+launcher current, and install preserves the retained Linux path instead of rewriting it. A missing,
+changed, unguarded, or differently identified retained artifact remains stale.
 
 An Objective snapshot can temporarily lag the repository shared-capacity journal after cleanup.
 If it reconstructs an exactly matching released claim, Factory normally checks at most three complete

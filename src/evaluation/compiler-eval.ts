@@ -67,6 +67,11 @@ export const ObligationInventorySchema = z
   })
   .strict();
 export type ObligationInventory = z.infer<typeof ObligationInventorySchema>;
+export const MAX_COMPILER_OBLIGATION_CHALLENGES = 128;
+export const MAX_COMPILER_ITEM_CHALLENGES = 64;
+export const MAX_COMPILER_INFERENCE_CHALLENGES =
+  MAX_COMPILER_OBLIGATION_CHALLENGES + MAX_COMPILER_ITEM_CHALLENGES;
+
 export const CompilerJudgeVerdictSchema = z
   .object({
     version: z.literal(1),
@@ -101,7 +106,7 @@ export const CompilerJudgeVerdictSchema = z
           })
           .strict(),
       )
-      .max(128),
+      .max(100),
     dimensions: z
       .array(
         z
@@ -119,13 +124,13 @@ export const CompilerJudgeVerdictSchema = z
         z
           .object({
             itemId: Id,
-            dependsOn: Id,
+            dependsOn: z.array(Id).max(50),
             reason: Text,
             evidenceIds: Refs.min(1),
           })
           .strict(),
       )
-      .max(1024),
+      .max(100),
     findings: z
       .array(
         z
@@ -156,7 +161,7 @@ export const CompilerJudgeVerdictSchema = z
           })
           .strict(),
       )
-      .max(64)
+      .max(MAX_COMPILER_OBLIGATION_CHALLENGES)
       .optional(),
     uncertainty: z.array(Text).max(64),
     decision: z.enum(["accept", "repair", "abstain"]),
@@ -315,15 +320,33 @@ export function validateCompilerJudgeVerdict(
     if (entry.status === "covered" && entry.itemIds.length === 0)
       throw new Error("covered obligation requires item mapping");
   }
-  const edges = new Set([
-    ...expected.graph.workItems.flatMap((entry) =>
-      entry.dependsOn.map((dependency) => `${entry.id}\0${dependency}`),
-    ),
-    ...(expected.addedEdges ?? []).map((entry) => `${entry.itemId}\0${entry.dependsOn}`),
-  ]);
-  const reviewedEdges = verdict.dependencies.map((entry) => `${entry.itemId}\0${entry.dependsOn}`);
-  references(reviewedEdges, edges, "dependency edge");
-  if (reviewedEdges.length !== edges.size) throw new Error("incomplete dependency rationale");
+  const expectedDependencies = new Map(
+    expected.graph.workItems.map((entry) => [entry.id, new Set(entry.dependsOn)] as const),
+  );
+  for (const edge of expected.addedEdges ?? []) {
+    const dependencies = expectedDependencies.get(edge.itemId);
+    if (!dependencies || !items.has(edge.dependsOn))
+      throw new Error("invalid Factory-added dependency edge");
+    dependencies.add(edge.dependsOn);
+  }
+  unique(
+    verdict.dependencies.map((entry) => entry.itemId),
+    "dependency item",
+  );
+  references(
+    verdict.dependencies.map((entry) => entry.itemId),
+    items,
+    "dependency item",
+  );
+  if (verdict.dependencies.length !== items.size)
+    throw new Error("incomplete dependency rationale");
+  for (const entry of verdict.dependencies) {
+    references(entry.dependsOn, items, "dependency edge");
+    const wanted = [...expectedDependencies.get(entry.itemId)!].sort();
+    const reviewed = [...entry.dependsOn].sort();
+    if (compilerEvalDigest(reviewed) !== compilerEvalDigest(wanted))
+      throw new Error("dependency rationale differs from exact dependency set");
+  }
   unique(
     verdict.findings.map((entry) => entry.id),
     "finding identity",
@@ -568,7 +591,7 @@ export function renderCompilerEvalMarkdown(report: CompilerEvalReport): string {
     ),
     ...report.verdict.dependencies.map(
       (entry) =>
-        `- ${clean(entry.itemId)} depends on ${clean(entry.dependsOn)}: ${clean(entry.reason)}; evidence: ${entry.evidenceIds.map(clean).join(", ")}`,
+        `- ${clean(entry.itemId)} depends on ${entry.dependsOn.map(clean).join(", ") || "nothing"}: ${clean(entry.reason)}; evidence: ${entry.evidenceIds.map(clean).join(", ")}`,
     ),
     "",
     "## Quality dimensions",
@@ -959,14 +982,69 @@ export const CompilerInferenceChallengeSchema = z
     "challenge requires an original obligation or item finding",
   );
 export type CompilerInferenceChallenge = z.infer<typeof CompilerInferenceChallengeSchema>;
+export const CompilerInferenceChallengesSchema = z
+  .array(CompilerInferenceChallengeSchema)
+  .max(MAX_COMPILER_INFERENCE_CHALLENGES)
+  .superRefine((challenges, context) => {
+    const obligationCount = challenges.filter(
+      (challenge) => challenge.obligationId !== undefined,
+    ).length;
+    const itemCount = challenges.length - obligationCount;
+    if (obligationCount > MAX_COMPILER_OBLIGATION_CHALLENGES)
+      context.addIssue({
+        code: z.ZodIssueCode.too_big,
+        type: "array",
+        maximum: MAX_COMPILER_OBLIGATION_CHALLENGES,
+        inclusive: true,
+        exact: false,
+        message: "too many obligation inference challenges",
+      });
+    if (itemCount > MAX_COMPILER_ITEM_CHALLENGES)
+      context.addIssue({
+        code: z.ZodIssueCode.too_big,
+        type: "array",
+        maximum: MAX_COMPILER_ITEM_CHALLENGES,
+        inclusive: true,
+        exact: false,
+        message: "too many item-only inference challenges",
+      });
+  });
+
+export class CompilerInferenceChallengeLimitError extends CompilerDraftStopError {
+  constructor(kind: "obligation" | "item-only", observed: number, maximum: number) {
+    super(`compiler-inference-challenge-limit: ${kind} challenges ${observed} exceed ${maximum}`);
+    this.name = "CompilerInferenceChallengeLimitError";
+  }
+}
+
 export function validateCompilerInferenceChallenges(
   value: unknown,
   inventory: ObligationInventory,
 ): CompilerInferenceChallenge[] {
-  const challenges = z.array(CompilerInferenceChallengeSchema).max(64).parse(value);
+  const challenges = z.array(CompilerInferenceChallengeSchema).parse(value);
+  const obligationChallenges = challenges.filter(
+    (challenge) => challenge.obligationId !== undefined,
+  );
+  const itemChallenges = challenges.filter((challenge) => challenge.obligationId === undefined);
+  if (obligationChallenges.length > MAX_COMPILER_OBLIGATION_CHALLENGES)
+    throw new CompilerInferenceChallengeLimitError(
+      "obligation",
+      obligationChallenges.length,
+      MAX_COMPILER_OBLIGATION_CHALLENGES,
+    );
+  if (itemChallenges.length > MAX_COMPILER_ITEM_CHALLENGES)
+    throw new CompilerInferenceChallengeLimitError(
+      "item-only",
+      itemChallenges.length,
+      MAX_COMPILER_ITEM_CHALLENGES,
+    );
   unique(
     challenges.map((entry) => `${entry.findingId}\0${entry.obligationId ?? ""}`),
     "inference challenge",
+  );
+  unique(
+    obligationChallenges.map((entry) => entry.obligationId!),
+    "challenged obligation",
   );
   const evidence = new Set(inventory.evidence.map((entry) => entry.id));
   const obligations = new Set(inventory.obligations.map((entry) => entry.id));
@@ -977,6 +1055,79 @@ export function validateCompilerInferenceChallenges(
     references(challenge.evidenceIds, evidence, "challenge citation");
   }
   return challenges;
+}
+
+function canonicalInferenceChallenges(
+  challenges: readonly CompilerInferenceChallenge[],
+): CompilerInferenceChallenge[] {
+  const obligationChallenges = new Map<string, CompilerInferenceChallenge>();
+  const itemChallenges = new Map<string, CompilerInferenceChallenge>();
+  for (const challenge of challenges) {
+    if (challenge.obligationId === undefined) {
+      const existing = itemChallenges.get(challenge.findingId);
+      if (!existing || compilerEvalDigest(challenge) < compilerEvalDigest(existing))
+        itemChallenges.set(challenge.findingId, challenge);
+      continue;
+    }
+    const existing = obligationChallenges.get(challenge.obligationId);
+    if (
+      !existing ||
+      challenge.findingId < existing.findingId ||
+      (challenge.findingId === existing.findingId &&
+        compilerEvalDigest(challenge) < compilerEvalDigest(existing))
+    )
+      obligationChallenges.set(challenge.obligationId, challenge);
+  }
+  return [
+    ...[...obligationChallenges.values()].sort((left, right) =>
+      left.obligationId!.localeCompare(right.obligationId!),
+    ),
+    ...[...itemChallenges.values()].sort((left, right) =>
+      left.findingId.localeCompare(right.findingId),
+    ),
+  ];
+}
+
+/** Derive the exact post-repair judge challenges from durable request evidence.
+ * Explicit obligations and obligations mapped by the repaired proposal are never challenged. */
+export function deriveCompilerInferenceChallenges(input: {
+  inventory: ObligationInventory;
+  findings: CompilerJudgeVerdict["findings"];
+  proposal: { workItems: Array<{ obligationIds: string[] }> };
+  carried?: unknown;
+}): CompilerInferenceChallenge[] {
+  const carried = validateCompilerInferenceChallenges(input.carried ?? [], input.inventory);
+  const carriedObligations = new Set(
+    carried.flatMap((challenge) =>
+      challenge.obligationId === undefined ? [] : [challenge.obligationId],
+    ),
+  );
+  const mapped = new Set(input.proposal.workItems.flatMap((item) => item.obligationIds));
+  const challengeable = new Set(
+    input.inventory.obligations
+      .filter((obligation) => obligation.kind !== "explicit" && !mapped.has(obligation.id))
+      .map((obligation) => obligation.id),
+  );
+  const generated = canonicalInferenceChallenges(
+    [...input.findings]
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .flatMap((finding) =>
+        [...finding.obligationIds]
+          .sort()
+          .filter(
+            (obligationId) =>
+              challengeable.has(obligationId) && !carriedObligations.has(obligationId),
+          )
+          .map((obligationId) => ({
+            findingId: finding.id,
+            obligationId,
+            reason:
+              "The semantic repair deliberately leaves the cited non-explicit obligation unmapped for independent adjudication.",
+            evidenceIds: [...new Set(finding.evidenceIds)].sort(),
+          })),
+      ),
+  );
+  return validateCompilerInferenceChallenges([...carried, ...generated], input.inventory);
 }
 /** Only structured, cited dispositions enter the isolated judge; never compiler private reasoning. */
 export function buildCompilerInferenceChallenges(
@@ -1019,5 +1170,5 @@ export function buildCompilerInferenceChallenges(
         evidenceIds: disposition.evidenceIds,
       });
   }
-  return validateCompilerInferenceChallenges(challenges, inventory);
+  return validateCompilerInferenceChallenges(canonicalInferenceChallenges(challenges), inventory);
 }

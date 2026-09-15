@@ -23,6 +23,7 @@ import {
   type ObligationInventory,
 } from "../src/evaluation/compiler-eval.js";
 import type { CompilerRequest } from "../src/compiler/contracts.js";
+import { CompilerInvariantError } from "../src/compiler/invariant-error.js";
 import { pinFixtureRepository } from "./helpers/compiler-proposal.js";
 const BASE_SHA = "a".repeat(40);
 const BASE_TREE = "b".repeat(40);
@@ -214,6 +215,7 @@ async function setup(
     allowedNetworkDestinations: [],
     runPolicy: {
       ...DEFAULT_RUN_POLICY,
+      allowedNetworkDestinations: [],
       compilerEvaluation: { mode: options.reportOnly ? "report-only" : "auto-repair" },
     },
   };
@@ -307,7 +309,14 @@ async function setup(
           reason: "Reviewed pinned evidence",
           evidenceIds: ["objective"],
         })),
-        dependencies: [],
+        dependencies: [
+          {
+            itemId: "feature",
+            dependsOn: [],
+            reason: "No prerequisite items",
+            evidenceIds: ["objective"],
+          },
+        ],
         findings: accept
           ? []
           : [
@@ -388,6 +397,26 @@ async function setup(
   return { args, stages, prompts, runStructured, accounting, store, leases };
 }
 describe("production compiler draft adapter", () => {
+  it("terminates a schema-valid proposal on a Factory economics invariant without repair spend", async () => {
+    const f = await setup({ acceptFirst: true });
+    f.args.context.economicEvidence = vi.fn(async () => ({
+      objective: 42,
+      policy: null,
+    })) as never;
+
+    const first = await compileEvaluatedDraft(f.args).catch((error) => error);
+    expect(first).toBeInstanceOf(CompilerInvariantError);
+    expect(first.message).toContain("compiler projection invariant failed");
+    expect(f.stages).toEqual(["inventory", "compile"]);
+    expect(f.accounting.size).toBe(2);
+    expect(f.args.admit).toHaveBeenCalledTimes(2);
+
+    await expect(compileEvaluatedDraft(f.args)).rejects.toBeInstanceOf(CompilerInvariantError);
+    expect(f.stages).toEqual(["inventory", "compile"]);
+    expect(f.accounting.size).toBe(2);
+    expect(f.args.admit).toHaveBeenCalledTimes(2);
+  });
+
   it("repairs a known-accounted mechanically invalid initial production proposal", async () => {
     const f = await setup({ mechanicallyInvalidFirst: true });
     const result = await compileEvaluatedDraft(f.args);

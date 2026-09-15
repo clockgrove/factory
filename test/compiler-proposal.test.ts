@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import type { CompilerProposal, CompilerRequest } from "../src/compiler/contracts.js";
+import {
+  compilerEvalDigest,
+  deriveCompilerInferenceChallenges,
+} from "../src/evaluation/compiler-eval.js";
+import {
+  compilerJudgeSourceBytes,
+  MAX_COMPILER_JUDGE_SOURCE_BYTES,
+} from "../src/compiler/judge-context.js";
+import { workerPacketFromCompiled } from "../src/graph.js";
 import type { PinnedRepositoryFacts } from "../src/repository-profiles/read.js";
 import {
   parseAndValidateCompilerProposal,
@@ -23,7 +32,7 @@ function codes(request: CompilerRequest, proposal: unknown, pinned?: PinnedRepos
   return parseAndValidateCompilerProposal(
     request,
     proposal,
-    pinned ? { pinnedFacts: pinned, runPolicy: DEFAULT_RUN_POLICY } : undefined,
+    pinned ? { pinnedFacts: pinned, runPolicy: projectionPolicy(request) } : undefined,
   ).report.violations.map((entry) => ({
     code: entry.code,
     itemId: entry.itemId,
@@ -31,6 +40,36 @@ function codes(request: CompilerRequest, proposal: unknown, pinned?: PinnedRepos
     expected: entry.expected,
     observed: entry.observed,
   }));
+}
+
+function projectionPolicy(request: CompilerRequest) {
+  return {
+    ...DEFAULT_RUN_POLICY,
+    workItemTimeoutMinutes: request.constraints.workItemTimeoutMinutes,
+    allowedNetworkDestinations: [...request.constraints.allowedNetworkDestinations],
+  };
+}
+
+function judgeSourceBytes(
+  request: CompilerRequest,
+  proposal: CompilerProposal,
+  trace: ReturnType<typeof projectCompilerProposal>["trace"],
+) {
+  return compilerJudgeSourceBytes({
+    originalObjective: {
+      number: request.objective.number,
+      title: request.objective.title,
+      body: request.objective.body,
+    },
+    baseSha: request.baseSha,
+    priorCompilationFailure: { reason: "x".repeat(8_000), rawProposalAvailable: false },
+    inventory: request.inventory,
+    challenges: request.challenges,
+    proposal,
+    projectionTrace: trace,
+    draftDigest: trace.graphDigest,
+    inventoryDigest: compilerEvalDigest(request.inventory),
+  });
 }
 
 describe("semantic proposal validation", () => {
@@ -307,7 +346,7 @@ describe("semantic proposal validation", () => {
         request,
         proposal: boundary,
         pinnedFacts: pinned,
-        runPolicy: DEFAULT_RUN_POLICY,
+        runPolicy: projectionPolicy(request),
       }).objective.workItems[0]!.requirements!.tools,
     ).toHaveLength(64);
 
@@ -346,7 +385,7 @@ describe("semantic proposal validation", () => {
     expect(
       parseAndValidateCompilerProposal(boundary.request, boundary.proposal, {
         pinnedFacts: boundary.pinned,
-        runPolicy: DEFAULT_RUN_POLICY,
+        runPolicy: projectionPolicy(boundary.request),
       }).report.status,
     ).toBe("valid");
     expect(
@@ -354,7 +393,7 @@ describe("semantic proposal validation", () => {
         request: boundary.request,
         proposal: boundary.proposal,
         pinnedFacts: boundary.pinned,
-        runPolicy: DEFAULT_RUN_POLICY,
+        runPolicy: projectionPolicy(boundary.request),
       }).objective.workItems[0]!.changeSurface?.exclusiveResources,
     ).toHaveLength(64);
 
@@ -411,7 +450,7 @@ describe("semantic proposal validation", () => {
     expect(
       parseAndValidateCompilerProposal(boundary.request, boundary.proposal, {
         pinnedFacts: boundary.pinned,
-        runPolicy: DEFAULT_RUN_POLICY,
+        runPolicy: projectionPolicy(boundary.request),
       }).report.status,
     ).toBe("valid");
     expect(
@@ -419,7 +458,7 @@ describe("semantic proposal validation", () => {
         request: boundary.request,
         proposal: boundary.proposal,
         pinnedFacts: boundary.pinned,
-        runPolicy: DEFAULT_RUN_POLICY,
+        runPolicy: projectionPolicy(boundary.request),
       }).objective.workItems.at(-1)!.dependsOn,
     ).toHaveLength(50);
 
@@ -433,6 +472,46 @@ describe("semantic proposal validation", () => {
         observed: 51,
       }),
     );
+
+    overflow.proposal.workItems[0]!.obligationIds = [];
+    const combined = codes(overflow.request, overflow.proposal, overflow.pinned);
+    expect(combined.map((entry) => entry.code)).toEqual(
+      expect.arrayContaining(["unmapped-obligation", "dependency-limit"]),
+    );
+  });
+
+  it("supports the graph's per-item dependency capacity without a smaller judge-wide cap", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const fixture = (finalJoinWidth: number) => {
+      const proposal = semanticProposal(request, 100);
+      for (const [index, item] of proposal.workItems.entries()) {
+        item.scope = [`src/disjoint-${index + 1}.ts`];
+        item.dependsOn =
+          index < 51
+            ? []
+            : Array.from(
+                { length: index === 99 ? finalJoinWidth : 21 },
+                (_, dependency) => `item-${dependency + 1}`,
+              );
+      }
+      return proposal;
+    };
+    const boundary = fixture(21);
+    expect(
+      parseAndValidateCompilerProposal(request, boundary, {
+        pinnedFacts: pinned,
+        runPolicy: projectionPolicy(request),
+      }).report.status,
+    ).toBe("valid");
+    expect(
+      projectCompilerProposal({
+        request,
+        proposal: boundary,
+        pinnedFacts: pinned,
+        runPolicy: projectionPolicy(request),
+      }).objective.workItems.reduce((total, item) => total + item.dependsOn.length, 0),
+    ).toBe(1_029);
   });
 
   it("bounds the fully expanded Worker Packet before projection", () => {
@@ -449,13 +528,18 @@ describe("semantic proposal validation", () => {
       }));
       return { pinned, request, proposal };
     };
-    const boundary = fixture(40);
+    const boundary = fixture(7);
     expect(
       parseAndValidateCompilerProposal(boundary.request, boundary.proposal, {
         pinnedFacts: boundary.pinned,
-        runPolicy: DEFAULT_RUN_POLICY,
+        runPolicy: projectionPolicy(boundary.request),
       }).report.status,
     ).toBe("valid");
+
+    const issueOverflow = fixture(10);
+    expect(
+      codes(issueOverflow.request, issueOverflow.proposal, issueOverflow.pinned),
+    ).toContainEqual(expect.objectContaining({ code: "issue-body-limit", itemId: "item-1" }));
 
     const overflow = fixture(50);
     expect(codes(overflow.request, overflow.proposal, overflow.pinned)).toContainEqual(
@@ -467,6 +551,104 @@ describe("semantic proposal validation", () => {
         observed: expect.any(Number),
       }),
     );
+  });
+
+  it("reports invalid metadata and an independent exact oversized issue body together", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request, 52);
+    const evidence = proposal.workItems[0]!.criteria[0]!.validation;
+    proposal.workItems[0]!.criteria = Array.from({ length: 10 }, (_, index) => ({
+      id: `criterion-${index + 1}`,
+      text: `Criterion ${index + 1} verifies ${"x".repeat(index === 0 ? 967 : 970)}.`,
+      risk: "ordinary" as const,
+      validation: structuredClone(evidence),
+    }));
+    proposal.workItems[51]!.dependsOn = proposal.workItems.slice(0, 50).map((item) => item.id);
+    proposal.workItems[51]!.scope = [...proposal.workItems[50]!.scope];
+
+    const report = parseAndValidateCompilerProposal(request, proposal, {
+      pinnedFacts: pinned,
+      runPolicy: projectionPolicy(request),
+    }).report;
+    expect(report.violations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "projection-blocked",
+          itemId: proposal.workItems[51]!.id,
+          field: "/workItems/51",
+        }),
+        expect.objectContaining({
+          code: "issue-body-limit",
+          itemId: proposal.workItems[0]!.id,
+          observed: 73_507,
+        }),
+      ]),
+    );
+  });
+
+  it.each([
+    {
+      name: "duplicate maximum-length preconditions and exclusions",
+      mutate(proposal: CompilerProposal) {
+        proposal.workItems[0]!.preconditions = Array(64).fill(`P${"p".repeat(1_999)}`);
+        proposal.workItems[0]!.outOfScope = Array(64).fill(`O${"o".repeat(1_999)}`);
+      },
+    },
+    {
+      name: "restored criteria, scope, and conventions",
+      mutate(proposal: CompilerProposal) {
+        proposal.workItems[0]!.criteria[0]!.text = `C${"c".repeat(1_999)}`;
+        proposal.workItems[0]!.scope = Array(64).fill(`src/${"s".repeat(493)}.ts`);
+        proposal.workItems[0]!.conventions = Array(64).fill(`V${"v".repeat(1_999)}`);
+      },
+    },
+  ])("bounds $name after restoring authored fields", ({ mutate }) => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request);
+    mutate(proposal);
+    expect(codes(request, proposal, pinned)).toContainEqual(
+      expect.objectContaining({
+        code: "worker-packet-limit",
+        itemId: "item-1",
+        field: "/workItems/0",
+        expected: { maximumProjectedBytes: 128 * 1024 },
+        observed: expect.any(Number),
+      }),
+    );
+  });
+
+  it("projects every restored authored field when its exact Worker Packet fits", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request);
+    proposal.workItems[0]!.criteria[0]!.text = `C${"c".repeat(999)}`;
+    proposal.workItems[0]!.scope = Array(5).fill(`src/${"s".repeat(193)}.ts`);
+    proposal.workItems[0]!.preconditions = Array(5).fill(`P${"p".repeat(999)}`);
+    proposal.workItems[0]!.outOfScope = Array(5).fill(`O${"o".repeat(999)}`);
+    proposal.workItems[0]!.conventions = Array(5).fill(`V${"v".repeat(999)}`);
+
+    expect(
+      parseAndValidateCompilerProposal(request, proposal, {
+        pinnedFacts: pinned,
+        runPolicy: projectionPolicy(request),
+      }).report.status,
+    ).toBe("valid");
+    const projected = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      runPolicy: projectionPolicy(request),
+    }).objective.workItems[0]!;
+    expect(() => workerPacketFromCompiled(projected)).not.toThrow();
+    expect(projected).toMatchObject({
+      acceptance: proposal.workItems[0]!.criteria.map((criterion) => criterion.text),
+      scope: proposal.workItems[0]!.scope,
+      preconditions: proposal.workItems[0]!.preconditions,
+      outOfScope: proposal.workItems[0]!.outOfScope,
+      conventions: proposal.workItems[0]!.conventions,
+    });
   });
 
   it("reserves the maximum later economic rationale in the compiled graph envelope", () => {
@@ -524,7 +706,7 @@ describe("semantic proposal validation", () => {
       status: "repairable",
       violations: [
         expect.objectContaining({
-          code: "schema-invalid",
+          code: "projection-blocked",
           itemId: null,
           field: "/workItems",
           observed: {
@@ -575,7 +757,7 @@ describe("semantic proposal validation", () => {
   it.each([
     ["Rust", "src/lib.rs", "unsupported-toolchain"],
     ["Go", "src/main.go", "unsupported-toolchain"],
-    ["ambient Python", "src/app.py", "uncovered-criterion"],
+    ["ambient Python", "src/app.py", "unsupported-toolchain"],
   ])(
     "does not let an observed npm recipe validate %s work in a polyglot repository",
     (_language, scope, expectedCode) => {
@@ -746,7 +928,7 @@ describe("deferred capability provider validation", () => {
         request,
         proposal: boundary,
         pinnedFacts: pinned,
-        runPolicy: DEFAULT_RUN_POLICY,
+        runPolicy: projectionPolicy(request),
       }),
     ).not.toThrow();
     expect(codes(request, proposal)).toContainEqual(
@@ -786,8 +968,8 @@ describe("deterministic semantic projection", () => {
     const pinned = semanticPinnedFacts();
     const request = semanticRequest(pinned);
     const proposal = semanticProposal(request);
-    const runPolicy = structuredClone(DEFAULT_RUN_POLICY);
-    runPolicy.workItemTimeoutMinutes = 7;
+    request.constraints.workItemTimeoutMinutes = 7;
+    const runPolicy = structuredClone(projectionPolicy(request));
     runPolicy.capacity!.local!.defaultCpu = 3;
     runPolicy.capacity!.local!.defaultMemoryMb = 4_096;
 
@@ -816,13 +998,7 @@ describe("deterministic semantic projection", () => {
       request,
       proposal,
       pinnedFacts: pinned,
-      runPolicy: {
-        ...DEFAULT_RUN_POLICY,
-        allowedNetworkDestinations: [
-          ...DEFAULT_RUN_POLICY.allowedNetworkDestinations,
-          "api.example.com",
-        ],
-      },
+      runPolicy: projectionPolicy(request),
     });
     expect(projected.objective.workItems[0]!.requirements).toMatchObject({
       trust: "trusted_local",
@@ -848,7 +1024,7 @@ describe("deterministic semantic projection", () => {
       request,
       proposal,
       pinnedFacts: pinned,
-      runPolicy: DEFAULT_RUN_POLICY,
+      runPolicy: projectionPolicy(request),
     });
     expect(projected.objective.workItems[0]).toMatchObject({
       title: proposal.workItems[0]!.title,
@@ -869,15 +1045,18 @@ describe("deterministic semantic projection", () => {
       criterion: "A credential is never exposed.",
       risk: "security",
     });
-    expect(projected.trace.riskElevations).toEqual([
+    const riskElevation = [
       { itemId: "item-1", criterionId: "implemented", from: "ordinary", to: "security" },
-    ]);
+    ];
+    expect(projected.trace.riskElevations).toEqual({
+      count: 1,
+      digest: compilerEvalDigest(riskElevation),
+    });
     expect(projected.trace.addedEdges).toEqual([
       {
         itemId: "item-2",
         dependsOn: "item-1",
         reason: "scope-overlap",
-        resources: ["emulator:android"],
       },
     ]);
     expect(projected.objective.workItems[1]!.dependsOn).toEqual(["item-1"]);
@@ -894,16 +1073,307 @@ describe("deterministic semantic projection", () => {
       request,
       proposal,
       pinnedFacts: pinned,
-      runPolicy: DEFAULT_RUN_POLICY,
+      runPolicy: projectionPolicy(request),
     });
     expect(trace.addedEdges).toEqual([
       {
         itemId: "item-2",
         dependsOn: "item-1",
         reason: "exclusive-resource",
-        resources: ["gpu:0"],
       },
     ]);
+  });
+
+  it("keeps a 51-item, 64-resource serialization trace compact", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request, 51);
+    const resources = Array.from({ length: 64 }, (_, index) => `lock:shared-${index + 1}`);
+    for (const [index, item] of proposal.workItems.entries()) {
+      item.scope = [`src/disjoint-${index + 1}.ts`];
+      item.dependsOn = [];
+      item.exclusiveResources = index < 43 ? resources : [];
+    }
+    const projected = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      runPolicy: projectionPolicy(request),
+    });
+    expect(projected.trace.addedEdges.length).toBeGreaterThan(600);
+    expect(projected.trace.addedEdges[0]).not.toHaveProperty("resources");
+    expect(Buffer.byteLength(JSON.stringify(projected.trace))).toBeLessThan(1024 * 1024);
+    expect(judgeSourceBytes(request, proposal, projected.trace)).toBeLessThan(
+      MAX_COMPILER_JUDGE_SOURCE_BYTES,
+    );
+  });
+
+  it("keeps a 100-item near-maximum derived-edge trace and validation record bounded", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request, 100);
+    for (const [index, item] of proposal.workItems.entries()) {
+      item.scope = [`src/disjoint-${index + 1}.ts`];
+      item.dependsOn = [];
+      item.exclusiveResources =
+        index < 45 ? ["lock:cluster-a"] : index < 53 ? ["lock:cluster-b"] : [];
+    }
+    const projected = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      runPolicy: projectionPolicy(request),
+    });
+    expect(projected.trace.addedEdges.length).toBeGreaterThan(700);
+    expect(Buffer.byteLength(JSON.stringify(projected.trace))).toBeLessThan(1024 * 1024);
+    expect(
+      Buffer.byteLength(
+        JSON.stringify({
+          request,
+          proposal,
+          report: parseAndValidateCompilerProposal(request, proposal, {
+            pinnedFacts: pinned,
+            runPolicy: projectionPolicy(request),
+          }).report,
+          projectionTrace: projected.trace,
+        }),
+      ),
+    ).toBeLessThan(2 * 1024 * 1024);
+    expect(judgeSourceBytes(request, proposal, projected.trace)).toBeLessThan(
+      MAX_COMPILER_JUDGE_SOURCE_BYTES,
+    );
+  });
+
+  it("rejects an otherwise projectable proposal when the exact judge source cannot fit", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    request.inventory.obligations.push(
+      ...Array.from({ length: 127 }, (_, index) => ({
+        id: `inferred-${index + 1}`,
+        text: `${String(index + 1).padStart(3, "0")}:${"o".repeat(2_995)}`,
+        kind: "prerequisite" as const,
+        evidenceIds: ["objective"],
+        acceptanceEvidence: `${String(index + 1).padStart(3, "0")}:${"e".repeat(2_995)}`,
+      })),
+    );
+    const proposal = semanticProposal(request, 100);
+    for (const [index, item] of proposal.workItems.entries())
+      item.goal = `${String(index + 1).padStart(3, "0")}:${"g".repeat(3_880)}`;
+
+    expect(Buffer.byteLength(JSON.stringify(request))).toBeLessThan(900 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(proposal))).toBeLessThan(512 * 1024);
+    const report = parseAndValidateCompilerProposal(request, proposal, {
+      pinnedFacts: pinned,
+      runPolicy: projectionPolicy(request),
+    }).report;
+    expect(report.violations).toContainEqual(
+      expect.objectContaining({
+        code: "judge-context-limit",
+        expected: { maximumBytes: MAX_COMPILER_JUDGE_SOURCE_BYTES },
+      }),
+    );
+  });
+
+  it("sizes the exact post-repair derived challenges before accepting a proposal", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const inferredIds = Array.from({ length: 64 }, (_, index) => `inferred-${index}`);
+    request.inventory.obligations.push(
+      ...inferredIds.map((id) => ({
+        id,
+        kind: "prerequisite" as const,
+        text: "x".repeat(4_000),
+        evidenceIds: ["objective"],
+        acceptanceEvidence: "y".repeat(4_000),
+      })),
+    );
+    const proposal = semanticProposal(request, 100);
+    for (const [index, item] of proposal.workItems.entries())
+      item.goal = `${index}:${"g".repeat(3_280)}`;
+    request.revision = 1;
+    request.previousProposal = structuredClone(proposal);
+    request.semanticFindings = [
+      {
+        id: "missing-inferences",
+        dimension: "coverage",
+        severity: "blocking",
+        confidence: 1,
+        obligationIds: inferredIds,
+        itemIds: [],
+        evidenceIds: ["objective"],
+        rootCause: "Missing prerequisites",
+        correction: "Resolve prerequisites",
+        uncertainty: "",
+      },
+    ];
+
+    expect(Buffer.byteLength(JSON.stringify(request))).toBeLessThan(900 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(proposal))).toBeLessThan(512 * 1024);
+    const report = parseAndValidateCompilerProposal(request, proposal, {
+      pinnedFacts: pinned,
+      runPolicy: projectionPolicy(request),
+    }).report;
+    expect(report.violations).toContainEqual(
+      expect.objectContaining({
+        code: "judge-context-limit",
+        expected: { maximumBytes: MAX_COMPILER_JUDGE_SOURCE_BYTES },
+      }),
+    );
+  });
+
+  it("sizes all 64 independently cited late challenges with byte-identical production inputs", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    request.objective.body = "b".repeat(64_000);
+    request.objective.digest = compilerEvalDigest({
+      number: request.objective.number,
+      title: request.objective.title,
+      body: request.objective.body,
+    });
+    request.inventory.objectiveDigest = request.objective.digest;
+    request.inventory.evidence.push(
+      ...Array.from({ length: 127 }, (_, index) => ({
+        id: `e-${index}`,
+        kind: "repository" as const,
+        identity: `identity-${index}`,
+        excerpt: `${index}:` + "e".repeat(995),
+      })),
+    );
+    request.inventory.obligations.push(
+      ...Array.from({ length: 127 }, (_, index) => ({
+        id: `inferred-${index}`,
+        text: `${index}:` + "t".repeat(1_490),
+        kind: "prerequisite" as const,
+        evidenceIds: [`e-${index}`],
+        acceptanceEvidence: `${index}:` + "a".repeat(1_490),
+      })),
+    );
+    const proposal = semanticProposal(request, 100);
+    for (const [index, item] of proposal.workItems.entries()) {
+      item.goal = `${index}:` + "g".repeat(2_480);
+      item.scope = [`src/disjoint-${index}.ts`];
+      item.dependsOn = [];
+    }
+    request.revision = 1;
+    request.previousProposal = semanticProposal(request);
+    request.semanticFindings = Array.from({ length: 64 }, (_, index) => ({
+      id: `finding-${index}`,
+      dimension: "coverage" as const,
+      severity: "blocking" as const,
+      confidence: 1,
+      obligationIds: [`inferred-${index}`],
+      itemIds: ["item-1"],
+      evidenceIds: request.inventory.evidence.map((entry) => entry.id),
+      rootCause: `Missing inference ${index}`,
+      correction: `Resolve inference ${index}`,
+      uncertainty: "",
+    }));
+    const trace = {
+      protocol: "clockgrove.factory/compiler-projection" as const,
+      requestDigest: compilerEvalDigest(request),
+      proposalDigest: compilerEvalDigest(proposal),
+      graphDigest: "2".repeat(64),
+      addedEdges: [],
+      adapterBindings: [],
+      riskElevations: { count: 0, digest: compilerEvalDigest([]) },
+    };
+    const challenges = deriveCompilerInferenceChallenges({
+      inventory: request.inventory,
+      findings: request.semanticFindings,
+      proposal,
+      carried: request.challenges,
+    });
+    const sourceBytes = (effectiveChallenges: typeof challenges) =>
+      compilerJudgeSourceBytes({
+        originalObjective: request.objective,
+        baseSha: request.baseSha,
+        priorCompilationFailure: { reason: "x".repeat(8_000), rawProposalAvailable: false },
+        inventory: request.inventory,
+        challenges: effectiveChallenges,
+        proposal,
+        projectionTrace: trace,
+        draftDigest: trace.graphDigest,
+        inventoryDigest: compilerEvalDigest(request.inventory),
+      });
+    expect(challenges).toHaveLength(64);
+    expect(sourceBytes([])).toBeLessThan(MAX_COMPILER_JUDGE_SOURCE_BYTES);
+    expect(sourceBytes(challenges)).toBeGreaterThan(MAX_COMPILER_JUDGE_SOURCE_BYTES);
+    expect(sourceBytes(challenges)).toBeGreaterThan(960_000);
+    expect(
+      parseAndValidateCompilerProposal(request, proposal, {
+        pinnedFacts: pinned,
+        runPolicy: projectionPolicy(request),
+      }).report.violations,
+    ).toContainEqual(expect.objectContaining({ code: "judge-context-limit" }));
+  });
+
+  it("reports independent dependency, packet, graph, and judge envelope failures together", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request, 52);
+    const rootScopes = Array.from({ length: 51 }, (_, index) => `src/root-${index + 1}.ts`);
+    for (const [index, item] of proposal.workItems.entries()) {
+      item.dependsOn = [];
+      item.scope = index < 51 ? [rootScopes[index]!] : rootScopes;
+      item.criteria = Array.from({ length: 10 }, (_, criterionIndex) => ({
+        id: `criterion-${criterionIndex + 1}`,
+        text: `${item.id}-${criterionIndex + 1}:${"c".repeat(1_780)}`,
+        risk: "ordinary" as const,
+        validation: [
+          {
+            tier: "mechanical" as const,
+            evidence: [
+              {
+                kind: "observed" as const,
+                recipeId: request.repository.validationRecipes[0]!.id,
+              },
+            ],
+          },
+        ],
+      }));
+    }
+    proposal.workItems[0]!.preconditions = Array.from({ length: 64 }, () => "p".repeat(2_000));
+    proposal.workItems[0]!.outOfScope = Array.from({ length: 64 }, () => "o".repeat(2_000));
+
+    const report = parseAndValidateCompilerProposal(request, proposal, {
+      pinnedFacts: pinned,
+      runPolicy: projectionPolicy(request),
+    }).report;
+    expect(report.violations.map((entry) => entry.code)).toEqual(
+      expect.arrayContaining([
+        "dependency-limit",
+        "worker-packet-limit",
+        "compiled-graph-limit",
+        "judge-context-limit",
+      ]),
+    );
+  });
+
+  it("reports an independent oversized packet when another item blocks graph projection", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request, 2);
+    proposal.workItems[0]!.dependsOn = ["unknown-item"];
+    proposal.workItems[1]!.preconditions = Array.from({ length: 64 }, () => "p".repeat(2_000));
+    proposal.workItems[1]!.outOfScope = Array.from({ length: 64 }, () => "o".repeat(2_000));
+
+    const first = parseAndValidateCompilerProposal(request, proposal, {
+      pinnedFacts: pinned,
+      runPolicy: projectionPolicy(request),
+    }).report;
+    expect(first.violations.map((entry) => entry.code)).toEqual(
+      expect.arrayContaining(["unknown-dependency", "worker-packet-limit", "projection-blocked"]),
+    );
+
+    proposal.workItems[0]!.dependsOn = [];
+    proposal.workItems[1]!.preconditions = [];
+    proposal.workItems[1]!.outOfScope = [];
+    expect(
+      parseAndValidateCompilerProposal(request, proposal, {
+        pinnedFacts: pinned,
+        runPolicy: projectionPolicy(request),
+      }).report.status,
+    ).toBe("valid");
   });
 });
 

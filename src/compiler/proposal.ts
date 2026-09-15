@@ -1,18 +1,17 @@
 import {
   assertCompiledObjectiveAdoptsLegacyConstraints,
   compiledGraphDigest,
+  compiledGraphDigestForDiagnostics,
   MAX_COMPILED_GRAPH_BYTES,
-  serializeCompiledObjective,
+  renderWorkPacket,
+  renderWorkPacketWithRawGraphMetadataForDiagnostics,
   validateGraph,
   workerPacketFromCompiled,
   type CompiledObjective,
+  type GraphItemMetadata,
   type LegacyGraphConstraints,
 } from "../graph.js";
-import {
-  analyzeDependencies,
-  exclusiveResourcePairs,
-  overlappingScopePairs,
-} from "../graph-analysis.js";
+import { analyzeDependencies, overlappingScopePairs } from "../graph-analysis.js";
 import type { CompilationContext } from "../management/backend.js";
 import {
   destinationAllowedByPolicy,
@@ -20,7 +19,7 @@ import {
   type RunPolicy,
 } from "../protocol/policy.js";
 import { RepositoryScopePathSchema } from "../protocol/worker-packet.js";
-import { MAX_WORKER_PACKET_BYTES } from "../protocol/limits.js";
+import { MAX_GITHUB_TEXT_BYTES, MAX_WORKER_PACKET_BYTES } from "../protocol/limits.js";
 import {
   readPinnedCompilerFacts,
   scopedNodeTestCommand,
@@ -34,6 +33,7 @@ import {
 import { toolchainAdapterById } from "../toolchains/authority.js";
 import {
   compilerEvalDigest,
+  deriveCompilerInferenceChallenges,
   ObligationInventorySchema,
   type CompilerInferenceChallenge,
   type CompilerJudgeVerdict,
@@ -46,6 +46,7 @@ import {
   type CompilerWorkItem,
   type CompilerWorkItemInput,
 } from "./index.js";
+import { compilerJudgeSourceBytes, MAX_COMPILER_JUDGE_SOURCE_BYTES } from "./judge-context.js";
 import { inferCriterionRisk, type CriterionRisk } from "./validation-design.js";
 import {
   CompilerProposalSchema,
@@ -59,18 +60,8 @@ import {
   type ValidationIntentRef,
 } from "./contracts.js";
 import { createCompilerValidationReport, emptyCompilerValidationReport } from "./violations.js";
-
-export class CompilerInvariantError extends Error {
-  constructor(cause: unknown) {
-    super(
-      `compiler projection invariant failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-      {
-        cause,
-      },
-    );
-    this.name = "CompilerInvariantError";
-  }
-}
+import { CompilerInvariantError } from "./invariant-error.js";
+export { CompilerInvariantError } from "./invariant-error.js";
 
 export class CompilerRequestValidationError extends Error {
   constructor(readonly report: CompilerValidationReport) {
@@ -78,6 +69,8 @@ export class CompilerRequestValidationError extends Error {
     this.name = "CompilerRequestValidationError";
   }
 }
+
+export const MAX_COMPILER_REQUEST_BYTES = 900 * 1024;
 
 export interface CompilerProjectionTrace {
   protocol: "clockgrove.factory/compiler-projection";
@@ -88,7 +81,6 @@ export interface CompilerProjectionTrace {
     itemId: string;
     dependsOn: string;
     reason: "scope-overlap" | "exclusive-resource";
-    resources: string[];
   }>;
   adapterBindings: Array<{
     itemId: string;
@@ -96,12 +88,10 @@ export interface CompilerProjectionTrace {
     providerWorkItem: string;
     operation: { kind: string; key: string };
   }>;
-  riskElevations: Array<{
-    itemId: string;
-    criterionId: string;
-    from: "ordinary";
-    to: Exclude<CriterionRisk, "ordinary">;
-  }>;
+  riskElevations: {
+    count: number;
+    digest: string;
+  };
 }
 
 export interface PreparedCompilerRequest {
@@ -118,6 +108,95 @@ interface CompilerProjectionFacts {
 export interface CompilerProjectionContext {
   pinnedFacts: PinnedRepositoryFacts;
   runPolicy: RunPolicy;
+}
+
+type CompilerValidationSurfacePaths = {
+  deterministicSimulation: string[];
+  visual: string[];
+  python: string[];
+  rust: string[];
+  go: string[];
+};
+
+function compilerValidationSurfacePaths(
+  pathsInput: readonly string[],
+): CompilerValidationSurfacePaths {
+  const paths = [...new Set(pathsInput)].sort();
+  return {
+    deterministicSimulation: paths.filter((path) =>
+      /(?:simulation|simulator|replay|seed)/.test(path.toLowerCase()),
+    ),
+    visual: paths.filter(
+      (path) =>
+        /(?:screenshot|snapshot|visual|storybook)/.test(path.toLowerCase()) ||
+        /\.(?:png|jpe?g|webp)$/i.test(path),
+    ),
+    python: paths.filter((path) => path === "pyproject.toml" || path.endsWith(".py")),
+    rust: paths.filter((path) => path === "Cargo.toml" || path.endsWith(".rs")),
+    go: paths.filter((path) => path === "go.mod" || path.endsWith(".go")),
+  };
+}
+
+export function summarizeCompilerValidationSurfaces(paths: readonly string[]) {
+  const surfaces = compilerValidationSurfacePaths(paths);
+  return Object.fromEntries(
+    Object.entries(surfaces).map(([name, values]) => [
+      name,
+      {
+        count: values.length,
+        digest: compilerEvalDigest(values),
+        sample: values.slice(0, 32),
+      },
+    ]),
+  ) as {
+    [K in keyof CompilerValidationSurfacePaths]: {
+      count: number;
+      digest: string;
+      sample: string[];
+    };
+  };
+}
+
+export function assertCompilerProjectionAuthority(
+  request: CompilerRequest,
+  context: CompilerProjectionContext,
+): void {
+  if (!context) throw new Error("compiler projection authority is required");
+  const { pinnedFacts, runPolicy } = context;
+  const { digest: pinnedDigest, ...unsignedPinnedFacts } = pinnedFacts;
+  if (
+    pinnedDigest !== compilerEvalDigest(unsignedPinnedFacts) ||
+    pinnedFacts.baseSha !== request.baseSha ||
+    pinnedFacts.relevantPaths.length !== request.repository.pathCount ||
+    compilerEvalDigest(pinnedFacts.manifests) !==
+      compilerEvalDigest(request.repository.manifests) ||
+    compilerEvalDigest([...new Set(pinnedFacts.repository.lfs?.requiredTools ?? [])].sort()) !==
+      compilerEvalDigest(request.repository.requiredTools)
+  )
+    throw new Error("pinned repository facts differ from the compiler request");
+  const expectedCapabilities = compilerCapabilitiesForRepository(
+    pinnedFacts,
+    request.constraints.allowedNetworkDestinations,
+  );
+  if (
+    compilerEvalDigest(expectedCapabilities) !==
+    compilerEvalDigest({
+      validationRecipes: request.repository.validationRecipes,
+      toolchains: request.repository.toolchains,
+    })
+  )
+    throw new Error("compiler request capabilities differ from pinned adapter facts");
+  if (
+    compilerEvalDigest(summarizeCompilerValidationSurfaces(pinnedFacts.relevantPaths)) !==
+    compilerEvalDigest(request.repository.validationSurfaces)
+  )
+    throw new Error("compiler request surface summary differs from pinned repository facts");
+  if (
+    runPolicy.workItemTimeoutMinutes !== request.constraints.workItemTimeoutMinutes ||
+    compilerEvalDigest([...runPolicy.allowedNetworkDestinations].sort()) !==
+      compilerEvalDigest([...request.constraints.allowedNetworkDestinations].sort())
+  )
+    throw new Error("run policy differs from the compiler request constraints");
 }
 
 function normalizeCompilerProjectionFacts(
@@ -197,6 +276,16 @@ export function validateCompilerRequest(requestInput: unknown): CompilerValidati
     return createCompilerValidationReport("request", schemaViolations(parsed.error, requestInput));
   const request = parsed.data;
   const violations: CompilerViolation[] = [];
+  const requestBytes = Buffer.byteLength(JSON.stringify(request));
+  if (requestBytes > MAX_COMPILER_REQUEST_BYTES)
+    violations.push(
+      violation(
+        "compiler-request-limit",
+        "",
+        { maximumBytes: MAX_COMPILER_REQUEST_BYTES },
+        requestBytes,
+      ),
+    );
   if (
     request.objective.digest !==
     compilerEvalDigest({
@@ -350,23 +439,7 @@ export async function prepareCompilerRequest(input: {
       requiredTools: [...new Set(pinnedFacts.repository.lfs?.requiredTools ?? [])].sort(),
       validationRecipes: repository.validationRecipes,
       toolchains: repository.toolchains,
-      validationSurfaces: {
-        deterministicSimulation: pinnedFacts.relevantPaths.filter((path) =>
-          /(?:simulation|simulator|replay|seed)/.test(path.toLowerCase()),
-        ),
-        visual: pinnedFacts.relevantPaths.filter(
-          (path) =>
-            /(?:screenshot|snapshot|visual|storybook)/.test(path.toLowerCase()) ||
-            /\.(?:png|jpe?g|webp)$/i.test(path),
-        ),
-        python: pinnedFacts.relevantPaths.filter(
-          (path) => path === "pyproject.toml" || path.endsWith(".py"),
-        ),
-        rust: pinnedFacts.relevantPaths.filter(
-          (path) => path === "Cargo.toml" || path.endsWith(".rs"),
-        ),
-        go: pinnedFacts.relevantPaths.filter((path) => path === "go.mod" || path.endsWith(".go")),
-      },
+      validationSurfaces: summarizeCompilerValidationSurfaces(pinnedFacts.relevantPaths),
       pathCount: pinnedFacts.relevantPaths.length,
     },
     constraints: {
@@ -535,6 +608,16 @@ export function parseAndValidateCompilerProposal(
   const capabilities = new Map(
     request.repository.toolchains.map((capability) => [capability.adapterId, capability]),
   );
+  const validationSurfacePaths: CompilerValidationSurfacePaths = projectionContext
+    ? compilerValidationSurfacePaths(projectionContext.pinnedFacts.relevantPaths)
+    : {
+        deterministicSimulation:
+          request.repository.validationSurfaces.deterministicSimulation.sample,
+        visual: request.repository.validationSurfaces.visual.sample,
+        python: request.repository.validationSurfaces.python.sample,
+        rust: request.repository.validationSurfaces.rust.sample,
+        go: request.repository.validationSurfaces.go.sample,
+      };
   const deferredUses: Array<{
     item: CompilerProposal["workItems"][number];
     adapterId: string;
@@ -548,17 +631,11 @@ export function parseAndValidateCompilerProposal(
     ) =>
       paths.some((path) => scopeOwnsPath(item.scope, path)) ||
       item.scope.some((path) => extension.test(path) || manifests.includes(path));
-    const pythonScope = ownsLanguageSurface(
-      request.repository.validationSurfaces.python,
-      /\.py$/i,
-      ["pyproject.toml"],
-    );
-    const rustScope = ownsLanguageSurface(request.repository.validationSurfaces.rust, /\.rs$/i, [
-      "Cargo.toml",
+    const pythonScope = ownsLanguageSurface(validationSurfacePaths.python, /\.py$/i, [
+      "pyproject.toml",
     ]);
-    const goScope = ownsLanguageSurface(request.repository.validationSurfaces.go, /\.go$/i, [
-      "go.mod",
-    ]);
+    const rustScope = ownsLanguageSurface(validationSurfacePaths.rust, /\.rs$/i, ["Cargo.toml"]);
+    const goScope = ownsLanguageSurface(validationSurfacePaths.go, /\.go$/i, ["go.mod"]);
     for (const language of [...(rustScope ? ["rust"] : []), ...(goScope ? ["go"] : [])])
       violations.push(
         violation(
@@ -711,13 +788,11 @@ export function parseAndValidateCompilerProposal(
       for (const [validationIndex, validation] of criterion.validation.entries()) {
         const groundedTier =
           validation.tier === "deterministic-simulation"
-            ? request.repository.validationSurfaces.deterministicSimulation.some((path) =>
+            ? validationSurfacePaths.deterministicSimulation.some((path) =>
                 scopeOwnsPath(item.scope, path),
               )
             : validation.tier === "visual"
-              ? request.repository.validationSurfaces.visual.some((path) =>
-                  scopeOwnsPath(item.scope, path),
-                )
+              ? validationSurfacePaths.visual.some((path) => scopeOwnsPath(item.scope, path))
               : true;
         if (!groundedTier)
           violations.push(
@@ -1067,8 +1142,10 @@ export function parseAndValidateCompilerProposal(
       );
     else economicContracts.set(digest, item.id);
   }
-  if (violations.length === 0 && projectionContext)
-    violations.push(...projectedEnvelopeViolations(request, proposal, projectionContext));
+  if (projectionContext) {
+    const projected = projectedEnvelopeViolations(request, proposal, projectionContext);
+    violations.push(...projected);
+  }
   const report = createCompilerValidationReport("proposal", violations);
   return { proposal, report };
 }
@@ -1168,6 +1245,98 @@ function semanticCompilerWorkItems(
   return proposal.workItems.map((item) => semanticWorkItem(request, item, runPolicy));
 }
 
+function restoreAuthoredWorkItemFields(
+  projected: Pick<CompiledObjective, "workItems">,
+  proposal: CompilerProposal,
+): void {
+  const proposalById = new Map(proposal.workItems.map((item) => [item.id, item]));
+  for (const item of projected.workItems) {
+    const authored = proposalById.get(item.id);
+    if (!authored) throw new Error(`projected Work Item ${item.id} has no authored proposal`);
+    const authoredDependencies = new Set(authored.dependsOn);
+    item.title = authored.title;
+    item.goal = authored.goal;
+    item.acceptance = authored.criteria.map((criterion) => criterion.text);
+    item.scope = [...authored.scope];
+    item.preconditions = [...authored.preconditions];
+    item.outOfScope = [...authored.outOfScope];
+    item.conventions = [...authored.conventions];
+    item.dependsOn = [
+      ...authored.dependsOn,
+      ...item.dependsOn.filter((dependency) => !authoredDependencies.has(dependency)).sort(),
+    ];
+  }
+}
+
+function compilerProjectionTrace(
+  request: CompilerRequest,
+  proposal: CompilerProposal,
+  projected: CompiledObjective,
+  graphDigest = compiledGraphDigest(projected),
+): CompilerProjectionTrace {
+  const proposalById = new Map(proposal.workItems.map((item) => [item.id, item]));
+  const scopePairs = new Set(
+    overlappingScopePairs(proposal.workItems).map(([left, right]) => `${left}\0${right}`),
+  );
+  const addedEdges: CompilerProjectionTrace["addedEdges"] = [];
+  for (const item of projected.workItems) {
+    const authored = proposalById.get(item.id);
+    if (!authored) throw new Error(`projected Work Item ${item.id} has no authored proposal`);
+    const authoredDependencies = new Set(authored.dependsOn);
+    for (const dependency of item.dependsOn.filter((id) => !authoredDependencies.has(id))) {
+      const key = [item.id, dependency].sort().join("\0");
+      addedEdges.push({
+        itemId: item.id,
+        dependsOn: dependency,
+        reason: scopePairs.has(key) ? "scope-overlap" : "exclusive-resource",
+      });
+    }
+  }
+  const riskElevationEntries = proposal.workItems.flatMap((item) =>
+    item.criteria.flatMap((criterion) => {
+      const inferred = inferCriterionRisk(criterion.text);
+      return criterion.risk === "ordinary" && inferred !== "ordinary"
+        ? [
+            {
+              itemId: item.id,
+              criterionId: criterion.id,
+              from: "ordinary" as const,
+              to: inferred,
+            },
+          ]
+        : [];
+    }),
+  );
+  const adapterBindings = projected.workItems.flatMap((item) =>
+    (item.repositoryCapabilities?.requires ?? []).map((binding) => ({
+      itemId: item.id,
+      adapterId: binding.adapter,
+      providerWorkItem: binding.providerWorkItem,
+      operation: { ...binding.operation },
+    })),
+  );
+  return {
+    protocol: "clockgrove.factory/compiler-projection",
+    requestDigest: compilerEvalDigest(request),
+    proposalDigest: compilerEvalDigest(proposal),
+    graphDigest,
+    addedEdges: addedEdges.sort(
+      (left, right) =>
+        left.itemId.localeCompare(right.itemId) || left.dependsOn.localeCompare(right.dependsOn),
+    ),
+    adapterBindings: adapterBindings.sort(
+      (left, right) =>
+        left.itemId.localeCompare(right.itemId) ||
+        left.adapterId.localeCompare(right.adapterId) ||
+        left.operation.key.localeCompare(right.operation.key),
+    ),
+    riskElevations: {
+      count: riskElevationEntries.length,
+      digest: compilerEvalDigest(riskElevationEntries),
+    },
+  };
+}
+
 function projectedEnvelopeViolations(
   request: CompilerRequest,
   proposal: CompilerProposal,
@@ -1185,15 +1354,52 @@ function projectedEnvelopeViolations(
       validationCommands: [...new Set(workItems.flatMap((item) => item.validationCommands))],
       runPolicy,
     });
+    restoreAuthoredWorkItemFields(projected, proposal);
   } catch (error) {
-    return [
+    const violations: CompilerViolation[] = [];
+    for (const [itemIndex, item] of proposal.workItems.entries()) {
+      try {
+        const isolatedProposal: CompilerProposal = {
+          ...proposal,
+          workItems: [{ ...item, dependsOn: [] }],
+        };
+        const isolatedSemantic = semanticCompilerWorkItems(request, isolatedProposal, runPolicy);
+        const isolated = compileObjective({
+          title: request.objective.title,
+          baseSha: request.baseSha,
+          repositoryFacts: pinnedFacts.repository,
+          workItems: isolatedSemantic,
+          validationCommands: [
+            ...new Set(isolatedSemantic.flatMap((entry) => entry.validationCommands)),
+          ],
+          runPolicy,
+        });
+        restoreAuthoredWorkItemFields(isolated, isolatedProposal);
+        workerPacketFromCompiled(isolated.workItems[0]!);
+      } catch (itemError) {
+        const message = itemError instanceof Error ? itemError.message : String(itemError);
+        const bytes = /^Worker Packet is (\d+) bytes; maximum is \d+$/.exec(message)?.[1];
+        if (bytes)
+          violations.push(
+            violation(
+              "worker-packet-limit",
+              pointer("workItems", itemIndex),
+              { maximumProjectedBytes: MAX_WORKER_PACKET_BYTES },
+              Number(bytes),
+              item.id,
+            ),
+          );
+      }
+    }
+    violations.push(
       violation(
-        "schema-invalid",
+        "projection-blocked",
         "/workItems",
-        "a deterministically projectable compiler proposal",
+        "a graph whose dependent projection-envelope checks can be completed",
         { error: error instanceof Error ? error.message : String(error) },
       ),
-    ];
+    );
+    return violations;
   }
 
   const violations: CompilerViolation[] = [];
@@ -1226,7 +1432,9 @@ function projectedEnvelopeViolations(
       );
     }
   }
-  if (violations.length > 0) return violations;
+  const dependencyShapeInvalid = projected.workItems.some(
+    (item) => item.dependsOn.length > request.constraints.maxDependenciesPerItem,
+  );
   const graphEnvelope = {
     ...projected,
     workItems: projected.workItems.map((item) => ({
@@ -1240,20 +1448,120 @@ function projectedEnvelopeViolations(
       },
     })),
   };
+  const diagnosticGraph = graphEnvelope as CompiledObjective;
+  const graphDigest = compiledGraphDigestForDiagnostics(diagnosticGraph);
+  for (const [itemIndex, item] of diagnosticGraph.workItems.entries()) {
+    const metadata: GraphItemMetadata = {
+      protocol: "clockgrove.factory/graph-v1",
+      id: item.id,
+      graphDigest,
+      graphSize: diagnosticGraph.workItems.length,
+      index: itemIndex,
+      dependsOn: item.dependsOn,
+      ...(diagnosticGraph.deferredCapabilityAdapters === undefined
+        ? {}
+        : { deferredCapabilityAdapters: diagnosticGraph.deferredCapabilityAdapters }),
+    };
+    let body: string;
+    try {
+      renderWorkPacket(item);
+    } catch {
+      // The independent Worker Packet violation above owns this item.
+      continue;
+    }
+    try {
+      body = renderWorkPacket(item, metadata);
+    } catch (error) {
+      violations.push(
+        violation(
+          "projection-blocked",
+          pointer("workItems", itemIndex),
+          "valid final graph-item metadata",
+          { error: error instanceof Error ? error.message : String(error) },
+          item.id,
+        ),
+      );
+      body = renderWorkPacketWithRawGraphMetadataForDiagnostics(item, metadata);
+    }
+    const bytes = Buffer.byteLength(body, "utf8");
+    if (bytes > MAX_GITHUB_TEXT_BYTES)
+      violations.push(
+        violation(
+          "issue-body-limit",
+          pointer("workItems", itemIndex),
+          { maximumProjectedBytes: MAX_GITHUB_TEXT_BYTES },
+          bytes,
+          item.id,
+        ),
+      );
+  }
+  if (dependencyShapeInvalid) {
+    const observedBytes = Buffer.byteLength(JSON.stringify(graphEnvelope));
+    if (observedBytes > MAX_COMPILED_GRAPH_BYTES)
+      violations.push(
+        violation(
+          "compiled-graph-limit",
+          "/workItems",
+          { maximumProjectedBytes: MAX_COMPILED_GRAPH_BYTES },
+          observedBytes,
+        ),
+      );
+  } else {
+    const observedBytes = Buffer.byteLength(JSON.stringify(graphEnvelope));
+    if (observedBytes > MAX_COMPILED_GRAPH_BYTES)
+      violations.push(
+        violation(
+          "compiled-graph-limit",
+          "/workItems",
+          { maximumProjectedBytes: MAX_COMPILED_GRAPH_BYTES },
+          observedBytes,
+        ),
+      );
+  }
   try {
-    serializeCompiledObjective(graphEnvelope);
+    const trace = compilerProjectionTrace(
+      request,
+      proposal,
+      projected as CompiledObjective,
+      dependencyShapeInvalid ? compilerEvalDigest(projected) : compiledGraphDigest(projected),
+    );
+    const effectiveChallenges = deriveCompilerInferenceChallenges({
+      inventory: request.inventory,
+      findings: request.semanticFindings,
+      proposal,
+      carried: request.challenges,
+    });
+    const observedBytes = compilerJudgeSourceBytes({
+      originalObjective: {
+        number: request.objective.number,
+        title: request.objective.title,
+        body: request.objective.body,
+      },
+      baseSha: request.baseSha,
+      // A retry may carry the maximum bounded failure reason even when the
+      // first judge call does not. Reserve it before accepting paid output.
+      priorCompilationFailure: { reason: "x".repeat(8_000), rawProposalAvailable: false },
+      inventory: request.inventory,
+      challenges: effectiveChallenges,
+      proposal,
+      projectionTrace: trace,
+      draftDigest: trace.graphDigest,
+      inventoryDigest: compilerEvalDigest(request.inventory),
+    });
+    if (observedBytes > MAX_COMPILER_JUDGE_SOURCE_BYTES)
+      violations.push(
+        violation(
+          "judge-context-limit",
+          "/workItems",
+          { maximumBytes: MAX_COMPILER_JUDGE_SOURCE_BYTES },
+          observedBytes,
+        ),
+      );
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const bytes = /^compiled graph is (\d+) bytes; maximum is \d+$/.exec(message)?.[1];
     violations.push(
-      violation(
-        bytes ? "compiled-graph-limit" : "schema-invalid",
-        "/workItems",
-        bytes
-          ? { maximumProjectedBytes: MAX_COMPILED_GRAPH_BYTES }
-          : "a persistable compiled graph",
-        bytes ? Number(bytes) : { error: message },
-      ),
+      violation("schema-invalid", "/workItems", "a deterministically serializable judge context", {
+        error: error instanceof Error ? error.message : String(error),
+      }),
     );
   }
   return violations;
@@ -1284,35 +1592,20 @@ export function projectCompilerProposal(input: {
   economicEvidence?: DecompositionEvidence;
   legacyGraphConstraints?: LegacyGraphConstraints;
 }): { objective: CompiledObjective; trace: CompilerProjectionTrace } {
+  assertCompilerProjectionAuthority(input.request, {
+    pinnedFacts: input.pinnedFacts,
+    runPolicy: input.runPolicy,
+  });
   const validated = parseAndValidateCompilerProposal(input.request, input.proposal, {
     pinnedFacts: input.pinnedFacts,
     runPolicy: input.runPolicy,
   });
   if (!validated.proposal || validated.report.status !== "valid")
-    throw new CompilerInvariantError("projection received an invalid proposal");
+    throw Object.assign(new CompilerInvariantError("projection received an invalid proposal"), {
+      validationReport: validated.report,
+      proposal: input.proposal,
+    });
   try {
-    if (
-      input.pinnedFacts.baseSha !== input.request.baseSha ||
-      input.pinnedFacts.relevantPaths.length !== input.request.repository.pathCount ||
-      compilerEvalDigest(input.pinnedFacts.manifests) !==
-        compilerEvalDigest(input.request.repository.manifests) ||
-      compilerEvalDigest(
-        [...new Set(input.pinnedFacts.repository.lfs?.requiredTools ?? [])].sort(),
-      ) !== compilerEvalDigest(input.request.repository.requiredTools)
-    )
-      throw new Error("pinned repository facts differ from the compiler request");
-    const expectedCapabilities = compilerCapabilitiesForRepository(
-      input.pinnedFacts,
-      input.request.constraints.allowedNetworkDestinations,
-    );
-    if (
-      compilerEvalDigest(expectedCapabilities) !==
-      compilerEvalDigest({
-        validationRecipes: input.request.repository.validationRecipes,
-        toolchains: input.request.repository.toolchains,
-      })
-    )
-      throw new Error("compiler request capabilities differ from pinned adapter facts");
     const semantic = semanticCompilerWorkItems(input.request, validated.proposal, input.runPolicy);
     const projected = compileObjective({
       title: input.request.objective.title,
@@ -1323,90 +1616,14 @@ export function projectCompilerProposal(input: {
       runPolicy: input.runPolicy,
       ...(input.economicEvidence ? { economicEvidence: input.economicEvidence } : {}),
     }) as CompiledObjective;
-    const proposalById = new Map(validated.proposal.workItems.map((item) => [item.id, item]));
-    const addedEdges: CompilerProjectionTrace["addedEdges"] = [];
-    const scopePairs = new Set(
-      overlappingScopePairs(validated.proposal.workItems).map(
-        ([left, right]) => `${left}\0${right}`,
-      ),
-    );
-    const resourcePairs = new Map(
-      exclusiveResourcePairs(
-        validated.proposal.workItems.map((item) => ({
-          id: item.id,
-          exclusiveResources: item.exclusiveResources,
-        })),
-      ).map((pair) => [`${pair.left}\0${pair.right}`, pair.resources]),
-    );
-    for (const item of projected.workItems) {
-      const authored = proposalById.get(item.id)!;
-      const authoredDependencies = new Set(authored.dependsOn);
-      for (const dependency of item.dependsOn.filter((id) => !authoredDependencies.has(id))) {
-        const key = [item.id, dependency].sort().join("\0");
-        const resources = resourcePairs.get(key) ?? [];
-        addedEdges.push({
-          itemId: item.id,
-          dependsOn: dependency,
-          reason: scopePairs.has(key) ? "scope-overlap" : "exclusive-resource",
-          resources,
-        });
-      }
-      item.title = authored.title;
-      item.goal = authored.goal;
-      item.acceptance = authored.criteria.map((criterion) => criterion.text);
-      item.scope = [...authored.scope];
-      item.preconditions = [...authored.preconditions];
-      item.outOfScope = [...authored.outOfScope];
-      item.conventions = [...authored.conventions];
-      item.dependsOn = [
-        ...authored.dependsOn,
-        ...item.dependsOn.filter((dependency) => !authoredDependencies.has(dependency)).sort(),
-      ];
-    }
+    restoreAuthoredWorkItemFields(projected, validated.proposal);
     validateGraph(projected);
     if (input.legacyGraphConstraints)
       assertCompiledObjectiveAdoptsLegacyConstraints(projected, input.legacyGraphConstraints);
-    const riskElevations = validated.proposal.workItems.flatMap((item) =>
-      item.criteria.flatMap((criterion) => {
-        const inferred = inferCriterionRisk(criterion.text);
-        return criterion.risk === "ordinary" && inferred !== "ordinary"
-          ? [
-              {
-                itemId: item.id,
-                criterionId: criterion.id,
-                from: "ordinary" as const,
-                to: inferred,
-              },
-            ]
-          : [];
-      }),
-    );
-    const adapterBindings = projected.workItems.flatMap((item) =>
-      (item.repositoryCapabilities?.requires ?? []).map((binding) => ({
-        itemId: item.id,
-        adapterId: binding.adapter,
-        providerWorkItem: binding.providerWorkItem,
-        operation: { ...binding.operation },
-      })),
-    );
-    const traceWithoutGraph = {
-      protocol: "clockgrove.factory/compiler-projection" as const,
-      requestDigest: compilerEvalDigest(input.request),
-      proposalDigest: compilerEvalDigest(validated.proposal),
-      addedEdges: addedEdges.sort(
-        (left, right) =>
-          left.itemId.localeCompare(right.itemId) || left.dependsOn.localeCompare(right.dependsOn),
-      ),
-      adapterBindings: adapterBindings.sort(
-        (left, right) =>
-          left.itemId.localeCompare(right.itemId) ||
-          left.adapterId.localeCompare(right.adapterId) ||
-          left.operation.key.localeCompare(right.operation.key),
-      ),
-      riskElevations,
+    return {
+      objective: projected,
+      trace: compilerProjectionTrace(input.request, validated.proposal, projected),
     };
-    const graphDigest = compiledGraphDigest(projected);
-    return { objective: projected, trace: { ...traceWithoutGraph, graphDigest } };
   } catch (error) {
     if (error instanceof CompilerInvariantError) throw error;
     throw new CompilerInvariantError(error);

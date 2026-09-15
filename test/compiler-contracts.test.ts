@@ -18,14 +18,15 @@ import {
   renderCompilerValidationReport,
 } from "../src/compiler/violations.js";
 import {
-  CompilerRequestValidationError,
+  parseAndValidateCompilerProposal,
   validateCompilerRequest,
 } from "../src/compiler/proposal.js";
-import { CodexCliManagementBackend, compilerProposalPrompt } from "../src/management/codex-cli.js";
+import { compilerProposalPrompt } from "../src/management/codex-cli.js";
 import { readPinnedCompilerFacts } from "../src/repository-profiles/read.js";
 import { compilerCapabilitiesForRepository } from "../src/toolchains/compiler-capabilities.js";
 import {
   semanticPinnedFacts,
+  semanticProjectionContext,
   semanticProposal,
   semanticRequest,
 } from "./helpers/semantic-compiler.js";
@@ -39,6 +40,31 @@ afterEach(async () => {
 const allToolchainDestinations = ["files.pythonhosted.org", "pypi.org", "registry.npmjs.org"];
 
 describe("adapter-owned compiler capabilities", () => {
+  it("retains an unrelated observed generic recipe beside unsupported provider evidence", () => {
+    const fixture = (paths: string[]) =>
+      semanticPinnedFacts({
+        paths,
+        scripts: {},
+        documents: { Makefile: "test:\n\tchecker\n" },
+      });
+    const baseline = compilerCapabilitiesForRepository(
+      fixture(["Makefile", "src/app.js"]),
+      allToolchainDestinations,
+    );
+    const pinned = fixture(["Makefile", "src/app.js", "tools/check.rs"]);
+    const request = semanticRequest(pinned);
+    expect(compilerCapabilitiesForRepository(pinned, allToolchainDestinations).toolchains).toEqual(
+      baseline.toolchains,
+    );
+    expect(
+      compilerCapabilitiesForRepository(pinned, allToolchainDestinations).validationRecipes,
+    ).toContainEqual(expect.objectContaining({ command: "make test", adapterId: null }));
+    expect(request.repository.validationRecipes).toContainEqual(
+      expect.objectContaining({ command: "make test", adapterId: null }),
+    );
+    expect(validateCompilerRequest(request).status).toBe("valid");
+  });
+
   it.each([
     {
       name: "npm",
@@ -111,7 +137,7 @@ describe("adapter-owned compiler capabilities", () => {
       state: "unsupported",
       paths: ["Cargo.toml", "src/lib.rs"],
       allowed: allToolchainDestinations,
-      expected: ["unsupported"],
+      expected: ["eligible-deferred", "unsupported"],
     },
   ])("returns canonical $state repository states", ({ paths, allowed, expected }) => {
     const selected = compilerCapabilitiesForRepository(
@@ -125,16 +151,21 @@ describe("adapter-owned compiler capabilities", () => {
   });
 
   it.each([
-    ["Cargo", ["Cargo.toml", "src/lib.rs"]],
-    ["Go", ["go.mod", "main.go"]],
-    ["ambient Python", ["requirements.txt", "app.py"]],
-  ])("keeps %s outside bootstrap authority", (_name, paths) => {
+    ["Cargo", ["Cargo.toml", "src/lib.rs"], "rust-cargo"],
+    ["Go", ["go.mod", "main.go"], "go-modules"],
+    ["ambient Python", ["requirements.txt", "app.py"], "python-uv"],
+  ])("keeps %s outside bootstrap authority", (_name, paths, adapterId) => {
     const selected = compilerCapabilitiesForRepository(
       semanticPinnedFacts({ paths, scripts: {} }),
       allToolchainDestinations,
     );
     expect(selected.validationRecipes).toEqual([]);
-    expect(selected.toolchains.every((entry) => entry.state === "unsupported")).toBe(true);
+    expect(selected.toolchains).toContainEqual(
+      expect.objectContaining({ adapterId, state: "unsupported" }),
+    );
+    expect(selected.toolchains).toContainEqual(
+      expect.objectContaining({ state: "eligible-deferred" }),
+    );
   });
 
   it("does not leak unsupported commands beside an observed supported adapter", () => {
@@ -210,7 +241,7 @@ describe("strict semantic compiler contracts", () => {
 
   it("keeps strict Zod and JSON schemas in parity for valid and invalid boundaries", () => {
     const request = semanticRequest();
-    const proposal = semanticProposal(request);
+    const proposal = semanticProposal(semanticRequest());
     const invalidProposal = structuredClone(proposal) as Record<string, unknown>;
     (invalidProposal.workItems as Array<Record<string, unknown>>)[0]!.scope = ["../secret"];
     const invalidRequest = structuredClone(request) as Record<string, unknown>;
@@ -237,6 +268,57 @@ describe("strict semantic compiler contracts", () => {
     }
   });
 
+  it("keeps every validation-report and surface cross-field refinement in JSON parity", () => {
+    const request = semanticRequest();
+    const violation = (code: string) => ({
+      code,
+      itemId: null,
+      field: "/repository",
+      expected: "supported",
+      observed: "unsupported",
+    });
+    const cases: Array<{ value: typeof request; accepted: boolean }> = [];
+    const withReport = (
+      status: "valid" | "repairable" | "unsatisfiable",
+      phase: "request" | "obligations" | "proposal",
+      violations: ReturnType<typeof violation>[],
+      accepted: boolean,
+    ) => {
+      const value = structuredClone(request);
+      value.validationReport = { ...value.validationReport, status, phase, violations } as never;
+      cases.push({ value, accepted });
+    };
+    withReport("valid", "request", [], true);
+    withReport("repairable", "request", [], false);
+    withReport("valid", "request", [violation("unknown-dependency")], false);
+    withReport("repairable", "request", [violation("unknown-dependency")], true);
+    withReport("repairable", "request", [violation("unsupported-toolchain")], false);
+    withReport("unsatisfiable", "request", [violation("unsupported-toolchain")], true);
+    withReport("unsatisfiable", "proposal", [violation("unknown-dependency")], false);
+    withReport("unsatisfiable", "proposal", [violation("report-truncated")], true);
+    withReport("repairable", "proposal", [violation("report-truncated")], true);
+
+    const invalidSurface = structuredClone(request);
+    invalidSurface.repository.validationSurfaces.visual = {
+      count: 0,
+      digest: "a".repeat(64),
+      sample: ["src/visible.ts"],
+    };
+    cases.push({ value: invalidSurface, accepted: false });
+    const boundedSurface = structuredClone(request);
+    boundedSurface.repository.validationSurfaces.visual = {
+      count: 1,
+      digest: "a".repeat(64),
+      sample: ["src/visible.ts"],
+    };
+    cases.push({ value: boundedSurface, accepted: true });
+
+    for (const { value, accepted } of cases) {
+      expect(CompilerRequestSchema.safeParse(value).success).toBe(accepted);
+      expect(jsonRequest(value), JSON.stringify(jsonRequest.errors)).toBe(accepted);
+    }
+  });
+
   it.each(["LOCALHOST", "service.LocalHost", "Metadata.Google.Internal"])(
     "keeps forbidden network destination %s out of both proposal schemas",
     (destination) => {
@@ -250,26 +332,27 @@ describe("strict semantic compiler contracts", () => {
     },
   );
 
-  it("rejects an unsatisfiable request before model dispatch with stable bytes", async () => {
-    const request = semanticRequest(
-      semanticPinnedFacts({ paths: ["go.mod", "main.go"], scripts: {} }),
-      allToolchainDestinations,
-    );
+  it("keeps unrelated adapters eligible while rejecting exact unsupported scope", () => {
+    const pinned = semanticPinnedFacts({ paths: ["go.mod", "main.go"], scripts: {} });
+    const request = semanticRequest(pinned, allToolchainDestinations);
     const first = validateCompilerRequest(request);
     const second = validateCompilerRequest(structuredClone(request));
     expect(first).toEqual(second);
-    expect(first).toMatchObject({
-      phase: "request",
-      status: "unsatisfiable",
-      violations: [{ code: "unsupported-toolchain", field: "/repository" }],
+    expect(first.status).toBe("valid");
+    const proposal = semanticProposal(semanticRequest());
+    proposal.workItems[0]!.scope = ["main.go"];
+    expect(
+      parseAndValidateCompilerProposal(request, proposal, semanticProjectionContext(pinned)).report,
+    ).toMatchObject({
+      phase: "proposal",
+      status: "repairable",
+      violations: expect.arrayContaining([
+        expect.objectContaining({
+          code: "unsupported-toolchain",
+          field: "/workItems/0/scope",
+        }),
+      ]),
     });
-    const runStructured = vi.fn();
-    const backend = new CodexCliManagementBackend({ runStructured });
-    await expect(backend.proposePlan(request, async () => {})).rejects.toMatchObject({
-      name: CompilerRequestValidationError.name,
-      report: first,
-    });
-    expect(runStructured).not.toHaveBeenCalled();
   });
 
   it.each([

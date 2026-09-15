@@ -28,6 +28,7 @@ const corpusRoot = fileURLToPath(new URL("./fixtures/evaluation", import.meta.ur
 const sha = "a".repeat(40);
 const corpusRunPolicy: RunPolicy = {
   ...DEFAULT_RUN_POLICY,
+  allowedNetworkDestinations: [],
   workItemTimeoutMinutes: 5,
   capacity: {
     ...DEFAULT_RUN_POLICY.capacity!,
@@ -243,7 +244,7 @@ describe("representative executable corpus integrity, not compiler/model quality
         objectiveNumber: 17,
         baseSha,
         defaultBranch: "main",
-        allowedNetworkDestinations: [],
+        allowedNetworkDestinations: corpusRunPolicy.allowedNetworkDestinations,
         runPolicy: corpusRunPolicy,
       },
       backend,
@@ -267,7 +268,7 @@ describe("representative executable corpus integrity, not compiler/model quality
           objectiveNumber: 17,
           baseSha,
           defaultBranch: "main",
-          allowedNetworkDestinations: [],
+          allowedNetworkDestinations: corpusRunPolicy.allowedNetworkDestinations,
           runPolicy: corpusRunPolicy,
         },
         backend,

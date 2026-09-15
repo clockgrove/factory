@@ -68,7 +68,7 @@ function validDraft(): { inventory: unknown; draft: ValidatedCompilerDraft } {
     request,
     proposal,
     pinnedFacts: pinned,
-    runPolicy: DEFAULT_RUN_POLICY,
+    runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
   });
   return {
     inventory: request.inventory,

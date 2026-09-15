@@ -20,6 +20,7 @@ import {
 } from "../evaluation/compiler-draft-loop.js";
 import {
   compilerEvalDigest,
+  deriveCompilerInferenceChallenges,
   validateCompilerInferenceChallenges,
   parseObligationInventory,
   validateCompilerJudgeVerdict,
@@ -38,6 +39,7 @@ import {
 import {
   prepareCompilerRequest,
   compilerWorkItemsForEconomics,
+  MAX_COMPILER_REQUEST_BYTES,
   projectCompilerProposal,
   type CompilerProjectionTrace,
 } from "../compiler/proposal.js";
@@ -46,9 +48,24 @@ import {
   emptyCompilerValidationReport,
 } from "../compiler/violations.js";
 import { readPinnedCompilerFacts } from "../repository-profiles/index.js";
-import { inferCriterionRisk } from "../compiler/validation-design.js";
-import { readCompilerObligationEvidence } from "./codex-cli.js";
-import type { CompilationContext, ManagementBackend, ManagementUsage } from "./backend.js";
+import {
+  boundedCompilerPriorFailure,
+  compilerJudgeCandidateFromCompiled,
+  compilerJudgeSourceBytes,
+  MAX_COMPILER_JUDGE_SOURCE_BYTES,
+  type CompilerJudgeCandidate,
+} from "../compiler/judge-context.js";
+import {
+  compilerProposalPrompt,
+  MANAGEMENT_PROMPT_MAX_BYTES,
+  readCompilerObligationEvidence,
+} from "./codex-cli.js";
+import type {
+  CompilationContext,
+  CompilerInvocationProvenance,
+  ManagementBackend,
+  ManagementUsage,
+} from "./backend.js";
 
 interface PersistedProposalResult {
   request: CompilerRequest;
@@ -57,11 +74,24 @@ interface PersistedProposalResult {
   provenance: { requestDigest: string };
 }
 
-function fixedGraphResource(resource: string): string {
-  return /^[a-z0-9][a-z0-9:._/-]{0,159}$/.test(resource) &&
-    !resource.split("/").some((part) => part === "." || part === ".." || part === "")
-    ? resource
-    : `fixed-resource-${draftDigest(resource)}`;
+function durableInvocationProvenance(
+  provenance: CompilerInvocationProvenance | null | undefined,
+): CompilerInvocationProvenance | undefined {
+  if (!provenance) return undefined;
+  return {
+    promptDigest: provenance.promptDigest,
+    schemaDigest: provenance.schemaDigest,
+    baseSha: provenance.baseSha,
+    model: provenance.model,
+    reasoning: provenance.reasoning,
+  };
+}
+
+function durableInvocationProvenanceField(
+  provenance: CompilerInvocationProvenance | null | undefined,
+): { provenance?: CompilerInvocationProvenance } {
+  const durable = durableInvocationProvenance(provenance);
+  return durable ? { provenance: durable } : {};
 }
 
 function persistedProposalResult(value: unknown): PersistedProposalResult {
@@ -80,42 +110,9 @@ function persistedProposalResult(value: unknown): PersistedProposalResult {
   return { request, proposal, report, provenance: { requestDigest } };
 }
 
-function proposalFromFixedGraph(graph: CompiledObjective): CompilerProposal {
-  return CompilerProposalSchema.parse({
-    protocol: "clockgrove.factory/compiler-proposal",
-    workItems: graph.workItems.map((item) => ({
-      id: item.id,
-      title: item.title,
-      goal: item.goal,
-      obligationIds: [],
-      criteria: item.acceptance.map((text, index) => ({
-        id: `criterion-${index + 1}`,
-        text,
-        risk:
-          item.criterionRisks?.find((entry) => entry.criterion === text)?.risk ??
-          inferCriterionRisk(text),
-        validation: [{ tier: "semantic", evidence: [] }],
-      })),
-      scope: item.scope,
-      preconditions: item.preconditions,
-      outOfScope: item.outOfScope,
-      conventions: item.conventions,
-      dependsOn: item.dependsOn,
-      exclusiveResources: (item.changeSurface?.exclusiveResources ?? []).map(fixedGraphResource),
-      executionIntent: {
-        estimatedDurationMinutes: item.requirements?.estimatedDurationMinutes ?? 30,
-        additionalTools: item.requirements?.tools ?? [],
-        services: item.requirements?.services ?? [],
-        additionalNetworkDestinations: item.requirements?.networkDestinations ?? [],
-        trust: item.requirements?.trust ?? "isolated",
-      },
-    })),
-  });
-}
-
 function fixedProjectionTrace(
   graph: CompiledObjective,
-  proposal: CompilerProposal,
+  proposal: CompilerJudgeCandidate,
 ): CompilerProjectionTrace {
   return {
     protocol: "clockgrove.factory/compiler-projection",
@@ -131,7 +128,7 @@ function fixedProjectionTrace(
         operation: { ...binding.operation },
       })),
     ),
-    riskElevations: [],
+    riskElevations: { count: 0, digest: compilerEvalDigest([]) },
   };
 }
 
@@ -261,6 +258,7 @@ export async function compileEvaluatedDraft(args: {
   lease: LeaseState;
   binding: CompilerDraftBinding;
   admit: (invocationId: string) => Promise<void>;
+  abandonNotInvoked?: (invocationId: string, reason: string) => Promise<void>;
   recordUsage: (invocationId: string, stage: DraftStage, usage: ManagementUsage) => Promise<void>;
   assertInputs: () => Promise<void>;
   validate: (objective: CompiledObjective) => Promise<void>;
@@ -327,7 +325,7 @@ export async function compileEvaluatedDraft(args: {
         if (!activeInventory) throw new Error("draft validation has no obligation inventory");
         if (value && typeof value === "object" && "fixedGraph" in value) {
           const objective = parsePersistedCompiledObjective(value.fixedGraph);
-          const proposal = proposalFromFixedGraph(objective);
+          const proposal = compilerJudgeCandidateFromCompiled(objective);
           const projectionTrace = fixedProjectionTrace(objective, proposal);
           await args.validate(objective);
           return {
@@ -387,10 +385,23 @@ export async function compileEvaluatedDraft(args: {
           requestDigest: persisted.provenance.requestDigest,
         };
       },
-      reviewEvidence: (_candidate, _failure, obligations, priorReviewEvidence) => {
+      reviewEvidence: (candidate, _failure, obligations, priorReviewEvidence) => {
         const original = inventory(obligations);
-        const carried = validateCompilerInferenceChallenges(priorReviewEvidence ?? [], original);
-        return carried.length ? carried : null;
+        let proposal: PersistedProposalResult | null = null;
+        try {
+          proposal = persistedProposalResult(candidate);
+        } catch {}
+        if (!proposal || proposal.request.revision === 0) {
+          const carried = validateCompilerInferenceChallenges(priorReviewEvidence ?? [], original);
+          return carried.length ? carried : null;
+        }
+        const challenges = deriveCompilerInferenceChallenges({
+          inventory: original,
+          findings: proposal.request.semanticFindings,
+          proposal: proposal.proposal,
+          carried: proposal.request.challenges,
+        });
+        return challenges.length ? challenges : null;
       },
       accept: (value, draft, obligations, reviewEvidence) => {
         const original = inventory(obligations);
@@ -417,9 +428,10 @@ export async function compileEvaluatedDraft(args: {
       ) => {
         let dispatched = false;
         let dispatchRequested = false;
+        let journalReserved = false;
         let compilerRequestDigest: string | undefined;
         frozenContext.invocationTimeoutMs = deadlineAt - Date.now();
-        const beforeModelInvocation = async () => {
+        const beforeModelInvocation = async (expectedProvenance?: CompilerInvocationProvenance) => {
           if (dispatchRequested)
             throw new CompilerDraftAdmissionError(
               new Error("compiler backend requested duplicate admission"),
@@ -430,7 +442,11 @@ export async function compileEvaluatedDraft(args: {
             const remainingMs = deadlineAt - Date.now();
             if (remainingMs <= 0) throw new Error("compiler evaluation deadline exhausted");
             frozenContext.invocationTimeoutMs = remainingMs;
-            await reserve(compilerRequestDigest ? { compilerRequestDigest } : undefined);
+            await reserve({
+              ...(compilerRequestDigest ? { compilerRequestDigest } : {}),
+              ...(expectedProvenance ? { expectedProvenance } : {}),
+            });
+            journalReserved = true;
             await args.admit(request.invocationId);
             const dispatchTimeoutMs = deadlineAt - Date.now();
             if (dispatchTimeoutMs <= 0) throw new Error("compiler evaluation deadline exhausted");
@@ -441,6 +457,16 @@ export async function compileEvaluatedDraft(args: {
               checkpointProviderRefusal,
             };
           } catch (error) {
+            if (journalReserved && !dispatched) {
+              await args.abandonNotInvoked?.(
+                request.invocationId,
+                error instanceof Error ? error.message : String(error),
+              );
+              throw Object.assign(
+                new CompilerDraftStopError("compiler admission rejected before provider dispatch"),
+                { preProviderTerminal: true },
+              );
+            }
             throw new CompilerDraftAdmissionError(error);
           }
         };
@@ -461,16 +487,61 @@ export async function compileEvaluatedDraft(args: {
               throw new Error("inventory repair has no prior validation report");
             const result = await backend.extractObligations!(
               frozenContext,
-              async (result) => checkpoint({ value: result.inventory, usage: result.usage }),
+              async (result) =>
+                checkpoint({
+                  value: result.inventory,
+                  usage: result.usage,
+                  ...durableInvocationProvenanceField(result.provenance),
+                }),
               beforeModelInvocation,
               failure,
             );
-            return { value: result.inventory, usage: result.usage };
+            return {
+              value: result.inventory,
+              usage: result.usage,
+              ...durableInvocationProvenanceField(result.provenance),
+            };
           }
           const obligations = inventory(request.inventory);
           if (request.stage === "judge") {
             if (!request.previous || !request.projection)
               throw new Error("judge has no mechanically valid proposal and projection");
+            const challenges = validateCompilerInferenceChallenges(
+              request.reviewEvidence ?? [],
+              obligations,
+            );
+            const priorCompilationFailure = boundedCompilerPriorFailure(
+              frozenContext.priorCompilationFailure,
+            );
+            const judgeContextBytes = compilerJudgeSourceBytes({
+              originalObjective: frozenContext.objective,
+              baseSha: frozenContext.baseSha,
+              ...(priorCompilationFailure ? { priorCompilationFailure } : {}),
+              inventory: obligations,
+              challenges,
+              proposal: request.previous,
+              projectionTrace: request.projection,
+              draftDigest: request.projection.graphDigest,
+              inventoryDigest: compilerEvalDigest(obligations),
+            });
+            if (judgeContextBytes > MAX_COMPILER_JUDGE_SOURCE_BYTES) {
+              const report = createCompilerValidationReport("request", [
+                {
+                  code: "judge-context-limit",
+                  itemId: null,
+                  field: "/workItems",
+                  expected: { maximumBytes: MAX_COMPILER_JUDGE_SOURCE_BYTES },
+                  observed: judgeContextBytes,
+                },
+              ]);
+              await reserve();
+              throw Object.assign(
+                new CompilerDraftStopError(
+                  "judge-context-limit: split the Objective into smaller Objectives",
+                ),
+                { validationReport: report, preProviderTerminal: true },
+              );
+            }
             const result = await backend.judgePlan!(
               {
                 compilation: frozenContext,
@@ -478,15 +549,21 @@ export async function compileEvaluatedDraft(args: {
                 proposal: request.previous,
                 projectionTrace: request.projection,
                 graphDigest: request.projection.graphDigest,
-                challenges: validateCompilerInferenceChallenges(
-                  request.reviewEvidence ?? [],
-                  obligations,
-                ),
+                challenges,
               },
-              async (result) => checkpoint({ value: result.verdict, usage: result.usage }),
+              async (result) =>
+                checkpoint({
+                  value: result.verdict,
+                  usage: result.usage,
+                  ...durableInvocationProvenanceField(result.provenance),
+                }),
               beforeModelInvocation,
             );
-            return { value: result.verdict, usage: result.usage };
+            return {
+              value: result.verdict,
+              usage: result.usage,
+              ...durableInvocationProvenanceField(result.provenance),
+            };
           }
           const verdict = CompilerJudgeVerdictSchema.safeParse(request.failure);
           const report =
@@ -500,7 +577,8 @@ export async function compileEvaluatedDraft(args: {
             inventory: obligations,
             inventorySource: "independent-extraction",
             revision: request.revision,
-            previousProposal: request.previous,
+            previousProposal:
+              request.previous === null ? null : CompilerProposalSchema.parse(request.previous),
             validationReport: report,
             semanticFindings: verdict.success ? verdict.data.findings : [],
             challenges: validateCompilerInferenceChallenges(
@@ -509,11 +587,65 @@ export async function compileEvaluatedDraft(args: {
             ),
             pinnedFacts,
           });
-          if (prepared.report.status !== "valid")
-            throw Object.assign(new CompilerDraftStopError("compiler request is unsatisfiable"), {
-              validationReport: prepared.report,
-            });
-          compilerRequestDigest = compilerEvalDigest(prepared.request);
+          const preparedRequestDigest = compilerEvalDigest(prepared.request);
+          if (prepared.report.status !== "valid") {
+            const requestBytes = Buffer.byteLength(JSON.stringify(prepared.request));
+            const oversized = requestBytes > MAX_COMPILER_REQUEST_BYTES;
+            const terminalReport =
+              oversized &&
+              !prepared.report.violations.some(
+                (violation) => violation.code === "compiler-request-limit",
+              )
+                ? createCompilerValidationReport("request", [
+                    ...prepared.report.violations,
+                    {
+                      code: "compiler-request-limit",
+                      itemId: null,
+                      field: "",
+                      expected: { maximumBytes: MAX_COMPILER_REQUEST_BYTES },
+                      observed: requestBytes,
+                    },
+                  ])
+                : prepared.report;
+            // Persist the exact locally rejected request and typed report without
+            // crossing the provider admission boundary. This makes terminal
+            // request-envelope failures replayable without inventing model usage.
+            await reserve({ compilerRequestDigest: preparedRequestDigest });
+            throw Object.assign(
+              new CompilerDraftStopError(
+                oversized
+                  ? "compiler-request-limit: split the Objective into smaller Objectives"
+                  : "compiler request is unsatisfiable",
+              ),
+              { validationReport: terminalReport, preProviderTerminal: true },
+            );
+          }
+          compilerRequestDigest = preparedRequestDigest;
+          try {
+            // This is the authoritative composite envelope: instructions,
+            // immutable legacy constraints, and the exact request together.
+            compilerProposalPrompt(prepared.request, frozenContext.legacyGraphConstraints);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const observed = /^compiler prompt is (\d+) bytes; maximum is \d+$/.exec(message)?.[1];
+            if (!observed) throw error;
+            const promptReport = createCompilerValidationReport("request", [
+              {
+                code: "compiler-prompt-limit",
+                itemId: null,
+                field: "/workItems",
+                expected: { maximumBytes: MANAGEMENT_PROMPT_MAX_BYTES },
+                observed: Number(observed),
+              },
+            ]);
+            await reserve({ compilerRequestDigest: preparedRequestDigest });
+            throw Object.assign(
+              new CompilerDraftStopError(
+                "compiler-prompt-limit: split or repair the adopted Objective",
+              ),
+              { validationReport: promptReport, preProviderTerminal: true },
+            );
+          }
           const result = await backend.proposePlan(
             prepared.request,
             async (result) =>
@@ -525,10 +657,11 @@ export async function compileEvaluatedDraft(args: {
                   provenance: result.provenance,
                 },
                 usage: result.usage,
+                ...durableInvocationProvenanceField(result.provenance),
               }),
+            { pinnedFacts, runPolicy: frozenContext.runPolicy },
             beforeModelInvocation,
             frozenContext,
-            { pinnedFacts, runPolicy: frozenContext.runPolicy },
           );
           return {
             value: {
@@ -538,8 +671,10 @@ export async function compileEvaluatedDraft(args: {
               provenance: result.provenance,
             },
             usage: result.usage,
+            ...durableInvocationProvenanceField(result.provenance),
           };
         } catch (error) {
+          if (error instanceof CompilerDraftStopError) throw error;
           if (!dispatched && !(error instanceof CompilerDraftAdmissionError))
             throw new CompilerDraftAdmissionError(error);
           throw error;

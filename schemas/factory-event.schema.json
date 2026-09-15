@@ -500,7 +500,7 @@
     "usageId": { "type": "string", "minLength": 1, "maxLength": 300 },
     "modelInvocationId": {
       "$ref": "#/definitions/safeId",
-      "description": "Dispatch/actual-usage linkage. Exact marker usageId equality and authenticated closure identity are additionally checked by the runtime."
+      "description": "Dispatch/terminal linkage. Exact marker, actual-usage, and no-dispatch abandonment identities are additionally checked by the runtime."
     },
     "provider": { "$ref": "#/definitions/safeId" },
     "providerMessage": { "type": "string", "minLength": 1, "maxLength": 320 },
@@ -523,7 +523,7 @@
         "required": ["usageId", "phase", "unit", "amount"],
         "properties": {
           "kind": { "const": "budget" },
-          "event": { "enum": ["BudgetReserved", "BudgetReconciled"] },
+          "event": { "enum": ["BudgetReserved", "BudgetReconciled", "BudgetAbandoned"] },
           "unit": { "const": "model_tokens" },
           "phase": { "enum": ["management", "execution"] }
         },
@@ -551,6 +551,20 @@
               }
             },
             "else": { "properties": { "usageId": { "not": { "pattern": "^invocation-" } } } }
+          },
+          {
+            "if": { "properties": { "event": { "const": "BudgetAbandoned" } } },
+            "then": {
+              "required": ["reason"],
+              "properties": {
+                "amount": { "const": 0 },
+                "usageId": { "pattern": "^abandoned-" },
+                "reason": { "type": "string", "minLength": 1 }
+              },
+              "not": {
+                "anyOf": [{ "required": ["reportedModelUsage"] }, { "required": ["usageEvidence"] }]
+              }
+            }
           }
         ]
       }

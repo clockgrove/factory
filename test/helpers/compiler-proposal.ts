@@ -20,7 +20,10 @@ import { parseAndValidateCompilerProposal } from "../../src/compiler/proposal.js
 import { compiledGraphDigest } from "../../src/graph.js";
 import type { ValidatedCompilerDraft } from "../../src/evaluation/compiler-draft-loop.js";
 
-export function pinFixtureRepository(repository: string): string {
+export function pinFixtureRepository(
+  repository: string,
+  options: { commitDate?: string } = {},
+): string {
   execFileSync("git", ["init", "-q"], { cwd: repository });
   execFileSync("git", ["add", "-A"], { cwd: repository });
   execFileSync(
@@ -34,7 +37,15 @@ export function pinFixtureRepository(repository: string): string {
       "-qm",
       "fixture",
     ],
-    { cwd: repository },
+    {
+      cwd: repository,
+      env: {
+        ...process.env,
+        ...(options.commitDate
+          ? { GIT_AUTHOR_DATE: options.commitDate, GIT_COMMITTER_DATE: options.commitDate }
+          : {}),
+      },
+    },
   );
   return execFileSync("git", ["rev-parse", "HEAD"], {
     cwd: repository,
@@ -205,7 +216,7 @@ export function validatedDraftFromCompiledFixture(
       graphDigest: compiledGraphDigest(objective),
       addedEdges: [],
       adapterBindings: [],
-      riskElevations: [],
+      riskElevations: { count: 0, digest: compilerEvalDigest([]) },
     },
     report: emptyCompilerValidationReport(),
     requestDigest: compilerEvalDigest(request),
@@ -215,7 +226,7 @@ export function validatedDraftFromCompiledFixture(
 export function adaptFixtureCompiler(
   compile: LegacyFixtureCompiler,
 ): ManagementBackend["proposePlan"] {
-  return async (request, checkpoint, _admission, execution) => {
+  return async (request, checkpoint, _projection, _admission, execution) => {
     if (!execution) throw new Error("fixture compiler requires execution context");
     const compiled = await compile(execution, async () => {}, _admission);
     const result = proposalResultFromCompiledFixture(request, compiled.objective, compiled.usage);

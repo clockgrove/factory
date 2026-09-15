@@ -5269,6 +5269,8 @@ export class FactorySupervisor {
                       this.#externalAdmission(async () => {
                         await this.#admitModelInvocation(id, snapshot.id);
                       }),
+                    abandonNotInvoked: (id, reason) =>
+                      this.#abandonManagementInvocation(id, snapshot.id, reason),
                     recordUsage: (id, _stage, usage) =>
                       this.#recordManagementUsage(id, usage, snapshot.id, undefined, `draft-${id}`),
                     assertInputs,
@@ -10336,6 +10338,72 @@ export class FactorySupervisor {
       this.#sequences.observe(snapshotEvents(snapshot));
       this.#budgetEvents.push(...recovered);
     }
+  }
+
+  /** Close an admitted intent only while the caller still proves the provider boundary was not crossed. */
+  async #abandonManagementInvocation(
+    invocationId: string,
+    objectiveNodeId: string,
+    _reason: string,
+  ): Promise<void> {
+    const marker = this.#budgetEvents.find(
+      (event) =>
+        isModelInvocationMarker(event) &&
+        event.runId === this.#run.runId &&
+        event.phase === "management" &&
+        event.modelInvocationId === invocationId &&
+        event.workItem === undefined &&
+        event.attempt === undefined,
+    );
+    // Admission can reject before it writes a marker; there is then nothing to abandon.
+    if (!marker) return;
+    const matches = (events: readonly FactoryEvent[]) =>
+      events.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.event === "BudgetAbandoned" &&
+          event.runId === this.#run.runId &&
+          event.phase === "management" &&
+          event.modelInvocationId === invocationId &&
+          event.workItem === undefined &&
+          event.attempt === undefined,
+      );
+    const existing = matches(this.#budgetEvents);
+    if (existing.length > 1) throw new Error("model dispatch abandonment is duplicated");
+    if (existing.length === 0) {
+      try {
+        const event = await this.#lease.use((lease) =>
+          this.#recorder.objectiveBudget({
+            lease,
+            objectiveNodeId,
+            sequence: this.#sequences.take(),
+            event: "BudgetAbandoned",
+            unit: "model_tokens",
+            amount: 0,
+            usageId: `abandoned-${invocationId}`,
+            modelInvocationId: invocationId,
+            directorEpoch: Number(marker.directorEpoch),
+            policyDigest: String(marker.policyDigest),
+            reason: "provider boundary was not crossed after local admission rejection",
+          }),
+        );
+        this.#budgetEvents.push(event);
+      } catch (error) {
+        const snapshot = await this.#reader.readObjective(this.#run.objective);
+        this.#fenceSnapshot(snapshot);
+        const recovered = matches(snapshotEvents(snapshot));
+        if (recovered.length !== 1) throw error;
+        this.#sequences.observe(snapshotEvents(snapshot));
+        this.#budgetEvents.push(...recovered);
+      }
+    }
+    const key = modelInvocationKey({
+      objective: this.#run.objective,
+      runId: this.#run.runId,
+      phase: "management",
+      modelInvocationId: invocationId,
+    });
+    if (this.#modelInvocations.active.has(key)) this.#modelInvocations.retire(key);
   }
 
   async #recordProviderQuotaGate(

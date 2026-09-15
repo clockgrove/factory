@@ -117,9 +117,29 @@ export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule
     "worker-packet-limit",
     "A projected Worker Packet exceeds its persisted byte bound.",
   ),
+  "issue-body-limit": rule(
+    "issue-body-limit",
+    "A projected Work Item issue body exceeds the GitHub byte policy.",
+  ),
   "compiled-graph-limit": rule(
     "compiled-graph-limit",
     "The projected compiled graph exceeds its persisted byte bound.",
+  ),
+  "projection-blocked": rule(
+    "projection-blocked",
+    "A graph defect blocks dependent projection-envelope checks.",
+  ),
+  "compiler-request-limit": rule(
+    "compiler-request-limit",
+    "The complete compiler request exceeds its model transport bound.",
+  ),
+  "compiler-prompt-limit": rule(
+    "compiler-prompt-limit",
+    "The complete provider prompt envelope exceeds its transport bound.",
+  ),
+  "judge-context-limit": rule(
+    "judge-context-limit",
+    "The projected judge context exceeds its model transport bound.",
   ),
   "denied-network-destination": rule(
     "denied-network-destination",

@@ -30,7 +30,12 @@ import {
   materializePinnedCompilationTree,
   sealPinnedCompilationTreeProof,
 } from "../src/execution/pinned-compilation-tree.js";
-import { semanticProposal, semanticRequest } from "./helpers/semantic-compiler.js";
+import {
+  semanticPinnedFacts,
+  semanticProjectionContext,
+  semanticProposal,
+  semanticRequest,
+} from "./helpers/semantic-compiler.js";
 
 const roots: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -81,7 +86,13 @@ async function proposeWithTranscript(
     runPolicy: DEFAULT_RUN_POLICY,
   };
   try {
-    return await backend.proposePlan(request, checkpoint, undefined, execution);
+    return await backend.proposePlan(
+      request,
+      checkpoint,
+      semanticProjectionContext(semanticPinnedFacts({ baseSha: request.baseSha })),
+      undefined,
+      execution,
+    );
   } finally {
     await pinned?.dispose();
   }

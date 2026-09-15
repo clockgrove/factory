@@ -25,6 +25,13 @@ import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
 import { proposalResultFromCompiledFixture } from "./helpers/compiler-proposal.js";
 
 const usage = { inputTokens: 20, outputTokens: 10, cachedInputTokens: 4 };
+const invocationProvenance = (baseSha: string) => ({
+  promptDigest: "a".repeat(64),
+  schemaDigest: "b".repeat(64),
+  baseSha,
+  model: null,
+  reasoning: null,
+});
 type Fixture = Awaited<ReturnType<typeof providerSupervisorFixture>>;
 function freshObjective(f: Fixture) {
   for (const ref of [...f.refs.keys()])
@@ -54,11 +61,17 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
         },
       ],
     };
-    const result = { inventory, usage };
+    const result = { inventory, provenance: invocationProvenance(context.baseSha), usage };
     await checkpoint(result);
     return result;
   };
-  f.management.proposePlan = async (request, checkpoint, beforeModelInvocation, execution) => {
+  f.management.proposePlan = async (
+    request,
+    checkpoint,
+    _projection,
+    beforeModelInvocation,
+    execution,
+  ) => {
     await beforeModelInvocation?.();
     calls.push("compile");
     if (!execution) throw new Error("fixture requires compilation context");
@@ -144,7 +157,14 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
         reason: "Fixture evidence",
         evidenceIds: ["objective"],
       })),
-      dependencies: [],
+      dependencies: [
+        {
+          itemId: "answer",
+          dependsOn: [],
+          reason: "No prerequisite items",
+          evidenceIds: ["objective"],
+        },
+      ],
       findings:
         decision === "accept"
           ? []
@@ -165,7 +185,11 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
       uncertainty: [],
       decision,
     };
-    const result = { verdict, usage };
+    const result = {
+      verdict,
+      provenance: invocationProvenance(context.compilation.baseSha),
+      usage,
+    };
     await checkpoint(result);
     return result;
   };
@@ -489,10 +513,17 @@ describe("Supervisor compiler evaluation activation boundary", () => {
           f.management.proposePlan = async (
             request,
             checkpoint,
+            projection,
             beforeModelInvocation,
             execution,
           ) => {
-            const result = await proposePlan(request, checkpoint, beforeModelInvocation, execution);
+            const result = await proposePlan(
+              request,
+              checkpoint,
+              projection,
+              beforeModelInvocation,
+              execution,
+            );
             changeObjective();
             return result;
           };

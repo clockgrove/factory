@@ -4,11 +4,17 @@ import { compilerEvalDigest } from "../../src/evaluation/compiler-eval.js";
 import { normalizeRepositoryFacts } from "../../src/repository-profiles/index.js";
 import type { PinnedLfsFacts } from "../../src/repository-profiles/git-lfs.js";
 import type { PinnedRepositoryFacts } from "../../src/repository-profiles/read.js";
+import { DEFAULT_RUN_POLICY, type RunPolicy } from "../../src/protocol/policy.js";
+import {
+  summarizeCompilerValidationSurfaces,
+  type CompilerProjectionContext,
+} from "../../src/compiler/proposal.js";
 import { compilerCapabilitiesForRepository } from "../../src/toolchains/compiler-capabilities.js";
 
 export const semanticBaseSha = "a".repeat(40);
 
 export function semanticPinnedFacts(input?: {
+  baseSha?: string;
   paths?: string[];
   scripts?: Record<string, string>;
   documents?: Record<string, string>;
@@ -33,8 +39,23 @@ export function semanticPinnedFacts(input?: {
     )
     .sort();
   const relevantPaths = [...paths].sort();
-  const unsigned = { baseSha: semanticBaseSha, repository, manifests, relevantPaths };
+  const unsigned = {
+    baseSha: input?.baseSha ?? semanticBaseSha,
+    repository,
+    manifests,
+    relevantPaths,
+  };
   return { ...unsigned, digest: compilerEvalDigest(unsigned) };
+}
+
+export function semanticProjectionContext(
+  pinnedFacts = semanticPinnedFacts(),
+  runPolicy: RunPolicy = {
+    ...DEFAULT_RUN_POLICY,
+    allowedNetworkDestinations: [],
+  },
+): CompilerProjectionContext {
+  return { pinnedFacts, runPolicy };
 }
 
 export function semanticRequest(
@@ -48,11 +69,11 @@ export function semanticRequest(
     protocol: "clockgrove.factory/compiler-request",
     revision: 0,
     objective: { ...objective, digest: objectiveDigest },
-    baseSha: semanticBaseSha,
+    baseSha: pinned.baseSha,
     inventory: {
       version: 1,
       objectiveDigest,
-      baseSha: semanticBaseSha,
+      baseSha: pinned.baseSha,
       evidence: [
         {
           id: "objective",
@@ -77,21 +98,7 @@ export function semanticRequest(
       requiredTools: [...new Set(pinned.repository.lfs?.requiredTools ?? [])].sort(),
       validationRecipes: capabilities.validationRecipes,
       toolchains: capabilities.toolchains,
-      validationSurfaces: {
-        deterministicSimulation: pinned.relevantPaths.filter((path) =>
-          /(?:simulation|simulator|replay|seed)/.test(path.toLowerCase()),
-        ),
-        visual: pinned.relevantPaths.filter(
-          (path) =>
-            /(?:screenshot|snapshot|visual|storybook)/.test(path.toLowerCase()) ||
-            /\.(?:png|jpe?g|webp)$/i.test(path),
-        ),
-        python: pinned.relevantPaths.filter(
-          (path) => path === "pyproject.toml" || path.endsWith(".py"),
-        ),
-        rust: pinned.relevantPaths.filter((path) => path === "Cargo.toml" || path.endsWith(".rs")),
-        go: pinned.relevantPaths.filter((path) => path === "go.mod" || path.endsWith(".go")),
-      },
+      validationSurfaces: summarizeCompilerValidationSurfaces(pinned.relevantPaths),
       pathCount: pinned.relevantPaths.length,
     },
     constraints: {

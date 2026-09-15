@@ -4,6 +4,8 @@ export const PROTOCOL_V2 = "clockgrove.factory/v2" as const;
 export const MAX_PERSISTED_EVENT_BYTES = 64 * 1024;
 export const MAX_WORKER_PACKET_BYTES = 128 * 1024;
 export const MAX_LOG_BYTES = 64 * 1024;
+/** Conservative raw UTF-8 bound shared by GitHub issue/comment text surfaces. */
+export const MAX_GITHUB_TEXT_BYTES = 60_000;
 
 export const boundedText = (max: number) => z.string().min(1).max(max);
 export const safeId = boundedText(160).regex(/^[A-Za-z0-9._:/+-]+$/);
@@ -21,6 +23,15 @@ const SECRET_PATTERNS: Array<[string, RegExp]> = [
 
 export function byteLength(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+export function utf8ByteLength(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
+export function assertUtf8WithinBytes(value: string, limit: number, label: string): void {
+  const size = utf8ByteLength(value);
+  if (size > limit) throw new Error(`${label} is ${size} bytes; maximum is ${limit}`);
 }
 
 export function assertWithinBytes(value: unknown, limit: number, label: string): void {

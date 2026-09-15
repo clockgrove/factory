@@ -46,15 +46,15 @@ function acceptedVerdict(
       reason: "Assessed against the Objective and semantic proposal.",
       evidenceIds: ["objective"],
     })),
-    dependencies: [
-      ...proposal.workItems.flatMap((item) =>
-        item.dependsOn.map((dependsOn) => ({ itemId: item.id, dependsOn })),
-      ),
-      ...edges,
-    ].map((edge) => ({
-      itemId: edge.itemId,
-      dependsOn: edge.dependsOn,
-      reason: "The dependency preserves authored or deterministic serialization intent.",
+    dependencies: proposal.workItems.map((item) => ({
+      itemId: item.id,
+      dependsOn: [
+        ...new Set([
+          ...item.dependsOn,
+          ...edges.filter((edge) => edge.itemId === item.id).map((edge) => edge.dependsOn),
+        ]),
+      ],
+      reason: "The dependency set preserves authored and deterministic serialization intent.",
       evidenceIds: ["objective"],
     })),
     findings: [],
@@ -76,7 +76,7 @@ describe("independent semantic compiler judgment", () => {
       request,
       proposal,
       pinnedFacts: pinned,
-      runPolicy: DEFAULT_RUN_POLICY,
+      runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
     });
     const verdict = acceptedVerdict(
       request,
@@ -112,7 +112,7 @@ describe("independent semantic compiler judgment", () => {
       request,
       proposal,
       pinnedFacts: pinned,
-      runPolicy: DEFAULT_RUN_POLICY,
+      runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
     });
     const digest = compiledGraphDigest(projection.objective);
     const missing = acceptedVerdict(request, proposal, digest);

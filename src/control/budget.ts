@@ -43,7 +43,7 @@ export function isModelInvocationMarker(
   );
 }
 
-/** Unknown consumption is not zero. Only the exact actual-usage link closes intent. */
+/** Unknown consumption is not zero. Exact usage or a bound no-dispatch abandonment closes intent. */
 export function unresolvedModelInvocations(
   events: FactoryEvent[],
   runId?: string,
@@ -62,11 +62,15 @@ export function unresolvedModelInvocations(
       )
         throw new Error("model invocation has conflicting dispatch bindings");
       if (!prior || event.sequence < prior.sequence) markers.set(key, event);
-    } else if (event.event === "BudgetReconciled" && event.unit === "model_tokens") {
+    } else if (
+      (event.event === "BudgetReconciled" || event.event === "BudgetAbandoned") &&
+      event.unit === "model_tokens"
+    ) {
       const prior = closures.get(key);
       if (
         prior &&
-        (prior.amount !== event.amount ||
+        (prior.event !== event.event ||
+          prior.amount !== event.amount ||
           prior.usageId !== event.usageId ||
           prior.policyDigest !== event.policyDigest ||
           prior.directorEpoch !== event.directorEpoch)
@@ -131,7 +135,12 @@ export function deriveBudgetUsage(events: FactoryEvent[]): BudgetUsage {
   for (const event of deduplicateFactoryEvents(events).sort(
     (left, right) => left.sequence - right.sequence,
   )) {
-    if (event.kind !== "budget" || isModelInvocationMarker(event)) continue;
+    if (
+      event.kind !== "budget" ||
+      isModelInvocationMarker(event) ||
+      event.event === "BudgetAbandoned"
+    )
+      continue;
     const key = `${event.runId}:${event.workItem}:${event.attempt}:${event.phase}:${event.unit}:${event.usageId ?? "default"}`;
     const entry = ledger.get(key) ?? { reserved: 0, event };
     if (event.event === "BudgetReserved") entry.reserved += event.amount;
@@ -174,7 +183,7 @@ export function unreconciledBudgetReservations(
     if (event.event === "BudgetReserved") {
       const prior = ledger.get(key);
       ledger.set(key, { reserved: event, reconciled: prior?.reconciled ?? false });
-    } else {
+    } else if (event.event === "BudgetReconciled" || event.event === "BudgetAbandoned") {
       const prior = ledger.get(key);
       if (prior) prior.reconciled = true;
     }

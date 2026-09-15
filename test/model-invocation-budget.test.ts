@@ -26,7 +26,7 @@ const policy = parseRunPolicy({
 });
 
 function budget(
-  event: "BudgetReserved" | "BudgetReconciled",
+  event: "BudgetReserved" | "BudgetReconciled" | "BudgetAbandoned",
   overrides: Record<string, unknown> = {},
 ): BudgetEvent {
   const parsed = parseFactoryEvent({
@@ -96,6 +96,20 @@ describe("durable model dispatch intent", () => {
     expect(() => assertModelInvocationAdmission([marker], DEFAULT_RUN_POLICY)).toThrow(
       /consumption is unknown/,
     );
+  });
+
+  it("closes an exact no-dispatch marker without inventing token usage", () => {
+    const marker = budget("BudgetReserved");
+    const abandoned = budget("BudgetAbandoned", {
+      amount: 0,
+      usageId: `abandoned-${invocation}`,
+      reason: "provider boundary was not crossed",
+    });
+
+    expect(unresolvedModelInvocations([marker, abandoned])).toEqual([]);
+    expect(unreconciledBudgetReservations([marker, abandoned])).toEqual([]);
+    expect(deriveBudgetUsage([marker, abandoned]).modelTokens).toBe(0);
+    expect(() => assertModelInvocationAdmission([marker, abandoned], policy)).not.toThrow();
   });
 
   it.each([

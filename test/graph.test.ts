@@ -10,7 +10,9 @@ import {
   parseGraphItemMetadata,
   parseLegacyGraphConstraints,
   parseLegacyGraphConstraintsSnapshot,
+  parsePersistedCompiledObjective,
   renderLegacyWorkItemCore,
+  renderCompiledGraphWorkItems,
   renderWorkPacket,
   validateGraph,
   type CompiledObjective,
@@ -126,6 +128,60 @@ function rateLimitError(): unknown {
 }
 
 describe("validateGraph", () => {
+  it("applies the in-place 100-item cutover to persisted graphs without a legacy reader", () => {
+    const oversized = objective(
+      Array.from({ length: 101 }, (_, index) => ({
+        ...workItem({ id: `item-${index + 1}`, scope: [`src/item-${index + 1}.ts`] }),
+        baseSha: "a".repeat(40),
+        validationCommands: ["npm test"],
+        requirements: {
+          os: [],
+          architecture: [],
+          tools: ["node"],
+          services: [],
+          networkDestinations: [],
+          permittedSecretNames: [],
+          trust: "trusted_local" as const,
+        },
+        artifactContract: "clockgrove.factory/artifact-v1" as const,
+      })),
+    );
+
+    expect(() => parsePersistedCompiledObjective(oversized)).toThrow(/100/);
+  });
+
+  it("rejects a persisted multibyte issue body above 60,000 UTF-8 bytes at the in-place cutover", () => {
+    const persisted = objective([
+      {
+        ...workItem({
+          id: "multibyte-body",
+          preconditions: Array.from({ length: 16 }, () => "😀".repeat(1_000)),
+        }),
+        baseSha: "a".repeat(40),
+        validationCommands: ["npm test"],
+        requirements: {
+          os: [],
+          architecture: [],
+          tools: ["node"],
+          services: [],
+          networkDestinations: [],
+          permittedSecretNames: [],
+          trust: "trusted_local" as const,
+        },
+        artifactContract: "clockgrove.factory/artifact-v1" as const,
+      },
+    ]);
+    const rendered = renderCompiledGraphWorkItems(persisted)[0]!;
+    expect(rendered.bytes).toBeGreaterThan(60_000);
+    expect(
+      Buffer.byteLength(persisted.workItems[0]!.preconditions.join(""), "utf8"),
+    ).toBeGreaterThan(persisted.workItems[0]!.preconditions.join("").length);
+
+    expect(() => parsePersistedCompiledObjective(persisted)).toThrow(
+      `Work Item multibyte-body issue body is ${rendered.bytes} bytes; maximum is 60000`,
+    );
+  });
+
   it("accepts a graph of independent Work Items", () => {
     expect(() =>
       validateGraph(
@@ -724,6 +780,29 @@ describe("GraphApplier.apply", () => {
     await expect(
       applier.apply(objective([workItem({ id: "a", dependsOn: ["ghost"] })]), ctx),
     ).rejects.toThrow(/unknown id/i);
+    expect(writer.calls).toEqual([]);
+  });
+
+  it("preflights a 284 KB Work Item body before the first graph write", async () => {
+    const dense = (label: string) =>
+      Array.from({ length: 50 }, (_, index) => `${label}-${index}-${"x".repeat(1_890)}`);
+    const graph = objective([
+      workItem({
+        id: "oversized-body",
+        preconditions: dense("precondition"),
+        outOfScope: dense("out-of-scope"),
+        conventions: dense("convention"),
+      }),
+    ]);
+    expect(renderCompiledGraphWorkItems(graph)[0]!.bytes).toBeGreaterThan(284_000);
+    const writer = new FakeGraphWriter();
+
+    await expect(
+      new GraphApplier({ writer, mutationScheduler: fixedClockMutationScheduler() }).apply(
+        graph,
+        ctx,
+      ),
+    ).rejects.toThrow(/issue body is \d+ bytes; maximum is 60000/);
     expect(writer.calls).toEqual([]);
   });
 

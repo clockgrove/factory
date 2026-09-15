@@ -58,7 +58,12 @@ import {
   type RepositoryCapabilityBindings,
   type WorkerPacket,
 } from "./protocol/worker-packet.js";
-import { assertWithinBytes } from "./protocol/limits.js";
+import {
+  assertUtf8WithinBytes,
+  assertWithinBytes,
+  MAX_GITHUB_TEXT_BYTES,
+  utf8ByteLength,
+} from "./protocol/limits.js";
 import { validateCapabilityGraphBindings } from "./repository-capabilities/model.js";
 import {
   DEFERRED_CAPABILITY_ADAPTERS,
@@ -487,6 +492,7 @@ const PersistedCompiledObjectiveSchema = z
 export function parsePersistedCompiledObjective(input: unknown): CompiledObjective {
   const objective = PersistedCompiledObjectiveSchema.parse(input);
   validateGraphShape(objective, true);
+  validateGraphIssueBodies(objective);
   return objective;
 }
 
@@ -586,6 +592,7 @@ function validateGraphShape(
 
 export function validateGraph(objective: CompiledObjective): void {
   validateGraphShape(objective, false);
+  validateGraphIssueBodies(objective);
 }
 
 const WORKER_PACKET_MARKER = "clockgrove-factory:worker-packet";
@@ -660,9 +667,23 @@ export function compiledGraphDigest(objective: CompiledObjective): string {
   return createHash("sha256").update(canonical(objective)).digest("hex");
 }
 
+/** Exact graph digest for diagnostics after an independent projection violation is known. */
+export function compiledGraphDigestForDiagnostics(objective: CompiledObjective): string {
+  return createHash("sha256").update(canonical(objective)).digest("hex");
+}
+
 export function encodeGraphItemMetadata(metadata: GraphItemMetadata): string {
   const value = GraphItemMetadataSchema.parse(metadata);
   return `<!-- ${GRAPH_ITEM_MARKER} ${Buffer.from(JSON.stringify(value), "utf8").toString("base64url")} -->`;
+}
+
+/** Exact diagnostic rendering for metadata that the publication schema rejects. */
+export function renderWorkPacketWithRawGraphMetadataForDiagnostics(
+  wi: CompiledWorkItem,
+  metadata: GraphItemMetadata,
+): string {
+  const encoded = `<!-- ${GRAPH_ITEM_MARKER} ${Buffer.from(JSON.stringify(metadata), "utf8").toString("base64url")} -->`;
+  return [renderWorkPacket(wi), encoded].filter(Boolean).join("\n\n");
 }
 
 export function parseGraphItemMetadata(body: string): GraphItemMetadata {
@@ -793,6 +814,47 @@ export function renderWorkPacket(wi: CompiledWorkItem, graphMetadata?: GraphItem
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+export interface RenderedGraphWorkItem {
+  item: CompiledWorkItem;
+  metadata: GraphItemMetadata;
+  body: string;
+  bytes: number;
+}
+
+/** Render and validate the exact final GitHub issue bodies for a complete graph. */
+export function renderCompiledGraphWorkItems(
+  objective: CompiledObjective,
+): RenderedGraphWorkItem[] {
+  validateGraphShape(objective, true);
+  const graphDigest = compiledGraphDigest(objective);
+  return objective.workItems.map((item, index) => {
+    const metadata: GraphItemMetadata = {
+      protocol: "clockgrove.factory/graph-v1",
+      id: item.id,
+      graphDigest,
+      graphSize: objective.workItems.length,
+      index,
+      dependsOn: item.dependsOn,
+      ...(objective.deferredCapabilityAdapters === undefined
+        ? {}
+        : { deferredCapabilityAdapters: objective.deferredCapabilityAdapters }),
+    };
+    const body = renderWorkPacket(item, metadata);
+    return { item, metadata, body, bytes: utf8ByteLength(body) };
+  });
+}
+
+export function validateGraphIssueBodies(objective: CompiledObjective): RenderedGraphWorkItem[] {
+  const renderedItems = renderCompiledGraphWorkItems(objective);
+  for (const rendered of renderedItems)
+    assertUtf8WithinBytes(
+      rendered.body,
+      MAX_GITHUB_TEXT_BYTES,
+      `Work Item ${rendered.item.id} issue body`,
+    );
+  return renderedItems;
 }
 
 /**
@@ -1024,8 +1086,10 @@ export class GraphApplier {
   ): Promise<Map<string, CreatedWorkItem>> {
     if (ctx.allowAuthenticatedLegacyOmissions || ctx.legacyGraphConstraints)
       validateGraphShape(objective, true);
-    else validateGraph(objective);
-    const digest = compiledGraphDigest(objective);
+    else validateGraphShape(objective, false);
+    // Render every exact final issue body before the first create/update/edge mutation.
+    const renderedItems = validateGraphIssueBodies(objective);
+    const renderedById = new Map(renderedItems.map((entry) => [entry.item.id, entry]));
 
     const created = new Map<string, CreatedWorkItem>();
     const observedDependencies = new Map<string, Set<number>>();
@@ -1088,24 +1152,15 @@ export class GraphApplier {
         );
       }
     }
-    for (const [index, wi] of objective.workItems.entries()) {
+    for (const wi of objective.workItems) {
       if (created.has(wi.id)) continue;
+      const rendered = renderedById.get(wi.id)!;
       const issue = await this.#call(() =>
         this.#writer.createWorkItemIssue({
           repositoryId: ctx.repositoryId,
           parentIssueId: ctx.objectiveIssueId,
           title: wi.title,
-          body: renderWorkPacket(wi, {
-            protocol: "clockgrove.factory/graph-v1",
-            id: wi.id,
-            graphDigest: digest,
-            graphSize: objective.workItems.length,
-            index,
-            dependsOn: wi.dependsOn,
-            ...(objective.deferredCapabilityAdapters === undefined
-              ? {}
-              : { deferredCapabilityAdapters: objective.deferredCapabilityAdapters }),
-          }),
+          body: rendered.body,
           ...(ctx.workItemLabelId ? { labelIds: [ctx.workItemLabelId] } : {}),
         }),
       );
@@ -1116,24 +1171,15 @@ export class GraphApplier {
     // A lost response is replayable because the authenticated envelope makes the
     // completed update observable while the remaining legacy bodies retain the
     // same immutable constraint digest.
-    for (const [index, wi] of objective.workItems.entries()) {
+    for (const wi of objective.workItems) {
       const legacy = legacyById.get(wi.id);
       if (!legacy || (ctx.existingWorkItems ?? []).some((item) => item.compilerId === wi.id))
         continue;
+      const rendered = renderedById.get(wi.id)!;
       await this.#call(() =>
         this.#writer.updateWorkItemIssue({
           issueId: legacy.issueNodeId,
-          body: renderWorkPacket(wi, {
-            protocol: "clockgrove.factory/graph-v1",
-            id: wi.id,
-            graphDigest: digest,
-            graphSize: objective.workItems.length,
-            index,
-            dependsOn: wi.dependsOn,
-            ...(objective.deferredCapabilityAdapters === undefined
-              ? {}
-              : { deferredCapabilityAdapters: objective.deferredCapabilityAdapters }),
-          }),
+          body: rendered.body,
         }),
       );
     }

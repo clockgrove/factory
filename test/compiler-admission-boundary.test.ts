@@ -14,7 +14,7 @@ import {
   type CompilerJudgeVerdict,
   type ObligationInventory,
 } from "../src/evaluation/compiler-eval.js";
-import type { CompilationContext } from "../src/management/backend.js";
+import { ManagementCleanupError, type CompilationContext } from "../src/management/backend.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import type {
   CompilerDraftBinding,
@@ -24,7 +24,7 @@ import type {
 import type { LeaseState } from "../src/control/lease.js";
 import { ProviderQuotaError } from "../src/providers/quota.js";
 import { pinFixtureRepository, proposalFromCompiledFixture } from "./helpers/compiler-proposal.js";
-import { semanticRequest } from "./helpers/semantic-compiler.js";
+import { semanticProjectionContext, semanticRequest } from "./helpers/semantic-compiler.js";
 import { createCompilerValidationReport } from "../src/compiler/violations.js";
 import {
   materializePinnedCompilationTree,
@@ -53,6 +53,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await Promise.all(disposePinnedTrees.splice(0).map((dispose) => dispose()));
   await Promise.all(
     directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
@@ -84,7 +85,11 @@ async function fixture() {
     repositoryFiles: tree.files,
     pinnedCompilationTree: tree.proof,
     allowedNetworkDestinations: [],
-    runPolicy: { ...DEFAULT_RUN_POLICY, compilerEvaluation: { mode: "report-only" } },
+    runPolicy: {
+      ...DEFAULT_RUN_POLICY,
+      allowedNetworkDestinations: [],
+      compilerEvaluation: { mode: "report-only" },
+    },
   };
   context.repositoryEvidence = compilerObligationEvidence(context);
   const graph = parsePersistedCompiledObjective({
@@ -103,7 +108,7 @@ async function fixture() {
     graphDigest: compiledGraphDigest(graph),
     addedEdges: [],
     adapterBindings: [],
-    riskElevations: [],
+    riskElevations: { count: 0, digest: compilerEvalDigest([]) },
   };
   const inventory: ObligationInventory = {
     version: 1,
@@ -147,14 +152,12 @@ async function fixture() {
       reason: "Reviewed",
       evidenceIds: ["objective"],
     })),
-    dependencies: graph.workItems.flatMap((item) =>
-      item.dependsOn.map((dependsOn) => ({
-        itemId: item.id,
-        dependsOn,
-        reason: "Producer output",
-        evidenceIds: ["objective"],
-      })),
-    ),
+    dependencies: graph.workItems.map((item) => ({
+      itemId: item.id,
+      dependsOn: item.dependsOn,
+      reason: "Producer output",
+      evidenceIds: ["objective"],
+    })),
     findings: [],
     uncertainty: [],
     decision: "accept",
@@ -210,6 +213,61 @@ async function home() {
 }
 const usage = { inputTokens: 4, outputTokens: 2 };
 describe("compiler dispatch admission", () => {
+  it("removes every qualification authority value from the model subprocess environment", async () => {
+    const f = await fixture();
+    const authorityEnvironment = {
+      FACTORY_LIVE_OBJECTIVE: "1",
+      FACTORY_LIVE_COMPILER_ISSUE404: "1",
+      FACTORY_LIVE_COMPILER_ISSUE404_PAID_ACK: "consume-paid-compiler-evaluation",
+      FACTORY_LIVE_COMPILER_ISSUE404_RUN_ID: "qualification-environment",
+      FACTORY_ISSUE404_CANDIDATE_SHA: "9".repeat(40),
+      FACTORY_MANAGEMENT_TRANSCRIPT_DIR: "/private/factory-evidence/issue-404",
+    };
+    for (const [name, value] of Object.entries(authorityEnvironment)) vi.stubEnv(name, value);
+    const backend = new CodexCliManagementBackend({
+      createCodexHome: home,
+      authFile: join(f.directory, "no-auth"),
+      transcriptRecorder: null,
+    });
+    mocks.run.mockImplementation(async (args: { env: NodeJS.ProcessEnv }) => {
+      for (const name of Object.keys(authorityEnvironment)) expect(args.env[name]).toBeUndefined();
+      const subprocessValues = Object.values(args.env);
+      for (const value of [
+        authorityEnvironment.FACTORY_LIVE_COMPILER_ISSUE404_PAID_ACK,
+        authorityEnvironment.FACTORY_LIVE_COMPILER_ISSUE404_RUN_ID,
+        authorityEnvironment.FACTORY_ISSUE404_CANDIDATE_SHA,
+        authorityEnvironment.FACTORY_MANAGEMENT_TRANSCRIPT_DIR,
+      ])
+        expect(subprocessValues).not.toContain(value);
+      return {
+        exitCode: 0,
+        stderr: "",
+        stdout: [
+          JSON.stringify({
+            type: "item.completed",
+            item: {
+              type: "agent_message",
+              text: JSON.stringify({
+                version: f.inventory.version,
+                obligations: f.inventory.obligations,
+              }),
+            },
+          }),
+          JSON.stringify({
+            type: "turn.completed",
+            usage: { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens },
+          }),
+        ].join("\n"),
+      };
+    });
+
+    await expect(backend.extractObligations(f.context, async () => {})).resolves.toMatchObject({
+      inventory: f.inventory,
+      usage,
+    });
+    expect(mocks.run).toHaveBeenCalledOnce();
+  });
+
   it("rejects a mutable compiler cwd before an external model can inspect it", async () => {
     const f = await fixture();
     await writeFile(join(f.directory, "transient-secret.txt"), "must remain invisible\n");
@@ -277,7 +335,14 @@ describe("compiler dispatch admission", () => {
         stage === "inventory"
           ? () => backend.extractObligations(f.context, async () => {}, before)
           : stage === "compile"
-            ? () => backend.proposePlan(f.request, async () => {}, before, f.context)
+            ? () =>
+                backend.proposePlan(
+                  f.request,
+                  async () => {},
+                  semanticProjectionContext(undefined, f.context.runPolicy),
+                  before,
+                  f.context,
+                )
             : stage === "judge"
               ? () =>
                   backend.judgePlan(
@@ -308,6 +373,7 @@ describe("compiler dispatch admission", () => {
                       ]),
                     },
                     async () => {},
+                    semanticProjectionContext(undefined, f.context.runPolicy),
                     before,
                     f.context,
                   );
@@ -316,7 +382,7 @@ describe("compiler dispatch admission", () => {
       expect(mocks.run).not.toHaveBeenCalled();
     },
   );
-  it.each(["prompt", "home", "command", "environment"] as const)(
+  it.each(["home", "command", "environment"] as const)(
     "retains no invocation or model budget admission after known %s preparation failure",
     async (stage) => {
       const f = await fixture();
@@ -326,7 +392,6 @@ describe("compiler dispatch admission", () => {
         mocks.environment.mockImplementation(() => {
           throw failure;
         });
-      if (stage === "prompt") f.context.objective.body = "x".repeat(600_000);
       const backend = new CodexCliManagementBackend({
         createCodexHome:
           stage === "home"
@@ -349,11 +414,11 @@ describe("compiler dispatch admission", () => {
           recordUsage,
           validate: async () => {},
         }),
-      ).rejects.toThrow(stage === "prompt" ? /exceeds|bytes/ : failure.message);
+      ).rejects.toThrow(failure.message);
       expect(admit).not.toHaveBeenCalled();
       expect(recordUsage).not.toHaveBeenCalled();
       expect(mocks.run).not.toHaveBeenCalled();
-      expect(f.records.map((record) => record.kind)).toEqual(["started"]);
+      expect(f.records.map((record) => record.kind)).toEqual(["started", "source-evidence"]);
     },
   );
   it("keeps post-dispatch transport outcomes unknown and never repeats them on restart", async () => {
@@ -387,6 +452,57 @@ describe("compiler dispatch admission", () => {
     expect(mocks.run).toHaveBeenCalledOnce();
     expect(admit).toHaveBeenCalledOnce();
   });
+  it("durably closes a reserved invocation when admission proves no provider dispatch", async () => {
+    const f = await fixture();
+    const backend = new CodexCliManagementBackend({
+      createCodexHome: home,
+      authFile: join(f.directory, "no-auth"),
+    });
+    const admissionFailure = new Error("budget reservation was withdrawn");
+    const admit = vi.fn(async () => {
+      throw admissionFailure;
+    });
+    const abandonNotInvoked = vi.fn(async () => {});
+    const recordUsage = vi.fn(async () => {});
+    const args = {
+      ...f,
+      backend,
+      lease: {} as LeaseState,
+      deadlineAt: Date.now() + 60_000,
+      assertInputs: async () => {},
+      admit,
+      abandonNotInvoked,
+      recordUsage,
+      validate: async () => {},
+    };
+
+    await expect(compileEvaluatedDraft(args)).resolves.toMatchObject({
+      status: "stopped",
+      reason: "compiler admission rejected before provider dispatch",
+    });
+    const invocation = f.records.find((record) => record.kind === "invocation")!;
+    expect(abandonNotInvoked).toHaveBeenCalledExactlyOnceWith(
+      invocation.payload.invocationId,
+      admissionFailure.message,
+    );
+    expect(f.records.find((record) => record.kind === "result")?.payload).toMatchObject({
+      invocationId: invocation.payload.invocationId,
+      usage: null,
+      value: null,
+      preProviderTerminal: true,
+      stopReason: "compiler admission rejected before provider dispatch",
+    });
+    expect(mocks.run).not.toHaveBeenCalled();
+    expect(recordUsage).not.toHaveBeenCalled();
+
+    await expect(compileEvaluatedDraft(args)).resolves.toMatchObject({
+      status: "stopped",
+      reason: "compiler admission rejected before provider dispatch",
+    });
+    expect(admit).toHaveBeenCalledOnce();
+    expect(abandonNotInvoked).toHaveBeenCalledOnce();
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
   it.each([0, 1])(
     "preserves a structured quota failure when isolated-home cleanup fails after exit %i",
     async (exitCode) => {
@@ -419,6 +535,7 @@ describe("compiler dispatch admission", () => {
         await backend.proposePlan(
           f.request,
           async () => {},
+          semanticProjectionContext(undefined, f.context.runPolicy),
           async () => ({
             modelInvocationId: "compile-fixture",
             checkpointProviderRefusal: async (error) => {
@@ -444,6 +561,56 @@ describe("compiler dispatch admission", () => {
       expect(refusalCheckpointed).toBe(true);
     },
   );
+  it("retains exact paid output and provenance when isolated-home cleanup fails", async () => {
+    const f = await fixture();
+    const cleanupFailure = new Error("isolated home cleanup failed");
+    const backend = new CodexCliManagementBackend({
+      createCodexHome: home,
+      removeCodexHome: async () => {
+        throw cleanupFailure;
+      },
+      authFile: join(f.directory, "no-auth"),
+    });
+    mocks.run.mockResolvedValue({
+      exitCode: 0,
+      stderr: "",
+      stdout: [
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: JSON.stringify(f.proposal) },
+        }),
+        JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens },
+        }),
+      ].join("\n"),
+    });
+    const checkpoint = vi.fn(async () => {});
+    let observed: unknown;
+    try {
+      await backend.proposePlan(
+        f.request,
+        checkpoint,
+        semanticProjectionContext(undefined, f.context.runPolicy),
+        async () => {},
+        f.context,
+      );
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toBeInstanceOf(ManagementCleanupError);
+    expect(observed).toMatchObject({
+      usage,
+      proposal: f.proposal,
+      provenance: {
+        baseSha: f.request.baseSha,
+        promptDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        schemaDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+    expect((observed as Error).cause).toBe(cleanupFailure);
+    expect(checkpoint).not.toHaveBeenCalled();
+  });
   it.each([0, 1])(
     "preserves a structured quota failure when its durable checkpoint fails after exit %i",
     async (exitCode) => {
@@ -471,6 +638,7 @@ describe("compiler dispatch admission", () => {
         await backend.proposePlan(
           f.request,
           async () => {},
+          semanticProjectionContext(undefined, f.context.runPolicy),
           async () => ({
             modelInvocationId: "compile-checkpoint-failure",
             checkpointProviderRefusal: async () => {
@@ -518,7 +686,7 @@ describe("compiler dispatch admission", () => {
     ).rejects.toBe(cancellation);
     expect(admit).not.toHaveBeenCalled();
     expect(mocks.run).not.toHaveBeenCalled();
-    expect(f.records.map((record) => record.kind)).toEqual(["started"]);
+    expect(f.records.map((record) => record.kind)).toEqual(["started", "source-evidence"]);
   });
   it("reserves only at actual dispatch and applies the remaining deadline to the process timeout", async () => {
     const f = await fixture();

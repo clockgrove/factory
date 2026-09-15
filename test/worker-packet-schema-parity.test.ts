@@ -6,6 +6,13 @@ import { describe, expect, it } from "vitest";
 import { parsePersistedCompiledObjective } from "../src/graph.js";
 import { parseWorkerPacket, type WorkerPacket } from "../src/protocol/worker-packet.js";
 import { DEFERRED_CAPABILITY_ADAPTERS } from "../src/toolchains/authority.js";
+import { projectCompilerProposal } from "../src/compiler/proposal.js";
+import {
+  semanticPinnedFacts,
+  semanticProposal,
+  semanticRequest,
+} from "./helpers/semantic-compiler.js";
+import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 
 const pnpmRuntime = DEFERRED_CAPABILITY_ADAPTERS.find(({ id }) => id === "node-pnpm")!.runtime!;
 
@@ -175,5 +182,37 @@ describe("repository capability JSON Schema parity", () => {
     expect(() =>
       parsePersistedCompiledObjective({ title: "Capability", workItems: [invalid] }),
     ).toThrow();
+  });
+
+  it("accepts the current projected graph in the published Objective and Work Item schemas", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request);
+    const graph = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      runPolicy: {
+        ...DEFAULT_RUN_POLICY,
+        workItemTimeoutMinutes: request.constraints.workItemTimeoutMinutes,
+        allowedNetworkDestinations: request.constraints.allowedNetworkDestinations,
+      },
+    }).objective;
+    const workerSchema = JSON.parse(
+      readFileSync(new URL("../schemas/worker-packet.schema.json", import.meta.url), "utf8"),
+    );
+    const workItemSchema = JSON.parse(
+      readFileSync(new URL("../schemas/work-item.schema.json", import.meta.url), "utf8"),
+    );
+    const objectiveSchema = JSON.parse(
+      readFileSync(new URL("../schemas/objective.schema.json", import.meta.url), "utf8"),
+    );
+    const ajv = new Ajv({ strict: false });
+    ajv.addSchema(workerSchema);
+    ajv.addSchema(workItemSchema);
+    const validateObjective = ajv.compile(objectiveSchema);
+    expect(validateObjective(graph), JSON.stringify(validateObjective.errors)).toBe(true);
+    expect(graph.workItems.every((item) => ajv.validate(workItemSchema.$id, item))).toBe(true);
+    expect(parsePersistedCompiledObjective(graph)).toEqual(graph);
   });
 });

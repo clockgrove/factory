@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,12 +21,97 @@ import {
 } from "../src/evaluation/compiler-eval.js";
 import type { CompilerProposal } from "../src/compiler/contracts.js";
 import { createCompilerValidationReport } from "../src/compiler/violations.js";
-import { semanticProposal, semanticRequest } from "./helpers/semantic-compiler.js";
+import { compilerJudgeCandidateFromCompiled } from "../src/compiler/judge-context.js";
+import type { CompiledObjective } from "../src/graph.js";
+import {
+  semanticProjectionContext,
+  semanticProposal,
+  semanticRequest,
+} from "./helpers/semantic-compiler.js";
 
 const temporary: string[] = [];
 const usage = { inputTokens: 32, outputTokens: 12, cachedInputTokens: 8 };
 afterEach(async () => {
   await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
+
+it("preserves a fixed graph's exact execution design for independent judgment", () => {
+  const graph: CompiledObjective = {
+    title: "Existing exact graph",
+    deferredCapabilityAdapters: ["adapter-one"],
+    workItems: [
+      {
+        id: "fixed-item",
+        title: "Keep exact fields",
+        goal: "Preserve every persisted semantic and execution field.",
+        acceptance: ["The exact command remains bound."],
+        scope: ["src/fixed.ts"],
+        preconditions: ["Pinned evidence exists."],
+        outOfScope: ["No unrelated edits."],
+        conventions: ["Keep the protocol exact."],
+        dependsOn: [],
+        baseSha: "a".repeat(40),
+        validationCommands: ["tool:with/slash verify --exact"],
+        validation: [
+          {
+            tier: "mechanical",
+            criteria: ["The exact command remains bound."],
+            evidenceCommands: ["tool:with/slash verify --exact"],
+            rationale: "Pinned deterministic evidence.",
+          },
+        ],
+        requirements: {
+          os: ["linux"],
+          architecture: ["x64"],
+          tools: ["tool:with/slash"],
+          services: ["fixture-service"],
+          networkDestinations: ["example.invalid"],
+          permittedSecretNames: ["FIXTURE_TOKEN"],
+          trust: "isolated",
+        },
+        repositoryCapabilities: {
+          provides: [
+            {
+              adapter: "adapter-one",
+              generation: "generation-one",
+              authorityPaths: ["src/fixed.ts"],
+              operations: [{ kind: "verify", key: "exact" }],
+            },
+          ],
+          requires: [],
+        },
+        managedRuntimes: [
+          {
+            tool: "npm",
+            adapter: "adapter-one",
+            adapterContract: 1,
+            platform: { os: "linux", architecture: "x64", libc: "glibc" },
+            releaseChannel: "ga",
+          },
+        ],
+        context: {
+          mustRead: ["README.md"],
+          searchSeeds: ["Exact context"],
+          dependencyEvidence: [],
+        },
+        criterionRisks: [{ criterion: "The exact command remains bound.", risk: "recovery" }],
+        delivery: { group: "fixed-group", relationship: "root" },
+      },
+    ],
+  };
+
+  const candidate = compilerJudgeCandidateFromCompiled(graph);
+  expect(candidate.workItems[0]).toMatchObject({
+    validationCommands: ["tool:with/slash verify --exact"],
+    validation: graph.workItems[0]!.validation,
+    requirements: graph.workItems[0]!.requirements,
+    repositoryCapabilities: graph.workItems[0]!.repositoryCapabilities,
+    managedRuntimes: graph.workItems[0]!.managedRuntimes,
+    context: graph.workItems[0]!.context,
+    criterionRisks: graph.workItems[0]!.criterionRisks,
+    delivery: graph.workItems[0]!.delivery,
+  });
+  expect(candidate.workItems[0]!.requirements?.tools).toEqual(["tool:with/slash"]);
 });
 async function fixture() {
   const repository = await mkdtemp(join(tmpdir(), "compiler-judge-management-"));
@@ -133,7 +219,14 @@ function verdict(
       reason: "Supported",
       evidenceIds: ["objective"],
     })),
-    dependencies: [],
+    dependencies: [
+      {
+        itemId: "code",
+        dependsOn: [],
+        reason: "No prerequisite items",
+        evidenceIds: ["objective"],
+      },
+    ],
     findings: [],
     uncertainty: [],
     decision: "accept",
@@ -160,7 +253,7 @@ function judgeContext(
       graphDigest,
       addedEdges: [],
       adapterBindings: [],
-      riskElevations: [],
+      riskElevations: { count: 0, digest: compilerEvalDigest([]) },
     },
   };
 }
@@ -184,9 +277,13 @@ describe("independent compiler management boundaries", () => {
   it("extracts obligations without a graph and durably checkpoints before returning", async () => {
     const { context, inventory, claims } = await fixture();
     const calls: string[] = [];
+    let observedPrompt = "";
+    let observedSchema: unknown;
     const backend = new CodexCliManagementBackend({
-      runStructured: async (_cwd, _schema, prompt) => {
+      runStructured: async (_cwd, schema, prompt) => {
         calls.push("invoke");
+        observedPrompt = prompt;
+        observedSchema = schema;
         expect(prompt).toContain("No compiled plan is available");
         expect(prompt).not.toContain('"workItems"');
         expect(prompt).toContain("do not return or rewrite that trusted envelope");
@@ -199,11 +296,84 @@ describe("independent compiler management boundaries", () => {
     calls.push("returned");
     expect(calls).toEqual(["invoke", "checkpoint", "returned"]);
     expect(result.inventory).toEqual(inventory);
+    expect(result.provenance).toEqual({
+      promptDigest: createHash("sha256").update(observedPrompt).digest("hex"),
+      schemaDigest: createHash("sha256").update(JSON.stringify(observedSchema)).digest("hex"),
+      baseSha: context.baseSha,
+      model: null,
+      reasoning: null,
+    });
     await expect(
       backend.extractObligations(context, async () => {
         throw new Error("checkpoint unavailable");
       }),
     ).rejects.toMatchObject({ usage, message: "checkpoint unavailable" });
+  });
+
+  it("keeps 5,000 near-maximum repository paths out of the obligation model input", async () => {
+    const { context, claims } = await fixture();
+    const paths = Array.from(
+      { length: 5_000 },
+      (_, index) => `python/${String(index).padStart(5, "0")}-${"x".repeat(470)}.py`,
+    );
+    context.repositoryFiles = paths;
+    context.repositoryEvidence = compilerObligationEvidence(context);
+    let observedPrompt = "";
+    const backend = new CodexCliManagementBackend({
+      runStructured: async (_cwd, _schema, prompt) => {
+        observedPrompt = prompt;
+        return { value: claims, usage };
+      },
+    });
+    await expect(backend.extractObligations(context, async () => {})).resolves.toBeDefined();
+    expect(Buffer.byteLength(observedPrompt)).toBeLessThan(512 * 1024);
+    expect(observedPrompt).not.toContain(paths.at(-1)!);
+    expect(observedPrompt).toContain('"count":5000');
+  });
+
+  it("admits the maximum Objective and a maximum retained inventory repair without source duplication", async () => {
+    const { context, claims } = await fixture();
+    context.objective.title = "T".repeat(256);
+    context.objective.body = "b".repeat(384 * 1024);
+    context.repositoryEvidence = compilerObligationEvidence(context);
+    expect(context.repositoryEvidence.filter((entry) => entry.kind === "objective").length).toBe(
+      99,
+    );
+    const previousProposal = {
+      version: 1,
+      obligations: Array.from({ length: 30 }, (_, index) => ({
+        id: `prior-${index}`,
+        text: `${index}:` + "p".repeat(3_900),
+        kind: "ambiguity",
+        evidenceIds: ["foreign"],
+        acceptanceEvidence: `${index}:` + "a".repeat(3_900),
+      })),
+    };
+    expect(Buffer.byteLength(JSON.stringify(previousProposal))).toBeLessThan(256 * 1024);
+    const prompts: string[] = [];
+    const backend = new CodexCliManagementBackend({
+      runStructured: async (_cwd, _schema, prompt) => {
+        prompts.push(prompt);
+        return { value: claims, usage };
+      },
+    });
+    await backend.extractObligations(context, async () => {});
+    await backend.extractObligations(context, async () => {}, undefined, {
+      revision: 1,
+      validationReport: createCompilerValidationReport("obligations", [
+        {
+          code: "schema-invalid",
+          itemId: null,
+          field: "/obligations/0/evidenceIds/0",
+          expected: "known evidence ID",
+          observed: "foreign",
+        },
+      ]),
+      previousProposal,
+    });
+    expect(prompts).toHaveLength(2);
+    expect(prompts.every((prompt) => Buffer.byteLength(prompt) < 1024 * 1024)).toBe(true);
+    expect(prompts[1]).not.toContain('"body":"');
   });
 
   it("hydrates canonical evidence and gives a bounded invalid claim to one repair", async () => {
@@ -308,6 +478,7 @@ describe("independent compiler management boundaries", () => {
     await backend.proposePlan(
       request,
       async () => {},
+      semanticProjectionContext(),
       async () => 44 * 60_000,
       context,
     );
@@ -317,7 +488,11 @@ describe("independent compiler management boundaries", () => {
 
   it("judges complete coverage in an isolated prompt without compiler self-assessment", async () => {
     const { context, inventory, proposal } = await fixture();
+    let observedPrompt = "";
+    let observedSchema: unknown;
     const runStructured = vi.fn(async (_cwd, schema, prompt: string) => {
+      observedPrompt = prompt;
+      observedSchema = schema;
       expect(schema).toEqual(CODEX_PLAN_JUDGE_SCHEMA);
       expect(prompt).not.toContain("PRIVATE_COMPILER_SELF_ASSESSMENT");
       expect(prompt).toContain("every item");
@@ -329,6 +504,97 @@ describe("independent compiler management boundaries", () => {
       async () => {},
     );
     expect(judged.verdict.draftDigest).toBe(compilerEvalDigest(proposal));
+    expect(judged.provenance).toEqual({
+      promptDigest: createHash("sha256").update(observedPrompt).digest("hex"),
+      schemaDigest: createHash("sha256").update(JSON.stringify(observedSchema)).digest("hex"),
+      baseSha: context.baseSha,
+      model: null,
+      reasoning: null,
+    });
+    expect(runStructured).toHaveBeenCalledOnce();
+  });
+
+  it("admits a compact 903-edge projection trace through the production judge boundary", async () => {
+    const { context, inventory, proposal: single } = await fixture();
+    const proposal: CompilerProposal = {
+      ...single,
+      workItems: Array.from({ length: 51 }, (_, index) => ({
+        ...structuredClone(single.workItems[0]!),
+        id: `item-${index + 1}`,
+        title: `Implement item ${index + 1}`,
+        goal: `Implement item ${index + 1}`,
+        obligationIds: index === 0 ? ["tests"] : [],
+        scope: [`src/item-${index + 1}.ts`],
+        criteria: [
+          {
+            ...structuredClone(single.workItems[0]!.criteria[0]!),
+            id: "tests-pass",
+            text: `Item ${index + 1} passes its tests`,
+          },
+        ],
+      })),
+    };
+    const addedEdges = Array.from({ length: 43 }, (_, later) =>
+      Array.from({ length: later }, (_, earlier) => ({
+        itemId: `item-${later + 1}`,
+        dependsOn: `item-${earlier + 1}`,
+        reason: "exclusive-resource" as const,
+      })),
+    ).flat();
+    expect(addedEdges).toHaveLength(903);
+    const graphDigest = compilerEvalDigest(proposal);
+    const contextWithTrace: PlanJudgeContext = {
+      compilation: context,
+      inventory,
+      proposal,
+      graphDigest,
+      challenges: [],
+      projectionTrace: {
+        protocol: "clockgrove.factory/compiler-projection",
+        requestDigest: "a".repeat(64),
+        proposalDigest: compilerEvalDigest(proposal),
+        graphDigest,
+        addedEdges,
+        adapterBindings: [],
+        riskElevations: { count: 0, digest: compilerEvalDigest([]) },
+      },
+    };
+    const reviewed: CompilerJudgeVerdict = {
+      ...verdict(inventory, single, graphDigest),
+      draftDigest: graphDigest,
+      coverage: [
+        {
+          obligationId: "tests",
+          status: "covered",
+          itemIds: ["item-1"],
+          acceptanceBindings: [{ itemId: "item-1", criterionId: "tests-pass" }],
+          evidenceIds: ["objective"],
+          reason: "Tests required",
+        },
+      ],
+      items: proposal.workItems.map((item) => ({
+        itemId: item.id,
+        granularity: "cohesive",
+        reason: "One bounded result",
+        evidenceIds: ["objective"],
+      })),
+      dependencies: proposal.workItems.map((item) => ({
+        itemId: item.id,
+        dependsOn: addedEdges
+          .filter((edge) => edge.itemId === item.id)
+          .map((edge) => edge.dependsOn),
+        reason: "Factory serialized the complete exclusive-resource dependency set",
+        evidenceIds: ["objective"],
+      })),
+    };
+    const runStructured = vi.fn(async (_cwd, _schema, prompt: string) => {
+      const source = prompt.split("\n\n").at(-1)!;
+      expect(Buffer.byteLength(source)).toBeLessThan(900 * 1024);
+      return { value: reviewed, usage };
+    });
+    await expect(
+      new CodexCliManagementBackend({ runStructured }).judgePlan(contextWithTrace, async () => {}),
+    ).resolves.toMatchObject({ verdict: { decision: "accept" } });
     expect(runStructured).toHaveBeenCalledOnce();
   });
 
@@ -352,7 +618,7 @@ describe("independent compiler management boundaries", () => {
     await expect(
       new CodexCliManagementBackend({
         runStructured: async () => ({ value: invalid, usage }),
-      }).proposePlan(request, async () => {}, undefined, context),
+      }).proposePlan(request, async () => {}, semanticProjectionContext(), undefined, context),
     ).rejects.toMatchObject({ proposal: invalid, usage });
     const repairedRequest = {
       ...request,
@@ -373,7 +639,13 @@ describe("independent compiler management boundaries", () => {
         value: semanticProposal(request),
         usage,
       }),
-    }).proposePlan(repairedRequest, async () => {}, undefined, context);
+    }).proposePlan(
+      repairedRequest,
+      async () => {},
+      semanticProjectionContext(),
+      undefined,
+      context,
+    );
     expect(repaired.proposal.workItems).toHaveLength(1);
   });
 
@@ -541,20 +813,52 @@ it("retains actual assisted-label prompt/source identities and marks provider mo
   expect(result.provenance.sourceDigest).toBe(compilerEvalDigest(source));
 });
 
-it("permits 129 dependency reviews in both provider and runtime judge schemas", async () => {
+it("keeps provider and runtime judge cardinality contracts aligned", async () => {
   const { default: Ajv } = await import("ajv");
-  const { CompilerJudgeVerdictSchema } = await import("../src/evaluation/compiler-eval.js");
+  const { CompilerJudgeVerdictSchema, ObligationClaimsSchema } = await import(
+    "../src/evaluation/compiler-eval.js"
+  );
   const { inventory, proposal } = await fixture();
   const output = verdict(inventory, proposal);
   output.inferenceCorrections = [];
-  output.dependencies = Array.from({ length: 129 }, (_, index) => ({
-    itemId: `item-${index}`,
-    dependsOn: "base",
-    reason: "Dependency rationale",
-    evidenceIds: ["objective"],
-  }));
-  expect(new Ajv({ strict: false }).compile(CODEX_PLAN_JUDGE_SCHEMA)(output)).toBe(true);
-  expect(CompilerJudgeVerdictSchema.safeParse(output).success).toBe(true);
+  const ajv = new Ajv({ strict: false });
+  const providerJudge = ajv.compile(CODEX_PLAN_JUDGE_SCHEMA);
+  const providerObligations = ajv.compile(CODEX_OBLIGATION_SCHEMA);
+  expect(providerJudge(output)).toBe(CompilerJudgeVerdictSchema.safeParse(output).success);
+  const invalidJudgments = [
+    { ...output, coverage: [] },
+    { ...output, items: Array.from({ length: 101 }, () => output.items[0]!) },
+    { ...output, dimensions: output.dimensions.slice(0, -1) },
+    { ...output, findings: Array.from({ length: 65 }, () => ({ ...output.findings[0] })) },
+    {
+      ...output,
+      dependencies: [
+        {
+          itemId: "code",
+          dependsOn: Array.from({ length: 51 }, (_, index) => `item-${index}`),
+          reason: "Too many dependencies",
+          evidenceIds: ["objective"],
+        },
+      ],
+    },
+    { ...output, draftDigest: "not-a-digest" },
+    { ...output, items: [{ ...output.items[0]!, itemId: "x".repeat(161) }] },
+    { ...output, coverage: [{ ...output.coverage[0]!, evidenceIds: [] }] },
+  ];
+  for (const invalid of invalidJudgments) {
+    expect(providerJudge(invalid)).toBe(false);
+    expect(CompilerJudgeVerdictSchema.safeParse(invalid).success).toBe(false);
+  }
+  const claims = { version: 1 as const, obligations: inventory.obligations };
+  expect(providerObligations(claims)).toBe(ObligationClaimsSchema.safeParse(claims).success);
+  for (const invalid of [
+    { ...claims, obligations: [] },
+    { ...claims, obligations: [{ ...claims.obligations[0]!, evidenceIds: [] }] },
+    { ...claims, obligations: [{ ...claims.obligations[0]!, id: "x".repeat(161) }] },
+  ]) {
+    expect(providerObligations(invalid)).toBe(false);
+    expect(ObligationClaimsSchema.safeParse(invalid).success).toBe(false);
+  }
 });
 
 it("supplies carried challenges and prior independent corrections to the production repair prompt", async () => {
@@ -599,6 +903,13 @@ it("supplies carried challenges and prior independent corrections to the product
     uncertainty: "",
   });
   const request = semanticRequest();
+  request.inventory.obligations.push({
+    id: "inferred-deploy",
+    text: "Deploy infrastructure",
+    kind: "prerequisite",
+    evidenceIds: ["objective"],
+    acceptanceEvidence: "Deployment exists",
+  });
   const repairRequest = {
     ...request,
     revision: 2,
@@ -617,6 +928,12 @@ it("supplies carried challenges and prior independent corrections to the product
     },
   });
   await expect(
-    backend.proposePlan(repairRequest, async () => {}, undefined, context),
+    backend.proposePlan(
+      repairRequest,
+      async () => {},
+      semanticProjectionContext(),
+      undefined,
+      context,
+    ),
   ).resolves.toMatchObject({ proposal: { protocol: "clockgrove.factory/compiler-proposal" } });
 });

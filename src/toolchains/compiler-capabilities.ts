@@ -83,21 +83,6 @@ function supportedStates(
   const paths = new Set(pinned.relevantPaths);
   const supported = TOOLCHAIN_AUTHORITY_ADAPTERS.filter((adapter) => adapter.compiler);
   const result = new Map<string, CompilerToolchainCapability["state"]>();
-  const hasSupportedAuthorityPath = supported.some((adapter) =>
-    adapter.compiler!.rootAuthorityPaths.some((path) => paths.has(path)),
-  );
-  const unsupportedLanguageSurface = [...paths].some(
-    (path) =>
-      path === "Cargo.toml" ||
-      path === "go.mod" ||
-      path.endsWith(".rs") ||
-      path.endsWith(".go") ||
-      path.endsWith(".py"),
-  );
-  if (!hasSupportedAuthorityPath && unsupportedLanguageSurface) {
-    for (const adapter of supported) result.set(adapter.id, "unsupported");
-    return result;
-  }
   const groups = new Map<string, ToolchainAuthorityAdapter[]>();
   for (const adapter of supported)
     if (adapter.compiler!.authorityGroup)
@@ -144,10 +129,18 @@ function supportedStates(
       result.set(adapter.id, "observed");
     else if (present.length > 0) result.set(adapter.id, "partial");
     else {
+      const unsupportedSource = [...paths].some((path) =>
+        (adapter.compiler!.unsupportedWithoutAuthorityExtensions ?? []).some((extension) =>
+          path.endsWith(extension),
+        ),
+      );
       const denied = adapter.compiler!.networkDestinations.some(
         (destination) => !destinationAllowedByPolicy(destination, [...allowedDestinations]),
       );
-      result.set(adapter.id, denied ? "policy-blocked" : "eligible-deferred");
+      result.set(
+        adapter.id,
+        unsupportedSource ? "unsupported" : denied ? "policy-blocked" : "eligible-deferred",
+      );
     }
   }
   return result;
@@ -243,15 +236,10 @@ export function compilerCapabilitiesForRepository(
   const observedAdapters = TOOLCHAIN_AUTHORITY_ADAPTERS.filter(
     (adapter) => states.get(adapter.id) === "observed",
   );
-  const unsupportedOnly = toolchains.every((toolchain) => toolchain.state === "unsupported");
-  const validationRecipes = (
-    unsupportedOnly
-      ? []
-      : [
-          ...observedAdapters.flatMap((adapter) => adapterRecipes(adapter, pinned)),
-          ...genericRecipes(pinned),
-        ]
-  )
+  const validationRecipes = [
+    ...observedAdapters.flatMap((adapter) => adapterRecipes(adapter, pinned)),
+    ...genericRecipes(pinned),
+  ]
     .sort((left, right) => left.id.localeCompare(right.id))
     .filter(
       (recipe, index, all) => all.findIndex((candidate) => candidate.id === recipe.id) === index,

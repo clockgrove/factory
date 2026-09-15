@@ -13,7 +13,7 @@ tiers, and prerequisite relationships. Each project deliberately implements a sm
 
 | Case | Real baseline | Requested capability |
 | --- | --- | --- |
-| `typed-cart` | Compiled TypeScript integer-cent cart and executable assertions | Validated percentage discounts, default compatibility |
+| `typed-cart` | Compiled TypeScript integer-cent cart and executable assertions | Validated percentage discounts, unchanged default-price behavior |
 | `generated-catalog` | Source JSON, generator, checked output and stale-output assertion | Additional status with deterministic regeneration |
 | `binary-module` | Actual valid eight-byte WebAssembly module and byte generator | Reproducible bounded `answer()` export |
 | `seeded-simulation` | Bounded seed-offset arrival simulator and deterministic trace assertions | Capacity admission/rejection and repeatable replay |
@@ -54,9 +54,9 @@ runtime API, model runner, or installed MCP tool. Existing qualification code ca
    `compilePreparedCorpusCase(prepared, context, backend, checkpoint)` with an explicitly
    selected management backend, real Objective number, actual base SHA, default branch,
    operator-approved network/model context, and the existing durable usage checkpoint. It passes
-   the human Objective and real file inventory to `ManagementBackend.compile`, including the
-   normal Codex backend's repository discovery/compiler validation. It rejects changed fixture
-   bytes before invocation. It neither selects a model nor fabricates/checkpoints usage itself.
+   the human Objective and real file inventory through `compilePlan`, which calls the backend's
+   single `proposePlan` route with repository discovery and compiler validation. It rejects changed
+   fixture bytes before invocation. It neither selects a model nor fabricates/checkpoints usage itself.
    The caller owns authorization, Git/base verification, model limits and truthful run evidence.
 4. A reviewer supplies `CompilerCriterionBindings`: each criterion ID maps to one or more
    `{workItemId, index}` acceptance references and a rationale. Call
@@ -128,13 +128,14 @@ no repairs and no execution graph projection. The existing write-free `factory p
 entry point remains a single response-only compilation; it does not create a durable evaluated
 run. Draft evaluation requires its explicit immutable run envelope.
 
-Deterministic regression coverage includes an explicit semantic matrix across supported and
-unsupported toolchain states; missing, partial, and mixed toolchain evidence; manifest and lockfile
-presence; runtime pins; observed and deferred validation; dependency, scope-overlap, and exclusive-
-resource graph shapes; protected risks; offline/network policy; generated and binary/LFS ownership;
-and report-only versus auto-repair modes. The checked-in pairwise corpus names every dimension, while
-focused tests exercise the associated adapter, validator, projection, recovery, and public-report
-boundaries. Model-backed qualification evidence must separately report the exact candidate, model,
+Deterministic regression coverage includes an executable semantic matrix across observed, absent,
+partial, mixed, policy-blocked, and unsupported toolchain evidence; concrete dependency shapes;
+criterion risk and validation tiers; deferred-provider classifications; request/proposal outcomes;
+and canonical ordering. Every row contains importable inputs and expected structured observations,
+and the matrix computes its required cross-dimension pairs from the observations produced by
+production capability, validation, and graph helpers. Named source references are navigation only.
+Focused suites separately cover pinned LFS materialization, draft recovery, projection, and public
+report boundaries. Model-backed qualification evidence must report the exact candidate, model,
 reasoning effort, calls, stages, token accounting, elapsed time, terminal result, and whether repair
 was actually observed; an initially complete proposal must never be described as naturally repaired.
 

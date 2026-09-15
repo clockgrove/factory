@@ -89,6 +89,8 @@ export interface ToolchainCompilerContract {
   authorityGroup?: string;
   observedRecipeSource: "package-scripts" | "python-test" | null;
   rootAuthorityPaths: readonly string[];
+  /** Source extensions this adapter cannot validate without observed root authority. */
+  unsupportedWithoutAuthorityExtensions?: readonly string[];
   generationAuthorityPaths: readonly string[];
   requiredTools: readonly string[];
   networkDestinations: readonly string[];
@@ -1493,6 +1495,7 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
       contract: "clockgrove.factory/toolchain-compiler/uv",
       observedRecipeSource: "python-test",
       rootAuthorityPaths: ["pyproject.toml", "uv.lock", ".python-version"],
+      unsupportedWithoutAuthorityExtensions: [".py"],
       generationAuthorityPaths: ["pyproject.toml"],
       requiredTools: ["uv", "python"],
       networkDestinations: ["pypi.org", "files.pythonhosted.org"],

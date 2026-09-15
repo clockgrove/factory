@@ -1,8 +1,11 @@
 import { z } from "zod";
 
 import {
-  CompilerInferenceChallengeSchema,
+  CompilerInferenceChallengesSchema,
   CompilerJudgeVerdictSchema,
+  MAX_COMPILER_INFERENCE_CHALLENGES,
+  MAX_COMPILER_ITEM_CHALLENGES,
+  MAX_COMPILER_OBLIGATION_CHALLENGES,
   ObligationInventorySchema,
   type CompilerInferenceChallenge,
   type CompilerJudgeVerdict,
@@ -67,7 +70,12 @@ export const COMPILER_VIOLATION_CODES = [
   "execution-requirement-limit",
   "exclusive-resource-limit",
   "worker-packet-limit",
+  "issue-body-limit",
   "compiled-graph-limit",
+  "projection-blocked",
+  "compiler-request-limit",
+  "compiler-prompt-limit",
+  "judge-context-limit",
   "denied-network-destination",
   "legacy-constraint-mismatch",
   "report-truncated",
@@ -83,6 +91,9 @@ export const COMPILER_TERMINAL_VIOLATION_PHASES: Readonly<
   "mixed-toolchain-authority": ["request"],
   "unsupported-toolchain": ["request"],
   "no-validation-capability": ["request"],
+  "compiler-request-limit": ["request"],
+  "compiler-prompt-limit": ["request"],
+  "judge-context-limit": ["request"],
   "denied-network-destination": ["request"],
 };
 
@@ -287,6 +298,22 @@ export const CompilerToolchainCapabilitySchema = z
   .strict();
 export type CompilerToolchainCapability = z.infer<typeof CompilerToolchainCapabilitySchema>;
 
+const CompilerValidationSurfaceSchema = z
+  .object({
+    count: z.number().int().min(0).max(10_000),
+    digest: z.string().regex(/^[a-f0-9]{64}$/),
+    sample: z.array(RepositoryScopePathSchema).max(32),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.sample.length > value.count)
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["sample"],
+        message: "sample cannot exceed the represented path count",
+      });
+  });
+
 const CompilerJudgeFindingsSchema = CompilerJudgeVerdictSchema.shape.findings;
 export type CompilerJudgeFinding = CompilerJudgeVerdict["findings"][number];
 
@@ -313,11 +340,11 @@ export const CompilerRequestSchema = z
         toolchains: z.array(CompilerToolchainCapabilitySchema).max(32),
         validationSurfaces: z
           .object({
-            deterministicSimulation: z.array(RepositoryScopePathSchema).max(256),
-            visual: z.array(RepositoryScopePathSchema).max(256),
-            python: z.array(RepositoryScopePathSchema).max(5_000),
-            rust: z.array(RepositoryScopePathSchema).max(5_000),
-            go: z.array(RepositoryScopePathSchema).max(5_000),
+            deterministicSimulation: CompilerValidationSurfaceSchema,
+            visual: CompilerValidationSurfaceSchema,
+            python: CompilerValidationSurfaceSchema,
+            rust: CompilerValidationSurfaceSchema,
+            go: CompilerValidationSurfaceSchema,
           })
           .strict(),
         pathCount: z.number().int().min(0).max(10_000),
@@ -334,7 +361,7 @@ export const CompilerRequestSchema = z
     previousProposal: CompilerProposalSchema.nullable(),
     validationReport: CompilerValidationReportSchema,
     semanticFindings: CompilerJudgeFindingsSchema,
-    challenges: z.array(CompilerInferenceChallengeSchema).max(64),
+    challenges: CompilerInferenceChallengesSchema,
   })
   .strict();
 export type CompilerRequest = z.infer<typeof CompilerRequestSchema> & {
@@ -502,12 +529,62 @@ const jsonViolation = strictObject({
   expected: jsonDiagnostic,
   observed: jsonDiagnostic,
 });
-const jsonValidationReport = strictObject({
-  protocol: { const: "clockgrove.factory/compiler-validation" },
-  phase: { enum: ["request", "obligations", "proposal"] },
-  status: { enum: ["valid", "repairable", "unsatisfiable"] },
-  violations: { type: "array", maxItems: 128, items: jsonViolation },
-});
+const jsonTerminalViolationCodes = Object.keys(COMPILER_TERMINAL_VIOLATION_PHASES);
+const jsonConditional = (condition: object, consequence: object) =>
+  Object.fromEntries([
+    ["if", condition],
+    // biome-ignore lint/suspicious/noThenProperty: JSON Schema defines this conditional keyword.
+    ["then", consequence],
+  ]);
+const jsonValidationReport = {
+  ...strictObject({
+    protocol: { const: "clockgrove.factory/compiler-validation" },
+    phase: { enum: ["request", "obligations", "proposal"] },
+    status: { enum: ["valid", "repairable", "unsatisfiable"] },
+    violations: { type: "array", maxItems: 128, items: jsonViolation },
+  }),
+  allOf: [
+    jsonConditional(
+      { properties: { violations: { maxItems: 0 } }, required: ["violations"] },
+      { properties: { status: { const: "valid" } }, required: ["status"] },
+    ),
+    jsonConditional(
+      { properties: { status: { const: "valid" } }, required: ["status"] },
+      { properties: { violations: { maxItems: 0 } }, required: ["violations"] },
+    ),
+    jsonConditional(
+      {
+        properties: {
+          phase: { const: "request" },
+          violations: { contains: { properties: { code: { enum: jsonTerminalViolationCodes } } } },
+        },
+        required: ["phase", "violations"],
+      },
+      { properties: { status: { const: "unsatisfiable" } }, required: ["status"] },
+    ),
+    jsonConditional(
+      {
+        properties: {
+          violations: {
+            minItems: 1,
+            not: { contains: { properties: { code: { const: "report-truncated" } } } },
+          },
+        },
+        required: ["violations"],
+        not: {
+          properties: {
+            phase: { const: "request" },
+            violations: {
+              contains: { properties: { code: { enum: jsonTerminalViolationCodes } } },
+            },
+          },
+          required: ["phase", "violations"],
+        },
+      },
+      { properties: { status: { const: "repairable" } }, required: ["status"] },
+    ),
+  ],
+};
 const jsonRecipe = strictObject({
   id: jsonId,
   command: { type: "string", minLength: 1, maxLength: 1_000 },
@@ -599,6 +676,19 @@ const jsonChallenge = {
   required: ["findingId", "reason", "evidenceIds"],
   anyOf: [{ required: ["obligationId"] }, { required: ["originalFinding"] }],
 };
+const jsonValidationSurface = {
+  ...strictObject({
+    count: { type: "integer", minimum: 0, maximum: 10_000 },
+    digest: jsonDigest,
+    sample: stringArray(32, jsonScopePath),
+  }),
+  allOf: Array.from({ length: 32 }, (_, count) =>
+    jsonConditional(
+      { properties: { count: { const: count } }, required: ["count"] },
+      { properties: { sample: { maxItems: count } }, required: ["sample"] },
+    ),
+  ),
+};
 
 /** Full transport schema used for parity and durable-fixture validation. */
 export const COMPILER_REQUEST_JSON_SCHEMA = {
@@ -621,11 +711,11 @@ export const COMPILER_REQUEST_JSON_SCHEMA = {
       validationRecipes: { type: "array", maxItems: 128, items: jsonRecipe },
       toolchains: { type: "array", maxItems: 32, items: jsonToolchain },
       validationSurfaces: strictObject({
-        deterministicSimulation: stringArray(256, jsonScopePath),
-        visual: stringArray(256, jsonScopePath),
-        python: stringArray(5_000, jsonScopePath),
-        rust: stringArray(5_000, jsonScopePath),
-        go: stringArray(5_000, jsonScopePath),
+        deterministicSimulation: jsonValidationSurface,
+        visual: jsonValidationSurface,
+        python: jsonValidationSurface,
+        rust: jsonValidationSurface,
+        go: jsonValidationSurface,
       }),
       pathCount: { type: "integer", minimum: 0, maximum: 10_000 },
     }),
@@ -642,6 +732,22 @@ export const COMPILER_REQUEST_JSON_SCHEMA = {
     previousProposal: { oneOf: [{ type: "null" }, compilerProposalObjectSchema] },
     validationReport: jsonValidationReport,
     semanticFindings: { type: "array", maxItems: 64, items: jsonFinding },
-    challenges: { type: "array", maxItems: 64, items: jsonChallenge },
+    challenges: {
+      type: "array",
+      maxItems: MAX_COMPILER_INFERENCE_CHALLENGES,
+      items: jsonChallenge,
+      allOf: [
+        {
+          contains: { required: ["obligationId"] },
+          minContains: 0,
+          maxContains: MAX_COMPILER_OBLIGATION_CHALLENGES,
+        },
+        {
+          contains: { not: { required: ["obligationId"] } },
+          minContains: 0,
+          maxContains: MAX_COMPILER_ITEM_CHALLENGES,
+        },
+      ],
+    },
   }),
 } as const;

@@ -26,7 +26,7 @@ export interface BudgetEventArgs {
   workItemNodeId: string;
   reservation: AttemptReservation;
   sequence: number;
-  event: "BudgetReserved" | "BudgetReconciled";
+  event: "BudgetReserved" | "BudgetReconciled" | "BudgetAbandoned";
   unit:
     | "model_tokens"
     | "local_milliseconds"
@@ -465,7 +465,7 @@ export class LifecycleRecorder {
           ? first.event === "BudgetReserved" && first.modelInvocationId
             ? "Factory recorded model dispatch intent; token consumption is not yet known."
             : (reconciledModelTokenSummary(events[0]!) ??
-              `Factory ${first.event === "BudgetReserved" ? "reserved" : "reconciled"} ${first.amount} ${first.unit}.`)
+              `Factory ${first.event === "BudgetReserved" ? "reserved" : first.event === "BudgetAbandoned" ? "abandoned" : "reconciled"} ${first.amount} ${first.unit}.`)
           : [
               `Factory recorded ${events.length} adjacent budget events.`,
               ...events.flatMap((event) => {
@@ -485,7 +485,7 @@ export class LifecycleRecorder {
     objectiveNodeId: string;
     workItem?: number;
     sequence: number;
-    event: "BudgetReserved" | "BudgetReconciled";
+    event: "BudgetReserved" | "BudgetReconciled" | "BudgetAbandoned";
     unit: "model_tokens" | "local_milliseconds";
     amount: number;
     usageId?: string;
@@ -495,7 +495,7 @@ export class LifecycleRecorder {
     reason?: string;
     reportedModelUsage?: ReportedModelUsage;
   }): Promise<FactoryEvent> {
-    const mutationClass = args.event === "BudgetReconciled" ? "cleanup" : "normal";
+    const mutationClass = args.event === "BudgetReserved" ? "normal" : "cleanup";
     await this.leases.assertMutationAuthorized(args.lease);
     if (
       args.modelInvocationId &&
@@ -532,7 +532,9 @@ export class LifecycleRecorder {
       encodeEventComment(
         args.event === "BudgetReserved" && args.modelInvocationId
           ? "Factory recorded model dispatch intent; token consumption is not yet known."
-          : (reconciledModelTokenSummary(event) ??
+          : args.event === "BudgetAbandoned" && args.modelInvocationId
+            ? "Factory abandoned a model dispatch intent before the provider boundary."
+            : (reconciledModelTokenSummary(event) ??
               `Factory recorded ${args.amount} ${args.unit} for management.`),
         event,
       ),

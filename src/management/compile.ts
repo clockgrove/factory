@@ -124,9 +124,9 @@ export async function compilePlan(
       };
       await checkpoint(projected);
     },
+    { pinnedFacts: prepared.pinnedFacts, runPolicy: context.runPolicy },
     beforeModelInvocation,
     context,
-    { pinnedFacts: prepared.pinnedFacts, runPolicy: context.runPolicy },
   );
   if (!projected)
     throw new Error(

@@ -13,6 +13,11 @@ import {
   CompilerValidationReportSchema,
 } from "../compiler/contracts.js";
 import {
+  compilerJudgeCandidateFromCompiled,
+  type CompilerJudgeCandidate,
+} from "../compiler/judge-context.js";
+import { compiledGraphDigest } from "../graph.js";
+import {
   ObligationInventorySchema,
   createCompilerEvalReport,
   renderCompilerEvalMarkdown,
@@ -20,6 +25,7 @@ import {
   type CompilerEvalUsage,
   type CompilerEvidence,
 } from "../evaluation/compiler-eval.js";
+import { validatePersistedCompilerDraftJournal } from "../evaluation/compiler-draft-loop.js";
 import type { ApplicationSnapshot } from "./services.js";
 
 export const MAX_COMPILER_ANNOTATION_BYTES = 256 * 1024;
@@ -33,7 +39,12 @@ const ProjectionTrace = z
     graphDigest: z.string().regex(/^[a-f0-9]{64}$/),
     addedEdges: z.array(z.object({ itemId: z.string(), dependsOn: z.string() }).passthrough()),
     adapterBindings: z.array(z.record(z.unknown())),
-    riskElevations: z.array(z.record(z.unknown())),
+    riskElevations: z
+      .object({
+        count: z.number().int().nonnegative(),
+        digest: z.string().regex(/^[a-f0-9]{64}$/),
+      })
+      .strict(),
   })
   .strict();
 /** These are caller assertions with mechanically checked citations, never authenticated causal authority. */
@@ -236,6 +247,24 @@ export async function inspectCompilerEvaluation(args: {
       (run.start.baseSha && binding.baseSha !== run.start.baseSha))
   )
     throw new Error("compiler draft disagrees with authenticated run identity");
+  const hasFixedGraphRecord = records.some((record) => record.kind === "fixed-graph");
+  const fixedAuthority = hasFixedGraphRecord
+    ? validatePersistedCompilerDraftJournal(records)
+    : null;
+  const fixedGraph = fixedAuthority?.fixedGraph;
+  if (hasFixedGraphRecord && !fixedGraph)
+    throw new Error("fixed compiler graph is not in its canonical journal position");
+  const fixedEvaluation = fixedGraph
+    ? (() => {
+        const graphDigest = compiledGraphDigest(fixedGraph);
+        const candidate = compilerJudgeCandidateFromCompiled(fixedGraph);
+        return {
+          candidate,
+          proposalDigest: draftDigest(candidate),
+          requestDigest: draftDigest({ fixedGraph: graphDigest }),
+        };
+      })()
+    : null;
   const graph = await loadCompiledGraph(args.store, args.snapshot.number, run.runId);
   const selections = records.filter((record) => record.kind === "selection");
   if (selections.length > 1) throw new Error("multiple compiler draft selections");
@@ -303,8 +332,28 @@ export async function inspectCompilerEvaluation(args: {
   if (selection && terminalConflicts.length)
     throw new Error("Compiler selection conflicts with original terminal evidence");
   const unresolvedInvocations: string[] = [];
-  const usage: CompilerEvalUsage[] = invocations.map(({ record, invocation }) => {
+  const preProviderTerminals: Array<{
+    invocationId: string;
+    phase: CompilerEvalUsage["phase"];
+    reason: string;
+    evidenceId: string;
+  }> = [];
+  const usage: CompilerEvalUsage[] = invocations.flatMap(({ record, invocation }) => {
     const result = results.find((item) => item.payload.invocationId === invocation.invocationId);
+    if (
+      !disputedUsage.has(invocation.invocationId) &&
+      result?.payload.preProviderTerminal === true &&
+      result.payload.usage === null &&
+      typeof result.payload.stopReason === "string"
+    ) {
+      preProviderTerminals.push({
+        invocationId: invocation.invocationId,
+        phase: invocation.stage === "inventory" ? "obligations" : invocation.stage,
+        reason: result.payload.stopReason,
+        evidenceId: `draft-invocation-${record.sequence}`,
+      });
+      return [];
+    }
     const counters =
       disputedUsage.has(invocation.invocationId) || result?.payload.usage == null
         ? null
@@ -315,19 +364,21 @@ export async function inspectCompilerEvaluation(args: {
     )
       throw new Error("invalid cached compiler token evidence");
     if (!counters) unresolvedInvocations.push(invocation.invocationId);
-    return {
-      invocationId: invocation.invocationId,
-      phase: invocation.stage === "inventory" ? "obligations" : invocation.stage,
-      evidenceId: `draft-invocation-${record.sequence}`,
-      inputTokens: counters?.inputTokens ?? null,
-      outputTokens: counters?.outputTokens ?? null,
-      cachedInputTokens: counters?.cachedInputTokens ?? null,
-      observedTokens: counters ? counters.inputTokens + counters.outputTokens : null,
-      observedMilliseconds:
-        typeof result?.payload.observedMilliseconds === "number"
-          ? result.payload.observedMilliseconds
-          : null,
-    };
+    return [
+      {
+        invocationId: invocation.invocationId,
+        phase: invocation.stage === "inventory" ? "obligations" : invocation.stage,
+        evidenceId: `draft-invocation-${record.sequence}`,
+        inputTokens: counters?.inputTokens ?? null,
+        outputTokens: counters?.outputTokens ?? null,
+        cachedInputTokens: counters?.cachedInputTokens ?? null,
+        observedTokens: counters ? counters.inputTokens + counters.outputTokens : null,
+        observedMilliseconds:
+          typeof result?.payload.observedMilliseconds === "number"
+            ? result.payload.observedMilliseconds
+            : null,
+      },
+    ];
   });
   const missingEvidence: string[] = [];
   if (runtimeByDigest.size > boundedRuntimeEvents.length)
@@ -348,7 +399,15 @@ export async function inspectCompilerEvaluation(args: {
     missingEvidence.push(
       `Unresolved compiler invocation accounting: ${unresolvedInvocations.join(", ")}`,
     );
-  const accountingFailed = records.some((record) => record.kind === "accounting-failure");
+  const accountingFailed = records.some(
+    (record) =>
+      record.kind === "accounting-failure" &&
+      !records.some(
+        (candidate) =>
+          candidate.kind === "accounting-reconciled" &&
+          candidate.payload.failureSequence === record.sequence,
+      ),
+  );
   if (accountingFailed)
     missingEvidence.push(
       "Compiler usage checkpoint exists but accounting reconciliation failed; ledger completeness is unavailable",
@@ -356,7 +415,12 @@ export async function inspectCompilerEvaluation(args: {
   const invalidReviews: Array<{ sequence: number; evidenceDigest: string }> = [];
   const reportBindings = new Map<
     number,
-    { proposalDigest: string; traceDigest: string; requestDigest: string }
+    {
+      proposalDigest: string;
+      traceDigest: string;
+      requestDigest: string;
+      candidate: CompilerJudgeCandidate;
+    }
   >();
   const reports = inventory
     ? results
@@ -370,42 +434,54 @@ export async function inspectCompilerEvaluation(args: {
               item.sequence < record.sequence,
           );
           if (!validated) throw new Error("judge result has no mechanically validated draft");
-          const proposalResult = results.find(
-            (item) =>
-              item.payload.revision === record.payload.revision &&
-              (item.payload.stage === "compile" || item.payload.stage === "repair") &&
-              !item.payload.error,
-          );
-          if (
-            !proposalResult ||
-            !proposalResult.payload.value ||
-            typeof proposalResult.payload.value !== "object"
-          )
-            throw new Error("judge result has no semantic proposal");
-          const persisted = proposalResult.payload.value as Record<string, unknown>;
-          const request = CompilerRequestSchema.parse(persisted.request);
-          const proposal = CompilerProposalSchema.parse(persisted.proposal);
-          const proposalReport = CompilerValidationReportSchema.parse(persisted.report);
-          const provenance = persisted.provenance as Record<string, unknown> | undefined;
-          const proposalInvocation = invocations.find(
-            (entry) => entry.invocation.invocationId === proposalResult.payload.invocationId,
-          );
-          if (
-            proposalReport.status !== "valid" ||
-            request.revision !== record.payload.revision ||
-            draftDigest(request.inventory) !== draftDigest(inventory) ||
-            provenance?.requestDigest !== draftDigest(request) ||
-            proposalInvocation?.invocation.compilerRequestDigest !== draftDigest(request)
-          )
-            throw new Error("proposal result is not bound to its exact compiler request");
+          let proposal: CompilerJudgeCandidate;
+          let requestDigest: string;
+          let requestRevision: number;
+          if (fixedEvaluation) {
+            proposal = fixedEvaluation.candidate;
+            requestDigest = fixedEvaluation.requestDigest;
+            requestRevision = 0;
+          } else {
+            const proposalResult = results.find(
+              (item) =>
+                item.payload.revision === record.payload.revision &&
+                (item.payload.stage === "compile" || item.payload.stage === "repair") &&
+                !item.payload.error,
+            );
+            if (
+              !proposalResult ||
+              !proposalResult.payload.value ||
+              typeof proposalResult.payload.value !== "object"
+            )
+              throw new Error("judge result has no semantic proposal");
+            const persisted = proposalResult.payload.value as Record<string, unknown>;
+            const request = CompilerRequestSchema.parse(persisted.request);
+            proposal = CompilerProposalSchema.parse(persisted.proposal);
+            const proposalReport = CompilerValidationReportSchema.parse(persisted.report);
+            const provenance = persisted.provenance as Record<string, unknown> | undefined;
+            const proposalInvocation = invocations.find(
+              (entry) => entry.invocation.invocationId === proposalResult.payload.invocationId,
+            );
+            requestDigest = draftDigest(request);
+            requestRevision = request.revision;
+            if (
+              proposalReport.status !== "valid" ||
+              requestRevision !== record.payload.revision ||
+              draftDigest(request.inventory) !== draftDigest(inventory) ||
+              provenance?.requestDigest !== requestDigest ||
+              proposalInvocation?.invocation.compilerRequestDigest !== requestDigest
+            )
+              throw new Error("proposal result is not bound to its exact compiler request");
+          }
           const trace = ProjectionTrace.parse(validated.payload.projectionTrace);
           const digest = String(validated.payload.graphDigest);
+          const proposalDigest = fixedEvaluation?.proposalDigest ?? draftDigest(proposal);
           if (
-            validated.payload.proposalDigest !== draftDigest(proposal) ||
+            validated.payload.proposalDigest !== proposalDigest ||
             validated.payload.traceDigest !== draftDigest(trace) ||
-            validated.payload.requestDigest !== draftDigest(request) ||
-            trace.proposalDigest !== draftDigest(proposal) ||
-            trace.requestDigest !== draftDigest(request) ||
+            validated.payload.requestDigest !== requestDigest ||
+            trace.proposalDigest !== proposalDigest ||
+            trace.requestDigest !== requestDigest ||
             trace.graphDigest !== digest
           )
             throw new Error("projection trace is not bound to its exact proposal and request");
@@ -443,10 +519,11 @@ export async function inspectCompilerEvaluation(args: {
                 ? []
                 : ["repair"],
             });
-            reportBindings.set(request.revision, {
-              proposalDigest: draftDigest(proposal),
+            reportBindings.set(requestRevision, {
+              proposalDigest,
               traceDigest: draftDigest(trace),
-              requestDigest: draftDigest(request),
+              requestDigest,
+              candidate: proposal,
             });
             return [
               { ...report, revision: record.payload.revision, resultSequence: record.sequence },
@@ -487,20 +564,9 @@ export async function inspectCompilerEvaluation(args: {
     );
     if (!original)
       throw new Error("Compiler causal annotations name a stale or unavailable draft revision");
-    const annotatedProposalResult = results.find(
-      (record) =>
-        record.payload.revision === annotations.revision &&
-        (record.payload.stage === "compile" || record.payload.stage === "repair") &&
-        !record.payload.error,
-    );
-    if (
-      !annotatedProposalResult?.payload.value ||
-      typeof annotatedProposalResult.payload.value !== "object"
-    )
-      throw new Error("Compiler causal annotations have no semantic proposal");
-    const annotatedProposal = CompilerProposalSchema.parse(
-      (annotatedProposalResult.payload.value as Record<string, unknown>).proposal,
-    );
+    const annotatedProposal = reportBindings.get(annotations.revision)?.candidate;
+    if (!annotatedProposal)
+      throw new Error("Compiler causal annotations have no bound judge candidate");
     const itemIds = new Set(annotatedProposal.workItems.map((item) => item.id));
     const findingIds = new Set(original.verdict.findings.map((finding) => finding.id));
     const causeIds = new Set<string>();
@@ -586,6 +652,7 @@ export async function inspectCompilerEvaluation(args: {
       Boolean(record.payload.error) ||
       record.payload.valid === false ||
       record.kind === "accounting-failure" ||
+      record.kind === "accounting-reconciled" ||
       record.kind === "terminal-conflict" ||
       record.kind === "stopped",
   }));
@@ -624,7 +691,13 @@ export async function inspectCompilerEvaluation(args: {
           (invocation) =>
             `- ${invocation.invocationId} (${invocation.phase}): total tokens ${invocation.observedTokens ?? "unavailable"}; input ${invocation.inputTokens ?? "unavailable"}; output ${invocation.outputTokens ?? "unavailable"}; cached input ${invocation.cachedInputTokens ?? "unavailable"} (cached input is included in input); milliseconds ${invocation.observedMilliseconds ?? "unknown"}; evidence: ${invocation.evidenceId}`,
         )
-      : ["- No compiler invocation records are available."]),
+      : preProviderTerminals.length
+        ? []
+        : ["- No compiler invocation records are available."]),
+    ...preProviderTerminals.map(
+      (terminal) =>
+        `- ${terminal.invocationId} (${terminal.phase}): provider not invoked; terminal reason ${terminal.reason.replace(/[\r\n|]/g, " ")}; evidence: ${terminal.evidenceId}`,
+    ),
     "",
     `Observed compiler token subtotal: ${observedCompilerTokenSubtotal}; complete total: ${observedCompilerTokenTotal ?? "unavailable"}.`,
     "",
@@ -657,6 +730,7 @@ export async function inspectCompilerEvaluation(args: {
     runtimeEvidence,
     annotations: annotations ?? null,
     usage,
+    preProviderTerminals,
     correctionBudget,
     unresolvedInvocations,
     graphDigest: graph?.graphDigest ?? null,
@@ -683,7 +757,7 @@ export async function inspectCompilerEvaluation(args: {
         ? [
             "## Caller-supplied causal annotations",
             "",
-            `Provenance: ${annotations.provenance.authorType}; source: ${annotations.provenance.source}. Citation identity is verified; causal conclusions remain caller supplied. Estimates are not measured savings.`,
+            `Provenance: ${annotations.provenance.authorType}; source: ${annotations.provenance.source.replace(/[\r\n]+/g, " ").replace(/[^A-Za-z0-9 .,:/@+-]/g, " ")}. Citation identity is verified; causal conclusions remain caller supplied. Estimates are not measured savings.`,
             "",
             ...annotations.causes.map(
               (cause) =>

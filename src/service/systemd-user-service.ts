@@ -284,9 +284,11 @@ export class SystemdUserService {
       );
     }
     let mutationAttempted = false;
+    let runtimeContinuityLost = false;
     try {
       if (before.active) {
         mutationAttempted = true;
+        runtimeContinuityLost = true;
         await this.#systemctl(["stop", unit], manager);
       }
       if (before.enabled) {
@@ -302,6 +304,7 @@ export class SystemdUserService {
         (beforeState.activeState === "failed" ||
           (beforeState.result !== null && beforeState.result !== "success"))
       ) {
+        runtimeContinuityLost = true;
         await this.#systemctl(["reset-failed", unit], manager);
         await this.#systemctl(["daemon-reload"], manager);
         afterState = await this.#managerState(input, manager, "uninstall");
@@ -319,7 +322,15 @@ export class SystemdUserService {
       return status;
     } catch (error) {
       if (!mutationAttempted) throw error;
-      return this.#rollbackUninstall(input, manager, old!, beforeState, before, error);
+      return this.#rollbackUninstall(
+        input,
+        manager,
+        old!,
+        beforeState,
+        before,
+        runtimeContinuityLost,
+        error,
+      );
     }
   }
   async status(input: SystemdServiceInput): Promise<SystemdStatus> {
@@ -630,6 +641,7 @@ export class SystemdUserService {
     old: string,
     beforeState: UnitManagerState,
     beforeStatus: SystemdStatus,
+    runtimeContinuityLost: boolean,
     cause: unknown,
   ): Promise<never> {
     const unit = this.unitName(input);
@@ -663,9 +675,9 @@ export class SystemdUserService {
     } catch (error) {
       repairErrors.push(errorMessage(error));
     }
-    if (!restored) {
+    if (!restored || runtimeContinuityLost) {
       throw new Error(
-        `controller-lifecycle-outcome-unknown: uninstall failed (${errorMessage(cause)}) and rollback could not be verified${repairErrors.length ? ` (${repairErrors.join("; ")})` : ""}; ${this.#inspectionAction(input)}`,
+        `controller-lifecycle-outcome-unknown: uninstall failed (${errorMessage(cause)}) and ${runtimeContinuityLost ? "the original controller process or failure state cannot be restored" : "rollback could not be verified"}${restored ? "; unit file, enablement, and active-state repair was verified" : ""}${repairErrors.length ? ` (${repairErrors.join("; ")})` : ""}; ${this.#inspectionAction(input)}`,
       );
     }
     throw new Error(

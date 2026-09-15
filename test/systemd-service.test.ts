@@ -460,6 +460,58 @@ describe("systemd user service lifecycle", () => {
     expect(resetFailedCalls).toBe(0);
   });
 
+  it("reports unknown outcome when rollback starts a replacement after stopping the original", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-post-stop-failure-"));
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let enabled = false;
+    let active = false;
+    let failDisable = false;
+    let startCalls = 0;
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "enable") enabled = true;
+      if (args[0] === "disable") {
+        if (failDisable) throw new Error("fixture failure after original stop");
+        enabled = false;
+      }
+      if (args[0] === "start") {
+        startCalls += 1;
+        active = true;
+      }
+      if (args[0] === "stop") active = false;
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(directory, args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled: installed && enabled,
+          active: installed && active,
+        });
+      }
+    };
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      currentUserManager,
+      startupHealthDelayMs: 0,
+      run,
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+    await service.start(input);
+    failDisable = true;
+
+    await expect(service.uninstall(input)).rejects.toThrow(
+      /controller-lifecycle-outcome-unknown:.*original controller process.*repair was verified/,
+    );
+    expect(await readFile(service.unitPath(input), "utf8")).toContain(
+      "# Managed by Clockgrove Factory v2",
+    );
+    expect(enabled).toBe(true);
+    expect(active).toBe(true);
+    expect(startCalls).toBe(2);
+  });
+
   it("does not translate a user-manager transport failure into disabled and inactive", async () => {
     const f = await commandFixture();
     const service = new SystemdUserService({

@@ -145,9 +145,10 @@ Restarting the controller resumes eligible non-terminal work; it does not revive
 cancelled run. For an escalated Objective, ask the Director to inspect `factory_recovery_plan`,
 then propose a successor with `factory_recovery_propose`. The proposal is read-only and binds the
 existing graph, issues, source artifacts, historical usage, and continuation actions to a digest.
-If a reconciled one-shot compiler failed before it created a graph or Work Items, the proposal can
-instead bind one successor compilation of the unchanged Objective and base. That proposal requires
-an explicit auto-repair envelope; it creates no placeholder Work Items, and the successor cannot
+If an evaluated compiler exhausted its repair envelope before it created a graph or Work Items, the
+proposal can instead bind one successor compilation of the unchanged Objective and base. The source
+and successor must carry the same fully explicit auto-repair envelope; the proposal creates no
+placeholder Work Items, and the successor cannot
 launch workers until its compiled graph and GitHub projection authenticate.
 `factory_status.operatorAction.monitoring: "stop"` means no Factory work is active: pause or delete
 any attached recurring monitor and report the returned next action once. Do not keep polling a

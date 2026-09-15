@@ -552,10 +552,21 @@ function makeLegacyGraphless(f: Awaited<ReturnType<typeof fixture>>): void {
     item.body = renderLegacyWorkItemCore(f.graph.objective.workItems[index]!);
 }
 
-function makeFailedCompilerGraphless(f: Awaited<ReturnType<typeof fixture>>): void {
+const canonicalCompilerEvaluation = {
+  mode: "auto-repair" as const,
+  maxRepairs: 2,
+  maxInvocations: 7,
+  timeoutSeconds: 600,
+  maxObservedTokens: 500_000,
+};
+
+function makeEvaluatedCompilerGraphless(f: Awaited<ReturnType<typeof fixture>>): void {
   f.refs.clear();
   if (f.start.event !== "FactoryRunStarted") throw new Error("fixture start");
-  const sourcePolicy = structuredClone(f.start.policy);
+  const sourcePolicy = {
+    ...structuredClone(f.start.policy),
+    compilerEvaluation: canonicalCompilerEvaluation,
+  };
   delete sourcePolicy.economics;
   const policyDigestValue = policyDigest(sourcePolicy);
   const start = f.event({
@@ -564,7 +575,7 @@ function makeFailedCompilerGraphless(f: Awaited<ReturnType<typeof fixture>>): vo
     policy: sourcePolicy,
     policyDigest: policyDigestValue,
   });
-  const invocationId = `compile-${f.base.oid}`;
+  const invocationId = `compiler-${digest("7")}`;
   f.snapshot.workItems = [];
   f.snapshot.factoryEvents = [
     start,
@@ -594,23 +605,23 @@ function makeFailedCompilerGraphless(f: Awaited<ReturnType<typeof fixture>>): vo
       event: "BudgetReconciled",
       sequence: 4,
       phase: "management",
-      usageId: `failed-compile-${f.base.oid}`,
+      usageId: `draft-${invocationId}`,
       modelInvocationId: invocationId,
       unit: "model_tokens",
-      amount: 161_754,
+      amount: 345_907,
       directorEpoch: 1,
       policyDigest: policyDigestValue,
       reportedModelUsage: {
-        inputTokens: 152_986,
-        outputTokens: 8_768,
-        cachedInputTokens: 107_904,
+        inputTokens: 321_500,
+        outputTokens: 24_407,
+        cachedInputTokens: 202_000,
       },
     }),
     f.event({
       kind: "run",
       event: "FactoryRunEscalated",
       sequence: 5,
-      reason: "compiled Objective has 16 deterministic violations:\n- fixture violation",
+      reason: "compiler draft stopped without projection: inventory-repair-exhausted",
     }),
   ];
 }
@@ -1164,7 +1175,7 @@ describe("explicit recovery request application", () => {
 
   async function requests(graphlessCompilerFailure = false) {
     const f = await fixture(!graphlessCompilerFailure);
-    if (graphlessCompilerFailure) makeFailedCompilerGraphless(f);
+    if (graphlessCompilerFailure) makeEvaluatedCompilerGraphless(f);
     let actor = "operator";
     let loseCommentResponse = false;
     let beforeRead: (() => void) | undefined;
@@ -1639,13 +1650,7 @@ describe("explicit recovery request application", () => {
 
   it("persists and replays graphless compiler recovery only with the exact proposed repair policy", async () => {
     const f = await requests(true);
-    const compilerEvaluation = {
-      mode: "auto-repair" as const,
-      maxRepairs: 2,
-      maxInvocations: 7,
-      timeoutSeconds: 600,
-      maxObservedTokens: 500_000,
-    };
+    const compilerEvaluation = canonicalCompilerEvaluation;
     const proposal = await f.service.propose({
       objective: 7,
       requestId: "compiler-recovery",
@@ -1735,22 +1740,21 @@ describe("explicit recovery request application", () => {
 });
 
 describe("bounded read-only immutable recovery proposals", () => {
-  it("proposes one bounded auto-repair successor for the exact reconciled pre-graph failure", async () => {
+  it("proposes a read-only successor for Objective 184's canonical evaluated-compiler failure", async () => {
     const f = await fixture(false);
-    makeFailedCompilerGraphless(f);
-    const compilerEvaluation = {
-      mode: "auto-repair" as const,
-      maxRepairs: 2,
-      maxInvocations: 7,
-      timeoutSeconds: 600,
-      maxObservedTokens: 500_000,
-    };
+    makeEvaluatedCompilerGraphless(f);
+    const compilerEvaluation = canonicalCompilerEvaluation;
 
     const result = await f.build({ compilerEvaluation });
 
     expect(result.status, JSON.stringify(result.blockers)).toBe("proposed");
     expect(result.blockers).toEqual([]);
     expect(result.unknownUsageDigest).toBeNull();
+    expect(result.historicalAccounting).toMatchObject({
+      usage: { modelTokens: 345_907 },
+      unknownModelUsageCount: 0,
+      unreconciledReservationCount: 0,
+    });
     expect(result.plan).toMatchObject({
       protocol: "clockgrove.factory/recovery-plan-v2",
       graph: {
@@ -1786,68 +1790,74 @@ describe("bounded read-only immutable recovery proposals", () => {
     expect(f.mutations.createCommit).not.toHaveBeenCalled();
   });
 
-  it("requires the exact failed-compiler receipt and enforces its optional terminal reason", async () => {
-    const compilerEvaluation = {
-      mode: "auto-repair" as const,
-      maxRepairs: 2,
-      maxInvocations: 7,
-      timeoutSeconds: 600,
-      maxObservedTokens: 500_000,
-    };
-    const legacy = await fixture(false);
-    makeFailedCompilerGraphless(legacy);
-    legacy.snapshot.factoryEvents = legacy.snapshot
-      .factoryEvents!.filter(
-        (event) =>
-          event.kind !== "budget" ||
-          (!event.usageId?.startsWith("invocation-") &&
-            !event.usageId?.startsWith("failed-compile-")),
-      )
-      .concat(
-        legacy.event({
-          kind: "budget",
-          event: "BudgetReconciled",
-          sequence: 4,
-          phase: "management",
-          unit: "model_tokens",
-          amount: 161_754,
-          usageId: `compile-${"c".repeat(64)}`,
-        }),
-      );
-    const legacyResult = await legacy.build({ compilerEvaluation });
-    expect(legacyResult.blockers).toEqual([
-      expect.objectContaining({ code: "compile-objective-failure-accounting" }),
-    ]);
-
-    const matching = await fixture(false);
-    makeFailedCompilerGraphless(matching);
-    const matchingTerminal = matching.snapshot.factoryEvents!.find(
-      (event) => event.event === "FactoryRunEscalated",
+  it("rejects failed-compile accounting for an evaluated source", async () => {
+    const f = await fixture(false);
+    makeEvaluatedCompilerGraphless(f);
+    const usage = f.snapshot.factoryEvents!.find(
+      (event) => event.kind === "budget" && event.event === "BudgetReconciled",
     )!;
-    Object.assign(
-      matching.snapshot.factoryEvents!.find(
-        (event) => event.kind === "budget" && event.usageId?.startsWith("failed-compile-"),
-      )!,
-      { reason: matchingTerminal.reason },
-    );
-    expect((await matching.build({ compilerEvaluation })).status).toBe("proposed");
+    if (usage.kind !== "budget" || !usage.modelInvocationId) throw new Error("fixture usage");
+    usage.usageId = `failed-${usage.modelInvocationId}`;
 
-    const mismatched = await fixture(false);
-    makeFailedCompilerGraphless(mismatched);
-    Object.assign(
-      mismatched.snapshot.factoryEvents!.find(
-        (event) => event.kind === "budget" && event.usageId?.startsWith("failed-compile-"),
-      )!,
-      { reason: "a different compiler failure" },
-    );
-    expect((await mismatched.build({ compilerEvaluation })).blockers).toEqual([
+    expect((await f.build({ compilerEvaluation: canonicalCompilerEvaluation })).blockers).toEqual([
       expect.objectContaining({ code: "compile-objective-failure-accounting" }),
     ]);
   });
 
+  it("rejects a source without the canonical evaluated-compiler policy", async () => {
+    const f = await fixture(false);
+    makeEvaluatedCompilerGraphless(f);
+    const start = f.snapshot.factoryEvents!.find((event) => event.event === "FactoryRunStarted");
+    if (start?.event !== "FactoryRunStarted") throw new Error("fixture start");
+    const sourcePolicy = structuredClone(start.policy);
+    delete sourcePolicy.compilerEvaluation;
+    start.policy = sourcePolicy;
+    start.policyDigest = policyDigest(sourcePolicy);
+    for (const event of f.snapshot.factoryEvents!)
+      if (event.kind === "budget") event.policyDigest = start.policyDigest;
+
+    expect((await f.build({ compilerEvaluation: canonicalCompilerEvaluation })).blockers).toEqual([
+      expect.objectContaining({ code: "compile-objective-failure-accounting" }),
+    ]);
+  });
+
+  it("rejects report-only, partial, or changed evaluated-compiler policy", async () => {
+    const requestedPolicies = [
+      { ...canonicalCompilerEvaluation, maxRepairs: 1 },
+      { ...canonicalCompilerEvaluation, maxInvocations: 6 },
+      { ...canonicalCompilerEvaluation, timeoutSeconds: 599 },
+      { ...canonicalCompilerEvaluation, maxObservedTokens: 499_999 },
+    ];
+    const partial = { ...canonicalCompilerEvaluation };
+    Reflect.deleteProperty(partial, "maxRepairs");
+    requestedPolicies.push(partial);
+
+    for (const compilerEvaluation of requestedPolicies) {
+      const f = await fixture(false);
+      makeEvaluatedCompilerGraphless(f);
+      expect((await f.build({ compilerEvaluation })).blockers).toEqual([
+        expect.objectContaining({ code: "compile-objective-policy-delta" }),
+      ]);
+    }
+
+    const reportOnly = await fixture(false);
+    makeEvaluatedCompilerGraphless(reportOnly);
+    const start = reportOnly.snapshot.factoryEvents!.find(
+      (event) => event.event === "FactoryRunStarted",
+    );
+    if (start?.event !== "FactoryRunStarted") throw new Error("fixture start");
+    start.policy = { ...start.policy, compilerEvaluation: { mode: "report-only" } };
+    start.policyDigest = policyDigest(start.policy);
+    for (const event of reportOnly.snapshot.factoryEvents!)
+      if (event.kind === "budget") event.policyDigest = start.policyDigest;
+    expect(
+      (await reportOnly.build({ compilerEvaluation: canonicalCompilerEvaluation })).blockers,
+    ).toEqual([expect.objectContaining({ code: "compile-objective-policy-delta" })]);
+  });
+
   it("fails closed when pre-graph recovery omits repair authority or observes a moved base", async () => {
     const f = await fixture(false);
-    makeFailedCompilerGraphless(f);
+    makeEvaluatedCompilerGraphless(f);
     expect((await f.build()).blockers.map((blocker) => blocker.code)).toContain(
       "compile-objective-policy-delta",
     );
@@ -1861,13 +1871,7 @@ describe("bounded read-only immutable recovery proposals", () => {
     });
     f.commits.set(sha("9"), await f.store.getBranchHead("main"));
     const moved = await f.build({
-      compilerEvaluation: {
-        mode: "auto-repair",
-        maxRepairs: 2,
-        maxInvocations: 7,
-        timeoutSeconds: 600,
-        maxObservedTokens: 500_000,
-      },
+      compilerEvaluation: canonicalCompilerEvaluation,
     });
     expect(moved.blockers.map((blocker) => blocker.code)).toContain(
       "compile-objective-base-changed",
@@ -1876,20 +1880,14 @@ describe("bounded read-only immutable recovery proposals", () => {
 
   it("does not offer an unrunnable compiler successor when cumulative model allowance is exhausted", async () => {
     const f = await fixture(false);
-    makeFailedCompilerGraphless(f);
-    setGraphlessCompilerModelAllowance(f, 161_754);
-    const compilerEvaluation = {
-      mode: "auto-repair" as const,
-      maxRepairs: 2,
-      maxInvocations: 7,
-      timeoutSeconds: 600,
-      maxObservedTokens: 500_000,
-    };
+    makeEvaluatedCompilerGraphless(f);
+    setGraphlessCompilerModelAllowance(f, 345_907);
+    const compilerEvaluation = canonicalCompilerEvaluation;
     const blocked = await f.build({ compilerEvaluation });
     expect(blocked.blockers.map((blocker) => blocker.code)).toContain(
       "compile-objective-model-allowance-exhausted",
     );
-    expect(blocked.historicalAccounting?.usage?.modelTokens).toBe(161_754);
+    expect(blocked.historicalAccounting?.usage?.modelTokens).toBe(345_907);
     expect(blocked.historicalAccounting?.remaining?.modelTokens).toBe(0);
 
     const proposed = await f.build({

@@ -348,57 +348,6 @@ describe("historical successor accounting assessment", () => {
     expect(result.unknownModelUsageCount).toBe(1);
     expect(result.unknownModelUsage[0]?.reason).toContain("compilation");
   });
-  it("requires an exact dispatch, base, policy, and provider counter binding for failed compilation", () => {
-    const events = history("one");
-    const invocationId = `compile-${"a".repeat(40)}`;
-    Object.assign(events[1]!, {
-      sequence: 2,
-      usageId: `failed-${invocationId}`,
-      amount: 0,
-      modelInvocationId: invocationId,
-      directorEpoch: 1,
-      policyDigest: digest,
-      reportedModelUsage: { inputTokens: 0, outputTokens: 0 },
-    });
-    expect(assess(events).unknownModelUsageCount).toBe(1);
-    const marker = parseFactoryEvent({
-      ...common("one", 1),
-      kind: "budget",
-      event: "BudgetReserved",
-      phase: "management",
-      unit: "model_tokens",
-      amount: 0,
-      usageId: `invocation-${invocationId}`,
-      modelInvocationId: invocationId,
-      directorEpoch: 1,
-      policyDigest: digest,
-    });
-    const result = assess([...events, marker]);
-    expect(result.usage?.modelTokens).toBe(0);
-    expect(result.unknownModelUsageCount).toBe(0);
-    Object.assign(events[1]!, { reason: "bounded fixture" });
-    expect(assess([...events, marker]).unknownModelUsageCount).toBe(0);
-    Object.assign(events[1]!, { reason: "different failure" });
-    expect(assess([...events, marker]).unknownModelUsageCount).toBe(1);
-    Reflect.deleteProperty(events[1]!, "reason");
-    expect(assess([...events, marker, marker]).unknownModelUsageCount).toBe(0);
-    expect(
-      codes(assess([...events, marker, { ...marker, sequence: 3 } as FactoryEvent])),
-    ).toContain("unknown-model-usage");
-    expect(
-      codes(assess([...events, marker, { ...events[1]!, sequence: 3 } as FactoryEvent])),
-    ).toContain("unknown-model-usage");
-    for (const change of [
-      { modelInvocationId: `compile-${"b".repeat(40)}` },
-      { policyDigest: "b".repeat(64) },
-      { reportedModelUsage: { inputTokens: 1, outputTokens: 0 } },
-    ]) {
-      const tampered = events.map((event) =>
-        event.event === "BudgetReconciled" ? ({ ...event, ...change } as FactoryEvent) : event,
-      );
-      expect(assess([...tampered, marker]).blockers.length).toBeGreaterThan(0);
-    }
-  });
   it("counts exact evaluated-compiler draft usage once and leaves malformed draft usage unknown", () => {
     const evaluatedPolicy = {
       ...policy,

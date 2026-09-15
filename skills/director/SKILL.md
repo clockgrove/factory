@@ -140,11 +140,11 @@ The assessment is not execution authority. For an explicitly authorized continua
 
 1. Call `factory_recovery_propose` with a unique, stable `requestId`. Omit `allowanceIncrement`
    unless the user explicitly authorized additional amounts; the default increment is zero.
-   When the source terminally failed after a reconciled one-shot compilation but before creating
-   any Work Items or graph, include a fully explicit successor-only `compilerEvaluation` object
+   When the source evaluated compiler exhausted its repair envelope before creating any Work Items
+   or graph, include the same fully explicit `compilerEvaluation` object recorded by the source
    with `mode: "auto-repair"`, `maxRepairs`, `maxInvocations`, `timeoutSeconds`, and
-   `maxObservedTokens`. This is a policy change, so present the exact limits and added invocation
-   exposure for authorization. `maxObservedTokens` is an observed evaluation stop, not a hard
+   `maxObservedTokens`. Present the exact retained limits and added invocation exposure for
+   authorization. `maxObservedTokens` is an observed evaluation stop, not a hard
    provider token cap; the cumulative economics policy remains the spending boundary.
    Report the proposed reuse, required fresh validation, cumulative usage, and blockers. A blocked
    proposal is not a runnable plan.

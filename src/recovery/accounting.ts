@@ -76,29 +76,24 @@ const objectiveCompilationReconciliation = (event: BudgetEvent) =>
   event.workItem === undefined &&
   event.attempt === undefined;
 
-function exactCompilationInvocation(
+function exactDraftCompilationInvocation(
   event: BudgetEvent,
   runEvents: readonly FactoryEvent[],
   start: RunStartedEvent,
   terminal: RunTerminalEvent,
-  kind: "failed" | "draft",
 ): boolean {
   if (!objectiveCompilationReconciliation(event) || !event.modelInvocationId) return false;
-  const invocationId =
-    kind === "failed" && start.baseSha ? `compile-${start.baseSha}` : event.modelInvocationId;
+  const invocationId = event.modelInvocationId;
   if (
-    (kind === "failed" &&
-      (event.modelInvocationId !== invocationId || event.usageId !== `failed-${invocationId}`)) ||
-    (kind === "draft" &&
-      (!start.policy.compilerEvaluation || event.usageId !== `draft-${invocationId}`)) ||
+    !start.policy.compilerEvaluation ||
+    event.usageId !== `draft-${invocationId}` ||
     event.directorEpoch === undefined ||
     event.policyDigest !== start.policyDigest ||
     event.reportedModelUsage?.inputTokens === undefined ||
     event.reportedModelUsage.outputTokens === undefined ||
     event.reportedModelUsage.inputTokens + event.reportedModelUsage.outputTokens !== event.amount ||
     event.sequence <= start.sequence ||
-    event.sequence >= terminal.sequence ||
-    (kind === "failed" && event.reason !== undefined && event.reason !== terminal.reason)
+    event.sequence >= terminal.sequence
   )
     return false;
   const reconciliations = runEvents.filter(
@@ -131,15 +126,14 @@ function exactCompilationInvocation(
   );
 }
 
-export function hasExactFailedCompilationUsage(
+export function hasExactDraftCompilationUsage(
   events: readonly FactoryEvent[],
   start: RunStartedEvent,
   terminal: RunTerminalEvent,
 ): boolean {
   return events.some(
     (event) =>
-      event.kind === "budget" &&
-      exactCompilationInvocation(event, events, start, terminal, "failed"),
+      event.kind === "budget" && exactDraftCompilationInvocation(event, events, start, terminal),
   );
 }
 
@@ -150,18 +144,14 @@ function compilationUsage(
   terminal: RunTerminalEvent,
 ): boolean {
   if (!objectiveCompilationReconciliation(event)) return false;
-  // Successful compiler receipts predate invocation-linked accounting and remain
-  // valid historical coverage. Failed compilation is the new recovery authority,
-  // so require its complete dispatch, policy, base, and provider-counter binding.
+  // One-shot compilation records its successful graph digest. Evaluated compilation
+  // has no aggregate receipt and is covered only by exact draft invocation pairs.
   if (
     start.policy.compilerEvaluation === undefined &&
     /^compile-[0-9a-f]{64}$/.test(event.usageId ?? "")
   )
     return true;
-  return (
-    exactCompilationInvocation(event, runEvents, start, terminal, "failed") ||
-    exactCompilationInvocation(event, runEvents, start, terminal, "draft")
-  );
+  return exactDraftCompilationInvocation(event, runEvents, start, terminal);
 }
 
 /** Exact authenticated adoption declares graph reuse, not a zero-cost compiler invocation.
@@ -383,7 +373,7 @@ export function assessRecoveryAccounting(input: {
         event.kind !== "budget" ||
         !objectiveCompilationReconciliation(event) ||
         !event.usageId?.startsWith("draft-") ||
-        exactCompilationInvocation(event, runEvents, start, terminal, "draft")
+        exactDraftCompilationInvocation(event, runEvents, start, terminal)
       )
         continue;
       invalidDraftRuns.add(runId);

@@ -74,7 +74,7 @@ async function interruptedCompilationFixture(includeCancellation: boolean): Prom
     marker,
     ...(includeCancellation ? [cancellation] : []),
   ];
-  const compile = vi.spyOn(f.management, "compile");
+  const compile = vi.spyOn(f.management, "proposePlan");
   vi.mocked(GitHubReader.prototype.readRunCancellationRequest).mockResolvedValue(cancellation);
   return { f, marker, cancellation, compile };
 }

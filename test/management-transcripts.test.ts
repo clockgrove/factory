@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import {
   access,
   chmod,
@@ -12,6 +13,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
+import { build } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CodexCliManagementBackend } from "../src/management/codex-cli.js";
 import {
@@ -23,6 +26,7 @@ import {
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 
 const roots: string[] = [];
+const execFileAsync = promisify(execFile);
 
 async function root() {
   const value = await mkdtemp(join(tmpdir(), "factory-management-transcripts-"));
@@ -216,6 +220,86 @@ describe("local management transcripts", () => {
     });
     expect(names.filter((name) => name.startsWith("factory-management-")).length).toBe(2);
   });
+
+  it("enforces retention across independent controller and MCP processes", async () => {
+    const base = await root();
+    const directory = join(base, "archive");
+    const runner = join(base, "transcript-writer.mjs");
+    const barrier = join(base, "go");
+    const processCount = 16;
+    await build({
+      stdin: {
+        resolveDir: process.cwd(),
+        sourcefile: "transcript-writer.ts",
+        loader: "ts",
+        contents: `
+            import { access, writeFile } from "node:fs/promises";
+            import { setTimeout as delay } from "node:timers/promises";
+            import { LocalManagementTranscriptRecorder } from ${JSON.stringify(
+              join(process.cwd(), "src/management/transcripts.ts"),
+            )};
+            const [directory, id, ready, barrier] = process.argv.slice(2);
+            await writeFile(ready, "ready");
+            while (true) {
+              try { await access(barrier); break; } catch { await delay(5); }
+            }
+            const recorder = new LocalManagementTranscriptRecorder(directory, {
+              maxRecordBytes: 2 * 1024 * 1024,
+              maxArchiveBytes: 16 * 1024 * 1024,
+              maxRecords: 1,
+            });
+            const session = await recorder.begin({
+              cwd: directory,
+              modelInvocationId: id,
+              prompt: "x".repeat(128 * 1024),
+              schema: {},
+              profile: null,
+              model: null,
+              reasoning: null,
+              transport: "structured-adapter",
+            });
+            await session.finish({
+              state: "succeeded",
+              parsedResponse: { id, content: "y".repeat(128 * 1024) },
+            });
+          `,
+      },
+      outfile: runner,
+      bundle: true,
+      platform: "node",
+      format: "esm",
+      logLevel: "silent",
+    });
+    const ready = Array.from({ length: processCount }, (_, index) => join(base, `ready-${index}`));
+    const children = ready.map((readyPath, index) =>
+      execFileAsync(process.execPath, [runner, directory, `process-${index}`, readyPath, barrier], {
+        cwd: base,
+      }),
+    );
+    for (let attempt = 0; attempt < 1_000; attempt += 1) {
+      if (
+        (
+          await Promise.all(
+            ready.map((path) =>
+              access(path).then(
+                () => true,
+                () => false,
+              ),
+            ),
+          )
+        ).every(Boolean)
+      )
+        break;
+      if (attempt === 999) throw new Error("transcript child processes did not reach barrier");
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+    }
+    await writeFile(barrier, "go");
+    await Promise.all(children);
+    const names = await readdir(directory);
+    expect(names.filter((name) => name.startsWith("factory-management-")).length).toBe(1);
+    expect(names.some((name) => name.endsWith(".tmp"))).toBe(false);
+    expect(names).not.toContain(".factory-management-retention.lock");
+  }, 30_000);
 
   it("prunes oldest owned records to the byte bound before replacement", async () => {
     const directory = join(await root(), "archive");

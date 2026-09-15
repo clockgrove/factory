@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { ManagementUsage } from "./backend.js";
 
 export const MANAGEMENT_TRANSCRIPT_DIRECTORY_ENV = "FACTORY_MANAGEMENT_TRANSCRIPT_DIR";
@@ -8,6 +9,9 @@ export const MAX_MANAGEMENT_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
 export const MAX_MANAGEMENT_TRANSCRIPT_ARCHIVE_BYTES = 512 * 1024 * 1024;
 export const MAX_MANAGEMENT_TRANSCRIPT_RECORDS = 1_000;
 export const MANAGEMENT_TRANSCRIPT_FILENAME_PREFIX = "factory-management-";
+const MANAGEMENT_TRANSCRIPT_LOCK_NAME = ".factory-management-retention.lock";
+const MANAGEMENT_TRANSCRIPT_LOCK_TIMEOUT_MS = 5_000;
+const MANAGEMENT_TRANSCRIPT_STALE_LOCK_MS = 60_000;
 
 export interface ManagementTranscriptStart {
   cwd: string;
@@ -289,18 +293,21 @@ export class LocalManagementTranscriptRecorder implements ManagementTranscriptRe
       );
     }
     await this.#prepareRoot();
-    await this.#pruneFor(path, bytes);
-    const temporary = join(
-      this.#root,
-      `.${MANAGEMENT_TRANSCRIPT_FILENAME_PREFIX}${randomUUID()}.tmp`,
-    );
-    try {
-      await writeFile(temporary, body, { encoding: "utf8", mode: 0o600, flag: "wx" });
-      await rename(temporary, path);
-    } catch (error) {
-      await rm(temporary, { force: true }).catch(() => {});
-      throw error;
-    }
+    await this.#withArchiveLock(async () => {
+      await this.#removeOwnedTemporaryFiles();
+      await this.#pruneFor(path, bytes);
+      const temporary = join(
+        this.#root,
+        `.${MANAGEMENT_TRANSCRIPT_FILENAME_PREFIX}${randomUUID()}.tmp`,
+      );
+      try {
+        await writeFile(temporary, body, { encoding: "utf8", mode: 0o600, flag: "wx" });
+        await rename(temporary, path);
+      } catch (error) {
+        await rm(temporary, { force: true }).catch(() => {});
+        throw error;
+      }
+    });
   }
 
   async #prepareRoot(): Promise<void> {
@@ -309,6 +316,57 @@ export class LocalManagementTranscriptRecorder implements ManagementTranscriptRe
     if (details.isSymbolicLink() || !details.isDirectory())
       throw new Error("management transcript directory must be a real directory, not a symlink");
     await chmod(this.#root, 0o700);
+  }
+
+  async #withArchiveLock<T>(operation: () => Promise<T>): Promise<T> {
+    const lock = join(this.#root, MANAGEMENT_TRANSCRIPT_LOCK_NAME);
+    const deadline = Date.now() + MANAGEMENT_TRANSCRIPT_LOCK_TIMEOUT_MS;
+    while (true) {
+      try {
+        await mkdir(lock, { mode: 0o700 });
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        let details;
+        try {
+          details = await lstat(lock);
+        } catch (inspectionError) {
+          if ((inspectionError as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw inspectionError;
+        }
+        if (!details.isDirectory() || details.isSymbolicLink())
+          throw new Error("management transcript retention lock is not a real directory");
+        if (Date.now() - details.mtimeMs > MANAGEMENT_TRANSCRIPT_STALE_LOCK_MS) {
+          try {
+            await rmdir(lock);
+            continue;
+          } catch (removalError) {
+            if ((removalError as NodeJS.ErrnoException).code === "ENOENT") continue;
+          }
+        }
+        if (Date.now() >= deadline)
+          throw new Error("management transcript retention lock timed out");
+        await delay(10);
+      }
+    }
+    try {
+      return await operation();
+    } finally {
+      await rmdir(lock).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      });
+    }
+  }
+
+  async #removeOwnedTemporaryFiles(): Promise<void> {
+    for (const entry of await readdir(this.#root, { withFileTypes: true })) {
+      if (
+        entry.isFile() &&
+        entry.name.startsWith(`.${MANAGEMENT_TRANSCRIPT_FILENAME_PREFIX}`) &&
+        entry.name.endsWith(".tmp")
+      )
+        await rm(join(this.#root, entry.name));
+    }
   }
 
   async #pruneFor(target: string, replacementBytes: number): Promise<void> {

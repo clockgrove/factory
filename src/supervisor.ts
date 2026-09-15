@@ -121,6 +121,7 @@ import {
 } from "./repository-profiles/git-lfs.js";
 import {
   DEFAULT_LEASE_RENEWAL_LEAD_MS,
+  LeaseAcquisitionContendedError,
   LeaseLostError,
   LeaseManager,
   type LeaseState,
@@ -130,6 +131,7 @@ import {
   deduplicateFactoryEvents,
   encodeEventComment,
   nextEventSequence,
+  latestRunReceipts,
   latestSupportedRun,
   hasCurrentWriterAuthority,
 } from "./control/receipts.js";
@@ -262,7 +264,7 @@ import {
   parseGraphItemMetadata,
   type CompiledObjective,
 } from "./graph.js";
-import { GitHubReader, type GitHubOptions } from "./github.js";
+import { GitHubReader, type GitHubOptions, type RunCancellationRequest } from "./github.js";
 import { CodexCliManagementBackend } from "./management/codex-cli.js";
 import {
   compileEvaluatedDraft,
@@ -418,6 +420,13 @@ class RunCancellationRequestedError extends Error {
   }
 }
 
+class ObservedTerminalRun extends Error {
+  constructor(readonly result: SupervisorResult) {
+    super(`Factory run ${result.runId} became terminal during reconnect`);
+    this.name = "ObservedTerminalRun";
+  }
+}
+
 class CancellationAccountingPublicationError extends Error {
   constructor(cause: unknown) {
     super(
@@ -525,7 +534,7 @@ export function createRepositorySupervisorResources(
 }
 
 export interface SupervisorResult {
-  status: "completed" | "cancelled" | "drained" | "escalated";
+  status: "completed" | "cancelled" | "draining" | "drained" | "escalated";
   objective: number;
   runId: string;
   reason?: string;
@@ -818,6 +827,18 @@ export async function runDurableCompilationTransaction(args: {
 }
 
 type Snapshot = Awaited<ReturnType<GitHubReader["readObjective"]>>;
+
+/** Resolve constructor-time resources from the same authenticated observation
+ * that the foreground Supervisor will consume. A later under-lease read still
+ * fences execution if the active run changes after this observation. */
+export function foregroundRunPolicyFromSnapshot(snapshot: Snapshot, requested: unknown): RunPolicy {
+  const active = latestSupportedRun(snapshotEvents(snapshot), snapshot.objectiveAuthority);
+  if (!active || active.kind !== "run" || active.event !== "FactoryRunStarted")
+    return parseRunPolicy(requested);
+  const durable = parseRunPolicy(active.policy);
+  if (policyDigest(durable) !== active.policyDigest) throw new Error("run policy digest mismatch");
+  return durable;
+}
 function snapshotEvents(snapshot: Snapshot): FactoryEvent[] {
   return deduplicateFactoryEvents([
     ...(snapshot.factoryEvents ?? []),
@@ -851,6 +872,101 @@ function hasCancellationRequest(snapshot: Snapshot, runId: string): boolean {
       event.event === "FactoryRunCancellationRequested" &&
       event.runId === runId,
   );
+}
+
+function foregroundCancellationRequest(
+  snapshot: Snapshot,
+  runId: string,
+): ForegroundCancellationRequest | null {
+  const start = deduplicateFactoryEvents(snapshot.factoryEvents ?? []).find(
+    (event) => event.kind === "run" && event.event === "FactoryRunStarted" && event.runId === runId,
+  );
+  if (!start || start.kind !== "run" || start.event !== "FactoryRunStarted") return null;
+  return (
+    deduplicateFactoryEvents(snapshot.factoryEvents ?? [])
+      .filter(
+        (event): event is ForegroundCancellationRequest =>
+          event.kind === "run" &&
+          event.event === "FactoryRunCancellationRequested" &&
+          event.runId === runId &&
+          event.requestedBy.toLowerCase() === start.actor.toLowerCase(),
+      )
+      .sort((left, right) => right.sequence - left.sequence)[0] ?? null
+  );
+}
+
+type ForegroundCancellationRequest = Extract<
+  RunCancellationRequest,
+  { event: "FactoryRunCancellationRequested" }
+>;
+
+function exactForegroundCancellationRequest(
+  run: RunState,
+  request: RunCancellationRequest | null,
+): ForegroundCancellationRequest | null {
+  if (!request) return null;
+  if (
+    request.event !== "FactoryRunCancellationRequested" ||
+    request.objective !== run.objective ||
+    request.runId !== run.runId ||
+    request.requestedBy.toLowerCase() !== run.actor.toLowerCase()
+  )
+    throw new Error("cancellation does not bind the original foreground run authority");
+  return request;
+}
+
+function drainingForegroundCancellationResult(
+  run: RunState,
+  request: ForegroundCancellationRequest,
+  error: LeaseLostError,
+): SupervisorResult {
+  const retry =
+    error instanceof LeaseAcquisitionContendedError
+      ? `retry after ${error.retryAfterMs}ms if no terminal receipt appears`
+      : "re-read status before retrying because another Director won the lease race";
+  return {
+    status: "draining",
+    objective: run.objective,
+    runId: run.runId,
+    reason: `cancellation request ${request.requestId} is draining under the current run holder; ${retry}`,
+  };
+}
+
+function isForegroundCompilationOnly(snapshot: Snapshot, runId: string): boolean {
+  return (
+    snapshot.workItems.length === 0 &&
+    snapshotEvents(snapshot)
+      .filter((event) => event.runId === runId)
+      .every(
+        (event) =>
+          event.kind === "run" ||
+          event.kind === "controller" ||
+          event.kind === "delivery" ||
+          (event.kind === "provider" &&
+            event.phase === "management" &&
+            event.workItem === undefined) ||
+          (event.kind === "budget" &&
+            event.phase === "management" &&
+            event.workItem === undefined &&
+            event.attempt === undefined),
+      )
+  );
+}
+
+function observedTerminalResult(snapshot: Snapshot, runId: string): SupervisorResult | null {
+  const latest = latestRunReceipts(snapshot.factoryEvents ?? [], snapshot.objectiveAuthority);
+  if (latest?.runId !== runId || !latest.terminal) return null;
+  return {
+    status:
+      latest.terminal.event === "FactoryRunCompleted"
+        ? "completed"
+        : latest.terminal.event === "FactoryRunCancelled"
+          ? "cancelled"
+          : "escalated",
+    objective: snapshot.number,
+    runId,
+    ...(latest.terminal.reason ? { reason: latest.terminal.reason } : {}),
+  };
 }
 
 export function retryCommandAllows(
@@ -1161,6 +1277,7 @@ class RetryArtifactCache {
 
 export class FactorySupervisor {
   readonly #options: SupervisorOptions;
+  #initialSnapshot: Snapshot | undefined;
   #policy: RunPolicy;
   readonly #notify: (message: string) => void;
   readonly #reader: GitHubReader;
@@ -1231,9 +1348,14 @@ export class FactorySupervisor {
   #compiledProjection: CompiledGraphProjectionRecord | null = null;
   #localScopeHost: ReturnType<typeof discoverLocalScopeHost> | undefined;
 
-  constructor(options: SupervisorOptions) {
+  constructor(options: SupervisorOptions, bootstrap?: { initialSnapshot: Snapshot }) {
     this.#options = { ...options, repository: resolve(options.repository) };
-    this.#policy = parseRunPolicy(options.policy);
+    this.#initialSnapshot = bootstrap?.initialSnapshot;
+    if (this.#initialSnapshot && this.#initialSnapshot.number !== options.objective)
+      throw new Error("foreground bootstrap snapshot does not match the requested Objective");
+    this.#policy = this.#initialSnapshot
+      ? foregroundRunPolicyFromSnapshot(this.#initialSnapshot, options.policy)
+      : parseRunPolicy(options.policy);
     this.#notify = options.onStatus ?? (() => {});
     const shared = options.repositoryResources;
     const quota = shared ?? createGitHubMutationScope(options.token);
@@ -1390,23 +1512,26 @@ export class FactorySupervisor {
       () => this.#lease.assertGeneration("admission"),
       async () => {
         const binding = this.#activationBinding();
-        if (binding) {
-          const cancellation = await this.#reader.readRunCancellationRequest(
-            this.#run.objective,
-            this.#run.runId,
-            this.#run.actor,
-            binding,
+        const cancellation =
+          binding || (!this.#options.activation && !this.#options.recovery)
+            ? await this.#reader.readRunCancellationRequest(
+                this.#run.objective,
+                this.#run.runId,
+                this.#run.actor,
+                binding,
+              )
+            : null;
+        if (cancellation) {
+          this.#sequences.observe([cancellation]);
+          throw new RunCancellationRequestedError(
+            binding
+              ? "operator withdrew the activation through GitHub"
+              : "operator requested cancellation through GitHub",
           );
-          if (cancellation) {
-            this.#sequences.observe([cancellation]);
-            throw new RunCancellationRequestedError(
-              "operator withdrew the activation through GitHub",
-            );
-          }
-          // The receipt read can span an authority change. Admission still
-          // belongs to the current Objective generation, never the pre-read observation.
-          await this.#lease.assertGeneration("admission");
         }
+        // The receipt read can span an authority change. Admission still
+        // belongs to the current Objective generation, never the pre-read observation.
+        await this.#lease.assertGeneration("admission");
         return operation();
       },
     );
@@ -3322,24 +3447,27 @@ export class FactorySupervisor {
 
   /** Cancellation or elapsed immutable authority permits resource retirement,
    * never execution. Keep this outside graph repair, continuation and admission. */
-  async #cancelActivatedRun(
+  async #cancelResumedRun(
     snapshot: Snapshot,
     run: RunState,
     manager: RunManager,
     actor: string,
   ): Promise<SupervisorResult | null> {
-    if (!run.activationRequestId || !run.baseSha || !run.repository || this.#options.recovery)
-      return null;
+    if (!run.repository || this.#options.recovery) return null;
     if (run.actor.toLowerCase() !== actor.toLowerCase())
       throw new Error("only the original run actor may reconcile cancellation");
-    const binding: ActivationBinding = {
-      objective: run.objective,
-      requestId: run.activationRequestId,
-      requestedBy: run.actor,
-      repository: run.repository,
-      baseSha: run.baseSha,
-      policyDigest: run.policyDigest,
-    };
+    let binding: ActivationBinding | undefined;
+    if (run.activationRequestId) {
+      if (!run.baseSha) throw new Error("activation-bound run is missing its immutable base");
+      binding = {
+        objective: run.objective,
+        requestId: run.activationRequestId,
+        requestedBy: run.actor,
+        repository: run.repository,
+        baseSha: run.baseSha,
+        policyDigest: run.policyDigest,
+      };
+    }
     const readCancellation = async () => {
       const request = await this.#reader.readRunCancellationRequest(
         run.objective,
@@ -3353,13 +3481,19 @@ export class FactorySupervisor {
         request.requestedBy.toLowerCase() !== run.actor.toLowerCase() ||
         (request.event === "FactoryRunCancellationRequested" && request.runId !== run.runId) ||
         (request.event === "ActivationCancellationRequested" &&
-          !activationCancellation([request], binding))
+          (!binding || !activationCancellation([request], binding)))
       )
         throw new Error("cancellation does not bind the original run authority");
       return request;
     };
-    const requested = await readCancellation();
     const initial = snapshotEvents(snapshot);
+    const requested = binding
+      ? await readCancellation()
+      : foregroundCancellationRequest(snapshot, run.runId);
+    const foregroundCompilationCancellation = Boolean(
+      requested && !binding && isForegroundCompilationOnly(snapshot, run.runId),
+    );
+    if (!binding && !foregroundCompilationCancellation) return null;
     const scheduling = normalizeSchedulingPolicy(run.policy);
     const outstandingCapacity = deriveCapacityReservations(
       snapshot.workItems.map((item) => ({
@@ -3374,6 +3508,7 @@ export class FactorySupervisor {
     if (!requested && !(Date.now() >= deadline && outstandingCapacity.length)) return null;
     let terminalCancellation = requested;
     const assertActivation = (events: readonly FactoryEvent[]) => {
+      if (!binding) return;
       const activations = events.filter(
         (event) => event.event === "ActivationRequested" && event.requestId === binding.requestId,
       );
@@ -3397,6 +3532,7 @@ export class FactorySupervisor {
     // Keep the ordinary completion/cancellation path only when this snapshot has
     // no outstanding capacity; completed cloud history is not a new obligation.
     if (
+      binding &&
       outstandingCapacity.length === 0 &&
       (base.oid === run.baseSha ||
         (await this.#observedRunOwnsBaseAdvance(snapshot, run, base.oid)))
@@ -3409,16 +3545,27 @@ export class FactorySupervisor {
       priorLease ?? undefined,
     );
     // Current Git tree is only the lease's storage parent, not an execution base.
-    const acquired = await this.#leases.acquire(
-      {
-        objective: run.objective,
-        runId: run.runId,
-        holder: `${actor}-${randomUUID()}`,
-        policyDigest: run.policyDigest,
-      },
-      base,
-      this.#sequences.take(),
-    );
+    let acquired: LeaseState;
+    try {
+      acquired = await this.#leases.acquire(
+        {
+          objective: run.objective,
+          runId: run.runId,
+          holder: `${actor}-${randomUUID()}`,
+          policyDigest: run.policyDigest,
+        },
+        base,
+        this.#sequences.take(),
+      );
+    } catch (error) {
+      if (!binding && requested && error instanceof LeaseLostError)
+        return drainingForegroundCancellationResult(
+          run,
+          exactForegroundCancellationRequest(run, requested)!,
+          error,
+        );
+      throw error;
+    }
     this.#lease = new LeaseController(this.#leases, acquired, this.#sequences);
     this.#run = run;
     let heartbeatError: unknown;
@@ -3442,6 +3589,10 @@ export class FactorySupervisor {
       const current = await this.#reader.readObjective(run.objective);
       assertActivation(snapshotEvents(current));
       const observed = manager.resume(current.factoryEvents ?? [], current.objectiveAuthority);
+      if (!observed && !binding) {
+        const terminal = observedTerminalResult(current, run.runId);
+        if (terminal) throw new ObservedTerminalRun(terminal);
+      }
       if (
         !observed ||
         current.number !== run.objective ||
@@ -3888,8 +4039,16 @@ export class FactorySupervisor {
         throw new Error("cancellation has unresolved resource or native accounting ownership");
       for (const marker of unresolvedModelInvocations(remaining)) {
         const reservation = retired.get(`${marker.workItem}:${marker.attempt}`);
-        if (marker.phase === "management")
+        if (marker.phase === "management") {
+          if (
+            terminalCancellation &&
+            foregroundCompilationCancellation &&
+            !this.#compiledGraph &&
+            snapshot.workItems.length === 0
+          )
+            continue;
           throw new Error("cancellation management invocation cleanup is not independently known");
+        }
         if (
           !reservation ||
           marker.policyDigest !== reservation.policyDigest ||
@@ -3909,6 +4068,7 @@ export class FactorySupervisor {
       );
     } catch (error) {
       await this.#lease.release().catch(() => {});
+      if (error instanceof ObservedTerminalRun) return error.result;
       throw error;
     } finally {
       clearInterval(heartbeat);
@@ -3922,7 +4082,9 @@ export class FactorySupervisor {
     this.#durablePackets.clear();
     this.#discoveryEpochs.clear();
     await verifyLocalRepository(this.#options.repository, this.#options.owner, this.#options.repo);
-    let snapshot = await this.#reader.readObjective(this.#options.objective);
+    let snapshot =
+      this.#initialSnapshot ?? (await this.#reader.readObjective(this.#options.objective));
+    this.#initialSnapshot = undefined;
     this.#ciExpectedOnPullRequests = snapshot.ciExpectedOnPullRequests;
     const facts = await this.#store.getRepositoryFacts();
     const actor = await this.#store.getAuthenticatedLogin();
@@ -4022,8 +4184,8 @@ export class FactorySupervisor {
         );
       }
     }
-    if (resumedRun?.activationRequestId && !this.#options.recovery) {
-      const cancelled = await this.#cancelActivatedRun(snapshot, resumedRun, runManager, actor);
+    if (resumedRun && !this.#options.recovery) {
+      const cancelled = await this.#cancelResumedRun(snapshot, resumedRun, runManager, actor);
       if (cancelled) return cancelled;
     }
     if (
@@ -4076,7 +4238,7 @@ export class FactorySupervisor {
       listAttemptReservationRefs(this.#store, snapshot.number),
     );
     if (recoveryBlocker) {
-      return this.#startlessEscalation(recoveryBlocker, snapshot, actor);
+      return this.#implicitRestartRefusal(recoveryBlocker, snapshot, actor);
     }
     const priorityPolicy = normalizeSchedulingPolicy(this.#policy).priority;
     if (priorityPolicy.source === "issue-field-then-subissue-order") {
@@ -4224,16 +4386,39 @@ export class FactorySupervisor {
     const runId = resumedRun?.runId ?? randomUUID();
     this.#budgetEvents = this.#accountingEvents(initialEvents, runId);
     const acceptedPolicyDigest = resumedRun?.policyDigest ?? policyDigest(this.#policy);
-    const acquired = await this.#leases.acquire(
-      {
-        objective: snapshot.number,
-        runId,
-        holder: `${actor}-${randomUUID()}`,
-        policyDigest: acceptedPolicyDigest,
-      },
-      base,
-      this.#sequences.take(),
-    );
+    let acquired: LeaseState;
+    try {
+      acquired = await this.#leases.acquire(
+        {
+          objective: snapshot.number,
+          runId,
+          holder: `${actor}-${randomUUID()}`,
+          policyDigest: acceptedPolicyDigest,
+        },
+        base,
+        this.#sequences.take(),
+      );
+    } catch (error) {
+      if (
+        resumedRun &&
+        !this.#options.activation &&
+        !this.#options.recovery &&
+        isForegroundCompilationOnly(snapshot, resumedRun.runId) &&
+        error instanceof LeaseLostError
+      ) {
+        const cancellation = exactForegroundCancellationRequest(
+          resumedRun,
+          await this.#reader.readRunCancellationRequest(
+            resumedRun.objective,
+            resumedRun.runId,
+            resumedRun.actor,
+          ),
+        );
+        if (cancellation)
+          return drainingForegroundCancellationResult(resumedRun, cancellation, error);
+      }
+      throw error;
+    }
     this.#lease = new LeaseController(this.#leases, acquired, this.#sequences);
     let runStartAttempted = false;
     try {
@@ -4269,6 +4454,13 @@ export class FactorySupervisor {
       if (needsReconciliation) {
         current = await this.#reader.readObjective(snapshot.number);
         currentRun = await this.#resumeObservedRun(current, runManager);
+      }
+      if (resumedRun && !currentRun) {
+        const terminal = observedTerminalResult(current, resumedRun.runId);
+        if (terminal) {
+          await this.#lease.release();
+          return terminal;
+        }
       }
       if (!currentRun) {
         // The lease fences Factory writers while this fresh activation is
@@ -4308,12 +4500,46 @@ export class FactorySupervisor {
       ) {
         throw new Error("Objective run changed during startup; re-read its current state");
       }
+      if (
+        currentRun &&
+        !this.#options.activation &&
+        !this.#options.recovery &&
+        isForegroundCompilationOnly(current, currentRun.runId)
+      ) {
+        const cancellation = exactForegroundCancellationRequest(
+          currentRun,
+          await this.#reader.readRunCancellationRequest(
+            currentRun.objective,
+            currentRun.runId,
+            currentRun.actor,
+          ),
+        );
+        if (cancellation) {
+          snapshot = current;
+          this.#sequences.observe([...snapshotEvents(snapshot), cancellation]);
+          this.#budgetEvents = this.#accountingEvents(snapshotEvents(snapshot), currentRun.runId);
+          this.#run = currentRun;
+          const durableRunStart = (snapshot.factoryEvents ?? []).find(
+            (event) =>
+              event.kind === "run" &&
+              event.event === "FactoryRunStarted" &&
+              event.runId === currentRun.runId,
+          );
+          this.#runStartSequence = durableRunStart?.sequence ?? currentRun.sequence;
+          return await this.#terminal(
+            runManager,
+            snapshot,
+            "FactoryRunCancelled",
+            "operator requested cancellation through GitHub before resumed compilation",
+          );
+        }
+      }
       if (!resumedRun) {
         const blocker = await inspectImplicitRestart(current, () =>
           listAttemptReservationRefs(this.#store, current.number),
         );
         if (blocker) {
-          const rejected = await this.#startlessEscalation(blocker, current, actor);
+          const rejected = await this.#implicitRestartRefusal(blocker, current, actor);
           await this.#retireUnstartedDiscovery(acquired);
           await this.#lease.release();
           return rejected;
@@ -18616,6 +18842,22 @@ export class FactorySupervisor {
       objective: this.#options.objective,
       runId: "not-started",
       reason: durableReason,
+    };
+  }
+
+  async #implicitRestartRefusal(
+    reason: string,
+    snapshot: Snapshot,
+    actor: string,
+  ): Promise<SupervisorResult> {
+    if (this.#options.activation) return this.#startlessEscalation(reason, snapshot, actor);
+    const latest = latestRunReceipts(snapshot.factoryEvents ?? [], snapshot.objectiveAuthority);
+    this.#notify(`preflight blocked: ${reason}`);
+    return {
+      status: "escalated",
+      objective: snapshot.number,
+      runId: latest?.runId ?? "not-started",
+      reason,
     };
   }
 }

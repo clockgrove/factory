@@ -9,6 +9,7 @@ import {
   type RecoveryGraphBootstrapRuntime,
   type RecoveryRuntime,
 } from "../recovery/runtime.js";
+import { terminalRestartBlocker } from "./recovery.js";
 import { loadRecoverySourceReconciliation } from "../recovery/reconciliation.js";
 import { writerAuthority, type ObjectiveAuthorityObservation } from "./authority.js";
 import type { LeaseState } from "./lease.js";
@@ -157,8 +158,11 @@ export class RunManager {
     recordProtocol?: "clockgrove.factory/transition-receipt-v1";
     authority?: ObjectiveAuthorityObservation | null | undefined;
   }): Promise<RunState> {
-    const resumed = this.resume(args.existingEvents ?? [], args.authority);
+    const existingEvents = args.existingEvents ?? [];
+    const resumed = this.resume(existingEvents, args.authority);
     if (resumed) return resumed;
+    const terminalBlocker = terminalRestartBlocker(existingEvents, args.authority);
+    if (terminalBlocker) throw new Error(terminalBlocker);
     const policy = parseRunPolicy(args.policy);
     const digest = policyDigest(policy);
     const now = await this.store.serverTime();

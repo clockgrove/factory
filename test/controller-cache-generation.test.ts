@@ -105,6 +105,7 @@ it.each(["active", "activating", "deactivating", "reloading", "unknown"])(
   async (state) => {
     const f = await fixture();
     let enabled = false;
+    let activeState = "inactive";
     const run = vi.fn(async (args: readonly string[]) => {
       if (isVersionProbe(args)) return { stdout: "259\n" };
       if (args[0] === "enable") enabled = true;
@@ -112,7 +113,7 @@ it.each(["active", "activating", "deactivating", "reloading", "unknown"])(
         const installed = await unitInstalled(f.root, args[1]!);
         return systemdState(
           args[1]!,
-          installed ? state : "inactive",
+          installed ? activeState : "inactive",
           installed && enabled,
           installed ? "loaded" : "not-found",
         );
@@ -125,6 +126,7 @@ it.each(["active", "activating", "deactivating", "reloading", "unknown"])(
       run,
     });
     await service.install(f.input);
+    activeState = state;
     const original = await readFile(service.unitPath(f.input), "utf8");
     await writeFile(f.bundle, "// replacement bytes\n");
     run.mockClear();

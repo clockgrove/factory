@@ -185,7 +185,7 @@ export class SystemdUserService {
     const before = await this.#managerState(input, manager, "install");
     const beforeActiveState = classifyActiveState(before.activeState);
     const beforeUnitFileState = classifyUnitFileState(before.unitFileState);
-    if (beforeActiveState === "unsettled" || beforeUnitFileState === "unknown") {
+    if (beforeUnitFileState === "unknown") {
       throw new Error(
         `controller-lifecycle-outcome-unknown: install cannot safely mutate ${this.unitName(input)} while systemd reports ActiveState=${before.activeState} and UnitFileState=${before.unitFileState || "(empty)"}; ${this.#inspectionAction(input)}`,
       );
@@ -199,7 +199,7 @@ export class SystemdUserService {
       old === undefined &&
       (before.loadState !== "not-found" ||
         beforeUnitFileState !== "disabled" ||
-        beforeActiveState === "active")
+        beforeActiveState !== "stopped")
     ) {
       throw new Error(
         `controller-unit-unmanaged: ${this.unitName(input)} has manager state without an owned unit file; ${this.#inspectionAction(input)}`,
@@ -223,6 +223,11 @@ export class SystemdUserService {
           `controller-launcher-stale: ${this.unitName(input)}; settle work and owned resources, then stop the exact unit before refreshing its launcher (service state: ${before.activeState})`,
         );
       }
+    }
+    if (beforeActiveState === "unsettled") {
+      throw new Error(
+        `controller-lifecycle-outcome-unknown: install cannot safely mutate ${this.unitName(input)} while systemd reports ActiveState=${before.activeState} and UnitFileState=${before.unitFileState || "(empty)"}; ${this.#inspectionAction(input)}`,
+      );
     }
     let mutationAttempted = false;
     try {

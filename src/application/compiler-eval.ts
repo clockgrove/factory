@@ -519,7 +519,9 @@ export async function inspectCompilerEvaluation(args: {
     0,
   );
   const observedCompilerTokenTotal =
-    usage.length > 0 && usage.every((invocation) => invocation.observedTokens !== null)
+    !accountingFailed &&
+    usage.length > 0 &&
+    usage.every((invocation) => invocation.observedTokens !== null)
       ? observedCompilerTokenSubtotal
       : null;
   const compilerInvocationAccounting = [

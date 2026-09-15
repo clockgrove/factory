@@ -245,6 +245,31 @@ describe("read-only compiler evaluation", () => {
     expect(result.markdown).toContain("input 10; output 2; cached input 7");
     expect(JSON.stringify(result)).not.toContain("provider-secret");
   });
+  it("never labels compiler usage complete after an accounting failure without a valid report", async () => {
+    const records = history();
+    records.pop();
+    const judge = records.find(
+      (record) => record.kind === "result" && record.payload.stage === "judge",
+    )!;
+    judge.payload.value = "malformed historical judge output";
+    records.push({
+      protocol: "clockgrove.factory/compiler-draft-v1",
+      binding,
+      sequence: records.length,
+      kind: "accounting-failure",
+      payload: { stage: "judge", error: "ledger unavailable" },
+    });
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+    const result = await inspectCompilerEvaluation({
+      repository: binding.repository,
+      snapshot,
+      store,
+    });
+    expect(result.reports).toHaveLength(0);
+    expect(result.markdown).toContain("Observed compiler token subtotal: 48");
+    expect(result.markdown).toContain("complete total: unavailable");
+    expect(result.markdown).not.toContain("complete total: 48");
+  });
   it("reports absent history without reusing historical authority", async () => {
     vi.mocked(loadCompilerDrafts).mockResolvedValue([]);
     const result = await inspectCompilerEvaluation({

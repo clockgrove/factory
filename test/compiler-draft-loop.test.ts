@@ -202,6 +202,7 @@ function validatedObjective(graph: CompiledObjective): ValidatedCompilerDraft {
           },
         ],
       },
+      inventorySource: "independent-extraction",
       repository: {
         manifests: ["package.json"],
         validationRecipes: [

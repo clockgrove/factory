@@ -120,6 +120,9 @@ toolchain authority, runtime pins, provider steps, policy limits, and graph seri
 Factory-owned facts derived from the pinned base commit. Factory validates the semantic proposal,
 projects it deterministically into the execution graph, and records the request, proposal, validation,
 and projection identities. Initial proposals and bounded repairs use the same schema and entry point.
+The ordinary single-call path carries lossless bounded Objective source segments for structural
+mapping without claiming independent semantic extraction. An explicit compiler-evaluation policy
+adds the separately extracted obligation inventory and independent judgment described below.
 
 When opt-in compiler evaluation uses `maxRepairs`, that number is one shared correction budget for
 obligation-inventory regeneration and graph repair. For example, one inventory correction under

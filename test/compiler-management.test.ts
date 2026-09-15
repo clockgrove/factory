@@ -10,7 +10,7 @@ import { parseAndValidateCompilerProposal } from "../src/compiler/proposal.js";
 import { semanticProposal, semanticRequest } from "./helpers/semantic-compiler.js";
 
 describe("single semantic management route", () => {
-  it("inventories ordinary Objective requirements separately and detects an omitted segment", () => {
+  it("carries lossless ordinary Objective source coverage and detects an omitted segment", () => {
     const context = {
       objective: {
         number: 404,
@@ -22,9 +22,7 @@ describe("single semantic management route", () => {
     const inventory = structuralObjectiveInventory(context);
     expect(inventory.obligations.map((entry) => entry.text)).toEqual([
       "Add strict parsing",
-      "Add a parser.",
-      "Reject malformed input.",
-      "Add boundary tests.",
+      "Add a parser. Reject malformed input.\nAdd boundary tests.",
     ]);
     expect(inventory.obligations.map((entry) => entry.id)).not.toContain("objective-complete");
 
@@ -34,6 +32,7 @@ describe("single semantic management route", () => {
       digest: compilerEvalDigest(context.objective),
     };
     request.inventory = inventory;
+    request.inventorySource = "structural-source";
     const proposal = semanticProposal(request);
     proposal.workItems[0]!.obligationIds = inventory.obligations
       .slice(0, -1)
@@ -45,6 +44,38 @@ describe("single semantic management route", () => {
         observed: null,
       }),
     );
+  });
+
+  it("preserves every Objective body character across bounded source segments", () => {
+    const body = `  ${"a".repeat(4_100)}\r\n- keep exact spacing  `;
+    const context = {
+      objective: { number: 404, title: " Exact title ", body },
+      baseSha: "a".repeat(40),
+    } as CompilationContext;
+    const inventory = structuralObjectiveInventory(context);
+    expect(inventory.obligations[0]!.text).toBe(context.objective.title);
+    expect(
+      inventory.obligations
+        .slice(1)
+        .map((entry) => entry.text)
+        .join(""),
+    ).toBe(body);
+    expect(inventory.obligations.every((entry) => entry.text.length <= 4_000)).toBe(true);
+  });
+
+  it("keeps the maximum accepted Objective body within the inventory bound", () => {
+    const body = "x".repeat(384 * 1_024);
+    const inventory = structuralObjectiveInventory({
+      objective: { number: 404, title: "Bounded source", body },
+      baseSha: "a".repeat(40),
+    } as CompilationContext);
+    expect(inventory.obligations).toHaveLength(100);
+    expect(
+      inventory.obligations
+        .slice(1)
+        .map((entry) => entry.text)
+        .join(""),
+    ).toBe(body);
   });
 
   it("keeps unbroken Objective text within bounded inventory fields", () => {
@@ -97,6 +128,22 @@ describe("single semantic management route", () => {
     expect(firstCheckpoint).toHaveBeenCalledExactlyOnceWith(first);
     expect(second.proposal).toEqual(proposal);
     expect(first.provenance.schemaDigest).toBe(compilerEvalDigest(COMPILER_PROPOSAL_JSON_SCHEMA));
+  });
+
+  it("describes structural source coverage without claiming independent extraction", async () => {
+    const request = semanticRequest();
+    request.inventorySource = "structural-source";
+    const proposal = semanticProposal(request);
+    const prompts: string[] = [];
+    const backend = new CodexCliManagementBackend({
+      runStructured: async (_cwd, _schema, prompt) => {
+        prompts.push(prompt);
+        return { value: proposal, usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    });
+    await backend.proposePlan(request, async () => {});
+    expect(prompts[0]).toContain("lossless bounded Objective source segments");
+    expect(prompts[0]).not.toContain("complete independent obligation inventory");
   });
 
   it("persists known usage and the typed report for malformed and mechanically invalid output", async () => {

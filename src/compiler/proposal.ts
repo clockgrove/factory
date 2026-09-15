@@ -279,6 +279,7 @@ export function validateCompilerRequest(requestInput: unknown): CompilerValidati
 export async function prepareCompilerRequest(input: {
   context: CompilationContext;
   inventory: ObligationInventory;
+  inventorySource?: CompilerRequest["inventorySource"];
   revision?: number;
   previousProposal?: CompilerProposal | null;
   validationReport?: CompilerValidationReport;
@@ -309,6 +310,7 @@ export async function prepareCompilerRequest(input: {
     },
     baseSha: context.baseSha,
     inventory: ObligationInventorySchema.parse(input.inventory),
+    inventorySource: input.inventorySource ?? "independent-extraction",
     repository: {
       manifests: pinnedFacts.manifests,
       validationRecipes: repository.validationRecipes,

@@ -348,6 +348,7 @@ export async function compileEvaluatedDraft(args: {
         const prepared = await prepareCompilerRequest({
           context: frozenContext,
           inventory: activeInventory,
+          inventorySource: "independent-extraction",
           revision: persisted.request.revision,
           previousProposal: persisted.request.previousProposal,
           validationReport: persisted.request.validationReport,
@@ -497,6 +498,7 @@ export async function compileEvaluatedDraft(args: {
           const prepared = await prepareCompilerRequest({
             context: frozenContext,
             inventory: obligations,
+            inventorySource: "independent-extraction",
             revision: request.revision,
             previousProposal: request.previous,
             validationReport: report,

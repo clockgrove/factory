@@ -558,7 +558,9 @@ export function compilerProposalPrompt(
     "Select validation evidence only through recipe IDs and finite adapter operations exposed in the request. Each criterion needs sufficient evidence; protected behavior requires mechanical or deterministic-simulation evidence. Do not reproduce commands or derive execution defaults.",
     "Factory deterministically projects identity, commands, execution requirements, repository context, change surface, economics, delivery topology, capability bindings, managed runtimes, and serialization edges after validating the proposal.",
     request.revision === 0
-      ? "This is the initial proposal. The request includes the complete independent obligation inventory."
+      ? request.inventorySource === "independent-extraction"
+        ? "This is the initial proposal. The request includes the complete independent obligation inventory."
+        : "This is the initial proposal. The request includes lossless bounded Objective source segments for structural mapping; do not treat their boundaries as semantic decomposition."
       : "This is a repair. Return a complete replacement proposal with the smallest correction for every structured violation and semantic finding; preserve sound semantic intent and do not weaken obligations.",
     ...(legacyGraphConstraints
       ? [

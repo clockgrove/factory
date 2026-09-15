@@ -68,6 +68,7 @@ export function semanticRequest(
         },
       ],
     },
+    inventorySource: "independent-extraction",
     repository: {
       manifests: pinned.manifests,
       validationRecipes: capabilities.validationRecipes,

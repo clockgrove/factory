@@ -300,6 +300,7 @@ export const CompilerRequestSchema = z
       .strict(),
     baseSha: z.string().regex(/^[a-f0-9]{40}$/),
     inventory: ObligationInventorySchema,
+    inventorySource: z.enum(["structural-source", "independent-extraction"]),
     repository: z
       .object({
         manifests: z.array(RepositoryScopePathSchema).max(64),
@@ -608,6 +609,7 @@ export const COMPILER_REQUEST_JSON_SCHEMA = {
     }),
     baseSha: jsonBaseSha,
     inventory: jsonInventory,
+    inventorySource: { enum: ["structural-source", "independent-extraction"] },
     repository: strictObject({
       manifests: stringArray(64, jsonScopePath),
       validationRecipes: { type: "array", maxItems: 128, items: jsonRecipe },

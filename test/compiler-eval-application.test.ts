@@ -114,6 +114,7 @@ const proposalRequest = CompilerRequestSchema.parse({
   objective: { ...objective, digest: binding.inputDigest },
   baseSha: binding.baseSha,
   inventory,
+  inventorySource: "independent-extraction",
   repository: {
     manifests: ["package.json"],
     validationRecipes: [

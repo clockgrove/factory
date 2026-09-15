@@ -1378,6 +1378,10 @@ instead of a separate repair protocol. Only a completed response that fails dete
 schema or evidence-grounding validation may consume the next shared correction. Exact usage alone
 does not authorize a retry; provider, process, persistence, unsafe-output, and exhausted-bound failures
 remain terminal.
+Runs without `compilerEvaluation` retain one paid proposal call. That call receives a lossless bounded
+Objective source-coverage inventory so every source segment remains structurally visible, but Factory
+does not claim those syntactic boundaries are independently extracted semantic obligations. Only the
+explicit evaluation path adds the separately dispatched obligation extraction and independent judge.
 
 Before dispatch, Factory reads immutable compiler facts from the exact base tree. The request names
 only adapter-resolved validation recipes and capability records. npm, pnpm, Bun, and uv adapters can

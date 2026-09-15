@@ -416,8 +416,75 @@ describe("historical successor accounting assessment", () => {
     expect(tamperedResult.usage?.modelTokens).toBe(7);
     expect(tamperedResult.unreconciledReservationCount).toBe(0);
     expect(tamperedResult.unknownModelUsageCount).toBe(1);
+
+    const invalidCases: Array<{
+      name: string;
+      mutate: (candidate: FactoryEvent[]) => void;
+      rejectsEventSet?: boolean;
+    }> = [
+      {
+        name: "distinct duplicate marker",
+        mutate: (candidate) => candidate.push({ ...candidate[1]!, sequence: 3 } as FactoryEvent),
+      },
+      {
+        name: "distinct duplicate reconciliation",
+        mutate: (candidate) => candidate.push({ ...candidate[2]!, sequence: 3 } as FactoryEvent),
+      },
+      {
+        name: "wrong invocation identity",
+        mutate: (candidate) =>
+          Object.assign(candidate[2]!, {
+            usageId: "draft-compiler-inventory-other",
+            modelInvocationId: "compiler-inventory-other",
+          }),
+      },
+      {
+        name: "wrong director epoch",
+        mutate: (candidate) => Object.assign(candidate[2]!, { directorEpoch: 3 }),
+        rejectsEventSet: true,
+      },
+      {
+        name: "missing provider counters",
+        mutate: (candidate) => Reflect.deleteProperty(candidate[2]!, "reportedModelUsage"),
+      },
+      {
+        name: "provider counter mismatch",
+        mutate: (candidate) =>
+          Object.assign(candidate[2]!, {
+            reportedModelUsage: { inputTokens: 6, outputTokens: 2 },
+          }),
+      },
+      {
+        name: "wrong policy digest",
+        mutate: (candidate) => Object.assign(candidate[2]!, { policyDigest: "b".repeat(64) }),
+      },
+      {
+        name: "nonzero dispatch marker",
+        mutate: (candidate) => Object.assign(candidate[1]!, { amount: 1 }),
+      },
+      {
+        name: "dispatch outside terminal window",
+        mutate: (candidate) => Object.assign(candidate[1]!, { sequence: 0 }),
+      },
+      {
+        name: "reconciliation outside terminal window",
+        mutate: (candidate) => Object.assign(candidate[2]!, { sequence: 99 }),
+      },
+    ];
+    for (const invalid of invalidCases) {
+      const candidate = structuredClone(events);
+      invalid.mutate(candidate);
+      if (invalid.rejectsEventSet) {
+        expect(() => assess(candidate, ["one"], evaluatedPolicy), invalid.name).toThrow(
+          /dispatch binding/,
+        );
+        continue;
+      }
+      const result = assess(candidate, ["one"], evaluatedPolicy);
+      expect(result.unknownModelUsageCount + result.blockerCount, invalid.name).toBeGreaterThan(0);
+    }
   });
-  it("does not treat a legacy compiler receipt as coverage for an evaluated compiler run", () => {
+  it("does not treat a failed-compile receipt as coverage for an evaluated compiler run", () => {
     const evaluatedPolicy = {
       ...policy,
       compilerEvaluation: {

@@ -567,7 +567,7 @@ export function assessRecoveryAccounting(input: {
         runId,
         phase: "management",
         reason:
-          "No Objective-scoped compilation or failed-compilation model-token reconciliation was observed; review receipts cannot establish compilation usage or zero cost.",
+          "No valid Objective-scoped compilation model-token reconciliation was observed; review receipts cannot establish compilation usage or zero cost.",
       });
     }
   }

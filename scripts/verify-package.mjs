@@ -567,6 +567,13 @@ if (existsSync(installVerifier)) {
         receipt.sdkLocalAvailable === true,
         "the installed controller can run its default Codex SDK backend",
       );
+      check(
+        receipt.foregroundReconnect?.status === "draining" &&
+          receipt.foregroundReconnect?.unresolvedManagementInvocations === 1 &&
+          receipt.foregroundReconnect?.mutations === 0 &&
+          receipt.foregroundReconnect?.durationMs < 30_000,
+        "the installed MCP bundle returns bounded same-run draining for interrupted management cancellation",
+      );
     } catch (error) {
       check(false, "the clean-install verifier returns a JSON receipt", error.message);
     }

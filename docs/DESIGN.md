@@ -149,7 +149,13 @@ factory run OWNER/REPO#OBJECTIVE --until-terminal
 ```
 
 It uses the same application services for one Objective and remains useful for diagnostics, one-off
-runs, and clients that cannot install a local service.
+runs, and clients that cannot install a local service. If interrupted, another foreground call
+reconnects only to the latest authenticated non-terminal run and adopts that run's original policy.
+A durable cancellation is reconciled on that same run before new model, graph, Work Item, or worker
+admission. After terminal cancellation, or another terminal outcome that retains unresolved model
+accounting, a plain foreground call returns the exact run identity and the explicit-recovery
+requirement; it never creates an implicit successor. The existing fully accounted graph-only retry
+case remains eligible for its bounded implicit retry.
 
 While the controller is alive, no scheduler outside Factory is required. A powered-off host cannot
 wake itself. The supported lifecycle uses a user-authorized `systemd` service inside Linux, including

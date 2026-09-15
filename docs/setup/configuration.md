@@ -24,7 +24,7 @@ scheduler or a credential store, and nothing about provider configuration requir
 
 | Execution mode | Process that needs the credentials | How the target repo is selected | Lifetime |
 |---|---|---|---|
-| Plugin, one-shot `factory_run` | Factory's MCP server, launched by the agent client | Explicit `owner`, `repo`, Objective number, and absolute checkout path | Coupled to that MCP/client process |
+| Plugin, one-shot `factory_run` | Factory's MCP server, launched by the agent client | Explicit `owner`, `repo`, Objective number, and absolute checkout path | Coupled to that MCP/client process; a later call may reconnect only to the same non-terminal run |
 | Plugin, durable `factory_activate` | The separately installed repository controller; the MCP process also needs its own GitHub access and credentials for any probes it performs | Activation names the GitHub Objective; the controller is bound to `OWNER/REPO` and an absolute checkout | Independent of chat while the controller/host is running |
 | Foreground CLI | The shell-launched `factory` process, or `node .../dist/factory.js` | CLI target plus `--repo /absolute/checkout` | Coupled to that foreground process |
 | Unattended Linux service | The systemd **user service** running the repository controller | Recorded service command and working directory | Restarted according to the installed service policy |
@@ -32,6 +32,9 @@ scheduler or a credential store, and nothing about provider configuration requir
 Running your agent in a repo is convenient context; it is not a credential configuration mechanism.
 For Factory execution, name both the GitHub repo/Objective and its corresponding absolute checkout.
 Do not rely on an MCP server's implicit working directory to choose the intended repository.
+Reconnects ignore caller policy changes and use the authenticated run policy. After a terminal
+cancellation or another terminal run with unresolved model accounting, use the recovery assessment
+and explicit successor workflow; another plain `factory_run` does not start over.
 
 Keep the runtime, checkout, login files, and provider settings inside Linux. In WSL2, use Linux paths
 such as `/home/you/src/project`, not `/mnt/c/...`. A Windows app, its integrated terminal, and a WSL

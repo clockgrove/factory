@@ -18,12 +18,14 @@ import { importLegacyCapacity } from "./legacy-capacity.js";
 import {
   createRepositorySupervisorResources,
   FactorySupervisor,
+  foregroundRunPolicyFromSnapshot,
   type ControllerObservation,
   type RepositorySupervisorResources,
   type SupervisorOptions,
   type SupervisorResult,
   verifyLocalRepository,
 } from "../supervisor.js";
+import { GitHubReader } from "../github.js";
 import type { DurableObjectiveActivation } from "../control/github-store.js";
 import type { DiscoverySessionTelemetry } from "../control/discovery-session.js";
 import { GitHubControlStore } from "../control/github-store.js";
@@ -33,7 +35,6 @@ import {
   DEFAULT_CONTROLLER_POLICY,
   normalizeSchedulingPolicy,
   parseControllerPolicy,
-  parseRunPolicy,
 } from "../protocol/policy.js";
 import {
   classifyRefusal,
@@ -768,15 +769,16 @@ export async function runForegroundObjective(
   options: SupervisorOptions,
 ): Promise<SupervisorResult> {
   await verifyLocalRepository(options.repository, options.owner, options.repo);
-  const runPolicy = parseRunPolicy(options.policy);
-  const scheduling = normalizeSchedulingPolicy(runPolicy);
-  const policy = parseControllerPolicy({
-    ...DEFAULT_CONTROLLER_POLICY,
-    maxActiveObjectives: 1,
-    maxLocalWorkers: DEFAULT_CONTROLLER_POLICY.maxLocalWorkers,
-    maxPaidWorkers:
-      runPolicy.allowedPaidBackends.length === 0 ? 0 : scheduling.burst.maxCloudParallel,
-  });
+  const initialSnapshot = await new GitHubReader({
+    token: options.token,
+    owner: options.owner,
+    repo: options.repo,
+    ...(options.onStatus ? { onThrottle: options.onStatus } : {}),
+  }).readObjective(options.objective);
+  const { runPolicy, controllerPolicy: policy } = foregroundControllerPolicyFromSnapshot(
+    initialSnapshot,
+    options.policy,
+  );
   const resources =
     options.repositoryResources ??
     createRepositorySupervisorResources(
@@ -787,11 +789,33 @@ export async function runForegroundObjective(
       options.token,
     );
   await attachSharedCapacity(options, policy, resources);
-  return new FactorySupervisor({
-    ...options,
-    policy: runPolicy,
-    repositoryResources: resources,
-  }).run();
+  return new FactorySupervisor(
+    {
+      ...options,
+      policy: runPolicy,
+      repositoryResources: resources,
+    },
+    { initialSnapshot },
+  ).run();
+}
+
+export function foregroundControllerPolicyFromSnapshot(
+  snapshot: Parameters<typeof foregroundRunPolicyFromSnapshot>[0],
+  requested: unknown,
+): {
+  runPolicy: ReturnType<typeof foregroundRunPolicyFromSnapshot>;
+  controllerPolicy: ControllerPolicy;
+} {
+  const runPolicy = foregroundRunPolicyFromSnapshot(snapshot, requested);
+  const scheduling = normalizeSchedulingPolicy(runPolicy);
+  const controllerPolicy = parseControllerPolicy({
+    ...DEFAULT_CONTROLLER_POLICY,
+    maxActiveObjectives: 1,
+    maxLocalWorkers: DEFAULT_CONTROLLER_POLICY.maxLocalWorkers,
+    maxPaidWorkers:
+      runPolicy.allowedPaidBackends.length === 0 ? 0 : scheduling.burst.maxCloudParallel,
+  });
+  return { runPolicy, controllerPolicy };
 }
 
 async function attachSharedCapacity(

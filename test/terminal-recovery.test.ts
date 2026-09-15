@@ -16,6 +16,7 @@ import { decodeEventComments, encodeEventTrailer } from "../src/control/receipts
 import {
   implicitRestartBlocker,
   inspectImplicitRestart,
+  terminalRestartBlocker,
   TERMINAL_RECOVERY_REQUIRED,
   type RecoverySnapshot,
 } from "../src/control/recovery.js";
@@ -105,6 +106,60 @@ function mockSurvivingReservation(present: () => boolean): void {
 afterEach(() => vi.restoreAllMocks());
 
 describe("terminal-run recovery admission", () => {
+  it("retains a zero-effect cancelled run as explicit recovery history", () => {
+    const current = snapshot();
+    current.factoryEvents = [
+      started(),
+      event({ kind: "run", event: "FactoryRunCancelled", sequence: 3 }),
+    ];
+    expect(implicitRestartBlocker(current)).toBe(TERMINAL_RECOVERY_REQUIRED);
+  });
+
+  it("retains a terminal run with an unresolved management invocation", () => {
+    const events = [
+      started(),
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: "invocation-compile-base",
+        modelInvocationId: "compile-base",
+        directorEpoch: 1,
+        policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      }),
+      event({ kind: "run", event: "FactoryRunEscalated", sequence: 4 }),
+    ];
+    expect(terminalRestartBlocker(events)).toBe(TERMINAL_RECOVERY_REQUIRED);
+  });
+
+  it("prevents RunManager.start from bypassing terminal cancellation", async () => {
+    const addIssueComment = vi.fn(async () => {});
+    const serverTime = vi.fn(async () => new Date("2026-09-14T21:00:00.000Z"));
+    const manager = new RunManager({ addIssueComment, serverTime });
+    const existingEvents = [
+      started(),
+      event({ kind: "run", event: "FactoryRunCancelled", sequence: 3 }),
+    ];
+
+    await expect(
+      manager.start({
+        objective: 7,
+        objectiveNodeId: "I_7",
+        repository: "o/r",
+        objectiveAuthor: "operator",
+        actor: "operator",
+        fork: false,
+        baseBranch: "main",
+        policy: DEFAULT_RUN_POLICY,
+        existingEvents,
+      }),
+    ).rejects.toThrow(TERMINAL_RECOVERY_REQUIRED);
+    expect(serverTime).not.toHaveBeenCalled();
+    expect(addIssueComment).not.toHaveBeenCalled();
+  });
+
   it("directs blocked restarts to explicit supported recovery without granting adoption", async () => {
     const current = snapshot();
     current.factoryEvents!.push(attempt());
@@ -298,12 +353,19 @@ describe("terminal-run recovery admission", () => {
           ? { activation: { requestId: "race-activation", baseSha: "a".repeat(40) } }
           : {}),
       }).run();
-      if (change === "active" || change === "closed" || change.startsWith("resumed-")) {
+      const racedTerminal = {
+        "resumed-escalated": "escalated",
+        "resumed-cancelled": "cancelled",
+        "resumed-completed": "completed",
+      }[change];
+      if (racedTerminal) {
+        await expect(run).resolves.toMatchObject({ status: racedTerminal, runId: "prior" });
+      } else if (change === "active" || change === "closed" || change.startsWith("resumed-")) {
         await expect(run).rejects.toThrow("Objective run changed during startup");
       } else {
         await expect(run).resolves.toMatchObject({
           status: "escalated",
-          runId: "not-started",
+          runId: change === "controller-execution" ? "not-started" : "prior",
           reason: TERMINAL_RECOVERY_REQUIRED,
         });
       }
@@ -314,6 +376,9 @@ describe("terminal-run recovery admission", () => {
       const reachesGraphPreflight =
         change !== "active" &&
         ![
+          "resumed-escalated",
+          "resumed-cancelled",
+          "resumed-completed",
           "resumed-policy",
           "resumed-actor",
           "resumed-base",
@@ -736,7 +801,7 @@ describe("terminal-run recovery admission", () => {
         const result = await new FactorySupervisor(options).run();
         expect(result).toMatchObject({
           status: "escalated",
-          runId: "not-started",
+          runId: controller ? "not-started" : "prior",
           reason: TERMINAL_RECOVERY_REQUIRED,
         });
         if (controller) {

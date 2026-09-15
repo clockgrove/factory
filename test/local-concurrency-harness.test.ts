@@ -8,6 +8,7 @@ import {
   concurrencyObjectiveBody,
   concurrencyRefill,
   concurrencyReceiptProgress,
+  observeSettledConcurrencyMergeProofs,
   assertInnerTakeover,
   assertObjectiveContention,
   assertRetiredController,
@@ -157,6 +158,71 @@ describe("prospective concurrency observation window", () => {
     } finally {
       now.mockRestore();
     }
+  });
+
+  it("proves terminal merges from durable PR identity after disposable review refs are gone", async () => {
+    const publication = {
+      event: "PublicationRecorded",
+      runId: "run",
+      objective: 1,
+      workItem: 2,
+      attempt: 1,
+      pullRequest: 3,
+      headSha: "a".repeat(40),
+      validationDigest: "c".repeat(64),
+      exactHeadValidationDigest: "d".repeat(64),
+    };
+    const integration = { ...publication, event: "AttemptIntegrated", headSha: "b".repeat(40) };
+    const pull = {
+      number: 3,
+      node_id: "PR_terminal",
+      state: "closed",
+      merged: true,
+      head: { sha: publication.headSha },
+      base: { repo: { full_name: repository, node_id: "R_terminal" } },
+    };
+    const request = vi.fn(async (route: string) => {
+      expect(route).toBe("POST /graphql");
+      return {
+        data: {
+          data: {
+            node: {
+              __typename: "PullRequest",
+              id: pull.node_id,
+              number: pull.number,
+              repository: { id: "R_terminal", nameWithOwner: repository },
+              headRefOid: publication.headSha,
+              merged: true,
+              state: "MERGED",
+              mergeCommit: { oid: integration.headSha },
+            },
+          },
+        },
+      };
+    });
+    const entry = {
+      repository,
+      runResult: { runId: "run" },
+      status: { run: { runId: "run" } },
+      children: [{ number: 2 }],
+      pulls: [pull],
+      events: [
+        { ...publication, event: "AttemptPublished" },
+        {
+          ...publication,
+          event: "ValidationRecorded",
+          passed: true,
+          evidenceDigest: "c".repeat(64),
+        },
+        { ...publication, event: "AttemptValidated" },
+        publication,
+        integration,
+      ],
+    };
+    await expect(
+      observeSettledConcurrencyMergeProofs({ entry, request, repository }),
+    ).resolves.toEqual([expect.objectContaining({ pullRequest: 3, headSha: publication.headSha })]);
+    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it("uses one incremental repository comment listing while unchanged instead of full snapshots", async () => {

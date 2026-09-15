@@ -260,6 +260,49 @@ describe("semantic proposal validation", () => {
     );
   });
 
+  it("counts pinned LFS tooling at the exact projected execution boundary", () => {
+    const pinned = semanticPinnedFacts({
+      lfs: {
+        baseSha: "a".repeat(40),
+        assets: [],
+        requiredTools: ["git-lfs"],
+        attributes: true,
+      },
+    });
+    const request = semanticRequest(pinned);
+    const boundary = semanticProposal(request);
+    boundary.workItems[0]!.executionIntent.additionalTools = Array.from(
+      { length: 61 },
+      (_, index) => `extra-tool-${index + 1}`,
+    );
+
+    expect(parseAndValidateCompilerProposal(request, boundary).report.status).toBe("valid");
+    expect(
+      projectCompilerProposal({
+        request,
+        proposal: boundary,
+        pinnedFacts: pinned,
+        runPolicy: DEFAULT_RUN_POLICY,
+      }).objective.workItems[0]!.requirements!.tools,
+    ).toHaveLength(64);
+
+    const overflow = structuredClone(boundary);
+    overflow.workItems[0]!.executionIntent.additionalTools.push("extra-tool-62");
+    expect(parseAndValidateCompilerProposal(request, overflow).report).toMatchObject({
+      phase: "proposal",
+      status: "repairable",
+      violations: expect.arrayContaining([
+        expect.objectContaining({
+          code: "execution-requirement-limit",
+          itemId: "item-1",
+          field: "/workItems/0/executionIntent/additionalTools",
+          expected: { maximumProjectedValues: 64 },
+          observed: 65,
+        }),
+      ]),
+    });
+  });
+
   it("accepts bounded model-owned non-derivable execution intent", () => {
     const request = semanticRequest(undefined, ["api.example.com"]);
     const proposal = semanticProposal(request);

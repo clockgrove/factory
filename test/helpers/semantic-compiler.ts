@@ -2,6 +2,7 @@ import type { CompilerProposal, CompilerRequest } from "../../src/compiler/contr
 import { emptyCompilerValidationReport } from "../../src/compiler/violations.js";
 import { compilerEvalDigest } from "../../src/evaluation/compiler-eval.js";
 import { normalizeRepositoryFacts } from "../../src/repository-profiles/index.js";
+import type { PinnedLfsFacts } from "../../src/repository-profiles/git-lfs.js";
 import type { PinnedRepositoryFacts } from "../../src/repository-profiles/read.js";
 import { compilerCapabilitiesForRepository } from "../../src/toolchains/compiler-capabilities.js";
 
@@ -11,11 +12,13 @@ export function semanticPinnedFacts(input?: {
   paths?: string[];
   scripts?: Record<string, string>;
   documents?: Record<string, string>;
+  lfs?: PinnedLfsFacts;
 }): PinnedRepositoryFacts {
   const paths = input?.paths ?? ["package.json", "package-lock.json", "src/item-1.ts"];
   const repository = normalizeRepositoryFacts({
     files: paths.map((path) => ({ path })),
     scripts: input?.scripts ?? { test: "vitest run" },
+    ...(input?.lfs ? { lfs: input.lfs } : {}),
     documents:
       input?.documents ??
       (paths.includes("package.json")
@@ -71,6 +74,7 @@ export function semanticRequest(
     inventorySource: "independent-extraction",
     repository: {
       manifests: pinned.manifests,
+      requiredTools: [...new Set(pinned.repository.lfs?.requiredTools ?? [])].sort(),
       validationRecipes: capabilities.validationRecipes,
       toolchains: capabilities.toolchains,
       validationSurfaces: {

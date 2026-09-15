@@ -117,6 +117,7 @@ const proposalRequest = CompilerRequestSchema.parse({
   inventorySource: "independent-extraction",
   repository: {
     manifests: ["package.json"],
+    requiredTools: [],
     validationRecipes: [
       {
         id: "recipe-test",

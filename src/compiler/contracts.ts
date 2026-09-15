@@ -305,6 +305,7 @@ export const CompilerRequestSchema = z
     repository: z
       .object({
         manifests: z.array(RepositoryScopePathSchema).max(64),
+        requiredTools: z.array(Id).max(64),
         validationRecipes: z.array(CompilerValidationRecipeSchema).max(128),
         toolchains: z.array(CompilerToolchainCapabilitySchema).max(32),
         validationSurfaces: z
@@ -613,6 +614,7 @@ export const COMPILER_REQUEST_JSON_SCHEMA = {
     inventorySource: { enum: ["structural-source", "independent-extraction"] },
     repository: strictObject({
       manifests: stringArray(64, jsonScopePath),
+      requiredTools: stringArray(64, jsonId),
       validationRecipes: { type: "array", maxItems: 128, items: jsonRecipe },
       toolchains: { type: "array", maxItems: 32, items: jsonToolchain },
       validationSurfaces: strictObject({

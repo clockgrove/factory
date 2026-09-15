@@ -313,6 +313,7 @@ export async function prepareCompilerRequest(input: {
     inventorySource: input.inventorySource ?? "independent-extraction",
     repository: {
       manifests: pinnedFacts.manifests,
+      requiredTools: [...new Set(pinnedFacts.repository.lfs?.requiredTools ?? [])].sort(),
       validationRecipes: repository.validationRecipes,
       toolchains: repository.toolchains,
       validationSurfaces: {
@@ -393,6 +394,7 @@ function resolvedExecutionRequirements(
   return {
     tools: [
       ...new Set([
+        ...request.repository.requiredTools,
         ...recipes.flatMap((recipe) => recipe.requiredTools),
         ...deferred.flatMap((capability) => capability.requiredTools),
         ...item.executionIntent.additionalTools,
@@ -1108,7 +1110,10 @@ export function projectCompilerProposal(input: {
       input.pinnedFacts.baseSha !== input.request.baseSha ||
       input.pinnedFacts.relevantPaths.length !== input.request.repository.pathCount ||
       compilerEvalDigest(input.pinnedFacts.manifests) !==
-        compilerEvalDigest(input.request.repository.manifests)
+        compilerEvalDigest(input.request.repository.manifests) ||
+      compilerEvalDigest(
+        [...new Set(input.pinnedFacts.repository.lfs?.requiredTools ?? [])].sort(),
+      ) !== compilerEvalDigest(input.request.repository.requiredTools)
     )
       throw new Error("pinned repository facts differ from the compiler request");
     const expectedCapabilities = compilerCapabilitiesForRepository(

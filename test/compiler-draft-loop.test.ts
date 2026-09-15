@@ -205,6 +205,7 @@ function validatedObjective(graph: CompiledObjective): ValidatedCompilerDraft {
       inventorySource: "independent-extraction",
       repository: {
         manifests: ["package.json"],
+        requiredTools: [],
         validationRecipes: [
           {
             id: "npm-test",

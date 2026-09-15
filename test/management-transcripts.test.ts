@@ -494,6 +494,12 @@ describe("local management transcripts", () => {
     expect((failure as Error).message).toContain("exited with status 7");
     expect((failure as Error).message).not.toContain("private assistant progress");
     expect((failure as Error).message).not.toContain("private repository stderr");
+    await vi.waitFor(async () => {
+      const [name] = await readdir(directory);
+      expect(JSON.parse(await readFile(join(directory, name!), "utf8")).response.state).toBe(
+        "provider-failed",
+      );
+    });
     const [name] = await readdir(directory);
     const record = JSON.parse(await readFile(join(directory, name!), "utf8"));
     expect(record.response).toMatchObject({
@@ -554,6 +560,12 @@ describe("local management transcripts", () => {
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).message).toContain("invalid structured JSON");
     expect((failure as Error).message).not.toContain("not valid structured json");
+    await vi.waitFor(async () => {
+      const [name] = await readdir(directory);
+      expect(JSON.parse(await readFile(join(directory, name!), "utf8")).response.state).toBe(
+        "invalid-response",
+      );
+    });
     const [name] = await readdir(directory);
     const record = JSON.parse(await readFile(join(directory, name!), "utf8"));
     expect(record.response).toMatchObject({
@@ -677,9 +689,90 @@ describe("local management transcripts", () => {
       ),
     ).rejects.toThrow("provider primary failure");
     expect(provider).toHaveBeenCalledOnce();
-    expect(finish).toHaveBeenCalledOnce();
-    expect(diagnostic).toHaveBeenCalledWith(
-      "[factory-debug] management transcript unavailable: archive full",
+    await vi.waitFor(() => {
+      expect(finish).toHaveBeenCalledOnce();
+      expect(diagnostic).toHaveBeenCalledWith(
+        "[factory-debug] management transcript unavailable: archive full",
+      );
+    });
+  });
+
+  it("checkpoints successful accounting without waiting for the transcript sink", async () => {
+    const repository = await root();
+    await writeFile(
+      join(repository, "package.json"),
+      JSON.stringify({ scripts: { test: "node --test" } }),
     );
+    const usage = { inputTokens: 30, outputTokens: 12, cachedInputTokens: 10 };
+    const finish = vi.fn(() => new Promise<void>(() => {}));
+    const transcriptRecorder: ManagementTranscriptRecorder = {
+      begin: vi.fn(async () => ({ finish })),
+    };
+    const backend = new CodexCliManagementBackend({
+      transcriptRecorder,
+      runStructured: async () => ({
+        usage,
+        value: {
+          title: "Test",
+          workItems: [
+            {
+              id: "code",
+              title: "Implement code",
+              goal: "Implement code",
+              acceptance: ["Tests pass"],
+              criterionRisks: [{ criterion: "Tests pass", risk: "ordinary" }],
+              scope: ["src/code.ts"],
+              preconditions: [],
+              outOfScope: [],
+              conventions: [],
+              dependsOn: [],
+              baseSha: "a".repeat(40),
+              validationCommands: ["npm test"],
+              validation: [
+                {
+                  tier: "mechanical",
+                  criteria: ["Tests pass"],
+                  rationale: "The repository test command establishes the criterion.",
+                  evidenceCommands: ["npm test"],
+                },
+              ],
+              requirements: {
+                os: ["linux"],
+                architecture: ["x64"],
+                cpu: 1,
+                memoryMb: 2048,
+                diskMb: 1024,
+                timeoutMinutes: 30,
+                estimatedDurationMinutes: 10,
+                tools: ["node", "npm"],
+                services: [],
+                networkDestinations: [],
+                permittedSecretNames: [],
+                trust: "trusted_local",
+              },
+              artifactContract: "clockgrove.factory/artifact-v1",
+            },
+          ],
+        },
+      }),
+    });
+    const checkpoint = vi.fn(async () => {});
+
+    await expect(
+      backend.compile(
+        {
+          repository,
+          objective: { number: 1, title: "Test", body: "Test" },
+          defaultBranch: "main",
+          baseSha: "a".repeat(40),
+          repositoryFiles: ["src/code.ts", "package.json"],
+          allowedNetworkDestinations: [],
+          runPolicy: DEFAULT_RUN_POLICY,
+        },
+        checkpoint,
+      ),
+    ).resolves.toMatchObject({ usage });
+    expect(checkpoint).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(finish).toHaveBeenCalledOnce());
   });
 });

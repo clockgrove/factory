@@ -1636,15 +1636,19 @@ export class CodexCliManagementBackend implements ManagementBackend {
     }
   }
 
-  async #finishTranscript(
+  #finishTranscript(
     session: ManagementTranscriptSession | undefined,
     outcome: ManagementTranscriptOutcome,
-  ): Promise<void> {
-    try {
-      await session?.finish(outcome);
-    } catch (error) {
-      console.error(`[factory-debug] ${transcriptDiagnostic(error)}`);
-    }
+  ): void {
+    if (!session) return;
+    // Transcript persistence is diagnostic-only. Its filesystem latency must
+    // not precede the caller's authoritative result checkpoint or model-usage
+    // reconciliation.
+    void Promise.resolve()
+      .then(() => session.finish(outcome))
+      .catch((error) => {
+        console.error(`[factory-debug] ${transcriptDiagnostic(error)}`);
+      });
   }
 
   async #run<T>(
@@ -1687,7 +1691,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
           effectiveTimeoutMs,
         );
         const usage = assertManagementUsage(result.usage);
-        await this.#finishTranscript(transcript, {
+        this.#finishTranscript(transcript, {
           state: "succeeded",
           parsedResponse: result.value,
           usage,
@@ -1697,7 +1701,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
           usage,
         };
       } catch (error) {
-        await this.#finishTranscript(transcript, {
+        this.#finishTranscript(transcript, {
           state: error instanceof ManagementOutputError ? "invalid-response" : "provider-failed",
           ...(error instanceof ManagementOutputError || error instanceof ProviderQuotaError
             ? { usage: error.usage }
@@ -1780,7 +1784,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
           maxOutputBytes: 2 * 1024 * 1024,
         });
       } catch (error) {
-        await this.#finishTranscript(transcript, {
+        this.#finishTranscript(transcript, {
           state: "provider-failed",
           error: error instanceof Error ? error.message : String(error),
         });
@@ -1788,7 +1792,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       }
       if (result.exitCode !== 0) {
         const observedUsage = observedCompletionUsage(result.stdout);
-        await this.#finishTranscript(transcript, {
+        this.#finishTranscript(transcript, {
           state: "provider-failed",
           stdout: result.stdout,
           stderr: result.stderr,
@@ -1827,7 +1831,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       try {
         output = parseManagementJsonlOutput<T>(result.stdout);
       } catch (error) {
-        await this.#finishTranscript(transcript, {
+        this.#finishTranscript(transcript, {
           state: error instanceof ProviderQuotaError ? "provider-failed" : "invalid-response",
           stdout: result.stdout,
           stderr: result.stderr,
@@ -1844,7 +1848,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
           await propagateProviderQuotaFailure(error, admission);
         throw error;
       }
-      await this.#finishTranscript(transcript, {
+      this.#finishTranscript(transcript, {
         state: "succeeded",
         stdout: result.stdout,
         stderr: result.stderr,

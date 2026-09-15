@@ -28,10 +28,10 @@ import {
   waitForCreatedObjectiveNamespace,
 } from "./verify-live-objective.mjs";
 import {
-  observeNativeMergeProofs,
-  assertNativeMergeProof,
-} from "./qualification-sibling-refresh-proof.mjs";
-import { selectQualificationPublicationRecord } from "./qualification-merge-proof.mjs";
+  assertQualificationMergeProof,
+  observeQualificationMergeProofs,
+  selectQualificationPublicationRecord,
+} from "./qualification-merge-proof.mjs";
 import {
   inspectFreezeCapability,
   assertInnerContentionWindow,
@@ -559,6 +559,50 @@ export function assertConcurrencySettlement(observation, authority, { paused = f
     assert.ok(observation.children.every((child) => child.state === "closed"));
   }
   return { runId: start.runId, modelTokens: accounting.total, reservations: reservations.length };
+}
+
+/** Terminal Factory cleanup retires disposable review refs; merged PRs and receipts stay durable. */
+export async function observeSettledConcurrencyMergeProofs({ entry, request, repository }) {
+  const proofs = await observeQualificationMergeProofs({ request }, entry);
+  for (const proof of proofs) {
+    const integration = one(
+      entry.events.filter(
+        (event) => event.event === "AttemptIntegrated" && event.workItem === proof.workItem,
+      ),
+      "integration missing",
+    );
+    const publication = selectQualificationPublicationRecord(
+      entry.events.filter(
+        (event) => event.event === "PublicationRecorded" && sameAttempt(event, integration),
+      ),
+    );
+    const validation = one(
+      entry.events.filter(
+        (event) => event.event === "ValidationRecorded" && sameAttempt(event, integration),
+      ),
+      "validation proof missing",
+    );
+    one(
+      entry.events.filter(
+        (event) => event.event === "AttemptValidated" && sameAttempt(event, integration),
+      ),
+      "semantic review proof missing",
+    );
+    assert.equal(validation.passed, true);
+    assert.match(publication.validationDigest, /^[a-f0-9]{64}$/);
+    assert.match(publication.exactHeadValidationDigest, /^[a-f0-9]{64}$/);
+    assert.equal(publication.validationDigest, validation.evidenceDigest);
+    assertQualificationMergeProof(proof, {
+      repository,
+      pull: one(
+        entry.pulls.filter((pull) => pull.number === proof.pullRequest),
+        "pull missing",
+      ),
+      publication,
+      integration,
+    });
+  }
+  return proofs;
 }
 
 /** These are real Objective lease Git commits, not repository-controller receipts. */
@@ -1630,31 +1674,11 @@ export async function main(env = process.env, run = checkpointMain) {
                 policyFor(authority, index),
               );
               entry.measurements = concurrencyMeasurements(entry, evidence.observer);
-              entry.mergeProofs = await observeNativeMergeProofs({ evidence: entry, request });
-              for (const proof of entry.mergeProofs) {
-                const integration = one(
-                  entry.events.filter(
-                    (event) =>
-                      event.event === "AttemptIntegrated" && event.workItem === proof.workItem,
-                  ),
-                  "integration missing",
-                );
-                const publication = selectQualificationPublicationRecord(
-                  entry.events.filter(
-                    (event) =>
-                      event.event === "PublicationRecorded" && sameAttempt(event, integration),
-                  ),
-                );
-                assertNativeMergeProof(entry, proof, {
-                  repository: authority.repository,
-                  pull: one(
-                    entry.pulls.filter((pull) => pull.number === proof.pullRequest),
-                    "pull missing",
-                  ),
-                  publication,
-                  integration,
-                });
-              }
+              entry.mergeProofs = await observeSettledConcurrencyMergeProofs({
+                entry,
+                request,
+                repository: authority.repository,
+              });
             }
             const absence = [];
             for (const [index, observation] of final.entries()) {
@@ -1737,31 +1761,11 @@ export async function main(env = process.env, run = checkpointMain) {
                 policyFor(authority, index),
               );
               entry.measurements = concurrencyMeasurements(entry, evidence.observer);
-              entry.mergeProofs = await observeNativeMergeProofs({ evidence: entry, request });
-              for (const proof of entry.mergeProofs) {
-                const integration = one(
-                  entry.events.filter(
-                    (event) =>
-                      event.event === "AttemptIntegrated" && event.workItem === proof.workItem,
-                  ),
-                  "integration missing",
-                );
-                const publication = selectQualificationPublicationRecord(
-                  entry.events.filter(
-                    (event) =>
-                      event.event === "PublicationRecorded" && sameAttempt(event, integration),
-                  ),
-                );
-                assertNativeMergeProof(entry, proof, {
-                  repository: authority.repository,
-                  pull: one(
-                    entry.pulls.filter((pull) => pull.number === proof.pullRequest),
-                    "pull missing",
-                  ),
-                  publication,
-                  integration,
-                });
-              }
+              entry.mergeProofs = await observeSettledConcurrencyMergeProofs({
+                entry,
+                request,
+                repository: authority.repository,
+              });
             }
             evidence.finalObjectives = final;
             save();

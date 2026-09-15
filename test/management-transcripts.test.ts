@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CodexCliManagementBackend } from "../src/management/codex-cli.js";
 import {
   LocalManagementTranscriptRecorder,
+  MANAGEMENT_TRANSCRIPT_DIRECTORY_ENV,
   localManagementTranscriptRecorderFromEnvironment,
   type ManagementTranscriptRecorder,
 } from "../src/management/transcripts.js";
@@ -183,15 +184,15 @@ describe("local management transcripts", () => {
   it("prunes only Factory-owned records and serializes concurrent retention", async () => {
     const directory = join(await root(), "archive");
     await mkdir(directory);
-    const recorder = new LocalManagementTranscriptRecorder(directory, {
+    const limits = {
       maxRecordBytes: 16 * 1024,
       maxArchiveBytes: 32 * 1024,
       maxRecords: 2,
-    });
+    };
     await writeFile(join(directory, "user-settings.json"), '{"keep":true}\n');
     const sessions = await Promise.all(
       ["one", "two", "three", "four"].map((modelInvocationId) =>
-        recorder.begin({
+        new LocalManagementTranscriptRecorder(directory, limits).begin({
           cwd: directory,
           modelInvocationId,
           prompt: modelInvocationId,
@@ -214,6 +215,38 @@ describe("local management transcripts", () => {
       keep: true,
     });
     expect(names.filter((name) => name.startsWith("factory-management-")).length).toBe(2);
+  });
+
+  it("prunes oldest owned records to the byte bound before replacement", async () => {
+    const directory = join(await root(), "archive");
+    const limits = {
+      maxRecordBytes: 16 * 1024,
+      maxArchiveBytes: 18 * 1024,
+      maxRecords: 10,
+    };
+    for (const modelInvocationId of ["one", "two"]) {
+      const session = await new LocalManagementTranscriptRecorder(directory, limits).begin({
+        cwd: directory,
+        modelInvocationId,
+        prompt: modelInvocationId,
+        schema: {},
+        profile: null,
+        model: null,
+        reasoning: null,
+        transport: "structured-adapter",
+      });
+      await session.finish({
+        state: "succeeded",
+        parsedResponse: { modelInvocationId, content: "x".repeat(5_000) },
+      });
+    }
+    const names = await readdir(directory);
+    const sizes = await Promise.all(names.map((name) => stat(join(directory, name))));
+    expect(sizes.reduce((sum, details) => sum + details.size, 0)).toBeLessThanOrEqual(
+      limits.maxArchiveBytes,
+    );
+    expect(names).toHaveLength(1);
+    expect(JSON.parse(await readFile(join(directory, names[0]!), "utf8")).recordingId).toBe("two");
   });
 
   it("rejects a symlink archive root without touching its target", async () => {
@@ -337,6 +370,99 @@ describe("local management transcripts", () => {
         }),
       ],
     });
+  });
+
+  it("records actual invalid structured CLI output without inventing a final response", async () => {
+    const repository = await root();
+    const directory = join(repository, "archive");
+    const fakeCodex = join(repository, "fake-invalid-codex");
+    const codexHome = join(repository, "invalid-codex-home");
+    await writeFile(join(repository, "package.json"), JSON.stringify({ scripts: {} }));
+    await writeFile(
+      fakeCodex,
+      [
+        "#!/bin/sh",
+        'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"not valid structured json"}}\'',
+        'printf \'%s\\n\' \'{"type":"turn.completed","usage":{"input_tokens":11,"output_tokens":3,"cached_input_tokens":4}}\'',
+      ].join("\n"),
+    );
+    await chmod(fakeCodex, 0o700);
+    const backend = new CodexCliManagementBackend({
+      command: fakeCodex,
+      authFile: join(repository, "missing-auth.json"),
+      createCodexHome: async () => {
+        await mkdir(codexHome);
+        return codexHome;
+      },
+      removeCodexHome: async () => {},
+      transcriptRecorder: new LocalManagementTranscriptRecorder(directory),
+    });
+    await expect(
+      backend.compile(
+        {
+          repository,
+          objective: { number: 1, title: "Test", body: "Implement the requested behavior." },
+          defaultBranch: "main",
+          baseSha: "a".repeat(40),
+          repositoryFiles: ["package.json"],
+          allowedNetworkDestinations: [],
+          runPolicy: DEFAULT_RUN_POLICY,
+        },
+        async () => {},
+      ),
+    ).rejects.toThrow();
+    const [name] = await readdir(directory);
+    const record = JSON.parse(await readFile(join(directory, name!), "utf8"));
+    expect(record.response).toMatchObject({
+      state: "invalid-response",
+      parsedResponse: { availability: "unavailable" },
+      usage: {
+        inputTokens: 11,
+        outputTokens: 3,
+        cachedInputTokens: 4,
+        totalTokens: 14,
+      },
+      messages: [
+        expect.objectContaining({
+          content: "not valid structured json",
+          finalStructuredResponse: false,
+        }),
+      ],
+    });
+  });
+
+  it("performs no transcript filesystem work when backend recording is disabled", async () => {
+    const repository = await root();
+    const directory = join(repository, "must-not-exist");
+    await writeFile(join(repository, "package.json"), JSON.stringify({ scripts: {} }));
+    const previous = process.env[MANAGEMENT_TRANSCRIPT_DIRECTORY_ENV];
+    process.env[MANAGEMENT_TRANSCRIPT_DIRECTORY_ENV] = directory;
+    try {
+      const backend = new CodexCliManagementBackend({
+        transcriptRecorder: null,
+        runStructured: async () => {
+          throw new Error("provider primary failure");
+        },
+      });
+      await expect(
+        backend.compile(
+          {
+            repository,
+            objective: { number: 1, title: "Test", body: "Implement the requested behavior." },
+            defaultBranch: "main",
+            baseSha: "a".repeat(40),
+            repositoryFiles: ["package.json"],
+            allowedNetworkDestinations: [],
+            runPolicy: DEFAULT_RUN_POLICY,
+          },
+          async () => {},
+        ),
+      ).rejects.toThrow("provider primary failure");
+      await expect(access(directory)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (previous === undefined) delete process.env[MANAGEMENT_TRANSCRIPT_DIRECTORY_ENV];
+      else process.env[MANAGEMENT_TRANSCRIPT_DIRECTORY_ENV] = previous;
+    }
   });
 
   it("fails open when the real transcript root cannot be created", async () => {

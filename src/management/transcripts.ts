@@ -47,6 +47,8 @@ interface TranscriptLimits {
   maxRecords?: number;
 }
 
+const archiveOperations = new Map<string, Promise<void>>();
+
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -128,7 +130,6 @@ export class LocalManagementTranscriptRecorder implements ManagementTranscriptRe
   readonly #maxRecordBytes: number;
   readonly #maxArchiveBytes: number;
   readonly #maxRecords: number;
-  #operations: Promise<void> = Promise.resolve();
 
   constructor(directory: string, limits: TranscriptLimits = {}) {
     if (!directory.trim() || !isAbsolute(directory)) {
@@ -266,11 +267,16 @@ export class LocalManagementTranscriptRecorder implements ManagementTranscriptRe
   }
 
   #serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.#operations.then(operation, operation);
-    this.#operations = result.then(
+    const previous = archiveOperations.get(this.#root) ?? Promise.resolve();
+    const result = previous.then(operation, operation);
+    const settled = result.then(
       () => undefined,
       () => undefined,
     );
+    archiveOperations.set(this.#root, settled);
+    void settled.then(() => {
+      if (archiveOperations.get(this.#root) === settled) archiveOperations.delete(this.#root);
+    });
     return result;
   }
 

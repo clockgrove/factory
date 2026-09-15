@@ -89,12 +89,26 @@ async function fixture(
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-sibling-integration-"));
   directories.push(repository);
-  const git = (...args: string[]) =>
-    execFileSync("git", args, {
+  let currentBranch: string | undefined;
+  let mainHead: string | undefined;
+  const git = (...args: string[]) => {
+    const output = execFileSync("git", args, {
       cwd: repository,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
     }).trim();
+    if (args[0] === "init") currentBranch = args[args.indexOf("-b") + 1];
+    if (args[0] === "checkout") {
+      const branchIndex = args.indexOf("-b");
+      currentBranch = branchIndex >= 0 ? args[branchIndex + 1] : args.at(-1);
+    }
+    if (
+      args[0] === "rev-parse" &&
+      (args[1] === "main" || (args[1] === "HEAD" && currentBranch === "main"))
+    )
+      mainHead = output;
+    return output;
+  };
   vi.spyOn(processGroup, "runContainedProcess").mockImplementation(async (input) => {
     if (input.command !== "git" || input.cwd !== repository) return runContainedProcess(input);
     const startedAt = Date.now();
@@ -145,6 +159,8 @@ async function fixture(
   git("add", ".");
   git("commit", "-qm", "base");
   const baseSha = git("rev-parse", "HEAD");
+  mainHead = baseSha;
+  const readMainHead = () => mainHead ?? git("rev-parse", "main");
   const heads: string[] = [];
   const names = options.thirdSibling ? ["a", "b", "c"] : ["a", "b"];
   for (const name of names) {
@@ -178,6 +194,7 @@ async function fixture(
     });
   const refs = new Map<string, string>();
   const commits = new Map<string, GitCommitObject>();
+  const observedCommits = new Map<string, GitCommitObject>();
   const blobs = new Map<string, Buffer>();
   const trees = new Map<string, Map<string, string>>();
   let stalePreviewServed = false;
@@ -186,15 +203,15 @@ async function fixture(
   const oid = () => createHash("sha1").update(`metadata-${counter++}`).digest("hex");
   const readCommit = async (id: string): Promise<GitCommitObject> => {
     if (id === stalePreviewOid) stalePreviewServed = true;
-    const synthetic = commits.get(id);
-    if (synthetic) return synthetic;
-    // Read fresh immutable metadata in one subprocess; do not cache observations
-    // or spend three Git startups on every admission/recovery proof read.
+    const cached = commits.get(id) ?? observedCommits.get(id);
+    if (cached) return cached;
+    // Commit objects are immutable by OID. Cache fixture reads so the parallel
+    // suite does not turn repeated proof checks into hundreds of Git startups.
     const output = git("show", "-s", "--format=%T%x00%P%x00%B", id);
     const treeEnd = output.indexOf("\0");
     const parentsEnd = output.indexOf("\0", treeEnd + 1);
     if (treeEnd < 0 || parentsEnd < 0) throw new Error("malformed fixture Git commit");
-    return {
+    const commit = {
       oid: id,
       treeOid: output.slice(0, treeEnd),
       parentOids: output
@@ -204,10 +221,11 @@ async function fixture(
       message: output.slice(parentsEnd + 1).trim(),
       serverTime: new Date(),
     };
+    observedCommits.set(id, commit);
+    return commit;
   };
   const storage: CompiledGraphStore = {
-    readRef: async (ref) =>
-      ref === "refs/heads/main" ? git("rev-parse", "main") : (refs.get(ref) ?? null),
+    readRef: async (ref) => (ref === "refs/heads/main" ? readMainHead() : (refs.get(ref) ?? null)),
     readCommit,
     readCommitContent: readCommit,
     readBlob: async (id) => {
@@ -582,6 +600,7 @@ async function fixture(
     git("merge", "--squash", peerHead);
     git("commit", "-qm", "peer squash");
     peerMergeSha = git("rev-parse", "HEAD");
+    mainHead = peerMergeSha;
     const peerTree = (await readCommit(peerHead)).treeOid;
     const peerLease = { ...lease, objective: 6, runId: "peer" };
     const peerItem = {
@@ -830,7 +849,7 @@ async function fixture(
     observedChecks: [],
   });
   vi.spyOn(GitHubControlStore.prototype, "getBranchHead").mockImplementation(async () =>
-    readCommit(git("rev-parse", "main")),
+    readCommit(readMainHead()),
   );
   let lostIntegrationReceipt = false;
   vi.spyOn(GitHubControlStore.prototype, "addIssueComment").mockImplementation(
@@ -977,32 +996,46 @@ async function fixture(
       };
     },
   );
+  const previewTrees = new Map<string, string>();
+  const previewCommits = new Map<string, string>();
   const pullReads = vi
     .spyOn(GitHubControlStore.prototype, "readPullRequest")
     .mockImplementation(async (number) => {
       const pull = findPull(number);
       const lag = staleRefreshHeads.get(number);
       const observedHead = lag && lag.remaining-- > 0 ? lag.head : pull.headSha;
-      const currentBase = git("rev-parse", "main");
+      const currentBase = readMainHead();
       const previewState = number === 19 ? options.previewState?.() : "fresh";
       const oneShotStaleParents =
         options.stalePreviewOnce &&
         !stalePreviewServed &&
         number === 19 &&
         [...refs.keys()].filter((ref) => ref.includes("/reviews/")).length > names.length;
-      const previewTree =
-        options.wrongPreviewTree && number === 19
-          ? git("rev-parse", `${heads[number - 18]}^{tree}`)
-          : git("merge-tree", "--write-tree", currentBase, pull.headSha).split("\n")[0]!;
+      const previewTreeKey = `${currentBase}:${pull.headSha}:${
+        options.wrongPreviewTree && number === 19 ? "wrong" : "merge"
+      }`;
+      let previewTree = previewTrees.get(previewTreeKey);
+      if (!previewTree) {
+        previewTree =
+          options.wrongPreviewTree && number === 19
+            ? git("rev-parse", `${heads[number - 18]}^{tree}`)
+            : git("merge-tree", "--write-tree", currentBase, pull.headSha).split("\n")[0]!;
+        previewTrees.set(previewTreeKey, previewTree);
+      }
       const previewParents = [
         oneShotStaleParents || previewState === "stale-parents" ? baseSha : currentBase,
         pull.headSha,
       ];
-      const preview = execFileSync(
-        "git",
-        ["commit-tree", previewTree, ...previewParents.flatMap((parent) => ["-p", parent])],
-        { cwd: repository, input: "GitHub test merge", encoding: "utf8" },
-      ).trim();
+      const previewKey = `${previewTree}:${previewParents.join(":")}`;
+      let preview = previewCommits.get(previewKey);
+      if (!preview) {
+        preview = execFileSync(
+          "git",
+          ["commit-tree", previewTree, ...previewParents.flatMap((parent) => ["-p", parent])],
+          { cwd: repository, input: "GitHub test merge", encoding: "utf8" },
+        ).trim();
+        previewCommits.set(previewKey, preview);
+      }
       if (pull.state === "OPEN")
         commits.set(preview, {
           oid: preview,
@@ -1053,7 +1086,7 @@ async function fixture(
           runId: "parallel",
           pullRequest: number,
           headSha,
-          baseSha: git("rev-parse", "main"),
+          baseSha: readMainHead(),
         },
       });
       if (number === 19 && options.rejectMergeOnce && !mergeRejected) {
@@ -1063,6 +1096,7 @@ async function fixture(
       git("merge", "--squash", headSha);
       git("commit", "-qm", `merge PR ${number}`);
       const merged = git("rev-parse", "HEAD");
+      mainHead = merged;
       mergeShas.set(number, merged);
       findPull(number).state = "MERGED";
       if (number === 19 && options.loseMergeResponse && !responseLost) {
@@ -1076,6 +1110,7 @@ async function fixture(
         await writeFile(join(repository, "external.txt"), "outside this run\n");
         git("add", ".");
         git("commit", "-qm", "external advance");
+        mainHead = git("rev-parse", "HEAD");
       }
       options.afterMerge?.(number);
       return merged;

@@ -1289,11 +1289,15 @@ server.registerTool(
     title: "Run Factory Objective",
     annotations: DESTRUCTIVE_WRITE_TOOL_ANNOTATIONS,
     description:
-      "Run one explicitly activated Objective to a terminal state using Factory: acquire the " +
+      "Run one Objective to a terminal state using Factory, or reconnect to its exact current " +
+      "non-terminal run after interruption: acquire the " +
       "GitHub-backed Director lease, compile missing Work Items, schedule policy-approved workers, " +
       "validate independently, publish and squash-merge acceptable work, retry bounded failures, " +
-      "and persist every decision in GitHub. The default policy is local-only and never falls back " +
-      "to paid compute. This call remains active until completion, cancellation, or evidenced escalation.",
+      "and persist every decision in GitHub. Reconnect always uses the recorded run policy. A " +
+      "terminal cancellation or terminal run with unresolved model accounting is never replaced " +
+      "implicitly; assess and explicitly authorize successor recovery. " +
+      "The default policy is local-only and never falls back to paid compute. This call remains " +
+      "active until completion, cancellation, evidenced escalation, or a bounded draining/refusal result.",
     inputSchema: {
       ...RepoShape,
       objectiveNumber: z.number().int().positive(),

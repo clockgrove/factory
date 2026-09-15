@@ -74,6 +74,7 @@ export const SEMANTIC_COMPILER_CASES: ReadonlyArray<SemanticCompilerCase> = [
     name: "observed npm valid linear",
     tests: [
       "compiler-contracts.test.ts::selects $name authority and formats only its observed recipes",
+      "compiler-proposal.test.ts::combines adapter requirements with model-owned non-derivable execution intent",
       "compiler-proposal.test.ts::preserves semantic ownership while deriving mechanics",
     ],
     tags: {

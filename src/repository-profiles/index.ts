@@ -87,6 +87,16 @@ function nodeTestTargets(command: string): string[] | undefined {
   return targets;
 }
 
+/** Format only the exact scoped specialization accepted by validation grounding. */
+export function scopedNodeTestCommand(targets: readonly string[]): string | null {
+  const command = `node --test ${targets.join(" ")}`;
+  const parsed = nodeTestTargets(command);
+  return parsed?.length === targets.length &&
+    parsed.every((target, index) => target === targets[index])
+    ? command
+    : null;
+}
+
 export function normalizeRepositoryFacts(input: RepositoryFacts): RepositoryFacts {
   if (input.files.length > MAX_REPOSITORY_FILES)
     throw new Error("repository file inventory exceeds bound");

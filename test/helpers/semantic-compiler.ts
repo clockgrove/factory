@@ -132,6 +132,10 @@ export function semanticProposal(request: CompilerRequest, count = 1): CompilerP
         exclusiveResources: [],
         executionIntent: {
           estimatedDurationMinutes: 15,
+          additionalTools: [],
+          services: [],
+          additionalNetworkDestinations: [],
+          trust: "isolated",
         },
       };
     }),

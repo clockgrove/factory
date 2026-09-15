@@ -89,6 +89,10 @@ async function fixture() {
         exclusiveResources: [],
         executionIntent: {
           estimatedDurationMinutes: 10,
+          additionalTools: [],
+          services: [],
+          additionalNetworkDestinations: [],
+          trust: "isolated",
         },
       },
     ],

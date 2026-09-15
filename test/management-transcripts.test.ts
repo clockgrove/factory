@@ -26,6 +26,10 @@ import {
 } from "../src/management/transcripts.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import type { CompilationContext, CompilerProposalCheckpoint } from "../src/management/backend.js";
+import {
+  materializePinnedCompilationTree,
+  sealPinnedCompilationTreeProof,
+} from "../src/execution/pinned-compilation-tree.js";
 import { semanticProposal, semanticRequest } from "./helpers/semantic-compiler.js";
 
 const roots: string[] = [];
@@ -37,14 +41,33 @@ async function root() {
   return value;
 }
 
-function proposeWithTranscript(
+async function proposeWithTranscript(
   backend: CodexCliManagementBackend,
   repository: string,
   checkpoint: CompilerProposalCheckpoint = async () => {},
+  exactBase = false,
 ) {
-  const request = semanticRequest();
+  let request = semanticRequest();
+  let pinned: Awaited<ReturnType<typeof materializePinnedCompilationTree>> | undefined;
+  if (exactBase) {
+    const git = async (...args: string[]) =>
+      (await execFileAsync("git", ["-C", repository, ...args])).stdout.trim();
+    await git("init", "-b", "main");
+    await git("config", "user.name", "Fixture");
+    await git("config", "user.email", "fixture@example.test");
+    await git("add", ".");
+    await git("commit", "-m", "fixture");
+    const baseSha = await git("rev-parse", "HEAD");
+    pinned = await materializePinnedCompilationTree(repository, baseSha);
+    await sealPinnedCompilationTreeProof(pinned.proof);
+    request = {
+      ...request,
+      baseSha,
+      inventory: { ...request.inventory, baseSha },
+    };
+  }
   const execution: CompilationContext = {
-    repository,
+    repository: pinned?.path ?? repository,
     objective: {
       number: request.objective.number,
       title: request.objective.title,
@@ -52,11 +75,16 @@ function proposeWithTranscript(
     },
     defaultBranch: "main",
     baseSha: request.baseSha,
-    repositoryFiles: ["package.json"],
+    repositoryFiles: pinned?.files ?? ["package.json"],
+    ...(pinned ? { pinnedCompilationTree: pinned.proof } : {}),
     allowedNetworkDestinations: [],
     runPolicy: DEFAULT_RUN_POLICY,
   };
-  return backend.proposePlan(request, checkpoint, undefined, execution);
+  try {
+    return await backend.proposePlan(request, checkpoint, undefined, execution);
+  } finally {
+    await pinned?.dispose();
+  }
 }
 
 afterEach(async () => {
@@ -499,7 +527,7 @@ describe("local management transcripts", () => {
     });
     let failure: unknown;
     try {
-      await proposeWithTranscript(backend, repository);
+      await proposeWithTranscript(backend, repository, undefined, true);
     } catch (error) {
       failure = error;
     }
@@ -555,7 +583,7 @@ describe("local management transcripts", () => {
     });
     let failure: unknown;
     try {
-      await proposeWithTranscript(backend, repository);
+      await proposeWithTranscript(backend, repository, undefined, true);
     } catch (error) {
       failure = error;
     }

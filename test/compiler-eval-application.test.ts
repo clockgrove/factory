@@ -101,6 +101,10 @@ const proposal = CompilerProposalSchema.parse({
     exclusiveResources: item.changeSurface?.exclusiveResources ?? [],
     executionIntent: {
       estimatedDurationMinutes: 30,
+      additionalTools: [],
+      services: [],
+      additionalNetworkDestinations: [],
+      trust: "isolated",
     },
   })),
 });

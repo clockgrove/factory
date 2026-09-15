@@ -11,10 +11,15 @@ import {
   overlappingScopePairs,
 } from "../graph-analysis.js";
 import type { CompilationContext } from "../management/backend.js";
-import { normalizeSchedulingPolicy, type RunPolicy } from "../protocol/policy.js";
+import {
+  destinationAllowedByPolicy,
+  normalizeSchedulingPolicy,
+  type RunPolicy,
+} from "../protocol/policy.js";
 import { RepositoryScopePathSchema } from "../protocol/worker-packet.js";
 import {
   readPinnedCompilerFacts,
+  scopedNodeTestCommand,
   type PinnedRepositoryFacts,
 } from "../repository-profiles/index.js";
 import { scopeOwnsPath } from "../repository-capabilities/model.js";
@@ -358,8 +363,47 @@ function validationCommand(
       request.repository.validationRecipes.find((recipe) => recipe.id === reference.recipeId)
         ?.command ?? null
     );
-  if (reference.kind === "scoped-node-test") return `node --test ${reference.targets.join(" ")}`;
+  if (reference.kind === "scoped-node-test") return scopedNodeTestCommand(reference.targets);
   return formatCompilerOperation(reference.adapterId, reference.operation);
+}
+
+function resolvedExecutionRequirements(
+  request: CompilerRequest,
+  item: CompilerProposal["workItems"][number],
+) {
+  const references = item.criteria.flatMap((criterion) =>
+    criterion.validation.flatMap((validation) => validation.evidence),
+  );
+  const recipes = references.flatMap((reference) =>
+    reference.kind === "observed"
+      ? request.repository.validationRecipes.filter((recipe) => recipe.id === reference.recipeId)
+      : reference.kind === "scoped-node-test"
+        ? request.repository.validationRecipes.filter((recipe) => recipe.command === "node --test")
+        : [],
+  );
+  const deferred = references.flatMap((reference) =>
+    reference.kind === "deferred"
+      ? request.repository.toolchains.filter(
+          (toolchain) => toolchain.adapterId === reference.adapterId,
+        )
+      : [],
+  );
+  return {
+    tools: [
+      ...new Set([
+        ...recipes.flatMap((recipe) => recipe.requiredTools),
+        ...deferred.flatMap((capability) => capability.requiredTools),
+        ...item.executionIntent.additionalTools,
+      ]),
+    ].sort(),
+    networkDestinations: [
+      ...new Set([
+        ...recipes.flatMap((recipe) => recipe.networkDestinations),
+        ...deferred.flatMap((capability) => capability.networkDestinations),
+        ...item.executionIntent.additionalNetworkDestinations,
+      ]),
+    ].sort(),
+  };
 }
 
 function criterionHasDeterministicValidation(
@@ -665,11 +709,13 @@ export function parseAndValidateCompilerProposal(
             const observedBare = [...recipes.values()].some(
               (recipe) => recipe.command === "node --test",
             );
-            const validTargets = reference.targets.every(
-              (target) =>
-                /\.(?:c|m)?js$/.test(target) &&
-                item.scope.some((path) => scopeOwnsPath([path], target)),
-            );
+            const validTargets =
+              scopedNodeTestCommand(reference.targets) !== null &&
+              reference.targets.every(
+                (target) =>
+                  /\.(?:c|m)?js$/.test(target) &&
+                  item.scope.some((path) => scopeOwnsPath([path], target)),
+              );
             if (!observedBare || !validTargets)
               violations.push(
                 violation(
@@ -735,6 +781,46 @@ export function parseAndValidateCompilerProposal(
           pointer("workItems", itemIndex, "criteria"),
           "at least one executable validation reference per Work Item",
           0,
+          item.id,
+        ),
+      );
+    const validationCommands = uniqueCommands(request, item);
+    if (validationCommands.length > 32)
+      violations.push(
+        violation(
+          "validation-command-limit",
+          pointer("workItems", itemIndex, "criteria"),
+          { maximumUniqueValidationCommands: 32 },
+          validationCommands.length,
+          item.id,
+        ),
+      );
+    const executionRequirements = resolvedExecutionRequirements(request, item);
+    for (const [field, values] of [
+      ["additionalTools", executionRequirements.tools],
+      ["additionalNetworkDestinations", executionRequirements.networkDestinations],
+    ] as const)
+      if (values.length > 64)
+        violations.push(
+          violation(
+            "execution-requirement-limit",
+            pointer("workItems", itemIndex, "executionIntent", field),
+            { maximumProjectedValues: 64 },
+            values.length,
+            item.id,
+          ),
+        );
+    const denied = item.executionIntent.additionalNetworkDestinations.filter(
+      (destination) =>
+        !destinationAllowedByPolicy(destination, request.constraints.allowedNetworkDestinations),
+    );
+    if (denied.length)
+      violations.push(
+        violation(
+          "denied-network-destination",
+          pointer("workItems", itemIndex, "executionIntent", "additionalNetworkDestinations"),
+          request.constraints.allowedNetworkDestinations,
+          denied,
           item.id,
         ),
       );
@@ -905,21 +991,7 @@ function semanticWorkItem(
   runPolicy: RunPolicy,
 ): CompilerWorkItemInput {
   const scheduling = normalizeSchedulingPolicy(runPolicy);
-  const references = item.criteria.flatMap((criterion) =>
-    criterion.validation.flatMap((validation) => validation.evidence),
-  );
-  const recipes = references.flatMap((reference) =>
-    reference.kind === "observed"
-      ? request.repository.validationRecipes.filter((recipe) => recipe.id === reference.recipeId)
-      : [],
-  );
-  const deferred = references.flatMap((reference) =>
-    reference.kind === "deferred"
-      ? request.repository.toolchains.filter(
-          (toolchain) => toolchain.adapterId === reference.adapterId,
-        )
-      : [],
-  );
+  const executionRequirements = resolvedExecutionRequirements(request, item);
   const risk = (criterion: (typeof item.criteria)[number]): CriterionRisk => {
     const inferred = inferCriterionRisk(criterion.text);
     return criterion.risk === "ordinary" ? inferred : criterion.risk;
@@ -949,21 +1021,11 @@ function semanticWorkItem(
       diskMb: 1,
       timeoutMinutes: request.constraints.workItemTimeoutMinutes,
       estimatedDurationMinutes: item.executionIntent.estimatedDurationMinutes,
-      tools: [
-        ...new Set([
-          ...recipes.flatMap((recipe) => recipe.requiredTools),
-          ...deferred.flatMap((capability) => capability.requiredTools),
-        ]),
-      ].sort(),
-      services: [],
-      networkDestinations: [
-        ...new Set([
-          ...recipes.flatMap((recipe) => recipe.networkDestinations),
-          ...deferred.flatMap((capability) => capability.networkDestinations),
-        ]),
-      ].sort(),
+      tools: executionRequirements.tools,
+      services: [...new Set(item.executionIntent.services)].sort(),
+      networkDestinations: executionRequirements.networkDestinations,
       permittedSecretNames: [],
-      trust: runPolicy.trust === "sandbox_untrusted" ? "isolated" : "trusted_local",
+      trust: item.executionIntent.trust,
     },
     artifactContract: "clockgrove.factory/artifact-v1",
     exclusiveResources: [...item.exclusiveResources],

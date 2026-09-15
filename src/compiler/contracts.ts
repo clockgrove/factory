@@ -8,7 +8,7 @@ import {
   type CompilerJudgeVerdict,
   type ObligationInventory,
 } from "../evaluation/compiler-eval.js";
-import { RepositoryScopePathSchema } from "../protocol/worker-packet.js";
+import { NetworkDestinationSchema, RepositoryScopePathSchema } from "../protocol/worker-packet.js";
 
 export type JsonSchema = Readonly<Record<string, unknown>>;
 
@@ -62,6 +62,8 @@ export const COMPILER_VIOLATION_CODES = [
   "ambiguous-capability-provider",
   "non-ancestor-capability-provider",
   "operation-count-limit",
+  "validation-command-limit",
+  "execution-requirement-limit",
   "denied-network-destination",
   "legacy-constraint-mismatch",
   "report-truncated",
@@ -195,12 +197,23 @@ export const CompilerProposalSchema = z
                   .string()
                   .min(1)
                   .max(160)
-                  .regex(/^[a-z0-9][a-z0-9:._/-]*$/),
+                  .regex(/^[a-z0-9][a-z0-9:._/-]*$/)
+                  .refine(
+                    (value) =>
+                      !value
+                        .split("/")
+                        .some((part) => part === ".." || part === "." || part === ""),
+                    "resource identity contains traversal or empty components",
+                  ),
               )
               .max(64),
             executionIntent: z
               .object({
                 estimatedDurationMinutes: z.number().int().min(1).max(1_440),
+                additionalTools: z.array(Id).max(64),
+                services: z.array(Id).max(64),
+                additionalNetworkDestinations: z.array(NetworkDestinationSchema).max(64),
+                trust: z.enum(["trusted_local", "isolated", "managed"]),
               })
               .strict(),
           })
@@ -350,6 +363,13 @@ const jsonScopePath = {
   maxLength: 500,
   pattern: "^(?!/)(?!.*\\\\)(?!.*//)(?!.*[*?\\[])(?!.*(?:^|/)\\.\\.?(?:/|$)).+$",
 };
+const jsonNetworkDestination = {
+  type: "string",
+  minLength: 1,
+  maxLength: 253,
+  pattern:
+    "^(?!.*(?:^|\\.)[Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]$)(?![Mm][Ee][Tt][Aa][Dd][Aa][Tt][Aa]\\.[Gg][Oo][Oo][Gg][Ll][Ee]\\.[Ii][Nn][Tt][Ee][Rr][Nn][Aa][Ll]$)(?:\\*\\.)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}$",
+};
 const jsonDiagnostic = {
   type: ["null", "boolean", "number", "string", "array", "object"],
 };
@@ -427,10 +447,14 @@ const compilerProposalObjectSchema = strictObject({
         type: "string",
         minLength: 1,
         maxLength: 160,
-        pattern: "^[a-z0-9][a-z0-9:._/-]*$",
+        pattern: "^(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*//)[a-z0-9][a-z0-9:._/-]*$",
       }),
       executionIntent: strictObject({
         estimatedDurationMinutes: { type: "integer", minimum: 1, maximum: 1_440 },
+        additionalTools: stringArray(64, jsonId),
+        services: stringArray(64, jsonId),
+        additionalNetworkDestinations: stringArray(64, jsonNetworkDestination),
+        trust: { enum: ["trusted_local", "isolated", "managed"] },
       }),
     }),
   },

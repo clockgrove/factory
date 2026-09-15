@@ -1366,8 +1366,9 @@ fail closed. Malformed repair output consumes its attempt. Revisions never emit 
 only an accepted exact selection reaches the existing graph commitment/projection transaction.
 Changing an Objective before that commitment invalidates its assessment, including on restart.
 The model emits only semantic Work Item intent: obligation mappings, acceptance criteria, validation
-intent references, scopes, dependency intent, risk classifications, exclusive resources, and
-estimated duration. Trust, tools, services, and network destinations are policy/adapter-owned.
+intent references, scopes, dependency intent, risk classifications, exclusive resources, estimated
+duration, trust, and non-derivable tool, service, and network needs. Factory derives adapter-owned
+requirements and execution sizing, and rejects proposal needs that exceed the accepted policy.
 It cannot emit shell commands, adapter internals, runtime pins, provider provisioning plans, compiled
 graph envelopes, or durability state. Factory attaches the frozen Objective digest, base SHA, and
 exact evidence records before strict validation, so model formatting cannot rewrite trusted evidence.
@@ -1384,9 +1385,9 @@ advertise observed or eligible deferred authority, including manifest/lock/runti
 bounded provider operation they own. Partial, mixed, policy-blocked, or unsupported states fail closed;
 Cargo, Go, and ambient Python do not gain inferred bootstrap authority. The model-facing prompt contains
 no hard-coded toolchain rules. Deterministic projection resolves every accepted validation intent,
-adds only required scope/resource serialization and provider-ancestor edges, applies policy-owned
-execution requirements, and records a digest-bound trace of adapter bindings, added edges, and risk
-elevations. The existing graph validators and this projection share dependency, overlap, and exclusive-
+adds only required scope/resource serialization and provider-ancestor edges, combines validated
+semantic needs with adapter and policy-derived execution requirements, and records a digest-bound trace
+of adapter bindings, added edges, and risk elevations. The existing graph validators and this projection share dependency, overlap, and exclusive-
 resource analysis so they cannot silently implement different graph semantics.
 
 This is an opt-in policy extension, not a change to existing immutable policies or the current

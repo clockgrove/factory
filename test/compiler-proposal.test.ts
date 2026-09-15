@@ -184,22 +184,95 @@ describe("semantic proposal validation", () => {
     expect(JSON.stringify(result.report)).not.toContain("../private");
   });
 
-  it.each(["trust", "additionalTools", "services", "additionalNetworkDestinations"])(
-    "rejects model-authored operational authority through %s",
-    (field) => {
-      const request = semanticRequest();
-      const proposal = structuredClone(semanticProposal(request)) as unknown as {
-        workItems: Array<{ executionIntent: Record<string, unknown> }>;
-      };
-      proposal.workItems[0]!.executionIntent[field] = field === "trust" ? "trusted_local" : [];
-      expect(codes(request, proposal)).toContainEqual(
+  it("reports projection preconditions through structured proposal violations", () => {
+    const request = semanticRequest();
+
+    const unsafeResource = structuredClone(semanticProposal(request)) as unknown as {
+      workItems: Array<Record<string, unknown>>;
+    };
+    unsafeResource.workItems[0]!.exclusiveResources = ["cache/../shared"];
+    expect(parseAndValidateCompilerProposal(request, unsafeResource).report).toMatchObject({
+      phase: "proposal",
+      status: "repairable",
+      violations: [
         expect.objectContaining({
           code: "schema-invalid",
-          field: "/workItems/0/executionIntent",
+          itemId: "item-1",
+          field: "/workItems/0/exclusiveResources/0",
         }),
-      );
-    },
-  );
+      ],
+    });
+
+    const scopedTarget = semanticProposal(request);
+    scopedTarget.workItems[0]!.scope = ["test/my file.js"];
+    scopedTarget.workItems[0]!.criteria[0]!.validation[0]!.evidence = [
+      { kind: "scoped-node-test", targets: ["test/my file.js"] },
+    ];
+    expect(codes(request, scopedTarget)).toContainEqual(
+      expect.objectContaining({
+        code: "unknown-validation-recipe",
+        itemId: "item-1",
+        field: "/workItems/0/criteria/0/validation/0/evidence",
+      }),
+    );
+
+    const commandBound = semanticProposal(request);
+    request.repository.validationRecipes = Array.from({ length: 33 }, (_, index) => ({
+      ...request.repository.validationRecipes[0]!,
+      id: `recipe-${index + 1}`,
+      command: `node --test test/case-${index + 1}.js`,
+    }));
+    commandBound.workItems[0]!.criteria[0]!.validation = [
+      {
+        tier: "mechanical",
+        evidence: request.repository.validationRecipes
+          .slice(0, 32)
+          .map((recipe) => ({ kind: "observed" as const, recipeId: recipe.id })),
+      },
+      {
+        tier: "mechanical",
+        evidence: [{ kind: "observed", recipeId: request.repository.validationRecipes[32]!.id }],
+      },
+    ];
+    expect(codes(request, commandBound)).toContainEqual(
+      expect.objectContaining({
+        code: "validation-command-limit",
+        itemId: "item-1",
+        expected: { maximumUniqueValidationCommands: 32 },
+        observed: 33,
+      }),
+    );
+
+    const requirementRequest = semanticRequest();
+    const requirementBound = semanticProposal(requirementRequest);
+    requirementBound.workItems[0]!.executionIntent.additionalTools = Array.from(
+      { length: 64 },
+      (_, index) => `extra-tool-${index + 1}`,
+    );
+    expect(codes(requirementRequest, requirementBound)).toContainEqual(
+      expect.objectContaining({
+        code: "execution-requirement-limit",
+        itemId: "item-1",
+        field: "/workItems/0/executionIntent/additionalTools",
+        expected: { maximumProjectedValues: 64 },
+        observed: 66,
+      }),
+    );
+  });
+
+  it("accepts bounded model-owned non-derivable execution intent", () => {
+    const request = semanticRequest(undefined, ["api.example.com"]);
+    const proposal = semanticProposal(request);
+    proposal.workItems[0]!.executionIntent = {
+      estimatedDurationMinutes: 20,
+      additionalTools: ["ffmpeg"],
+      services: ["postgresql"],
+      additionalNetworkDestinations: ["api.example.com"],
+      trust: "trusted_local",
+    };
+
+    expect(parseAndValidateCompilerProposal(request, proposal).report.status).toBe("valid");
+  });
 
   it.each([
     ["Rust", "src/lib.rs", "unsupported-toolchain"],
@@ -276,6 +349,10 @@ function deferredFixture() {
     exclusiveResources: [],
     executionIntent: {
       estimatedDurationMinutes: 10,
+      additionalTools: [],
+      services: [],
+      additionalNetworkDestinations: [],
+      trust: "isolated",
     },
   });
   return { request, pinned, adapter, evidence, item };
@@ -407,21 +484,34 @@ describe("deferred capability provider validation", () => {
 });
 
 describe("deterministic semantic projection", () => {
-  it("derives execution trust from policy and admits no model-authored tools or services", () => {
+  it("combines adapter requirements with model-owned non-derivable execution intent", () => {
     const pinned = semanticPinnedFacts();
-    const request = semanticRequest(pinned);
+    const request = semanticRequest(pinned, ["api.example.com"]);
     const proposal = semanticProposal(request);
+    proposal.workItems[0]!.executionIntent = {
+      estimatedDurationMinutes: 20,
+      additionalTools: ["ffmpeg"],
+      services: ["postgresql"],
+      additionalNetworkDestinations: ["api.example.com"],
+      trust: "trusted_local",
+    };
     const projected = projectCompilerProposal({
       request,
       proposal,
       pinnedFacts: pinned,
-      runPolicy: { ...DEFAULT_RUN_POLICY, trust: "sandbox_untrusted" },
+      runPolicy: {
+        ...DEFAULT_RUN_POLICY,
+        allowedNetworkDestinations: [
+          ...DEFAULT_RUN_POLICY.allowedNetworkDestinations,
+          "api.example.com",
+        ],
+      },
     });
     expect(projected.objective.workItems[0]!.requirements).toMatchObject({
-      trust: "isolated",
-      tools: ["node", "npm"],
-      services: [],
-      networkDestinations: [],
+      trust: "trusted_local",
+      tools: ["ffmpeg", "node", "npm"],
+      services: ["postgresql"],
+      networkDestinations: ["api.example.com"],
     });
   });
 
@@ -568,5 +658,15 @@ describe("shared bounded graph analysis", () => {
         { id: "a", exclusiveResources: ["gpu:0"] },
       ]),
     ).toEqual([{ left: "a", right: "b", resources: ["gpu:0"] }]);
+  });
+
+  it("does not let case-distinct Linux paths hide a later prefix overlap", () => {
+    expect(
+      overlappingScopePairs([
+        { id: "lower-root", scope: ["a/"] },
+        { id: "upper-root", scope: ["A/"] },
+        { id: "lower-child", scope: ["a/x"] },
+      ]),
+    ).toEqual([["lower-child", "lower-root"]]);
   });
 });

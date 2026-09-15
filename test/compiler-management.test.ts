@@ -4,10 +4,61 @@ import { COMPILER_PROPOSAL_JSON_SCHEMA } from "../src/compiler/contracts.js";
 import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
 import { ManagementOutputError } from "../src/management/backend.js";
 import { CodexCliManagementBackend } from "../src/management/codex-cli.js";
+import { structuralObjectiveInventory } from "../src/management/compile.js";
+import type { CompilationContext } from "../src/management/backend.js";
 import { parseAndValidateCompilerProposal } from "../src/compiler/proposal.js";
 import { semanticProposal, semanticRequest } from "./helpers/semantic-compiler.js";
 
 describe("single semantic management route", () => {
+  it("inventories ordinary Objective requirements separately and detects an omitted segment", () => {
+    const context = {
+      objective: {
+        number: 404,
+        title: "Add strict parsing",
+        body: "Add a parser. Reject malformed input.\nAdd boundary tests.",
+      },
+      baseSha: "a".repeat(40),
+    } as CompilationContext;
+    const inventory = structuralObjectiveInventory(context);
+    expect(inventory.obligations.map((entry) => entry.text)).toEqual([
+      "Add strict parsing",
+      "Add a parser.",
+      "Reject malformed input.",
+      "Add boundary tests.",
+    ]);
+    expect(inventory.obligations.map((entry) => entry.id)).not.toContain("objective-complete");
+
+    const request = semanticRequest();
+    request.objective = {
+      ...context.objective,
+      digest: compilerEvalDigest(context.objective),
+    };
+    request.inventory = inventory;
+    const proposal = semanticProposal(request);
+    proposal.workItems[0]!.obligationIds = inventory.obligations
+      .slice(0, -1)
+      .map((entry) => entry.id);
+    expect(parseAndValidateCompilerProposal(request, proposal).report.violations).toContainEqual(
+      expect.objectContaining({
+        code: "unmapped-obligation",
+        expected: inventory.obligations.at(-1)!.id,
+        observed: null,
+      }),
+    );
+  });
+
+  it("keeps unbroken Objective text within bounded inventory fields", () => {
+    const inventory = structuralObjectiveInventory({
+      objective: { number: 404, title: "Bounded text", body: "x".repeat(8_001) },
+      baseSha: "a".repeat(40),
+    } as CompilationContext);
+    expect(inventory.obligations).toHaveLength(4);
+    expect(inventory.obligations.every((entry) => entry.text.length <= 4_000)).toBe(true);
+    expect(inventory.obligations.slice(1).map((entry) => entry.text.length)).toEqual([
+      4_000, 4_000, 1,
+    ]);
+  });
+
   it("uses the identical proposal schema for initial and repair and includes inventory initially", async () => {
     const initial = semanticRequest();
     const proposal = semanticProposal(initial);

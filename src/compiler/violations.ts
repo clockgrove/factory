@@ -97,6 +97,14 @@ export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule
     "operation-count-limit",
     "The adapter operation-count bound is exceeded.",
   ),
+  "validation-command-limit": rule(
+    "validation-command-limit",
+    "A Work Item exceeds the projected validation-command bound.",
+  ),
+  "execution-requirement-limit": rule(
+    "execution-requirement-limit",
+    "A Work Item exceeds a projected execution-requirement bound.",
+  ),
   "denied-network-destination": rule(
     "denied-network-destination",
     "A required network destination is denied by policy.",

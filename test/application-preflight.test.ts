@@ -124,7 +124,7 @@ describe("read-only checkout preflight", () => {
             body: renderLegacyWorkItemCore({
               goal: "Implement the reviewed behavior",
               acceptance: ["The behavior is observable"],
-              scope: ["sample.py"],
+              scope: ["package.json"],
               preconditions: [],
               outOfScope: [],
               conventions: [],
@@ -201,7 +201,7 @@ describe("read-only checkout preflight", () => {
               title: "Feature",
               goal: "Implement feature",
               acceptance: ["Feature returns a value"],
-              scope: ["sample.py"],
+              scope: ["package.json"],
               preconditions: [],
               outOfScope: [],
               conventions: [],

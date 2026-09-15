@@ -237,6 +237,19 @@ describe("strict semantic compiler contracts", () => {
     }
   });
 
+  it.each(["LOCALHOST", "service.LocalHost", "Metadata.Google.Internal"])(
+    "keeps forbidden network destination %s out of both proposal schemas",
+    (destination) => {
+      const proposal = semanticProposal(semanticRequest());
+      const candidate = structuredClone(proposal) as unknown as {
+        workItems: Array<{ executionIntent: { additionalNetworkDestinations: string[] } }>;
+      };
+      candidate.workItems[0]!.executionIntent.additionalNetworkDestinations = [destination];
+      expect(CompilerProposalSchema.safeParse(candidate).success).toBe(false);
+      expect(jsonProposal(candidate)).toBe(false);
+    },
+  );
+
   it("rejects an unsatisfiable request before model dispatch with stable bytes", async () => {
     const request = semanticRequest(
       semanticPinnedFacts({ paths: ["go.mod", "main.go"], scripts: {} }),

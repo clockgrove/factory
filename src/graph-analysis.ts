@@ -103,7 +103,8 @@ export function overlappingScopePairs(
     .flatMap((item) => item.scope.map((path) => ({ itemId: item.id, path })))
     .sort(
       (left, right) =>
-        left.path.localeCompare(right.path) || left.itemId.localeCompare(right.itemId),
+        (left.path < right.path ? -1 : left.path > right.path ? 1 : 0) ||
+        (left.itemId < right.itemId ? -1 : left.itemId > right.itemId ? 1 : 0),
     );
   const pairs = new Set<string>();
   for (let leftIndex = 0; leftIndex < entries.length; leftIndex += 1) {

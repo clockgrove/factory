@@ -170,6 +170,10 @@ function proposal(request: CompilerRequest, repaired = false) {
         exclusiveResources: [],
         executionIntent: {
           estimatedDurationMinutes: 10,
+          additionalTools: [],
+          services: [],
+          additionalNetworkDestinations: [],
+          trust: "isolated",
         },
       },
     ],

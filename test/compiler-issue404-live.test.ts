@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
-import { CompilerDraftManager } from "../src/control/compiler-drafts.js";
+import { CompilerDraftManager, type CompilerDraftRecord } from "../src/control/compiler-drafts.js";
 import type { CompiledGraphStore } from "../src/control/graphs.js";
 import { LeaseManager, type GitCommitObject, type LeaseStore } from "../src/control/lease.js";
 import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
@@ -16,6 +18,7 @@ import {
   CodexCliManagementBackend,
   compilerObligationEvidence,
 } from "../src/management/codex-cli.js";
+import { LocalManagementTranscriptRecorder } from "../src/management/transcripts.js";
 import {
   ManagementOutputError,
   type CompilationContext,
@@ -32,8 +35,31 @@ import {
 } from "../src/execution/pinned-compilation-tree.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { pinFixtureRepository } from "./helpers/compiler-proposal.js";
+import {
+  issue404LiveAuthority,
+  type Issue404LiveAuthority,
+} from "./helpers/issue404-live-authority.js";
 
 const BASE_TREE = "b".repeat(40);
+const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const LIVE = process.env.FACTORY_LIVE_COMPILER_ISSUE404 === "1";
+
+let authority: Issue404LiveAuthority | undefined;
+
+function inspectLiveCandidate(candidateSha: string) {
+  const git = (...args: string[]) =>
+    execFileSync("git", args, { cwd: REPOSITORY_ROOT, encoding: "utf8" }).trim();
+  return {
+    candidateCommitSha: git("rev-parse", "--verify", `${candidateSha}^{commit}`),
+    headSha: git("rev-parse", "--verify", "HEAD"),
+    worktreeStatus: git("status", "--porcelain", "--untracked-files=all"),
+  };
+}
+
+function transcriptRecorder() {
+  if (!authority) throw new Error("live compiler authority was not established");
+  return new LocalManagementTranscriptRecorder(authority.transcriptDirectory);
+}
 
 class MemoryStore implements LeaseStore, CompiledGraphStore {
   readonly now = new Date("2026-09-15T18:00:00.000Z");
@@ -169,6 +195,31 @@ const temporary: string[] = [];
 const disposePinnedTrees: Array<() => Promise<void>> = [];
 const evidence: Array<Record<string, unknown>> = [];
 
+function tokenUsageByStage(records: readonly CompilerDraftRecord[]) {
+  return records
+    .filter((record) => record.kind === "result")
+    .map((record) => {
+      const usage = record.payload.usage as
+        | { inputTokens: number; outputTokens: number; cachedInputTokens?: number }
+        | null
+        | undefined;
+      return {
+        stage: record.payload.stage,
+        revision: record.payload.revision,
+        tokens: usage
+          ? {
+              availability: "observed",
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              cachedInputTokens: usage.cachedInputTokens ?? 0,
+              cachedInputIsIncludedInInput: true,
+              totalTokens: usage.inputTokens + usage.outputTokens,
+            }
+          : { availability: "unknown" },
+      };
+    });
+}
+
 afterEach(async () => {
   await Promise.all(disposePinnedTrees.splice(0).map((dispose) => dispose()));
   await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -177,7 +228,7 @@ afterEach(async () => {
 afterAll(() => {
   console.log(
     `ISSUE404_LIVE_EVIDENCE=${JSON.stringify({
-      candidateSha: process.env.ISSUE404_CANDIDATE_SHA,
+      candidateSha: authority?.candidateSha ?? null,
       model: "gpt-5.6-sol",
       reasoning: "xhigh",
       cases: evidence,
@@ -274,6 +325,7 @@ async function qualify(
       status: result.status,
       reason: result.reason,
       elapsedMilliseconds: Date.now() - started,
+      tokenUsageByStage: tokenUsageByStage(result.records),
       records: result.records.map((record) => ({
         kind: record.kind,
         sequence: record.sequence,
@@ -324,6 +376,7 @@ async function qualify(
     graphDigest: result.graphDigest,
     calls: invocations.length,
     stages: invocations.map((record) => `${record.payload.stage}:${record.payload.revision}`),
+    tokenUsageByStage: tokenUsageByStage(result.records),
     usage: { ...usage, totalTokens: usage.inputTokens + usage.outputTokens },
     elapsedMilliseconds: Date.now() - started,
     terminalRecord: result.records.at(-1)?.kind,
@@ -332,7 +385,10 @@ async function qualify(
   return { result, summary };
 }
 
-describe.sequential("issue #404 live semantic compiler qualification", () => {
+describe.skipIf(!LIVE).sequential("issue #404 live semantic compiler qualification", () => {
+  beforeAll(() => {
+    authority = issue404LiveAuthority(process.env, REPOSITORY_ROOT, inspectLiveCandidate);
+  });
   it(
     "accepts a mechanically valid first draft without repair",
     async () => {
@@ -347,7 +403,7 @@ describe.sequential("issue #404 live semantic compiler qualification", () => {
             "Keep the package private and do not add runtime dependencies.",
           ].join("\n"),
         },
-        new CodexCliManagementBackend(),
+        new CodexCliManagementBackend({ transcriptRecorder: transcriptRecorder() }),
       );
       expect(summary.acceptedRevision).toBe(0);
       expect(summary.stages).not.toContain("repair:1");
@@ -358,7 +414,7 @@ describe.sequential("issue #404 live semantic compiler qualification", () => {
   it(
     "repairs an explicitly injected omitted-obligation fault",
     async () => {
-      const backend = new OmittedObligationBackend();
+      const backend = new OmittedObligationBackend({ transcriptRecorder: transcriptRecorder() });
       const { result, summary } = await qualify(
         "omitted-obligation-repair",
         {
@@ -384,7 +440,8 @@ describe.sequential("issue #404 live semantic compiler qualification", () => {
         violations: expect.arrayContaining([
           expect.objectContaining({
             code: "unmapped-obligation",
-            observed: backend.injectedObligationId,
+            expected: backend.injectedObligationId,
+            observed: null,
           }),
         ]),
       });

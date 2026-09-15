@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, mkdtemp, mkdir, readFile, readdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { sanitizedWorkerEnvironment, terminateProcessGroup } from "../runtime/process-group.js";
@@ -28,20 +29,74 @@ export interface PinnedCompilationTreeProof {
   readonly files: readonly string[];
 }
 
-const activePinnedCompilationTrees = new WeakSet<PinnedCompilationTreeProof>();
+const activePinnedCompilationTrees = new WeakMap<
+  PinnedCompilationTreeProof,
+  { sealedDigest?: string }
+>();
 
-export function assertPinnedCompilationTreeProof(
+async function compilationTreeDigest(proof: PinnedCompilationTreeProof): Promise<string> {
+  const observed: string[] = [];
+  const visit = async (directory: string, prefix = ""): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (!prefix && entry.name === ".git") continue;
+      const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const target = join(directory, entry.name);
+      if (entry.isDirectory()) await visit(target, path);
+      else if (entry.isFile() && !entry.isSymbolicLink()) observed.push(path);
+      else throw new Error("exact-base compilation tree contains an unsupported entry");
+    }
+  };
+  await visit(proof.repository);
+  observed.sort();
+  if (JSON.stringify(observed) !== JSON.stringify(proof.files))
+    throw new Error("exact-base compilation tree paths changed after materialization");
+  const hash = createHash("sha256");
+  for (const path of observed) {
+    const target = join(proof.repository, ...path.split("/"));
+    const before = await lstat(target);
+    if (!before.isFile() || before.isSymbolicLink())
+      throw new Error("exact-base compilation tree file identity changed");
+    const bytes = await readFile(target);
+    const after = await lstat(target);
+    if (
+      !after.isFile() ||
+      after.isSymbolicLink() ||
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      before.ctimeMs !== after.ctimeMs
+    )
+      throw new Error("exact-base compilation tree changed during verification");
+    hash.update(`${path}\0${bytes.length}\0`);
+    hash.update(bytes);
+  }
+  return hash.digest("hex");
+}
+
+export async function sealPinnedCompilationTreeProof(
+  proof: PinnedCompilationTreeProof,
+): Promise<void> {
+  const state = activePinnedCompilationTrees.get(proof);
+  if (!state) throw new Error("cannot seal an inactive exact-base compilation tree");
+  state.sealedDigest = await compilationTreeDigest(proof);
+}
+
+export async function assertPinnedCompilationTreeProof(
   proof: PinnedCompilationTreeProof | undefined,
   expected: { repository: string; baseSha: string; files: readonly string[] },
-): void {
+): Promise<void> {
+  const state = proof ? activePinnedCompilationTrees.get(proof) : undefined;
   if (
     !proof ||
-    !activePinnedCompilationTrees.has(proof) ||
+    !state?.sealedDigest ||
     proof.repository !== resolve(expected.repository) ||
     proof.baseSha !== expected.baseSha ||
     JSON.stringify(proof.files) !== JSON.stringify([...expected.files].sort())
   )
     throw new Error("management model context is not an active exact-base compilation tree");
+  if ((await compilationTreeDigest(proof)) !== state.sealedDigest)
+    throw new Error("management model exact-base compilation tree changed after sealing");
 }
 
 async function readPinnedGit(
@@ -298,7 +353,7 @@ export async function materializePinnedCompilationTree(
       baseSha,
       files: Object.freeze([...files].sort()),
     });
-    activePinnedCompilationTrees.add(proof);
+    activePinnedCompilationTrees.set(proof, {});
     return {
       path: checkout,
       root,

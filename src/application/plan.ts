@@ -18,7 +18,10 @@ import { assertNewRunBudgetIntent } from "../protocol/budget-intent.js";
 import type { ApplicationSnapshot } from "./services.js";
 import { safeDiagnosticMessage } from "./doctor.js";
 import { assertCleanPlanningFiles, inspectLocalCheckout } from "./checkout.js";
-import { materializePinnedCompilationTree } from "../execution/pinned-compilation-tree.js";
+import {
+  materializePinnedCompilationTree,
+  sealPinnedCompilationTreeProof,
+} from "../execution/pinned-compilation-tree.js";
 import {
   assertLocalLfsAvailable,
   materializeLocalLfsAssets,
@@ -291,6 +294,7 @@ export async function buildPlanReport(input: {
     const tree = await materializePinnedCompilationTree(input.planning.repositoryPath, baseSha);
     try {
       await materializeLocalLfsAssets(input.planning.repositoryPath, tree.path, baseSha);
+      await sealPinnedCompilationTreeProof(tree.proof);
       const context: CompilationContext = {
         repository: tree.path,
         objective: {

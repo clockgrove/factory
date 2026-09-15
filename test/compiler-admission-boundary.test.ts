@@ -26,7 +26,10 @@ import { ProviderQuotaError } from "../src/providers/quota.js";
 import { pinFixtureRepository, proposalFromCompiledFixture } from "./helpers/compiler-proposal.js";
 import { semanticRequest } from "./helpers/semantic-compiler.js";
 import { createCompilerValidationReport } from "../src/compiler/violations.js";
-import { materializePinnedCompilationTree } from "../src/execution/pinned-compilation-tree.js";
+import {
+  materializePinnedCompilationTree,
+  sealPinnedCompilationTreeProof,
+} from "../src/execution/pinned-compilation-tree.js";
 const mocks = vi.hoisted(() => ({ resolve: vi.fn(), run: vi.fn(), environment: vi.fn() }));
 vi.mock("../src/runtime/codex-command.js", () => ({ resolveCodexCommand: mocks.resolve }));
 vi.mock("../src/runtime/process-group.js", async (original) => {
@@ -72,6 +75,7 @@ async function fixture() {
   const baseSha = pinFixtureRepository(directory);
   const tree = await materializePinnedCompilationTree(directory, baseSha);
   disposePinnedTrees.push(tree.dispose);
+  await sealPinnedCompilationTreeProof(tree.proof);
   const context: CompilationContext = {
     repository: tree.path,
     objective: { number: 42, title: golden.title, body: "Implement core behavior and tests" },

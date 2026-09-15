@@ -114,7 +114,10 @@ import {
   type SharedCapacityCoordinator,
   type SharedCapacityOwner,
 } from "./controller/shared-capacity.js";
-import { materializePinnedCompilationTree } from "./execution/pinned-compilation-tree.js";
+import {
+  materializePinnedCompilationTree,
+  sealPinnedCompilationTreeProof,
+} from "./execution/pinned-compilation-tree.js";
 import {
   assertLocalLfsAvailable,
   materializeLocalLfsAssets,
@@ -5141,6 +5144,7 @@ export class FactorySupervisor {
               );
               try {
                 await materializeLocalLfsAssets(this.#options.repository, tree.path, base.oid);
+                await sealPinnedCompilationTreeProof(tree.proof);
                 const observedCapacity = await this.#capacitySnapshot();
                 const context: CompilationContext = {
                   repository: tree.path,

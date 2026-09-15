@@ -6,6 +6,43 @@ import { afterEach, expect, it, vi } from "vitest";
 import { SystemdUserService } from "../src/service/systemd-user-service.js";
 
 const roots: string[] = [];
+const testUid = process.getuid?.() ?? 1000;
+const currentUserManager = async () => ({
+  uid: testUid,
+  runtimeDirectory: `/run/user/${testUid}`,
+  environment: {
+    LANG: "C",
+    LC_ALL: "C",
+    PATH: "/usr/bin:/bin",
+    XDG_RUNTIME_DIR: `/run/user/${testUid}`,
+    DBUS_SESSION_BUS_ADDRESS: `unix:path=/run/user/${testUid}/bus`,
+  },
+});
+function isVersionProbe(args: readonly string[]): boolean {
+  return args[0] === "show" && args[1] === "--property=Version";
+}
+function isUnitProbe(args: readonly string[]): boolean {
+  return args[0] === "show" && !args[1]?.startsWith("--");
+}
+function systemdState(
+  unit: string,
+  activeState: string,
+  enabled = true,
+  loadState = "loaded",
+): { stdout: string } {
+  return {
+    stdout: `Id=${unit}\nLoadState=${loadState}\nUnitFileState=${enabled ? "enabled" : "disabled"}\nActiveState=${activeState}\nResult=success\nExecMainStatus=0\nNRestarts=0\n`,
+  };
+}
+async function unitInstalled(root: string, unit: string): Promise<boolean> {
+  try {
+    await readFile(join(root, "units", unit));
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -20,10 +57,24 @@ async function fixture() {
 
 it("stops an evicted Node launcher before generic exit 1 without changing crash policy", async () => {
   const f = await fixture();
+  let enabled = false;
   const service = new SystemdUserService({
     factoryCommand: [process.execPath, f.bundle],
     unitDirectory: join(f.root, "units"),
-    run: async () => {},
+    currentUserManager,
+    run: async (args) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "enable") enabled = true;
+      if (isUnitProbe(args)) {
+        const installed = await unitInstalled(f.root, args[1]!);
+        return systemdState(
+          args[1]!,
+          "inactive",
+          installed && enabled,
+          installed ? "loaded" : "not-found",
+        );
+      }
+    },
   });
   await service.install(f.input);
   const body = await readFile(service.unitPath(f.input), "utf8");
@@ -53,28 +104,58 @@ it.each(["active", "activating", "deactivating", "reloading", "unknown"])(
   "preserves the old unit when launcher replacement finds %s ownership",
   async (state) => {
     const f = await fixture();
-    const run = vi.fn(async (_args: readonly string[]) => ({ stdout: `ActiveState=${state}\n` }));
+    let enabled = false;
+    let activeState = "inactive";
+    const run = vi.fn(async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "enable") enabled = true;
+      if (isUnitProbe(args)) {
+        const installed = await unitInstalled(f.root, args[1]!);
+        return systemdState(
+          args[1]!,
+          installed ? activeState : "inactive",
+          installed && enabled,
+          installed ? "loaded" : "not-found",
+        );
+      }
+    });
     const service = new SystemdUserService({
       factoryCommand: [process.execPath, f.bundle],
       unitDirectory: join(f.root, "units"),
+      currentUserManager,
       run,
     });
     await service.install(f.input);
+    activeState = state;
     const original = await readFile(service.unitPath(f.input), "utf8");
     await writeFile(f.bundle, "// replacement bytes\n");
     run.mockClear();
     await expect(service.install(f.input)).rejects.toThrow("settle work and owned resources");
     expect(await readFile(service.unitPath(f.input), "utf8")).toBe(original);
-    expect(run.mock.calls.map(([args]) => args)).toHaveLength(1);
+    expect(run.mock.calls.map(([args]) => args)).toHaveLength(2);
   },
 );
 
 it("marks a legacy unit stale and adds guards without changing its running bytes", async () => {
   const f = await fixture();
-  const run = vi.fn(async (_args: readonly string[]) => ({ stdout: "ActiveState=active\n" }));
+  let enabled = false;
+  const run = vi.fn(async (args: readonly string[]) => {
+    if (isVersionProbe(args)) return { stdout: "259\n" };
+    if (args[0] === "enable") enabled = true;
+    if (isUnitProbe(args)) {
+      const installed = await unitInstalled(f.root, args[1]!);
+      return systemdState(
+        args[1]!,
+        installed ? "active" : "inactive",
+        installed && enabled,
+        installed ? "loaded" : "not-found",
+      );
+    }
+  });
   const service = new SystemdUserService({
     factoryCommand: [process.execPath, f.bundle],
     unitDirectory: join(f.root, "units"),
+    currentUserManager,
     run,
   });
   const installed = await service.install(f.input);

@@ -52,6 +52,11 @@ human Work Item template: Factory generates Work Items from the accepted graph.
    blocker and its next action. Treat missing optional-provider credentials and a stopped controller
    as informational unless the user selected that provider or unattended mode.
 
+For `controller-user-manager-unavailable`, preserve Factory's exact host action. Run its systemd
+probe and lifecycle command only from a Linux/WSL terminal as the same effective user; do not inject
+another bus address, use another user's manager, add a daemon, or infer disabled/inactive state from
+the failed observation. The failed preflight has not installed or changed a unit.
+
 Installation does not authorize controller installation/start, model compilation, Objective
 activation, worker execution, cloud use, or spending. Route requests to start, stop, inspect the
 progress of, or recover an Objective to the `director` skill. Route requests to decompose or repair

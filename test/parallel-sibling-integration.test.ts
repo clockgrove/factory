@@ -879,7 +879,6 @@ async function fixture(
       true;
   });
   vi.spyOn(GitHubControlStore.prototype, "assignIssue").mockResolvedValue(undefined);
-  let reads = 0;
   vi.spyOn(GitHubReader.prototype, "readObjective").mockImplementation(async (number) => {
     if (number === 6 && peerSnapshot) {
       const observed = structuredClone(peerSnapshot);
@@ -889,10 +888,6 @@ async function fixture(
           for (const pull of item.linkedPullRequests) pull.state = "OPEN";
       return observed;
     }
-    // Concurrent Git and validation work can require more than 80 observations
-    // under the full coverage matrix. Keep a finite runaway fence aligned with
-    // the provider Supervisor fixture instead of racing normal slow progress.
-    if (++reads > 500) throw new Error("fixture exceeded bounded snapshot reads");
     return structuredClone(snapshot);
   });
   vi.spyOn(GitHubReader.prototype, "readRunCancellationRequest").mockResolvedValue(null);
@@ -1154,7 +1149,10 @@ async function fixture(
       policy,
       managementBackend: management,
       ...(options.peerAdvance ? { controllerObservation: () => controller } : {}),
-      pollIntervalMs: options.pollIntervalMs ?? 1,
+      // The mocked snapshot transport returns immediately while validation
+      // still uses real child processes. Use a realistic observation cadence
+      // so a contended suite cannot spin snapshots while those children run.
+      pollIntervalMs: options.pollIntervalMs ?? 50,
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.onStatus ? { onStatus: options.onStatus } : {}),
     }).run();

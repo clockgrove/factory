@@ -176,7 +176,12 @@ node dist/factory.js run OWNER/REPO#OBJECTIVE --until-terminal --repo /absolute/
 ```
 
 The process survives ordinary worker failures and reconstructs interrupted work from GitHub when
-restarted. It cannot wake a powered-off machine. The repository controller provides one fenced
+restarted. A repeated foreground call resumes only the exact non-terminal run with its recorded
+policy. Durable cancellation is handled before any new compilation or worker admission. After
+terminal cancellation, or another terminal outcome that retains unresolved model accounting,
+explicit successor recovery is required instead of another plain run; the fully accounted
+graph-only retry remains eligible for its existing bounded retry. It cannot wake a powered-off
+machine. The repository controller provides one fenced
 service per checkout. Each running controller has one random identity and repository-lease epoch;
 every Objective Supervisor it starts carries that same observation, and restart/takeover establishes
 a new fenced identity rather than impersonating the prior process. The service can be installed into

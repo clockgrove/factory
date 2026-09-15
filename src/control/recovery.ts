@@ -1,5 +1,6 @@
 import type { FactoryEvent } from "../protocol/events.js";
-import { deduplicateFactoryEvents, latestSupportedRun } from "./receipts.js";
+import { unresolvedModelInvocations } from "./budget.js";
+import { deduplicateFactoryEvents, latestRunReceipts, latestSupportedRun } from "./receipts.js";
 import type { ObjectiveAuthorityObservation } from "./authority.js";
 
 export interface RecoverySnapshot {
@@ -36,6 +37,19 @@ function needsSuccessorInspection(snapshot: RecoverySnapshot): boolean {
   );
 }
 
+/** Terminal cancellation is never fresh-run authority. An unresolved model
+ * invocation likewise keeps its exact terminal run and accounting identity,
+ * even when the rest of the history is still eligible for a graph-only retry. */
+export function terminalRestartBlocker(
+  events: FactoryEvent[],
+  authority?: ObjectiveAuthorityObservation | null,
+): string | null {
+  const latest = latestRunReceipts(events, authority);
+  if (!latest?.terminal) return null;
+  if (latest.terminal.event === "FactoryRunCancelled") return TERMINAL_RECOVERY_REQUIRED;
+  return unresolvedModelInvocations(latest.events).length > 0 ? TERMINAL_RECOVERY_REQUIRED : null;
+}
+
 /** Cheap rejection at command entry. The Supervisor additionally checks reservation refs. */
 export function implicitRestartBlocker(snapshot: RecoverySnapshot): string | null {
   if (!needsSuccessorInspection(snapshot)) return null;
@@ -43,6 +57,8 @@ export function implicitRestartBlocker(snapshot: RecoverySnapshot): string | nul
     ...(snapshot.factoryEvents ?? []),
     ...snapshot.workItems.flatMap((item) => item.factoryEvents ?? []),
   ]);
+  const terminal = terminalRestartBlocker(events, snapshot.objectiveAuthority);
+  if (terminal) return terminal;
   const execution = events.some(
     (event) =>
       event.kind === "attempt" ||

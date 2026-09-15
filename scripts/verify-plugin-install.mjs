@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { installedPluginRoot, optionalHostQualification } from "./qualify-linux-host.mjs";
+import { qualifyInstalledForegroundReconnect } from "./qualification-foreground-reconnect.mjs";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const codexCommand = process.env.FACTORY_CODEX_COMMAND || "codex";
@@ -311,6 +312,13 @@ async function main() {
     codexLoader: true,
   });
   const mcpResult = await inspectMcp(mcp.command, mcpArgs, installedRoot);
+  const foregroundReconnect = await qualifyInstalledForegroundReconnect({
+    command: mcp.command,
+    args: mcpArgs,
+    installedRoot,
+    temporaryRoot,
+    environment: cleanEnvironment(),
+  });
   const toolNames = (mcpResult.tools ?? []).map((tool) => tool.name);
   if (toolNames.some((name) => !codexMcp.tools[name]))
     throw new Error("Codex plugin discovery omitted an installed Factory MCP tool");
@@ -451,6 +459,7 @@ async function main() {
       doctorOverall,
       doctorAttentionAreas,
       statusRunState,
+      foregroundReconnect,
     }),
   );
 }

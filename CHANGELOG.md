@@ -21,6 +21,11 @@ and artifacts, and record the commit SHA when installing from source.
 
 ### Fixed
 
+- Reconnect interrupted foreground calls to the exact non-terminal run and honor its durable
+  cancellation before another compiler, graph, Work Item, or worker admission. Cancelled terminal
+  history and unresolved model invocations now require explicit successor recovery instead of an
+  implicit new run, while preserving unknown usage and discovery identity. ([#386](https://github.com/clockgrove/factory/issues/386))
+
 - Recover an unchanged Objective whose original, fully accounted compiler run stopped before graph
   or Work Item projection. An explicitly bounded auto-repair successor carries the prior failure,
   authenticates its new graph before deriving execute-only Work Item authority, and preserves the

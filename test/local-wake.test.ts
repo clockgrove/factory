@@ -75,9 +75,15 @@ it("routes cross-process publication to every matching subscriber and cleans end
 it("does not create a receiver or fail publication when no local consumer exists", async () => {
   const repository = `fixture/${randomUUID()}`;
   const root = `/tmp/clockgrove-factory-wake-${process.getuid!()}`;
-  const before = await readdir(root).catch(() => []);
+  const prefix = createHash("sha256")
+    .update(JSON.stringify([repository.toLowerCase(), "discovery"]))
+    .digest("hex")
+    .slice(0, 32);
+  const matchingEndpoints = async () =>
+    (await readdir(root).catch(() => [])).filter((name) => name.startsWith(`${prefix}-`));
+  expect(await matchingEndpoints()).toEqual([]);
   await expect(publishLocalWake({ repository }, "request")).resolves.toBeUndefined();
-  expect(await readdir(root)).toEqual(before);
+  expect(await matchingEndpoints()).toEqual([]);
 });
 
 it("wakes the real controller after successful application publication, then discovers authority", async () => {

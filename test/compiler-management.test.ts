@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { COMPILER_PROPOSAL_JSON_SCHEMA } from "../src/compiler/contracts.js";
 import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
 import { ManagementOutputError } from "../src/management/backend.js";
-import { CodexCliManagementBackend } from "../src/management/codex-cli.js";
+import { CodexCliManagementBackend, compilerProposalPrompt } from "../src/management/codex-cli.js";
 import { structuralObjectiveInventory } from "../src/management/compile.js";
 import type { CompilationContext } from "../src/management/backend.js";
 import { parseAndValidateCompilerProposal } from "../src/compiler/proposal.js";
@@ -20,7 +20,7 @@ describe("single semantic management route", () => {
       baseSha: "a".repeat(40),
     } as CompilationContext;
     const inventory = structuralObjectiveInventory(context);
-    expect(inventory.obligations.map((entry) => entry.text)).toEqual([
+    expect(inventory.evidence.map((entry) => entry.excerpt)).toEqual([
       "Add strict parsing",
       "Add a parser. Reject malformed input.\nAdd boundary tests.",
     ]);
@@ -53,14 +53,14 @@ describe("single semantic management route", () => {
       baseSha: "a".repeat(40),
     } as CompilationContext;
     const inventory = structuralObjectiveInventory(context);
-    expect(inventory.obligations[0]!.text).toBe(context.objective.title);
+    expect(inventory.evidence[0]!.excerpt).toBe(context.objective.title);
     expect(
-      inventory.obligations
+      inventory.evidence
         .slice(1)
-        .map((entry) => entry.text)
+        .map((entry) => entry.excerpt)
         .join(""),
     ).toBe(body);
-    expect(inventory.obligations.every((entry) => entry.text.length <= 4_000)).toBe(true);
+    expect(inventory.evidence.every((entry) => entry.excerpt.length <= 4_000)).toBe(true);
   });
 
   it("keeps the maximum accepted Objective body within the inventory bound", () => {
@@ -71,9 +71,9 @@ describe("single semantic management route", () => {
     } as CompilationContext);
     expect(inventory.obligations).toHaveLength(100);
     expect(
-      inventory.obligations
+      inventory.evidence
         .slice(1)
-        .map((entry) => entry.text)
+        .map((entry) => entry.excerpt)
         .join(""),
     ).toBe(body);
   });
@@ -84,10 +84,30 @@ describe("single semantic management route", () => {
       baseSha: "a".repeat(40),
     } as CompilationContext);
     expect(inventory.obligations).toHaveLength(4);
-    expect(inventory.obligations.every((entry) => entry.text.length <= 4_000)).toBe(true);
-    expect(inventory.obligations.slice(1).map((entry) => entry.text.length)).toEqual([
+    expect(inventory.evidence.every((entry) => entry.excerpt.length <= 4_000)).toBe(true);
+    expect(inventory.evidence.slice(1).map((entry) => entry.excerpt.length)).toEqual([
       4_000, 4_000, 1,
     ]);
+  });
+
+  it("keeps the maximum accepted structural Objective within the management prompt bound", () => {
+    const request = semanticRequest();
+    request.objective.body = "x".repeat(384 * 1_024);
+    request.objective.digest = compilerEvalDigest({
+      number: request.objective.number,
+      title: request.objective.title,
+      body: request.objective.body,
+    });
+    request.inventory = structuralObjectiveInventory({
+      objective: {
+        number: request.objective.number,
+        title: request.objective.title,
+        body: request.objective.body,
+      },
+      baseSha: request.baseSha,
+    } as CompilationContext);
+    request.inventorySource = "structural-source";
+    expect(() => compilerProposalPrompt(request)).not.toThrow();
   });
 
   it("uses the identical proposal schema for initial and repair and includes inventory initially", async () => {

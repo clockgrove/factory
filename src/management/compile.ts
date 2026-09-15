@@ -57,13 +57,19 @@ export function structuralObjectiveInventory(context: CompilationContext): Oblig
     objectiveDigest: identity,
     baseSha: context.baseSha,
     evidence,
-    obligations: evidence.map((source) => ({
-      id: source.id,
-      text: source.excerpt,
-      kind: "explicit" as const,
-      evidenceIds: [source.id],
-      acceptanceEvidence: "A Work Item maps this exact Objective source segment.",
-    })),
+    obligations: evidence.map((source, index) => {
+      const label =
+        index === 0
+          ? "the complete Objective title"
+          : `Objective body source segment ${index} of ${segments.length - 1}`;
+      return {
+        id: source.id,
+        text: `Map ${label}.`,
+        kind: "explicit" as const,
+        evidenceIds: [source.id],
+        acceptanceEvidence: `A Work Item maps ${label}.`,
+      };
+    }),
   });
 }
 

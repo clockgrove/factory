@@ -36,6 +36,10 @@ export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule
     "duplicate-criterion-text",
     "A Work Item repeats the same acceptance criterion text.",
   ),
+  "duplicate-work-item-contract": rule(
+    "duplicate-work-item-contract",
+    "Each Work Item must describe a distinct deliverable contract.",
+  ),
   "unknown-obligation": rule("unknown-obligation", "The proposal maps an unknown obligation."),
   "unmapped-obligation": rule(
     "unmapped-obligation",

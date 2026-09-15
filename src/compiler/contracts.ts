@@ -43,6 +43,7 @@ export const COMPILER_VIOLATION_CODES = [
   "duplicate-dependency",
   "duplicate-criterion-id",
   "duplicate-criterion-text",
+  "duplicate-work-item-contract",
   "unknown-obligation",
   "unmapped-obligation",
   "unknown-dependency",

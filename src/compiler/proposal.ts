@@ -943,6 +943,39 @@ export function parseAndValidateCompilerProposal(
         );
     }
   }
+  const economicContracts = new Map<string, string>();
+  for (const item of proposal.workItems) {
+    const execution = resolvedExecutionRequirements(request, item);
+    const digest = compilerEvalDigest({
+      goal: item.goal.trim(),
+      acceptance: [...new Set(item.criteria.map((criterion) => criterion.text))].sort(),
+      scope: [...new Set(item.scope)].sort(),
+      preconditions: [...new Set(item.preconditions)].sort(),
+      outOfScope: [...new Set(item.outOfScope)].sort(),
+      conventions: [...new Set(item.conventions)].sort(),
+      validationCommands: uniqueCommands(request, item),
+      executionIntent: {
+        estimatedDurationMinutes: item.executionIntent.estimatedDurationMinutes,
+        tools: execution.tools,
+        services: [...new Set(item.executionIntent.services)].sort(),
+        networkDestinations: execution.networkDestinations,
+        trust: item.executionIntent.trust,
+      },
+      exclusiveResources: [...new Set(item.exclusiveResources)].sort(),
+    });
+    const existing = economicContracts.get(digest);
+    if (existing)
+      violations.push(
+        violation(
+          "duplicate-work-item-contract",
+          "/workItems",
+          "distinct goal, acceptance, scope, validation, execution, or resource intent",
+          [existing, item.id],
+          item.id,
+        ),
+      );
+    else economicContracts.set(digest, item.id);
+  }
   const report = createCompilerValidationReport("proposal", violations);
   return { proposal, report };
 }

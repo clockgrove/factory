@@ -274,6 +274,29 @@ describe("semantic proposal validation", () => {
     expect(parseAndValidateCompilerProposal(request, proposal).report.status).toBe("valid");
   });
 
+  it("reports duplicate deliverable contracts before economic projection", () => {
+    const request = semanticRequest();
+    const proposal = semanticProposal(request, 2);
+    proposal.workItems[1] = {
+      ...structuredClone(proposal.workItems[0]!),
+      id: "item-2",
+      title: "A different label does not make a distinct deliverable",
+      obligationIds: [],
+    };
+    expect(parseAndValidateCompilerProposal(request, proposal).report).toMatchObject({
+      phase: "proposal",
+      status: "repairable",
+      violations: expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate-work-item-contract",
+          itemId: "item-2",
+          field: "/workItems",
+          observed: ["item-1", "item-2"],
+        }),
+      ]),
+    });
+  });
+
   it.each([
     ["Rust", "src/lib.rs", "unsupported-toolchain"],
     ["Go", "src/main.go", "unsupported-toolchain"],

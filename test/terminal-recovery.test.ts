@@ -258,7 +258,7 @@ describe("terminal-run recovery admission", () => {
         .spyOn(RunManager.prototype, "start")
         .mockRejectedValue(new Error("unexpected run start"));
       const compile = vi
-        .spyOn(CodexCliManagementBackend.prototype, "compile")
+        .spyOn(CodexCliManagementBackend.prototype, "proposePlan")
         .mockRejectedValue(new Error("unexpected compilation"));
       const review = vi
         .spyOn(CodexCliManagementBackend.prototype, "review")

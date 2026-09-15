@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { CompilerDraftStopError } from "./compiler-draft-loop.js";
+import { CompilerDraftStopError } from "./compiler-draft-errors.js";
 import type { CompilerObjective } from "../compiler/index.js";
 import { assessDecomposition, type DecompositionEvidence } from "../compiler/economics.js";
 
@@ -79,7 +79,7 @@ export const CompilerJudgeVerdictSchema = z
           .object({
             obligationId: Id,
             acceptanceBindings: z
-              .array(z.object({ itemId: Id, criterion: Text }).strict())
+              .array(z.object({ itemId: Id, criterionId: Id }).strict())
               .max(128),
             status: z.enum(["covered", "partial", "missing", "unknown"]),
             itemIds: Refs,
@@ -257,7 +257,14 @@ export function validateCompilerJudgeVerdict(
   expected: {
     draftDigest: string;
     inventory: ObligationInventory;
-    graph: { workItems: Array<{ id: string; dependsOn: string[]; acceptance: string[] }> };
+    graph: {
+      workItems: Array<{
+        id: string;
+        dependsOn: string[];
+        criteria: Array<{ id: string }>;
+      }>;
+    };
+    addedEdges?: Array<{ itemId: string; dependsOn: string }>;
     challenges?: CompilerInferenceChallenge[];
   },
 ): CompilerJudgeVerdict {
@@ -292,12 +299,15 @@ export function validateCompilerJudgeVerdict(
   for (const entry of verdict.coverage) {
     references(entry.itemIds, items, "coverage item");
     unique(
-      entry.acceptanceBindings.map((binding) => `${binding.itemId}\0${binding.criterion}`),
+      entry.acceptanceBindings.map((binding) => `${binding.itemId}\0${binding.criterionId}`),
       "acceptance binding",
     );
     for (const binding of entry.acceptanceBindings) {
       const item = expected.graph.workItems.find((candidate) => candidate.id === binding.itemId);
-      if (!entry.itemIds.includes(binding.itemId) || !item?.acceptance.includes(binding.criterion))
+      if (
+        !entry.itemIds.includes(binding.itemId) ||
+        !item?.criteria.some((criterion) => criterion.id === binding.criterionId)
+      )
         throw new Error("ungrounded acceptance binding");
     }
     if (entry.status === "covered" && entry.acceptanceBindings.length === 0)
@@ -305,11 +315,12 @@ export function validateCompilerJudgeVerdict(
     if (entry.status === "covered" && entry.itemIds.length === 0)
       throw new Error("covered obligation requires item mapping");
   }
-  const edges = new Set(
-    expected.graph.workItems.flatMap((entry) =>
+  const edges = new Set([
+    ...expected.graph.workItems.flatMap((entry) =>
       entry.dependsOn.map((dependency) => `${entry.id}\0${dependency}`),
     ),
-  );
+    ...(expected.addedEdges ?? []).map((entry) => `${entry.itemId}\0${entry.dependsOn}`),
+  ]);
   const reviewedEdges = verdict.dependencies.map((entry) => `${entry.itemId}\0${entry.dependsOn}`);
   references(reviewedEdges, edges, "dependency edge");
   if (reviewedEdges.length !== edges.size) throw new Error("incomplete dependency rationale");
@@ -413,7 +424,10 @@ export interface CompilerPostMortemCause {
 }
 export function createCompilerEvalReport(input: {
   inventory: ObligationInventory;
-  graph: { workItems: Array<{ id: string; dependsOn: string[]; acceptance: string[] }> };
+  graph: {
+    workItems: Array<{ id: string; dependsOn: string[]; criteria: Array<{ id: string }> }>;
+  };
+  addedEdges?: Array<{ itemId: string; dependsOn: string }>;
   verdict: CompilerJudgeVerdict;
   draftDigest: string;
   challenges?: CompilerInferenceChallenge[];

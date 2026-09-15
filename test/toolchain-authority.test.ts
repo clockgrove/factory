@@ -24,7 +24,6 @@ import {
   assertFutureToolchainRequirements,
   activateManagedRuntimePacket,
   createManagedRuntimeActivation,
-  futurePackageScriptCommand,
   isFutureToolchainProvider,
   isolatedManagedToolchainPlan,
   managedToolAvailable,
@@ -436,8 +435,7 @@ describe("toolchain authority adapters", () => {
       script: "check",
       adapter: { id: "node-pnpm" },
     });
-    expect(futurePackageScriptCommand("npm test")).toBeNull();
-    expect(futurePackageScriptCommand("pnpm run test:unit")).toMatchObject({
+    expect(packageScriptValidationCommand("pnpm run test:unit")).toMatchObject({
       manager: "pnpm",
       script: "test:unit",
     });
@@ -459,7 +457,7 @@ describe("toolchain authority adapters", () => {
       isFutureToolchainProvider({ ...provider, allowedPaths: ["package.json"] } as never),
     ).toBe(false);
     expect(() =>
-      assertFutureToolchainRequirements(futurePackageScriptCommand("pnpm check")!, {
+      assertFutureToolchainRequirements(packageScriptValidationCommand("pnpm check")!, {
         ...provider,
         requirements: { ...provider.requirements, networkDestinations: [] },
       } as never),
@@ -472,8 +470,29 @@ describe("toolchain authority adapters", () => {
       runner: "fixture",
       provisioning: "factory-provisioned",
       deferredOperations: true,
-      futurePackageScripts: false,
       requiredRootPaths: ["example/tool/root.lock"],
+      compiler: {
+        contract: "clockgrove.factory/toolchain-compiler/example",
+        observedRecipeSource: null,
+        rootAuthorityPaths: ["example/tool/root.lock"],
+        generationAuthorityPaths: ["example/tool/"],
+        requiredTools: ["fixture"],
+        networkDestinations: [],
+        runtimePins: [],
+        mixedAuthority: "reject",
+        descendants: { allowed: true, requiresTransitiveProviderAncestor: true },
+        operation: {
+          kind: "check",
+          keySchema: { type: "string" },
+          providerCommandCount: { min: 1, max: 1 },
+          maxProvisionedOperations: 32,
+          parse: (command) =>
+            command === "fixture check" ? { kind: "check", key: "check" } : null,
+          format: (operation) =>
+            operation.kind === "check" && operation.key === "check" ? "fixture check" : null,
+          observed: () => null,
+        },
+      },
       setupCommands: [],
       operation: (command) =>
         command === "fixture check" ? { kind: "check", key: "check" } : null,

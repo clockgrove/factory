@@ -5,6 +5,11 @@ import {
 } from "../protocol/worker-packet.js";
 import { addScopeSerializationEdges } from "../graph.js";
 import {
+  analyzeDependencies,
+  exclusiveResourcePairs,
+  overlappingScopePairs,
+} from "../graph-analysis.js";
+import {
   assertRequirementsWithinPolicy,
   DEFAULT_RUN_POLICY,
   type RunPolicy,
@@ -121,6 +126,8 @@ export type CompileInput = {
   baseSha: string;
   repositoryFacts: RepositoryFacts;
   workItems: CompilerWorkItemInput[];
+  /** Exact adapter-resolved compiler catalog. Omitted by direct legacy callers. */
+  validationCommands?: string[];
   /** Immutable active policy. Omitted only by legacy direct callers, which receive product defaults. */
   runPolicy?: RunPolicy;
   economicEvidence?: DecompositionEvidence;
@@ -132,26 +139,8 @@ const dependencyOrder = <T extends { id: string; dependsOn: string[] }>(items: T
   // entry through ID-keyed ordering state.
   if (new Set(items.map((item) => item.id)).size !== items.length) return items;
   const byId = new Map(items.map((item) => [item.id, item]));
-  const remaining = new Set(byId.keys());
-  const ordered: T[] = [];
-  while (remaining.size) {
-    const next = items.find(
-      (item) =>
-        remaining.has(item.id) && item.dependsOn.every((dependency) => !remaining.has(dependency)),
-    );
-    // Invalid cycles are rejected by validateCompiledObjective. Keep this
-    // total so validation, rather than an ordering loop, reports the defect.
-    if (!next) {
-      ordered.push(...items.filter((item) => remaining.has(item.id)));
-      break;
-    }
-    ordered.push(next);
-    remaining.delete(next.id);
-  }
-  return ordered;
+  return analyzeDependencies(items).order.map((id) => byId.get(id)!);
 };
-const overlaps = (a: string, b: string) =>
-  a === b || (a.endsWith("/") && b.startsWith(a)) || (b.endsWith("/") && a.startsWith(b));
 // This is a structural guard, not a natural-language observability classifier.
 // Function names, equations, error behavior, and domain vocabulary are all valid
 // ways to describe acceptance. Reject only malformed text and obvious whole-text
@@ -406,37 +395,11 @@ export function validateCompiledObjective(
     )
       reject(`non-conservative economic review in ${w.id}`);
   }
-  const visiting = new Set<string>(),
-    done = new Set<string>();
-  const visit = (id: string): void => {
-    if (visiting.has(id)) {
-      reject("dependency cycle");
-      return;
-    }
-    if (done.has(id)) return;
-    const w = byId.get(id);
-    if (!w) {
-      reject(`unknown dependency ${id}`);
-      return;
-    }
-    visiting.add(id);
-    w.dependsOn.forEach(visit);
-    visiting.delete(id);
-    done.add(id);
-  };
-  byId.forEach((_, id) => visit(id));
-  const path = (from: string, to: string): boolean => {
-    const pending = [from],
-      seen = new Set<string>();
-    while (pending.length) {
-      const id = pending.pop()!;
-      if (id === to) return true;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      pending.push(...(byId.get(id)?.dependsOn ?? []));
-    }
-    return false;
-  };
+  const dependencyAnalysis = analyzeDependencies([...byId.values()]);
+  if (dependencyAnalysis.cycleItems.length) reject("dependency cycle");
+  for (const entry of dependencyAnalysis.unknownDependencies)
+    reject(`unknown dependency ${entry.dependencyId}`);
+  const path = dependencyAnalysis.hasPath;
   const futureProviders = new Map<string, CompilerWorkItem[]>();
   if (facts)
     for (const item of byId.values()) {
@@ -488,30 +451,17 @@ export function validateCompiledObjective(
     }
   }
   const items = [...byId.values()];
-  for (let i = 0; i < items.length; i++)
-    for (let j = i + 1; j < items.length; j++) {
-      const a = items[i]!,
-        b = items[j]!;
-      if (
-        a.scope.some((x) => b.scope.some((y) => overlaps(x, y))) &&
-        !path(a.id, b.id) &&
-        !path(b.id, a.id)
-      )
-        reject(`overlapping unordered scopes: ${a.id}, ${b.id}`);
-    }
-  for (let i = 0; i < items.length; i++)
-    for (let j = i + 1; j < items.length; j++) {
-      const a = items[i]!,
-        b = items[j]!;
-      if (
-        (a.changeSurface?.exclusiveResources ?? []).some((x) =>
-          (b.changeSurface?.exclusiveResources ?? []).includes(x),
-        ) &&
-        !path(a.id, b.id) &&
-        !path(b.id, a.id)
-      )
-        reject(`conflicting unordered exclusive resource: ${a.id}, ${b.id}`);
-    }
+  for (const [left, right] of overlappingScopePairs(items))
+    if (!path(left, right) && !path(right, left))
+      reject(`overlapping unordered scopes: ${left}, ${right}`);
+  for (const pair of exclusiveResourcePairs(
+    items.map((item) => ({
+      id: item.id,
+      exclusiveResources: item.changeSurface?.exclusiveResources ?? [],
+    })),
+  ))
+    if (!path(pair.left, pair.right) && !path(pair.right, pair.left))
+      reject(`conflicting unordered exclusive resource: ${pair.left}, ${pair.right}`);
   for (const w of items) {
     const d = w.delivery;
     if (!d) continue;
@@ -631,31 +581,26 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     title: input.title,
     workItems: analyzed,
   }).workItems;
-  const depends = (from: string, to: string): boolean => {
-    const pending = [from],
-      seen = new Set<string>();
-    while (pending.length) {
-      const id = pending.pop()!;
-      if (id === to) return true;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      pending.push(...(serialized.find((item) => item.id === id)?.dependsOn ?? []));
-    }
-    return false;
-  };
-  for (let i = 0; i < serialized.length; i++)
-    for (let j = i + 1; j < serialized.length; j++) {
-      const a = serialized[i]!,
-        b = serialized[j]!;
-      if (
-        a.changeSurface.exclusiveResources.some((resource) =>
-          b.changeSurface.exclusiveResources.includes(resource),
-        ) &&
-        !depends(a.id, b.id) &&
-        !depends(b.id, a.id)
-      )
-        b.dependsOn = sorted([...b.dependsOn, a.id]);
-    }
+  const position = new Map(serialized.map((item, index) => [item.id, index]));
+  for (const pair of exclusiveResourcePairs(
+    serialized.map((item) => ({
+      id: item.id,
+      exclusiveResources: item.changeSurface.exclusiveResources,
+    })),
+  )) {
+    const [earlier, later] = [pair.left, pair.right].sort(
+      (left, right) => position.get(left)! - position.get(right)!,
+    );
+    const dependencyAnalysis = analyzeDependencies(serialized);
+    if (
+      !dependencyAnalysis.hasPath(earlier!, later!) &&
+      !dependencyAnalysis.hasPath(later!, earlier!)
+    )
+      serialized[position.get(later!)!]!.dependsOn = sorted([
+        ...serialized[position.get(later!)!]!.dependsOn,
+        earlier!,
+      ]);
+  }
   const analyzedById = new Map(serialized.map((w) => [w.id, w]));
   const childCounts = new Map<string, number>();
   for (const item of serialized) {
@@ -743,7 +688,7 @@ export function compileObjective(input: CompileInput): CompilerObjective {
   ].sort();
   for (const item of result.workItems)
     assertRequirementsWithinPolicy(item.requirements, runPolicy, `Work Item ${item.id}`);
-  validateCompiledObjective(result, facts);
+  validateCompiledObjective(result, input.validationCommands ?? facts);
   applyEconomicReview(result, input.economicEvidence);
   return result;
 }

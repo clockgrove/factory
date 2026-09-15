@@ -7,19 +7,20 @@ import {
   CodexCliManagementBackend,
   compilerObligationEvidence,
   readCompilerObligationEvidence,
-  validateCompilerDraft,
   CODEX_OBLIGATION_SCHEMA,
   CODEX_PLAN_JUDGE_SCHEMA,
 } from "../src/management/codex-cli.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
-import { compiledGraphDigest, type CompiledObjective } from "../src/graph.js";
-import type { CompilationContext } from "../src/management/backend.js";
+import type { CompilationContext, PlanJudgeContext } from "../src/management/backend.js";
 import {
   COMPILER_JUDGE_DIMENSIONS,
   compilerEvalDigest,
   type ObligationInventory,
   type CompilerJudgeVerdict,
 } from "../src/evaluation/compiler-eval.js";
+import type { CompilerProposal } from "../src/compiler/contracts.js";
+import { createCompilerValidationReport } from "../src/compiler/violations.js";
+import { semanticProposal, semanticRequest } from "./helpers/semantic-compiler.js";
 
 const temporary: string[] = [];
 const usage = { inputTokens: 32, outputTokens: 12, cachedInputTokens: 8 };
@@ -59,45 +60,40 @@ async function fixture() {
     ],
   };
   const claims = { version: 1 as const, obligations: inventory.obligations };
-  const proposal = {
-    title: "Test",
+  const proposal: CompilerProposal = {
+    protocol: "clockgrove.factory/compiler-proposal" as const,
     workItems: [
       {
         id: "code",
         title: "Implement code",
         goal: "Implement code",
-        acceptance: ["Tests pass"],
-        criterionRisks: [{ criterion: "Tests pass", risk: "ordinary" }],
+        obligationIds: ["tests"],
+        criteria: [
+          {
+            id: "tests-pass",
+            text: "Tests pass",
+            risk: "ordinary" as const,
+            validation: [
+              {
+                tier: "mechanical" as const,
+                evidence: [{ kind: "observed" as const, recipeId: "fixture-recipe" }],
+              },
+            ],
+          },
+        ],
         scope: ["src/code.ts"],
         preconditions: [],
         outOfScope: [],
         conventions: [],
         dependsOn: [],
-        baseSha: context.baseSha,
-        validationCommands: ["npm test"],
-        validation: [
-          {
-            tier: "mechanical",
-            criteria: ["Tests pass"],
-            rationale: "Repository test command establishes the criterion",
-            evidenceCommands: ["npm test"],
-          },
-        ],
-        requirements: {
-          os: ["linux"],
-          architecture: ["x64"],
-          cpu: 1,
-          memoryMb: 2048,
-          diskMb: 1024,
-          timeoutMinutes: 30,
+        exclusiveResources: [],
+        executionIntent: {
           estimatedDurationMinutes: 10,
-          tools: ["node", "npm"],
+          additionalTools: [],
           services: [],
-          networkDestinations: [],
-          permittedSecretNames: [],
+          additionalNetworkDestinations: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
       },
     ],
   };
@@ -105,19 +101,20 @@ async function fixture() {
 }
 function verdict(
   inventory: ObligationInventory,
-  objective: CompiledObjective,
+  proposal: CompilerProposal,
+  graphDigest = compilerEvalDigest(proposal),
 ): CompilerJudgeVerdict {
   return {
     version: 1,
     rubricVersion: 1,
-    draftDigest: compiledGraphDigest(objective),
+    draftDigest: graphDigest,
     inventoryDigest: compilerEvalDigest(inventory),
     coverage: [
       {
         obligationId: "tests",
         status: "covered",
         itemIds: ["code"],
-        acceptanceBindings: [{ itemId: "code", criterion: "Tests pass" }],
+        acceptanceBindings: [{ itemId: "code", criterionId: "tests-pass" }],
         evidenceIds: ["objective"],
         reason: "Tests required",
       },
@@ -140,6 +137,31 @@ function verdict(
     findings: [],
     uncertainty: [],
     decision: "accept",
+  };
+}
+
+function judgeContext(
+  compilation: CompilationContext,
+  inventory: ObligationInventory,
+  proposal: CompilerProposal,
+  challenges: PlanJudgeContext["challenges"] = [],
+): PlanJudgeContext {
+  const graphDigest = compilerEvalDigest(proposal);
+  return {
+    compilation,
+    inventory,
+    proposal,
+    graphDigest,
+    challenges,
+    projectionTrace: {
+      protocol: "clockgrove.factory/compiler-projection",
+      requestDigest: "a".repeat(64),
+      proposalDigest: compilerEvalDigest(proposal),
+      graphDigest,
+      addedEdges: [],
+      adapterBindings: [],
+      riskElevations: [],
+    },
   };
 }
 
@@ -196,20 +218,25 @@ describe("independent compiler management boundaries", () => {
     });
     const result = await backend.extractObligations(context, async () => {}, undefined, {
       revision: 1,
-      validationFailure: "unknown obligation citation",
-      previousProposal: {
-        rawProposal: {
-          version: 1,
-          obligations: [{ ...claims.obligations[0], evidenceIds: ["foreign"] }],
+      validationReport: createCompilerValidationReport("obligations", [
+        {
+          code: "schema-invalid",
+          itemId: null,
+          field: "/obligations/0/evidenceIds/0",
+          expected: "known evidence ID",
+          observed: "foreign",
         },
-        normalizationTrace: ["Factory attached the exact frozen evidence records"],
+      ]),
+      previousProposal: {
+        version: 1,
+        obligations: [{ ...claims.obligations[0], evidenceIds: ["foreign"] }],
       },
     });
 
     expect(result.inventory).toEqual(inventory);
     expect(result.inventory.evidence).toEqual(context.repositoryEvidence);
     expect(prompts[0]).toContain("priorInventoryFailure");
-    expect(prompts[0]).toContain("unknown obligation citation");
+    expect(prompts[0]).toContain('"code":"schema-invalid"');
     expect(prompts[0]).toContain('"foreign"');
   });
 
@@ -244,11 +271,16 @@ describe("independent compiler management boundaries", () => {
         undefined,
         {
           revision: 1,
-          validationFailure: "prior claims invalid",
-          previousProposal: {
-            rawProposal: oversized,
-            normalizationTrace: ["Factory rejected oversized obligation claims"],
-          },
+          validationReport: createCompilerValidationReport("obligations", [
+            {
+              code: "schema-invalid",
+              itemId: null,
+              field: "",
+              expected: "bounded obligation claims",
+              observed: "oversized",
+            },
+          ]),
+          previousProposal: oversized,
         },
       ),
     ).rejects.toThrow("prior obligation proposal is");
@@ -256,7 +288,8 @@ describe("independent compiler management boundaries", () => {
   });
 
   it("passes the final admitted Objective remainder without a legacy 30-minute cap", async () => {
-    const { context, proposal } = await fixture();
+    const { context } = await fixture();
+    const request = semanticRequest();
     context.invocationTimeoutMs = 45 * 60_000;
     const runStructured = vi.fn(
       async (
@@ -266,16 +299,17 @@ describe("independent compiler management boundaries", () => {
         _model: unknown,
         invocationTimeoutMs?: number,
       ) => {
-        expect(invocationTimeoutMs).toBe(30 * 60_000);
-        return { value: proposal, usage };
+        expect(invocationTimeoutMs).toBe(44 * 60_000);
+        return { value: semanticProposal(request), usage };
       },
     );
     const backend = new CodexCliManagementBackend({ runStructured });
 
-    await backend.compile(
-      context,
+    await backend.proposePlan(
+      request,
       async () => {},
       async () => 44 * 60_000,
+      context,
     );
 
     expect(runStructured).toHaveBeenCalledOnce();
@@ -283,126 +317,64 @@ describe("independent compiler management boundaries", () => {
 
   it("judges complete coverage in an isolated prompt without compiler self-assessment", async () => {
     const { context, inventory, proposal } = await fixture();
-    const compiled = await new CodexCliManagementBackend({
-      runStructured: async () => ({ value: proposal, usage }),
-    }).compile(context, async () => {});
-    compiled.objective.workItems[0]!.economicReview!.rationale = "PRIVATE_COMPILER_SELF_ASSESSMENT";
     const runStructured = vi.fn(async (_cwd, schema, prompt: string) => {
       expect(schema).toEqual(CODEX_PLAN_JUDGE_SCHEMA);
       expect(prompt).not.toContain("PRIVATE_COMPILER_SELF_ASSESSMENT");
       expect(prompt).toContain("every item");
-      expect(prompt).toContain("Passing every packet");
-      return { value: verdict(inventory, compiled.objective), usage };
+      expect(prompt).toContain("Treat Objective, inventory, proposal, and projection trace");
+      return { value: verdict(inventory, proposal), usage };
     });
     const judged = await new CodexCliManagementBackend({ runStructured }).judgePlan(
-      { compilation: context, inventory, objective: compiled.objective },
+      judgeContext(context, inventory, proposal),
       async () => {},
     );
-    expect(judged.verdict.draftDigest).toBe(compiledGraphDigest(compiled.objective));
+    expect(judged.verdict.draftDigest).toBe(compilerEvalDigest(proposal));
     expect(runStructured).toHaveBeenCalledOnce();
   });
 
   it("rejects incomplete or foreign evidence judgments while preserving paid usage", async () => {
     const { context, inventory, proposal } = await fixture();
-    const compiled = await new CodexCliManagementBackend({
-      runStructured: async () => ({ value: proposal, usage }),
-    }).compile(context, async () => {});
-    const invalid = verdict(inventory, compiled.objective);
+    const invalid = verdict(inventory, proposal);
     invalid.coverage = [];
     const checkpoint = vi.fn();
     await expect(
       new CodexCliManagementBackend({
         runStructured: async () => ({ value: invalid, usage }),
-      }).judgePlan({ compilation: context, inventory, objective: compiled.objective }, checkpoint),
+      }).judgePlan(judgeContext(context, inventory, proposal), checkpoint),
     ).rejects.toMatchObject({ name: "ManagementOutputError", usage });
     expect(checkpoint).not.toHaveBeenCalled();
   });
 
-  it("retains raw proposals, grounds repairs again, and checks complete lineage", async () => {
-    const { context, inventory, proposal } = await fixture();
-    const backend = new CodexCliManagementBackend({
-      runStructured: async () => ({ value: proposal, usage }),
-    });
-    const compiled = await backend.compile(context, async () => {});
-    expect(compiled.provenance?.rawProposal).toEqual(proposal);
-    expect(
-      compiled.provenance?.normalizationTrace.some((change) =>
-        change.startsWith("code.requirements:"),
-      ),
-    ).toBe(true);
-    await expect(validateCompilerDraft(context, compiled.objective)).resolves.toEqual(
-      compiled.objective,
-    );
-    const summary = {
-      changeSummary: "Retain cohesive behavior",
-      lineage: [{ itemId: "code", previousItemIds: ["code"] }],
-      findingDispositions: [],
-    };
-    const repairBackend = new CodexCliManagementBackend({
-      runStructured: async (_cwd, _schema, prompt) => {
-        expect(prompt).toContain("complete replacement");
-        expect(prompt).toContain("Original obligations are immutable");
-        return { value: { objective: proposal, summary }, usage };
-      },
-    });
-    const repaired = await repairBackend.repairPlan(
-      {
-        compilation: context,
-        inventory,
-        objective: compiled.objective,
-        verdict: verdict(inventory, compiled.objective),
-        revision: 1,
-      },
-      async () => {},
-    );
-    expect(repaired.repair).toEqual(summary);
-    expect(repaired.objective).toEqual(compiled.objective);
-    summary.lineage[0]!.previousItemIds = [];
-    await expect(
-      repairBackend.repairPlan(
-        {
-          compilation: context,
-          inventory,
-          objective: compiled.objective,
-          verdict: verdict(inventory, compiled.objective),
-          revision: 2,
-        },
-        async () => {},
-      ),
-    ).rejects.toMatchObject({ usage, message: "repair reused item ID without its lineage" });
-  });
-
   it("preserves malformed proposals and can repair an initial mechanical failure", async () => {
-    const { context, inventory, proposal } = await fixture();
-    const invalid = { title: "Test", workItems: [] };
+    const { context } = await fixture();
+    const request = semanticRequest();
+    const invalid = { protocol: "clockgrove.factory/compiler-proposal", workItems: [] };
     await expect(
       new CodexCliManagementBackend({
         runStructured: async () => ({ value: invalid, usage }),
-      }).compile(context, async () => {}),
+      }).proposePlan(request, async () => {}, undefined, context),
     ).rejects.toMatchObject({ proposal: invalid, usage });
+    const repairedRequest = {
+      ...request,
+      revision: 1,
+      previousProposal: semanticProposal(request),
+      validationReport: createCompilerValidationReport("proposal", [
+        {
+          code: "duplicate-item-id" as const,
+          itemId: null,
+          field: "/workItems",
+          expected: "unique Work Item IDs",
+          observed: "duplicate",
+        },
+      ]),
+    };
     const repaired = await new CodexCliManagementBackend({
       runStructured: async () => ({
-        value: {
-          objective: proposal,
-          summary: {
-            changeSummary: "Restore missing graph",
-            lineage: [{ itemId: "code", previousItemIds: [] }],
-            findingDispositions: [],
-          },
-        },
+        value: semanticProposal(request),
         usage,
       }),
-    }).repairPlan(
-      {
-        compilation: context,
-        inventory,
-        previousProposal: invalid,
-        validationFailure: "Work Item count is out of bounds",
-        revision: 1,
-      },
-      async () => {},
-    );
-    expect(repaired.objective.workItems).toHaveLength(1);
+    }).proposePlan(repairedRequest, async () => {}, undefined, context);
+    expect(repaired.proposal.workItems).toHaveLength(1);
   });
 
   it("reads pinned source bytes instead of changed working files and reports gaps", async () => {
@@ -477,9 +449,6 @@ describe("independent compiler management boundaries", () => {
 
 it("adjudicates a cited inferred-obligation challenge independently without changing the graph", async () => {
   const { context, inventory, proposal } = await fixture();
-  const compiled = await new CodexCliManagementBackend({
-    runStructured: async () => ({ value: proposal, usage }),
-  }).compile(context, async () => {});
   inventory.obligations.push({
     id: "invented",
     text: "Install unrelated infrastructure",
@@ -487,7 +456,7 @@ it("adjudicates a cited inferred-obligation challenge independently without chan
     evidenceIds: ["objective"],
     acceptanceEvidence: "Inferred infrastructure exists",
   });
-  const reviewed = verdict(inventory, compiled.objective);
+  const reviewed = verdict(inventory, proposal);
   reviewed.coverage.push({
     obligationId: "invented",
     status: "missing",
@@ -510,7 +479,7 @@ it("adjudicates a cited inferred-obligation challenge independently without chan
     return { value: reviewed, usage };
   });
   const result = await new CodexCliManagementBackend({ runStructured }).judgePlan(
-    { compilation: context, inventory, objective: compiled.objective, challenges: [challenge] },
+    judgeContext(context, inventory, proposal, [challenge]),
     async () => {},
   );
   expect(result.verdict.decision).toBe("accept");
@@ -522,7 +491,7 @@ it("adjudicates a cited inferred-obligation challenge independently without chan
   reviewed.inventoryDigest = compilerEvalDigest(inventory);
   await expect(
     new CodexCliManagementBackend({ runStructured }).judgePlan(
-      { compilation: context, inventory, objective: compiled.objective, challenges: [challenge] },
+      judgeContext(context, inventory, proposal, [challenge]),
       async () => {},
     ),
   ).rejects.toMatchObject({ name: "ManagementOutputError", usage });
@@ -575,11 +544,8 @@ it("retains actual assisted-label prompt/source identities and marks provider mo
 it("permits 129 dependency reviews in both provider and runtime judge schemas", async () => {
   const { default: Ajv } = await import("ajv");
   const { CompilerJudgeVerdictSchema } = await import("../src/evaluation/compiler-eval.js");
-  const { context, inventory, proposal } = await fixture();
-  const compiled = await new CodexCliManagementBackend({
-    runStructured: async () => ({ value: proposal, usage }),
-  }).compile(context, async () => {});
-  const output = verdict(inventory, compiled.objective);
+  const { inventory, proposal } = await fixture();
+  const output = verdict(inventory, proposal);
   output.inferenceCorrections = [];
   output.dependencies = Array.from({ length: 129 }, (_, index) => ({
     itemId: `item-${index}`,
@@ -593,9 +559,6 @@ it("permits 129 dependency reviews in both provider and runtime judge schemas", 
 
 it("supplies carried challenges and prior independent corrections to the production repair prompt", async () => {
   const { context, inventory, proposal } = await fixture();
-  const compiled = await new CodexCliManagementBackend({
-    runStructured: async () => ({ value: proposal, usage }),
-  }).compile(context, async () => {});
   inventory.obligations.push({
     id: "inferred-deploy",
     text: "Deploy infrastructure",
@@ -603,7 +566,7 @@ it("supplies carried challenges and prior independent corrections to the product
     evidenceIds: ["objective"],
     acceptanceEvidence: "Deployment exists",
   });
-  const reviewed = verdict(inventory, compiled.objective);
+  const reviewed = verdict(inventory, proposal);
   reviewed.decision = "repair";
   reviewed.coverage.push({
     obligationId: "inferred-deploy",
@@ -623,32 +586,37 @@ it("supplies carried challenges and prior independent corrections to the product
   // The next repair still needs a real outstanding requirement after the invented one is waived.
   reviewed.coverage[0]!.status = "partial";
   reviewed.coverage[0]!.reason = "The original behavior still needs a correction";
-  const summary = {
-    changeSummary: "Preserve cited correction",
-    lineage: [{ itemId: "code", previousItemIds: ["code"] }],
-    findingDispositions: [],
+  reviewed.findings.push({
+    id: "correct-tests",
+    dimension: "coverage",
+    severity: "blocking",
+    confidence: 1,
+    obligationIds: ["tests"],
+    itemIds: ["code"],
+    evidenceIds: ["objective"],
+    rootCause: "The original behavior still needs a correction",
+    correction: "Correct the original behavior",
+    uncertainty: "",
+  });
+  const request = semanticRequest();
+  const repairRequest = {
+    ...request,
+    revision: 2,
+    previousProposal: semanticProposal(request),
+    semanticFindings: reviewed.findings,
+    challenges: [challenge],
   };
   const backend = new CodexCliManagementBackend({
     runStructured: async (_cwd, _schema, prompt) => {
       const source = JSON.parse(prompt.split("\n\n").at(-1)!);
       expect(source.challenges).toEqual([challenge]);
-      expect(source.inferenceCorrections).toEqual(reviewed.inferenceCorrections);
-      expect(prompt).toContain("not permission to waive explicit requirements");
-      expect(prompt).toContain("next judge must reassess every original obligation");
-      return { value: { objective: proposal, summary }, usage };
+      expect(source.semanticFindings).toEqual(reviewed.findings);
+      expect(prompt).toContain("preserve sound semantic intent");
+      expect(prompt).toContain("do not weaken obligations");
+      return { value: semanticProposal(request), usage };
     },
   });
   await expect(
-    backend.repairPlan(
-      {
-        compilation: context,
-        inventory,
-        objective: compiled.objective,
-        verdict: reviewed,
-        challenges: [challenge],
-        revision: 2,
-      },
-      async () => {},
-    ),
-  ).resolves.toMatchObject({ repair: summary });
+    backend.proposePlan(repairRequest, async () => {}, undefined, context),
+  ).resolves.toMatchObject({ proposal: { protocol: "clockgrove.factory/compiler-proposal" } });
 });

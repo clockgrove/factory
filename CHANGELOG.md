@@ -123,11 +123,14 @@ and artifacts, and record the commit SHA when installing from source.
   remainder. Vercel cleanup uses a separate bounded stop-confirmation window and preserves timed-out
   cleanup as an unresolved provider resource. ([#309](https://github.com/clockgrove/factory/issues/309))
 
-- Opt-in obligation-first compiler judgment and bounded draft repair, with immutable revisions,
+- Replace raw-graph model compilation with a strict semantic request/proposal contract. Pinned
+  adapter facts own commands, toolchain authority, runtime pins, deferred provider operations, and
+  policy constraints; deterministic projection records exact graph and trace identities. Initial and
+  bounded repair turns use one `proposePlan` entry point and schema, with immutable revisions,
   independent full-coverage review, exact accepted projection and per-invocation accounting.
   Report-only runs never dispatch implementation. Read-only compiler evaluation JSON/Markdown
   retains historical failures, unknown attribution, automated-label provenance and honest
-  comparative-evidence boundaries; model-backed calibration and savings are not yet qualified.
+  comparative-evidence boundaries; no compatibility reader retains the replaced draft format.
 
 - Unify Work Item ownership and attempt admission in an issue-scoped CAS ledger, preserving
   original recovery identities and unknown liabilities through a permanent legacy-writer bridge.

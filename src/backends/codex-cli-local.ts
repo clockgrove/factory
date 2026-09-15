@@ -47,8 +47,11 @@ import {
 } from "../runtime/codex-home.js";
 import { restrictedCodexArgs } from "./codex-cli-policy.js";
 import { readLocalResourceHostIdentity } from "../recovery/local-resources.js";
-import { bootstrapPackageValidationCommand } from "../validation/plan.js";
-import { managedToolAvailable, withManagedToolchainPath } from "../toolchains/authority.js";
+import {
+  managedToolAvailable,
+  packageScriptValidationCommand,
+  withManagedToolchainPath,
+} from "../toolchains/authority.js";
 import {
   exactProviderQuotaUsage,
   preserveProviderQuotaError,
@@ -183,7 +186,7 @@ export function workerPacketPrompt(context: AttemptContext): string {
   const manifest = packet.context ? ContextManifestSchema.parse(packet.context) : undefined;
   const bootstrapValidation =
     packet.validationCommands.length === 1 && packet.allowedPaths.includes("package.json")
-      ? bootstrapPackageValidationCommand(packet.validationCommands[0]!)
+      ? packageScriptValidationCommand(packet.validationCommands[0]!)
       : null;
   return [
     "You are a restricted Factory implementation worker.",
@@ -216,7 +219,7 @@ export function workerPacketPrompt(context: AttemptContext): string {
         JSON.stringify(packet.retryContext) +
         "\nCorrect the underlying problem while still satisfying the original Work Packet."
       : "This is the first attempt; there is no prior-attempt diagnostic.",
-    ...(bootstrapValidation
+    ...(bootstrapValidation?.manager === "pnpm"
       ? [
           `Greenfield bootstrap validation is intentionally narrow. The root package.json must pin packageManager to the exact pnpm tool version and define ${bootstrapValidation.script}. Pin every external dependency to an exact version; workspace dependencies may use only workspace:*. The pnpm v9 lock must enumerate every workspace importer, bind registry packages by sha512 integrity, and contain no URL, git, tarball, patch, or escaping local source. Do not define install/prepare lifecycle hooks, package-manager overrides, .npmrc, or pnpm hook files. The selected script body may be one finite allowlisted check, or exactly "turbo run ${bootstrapValidation.script}". For Turborepo, pnpm-workspace.yaml may contain only repository-relative direct-child package patterns, turbo.json may give ${bootstrapValidation.script} no dependency or only "^${bootstrapValidation.script}", and each package's matching script may be absent or exactly tsc --noEmit, vitest run, eslint ., prettier --check ., or node --test followed by explicit scoped JavaScript test paths. Declare registry.npmjs.org as the package-setup network destination. Authoritative setup first verifies pnpm's exact version, then performs a frozen install only from that registry with scripts disabled and store integrity enabled; do not add an installation command to the validation recipe.`,
         ]

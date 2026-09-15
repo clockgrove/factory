@@ -272,13 +272,12 @@ import { CompilerDraftManager, loadCompilerDrafts } from "./control/compiler-dra
 import { compilerEvalDigest } from "./evaluation/compiler-eval.js";
 import { collectCompilationEvidence } from "./compiler/runtime-evidence.js";
 import { ManagementOutputError } from "./management/backend.js";
+import { compilePlan } from "./management/compile.js";
 import { preserveProviderQuotaError, ProviderQuotaError } from "./providers/quota.js";
 import { providerQuotaGates, providerQuotaGateState } from "./control/provider-gates.js";
 import { reportedModelUsage, type ReportedModelUsage } from "./protocol/model-usage.js";
 import type {
-  CompilationCheckpoint,
   CompilationContext,
-  CompilationResult,
   ManagementBackend,
   ManagementUsage,
   ReviewContext,
@@ -377,7 +376,6 @@ import {
 } from "./publication/workflow-safety.js";
 import {
   bindValidationToPublishedHead,
-  bootstrapPackageValidationCommand,
   validationLocalCommandCount,
   validationPlanFromPacket,
 } from "./validation/plan.js";
@@ -387,6 +385,7 @@ import {
   assertRepositoryCapabilityProofsCurrent,
   createManagedRuntimeActivation,
   managedRuntimeRequirements,
+  packageScriptValidationCommand,
   packetWithManagedRuntimeActivation,
   resolveIntegratedRepositoryCapabilities,
   toolchainAdapterById,
@@ -757,6 +756,12 @@ export type CompilationFaultPoint =
   | "after-usage-write"
   | "after-preflight";
 
+interface DurableCompilationResult {
+  objective: CompiledObjective;
+  usage: ManagementUsage;
+}
+type DurableCompilationCheckpoint = (result: DurableCompilationResult) => Promise<void>;
+
 /**
  * A paid compiler may return to the Supervisor only through a callback that
  * has atomically checkpointed graph and usage evidence. Every later step is
@@ -764,8 +769,8 @@ export type CompilationFaultPoint =
  */
 export async function runDurableCompilationTransaction(args: {
   existing: CompiledGraphRecord | null;
-  invoke?: (checkpoint: CompilationCheckpoint) => Promise<CompilationResult>;
-  persist: (result: CompilationResult) => Promise<CompiledGraphRecord>;
+  invoke?: (checkpoint: DurableCompilationCheckpoint) => Promise<DurableCompilationResult>;
+  persist: (result: DurableCompilationResult) => Promise<CompiledGraphRecord>;
   recover: () => Promise<CompiledGraphRecord | null>;
   recordUsage: (record: CompiledGraphRecord) => Promise<void>;
   recordFailureUsage?: (usage: ManagementUsage, reason: string) => Promise<void>;
@@ -4877,7 +4882,7 @@ export class FactorySupervisor {
         if (this.#policy.compilerEvaluation && recoverableObjective && !durableGraph)
           throw new Error("existing issue graph cannot bypass the independent draft assessment");
         let invokeCompilation:
-          | ((checkpoint: CompilationCheckpoint) => Promise<CompilationResult>)
+          | ((checkpoint: DurableCompilationCheckpoint) => Promise<DurableCompilationResult>)
           | undefined;
         const compilationInvocationId = `compile-${base.oid}`;
         if (!recoverableObjective) {
@@ -4971,14 +4976,14 @@ export class FactorySupervisor {
                   };
                   if (this.#management.supportsCompilerAdmission) {
                     return await this.#observePhase("compilation", () =>
-                      this.#management.compile(context, checkpoint, admitCompilation),
+                      compilePlan(context, this.#management, checkpoint, admitCompilation),
                     );
                   }
                   // Compatibility for injected legacy backends that cannot place
                   // durable admission at their own final dispatch boundary.
                   context.invocationTimeoutMs = (await admitCompilation()).timeoutMs;
                   return await this.#observePhase("compilation", () =>
-                    this.#management.compile(context, checkpoint),
+                    compilePlan(context, this.#management, checkpoint),
                   );
                 }
                 const inputDigest = compilerEvalDigest(context.objective);
@@ -16148,9 +16153,9 @@ export class FactorySupervisor {
     const packet = this.#packetFor(item.number);
     const bootstrapCommand =
       packet.validationCommands.length === 1
-        ? bootstrapPackageValidationCommand(packet.validationCommands[0]!)
+        ? packageScriptValidationCommand(packet.validationCommands[0]!)
         : null;
-    if (bootstrapCommand && packet.allowedPaths.includes("package.json")) {
+    if (bootstrapCommand?.manager === "pnpm" && packet.allowedPaths.includes("package.json")) {
       const sourceBase = await this.#store.readCommit(pull.exactHeadValidation.baseSha);
       const basePackageJson = await this.#store.readTreeEntry(sourceBase.treeOid, "package.json");
       if (basePackageJson === null) {

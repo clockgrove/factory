@@ -15,7 +15,11 @@ import {
   CompilerDraftStopError,
   repairableInvalidClaimsEvidence,
   type CompilerDraftCallbacks,
+  type ValidatedCompilerDraft,
 } from "../src/evaluation/compiler-draft-loop.js";
+import { proposalFromCompiledFixture } from "./helpers/compiler-proposal.js";
+import { emptyCompilerValidationReport } from "../src/compiler/violations.js";
+import { compiledGraphDigest } from "../src/graph.js";
 import { ManagementOutputError, type ManagementUsage } from "../src/management/backend.js";
 import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
 import { ProviderQuotaError } from "../src/providers/quota.js";
@@ -24,10 +28,7 @@ const BASE_TREE = "b".repeat(40);
 
 function repairableInventoryFailure(
   usage: ManagementUsage,
-  proposal = {
-    rawProposal: { version: 1, obligations: [] },
-    normalizationTrace: ["Factory rejected malformed obligation claims"],
-  },
+  proposal = { version: 1, obligations: [] },
 ) {
   return Object.assign(
     new ManagementOutputError(new Error("unknown obligation citation"), usage, proposal),
@@ -172,6 +173,80 @@ function objective(goal = "Implement the feature."): CompiledObjective {
   };
 }
 
+function validatedObjective(graph: CompiledObjective): ValidatedCompilerDraft {
+  const proposal = proposalFromCompiledFixture(
+    {
+      protocol: "clockgrove.factory/compiler-request",
+      revision: 0,
+      objective: {
+        number: 42,
+        title: graph.title,
+        body: "Ship feature",
+        digest: "d".repeat(64),
+      },
+      baseSha: BASE_SHA,
+      inventory: {
+        version: 1,
+        objectiveDigest: "d".repeat(64),
+        baseSha: BASE_SHA,
+        evidence: [
+          { id: "objective", kind: "objective", identity: "fixture", excerpt: "Ship feature" },
+        ],
+        obligations: [
+          {
+            id: "feature",
+            text: "Ship feature",
+            kind: "explicit",
+            evidenceIds: ["objective"],
+            acceptanceEvidence: "The feature is tested.",
+          },
+        ],
+      },
+      repository: {
+        manifests: ["package.json"],
+        validationRecipes: [
+          {
+            id: "npm-test",
+            command: "npm test",
+            adapterId: "npm",
+            requiredTools: ["node", "npm"],
+            networkDestinations: [],
+          },
+        ],
+        toolchains: [],
+        pathCount: 1,
+      },
+      constraints: {
+        maxWorkItems: 100,
+        maxDependenciesPerItem: 50,
+        allowedNetworkDestinations: [],
+        workItemTimeoutMinutes: 30,
+      },
+      previousProposal: null,
+      validationReport: emptyCompilerValidationReport(),
+      semanticFindings: [],
+      challenges: [],
+    },
+    graph,
+  );
+  const graphDigest = compiledGraphDigest(graph);
+  return {
+    proposal,
+    objective: graph,
+    projectionTrace: {
+      protocol: "clockgrove.factory/compiler-projection",
+      requestDigest: "d".repeat(64),
+      proposalDigest: draftDigest(proposal),
+      graphDigest,
+      addedEdges: [],
+      adapterBindings: [],
+      riskElevations: [],
+    },
+    report: emptyCompilerValidationReport(),
+    requestDigest: "d".repeat(64),
+  };
+}
+
 async function setup() {
   const store = new MemoryGraphStore();
   const leases = new LeaseManager({ store });
@@ -207,7 +282,7 @@ async function setup() {
     validate: (value) => {
       if (!value || typeof value !== "object" || !("workItems" in value))
         throw new Error("malformed graph");
-      return value as CompiledObjective;
+      return validatedObjective(value as CompiledObjective);
     },
     accept: (value) => (value as { accepted: boolean }).accepted,
   };
@@ -351,7 +426,12 @@ describe("compiler draft durable repair", () => {
       invocationId,
       stage: "inventory",
       revision: 0,
-      inputDigest: draftDigest({ inventory: null, previous: null, failure: null }),
+      inputDigest: draftDigest({
+        inventory: null,
+        previous: null,
+        projection: null,
+        failure: null,
+      }),
     });
     expect(await runCompilerDraftLoop(args)).toMatchObject({
       status: "stopped",
@@ -420,10 +500,7 @@ describe("compiler draft durable repair", () => {
         revision: 1,
         failure: {
           error: "unknown obligation citation",
-          proposal: {
-            rawProposal: { version: 1, obligations: [] },
-            normalizationTrace: ["Factory rejected malformed obligation claims"],
-          },
+          proposal: { version: 1, obligations: [] },
         },
       },
     ]);
@@ -509,7 +586,12 @@ describe("compiler draft durable repair", () => {
       invocationId,
       stage: "inventory",
       revision: 0,
-      inputDigest: draftDigest({ inventory: null, previous: null, failure: null }),
+      inputDigest: draftDigest({
+        inventory: null,
+        previous: null,
+        projection: null,
+        failure: null,
+      }),
     });
     await args.manager.append(args.lease, args.binding, 2, "result", {
       invocationId,
@@ -518,10 +600,8 @@ describe("compiler draft durable repair", () => {
       value: null,
       usage: { inputTokens: 2, outputTokens: 1 },
       error: "unknown obligation citation",
-      proposal: { rawProposal: { version: 1, obligations: [] } },
-      repairableInvalidClaims: repairableInvalidClaimsEvidence({
-        rawProposal: { version: 1, obligations: [] },
-      }),
+      proposal: { version: 1, obligations: [] },
+      repairableInvalidClaims: repairableInvalidClaimsEvidence({ version: 1, obligations: [] }),
     });
     const invoke = vi.mocked(args.callbacks.invoke);
 
@@ -574,10 +654,7 @@ describe("compiler draft durable repair", () => {
   });
   it("does not retry a known-accounted management process failure, including restart", async () => {
     const args = await setup();
-    const proposal = {
-      rawProposal: { version: 1, obligations: [] },
-      normalizationTrace: ["untrusted provider process output"],
-    };
+    const proposal = { version: 1, obligations: [] };
     const invoke = vi.fn(async () => {
       throw new ManagementOutputError(
         new Error("Codex CLI process exited unsuccessfully"),
@@ -736,7 +813,8 @@ describe("compiler draft durable repair", () => {
         usage: { inputTokens: 2, outputTokens: 1 },
       };
     });
-    args.callbacks.validate = (value) => (value as { objective: CompiledObjective }).objective;
+    args.callbacks.validate = (value) =>
+      validatedObjective((value as { fixedGraph: CompiledObjective }).fixedGraph);
     const fixed = {
       ...args,
       fixedGraph: graph,

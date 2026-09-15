@@ -23,6 +23,7 @@ import {
 } from "../src/evaluation/compiler-eval.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import type { ApplicationSnapshot } from "../src/application/services.js";
+import { CompilerProposalSchema } from "../src/compiler/contracts.js";
 vi.mock("../src/control/compiler-drafts.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/control/compiler-drafts.js")>()),
   loadCompilerDrafts: vi.fn(),
@@ -73,11 +74,53 @@ const golden = JSON.parse(
   await readFile(new URL("./fixtures/compiler/golden-objective.json", import.meta.url), "utf8"),
 );
 const graph = parsePersistedCompiledObjective({ title: golden.title, workItems: golden.workItems });
+const proposal = CompilerProposalSchema.parse({
+  protocol: "clockgrove.factory/compiler-proposal",
+  workItems: graph.workItems.map((item, itemIndex) => ({
+    id: item.id,
+    title: item.title,
+    goal: item.goal,
+    obligationIds: itemIndex === 0 ? ["change"] : [],
+    criteria: item.acceptance.map((text, criterionIndex) => ({
+      id: `${item.id}-criterion-${criterionIndex + 1}`,
+      text,
+      risk: "ordinary",
+      validation: [
+        {
+          tier: "mechanical",
+          evidence: [{ kind: "observed", recipeId: "recipe-test" }],
+        },
+      ],
+    })),
+    scope: item.scope,
+    preconditions: item.preconditions,
+    outOfScope: item.outOfScope,
+    conventions: item.conventions,
+    dependsOn: item.dependsOn,
+    exclusiveResources: item.changeSurface?.exclusiveResources ?? [],
+    executionIntent: {
+      estimatedDurationMinutes: 30,
+      additionalTools: [],
+      services: [],
+      additionalNetworkDestinations: [],
+      trust: "trusted_local",
+    },
+  })),
+});
+const projectionTrace = {
+  protocol: "clockgrove.factory/compiler-projection",
+  requestDigest: "d".repeat(64),
+  proposalDigest: compilerEvalDigest(proposal),
+  graphDigest: compiledGraphDigest(graph),
+  addedEdges: [],
+  adapterBindings: [],
+  riskElevations: [],
+};
 function history() {
   const records: CompilerDraftRecord[] = [];
   const add = (kind: CompilerDraftRecord["kind"], payload: Record<string, unknown>) =>
     records.push({
-      protocol: "clockgrove.factory/compiler-draft-v1",
+      protocol: "clockgrove.factory/compiler-draft",
       binding,
       sequence: records.length,
       kind,
@@ -98,8 +141,26 @@ function history() {
   add("started", {});
   call("inventory", 0, inventory);
   call("compile", 0, null, "secret-api-key=do-not-display");
-  call("repair", 1, { objective: graph });
-  add("validation", { revision: 1, valid: true, graph, graphDigest: compiledGraphDigest(graph) });
+  call("repair", 1, {
+    proposal,
+    report: {
+      protocol: "clockgrove.factory/compiler-validation",
+      phase: "proposal",
+      status: "valid",
+      violations: [],
+    },
+    provenance: { requestDigest: projectionTrace.requestDigest },
+  });
+  add("validation", {
+    revision: 1,
+    valid: true,
+    graph,
+    graphDigest: compiledGraphDigest(graph),
+    proposalDigest: draftDigest(proposal),
+    traceDigest: draftDigest(projectionTrace),
+    projectionTrace,
+    requestDigest: projectionTrace.requestDigest,
+  });
   const verdict = {
     version: 1,
     rubricVersion: 1,
@@ -111,7 +172,7 @@ function history() {
         status: "covered",
         itemIds: [graph.workItems[0]!.id],
         acceptanceBindings: [
-          { itemId: graph.workItems[0]!.id, criterion: graph.workItems[0]!.acceptance[0]! },
+          { itemId: graph.workItems[0]!.id, criterionId: proposal.workItems[0]!.criteria[0]!.id },
         ],
         evidenceIds: ["objective"],
         reason: "Mapped acceptance",
@@ -147,6 +208,9 @@ function history() {
     graphDigest: compiledGraphDigest(graph),
     inventoryDigest: draftDigest(inventory),
     verdictDigest: draftDigest(verdict),
+    proposalDigest: draftDigest(proposal),
+    requestDigest: projectionTrace.requestDigest,
+    traceDigest: draftDigest(projectionTrace),
   });
   return records;
 }
@@ -193,7 +257,7 @@ describe("read-only compiler evaluation", () => {
     const records = history();
     records.pop();
     records.push({
-      protocol: "clockgrove.factory/compiler-draft-v1",
+      protocol: "clockgrove.factory/compiler-draft",
       binding,
       sequence: records.length,
       kind: "invocation",
@@ -253,7 +317,7 @@ describe("read-only compiler evaluation", () => {
     )!;
     judge.payload.value = "malformed historical judge output";
     records.push({
-      protocol: "clockgrove.factory/compiler-draft-v1",
+      protocol: "clockgrove.factory/compiler-draft",
       binding,
       sequence: records.length,
       kind: "accounting-failure",
@@ -545,7 +609,7 @@ it("reports disputed terminal usage as unknown while retaining the original fail
   const records = history();
   records.pop();
   records.push({
-    protocol: "clockgrove.factory/compiler-draft-v1",
+    protocol: "clockgrove.factory/compiler-draft",
     binding,
     sequence: records.length,
     kind: "terminal-conflict",

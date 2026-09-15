@@ -31,6 +31,7 @@ import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "./platfo
  */
 
 import { createHash } from "node:crypto";
+import { analyzeDependencies, overlappingScopePairs } from "./graph-analysis.js";
 
 import type { Octokit } from "@octokit/core";
 import {
@@ -397,33 +398,6 @@ export function assertCompiledObjectiveAdoptsLegacyConstraints(
   }
 }
 
-function scopeOverlaps(left: string, right: string): boolean {
-  const leftDirectory = left.endsWith("/");
-  const rightDirectory = right.endsWith("/");
-  if (!leftDirectory && !rightDirectory) return left === right;
-  if (leftDirectory && rightDirectory) {
-    return left.startsWith(right) || right.startsWith(left);
-  }
-  return leftDirectory ? right.startsWith(left) : left.startsWith(right);
-}
-
-function dependsTransitivelyOn(
-  byId: Map<string, CompiledWorkItem>,
-  from: string,
-  target: string,
-): boolean {
-  const pending = [...(byId.get(from)?.dependsOn ?? [])];
-  const seen = new Set<string>();
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    if (current === target) return true;
-    if (seen.has(current)) continue;
-    seen.add(current);
-    pending.push(...(byId.get(current)?.dependsOn ?? []));
-  }
-  return false;
-}
-
 /**
  * A compiler may correctly identify shared files while forgetting to order the
  * affected Work Items. That omission has one safe mechanical repair: preserve
@@ -439,25 +413,14 @@ export function addScopeSerializationEdges<T extends CompiledObjective>(objectiv
     })),
   } as T;
   const byId = new Map(normalized.workItems.map((item) => [item.id, item]));
-  for (let leftIndex = 0; leftIndex < normalized.workItems.length; leftIndex += 1) {
-    const left = normalized.workItems[leftIndex]!;
-    for (
-      let rightIndex = leftIndex + 1;
-      rightIndex < normalized.workItems.length;
-      rightIndex += 1
-    ) {
-      const right = normalized.workItems[rightIndex]!;
-      const overlapping = left.scope.some((leftPath) =>
-        right.scope.some((rightPath) => scopeOverlaps(leftPath, rightPath)),
-      );
-      if (
-        overlapping &&
-        !dependsTransitivelyOn(byId, left.id, right.id) &&
-        !dependsTransitivelyOn(byId, right.id, left.id)
-      ) {
-        right.dependsOn.push(left.id);
-      }
-    }
+  const position = new Map(normalized.workItems.map((item, index) => [item.id, index]));
+  for (const pair of overlappingScopePairs(normalized.workItems)) {
+    const [first, second] = [...pair].sort(
+      (left, right) => position.get(left)! - position.get(right)!,
+    );
+    const analysis = analyzeDependencies(normalized.workItems);
+    if (!analysis.hasPath(first!, second!) && !analysis.hasPath(second!, first!))
+      byId.get(second!)!.dependsOn.push(first!);
   }
   return normalized;
 }
@@ -569,47 +532,20 @@ function validateGraphShape(
     }
   }
 
-  // Cycle check: a plain DFS over the dependsOn edges. Objective graphs are
-  // small enough that there is no need for anything more clever.
-  const byId = new Map(objective.workItems.map((wi) => [wi.id, wi]));
-  const state = new Map<string, "visiting" | "done">();
-  const visit = (id: string, path: string[]): void => {
-    const mark = state.get(id);
-    if (mark === "done") return;
-    if (mark === "visiting") {
-      throw new Error(`dependency cycle: ${[...path, id].join(" -> ")}`);
-    }
-    state.set(id, "visiting");
-    for (const dep of byId.get(id)!.dependsOn) {
-      visit(dep, [...path, id]);
-    }
-    state.set(id, "done");
-  };
-  for (const wi of objective.workItems) visit(wi.id, []);
+  const analysis = analyzeDependencies(objective.workItems);
+  if (analysis.cycleItems.length)
+    throw new Error(`dependency cycle: ${analysis.cycleItems.join(" -> ")}`);
 
   // Two scopes overlap when they name the same file/directory, when an exact
   // file sits below a directory scope, or when two directory scopes nest. A
   // dependency path in either direction serializes the pair. Without one,
   // both items can enter the same wave and independently publish changes to
   // the same path, so reject that graph before its first GitHub write.
-  for (let leftIndex = 0; leftIndex < objective.workItems.length; leftIndex += 1) {
-    const left = objective.workItems[leftIndex]!;
-    for (let rightIndex = leftIndex + 1; rightIndex < objective.workItems.length; rightIndex += 1) {
-      const right = objective.workItems[rightIndex]!;
-      const overlapping = left.scope.some((leftPath) =>
-        right.scope.some((rightPath) => scopeOverlaps(leftPath, rightPath)),
+  for (const [left, right] of overlappingScopePairs(objective.workItems))
+    if (!analysis.hasPath(left, right) && !analysis.hasPath(right, left))
+      throw new Error(
+        `Work Items ${left} and ${right} have overlapping scopes but no dependency path`,
       );
-      if (
-        overlapping &&
-        !dependsTransitivelyOn(byId, left.id, right.id) &&
-        !dependsTransitivelyOn(byId, right.id, left.id)
-      ) {
-        throw new Error(
-          `Work Items ${left.id} and ${right.id} have overlapping scopes but no dependency path`,
-        );
-      }
-    }
-  }
 
   if (!allowAuthenticatedLegacyOmissions && objective.deferredCapabilityAdapters === undefined)
     throw new Error("compiled Objective lacks deferred capability adapter disposition");

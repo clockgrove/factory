@@ -7,7 +7,7 @@ import { draftDigest, loadCompilerDrafts } from "../control/compiler-drafts.js";
 import { loadCompiledGraph, type CompiledGraphReadStore } from "../control/graphs.js";
 import { latestRunReceipts } from "../control/receipts.js";
 import { summarizeRun } from "../economics/index.js";
-import { compiledGraphDigest, parsePersistedCompiledObjective } from "../graph.js";
+import { CompilerProposalSchema } from "../compiler/contracts.js";
 import {
   ObligationInventorySchema,
   createCompilerEvalReport,
@@ -342,10 +342,25 @@ export async function inspectCompilerEvaluation(args: {
               item.sequence < record.sequence,
           );
           if (!validated) throw new Error("judge result has no mechanically validated draft");
-          const objective = parsePersistedCompiledObjective(validated.payload.graph);
-          const digest = compiledGraphDigest(objective);
-          if (digest !== validated.payload.graphDigest)
-            throw new Error("mechanical validation digest mismatch");
+          const proposalResult = results.find(
+            (item) =>
+              item.payload.revision === record.payload.revision &&
+              (item.payload.stage === "compile" || item.payload.stage === "repair") &&
+              !item.payload.error,
+          );
+          if (
+            !proposalResult ||
+            !proposalResult.payload.value ||
+            typeof proposalResult.payload.value !== "object"
+          )
+            throw new Error("judge result has no semantic proposal");
+          const proposal = CompilerProposalSchema.parse(
+            (proposalResult.payload.value as Record<string, unknown>).proposal,
+          );
+          const trace = validated.payload.projectionTrace as {
+            addedEdges: Array<{ itemId: string; dependsOn: string }>;
+          };
+          const digest = String(validated.payload.graphDigest);
           try {
             const judgeInvocation = invocations.find(
               (entry) => entry.invocation.invocationId === record.payload.invocationId,
@@ -357,7 +372,8 @@ export async function inspectCompilerEvaluation(args: {
             const report = createCompilerEvalReport({
               inventory,
               challenges,
-              graph: objective,
+              graph: proposal,
+              addedEdges: trace.addedEdges,
               verdict: record.payload.value as Parameters<
                 typeof createCompilerEvalReport
               >[0]["verdict"],
@@ -403,18 +419,21 @@ export async function inspectCompilerEvaluation(args: {
     );
     if (!original)
       throw new Error("Compiler causal annotations name a stale or unavailable draft revision");
-    const itemIds = new Set(
-      records
-        .filter(
-          (record) =>
-            record.kind === "validation" &&
-            record.payload.revision === annotations.revision &&
-            record.payload.valid === true,
-        )
-        .flatMap((record) =>
-          parsePersistedCompiledObjective(record.payload.graph).workItems.map((item) => item.id),
-        ),
+    const annotatedProposalResult = results.find(
+      (record) =>
+        record.payload.revision === annotations.revision &&
+        (record.payload.stage === "compile" || record.payload.stage === "repair") &&
+        !record.payload.error,
     );
+    if (
+      !annotatedProposalResult?.payload.value ||
+      typeof annotatedProposalResult.payload.value !== "object"
+    )
+      throw new Error("Compiler causal annotations have no semantic proposal");
+    const annotatedProposal = CompilerProposalSchema.parse(
+      (annotatedProposalResult.payload.value as Record<string, unknown>).proposal,
+    );
+    const itemIds = new Set(annotatedProposal.workItems.map((item) => item.id));
     const findingIds = new Set(original.verdict.findings.map((finding) => finding.id));
     const causeIds = new Set<string>();
     for (const cause of annotations.causes) {
@@ -461,7 +480,12 @@ export async function inspectCompilerEvaluation(args: {
     const annotated = createCompilerEvalReport({
       inventory: original.inventory,
       challenges: original.challenges,
-      graph: parsePersistedCompiledObjective(validation.payload.graph),
+      graph: annotatedProposal,
+      addedEdges: (
+        validation.payload.projectionTrace as {
+          addedEdges: Array<{ itemId: string; dependsOn: string }>;
+        }
+      ).addedEdges,
       verdict: original.verdict,
       draftDigest: original.draftDigest,
       mode: original.mode,

@@ -7,7 +7,7 @@ import {
   compilerObligationEvidence,
 } from "../src/management/codex-cli.js";
 import { compileEvaluatedDraft } from "../src/management/draft-compilation.js";
-import { compiledGraphDigest } from "../src/graph.js";
+import { compiledGraphDigest, parsePersistedCompiledObjective } from "../src/graph.js";
 import {
   COMPILER_JUDGE_DIMENSIONS,
   compilerEvalDigest,
@@ -23,12 +23,19 @@ import type {
 } from "../src/control/compiler-drafts.js";
 import type { LeaseState } from "../src/control/lease.js";
 import { ProviderQuotaError } from "../src/providers/quota.js";
+import { pinFixtureRepository, proposalFromCompiledFixture } from "./helpers/compiler-proposal.js";
+import { semanticRequest } from "./helpers/semantic-compiler.js";
+import { createCompilerValidationReport } from "../src/compiler/violations.js";
 const mocks = vi.hoisted(() => ({ resolve: vi.fn(), run: vi.fn(), environment: vi.fn() }));
 vi.mock("../src/runtime/codex-command.js", () => ({ resolveCodexCommand: mocks.resolve }));
-vi.mock("../src/runtime/process-group.js", async (original) => ({
-  ...(await original<typeof import("../src/runtime/process-group.js")>()),
-  runContainedProcess: mocks.run,
-}));
+vi.mock("../src/runtime/process-group.js", async (original) => {
+  const actual = await original<typeof import("../src/runtime/process-group.js")>();
+  return {
+    ...actual,
+    runContainedProcess: (args: Parameters<typeof actual.runContainedProcess>[0]) =>
+      args.command === "git" ? actual.runContainedProcess(args) : mocks.run(args),
+  };
+});
 vi.mock("../src/runtime/codex-home.js", async (original) => ({
   ...(await original<typeof import("../src/runtime/codex-home.js")>()),
   isolateCodexEnvironment: mocks.environment,
@@ -55,28 +62,42 @@ async function fixture() {
     join(directory, "package.json"),
     JSON.stringify({ scripts: golden.repositoryFacts.scripts }),
   );
+  await writeFile(
+    join(directory, "package-lock.json"),
+    JSON.stringify({ name: "compiler-admission-fixture", lockfileVersion: 3, packages: {} }),
+  );
+  const baseSha = pinFixtureRepository(directory);
   const context: CompilationContext = {
     repository: directory,
     objective: { number: 42, title: golden.title, body: "Implement core behavior and tests" },
-    baseSha: golden.baseSha,
+    baseSha,
     defaultBranch: "main",
-    repositoryFiles: golden.repositoryFacts.files.map((file: { path: string }) => file.path),
+    repositoryFiles: [
+      "package-lock.json",
+      ...golden.repositoryFacts.files.map((file: { path: string }) => file.path),
+    ],
     allowedNetworkDestinations: [],
     runPolicy: { ...DEFAULT_RUN_POLICY, compilerEvaluation: { mode: "report-only" } },
   };
   context.repositoryEvidence = compilerObligationEvidence(context);
-  const proposal = {
+  const graph = parsePersistedCompiledObjective({
     title: golden.title,
     workItems: golden.workItems.map((item: { acceptance: string[] }) => ({
       ...item,
       criterionRisks: item.acceptance.map((criterion) => ({ criterion, risk: "ordinary" })),
     })),
+  });
+  const request = semanticRequest();
+  const proposal = proposalFromCompiledFixture(request, graph);
+  const projectionTrace = {
+    protocol: "clockgrove.factory/compiler-projection" as const,
+    requestDigest: compilerEvalDigest(request),
+    proposalDigest: compilerEvalDigest(proposal),
+    graphDigest: compiledGraphDigest(graph),
+    addedEdges: [],
+    adapterBindings: [],
+    riskElevations: [],
   };
-  const graph = (
-    await new CodexCliManagementBackend({
-      runStructured: async () => ({ value: proposal, usage: { inputTokens: 1, outputTokens: 1 } }),
-    }).compile(context, async () => {})
-  ).objective;
   const inventory: ObligationInventory = {
     version: 1,
     objectiveDigest: compilerEvalDigest(context.objective),
@@ -102,9 +123,7 @@ async function fixture() {
         obligationId: "core",
         status: "covered",
         itemIds: [graph.workItems[0]!.id],
-        acceptanceBindings: [
-          { itemId: graph.workItems[0]!.id, criterion: graph.workItems[0]!.acceptance[0]! },
-        ],
+        acceptanceBindings: [{ itemId: graph.workItems[0]!.id, criterionId: "criterion-1" }],
         evidenceIds: ["objective"],
         reason: "Tests establish behavior",
       },
@@ -153,7 +172,7 @@ async function fixture() {
     ) => {
       if (sequence !== records.length) throw new Error("append fence");
       const record: CompilerDraftRecord = {
-        protocol: "clockgrove.factory/compiler-draft-v1",
+        protocol: "clockgrove.factory/compiler-draft",
         binding,
         sequence,
         kind,
@@ -163,7 +182,19 @@ async function fixture() {
       return structuredClone(record);
     },
   } as unknown as CompilerDraftManager;
-  return { context, graph, inventory, verdict, binding, records, manager, directory };
+  return {
+    context,
+    graph,
+    request,
+    proposal,
+    projectionTrace,
+    inventory,
+    verdict,
+    binding,
+    records,
+    manager,
+    directory,
+  };
 }
 async function home() {
   const path = await mkdtemp(join(tmpdir(), "compiler-prepared-home-"));
@@ -224,25 +255,39 @@ describe("compiler dispatch admission", () => {
         stage === "inventory"
           ? () => backend.extractObligations(f.context, async () => {}, before)
           : stage === "compile"
-            ? () => backend.compile(f.context, async () => {}, before)
+            ? () => backend.proposePlan(f.request, async () => {}, before, f.context)
             : stage === "judge"
               ? () =>
                   backend.judgePlan(
-                    { compilation: f.context, inventory: f.inventory, objective: f.graph },
+                    {
+                      compilation: f.context,
+                      inventory: f.inventory,
+                      proposal: f.proposal,
+                      projectionTrace: f.projectionTrace,
+                      graphDigest: f.projectionTrace.graphDigest,
+                    },
                     async () => {},
                     before,
                   )
               : () =>
-                  backend.repairPlan(
+                  backend.proposePlan(
                     {
-                      compilation: f.context,
-                      inventory: f.inventory,
-                      objective: f.graph,
-                      verdict: f.verdict,
+                      ...f.request,
                       revision: 1,
+                      previousProposal: f.proposal,
+                      validationReport: createCompilerValidationReport("proposal", [
+                        {
+                          code: "unmapped-obligation",
+                          itemId: null,
+                          field: "/workItems",
+                          expected: "explicit-contract",
+                          observed: null,
+                        },
+                      ]),
                     },
                     async () => {},
                     before,
+                    f.context,
                   );
       await expect(call()).rejects.toBe(error);
       expect(before).not.toHaveBeenCalled();
@@ -349,8 +394,8 @@ describe("compiler dispatch admission", () => {
       });
       let observed: unknown;
       try {
-        await backend.compile(
-          f.context,
+        await backend.proposePlan(
+          f.request,
           async () => {},
           async () => ({
             modelInvocationId: "compile-fixture",
@@ -359,6 +404,7 @@ describe("compiler dispatch admission", () => {
               refusalCheckpointed = true;
             },
           }),
+          f.context,
         );
       } catch (error) {
         observed = error;
@@ -400,8 +446,8 @@ describe("compiler dispatch admission", () => {
       });
       let observed: unknown;
       try {
-        await backend.compile(
-          f.context,
+        await backend.proposePlan(
+          f.request,
           async () => {},
           async () => ({
             modelInvocationId: "compile-checkpoint-failure",
@@ -409,6 +455,7 @@ describe("compiler dispatch admission", () => {
               throw checkpointFailure;
             },
           }),
+          f.context,
         );
       } catch (error) {
         observed = error;

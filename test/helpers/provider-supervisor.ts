@@ -121,6 +121,7 @@ export interface ProviderFaults {
   capabilityConsumerPublicationCrash?: boolean;
   workflowLiveBaseUnsafe?: boolean | "create" | "push";
   afterWorkflowCandidatePreparedSnapshot?: () => Promise<void>;
+  compilerNpmAuthority?: boolean;
 }
 
 export async function providerSupervisorFixture(
@@ -154,6 +155,16 @@ export async function providerSupervisorFixture(
   git("config", "user.email", "fixture@example.invalid");
   git("remote", "add", "origin", "https://github.com/fixture/provider-qualification.git");
   await writeFile(join(repository, "README.md"), "Disposable provider qualification fixture\n");
+  if (faults.compilerNpmAuthority) {
+    await writeFile(
+      join(repository, "package.json"),
+      JSON.stringify({ name: "compiler-fixture", scripts: { test: "node --test" } }),
+    );
+    await writeFile(
+      join(repository, "package-lock.json"),
+      JSON.stringify({ name: "compiler-fixture", lockfileVersion: 3, packages: {} }),
+    );
+  }
   if (faults.capabilityAdmission) {
     await mkdir(join(repository, "test"));
     await writeFile(join(repository, "test/check.js"), "// exact-base capability fixture\n");
@@ -249,10 +260,16 @@ wheels = [
     }
   }
   if (faults.compilerEvaluation)
-    await writeFile(
-      join(repository, "package.json"),
-      JSON.stringify({ scripts: { test: "node --test" } }),
-    );
+    await Promise.all([
+      writeFile(
+        join(repository, "package.json"),
+        JSON.stringify({ scripts: { test: "node --test" } }),
+      ),
+      writeFile(
+        join(repository, "package-lock.json"),
+        JSON.stringify({ name: "compiler-evaluation-fixture", lockfileVersion: 3, packages: {} }),
+      ),
+    ]);
   git("add", ".");
   git("commit", "-qm", "base");
   const baseSha = git("rev-parse", "HEAD");
@@ -1431,7 +1448,9 @@ wheels = [
         !faults.pnpmUnavailable &&
         (faults.greenfieldBootstrap || faults.greenfieldLifecycle || faults.capabilityAdmission)
           ? ["node", faults.capabilityAdapter ?? "pnpm"]
-          : ["node"],
+          : faults.compilerEvaluation
+            ? ["node", "npm"]
+            : ["node"],
       supportedServices: [],
       supportsCancellation: true,
       supportsObservation: true,
@@ -1693,7 +1712,7 @@ jobs:
   const management: ManagementBackend = {
     id: policy.managementBackend,
     probe: async () => ({ available: true, authenticated: true }),
-    compile: async () => {
+    proposePlan: async () => {
       throw new Error("already compiled immutable fixture");
     },
     review: async (context, checkpoint) => {

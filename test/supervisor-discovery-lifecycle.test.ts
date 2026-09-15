@@ -66,7 +66,7 @@ describe("Supervisor exact lifecycle discovery", () => {
       treeTruncatedByGitHub: false,
     });
     let compilationReached = false;
-    f.management.compile = async () => {
+    f.management.proposePlan = async () => {
       compilationReached = true;
       expect(locators(f).length).toBeGreaterThan(0);
       expect(f.resources.size).toBe(0);

@@ -5,7 +5,13 @@ import type {
   CompilerEvidence,
   CompilerCaseLabel,
 } from "../evaluation/compiler-eval.js";
-import type { CompiledObjective, LegacyGraphConstraints } from "../graph.js";
+import type { LegacyGraphConstraints } from "../graph.js";
+import type {
+  CompilerProposal,
+  CompilerRequest,
+  CompilerValidationReport,
+} from "../compiler/contracts.js";
+import type { CompilerProjectionTrace } from "../compiler/proposal.js";
 import type { NormalizedArtifact } from "../execution/artifacts.js";
 import type { WorkerPacket } from "../protocol/worker-packet.js";
 import type { ValidationEvidence } from "../validation/evidence.js";
@@ -62,15 +68,22 @@ export interface CompilationContext {
   economicEvidence?: (items: readonly CompilerWorkItem[]) => Promise<DecompositionEvidence>;
 }
 
-export interface CompilerProposalTrace {
-  rawProposal: unknown;
-  normalizationTrace: string[];
+export interface CompilerProposalProvenance {
   promptDigest: string;
   schemaDigest: string;
+  requestDigest: string;
   model: string | null;
   reasoning: string | null;
   baseSha: string;
 }
+
+export interface CompilerProposalResult {
+  proposal: CompilerProposal;
+  report: CompilerValidationReport;
+  provenance: CompilerProposalProvenance;
+  usage: ManagementUsage;
+}
+export type CompilerProposalCheckpoint = (result: CompilerProposalResult) => Promise<void>;
 
 export interface ObligationResult {
   inventory: ObligationInventory;
@@ -79,30 +92,22 @@ export interface ObligationResult {
 export type ObligationCheckpoint = (result: ObligationResult) => Promise<void>;
 export interface ObligationRepairContext {
   revision: number;
-  validationFailure: string;
+  validationReport: CompilerValidationReport;
   previousProposal: unknown;
 }
 export interface PlanJudgeContext {
   challenges?: CompilerInferenceChallenge[];
   compilation: CompilationContext;
   inventory: ObligationInventory;
-  objective: CompiledObjective;
+  proposal: CompilerProposal;
+  projectionTrace: CompilerProjectionTrace;
+  graphDigest: string;
 }
 export interface PlanJudgeResult {
   verdict: CompilerJudgeVerdict;
   usage: ManagementUsage;
 }
 export type PlanJudgeCheckpoint = (result: PlanJudgeResult) => Promise<void>;
-export interface PlanRepairContext {
-  challenges?: CompilerInferenceChallenge[];
-  compilation: CompilationContext;
-  inventory: ObligationInventory;
-  objective?: CompiledObjective;
-  verdict?: CompilerJudgeVerdict;
-  previousProposal?: unknown;
-  validationFailure?: string;
-  revision: number;
-}
 export interface CompilerCaseLabelContext {
   compilation: CompilationContext;
   caseDigest: string;
@@ -124,30 +129,6 @@ export interface CompilerCaseLabelResult {
   usage: ManagementUsage;
 }
 export type CompilerCaseLabelCheckpoint = (result: CompilerCaseLabelResult) => Promise<void>;
-export interface PlanRepairSummary {
-  changeSummary: string;
-  lineage: Array<{ itemId: string; previousItemIds: string[] }>;
-  findingDispositions: Array<{
-    findingId: string;
-    disposition: "addressed" | "challenged";
-    reason: string;
-    evidenceIds: string[];
-  }>;
-}
-
-export interface CompilationResult {
-  provenance?: CompilerProposalTrace;
-  repair?: PlanRepairSummary;
-  objective: CompiledObjective;
-  usage: ManagementUsage;
-}
-
-/**
- * The management backend must not expose a paid compilation result to its
- * caller until this callback has durably checkpointed that exact result.
- */
-export type CompilationCheckpoint = (result: CompilationResult) => Promise<void>;
-
 export interface SemanticReview {
   accepted: boolean;
   summary: string;
@@ -200,11 +181,12 @@ export interface ManagementBackend {
   readonly supportsCompilerAdmission?: true;
   readonly id: string;
   probe(): Promise<{ available: boolean; authenticated: boolean; reason?: string }>;
-  compile(
-    context: CompilationContext,
-    checkpoint: CompilationCheckpoint,
+  proposePlan(
+    request: CompilerRequest,
+    checkpoint: CompilerProposalCheckpoint,
     beforeModelInvocation?: CompilerModelAdmission,
-  ): Promise<CompilationResult>;
+    execution?: CompilationContext,
+  ): Promise<CompilerProposalResult>;
   /** Draft-stage calls share the compile accounting/checkpoint boundary. Legacy backends
    * may omit them; callers must refuse judge-enabled compilation when unavailable. */
   labelCompilerCase?(
@@ -222,11 +204,6 @@ export interface ManagementBackend {
     checkpoint: PlanJudgeCheckpoint,
     beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<PlanJudgeResult>;
-  repairPlan?(
-    context: PlanRepairContext,
-    checkpoint: CompilationCheckpoint,
-    beforeModelInvocation?: CompilerModelAdmission,
-  ): Promise<CompilationResult>;
   review(context: ReviewContext, checkpoint: ReviewCheckpoint): Promise<ReviewResult>;
   /** Optional local preparation boundary. The backend must call the admission
    * callback exactly once immediately before paid invocation dispatch, after

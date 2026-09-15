@@ -43,6 +43,7 @@ import { CodexSdkLocalBackend } from "../src/backends/codex-sdk-local.js";
 import { DaytonaResourceCleanupError } from "../src/backends/daytona.js";
 import type { ManagementBackend } from "../src/management/backend.js";
 import type { ObjectiveSnapshot, LinkedPullRequest } from "../src/types.js";
+import { adaptFixtureCompiler, type LegacyFixtureCompiler } from "./helpers/compiler-proposal.js";
 import { PlatformUnavailableError } from "../src/platform.js";
 import * as cleanValidation from "../src/validation/clean-run.js";
 import { ReviewCheckpointManager } from "../src/control/reviews.js";
@@ -136,6 +137,7 @@ async function fixture(
       available?: boolean;
       fault?: "validation" | "cleanup";
     };
+    compilerNpmAuthority?: boolean;
   } = {},
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-successor-integration-"));
@@ -151,6 +153,16 @@ async function fixture(
   git("config", "user.email", "fixture@example.invalid");
   git("remote", "add", "origin", "https://github.com/o/r.git");
   await writeFile(join(repository, "README.md"), "Fixture\n");
+  if (options.compilerNpmAuthority) {
+    await writeFile(
+      join(repository, "package.json"),
+      JSON.stringify({ name: "successor-compiler-fixture", scripts: { test: "node --test" } }),
+    );
+    await writeFile(
+      join(repository, "package-lock.json"),
+      JSON.stringify({ name: "successor-compiler-fixture", lockfileVersion: 3, packages: {} }),
+    );
+  }
   if (options.failCombinedTests)
     await writeFile(
       join(repository, "combined.test.mjs"),
@@ -976,7 +988,7 @@ async function fixture(
   const management: ManagementBackend = {
     id: policy.managementBackend,
     probe: async () => ({ available: true, authenticated: true }),
-    compile: vi.fn(async () => {
+    proposePlan: vi.fn(async () => {
       throw new Error("unexpected compilation");
     }),
     review,
@@ -3702,7 +3714,7 @@ describe("Supervisor authenticated successor execution", () => {
     60_000,
   );
   it("recompiles once in a second successor after an accounted graph-bootstrap terminal", async () => {
-    const f = await fixture();
+    const f = await fixture({ compilerNpmAuthority: true });
     const store = new GitHubControlStore({ token: "fixture-token", owner: "o", repo: "r" });
     const sourceStart = f.snapshot.factoryEvents!.find(
       (event) => event.event === "FactoryRunStarted" && event.runId === "parallel",
@@ -3895,8 +3907,7 @@ describe("Supervisor authenticated successor execution", () => {
         dependsOn: item.dependsOn.map((id) => idMap.get(id)!),
       })),
     };
-    const compile = vi.mocked(f.management.compile);
-    compile.mockImplementation(async (context, checkpoint) => {
+    const compile = vi.fn<LegacyFixtureCompiler>(async (context, checkpoint) => {
       expect(context.legacyGraphConstraints?.workItems).toHaveLength(compiled.workItems.length);
       const result = {
         objective: compiled,
@@ -3905,6 +3916,7 @@ describe("Supervisor authenticated successor execution", () => {
       await checkpoint(result);
       return result;
     });
+    f.management.proposePlan = adaptFixtureCompiler(compile);
     const create = vi
       .spyOn(GithubOctokitGraphWriter.prototype, "createWorkItemIssue")
       .mockRejectedValue(new Error("recovery must not duplicate an issue"));
@@ -4363,7 +4375,7 @@ describe("Supervisor authenticated successor execution", () => {
       ].filter((event) => event.runId === "parallel"),
     ).toEqual(f.original);
     expect(f.launch).toHaveBeenCalledTimes(1);
-    expect(f.management.compile).not.toHaveBeenCalled();
+    expect(f.management.proposePlan).not.toHaveBeenCalled();
     expect(f.review).toHaveBeenCalledTimes(2);
     expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 80 } });
     expect(await f.run()).toMatchObject({ status: "completed" });

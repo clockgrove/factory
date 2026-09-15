@@ -73,16 +73,21 @@ import {
   adapterNetworkDestinations,
   futureToolchainCommand,
   localManagedToolchainPlan,
+  packageScriptValidationCommand,
+  PACKAGE_SETUP_REGISTRY,
+  PNPM_VALIDATION_SETUP_COMMAND,
+  PNPM_VERSION_COMMAND,
 } from "../toolchains/authority.js";
 import {
   assertSafeValidationCommand,
-  bootstrapPackageValidationCommand,
   NPM_VALIDATION_SETUP_COMMAND,
-  PNPM_BOOTSTRAP_REGISTRY,
-  PNPM_BOOTSTRAP_VERSION_COMMAND,
-  PNPM_BOOTSTRAP_VALIDATION_SETUP_COMMAND,
   validationPlanFromPacket,
 } from "./plan.js";
+
+function pnpmPackageScriptValidationCommand(command: string) {
+  const parsed = packageScriptValidationCommand(command);
+  return parsed?.manager === "pnpm" ? parsed : null;
+}
 
 async function git(worktree: LocalWorktree, args: string[]): Promise<string> {
   const result = await runContainedProcess({
@@ -759,11 +764,11 @@ export async function assertBunOrUvValidation(
 
 function pnpmValidationCommands(commands: string[]): Array<{
   command: string;
-  parsed: NonNullable<ReturnType<typeof bootstrapPackageValidationCommand>>;
+  parsed: NonNullable<ReturnType<typeof pnpmPackageScriptValidationCommand>>;
 }> {
   const pnpmCommands = commands.filter((command) => /^pnpm(?:\s|$)/.test(command.trim()));
   const parsed = pnpmCommands.flatMap((command) => {
-    const value = bootstrapPackageValidationCommand(command);
+    const value = pnpmPackageScriptValidationCommand(command);
     return value ? [{ command, parsed: value }] : [];
   });
   if (parsed.length !== pnpmCommands.length)
@@ -804,7 +809,7 @@ export async function assertEstablishedPnpmValidation(
   if (packageCommands.length === 0) return null;
   if (!packet.requirements.tools.includes("pnpm"))
     throw new Error("pnpm validation package manager is not a declared tool");
-  if (!packet.requirements.networkDestinations.includes(PNPM_BOOTSTRAP_REGISTRY))
+  if (!packet.requirements.networkDestinations.includes(PACKAGE_SETUP_REGISTRY))
     throw new Error("pnpm validation must declare registry.npmjs.org network access");
 
   const root = await readPackageManifest(worktree.path, "package.json");
@@ -895,8 +900,8 @@ export async function assertEstablishedPnpmValidation(
   return {
     manager: "pnpm",
     expectedVersion: expectedPnpmVersion,
-    versionCommand: PNPM_BOOTSTRAP_VERSION_COMMAND,
-    setupCommand: PNPM_BOOTSTRAP_VALIDATION_SETUP_COMMAND,
+    versionCommand: PNPM_VERSION_COMMAND,
+    setupCommand: PNPM_VALIDATION_SETUP_COMMAND,
     permittedSensitivePaths,
     changedOperations,
   };
@@ -922,13 +927,13 @@ export async function assertBootstrapPackageValidation(
   commands: string[],
 ): Promise<BootstrapPackageValidation | null> {
   const packageCommands = commands
-    .map((command) => ({ command, parsed: bootstrapPackageValidationCommand(command) }))
+    .map((command) => ({ command, parsed: pnpmPackageScriptValidationCommand(command) }))
     .filter(
       (
         value,
       ): value is {
         command: string;
-        parsed: NonNullable<ReturnType<typeof bootstrapPackageValidationCommand>>;
+        parsed: NonNullable<ReturnType<typeof pnpmPackageScriptValidationCommand>>;
       } => value.parsed !== null,
     );
   if (packageCommands.length === 0) return null;
@@ -948,7 +953,7 @@ export async function assertBootstrapPackageValidation(
   const { parsed } = packageCommands[0]!;
   if (!packet.requirements.tools.includes(parsed.manager))
     throw new Error("bootstrap validation package manager is not a declared tool");
-  if (!packet.requirements.networkDestinations.includes(PNPM_BOOTSTRAP_REGISTRY))
+  if (!packet.requirements.networkDestinations.includes(PACKAGE_SETUP_REGISTRY))
     throw new Error("bootstrap validation must declare registry.npmjs.org network access");
   if (
     typeof root.packageManager !== "string" ||
@@ -1037,8 +1042,8 @@ export async function assertBootstrapPackageValidation(
   return {
     manager: "pnpm",
     expectedVersion: managedPnpmVersion(packet),
-    versionCommand: PNPM_BOOTSTRAP_VERSION_COMMAND,
-    setupCommand: PNPM_BOOTSTRAP_VALIDATION_SETUP_COMMAND,
+    versionCommand: PNPM_VERSION_COMMAND,
+    setupCommand: PNPM_VALIDATION_SETUP_COMMAND,
     permittedSensitivePaths,
     changedOperations: new Set(),
   };
@@ -1186,7 +1191,7 @@ export async function validateArtifactClean(
   const plan = validationPlanFromPacket(input.packet);
   const potentialBootstrapManagers = new Set<"npm" | "pnpm" | "bun" | "uv">(
     plan.commands.flatMap((command) => {
-      const parsed = bootstrapPackageValidationCommand(command);
+      const parsed = pnpmPackageScriptValidationCommand(command);
       if (parsed) return [parsed.manager];
       const managed = futureToolchainCommand(command);
       return managed &&

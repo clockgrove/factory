@@ -1,4 +1,3 @@
-import { z } from "zod";
 import {
   compiledGraphDigest,
   parsePersistedCompiledObjective,
@@ -17,10 +16,10 @@ import {
   CompilerDraftAdmissionError,
   type CompilerDraftOutcome,
   type DraftStage,
+  type ValidatedCompilerDraft,
 } from "../evaluation/compiler-draft-loop.js";
 import {
   compilerEvalDigest,
-  buildCompilerInferenceChallenges,
   validateCompilerInferenceChallenges,
   parseObligationInventory,
   validateCompilerJudgeVerdict,
@@ -28,15 +27,102 @@ import {
   ObligationInventorySchema,
   type ObligationInventory,
 } from "../evaluation/compiler-eval.js";
-import { readCompilerObligationEvidence, validateCompilerDraft } from "./codex-cli.js";
-import type {
-  CompilationContext,
-  CompilationResult,
-  ManagementBackend,
-  ManagementUsage,
-} from "./backend.js";
+import {
+  CompilerProposalSchema,
+  CompilerValidationReportSchema,
+  type CompilerProposal,
+  type CompilerValidationReport,
+} from "../compiler/contracts.js";
+import {
+  prepareCompilerRequest,
+  compilerWorkItemsForEconomics,
+  projectCompilerProposal,
+  type CompilerProjectionTrace,
+} from "../compiler/proposal.js";
+import {
+  createCompilerValidationReport,
+  emptyCompilerValidationReport,
+} from "../compiler/violations.js";
+import { readPinnedCompilerFacts } from "../repository-profiles/index.js";
+import { inferCriterionRisk } from "../compiler/validation-design.js";
+import { readCompilerObligationEvidence } from "./codex-cli.js";
+import type { CompilationContext, ManagementBackend, ManagementUsage } from "./backend.js";
 
-/** No mutable Objective text or different accepted graph can inherit a draft assessment. */
+interface PersistedProposalResult {
+  proposal: CompilerProposal;
+  report: CompilerValidationReport;
+  provenance: { requestDigest: string };
+}
+
+function persistedProposalResult(value: unknown): PersistedProposalResult {
+  if (!value || typeof value !== "object") throw new Error("compiler result is not an object");
+  const candidate = value as Record<string, unknown>;
+  const proposal = CompilerProposalSchema.parse(candidate.proposal);
+  const report = CompilerValidationReportSchema.parse(candidate.report);
+  const provenance = candidate.provenance as Record<string, unknown> | undefined;
+  const requestDigest = String(provenance?.requestDigest ?? "");
+  if (!/^[a-f0-9]{64}$/.test(requestDigest))
+    throw new Error("compiler result has no request digest");
+  if (report.status !== "valid") throw new Error("persisted compiler proposal is invalid");
+  return { proposal, report, provenance: { requestDigest } };
+}
+
+function proposalFromFixedGraph(graph: CompiledObjective): CompilerProposal {
+  return CompilerProposalSchema.parse({
+    protocol: "clockgrove.factory/compiler-proposal",
+    workItems: graph.workItems.map((item) => ({
+      id: item.id,
+      title: item.title,
+      goal: item.goal,
+      obligationIds: [],
+      criteria: item.acceptance.map((text, index) => ({
+        id: `criterion-${index + 1}`,
+        text,
+        risk:
+          item.criterionRisks?.find((entry) => entry.criterion === text)?.risk ??
+          inferCriterionRisk(text),
+        validation: [{ tier: "semantic", evidence: [] }],
+      })),
+      scope: item.scope,
+      preconditions: item.preconditions,
+      outOfScope: item.outOfScope,
+      conventions: item.conventions,
+      dependsOn: item.dependsOn,
+      exclusiveResources: item.changeSurface?.exclusiveResources ?? [],
+      executionIntent: {
+        estimatedDurationMinutes: item.requirements?.estimatedDurationMinutes ?? 30,
+        additionalTools: item.requirements?.tools ?? [],
+        services: item.requirements?.services ?? [],
+        additionalNetworkDestinations: item.requirements?.networkDestinations ?? [],
+        trust: item.requirements?.trust ?? "trusted_local",
+      },
+    })),
+  });
+}
+
+function fixedProjectionTrace(
+  graph: CompiledObjective,
+  proposal: CompilerProposal,
+): CompilerProjectionTrace {
+  return {
+    protocol: "clockgrove.factory/compiler-projection",
+    requestDigest: draftDigest({ fixedGraph: compiledGraphDigest(graph) }),
+    proposalDigest: compilerEvalDigest(proposal),
+    graphDigest: compiledGraphDigest(graph),
+    addedEdges: [],
+    adapterBindings: graph.workItems.flatMap((item) =>
+      (item.repositoryCapabilities?.requires ?? []).map((binding) => ({
+        itemId: item.id,
+        adapterId: binding.adapter,
+        providerWorkItem: binding.providerWorkItem,
+        operation: { ...binding.operation },
+      })),
+    ),
+    riskElevations: [],
+  };
+}
+
+/** No mutable Objective text or different accepted proposal can inherit an assessment. */
 export function assertCompilerDraftSelection(
   records: readonly CompilerDraftRecord[],
   graph: CompiledObjective,
@@ -46,34 +132,39 @@ export function assertCompilerDraftSelection(
     throw new Error("compiler selection contains disputed terminal evidence");
   const binding = records[0]?.binding;
   if (!binding || (inputDigest !== undefined && binding.inputDigest !== inputDigest))
-    throw new Error("compiler assessment inputs changed before graph projection");
+    throw new Error("compiler assessment inputs changed before graph commitment");
   const selected = records.find((record) => record.kind === "selection");
   const inventoryResults = records.filter(
     (record) =>
       record.kind === "result" && record.payload.stage === "inventory" && !record.payload.error,
   );
-  if (inventoryResults.length > 1) throw new Error("compiled graph has ambiguous inventories");
-  const inventoryResult = inventoryResults[0];
-  const verdictResult =
-    selected &&
-    records.find(
-      (record) =>
-        record.kind === "result" &&
-        record.payload.stage === "judge" &&
-        record.payload.revision === selected.payload.revision,
-    );
-  if (
-    !selected ||
-    !inventoryResult ||
-    !verdictResult ||
-    inventoryResult.payload.error ||
-    verdictResult.payload.error
-  )
-    throw new Error("compiled graph has no completed independent draft assessment");
-  const inventory = ObligationInventorySchema.parse(inventoryResult.payload.value);
-  if (inventory.objectiveDigest !== binding.inputDigest || inventory.baseSha !== binding.baseSha)
-    throw new Error("compiler obligation inventory differs from frozen inputs");
-  const graphDigest = compiledGraphDigest(graph);
+  if (inventoryResults.length !== 1 || !selected)
+    throw new Error("compiled graph has no unambiguous accepted assessment");
+  const inventory = ObligationInventorySchema.parse(inventoryResults[0]!.payload.value);
+  const proposalResult = records.find(
+    (record) =>
+      record.kind === "result" &&
+      record.payload.revision === selected.payload.revision &&
+      (record.payload.stage === "compile" || record.payload.stage === "repair") &&
+      !record.payload.error,
+  );
+  const validation = records.find(
+    (record) =>
+      record.kind === "validation" && record.payload.revision === selected.payload.revision,
+  );
+  const verdictResult = records.find(
+    (record) =>
+      record.kind === "result" &&
+      record.payload.stage === "judge" &&
+      record.payload.revision === selected.payload.revision &&
+      !record.payload.error,
+  );
+  if (!proposalResult || !validation || !verdictResult)
+    throw new Error("compiler selection lacks proposal, projection, or judgment evidence");
+  const persisted = persistedProposalResult(proposalResult.payload.value);
+  const trace = validation.payload.projectionTrace as CompilerProjectionTrace;
+  if (draftDigest(trace) !== validation.payload.traceDigest)
+    throw new Error("compiler projection trace changed");
   const reviewEvidence = selected.payload.reviewEvidence ?? null;
   const challenges = validateCompilerInferenceChallenges(reviewEvidence ?? [], inventory);
   const judgeIntent = records.find(
@@ -81,32 +172,41 @@ export function assertCompilerDraftSelection(
       record.kind === "invocation" &&
       record.payload.invocationId === verdictResult.payload.invocationId,
   );
+  const projection = {
+    graphDigest: trace.graphDigest,
+    addedEdges: trace.addedEdges,
+    adapterBindings: trace.adapterBindings,
+    riskElevations: trace.riskElevations,
+  };
   if (
     !judgeIntent ||
-    draftDigest(judgeIntent.payload.reviewEvidence ?? null) !== draftDigest(reviewEvidence) ||
     judgeIntent.payload.inputDigest !==
       draftDigest({
         inventory,
-        previous: graph,
+        previous: persisted.proposal,
+        projection,
         failure: reviewEvidence,
         ...(reviewEvidence === null ? {} : { reviewEvidence }),
       })
   )
     throw new Error("compiler selection judge input evidence changed");
   const verdict = validateCompilerJudgeVerdict(verdictResult.payload.value, {
-    draftDigest: graphDigest,
+    draftDigest: compiledGraphDigest(graph),
     inventory,
-    graph,
+    graph: persisted.proposal,
+    addedEdges: trace.addedEdges,
     challenges,
   });
   if (
-    selected.payload.graphDigest !== graphDigest ||
-    compiledGraphDigest(parsePersistedCompiledObjective(selected.payload.graph)) !== graphDigest ||
+    selected.payload.graphDigest !== compiledGraphDigest(graph) ||
+    selected.payload.proposalDigest !== draftDigest(persisted.proposal) ||
+    selected.payload.requestDigest !== persisted.provenance.requestDigest ||
+    selected.payload.traceDigest !== draftDigest(trace) ||
     selected.payload.inventoryDigest !== draftDigest(inventory) ||
     selected.payload.verdictDigest !== draftDigest(verdict) ||
     verdict.decision !== "accept"
   )
-    throw new Error("compiled graph differs from its exact accepted draft");
+    throw new Error("compiled graph differs from its exact accepted proposal");
   for (const intent of records.filter((record) => record.kind === "invocation")) {
     const results = records.filter(
       (record) =>
@@ -117,7 +217,19 @@ export function assertCompilerDraftSelection(
   }
 }
 
-/** Production adapter: every paid phase shares the existing admission/accounting machinery. */
+function obligationFailureReport(proposal: unknown): CompilerValidationReport {
+  return createCompilerValidationReport("obligations", [
+    {
+      code: "schema-invalid",
+      itemId: null,
+      field: "",
+      expected: "valid obligation claims",
+      observed: { proposalDigest: draftDigest(proposal) },
+    },
+  ]);
+}
+
+/** Production adapter: every paid phase shares admission and exact accounting. */
 export async function compileEvaluatedDraft(args: {
   context: CompilationContext;
   backend: ManagementBackend;
@@ -129,7 +241,6 @@ export async function compileEvaluatedDraft(args: {
   assertInputs: () => Promise<void>;
   validate: (objective: CompiledObjective) => Promise<void>;
   deadlineAt: number;
-  /** Source-only assessment under a fresh report-only envelope; never mutable execution input. */
   fixedGraph?: CompiledObjective;
 }): Promise<CompilerDraftOutcome> {
   const { context, backend } = args;
@@ -137,25 +248,30 @@ export async function compileEvaluatedDraft(args: {
   const policy = context.runPolicy.compilerEvaluation;
   if (!policy) throw new Error("compiler evaluation requires explicit immutable policy");
   if (args.fixedGraph && policy.mode !== "report-only")
-    throw new Error("historical fixed graphs require a separate report-only evaluation purpose");
-  if (
-    !backend.extractObligations ||
-    !backend.judgePlan ||
-    !backend.repairPlan ||
-    !backend.supportsCompilerAdmission
-  )
+    throw new Error("historical fixed graphs require report-only evaluation");
+  if (!backend.extractObligations || !backend.judgePlan || !backend.supportsCompilerAdmission)
     throw new Error("management backend does not support compiler evaluation dispatch admission");
   const evidence = await readCompilerObligationEvidence(context);
   const frozenContext = { ...context, repositoryEvidence: evidence };
+  const pinnedFacts = await readPinnedCompilerFacts(
+    context.repository,
+    context.baseSha,
+    context.repositoryFiles,
+    context.repositoryLfs,
+  );
   const prior = await args.manager.load(args.binding);
   const startedAt = Number(prior[0]?.payload.startedAt ?? evidenceStartedAt);
   const deadlineAt = Math.min(args.deadlineAt, startedAt + (policy.timeoutSeconds ?? 600) * 1000);
-  const inventory = (value: unknown): ObligationInventory =>
-    parseObligationInventory(value, {
+  let activeInventory: ObligationInventory | null = null;
+  const inventory = (value: unknown): ObligationInventory => {
+    const parsed = parseObligationInventory(value, {
       objectiveDigest: compilerEvalDigest(context.objective),
       baseSha: context.baseSha,
       evidence,
     });
+    activeInventory = parsed;
+    return parsed;
+  };
   return runCompilerDraftLoop({
     manager: args.manager,
     lease: args.lease,
@@ -179,68 +295,70 @@ export async function compileEvaluatedDraft(args: {
       reserveAtDispatch: true,
       recordUsage: args.recordUsage,
       validateInventory: inventory,
-      validate: async (value) => {
-        if (!value || typeof value !== "object" || !("objective" in value))
-          throw new Error("draft compilation result missing graph");
-        const graph = parsePersistedCompiledObjective(value.objective);
-        if (
-          graph.title !== context.objective.title ||
-          graph.workItems.some((item) => item.baseSha !== context.baseSha)
-        )
-          throw new Error("draft changed pinned Objective or base");
-        await validateCompilerDraft(frozenContext, graph);
-        await args.validate(graph);
-        return graph;
+      validate: async (value): Promise<ValidatedCompilerDraft> => {
+        if (!activeInventory) throw new Error("draft validation has no obligation inventory");
+        if (value && typeof value === "object" && "fixedGraph" in value) {
+          const objective = parsePersistedCompiledObjective(value.fixedGraph);
+          const proposal = proposalFromFixedGraph(objective);
+          const projectionTrace = fixedProjectionTrace(objective, proposal);
+          await args.validate(objective);
+          return {
+            proposal,
+            objective,
+            projectionTrace,
+            report: emptyCompilerValidationReport(),
+            requestDigest: projectionTrace.requestDigest,
+          };
+        }
+        const persisted = persistedProposalResult(value);
+        const prepared = await prepareCompilerRequest({
+          context: frozenContext,
+          inventory: activeInventory,
+          pinnedFacts,
+        });
+        const economics = frozenContext.economicEvidence
+          ? await frozenContext.economicEvidence(
+              compilerWorkItemsForEconomics(
+                prepared.request,
+                persisted.proposal,
+                pinnedFacts,
+                frozenContext.runPolicy,
+              ),
+            )
+          : undefined;
+        const projected = projectCompilerProposal({
+          request: prepared.request,
+          proposal: persisted.proposal,
+          pinnedFacts,
+          runPolicy: frozenContext.runPolicy,
+          ...(economics ? { economicEvidence: economics } : {}),
+          ...(prepared.legacyGraphConstraints
+            ? { legacyGraphConstraints: prepared.legacyGraphConstraints }
+            : {}),
+        });
+        projected.trace.requestDigest = persisted.provenance.requestDigest;
+        await args.validate(projected.objective);
+        return {
+          proposal: persisted.proposal,
+          objective: projected.objective,
+          projectionTrace: projected.trace,
+          report: persisted.report,
+          requestDigest: persisted.provenance.requestDigest,
+        };
       },
-      reviewEvidence: (candidate, priorFailure, obligations, priorReviewEvidence) => {
+      reviewEvidence: (_candidate, _failure, obligations, priorReviewEvidence) => {
         const original = inventory(obligations);
         const carried = validateCompilerInferenceChallenges(priorReviewEvidence ?? [], original);
-        const priorVerdict = CompilerJudgeVerdictSchema.safeParse(priorFailure);
-        if (
-          !priorVerdict.success ||
-          !candidate ||
-          typeof candidate !== "object" ||
-          !("repair" in candidate)
-        )
-          return carried.length ? carried : null;
-        const summary = z
-          .object({
-            findingDispositions: z
-              .array(
-                z
-                  .object({
-                    findingId: z.string(),
-                    disposition: z.enum(["addressed", "challenged"]),
-                    reason: z.string(),
-                    evidenceIds: z.array(z.string()),
-                  })
-                  .strict(),
-              )
-              .max(64),
-          })
-          .parse(candidate.repair);
-        const fresh = buildCompilerInferenceChallenges(
-          original,
-          priorVerdict.data,
-          summary.findingDispositions,
-        );
-        const merged = new Map(
-          carried.map((entry) => [`${entry.findingId}\0${entry.obligationId ?? ""}`, entry]),
-        );
-        for (const challenge of fresh)
-          merged.set(`${challenge.findingId}\0${challenge.obligationId ?? ""}`, challenge);
-        const challenges = validateCompilerInferenceChallenges([...merged.values()], original);
-        return challenges.length ? challenges : null;
+        return carried.length ? carried : null;
       },
-      accept: (value, graph, obligations, reviewEvidence) => {
+      accept: (value, draft, obligations, reviewEvidence) => {
+        const original = inventory(obligations);
         const verdict = validateCompilerJudgeVerdict(value, {
-          draftDigest: compiledGraphDigest(graph),
-          graph,
-          inventory: inventory(obligations),
-          challenges: validateCompilerInferenceChallenges(
-            reviewEvidence ?? [],
-            inventory(obligations),
-          ),
+          draftDigest: compiledGraphDigest(draft.objective),
+          graph: draft.proposal,
+          addedEdges: draft.projectionTrace.addedEdges,
+          inventory: original,
+          challenges: validateCompilerInferenceChallenges(reviewEvidence ?? [], original),
         });
         if (verdict.decision === "abstain")
           throw new CompilerDraftStopError("judge cannot resolve material ambiguity");
@@ -290,21 +408,18 @@ export async function compileEvaluatedDraft(args: {
               request.revision > 0 &&
               request.failure &&
               typeof request.failure === "object" &&
-              "error" in request.failure &&
               "proposal" in request.failure
                 ? {
                     revision: request.revision,
-                    validationFailure: String(request.failure.error),
+                    validationReport: obligationFailureReport(request.failure.proposal),
                     previousProposal: request.failure.proposal,
                   }
                 : undefined;
             if (request.revision > 0 && !failure)
-              throw new Error("inventory repair has no prior validation failure");
+              throw new Error("inventory repair has no prior validation report");
             const result = await backend.extractObligations!(
               frozenContext,
-              async (result) => {
-                await checkpoint({ value: result.inventory, usage: result.usage });
-              },
+              async (result) => checkpoint({ value: result.inventory, usage: result.usage }),
               beforeModelInvocation,
               failure,
             );
@@ -312,60 +427,76 @@ export async function compileEvaluatedDraft(args: {
           }
           const obligations = inventory(request.inventory);
           if (request.stage === "judge") {
-            if (!request.previous) throw new Error("judge has no mechanically valid draft");
+            if (!request.previous || !request.projection)
+              throw new Error("judge has no mechanically valid proposal and projection");
             const result = await backend.judgePlan!(
               {
                 compilation: frozenContext,
                 inventory: obligations,
-                objective: request.previous,
+                proposal: request.previous,
+                projectionTrace: {
+                  protocol: "clockgrove.factory/compiler-projection",
+                  requestDigest: "0".repeat(64),
+                  proposalDigest: compilerEvalDigest(request.previous),
+                  ...request.projection,
+                },
+                graphDigest: request.projection.graphDigest,
                 challenges: validateCompilerInferenceChallenges(
                   request.reviewEvidence ?? [],
                   obligations,
                 ),
               },
-              async (result) => {
-                await checkpoint({ value: result.verdict, usage: result.usage });
-              },
+              async (result) => checkpoint({ value: result.verdict, usage: result.usage }),
               beforeModelInvocation,
             );
             return { value: result.verdict, usage: result.usage };
           }
-          const checkpointCompilation = async (result: CompilationResult) =>
-            checkpoint({ value: result, usage: result.usage });
           const verdict = CompilerJudgeVerdictSchema.safeParse(request.failure);
-          const result =
-            request.stage === "compile"
-              ? await backend.compile(frozenContext, checkpointCompilation, beforeModelInvocation)
-              : await backend.repairPlan!(
-                  {
-                    compilation: frozenContext,
-                    inventory: obligations,
-                    revision: request.revision,
-                    challenges: validateCompilerInferenceChallenges(
-                      request.reviewEvidence ?? [],
-                      obligations,
-                    ),
-                    ...(request.previous ? { objective: request.previous } : {}),
-                    ...(verdict.success
-                      ? { verdict: verdict.data }
-                      : {
-                          validationFailure:
-                            typeof request.failure === "object" &&
-                            request.failure !== null &&
-                            "error" in request.failure
-                              ? String(request.failure.error)
-                              : "prior draft failed mechanical validation",
-                          ...(typeof request.failure === "object" &&
-                          request.failure !== null &&
-                          "proposal" in request.failure
-                            ? { previousProposal: request.failure.proposal }
-                            : {}),
-                        }),
-                  },
-                  checkpointCompilation,
-                  beforeModelInvocation,
-                );
-          return { value: result, usage: result.usage };
+          const report =
+            request.failure &&
+            typeof request.failure === "object" &&
+            "validationReport" in request.failure
+              ? CompilerValidationReportSchema.parse(request.failure.validationReport)
+              : emptyCompilerValidationReport();
+          const prepared = await prepareCompilerRequest({
+            context: frozenContext,
+            inventory: obligations,
+            revision: request.revision,
+            previousProposal: request.previous,
+            validationReport: report,
+            semanticFindings: verdict.success ? verdict.data.findings : [],
+            challenges: validateCompilerInferenceChallenges(
+              request.reviewEvidence ?? [],
+              obligations,
+            ),
+            pinnedFacts,
+          });
+          if (prepared.report.status !== "valid")
+            throw Object.assign(new CompilerDraftStopError("compiler request is unsatisfiable"), {
+              validationReport: prepared.report,
+            });
+          const result = await backend.proposePlan(
+            prepared.request,
+            async (result) =>
+              checkpoint({
+                value: {
+                  proposal: result.proposal,
+                  report: result.report,
+                  provenance: result.provenance,
+                },
+                usage: result.usage,
+              }),
+            beforeModelInvocation,
+            frozenContext,
+          );
+          return {
+            value: {
+              proposal: result.proposal,
+              report: result.report,
+              provenance: result.provenance,
+            },
+            usage: result.usage,
+          };
         } catch (error) {
           if (!dispatched && !(error instanceof CompilerDraftAdmissionError))
             throw new CompilerDraftAdmissionError(error);

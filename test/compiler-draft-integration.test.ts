@@ -22,7 +22,8 @@ import {
   type CompilerJudgeVerdict,
   type ObligationInventory,
 } from "../src/evaluation/compiler-eval.js";
-import type { CompiledObjective } from "../src/graph.js";
+import type { CompilerRequest } from "../src/compiler/contracts.js";
+import { pinFixtureRepository } from "./helpers/compiler-proposal.js";
 const BASE_SHA = "a".repeat(40);
 const BASE_TREE = "b".repeat(40);
 
@@ -34,9 +35,9 @@ class MemoryGraphStore implements LeaseStore, CompiledGraphStore {
   trees = new Map<string, Map<string, string>>();
   next = 1;
 
-  constructor() {
-    this.commits.set(BASE_SHA, {
-      oid: BASE_SHA,
+  constructor(baseSha = BASE_SHA) {
+    this.commits.set(baseSha, {
+      oid: baseSha,
       treeOid: BASE_TREE,
       parentOids: [],
       message: "base",
@@ -135,49 +136,45 @@ const temporary: string[] = [];
 afterEach(async () => {
   await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
-function proposal(repaired = false) {
+function proposal(request: CompilerRequest, repaired = false) {
   const criterion = repaired
     ? "Feature handles positive and negative values."
     : "Feature handles positive values.";
+  const recipe = request.repository.validationRecipes[0]!;
   return {
-    title: "Test",
+    protocol: "clockgrove.factory/compiler-proposal" as const,
     workItems: [
       {
         id: "feature",
         title: "Implement feature",
         goal: "Implement feature",
-        acceptance: [criterion],
-        criterionRisks: [{ criterion, risk: "ordinary" }],
+        obligationIds: ["values"],
+        criteria: [
+          {
+            id: "values-work",
+            text: criterion,
+            risk: "ordinary" as const,
+            validation: [
+              {
+                tier: "mechanical" as const,
+                evidence: [{ kind: "observed" as const, recipeId: recipe.id }],
+              },
+            ],
+          },
+        ],
         scope: ["src/feature.ts"],
         preconditions: [],
         outOfScope: [],
         conventions: [],
         dependsOn: [],
-        baseSha: BASE_SHA,
-        validationCommands: ["npm test"],
-        validation: [
-          {
-            tier: "semantic",
-            criteria: [criterion],
-            rationale: "Review changed behavior",
-            evidenceCommands: [],
-          },
-        ],
-        requirements: {
-          os: ["linux"],
-          architecture: ["x64"],
-          cpu: 1,
-          memoryMb: 2048,
-          diskMb: 1024,
-          timeoutMinutes: 30,
+        exclusiveResources: [],
+        executionIntent: {
           estimatedDurationMinutes: 10,
-          tools: ["node", "npm"],
+          additionalTools: [],
           services: [],
-          networkDestinations: [],
-          permittedSecretNames: [],
+          additionalNetworkDestinations: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
       },
     ],
   };
@@ -200,12 +197,17 @@ async function setup(
     join(repository, "package.json"),
     JSON.stringify({ scripts: { test: "node --test" } }),
   );
+  await writeFile(
+    join(repository, "package-lock.json"),
+    JSON.stringify({ name: "draft-integration-fixture", lockfileVersion: 3, packages: {} }),
+  );
+  const baseSha = pinFixtureRepository(repository);
   const context: CompilationContext = {
     repository,
     objective: { number: 42, title: "Test", body: "Implement positive and negative values." },
     defaultBranch: "main",
-    baseSha: BASE_SHA,
-    repositoryFiles: ["package.json", "src/feature.ts"],
+    baseSha,
+    repositoryFiles: ["package-lock.json", "package.json", "src/feature.ts"],
     allowedNetworkDestinations: [],
     runPolicy: {
       ...DEFAULT_RUN_POLICY,
@@ -216,7 +218,7 @@ async function setup(
   const inventory: ObligationInventory = {
     version: 1,
     objectiveDigest: compilerEvalDigest(context.objective),
-    baseSha: BASE_SHA,
+    baseSha,
     evidence: context.repositoryEvidence,
     obligations: [
       {
@@ -266,7 +268,7 @@ async function setup(
     if (prompt.includes("independent compiler judge")) {
       stages.push("judge");
       const source = JSON.parse(prompt.split("\n\n").at(-1)!) as {
-        graph: CompiledObjective;
+        proposal: { workItems: Array<{ id: string; criteria: Array<{ id: string }> }> };
         draftDigest: string;
         inventoryDigest: string;
       };
@@ -282,7 +284,7 @@ async function setup(
             status: accept ? "covered" : "partial",
             itemIds: ["feature"],
             acceptanceBindings: [
-              { itemId: "feature", criterion: source.graph.workItems[0]!.acceptance[0]! },
+              { itemId: "feature", criterionId: source.proposal.workItems[0]!.criteria[0]!.id },
             ],
             evidenceIds: ["objective"],
             reason: accept ? "Both cases specified" : "Negative case missing",
@@ -331,40 +333,25 @@ async function setup(
       }
       return { value: verdict, usage };
     }
-    if (prompt.includes("Repair the draft")) {
+    if (prompt.includes("This is a repair")) {
       stages.push("repair");
       repairs++;
       if (options.malformedRepair) return { value: { malformed: "preserve this proposal" }, usage };
-      return {
-        value: {
-          objective: proposal(true),
-          summary: {
-            changeSummary: "Cover negative behavior",
-            lineage: [{ itemId: "feature", previousItemIds: ["feature"] }],
-            findingDispositions: [
-              {
-                findingId: "missing-negative",
-                disposition: "addressed",
-                reason: "Added behavior",
-                evidenceIds: ["objective"],
-              },
-            ],
-          },
-        },
-        usage,
-      };
+      const request = JSON.parse(prompt.split("\n\n").at(-1)!) as CompilerRequest;
+      return { value: proposal(request, true), usage };
     }
     stages.push("compile");
     if (options.missingAccounting) throw new Error("transport outcome unknown");
-    return { value: proposal(), usage };
+    const request = JSON.parse(prompt.split("\n\n").at(-1)!) as CompilerRequest;
+    return { value: proposal(request), usage };
   });
   const backend = new CodexCliManagementBackend({ runStructured });
-  const store = new MemoryGraphStore();
+  const store = new MemoryGraphStore(baseSha);
   const leases = new LeaseManager({ store });
   const pd = policyDigest(context.runPolicy);
   const lease = await leases.acquire(
     { objective: 42, runId: "integrated", holder: "director", policyDigest: pd },
-    await store.readCommit(BASE_SHA),
+    await store.readCommit(baseSha),
   );
   const manager = new CompilerDraftManager(store, leases);
   const accounting = new Map<string, unknown>();
@@ -379,7 +366,7 @@ async function setup(
       objective: 42,
       runId: lease.runId,
       policyDigest: pd,
-      baseSha: BASE_SHA,
+      baseSha,
       inputDigest: compilerEvalDigest(context.objective),
     },
     admit,
@@ -413,7 +400,7 @@ describe("production compiler draft adapter", () => {
     expect(result.records.at(-1)?.kind).toBe("selection");
     const args = {
       lease: f.args.lease,
-      base: await f.store.readCommit(BASE_SHA),
+      base: await f.store.readCommit(f.args.context.baseSha),
       objective: result.graph,
     };
     const saved = await graphs.persist(args);
@@ -425,7 +412,10 @@ describe("production compiler draft adapter", () => {
     expect(
       result.records.filter((r) => r.kind === "result" && r.payload.stage === "compile")[0]?.payload
         .value,
-    ).toMatchObject({ provenance: { rawProposal: proposal(), baseSha: BASE_SHA } });
+    ).toMatchObject({
+      proposal: { protocol: "clockgrove.factory/compiler-proposal" },
+      provenance: { baseSha: f.args.context.baseSha },
+    });
   });
   it("never produces accepted projection authority for report-only rejected plans", async () => {
     const f = await setup({ reportOnly: true });
@@ -441,8 +431,8 @@ describe("production compiler draft adapter", () => {
     const f = await setup({ malformedRepair: true });
     const result = await compileEvaluatedDraft(f.args);
     expect(result.status).toBe("stopped");
-    expect(f.stages.filter((stage) => stage === "repair")).toHaveLength(2);
-    expect(f.accounting.size).toBe(5);
+    expect(f.stages.filter((stage) => stage === "repair")).toHaveLength(1);
+    expect(f.accounting.size).toBe(4);
     expect(
       result.records.filter((r) => r.kind === "result" && r.payload.stage === "repair"),
     ).toEqual(
@@ -467,7 +457,7 @@ describe("production compiler draft adapter", () => {
     expect(f.accounting.size).toBe(6);
     expect(f.args.admit).toHaveBeenCalledTimes(6);
     expect(f.prompts[1]).toContain("priorInventoryFailure");
-    expect(f.prompts[1]).toContain("unknown obligation citation");
+    expect(f.prompts[1]).toContain('"code":"schema-invalid"');
     const rejected = result.records.find(
       (record) =>
         record.kind === "result" &&
@@ -482,15 +472,8 @@ describe("production compiler draft adapter", () => {
         proposalDigest: draftDigest(rejected?.payload.proposal),
       },
       proposal: {
-        rawProposal: {
-          version: 1,
-          obligations: [expect.objectContaining({ evidenceIds: ["foreign"] })],
-        },
-        normalizationTrace: [
-          "Factory attached the frozen objective digest",
-          "Factory attached the frozen base SHA",
-          "Factory attached the exact frozen evidence records",
-        ],
+        version: 1,
+        obligations: [expect.objectContaining({ evidenceIds: ["foreign"] })],
       },
     });
     expect((await compileEvaluatedDraft(f.args)).status).toBe("accepted");
@@ -507,7 +490,7 @@ describe("production compiler draft adapter", () => {
     delete firstInventory.payload.error;
     firstInventory.payload.value = validInventory.payload.value;
     expect(() => assertCompilerDraftSelection(ambiguous, result.graph)).toThrow(
-      "ambiguous inventories",
+      "no unambiguous accepted assessment",
     );
   });
   it("keeps report-only invalid inventory single-shot", async () => {

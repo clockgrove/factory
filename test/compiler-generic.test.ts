@@ -14,7 +14,6 @@ import {
   isGroundedValidationCommand,
   type RepositoryFacts,
 } from "../src/repository-profiles/index.js";
-import { CodexCliManagementBackend } from "../src/management/codex-cli.js";
 import {
   parseLegacyGraphConstraints,
   renderLegacyWorkItemCore,
@@ -23,6 +22,8 @@ import {
 } from "../src/graph.js";
 import { validationPlanFromPacket } from "../src/validation/plan.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
+import { validateLegacyProposal } from "../src/compiler/proposal.js";
+import { semanticProposal, semanticRequest } from "./helpers/semantic-compiler.js";
 
 const paths: string[] = [];
 afterEach(async () => {
@@ -90,9 +91,6 @@ const compile = (workItems: CompilerWorkItemInput[]) =>
 
 describe("generic repository command grounding", () => {
   it("constrains compilation to enrich the exact existing Work Item core", async () => {
-    const root = await repository({
-      "package.json": JSON.stringify({ scripts: { test: "node --test" } }),
-    });
     const constrained = item("adopted-8", {
       title: "Existing Work Item",
       goal: "Preserve the reviewed behavior.",
@@ -111,56 +109,29 @@ describe("generic repository command grounding", () => {
         },
       ],
     });
-    const context = {
-      repository: root,
-      repositoryFiles: ["package.json"],
-      objective: { number: 1, title: "Generic", body: "Implement the existing plan" },
-      defaultBranch: "main",
-      baseSha: sha,
-      allowedNetworkDestinations: [],
-      runPolicy: DEFAULT_RUN_POLICY,
-      legacyGraphConstraints,
+    const request = semanticRequest();
+    const proposal = semanticProposal(request);
+    proposal.workItems[0] = {
+      ...proposal.workItems[0]!,
+      id: "adopted-8",
+      title: constrained.title,
+      goal: constrained.goal,
+      criteria: proposal.workItems[0]!.criteria.map((criterion, index) => ({
+        ...criterion,
+        text: constrained.acceptance[index]!,
+      })),
+      scope: constrained.scope,
+      preconditions: constrained.preconditions,
+      outOfScope: constrained.outOfScope,
+      conventions: constrained.conventions,
+      dependsOn: constrained.dependsOn,
     };
-    const backend = new CodexCliManagementBackend({
-      runStructured: async (_cwd, _schema, prompt) => {
-        expect(prompt).toContain("authenticated human-authored Work Items");
-        expect(prompt).toContain(JSON.stringify(legacyGraphConstraints));
-        return {
-          value: { title: "Generic", workItems: [constrained] },
-          usage: { inputTokens: 1, outputTokens: 1 },
-        };
-      },
+    expect(validateLegacyProposal(proposal, legacyGraphConstraints).status).toBe("valid");
+    proposal.workItems[0]!.criteria[0]!.text = "A rewritten criterion.";
+    expect(validateLegacyProposal(proposal, legacyGraphConstraints)).toMatchObject({
+      status: "repairable",
+      violations: [{ code: "legacy-constraint-mismatch" }],
     });
-
-    await expect(backend.compile(context, async () => {})).resolves.toMatchObject({
-      objective: { workItems: [{ id: "adopted-8", title: "Existing Work Item" }] },
-    });
-
-    await expect(
-      new CodexCliManagementBackend({
-        runStructured: async () => ({
-          value: {
-            title: "Generic",
-            workItems: [
-              {
-                ...constrained,
-                acceptance: ["A rewritten criterion."],
-                validation: [
-                  {
-                    ...constrained.validation![0]!,
-                    criteria: ["A rewritten criterion."],
-                  },
-                ],
-                criterionRisks: [
-                  { criterion: "A rewritten criterion.", risk: "ordinary" as const },
-                ],
-              },
-            ],
-          },
-          usage: { inputTokens: 1, outputTokens: 1 },
-        }),
-      }).compile(context, async () => {}),
-    ).rejects.toThrow(/changed legacy Work Item #8/);
   });
 
   it("preserves pinned LFS tooling and conservatively serializes asset scope", () => {
@@ -232,30 +203,16 @@ describe("generic repository command grounding", () => {
         validationCommands: [expected[0]!],
         requirements: { ...item("a").requirements, tools: [runner] },
       });
-      const backend = new CodexCliManagementBackend({
-        runStructured: async (_cwd, _schema, prompt) => {
-          expect(prompt).toContain(expected[0]!);
-          return {
-            value: { title: "Generic", workItems: [workItem] },
-            usage: { inputTokens: 1, outputTokens: 1 },
-          };
-        },
+      const result = compileObjective({
+        title: "Generic",
+        baseSha: sha,
+        repositoryFacts: observed,
+        workItems: [workItem],
+        runPolicy: DEFAULT_RUN_POLICY,
       });
-      const result = await backend.compile(
-        {
-          repository: root,
-          repositoryFiles: Object.keys(documents),
-          objective: { number: 1, title: "Generic", body: "Implement a" },
-          defaultBranch: "main",
-          baseSha: sha,
-          allowedNetworkDestinations: [],
-          runPolicy: DEFAULT_RUN_POLICY,
-        },
-        async () => {},
-      );
-      validateGraph(result.objective);
+      validateGraph(result);
       expect(
-        validationPlanFromPacket(workerPacketFromCompiled(result.objective.workItems[0]!)).commands,
+        validationPlanFromPacket(workerPacketFromCompiled(result.workItems[0]!)).commands,
       ).toEqual([expected[0]!]);
     },
   );

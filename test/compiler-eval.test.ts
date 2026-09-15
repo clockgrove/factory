@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CompilerObjective } from "../src/compiler/index.js";
+import type { CompilerProposal } from "../src/compiler/contracts.js";
 import {
   COMPILER_JUDGE_DIMENSIONS,
   validateCompilerCaseLabel,
@@ -39,11 +39,15 @@ const inventory: ObligationInventory = {
 };
 // These tests exercise evidence contracts only, not structural compilation or model quality.
 const graph = {
-  title: "API",
+  protocol: "clockgrove.factory/compiler-proposal",
   workItems: [
-    { id: "api", dependsOn: [], acceptance: ["Acceptance includes the requested outcome"] },
+    {
+      id: "api",
+      dependsOn: [],
+      criteria: [{ id: "requested-outcome" }],
+    },
   ],
-} as unknown as CompilerObjective;
+} as unknown as CompilerProposal;
 const expected = { inventory, graph, draftDigest: "c".repeat(64) };
 const verdict = (): CompilerJudgeVerdict => ({
   version: 1,
@@ -52,7 +56,7 @@ const verdict = (): CompilerJudgeVerdict => ({
   inventoryDigest: compilerEvalDigest(inventory),
   coverage: inventory.obligations.map((obligation) => ({
     obligationId: obligation.id,
-    acceptanceBindings: [{ itemId: "api", criterion: "Acceptance includes the requested outcome" }],
+    acceptanceBindings: [{ itemId: "api", criterionId: "requested-outcome" }],
     status: "covered",
     itemIds: ["api"],
     evidenceIds: ["objective"],
@@ -161,12 +165,12 @@ describe("obligation-first compiler evidence", () => {
       validateCompilerJudgeVerdict(verdict(), { ...expected, draftDigest: "d".repeat(64) }),
     ).toThrow("identity");
     const serial = {
-      title: "API",
+      protocol: "clockgrove.factory/compiler-proposal",
       workItems: [
-        { id: "api", dependsOn: [], acceptance: ["Acceptance includes the requested outcome"] },
-        { id: "consumer", dependsOn: ["api"], acceptance: ["Consumes API"] },
+        { id: "api", dependsOn: [], criteria: [{ id: "requested-outcome" }] },
+        { id: "consumer", dependsOn: ["api"], criteria: [{ id: "consumes-api" }] },
       ],
-    } as unknown as CompilerObjective;
+    } as unknown as CompilerProposal;
     const reviewed = verdict();
     reviewed.items.push({ ...reviewed.items[0]!, itemId: "consumer" });
     expect(() => validateCompilerJudgeVerdict(reviewed, { ...expected, graph: serial })).toThrow(

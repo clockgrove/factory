@@ -17,6 +17,8 @@ import {
   type CompilerCriterionBindings,
   type PreparedCompilerCase,
 } from "../src/evaluation/compiler-corpus.js";
+import type { CompilerRequest } from "../src/compiler/contracts.js";
+import { pinFixtureRepository, proposalFromCompiledFixture } from "./helpers/compiler-proposal.js";
 import {
   assessToolSelection,
   parseToolSelectionCorpus,
@@ -56,6 +58,7 @@ function item(
   id: string,
   scope: string[],
   dependsOn: string[] = [],
+  baseSha = sha,
 ): CompilerWorkItemInput {
   const criteria = value.entry.criteria;
   const tiers = ["mechanical", "semantic", "visual", "deterministic-simulation"] as const;
@@ -69,7 +72,7 @@ function item(
     preconditions: [],
     outOfScope: [],
     conventions: [],
-    baseSha: sha,
+    baseSha,
     validationCommands: value.commands,
     criterionRisks: criteria.map((criterion) => ({ criterion: criterion.text, risk: "ordinary" })),
     validation: tiers.flatMap((tier) => {
@@ -103,10 +106,10 @@ function item(
     artifactContract: "clockgrove.factory/artifact-v1",
   };
 }
-function combined(value: PreparedCompilerCase) {
+function combined(value: PreparedCompilerCase, baseSha = sha) {
   return compileObjective({
     title: value.entry.title,
-    baseSha: sha,
+    baseSha,
     repositoryFacts: value.facts,
     runPolicy: corpusRunPolicy,
     workItems: [
@@ -114,6 +117,8 @@ function combined(value: PreparedCompilerCase) {
         value,
         "capability",
         value.inventory.map((file) => file.path),
+        [],
+        baseSha,
       ),
     ],
   });
@@ -214,6 +219,8 @@ describe("representative executable corpus integrity, not compiler/model quality
 
   it("feeds the human Objective and real facts through the existing management adapter", async () => {
     const value = await fixture("generated-catalog");
+    const baseSha = pinFixtureRepository(value.repository);
+    const expected = combined(value, baseSha);
     let observedPrompt = "";
     let checkpoints = 0;
     const backend = new CodexCliManagementBackend({
@@ -222,16 +229,10 @@ describe("representative executable corpus integrity, not compiler/model quality
         observedPrompt = prompt;
         // Injected provider result checks wiring only; this is not an actual compiler evaluation.
         return {
-          value: {
-            title: value.entry.title,
-            workItems: [
-              item(
-                value,
-                "capability",
-                value.inventory.map((file) => file.path),
-              ),
-            ],
-          },
+          value: proposalFromCompiledFixture(
+            JSON.parse(prompt.split("\n\n").at(-1)!) as CompilerRequest,
+            expected,
+          ),
           usage: { inputTokens: 0, outputTokens: 0 },
         };
       },
@@ -240,7 +241,7 @@ describe("representative executable corpus integrity, not compiler/model quality
       value,
       {
         objectiveNumber: 17,
-        baseSha: sha,
+        baseSha,
         defaultBranch: "main",
         allowedNetworkDestinations: [],
         runPolicy: corpusRunPolicy,
@@ -255,7 +256,7 @@ describe("representative executable corpus integrity, not compiler/model quality
     expect(observedPrompt).toContain("npm run generate");
     expect(checkpoints).toBe(1);
     expect(
-      assessCompilerCorpusResult(value, result.objective, bindings(value), sha)
+      assessCompilerCorpusResult(value, result.objective, bindings(value), baseSha)
         .installedExecutionProven,
     ).toBe(false);
     await writeFile(join(value.repository, "data/status.json"), "{}\n");
@@ -264,7 +265,7 @@ describe("representative executable corpus integrity, not compiler/model quality
         value,
         {
           objectiveNumber: 17,
-          baseSha: sha,
+          baseSha,
           defaultBranch: "main",
           allowedNetworkDestinations: [],
           runPolicy: corpusRunPolicy,

@@ -12,6 +12,7 @@ import {
   type ManagementBackend,
   type ManagementUsage,
 } from "../management/backend.js";
+import { compilePlan } from "../management/compile.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy, resolveModelSelection } from "../protocol/policy.js";
 import { assertNewRunBudgetIntent } from "../protocol/budget-intent.js";
 import type { ApplicationSnapshot } from "./services.js";
@@ -308,7 +309,7 @@ export async function buildPlanReport(input: {
         ...(modelSelection ? { modelSelection } : {}),
       };
       let checkpointed = false;
-      const result = await management.compile(context, async (candidate) => {
+      const result = await compilePlan(context, management, async (candidate) => {
         observedUsage = { ...candidate.usage };
         checkpointed = true;
       });

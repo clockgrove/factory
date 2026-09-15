@@ -393,8 +393,8 @@ async function fixture(
           phase: "management",
           unit: "model_tokens",
           amount: 0,
-          usageId: "invocation-compiler-inventory-1",
-          modelInvocationId: "compiler-inventory-1",
+          usageId: `invocation-compile-${base.oid}`,
+          modelInvocationId: `compile-${base.oid}`,
           directorEpoch: 1,
           policyDigest: policyDigest(policy),
         }),
@@ -405,8 +405,8 @@ async function fixture(
           phase: "management",
           unit: "model_tokens",
           amount: 30,
-          usageId: "draft-compiler-inventory-1",
-          modelInvocationId: "compiler-inventory-1",
+          usageId: `draft-compile-${base.oid}`,
+          modelInvocationId: `compile-${base.oid}`,
           directorEpoch: 1,
           policyDigest: policyDigest(policy),
           reportedModelUsage: { inputTokens: 11, outputTokens: 19 },
@@ -790,7 +790,8 @@ import {
 
 async function adopted(options: Parameters<typeof fixture>[0] = {}) {
   const f = await fixture(options);
-  expect(await f.make().adopt(f.args)).toMatchObject({ status: "adopted" });
+  const adoption = await f.make().adopt(f.args);
+  expect(adoption, JSON.stringify(adoption)).toMatchObject({ status: "adopted" });
   f.store.enforce = false;
   const read = (store: RecoveryReadStore = f.store) =>
     loadRecoveryRuntime({
@@ -834,6 +835,30 @@ async function addAttempt(f: Awaited<ReturnType<typeof adopted>>, attempt = 1) {
 }
 
 describe("verified successor runtime loader", () => {
+  it.each(["base", "policy"] as const)(
+    "fails closed instead of returning a retained compiler reason on %s mismatch",
+    async (mismatch) => {
+      const f = await adopted({ compileFailure: true });
+      for (const receipt of f.snapshot.factoryEvents!.filter(
+        (event) => event.kind === "budget" && event.phase === "management",
+      )) {
+        if (receipt.kind !== "budget") continue;
+        if (mismatch === "base") receipt.modelInvocationId = `compile-${"d".repeat(40)}`;
+        else receipt.policyDigest = "e".repeat(64);
+      }
+      expect(await f.read()).toEqual({
+        status: "blocked",
+        adoptionVerified: false,
+        executionAuthorized: false,
+        blockers: [
+          mismatch === "base"
+            ? "runtime-binding-unavailable"
+            : "prior-compilation-failure-unavailable",
+        ],
+      });
+    },
+  );
+
   it.each(["graph", "projection"] as const)(
     "blocks adoption when the predecessor %s ref appears after the recovery request",
     async (kind) => {

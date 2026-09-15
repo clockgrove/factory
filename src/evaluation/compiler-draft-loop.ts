@@ -10,6 +10,9 @@ import {
   parsePersistedCompiledObjective,
   type CompiledObjective,
 } from "../graph.js";
+import type { CompilerProposal, CompilerValidationReport } from "../compiler/contracts.js";
+import { CompilerProposalSchema, CompilerValidationReportSchema } from "../compiler/contracts.js";
+import type { CompilerProjectionTrace } from "../compiler/proposal.js";
 import {
   type CompilerDraftManager,
   CompilerDraftReservationConflictError,
@@ -19,6 +22,8 @@ import {
 } from "../control/compiler-drafts.js";
 import type { LeaseState } from "../control/lease.js";
 import { ProviderQuotaError } from "../providers/quota.js";
+import { CompilerDraftStopError } from "./compiler-draft-errors.js";
+export { CompilerDraftStopError } from "./compiler-draft-errors.js";
 
 function diagnostic(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error);
@@ -44,6 +49,10 @@ function safeProposal(error: unknown): Record<string, unknown> {
   } catch {
     return { proposalUnavailable: "unsafe or oversized proposal" };
   }
+}
+function safeValidationReport(error: unknown): CompilerValidationReport | null {
+  if (typeof error !== "object" || error === null || !("validationReport" in error)) return null;
+  return CompilerValidationReportSchema.safeParse(error.validationReport).data ?? null;
 }
 const TimestampSchema = z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER);
 
@@ -78,7 +87,6 @@ const RepairableInvalidClaimsSchema = z
   })
   .strict();
 export type DraftUsage = z.infer<typeof UsageSchema>;
-export class CompilerDraftStopError extends Error {}
 /** Admission failed before provider dispatch; absence of provider usage is not a failed paid call. */
 export class CompilerDraftAdmissionError extends Error {
   constructor(cause: unknown) {
@@ -108,12 +116,23 @@ function retainedRepairableInvalidClaims(
 }
 
 export type DraftStage = "inventory" | "compile" | "repair" | "judge";
+export interface ValidatedCompilerDraft {
+  proposal: CompilerProposal;
+  objective: CompiledObjective;
+  projectionTrace: CompilerProjectionTrace;
+  report: CompilerValidationReport;
+  requestDigest: string;
+}
 export interface DraftInvocation {
   invocationId: string;
   stage: DraftStage;
   revision: number;
   inventory: unknown;
-  previous: CompiledObjective | null;
+  previous: CompilerProposal | null;
+  projection: Pick<
+    CompilerProjectionTrace,
+    "graphDigest" | "addedEdges" | "adapterBindings" | "riskElevations"
+  > | null;
   failure: unknown;
   reviewEvidence?: unknown;
 }
@@ -135,11 +154,11 @@ export interface CompilerDraftCallbacks {
   recordUsage(invocationId: string, stage: DraftStage, usage: DraftUsage): Promise<void>;
   validateInventory(value: unknown): unknown | Promise<unknown>;
   /** Re-run mechanical grounding against the pinned context, even after restart. */
-  validate(value: unknown): CompiledObjective | Promise<CompiledObjective>;
+  validate(value: unknown): ValidatedCompilerDraft | Promise<ValidatedCompilerDraft>;
   /** Parse full-coverage judge evidence and enforce its exact graph/inventory binding. */
   accept(
     value: unknown,
-    graph: CompiledObjective,
+    draft: ValidatedCompilerDraft,
     inventory: unknown,
     reviewEvidence?: unknown,
   ): boolean;
@@ -356,10 +375,8 @@ export async function runCompilerDraftLoop(args: {
     )
       throw new Error("compiler selection lacks known invocation evidence");
     const inventory = await callbacks.validateInventory(inventoryResult.payload.value);
-    const graph = await callbacks.validate(
-      fixedGraph ? { objective: fixedGraph } : proposal!.payload.value,
-    );
-    parsePersistedCompiledObjective(terminal.payload.graph);
+    const draft = await callbacks.validate(fixedGraph ? { fixedGraph } : proposal!.payload.value);
+    const graph = draft.objective;
     const reviewEvidence = terminal.payload.reviewEvidence ?? null;
     const judgeIntent = records.find(
       (item) =>
@@ -371,7 +388,13 @@ export async function runCompilerDraftLoop(args: {
       judgeIntent.payload.inputDigest !==
         draftDigest({
           inventory,
-          previous: graph,
+          previous: draft.proposal,
+          projection: {
+            graphDigest: draft.projectionTrace.graphDigest,
+            addedEdges: draft.projectionTrace.addedEdges,
+            adapterBindings: draft.projectionTrace.adapterBindings,
+            riskElevations: draft.projectionTrace.riskElevations,
+          },
           failure: reviewEvidence,
           ...(reviewEvidence === null ? {} : { reviewEvidence }),
         })
@@ -380,7 +403,10 @@ export async function runCompilerDraftLoop(args: {
     if (
       draftDigest(inventory) !== terminal.payload.inventoryDigest ||
       draftDigest(judged.payload.value) !== terminal.payload.verdictDigest ||
-      !callbacks.accept(judged.payload.value, graph, inventory, reviewEvidence)
+      draftDigest(draft.proposal) !== terminal.payload.proposalDigest ||
+      draftDigest(draft.projectionTrace) !== terminal.payload.traceDigest ||
+      draft.requestDigest !== terminal.payload.requestDigest ||
+      !callbacks.accept(judged.payload.value, draft, inventory, reviewEvidence)
     )
       throw new Error("compiler selection acceptance no longer validates");
     if (compiledGraphDigest(graph) !== terminal.payload.graphDigest)
@@ -406,9 +432,10 @@ export async function runCompilerDraftLoop(args: {
     stage: DraftStage,
     revision: number,
     inventory: unknown,
-    previous: CompiledObjective | null,
+    previous: CompilerProposal | null,
     failure: unknown,
     reviewEvidence: unknown = null,
+    projection: DraftInvocation["projection"] = null,
   ): Promise<unknown> => {
     const invocationId = `compiler-${draftDigest({ binding, stage, revision })}`;
     const completed = records.find(
@@ -423,6 +450,7 @@ export async function runCompilerDraftLoop(args: {
         draftDigest({
           inventory,
           previous,
+          projection,
           failure,
           ...(reviewEvidence === null ? {} : { reviewEvidence }),
         })
@@ -435,6 +463,7 @@ export async function runCompilerDraftLoop(args: {
       if (completed.payload.error)
         throw Object.assign(new Error(String(completed.payload.error)), {
           proposal: completed.payload.proposal,
+          validationReport: completed.payload.validationReport,
           repairableInvalidClaims: completed.payload.repairableInvalidClaims,
         });
       return completed.payload.value;
@@ -465,6 +494,7 @@ export async function runCompilerDraftLoop(args: {
         inputDigest: draftDigest({
           inventory,
           previous,
+          projection,
           failure,
           ...(reviewEvidence === null ? {} : { reviewEvidence }),
         }),
@@ -563,7 +593,16 @@ export async function runCompilerDraftLoop(args: {
     let result: DraftInvocationResult;
     try {
       result = await callbacks.invoke(
-        { invocationId, stage, revision, inventory, previous, failure, reviewEvidence },
+        {
+          invocationId,
+          stage,
+          revision,
+          inventory,
+          previous,
+          projection,
+          failure,
+          reviewEvidence,
+        },
         checkpoint,
         reserve,
         checkpointProviderRefusal,
@@ -612,6 +651,7 @@ export async function runCompilerDraftLoop(args: {
             ? ProviderQuotaCheckpointSchema.parse(error.bindInvocation(invocationId).gate)
             : undefined;
         const proposal = safeProposal(error);
+        const validationReport = safeValidationReport(error);
         const repairableInvalidClaims =
           typeof error === "object" && error !== null && "repairableInvalidClaims" in error
             ? RepairableInvalidClaimsSchema.safeParse(error.repairableInvalidClaims)
@@ -631,6 +671,7 @@ export async function runCompilerDraftLoop(args: {
           usage,
           ...timing(),
           ...proposal,
+          ...(validationReport ? { validationReport } : {}),
           ...retainedRepairability,
           error: diagnostic(error),
           ...(providerQuota ? { providerQuota } : {}),
@@ -695,28 +736,31 @@ export async function runCompilerDraftLoop(args: {
         inventoryRepairs += 1;
       }
     }
-    let previous: CompiledObjective | null = null;
+    let previous: ValidatedCompilerDraft | null = null;
+    let previousProposal: CompilerProposal | null = null;
     let failure: unknown = null;
     let reviewEvidence: unknown = null;
     const seen = new Set<string>();
     const blockerSets = new Set<string>();
     const graphRepairs = limits.maxRepairs - inventoryRepairs;
     for (let revision = 0; revision <= graphRepairs; revision++) {
+      let draft: ValidatedCompilerDraft;
       let graph: CompiledObjective;
       let candidate: unknown;
       try {
         const value = fixedGraph
-          ? { objective: fixedGraph }
+          ? { fixedGraph }
           : await invoke(
               revision === 0 ? "compile" : "repair",
               revision,
               inventory,
-              previous,
+              previous?.proposal ?? previousProposal,
               failure,
               reviewEvidence,
             );
         candidate = value;
-        graph = await callbacks.validate(value);
+        draft = await callbacks.validate(value);
+        graph = draft.objective;
       } catch (error) {
         if (
           error instanceof CompilerDraftStopError ||
@@ -738,11 +782,20 @@ export async function runCompilerDraftLoop(args: {
         failure = {
           error: diagnostic(error),
           ...safeProposal(error),
+          ...(safeValidationReport(error) ? { validationReport: safeValidationReport(error) } : {}),
         };
+        if (typeof error === "object" && error !== null && "proposal" in error) {
+          const retained = CompilerProposalSchema.safeParse(error.proposal);
+          if (retained.success) previousProposal = retained.data;
+        }
         if (
           !records.some((item) => item.kind === "validation" && item.payload.revision === revision)
         )
-          await append("validation", { revision, valid: false, failure });
+          await append("validation", {
+            revision,
+            valid: false,
+            reportDigest: draftDigest(safeValidationReport(error)),
+          });
         continue;
       }
       const graphDigest = compiledGraphDigest(graph);
@@ -753,34 +806,55 @@ export async function runCompilerDraftLoop(args: {
       );
       if (
         validated &&
-        (validated.payload.valid !== true || validated.payload.graphDigest !== graphDigest)
+        (validated.payload.valid !== true ||
+          validated.payload.graphDigest !== graphDigest ||
+          validated.payload.proposalDigest !== draftDigest(draft.proposal) ||
+          validated.payload.traceDigest !== draftDigest(draft.projectionTrace) ||
+          validated.payload.requestDigest !== draft.requestDigest)
       )
         throw new Stop("draft-grounding-changed");
       reviewEvidence =
         callbacks.reviewEvidence?.(candidate, failure, inventory, reviewEvidence) ?? null;
-      const reviewKey = draftDigest({ graphDigest, reviewEvidence });
+      const reviewKey = draftDigest({ proposal: draft.proposal, graphDigest, reviewEvidence });
       if (seen.has(reviewKey)) throw new Stop("draft-cycle");
       seen.add(reviewKey);
-      previous = graph;
+      previous = draft;
+      previousProposal = draft.proposal;
       if (!records.some((item) => item.kind === "validation" && item.payload.revision === revision))
-        await append("validation", { revision, valid: true, graphDigest, graph });
+        await append("validation", {
+          revision,
+          valid: true,
+          graphDigest,
+          proposalDigest: draftDigest(draft.proposal),
+          traceDigest: draftDigest(draft.projectionTrace),
+          projectionTrace: draft.projectionTrace,
+          requestDigest: draft.requestDigest,
+        });
       try {
         const verdict = await invoke(
           "judge",
           revision,
           inventory,
-          graph,
+          draft.proposal,
           reviewEvidence,
           reviewEvidence,
+          {
+            graphDigest,
+            addedEdges: draft.projectionTrace.addedEdges,
+            adapterBindings: draft.projectionTrace.adapterBindings,
+            riskElevations: draft.projectionTrace.riskElevations,
+          },
         );
-        if (callbacks.accept(verdict, graph, inventory, reviewEvidence)) {
+        if (callbacks.accept(verdict, draft, inventory, reviewEvidence)) {
           if (tokens > limits.maxObservedTokens) throw new Stop("observed-token-limit");
           if (now() - Number(first.payload.startedAt) >= limits.deadlineMs)
             throw new Stop("deadline-exhausted");
           await append("selection", {
             revision,
             graphDigest,
-            graph,
+            proposalDigest: draftDigest(draft.proposal),
+            requestDigest: draft.requestDigest,
+            traceDigest: draftDigest(draft.projectionTrace),
             inventoryDigest: draftDigest(inventory),
             verdictDigest: draftDigest(verdict),
             ...(reviewEvidence === null ? {} : { reviewEvidence }),

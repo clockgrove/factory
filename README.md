@@ -113,6 +113,13 @@ changes through pull requests. The run ends with a terminal status and recorded 
 escalation explaining what needs your attention. See the
 [first-Objective walkthrough](docs/setup/local.md#a-small-first-objective) for expected evidence.
 
+Compilation gives the model a strict semantic request: the Objective, obligation inventory,
+validation intents, scope, dependency intent, risk, and execution intent. Repository commands,
+toolchain authority, runtime pins, provider steps, policy limits, and graph serialization remain
+Factory-owned facts derived from the pinned base commit. Factory validates the semantic proposal,
+projects it deterministically into the execution graph, and records the request, proposal, validation,
+and projection identities. Initial proposals and bounded repairs use the same schema and entry point.
+
 When opt-in compiler evaluation uses `maxRepairs`, that number is one shared correction budget for
 obligation-inventory regeneration and graph repair. For example, one inventory correction under
 `maxRepairs: 2` leaves at most one graph correction. Report-only evaluation and `maxRepairs: 0` keep
@@ -131,7 +138,8 @@ state. See [local management transcripts](docs/setup/configuration.md#local-mana
 ## What Factory handles
 
 - **Planning and scheduling:** acceptance criteria, native GitHub dependencies, ready-task ordering,
-  and local CPU/memory admission. The default ceiling is two workers; adaptive concurrency is opt-in.
+  repository-grounded validation, and local CPU/memory admission. The default ceiling is two workers;
+  adaptive concurrency is opt-in.
 - **Execution and delivery:** isolated Git worktrees, independent validation, ordinary pull requests,
   and explicitly selected native stacks with capability checks.
 - **Recovery and inspection:** durable GitHub records, restart recovery, cancellation, status,

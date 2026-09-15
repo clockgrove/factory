@@ -32,7 +32,7 @@ const launch = vi.spyOn(CodexSdkLocalBackend.prototype, "launch").mockImplementa
   throw new Error("replay attempted a worker launch");
 });
 const compile = vi
-  .spyOn(CodexCliManagementBackend.prototype, "compile")
+  .spyOn(CodexCliManagementBackend.prototype, "proposePlan")
   .mockImplementation(async () => {
     throw new Error("replay attempted a management call");
   });

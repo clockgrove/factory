@@ -17,11 +17,14 @@ import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import { compileObjective } from "../src/compiler/index.js";
 import {
   ManagementOutputError,
-  type CompilationCheckpoint,
   type CompilationContext,
-  type CompilationResult,
   type ManagementBackend,
 } from "../src/management/backend.js";
+import {
+  adaptFixtureCompiler,
+  type LegacyFixtureCompilationResult,
+  type LegacyFixtureCompiler,
+} from "./helpers/compiler-proposal.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -70,6 +73,10 @@ async function fixture() {
   git("remote", "add", "origin", "https://github.com/o/r.git");
   await writeFile(join(repository, "package.json"), '{"scripts":{"test":"node --test"}}\n');
   await writeFile(
+    join(repository, "package-lock.json"),
+    JSON.stringify({ name: "plan-lfs-fixture", lockfileVersion: 3, packages: {} }),
+  );
+  await writeFile(
     join(repository, "sample.test.mjs"),
     'import {test} from "node:test";\ntest("sample",()=>{});\n',
   );
@@ -88,7 +95,13 @@ async function fixture() {
     await writeFile(cache, bytes);
     assets.push({ path, bytes, oid, pointer, cache });
   }
-  git("add", "package.json", "sample.test.mjs", ...assets.map((asset) => asset.path));
+  git(
+    "add",
+    "package.json",
+    "package-lock.json",
+    "sample.test.mjs",
+    ...assets.map((asset) => asset.path),
+  );
   // Attributes are installed after raw pointer staging: no clean/smudge executable is needed.
   await writeFile(
     join(repository, ".gitattributes"),
@@ -105,7 +118,7 @@ async function fixture() {
   };
   return { root, repository, bin, assets, baseSha, planning, git, toolMarker };
 }
-async function resultFor(context: CompilationContext): Promise<CompilationResult> {
+async function resultFor(context: CompilationContext): Promise<LegacyFixtureCompilationResult> {
   const repositoryFacts = await readRepositoryFacts(
     context.repository,
     context.repositoryFiles,
@@ -143,17 +156,17 @@ async function resultFor(context: CompilationContext): Promise<CompilationResult
   });
   return { objective, usage };
 }
-function backend(compile: ManagementBackend["compile"]): ManagementBackend {
+function backend(compile: LegacyFixtureCompiler): ManagementBackend {
   return {
     id: "observed-test-management",
-    compile,
+    proposePlan: adaptFixtureCompiler(compile),
     probe: async () => ({ available: true, authenticated: true }),
     review: async () => {
       throw new Error("review not expected");
     },
   };
 }
-function plan(f: Awaited<ReturnType<typeof fixture>>, compile: ManagementBackend["compile"]) {
+function plan(f: Awaited<ReturnType<typeof fixture>>, compile: LegacyFixtureCompiler) {
   return buildPlanReport({
     repository: "o/r",
     request: { objective: 7, compile: true, baseSha: f.baseSha },
@@ -165,13 +178,11 @@ function plan(f: Awaited<ReturnType<typeof fixture>>, compile: ManagementBackend
 describe("explicit plan pinned LFS preflight", () => {
   it("preserves actual compilation usage above an explicitly observed threshold without pretending to cap it", async () => {
     const f = await fixture();
-    const compile = vi.fn(
-      async (context: CompilationContext, checkpoint: CompilationCheckpoint) => {
-        const result = await resultFor(context);
-        await checkpoint(result);
-        return result;
-      },
-    );
+    const compile = vi.fn(async (context: CompilationContext, checkpoint) => {
+      const result = await resultFor(context);
+      await checkpoint(result);
+      return result;
+    });
     const report = await buildPlanReport({
       repository: "o/r",
       request: {
@@ -193,7 +204,7 @@ describe("explicit plan pinned LFS preflight", () => {
       planning: { ...f.planning, management: backend(compile) },
     });
     expect(compile).toHaveBeenCalledTimes(1);
-    expect(report.compilation).toMatchObject({
+    expect(report.compilation, JSON.stringify(report.diagnostics)).toMatchObject({
       result: "completed",
       usagePersistence: "response-only",
     });
@@ -215,13 +226,17 @@ describe("explicit plan pinned LFS preflight", () => {
       const index = await readFile(join(f.repository, ".git/index"));
       const config = await readFile(join(f.repository, ".git/config"));
       const compile = vi.fn(
-        async (context: CompilationContext, checkpoint: CompilationCheckpoint) => {
+        async (
+          context: CompilationContext,
+          checkpoint: (result: LegacyFixtureCompilationResult) => Promise<void>,
+        ) => {
           expect(context.repository).not.toBe(f.repository);
           expect(context.baseSha).toBe(f.baseSha);
           expect(context.repositoryFiles).toEqual([
             ".gitattributes",
             "canonical.bin",
             "legacy.bin",
+            "package-lock.json",
             "package.json",
             "sample.test.mjs",
           ]);
@@ -341,7 +356,10 @@ describe("explicit plan pinned LFS preflight", () => {
       };
     });
     const compile = vi.fn(
-      async (context: CompilationContext, checkpoint: CompilationCheckpoint) => {
+      async (
+        context: CompilationContext,
+        checkpoint: (result: LegacyFixtureCompilationResult) => Promise<void>,
+      ) => {
         const result = await resultFor(context);
         await checkpoint(result);
         return result;
@@ -413,7 +431,10 @@ describe("explicit plan pinned LFS preflight", () => {
   it("keeps postcompile source checking and its observed usage for later hydrated edits", async () => {
     const f = await fixture();
     const compile = vi.fn(
-      async (context: CompilationContext, checkpoint: CompilationCheckpoint) => {
+      async (
+        context: CompilationContext,
+        checkpoint: (result: LegacyFixtureCompilationResult) => Promise<void>,
+      ) => {
         const result = await resultFor(context);
         await checkpoint(result);
         await writeFile(

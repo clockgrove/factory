@@ -26,14 +26,15 @@ import {
 import { compileObjective } from "../src/compiler/index.js";
 import { managedRuntimeRequirements } from "../src/toolchains/authority.js";
 import type { ManagementBackend } from "../src/management/backend.js";
-import type { CompilationContext, CompilationCheckpoint } from "../src/management/backend.js";
+import type { CompilationContext } from "../src/management/backend.js";
+import { adaptFixtureCompiler } from "./helpers/compiler-proposal.js";
 
 const exec = promisify(execFile);
 const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
-async function fixture() {
+async function fixture(withNpmAuthority = false) {
   const root = await mkdtemp(join(tmpdir(), "factory-preflight-"));
   roots.push(root);
   const git = async (...args: string[]) => (await exec("git", ["-C", root, ...args])).stdout.trim();
@@ -43,7 +44,17 @@ async function fixture() {
   await git("remote", "add", "origin", "git@github.com:o/r.git");
   await writeFile(join(root, "README.md"), "```sh\npython3 -m unittest discover\n```\n");
   await writeFile(join(root, "sample.py"), "VALUE = 1\n");
-  await git("add", "README.md", "sample.py");
+  if (withNpmAuthority) {
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({ name: "preflight-fixture", scripts: { test: "node --test" } }),
+    );
+    await writeFile(
+      join(root, "package-lock.json"),
+      JSON.stringify({ name: "preflight-fixture", lockfileVersion: 3, packages: {} }),
+    );
+  }
+  await git("add", ".");
   await git("commit", "-m", "fixture");
   return { root, git, head: await git("rev-parse", "HEAD") };
 }
@@ -169,58 +180,69 @@ describe("read-only checkout preflight", () => {
   it.each([false, true])(
     "checks the same checkout again after compilation (concurrent edit: %s)",
     async (changed) => {
-      const f = await fixture();
-      const compile = vi.fn(
-        async (context: CompilationContext, checkpoint: CompilationCheckpoint) => {
-          expect(context.repositoryFiles).toEqual(["README.md", "sample.py"]);
-          const objective = compileObjective({
-            title: "Feature",
-            baseSha: context.baseSha,
-            repositoryFacts: { files: [], scripts: { test: "test" } },
-            workItems: [
-              {
-                id: "feature",
-                title: "Feature",
-                goal: "Implement feature",
-                acceptance: ["Feature returns a value"],
-                scope: ["sample.py"],
-                preconditions: [],
-                outOfScope: [],
-                conventions: [],
-                dependsOn: [],
-                baseSha: context.baseSha,
-                validationCommands: ["npm test"],
-                requirements: {
-                  os: ["linux"],
-                  architecture: [],
-                  tools: ["npm"],
-                  services: [],
-                  networkDestinations: [],
-                  permittedSecretNames: [],
-                  trust: "trusted_local",
-                },
-                artifactContract: "clockgrove.factory/artifact-v1",
+      const f = await fixture(true);
+      const compile = vi.fn(async (context: CompilationContext, checkpoint) => {
+        expect(context.repositoryFiles).toEqual([
+          "README.md",
+          "package-lock.json",
+          "package.json",
+          "sample.py",
+        ]);
+        const objective = compileObjective({
+          title: "Feature",
+          baseSha: context.baseSha,
+          repositoryFacts: {
+            files: [{ path: "package.json" }, { path: "package-lock.json" }],
+            scripts: { test: "node --test" },
+          },
+          workItems: [
+            {
+              id: "feature",
+              title: "Feature",
+              goal: "Implement feature",
+              acceptance: ["Feature returns a value"],
+              scope: ["sample.py"],
+              preconditions: [],
+              outOfScope: [],
+              conventions: [],
+              dependsOn: [],
+              baseSha: context.baseSha,
+              validationCommands: ["npm test"],
+              requirements: {
+                os: ["linux"],
+                architecture: [],
+                tools: ["npm"],
+                services: [],
+                networkDestinations: [],
+                permittedSecretNames: [],
+                trust: "trusted_local",
               },
-            ],
-          });
-          const result = { objective, usage: { inputTokens: 10, outputTokens: 5 } };
-          await checkpoint(result);
-          if (changed) await writeFile(join(f.root, "sample.py"), "VALUE = 2\n");
-          return result;
-        },
-      );
+              artifactContract: "clockgrove.factory/artifact-v1",
+            },
+          ],
+        });
+        const result = { objective, usage: { inputTokens: 10, outputTokens: 5 } };
+        await checkpoint(result);
+        if (changed) await writeFile(join(f.root, "sample.py"), "VALUE = 2\n");
+        return result;
+      });
       const report = await buildPlanReport({
         repository: "o/r",
         request: { objective: 7, compile: true, baseSha: f.head },
         snapshot,
         planning: {
           repositoryPath: f.root,
-          management: { id: "test", compile } as unknown as ManagementBackend,
+          management: {
+            id: "test",
+            proposePlan: adaptFixtureCompiler(compile),
+          } as unknown as ManagementBackend,
           validateCheckout: validatePlanningCheckout,
           readRepositoryLayout: (max, base) => readPlanningRepositoryLayout(f.root, max, base),
         },
       });
-      expect(report.compilation.result).toBe(changed ? "failed" : "completed");
+      expect(report.compilation.result, JSON.stringify(report.diagnostics)).toBe(
+        changed ? "failed" : "completed",
+      );
       expect(report.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
       expect(report.activationAuthorized).toBe(false);
       expect(compile).toHaveBeenCalledTimes(1);
@@ -425,7 +447,7 @@ describe("read-only checkout preflight", () => {
             architecture: [],
             tools: ["npm"],
             services: [],
-            networkDestinations: [],
+            networkDestinations: ["registry.npmjs.org"],
             permittedSecretNames: [],
             trust: "trusted_local",
           },

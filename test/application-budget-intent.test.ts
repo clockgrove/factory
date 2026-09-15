@@ -58,7 +58,7 @@ function fixture() {
       readRepositoryLayout: async () => ({ files: [], truncated: false }),
       management: {
         id: "test-management",
-        compile,
+        proposePlan: compile,
         probe: async () => ({ available: true, authenticated: true }),
         review: async () => {
           throw new Error("unexpected review");

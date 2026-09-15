@@ -8,14 +8,8 @@ import type {
   CompilerDraftRecord,
 } from "../src/control/compiler-drafts.js";
 import type { LeaseState } from "../src/control/lease.js";
-import {
-  compileEvaluatedDraft,
-  assertCompilerDraftSelection,
-} from "../src/management/draft-compilation.js";
-import {
-  CodexCliManagementBackend,
-  compilerObligationEvidence,
-} from "../src/management/codex-cli.js";
+import { compileEvaluatedDraft } from "../src/management/draft-compilation.js";
+import { compilerObligationEvidence } from "../src/management/codex-cli.js";
 import type {
   CompilationContext,
   CompilerModelAdmission,
@@ -23,7 +17,7 @@ import type {
   PlanJudgeContext,
 } from "../src/management/backend.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
-import { compiledGraphDigest, type CompiledObjective } from "../src/graph.js";
+import { parsePersistedCompiledObjective, type CompiledObjective } from "../src/graph.js";
 import {
   COMPILER_JUDGE_DIMENSIONS,
   compilerEvalDigest,
@@ -35,6 +29,12 @@ import {
   CompilerDraftAdmissionError,
   type CompilerDraftCallbacks,
 } from "../src/evaluation/compiler-draft-loop.js";
+import {
+  proposalResultFromCompiledFixture,
+  pinFixtureRepository,
+  validatedDraftFromCompiledFixture,
+} from "./helpers/compiler-proposal.js";
+import { semanticRequest } from "./helpers/semantic-compiler.js";
 const temporary: string[] = [];
 afterEach(async () => {
   await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -52,7 +52,7 @@ function memoryJournal() {
     ) => {
       if (sequence !== records.length) throw new Error("competing append");
       const record = {
-        protocol: "clockgrove.factory/compiler-draft-v1" as const,
+        protocol: "clockgrove.factory/compiler-draft" as const,
         binding,
         sequence,
         kind,
@@ -74,6 +74,11 @@ async function fixture() {
     join(repository, "package.json"),
     JSON.stringify({ scripts: golden.repositoryFacts.scripts }),
   );
+  await writeFile(
+    join(repository, "package-lock.json"),
+    JSON.stringify({ name: "draft-challenge-fixture", lockfileVersion: 3, packages: {} }),
+  );
+  const baseSha = pinFixtureRepository(repository);
   const context: CompilationContext = {
     repository,
     objective: {
@@ -81,27 +86,23 @@ async function fixture() {
       title: golden.title,
       body: "Implement core behavior and executable tests. No infrastructure deployment is requested.",
     },
-    baseSha: golden.baseSha,
+    baseSha,
     defaultBranch: "main",
-    repositoryFiles: golden.repositoryFacts.files.map((file: { path: string }) => file.path),
+    repositoryFiles: [
+      "package-lock.json",
+      ...golden.repositoryFacts.files.map((file: { path: string }) => file.path),
+    ],
     allowedNetworkDestinations: [],
     runPolicy: { ...DEFAULT_RUN_POLICY, compilerEvaluation: { mode: "auto-repair" } },
   };
   context.repositoryEvidence = compilerObligationEvidence(context);
-  const graph = (
-    await new CodexCliManagementBackend({
-      runStructured: async () => ({
-        value: {
-          title: golden.title,
-          workItems: golden.workItems.map((item: { acceptance: string[] }) => ({
-            ...item,
-            criterionRisks: item.acceptance.map((criterion) => ({ criterion, risk: "ordinary" })),
-          })),
-        },
-        usage: { inputTokens: 1, outputTokens: 1 },
-      }),
-    }).compile(context, async () => {})
-  ).objective;
+  const graph = parsePersistedCompiledObjective({
+    title: golden.title,
+    workItems: golden.workItems.map((item: { acceptance: string[] }) => ({
+      ...item,
+      criterionRisks: item.acceptance.map((criterion) => ({ criterion, risk: "ordinary" })),
+    })),
+  });
   const inventory: ObligationInventory = {
     version: 1,
     objectiveDigest: compilerEvalDigest(context.objective),
@@ -136,12 +137,12 @@ async function fixture() {
   return { context, graph, inventory, binding, ...journal };
 }
 function judged(context: PlanJudgeContext, accepted: boolean): CompilerJudgeVerdict {
-  const graph = context.objective;
+  const graph = context.proposal;
   const corrected = Boolean(context.challenges?.length);
   return {
     version: 1,
     rubricVersion: 1,
-    draftDigest: compiledGraphDigest(graph),
+    draftDigest: context.graphDigest,
     inventoryDigest: compilerEvalDigest(context.inventory),
     coverage: context.inventory.obligations.map((entry) => ({
       obligationId: entry.id,
@@ -150,7 +151,7 @@ function judged(context: PlanJudgeContext, accepted: boolean): CompilerJudgeVerd
       acceptanceBindings:
         entry.id === "invented"
           ? []
-          : [{ itemId: graph.workItems[0]!.id, criterion: graph.workItems[0]!.acceptance[0]! }],
+          : [{ itemId: graph.workItems[0]!.id, criterionId: graph.workItems[0]!.criteria[0]!.id }],
       reason: "Original evidence assessed",
       evidenceIds: ["objective"],
     })),
@@ -206,7 +207,7 @@ function judged(context: PlanJudgeContext, accepted: boolean): CompilerJudgeVerd
   };
 }
 describe("bounded independent challenge integration", () => {
-  it("reviews an unchanged graph with new challenge evidence and carries it through a second repair and replay", async () => {
+  it("stops an unchanged semantic repair before duplicate judgment", async () => {
     const f = await fixture();
     const calls: string[] = [];
     let judges = 0;
@@ -222,44 +223,19 @@ describe("bounded independent challenge integration", () => {
         calls.push("inventory");
         return { inventory: f.inventory, usage };
       },
-      compile: async (
-        _context: unknown,
-        _checkpoint: unknown,
+      proposePlan: async (
+        request: Parameters<ManagementBackend["proposePlan"]>[0],
+        checkpoint: Parameters<ManagementBackend["proposePlan"]>[1],
         beforeModelInvocation?: CompilerModelAdmission,
       ) => {
         await beforeModelInvocation?.();
-        calls.push("compile");
-        return { objective: f.graph, usage };
-      },
-      repairPlan: async (
-        context: { revision: number; challenges?: unknown[] },
-        _checkpoint: unknown,
-        beforeModelInvocation?: CompilerModelAdmission,
-      ) => {
-        await beforeModelInvocation?.();
-        calls.push("repair");
-        if (context.revision === 2) expect(context.challenges).toHaveLength(1);
+        calls.push(request.revision === 0 ? "compile" : "repair");
+        if (request.revision === 2) expect(request.challenges).toHaveLength(1);
         const graph = structuredClone(f.graph);
-        if (context.revision === 2) graph.workItems[0]!.goal += " with explicit execution detail";
-        return {
-          objective: graph,
-          usage,
-          repair: {
-            changeSummary: "Evidence-cited correction",
-            lineage: graph.workItems.map((item) => ({
-              itemId: item.id,
-              previousItemIds: [item.id],
-            })),
-            findingDispositions: [
-              {
-                findingId: context.revision === 1 ? "false-inference" : "real-refinement",
-                disposition: context.revision === 1 ? "challenged" : "addressed",
-                reason: "Original source excludes deployment",
-                evidenceIds: ["objective"],
-              },
-            ],
-          },
-        };
+        if (request.revision === 2) graph.workItems[0]!.goal += " with explicit execution detail";
+        const result = proposalResultFromCompiledFixture(request, graph, usage);
+        await checkpoint(result);
+        return result;
       },
       judgePlan: async (
         context: PlanJudgeContext,
@@ -284,18 +260,14 @@ describe("bounded independent challenge integration", () => {
       validate: async () => {},
     };
     const outcome = await compileEvaluatedDraft(args);
-    expect(outcome.status).toBe("accepted");
-    expect(calls).toEqual(["inventory", "compile", "judge", "repair", "judge", "repair", "judge"]);
-    const selected = f.records.find((record) => record.kind === "selection")!;
-    expect(selected.payload.reviewEvidence).toHaveLength(1);
-    if (outcome.status !== "accepted") throw new Error("expected accepted");
-    assertCompilerDraftSelection(f.records, outcome.graph, f.binding.inputDigest);
-    await expect(compileEvaluatedDraft(args)).resolves.toMatchObject({ status: "accepted" });
-    expect(calls).toHaveLength(7);
-    selected.payload.reviewEvidence = [];
-    expect(() => assertCompilerDraftSelection(f.records, outcome.graph)).toThrow(
-      "judge input evidence changed",
-    );
+    expect(outcome).toMatchObject({ status: "stopped", reason: "draft-cycle" });
+    expect(calls).toEqual(["inventory", "compile", "judge", "repair"]);
+    expect(f.records.some((record) => record.kind === "selection")).toBe(false);
+    await expect(compileEvaluatedDraft(args)).resolves.toMatchObject({
+      status: "stopped",
+      reason: "draft-cycle",
+    });
+    expect(calls).toHaveLength(4);
   });
   it("propagates original pre-provider admission failures without synthetic usage results", async () => {
     const f = await fixture();
@@ -312,7 +284,7 @@ describe("bounded independent challenge integration", () => {
         return provider();
       },
       judgePlan: vi.fn(),
-      repairPlan: vi.fn(),
+      proposePlan: vi.fn(),
     } as unknown as ManagementBackend;
     await expect(
       compileEvaluatedDraft({
@@ -360,7 +332,8 @@ describe("bounded independent challenge integration", () => {
               : { ...f.graph, title: `revision ${request.revision}` },
       }),
       validateInventory: (value) => value,
-      validate: (value) => value as CompiledObjective,
+      validate: (value) =>
+        validatedDraftFromCompiledFixture(semanticRequest(), value as CompiledObjective),
       accept: (value) => (value as { accepted: boolean }).accepted,
       recordUsage: async () => {},
     };
@@ -379,7 +352,7 @@ describe("bounded independent challenge integration", () => {
   });
 });
 
-it("reconsiders a cited item-only granularity false positive on the unchanged graph", async () => {
+it("does not spend a second judgment on a no-op semantic repair", async () => {
   const f = await fixture();
   f.inventory.obligations = f.inventory.obligations.filter((entry) => entry.kind === "explicit");
   let judges = 0;
@@ -395,41 +368,16 @@ it("reconsiders a cited item-only granularity false positive on the unchanged gr
       await beforeModelInvocation?.();
       return { inventory: f.inventory, usage };
     },
-    compile: async (
-      _context: unknown,
-      _checkpoint: unknown,
+    proposePlan: async (
+      request: Parameters<ManagementBackend["proposePlan"]>[0],
+      checkpoint: Parameters<ManagementBackend["proposePlan"]>[1],
       beforeModelInvocation?: CompilerModelAdmission,
     ) => {
       await beforeModelInvocation?.();
-      return { objective: f.graph, usage };
-    },
-    repairPlan: async (
-      _context: unknown,
-      _checkpoint: unknown,
-      beforeModelInvocation?: CompilerModelAdmission,
-    ) => {
-      await beforeModelInvocation?.();
-      repairs++;
-      return {
-        objective: f.graph,
-        usage,
-        repair: {
-          changeSummary: "Challenge unsupported split",
-          lineage: f.graph.workItems.map((item) => ({
-            itemId: item.id,
-            previousItemIds: [item.id],
-          })),
-          findingDispositions: [
-            {
-              findingId: "oversized-false-positive",
-              disposition: "challenged",
-              reason:
-                "The cited source defines one cohesive bounded deliverable; splitting would duplicate validation",
-              evidenceIds: ["objective"],
-            },
-          ],
-        },
-      };
+      if (request.revision > 0) repairs++;
+      const result = proposalResultFromCompiledFixture(request, f.graph, usage);
+      await checkpoint(result);
+      return result;
     },
     judgePlan: async (
       context: PlanJudgeContext,
@@ -483,12 +431,13 @@ it("reconsiders a cited item-only granularity false positive on the unchanged gr
     validate: async () => {},
   };
   const outcome = await compileEvaluatedDraft(args);
-  expect(outcome.status).toBe("accepted");
-  expect(judges).toBe(2);
+  expect(outcome).toMatchObject({ status: "stopped", reason: "draft-cycle" });
+  expect(judges).toBe(1);
   expect(repairs).toBe(1);
-  if (outcome.status !== "accepted") throw new Error("expected acceptance");
-  expect(outcome.graphDigest).toBe(compiledGraphDigest(f.graph));
-  assertCompilerDraftSelection(f.records, outcome.graph, f.binding.inputDigest);
-  await expect(compileEvaluatedDraft(args)).resolves.toMatchObject({ status: "accepted" });
-  expect(judges).toBe(2);
+  expect(f.records.some((record) => record.kind === "selection")).toBe(false);
+  await expect(compileEvaluatedDraft(args)).resolves.toMatchObject({
+    status: "stopped",
+    reason: "draft-cycle",
+  });
+  expect(judges).toBe(1);
 });

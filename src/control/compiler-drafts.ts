@@ -20,7 +20,7 @@ const BindingSchema = z
 export type CompilerDraftBinding = z.infer<typeof BindingSchema>;
 const RecordSchema = z
   .object({
-    protocol: z.literal("clockgrove.factory/compiler-draft-v1"),
+    protocol: z.literal("clockgrove.factory/compiler-draft"),
     binding: BindingSchema,
     sequence: z.number().int().min(0).max(255),
     kind: z.enum([
@@ -77,7 +77,7 @@ export class CompilerDraftManager {
     )
       throw new Error("compiler draft lease binding mismatch");
     const record = RecordSchema.parse({
-      protocol: "clockgrove.factory/compiler-draft-v1",
+      protocol: "clockgrove.factory/compiler-draft",
       binding,
       sequence,
       kind,

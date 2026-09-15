@@ -5,16 +5,14 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import { validateCompiledObjective, type CompilerObjective } from "../compiler/index.js";
 import { parsePersistedCompiledObjective } from "../graph.js";
-import type {
-  CompilationCheckpoint,
-  CompilationContext,
-  ManagementBackend,
-} from "../management/backend.js";
+import type { CompilationContext, ManagementBackend } from "../management/backend.js";
+import { compilePlan, type CompiledPlanCheckpoint } from "../management/compile.js";
 import {
   discoverValidationCommands,
   profileRepository,
   readRepositoryFacts,
 } from "../repository-profiles/index.js";
+import { futureToolchainCommand } from "../toolchains/authority.js";
 
 const PathSchema = z
   .string()
@@ -213,7 +211,7 @@ export async function compilePreparedCorpusCase(
     objectiveNumber: number;
   },
   backend: ManagementBackend,
-  checkpoint: CompilationCheckpoint,
+  checkpoint: CompiledPlanCheckpoint,
 ) {
   const { objectiveNumber, ...execution } = context;
   if (
@@ -232,7 +230,7 @@ export async function compilePreparedCorpusCase(
     )
       throw new Error("prepared fixture changed before compilation");
   }
-  return backend.compile(
+  return compilePlan(
     {
       ...execution,
       repository: prepared.repository,
@@ -243,6 +241,7 @@ export async function compilePreparedCorpusCase(
         body: `${prepared.entry.objective}\n\nExecution contract: every Work Item must explicitly set positive cpu <= ${prepared.limits.cpu}, memoryMb <= ${prepared.limits.memoryMb}, and timeoutMinutes <= ${prepared.limits.timeoutMinutes}. Use trusted_local, no services, no network destinations, and no secrets. Provision the declared local tools before execution; do not install dependencies during the offline task.`,
       },
     },
+    backend,
     checkpoint,
   );
 }
@@ -321,6 +320,17 @@ export function assessCompilerCorpusResult(
   const owners = new Map<string, string[]>();
   const covers = (scope: string[], path: string) =>
     scope.some((value) => value === path || (value.endsWith("/") && path.startsWith(value)));
+  const sameValidationOperation = (left: string, right: string) => {
+    if (left === right) return true;
+    const leftOperation = futureToolchainCommand(left);
+    const rightOperation = futureToolchainCommand(right);
+    if (!leftOperation || !rightOperation) return false;
+    return (
+      leftOperation.adapter.id === rightOperation.adapter.id &&
+      leftOperation.operation.kind === rightOperation.operation.kind &&
+      leftOperation.operation.key === rightOperation.operation.key
+    );
+  };
   for (const binding of bindings) {
     const criterion = prepared.entry.criteria.find(
       (candidate) => candidate.id === binding.criterionId,
@@ -335,7 +345,12 @@ export function assessCompilerCorpusResult(
     if (
       criterion.paths.some((path) => !items.some((item) => covers(item.scope, path))) ||
       criterion.commands.some(
-        (command) => !items.some((item) => item.validationCommands.includes(command)),
+        (command) =>
+          !items.some((item) =>
+            item.validationCommands.some((candidate) =>
+              sameValidationOperation(command, candidate),
+            ),
+          ),
       ) ||
       criterion.tiers.some(
         (tier) =>

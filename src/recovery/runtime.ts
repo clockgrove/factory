@@ -361,15 +361,30 @@ export async function loadRecoveryRuntime(input: {
       (event): event is Request =>
         event.event === "RecoveryRequested" && event.predecessorRunId === plan.predecessor.runId,
     );
-    const predecessor = events.find(
+    const predecessorStarts = events.filter(
       (event): event is Start =>
         event.event === "FactoryRunStarted" && event.runId === plan.predecessor.runId,
     );
-    requireRuntime(requests.length === 1 && predecessor, "authority-unavailable");
+    const predecessor = predecessorStarts[0];
+    requireRuntime(
+      requests.length === 1 && predecessorStarts.length === 1 && predecessor,
+      "authority-unavailable",
+    );
     const predecessorTerminal = isRecoveryCompileObjectiveGraph(plan.graph)
       ? observation.findByDigest(plan.predecessor.terminalDigest)
       : undefined;
-    if (isRecoveryCompileObjectiveGraph(plan.graph))
+    if (isRecoveryCompileObjectiveGraph(plan.graph)) {
+      const invocationId = `compile-${predecessor!.baseSha}`;
+      const failureReceipts = events.filter(
+        (event) =>
+          event.runId === predecessor!.runId &&
+          event.kind === "budget" &&
+          event.phase === "management" &&
+          event.unit === "model_tokens" &&
+          event.modelInvocationId === invocationId &&
+          event.sequence > predecessor!.sequence &&
+          event.sequence < (predecessorTerminal?.sequence ?? -1),
+      );
       requireRuntime(
         predecessorTerminal?.runId === plan.predecessor.runId &&
           predecessorTerminal.event === "FactoryRunEscalated" &&
@@ -379,6 +394,10 @@ export async function loadRecoveryRuntime(input: {
           predecessor.baseSha === plan.graph.sourceBaseSha &&
           plan.expectedBaseSha === plan.graph.sourceBaseSha &&
           controllingRun.baseSha === plan.graph.sourceBaseSha &&
+          failureReceipts.length === 2 &&
+          failureReceipts.filter((event) => event.event === "BudgetReserved").length === 1 &&
+          failureReceipts.filter((event) => event.event === "BudgetReconciled").length === 1 &&
+          failureReceipts.every((event) => event.policyDigest === predecessor.policyDigest) &&
           compilerEvalDigest({
             number: snapshot.number,
             title: snapshot.title,
@@ -386,6 +405,7 @@ export async function loadRecoveryRuntime(input: {
           }) === plan.graph.objectiveInputDigest,
         "prior-compilation-failure-unavailable",
       );
+    }
     const plans: Record<string, RecoveryPlanRecord> = { [record.digest]: record };
     let prior = plan.priorPlanDigest;
     while (prior !== null) {

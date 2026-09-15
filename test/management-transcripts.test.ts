@@ -9,6 +9,7 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -300,6 +301,32 @@ describe("local management transcripts", () => {
     expect(names.some((name) => name.endsWith(".tmp"))).toBe(false);
     expect(names).not.toContain(".factory-management-retention.lock");
   }, 30_000);
+
+  it("never steals an old retention lock from a possibly live writer", async () => {
+    const directory = join(await root(), "archive");
+    const lock = join(directory, ".factory-management-retention.lock");
+    await mkdir(lock, { recursive: true });
+    const old = new Date(Date.now() - 120_000);
+    await utimes(lock, old, old);
+
+    await expect(
+      new LocalManagementTranscriptRecorder(directory).begin({
+        cwd: directory,
+        modelInvocationId: "blocked-by-existing-writer",
+        prompt: "must not race the existing writer",
+        schema: {},
+        profile: null,
+        model: null,
+        reasoning: null,
+        transport: "structured-adapter",
+      }),
+    ).rejects.toThrow("management transcript retention lock timed out");
+
+    expect((await stat(lock)).isDirectory()).toBe(true);
+    expect(
+      (await readdir(directory)).filter((name) => name.startsWith("factory-management-")),
+    ).toEqual([]);
+  }, 10_000);
 
   it("prunes oldest owned records to the byte bound before replacement", async () => {
     const directory = join(await root(), "archive");

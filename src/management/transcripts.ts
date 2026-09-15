@@ -11,7 +11,6 @@ export const MAX_MANAGEMENT_TRANSCRIPT_RECORDS = 1_000;
 export const MANAGEMENT_TRANSCRIPT_FILENAME_PREFIX = "factory-management-";
 const MANAGEMENT_TRANSCRIPT_LOCK_NAME = ".factory-management-retention.lock";
 const MANAGEMENT_TRANSCRIPT_LOCK_TIMEOUT_MS = 5_000;
-const MANAGEMENT_TRANSCRIPT_STALE_LOCK_MS = 60_000;
 
 export interface ManagementTranscriptStart {
   cwd: string;
@@ -336,14 +335,6 @@ export class LocalManagementTranscriptRecorder implements ManagementTranscriptRe
         }
         if (!details.isDirectory() || details.isSymbolicLink())
           throw new Error("management transcript retention lock is not a real directory");
-        if (Date.now() - details.mtimeMs > MANAGEMENT_TRANSCRIPT_STALE_LOCK_MS) {
-          try {
-            await rmdir(lock);
-            continue;
-          } catch (removalError) {
-            if ((removalError as NodeJS.ErrnoException).code === "ENOENT") continue;
-          }
-        }
         if (Date.now() >= deadline)
           throw new Error("management transcript retention lock timed out");
         await delay(10);

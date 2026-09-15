@@ -255,18 +255,15 @@ async function fixture(
       maxManagedSessions: 0,
       minCloudTimeSavedMinutes: 0,
     };
-  const acceptedPolicy = options.compileFailure
-    ? {
-        ...policy,
-        compilerEvaluation: {
-          mode: "auto-repair" as const,
-          maxRepairs: 2,
-          maxInvocations: 7,
-          timeoutSeconds: 600,
-          maxObservedTokens: 500_000,
-        },
-      }
-    : policy;
+  if (options.compileFailure)
+    policy.compilerEvaluation = {
+      mode: "auto-repair",
+      maxRepairs: 2,
+      maxInvocations: 7,
+      timeoutSeconds: 600,
+      maxObservedTokens: 500_000,
+    };
+  const acceptedPolicy = policy;
   let resourceReads = 0;
   const resourceState = { unavailable: false };
   const resourceReader: LocalResourceReader = {
@@ -396,8 +393,8 @@ async function fixture(
           phase: "management",
           unit: "model_tokens",
           amount: 0,
-          usageId: `invocation-compile-${base.oid}`,
-          modelInvocationId: `compile-${base.oid}`,
+          usageId: "invocation-compiler-inventory-1",
+          modelInvocationId: "compiler-inventory-1",
           directorEpoch: 1,
           policyDigest: policyDigest(policy),
         }),
@@ -408,8 +405,8 @@ async function fixture(
           phase: "management",
           unit: "model_tokens",
           amount: 30,
-          usageId: `failed-compile-${base.oid}`,
-          modelInvocationId: `compile-${base.oid}`,
+          usageId: "draft-compiler-inventory-1",
+          modelInvocationId: "compiler-inventory-1",
           directorEpoch: 1,
           policyDigest: policyDigest(policy),
           reportedModelUsage: { inputTokens: 11, outputTokens: 19 },

@@ -63,13 +63,15 @@ authenticated graph absence, and the successor's deterministic future graph/proj
 contains no Work Item identities. Its content-addressed ref is a durable proposal, not execution
 authority. Changed source evidence requires a different acknowledged plan.
 
-A pre-graph compiler recovery is available only for one original, authoritatively escalated run
-whose Objective-scoped compilation usage is fully reconciled and which produced no graph, Work
-Items, execution effects, or attempt reservations. The successor adds a fully explicit bounded
-`compilerEvaluation: auto-repair` policy; all other policy and cumulative allowance fields are
-preserved unless the operator explicitly approves a model-token increment. The authenticated prior
-terminal reason is diagnostic input. No unavailable raw proposal, graph authority, or execution
-authority is reconstructed from it.
+A pre-graph compiler recovery is available only for one original, authoritatively escalated
+evaluated-compiler run whose Objective-scoped draft usage is fully reconciled and which produced no
+graph, Work Items, execution effects, or attempt reservations. The source and successor carry the
+same fully explicit five-field `compilerEvaluation: auto-repair` policy. All cumulative allowance
+fields are preserved unless the operator explicitly approves a model-token increment. The
+authenticated prior terminal reason is diagnostic input. No unavailable raw proposal, graph
+authority, or execution authority is reconstructed from it. Runs without that canonical evaluated
+compiler policy and exact draft accounting are ineligible; Factory does not translate an older
+receipt or synthesize a missing policy.
 
 `RecoveryRequested`, `RecoveryConsumed`, and `RecoveryAdoptionCompleted` have a separate event kind. Successor start records name
 the exact request, plan digest, and predecessor; authenticated reader bindings reject a changed

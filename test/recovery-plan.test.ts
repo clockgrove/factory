@@ -215,6 +215,8 @@ function compileObjectiveProposal(): RecoveryPlan {
     maxObservedTokens: 500_000,
   };
   const acceptedPolicy = { ...original.acceptedPolicy, compilerEvaluation };
+  original.history[0]!.policyDigest = policyDigest(acceptedPolicy);
+  original.historyDigest = recoveryHistoryDigest(original.history);
   return {
     ...original,
     protocol: RECOVERY_PLAN_PROTOCOL_V2,
@@ -384,7 +386,7 @@ describe("immutable recovery proposal", () => {
     expect(() => parseRecoveryPlan(changedPolicy)).toThrow(/policy digest/i);
   });
 
-  it("limits v2 authority to one root source and the exact compiler-policy addition", () => {
+  it("limits v2 authority to one root source with one exact evaluated-compiler policy", () => {
     const plan = compileObjectiveProposal();
 
     const linked = structuredClone(plan);
@@ -403,16 +405,16 @@ describe("immutable recovery proposal", () => {
     extraHistory.historyDigest = recoveryHistoryDigest(extraHistory.history);
     expect(() => parseRecoveryPlan(extraHistory)).toThrow(/exactly one original run/i);
 
-    const sourceAlreadyHadCompilerPolicy = structuredClone(plan);
-    sourceAlreadyHadCompilerPolicy.history[0]!.policyDigest = policyDigest(
-      sourceAlreadyHadCompilerPolicy.acceptedPolicy,
+    expect(parseRecoveryPlan(structuredClone(plan))).toEqual(plan);
+
+    const sourceWithoutCompilerPolicy = structuredClone(plan);
+    const sourcePolicy = structuredClone(sourceWithoutCompilerPolicy.acceptedPolicy);
+    delete sourcePolicy.compilerEvaluation;
+    sourceWithoutCompilerPolicy.history[0]!.policyDigest = policyDigest(sourcePolicy);
+    sourceWithoutCompilerPolicy.historyDigest = recoveryHistoryDigest(
+      sourceWithoutCompilerPolicy.history,
     );
-    sourceAlreadyHadCompilerPolicy.historyDigest = recoveryHistoryDigest(
-      sourceAlreadyHadCompilerPolicy.history,
-    );
-    expect(() => parseRecoveryPlan(sourceAlreadyHadCompilerPolicy)).toThrow(
-      /differs from the source policy/i,
-    );
+    expect(() => parseRecoveryPlan(sourceWithoutCompilerPolicy)).toThrow(/source policy/i);
 
     const changedAcceptedPolicy = structuredClone(plan);
     changedAcceptedPolicy.acceptedPolicy.maxParallel = 3;

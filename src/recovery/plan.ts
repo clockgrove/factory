@@ -668,7 +668,6 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
       "compile-objective can increment only the model-token allowance",
     );
     const sourcePolicyInput = structuredClone(policy);
-    delete sourcePolicyInput.compilerEvaluation;
     if (before.modelTokens !== null) {
       requirePlan(
         sourcePolicyInput.economics !== undefined,
@@ -682,7 +681,7 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
     const sourcePolicy = parseRunPolicy(sourcePolicyInput);
     requirePlan(
       policyDigest(sourcePolicy) === plan.history[0]!.policyDigest,
-      "compile-objective accepted policy differs from the source policy beyond its explicit compiler and model-token authority",
+      "compile-objective accepted policy differs from the source policy beyond its explicit model-token allowance",
     );
     requirePlan(
       before.modelTokens === (sourcePolicy.economics?.maxModelTokens ?? null) &&

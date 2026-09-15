@@ -51,6 +51,11 @@ including on WSL2. Diagnose the user bus with
 replace real transient-scope containment tests. Package checks install an isolated staged plugin
 and npm tarball and exercise their executable surfaces without the development worktree's
 configuration. Those checks do not establish published-artifact installation support.
+Controller lifecycle qualification must also cover a Desktop-style process with missing or
+misleading inherited bus variables, a post-write install failure with verified rollback, and
+different Desktop/Linux launcher paths containing byte-identical bundle bytes. Status and doctor
+must fail explicitly when the current-user manager cannot be observed; false disabled/inactive
+receipts do not satisfy this gate.
 
 ## Verification required before publication
 

@@ -350,6 +350,22 @@ describe("read-only checkout preflight", () => {
       status: "warning",
       summary: expect.stringContaining("controller-launcher-stale"),
     });
+    const unreachableController = await report({
+      ...healthyChecks(),
+      controller: {
+        status: async () => {
+          throw new Error(
+            "controller-user-manager-unavailable: verify the current Linux user manager; run the exact Linux CLI command",
+          );
+        },
+      } as unknown as NonNullable<DoctorChecks["controller"]>,
+    });
+    expect(
+      unreachableController.diagnostics.find((entry) => entry.area === "controller"),
+    ).toMatchObject({
+      status: "fail",
+      summary: expect.stringContaining("controller-user-manager-unavailable"),
+    });
     const fusedController = await report({
       ...healthyChecks(),
       controller: {

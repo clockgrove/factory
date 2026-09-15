@@ -33,13 +33,6 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function advanceUntil(observed: () => boolean, maximumMs = 10_000) {
-  // Advance Factory's timers only to the named boundary.
-  for (let elapsed = 0; elapsed < maximumMs && !observed(); elapsed += 100)
-    await vi.advanceTimersByTimeAsync(100);
-  expect(observed()).toBe(true);
-}
-
 let fixtureSequence = 0;
 
 function setup(input: { queued?: boolean; fetch?: typeof globalThis.fetch } = {}) {
@@ -50,11 +43,11 @@ function setup(input: { queued?: boolean; fetch?: typeof globalThis.fetch } = {}
   // Hold the actual pretransport gate; stopping this owner must remove only its
   // queued normal work, while cleanup proceeds once the holder releases.
   const held = input.queued ? resources.mutationScheduler.acquire("lease") : undefined;
-  let queueObserved = false;
+  const queueObserved = deferred();
   const acquirePermit = resources.mutationScheduler.acquire.bind(resources.mutationScheduler);
   vi.spyOn(resources.mutationScheduler, "acquire").mockImplementation((kind) => {
     const permit = acquirePermit(kind);
-    if (kind === undefined || kind === "normal") queueObserved = true;
+    if (kind === undefined || kind === "normal") queueObserved.resolve();
     return permit;
   });
   const request = vi.fn(
@@ -150,7 +143,7 @@ function setup(input: { queued?: boolean; fetch?: typeof globalThis.fetch } = {}
     release,
     run,
     normal,
-    queueObserved: () => queueObserved,
+    queueObserved: queueObserved.promise,
   };
 }
 
@@ -171,16 +164,11 @@ it("stops a queued normal admission wait, settles priority cleanup, and never di
       cleanupProved = true;
     }
   });
-  await advanceUntil(f.queueObserved);
+  await f.queueObserved;
   expect(f.request).not.toHaveBeenCalled();
-  let settled = false;
-  const outcome = task.finally(() => {
-    settled = true;
-  });
   f.abort.abort();
   await f.releaseGate();
-  await advanceUntil(() => settled);
-  await outcome;
+  await task;
   expect(cleanupProved).toBe(true);
   expect(f.acquire).toHaveBeenCalledTimes(1);
   expect(f.release).toHaveBeenCalledTimes(1);
@@ -197,11 +185,11 @@ it.each([false, true])(
   "waits for admitted transport after stop and preserves its actual outcome (refused: %s)",
   async (refused) => {
     const response = deferred();
-    let entered = false;
+    const entered = deferred();
     const f = setup({
       fetch: async (url) => {
         if (String(url).includes("/comments")) {
-          entered = true;
+          entered.resolve();
           await response.promise;
           return new Response(
             JSON.stringify(refused ? { message: "fixture unavailable" } : { id: 1 }),
@@ -217,10 +205,10 @@ it.each([false, true])(
         });
       },
     });
-    let settled = false;
     const task = f.run(async () => {
       await f.normal();
     });
+    let settled = false;
     const outcome = task.then(
       () => {
         settled = true;
@@ -231,7 +219,7 @@ it.each([false, true])(
         return error;
       },
     );
-    await advanceUntil(() => entered);
+    await entered.promise;
     f.abort.abort();
     await vi.advanceTimersByTimeAsync(1_000);
     expect(settled).toBe(false);
@@ -239,7 +227,6 @@ it.each([false, true])(
     response.resolve();
     // Shutdown waits for the in-flight response; the client cannot replay an
     // uncertain 503 effect. Factory then surfaces the unresolved refusal.
-    await advanceUntil(() => settled, refused ? 30_000 : 10_000);
     const failure = await outcome;
     if (refused)
       expect(failure).toMatchObject({
@@ -267,16 +254,10 @@ it("does not hide unresolved cleanup behind a pre-dispatch cancellation", async 
       throw error;
     }
   });
-  let settled = false;
-  const outcome = task
-    .catch((error: unknown) => error)
-    .finally(() => {
-      settled = true;
-    });
-  await advanceUntil(f.queueObserved);
+  const outcome = task.catch((error: unknown) => error);
+  await f.queueObserved;
   f.abort.abort();
   await f.releaseGate();
-  await advanceUntil(() => settled);
   expect(await outcome).toMatchObject({
     code: "controller-internal-invariant",
     safeIdentity: "controller-invariant-failure",
@@ -364,7 +345,6 @@ it("rechecks local discovery retirement beside the Objective fence after a queue
     { owner: "fixture", repo: "fixture", issue_number: 1, body: "Objective writer fallback" },
     true,
   );
-  await advanceUntil(() => f.request.mock.calls.length === 1);
   await fallback;
   expect(f.request).toHaveBeenCalledTimes(1);
 });

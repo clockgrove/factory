@@ -8,6 +8,7 @@ import {
   concurrencyObjectiveBody,
   concurrencyRefill,
   concurrencyReceiptProgress,
+  observeSettledConcurrencyMergeProofs,
   assertInnerTakeover,
   assertObjectiveContention,
   assertRetiredController,
@@ -157,6 +158,231 @@ describe("prospective concurrency observation window", () => {
     } finally {
       now.mockRestore();
     }
+  });
+
+  it("proves terminal merges from durable PR identity after disposable review refs are gone", async () => {
+    const source = {
+      baseSha: "e".repeat(40),
+      outputTreeSha: "f".repeat(40),
+      validationDigest: "c".repeat(64),
+      publishedHeadSha: "a".repeat(40),
+    };
+    const exactHeadValidationDigest = createHash("sha256")
+      .update(
+        JSON.stringify({
+          protocol: "clockgrove.factory/exact-head-validation-v1",
+          validationDigest: source.validationDigest,
+          baseSha: source.baseSha,
+          outputTreeSha: source.outputTreeSha,
+          publishedHeadSha: source.publishedHeadSha,
+        }),
+      )
+      .digest("hex");
+    const publication = {
+      event: "PublicationRecorded",
+      runId: "run",
+      objective: 1,
+      workItem: 2,
+      attempt: 1,
+      pullRequest: 3,
+      branch: "factory/objective-1/work-item-2/attempt-1",
+      baseSha: source.baseSha,
+      headSha: source.publishedHeadSha,
+      validationDigest: source.validationDigest,
+      exactHeadValidationDigest,
+      sequence: 4,
+    };
+    const integration = {
+      ...publication,
+      event: "AttemptIntegrated",
+      headSha: "b".repeat(40),
+      sequence: 5,
+    };
+    const pull = {
+      number: 3,
+      node_id: "PR_terminal",
+      state: "closed",
+      merged: true,
+      head: { sha: publication.headSha, ref: publication.branch, repo: { full_name: repository } },
+      base: { repo: { full_name: repository, node_id: "R_terminal" } },
+    };
+    const request = vi.fn(async (route: string) => {
+      expect(route).toBe("POST /graphql");
+      return {
+        data: {
+          data: {
+            node: {
+              __typename: "PullRequest",
+              id: pull.node_id,
+              number: pull.number,
+              repository: { id: "R_terminal", nameWithOwner: repository },
+              headRefOid: publication.headSha,
+              merged: true,
+              state: "MERGED",
+              mergeCommit: { oid: integration.headSha },
+            },
+          },
+        },
+      };
+    });
+    const entry = {
+      repository,
+      runResult: { runId: "run" },
+      status: { run: { runId: "run" } },
+      children: [{ number: 2 }],
+      pulls: [pull],
+      events: [
+        {
+          ...publication,
+          event: "AttemptPublished",
+          artifactDigest: "1".repeat(64),
+          sequence: 3,
+        },
+        {
+          ...publication,
+          event: "ValidationRecorded",
+          passed: true,
+          evidenceDigest: source.validationDigest,
+          outputTreeSha: source.outputTreeSha,
+          sequence: 1,
+        },
+        {
+          ...publication,
+          event: "AttemptValidated",
+          artifactDigest: "1".repeat(64),
+          sequence: 2,
+        },
+        publication,
+        integration,
+      ],
+    };
+    await expect(
+      observeSettledConcurrencyMergeProofs({ entry, request, repository }),
+    ).resolves.toEqual([expect.objectContaining({ pullRequest: 3, headSha: publication.headSha })]);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds a durable refreshed PR head to its original published head without reading refs", async () => {
+    const source = {
+      baseSha: "e".repeat(40),
+      outputTreeSha: "f".repeat(40),
+      validationDigest: "c".repeat(64),
+      publishedHeadSha: "a".repeat(40),
+    };
+    const exactHeadValidationDigest = createHash("sha256")
+      .update(
+        JSON.stringify({
+          protocol: "clockgrove.factory/exact-head-validation-v1",
+          validationDigest: source.validationDigest,
+          baseSha: source.baseSha,
+          outputTreeSha: source.outputTreeSha,
+          publishedHeadSha: source.publishedHeadSha,
+        }),
+      )
+      .digest("hex");
+    const publication = {
+      event: "PublicationRecorded",
+      runId: "run",
+      objective: 1,
+      workItem: 2,
+      attempt: 1,
+      pullRequest: 3,
+      branch: "factory/objective-1/work-item-2/attempt-1",
+      baseSha: source.baseSha,
+      headSha: source.publishedHeadSha,
+      validationDigest: source.validationDigest,
+      exactHeadValidationDigest,
+      sequence: 4,
+    };
+    const integration = {
+      ...publication,
+      event: "AttemptIntegrated",
+      headSha: "b".repeat(40),
+      sequence: 5,
+    };
+    const deliveryHead = "d".repeat(40);
+    const pull = {
+      number: 3,
+      node_id: "PR_terminal",
+      state: "closed",
+      merged: true,
+      head: { sha: deliveryHead, ref: publication.branch, repo: { full_name: repository } },
+      base: { repo: { full_name: repository, node_id: "R_terminal" } },
+    };
+    const request = vi.fn(async (route: string, parameters: Record<string, unknown>) => {
+      if (route === "GET /repos/{owner}/{repo}/git/commits/{commit_sha}") {
+        expect(parameters).toEqual({ commit_sha: deliveryHead });
+        return {
+          data: {
+            sha: deliveryHead,
+            message: `Refresh\n\nFactory-Sibling-Refresh: ${"1".repeat(64)}`,
+            parents: [{ sha: publication.headSha }, { sha: "9".repeat(40) }],
+          },
+        };
+      }
+      expect(route).toBe("POST /graphql");
+      return {
+        data: {
+          data: {
+            node: {
+              __typename: "PullRequest",
+              id: pull.node_id,
+              number: pull.number,
+              repository: { id: "R_terminal", nameWithOwner: repository },
+              headRefOid: deliveryHead,
+              merged: true,
+              state: "MERGED",
+              mergeCommit: { oid: integration.headSha },
+            },
+          },
+        },
+      };
+    });
+    const entry = {
+      repository,
+      runResult: { runId: "run" },
+      status: { run: { runId: "run" } },
+      children: [{ number: 2 }],
+      pulls: [pull],
+      events: [
+        {
+          ...publication,
+          event: "AttemptPublished",
+          artifactDigest: "1".repeat(64),
+          sequence: 3,
+        },
+        {
+          ...publication,
+          event: "ValidationRecorded",
+          passed: true,
+          evidenceDigest: source.validationDigest,
+          outputTreeSha: source.outputTreeSha,
+          sequence: 1,
+        },
+        {
+          ...publication,
+          event: "AttemptValidated",
+          artifactDigest: "1".repeat(64),
+          sequence: 2,
+        },
+        publication,
+        integration,
+      ],
+    };
+    await expect(
+      observeSettledConcurrencyMergeProofs({ entry, request, repository }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        pullRequest: 3,
+        headSha: deliveryHead,
+        sourceHeadSha: publication.headSha,
+        refreshCommitShas: [deliveryHead],
+      }),
+    ]);
+    expect(request.mock.calls.map(([route]) => route)).toEqual([
+      "GET /repos/{owner}/{repo}/git/commits/{commit_sha}",
+      "POST /graphql",
+    ]);
   });
 
   it("uses one incremental repository comment listing while unchanged instead of full snapshots", async () => {
@@ -886,34 +1112,45 @@ describe("installed two-Objective qualification authority", () => {
 });
 
 describe("independent authenticated timing assertions", () => {
-  it("requires a completed B worker and distinct B refill during an A execution lifetime", () => {
+  it("requires cross-Objective overlap followed by a distinct refill", () => {
     expect(concurrencyRefill(pair())).toMatchObject({
       boundary: "authenticated-worker-lifetimes",
       simultaneousCpu: "not-measured",
-      slow: { workItem: 10 },
-      released: { workItem: 20 },
-      refill: { workItem: 21 },
+      peer: { workItem: 20 },
+      released: { workItem: 10 },
+      refill: { workItem: 11 },
     });
     expect(concurrencyRefill(pair(false))).not.toBeNull();
     expect(concurrencyRefill([...pair()].reverse())).toMatchObject({
-      spanningObjective: 1,
+      overlapObjective: 1,
       refillObjective: 0,
       released: { workItem: 20 },
       refill: { workItem: 21 },
     });
     expect(concurrencyReceiptProgress("refill", [...pair()].reverse())).toBe(true);
   });
-  it("does not manufacture refill from overlap alone or equal server timestamps", () => {
+  it("proves overlap and refill separately without manufacturing either", () => {
     const overlap = pair();
+    overlap[0]!.receipts.splice(3);
     overlap[1]!.receipts.splice(3);
     expect(concurrencyRefill(overlap)).toBeNull();
     const tied = pair();
+    tied[0]!.receipts.splice(3);
     tied[1]!.receipts[3]!.event.at = at(4);
     expect(concurrencyRefill(tied)).toBeNull();
     const late = pair();
+    late[0]!.receipts.splice(3);
     late[1]!.receipts[3]!.event.at = at(21);
     late[1]!.receipts[4]!.event.at = at(23);
-    expect(concurrencyRefill(late)).toBeNull();
+    expect(concurrencyRefill(late)).toMatchObject({
+      peer: { workItem: 10 },
+      released: { workItem: 20 },
+      refill: { workItem: 21 },
+    });
+    const disjoint = pair();
+    disjoint[0]!.receipts[1]!.event.at = at(10);
+    disjoint[0]!.receipts[2]!.event.at = at(20);
+    expect(concurrencyRefill(disjoint)).toBeNull();
   });
   it("rejects two concurrently started workers in the same one-worker Objective", () => {
     const invalid = pair();

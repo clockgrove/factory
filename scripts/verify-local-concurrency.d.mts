@@ -28,6 +28,11 @@ export function assertConcurrencySettlement(
   authority: CheckpointAuthority,
   options?: { paused?: boolean },
 ): { runId: string; modelTokens: number; reservations: number };
+export function observeSettledConcurrencyMergeProofs(input: {
+  entry: unknown;
+  request: (route: string, parameters: Record<string, unknown>) => Promise<unknown>;
+  repository: string;
+}): Promise<Record<string, unknown>[]>;
 export function assertInnerTakeover(
   before: unknown,
   after: unknown,

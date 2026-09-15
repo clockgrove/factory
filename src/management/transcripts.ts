@@ -224,7 +224,7 @@ export class LocalManagementTranscriptRecorder implements ManagementTranscriptRe
             role: "assistant",
             availability: "observed",
             content,
-            finalStructuredResponse: true,
+            finalStructuredResponse: outcome.state === "succeeded",
           });
         }
         const completedAt = new Date().toISOString();

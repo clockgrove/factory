@@ -391,6 +391,32 @@ describe("local management transcripts", () => {
     ]);
   });
 
+  it("does not label a contradictory failed parsed adapter result as final", async () => {
+    const directory = join(await root(), "archive");
+    const session = await new LocalManagementTranscriptRecorder(directory).begin({
+      cwd: directory,
+      prompt: "adapter failure",
+      schema: {},
+      profile: null,
+      model: null,
+      reasoning: null,
+      transport: "structured-adapter",
+    });
+    await session.finish({
+      state: "invalid-response",
+      parsedResponse: { partial: true },
+      error: "adapter rejected result",
+    });
+    const [name] = await readdir(directory);
+    const record = JSON.parse(await readFile(join(directory, name!), "utf8"));
+    expect(record.response.messages).toEqual([
+      expect.objectContaining({
+        content: '{"partial":true}',
+        finalStructuredResponse: false,
+      }),
+    ]);
+  });
+
   it("keeps actual failed CLI streams only in the local transcript", async () => {
     const repository = await root();
     const directory = join(repository, "archive");

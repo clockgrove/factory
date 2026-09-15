@@ -212,11 +212,15 @@ export class SystemdUserService {
       }
       mutationAttempted = true;
       await this.#systemctl(["daemon-reload"], manager);
-      if (!enabledUnitFileState(before.unitFileState)) {
+      if (!persistentlyEnabledUnitFileState(before.unitFileState)) {
         await this.#systemctl(["enable", this.unitName(input)], manager);
       }
-      const status = await this.#status(input, manager);
-      if (!status.installed || !status.enabled) {
+      const [installedBody, installedState] = await Promise.all([
+        readOptionalFile(path),
+        this.#managerState(input, manager, "install verification"),
+      ]);
+      const status = await this.#statusFrom(input, installedBody, installedState);
+      if (!status.installed || !persistentlyEnabledUnitFileState(installedState.unitFileState)) {
         throw new Error(`failed to install and enable ${status.unit}`);
       }
       return status;
@@ -241,11 +245,23 @@ export class SystemdUserService {
   async stop(input: SystemdServiceInput): Promise<SystemdStatus> {
     validateInput(input);
     const manager = await this.#connectUserManager("stop", input);
-    const before = await this.#status(input, manager);
-    if (!before.active) return before;
+    const [beforeBody, beforeState] = await Promise.all([
+      readOptionalFile(this.unitPath(input)),
+      this.#managerState(input, manager, "stop"),
+    ]);
+    const before = await this.#statusFrom(input, beforeBody, beforeState);
+    if (settledStoppedActiveState(beforeState.activeState)) return before;
     await this.#systemctl(["stop", this.unitName(input)], manager);
-    const status = await this.#status(input, manager);
-    if (status.active) throw new Error(`failed to stop ${status.unit}`);
+    const [body, state] = await Promise.all([
+      readOptionalFile(this.unitPath(input)),
+      this.#managerState(input, manager, "stop verification"),
+    ]);
+    const status = await this.#statusFrom(input, body, state);
+    if (!settledStoppedActiveState(state.activeState)) {
+      throw new Error(
+        `controller-lifecycle-outcome-unknown: stop did not settle ${status.unit} (systemd reports ${state.activeState}); ${this.#inspectionAction(input)}`,
+      );
+    }
     return status;
   }
   async restart(input: SystemdServiceInput): Promise<SystemdStatus> {
@@ -601,7 +617,7 @@ export class SystemdUserService {
         repairErrors.push(errorMessage(error));
       }
     };
-    if (!enabledUnitFileState(before.unitFileState)) {
+    if (!persistentlyEnabledUnitFileState(before.unitFileState)) {
       await repair(() => this.#systemctl(["disable", unit], manager));
     }
     await repair(async () => {
@@ -610,7 +626,14 @@ export class SystemdUserService {
     });
     await repair(() => this.#systemctl(["daemon-reload"], manager));
     if (enabledUnitFileState(before.unitFileState)) {
-      await repair(() => this.#systemctl(["enable", unit], manager));
+      await repair(() =>
+        this.#systemctl(
+          runtimeEnabledUnitFileState(before.unitFileState)
+            ? ["enable", "--runtime", unit]
+            : ["enable", unit],
+          manager,
+        ),
+      );
     }
     let restored = false;
     try {
@@ -620,7 +643,7 @@ export class SystemdUserService {
       ]);
       restored =
         body === old &&
-        enabledUnitFileState(state.unitFileState) === enabledUnitFileState(before.unitFileState) &&
+        state.unitFileState === before.unitFileState &&
         state.activeState === before.activeState &&
         (old !== undefined || state.loadState === "not-found");
     } catch (error) {
@@ -657,7 +680,12 @@ export class SystemdUserService {
     await repair(() => atomicWrite(path, old));
     await repair(() => this.#systemctl(["daemon-reload"], manager));
     await repair(() =>
-      this.#systemctl([beforeStatus.enabled ? "enable" : "disable", unit], manager),
+      this.#systemctl(
+        runtimeEnabledUnitFileState(beforeState.unitFileState)
+          ? ["enable", "--runtime", unit]
+          : [beforeStatus.enabled ? "enable" : "disable", unit],
+        manager,
+      ),
     );
     if (beforeStatus.active) {
       await repair(() => this.#systemctl(["start", unit], manager));
@@ -670,7 +698,7 @@ export class SystemdUserService {
       ]);
       restored =
         body === old &&
-        enabledUnitFileState(state.unitFileState) === beforeStatus.enabled &&
+        state.unitFileState === beforeState.unitFileState &&
         state.activeState === beforeState.activeState;
     } catch (error) {
       repairErrors.push(errorMessage(error));
@@ -865,6 +893,18 @@ async function atomicWrite(path: string, body: string): Promise<void> {
 
 function enabledUnitFileState(state: string): boolean {
   return ["enabled", "enabled-runtime", "linked", "linked-runtime", "alias"].includes(state);
+}
+
+function persistentlyEnabledUnitFileState(state: string): boolean {
+  return state === "enabled";
+}
+
+function runtimeEnabledUnitFileState(state: string): boolean {
+  return state === "enabled-runtime" || state === "linked-runtime";
+}
+
+function settledStoppedActiveState(state: string): boolean {
+  return state === "inactive" || state === "failed";
 }
 
 function hasOutputText(value: unknown): boolean {

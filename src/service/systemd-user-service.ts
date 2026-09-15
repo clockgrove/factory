@@ -270,6 +270,7 @@ export class SystemdUserService {
       readOptionalFile(this.unitPath(input)),
       this.#managerState(input, manager, "stop"),
     ]);
+    const beforeActiveState = classifyActiveState(beforeState.activeState);
     const beforeUnitFileState = classifyUnitFileState(beforeState.unitFileState);
     if (unmanagedUnitFileState(beforeUnitFileState)) {
       throw new Error(
@@ -281,7 +282,19 @@ export class SystemdUserService {
         `controller-lifecycle-outcome-unknown: stop cannot safely mutate ${this.unitName(input)} while systemd reports UnitFileState=${beforeState.unitFileState || "(empty)"}; ${this.#inspectionAction(input)}`,
       );
     }
-    if (classifyActiveState(beforeState.activeState) === "stopped") {
+    const managerStatePresent =
+      beforeState.loadState !== "not-found" ||
+      beforeUnitFileState !== "disabled" ||
+      beforeActiveState !== "stopped";
+    if (
+      (beforeBody === undefined && managerStatePresent) ||
+      (beforeBody !== undefined && !beforeBody.startsWith(FACTORY_UNIT_MARKER))
+    ) {
+      throw new Error(
+        `controller-unit-unmanaged: ${this.unitName(input)} cannot be stopped because its regular unit file and manager state do not prove Factory ownership; ${this.#inspectionAction(input)}`,
+      );
+    }
+    if (beforeActiveState === "stopped") {
       return this.#statusFrom(input, beforeBody, beforeState);
     }
     await this.#systemctl(["stop", this.unitName(input)], manager);

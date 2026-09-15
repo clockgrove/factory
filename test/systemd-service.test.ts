@@ -586,6 +586,87 @@ describe("systemd user service lifecycle", () => {
     expect(stopCalls).toBe(0);
   });
 
+  it.each(["unmarked-file", "no-file-manager-state"])(
+    "refuses to stop active unmanaged %s before mutation",
+    async (conflict) => {
+      const directory = await mkdtemp(join(tmpdir(), "factory-systemd-unmanaged-stop-"));
+      commandFixtures.push(directory);
+      const bundle = join(directory, "factory.js");
+      await writeFile(bundle, "// controller fixture\n");
+      let stopCalls = 0;
+      const run = async (args: readonly string[]) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
+        if (args[0] === "stop") stopCalls += 1;
+        if (isUnitProbe(args)) {
+          return systemdState(args[1]!, {
+            loadState: "loaded",
+            unitFileState: "enabled",
+            activeState: "active",
+          });
+        }
+      };
+      const service = new SystemdUserService({
+        factoryCommand: [process.execPath, bundle],
+        unitDirectory: directory,
+        currentUserManager,
+        run,
+      });
+      const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+      if (conflict === "unmarked-file") {
+        await writeFile(service.unitPath(input), "[Service]\nExecStart=/bin/false\n");
+      }
+
+      await expect(service.stop(input)).rejects.toThrow(/controller-unit-unmanaged/);
+      expect(stopCalls).toBe(0);
+    },
+  );
+
+  it.each(["disabled", "stale-launcher"])(
+    "stops an active owned unit even when its status is %s",
+    async (condition) => {
+      const directory = await mkdtemp(join(tmpdir(), "factory-systemd-owned-stop-"));
+      commandFixtures.push(directory);
+      const bundle = join(directory, "factory.js");
+      await writeFile(bundle, "// controller fixture\n");
+      let activeState = "inactive";
+      let unitFileState = "disabled";
+      let stopCalls = 0;
+      const run = async (args: readonly string[]) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
+        if (args[0] === "enable") unitFileState = "enabled";
+        if (args[0] === "stop") {
+          stopCalls += 1;
+          activeState = "inactive";
+        }
+        if (isUnitProbe(args)) {
+          const installed = await fileExists(join(directory, args[1]!));
+          return systemdState(args[1]!, {
+            loadState: installed ? "loaded" : "not-found",
+            unitFileState: installed ? unitFileState : "disabled",
+            activeState: installed ? activeState : "inactive",
+          });
+        }
+      };
+      const service = new SystemdUserService({
+        factoryCommand: [process.execPath, bundle],
+        unitDirectory: directory,
+        currentUserManager,
+        run,
+      });
+      const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+      await service.install(input);
+      activeState = "active";
+      if (condition === "disabled") unitFileState = "disabled";
+      else await writeFile(bundle, "// changed controller fixture\n");
+
+      expect(await service.stop(input)).toMatchObject({
+        active: false,
+        reasonCode: condition === "disabled" ? "controller-disabled" : "controller-launcher-stale",
+      });
+      expect(stopCalls).toBe(1);
+    },
+  );
+
   it("converts runtime-only enablement into verified persistent enablement", async () => {
     const directory = await mkdtemp(join(tmpdir(), "factory-systemd-runtime-enable-"));
     commandFixtures.push(directory);

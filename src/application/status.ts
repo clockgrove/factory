@@ -258,6 +258,63 @@ export interface FactoryStatusReport {
   };
   workItems: StatusWorkItem[];
   summary: RunSummary | null;
+  findings: Array<{
+    findingId: string;
+    workItem?: number;
+    classification: string;
+    disposition:
+      | "repaired"
+      | "issue-filed"
+      | "existing-issue-linked"
+      | "issue-ready"
+      | "reporting-refused"
+      | "reporting-limit"
+      | "pending";
+    destination: string;
+    issueNumber?: number;
+    issueUrl?: string;
+    reasonCode?: string;
+  }>;
+  compilerEvaluation?:
+    | {
+        availability: "unavailable";
+        policy: {
+          mode: "report-only" | "auto-repair";
+          maxRepairs: number;
+          maxInvocations: number;
+          timeoutSeconds: number;
+          maxObservedTokens: number | null;
+        };
+        reason: string;
+      }
+    | {
+        availability: "observed";
+        policy: {
+          mode: "report-only" | "auto-repair";
+          maxRepairs: number;
+          maxInvocations: number;
+          timeoutSeconds: number;
+          maxObservedTokens: number | null;
+        };
+        invocations: Array<{
+          invocationId: string;
+          stage: "inventory" | "compile" | "repair" | "judge";
+          revision: number;
+          state: "reserved" | "completed" | "failed" | "not-invoked";
+          inputTokens: number | null;
+          outputTokens: number | null;
+          cachedInputTokens: number | null;
+          observedTokens: number | null;
+          observedMilliseconds: number | null;
+        }>;
+        cumulativeUsage: {
+          inputTokens: number;
+          outputTokens: number;
+          cachedInputTokens: number;
+          observedTokens: number;
+          complete: boolean;
+        };
+      };
   /** Explicitly process-local telemetry; separate from durable/replayed run economics. */
   github?: GitHubMutationTelemetry;
 }
@@ -267,6 +324,43 @@ export function snapshotEvents(snapshot: FactoryReadSnapshot): FactoryEvent[] {
     ...(snapshot.factoryEvents ?? []),
     ...snapshot.workItems.flatMap((item) => item.factoryEvents ?? []),
   ]).sort((left, right) => left.sequence - right.sequence);
+}
+
+function findingStatus(events: readonly FactoryEvent[]): FactoryStatusReport["findings"] {
+  const findings = new Map<string, FactoryStatusReport["findings"][number]>();
+  for (const event of events) {
+    if (event.kind !== "finding") continue;
+    const current = findings.get(event.findingId);
+    findings.set(event.findingId, {
+      findingId: event.findingId,
+      ...(event.workItem
+        ? { workItem: event.workItem }
+        : current?.workItem
+          ? { workItem: current.workItem }
+          : {}),
+      classification: event.classification,
+      disposition: event.disposition ?? current?.disposition ?? "pending",
+      destination: event.destination,
+      ...(event.issueNumber
+        ? { issueNumber: event.issueNumber }
+        : current?.issueNumber
+          ? { issueNumber: current.issueNumber }
+          : {}),
+      ...(event.issueUrl
+        ? { issueUrl: event.issueUrl }
+        : current?.issueUrl
+          ? { issueUrl: current.issueUrl }
+          : {}),
+      ...(event.reasonCode
+        ? { reasonCode: event.reasonCode }
+        : current?.reasonCode
+          ? { reasonCode: current.reasonCode }
+          : {}),
+    });
+  }
+  return [...findings.values()].sort((left, right) =>
+    left.findingId.localeCompare(right.findingId),
+  );
 }
 
 function evidenceTime(snapshot: FactoryReadSnapshot, events: readonly FactoryEvent[]): Date {
@@ -518,6 +612,20 @@ export function buildStatusReport(input: {
     .filter((event) => event.kind === "controller")
     .sort((left, right) => right.sequence - left.sequence)[0];
   const summary = summarizeRun(events, policy ?? undefined, input.snapshot.objectiveAuthority);
+  const compilerPolicy = policy?.compilerEvaluation;
+  const compilerEvaluation = compilerPolicy
+    ? {
+        availability: "unavailable" as const,
+        policy: {
+          mode: compilerPolicy.mode,
+          maxRepairs: compilerPolicy.mode === "report-only" ? 0 : (compilerPolicy.maxRepairs ?? 2),
+          maxInvocations: compilerPolicy.maxInvocations ?? 7,
+          timeoutSeconds: compilerPolicy.timeoutSeconds ?? 600,
+          maxObservedTokens: compilerPolicy.maxObservedTokens ?? null,
+        },
+        reason: "immutable compiler draft status reader is unavailable",
+      }
+    : undefined;
   const admissionGateAcknowledged = Boolean(
     commandState?.admissionGate &&
       runEvents.some(
@@ -972,6 +1080,8 @@ export function buildStatusReport(input: {
     },
     workItems: statusItems,
     summary,
+    findings: findingStatus(events),
+    ...(compilerEvaluation ? { compilerEvaluation } : {}),
     ...(input.platformTelemetry ? { github: input.platformTelemetry } : {}),
   };
 }

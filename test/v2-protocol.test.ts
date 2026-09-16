@@ -440,6 +440,7 @@ describe("v2 event protocol", () => {
 describe("Worker Packet", () => {
   it("accepts a bounded local packet", () => {
     const packet = parseWorkerPacket({
+      protocol: "clockgrove.factory/worker-packet",
       goal: "Add invitation persistence.",
       acceptanceCriteria: ["Invitations survive a restart."],
       allowedPaths: ["src/invitations/", "test/invitations.test.ts"],
@@ -449,13 +450,14 @@ describe("Worker Packet", () => {
       baseSha: SHA,
       validationCommands: ["npm test -- invitations"],
       requirements: { trust: "trusted_local" },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     });
     expect(packet.requirements.networkDestinations).toEqual([]);
   });
 
   it("rejects secret values while permitting secret names", () => {
     const base = {
+      protocol: "clockgrove.factory/worker-packet" as const,
       goal: "Use the mail provider.",
       acceptanceCriteria: ["Mail is sent."],
       allowedPaths: ["src/mail.ts"],
@@ -465,7 +467,7 @@ describe("Worker Packet", () => {
         trust: "isolated",
         permittedSecretNames: ["OPENAI_API_KEY"],
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     };
     expect(parseWorkerPacket(base).requirements.permittedSecretNames).toEqual(["OPENAI_API_KEY"]);
     expect(() => parseWorkerPacket({ ...base, conventions: [`sk-${"x".repeat(40)}`] })).toThrow(
@@ -475,12 +477,13 @@ describe("Worker Packet", () => {
 
   it("rejects absolute, traversing, and glob scope entries", () => {
     const base = {
+      protocol: "clockgrove.factory/worker-packet" as const,
       goal: "Change one file.",
       acceptanceCriteria: ["The change is tested."],
       baseSha: SHA,
       validationCommands: ["npm test"],
       requirements: { trust: "trusted_local" },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     };
     for (const path of ["/etc/passwd", "../outside", "src/*", "src\\file.ts"]) {
       expect(() => parseWorkerPacket({ ...base, allowedPaths: [path] })).toThrow(/scope/i);
@@ -489,6 +492,7 @@ describe("Worker Packet", () => {
 
   it("accepts bounded context, change-surface, delivery, and duration metadata", () => {
     const packet = parseWorkerPacket({
+      protocol: "clockgrove.factory/worker-packet",
       goal: "Add the scheduler.",
       acceptanceCriteria: ["Admissions are deterministic."],
       allowedPaths: ["src/scheduling/"],
@@ -512,7 +516,7 @@ describe("Worker Packet", () => {
         relationship: "continue-stack",
         parentWorkItem: "policy",
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     });
     expect(packet.context?.mustRead).toEqual(["docs/DESIGN.md"]);
     expect(packet.requirements.estimatedDurationMinutes).toBe(20);
@@ -520,13 +524,14 @@ describe("Worker Packet", () => {
 
   it("rejects contradictory change-surface and stack metadata", () => {
     const base = {
+      protocol: "clockgrove.factory/worker-packet" as const,
       goal: "Add one file.",
       acceptanceCriteria: ["It is tested."],
       allowedPaths: ["src/a.ts"],
       baseSha: SHA,
       validationCommands: ["npm test"],
       requirements: { trust: "trusted_local" },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     };
     expect(() =>
       parseWorkerPacket({

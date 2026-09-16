@@ -798,7 +798,7 @@ export function assertLargeFileFinalTree({ fixture, observation }) {
 }
 export function assertLargeFileArtifact({ fixture, artifact, observation, patch, phase }) {
   const expected = phaseFiles(fixture.namespace, phase);
-  assert.equal(artifact.protocol, "clockgrove.factory/artifact-v1");
+  assert.equal(artifact.protocol, "clockgrove.factory/artifact");
   assert.equal(artifact.outcome, "succeeded");
   assert.equal(artifact.baseSha, observation.baseSha);
   assert.equal(observation.provenance, "independent-local-raw-git-object-read");
@@ -808,7 +808,7 @@ export function assertLargeFileArtifact({ fixture, artifact, observation, patch,
   assert.ok(Array.isArray(observation.files) && observation.files.length <= 16);
   assert.deepEqual([...artifact.changedPaths].sort(), expected.map((file) => file.path).sort());
   const manifest = artifact.fileManifest;
-  assert.equal(manifest?.version, 1);
+  assert.ok(manifest);
   assert.equal(manifest.baseTreeSha, observation.baseTreeSha);
   assert.equal(manifest.resultTreeSha, observation.treeSha);
   assert.equal(manifest.files.length, expected.length);
@@ -840,7 +840,7 @@ export function assertLargeFileArtifact({ fixture, artifact, observation, patch,
   if (phase === "payload") {
     assert.ok(bytes.length > INLINE_BYTES, "fixture did not exercise oversized transfer");
     const payload = artifact.payload;
-    assert.equal(payload?.kind, "git-patch-chunks-v1");
+    assert.equal(payload?.kind, "content-chunks");
     assert.equal(payload.bytes, bytes.length);
     assert.equal(payload.digest, hash(bytes));
     assert.equal(payload.chunks.length, Math.ceil(bytes.length / CHUNK_BYTES));
@@ -856,9 +856,8 @@ export function assertLargeFileArtifact({ fixture, artifact, observation, patch,
     assert.equal(artifact.payload, undefined);
     assert.equal(artifact.patch, bytes.toString("utf8"));
   }
-  // Rebuild the public artifact-v1 digest with normalized field order, independently of runtime.
+  // Rebuild the public artifact digest with normalized field order, independently of runtime.
   const normalizedManifest = {
-    version: 1,
     baseTreeSha: manifest.baseTreeSha,
     resultTreeSha: manifest.resultTreeSha,
     files: manifest.files.map((file) => ({
@@ -888,7 +887,7 @@ export function assertLargeFileArtifact({ fixture, artifact, observation, patch,
     .update(artifact.changedPaths.slice().sort().join("\0"))
     .update("\0")
     .update(artifact.patch)
-    .update("\0content-v1\0")
+    .update("\0content\0")
     .update(
       JSON.stringify({
         ...(normalizedPayload ? { payload: normalizedPayload } : {}),

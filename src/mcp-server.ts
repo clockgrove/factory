@@ -187,6 +187,7 @@ function applicationFor(
     reader,
     platformTelemetry: () => mutations.telemetry(),
     compilerEvaluationStore: store,
+    assetStore: store,
     ...(recoveryReader
       ? {
           recovery: new RecoveryRequestService({
@@ -428,7 +429,7 @@ const CompiledWorkItemSchema = z.object({
   baseSha: z.string().regex(/^[0-9a-fA-F]{40}$/),
   validationCommands: z.array(z.string().min(1)).min(1),
   requirements: ExecutionRequirementsSchema,
-  artifactContract: z.literal("clockgrove.factory/artifact-v1"),
+  artifactContract: z.literal("clockgrove.factory/artifact"),
 });
 
 const CompiledObjectiveSchema = z.object({
@@ -1433,12 +1434,31 @@ type ApplicationToolInput = {
   unknownUsageAcknowledgementDigest?: string | null;
   pinnedAdmissionSnapshots?: unknown;
   annotations?: unknown;
+  revision?: number;
+  manifestDigest?: string;
+  assets?: Array<{
+    source:
+      | { kind: "local-file"; path: string; name?: string }
+      | { kind: "github-attachment"; url: string; name?: string };
+    metadata: {
+      importId: string;
+      visibility: "public" | "private";
+      allowOpaque?: boolean;
+      rights: {
+        basis: "user-owned" | "licensed" | "permission-granted" | "unknown";
+        license?: string;
+        attribution?: string;
+      };
+    };
+  }>;
 };
 
 function registerApplicationTool(
   name: string,
   operation:
     | "doctor"
+    | "assets-import"
+    | "assets-inspect"
     | "plan"
     | "compiler-eval"
     | "recovery-plan"
@@ -1474,94 +1494,153 @@ function registerApplicationTool(
         repository: z.string().min(1),
         requestId: z.string().min(1).max(160),
       }
-    : operation === "recovery-propose" || operation === "recovery-request"
+    : operation === "assets-import"
       ? {
           ...RequestToolShape,
-          allowanceIncrement: RecoveryProposalInputSchema.shape.allowanceIncrement,
-          compilerEvaluation: RecoveryProposalInputSchema.shape.compilerEvaluation,
-          unknownUsageAcknowledgementDigest:
-            RecoveryProposalInputSchema.shape.unknownUsageAcknowledgementDigest,
-          ...(operation === "recovery-request"
-            ? { planDigest: z.string().regex(/^[0-9a-f]{64}$/) }
-            : {}),
+          baseSha: z
+            .string()
+            .regex(/^[0-9a-fA-F]{40}$/)
+            .optional(),
+          revision: z.number().int().positive().default(1),
+          assets: z
+            .array(
+              z
+                .object({
+                  source: z.discriminatedUnion("kind", [
+                    z
+                      .object({
+                        kind: z.literal("local-file"),
+                        path: z.string().min(1),
+                        name: z.string().min(1).max(255).optional(),
+                      })
+                      .strict(),
+                    z
+                      .object({
+                        kind: z.literal("github-attachment"),
+                        url: z.string().url(),
+                        name: z.string().min(1).max(255).optional(),
+                      })
+                      .strict(),
+                  ]),
+                  metadata: z
+                    .object({
+                      importId: z.string().regex(/^[A-Za-z0-9._:/+-]{1,160}$/),
+                      visibility: z.enum(["public", "private"]),
+                      allowOpaque: z.boolean().optional(),
+                      rights: z
+                        .object({
+                          basis: z.enum([
+                            "user-owned",
+                            "licensed",
+                            "permission-granted",
+                            "unknown",
+                          ]),
+                          license: z.string().min(1).max(500).optional(),
+                          attribution: z.string().min(1).max(1000).optional(),
+                        })
+                        .strict(),
+                    })
+                    .strict(),
+                })
+                .strict(),
+            )
+            .min(1)
+            .max(32),
         }
-      : operation === "activate"
+      : operation === "assets-inspect"
         ? {
-            ...RequestToolShape,
-            baseSha: z
-              .string()
-              .regex(/^[0-9a-fA-F]{40}$/)
-              .optional(),
-            policy: z
-              .record(z.unknown())
-              .optional()
-              .describe(
-                "Complete immutable run policy. Omit for fixed local-only execution up to two workers with physical resource safeguards. Adaptive concurrency is explicit; paid backends are never inferred.",
-              ),
+            ...ObjectiveToolShape,
+            baseSha: z.string().regex(/^[0-9a-fA-F]{40}$/),
+            manifestDigest: z.string().regex(/^[a-f0-9]{64}$/),
           }
-        : [
-              "doctor",
-              "plan",
-              "compiler-eval",
-              "recovery-plan",
-              "status",
-              "explain",
-              "replay",
-            ].includes(operation)
+        : operation === "recovery-propose" || operation === "recovery-request"
           ? {
-              ...ObjectiveToolShape,
-              ...(operation === "doctor" ? { repository: z.string().min(1).optional() } : {}),
-              ...(operation === "plan"
-                ? {
-                    repository: z.string().min(1).optional(),
-                    compile: z
-                      .boolean()
-                      .optional()
-                      .default(false)
-                      .describe(
-                        "Explicitly invoke bounded management compilation. False only inspects an existing graph.",
-                      ),
-                    baseSha: z
-                      .string()
-                      .regex(/^[0-9a-fA-F]{40}$/)
-                      .optional(),
-                    policy: z.record(z.unknown()).optional(),
-                  }
-                : {}),
-              ...(operation === "compiler-eval"
-                ? {
-                    annotations: CompilerCausalAnnotationsSchema.optional().describe(
-                      "Optional caller-supplied causal claims bound to exact run/draft/revision and cited runtime receipts. Claims remain unauthenticated conclusions; no model work or writes.",
-                    ),
-                  }
-                : {}),
-              ...(operation === "explain"
-                ? { workItemNumber: z.number().int().positive().optional() }
-                : {}),
-              ...(operation === "replay"
-                ? {
-                    pinnedAdmissionSnapshots: z
-                      .array(z.unknown())
-                      .max(MAX_SUPPLIED_REPLAY_SNAPSHOTS)
-                      .optional()
-                      .describe(
-                        "Caller-supplied replay-v1 snapshots, at most 8 and 1 MiB total. Validated against replay-snapshot.schema.json and their digests. Simulations are not authenticated historical facts or execution authority.",
-                      ),
-                  }
+              ...RequestToolShape,
+              allowanceIncrement: RecoveryProposalInputSchema.shape.allowanceIncrement,
+              compilerEvaluation: RecoveryProposalInputSchema.shape.compilerEvaluation,
+              unknownUsageAcknowledgementDigest:
+                RecoveryProposalInputSchema.shape.unknownUsageAcknowledgementDigest,
+              ...(operation === "recovery-request"
+                ? { planDigest: z.string().regex(/^[0-9a-f]{64}$/) }
                 : {}),
             }
-          : {
-              ...RequestToolShape,
-              ...(operation === "retry" || operation === "priority"
-                ? { workItemNumber: z.number().int().positive() }
-                : {}),
-              ...(operation === "priority"
-                ? { priorityRank: z.number().int().min(0).max(1_000) }
-                : {}),
-              ...(["pause", "drain", "cloud-pause", "retry", "cancel"].includes(operation)
-                ? { reason: z.string().min(1).max(8_000).optional() }
-                : {}),
-            };
+          : operation === "activate"
+            ? {
+                ...RequestToolShape,
+                baseSha: z
+                  .string()
+                  .regex(/^[0-9a-fA-F]{40}$/)
+                  .optional(),
+                policy: z
+                  .record(z.unknown())
+                  .optional()
+                  .describe(
+                    "Complete immutable run policy. Omit for fixed local-only execution up to two workers with physical resource safeguards. Adaptive concurrency is explicit; paid backends are never inferred.",
+                  ),
+              }
+            : [
+                  "doctor",
+                  "plan",
+                  "compiler-eval",
+                  "recovery-plan",
+                  "status",
+                  "explain",
+                  "replay",
+                ].includes(operation)
+              ? {
+                  ...ObjectiveToolShape,
+                  ...(operation === "doctor" ? { repository: z.string().min(1).optional() } : {}),
+                  ...(operation === "plan"
+                    ? {
+                        repository: z.string().min(1).optional(),
+                        compile: z
+                          .boolean()
+                          .optional()
+                          .default(false)
+                          .describe(
+                            "Explicitly invoke bounded management compilation. False only inspects an existing graph.",
+                          ),
+                        baseSha: z
+                          .string()
+                          .regex(/^[0-9a-fA-F]{40}$/)
+                          .optional(),
+                        policy: z.record(z.unknown()).optional(),
+                      }
+                    : {}),
+                  ...(operation === "compiler-eval"
+                    ? {
+                        annotations: CompilerCausalAnnotationsSchema.optional().describe(
+                          "Optional caller-supplied causal claims bound to exact run/draft/revision and cited runtime receipts. Claims remain unauthenticated conclusions; no model work or writes.",
+                        ),
+                      }
+                    : {}),
+                  ...(operation === "explain"
+                    ? { workItemNumber: z.number().int().positive().optional() }
+                    : {}),
+                  ...(operation === "replay"
+                    ? {
+                        pinnedAdmissionSnapshots: z
+                          .array(z.unknown())
+                          .max(MAX_SUPPLIED_REPLAY_SNAPSHOTS)
+                          .optional()
+                          .describe(
+                            "Caller-supplied replay-v1 snapshots, at most 8 and 1 MiB total. Validated against replay-snapshot.schema.json and their digests. Simulations are not authenticated historical facts or execution authority.",
+                          ),
+                      }
+                    : {}),
+                }
+              : {
+                  ...RequestToolShape,
+                  ...(operation === "retry" || operation === "priority"
+                    ? { workItemNumber: z.number().int().positive() }
+                    : {}),
+                  ...(operation === "priority"
+                    ? { priorityRank: z.number().int().min(0).max(1_000) }
+                    : {}),
+                  ...(["pause", "drain", "cloud-pause", "retry", "cancel"].includes(operation)
+                    ? { reason: z.string().min(1).max(8_000).optional() }
+                    : {}),
+                };
   server.registerTool(
     name,
     {
@@ -1572,7 +1651,7 @@ function registerApplicationTool(
           : operation === "doctor"
             ? "Run bounded, secret-safe repository, authentication, toolchain, controller, backend, branch-policy, stack, and host-resource diagnostics. Read-only: creates no GitHub records or paid resources and never runs a model."
             : operation === "plan"
-              ? "Inspect an existing compiled graph mechanically. Set compile=true to explicitly request one bounded management compilation and receive its observed model usage. Never activates work or writes GitHub."
+              ? "Inspect an existing compiled graph mechanically. Set compile=true to explicitly request bounded planning and receive either one Work Item graph, proposed prerequisite-linked Objectives, or concrete clarification with observed model usage. Proposed Objectives include an identity digest but are not created, activated, or completed; this tool never writes GitHub."
               : operation === "recovery-plan"
                 ? "Read-only assessment of historical work, graph and PR evidence, and cumulative usage. Does not authorize successor execution, reset budgets, or modify GitHub."
                 : operation === "recovery-propose"
@@ -1606,6 +1685,25 @@ function registerApplicationTool(
         if (operation === "recovery-propose") return service.recoveryPropose(request);
         if (!input.planDigest) throw new Error("planDigest is required");
         return service.recoveryRequest({ ...request, planDigest: input.planDigest });
+      }
+      if (operation === "assets-import") {
+        if (!input.requestId || !input.assets) throw new Error("requestId and assets are required");
+        return service.importAssets({
+          objective: input.objectiveNumber!,
+          requestId: input.requestId,
+          revision: input.revision ?? 1,
+          assets: input.assets,
+          ...(input.baseSha ? { baseSha: input.baseSha } : {}),
+        });
+      }
+      if (operation === "assets-inspect") {
+        if (!input.baseSha || !input.manifestDigest)
+          throw new Error("baseSha and manifestDigest are required");
+        return service.inspectAssets({
+          objective: input.objectiveNumber!,
+          baseSha: input.baseSha,
+          manifestDigest: input.manifestDigest,
+        });
       }
       if (
         [

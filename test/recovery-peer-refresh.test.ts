@@ -167,7 +167,7 @@ async function fixture(sameObjective = false, peerNonhost = false) {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       })),
     };
     const manager = new CompiledGraphManager(storage, leases);

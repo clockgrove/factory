@@ -24,6 +24,7 @@ import {
 } from "../src/evaluation/compiler-eval.js";
 import type { CompilerRequest } from "../src/compiler/contracts.js";
 import { CompilerInvariantError } from "../src/compiler/invariant-error.js";
+import { validatePersistedCompilerDraftJournal } from "../src/evaluation/compiler-draft-loop.js";
 import { pinFixtureRepository } from "./helpers/compiler-proposal.js";
 const BASE_SHA = "a".repeat(40);
 const BASE_TREE = "b".repeat(40);
@@ -193,6 +194,9 @@ async function setup(
     mechanicallyInvalidFirst?: boolean;
     schemaInvalidFirst?: boolean;
     acceptFirst?: boolean;
+    invalidAcceptUnknownFirst?: boolean;
+    primitiveCompileFailure?: "string" | "null";
+    frozenCompileFailure?: "error" | "object";
   } = {},
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-draft-integration-"));
@@ -277,7 +281,11 @@ async function setup(
         draftDigest: string;
         inventoryDigest: string;
       };
-      const accept = (options.acceptFirst === true || repairs > 0) && !options.rejectAll;
+      const accept =
+        (options.acceptFirst === true ||
+          options.invalidAcceptUnknownFirst === true ||
+          repairs > 0) &&
+        !options.rejectAll;
       const verdict: CompilerJudgeVerdict = {
         version: 1,
         rubricVersion: 1,
@@ -333,6 +341,7 @@ async function setup(
                 uncertainty: "",
               },
             ],
+        inferenceCorrections: [],
         uncertainty: [],
         decision: options.abstain ? "abstain" : accept ? "accept" : "repair",
       };
@@ -342,6 +351,14 @@ async function setup(
         verdict.findings[0]!.rootCause = "Prefer a shorter item title";
         verdict.findings[0]!.correction = "Shorten the title";
         verdict.decision = "repair";
+      }
+      if (options.invalidAcceptUnknownFirst && repairs === 0) {
+        expect(prompt).toContain("If any dimension remains unknown, choose repair or abstain");
+        const dimension = verdict.dimensions.find(
+          (entry) => entry.dimension === "assumption-grounding",
+        )!;
+        dimension.status = "unknown";
+        dimension.reason = "The existing proposal leaves its assumptions unclear.";
       }
       return { value: verdict, usage };
     }
@@ -353,6 +370,14 @@ async function setup(
       return { value: proposal(request, true), usage };
     }
     stages.push("compile");
+    if (options.frozenCompileFailure)
+      throw Object.freeze(
+        options.frozenCompileFailure === "error"
+          ? new Error("frozen provider failure")
+          : { message: "frozen provider failure" },
+      );
+    if (options.primitiveCompileFailure)
+      throw options.primitiveCompileFailure === "string" ? "primitive provider failure" : null;
     if (options.missingAccounting) throw new Error("transport outcome unknown");
     const request = JSON.parse(prompt.split("\n\n").at(-1)!) as CompilerRequest;
     if (options.schemaInvalidFirst) return { value: { unexpected: true }, usage };
@@ -530,6 +555,54 @@ describe("production compiler draft adapter", () => {
       "reserved request binding",
     );
   });
+
+  it("repairs a schema-valid accept verdict with an unknown dimension and replays without spend", async () => {
+    const f = await setup({ invalidAcceptUnknownFirst: true });
+    const result = await compileEvaluatedDraft(f.args);
+    expect(result).toMatchObject({ status: "accepted", revision: 1 });
+    expect(f.stages).toEqual(["inventory", "compile", "judge", "repair", "judge"]);
+    const rawJudge = result.records.find(
+      (record) =>
+        record.kind === "result" &&
+        record.payload.stage === "judge" &&
+        record.payload.revision === 0,
+    );
+    expect(rawJudge).toMatchObject({
+      payload: {
+        usage: { inputTokens: 11, outputTokens: 3, cachedInputTokens: 4 },
+        terminalOutcome: {
+          state: "succeeded",
+          usage: { inputTokens: 11, outputTokens: 3, cachedInputTokens: 4 },
+        },
+        provenance: expect.objectContaining({ baseSha: f.args.context.baseSha }),
+        proposal: {
+          decision: "accept",
+          dimensions: expect.arrayContaining([
+            expect.objectContaining({ dimension: "assumption-grounding", status: "unknown" }),
+          ]),
+        },
+      },
+    });
+    const repairPrompt = f.prompts.find((prompt) => prompt.includes("This is a repair"))!;
+    const repairRequest = JSON.parse(repairPrompt.split("\n\n").at(-1)!) as CompilerRequest;
+    expect(repairRequest.semanticFindings).toEqual([
+      expect.objectContaining({
+        id: "invalid-acceptance",
+        dimension: "assumption-grounding",
+        severity: "blocking",
+        obligationIds: [],
+        itemIds: ["feature"],
+        evidenceIds: ["objective"],
+      }),
+    ]);
+    expect(() => validatePersistedCompilerDraftJournal(result.records)).not.toThrow();
+    const calls = f.runStructured.mock.calls.length;
+    await expect(compileEvaluatedDraft(f.args)).resolves.toMatchObject({
+      status: "accepted",
+      revision: 1,
+    });
+    expect(f.runStructured).toHaveBeenCalledTimes(calls);
+  });
   it("never produces accepted projection authority for report-only rejected plans", async () => {
     const f = await setup({ reportOnly: true });
     const result = await compileEvaluatedDraft(f.args);
@@ -539,6 +612,32 @@ describe("production compiler draft adapter", () => {
     expect(
       await new CompiledGraphManager(f.store, f.leases).load(42, f.args.lease.runId),
     ).toBeNull();
+  });
+  it("binds every provider result to its durable terminal outcome", async () => {
+    const f = await setup({ acceptFirst: true });
+    const result = await compileEvaluatedDraft(f.args);
+    expect(result.status).toBe("accepted");
+    expect(() => validatePersistedCompilerDraftJournal(result.records)).not.toThrow();
+    const providerResults = result.records.filter((record) => record.kind === "result");
+    expect(providerResults.length).toBeGreaterThan(0);
+    for (const mutation of ["missing", "state", "usage"] as const) {
+      const malformed = structuredClone(result.records);
+      const terminal = malformed.find((record) => record.kind === "result")!;
+      if (mutation === "missing") delete terminal.payload.terminalOutcome;
+      else if (mutation === "state")
+        terminal.payload.terminalOutcome = {
+          state: "provider-failed",
+          usage: terminal.payload.usage,
+        };
+      else
+        terminal.payload.terminalOutcome = {
+          state: "succeeded",
+          usage: { inputTokens: 999, outputTokens: 0 },
+        };
+      expect(() => validatePersistedCompilerDraftJournal(malformed), mutation).toThrow(
+        "provider terminal outcome differs",
+      );
+    }
   });
   it("judges a fixed graph whose derived resource is outside the semantic resource ID domain", async () => {
     const source = await setup({ acceptFirst: true });
@@ -733,4 +832,76 @@ describe("production compiler draft adapter", () => {
     expect((await compileEvaluatedDraft(f.args)).status).toBe("stopped");
     expect(f.runStructured).toHaveBeenCalledTimes(count);
   });
+  it.each([
+    ["string", "primitive provider failure"],
+    ["null", "null"],
+  ] as const)(
+    "durably closes a structured %s rejection without provider replay",
+    async (kind, diagnostic) => {
+      const f = await setup({ primitiveCompileFailure: kind });
+      const result = await compileEvaluatedDraft(f.args);
+      expect(result).toMatchObject({ status: "stopped", reason: "accounting-unavailable" });
+      expect(f.stages).toEqual(["inventory", "compile"]);
+      const failed = result.records.find(
+        (record) =>
+          record.kind === "result" &&
+          record.payload.stage === "compile" &&
+          record.payload.error !== undefined,
+      );
+      expect(failed?.payload).toMatchObject({
+        error: diagnostic,
+        usage: null,
+        terminalOutcome: { state: "provider-failed", usage: null },
+        provenance: {
+          baseSha: f.args.context.baseSha,
+          promptDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+          schemaDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+      });
+      const invocationCount = f.runStructured.mock.calls.length;
+      expect(await compileEvaluatedDraft(f.args)).toMatchObject({
+        status: "stopped",
+        reason: "accounting-unavailable",
+      });
+      expect(f.runStructured).toHaveBeenCalledTimes(invocationCount);
+
+      const forged = structuredClone(result.records);
+      const forgedResult = forged.find(
+        (record) => record.kind === "result" && record.payload.stage === "compile",
+      )!;
+      forgedResult.payload.terminalOutcome = { state: "succeeded", usage: null };
+      expect(() => validatePersistedCompilerDraftJournal(forged)).toThrow(
+        "successful provider terminal outcome requires exact usage",
+      );
+    },
+  );
+  it.each(["error", "object"] as const)(
+    "durably closes a frozen structured %s without replay",
+    async (kind) => {
+      const f = await setup({ frozenCompileFailure: kind });
+      const result = await compileEvaluatedDraft(f.args);
+      expect(result).toMatchObject({ status: "stopped", reason: "accounting-unavailable" });
+      expect(f.stages).toEqual(["inventory", "compile"]);
+      expect(
+        result.records.find(
+          (record) => record.kind === "result" && record.payload.stage === "compile",
+        )?.payload,
+      ).toMatchObject({
+        error: "frozen provider failure",
+        usage: null,
+        terminalOutcome: { state: "provider-failed", usage: null },
+        provenance: {
+          baseSha: f.args.context.baseSha,
+          promptDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+          schemaDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+      });
+      const invocationCount = f.runStructured.mock.calls.length;
+      expect(await compileEvaluatedDraft(f.args)).toMatchObject({
+        status: "stopped",
+        reason: "accounting-unavailable",
+      });
+      expect(f.runStructured).toHaveBeenCalledTimes(invocationCount);
+    },
+  );
 });

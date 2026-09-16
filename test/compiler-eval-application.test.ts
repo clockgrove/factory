@@ -23,6 +23,7 @@ import {
   type ObligationInventory,
 } from "../src/evaluation/compiler-eval.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
+import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import type { ApplicationSnapshot } from "../src/application/services.js";
 import { CompilerProposalSchema, CompilerRequestSchema } from "../src/compiler/contracts.js";
 import { compilerJudgeCandidateFromCompiled } from "../src/compiler/judge-context.js";
@@ -87,6 +88,7 @@ const golden = JSON.parse(
 const graph = parsePersistedCompiledObjective({ title: golden.title, workItems: golden.workItems });
 const proposal = CompilerProposalSchema.parse({
   protocol: "clockgrove.factory/compiler-proposal",
+  kind: "work-items",
   workItems: graph.workItems.map((item, itemIndex) => ({
     id: item.id,
     title: item.title,
@@ -149,6 +151,9 @@ const proposalRequest = CompilerRequestSchema.parse({
   },
   constraints: {
     maxWorkItems: 100,
+    planningWorkItemThreshold: 100,
+    planningCriticalPathMinutes: 43_200,
+    planningAggregateWorkMinutes: 432_000,
     maxDependenciesPerItem: 50,
     allowedNetworkDestinations: [],
     workItemTimeoutMinutes: 30,
@@ -255,7 +260,15 @@ function history() {
         status: "covered",
         itemIds: [graph.workItems[0]!.id],
         acceptanceBindings: [
-          { itemId: graph.workItems[0]!.id, criterionId: proposal.workItems[0]!.criteria[0]!.id },
+          {
+            itemId: graph.workItems[0]!.id,
+            criterionId:
+              proposal.kind === "work-items"
+                ? proposal.workItems[0]!.criteria[0]!.id
+                : (() => {
+                    throw new Error("fixture requires a Work Item proposal");
+                  })(),
+          },
         ],
         evidenceIds: ["objective"],
         reason: "Mapped acceptance",
@@ -279,6 +292,7 @@ function history() {
       reason: "Assessed",
       evidenceIds: ["objective"],
     })),
+    inferenceCorrections: [],
     findings: [],
     uncertainty: [],
     decision: "accept",
@@ -414,6 +428,17 @@ describe("read-only compiler evaluation", () => {
       observedTotalTokens: 24,
     });
     expect(result.usage).toHaveLength(2);
+    expect(result.invocationStatus).toEqual([
+      expect.objectContaining({ stage: "inventory", revision: 0, state: "completed" }),
+      expect.objectContaining({ stage: "judge", revision: 0, state: "completed" }),
+    ]);
+    expect(result.cumulativeUsage).toEqual({
+      inputTokens: 20,
+      outputTokens: 4,
+      cachedInputTokens: 14,
+      observedTokens: 24,
+      complete: true,
+    });
     expect(
       records.some(
         (record) => record.payload.stage === "compile" || record.payload.stage === "repair",
@@ -1059,6 +1084,54 @@ it("passes causal annotations through the read-only application service without 
     modelInvoked: false,
     activationAuthorized: false,
     annotatedReports: [{ annotationProvenance: fixture.annotations.provenance }],
+  });
+  fixture.snapshot.factoryEvents = [
+    parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      kind: "run",
+      event: "ActivationRequested",
+      objective: snapshot.number,
+      runId: binding.runId,
+      requestId: "status-fixture",
+      sequence: 0,
+      at: "2026-09-08T00:00:00.000Z",
+      requestedBy: "actor",
+      repository: binding.repository,
+      baseSha: binding.baseSha,
+      policy: DEFAULT_RUN_POLICY,
+      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      controllerProtocolMin: "clockgrove.factory/v2",
+      controllerProtocolMax: "clockgrove.factory/v2",
+    }),
+    fixture.runtime,
+  ];
+  vi.mocked(latestRunReceipts).mockReturnValue({
+    runId: binding.runId,
+    start: {
+      policyDigest: binding.policyDigest,
+      baseSha: binding.baseSha,
+      policy: DEFAULT_RUN_POLICY,
+    },
+  } as ReturnType<typeof latestRunReceipts>);
+  const status = await service.inspect("status", snapshot.number);
+  expect(status).toMatchObject({
+    compilerEvaluation: {
+      availability: "observed",
+      invocations: expect.arrayContaining([
+        expect.objectContaining({
+          invocationId: "compile-0",
+          stage: "compile",
+          state: "failed",
+        }),
+      ]),
+      cumulativeUsage: {
+        inputTokens: 40,
+        outputTokens: 8,
+        cachedInputTokens: 28,
+        observedTokens: 48,
+        complete: true,
+      },
+    },
   });
   await expect(
     service.inspect("status", snapshot.number, undefined, undefined, fixture.annotations),

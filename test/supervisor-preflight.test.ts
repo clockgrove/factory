@@ -43,7 +43,7 @@ function immutableGraph(): CompiledObjective {
         baseSha: "a".repeat(40),
         validationCommands: ["npm test"],
         requirements,
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       },
       {
         id: "b",
@@ -58,7 +58,7 @@ function immutableGraph(): CompiledObjective {
         baseSha: "a".repeat(40),
         validationCommands: ["npm test"],
         requirements,
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       },
     ],
   };

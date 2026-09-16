@@ -120,16 +120,33 @@ toolchain authority, runtime pins, provider steps, policy limits, and graph seri
 Factory-owned facts derived from the pinned base commit. Factory validates the semantic proposal,
 projects it deterministically into the execution graph, and records the request, proposal, validation,
 and projection identities. Initial proposals and bounded repairs use the same schema and entry point.
-The ordinary single-call path carries lossless bounded Objective source segments for structural
-mapping without claiming independent semantic extraction. An explicit compiler-evaluation policy
-adds the separately extracted obligation inventory and independent judgment described below.
+The proposal has three strict result kinds: `work-items` for one bounded Objective, `objectives` for
+a project-sized request that must be split first, and `clarification` when required planning facts are
+missing. The hard execution graph limit remains 100 Work Items. Fresh default policies use provisional
+earlier planning thresholds of 24 Work Items, 75% of the Objective timeout for configured critical
+path, and 150% for configured aggregate work; `objectivePlanning` can set all three ratios/counts.
+These are admission signals, not completion forecasts. Missing duration estimates remain unavailable.
 
-When opt-in compiler evaluation uses `maxRepairs`, that number is one shared correction budget for
+`factory_plan` returns proposed Objective specifications with an identity digest, complete parent-
+requirement coverage, concrete outputs, completion criteria, and prerequisite-output handoffs. They
+are proposals—not GitHub issues, activated Objectives, or completed work. Planning never expands the
+selected budget, deadline, trust, or network policy. Factory does not yet materialize or automatically
+execute a cross-Objective plan; any issue creation is a separate explicit user action, and each
+runnable Objective is compiled only after its prerequisite output is committed.
+For a new activation with no caller-supplied policy, Factory records an explicit auto-repair
+envelope: two shared repairs, seven total compiler invocations, 600 seconds, and a 500,000 observed-
+token stop threshold. The threshold is checked between calls and is not a provider-enforced hard cap;
+an in-flight response can overshoot it. Historical policies without `compilerEvaluation` retain the
+single-call path and their original digest and recovery authority.
+
+Compiler evaluation's `maxRepairs` is one shared correction budget for
 obligation-inventory regeneration and graph repair. For example, one inventory correction under
 `maxRepairs: 2` leaves at most one graph correction. Report-only evaluation and `maxRepairs: 0` keep
 the inventory single-shot; invocation, time, observed-token, accounting, and input fences still
 apply before every model call. Exact usage alone never authorizes an inventory retry: only a retained,
 bounded response that fails deterministic claims schema or evidence-grounding validation is repairable.
+`factory_status` reports every immutable compiler invocation and cumulative observed usage;
+unavailable counters remain unavailable rather than zero.
 
 For local compiler debugging, set `FACTORY_MANAGEMENT_TRANSCRIPT_DIR` to an absolute Linux path
 before launching Factory or installing its unattended controller. Factory then writes private,
@@ -148,6 +165,10 @@ state. See [local management transcripts](docs/setup/configuration.md#local-mana
   and explicitly selected native stacks with capability checks.
 - **Recovery and inspection:** durable GitHub records, restart recovery, cancellation, status,
   explanations, and replay without a separate database.
+- **Bounded defect reporting:** workers, validators, review, integration, the compiler, and the
+  Supervisor can produce evidence-bound finding candidates. Only the Supervisor classifies them.
+  Automatic issue creation is disabled unless immutable run policy names the exact destination,
+  audience, allowed operations, and publication-write allowance.
 - **Optional execution routes:** durable local Codex App Server sessions, Daytona cloud burst, and
   limited GitHub-managed integrations, subject to each provider's supported capabilities.
 
@@ -165,6 +186,10 @@ Use local workers only with trusted code: a same-user local process is not a har
 boundary. Workers use `workspace-write`; web search and command networking are off by default.
 Factory checks repository identity, permissions, branch rules, scope, artifact evidence, and budget,
 and escalates when it cannot safely proceed. Retries do not widen permissions, scope, or spending.
+Finding reports never change the compiled graph, activate work, consume implementation attempts, or
+grant model, network, or spending authority. Security-sensitive or unsafe content is refused from
+the ordinary issue path; ambiguous issue-create responses are reconciled by an exact machine marker
+and are never blindly replayed.
 
 <a id="policy-and-paid-backends"></a>
 

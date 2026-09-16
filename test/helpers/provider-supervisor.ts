@@ -107,6 +107,7 @@ export interface ProviderFaults {
   nativeRebaseBudgetExhaustion?: boolean;
   greenfieldBootstrap?: boolean;
   greenfieldLifecycle?: boolean;
+  greenfieldDescendants?: number;
   pnpmUnavailable?: boolean;
   capabilityAdmission?: "valid" | "unsafe";
   capabilityAdapter?: "npm" | "bun" | "uv";
@@ -259,7 +260,7 @@ wheels = [
       );
     }
   }
-  if (faults.compilerEvaluation)
+  if (faults.compilerEvaluation && !faults.greenfieldBootstrap && !faults.greenfieldLifecycle)
     await Promise.all([
       writeFile(
         join(repository, "package.json"),
@@ -276,8 +277,13 @@ wheels = [
   const managed = scenario !== "daytona-burst";
   const provider =
     scenario === "copilot-objective" ? COPILOT : scenario === "codex-objective" ? CODEX : DAYTONA;
+  const {
+    compilerEvaluation: _defaultCompilerEvaluation,
+    objectivePlanning: _defaultObjectivePlanning,
+    ...fixtureDefaultPolicy
+  } = DEFAULT_RUN_POLICY;
   const policy = parseRunPolicy({
-    ...DEFAULT_RUN_POLICY,
+    ...fixtureDefaultPolicy,
     ...(faults.compilerEvaluation ? { compilerEvaluation: faults.compilerEvaluation } : {}),
     ...(faults.sandboxUntrusted ? { trust: "sandbox_untrusted" } : {}),
     backendOrder: faults.localOnly ? [LOCAL] : managed ? [provider, DAYTONA] : [LOCAL, DAYTONA],
@@ -534,7 +540,7 @@ wheels = [
             : "trusted_local",
         estimatedDurationMinutes: 1,
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
       delivery:
         faults.nativeStack && index === 1
           ? { group: "a", relationship: "continue-stack", parentWorkItem: "a" }
@@ -748,7 +754,7 @@ wheels = [
       trust: "trusted_local",
       estimatedDurationMinutes: 1,
     },
-    artifactContract: "clockgrove.factory/artifact-v1",
+    artifactContract: "clockgrove.factory/artifact",
     managedRuntimes: [PNPM_RUNTIME_REQUIREMENT],
     delivery: { group: "bootstrap", relationship: "root" },
     ...(faults.greenfieldLifecycle
@@ -786,22 +792,30 @@ wheels = [
           workItems: [
             greenfieldRoot,
             ...(faults.greenfieldLifecycle
-              ? [
-                  {
+              ? Array.from({ length: faults.greenfieldDescendants ?? 1 }, (_, index) => {
+                  const id =
+                    index === 0 ? "consumer" : index === 1 ? "descendant" : `descendant-${index}`;
+                  const dependency =
+                    index === 0
+                      ? "bootstrap"
+                      : index === 1
+                        ? "consumer"
+                        : `descendant-${index - 1}`;
+                  return {
                     ...ordinaryGraph.workItems[1]!,
-                    id: "consumer",
-                    title: "Use integrated workspace check",
-                    goal: "Create consumer.txt containing consumer",
-                    acceptance: ["consumer.txt has the expected text"],
-                    scope: ["consumer.txt"],
-                    dependsOn: ["bootstrap"],
+                    id,
+                    title: `Use integrated workspace check in ${id}`,
+                    goal: `Create ${id}.txt containing ${id}`,
+                    acceptance: [`${id}.txt has the expected text`],
+                    scope: [`${id}.txt`],
+                    dependsOn: [dependency],
                     validationCommands: ["pnpm check"],
                     requirements: {
                       ...ordinaryGraph.workItems[1]!.requirements!,
                       tools: ["node", "pnpm"],
                       networkDestinations: ["registry.npmjs.org"],
                     },
-                    delivery: { group: "consumer", relationship: "sibling" as const },
+                    delivery: { group: id, relationship: "sibling" as const },
                     managedRuntimes: [PNPM_RUNTIME_REQUIREMENT],
                     repositoryCapabilities: {
                       provides: [],
@@ -817,8 +831,8 @@ wheels = [
                         },
                       ],
                     },
-                  },
-                ]
+                  };
+                })
               : []),
           ],
         }

@@ -104,7 +104,7 @@ function item(
       timeoutMinutes: 5,
       estimatedDurationMinutes: 5,
     },
-    artifactContract: "clockgrove.factory/artifact-v1",
+    artifactContract: "clockgrove.factory/artifact",
   };
 }
 function combined(value: PreparedCompilerCase, baseSha = sha) {
@@ -256,6 +256,7 @@ describe("representative executable corpus integrity, not compiler/model quality
     expect(observedPrompt).toContain("generated/status.mjs");
     expect(observedPrompt).toContain("npm run generate");
     expect(checkpoints).toBe(1);
+    if (result.kind !== "work-items") throw new Error("corpus case requires a Work Item graph");
     expect(
       assessCompilerCorpusResult(value, result.objective, bindings(value), baseSha)
         .installedExecutionProven,

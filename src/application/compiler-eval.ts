@@ -8,7 +8,7 @@ import { loadCompiledGraph, type CompiledGraphReadStore } from "../control/graph
 import { latestRunReceipts } from "../control/receipts.js";
 import { summarizeRun } from "../economics/index.js";
 import {
-  CompilerProposalSchema,
+  CompilerWorkItemsProposalSchema,
   CompilerRequestSchema,
   CompilerValidationReportSchema,
 } from "../compiler/contracts.js";
@@ -380,6 +380,35 @@ export async function inspectCompilerEvaluation(args: {
       },
     ];
   });
+  const invocationStatus = invocations.map(({ invocation }) => {
+    const result = results.find((item) => item.payload.invocationId === invocation.invocationId);
+    const counters = usage.find((item) => item.invocationId === invocation.invocationId);
+    return {
+      invocationId: invocation.invocationId,
+      stage: invocation.stage,
+      revision: invocation.revision,
+      state: !result
+        ? ("reserved" as const)
+        : result.payload.preProviderTerminal === true
+          ? ("not-invoked" as const)
+          : result.payload.error
+            ? ("failed" as const)
+            : ("completed" as const),
+      inputTokens: counters?.inputTokens ?? null,
+      outputTokens: counters?.outputTokens ?? null,
+      cachedInputTokens: counters?.cachedInputTokens ?? null,
+      observedTokens: counters?.observedTokens ?? null,
+      observedMilliseconds: counters?.observedMilliseconds ?? null,
+    };
+  });
+  const cumulativeUsage = {
+    inputTokens: usage.reduce((sum, item) => sum + (item.inputTokens ?? 0), 0),
+    outputTokens: usage.reduce((sum, item) => sum + (item.outputTokens ?? 0), 0),
+    cachedInputTokens: usage.reduce((sum, item) => sum + (item.cachedInputTokens ?? 0), 0),
+    observedTokens: usage.reduce((sum, item) => sum + (item.observedTokens ?? 0), 0),
+    complete:
+      usage.length === invocations.length && usage.every((item) => item.observedTokens !== null),
+  };
   const missingEvidence: string[] = [];
   if (runtimeByDigest.size > boundedRuntimeEvents.length)
     missingEvidence.push(
@@ -456,7 +485,7 @@ export async function inspectCompilerEvaluation(args: {
               throw new Error("judge result has no semantic proposal");
             const persisted = proposalResult.payload.value as Record<string, unknown>;
             const request = CompilerRequestSchema.parse(persisted.request);
-            proposal = CompilerProposalSchema.parse(persisted.proposal);
+            proposal = CompilerWorkItemsProposalSchema.parse(persisted.proposal);
             const proposalReport = CompilerValidationReportSchema.parse(persisted.report);
             const provenance = persisted.provenance as Record<string, unknown> | undefined;
             const proposalInvocation = invocations.find(
@@ -730,6 +759,8 @@ export async function inspectCompilerEvaluation(args: {
     runtimeEvidence,
     annotations: annotations ?? null,
     usage,
+    invocationStatus,
+    cumulativeUsage,
     preProviderTerminals,
     correctionBudget,
     unresolvedInvocations,

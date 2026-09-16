@@ -90,6 +90,7 @@ export class BackendRegistry {
     policy: RunPolicy;
     requirements: ExecutionRequirements;
     requiresManagedToolchain?: boolean;
+    requiresOfflineAssetInputs?: boolean;
     nowMs?: number;
     probeTtlMs?: number;
   }): Promise<BackendCandidate[]> {
@@ -132,6 +133,9 @@ export class BackendRegistry {
         !backend.capabilities.supportsManagedToolchainExecution
       ) {
         permanentReasons.push("backend cannot materialize exact managed toolchain runtimes");
+      }
+      if (args.requiresOfflineAssetInputs && !backend.capabilities.supportsOfflineAssetInputs) {
+        permanentReasons.push("backend cannot receive verified offline Objective assets");
       }
       permanentReasons.push(
         ...(backend.policyRejectionReasons?.({

@@ -58,7 +58,7 @@ function proposedGraph(baseSha = "a".repeat(40)): CompiledObjective {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       },
     ],
   });
@@ -111,6 +111,81 @@ describe("FactoryApplicationService", () => {
     ]);
     expect(comments).toHaveLength(1);
     expect(duplicate).toEqual(first);
+    expect(first).toMatchObject({
+      event: "ActivationRequested",
+      policy: { compilerEvaluation: DEFAULT_RUN_POLICY.compilerEvaluation },
+      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+    });
+  });
+
+  it("replays an omitted-policy historical activation without granting today's repair authority", async () => {
+    const { compilerEvaluation: _newDefault, ...historicalPolicy } = DEFAULT_RUN_POLICY;
+    const current = snapshot();
+    current.factoryEvents = [
+      parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        kind: "run",
+        event: "ActivationRequested",
+        objective: 7,
+        runId: "historical-activation",
+        requestId: "historical-activation",
+        sequence: 1,
+        at: "2026-01-01T00:00:00.000Z",
+        requestedBy: "actor",
+        repository: "o/r",
+        baseSha: "a".repeat(40),
+        policy: historicalPolicy,
+        policyDigest: policyDigest(historicalPolicy),
+        controllerProtocolMin: "clockgrove.factory/v2",
+        controllerProtocolMax: "clockgrove.factory/v2",
+      }),
+    ];
+    let writes = 0;
+    const service = new FactoryApplicationService({
+      owner: "o",
+      repo: "r",
+      reader: { readObjective: async () => structuredClone(current) },
+      store: {
+        ensureObjectiveLabel: async () => {},
+        getAuthenticatedLogin: async () => "actor",
+        serverTime: async () => new Date("2026-01-01T00:01:00.000Z"),
+        addIssueComment: async () => {
+          writes += 1;
+        },
+      },
+    });
+    const replay = await service.activate({ objective: 7, requestId: "historical-activation" });
+    expect(replay).toEqual(current.factoryEvents[0]);
+    expect(replay).not.toHaveProperty("policy.compilerEvaluation");
+    expect(replay).toMatchObject({ policyDigest: policyDigest(historicalPolicy) });
+    expect(writes).toBe(0);
+  });
+
+  it("does not inject compiler defaults into a caller-supplied policy", async () => {
+    const { compilerEvaluation: _newDefault, ...callerPolicy } = DEFAULT_RUN_POLICY;
+    let accepted: ReturnType<typeof parseFactoryEvent> | undefined;
+    const service = new FactoryApplicationService({
+      owner: "o",
+      repo: "r",
+      reader: { readObjective: async () => snapshot() },
+      store: {
+        ensureObjectiveLabel: async () => {},
+        getAuthenticatedLogin: async () => "actor",
+        serverTime: async () => new Date("2026-01-01T00:00:00.000Z"),
+        addIssueComment: async (_id, body) => {
+          accepted = decodeEventComments(body)[0];
+        },
+      },
+    });
+    const result = await service.activate({
+      objective: 7,
+      requestId: "caller-policy",
+      baseSha: "a".repeat(40),
+      policy: callerPolicy,
+    });
+    expect(result).toEqual(accepted);
+    expect(result).not.toHaveProperty("policy.compilerEvaluation");
+    expect(result).toMatchObject({ policyDigest: policyDigest(callerPolicy) });
   });
 
   it.each(["doctor", "plan", "status", "explain", "replay"] as const)(

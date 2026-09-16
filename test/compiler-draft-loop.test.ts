@@ -174,7 +174,7 @@ function objective(goal = "Implement the feature."): CompiledObjective {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       },
     ],
   };
@@ -234,6 +234,9 @@ function validatedObjective(graph: CompiledObjective): ValidatedCompilerDraft {
       },
       constraints: {
         maxWorkItems: 100,
+        planningWorkItemThreshold: 100,
+        planningCriticalPathMinutes: 43_200,
+        planningAggregateWorkMinutes: 432_000,
         maxDependenciesPerItem: 50,
         allowedNetworkDestinations: [],
         workItemTimeoutMinutes: 30,
@@ -1515,6 +1518,10 @@ describe("compiler draft durable repair", () => {
           revision: 0,
           value: inventory,
           usage: { inputTokens: 7, outputTokens: 3 },
+          terminalOutcome: {
+            state: "succeeded",
+            usage: { inputTokens: 7, outputTokens: 3 },
+          },
           provenance,
           completedAt: 100,
           observedMilliseconds: 0,
@@ -1551,6 +1558,10 @@ describe("compiler draft durable repair", () => {
           revision: 0,
           value: compileValue,
           usage: { inputTokens: 11, outputTokens: 5 },
+          terminalOutcome: {
+            state: "succeeded",
+            usage: { inputTokens: 11, outputTokens: 5 },
+          },
           provenance: compileProvenance,
           completedAt: 100,
           observedMilliseconds: 0,

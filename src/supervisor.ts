@@ -13,7 +13,9 @@ import {
 } from "./control/integration-admission.js";
 import { reconcileAdmissionForSuccessor } from "./control/admission-reassignment.js";
 import { observeLocalScopeBatch } from "./recovery/scope-resources.js";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { readObjectiveAssetManifest } from "./assets/storage.js";
+import { materializeObjectiveAssets } from "./assets/materialize.js";
 
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
 import { CodexSdkLocalBackend } from "./backends/codex-sdk-local.js";
@@ -108,6 +110,13 @@ export {
   type GraphProjectionExpectation,
 } from "./control/graph-evidence.js";
 import { GitHubControlStore } from "./control/github-store.js";
+import {
+  decideFindingAtSupervisor,
+  FindingReporter,
+  GitHubFindingReportingPort,
+  type FindingLifecycleDisposition,
+  type FindingRecord,
+} from "./control/finding-reporting.js";
 import {
   SharedCapacitySnapshotLagError,
   sharedCapacityClaimId,
@@ -209,6 +218,7 @@ import {
   parseFactoryEvent,
   type AttemptEvent,
   type FactoryEvent,
+  type FindingEvent,
   type ProviderQuotaEvent,
   type PublicationEvent,
 } from "./protocol/events.js";
@@ -272,12 +282,16 @@ import { CodexCliManagementBackend } from "./management/codex-cli.js";
 import {
   compileEvaluatedDraft,
   assertCompilerDraftSelection,
+  parseCompilerPlanningStop,
 } from "./management/draft-compilation.js";
 import { CompilerDraftManager, loadCompilerDrafts } from "./control/compiler-drafts.js";
 import { compilerEvalDigest } from "./evaluation/compiler-eval.js";
 import { collectCompilationEvidence } from "./compiler/runtime-evidence.js";
-import { ManagementOutputError } from "./management/backend.js";
-import { compilePlan } from "./management/compile.js";
+import {
+  assertCompilationContextPolicyAuthority,
+  ManagementOutputError,
+} from "./management/backend.js";
+import { compilePlan, compilePlanWithLegacyAdmission } from "./management/compile.js";
 import { preserveProviderQuotaError, ProviderQuotaError } from "./providers/quota.js";
 import { providerQuotaGates, providerQuotaGateState } from "./control/provider-gates.js";
 import { reportedModelUsage, type ReportedModelUsage } from "./protocol/model-usage.js";
@@ -405,6 +419,7 @@ import {
 } from "./runtime/local-scope.js";
 import { LocalScopeBatchSchema, type LocalScopeBatch } from "./protocol/local-scope.js";
 import type { ValidationEvidence } from "./validation/evidence.js";
+import { FINDING_PROTOCOL, type FindingCandidate } from "./protocol/findings.js";
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
@@ -761,6 +776,8 @@ export function assertManagementInvocationNotFailed(
 
 /** Report-only runs finish their evaluation purpose without committing an execution graph. */
 class CompilerDraftReportCompleted extends Error {}
+/** Planning-only results finish without graph projection or defect publication. */
+class CompilerPlanningCompleted extends Error {}
 
 export type CompilationFaultPoint =
   | "after-model-return"
@@ -835,6 +852,51 @@ export async function runDurableCompilationTransaction(args: {
 }
 
 type Snapshot = Awaited<ReturnType<GitHubReader["readObjective"]>>;
+
+async function prepareObjectiveAssetRoot(args: {
+  store: GitHubControlStore;
+  repository: string;
+  objective: number;
+  authorityBaseSha: string;
+  packet: WorkerPacket;
+  attemptWorkspace: string;
+}): Promise<string | undefined> {
+  const bindings = args.packet.assetInputs ?? [];
+  if (!bindings.length) return undefined;
+  const manifestDigests = [...new Set(bindings.map(({ manifestDigest }) => manifestDigest))];
+  if (manifestDigests.length !== 1)
+    throw new Error("one Worker Packet may bind assets from exactly one Objective manifest");
+  const manifest = await readObjectiveAssetManifest({
+    store: args.store,
+    authority: {
+      repository: args.repository,
+      objective: args.objective,
+      baseSha: args.authorityBaseSha,
+    },
+    digest: manifestDigests[0]!,
+  });
+  if (!manifest) throw new Error("Worker Packet Objective asset manifest is unavailable");
+  for (const binding of bindings) {
+    const entry = manifest.assets.find(
+      ({ descriptor }) => descriptor.digest === binding.descriptorDigest,
+    );
+    if (
+      !entry ||
+      entry.descriptor.content.digest !== binding.contentDigest ||
+      entry.storage.digest !== binding.storageReceiptDigest ||
+      entry.descriptor.materializationPath !== binding.path
+    )
+      throw new Error("Worker Packet Objective asset binding differs from its immutable manifest");
+  }
+  return (
+    await materializeObjectiveAssets({
+      store: args.store,
+      manifest,
+      supervisorRoot: join(args.attemptWorkspace, ".factory-objective-assets"),
+      descriptorDigests: bindings.map(({ descriptorDigest }) => descriptorDigest),
+    })
+  ).root;
+}
 
 /** Resolve constructor-time resources from the same authenticated observation
  * that the foreground Supervisor will consume. A later under-lease read still
@@ -1301,6 +1363,7 @@ export class FactorySupervisor {
   readonly #siblingRefreshes: SiblingRefreshStore;
   readonly #nativeRebases: NativeRebaseCheckpointStore;
   readonly #recorder: LifecycleRecorder;
+  readonly #findingReporter: FindingReporter;
   #management: ManagementBackend;
   readonly #managementOverride: boolean;
   readonly #registry: BackendRegistry;
@@ -1437,6 +1500,39 @@ export class FactorySupervisor {
     this.#siblingRefreshes = new SiblingRefreshStore(this.#store, this.#leases);
     this.#nativeRebases = new NativeRebaseCheckpointStore(this.#store, this.#leases);
     this.#recorder = new LifecycleRecorder(this.#store, this.#leases);
+    this.#findingReporter = new FindingReporter(
+      new GitHubFindingReportingPort((route, parameters, mutating) =>
+        this.#store.stackRequest(route, parameters, mutating),
+      ),
+      {
+        read: async () => {
+          const observed = await this.#reader.readObjective(this.#options.objective);
+          return snapshotEvents(observed).filter(
+            (event): event is FindingEvent => event.kind === "finding",
+          );
+        },
+        append: async (record: FindingRecord) => {
+          await this.#lease.use(async (lease) => {
+            const sequence = this.#sequences.take();
+            const event = parseFactoryEvent({
+              protocol: PROTOCOL_V2,
+              kind: "finding",
+              objective: lease.objective,
+              runId: lease.runId,
+              sequence,
+              at: (await this.#store.serverTime()).toISOString(),
+              ...writerAuthority(lease, sequence),
+              ...record,
+            });
+            const observed = await this.#reader.readObjective(lease.objective);
+            await this.#store.addIssueComment(
+              observed.id,
+              encodeEventComment("Factory recorded a bounded defect-reporting disposition.", event),
+            );
+          });
+        },
+      },
+    );
     this.#management =
       options.managementBackend ??
       new CodexCliManagementBackend({
@@ -4678,15 +4774,23 @@ export class FactorySupervisor {
       const escalation = errors.find(
         (error) =>
           !(error instanceof RunCancellationRequestedError) &&
-          !(error instanceof CompilerDraftReportCompleted),
+          !(error instanceof CompilerDraftReportCompleted) &&
+          !(error instanceof CompilerPlanningCompleted),
       );
       if (escalation !== undefined)
         return {
           event: "FactoryRunEscalated",
           reason: escalation instanceof Error ? escalation.message : String(escalation),
         };
-      const completed = errors.find((error) => error instanceof CompilerDraftReportCompleted);
-      if (completed instanceof CompilerDraftReportCompleted)
+      const completed = errors.find(
+        (error) =>
+          error instanceof CompilerDraftReportCompleted ||
+          error instanceof CompilerPlanningCompleted,
+      );
+      if (
+        completed instanceof CompilerDraftReportCompleted ||
+        completed instanceof CompilerPlanningCompleted
+      )
         return { event: "FactoryRunCompleted", reason: completed.message };
       return proposed;
     };
@@ -5185,6 +5289,7 @@ export class FactorySupervisor {
                     }),
                   ...(compilationModel ? { modelSelection: compilationModel } : {}),
                 };
+                assertCompilationContextPolicyAuthority(context);
                 if (!this.#policy.compilerEvaluation) {
                   const admitCompilation = async () => {
                     const timeoutMs = await this.#externalAdmission(async () =>
@@ -5205,16 +5310,37 @@ export class FactorySupervisor {
                         ),
                     };
                   };
+                  const requireExecutableGraph = async (
+                    result: Awaited<ReturnType<typeof compilePlan>>,
+                  ) => {
+                    if (result.kind === "work-items") return result;
+                    const identity = compilerEvalDigest(result.proposal);
+                    const reason =
+                      result.kind === "objectives"
+                        ? `Objective planning proposed bounded child Objectives (${identity}); no child Objective issues, Work Items, or child runs were created or activated. Inspect factory_plan with compile=true for the full proposal.`
+                        : `Objective compilation requires clarification (${identity}); no child Objective issues, Work Items, or child runs were created or activated. Inspect factory_plan with compile=true for the questions.`;
+                    throw new ManagementOutputError(
+                      new Error(reason),
+                      result.usage,
+                      result.proposal,
+                    );
+                  };
                   if (this.#management.supportsCompilerAdmission) {
                     return await this.#observePhase("compilation", () =>
-                      compilePlan(context, this.#management, checkpoint, admitCompilation),
+                      compilePlan(context, this.#management, checkpoint, admitCompilation).then(
+                        requireExecutableGraph,
+                      ),
                     );
                   }
                   // Compatibility for injected legacy backends that cannot place
                   // durable admission at their own final dispatch boundary.
-                  context.invocationTimeoutMs = (await admitCompilation()).timeoutMs;
                   return await this.#observePhase("compilation", () =>
-                    compilePlan(context, this.#management, checkpoint),
+                    compilePlanWithLegacyAdmission(
+                      context,
+                      this.#management,
+                      checkpoint,
+                      admitCompilation,
+                    ).then(requireExecutableGraph),
                   );
                 }
                 const inputDigest = compilerEvalDigest(context.objective);
@@ -5292,8 +5418,49 @@ export class FactorySupervisor {
                     `Report-only compiler evaluation completed: ${outcome.status === "accepted" ? "accepted draft" : outcome.reason}. No implementation was authorized and no Work Items were projected; inspect compiler-eval for the retained evidence.`,
                   );
                 }
-                if (outcome.status !== "accepted")
+                if (outcome.status !== "accepted") {
+                  const planning = parseCompilerPlanningStop(outcome.reason);
+                  if (planning)
+                    throw new CompilerPlanningCompleted(
+                      planning.kind === "objectives"
+                        ? `Objective planning proposed bounded child Objectives (${planning.identity}); no child Objective issues, Work Items, or child runs were created or activated. Inspect factory_plan with compile=true for a fresh read-only proposal.`
+                        : `Objective compilation requires clarification (${planning.identity}); no child Objective issues, Work Items, or child runs were created or activated. Inspect factory_plan with compile=true for the questions.`,
+                    );
+                  await this.#reportFindingCandidates(
+                    [
+                      {
+                        protocol: FINDING_PROTOCOL,
+                        phase: "compiler",
+                        failureClass: "compiler-evaluation-stopped",
+                        supportedBehavior:
+                          "The bounded semantic compiler produces an accepted graph or a classified report-only result.",
+                        observedBehavior:
+                          "The bounded compiler evaluation stopped without an accepted graph.",
+                        reproduction: [
+                          "Compile the originating Objective against the pinned base commit under its immutable run policy.",
+                        ],
+                        impact:
+                          "Factory cannot project the Objective into authenticated Work Items.",
+                        evidence: [
+                          {
+                            kind: "compiler-result",
+                            digest: createHash("sha256")
+                              .update(JSON.stringify({ inputDigest, records: outcome.records }))
+                              .digest("hex"),
+                            commit: base.oid,
+                          },
+                        ],
+                      },
+                    ],
+                    "blocking",
+                    {
+                      objective: snapshot.number,
+                      runId: this.#run.runId,
+                    },
+                    (snapshot.factoryEvents ?? []).filter((event) => event.kind === "finding"),
+                  );
                   throw new Error(`compiler draft stopped without projection: ${outcome.reason}`);
+                }
                 await assertInputs();
                 const usage = outcome.records
                   .filter((record) => record.kind === "result")
@@ -6563,6 +6730,7 @@ export class FactorySupervisor {
                 policy: this.#policy,
                 requirements: packet.requirements,
                 requiresManagedToolchain: Boolean(packet.managedRuntimes?.length),
+                requiresOfflineAssetInputs: Boolean(packet.assetInputs?.length),
                 nowMs,
               }),
               commandState.cloudPaused,
@@ -6894,7 +7062,10 @@ export class FactorySupervisor {
           throw failure;
         }
       }
-      if (failure instanceof CompilerDraftReportCompleted)
+      if (
+        failure instanceof CompilerDraftReportCompleted ||
+        failure instanceof CompilerPlanningCompleted
+      )
         return await terminalAfterDrain("FactoryRunCompleted", failure.message);
       if (terminalVeto(failure)) {
         executionAbort.abort();
@@ -6920,6 +7091,52 @@ export class FactorySupervisor {
         );
       }
       const reason = failure instanceof Error ? failure.message : String(failure);
+      if (!claimed) {
+        const failureClass =
+          failure instanceof PlatformUnavailableError
+            ? "platform-unavailable"
+            : "supervisor-lifecycle-failure";
+        const failureName = failure instanceof Error ? failure.name : typeof failure;
+        await this.#reportFindingCandidates(
+          [
+            {
+              protocol: FINDING_PROTOCOL,
+              phase: "supervisor",
+              failureClass,
+              supportedBehavior:
+                "The Supervisor durably completes or classifies every Objective lifecycle transition.",
+              observedBehavior:
+                "The Supervisor reached an unexpected lifecycle or platform failure before normal terminal settlement.",
+              reproduction: [
+                "Resume the originating Objective from its authenticated run evidence under the same immutable policy.",
+              ],
+              impact: "The Objective cannot safely reach successful terminal completion.",
+              evidence: [
+                {
+                  kind: "supervisor-observation",
+                  digest: createHash("sha256")
+                    .update(
+                      JSON.stringify({
+                        objective: this.#run.objective,
+                        policyDigest: this.#run.policyDigest,
+                        failureClass,
+                        failureName,
+                      }),
+                    )
+                    .digest("hex"),
+                },
+              ],
+            },
+          ],
+          "blocking",
+          { objective: this.#run.objective, runId: this.#run.runId },
+          (snapshot.factoryEvents ?? []).filter((event) => event.kind === "finding"),
+        ).catch((reportingError) =>
+          this.#notify(
+            `Factory finding reporting could not preserve the Supervisor failure: ${reportingError instanceof Error ? reportingError.message : String(reportingError)}`,
+          ),
+        );
+      }
       return await terminalAfterDrain("FactoryRunEscalated", reason);
     } finally {
       clearInterval(heartbeat);
@@ -6966,6 +7183,56 @@ export class FactorySupervisor {
       );
     return this.#observePhase(`work-item-${item.number}`, () =>
       recovered ? execute() : this.#modelInvocations.run(execute),
+    );
+  }
+
+  async #reportFindingCandidates(
+    findings: readonly FindingCandidate[] | undefined,
+    lifecycle: FindingLifecycleDisposition,
+    occurrence: {
+      objective: number;
+      workItem?: number;
+      runId: string;
+      attempt?: number;
+    },
+    priorEvents: readonly FindingEvent[],
+  ): Promise<void> {
+    if (!findings?.length) return;
+    const currentRepository = `${this.#options.owner}/${this.#options.repo}`.toLowerCase();
+    for (const candidate of findings) {
+      const decision = decideFindingAtSupervisor({
+        candidate,
+        lifecycle,
+        currentRepository,
+        policy: this.#policy.findingReporting,
+      });
+      await this.#findingReporter.report({
+        policy: this.#policy.findingReporting,
+        destination: decision.destination,
+        candidate,
+        classification: decision.classification,
+        occurrence,
+        priorEvents,
+      });
+    }
+  }
+
+  async #reportCandidateFindings(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    findings: readonly FindingCandidate[] | undefined,
+    lifecycle: FindingLifecycleDisposition,
+  ): Promise<void> {
+    return this.#reportFindingCandidates(
+      findings,
+      lifecycle,
+      {
+        objective: reservation.objective,
+        workItem: item.number,
+        runId: reservation.runId,
+        attempt: reservation.attempt,
+      },
+      (item.factoryEvents ?? []).filter((event) => event.kind === "finding"),
     );
   }
 
@@ -7532,6 +7799,14 @@ export class FactorySupervisor {
             throw new ExecutionSourceAdvancedBeforeDispatchError(
               "execution source ref changed during final dispatch validation",
             );
+          const assetRoot = await prepareObjectiveAssetRoot({
+            store: this.#store,
+            repository: `${this.#options.owner}/${this.#options.repo}`,
+            objective: this.#run.objective,
+            authorityBaseSha: this.#run.baseSha ?? packet.baseSha,
+            packet,
+            attemptWorkspace: worker!.path,
+          });
           assertSupportedModelTokenBudgetIntent(this.#policy);
           if (selected!.capabilities.reportsModelUsage)
             await this.#admitModelInvocation(
@@ -7558,6 +7833,7 @@ export class FactorySupervisor {
             directorEpoch: reservation!.directorEpoch,
             policyDigest: reservation!.policyDigest,
             workspace: worker!.path,
+            ...(assetRoot ? { assetRoot } : {}),
             packet,
             ...(sessionJournal ? { sessionJournal } : {}),
             policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
@@ -7830,6 +8106,9 @@ export class FactorySupervisor {
       this.#retainArtifactContent(artifact);
       retryableArtifact = artifact;
       if (artifact.outcome !== "succeeded") {
+        await confirmExecutionCleanup("pre-finding backend cleanup");
+        if (reservation.attempt >= this.#policy.maxAttemptsPerItem)
+          await this.#reportCandidateFindings(item, reservation, artifact.findings, "blocking");
         throw new Error(artifact.reason ?? `worker ${artifact.outcome}`);
       }
       try {
@@ -7901,6 +8180,7 @@ export class FactorySupervisor {
           this.#budgetEvents.push(event);
           executionBudgetReconciled = true;
         });
+      await this.#reportCandidateFindings(item, reservation, artifact.findings, "follow-up");
       // Fresh completed siblings have the same durable continuation boundary as
       // recovered attempts: ready artifact, terminal usage, and absent compute.
       // A controller shutdown must not turn that paid work into a failed attempt.
@@ -8202,8 +8482,21 @@ export class FactorySupervisor {
         if (validator && validationBudgetUnit) validationBudgetReconciled = true;
       });
       if (!validation.evidence.passed) {
+        if (reservation.attempt >= this.#policy.maxAttemptsPerItem)
+          await this.#reportCandidateFindings(
+            item,
+            reservation,
+            validation.evidence.findings,
+            "blocking",
+          );
         throw new Error(validation.evidence.failureReason ?? "validation failed");
       }
+      await this.#reportCandidateFindings(
+        item,
+        reservation,
+        validation.evidence.findings,
+        "follow-up",
+      );
 
       const reviewIdentity: ReviewIdentity = {
         kind: "artifact",
@@ -8263,7 +8556,7 @@ export class FactorySupervisor {
               ),
           );
       }
-      await this.#reviewTransaction({
+      const reviewRecord = await this.#reviewTransaction({
         existing: existingReview,
         ...(invokeReview ? { invoke: invokeReview } : {}),
         persist: (result) =>
@@ -8289,6 +8582,15 @@ export class FactorySupervisor {
         recordUsage: (record) => this.#recordReviewUsage(record, item, reservation!),
         recordOutcome: (record) => this.#recordInitialReviewOutcome(record, item, reservation!),
       });
+      const reviewAccepted =
+        reviewRecord.review.accepted && reviewRecord.review.unmetCriteria.length === 0;
+      if (reviewAccepted || reservation.attempt >= this.#policy.maxAttemptsPerItem)
+        await this.#reportCandidateFindings(
+          item,
+          reservation,
+          reviewRecord.review.findings,
+          reviewAccepted ? "follow-up" : "blocking",
+        );
       const assertPublicationSafety = async () => {
         try {
           await this.#assertWorkflowPublicationSafety({
@@ -9292,6 +9594,14 @@ export class FactorySupervisor {
       this.#policy,
       reservation.attempt === 1 ? "implement" : "recover",
     );
+    const assetRoot = await prepareObjectiveAssetRoot({
+      store: this.#store,
+      repository,
+      objective: reservation.objective,
+      authorityBaseSha: this.#run.baseSha ?? prepared.packet.baseSha,
+      packet: prepared.packet,
+      attemptWorkspace: prepared.binding.workspace,
+    });
     let handle: BackendHandle | undefined;
     try {
       handle = await backend.resume(
@@ -9304,6 +9614,7 @@ export class FactorySupervisor {
           directorEpoch: reservation.directorEpoch,
           policyDigest: reservation.policyDigest,
           workspace: prepared.binding.workspace,
+          ...(assetRoot ? { assetRoot } : {}),
           packet: prepared.packet,
           deadline: new Date(prepared.binding.deadline),
           policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
@@ -12630,6 +12941,7 @@ export class FactorySupervisor {
             artifact,
             packet,
             publicationBaseBranch: this.#baseBranch,
+            findingPhase: "integration",
             isolatedValidator: () =>
               this.#externalAdmission(async () => {
                 await this.#nativeRebaseAdmissionCurrent(
@@ -12660,8 +12972,15 @@ export class FactorySupervisor {
               }),
           }),
         );
-        if (!validation.evidence.passed)
+        if (!validation.evidence.passed) {
+          await this.#reportCandidateFindings(
+            item,
+            reservation,
+            validation.evidence.findings,
+            "blocking",
+          );
           throw new Error(validation.evidence.failureReason ?? "native rebase validation failed");
+        }
         record = await this.#lease.use((lease) =>
           this.#nativeRebases.persist({
             lease,
@@ -12899,6 +13218,7 @@ export class FactorySupervisor {
             artifact,
             packet,
             publicationBaseBranch: this.#baseBranch,
+            findingPhase: "integration",
             ...(scoped ? { localScope: scoped.hooks } : {}),
           }),
         );
@@ -12944,6 +13264,12 @@ export class FactorySupervisor {
     let validatedAndRecorded = false;
     try {
       if (!validation.evidence.passed) {
+        await this.#reportCandidateFindings(
+          item,
+          member.reservation,
+          validation.evidence.findings,
+          "blocking",
+        );
         throw new Error(validation.evidence.failureReason ?? "rebased stack validation failed");
       }
       const reviewIdentity: ReviewIdentity = {
@@ -14320,6 +14646,7 @@ export class FactorySupervisor {
             artifact: artifact!,
             packet,
             publicationBaseBranch: this.#baseBranch,
+            findingPhase: "integration",
             ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
             ...(validator
               ? {
@@ -14359,6 +14686,12 @@ export class FactorySupervisor {
             identityDigest,
             item,
             member.reservation,
+          );
+          await this.#reportCandidateFindings(
+            item,
+            member.reservation,
+            validation.evidence.findings,
+            "blocking",
           );
           throw new Error(validation.evidence.failureReason ?? "merge-candidate validation failed");
         }
@@ -16023,6 +16356,9 @@ export class FactorySupervisor {
               artifact: artifact!,
               packet,
               publicationBaseBranch: this.#baseBranch,
+              // This recovery path already persists the exact isolatedFailure receipt. Adding a
+              // new candidate would change that established replay digest after interruption.
+              findingPhase: false,
               ...(scope ? { localScope: scope.hooks } : {}),
               ...(isolated
                 ? {
@@ -16129,6 +16465,12 @@ export class FactorySupervisor {
               Date.parse(validation.evidence.completedAt) -
                 Date.parse(validation.evidence.startedAt),
               "validation_milliseconds",
+            );
+            await this.#reportCandidateFindings(
+              item,
+              reserved,
+              validation.evidence.findings,
+              "blocking",
             );
             throw new Error(
               validation.evidence.failureReason ?? "adopted candidate validation failed",

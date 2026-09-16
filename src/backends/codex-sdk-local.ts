@@ -66,11 +66,13 @@ import {
   type ProviderQuotaGate,
 } from "../providers/quota.js";
 import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
+import { parseFindingCandidates, type FindingCandidate } from "../protocol/findings.js";
 
 interface WorkerFinal {
   outcome: "succeeded" | "failed" | "declined";
   summary: string;
   commands: Array<{ command: string; exitCode: number }>;
+  findings?: FindingCandidate[] | undefined;
 }
 
 interface SdkThread {
@@ -414,6 +416,9 @@ function parseWorkerFinal(text: string): WorkerFinal | undefined {
     outcome: value.outcome as WorkerFinal["outcome"],
     summary: value.summary,
     commands,
+    ...(parseFindingCandidates(value.findings)
+      ? { findings: parseFindingCandidates(value.findings) }
+      : {}),
   };
 }
 
@@ -498,6 +503,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     supportsResume: false,
     supportsLocalInference: false,
     supportsManagedToolchainExecution: true,
+    supportsOfflineAssetInputs: true,
     reportsModelUsage: true,
     supportsModelSelection: true,
     requiresPaidRuntime: false,
@@ -728,6 +734,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
       })),
       logs: collected.logs,
       outcome,
+      ...(running.final?.findings ? { findings: running.final.findings } : {}),
       ...(outcome === "succeeded"
         ? {}
         : {

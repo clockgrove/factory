@@ -99,6 +99,67 @@ function codes(
 }
 
 describe("Objective plan semantic validation", () => {
+  it("accepts a completely covered project-scale split without pretending to execute it", () => {
+    const projectObligations = Array.from(
+      { length: 101 },
+      (_, index) => `requirement-${index + 1}`,
+    );
+    const objectives = Array.from({ length: 4 }, (_, index) => {
+      const id = `milestone-${index + 1}`;
+      const owned = projectObligations.filter(
+        (_, obligationIndex) => obligationIndex % 4 === index,
+      );
+      return {
+        id,
+        title: `Deliver milestone ${index + 1}`,
+        outcome: `Milestone ${index + 1} is independently reviewable and complete.`,
+        acceptance: [
+          {
+            id: `${id}-accepted`,
+            kind: "owned" as const,
+            text: `Every requirement owned by milestone ${index + 1} is demonstrably satisfied.`,
+          },
+        ],
+        ownedScope: [`src/${id}/`],
+        obligationIds: owned,
+        outputs: [
+          {
+            id: `${id}-output`,
+            description: `The accepted output of milestone ${index + 1}.`,
+            completionAcceptanceIds: [`${id}-accepted`],
+          },
+        ],
+        prerequisiteOutputs: [],
+      };
+    });
+    const proposal: CompilerObjectivesProposal = {
+      protocol: "clockgrove.factory/compiler-proposal",
+      kind: "objectives",
+      objectives,
+      coverage: objectives.flatMap((objective) =>
+        objective.obligationIds.map((obligationId) => ({
+          obligationId,
+          disposition: "owned" as const,
+          objectiveId: objective.id,
+          acceptanceId: objective.acceptance[0]!.id,
+        })),
+      ),
+      triggers: [
+        {
+          code: "work-item-threshold",
+          source: "obligation-inventory",
+          availability: "estimated",
+          observed: 101,
+          threshold: 24,
+          obligationIds: projectObligations,
+          explanation:
+            "The complete inventory is expected to exceed one Objective's provisional Work Item threshold.",
+        },
+      ],
+    };
+    expect(validateObjectivePlan(proposal, projectObligations)).toEqual([]);
+  });
+
   it("accepts a complete dependency-ordered plan", () => {
     expect(validateObjectivePlan(validPlan(), obligations)).toEqual([]);
   });

@@ -32,9 +32,24 @@ import { buildPlanReport, type PlanInput, type PlanningContext } from "./plan.js
 import type { GitHubMutationTelemetry } from "../platform.js";
 import { inspectCompilerEvaluation } from "./compiler-eval.js";
 import type { CompiledGraphReadStore } from "../control/graphs.js";
+import type { ObjectiveAssetStore } from "../assets/storage.js";
+import {
+  persistObjectiveAssetManifest,
+  readObjectiveAssetManifest,
+  readObjectiveAssetManifestByRequest,
+} from "../assets/storage.js";
+import {
+  importObjectiveAsset,
+  type ObjectiveAssetImport,
+  type ObjectiveAssetImportMetadata,
+} from "../assets/import.js";
+import { withArtifactContentScope } from "../execution/artifact-content-scope.js";
+import { MAX_OBJECTIVE_ASSETS, MAX_OBJECTIVE_ASSET_TOTAL_BYTES } from "../assets/contracts.js";
 
 export const APPLICATION_OPERATIONS = [
   "doctor",
+  "assets-import",
+  "assets-inspect",
   "plan",
   "compiler-eval",
   "recovery-plan",
@@ -146,11 +161,13 @@ export interface ServiceContext {
   diagnostics?: DoctorChecks;
   planning?: PlanningContext;
   compilerEvaluationStore?: CompiledGraphReadStore;
+  assetStore?: ObjectiveAssetStore;
   platformTelemetry?: () => GitHubMutationTelemetry;
 }
 
 export type ReadOperation =
   | "doctor"
+  | "assets-inspect"
   | "plan"
   | "compiler-eval"
   | "recovery-plan"
@@ -223,13 +240,38 @@ export class FactoryApplicationService {
       });
     }
     if (operation === "status") {
-      return buildStatusReport({
+      const status = buildStatusReport({
         repository,
         snapshot,
         ...(this.context.platformTelemetry
           ? { platformTelemetry: this.context.platformTelemetry() }
           : {}),
       });
+      if (!status.compilerEvaluation || !this.context.compilerEvaluationStore) return status;
+      try {
+        const evaluation = await inspectCompilerEvaluation({
+          repository,
+          snapshot,
+          store: this.context.compilerEvaluationStore,
+        });
+        return {
+          ...status,
+          compilerEvaluation: {
+            availability: "observed" as const,
+            policy: status.compilerEvaluation.policy,
+            invocations: evaluation.invocationStatus,
+            cumulativeUsage: evaluation.cumulativeUsage,
+          },
+        };
+      } catch {
+        return {
+          ...status,
+          compilerEvaluation: {
+            ...status.compilerEvaluation,
+            reason: "immutable compiler draft status could not be validated",
+          },
+        };
+      }
     }
     if (operation === "explain") {
       return buildExplanationReport({ repository, snapshot, ...(workItem ? { workItem } : {}) });
@@ -247,6 +289,106 @@ export class FactoryApplicationService {
       objective: snapshot,
       ...(workItem ? { workItem } : {}),
     };
+  }
+
+  async importAssets(input: {
+    objective: number;
+    requestId: string;
+    baseSha?: string;
+    revision: number;
+    assets: Array<{ source: ObjectiveAssetImport; metadata: ObjectiveAssetImportMetadata }>;
+  }) {
+    if (
+      !this.context.assetStore ||
+      !this.context.readBaseSha ||
+      !this.context.diagnostics?.repositoryFacts
+    )
+      throw new Error("Objective asset storage is not configured");
+    const snapshot = await this.context.reader.readObjective(input.objective);
+    if (snapshot.closed) throw new Error("cannot bind assets to a closed Objective");
+    const baseSha = input.baseSha ?? (await this.context.readBaseSha(snapshot.defaultBranch));
+    const facts = await this.context.diagnostics.repositoryFacts();
+    const authority = {
+      repository: `${this.context.owner}/${this.context.repo}`,
+      objective: input.objective,
+      baseSha,
+    };
+    const replay = await readObjectiveAssetManifestByRequest({
+      store: this.context.assetStore,
+      authority,
+      requestId: input.requestId,
+    });
+    if (replay) return this.assetImportResult(input.objective, baseSha, replay);
+    if (!input.assets.length || input.assets.length > MAX_OBJECTIVE_ASSETS)
+      throw new Error(`Objective asset batch must contain 1-${MAX_OBJECTIVE_ASSETS} entries`);
+    const captured: Array<Awaited<ReturnType<typeof importObjectiveAsset>>> = [];
+    let capturedBytes = 0;
+    for (const { source, metadata } of input.assets) {
+      const asset = await importObjectiveAsset(source, metadata, {
+        repositoryPrivate: facts.private,
+      });
+      capturedBytes += asset.bytes.length;
+      if (capturedBytes > MAX_OBJECTIVE_ASSET_TOTAL_BYTES)
+        throw new Error("Objective asset batch exceeds the aggregate byte limit");
+      captured.push(asset);
+    }
+    const assertCurrent = async () => {
+      const current = await this.context.reader.readObjective(input.objective);
+      if (current.closed || (await this.context.readBaseSha!(current.defaultBranch)) !== baseSha)
+        throw new Error("Objective asset authority changed before publication");
+    };
+    const result = await withArtifactContentScope(() =>
+      persistObjectiveAssetManifest({
+        store: this.context.assetStore!,
+        authority,
+        requestId: input.requestId,
+        revision: input.revision,
+        assets: captured,
+        assertCurrent,
+      }),
+    );
+    return this.assetImportResult(input.objective, baseSha, result);
+  }
+
+  private assetImportResult(
+    objective: number,
+    baseSha: string,
+    result: Awaited<ReturnType<typeof persistObjectiveAssetManifest>>,
+  ) {
+    return {
+      operation: "assets-import",
+      repository: `${this.context.owner}/${this.context.repo}`,
+      objective,
+      baseSha,
+      manifestDigest: result.manifest.digest,
+      manifestRef: result.ref,
+      manifestCommit: result.commit,
+      assets: result.manifest.assets.map(({ descriptor, storage }) => ({
+        descriptorDigest: descriptor.digest,
+        contentDigest: descriptor.content.digest,
+        bytes: descriptor.content.bytes,
+        mediaType: descriptor.content.inspection.mediaType,
+        validation: descriptor.content.inspection.status,
+        visibility: descriptor.visibility,
+        path: descriptor.materializationPath,
+        storageReceiptDigest: storage.digest,
+      })),
+    } as const;
+  }
+
+  async inspectAssets(input: { objective: number; baseSha: string; manifestDigest: string }) {
+    if (!this.context.assetStore) throw new Error("Objective asset storage is not configured");
+    const manifest = await readObjectiveAssetManifest({
+      store: this.context.assetStore,
+      authority: {
+        repository: `${this.context.owner}/${this.context.repo}`,
+        objective: input.objective,
+        baseSha: input.baseSha,
+      },
+      digest: input.manifestDigest,
+    });
+    if (!manifest) throw new Error("Objective asset manifest was not found");
+    return { operation: "assets-inspect", manifest };
   }
 
   doctor(objective: number, checkout?: string) {
@@ -436,7 +578,7 @@ export class FactoryApplicationService {
     });
   }
 
-  controller(
+  async controller(
     operation: "start" | "stop" | "restart" | "status" | "install" | "uninstall",
     input: ControllerInput,
   ): Promise<unknown> {

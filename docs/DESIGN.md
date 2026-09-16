@@ -471,7 +471,7 @@ current recovery authorization before a new control outcome. Acknowledged accoun
 working state and does not acquire authenticated snapshot membership.
 
 Post-PR `AttemptPublished` and `PublicationRecorded` facts share one comment on the selected ordinary
-path. Inline artifacts use a single v2 ready descriptor publication because no payload handoff lies
+path. Inline artifacts use a single ready descriptor publication because no payload handoff lies
 between intent and completion; external payloads retain their separate intent and ready boundaries.
 An exact current dispatched issue owner remains non-replayable and occupied until evidence-backed
 release, so its execution outcome need not also publish a redundant terminal ledger revision.
@@ -737,6 +737,29 @@ Workers receive no Director, merge, issue-mutation, escalation, or Objective too
 with GitHub credentials removed and credential helpers disabled. Sandbox workers receive no GitHub
 write credential. Workers may edit only their isolated workspace and return a content-addressed
 artifact plus bounded metadata.
+
+Finding candidates use the same boundary. A worker, deterministic validator, independent review,
+integration step, compiler, or explicit Supervisor mapping may state supported behavior, observed
+behavior, minimal reproduction, impact, immutable evidence, and a separately marked unverified
+possible cause. Producers cannot choose the destination, severity, blocking status, or disposition.
+Only the Supervisor classifies an observation as an in-scope repair, Objective blocker,
+nonblocking follow-up, issue-ready report, refused report, or exhausted reporting allowance.
+
+Automatic publication requires immutable `findingReporting` policy naming lowercase destination
+repositories, their public/private audience, allowed read/create/comment operations, and one bounded
+publication-write allowance. Finding identity includes destination, supported behavior, failure
+class, phase, reproduction, and source/artifact evidence; run and attempt identify occurrences but
+do not split retries. A separate common-cause identity exists only with explicit shared evidence.
+Title similarity never establishes identity.
+
+The authenticated Objective event journal records the decision, a pre-dispatch publication intent,
+and the final disposition. The target issue contains an exact finding/report marker. On response
+loss or restart the Supervisor searches for and validates that marker, repository, author, node,
+and body. An unproven absence is not permission to repeat create; it settles as issue-ready with an
+ambiguous-transport reason. Reporting uses the shared credential scheduler, circuit, rate limits,
+and final lease fence, but it cannot mutate the compiled graph, activate work, consume implementation
+attempts, or grant model, network, or spending authority. Ordinary reporting refuses secrets,
+personal data, private paths/topology, raw logs/prompts, and unverified security findings.
 
 The local boundary is intentionally trusted-local, not hostile-code containment. Factory redirects
 conventional home/config paths, strips conventional secret environment variables, and disables Git
@@ -1334,10 +1357,11 @@ part of the protocol; it is not accepted as an inert field.
 
 ## Management backends
 
-An explicit immutable `compilerEvaluation` policy adds an obligation-first draft stage before
+An immutable `compilerEvaluation` policy adds an obligation-first draft stage before
 the existing graph commitment. `mode: "auto-repair"` runs extraction, initial semantic proposal,
 mechanical grounding, and independent whole-Objective judgment; it permits at most two repairs
-by default. The default envelope is seven model invocations and 600 seconds. Optional
+by default. New activations that omit policy persist the complete standard envelope: two repairs,
+seven model invocations, 600 seconds, and a 500,000 observed-token stop threshold. Optional
 `maxRepairs` (0–2), `maxInvocations` (1–7), `timeoutSeconds` (1–3600), and
 `maxObservedTokens` configure that bounded envelope. The normal run deadline and observed-token admission
 remain additional limits. Observed tokens are not a provider-enforced hard cap. Every phase
@@ -1378,7 +1402,26 @@ instead of a separate repair protocol. Only a completed response that fails dete
 schema or evidence-grounding validation may consume the next shared correction. Exact usage alone
 does not authorize a retry; provider, process, persistence, unsafe-output, and exhausted-bound failures
 remain terminal.
-Runs without `compilerEvaluation` retain one paid proposal call. That call receives a lossless bounded
+
+The proposal discriminator is mandatory and has three current result kinds. `work-items` enters the
+ordinary flat execution path. `objectives` is a planning-only decomposition with complete obligation
+dispositions, concrete outputs, completion acceptance, and acyclic prerequisite-output references.
+`clarification` names the missing facts and affected obligations. Provider structured output uses one
+fully required wire object with empty arrays for irrelevant variants; Factory immediately converts it
+to the strict canonical discriminated value and rejects mixed variants. There is no pre-discriminator
+compatibility reader.
+
+Fresh policies may configure `objectivePlanning.maxWorkItemsPerObjective`,
+`maxCriticalPathRatio`, and `maxAggregateWorkRatio`. The defaults (24, 0.75, and 1.5) are provisional
+planning signals. The latter two derive minute thresholds from the immutable Objective timeout;
+configured Work Item durations remain advisory, and absent values remain unavailable. Factory checks
+the limits before accepting a projected graph, so a small but serial-heavy graph can require planning.
+The 100-item hard graph bound remains unchanged. Planning results carry no graph authority and cannot
+create issues, activate runs, enlarge policy, or spend implementation attempts. `factory_plan` exposes
+their exact identity and content read-only; automatic child-Objective materialization and execution are
+not supported.
+Historical and caller-supplied policies without `compilerEvaluation` retain one paid proposal call.
+That call receives a lossless bounded
 Objective source-coverage inventory so every source segment remains structurally visible, but Factory
 does not claim those syntactic boundaries are independently extracted semantic obligations. Only the
 explicit evaluation path adds the separately dispatched obligation extraction and independent judge.
@@ -1394,11 +1437,13 @@ semantic needs with adapter and policy-derived execution requirements, and recor
 of adapter bindings, added edges, and risk elevations. The existing graph validators and this projection share dependency, overlap, and exclusive-
 resource analysis so they cannot silently implement different graph semantics.
 
-This is an opt-in policy extension, not a change to existing immutable policies or the current
-release candidate's defaults. Runs without the field retain their original compilation path.
-Upgrade the plugin and controller together before enabling it; older controllers do not
-understand draft-stage authority and cannot safely resume these enabled runs. Default enablement
-and quality/efficiency claims require separate measured calibration and comparative evidence.
+Default selection changes only fresh omitted-policy activation. Existing immutable policies, exact
+request replays, and caller-supplied policies are never rewritten or given nested defaults; runs
+without the field retain their original compilation path and digest. Upgrade the plugin and controller
+together before starting a defaulted run; older controllers do not understand draft-stage authority
+and cannot safely resume these enabled runs. Status reads the immutable draft journal to show every
+compiler invocation and cumulative observed usage without replaying model work. Quality and efficiency
+claims require separate measured calibration and comparative evidence.
 Historical reports preserve missing originals, unresolved usage and unknown causal attribution;
 they cannot reconstruct absent evidence or revive a terminal run. See
 [the evaluation contract](EVALUATION-CORPUS.md#independent-draft-review-and-post-mortems).

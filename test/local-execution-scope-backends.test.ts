@@ -28,6 +28,7 @@ function context(workspace = "/tmp"): AttemptContext {
     workspace,
     deadline,
     packet: {
+      protocol: "clockgrove.factory/worker-packet",
       goal: "Change value.txt",
       acceptanceCriteria: ["value.txt changes"],
       allowedPaths: ["value.txt"],
@@ -36,7 +37,7 @@ function context(workspace = "/tmp"): AttemptContext {
       conventions: [],
       baseSha: "b".repeat(40),
       validationCommands: ["node --test"],
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
       requirements: {
         os: [],
         architecture: [],

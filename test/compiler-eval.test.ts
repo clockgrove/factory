@@ -43,6 +43,7 @@ const inventory: ObligationInventory = {
 // These tests exercise evidence contracts only, not structural compilation or model quality.
 const graph = {
   protocol: "clockgrove.factory/compiler-proposal",
+  kind: "work-items",
   workItems: [
     {
       id: "api",
@@ -88,6 +89,7 @@ const verdict = (): CompilerJudgeVerdict => ({
     },
   ],
   findings: [],
+  inferenceCorrections: [],
   uncertainty: [],
   decision: "accept",
 });
@@ -176,6 +178,7 @@ describe("obligation-first compiler evidence", () => {
     ).toThrow("identity");
     const serial = {
       protocol: "clockgrove.factory/compiler-proposal",
+      kind: "work-items",
       workItems: [
         { id: "api", dependsOn: [], criteria: [{ id: "requested-outcome" }] },
         { id: "consumer", dependsOn: ["api"], criteria: [{ id: "consumes-api" }] },
@@ -209,6 +212,7 @@ describe("obligation-first compiler evidence", () => {
     }));
     const groupedGraph = {
       protocol: "clockgrove.factory/compiler-proposal",
+      kind: "work-items",
       workItems,
     } as unknown as CompilerProposal;
     expect(workItems.reduce((total, item) => total + item.dependsOn.length, 0)).toBe(1_050);

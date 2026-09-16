@@ -13,6 +13,14 @@ Factory's Supervisor owns the loop. Do not reproduce scheduling with repeated mo
 not mutate GitHub with raw `gh`, REST, or GraphQL calls. The bundled MCP tools are the authorized
 surface.
 
+Finding reports shown by `factory_status` or `factory_explain` are Supervisor dispositions, not a
+new work queue. Preserve the exact distinction among repaired, issue-filed, existing-issue-linked,
+issue-ready, reporting-refused, and reporting-limit. Never file or update an issue with raw GitHub
+tools on Factory's behalf, never convert a finding into a Work Item, and never treat credentials or
+an available destination as publication authority. An issue-ready or refused nonblocking finding
+does not become Objective completion credit; a blocker remains a blocker until the Supervisor's
+authenticated evidence says otherwise.
+
 ## Resolve the target and request
 
 Use the repository and Objective selected by the user. Resolve "this repository" from the active
@@ -47,6 +55,13 @@ with `compile` omitted or `false`. Status and Work Item counts are not a substit
 the existing graph. Report a missing graph or unverified graph authority as returned; do not
 compile a replacement unless explicitly authorized.
 
+When the user explicitly supplies an Objective input file or recognized GitHub attachment, use
+`factory_assets_import` before activation and return its immutable manifest digest. Require the
+user's visibility and rights assertion and never infer `allowOpaque`. Use `factory_assets_inspect`
+for read-only manifest inspection. Do not scrape an issue for attachments, render Markdown, follow
+links embedded in content, or retry by silently refetching a source after its captured bytes are
+lost.
+
 For read-only plan inspection, omit the optional local `repository` argument. Never fill a checkout
 argument with the current directory merely because it is available. When compilation, preflight
 or execution requires a checkout, use an absolute checkout verified to belong to the selected
@@ -64,10 +79,15 @@ Collect:
 - an absolute local checkout of that exact repository for operations requiring one;
 - an optional complete run policy.
 
-If no policy was supplied, use Factory's fixed local-only default (up to two workers, further
-constrained by measured CPU and memory headroom). Adaptive local concurrency is an explicit policy
-choice until its default-enablement qualification passes. Never opt into paid backends or broaden
-trust on the user's behalf.
+If no policy was supplied, omit the policy argument. Factory records its fixed local-only default
+(up to two workers, further constrained by measured CPU and memory headroom) together with an
+explicit compiler auto-repair envelope: `maxRepairs: 2`, `maxInvocations: 7`,
+`timeoutSeconds: 600`, and `maxObservedTokens: 500000`. The token value is an observed stop checked
+between calls, not a provider hard cap; an in-flight response can overshoot it. `maxRepairs` is shared
+between obligation-inventory correction and graph repair. Status reports each compiler invocation
+and cumulative usage. Adaptive local concurrency remains an explicit policy choice until its
+default-enablement qualification passes. Never opt into paid backends or broaden trust on the user's
+behalf.
 
 A new policy containing `economics.maxModelTokens` must explicitly select
 `economics.modelTokenBudgetMode: "observed-stop"` to permit in-flight overshoot. Do not make that

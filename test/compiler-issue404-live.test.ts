@@ -45,12 +45,16 @@ import {
   materializePinnedCompilationTree,
   sealPinnedCompilationTreeProof,
 } from "../src/execution/pinned-compilation-tree.js";
-import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
+import { policyDigest } from "../src/protocol/policy.js";
 import { pinFixtureRepository } from "./helpers/compiler-proposal.js";
 import {
   issue404AggregateTokenUsage,
+  assertIssue404CanonicalFixture,
   issue404CanonicalPath,
+  issue404InvocationTerminalEvidence,
   issue404LiveAuthority,
+  issue404QualificationCompilationContext,
+  issue404SucceededTransformationFailure,
   issue404TerminalTranscriptEvidence,
   issue404TokenUsageByStage,
   type Issue404DurableRecord,
@@ -212,6 +216,8 @@ class OmittedObligationBackend extends CodexCliManagementBackend {
     const omitted = explicit.at(-1)?.id;
     if (!omitted) throw new Error("qualification inventory has no explicit obligation to omit");
     const proposal = structuredClone(result.proposal);
+    if (proposal.kind !== "work-items")
+      throw new Error("qualification mutation requires a Work Item proposal");
     for (const item of proposal.workItems)
       item.obligationIds = item.obligationIds.filter((id) => id !== omitted);
     const report = parseAndValidateCompilerProposal(request, proposal, projection).report;
@@ -224,10 +230,13 @@ class OmittedObligationBackend extends CodexCliManagementBackend {
       proposal,
     );
     const { promptDigest, schemaDigest, baseSha, model, reasoning } = result.provenance;
-    throw Object.assign(error, {
-      validationReport: report,
-      provenance: { promptDigest, schemaDigest, baseSha, model, reasoning },
-    });
+    throw issue404SucceededTransformationFailure(
+      Object.assign(error, {
+        validationReport: report,
+        provenance: { promptDigest, schemaDigest, baseSha, model, reasoning },
+      }),
+      result.usage,
+    );
   }
 }
 
@@ -249,6 +258,7 @@ async function assertTerminalTranscripts(
   },
 ) {
   if (!authority) throw new Error("live compiler authority was not established");
+  if (expectation.invocationIds.length === 0) return [];
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const files = (await readdir(authority.transcriptDirectory)).filter(
       (file) => file.startsWith("factory-management-") && file.endsWith(".json"),
@@ -330,7 +340,7 @@ async function qualify(
       content:
         "Qualification fixture. Source and test paths named by the Objective are intentionally new.\n",
     },
-  ].sort((left, right) => left.path.localeCompare(right.path));
+  ];
   await Promise.all(
     fixtureFiles.map((file) => writeFile(join(repository, file.path), file.content)),
   );
@@ -340,57 +350,21 @@ async function qualify(
   });
   const tree = await materializePinnedCompilationTree(repository, baseSha);
   disposePinnedTrees.push(tree.dispose);
-  const fixtureManifest = fixtureFiles.map((file) => ({
-    path: file.path,
-    mode: "100644",
-    bytes: Buffer.byteLength(file.content),
-    sha256: createHash("sha256").update(file.content).digest("hex"),
-  }));
-  const materializedManifest = await Promise.all(
-    tree.files.map(async (path) => {
-      const content = await readFile(join(tree.path, path));
-      return {
-        path,
-        mode: lstatSync(join(tree.path, path)).mode & 0o100 ? "100755" : "100644",
-        bytes: content.byteLength,
-        sha256: createHash("sha256").update(content).digest("hex"),
-      };
-    }),
-  );
-  if (
-    tree.baseSha !== baseSha ||
-    tree.files.includes(authorityMarkerPath) ||
-    compilerEvalDigest(materializedManifest) !== compilerEvalDigest(fixtureManifest)
-  )
-    throw new Error("live qualification materialized tree differs from its canonical manifest");
+  const fixtureManifest = await assertIssue404CanonicalFixture({
+    tree,
+    baseSha,
+    files: fixtureFiles,
+    forbiddenPaths: [authorityMarkerPath],
+  });
   await sealPinnedCompilationTreeProof(tree.proof);
   const canonicalCwd = issue404CanonicalPath(tree.path);
-  const context: CompilationContext = {
+  const context = issue404QualificationCompilationContext({
     repository: tree.path,
     objective: { number: name === "valid-first" ? 4041 : 4042, ...objective },
-    defaultBranch: "main",
     baseSha,
     repositoryFiles: tree.files,
     pinnedCompilationTree: tree.proof,
-    allowedNetworkDestinations: [],
-    runPolicy: {
-      ...DEFAULT_RUN_POLICY,
-      workItemTimeoutMinutes: 20,
-      compilerEvaluation: {
-        mode: "auto-repair",
-        maxRepairs: 2,
-        maxInvocations: 7,
-        timeoutSeconds: 3_600,
-        maxObservedTokens: 250_000,
-      },
-    },
-    modelSelection: {
-      profile: "issue404-qualification",
-      model: "gpt-5.6-sol",
-      reasoning: "xhigh",
-    },
-    invocationTimeoutMs: 5 * 60_000,
-  };
+  });
   context.repositoryEvidence = compilerObligationEvidence(context);
   const forbiddenAuthorityFragments = [
     authorityMarkerPath,
@@ -451,8 +425,9 @@ async function qualify(
     const invocationIds = result.records
       .filter((record) => record.kind === "invocation")
       .map((record) => String(record.payload.invocationId));
+    const terminalEvidence = issue404InvocationTerminalEvidence(result.records);
     const transcripts = await assertTerminalTranscripts(result.records, {
-      invocationIds,
+      invocationIds: terminalEvidence.providerInvocationIds,
       durableRunId: lease.runId,
       baseSha,
       canonicalCwd,
@@ -473,6 +448,8 @@ async function qualify(
       reason: result.reason,
       elapsedMilliseconds: Date.now() - started,
       invocationIds,
+      providerInvocationIds: terminalEvidence.providerInvocationIds,
+      preProviderTerminals: terminalEvidence.preProviderTerminals,
       transcripts,
       tokenUsageByStage: issue404TokenUsageByStage(result.records),
       usage: issue404AggregateTokenUsage(result.records),
@@ -502,8 +479,9 @@ async function qualify(
   expect(() => assertCompilerDraftSelection(result.records, result.graph)).not.toThrow();
   const invocations = result.records.filter((record) => record.kind === "invocation");
   const invocationIds = invocations.map((record) => String(record.payload.invocationId));
+  const terminalEvidence = issue404InvocationTerminalEvidence(result.records);
   const transcripts = await assertTerminalTranscripts(result.records, {
-    invocationIds,
+    invocationIds: terminalEvidence.providerInvocationIds,
     durableRunId: lease.runId,
     baseSha,
     canonicalCwd,
@@ -525,6 +503,8 @@ async function qualify(
     graphDigest: result.graphDigest,
     calls: invocations.length,
     invocationIds,
+    providerInvocationIds: terminalEvidence.providerInvocationIds,
+    preProviderTerminals: terminalEvidence.preProviderTerminals,
     transcripts,
     stages: invocations.map((record) => `${record.payload.stage}:${record.payload.revision}`),
     tokenUsageByStage: issue404TokenUsageByStage(result.records),

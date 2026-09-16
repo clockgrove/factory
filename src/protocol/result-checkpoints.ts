@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { gitSha, safeId, sha256Digest } from "./limits.js";
 import { ValidationEvidenceSchema } from "../validation/evidence.js";
+import { FindingCandidateSchema } from "./findings.js";
 
 export const ReviewIdentitySchema = z
   .object({
@@ -32,6 +33,7 @@ const SemanticReviewSchema = z
     summary: z.string().min(1).max(8_000),
     unmetCriteria: z.array(z.string().max(2_000)).max(64),
     risks: z.array(z.string().max(2_000)).max(64),
+    findings: z.array(FindingCandidateSchema).max(16).optional(),
   })
   .strict();
 

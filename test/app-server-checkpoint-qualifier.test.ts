@@ -90,6 +90,7 @@ function fixture(workItem = 8) {
     baseSha,
   };
   const packet = {
+    protocol: "clockgrove.factory/worker-packet" as const,
     goal: "bounded fixture",
     baseSha,
     validationCommands: ["node --test test/value.test.js"],
@@ -168,7 +169,7 @@ function fixture(workItem = 8) {
     changedPaths = ["src/value.js"];
   const artifactDigest = hash(`${baseSha}\0${changedPaths.join("\0")}\0${patch}`);
   const descriptor = {
-    protocol: "clockgrove.factory/artifact-transfer-v1",
+    protocol: "clockgrove.factory/artifact-transfer",
     identity,
     chunks: [],
     retention: "repository-audit",
@@ -290,7 +291,7 @@ function fixture(workItem = 8) {
     },
   ];
   const witness = {
-    protocol: "clockgrove.factory/app-server-checkpoint-reached-v1",
+    protocol: "clockgrove.factory/app-server-checkpoint-reached",
     ...identity,
     activationRequestId: "session-case-activate",
     artifactDigest,
@@ -300,8 +301,14 @@ function fixture(workItem = 8) {
     modelTokens: 110,
     nativeMilliseconds: 500,
     armDigest: "d".repeat(64),
+    startedAt: common.at,
+    eligibleUntil: new Date(
+      Date.parse(common.at) + parseRunPolicy(authority.policy).objectiveTimeoutMinutes * 60_000,
+    ).toISOString(),
     reachedAt: common.at,
-    expiresAt: "2026-09-06T12:05:00.000Z",
+    holdUntil: new Date(
+      Date.parse(common.at) + parseRunPolicy(authority.policy).workItemTimeoutMinutes * 60_000,
+    ).toISOString(),
   };
   const observation = {
     receipts: events.map((event) => ({ event })),
@@ -336,7 +343,7 @@ describe("installed App Server checkpoint qualification", () => {
       true,
     );
     expect(assertAppServerCheckpoint(f.observation, authority, f.proof, f.witness)).toMatchObject({
-      protocol: "clockgrove.factory/app-server-checkpoint-verification-v1",
+      protocol: "clockgrove.factory/app-server-checkpoint-verification",
       workItem: 8,
       runId: "run-7",
       attempt: 1,
@@ -586,7 +593,7 @@ describe("installed App Server checkpoint qualification", () => {
       ),
     ).rejects.toThrow(/changed after dependent proof reads/);
   });
-  it("rejects a v2 witness reached exactly at the half-open Objective boundary", () => {
+  it("rejects a witness reached exactly at the half-open Objective boundary", () => {
     const f = fixture();
     const startedAt = String(
       f.observation.receipts.find(({ event }) => event.event === "FactoryRunStarted")!.event.at,
@@ -595,10 +602,9 @@ describe("installed App Server checkpoint qualification", () => {
     const eligibleUntil = new Date(
       Date.parse(startedAt) + policy.objectiveTimeoutMinutes * 60_000,
     ).toISOString();
-    const { expiresAt: _expiresAt, ...legacy } = f.witness;
     const witness = {
-      ...legacy,
-      protocol: "clockgrove.factory/app-server-checkpoint-reached-v2",
+      ...f.witness,
+      protocol: "clockgrove.factory/app-server-checkpoint-reached",
       startedAt,
       eligibleUntil,
       reachedAt: eligibleUntil,

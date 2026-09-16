@@ -65,6 +65,7 @@ describe("Objective receipt writer generation", () => {
   it("keeps the full restorable runtime receipt in event-schema parity", () => {
     const receipt = activeRuntimeBundleSync("pnpm");
     const packet = parseWorkerPacket({
+      protocol: "clockgrove.factory/worker-packet",
       goal: "Run an exact managed check.",
       acceptanceCriteria: ["The exact check passes."],
       allowedPaths: ["package.json"],
@@ -92,7 +93,7 @@ describe("Objective receipt writer generation", () => {
           bundleDigest: receipt.digest,
         },
       ],
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     });
     const activation = createManagedRuntimeActivation({
       packet,

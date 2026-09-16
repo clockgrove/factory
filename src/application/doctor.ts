@@ -16,6 +16,7 @@ import { normalizeSchedulingPolicy } from "../protocol/policy.js";
 import { inspectLocalCheckout } from "./checkout.js";
 import { inspectObjectiveGraphInput } from "../control/objective-graph-input.js";
 import { legacyGraphConstraintsDigest } from "../graph.js";
+import { probeAssetHandlers } from "../assets/handlers.js";
 
 export type DiagnosticStatus = "pass" | "warning" | "fail";
 
@@ -30,7 +31,8 @@ export interface DoctorDiagnostic {
     | "backends"
     | "branch-rules"
     | "stacks"
-    | "resources";
+    | "resources"
+    | "assets";
   status: DiagnosticStatus;
   summary: string;
   details?: unknown;
@@ -430,6 +432,21 @@ export async function buildDoctorReport(input: {
     }),
   ]);
 
+  await check("assets", async () => {
+    const handlerProbe = await probeAssetHandlers();
+    return {
+      summary: `${handlerProbe.handlers.length} statically registered Objective asset handler(s) are available`,
+      details: {
+        ...handlerProbe,
+        limits: {
+          perAssetBytes: 100 * 1024 * 1024,
+          aggregateBytes: 256 * 1024 * 1024,
+          rasterPixels: 40_000_000,
+          rasterFrames: 16,
+        },
+      },
+    };
+  });
   return {
     operation: "doctor",
     repository: input.repository,

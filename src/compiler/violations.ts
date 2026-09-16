@@ -149,6 +149,85 @@ export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule
     "legacy-constraint-mismatch",
     "The proposal changes an immutable adopted Work Item constraint.",
   ),
+  "objective-count": rule("objective-count", "A split must contain multiple bounded Objectives."),
+  "duplicate-objective-id": rule(
+    "duplicate-objective-id",
+    "An Objective identifier is duplicated.",
+  ),
+  "duplicate-acceptance-id": rule(
+    "duplicate-acceptance-id",
+    "An Objective acceptance identifier is duplicated.",
+  ),
+  "duplicate-output-id": rule(
+    "duplicate-output-id",
+    "An Objective output identifier is duplicated.",
+  ),
+  "invalid-objective-content": rule(
+    "invalid-objective-content",
+    "A proposed Objective has incomplete or placeholder content.",
+  ),
+  "duplicate-obligation-disposition": rule(
+    "duplicate-obligation-disposition",
+    "A parent obligation has multiple dispositions.",
+  ),
+  "invalid-obligation-disposition": rule(
+    "invalid-obligation-disposition",
+    "A parent obligation disposition does not name its owning acceptance.",
+  ),
+  "unknown-prerequisite-objective": rule(
+    "unknown-prerequisite-objective",
+    "A prerequisite names an unknown proposed Objective.",
+  ),
+  "unknown-prerequisite-output": rule(
+    "unknown-prerequisite-output",
+    "A prerequisite names an unknown proposed output.",
+  ),
+  "duplicate-prerequisite-output": rule(
+    "duplicate-prerequisite-output",
+    "A prerequisite output is duplicated.",
+  ),
+  "self-prerequisite": rule("self-prerequisite", "A proposed Objective depends on its own output."),
+  "objective-cycle": rule("objective-cycle", "The proposed Objective graph contains a cycle."),
+  "objective-order": rule(
+    "objective-order",
+    "A prerequisite Objective must precede its dependent.",
+  ),
+  "unknown-completion-acceptance": rule(
+    "unknown-completion-acceptance",
+    "An output names an unknown completion criterion.",
+  ),
+  "duplicate-completion-acceptance": rule(
+    "duplicate-completion-acceptance",
+    "An output repeats a completion criterion.",
+  ),
+  "invalid-integration-acceptance": rule(
+    "invalid-integration-acceptance",
+    "Aggregate integration acceptance is not backed by prerequisite outputs.",
+  ),
+  "overlapping-objective-scope": rule(
+    "overlapping-objective-scope",
+    "Overlapping Objective scopes require prerequisite ordering.",
+  ),
+  "root-integration-acceptance": rule(
+    "root-integration-acceptance",
+    "A root Objective cannot claim aggregate integration.",
+  ),
+  "empty-objective-milestone": rule(
+    "empty-objective-milestone",
+    "A proposed Objective is not an owned or integration milestone.",
+  ),
+  "invalid-planning-trigger": rule(
+    "invalid-planning-trigger",
+    "Planning evidence or its threshold is inconsistent.",
+  ),
+  "clarification-coverage": rule(
+    "clarification-coverage",
+    "Clarification requirements do not account for the affected obligations.",
+  ),
+  "objective-planning-required": rule(
+    "objective-planning-required",
+    "The Work Item graph exceeds a configured planning threshold.",
+  ),
   "report-truncated": rule(
     "report-truncated",
     "Additional deterministic violations were omitted by the report bound.",

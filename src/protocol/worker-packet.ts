@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
+import { WorkerAssetInputSchema } from "../assets/contracts.js";
 
 import {
   MAX_WORKER_PACKET_BYTES,
@@ -380,6 +381,9 @@ export const RepositoryCapabilityBindingsSchema = z
 
 export const WorkerPacketSchema = z
   .object({
+    protocol: z
+      .literal("clockgrove.factory/worker-packet")
+      .default("clockgrove.factory/worker-packet"),
     goal: boundedText(4_000),
     acceptanceCriteria: shortList(boundedText(2_000)).min(1),
     allowedPaths: shortList(RepositoryScopePathSchema).min(1),
@@ -394,15 +398,19 @@ export const WorkerPacketSchema = z
     validation: ValidationDesignSchema.optional(),
     repositoryCapabilities: RepositoryCapabilityBindingsSchema.optional(),
     managedRuntimes: shortList(RuntimeBundleRequirementSchema, 8).optional(),
+    assetInputs: shortList(WorkerAssetInputSchema, 32).default([]),
     baseSha: gitSha,
     validationCommands: shortList(boundedText(1_000), 32).min(1),
     requirements: ExecutionRequirementsSchema,
-    artifactContract: z.literal("clockgrove.factory/artifact-v1"),
+    artifactContract: z.literal("clockgrove.factory/artifact"),
   })
-  .passthrough();
+  .strict();
 
 export type ExecutionRequirements = z.infer<typeof ExecutionRequirementsSchema>;
-export type WorkerPacket = z.infer<typeof WorkerPacketSchema>;
+type ParsedWorkerPacket = z.output<typeof WorkerPacketSchema>;
+export type WorkerPacket = Omit<ParsedWorkerPacket, "assetInputs"> & {
+  assetInputs?: ParsedWorkerPacket["assetInputs"];
+};
 export type ManagedRuntimeActivation = z.infer<typeof ManagedRuntimeActivationSchema>;
 export interface RepositoryCapabilityOperation {
   kind: string;
@@ -429,7 +437,7 @@ export interface RepositoryCapabilityBindings {
   requires: RepositoryCapabilityRequirement[];
 }
 
-/** Legacy packets conservatively retain semantic review of every criterion. */
+/** Packets without explicit validation design conservatively retain semantic review. */
 export function semanticReviewCriteria(packet: WorkerPacket): string[] {
   if (!packet.validation) return [...packet.acceptanceCriteria];
   const accepted = new Set(packet.acceptanceCriteria);
@@ -463,6 +471,12 @@ export function semanticReviewCriteria(packet: WorkerPacket): string[] {
 }
 
 export function parseWorkerPacket(input: unknown): WorkerPacket {
+  if (
+    !input ||
+    typeof input !== "object" ||
+    (input as { protocol?: unknown }).protocol !== "clockgrove.factory/worker-packet"
+  )
+    throw new Error("the canonical Worker Packet protocol is required");
   const packet = WorkerPacketSchema.parse(input);
   assertWithinBytes(packet, MAX_WORKER_PACKET_BYTES, "Worker Packet");
   assertNoSecretMaterial(packet, "Worker Packet");

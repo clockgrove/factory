@@ -13,6 +13,7 @@ const common = {
   legalComments: "none",
   minify: true,
   packages: "bundle",
+  external: ["sharp"],
   platform: "node",
   target: "node20",
 };
@@ -92,6 +93,15 @@ async function writeBundleCompliance({ outputDirectory, cliBuild, mcpBuild }) {
       byPackageRoot.set(packageRoot, current);
     }
   }
+  // Sharp remains external so the published npm package can install the correct
+  // native runtime for its host. It is nevertheless a distributed runtime
+  // dependency and must appear in the exact build inventory and notices.
+  for (const packageRoot of [
+    resolve(root, "node_modules/sharp"),
+    resolve(root, "node_modules/@img/sharp-linux-x64"),
+    resolve(root, "node_modules/@img/sharp-libvips-linux-x64"),
+  ])
+    byPackageRoot.set(packageRoot, new Set(["external runtime dependency"]));
 
   const compliance = [];
   for (const [packageRoot, bundles] of byPackageRoot) {
@@ -118,6 +128,15 @@ async function writeBundleCompliance({ outputDirectory, cliBuild, mcpBuild }) {
   for (const component of compliance) {
     if (component.licenses.length > 0) continue;
     const donor = licenseDonors.get(component.license);
+    if (!donor && component.bundles.includes("external runtime dependency")) {
+      component.licenses = [
+        {
+          name: "PACKAGE-METADATA-NOTICE.txt",
+          text: `${component.name}@${component.version} is installed as an external native runtime dependency and declares ${component.license}. The platform package does not ship a license text; source and license terms are identified above and in its npm package metadata.`,
+        },
+      ];
+      continue;
+    }
     if (!donor) {
       throw new Error(
         `bundled package ${component.name}@${component.version} has no license file or matching SPDX-text donor`,
@@ -145,7 +164,7 @@ async function writeBundleCompliance({ outputDirectory, cliBuild, mcpBuild }) {
   const notices = [
     "Factory third-party notices",
     "",
-    "This file is generated from the exact dependency inputs embedded in dist/factory.js and dist/mcp-server.js.",
+    "This file is generated from the exact bundled and external native runtime dependency inputs distributed by Factory.",
     `Bundle inventory SHA-256: ${sha256(inventoryBytes)}`,
   ];
   for (const component of compliance) {

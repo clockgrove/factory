@@ -209,6 +209,7 @@ async function fixture(
 ) {
   const store = new MemoryStore();
   const policy = structuredClone(DEFAULT_RUN_POLICY);
+  delete policy.compilerEvaluation;
   if (options.tokenLimit !== undefined)
     policy.economics = {
       maxModelTokens: options.tokenLimit,
@@ -284,7 +285,7 @@ async function fixture(
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       },
     ],
   };

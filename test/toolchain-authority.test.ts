@@ -331,6 +331,7 @@ describe("toolchain authority adapters", () => {
     const runtime = { ...adapter.runtimeRequirement!, bundleDigest: receipt.digest };
     const sourceRef = "refs/heads/main";
     const packet = parseWorkerPacket({
+      protocol: "clockgrove.factory/worker-packet",
       goal: `Use the integrated ${fixture.tool} test.`,
       acceptanceCriteria: ["The test passes."],
       allowedPaths: ["src/"],
@@ -363,7 +364,7 @@ describe("toolchain authority adapters", () => {
         ],
       },
       managedRuntimes: [runtime],
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     });
     const providerPacket = parseWorkerPacket({
       ...packet,
@@ -691,6 +692,7 @@ describe("toolchain authority adapters", () => {
     const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-npm")!;
     const sourceRef = "refs/heads/main";
     const graphPacket = parseWorkerPacket({
+      protocol: "clockgrove.factory/worker-packet",
       goal: "Use the later npm generation.",
       acceptanceCriteria: ["The npm check passes."],
       allowedPaths: ["src/"],
@@ -723,7 +725,7 @@ describe("toolchain authority adapters", () => {
         ],
       },
       managedRuntimes: [adapter.runtimeRequirement],
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     });
     const providerPacket = await activateManagedRuntimePacket(
       parseWorkerPacket({ ...graphPacket, repositoryCapabilities: undefined }),
@@ -871,6 +873,7 @@ describe("toolchain authority adapters", () => {
       }).trim(),
     };
     const graphPacket = {
+      protocol: "clockgrove.factory/worker-packet" as const,
       goal: "Use the integrated check.",
       acceptanceCriteria: ["The check passes."],
       allowedPaths: ["src/"],
@@ -916,7 +919,7 @@ describe("toolchain authority adapters", () => {
       managedRuntimes: [
         TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-pnpm")!.runtimeRequirement!,
       ],
-      artifactContract: "clockgrove.factory/artifact-v1" as const,
+      artifactContract: "clockgrove.factory/artifact" as const,
     };
     const sourceRef = "refs/heads/main";
     const { repositoryCapabilities: _providerBindings, ...providerGraphPacket } = graphPacket;
@@ -1193,6 +1196,7 @@ describe("toolchain authority adapters", () => {
       privateRoot,
       (
         await activateManagedRuntimePacket({
+          protocol: "clockgrove.factory/worker-packet",
           goal: "Use pnpm.",
           acceptanceCriteria: ["The command runs."],
           allowedPaths: ["package.json"],
@@ -1213,7 +1217,7 @@ describe("toolchain authority adapters", () => {
           managedRuntimes: [
             TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-pnpm")!.runtimeRequirement!,
           ],
-          artifactContract: "clockgrove.factory/artifact-v1",
+          artifactContract: "clockgrove.factory/artifact",
         })
       ).managedRuntimes,
     );

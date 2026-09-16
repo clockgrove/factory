@@ -27,8 +27,10 @@ import {
 
 const sha = (value: string) => value.repeat(40);
 const digest = (value: string) => value.repeat(64);
+const { compilerEvaluation: _defaultCompilerEvaluation, ...oneShotRecoveryPolicy } =
+  DEFAULT_RUN_POLICY;
 const policy: RunPolicy = {
-  ...DEFAULT_RUN_POLICY,
+  ...oneShotRecoveryPolicy,
   economics: {
     maxModelTokens: 1000,
     maxSandboxMinutes: 0,

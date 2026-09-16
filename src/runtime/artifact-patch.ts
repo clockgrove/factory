@@ -268,7 +268,7 @@ export async function inspectPatchManifest(
       });
       await rm(content);
     }
-    return ArtifactFileManifestSchema.parse({ version: 1, baseTreeSha, resultTreeSha, files });
+    return ArtifactFileManifestSchema.parse({ baseTreeSha, resultTreeSha, files });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -62,11 +62,13 @@ import {
   type LocalCapabilityProbe,
 } from "./codex-cli-local.js";
 import { withManagedToolchainPath } from "../toolchains/authority.js";
+import { parseFindingCandidates, type FindingCandidate } from "../protocol/findings.js";
 
 interface WorkerFinal {
   outcome: "succeeded" | "failed" | "declined";
   summary: string;
   commands: Array<{ command: string; exitCode: number }>;
+  findings?: FindingCandidate[] | undefined;
 }
 
 interface AppServerTurn {
@@ -200,6 +202,9 @@ function parseWorkerFinal(value: unknown): WorkerFinal | undefined {
     outcome: output.outcome as WorkerFinal["outcome"],
     summary: output.summary,
     commands,
+    ...(parseFindingCandidates(output.findings)
+      ? { findings: parseFindingCandidates(output.findings) }
+      : {}),
   };
 }
 
@@ -349,6 +354,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     },
     supportsLocalInference: false,
     supportsManagedToolchainExecution: true,
+    supportsOfflineAssetInputs: true,
     reportsModelUsage: true,
     supportsModelSelection: true,
     requiresPaidRuntime: false,
@@ -685,6 +691,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       })),
       logs: local.logs,
       outcome,
+      ...(attempt.final?.findings ? { findings: attempt.final.findings } : {}),
       ...(outcome === "succeeded"
         ? {}
         : {

@@ -8,6 +8,7 @@ import type {
 import type { LegacyGraphConstraints } from "../graph.js";
 import type {
   CompilerProposal,
+  CompilerProposalValue,
   CompilerRequest,
   CompilerValidationReport,
 } from "../compiler/contracts.js";
@@ -21,12 +22,92 @@ import type { CompilerWorkItem, DecompositionEvidence } from "../compiler/index.
 import type { PinnedLfsFacts } from "../repository-profiles/git-lfs.js";
 import type { PinnedCompilationTreeProof } from "../execution/pinned-compilation-tree.js";
 import type { ProviderQuotaCheckpoint } from "../providers/quota.js";
+import type { FindingCandidate } from "../protocol/findings.js";
 
 export interface ManagementUsage {
   inputTokens: number;
   outputTokens: number;
   /** Provider-reported subset of inputTokens; absence means unavailable. */
   cachedInputTokens?: number | undefined;
+}
+
+export interface ManagementTerminalOutcome {
+  state: "succeeded" | "provider-failed" | "invalid-response";
+  usage: ManagementUsage | null;
+}
+
+const managementFailureAuthorities = new WeakMap<
+  object,
+  {
+    terminalOutcome?: ManagementTerminalOutcome;
+    provenance?: CompilerInvocationProvenance;
+  }
+>();
+
+/** Preserve provider-owned objects, but make primitive rejections attachable and recoverable. */
+export function attachableManagementFailure(error: unknown): object {
+  if ((typeof error === "object" && error !== null) || typeof error === "function") return error;
+  return new Error(String(error), { cause: error });
+}
+
+export function managementFailureDiagnostic(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+  )
+    return error.message;
+  return String(error);
+}
+
+/** Retain only complete, exact counters exposed by an existing provider failure object. */
+export function managementFailureUsage(error: unknown): ManagementUsage | undefined {
+  if (typeof error !== "object" || error === null || !("usage" in error)) return undefined;
+  const usage = error.usage;
+  if (typeof usage !== "object" || usage === null) return undefined;
+  if (
+    !("inputTokens" in usage) ||
+    !Number.isSafeInteger(usage.inputTokens) ||
+    Number(usage.inputTokens) < 0 ||
+    !("outputTokens" in usage) ||
+    !Number.isSafeInteger(usage.outputTokens) ||
+    Number(usage.outputTokens) < 0
+  )
+    return undefined;
+  const cached = "cachedInputTokens" in usage ? usage.cachedInputTokens : undefined;
+  if (
+    cached !== undefined &&
+    (!Number.isSafeInteger(cached) ||
+      Number(cached) < 0 ||
+      Number(cached) > Number(usage.inputTokens))
+  )
+    return undefined;
+  return {
+    inputTokens: Number(usage.inputTokens),
+    outputTokens: Number(usage.outputTokens),
+    ...(cached === undefined ? {} : { cachedInputTokens: Number(cached) }),
+  };
+}
+
+/** Bind the structured adapter's observed terminal state without changing its public error type. */
+export function bindManagementTerminalOutcome(
+  error: unknown,
+  outcome: ManagementTerminalOutcome,
+): object {
+  const normalized = attachableManagementFailure(error);
+  managementFailureAuthorities.set(normalized, {
+    ...managementFailureAuthorities.get(normalized),
+    terminalOutcome: structuredClone(outcome),
+  });
+  return normalized;
+}
+
+export function managementTerminalOutcome(error: unknown): ManagementTerminalOutcome | null {
+  if ((typeof error !== "object" || error === null) && typeof error !== "function") return null;
+  const outcome = managementFailureAuthorities.get(error)?.terminalOutcome;
+  return outcome ? structuredClone(outcome) : null;
 }
 
 /** A paid response was observed but could not become a valid management result. */
@@ -45,6 +126,7 @@ export class ManagementOutputError extends Error {
 /** A paid output was observed, but its isolated provider home could not be proven removed. */
 export class ManagementCleanupError extends ManagementOutputError {
   readonly provenance: CompilerInvocationProvenance | undefined;
+  readonly cleanupDiagnostic: string;
 
   constructor(
     cause: unknown,
@@ -52,10 +134,43 @@ export class ManagementCleanupError extends ManagementOutputError {
     proposal: unknown,
     provenance?: CompilerInvocationProvenance,
   ) {
-    super(cause, usage, proposal);
+    const cleanupError = attachableManagementFailure(cause);
+    super(cleanupError, usage, proposal);
     this.name = "ManagementCleanupError";
     this.message = "management provider output cleanup is unresolved";
     this.provenance = provenance ? { ...provenance } : undefined;
+    this.cleanupDiagnostic = managementFailureDiagnostic(cleanupError);
+  }
+}
+
+/** A provider terminal failure and a later cleanup failure are separate durable facts. */
+export class ManagementFailureCleanupError extends Error {
+  readonly primaryError: object;
+  readonly cleanupError: object;
+  readonly providerDiagnostic: string;
+  readonly cleanupDiagnostic: string;
+  readonly usage?: ManagementUsage;
+  readonly proposal?: unknown;
+
+  constructor(primary: unknown, cleanup: unknown) {
+    const primaryError = attachableManagementFailure(primary);
+    const cleanupError = attachableManagementFailure(cleanup);
+    const providerDiagnostic = managementFailureDiagnostic(primaryError);
+    const cleanupDiagnostic = managementFailureDiagnostic(cleanupError);
+    super(providerDiagnostic, {
+      cause: new AggregateError(
+        [primaryError, cleanupError],
+        "management provider failure and isolated-home cleanup both failed",
+      ),
+    });
+    this.name = "ManagementFailureCleanupError";
+    this.primaryError = primaryError;
+    this.cleanupError = cleanupError;
+    this.providerDiagnostic = providerDiagnostic;
+    this.cleanupDiagnostic = cleanupDiagnostic;
+    const usage = managementFailureUsage(primaryError);
+    if (usage) this.usage = usage;
+    if ("proposal" in primaryError) this.proposal = primaryError.proposal;
   }
 }
 
@@ -89,6 +204,14 @@ export interface CompilationContext {
   economicEvidence?: (items: readonly CompilerWorkItem[]) => Promise<DecompositionEvidence>;
 }
 
+/** A compiler request and its projection policy must derive network authority from one source. */
+export function assertCompilationContextPolicyAuthority(context: CompilationContext): void {
+  const requested = [...context.allowedNetworkDestinations].sort();
+  const policy = [...context.runPolicy.allowedNetworkDestinations].sort();
+  if (JSON.stringify(requested) !== JSON.stringify(policy))
+    throw new Error("compilation context network authority differs from run policy");
+}
+
 export interface CompilerInvocationProvenance {
   promptDigest: string;
   schemaDigest: string;
@@ -97,16 +220,60 @@ export interface CompilerInvocationProvenance {
   baseSha: string;
 }
 
+/** Bind authoritative invocation provenance without requiring a mutable provider-owned error. */
+export function bindManagementFailureProvenance(
+  error: unknown,
+  provenance: CompilerInvocationProvenance,
+): object {
+  const normalized = attachableManagementFailure(error);
+  const retained = { ...provenance };
+  managementFailureAuthorities.set(normalized, {
+    ...managementFailureAuthorities.get(normalized),
+    provenance: retained,
+  });
+  try {
+    if (Object.isExtensible(normalized)) Object.assign(normalized, { provenance: { ...retained } });
+  } catch {
+    // The WeakMap is authoritative when a provider object rejects mutation.
+  }
+  return normalized;
+}
+
+/** Recover bound provenance through Factory-owned wrappers without trusting mutation support. */
+export function managementFailureProvenance(error: unknown): CompilerInvocationProvenance | null {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (
+    ((typeof current === "object" && current !== null) || typeof current === "function") &&
+    !seen.has(current)
+  ) {
+    seen.add(current);
+    const bound = managementFailureAuthorities.get(current)?.provenance;
+    if (bound) return { ...bound };
+    try {
+      if ("provenance" in current && current.provenance && typeof current.provenance === "object")
+        return { ...(current.provenance as CompilerInvocationProvenance) };
+      current = "cause" in current ? current.cause : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 export interface CompilerProposalProvenance extends CompilerInvocationProvenance {
   requestDigest: string;
 }
 
 export interface CompilerProposalResult {
   request: CompilerRequest;
-  proposal: CompilerProposal;
+  proposal: CompilerProposalValue;
   report: CompilerValidationReport;
   provenance: CompilerProposalProvenance;
   usage: ManagementUsage;
+}
+export interface CompilerWorkItemsProposalResult extends CompilerProposalResult {
+  proposal: CompilerProposal;
 }
 export type CompilerProposalCheckpoint = (result: CompilerProposalResult) => Promise<void>;
 
@@ -161,6 +328,7 @@ export interface SemanticReview {
   summary: string;
   unmetCriteria: string[];
   risks: string[];
+  findings?: FindingCandidate[] | undefined;
 }
 
 export interface ReviewContext {

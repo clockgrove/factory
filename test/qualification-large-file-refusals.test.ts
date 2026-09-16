@@ -332,7 +332,6 @@ function fixture(scenario = "scope") {
       ]);
     const patch = `diff --git a/${payload} b/${payload}\nnew file mode 120000\nindex 0000000..${blob.slice(0, 7)}\n--- /dev/null\n+++ b/${payload}\n@@ -0,0 +1 @@\n+${target}\n\\ No newline at end of file\n`;
     const fileManifest = {
-      version: 1,
       baseTreeSha: empty,
       resultTreeSha: resultTree,
       files: [
@@ -353,7 +352,7 @@ function fixture(scenario = "scope") {
       .update(payload)
       .update("\0")
       .update(patch)
-      .update("\0content-v1\0")
+      .update("\0content\0")
       .update(JSON.stringify({ fileManifest }))
       .digest("hex");
     const artifact = {
@@ -365,7 +364,7 @@ function fixture(scenario = "scope") {
       digest,
     };
     const descriptor = {
-      protocol: "clockgrove.factory/artifact-transfer-v1",
+      protocol: "clockgrove.factory/artifact-transfer",
       identity,
       artifact,
       retention: "repository-audit",

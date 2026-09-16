@@ -51,6 +51,7 @@ function context(workspace: string, baseSha: string): AttemptContext {
     workspace,
     deadline: new Date(Date.now() + 10_000),
     packet: {
+      protocol: "clockgrove.factory/worker-packet",
       goal: "Change value.txt.",
       acceptanceCriteria: ["value.txt contains changed"],
       allowedPaths: ["value.txt"],
@@ -68,7 +69,7 @@ function context(workspace: string, baseSha: string): AttemptContext {
         permittedSecretNames: [],
         trust: "trusted_local",
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     },
   };
 }

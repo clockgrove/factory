@@ -159,7 +159,7 @@ export function largeFileTransferArm(authority, producer, objective, baseSha) {
   assert.ok(Number.isInteger(objectiveTimeoutMinutes) && objectiveTimeoutMinutes >= 1);
   assert.ok(Number.isInteger(workItemTimeoutMinutes) && workItemTimeoutMinutes >= 1);
   return {
-    protocol: "clockgrove.factory/artifact-transfer-checkpoint-arm-v2",
+    protocol: "clockgrove.factory/artifact-transfer-checkpoint-arm",
     repository: authority.repository,
     objective,
     activationRequestId: `${authority.namespace}-activate`,
@@ -185,12 +185,7 @@ export function transferHoldReady(observation, authority, arm) {
   assert.deepEqual(start.policy, authority.policy);
   assert.equal(start.repository, authority.repository);
   assert.equal(start.runId, observation.status.run.runId);
-  assert.ok(
-    [
-      "clockgrove.factory/artifact-transfer-checkpoint-reached-v1",
-      "clockgrove.factory/artifact-transfer-checkpoint-reached-v2",
-    ].includes(witness.protocol),
-  );
+  assert.equal(witness.protocol, "clockgrove.factory/artifact-transfer-checkpoint-reached");
   assert.equal(witness.armDigest, arm.digest);
   assert.equal(witness.runId, start.runId);
   assert.equal(witness.policyDigest, start.policyDigest);

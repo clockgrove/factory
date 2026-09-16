@@ -123,7 +123,7 @@ async function fixture(topology: "regular" | "sibling" | "stack" = "regular") {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       },
     ],
   };

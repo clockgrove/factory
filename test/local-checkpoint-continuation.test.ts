@@ -16,6 +16,7 @@ function fixture() {
   const policy = {
     maxAttemptsPerItem: 2,
     objectiveTimeoutMinutes: 45,
+    workItemTimeoutMinutes: 10,
     allowedPaidBackends: [],
     economics: { maxModelTokens: 250000, modelTokenBudgetMode: "observed-stop" },
   };
@@ -51,11 +52,13 @@ function fixture() {
     requestedBy: actor.login,
   };
   const arm = {
+    protocol: "clockgrove.factory/app-server-checkpoint-arm",
     repository: authority.repository,
     objective: 7,
     activationRequestId: activation.requestId,
     policyDigest: digest,
-    expiresAt: "2026-09-07T05:08:07.000Z",
+    eligibilityDurationMs: policy.objectiveTimeoutMinutes * 60_000,
+    holdDurationMs: policy.workItemTimeoutMinutes * 60_000,
     unit: controller.unit,
     invocationId: controller.invocationId,
     producerPid: controller.pid,
@@ -63,19 +66,20 @@ function fixture() {
     hostIdentity: controller.hostIdentity,
   };
   const witness = {
-    protocol: "clockgrove.factory/app-server-checkpoint-reached-v1",
+    protocol: "clockgrove.factory/app-server-checkpoint-reached",
     armDigest: hash(JSON.stringify(arm)),
-    ...Object.fromEntries(
-      ["repository", "objective", "activationRequestId", "policyDigest", "expiresAt"].map((key) => [
-        key,
-        arm[key as keyof typeof arm],
-      ]),
-    ),
+    repository: arm.repository,
+    objective: arm.objective,
+    activationRequestId: arm.activationRequestId,
+    policyDigest: arm.policyDigest,
     runId: "run-original",
     workItem: 8,
     attempt: 1,
     baseSha: base,
+    startedAt: at,
+    eligibleUntil: new Date(Date.parse(at) + arm.eligibilityDurationMs).toISOString(),
     reachedAt: "2026-09-07T05:02:19.000Z",
+    holdUntil: new Date(Date.parse("2026-09-07T05:02:19.000Z") + arm.holdDurationMs).toISOString(),
   };
   const pause = {
     event: "RunPauseRequested",
@@ -86,13 +90,17 @@ function fixture() {
   };
   const create = { number: 7, node_id: "objective-7", user: actor, body: "fixture" };
   const original = {
-    protocol: "clockgrove.factory/checkpoint-restart-qualification-v1",
+    protocol: "clockgrove.factory/checkpoint-restart-qualification",
     result: { result: "incomplete" },
     authority,
     artifact: { inventorySha256: "f".repeat(64) },
     sourceCommit: base,
     harnessFiles: [],
     startedAt: at,
+    objectiveDeadline: {
+      startedAt: at,
+      deadline: new Date(Date.parse(at) + arm.eligibilityDurationMs).toISOString(),
+    },
     actor,
     base,
     configDigest: controller.configDigest,
@@ -340,7 +348,7 @@ describe("bounded original checkpoint observation continuation", () => {
       ),
     ).toThrow();
   });
-  it("accepts a timely historical witness after arm expiry without extending the original deadline", () => {
+  it("accepts a timely canonical witness under its authenticated deadline", () => {
     const f = fixture();
     expect(
       assertContinuationSeed(f.original, f.witness, f.pause, f.original.artifact, f.now),
@@ -353,45 +361,6 @@ describe("bounded original checkpoint observation continuation", () => {
       assertContinuationObservation(f.observation, f.original, f.witness, f.pause, f.now)
         .modelTokens,
     ).toBe(61350);
-  });
-  it("accepts a reached v2 witness under its immutable authenticated Objective deadline", () => {
-    const f = fixture();
-    const startedAt = "2026-09-07T05:00:00.000Z";
-    const deadline = "2026-09-07T05:45:00.000Z";
-    const { expiresAt: _legacyExpiry, ...legacyArm } = f.original.sessionArm.arm;
-    const arm = {
-      ...legacyArm,
-      protocol: "clockgrove.factory/app-server-checkpoint-arm-v2",
-      eligibilityDurationMs: 45 * 60_000,
-      holdDurationMs: 10 * 60_000,
-    };
-    const armDigest = hash(JSON.stringify(arm));
-    const legacyWitness = Object.fromEntries(
-      Object.entries(f.witness).filter(([key]) => key !== "expiresAt"),
-    );
-    const witness = {
-      ...legacyWitness,
-      protocol: "clockgrove.factory/app-server-checkpoint-reached-v2",
-      armDigest,
-      startedAt,
-      eligibleUntil: deadline,
-      holdUntil: "2026-09-07T05:12:19.000Z",
-    };
-    const original = {
-      ...f.original,
-      sessionArm: { ...f.original.sessionArm, arm, digest: armDigest },
-      objectiveDeadline: {
-        source: "FactoryRunStarted",
-        runId: f.witness.runId,
-        policyDigest: f.original.sessionArm.arm.policyDigest,
-        startedAt,
-        deadline,
-      },
-    };
-
-    expect(
-      assertContinuationSeed(original, witness, f.pause, original.artifact, f.now),
-    ).toMatchObject({ deadline: Date.parse(deadline), runId: "run-original" });
   });
   it.each([
     "expired",

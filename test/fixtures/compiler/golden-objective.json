@@ -39,7 +39,7 @@
         "permittedSecretNames": [],
         "trust": "trusted_local"
       },
-      "artifactContract": "clockgrove.factory/artifact-v1"
+      "artifactContract": "clockgrove.factory/artifact"
     },
     {
       "id": "tests",
@@ -70,7 +70,7 @@
         "permittedSecretNames": [],
         "trust": "trusted_local"
       },
-      "artifactContract": "clockgrove.factory/artifact-v1"
+      "artifactContract": "clockgrove.factory/artifact"
     }
   ]
 }

@@ -2,13 +2,13 @@ import type { CompiledObjective } from "../../src/graph.js";
 import { execFileSync } from "node:child_process";
 import type {
   CompilationContext,
-  CompilerProposalResult,
+  CompilerWorkItemsProposalResult,
   CompilerModelAdmission,
   ManagementBackend,
   ManagementUsage,
 } from "../../src/management/backend.js";
 import {
-  CompilerProposalSchema,
+  CompilerWorkItemsProposalSchema,
   type CompilerRequest,
   type ValidationIntentRef,
 } from "../../src/compiler/contracts.js";
@@ -101,8 +101,9 @@ export function proposalFromCompiledFixture(
   const explicit = request.inventory.obligations
     .filter((entry) => entry.kind === "explicit")
     .map((entry) => entry.id);
-  return CompilerProposalSchema.parse({
+  return CompilerWorkItemsProposalSchema.parse({
     protocol: "clockgrove.factory/compiler-proposal",
+    kind: "work-items",
     workItems: objective.workItems.map((item, itemIndex) => ({
       id: item.id,
       title: item.title,
@@ -180,7 +181,7 @@ export function proposalResultFromCompiledFixture(
   request: CompilerRequest,
   objective: CompiledObjective,
   usage: ManagementUsage = { inputTokens: 1, outputTokens: 1 },
-): CompilerProposalResult {
+): CompilerWorkItemsProposalResult {
   const proposal = proposalFromCompiledFixture(request, objective);
   const report = parseAndValidateCompilerProposal(request, proposal).report;
   if (report.status !== "valid")

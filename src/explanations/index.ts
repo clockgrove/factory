@@ -47,6 +47,13 @@ export const EXPLANATION_CODES = {
   deliveryCompleted: "delivery.completed",
   stateUnstarted: "state.unstarted",
   stateComplete: "state.complete",
+  findingRepaired: "finding.repaired",
+  findingIssueFiled: "finding.issue-filed",
+  findingExistingIssueLinked: "finding.existing-issue-linked",
+  findingIssueReady: "finding.issue-ready",
+  findingReportingRefused: "finding.reporting-refused",
+  findingReportingLimit: "finding.reporting-limit",
+  findingPending: "finding.pending",
 } as const;
 
 export type ExplanationCode = (typeof EXPLANATION_CODES)[keyof typeof EXPLANATION_CODES];
@@ -65,7 +72,8 @@ export type ExplanationCategory =
   | "execution"
   | "recovery"
   | "delivery"
-  | "state";
+  | "state"
+  | "finding";
 
 export interface Explanation {
   code: ExplanationCode;

@@ -581,7 +581,7 @@ describe("semantic proposal validation", () => {
         expect.objectContaining({
           code: "issue-body-limit",
           itemId: proposal.workItems[0]!.id,
-          observed: 73_507,
+          observed: 73_580,
         }),
       ]),
     );
@@ -843,6 +843,7 @@ describe("deferred capability provider validation", () => {
     const { request, item } = deferredFixture();
     const proposal: CompilerProposal = {
       protocol: "clockgrove.factory/compiler-proposal",
+      kind: "work-items",
       workItems: [
         item("provider", ["package.json", "package-lock.json"], []),
         item("child", ["src/child.ts"], ["provider"]),
@@ -857,6 +858,7 @@ describe("deferred capability provider validation", () => {
     const later = item("later", ["package.json"], ["provider"]);
     const proposal: CompilerProposal = {
       protocol: "clockgrove.factory/compiler-proposal",
+      kind: "work-items",
       workItems: [
         item("provider", ["package.json", "package-lock.json"], []),
         later,
@@ -898,6 +900,7 @@ describe("deferred capability provider validation", () => {
     const { request, item } = deferredFixture();
     const proposal: CompilerProposal = {
       protocol: "clockgrove.factory/compiler-proposal",
+      kind: "work-items",
       workItems: build(item),
     };
     expect(codes(request, proposal)).toContainEqual(
@@ -918,6 +921,7 @@ describe("deferred capability provider validation", () => {
     );
     const proposal: CompilerProposal = {
       protocol: "clockgrove.factory/compiler-proposal",
+      kind: "work-items",
       workItems: [provider, ...consumers],
     };
     const boundary = structuredClone(proposal);
@@ -951,7 +955,11 @@ describe("deferred capability provider validation", () => {
       validation: [{ tier: "mechanical", evidence: [evidence("check")] }],
     });
     expect(
-      codes(request, { protocol: "clockgrove.factory/compiler-proposal", workItems: [provider] }),
+      codes(request, {
+        protocol: "clockgrove.factory/compiler-proposal",
+        kind: "work-items",
+        workItems: [provider],
+      }),
     ).toContainEqual(
       expect.objectContaining({
         code: "operation-count-limit",
@@ -1035,7 +1043,7 @@ describe("deterministic semantic projection", () => {
       outOfScope: proposal.workItems[0]!.outOfScope,
       conventions: proposal.workItems[0]!.conventions,
       baseSha: request.baseSha,
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     });
     expect(projected.objective.workItems[0]!.validationCommands).toEqual([
       request.repository.validationRecipes[0]!.command,

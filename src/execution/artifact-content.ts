@@ -46,7 +46,7 @@ export const ContentChunkSchema = z
   .strict();
 export const ArtifactPayloadSchema = z
   .object({
-    kind: z.literal("git-patch-chunks-v1"),
+    kind: z.literal("content-chunks"),
     digest: sha256Digest,
     bytes: z.number().int().positive().max(MAX_CONTENT_BYTES),
     chunks: z
@@ -108,7 +108,6 @@ export const ArtifactFileSchema = z
   });
 export const ArtifactFileManifestSchema = z
   .object({
-    version: z.literal(1),
     baseTreeSha: gitSha,
     resultTreeSha: gitSha,
     files: z.array(ArtifactFileSchema).max(MAX_CONTENT_FILES),
@@ -327,7 +326,7 @@ export async function cachePayload(path: string): Promise<ArtifactPayload> {
       offset += bytes.length;
     }
     const payload = ArtifactPayloadSchema.parse({
-      kind: "git-patch-chunks-v1",
+      kind: "content-chunks",
       digest: identity.digest,
       bytes: identity.bytes,
       chunks,
@@ -347,6 +346,51 @@ export async function cachePayload(path: string): Promise<ArtifactPayload> {
       else contentReferences.delete(digest);
     }
     await file?.close();
+  }
+}
+
+/** Shared immutable-content capture used by artifact and Objective-asset transfers. */
+export async function cachePayloadBytes(input: Buffer): Promise<ArtifactPayload> {
+  if (input.length === 0 || input.length > MAX_CONTENT_BYTES)
+    throw new Error("content byte capture exceeds the shared transfer bound");
+  const root = await contentRoot(input.length);
+  const chunks: ArtifactPayload["chunks"] = [];
+  const captureReferences = new Set<string>();
+  try {
+    for (let offset = 0; offset < input.length; offset += CONTENT_CHUNK_BYTES) {
+      const bytes = input.subarray(offset, Math.min(input.length, offset + CONTENT_CHUNK_BYTES));
+      const digest = sha256(bytes);
+      if (!captureReferences.has(digest)) {
+        contentReferences.set(digest, (contentReferences.get(digest) ?? 0) + 1);
+        captureReferences.add(digest);
+      }
+      const destination = join(root, digest);
+      if (!cachedChunks.has(digest)) {
+        await writeFile(destination, bytes, { mode: 0o600, flag: "wx" });
+        cachedChunks.set(digest, destination);
+      }
+      chunks.push({ digest, bytes: bytes.length });
+    }
+    const payload = ArtifactPayloadSchema.parse({
+      kind: "content-chunks",
+      digest: sha256(input),
+      bytes: input.length,
+      chunks,
+    });
+    retainCurrentArtifactPayload(payload);
+    await verifyPayload(payload);
+    return payload;
+  } catch (error) {
+    activeRoots.delete(root);
+    await cleanupContentRoot(root);
+    throw error;
+  } finally {
+    activeRoots.delete(root);
+    for (const digest of captureReferences) {
+      const remaining = (contentReferences.get(digest) ?? 1) - 1;
+      if (remaining) contentReferences.set(digest, remaining);
+      else contentReferences.delete(digest);
+    }
   }
 }
 

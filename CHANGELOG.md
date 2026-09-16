@@ -10,6 +10,19 @@ they do not by themselves indicate a published or fully qualified release. The h
 [GitHub Releases](https://github.com/clockgrove/factory/releases) for published release notes
 and artifacts, and record the commit SHA when installing from source.
 
+### Added
+
+- Add an explainable Objective-planning gate with strict bounded-graph, proposed-Objective, and
+  clarification outcomes. Project-sized or serial-heavy requests can now return completely covered,
+  prerequisite-linked Objective proposals without creating or activating work. ([#380](https://github.com/clockgrove/factory/issues/380))
+
+- Add media-agnostic Objective input assets with exact-byte identity, explicit local-file and
+  recognized GitHub-attachment import, rights and visibility policy, static text/Markdown and
+  bounded raster handlers, opaque passive transport, immutable Git-ref receipts, verified offline
+  materialization, and digest-only Worker Packet bindings. Replace the prerelease Worker Packet,
+  artifact and transfer contracts in place with one canonical unversioned format.
+  ([#415](https://github.com/clockgrove/factory/issues/415))
+
 ### Documentation
 
 - Replace historical run ledgers with release procedures and supported-behavior guidance;
@@ -20,6 +33,10 @@ and artifacts, and record the commit SHA when installing from source.
   versioning and keep detailed operator guidance available from the README.
 
 ### Fixed
+
+- Give new omitted-policy Objective activations an explicit bounded compiler auto-repair envelope,
+  preserving exact historical and caller-supplied policy authority while reporting each compiler
+  invocation and cumulative observed usage. ([#389](https://github.com/clockgrove/factory/issues/389))
 
 - Reconnect interrupted foreground calls to the exact non-terminal run and honor its durable
   cancellation before another compiler, graph, Work Item, or worker admission. Cancelled terminal

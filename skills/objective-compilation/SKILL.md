@@ -1,12 +1,29 @@
 ---
 name: objective-compilation
-description: Compiles a human Objective into the smallest complete, validated DAG of issue-ready Factory Work Items with exact execution and validation requirements; use when an Objective needs decomposition or graph repair.
+description: Plans a human request as one bounded Objective, proposed prerequisite-linked Objectives, or concrete clarification, then compiles runnable Objectives into validated Work Item DAGs.
 ---
 
 # Objective compilation
 
-Compile an Objective into an issue-ready dependency graph. Work Item count is an output of the work,
-never a quota: one item is valid for indivisible work; larger Objectives may require many.
+First decide whether the request fits one bounded Objective. One item is valid for indivisible work;
+bounded features may require several. A clearly project-sized request returns proposed smaller
+Objectives before Work Item execution, and missing material facts return concrete clarification.
+
+The execution graph retains a hard 100-Work-Item cap. Also apply the request's earlier provisional
+planning thresholds for item count, configured aggregate work, and configured critical path. Treat
+duration estimates as uncertain signals, never guarantees; preserve unavailable estimates as null.
+Independent milestones and resource or authorization boundaries may justify a split even without a
+numeric estimate. Every trigger must state its source, observed or unavailable evidence, applicable
+threshold, affected obligations, and explanation.
+
+For a multi-Objective proposal, every proposed Objective needs an independently reviewable outcome,
+concrete acceptance, owned repository scope, named outputs, completion acceptance IDs, and exact
+prerequisite outputs. Account for every parent obligation exactly once through owned acceptance,
+aggregate integration acceptance, or an explicit deferral. Reject omissions, unresolved outputs,
+cycles, unordered prerequisites, and fake empty milestones. These are proposals only: do not create
+issues, activate work, expand policy, or claim completion. Factory currently requires an explicit
+committed handoff and a separate compilation of each runnable Objective; it has no automatic
+cross-Objective executor.
 
 ## Ground first
 
@@ -50,7 +67,7 @@ Every Work Item must contain:
   `delivery` hint;
 - a conservative `economicReview` based only on known validation/runtime needs (never invent live
   paid measurements);
-- `artifactContract: "clockgrove.factory/artifact-v1"`.
+- `artifactContract: "clockgrove.factory/artifact"`.
 
 The `workItems` array is semantic. Order independent peers by the Objective's requested initial
 priority and put every dependency before its dependent. Factory preserves that dependency-aware
@@ -105,7 +122,8 @@ Before returning the object:
 - the result validates against `schemas/objective.schema.json` and
   `schemas/work-item.schema.json`.
 
-Return only the compiled Objective object. The Supervisor authenticates the graph digest on the
+Return exactly one canonical result kind: a bounded Work Item proposal, a proposed Objective plan,
+or clarification requirements. The Supervisor authenticates an executable graph digest on the
 Objective before applying it, stores the complete graph under an immutable GitHub custom ref, and
 persists per-item receipts in each sub-issue. An interrupted application replays that stored object
 without recompilation; a divergent replay fails closed. Do not use the standalone legacy

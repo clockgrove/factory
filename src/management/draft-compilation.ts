@@ -14,6 +14,7 @@ import {
   runCompilerDraftLoop,
   CompilerDraftStopError,
   CompilerDraftAdmissionError,
+  CompilerDraftTerminalOutcomeError,
   type CompilerDraftOutcome,
   type DraftStage,
   type ValidatedCompilerDraft,
@@ -32,7 +33,7 @@ import {
   CompilerProposalSchema,
   CompilerRequestSchema,
   CompilerValidationReportSchema,
-  type CompilerProposal,
+  type CompilerProposalValue,
   type CompilerRequest,
   type CompilerValidationReport,
 } from "../compiler/contracts.js";
@@ -60,18 +61,41 @@ import {
   MANAGEMENT_PROMPT_MAX_BYTES,
   readCompilerObligationEvidence,
 } from "./codex-cli.js";
-import type {
-  CompilationContext,
-  CompilerInvocationProvenance,
-  ManagementBackend,
-  ManagementUsage,
+import {
+  assertCompilationContextPolicyAuthority,
+  managementFailureProvenance,
+  managementTerminalOutcome,
+  type CompilationContext,
+  type CompilerInvocationProvenance,
+  type ManagementBackend,
+  type ManagementUsage,
 } from "./backend.js";
+import { ProviderQuotaError } from "../providers/quota.js";
 
 interface PersistedProposalResult {
   request: CompilerRequest;
-  proposal: CompilerProposal;
+  proposal: CompilerProposalValue;
   report: CompilerValidationReport;
   provenance: { requestDigest: string };
+}
+
+const planningStopPattern = /^compiler-planning-result:(objectives|clarification):([a-f0-9]{64})$/;
+
+export interface CompilerPlanningStop {
+  kind: "objectives" | "clarification";
+  identity: string;
+}
+
+export function parseCompilerPlanningStop(reason: string): CompilerPlanningStop | null {
+  const match = planningStopPattern.exec(reason);
+  if (!match) return null;
+  return { kind: match[1] as CompilerPlanningStop["kind"], identity: match[2]! };
+}
+
+function compilerPlanningStop(
+  proposal: Extract<CompilerProposalValue, { kind: "objectives" | "clarification" }>,
+) {
+  return `compiler-planning-result:${proposal.kind}:${compilerEvalDigest(proposal)}`;
 }
 
 function durableInvocationProvenance(
@@ -92,6 +116,10 @@ function durableInvocationProvenanceField(
 ): { provenance?: CompilerInvocationProvenance } {
   const durable = durableInvocationProvenance(provenance);
   return durable ? { provenance: durable } : {};
+}
+
+function succeededTerminalOutcome(usage: ManagementUsage) {
+  return { state: "succeeded" as const, usage: { ...usage } };
 }
 
 function persistedProposalResult(value: unknown): PersistedProposalResult {
@@ -172,6 +200,8 @@ export function assertCompilerDraftSelection(
   if (!proposalResult || !validation || !verdictResult)
     throw new Error("compiler selection lacks proposal, projection, or judgment evidence");
   const persisted = persistedProposalResult(proposalResult.payload.value);
+  if (persisted.proposal.kind !== "work-items")
+    throw new Error("compiler selection cannot project an Objective planning result");
   const proposalIntent = records.find(
     (record) =>
       record.kind === "invocation" &&
@@ -266,6 +296,7 @@ export async function compileEvaluatedDraft(args: {
   fixedGraph?: CompiledObjective;
 }): Promise<CompilerDraftOutcome> {
   const { context, backend } = args;
+  assertCompilationContextPolicyAuthority(context);
   const evidenceStartedAt = Date.now();
   const policy = context.runPolicy.compilerEvaluation;
   if (!policy) throw new Error("compiler evaluation requires explicit immutable policy");
@@ -337,6 +368,9 @@ export async function compileEvaluatedDraft(args: {
           };
         }
         const persisted = persistedProposalResult(value);
+        if (persisted.proposal.kind !== "work-items") {
+          throw new CompilerDraftStopError(compilerPlanningStop(persisted.proposal));
+        }
         if (!expectedCompilerRequestDigest)
           throw new Error("compiler proposal has no reserved request binding");
         if (persisted.provenance.requestDigest !== expectedCompilerRequestDigest)
@@ -391,6 +425,7 @@ export async function compileEvaluatedDraft(args: {
         try {
           proposal = persistedProposalResult(candidate);
         } catch {}
+        if (proposal?.proposal.kind !== "work-items") return priorReviewEvidence ?? null;
         if (!proposal || proposal.request.revision === 0) {
           const carried = validateCompilerInferenceChallenges(priorReviewEvidence ?? [], original);
           return carried.length ? carried : null;
@@ -491,6 +526,7 @@ export async function compileEvaluatedDraft(args: {
                 checkpoint({
                   value: result.inventory,
                   usage: result.usage,
+                  terminalOutcome: succeededTerminalOutcome(result.usage),
                   ...durableInvocationProvenanceField(result.provenance),
                 }),
               beforeModelInvocation,
@@ -499,6 +535,7 @@ export async function compileEvaluatedDraft(args: {
             return {
               value: result.inventory,
               usage: result.usage,
+              terminalOutcome: succeededTerminalOutcome(result.usage),
               ...durableInvocationProvenanceField(result.provenance),
             };
           }
@@ -555,6 +592,7 @@ export async function compileEvaluatedDraft(args: {
                 checkpoint({
                   value: result.verdict,
                   usage: result.usage,
+                  terminalOutcome: succeededTerminalOutcome(result.usage),
                   ...durableInvocationProvenanceField(result.provenance),
                 }),
               beforeModelInvocation,
@@ -562,6 +600,7 @@ export async function compileEvaluatedDraft(args: {
             return {
               value: result.verdict,
               usage: result.usage,
+              terminalOutcome: succeededTerminalOutcome(result.usage),
               ...durableInvocationProvenanceField(result.provenance),
             };
           }
@@ -657,6 +696,7 @@ export async function compileEvaluatedDraft(args: {
                   provenance: result.provenance,
                 },
                 usage: result.usage,
+                terminalOutcome: succeededTerminalOutcome(result.usage),
                 ...durableInvocationProvenanceField(result.provenance),
               }),
             { pinnedFacts, runPolicy: frozenContext.runPolicy },
@@ -671,12 +711,21 @@ export async function compileEvaluatedDraft(args: {
               provenance: result.provenance,
             },
             usage: result.usage,
+            terminalOutcome: succeededTerminalOutcome(result.usage),
             ...durableInvocationProvenanceField(result.provenance),
           };
         } catch (error) {
           if (error instanceof CompilerDraftStopError) throw error;
           if (!dispatched && !(error instanceof CompilerDraftAdmissionError))
             throw new CompilerDraftAdmissionError(error);
+          const provenance = managementFailureProvenance(error);
+          if (error instanceof ProviderQuotaError) {
+            if (provenance) Object.assign(error, { provenance });
+            throw error;
+          }
+          const terminalOutcome = managementTerminalOutcome(error);
+          if (terminalOutcome)
+            throw new CompilerDraftTerminalOutcomeError(error, terminalOutcome, provenance);
           throw error;
         }
       },

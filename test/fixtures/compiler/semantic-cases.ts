@@ -109,6 +109,7 @@ function genericProposal(
   } else {
     proposal = {
       protocol: "clockgrove.factory/compiler-proposal",
+      kind: "work-items",
       workItems: dependencies.map((_, index) => ({
         id: `item-${index + 1}`,
         title: `Implement item ${index + 1}`,
@@ -239,7 +240,7 @@ function deferredProposal(request: CompilerRequest, capability: Capability): Com
       ];
       break;
   }
-  return { protocol: "clockgrove.factory/compiler-proposal", workItems };
+  return { protocol: "clockgrove.factory/compiler-proposal", kind: "work-items", workItems };
 }
 
 function repositoryState(request: CompilerRequest): DimensionValue<"repositoryState"> {

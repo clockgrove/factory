@@ -89,6 +89,10 @@ async function fixture(
     staleRefreshedHeadReads?: number;
   } = {},
 ) {
+  // This integration fixture validates graph and publication behavior. Keep it
+  // independent of ambient user-manager scopes; the one scope-accounting case
+  // below opts back into a deterministic mocked host explicitly.
+  vi.spyOn(localScopes, "discoverLocalScopeHost").mockResolvedValue(null);
   const repository = await mkdtemp(join(tmpdir(), "factory-sibling-integration-"));
   directories.push(repository);
   let currentBranch: string | undefined;
@@ -298,8 +302,10 @@ async function fixture(
     });
   }
   const now = new Date();
+  const { compilerEvaluation: _defaultCompilerEvaluation, ...oneShotFixturePolicy } =
+    DEFAULT_RUN_POLICY;
   const policy = parseRunPolicy({
-    ...DEFAULT_RUN_POLICY,
+    ...oneShotFixturePolicy,
     capacity: { ...DEFAULT_RUN_POLICY.capacity, mode: "fixed" },
     delivery: {
       mode: options.regular ? "regular-prs" : "stacked-prs",
@@ -458,7 +464,7 @@ async function fixture(
         permittedSecretNames: [],
         trust: "trusted_local",
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
       delivery: { group: name, relationship: "root" },
     })),
   };
@@ -1453,7 +1459,7 @@ describe("Supervisor parallel independent sibling integration", () => {
 
   it("records a complete candidate scope batch before any test command without per-command writes", async () => {
     const f = await fixture();
-    vi.spyOn(localScopes, "discoverLocalScopeHost").mockResolvedValue({
+    vi.mocked(localScopes.discoverLocalScopeHost).mockResolvedValue({
       hostIdentity: "b".repeat(64),
       producerPid: 123,
       producerStartTicks: "456",

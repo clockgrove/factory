@@ -50,6 +50,7 @@ async function fixture() {
     await cleanupLocalWorktree(worker);
   }
   const packet: WorkerPacket = {
+    protocol: "clockgrove.factory/worker-packet",
     baseSha,
     goal: "Add slugify",
     acceptanceCriteria: ["named slugify export lowercases text"],
@@ -58,7 +59,7 @@ async function fixture() {
     outOfScope: [],
     conventions: [],
     validationCommands: ["node --test"],
-    artifactContract: "clockgrove.factory/artifact-v1",
+    artifactContract: "clockgrove.factory/artifact",
     requirements: {
       os: ["linux"],
       architecture: [],
@@ -138,6 +139,7 @@ async function greenfieldFixture(unsafeLifecycle = false) {
   const artifact = await collectLocalArtifact(worker);
   await cleanupLocalWorktree(worker);
   const packet: WorkerPacket = {
+    protocol: "clockgrove.factory/worker-packet",
     baseSha,
     goal: "Bootstrap the workspace",
     acceptanceCriteria: ["the workspace check is deterministic"],
@@ -153,7 +155,7 @@ async function greenfieldFixture(unsafeLifecycle = false) {
     conventions: [],
     validationCommands: ["pnpm check"],
     managedRuntimes: selectedManagedRuntimeRequirements(["pnpm check"]),
-    artifactContract: "clockgrove.factory/artifact-v1",
+    artifactContract: "clockgrove.factory/artifact",
     requirements: {
       os: ["linux"],
       architecture: [],
@@ -324,6 +326,25 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:4, output
     await expect(stat(join(input.repository, "slugify.js"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  it("rejects extra provider review fields before checkpointing", async () => {
+    const input = await fixture();
+    const backend = new CodexCliManagementBackend({
+      runStructured: async () => ({
+        value: {
+          accepted: true,
+          summary: "exact candidate inspected",
+          unmetCriteria: [],
+          risks: [],
+          extra: "not in the review contract",
+        },
+        usage: { inputTokens: 4, outputTokens: 2 },
+      }),
+    });
+    const checkpoint = vi.fn(async () => {});
+    await expect(backend.review(input, checkpoint)).rejects.toThrow();
+    expect(checkpoint).not.toHaveBeenCalled();
   });
 
   it("clamps the final admission remainder to the supplied operation-stall bound", async () => {

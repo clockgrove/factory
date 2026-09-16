@@ -41,6 +41,7 @@ import {
 } from "../evaluation/compiler-eval.js";
 import {
   acceptanceTextProblem,
+  assessDecomposition,
   compileObjective,
   type DecompositionEvidence,
   type CompilerWorkItem,
@@ -49,16 +50,19 @@ import {
 import { compilerJudgeSourceBytes, MAX_COMPILER_JUDGE_SOURCE_BYTES } from "./judge-context.js";
 import { inferCriterionRisk, type CriterionRisk } from "./validation-design.js";
 import {
+  normalizeCompilerProposalProviderOutput,
   CompilerProposalSchema,
   CompilerRequestSchema,
   type CompilerDiagnosticValue,
   type CompilerJudgeFinding,
   type CompilerProposal,
+  type CompilerProposalValue,
   type CompilerRequest,
   type CompilerValidationReport,
   type CompilerViolation,
   type ValidationIntentRef,
 } from "./contracts.js";
+import { validateObjectivePlan } from "./objective-planning.js";
 import { createCompilerValidationReport, emptyCompilerValidationReport } from "./violations.js";
 import { CompilerInvariantError } from "./invariant-error.js";
 export { CompilerInvariantError } from "./invariant-error.js";
@@ -404,7 +408,7 @@ export async function prepareCompilerRequest(input: {
   inventory: ObligationInventory;
   inventorySource?: CompilerRequest["inventorySource"];
   revision?: number;
-  previousProposal?: CompilerProposal | null;
+  previousProposal?: CompilerProposalValue | null;
   validationReport?: CompilerValidationReport;
   semanticFindings?: CompilerJudgeFinding[];
   challenges?: CompilerInferenceChallenge[];
@@ -424,6 +428,8 @@ export async function prepareCompilerRequest(input: {
     context.allowedNetworkDestinations,
   );
   const revision = input.revision ?? 0;
+  const planning = context.runPolicy.objectivePlanning;
+  const adopted = context.legacyGraphConstraints !== undefined;
   const request = CompilerRequestSchema.parse({
     protocol: "clockgrove.factory/compiler-request",
     revision,
@@ -444,6 +450,15 @@ export async function prepareCompilerRequest(input: {
     },
     constraints: {
       maxWorkItems: context.legacyGraphConstraints?.workItems.length ?? 100,
+      planningWorkItemThreshold: adopted ? 100 : (planning?.maxWorkItemsPerObjective ?? 100),
+      planningCriticalPathMinutes:
+        adopted || !planning
+          ? 30 * 24 * 60
+          : context.runPolicy.objectiveTimeoutMinutes * planning.maxCriticalPathRatio,
+      planningAggregateWorkMinutes:
+        adopted || !planning
+          ? 300 * 24 * 60
+          : context.runPolicy.objectiveTimeoutMinutes * planning.maxAggregateWorkRatio,
       maxDependenciesPerItem: 50,
       allowedNetworkDestinations: [...new Set(context.allowedNetworkDestinations)].sort(),
       workItemTimeoutMinutes: context.runPolicy.workItemTimeoutMinutes,
@@ -556,16 +571,103 @@ export function parseAndValidateCompilerProposal(
   requestInput: CompilerRequest,
   value: unknown,
   projectionContext?: CompilerProjectionContext,
-): { proposal?: CompilerProposal; report: CompilerValidationReport } {
+): { proposal?: CompilerProposalValue; report: CompilerValidationReport } {
   const requestReport = validateCompilerRequest(requestInput);
   if (requestReport.status !== "valid") return { report: requestReport };
   const request = CompilerRequestSchema.parse(requestInput);
-  const parsed = CompilerProposalSchema.safeParse(value);
+  const normalized = normalizeCompilerProposalProviderOutput(value);
+  const parsed = CompilerProposalSchema.safeParse(normalized);
   if (!parsed.success)
     return {
-      report: createCompilerValidationReport("proposal", schemaViolations(parsed.error, value)),
+      report: createCompilerValidationReport(
+        "proposal",
+        schemaViolations(parsed.error, normalized),
+      ),
     };
   const proposal = parsed.data;
+  const inventory = new Set(request.inventory.obligations.map((entry) => entry.id));
+  const configuredPlanningThreshold = (code: string): number | undefined => {
+    if (code === "work-item-threshold") return request.constraints.planningWorkItemThreshold;
+    if (code === "critical-path-threshold") return request.constraints.planningCriticalPathMinutes;
+    if (code === "aggregate-work-threshold")
+      return request.constraints.planningAggregateWorkMinutes;
+    return undefined;
+  };
+  const planningTriggerViolations =
+    proposal.kind === "work-items"
+      ? []
+      : proposal.triggers.flatMap((trigger, index): CompilerViolation[] => {
+          const invalidObligations = trigger.obligationIds.filter((id) => !inventory.has(id));
+          const configuredThreshold = configuredPlanningThreshold(trigger.code);
+          const availabilityMismatch =
+            (trigger.availability === "unavailable" && trigger.observed !== null) ||
+            (trigger.availability !== "unavailable" && trigger.observed === null);
+          const thresholdMismatch =
+            configuredThreshold !== undefined && trigger.threshold !== configuredThreshold;
+          const nonTriggeringObservation =
+            configuredThreshold !== undefined &&
+            trigger.availability !== "unavailable" &&
+            (typeof trigger.observed !== "number" || trigger.observed <= configuredThreshold);
+          return [
+            ...(invalidObligations.length
+              ? [
+                  violation(
+                    "unknown-obligation",
+                    pointer("triggers", index, "obligationIds"),
+                    [...inventory].sort(),
+                    invalidObligations,
+                  ),
+                ]
+              : []),
+            ...(availabilityMismatch || thresholdMismatch || nonTriggeringObservation
+              ? [
+                  violation(
+                    "invalid-planning-trigger",
+                    pointer("triggers", index),
+                    configuredThreshold === undefined
+                      ? "consistent availability and observation evidence"
+                      : {
+                          configuredThreshold,
+                          observation:
+                            "a numeric value above the configured threshold, or unavailable",
+                        },
+                    trigger,
+                  ),
+                ]
+              : []),
+          ];
+        });
+  if (proposal.kind === "objectives") {
+    const planningViolations = validateObjectivePlan(
+      proposal,
+      request.inventory.obligations.map((entry) => entry.id),
+    ) as CompilerViolation[];
+    const report = createCompilerValidationReport("proposal", [
+      ...planningTriggerViolations,
+      ...planningViolations,
+    ]);
+    return { proposal, report };
+  }
+  if (proposal.kind === "clarification") {
+    const covered = new Set(proposal.requirements.flatMap((entry) => entry.obligationIds));
+    const unknown = [...covered].filter((id) => !inventory.has(id));
+    const violations: CompilerViolation[] = [
+      ...planningTriggerViolations,
+      ...unknown.map((id) =>
+        violation("unknown-obligation", "/requirements", [...inventory].sort(), id),
+      ),
+    ];
+    if (covered.size === 0)
+      violations.push(
+        violation(
+          "clarification-coverage",
+          "/requirements",
+          "at least one affected parent obligation",
+          [],
+        ),
+      );
+    return { proposal, report: createCompilerValidationReport("proposal", violations) };
+  }
   const violations: CompilerViolation[] = [];
   const projectionFacts = projectionContext
     ? compilerProjectionFactsFromPinned(projectionContext.pinnedFacts)
@@ -1145,6 +1247,40 @@ export function parseAndValidateCompilerProposal(
   if (projectionContext) {
     const projected = projectedEnvelopeViolations(request, proposal, projectionContext);
     violations.push(...projected);
+    if (projected.length === 0) {
+      const assessment = assessDecomposition(
+        compilerWorkItemsForEconomics(
+          request,
+          proposal,
+          projectionContext.pinnedFacts,
+          projectionContext.runPolicy,
+        ),
+      );
+      const exceeded =
+        assessment.workItems > request.constraints.planningWorkItemThreshold ||
+        (assessment.configuredCriticalPathMinutes !== null &&
+          assessment.configuredCriticalPathMinutes >
+            request.constraints.planningCriticalPathMinutes) ||
+        (assessment.configuredWorkMinutes !== null &&
+          assessment.configuredWorkMinutes > request.constraints.planningAggregateWorkMinutes);
+      if (exceeded)
+        violations.push(
+          violation(
+            "objective-planning-required",
+            "/workItems",
+            {
+              maximumWorkItems: request.constraints.planningWorkItemThreshold,
+              maximumCriticalPathMinutes: request.constraints.planningCriticalPathMinutes,
+              maximumAggregateWorkMinutes: request.constraints.planningAggregateWorkMinutes,
+            },
+            {
+              workItems: assessment.workItems,
+              configuredCriticalPathMinutes: assessment.configuredCriticalPathMinutes,
+              configuredAggregateWorkMinutes: assessment.configuredWorkMinutes,
+            },
+          ),
+        );
+    }
   }
   const report = createCompilerValidationReport("proposal", violations);
   return { proposal, report };
@@ -1225,14 +1361,16 @@ function semanticWorkItem(
       memoryMb: scheduling.capacity.local.defaultMemoryMb,
       diskMb: 1,
       timeoutMinutes: request.constraints.workItemTimeoutMinutes,
-      estimatedDurationMinutes: item.executionIntent.estimatedDurationMinutes,
+      ...(item.executionIntent.estimatedDurationMinutes === null
+        ? {}
+        : { estimatedDurationMinutes: item.executionIntent.estimatedDurationMinutes }),
       tools: executionRequirements.tools,
       services: [...new Set(item.executionIntent.services)].sort(),
       networkDestinations: executionRequirements.networkDestinations,
       permittedSecretNames: [],
       trust: item.executionIntent.trust,
     },
-    artifactContract: "clockgrove.factory/artifact-v1",
+    artifactContract: "clockgrove.factory/artifact",
     exclusiveResources: [...item.exclusiveResources],
   };
 }
@@ -1604,6 +1742,11 @@ export function projectCompilerProposal(input: {
     throw Object.assign(new CompilerInvariantError("projection received an invalid proposal"), {
       validationReport: validated.report,
       proposal: input.proposal,
+    });
+  if (validated.proposal.kind !== "work-items")
+    throw Object.assign(new CompilerInvariantError("projection requires a Work Item proposal"), {
+      validationReport: validated.report,
+      proposal: validated.proposal,
     });
   try {
     const semantic = semanticCompilerWorkItems(input.request, validated.proposal, input.runPolicy);

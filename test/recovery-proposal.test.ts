@@ -62,8 +62,10 @@ import { resolveRecoveryEvidence } from "../src/recovery/evidence.js";
 const sha = (value: string) => value.repeat(40);
 const digest = (value: string) => value.repeat(64);
 const now = new Date("2026-09-05T00:00:00Z");
+const { compilerEvaluation: _defaultCompilerEvaluation, ...oneShotRecoveryPolicy } =
+  DEFAULT_RUN_POLICY;
 const policy = {
-  ...DEFAULT_RUN_POLICY,
+  ...oneShotRecoveryPolicy,
   economics: {
     maxModelTokens: 1000,
     maxSandboxMinutes: 0,
@@ -185,7 +187,7 @@ async function fixture(withPublications = true, native: "siblings" | "stack" | f
         permittedSecretNames: [],
         trust: "trusted_local",
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
       ...(native
         ? {
             delivery: {

@@ -246,6 +246,9 @@ async function fixture(
 ) {
   const store = new MemoryStore();
   const policy = structuredClone(DEFAULT_RUN_POLICY);
+  // Most recovery fixtures model historical one-shot runs; evaluated compiler
+  // authority is added only by the compileFailure cases below.
+  delete policy.compilerEvaluation;
   if (options.stacked)
     policy.delivery = { mode: "stacked-prs", onUnavailable: "escalate", merge: "bottom-up" };
   if (options.tokenLimit !== undefined)
@@ -332,7 +335,7 @@ async function fixture(
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       },
     ],
   };

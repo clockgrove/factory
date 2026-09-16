@@ -166,7 +166,10 @@ safe after a lost response. For one-shot interactive work, the skill can instead
 `factory_run` call. Both modes default to
 `codex-sdk/local-worktree`, fall back to `codex-cli/local-worktree`, limit fixed admission to at most
 two workers within CPU and memory headroom, and never use paid compute. Adaptive concurrency is an
-explicit run-policy choice. The equivalent foreground source-checkout
+explicit run-policy choice. When policy is omitted, a new activation also records the standard
+compiler auto-repair envelope (two shared repairs, seven invocations, 600 seconds, and a 500,000
+observed-token stop). That observed threshold is not a provider hard cap. Status lists each compiler
+invocation and cumulative usage; historical policies are never rewritten. The equivalent foreground source-checkout
 command is:
 
 ```bash

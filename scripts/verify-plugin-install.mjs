@@ -324,6 +324,8 @@ async function main() {
     throw new Error("Codex plugin discovery omitted an installed Factory MCP tool");
   for (const required of [
     "factory_discover_objectives",
+    "factory_assets_import",
+    "factory_assets_inspect",
     "factory_run",
     "factory_status",
     "factory_explain",

@@ -20,6 +20,11 @@ import {
   isoDate,
   sha256Digest,
 } from "../protocol/limits.js";
+import {
+  FindingCandidateSchema,
+  validateFindingCandidate,
+  type FindingCandidate,
+} from "../protocol/findings.js";
 
 export const MAX_ARTIFACT_PATCH_BYTES = 5 * 1024 * 1024;
 
@@ -45,7 +50,7 @@ export const CommandResultSchema = z
 
 export const NormalizedArtifactSchema = z
   .object({
-    protocol: z.literal("clockgrove.factory/artifact-v1"),
+    protocol: z.literal("clockgrove.factory/artifact"),
     baseSha: gitSha,
     digest: sha256Digest,
     patch: z.string().max(MAX_ARTIFACT_PATCH_BYTES),
@@ -56,6 +61,7 @@ export const NormalizedArtifactSchema = z
     logs: z.string().max(MAX_LOG_BYTES),
     outcome: z.enum(["succeeded", "failed", "declined"]),
     reason: z.string().max(8_000).optional(),
+    findings: z.array(FindingCandidateSchema).max(16).optional(),
     createdAt: isoDate,
   })
   .passthrough();
@@ -72,6 +78,7 @@ export interface ArtifactInput {
   logs?: string;
   outcome: "succeeded" | "failed" | "declined";
   reason?: string;
+  findings?: FindingCandidate[];
   createdAt?: Date;
 }
 
@@ -81,6 +88,7 @@ export function artifactDigest(input: {
   changedPaths: string[];
   payload?: ArtifactPayload | undefined;
   fileManifest?: ArtifactFileManifest | undefined;
+  findings?: FindingCandidate[] | undefined;
 }): string {
   const hash = createHash("sha256")
     .update(input.baseSha)
@@ -88,9 +96,9 @@ export function artifactDigest(input: {
     .update(input.changedPaths.slice().sort().join("\0"))
     .update("\0")
     .update(input.patch);
-  // Preserve the exact old digest for old inline artifacts.
+  // The canonical artifact binds external content into the same digest.
   if (input.payload || input.fileManifest)
-    hash.update("\0content-v1\0").update(
+    hash.update("\0content\0").update(
       JSON.stringify({
         ...(input.payload ? { payload: ArtifactPayloadSchema.parse(input.payload) } : {}),
         ...(input.fileManifest
@@ -98,6 +106,10 @@ export function artifactDigest(input: {
           : {}),
       }),
     );
+  if (input.findings?.length)
+    hash
+      .update("\0findings-v1\0")
+      .update(JSON.stringify(input.findings.map((finding) => validateFindingCandidate(finding))));
   return hash.digest("hex");
 }
 
@@ -135,7 +147,7 @@ export function normalizeArtifact(input: ArtifactInput): NormalizedArtifact {
   // durable artifact boundary.
   assertNoSecretMaterial(rawLogs, "worker logs");
   const core = {
-    protocol: "clockgrove.factory/artifact-v1" as const,
+    protocol: "clockgrove.factory/artifact" as const,
     baseSha: input.baseSha,
     patch: input.patch,
     ...(input.payload ? { payload: input.payload } : {}),
@@ -145,6 +157,9 @@ export function normalizeArtifact(input: ArtifactInput): NormalizedArtifact {
     logs: boundWorkerLogs(rawLogs),
     outcome: input.outcome,
     ...(input.reason ? { reason: input.reason } : {}),
+    ...(input.findings?.length
+      ? { findings: input.findings.map((finding) => validateFindingCandidate(finding)) }
+      : {}),
     createdAt: (input.createdAt ?? new Date()).toISOString(),
   };
   const artifact = NormalizedArtifactSchema.parse({

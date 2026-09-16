@@ -191,8 +191,10 @@ async function fixture(
   }
   git("checkout", "-q", "main");
   const now = new Date(Date.now() - (options.historicalSuccessor ? 120_000 : 0));
+  const { compilerEvaluation: _defaultCompilerEvaluation, ...oneShotFixturePolicy } =
+    DEFAULT_RUN_POLICY;
   const policy = parseRunPolicy({
-    ...DEFAULT_RUN_POLICY,
+    ...oneShotFixturePolicy,
     ...(options.successorSandboxUntrusted ? { trust: "sandbox_untrusted" as const } : {}),
     ...(options.failC ? { maxAttemptsPerItem: 1 } : {}),
     ...(options.tokenLimit === undefined
@@ -394,7 +396,7 @@ async function fixture(
           permittedSecretNames: [],
           trust: options.isolatedItem === name ? "isolated" : "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
         delivery: options.retainedPrefix
           ? {
               group: "a",

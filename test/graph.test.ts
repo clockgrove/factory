@@ -143,7 +143,7 @@ describe("validateGraph", () => {
           permittedSecretNames: [],
           trust: "trusted_local" as const,
         },
-        artifactContract: "clockgrove.factory/artifact-v1" as const,
+        artifactContract: "clockgrove.factory/artifact" as const,
       })),
     );
 
@@ -168,7 +168,7 @@ describe("validateGraph", () => {
           permittedSecretNames: [],
           trust: "trusted_local" as const,
         },
-        artifactContract: "clockgrove.factory/artifact-v1" as const,
+        artifactContract: "clockgrove.factory/artifact" as const,
       },
     ]);
     const rendered = renderCompiledGraphWorkItems(persisted)[0]!;
@@ -406,7 +406,7 @@ describe("legacy Work Item constraints", () => {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       })),
     };
     const digest = compiledGraphDigest(compiled);

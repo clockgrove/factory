@@ -106,7 +106,8 @@ again after each revision. Compiler self-assessment never establishes that a cor
 existing invocation admission/accounting. No new model selection or provider spending authority is
 introduced.
 
-An operator enables the integrated flow with a complete normal run policy containing:
+New activations with omitted policy enable the integrated flow by recording this complete standard
+run-policy member; an operator may also supply a complete policy containing:
 
 ```json
 {
@@ -115,18 +116,20 @@ An operator enables the integrated flow with a complete normal run policy contai
     "maxRepairs": 2,
     "maxInvocations": 7,
     "timeoutSeconds": 600,
-    "maxObservedTokens": 40000
+    "maxObservedTokens": 500000
   }
 }
 ```
 
-The number above is an illustrative operator-selected observed threshold, not a measured optimal
-allowance or a hard token cap. Omitting the entire field preserves the ordinary single-proposal path;
-both paths use the semantic compiler and deterministic projection. Omitting the individual limits
-uses the bounded defaults documented in `DESIGN.md`. Report-only mode permits
+The standard threshold is an observed stop, not a measured optimal allowance or a hard token cap.
+Historical and caller-supplied policies that omit the entire field preserve the ordinary
+single-proposal path; Factory never injects today's nested defaults into them. Omitting individual
+limits from a caller-supplied compiler policy uses the bounded evaluator fallbacks documented in
+`DESIGN.md`. Report-only mode permits
 no repairs and no execution graph projection. The existing write-free `factory plan --compile`
 entry point remains a single response-only compilation; it does not create a durable evaluated
-run. Draft evaluation requires its explicit immutable run envelope.
+run. Draft evaluation requires its explicit immutable run envelope. Status exposes every retained
+compiler invocation and cumulative observed usage.
 
 Deterministic regression coverage includes an executable semantic matrix across observed, absent,
 partial, mixed, policy-blocked, and unsupported toolchain evidence; concrete dependency shapes;

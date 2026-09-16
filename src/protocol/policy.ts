@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { boundedText, safeId } from "./limits.js";
 import { NetworkDestinationSchema, type ExecutionRequirements } from "./worker-packet.js";
+import { FindingReportingPolicySchema } from "./findings.js";
 
 export const CloudFallbackSchema = z.enum(["never", "explicit"]);
 
@@ -227,7 +228,7 @@ export const DEFAULT_CONTROLLER_POLICY: ControllerPolicy = Object.freeze({
   pollIntervalSeconds: 60,
 });
 
-/** Opt-in draft evaluation; absent historical policies retain their original semantics. */
+/** Draft evaluation authority; absent historical policies retain their original semantics. */
 export const CompilerEvaluationPolicySchema = z
   .object({
     mode: z.enum(["report-only", "auto-repair"]),
@@ -238,6 +239,21 @@ export const CompilerEvaluationPolicySchema = z
     maxObservedTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   })
   .strict();
+
+export const ObjectivePlanningPolicySchema = z
+  .object({
+    maxWorkItemsPerObjective: z.number().int().min(1).max(100),
+    maxCriticalPathRatio: z.number().positive().max(1),
+    maxAggregateWorkRatio: z.number().positive().max(10),
+  })
+  .strict();
+
+export const DEFAULT_OBJECTIVE_PLANNING_POLICY = Object.freeze({
+  // Provisional until qualification provides enough observed planning data.
+  maxWorkItemsPerObjective: 24,
+  maxCriticalPathRatio: 0.75,
+  maxAggregateWorkRatio: 1.5,
+});
 
 export const RunPolicySchema = z
   .object({
@@ -272,10 +288,23 @@ export const RunPolicySchema = z
     models: ModelsPolicySchema.optional(),
     economics: EconomicsPolicySchema.optional(),
     compilerEvaluation: CompilerEvaluationPolicySchema.optional(),
+    objectivePlanning: ObjectivePlanningPolicySchema.optional(),
+    /** Explicit authority for bounded defect publication; absence denies automatic writes. */
+    findingReporting: FindingReportingPolicySchema.optional(),
   })
   .passthrough();
 
 export type RunPolicy = z.infer<typeof RunPolicySchema>;
+
+/** Explicit bounded compiler envelope selected for new runs that omit policy. */
+export const DEFAULT_COMPILER_EVALUATION_POLICY = Object.freeze({
+  mode: "auto-repair" as const,
+  maxRepairs: 2,
+  maxInvocations: 7,
+  timeoutSeconds: 600,
+  /** Observed stop threshold only; providers may overshoot an in-flight call. */
+  maxObservedTokens: 500_000,
+});
 
 export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
   backendOrder: ["codex-sdk/local-worktree", "codex-cli/local-worktree"],
@@ -289,6 +318,8 @@ export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
   maxManagedAgentSessions: 0,
   trust: "explicitly_activated_repo",
   managementBackend: "codex-cli/local",
+  compilerEvaluation: DEFAULT_COMPILER_EVALUATION_POLICY,
+  objectivePlanning: DEFAULT_OBJECTIVE_PLANNING_POLICY,
   allowedNetworkDestinations: ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"],
   priority: {
     source: "subissue-order" as const,

@@ -192,7 +192,7 @@ it("imports retained execution using exact original owner and immutable graph sc
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       },
     ],
   };

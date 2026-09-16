@@ -105,6 +105,13 @@ model invocation. Each use is additionally capped by the remaining authenticated
   "maxManagedAgentSessions": 0,
   "trust": "explicitly_activated_repo",
   "managementBackend": "codex-cli/local",
+  "compilerEvaluation": {
+    "mode": "auto-repair",
+    "maxRepairs": 2,
+    "maxInvocations": 7,
+    "timeoutSeconds": 600,
+    "maxObservedTokens": 500000
+  },
   "allowedNetworkDestinations": [
     "registry.npmjs.org",
     "*.npmjs.org",
@@ -145,6 +152,13 @@ model invocation. Each use is additionally capped by the remaining authenticated
   }
 }
 ```
+
+This compiler envelope is recorded for every new activation that omits policy. Its repair count is
+shared across obligation-inventory and graph correction, and its invocation and timeout values bound
+the whole evaluation. `maxObservedTokens` stops admission before the next invocation after observed
+usage reaches the threshold; it is not a hard provider cap and an in-flight call can overshoot it.
+Status lists each immutable compiler invocation and cumulative observed usage. Historical and
+caller-supplied policies without the field keep their exact digest and single-proposal authority.
 
 The default keeps a fixed two-worker ceiling and still applies CPU, memory and shared-resource
 safety checks. Explicitly set `capacity.mode` to `adaptive-local` and your desired worker ceilings

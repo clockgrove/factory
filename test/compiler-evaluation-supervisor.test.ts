@@ -4,10 +4,11 @@ import { CompiledGraphManager, compiledGraphProjectionRef } from "../src/control
 import { GitHubReader, cancellationRequestFromComments } from "../src/github.js";
 import { decodeEventComments, encodeEventComment } from "../src/control/receipts.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
-import { policyDigest } from "../src/protocol/policy.js";
+import { DEFAULT_COMPILER_EVALUATION_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { PlatformUnavailableError } from "../src/platform.js";
 import { compileObjective } from "../src/compiler/index.js";
+import { parseWorkerPacketFromIssue } from "../src/graph.js";
 import { readRepositoryFacts } from "../src/repository-profiles/index.js";
 import { readCompilerObligationEvidence } from "../src/management/codex-cli.js";
 import {
@@ -22,7 +23,10 @@ import { recoveryReadPort } from "../src/recovery/github-read-port.js";
 import { RecoveryPlanManager } from "../src/recovery/plan.js";
 import { RecoveryClaimManager } from "../src/recovery/claims.js";
 import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
+import { CompilerProposalSchema, type CompilerProposal } from "../src/compiler/contracts.js";
 import { proposalResultFromCompiledFixture } from "./helpers/compiler-proposal.js";
+import { parseAndValidateCompilerProposal } from "../src/compiler/proposal.js";
+import { parseCompilerOperation } from "../src/toolchains/compiler-capabilities.js";
 
 const usage = { inputTokens: 20, outputTokens: 10, cachedInputTokens: 4 };
 const invocationProvenance = (baseSha: string) => ({
@@ -387,6 +391,297 @@ async function graphlessCompilerRecoveryFixture() {
 }
 
 describe("Supervisor compiler evaluation activation boundary", () => {
+  it("repairs the observed greenfield pnpm failure shape under the omitted-policy default", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      greenfieldLifecycle: true,
+      greenfieldDescendants: 2,
+      compilerEvaluation: DEFAULT_COMPILER_EVALUATION_POLICY,
+    });
+    try {
+      freshObjective(f);
+      f.snapshot.body =
+        "Bootstrap one pnpm workspace provider, add descendant checks, and reject unsafe runtime authorization input.";
+      const safetyCriterion = "Runtime rejects unsafe authorization input";
+      const consumer = f.graph.workItems.find((item) => item.id === "consumer")!;
+      consumer.acceptance = [safetyCriterion];
+      consumer.criterionRisks = [{ criterion: safetyCriterion, risk: "security" }];
+      consumer.validation = [
+        {
+          tier: "mechanical",
+          criteria: [safetyCriterion],
+          rationale: "The pinned workspace check covers the runtime safety regression.",
+          evidenceCommands: ["pnpm check"],
+        },
+      ];
+
+      const calls: string[] = [];
+      const reports: string[][] = [];
+      Object.assign(f.management, { supportsCompilerAdmission: true });
+      f.management.extractObligations = async (context, checkpoint, beforeModelInvocation) => {
+        await beforeModelInvocation?.();
+        calls.push("inventory");
+        const inventory: ObligationInventory = {
+          version: 1,
+          objectiveDigest: compilerEvalDigest(context.objective),
+          baseSha: context.baseSha,
+          evidence: await readCompilerObligationEvidence(context),
+          obligations: [
+            {
+              id: "greenfield-pnpm",
+              text: context.objective.body,
+              kind: "explicit",
+              evidenceIds: ["objective"],
+              acceptanceEvidence: "Project the provider-bound pnpm graph.",
+            },
+          ],
+        };
+        const result = { inventory, provenance: invocationProvenance(context.baseSha), usage };
+        await checkpoint(result);
+        return result;
+      };
+      f.management.proposePlan = async (
+        request,
+        checkpoint,
+        _projection,
+        beforeModelInvocation,
+      ) => {
+        await beforeModelInvocation?.();
+        calls.push(request.revision === 0 ? "compile" : "repair");
+        const adapter = request.repository.toolchains.find(
+          (entry) => entry.adapterId === "node-pnpm" && entry.state === "eligible-deferred",
+        );
+        if (!adapter) throw new Error("fixture requires eligible deferred pnpm authority");
+        const checkOperation = parseCompilerOperation("node-pnpm", "pnpm run check");
+        if (!checkOperation) throw new Error("fixture requires the finite pnpm check operation");
+        const item = (
+          id: string,
+          scope: string[],
+          dependsOn: string[],
+          criterion: string,
+          risk: "ordinary" | "security",
+        ): CompilerProposal["workItems"][number] => ({
+          id,
+          title: `Implement ${id}`,
+          goal: `Deliver ${id}.`,
+          obligationIds: id === "bootstrap" ? ["greenfield-pnpm"] : [],
+          criteria: [
+            {
+              id: "criterion-1",
+              text: criterion,
+              risk,
+              validation: [
+                {
+                  tier: "mechanical",
+                  evidence: [
+                    {
+                      kind: "deferred",
+                      adapterId: "node-pnpm",
+                      operation: checkOperation,
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+          scope,
+          preconditions: [],
+          outOfScope: [],
+          conventions: [],
+          dependsOn,
+          exclusiveResources: [],
+          executionIntent: {
+            estimatedDurationMinutes: 10,
+            additionalTools: [],
+            services: [],
+            additionalNetworkDestinations: [],
+            trust: "trusted_local",
+          },
+        });
+        const proposal = CompilerProposalSchema.parse({
+          protocol: "clockgrove.factory/compiler-proposal",
+          workItems: [
+            item(
+              "bootstrap",
+              ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "turbo.json", "packages/"],
+              [],
+              "The introduced workspace check passes",
+              "ordinary",
+            ),
+            item("consumer", ["consumer.txt"], ["bootstrap"], safetyCriterion, "security"),
+            item(
+              "descendant",
+              ["descendant.txt"],
+              ["consumer"],
+              "The descendant workspace check passes",
+              "ordinary",
+            ),
+          ],
+        });
+        if (request.revision > 0) {
+          const report = parseAndValidateCompilerProposal(request, proposal).report;
+          const result = {
+            request,
+            proposal,
+            report,
+            usage,
+            provenance: {
+              ...invocationProvenance(request.baseSha),
+              requestDigest: compilerEvalDigest(request),
+            },
+          };
+          await checkpoint(result);
+          return result;
+        }
+        const secondOperation = parseCompilerOperation("node-pnpm", "pnpm run test");
+        if (!secondOperation) throw new Error("fixture requires a finite second pnpm operation");
+        proposal.workItems[0]!.criteria[0]!.validation[0]!.evidence.push({
+          kind: "deferred",
+          adapterId: "node-pnpm",
+          operation: secondOperation,
+        });
+        proposal.workItems[1]!.criteria[0]!.validation[0]!.evidence = [];
+        proposal.workItems[1]!.criteria[0]!.risk = "ordinary";
+        const report = parseAndValidateCompilerProposal(request, proposal).report;
+        reports.push(report.violations.map((violation) => violation.code));
+        throw Object.assign(new Error("invalid semantic proposal"), {
+          usage,
+          proposal,
+          validationReport: report,
+          provenance: invocationProvenance(request.baseSha),
+        });
+      };
+      f.management.judgePlan = async (context, checkpoint, beforeModelInvocation) => {
+        await beforeModelInvocation?.();
+        calls.push("judge");
+        const verdict: CompilerJudgeVerdict = {
+          version: 1,
+          rubricVersion: 1,
+          draftDigest: context.graphDigest,
+          inventoryDigest: compilerEvalDigest(context.inventory),
+          coverage: [
+            {
+              obligationId: "greenfield-pnpm",
+              status: "covered",
+              itemIds: context.proposal.workItems.map((item) => item.id),
+              acceptanceBindings: context.proposal.workItems.flatMap((item) =>
+                item.criteria.map((criterion) => ({
+                  itemId: item.id,
+                  criterionId: criterion.id,
+                })),
+              ),
+              evidenceIds: ["objective"],
+              reason: "The repaired provider and descendants cover the greenfield Objective.",
+            },
+          ],
+          items: context.proposal.workItems.map((item) => ({
+            itemId: item.id,
+            granularity: "cohesive",
+            reason: "Each item owns one bounded deliverable.",
+            evidenceIds: ["objective"],
+          })),
+          dimensions: COMPILER_JUDGE_DIMENSIONS.map((dimension) => ({
+            dimension,
+            status: "assessed",
+            reason: "The repaired proposal is complete and bounded.",
+            evidenceIds: ["objective"],
+          })),
+          dependencies: context.proposal.workItems.map((item) => ({
+            itemId: item.id,
+            dependsOn: item.dependsOn,
+            reason: item.dependsOn.length
+              ? "The descendant waits for its capability provider."
+              : "The bootstrap provider is the dependency root.",
+            evidenceIds: ["objective"],
+          })),
+          findings: [],
+          uncertainty: [],
+          decision: "accept",
+        };
+        const result = {
+          verdict,
+          provenance: invocationProvenance(context.compilation.baseSha),
+          usage,
+        };
+        await checkpoint(result);
+        return result;
+      };
+      let nextIssue = 8;
+      vi.spyOn(GithubOctokitGraphWriter.prototype, "createWorkItemIssue").mockImplementation(
+        async ({ title, body }) => {
+          const number = nextIssue++;
+          const id = `I_${number}`;
+          f.snapshot.workItems.push({
+            id,
+            number,
+            title,
+            body,
+            closed: false,
+            assignees: [],
+            labels: ["factory:work-item"],
+            blockedBy: [],
+            linkedPullRequests: [],
+            copilotAssignments: [],
+            factoryEvents: [],
+          });
+          return { id, number };
+        },
+      );
+      vi.spyOn(GithubOctokitGraphWriter.prototype, "addBlockedBy").mockImplementation(
+        async (issueId, blockingIssueId) => {
+          const blocked = f.snapshot.workItems.find((item) => item.id === issueId)!;
+          const blocking = f.snapshot.workItems.find((item) => item.id === blockingIssueId)!;
+          blocked.blockedBy.push({ number: blocking.number, closed: false });
+        },
+      );
+
+      const result = await f.run();
+      expect(reports).toHaveLength(1);
+      expect(calls).toEqual(["inventory", "compile", "repair", "judge"]);
+      expect(reports[0]).toEqual(
+        expect.arrayContaining(["operation-count-limit", "uncovered-criterion"]),
+      );
+      expect(
+        f
+          .events()
+          .some(
+            (event) =>
+              event.kind === "graph" && event.event === "GraphProjected" && event.graphSize === 3,
+          ),
+      ).toBe(true);
+      expect(f.snapshot.workItems).toHaveLength(3);
+      const projected = f.snapshot.workItems.map((workItem) =>
+        parseWorkerPacketFromIssue(workItem.body ?? ""),
+      );
+      expect(projected[1]?.criterionRisks).toContainEqual({
+        criterion: safetyCriterion,
+        risk: "security",
+      });
+      expect(
+        projected.map((packet) => packet.repositoryCapabilities?.requires[0]?.providerWorkItem),
+      ).toEqual(["bootstrap", "bootstrap", "bootstrap"]);
+      // This regression stops at its accepted projection boundary; worker
+      // qualification belongs to the installed candidate scenario.
+      expect(result).toMatchObject({
+        status: "escalated",
+        reason: expect.stringContaining("attempt budget exhausted"),
+      });
+      expect(
+        f
+          .events()
+          .filter(
+            (event) =>
+              event.kind === "budget" &&
+              event.event === "BudgetReconciled" &&
+              event.phase === "management" &&
+              event.unit === "model_tokens",
+          ),
+      ).toHaveLength(4);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
   it.each(["accept", "repair"] as const)(
     "report-only %s writes evaluation evidence without activating work",
     async (decision) => {

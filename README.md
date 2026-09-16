@@ -120,16 +120,20 @@ toolchain authority, runtime pins, provider steps, policy limits, and graph seri
 Factory-owned facts derived from the pinned base commit. Factory validates the semantic proposal,
 projects it deterministically into the execution graph, and records the request, proposal, validation,
 and projection identities. Initial proposals and bounded repairs use the same schema and entry point.
-The ordinary single-call path carries lossless bounded Objective source segments for structural
-mapping without claiming independent semantic extraction. An explicit compiler-evaluation policy
-adds the separately extracted obligation inventory and independent judgment described below.
+For a new activation with no caller-supplied policy, Factory records an explicit auto-repair
+envelope: two shared repairs, seven total compiler invocations, 600 seconds, and a 500,000 observed-
+token stop threshold. The threshold is checked between calls and is not a provider-enforced hard cap;
+an in-flight response can overshoot it. Historical policies without `compilerEvaluation` retain the
+single-call path and their original digest and recovery authority.
 
-When opt-in compiler evaluation uses `maxRepairs`, that number is one shared correction budget for
+Compiler evaluation's `maxRepairs` is one shared correction budget for
 obligation-inventory regeneration and graph repair. For example, one inventory correction under
 `maxRepairs: 2` leaves at most one graph correction. Report-only evaluation and `maxRepairs: 0` keep
 the inventory single-shot; invocation, time, observed-token, accounting, and input fences still
 apply before every model call. Exact usage alone never authorizes an inventory retry: only a retained,
 bounded response that fails deterministic claims schema or evidence-grounding validation is repairable.
+`factory_status` reports every immutable compiler invocation and cumulative observed usage;
+unavailable counters remain unavailable rather than zero.
 
 For local compiler debugging, set `FACTORY_MANAGEMENT_TRANSCRIPT_DIR` to an absolute Linux path
 before launching Factory or installing its unattended controller. Factory then writes private,

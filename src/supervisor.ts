@@ -16318,7 +16318,9 @@ export class FactorySupervisor {
               artifact: artifact!,
               packet,
               publicationBaseBranch: this.#baseBranch,
-              findingPhase: "integration",
+              // This recovery path already persists the exact isolatedFailure receipt. Adding a
+              // new candidate would change that established replay digest after interruption.
+              findingPhase: false,
               ...(scope ? { localScope: scope.hooks } : {}),
               ...(isolated
                 ? {

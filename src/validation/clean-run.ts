@@ -112,8 +112,9 @@ export interface CleanValidationInput {
   /** Protected branch whose update is the human-authorized integration event. */
   publicationBaseBranch?: string;
   isolatedValidator?: () => Promise<IsolatedValidationResult>;
-  /** Integration candidates use the same evidence contract with a distinct trusted phase. */
-  findingPhase?: "validation" | "integration";
+  /** Integration candidates use a distinct trusted phase. Recovery replay may suppress a new
+   * candidate when its pre-existing evidence digest is already the durable authority. */
+  findingPhase?: "validation" | "integration" | false;
   /** The Supervisor journals each exact scope before launch and fences each
    * command. This never authorizes a local substitute for isolated validation. */
   localScope?: {
@@ -1426,36 +1427,37 @@ export async function validateArtifactClean(
       passed = failureReason === undefined;
       evidenceCompletedAt = new Date().toISOString();
     }
-    const findingPhase = input.findingPhase ?? "validation";
-    const findings: FindingCandidate[] = passed
-      ? []
-      : [
-          {
-            protocol: FINDING_PROTOCOL,
-            phase: findingPhase,
-            failureClass:
-              findingPhase === "integration"
-                ? "integration-validation-failed"
-                : "deterministic-validation-failed",
-            supportedBehavior:
-              findingPhase === "integration"
-                ? "The exact integration candidate passes its admitted validation plan."
-                : "The exact implementation artifact passes its admitted validation plan.",
-            observedBehavior: `The deterministic validator returned a nonzero result at command index ${Math.max(
-              0,
-              commands.findIndex(({ exitCode }) => exitCode !== 0),
-            )}.`,
-            reproduction: [
-              "Materialize the exact artifact on its pinned base commit.",
-              "Run the admitted validation plan in the recorded validation environment.",
-            ],
-            impact:
-              findingPhase === "integration"
-                ? "Factory cannot safely integrate the candidate."
-                : "Factory cannot accept the implementation artifact.",
-            evidence: [{ kind: "artifact", digest: artifact.digest, commit: artifact.baseSha }],
-          },
-        ];
+    const findingPhase = input.findingPhase === false ? null : (input.findingPhase ?? "validation");
+    const findings: FindingCandidate[] =
+      passed || findingPhase === null
+        ? []
+        : [
+            {
+              protocol: FINDING_PROTOCOL,
+              phase: findingPhase,
+              failureClass:
+                findingPhase === "integration"
+                  ? "integration-validation-failed"
+                  : "deterministic-validation-failed",
+              supportedBehavior:
+                findingPhase === "integration"
+                  ? "The exact integration candidate passes its admitted validation plan."
+                  : "The exact implementation artifact passes its admitted validation plan.",
+              observedBehavior: `The deterministic validator returned a nonzero result at command index ${Math.max(
+                0,
+                commands.findIndex(({ exitCode }) => exitCode !== 0),
+              )}.`,
+              reproduction: [
+                "Materialize the exact artifact on its pinned base commit.",
+                "Run the admitted validation plan in the recorded validation environment.",
+              ],
+              impact:
+                findingPhase === "integration"
+                  ? "Factory cannot safely integrate the candidate."
+                  : "Factory cannot accept the implementation artifact.",
+              evidence: [{ kind: "artifact", digest: artifact.digest, commit: artifact.baseSha }],
+            },
+          ];
     const evidence = createValidationEvidence({
       protocol: "clockgrove.factory/validation-v1",
       artifactDigest: artifact.digest,

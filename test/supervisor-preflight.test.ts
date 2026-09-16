@@ -7,9 +7,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { CompiledGraphProjectionBinding } from "../src/control/graphs.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
+import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { compiledGraphDigest, renderWorkPacket, type CompiledObjective } from "../src/graph.js";
 import {
   assertAuthenticatedGraphProjection,
+  assertHistoricalGraphAssetAuthority,
   assertSnapshotMatchesCompiledGraph,
   type CompiledGraphSnapshot,
   runWithExternalAdmissionBoundary,
@@ -105,6 +107,38 @@ function immutableProjection(snapshot = immutableSnapshot()): CompiledGraphProje
 }
 
 describe("Supervisor repository preflight", () => {
+  it("rejects historical graph reuse under a different asset manifest", () => {
+    const manifestA = "a".repeat(64);
+    const manifestB = "b".repeat(64);
+    const start = parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      kind: "run",
+      event: "FactoryRunStarted",
+      objective: 7,
+      runId: "historical-run",
+      sequence: 1,
+      at: "2026-09-16T00:00:00.000Z",
+      actor: "operator",
+      repository: "clockgrove/factory",
+      objectiveAuthor: "operator",
+      fork: false,
+      baseBranch: "main",
+      baseSha: "c".repeat(40),
+      assetManifestDigest: manifestA,
+      policy: DEFAULT_RUN_POLICY,
+      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+    });
+    expect(() =>
+      assertHistoricalGraphAssetAuthority([start], "historical-run", manifestA),
+    ).not.toThrow();
+    expect(() => assertHistoricalGraphAssetAuthority([start], "historical-run", manifestB)).toThrow(
+      /asset manifest differs/,
+    );
+    expect(() => assertHistoricalGraphAssetAuthority([], "historical-run", manifestA)).toThrow(
+      /authority is unavailable/,
+    );
+  });
+
   it("accepts exact GitHub remotes and rejects lookalike hosts", async () => {
     const repository = await mkdtemp(join(tmpdir(), "factory-supervisor-preflight-"));
     execFileSync("git", ["init", "-q"], { cwd: repository });

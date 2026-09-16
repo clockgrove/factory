@@ -995,6 +995,24 @@ function snapshotEvents(snapshot: Snapshot): FactoryEvent[] {
   ]);
 }
 
+/** A graph from another run is executable only under the exact Objective media
+ * authority that informed its compilation. Call after run actors are authenticated. */
+export function assertHistoricalGraphAssetAuthority(
+  events: readonly FactoryEvent[],
+  sourceRunId: string,
+  expectedAssetManifestDigest: string | undefined,
+): void {
+  const starts = deduplicateFactoryEvents([...events]).filter(
+    (event): event is Extract<FactoryEvent, { kind: "run"; event: "FactoryRunStarted" }> =>
+      event.kind === "run" && event.event === "FactoryRunStarted" && event.runId === sourceRunId,
+  );
+  const sourceStart = starts[0];
+  if (!sourceStart || starts.length !== 1)
+    throw new Error("historical compiled graph run authority is unavailable");
+  if (sourceStart.assetManifestDigest !== expectedAssetManifestDigest)
+    throw new Error("historical compiled graph asset manifest differs from the current run");
+}
+
 function hasCancellationRequest(snapshot: Snapshot, runId: string): boolean {
   const events = deduplicateFactoryEvents(snapshot.factoryEvents ?? []);
   const start = events.find(
@@ -5221,6 +5239,12 @@ export class FactorySupervisor {
             ? durableGraph
             : await graphManager.load(snapshot.number, observedGraph.receiptRunId)
           : null;
+        if (receiptGraph && observedGraph.receiptRunId !== this.#run.runId)
+          assertHistoricalGraphAssetAuthority(
+            snapshotEvents(snapshot),
+            observedGraph.receiptRunId!,
+            this.#run.assetManifestDigest,
+          );
         if (receiptGraph && observedGraph.expectedDigest) {
           if (
             receiptGraph.graphDigest !== observedGraph.expectedDigest ||

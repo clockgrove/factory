@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import type { CompilationContext } from "../../src/management/backend.js";
+import { DEFAULT_RUN_POLICY } from "../../src/protocol/policy.js";
 
 export interface Issue404LiveGitIdentity {
   candidateCommitSha: string;
@@ -13,6 +15,38 @@ export interface Issue404LiveAuthority {
   candidateSha: string;
   runId: string;
   transcriptDirectory: string;
+}
+
+export function issue404QualificationCompilationContext(
+  input: Pick<
+    CompilationContext,
+    "repository" | "objective" | "baseSha" | "repositoryFiles" | "pinnedCompilationTree"
+  >,
+): CompilationContext {
+  const runPolicy = {
+    ...DEFAULT_RUN_POLICY,
+    allowedNetworkDestinations: [],
+    workItemTimeoutMinutes: 20,
+    compilerEvaluation: {
+      mode: "auto-repair" as const,
+      maxRepairs: 2,
+      maxInvocations: 7,
+      timeoutSeconds: 3_600,
+      maxObservedTokens: 250_000,
+    },
+  };
+  return {
+    ...input,
+    defaultBranch: "main",
+    allowedNetworkDestinations: [...runPolicy.allowedNetworkDestinations],
+    runPolicy,
+    modelSelection: {
+      profile: "issue404-qualification",
+      model: "gpt-5.6-sol",
+      reasoning: "xhigh",
+    },
+    invocationTimeoutMs: 5 * 60_000,
+  };
 }
 
 export interface Issue404FixtureFile {

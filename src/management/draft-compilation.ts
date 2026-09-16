@@ -60,11 +60,12 @@ import {
   MANAGEMENT_PROMPT_MAX_BYTES,
   readCompilerObligationEvidence,
 } from "./codex-cli.js";
-import type {
-  CompilationContext,
-  CompilerInvocationProvenance,
-  ManagementBackend,
-  ManagementUsage,
+import {
+  assertCompilationContextPolicyAuthority,
+  type CompilationContext,
+  type CompilerInvocationProvenance,
+  type ManagementBackend,
+  type ManagementUsage,
 } from "./backend.js";
 
 interface PersistedProposalResult {
@@ -266,6 +267,7 @@ export async function compileEvaluatedDraft(args: {
   fixedGraph?: CompiledObjective;
 }): Promise<CompilerDraftOutcome> {
   const { context, backend } = args;
+  assertCompilationContextPolicyAuthority(context);
   const evidenceStartedAt = Date.now();
   const policy = context.runPolicy.compilerEvaluation;
   if (!policy) throw new Error("compiler evaluation requires explicit immutable policy");

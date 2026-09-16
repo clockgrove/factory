@@ -4,14 +4,19 @@ import { describe, expect, it, vi } from "vitest";
 import { COMPILER_PROPOSAL_JSON_SCHEMA } from "../src/compiler/contracts.js";
 import { CompilerInvariantError } from "../src/compiler/invariant-error.js";
 import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
-import { ManagementOutputError } from "../src/management/backend.js";
+import { ManagementOutputError, type ManagementBackend } from "../src/management/backend.js";
 import {
   CodexCliManagementBackend,
   compilerProposalPrompt,
   renderCompilerProposalPrompt,
 } from "../src/management/codex-cli.js";
-import { structuralObjectiveInventory } from "../src/management/compile.js";
+import {
+  compilePlan,
+  compilePlanWithLegacyAdmission,
+  structuralObjectiveInventory,
+} from "../src/management/compile.js";
 import type { CompilationContext } from "../src/management/backend.js";
+import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import {
   CompilerRequestValidationError,
   MAX_COMPILER_REQUEST_BYTES,
@@ -31,6 +36,58 @@ import {
 } from "../src/graph.js";
 
 describe("single semantic management route", () => {
+  it.each([
+    ["generic compilePlan", false],
+    ["Supervisor legacy admission compatibility", true],
+  ] as const)("rejects split network authority before any %s effects", async (_name, legacy) => {
+    const context: CompilationContext = {
+      repository: process.cwd(),
+      objective: { number: 404, title: "Reject split authority", body: "Do not dispatch." },
+      defaultBranch: "main",
+      baseSha: "a".repeat(40),
+      repositoryFiles: [],
+      allowedNetworkDestinations: [],
+      runPolicy: DEFAULT_RUN_POLICY,
+    };
+    const legacyAdmission = vi.fn();
+    const accounting = vi.fn();
+    const journal = vi.fn();
+    const provider = vi.fn();
+    const admitCompilation = vi.fn(async () => {
+      legacyAdmission();
+      accounting();
+      journal();
+      return {
+        timeoutMs: 1_000,
+        modelInvocationId: "compile-test",
+        checkpointProviderRefusal: async () => {},
+      };
+    });
+    const proposePlan = vi.fn(async () => {
+      provider();
+      accounting();
+      journal();
+      throw new Error("backend reached");
+    });
+    const backend = { id: "arbitrary", proposePlan } as unknown as ManagementBackend;
+    const checkpoint = vi.fn(async () => {
+      journal();
+    });
+
+    await expect(
+      legacy
+        ? compilePlanWithLegacyAdmission(context, backend, checkpoint, admitCompilation)
+        : compilePlan(context, backend, checkpoint, admitCompilation),
+    ).rejects.toThrow("compilation context network authority differs from run policy");
+    expect(legacyAdmission).not.toHaveBeenCalled();
+    expect(admitCompilation).not.toHaveBeenCalled();
+    expect(proposePlan).not.toHaveBeenCalled();
+    expect(provider).not.toHaveBeenCalled();
+    expect(accounting).not.toHaveBeenCalled();
+    expect(journal).not.toHaveBeenCalled();
+    expect(checkpoint).not.toHaveBeenCalled();
+  });
+
   it("sizes a 1,151,759-byte adopted-constraint prompt before provider admission", async () => {
     const request = semanticRequest();
     const legacy: LegacyGraphConstraints = {

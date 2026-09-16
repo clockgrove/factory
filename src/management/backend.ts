@@ -89,6 +89,14 @@ export interface CompilationContext {
   economicEvidence?: (items: readonly CompilerWorkItem[]) => Promise<DecompositionEvidence>;
 }
 
+/** A compiler request and its projection policy must derive network authority from one source. */
+export function assertCompilationContextPolicyAuthority(context: CompilationContext): void {
+  const requested = [...context.allowedNetworkDestinations].sort();
+  const policy = [...context.runPolicy.allowedNetworkDestinations].sort();
+  if (JSON.stringify(requested) !== JSON.stringify(policy))
+    throw new Error("compilation context network authority differs from run policy");
+}
+
 export interface CompilerInvocationProvenance {
   promptDigest: string;
   schemaDigest: string;

@@ -83,7 +83,7 @@ async function proposeWithTranscript(
     repositoryFiles: pinned?.files ?? ["package.json"],
     ...(pinned ? { pinnedCompilationTree: pinned.proof } : {}),
     allowedNetworkDestinations: [],
-    runPolicy: DEFAULT_RUN_POLICY,
+    runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
   };
   try {
     return await backend.proposePlan(

@@ -276,8 +276,11 @@ import {
 import { CompilerDraftManager, loadCompilerDrafts } from "./control/compiler-drafts.js";
 import { compilerEvalDigest } from "./evaluation/compiler-eval.js";
 import { collectCompilationEvidence } from "./compiler/runtime-evidence.js";
-import { ManagementOutputError } from "./management/backend.js";
-import { compilePlan } from "./management/compile.js";
+import {
+  assertCompilationContextPolicyAuthority,
+  ManagementOutputError,
+} from "./management/backend.js";
+import { compilePlan, compilePlanWithLegacyAdmission } from "./management/compile.js";
 import { preserveProviderQuotaError, ProviderQuotaError } from "./providers/quota.js";
 import { providerQuotaGates, providerQuotaGateState } from "./control/provider-gates.js";
 import { reportedModelUsage, type ReportedModelUsage } from "./protocol/model-usage.js";
@@ -5185,6 +5188,7 @@ export class FactorySupervisor {
                     }),
                   ...(compilationModel ? { modelSelection: compilationModel } : {}),
                 };
+                assertCompilationContextPolicyAuthority(context);
                 if (!this.#policy.compilerEvaluation) {
                   const admitCompilation = async () => {
                     const timeoutMs = await this.#externalAdmission(async () =>
@@ -5212,9 +5216,13 @@ export class FactorySupervisor {
                   }
                   // Compatibility for injected legacy backends that cannot place
                   // durable admission at their own final dispatch boundary.
-                  context.invocationTimeoutMs = (await admitCompilation()).timeoutMs;
                   return await this.#observePhase("compilation", () =>
-                    compilePlan(context, this.#management, checkpoint),
+                    compilePlanWithLegacyAdmission(
+                      context,
+                      this.#management,
+                      checkpoint,
+                      admitCompilation,
+                    ),
                   );
                 }
                 const inputDigest = compilerEvalDigest(context.objective);

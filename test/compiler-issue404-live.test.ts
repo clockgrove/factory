@@ -45,13 +45,14 @@ import {
   materializePinnedCompilationTree,
   sealPinnedCompilationTreeProof,
 } from "../src/execution/pinned-compilation-tree.js";
-import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
+import { policyDigest } from "../src/protocol/policy.js";
 import { pinFixtureRepository } from "./helpers/compiler-proposal.js";
 import {
   issue404AggregateTokenUsage,
   assertIssue404CanonicalFixture,
   issue404CanonicalPath,
   issue404LiveAuthority,
+  issue404QualificationCompilationContext,
   issue404TerminalTranscriptEvidence,
   issue404TokenUsageByStage,
   type Issue404DurableRecord,
@@ -349,32 +350,13 @@ async function qualify(
   });
   await sealPinnedCompilationTreeProof(tree.proof);
   const canonicalCwd = issue404CanonicalPath(tree.path);
-  const context: CompilationContext = {
+  const context = issue404QualificationCompilationContext({
     repository: tree.path,
     objective: { number: name === "valid-first" ? 4041 : 4042, ...objective },
-    defaultBranch: "main",
     baseSha,
     repositoryFiles: tree.files,
     pinnedCompilationTree: tree.proof,
-    allowedNetworkDestinations: [],
-    runPolicy: {
-      ...DEFAULT_RUN_POLICY,
-      workItemTimeoutMinutes: 20,
-      compilerEvaluation: {
-        mode: "auto-repair",
-        maxRepairs: 2,
-        maxInvocations: 7,
-        timeoutSeconds: 3_600,
-        maxObservedTokens: 250_000,
-      },
-    },
-    modelSelection: {
-      profile: "issue404-qualification",
-      model: "gpt-5.6-sol",
-      reasoning: "xhigh",
-    },
-    invocationTimeoutMs: 5 * 60_000,
-  };
+  });
   context.repositoryEvidence = compilerObligationEvidence(context);
   const forbiddenAuthorityFragments = [
     authorityMarkerPath,

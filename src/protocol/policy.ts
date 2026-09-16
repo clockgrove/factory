@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { boundedText, safeId } from "./limits.js";
 import { NetworkDestinationSchema, type ExecutionRequirements } from "./worker-packet.js";
+import { FindingReportingPolicySchema } from "./findings.js";
 
 export const CloudFallbackSchema = z.enum(["never", "explicit"]);
 
@@ -272,6 +273,8 @@ export const RunPolicySchema = z
     models: ModelsPolicySchema.optional(),
     economics: EconomicsPolicySchema.optional(),
     compilerEvaluation: CompilerEvaluationPolicySchema.optional(),
+    /** Explicit authority for bounded defect publication; absence denies automatic writes. */
+    findingReporting: FindingReportingPolicySchema.optional(),
   })
   .passthrough();
 

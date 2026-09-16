@@ -109,6 +109,11 @@ export {
 } from "./control/graph-evidence.js";
 import { GitHubControlStore } from "./control/github-store.js";
 import {
+  FindingReporter,
+  GitHubFindingReportingPort,
+  type FindingRecord,
+} from "./control/finding-reporting.js";
+import {
   SharedCapacitySnapshotLagError,
   sharedCapacityClaimId,
   type SharedCapacityCoordinator,
@@ -209,6 +214,7 @@ import {
   parseFactoryEvent,
   type AttemptEvent,
   type FactoryEvent,
+  type FindingEvent,
   type ProviderQuotaEvent,
   type PublicationEvent,
 } from "./protocol/events.js";
@@ -405,6 +411,7 @@ import {
 } from "./runtime/local-scope.js";
 import { LocalScopeBatchSchema, type LocalScopeBatch } from "./protocol/local-scope.js";
 import type { ValidationEvidence } from "./validation/evidence.js";
+import type { FindingCandidate, FindingClassification } from "./protocol/findings.js";
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
@@ -1301,6 +1308,7 @@ export class FactorySupervisor {
   readonly #siblingRefreshes: SiblingRefreshStore;
   readonly #nativeRebases: NativeRebaseCheckpointStore;
   readonly #recorder: LifecycleRecorder;
+  readonly #findingReporter: FindingReporter;
   #management: ManagementBackend;
   readonly #managementOverride: boolean;
   readonly #registry: BackendRegistry;
@@ -1437,6 +1445,39 @@ export class FactorySupervisor {
     this.#siblingRefreshes = new SiblingRefreshStore(this.#store, this.#leases);
     this.#nativeRebases = new NativeRebaseCheckpointStore(this.#store, this.#leases);
     this.#recorder = new LifecycleRecorder(this.#store, this.#leases);
+    this.#findingReporter = new FindingReporter(
+      new GitHubFindingReportingPort((route, parameters, mutating) =>
+        this.#store.stackRequest(route, parameters, mutating),
+      ),
+      {
+        read: async () => {
+          const observed = await this.#reader.readObjective(this.#options.objective);
+          return snapshotEvents(observed).filter(
+            (event): event is FindingEvent => event.kind === "finding",
+          );
+        },
+        append: async (record: FindingRecord) => {
+          await this.#lease.use(async (lease) => {
+            const sequence = this.#sequences.take();
+            const event = parseFactoryEvent({
+              protocol: PROTOCOL_V2,
+              kind: "finding",
+              objective: lease.objective,
+              runId: lease.runId,
+              sequence,
+              at: (await this.#store.serverTime()).toISOString(),
+              ...writerAuthority(lease, sequence),
+              ...record,
+            });
+            const observed = await this.#reader.readObjective(lease.objective);
+            await this.#store.addIssueComment(
+              observed.id,
+              encodeEventComment("Factory recorded a bounded defect-reporting disposition.", event),
+            );
+          });
+        },
+      },
+    );
     this.#management =
       options.managementBackend ??
       new CodexCliManagementBackend({
@@ -6969,6 +7010,35 @@ export class FactorySupervisor {
     );
   }
 
+  async #reportCandidateFindings(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    findings: readonly FindingCandidate[] | undefined,
+    classification: FindingClassification,
+  ): Promise<void> {
+    if (!findings?.length) return;
+    const currentRepository = `${this.#options.owner}/${this.#options.repo}`.toLowerCase();
+    const destinations = this.#policy.findingReporting?.destinations ?? [];
+    const destination =
+      destinations.find((candidate) => candidate.repository === currentRepository)?.repository ??
+      (destinations.length === 1 ? destinations[0]!.repository : currentRepository);
+    for (const candidate of findings) {
+      await this.#findingReporter.report({
+        policy: this.#policy.findingReporting,
+        destination,
+        candidate,
+        classification,
+        occurrence: {
+          objective: reservation.objective,
+          workItem: item.number,
+          runId: reservation.runId,
+          attempt: reservation.attempt,
+        },
+        priorEvents: (item.factoryEvents ?? []).filter((event) => event.kind === "finding"),
+      });
+    }
+  }
+
   async #executeWithArtifactContent(
     item: DerivedWorkItem,
     objectiveDeadline: number,
@@ -7830,6 +7900,14 @@ export class FactorySupervisor {
       this.#retainArtifactContent(artifact);
       retryableArtifact = artifact;
       if (artifact.outcome !== "succeeded") {
+        await confirmExecutionCleanup("pre-finding backend cleanup");
+        if (reservation.attempt >= this.#policy.maxAttemptsPerItem)
+          await this.#reportCandidateFindings(
+            item,
+            reservation,
+            artifact.findings,
+            "objective-blocker",
+          );
         throw new Error(artifact.reason ?? `worker ${artifact.outcome}`);
       }
       try {
@@ -7901,6 +7979,12 @@ export class FactorySupervisor {
           this.#budgetEvents.push(event);
           executionBudgetReconciled = true;
         });
+      await this.#reportCandidateFindings(
+        item,
+        reservation,
+        artifact.findings,
+        "nonblocking-follow-up",
+      );
       // Fresh completed siblings have the same durable continuation boundary as
       // recovered attempts: ready artifact, terminal usage, and absent compute.
       // A controller shutdown must not turn that paid work into a failed attempt.
@@ -8202,8 +8286,21 @@ export class FactorySupervisor {
         if (validator && validationBudgetUnit) validationBudgetReconciled = true;
       });
       if (!validation.evidence.passed) {
+        if (reservation.attempt >= this.#policy.maxAttemptsPerItem)
+          await this.#reportCandidateFindings(
+            item,
+            reservation,
+            validation.evidence.findings,
+            "objective-blocker",
+          );
         throw new Error(validation.evidence.failureReason ?? "validation failed");
       }
+      await this.#reportCandidateFindings(
+        item,
+        reservation,
+        validation.evidence.findings,
+        "nonblocking-follow-up",
+      );
 
       const reviewIdentity: ReviewIdentity = {
         kind: "artifact",
@@ -8263,7 +8360,7 @@ export class FactorySupervisor {
               ),
           );
       }
-      await this.#reviewTransaction({
+      const reviewRecord = await this.#reviewTransaction({
         existing: existingReview,
         ...(invokeReview ? { invoke: invokeReview } : {}),
         persist: (result) =>
@@ -8289,6 +8386,15 @@ export class FactorySupervisor {
         recordUsage: (record) => this.#recordReviewUsage(record, item, reservation!),
         recordOutcome: (record) => this.#recordInitialReviewOutcome(record, item, reservation!),
       });
+      const reviewAccepted =
+        reviewRecord.review.accepted && reviewRecord.review.unmetCriteria.length === 0;
+      if (reviewAccepted || reservation.attempt >= this.#policy.maxAttemptsPerItem)
+        await this.#reportCandidateFindings(
+          item,
+          reservation,
+          reviewRecord.review.findings,
+          reviewAccepted ? "nonblocking-follow-up" : "objective-blocker",
+        );
       const assertPublicationSafety = async () => {
         try {
           await this.#assertWorkflowPublicationSafety({

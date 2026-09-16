@@ -20,6 +20,11 @@ import {
   isoDate,
   sha256Digest,
 } from "../protocol/limits.js";
+import {
+  FindingCandidateSchema,
+  validateFindingCandidate,
+  type FindingCandidate,
+} from "../protocol/findings.js";
 
 export const MAX_ARTIFACT_PATCH_BYTES = 5 * 1024 * 1024;
 
@@ -56,6 +61,7 @@ export const NormalizedArtifactSchema = z
     logs: z.string().max(MAX_LOG_BYTES),
     outcome: z.enum(["succeeded", "failed", "declined"]),
     reason: z.string().max(8_000).optional(),
+    findings: z.array(FindingCandidateSchema).max(16).optional(),
     createdAt: isoDate,
   })
   .passthrough();
@@ -72,6 +78,7 @@ export interface ArtifactInput {
   logs?: string;
   outcome: "succeeded" | "failed" | "declined";
   reason?: string;
+  findings?: FindingCandidate[];
   createdAt?: Date;
 }
 
@@ -81,6 +88,7 @@ export function artifactDigest(input: {
   changedPaths: string[];
   payload?: ArtifactPayload | undefined;
   fileManifest?: ArtifactFileManifest | undefined;
+  findings?: FindingCandidate[] | undefined;
 }): string {
   const hash = createHash("sha256")
     .update(input.baseSha)
@@ -98,6 +106,10 @@ export function artifactDigest(input: {
           : {}),
       }),
     );
+  if (input.findings?.length)
+    hash
+      .update("\0findings-v1\0")
+      .update(JSON.stringify(input.findings.map((finding) => validateFindingCandidate(finding))));
   return hash.digest("hex");
 }
 
@@ -145,6 +157,9 @@ export function normalizeArtifact(input: ArtifactInput): NormalizedArtifact {
     logs: boundWorkerLogs(rawLogs),
     outcome: input.outcome,
     ...(input.reason ? { reason: input.reason } : {}),
+    ...(input.findings?.length
+      ? { findings: input.findings.map((finding) => validateFindingCandidate(finding)) }
+      : {}),
     createdAt: (input.createdAt ?? new Date()).toISOString(),
   };
   const artifact = NormalizedArtifactSchema.parse({

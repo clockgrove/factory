@@ -148,6 +148,10 @@ state. See [local management transcripts](docs/setup/configuration.md#local-mana
   and explicitly selected native stacks with capability checks.
 - **Recovery and inspection:** durable GitHub records, restart recovery, cancellation, status,
   explanations, and replay without a separate database.
+- **Bounded defect reporting:** workers, validators, review, integration, the compiler, and the
+  Supervisor can produce evidence-bound finding candidates. Only the Supervisor classifies them.
+  Automatic issue creation is disabled unless immutable run policy names the exact destination,
+  audience, allowed operations, and publication-write allowance.
 - **Optional execution routes:** durable local Codex App Server sessions, Daytona cloud burst, and
   limited GitHub-managed integrations, subject to each provider's supported capabilities.
 
@@ -165,6 +169,10 @@ Use local workers only with trusted code: a same-user local process is not a har
 boundary. Workers use `workspace-write`; web search and command networking are off by default.
 Factory checks repository identity, permissions, branch rules, scope, artifact evidence, and budget,
 and escalates when it cannot safely proceed. Retries do not widen permissions, scope, or spending.
+Finding reports never change the compiled graph, activate work, consume implementation attempts, or
+grant model, network, or spending authority. Security-sensitive or unsafe content is refused from
+the ordinary issue path; ambiguous issue-create responses are reconciled by an exact machine marker
+and are never blindly replayed.
 
 <a id="policy-and-paid-backends"></a>
 

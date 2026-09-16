@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { z } from "zod";
+import { FINDING_CANDIDATE_JSON_SCHEMA, FindingCandidateSchema } from "../protocol/findings.js";
 
 import type { LegacyGraphConstraints } from "../graph.js";
 import {
@@ -191,6 +192,7 @@ const REVIEW_SCHEMA = {
     summary: { type: "string", minLength: 1, maxLength: 8000 },
     unmetCriteria: { type: "array", maxItems: 64, items: { type: "string", maxLength: 2000 } },
     risks: { type: "array", maxItems: 64, items: { type: "string", maxLength: 2000 } },
+    findings: { type: "array", maxItems: 16, items: FINDING_CANDIDATE_JSON_SCHEMA },
   },
 } as const;
 
@@ -199,6 +201,7 @@ const ReviewSchema = z.object({
   summary: z.string().min(1).max(8_000),
   unmetCriteria: z.array(z.string().max(2_000)).max(64),
   risks: z.array(z.string().max(2_000)).max(64),
+  findings: z.array(FindingCandidateSchema).max(16).optional(),
 });
 
 const judgeString = { type: "string", minLength: 1, maxLength: 4000 };

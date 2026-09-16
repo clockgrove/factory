@@ -26,6 +26,11 @@ import {
 } from "../execution/session.js";
 import { normalizeArtifact, type NormalizedArtifact } from "../execution/artifacts.js";
 import { ContextManifestSchema, type ExecutionRequirements } from "../protocol/worker-packet.js";
+import {
+  FINDING_CANDIDATE_JSON_SCHEMA,
+  parseFindingCandidates,
+  type FindingCandidate,
+} from "../protocol/findings.js";
 import { collectLocalArtifact } from "../runtime/local-worktree.js";
 import { resolveCodexCommand } from "../runtime/codex-command.js";
 import {
@@ -81,6 +86,7 @@ export const CODEX_WORKER_OUTPUT_SCHEMA = {
         },
       },
     },
+    findings: { type: "array", maxItems: 16, items: FINDING_CANDIDATE_JSON_SCHEMA },
   },
 } as const;
 
@@ -88,6 +94,7 @@ interface WorkerFinal {
   outcome: "succeeded" | "failed" | "declined";
   summary: string;
   commands: Array<{ command: string; exitCode: number }>;
+  findings?: FindingCandidate[] | undefined;
 }
 
 interface RunningAttempt {
@@ -225,6 +232,7 @@ export function workerPacketPrompt(context: AttemptContext): string {
         ]
       : []),
     `Authoritative validation will run later. You may run these checks while working:\n${packet.validationCommands.map((item) => `- ${item}`).join("\n")}`,
+    "If you directly observe a product defect that is not merely a failed implementation attempt, you may include a bounded findings array in the result. State supported behavior, observation, minimal reproduction, impact, and immutable evidence separately from any explicitly unverified possible cause. Never include credentials, personal data, private host paths/topology, raw logs, prompts, or unverified security findings. Do not choose a destination, severity, blocking status, or disposition and do not access GitHub; only the Supervisor may classify or report a finding.",
     "Return the required JSON result. Your report is informational; the host will collect and validate the filesystem artifact independently.",
   ].join("\n\n");
 }
@@ -281,6 +289,7 @@ export function parseCodexWorkerStream(stdout: string): {
       } catch {
         continue;
       }
+      const findings = parseFindingCandidates(candidate.findings);
       if (
         candidate &&
         ["succeeded", "failed", "declined"].includes(candidate.outcome) &&
@@ -291,7 +300,7 @@ export function parseCodexWorkerStream(stdout: string): {
             command && typeof command.command === "string" && Number.isInteger(command.exitCode),
         )
       )
-        final = candidate;
+        final = { ...candidate, ...(findings ? { findings } : {}) };
     } catch {
       failure = "CLI worker returned malformed JSONL";
     }
@@ -660,6 +669,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
       })),
       logs: collected.logs,
       outcome,
+      ...(running.final?.findings ? { findings: running.final.findings } : {}),
       ...(outcome === "succeeded"
         ? {}
         : {

@@ -4,6 +4,12 @@ import { RunPolicySchema } from "./policy.js";
 import { LocalScopeBatchSchema } from "./local-scope.js";
 import { ReportedModelUsageSchema } from "./model-usage.js";
 import { ManagedRuntimeActivationSchema } from "./worker-packet.js";
+import {
+  FindingClassificationSchema,
+  FindingDispositionSchema,
+  FindingEvidenceReferenceSchema,
+  FindingPhaseSchema,
+} from "./findings.js";
 export { ReportedModelUsageSchema, type ReportedModelUsage } from "./model-usage.js";
 import {
   MAX_PERSISTED_EVENT_BYTES,
@@ -831,6 +837,75 @@ const ProviderQuotaBlocked = Common.extend({
     });
 });
 
+const Finding = Common.extend({
+  kind: z.literal("finding"),
+  event: z.enum(["FindingDecision", "FindingPublicationIntent", "FindingDisposition"]),
+  findingId: sha256Digest,
+  commonCauseId: sha256Digest.optional(),
+  workItem: z.number().int().positive().optional(),
+  attempt: z.number().int().positive().optional(),
+  destination: boundedText(200),
+  phase: FindingPhaseSchema,
+  candidateDigest: sha256Digest,
+  evidence: z.array(FindingEvidenceReferenceSchema).min(1).max(16),
+  classification: FindingClassificationSchema,
+  reportDigest: sha256Digest.optional(),
+  operation: z.enum(["create-issue", "comment-evidence"]).optional(),
+  disposition: FindingDispositionSchema.optional(),
+  issueNumber: z.number().int().positive().optional(),
+  issueNodeId: safeId.optional(),
+  issueUrl: z.string().url().max(2_048).optional(),
+  reasonCode: z
+    .enum([
+      "repaired",
+      "filed",
+      "duplicate",
+      "no-authority",
+      "unsafe-content",
+      "security-sensitive",
+      "destination-unavailable",
+      "permission-denied",
+      "template-required",
+      "rate-limited",
+      "ambiguous-transport",
+      "closed-recurrence",
+      "reporting-limit",
+    ])
+    .optional(),
+}).superRefine((value, context) => {
+  if (
+    (value.attempt !== undefined && value.workItem === undefined) ||
+    !/^[a-z0-9].*\/[a-z0-9]/.test(value.destination)
+  ) {
+    context.addIssue({ code: "custom", message: "finding scope or destination is invalid" });
+  }
+  if (
+    value.event === "FindingDecision" &&
+    (value.reportDigest || value.operation || value.disposition)
+  )
+    context.addIssue({
+      code: "custom",
+      message: "finding decisions cannot claim publication effects",
+    });
+  if (
+    value.event === "FindingPublicationIntent" &&
+    (!value.reportDigest || !value.operation || value.disposition)
+  )
+    context.addIssue({ code: "custom", message: "finding publication intent is incomplete" });
+  if (
+    value.event === "FindingDisposition" &&
+    (!value.reportDigest || !value.disposition || !value.reasonCode || value.operation)
+  )
+    context.addIssue({ code: "custom", message: "finding disposition is incomplete" });
+  const linked =
+    value.disposition === "issue-filed" || value.disposition === "existing-issue-linked";
+  if (linked !== Boolean(value.issueNumber && value.issueNodeId && value.issueUrl))
+    context.addIssue({
+      code: "custom",
+      message: "linked finding dispositions require exact issue identity",
+    });
+});
+
 export const FactoryEventSchema = z.union([
   RunStarted,
   RunTerminal,
@@ -859,6 +934,7 @@ export const FactoryEventSchema = z.union([
   GraphProjected,
   Budget,
   ProviderQuotaBlocked,
+  Finding,
 ]);
 
 export type FactoryEvent = z.infer<typeof FactoryEventSchema>;
@@ -867,6 +943,7 @@ export type LeaseEvent = z.infer<typeof Lease>;
 export type DeliveryEvent = z.infer<typeof Delivery>;
 export type PublicationEvent = z.infer<typeof Publication>;
 export type ProviderQuotaEvent = z.infer<typeof ProviderQuotaBlocked>;
+export type FindingEvent = z.infer<typeof Finding>;
 
 export function parseFactoryEvent(input: unknown): FactoryEvent {
   const record = FactoryEventSchema.parse(input);

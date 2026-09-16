@@ -17,6 +17,9 @@ local-first, atomically budgeted cloud burst; correct linear-stack and sibling/j
 independent validation of every published SHA; explainable scheduling, accounting and delivery
 decisions; and reconstruction of meaningful state from GitHub without a private database or queue.
 The installed [application qualification](APPLICATION-QUALIFICATION.md) is part of this acceptance.
+The installed [finding-reporting qualification](FINDING-REPORTING-QUALIFICATION.md) is required for
+the optional automatic issue-publication path; deterministic tests alone do not authorize or prove
+live cross-repository mutations.
 The [design](DESIGN.md#definition-of-done) defines the complete behavior and boundaries.
 
 ## Release verification procedure

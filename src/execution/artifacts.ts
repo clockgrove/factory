@@ -50,7 +50,7 @@ export const CommandResultSchema = z
 
 export const NormalizedArtifactSchema = z
   .object({
-    protocol: z.literal("clockgrove.factory/artifact-v1"),
+    protocol: z.literal("clockgrove.factory/artifact"),
     baseSha: gitSha,
     digest: sha256Digest,
     patch: z.string().max(MAX_ARTIFACT_PATCH_BYTES),
@@ -96,9 +96,9 @@ export function artifactDigest(input: {
     .update(input.changedPaths.slice().sort().join("\0"))
     .update("\0")
     .update(input.patch);
-  // Preserve the exact old digest for old inline artifacts.
+  // The canonical artifact binds external content into the same digest.
   if (input.payload || input.fileManifest)
-    hash.update("\0content-v1\0").update(
+    hash.update("\0content\0").update(
       JSON.stringify({
         ...(input.payload ? { payload: ArtifactPayloadSchema.parse(input.payload) } : {}),
         ...(input.fileManifest
@@ -147,7 +147,7 @@ export function normalizeArtifact(input: ArtifactInput): NormalizedArtifact {
   // durable artifact boundary.
   assertNoSecretMaterial(rawLogs, "worker logs");
   const core = {
-    protocol: "clockgrove.factory/artifact-v1" as const,
+    protocol: "clockgrove.factory/artifact" as const,
     baseSha: input.baseSha,
     patch: input.patch,
     ...(input.payload ? { payload: input.payload } : {}),

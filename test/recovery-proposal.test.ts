@@ -187,7 +187,7 @@ async function fixture(withPublications = true, native: "siblings" | "stack" | f
         permittedSecretNames: [],
         trust: "trusted_local",
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
       ...(native
         ? {
             delivery: {

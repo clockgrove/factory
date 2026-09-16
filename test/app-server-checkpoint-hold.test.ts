@@ -84,7 +84,7 @@ async function fixture() {
     },
   };
   const arm = {
-    protocol: "clockgrove.factory/app-server-checkpoint-arm-v2",
+    protocol: "clockgrove.factory/app-server-checkpoint-arm",
     repository: args.repository,
     objective: args.objective,
     activationRequestId: args.activationRequestId,
@@ -139,7 +139,7 @@ describe("one-shot installed App Server checkpoint hold", () => {
     );
     const witness = JSON.parse(await readFile(`${f.path}.reached`, "utf8"));
     expect(witness).toMatchObject({
-      protocol: "clockgrove.factory/app-server-checkpoint-reached-v2",
+      protocol: "clockgrove.factory/app-server-checkpoint-reached",
       runId: "run-7",
       workItem: 8,
       attempt: 1,
@@ -236,20 +236,6 @@ describe("one-shot installed App Server checkpoint hold", () => {
       }),
     ).rejects.toThrow("lease lost");
     await expect(readFile(`${f.path}.reached`)).rejects.toMatchObject({ code: "ENOENT" });
-  });
-  it("rejects an unreached v1 arm instead of silently extending it", async () => {
-    const f = await fixture();
-    const {
-      eligibilityDurationMs: _eligibilityDurationMs,
-      holdDurationMs: _holdDurationMs,
-      ...legacy
-    } = f.arm;
-    await f.armNow({
-      ...legacy,
-      protocol: "clockgrove.factory/app-server-checkpoint-arm-v1",
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
-    await expect(holdAppServerQualificationCheckpoint(f.args)).rejects.toThrow("arm v1 is retired");
   });
   it("reaches after the former ten-minute arm window and starts a fresh bounded hold", async () => {
     const f = await fixture();

@@ -58,6 +58,7 @@ import {
   type RepositoryCapabilityBindings,
   type WorkerPacket,
 } from "./protocol/worker-packet.js";
+import { WorkerAssetInputSchema, type WorkerAssetInput } from "./assets/contracts.js";
 import {
   assertUtf8WithinBytes,
   assertWithinBytes,
@@ -99,7 +100,9 @@ export interface CompiledWorkItem {
   baseSha?: string | undefined;
   validationCommands?: string[] | undefined;
   requirements?: ExecutionRequirements | undefined;
-  artifactContract?: "clockgrove.factory/artifact-v1" | undefined;
+  artifactContract?: "clockgrove.factory/artifact" | undefined;
+  /** Immutable Objective inputs selected by the compiler; raw source locations are forbidden. */
+  assetInputs?: WorkerAssetInput[] | undefined;
   /** Compiler analysis fields are optional only for persisted pre-vNext graphs. */
   context?: z.infer<typeof ContextManifestSchema> | undefined;
   changeSurface?: z.infer<typeof ChangeSurfaceSchema> | undefined;
@@ -454,7 +457,8 @@ const PersistedCompiledWorkItemSchema = z
     baseSha: z.string().regex(/^[0-9a-f]{40}$/i),
     validationCommands: z.array(z.string().min(1).max(1_000)).min(1).max(32),
     requirements: ExecutionRequirementsSchema,
-    artifactContract: z.literal("clockgrove.factory/artifact-v1"),
+    artifactContract: z.literal("clockgrove.factory/artifact"),
+    assetInputs: z.array(WorkerAssetInputSchema).max(32).optional(),
     context: ContextManifestSchema.optional(),
     changeSurface: ChangeSurfaceSchema.optional(),
     criterionRisks: CriterionRiskAssessmentSchema.optional(),
@@ -704,9 +708,10 @@ export function workerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
     wi.requirements === undefined ||
     wi.artifactContract === undefined
   ) {
-    throw new Error(`Work Item ${wi.id} has an incomplete v2 Worker Packet`);
+    throw new Error(`Work Item ${wi.id} has an incomplete Worker Packet`);
   }
   return parseWorkerPacket({
+    protocol: "clockgrove.factory/worker-packet",
     goal: wi.goal,
     acceptanceCriteria: wi.acceptance,
     allowedPaths: wi.scope,
@@ -717,6 +722,7 @@ export function workerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
     validationCommands: wi.validationCommands,
     requirements: wi.requirements,
     artifactContract: wi.artifactContract,
+    assetInputs: wi.assetInputs ?? [],
     ...(wi.context ? { context: wi.context } : {}),
     ...(wi.changeSurface ? { changeSurface: wi.changeSurface } : {}),
     ...(wi.criterionRisks ? { criterionRisks: wi.criterionRisks } : {}),
@@ -755,7 +761,7 @@ export function parseWorkerPacketFromIssue(body: string): WorkerPacket {
   const pattern = new RegExp(`<!--\\s*${WORKER_PACKET_MARKER}\\s+([A-Za-z0-9_-]+)\\s*-->`, "g");
   const matches = [...body.matchAll(pattern)];
   if (matches.length !== 1 || !matches[0]?.[1]) {
-    throw new Error("Work Item must contain exactly one v2 Worker Packet envelope");
+    throw new Error("Work Item must contain exactly one Worker Packet envelope");
   }
   const raw = Buffer.from(matches[0][1], "base64url").toString("utf8");
   return parseWorkerPacket(JSON.parse(raw));

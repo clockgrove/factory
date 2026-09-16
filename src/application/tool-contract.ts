@@ -31,6 +31,8 @@ export const APPLICATION_TOOL_DEFINITIONS: ReadonlyArray<
   readonly [string, ApplicationOperation, ApplicationToolAnnotations]
 > = [
   ["factory_doctor", "doctor", READ],
+  ["factory_assets_import", "assets-import", WRITE],
+  ["factory_assets_inspect", "assets-inspect", READ],
   ["factory_plan", "plan", READ],
   ["factory_compiler_eval", "compiler-eval", READ],
   ["factory_recovery_plan", "recovery-plan", READ],

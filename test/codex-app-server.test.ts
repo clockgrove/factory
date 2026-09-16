@@ -196,6 +196,7 @@ async function context(
     workspace,
     deadline: new Date(Date.now() + 10_000),
     packet: {
+      protocol: "clockgrove.factory/worker-packet",
       goal: "change value",
       acceptanceCriteria: ["changed"],
       allowedPaths: ["value.txt"],
@@ -204,7 +205,7 @@ async function context(
       conventions: [],
       baseSha,
       validationCommands: ["node --version"],
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
       requirements: {
         os: [],
         architecture: [],

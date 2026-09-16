@@ -104,7 +104,7 @@ function item(
       timeoutMinutes: 5,
       estimatedDurationMinutes: 5,
     },
-    artifactContract: "clockgrove.factory/artifact-v1",
+    artifactContract: "clockgrove.factory/artifact",
   };
 }
 function combined(value: PreparedCompilerCase, baseSha = sha) {

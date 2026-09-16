@@ -13,7 +13,9 @@ import {
 } from "./control/integration-admission.js";
 import { reconcileAdmissionForSuccessor } from "./control/admission-reassignment.js";
 import { observeLocalScopeBatch } from "./recovery/scope-resources.js";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { readObjectiveAssetManifest } from "./assets/storage.js";
+import { materializeObjectiveAssets } from "./assets/materialize.js";
 
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
 import { CodexSdkLocalBackend } from "./backends/codex-sdk-local.js";
@@ -847,6 +849,51 @@ export async function runDurableCompilationTransaction(args: {
 }
 
 type Snapshot = Awaited<ReturnType<GitHubReader["readObjective"]>>;
+
+async function prepareObjectiveAssetRoot(args: {
+  store: GitHubControlStore;
+  repository: string;
+  objective: number;
+  authorityBaseSha: string;
+  packet: WorkerPacket;
+  attemptWorkspace: string;
+}): Promise<string | undefined> {
+  const bindings = args.packet.assetInputs ?? [];
+  if (!bindings.length) return undefined;
+  const manifestDigests = [...new Set(bindings.map(({ manifestDigest }) => manifestDigest))];
+  if (manifestDigests.length !== 1)
+    throw new Error("one Worker Packet may bind assets from exactly one Objective manifest");
+  const manifest = await readObjectiveAssetManifest({
+    store: args.store,
+    authority: {
+      repository: args.repository,
+      objective: args.objective,
+      baseSha: args.authorityBaseSha,
+    },
+    digest: manifestDigests[0]!,
+  });
+  if (!manifest) throw new Error("Worker Packet Objective asset manifest is unavailable");
+  for (const binding of bindings) {
+    const entry = manifest.assets.find(
+      ({ descriptor }) => descriptor.digest === binding.descriptorDigest,
+    );
+    if (
+      !entry ||
+      entry.descriptor.content.digest !== binding.contentDigest ||
+      entry.storage.digest !== binding.storageReceiptDigest ||
+      entry.descriptor.materializationPath !== binding.path
+    )
+      throw new Error("Worker Packet Objective asset binding differs from its immutable manifest");
+  }
+  return (
+    await materializeObjectiveAssets({
+      store: args.store,
+      manifest,
+      supervisorRoot: join(args.attemptWorkspace, ".factory-objective-assets"),
+      descriptorDigests: bindings.map(({ descriptorDigest }) => descriptorDigest),
+    })
+  ).root;
+}
 
 /** Resolve constructor-time resources from the same authenticated observation
  * that the foreground Supervisor will consume. A later under-lease read still
@@ -6648,6 +6695,7 @@ export class FactorySupervisor {
                 policy: this.#policy,
                 requirements: packet.requirements,
                 requiresManagedToolchain: Boolean(packet.managedRuntimes?.length),
+                requiresOfflineAssetInputs: Boolean(packet.assetInputs?.length),
                 nowMs,
               }),
               commandState.cloudPaused,
@@ -7713,6 +7761,14 @@ export class FactorySupervisor {
             throw new ExecutionSourceAdvancedBeforeDispatchError(
               "execution source ref changed during final dispatch validation",
             );
+          const assetRoot = await prepareObjectiveAssetRoot({
+            store: this.#store,
+            repository: `${this.#options.owner}/${this.#options.repo}`,
+            objective: this.#run.objective,
+            authorityBaseSha: this.#run.baseSha ?? packet.baseSha,
+            packet,
+            attemptWorkspace: worker!.path,
+          });
           assertSupportedModelTokenBudgetIntent(this.#policy);
           if (selected!.capabilities.reportsModelUsage)
             await this.#admitModelInvocation(
@@ -7739,6 +7795,7 @@ export class FactorySupervisor {
             directorEpoch: reservation!.directorEpoch,
             policyDigest: reservation!.policyDigest,
             workspace: worker!.path,
+            ...(assetRoot ? { assetRoot } : {}),
             packet,
             ...(sessionJournal ? { sessionJournal } : {}),
             policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
@@ -9499,6 +9556,14 @@ export class FactorySupervisor {
       this.#policy,
       reservation.attempt === 1 ? "implement" : "recover",
     );
+    const assetRoot = await prepareObjectiveAssetRoot({
+      store: this.#store,
+      repository,
+      objective: reservation.objective,
+      authorityBaseSha: this.#run.baseSha ?? prepared.packet.baseSha,
+      packet: prepared.packet,
+      attemptWorkspace: prepared.binding.workspace,
+    });
     let handle: BackendHandle | undefined;
     try {
       handle = await backend.resume(
@@ -9511,6 +9576,7 @@ export class FactorySupervisor {
           directorEpoch: reservation.directorEpoch,
           policyDigest: reservation.policyDigest,
           workspace: prepared.binding.workspace,
+          ...(assetRoot ? { assetRoot } : {}),
           packet: prepared.packet,
           deadline: new Date(prepared.binding.deadline),
           policyNetworkDestinations: this.#policy.allowedNetworkDestinations,

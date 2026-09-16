@@ -1418,7 +1418,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     );
   const list = createCheckpointList(request);
   evidence = {
-    protocol: "clockgrove.factory/checkpoint-restart-qualification-v1",
+    protocol: "clockgrove.factory/checkpoint-restart-qualification",
     authority,
     artifact,
     sourceCommit,

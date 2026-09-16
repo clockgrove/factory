@@ -19,7 +19,7 @@ import { recoveryEventDigest } from "../recovery/identity.js";
 
 export const ArtifactTransferQualificationArmSchema = z
   .object({
-    protocol: z.literal("clockgrove.factory/artifact-transfer-checkpoint-arm-v2"),
+    protocol: z.literal("clockgrove.factory/artifact-transfer-checkpoint-arm"),
     repository: z.string().regex(/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/),
     objective: z.number().int().positive(),
     activationRequestId: z.string().min(1).max(200),
@@ -167,7 +167,6 @@ export class ArtifactTransferQualificationHeldError extends Error {
     this.name = "ArtifactTransferQualificationHeldError";
   }
 }
-class ArtifactTransferQualificationArmVersionError extends Error {}
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 const directoryPath = () =>
   join(tmpdir(), `factory-artifact-transfer-checkpoints-${process.getuid?.()}`);
@@ -250,17 +249,9 @@ export async function holdArtifactTransferQualificationCheckpoint(args: {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       throw error;
     }
-    const rawArm: unknown = JSON.parse(original.bytes.toString("utf8"));
-    if (
-      rawArm !== null &&
-      typeof rawArm === "object" &&
-      (rawArm as { protocol?: unknown }).protocol ===
-        "clockgrove.factory/artifact-transfer-checkpoint-arm-v1"
-    )
-      throw new ArtifactTransferQualificationArmVersionError(
-        "artifact transfer qualification checkpoint arm v1 is retired; use a fresh v2 scenario",
-      );
-    const arm = ArtifactTransferQualificationArmSchema.parse(rawArm);
+    const arm = ArtifactTransferQualificationArmSchema.parse(
+      JSON.parse(original.bytes.toString("utf8")),
+    );
     const identity = checkpoint.identity;
     for (const key of ["repository", "objective", "policyDigest", "baseSha"] as const)
       if (arm[key] !== identity[key])
@@ -339,7 +330,7 @@ export async function holdArtifactTransferQualificationCheckpoint(args: {
       throw new Error("artifact transfer checkpoint expired before reaching");
     const holdUntil = reachedAt + arm.holdDurationMs;
     const witness = {
-      protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached-v2",
+      protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached",
       armDigest: hash(original.bytes),
       activationRequestId: arm.activationRequestId,
       ...identity,
@@ -385,11 +376,7 @@ export async function holdArtifactTransferQualificationCheckpoint(args: {
     }
     throw new ArtifactTransferQualificationHeldError();
   } catch (cause) {
-    if (
-      cause instanceof ArtifactTransferQualificationHeldError ||
-      cause instanceof ArtifactTransferQualificationArmVersionError
-    )
-      throw cause;
+    if (cause instanceof ArtifactTransferQualificationHeldError) throw cause;
     throw new ArtifactTransferQualificationHeldError(cause);
   } finally {
     await directory.close();

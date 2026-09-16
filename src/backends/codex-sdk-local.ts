@@ -503,6 +503,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     supportsResume: false,
     supportsLocalInference: false,
     supportsManagedToolchainExecution: true,
+    supportsOfflineAssetInputs: true,
     reportsModelUsage: true,
     supportsModelSelection: true,
     requiresPaidRuntime: false,

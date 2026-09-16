@@ -10,6 +10,15 @@ they do not by themselves indicate a published or fully qualified release. The h
 [GitHub Releases](https://github.com/clockgrove/factory/releases) for published release notes
 and artifacts, and record the commit SHA when installing from source.
 
+### Added
+
+- Add media-agnostic Objective input assets with exact-byte identity, explicit local-file and
+  recognized GitHub-attachment import, rights and visibility policy, static text/Markdown and
+  bounded raster handlers, opaque passive transport, immutable Git-ref receipts, verified offline
+  materialization, and digest-only Worker Packet bindings. Replace the prerelease Worker Packet,
+  artifact and transfer contracts in place with one canonical unversioned format.
+  ([#415](https://github.com/clockgrove/factory/issues/415))
+
 ### Documentation
 
 - Replace historical run ledgers with release procedures and supported-behavior guidance;

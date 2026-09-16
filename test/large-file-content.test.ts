@@ -190,7 +190,7 @@ describe("bounded content-addressed artifacts", () => {
     await expect(inspectContentFile(join(f.repository, "link"))).rejects.toThrow();
     expect(() =>
       ArtifactPayloadSchema.parse({
-        kind: "git-patch-chunks-v1",
+        kind: "content-chunks",
         digest: "a".repeat(64),
         bytes: 9,
         chunks: [{ digest: "b".repeat(64), bytes: 8 }],

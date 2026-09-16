@@ -36,6 +36,7 @@ function deadlineContext(): AttemptContext {
     workspace: "/tmp/factory-vercel-deadline",
     deadline: new Date(2_000),
     packet: {
+      protocol: "clockgrove.factory/worker-packet",
       goal: "deadline boundary",
       acceptanceCriteria: [],
       allowedPaths: [],
@@ -44,7 +45,7 @@ function deadlineContext(): AttemptContext {
       conventions: [],
       baseSha: "a".repeat(40),
       validationCommands: [],
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
       requirements: {
         os: [],
         architecture: [],
@@ -56,7 +57,7 @@ function deadlineContext(): AttemptContext {
       },
     },
     artifact: {
-      protocol: "clockgrove.factory/artifact-v1",
+      protocol: "clockgrove.factory/artifact",
       baseSha: "a".repeat(40),
       patch: "",
       changedPaths: [],

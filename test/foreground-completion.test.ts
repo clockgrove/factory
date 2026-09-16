@@ -132,7 +132,7 @@ async function fixture(backend = "codex-sdk/local-worktree", managedRuntime = fa
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
         ...(managedRuntime
           ? {
               managedRuntimes: [

@@ -192,7 +192,7 @@ describe.skipIf(!LIVE)("live GitHub managed-agent plus isolated-validator smoke"
                 memoryMb: 1_024,
                 diskMb: 2_048,
               },
-              artifactContract: "clockgrove.factory/artifact-v1",
+              artifactContract: "clockgrove.factory/artifact",
             },
           ],
         };
@@ -233,6 +233,7 @@ describe.skipIf(!LIVE)("live GitHub managed-agent plus isolated-validator smoke"
         const deadline = new Date(Date.now() + MAX_MINUTES * 60_000);
         const workItem = compiled.workItems[0]!;
         const packet = {
+          protocol: "clockgrove.factory/worker-packet" as const,
           goal: workItem.goal,
           acceptanceCriteria: workItem.acceptance,
           allowedPaths: workItem.scope,
@@ -242,7 +243,7 @@ describe.skipIf(!LIVE)("live GitHub managed-agent plus isolated-validator smoke"
           baseSha: base.oid,
           validationCommands: workItem.validationCommands!,
           requirements: workItem.requirements!,
-          artifactContract: "clockgrove.factory/artifact-v1" as const,
+          artifactContract: "clockgrove.factory/artifact" as const,
         };
         const context: AttemptContext = {
           repository: `${target.owner}/${target.repo}`,

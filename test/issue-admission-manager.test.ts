@@ -281,6 +281,7 @@ describe("production issue admission manager", () => {
     const f = await fixture();
     const runtimeReceipt = activeRuntimeBundleSync("pnpm");
     const packet = parseWorkerPacket({
+      protocol: "clockgrove.factory/worker-packet",
       goal: "Run the exact managed check.",
       acceptanceCriteria: ["the check passes"],
       allowedPaths: ["src/"],
@@ -308,7 +309,7 @@ describe("production issue admission manager", () => {
           bundleDigest: runtimeReceipt.digest,
         },
       ],
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     });
     const activation = createManagedRuntimeActivation({
       packet,

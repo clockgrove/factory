@@ -45,6 +45,54 @@ export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule
     "unmapped-obligation",
     "An explicit obligation has no Work Item mapping.",
   ),
+  "duplicate-media-intent-id": rule(
+    "duplicate-media-intent-id",
+    "A media intent identifier is duplicated.",
+  ),
+  "unknown-media-obligation": rule(
+    "unknown-media-obligation",
+    "A media intent maps an unknown obligation.",
+  ),
+  "unknown-media-work-item": rule(
+    "unknown-media-work-item",
+    "A media intent binds an unknown Work Item.",
+  ),
+  "unknown-media-criterion": rule(
+    "unknown-media-criterion",
+    "A media intent binds an unknown acceptance criterion.",
+  ),
+  "unknown-imported-asset": rule(
+    "unknown-imported-asset",
+    "A media intent references an asset outside the exact imported manifest.",
+  ),
+  "unconsumed-media-intent": rule(
+    "unconsumed-media-intent",
+    "A media intent lacks one canonical producer or consumer binding.",
+  ),
+  "ungrounded-media-intent": rule(
+    "ungrounded-media-intent",
+    "A media intent is not grounded in a bound Work Item obligation.",
+  ),
+  "incompatible-media-output": rule(
+    "incompatible-media-output",
+    "No permitted producer can satisfy the media output constraints.",
+  ),
+  "unauthorized-media-review": rule(
+    "unauthorized-media-review",
+    "The requested deterministic media review rule is not preauthorized.",
+  ),
+  "inconsistent-media-necessity": rule(
+    "inconsistent-media-necessity",
+    "A helpful media intent is used as required acceptance evidence or has inconsistent ordering.",
+  ),
+  "media-producer-unavailable": rule(
+    "media-producer-unavailable",
+    "A required media intent has no imported result or permitted producer.",
+  ),
+  "media-dependency-cycle": rule(
+    "media-dependency-cycle",
+    "Derived media producer ordering would create a dependency cycle.",
+  ),
   "unknown-dependency": rule("unknown-dependency", "A dependency names an unknown Work Item."),
   "dependency-cycle": rule("dependency-cycle", "The dependency graph contains a cycle."),
   "dependency-limit": rule("dependency-limit", "A Work Item exceeds the dependency bound."),

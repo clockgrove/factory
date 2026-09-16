@@ -58,7 +58,10 @@ function proposedGraph(baseSha = "a".repeat(40)): CompiledObjective {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact",
+        deliverable: {
+          kind: "repository-change" as const,
+          contract: "clockgrove.factory/artifact" as const,
+        },
       },
     ],
   });
@@ -104,6 +107,7 @@ describe("FactoryApplicationService", () => {
       objective: 7,
       requestId: "offline-activation",
       baseSha: "a".repeat(40),
+      assetManifestDigest: "b".repeat(64),
     };
     const [first, duplicate] = await Promise.all([
       service.activate(input),
@@ -113,9 +117,13 @@ describe("FactoryApplicationService", () => {
     expect(duplicate).toEqual(first);
     expect(first).toMatchObject({
       event: "ActivationRequested",
+      assetManifestDigest: "b".repeat(64),
       policy: { compilerEvaluation: DEFAULT_RUN_POLICY.compilerEvaluation },
       policyDigest: policyDigest(DEFAULT_RUN_POLICY),
     });
+    await expect(
+      service.activate({ ...input, assetManifestDigest: "c".repeat(64) }),
+    ).rejects.toThrow("already used for a different request");
   });
 
   it("replays an omitted-policy historical activation without granting today's repair authority", async () => {

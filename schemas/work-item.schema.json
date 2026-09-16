@@ -5,7 +5,17 @@
   "description": "One compiled Work Item: an Objective's sub-issue (§3.1), described fully enough to become both a GitHub issue and an Agent Tasks prompt (§8's Work Packet -> prompt) with no further judgment required at dispatch time.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "title", "goal", "acceptance", "criterionRisks", "scope", "baseSha", "validationCommands", "requirements", "artifactContract"],
+  "required": [
+    "id",
+    "title",
+    "goal",
+    "acceptance",
+    "scope",
+    "baseSha",
+    "validationCommands",
+    "requirements",
+    "deliverable"
+  ],
   "properties": {
     "id": {
       "type": "string",
@@ -42,7 +52,16 @@
         "required": ["criterion", "risk"],
         "properties": {
           "criterion": { "type": "string", "minLength": 1, "maxLength": 2000 },
-          "risk": { "enum": ["ordinary", "safety", "security", "destructive-action", "accounting", "recovery"] }
+          "risk": {
+            "enum": [
+              "ordinary",
+              "safety",
+              "security",
+              "destructive-action",
+              "accounting",
+              "recovery"
+            ]
+          }
         }
       },
       "minItems": 1,
@@ -51,8 +70,12 @@
     "scope": {
       "type": "array",
       "description": "Files or directories (trailing '/' scopes a whole directory) this Work Item may modify (§8). A one-line scope constraint holds reliably in practice (docs/PLATFORM-BEHAVIOR.md). This is also `evaluate.ts`'s `isUntouched` input -- keep entries concrete paths, not glob patterns.",
-      "items": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*[*?\\[]).+$" },
-      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500,
+        "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*[*?\\[]).+$"
+      },
       "maxItems": 64
     },
     "preconditions": {
@@ -79,7 +102,12 @@
     "dependsOn": {
       "type": "array",
       "description": "IDs (this schema's `id` field, not issue numbers) of Work Items that must finish first. `graph.ts` applies them as native GitHub 'blocked by' relationships. Every entry must resolve, the graph must be acyclic, and any pair with overlapping scope must have a dependency path; runtime graph validation enforces these cross-item invariants before the first issue write.",
-      "items": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9-]*$" },
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
       "default": [],
       "maxItems": 50
     },
@@ -92,51 +120,105 @@
       "type": "array",
       "description": "Authoritative host-side commands that must pass in a fresh checkout before publication.",
       "items": { "type": "string", "minLength": 1, "maxLength": 1000 },
-      "minItems": 1,
       "maxItems": 32
     },
     "requirements": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["os", "architecture", "tools", "services", "networkDestinations", "permittedSecretNames", "trust"],
+      "required": [
+        "os",
+        "architecture",
+        "tools",
+        "services",
+        "networkDestinations",
+        "permittedSecretNames",
+        "trust"
+      ],
       "properties": {
         "os": { "type": "array", "items": { "type": "string", "minLength": 1 }, "maxItems": 12 },
-        "architecture": { "type": "array", "items": { "type": "string", "minLength": 1 }, "maxItems": 8 },
+        "architecture": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "maxItems": 8
+        },
         "cpu": { "type": "number", "exclusiveMinimum": 0, "maximum": 256 },
         "memoryMb": { "type": "integer", "minimum": 1, "maximum": 1048576 },
         "diskMb": { "type": "integer", "minimum": 1, "maximum": 10485760 },
         "timeoutMinutes": { "type": "integer", "minimum": 1, "maximum": 1440 },
-        "tools": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" }, "maxItems": 64 },
-        "services": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" }, "maxItems": 64 },
-        "networkDestinations": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^(?:\\*\\.)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}$" }, "maxItems": 64 },
-        "permittedSecretNames": { "type": "array", "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,127}$" }, "maxItems": 32 },
+        "tools": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" },
+          "maxItems": 64
+        },
+        "services": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" },
+          "maxItems": 64
+        },
+        "networkDestinations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253,
+            "pattern": "^(?:\\*\\.)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}$"
+          },
+          "maxItems": 64
+        },
+        "permittedSecretNames": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,127}$" },
+          "maxItems": 32
+        },
         "trust": { "enum": ["trusted_local", "isolated", "managed"] },
-        "evidence": { "$ref": "worker-packet.schema.json#/properties/requirements/properties/evidence" }
+        "evidence": {
+          "$ref": "worker-packet.schema.json#/properties/requirements/properties/evidence"
+        }
       }
     },
-    "artifactContract": {
-      "const": "clockgrove.factory/artifact"
+    "deliverable": {
+      "$ref": "worker-packet.schema.json#/definitions/workItemDeliverable"
     },
     "assetInputs": { "$ref": "worker-packet.schema.json#/properties/assetInputs", "default": [] },
+    "generatedAssetRequirements": {
+      "$ref": "worker-packet.schema.json#/properties/generatedAssetRequirements",
+      "default": []
+    },
     "context": { "$ref": "worker-packet.schema.json#/properties/context" },
     "changeSurface": { "$ref": "worker-packet.schema.json#/properties/changeSurface" },
     "delivery": { "$ref": "worker-packet.schema.json#/properties/delivery" },
-    "repositoryCapabilities": { "$ref": "worker-packet.schema.json#/properties/repositoryCapabilities" },
+    "repositoryCapabilities": {
+      "$ref": "worker-packet.schema.json#/properties/repositoryCapabilities"
+    },
     "managedRuntimes": { "$ref": "worker-packet.schema.json#/properties/managedRuntimes" },
     "validation": {
-      "type": "array", "minItems": 1, "maxItems": 4,
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
       "items": {
-        "type": "object", "additionalProperties": false, "required": ["tier", "criteria"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tier", "criteria"],
         "properties": {
           "tier": { "enum": ["mechanical", "semantic", "visual", "deterministic-simulation"] },
-          "criteria": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+          "criteria": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": { "type": "string", "minLength": 1, "maxLength": 2000 }
+          },
           "rationale": { "type": "string", "minLength": 1, "maxLength": 2000 },
-          "evidenceCommands": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }
+          "evidenceCommands": {
+            "type": "array",
+            "maxItems": 32,
+            "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+          }
         }
       }
     },
     "economicReview": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "required": ["conservative", "rationale", "paidMeasurementRequired"],
       "properties": {
         "conservative": { "const": true },
@@ -144,5 +226,38 @@
         "paidMeasurementRequired": { "type": "boolean" }
       }
     }
-  }
+  },
+  "oneOf": [
+    {
+      "required": ["criterionRisks"],
+      "properties": {
+        "deliverable": {
+          "$ref": "worker-packet.schema.json#/definitions/workItemDeliverable/oneOf/0"
+        },
+        "scope": { "minItems": 1 },
+        "validationCommands": { "minItems": 1 }
+      }
+    },
+    {
+      "properties": {
+        "deliverable": {
+          "$ref": "worker-packet.schema.json#/definitions/workItemDeliverable/oneOf/1"
+        },
+        "scope": { "maxItems": 0 },
+        "validationCommands": { "maxItems": 0 }
+      },
+      "not": {
+        "anyOf": [
+          { "required": ["criterionRisks"] },
+          { "required": ["context"] },
+          { "required": ["changeSurface"] },
+          { "required": ["delivery"] },
+          { "required": ["validation"] },
+          { "required": ["repositoryCapabilities"] },
+          { "required": ["managedRuntimes"] },
+          { "required": ["generatedAssetRequirements"] }
+        ]
+      }
+    }
+  ]
 }

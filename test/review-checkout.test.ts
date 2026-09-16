@@ -59,7 +59,10 @@ async function fixture() {
     outOfScope: [],
     conventions: [],
     validationCommands: ["node --test"],
-    artifactContract: "clockgrove.factory/artifact",
+    deliverable: {
+      kind: "repository-change" as const,
+      contract: "clockgrove.factory/artifact" as const,
+    },
     requirements: {
       os: ["linux"],
       architecture: [],
@@ -155,7 +158,10 @@ async function greenfieldFixture(unsafeLifecycle = false) {
     conventions: [],
     validationCommands: ["pnpm check"],
     managedRuntimes: selectedManagedRuntimeRequirements(["pnpm check"]),
-    artifactContract: "clockgrove.factory/artifact",
+    deliverable: {
+      kind: "repository-change" as const,
+      contract: "clockgrove.factory/artifact" as const,
+    },
     requirements: {
       os: ["linux"],
       architecture: [],

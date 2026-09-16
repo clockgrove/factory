@@ -29,8 +29,14 @@ import type {
 import type { LeaseState } from "../src/control/lease.js";
 import { ProviderQuotaError } from "../src/providers/quota.js";
 import { pinFixtureRepository, proposalFromCompiledFixture } from "./helpers/compiler-proposal.js";
-import { semanticProjectionContext, semanticRequest } from "./helpers/semantic-compiler.js";
+import {
+  semanticPinnedFacts,
+  semanticProjectionContext,
+  semanticProposal,
+  semanticRequest,
+} from "./helpers/semantic-compiler.js";
 import { createCompilerValidationReport } from "../src/compiler/violations.js";
+import type { CompilerAssetManifestView } from "../src/assets/media-intent.js";
 import {
   materializePinnedCompilationTree,
   sealPinnedCompilationTreeProof,
@@ -113,6 +119,7 @@ async function fixture() {
     graphDigest: compiledGraphDigest(graph),
     addedEdges: [],
     adapterBindings: [],
+    mediaIntents: [],
     riskElevations: { count: 0, digest: compilerEvalDigest([]) },
   };
   const inventory: ObligationInventory = {
@@ -219,6 +226,236 @@ async function home() {
 }
 const usage = { inputTokens: 4, outputTokens: 2 };
 describe("compiler dispatch admission", () => {
+  it("passes supported compiler media separately while the prompt contains only opaque facts", async () => {
+    const f = await fixture();
+    const imagePath = join(f.directory, "compiler-reference.png");
+    await writeFile(imagePath, "verified-image-fixture");
+    const manifestDigest = "b".repeat(64);
+    const policy = {
+      ...f.context.runPolicy,
+      compilerMediaEgress: {
+        mode: "private-assets" as const,
+        maxAssets: 1,
+        deterministicReviewRuleIds: [],
+      },
+    };
+    const pinnedFacts = semanticPinnedFacts({
+      baseSha: f.context.baseSha,
+      paths: f.context.repositoryFiles,
+    });
+    const request = semanticRequest(pinnedFacts);
+    const assetManifest: CompilerAssetManifestView = {
+      digest: manifestDigest,
+      assets: [
+        {
+          id: "reference-image",
+          mediaType: "image/png",
+          bytes: 22,
+          inspection: {
+            kind: "raster",
+            width: 16,
+            height: 16,
+            frames: 1,
+            alpha: false,
+          },
+          visibility: "private",
+        },
+      ],
+    };
+    request.media = {
+      assetManifest,
+      assetEgress: {
+        mode: "private-assets",
+        policyDigest: compilerEvalDigest(policy.compilerMediaEgress),
+      },
+      producerCapabilities: [],
+      reviewRules: [],
+    };
+    const input = {
+      manifestDigest,
+      descriptorDigest: "c".repeat(64),
+      contentDigest: "d".repeat(64),
+      storageReceiptDigest: "e".repeat(64),
+      path: `assets/${"c".repeat(64)}/reference.png`,
+      purpose: "compiler-import" as const,
+    };
+    const assetEgress = {
+      mode: "private-assets" as const,
+      policyDigest: compilerEvalDigest(policy.compilerMediaEgress),
+    };
+    const mediaPlanning = {
+      assetManifest,
+      mediaInputs: [{ assetId: "reference-image", mediaType: "image/png", path: imagePath }],
+      assetBindings: [{ assetId: "reference-image", input }],
+      assetEgress,
+      producerCapabilities: [],
+      reviewRules: [],
+    };
+    const proposal = semanticProposal(request);
+    mocks.run.mockImplementation(async (args: { args: string[]; stdin: { text: string } }) => {
+      expect(args.args).toContain("--image");
+      expect(args.args).toContain(imagePath);
+      expect(args.stdin.text).not.toContain(imagePath);
+      expect(args.stdin.text).toContain('"id":"reference-image"');
+      return {
+        exitCode: 0,
+        stderr: "",
+        stdout: [
+          JSON.stringify({
+            type: "item.completed",
+            item: { type: "agent_message", text: JSON.stringify(proposal) },
+          }),
+          JSON.stringify({
+            type: "turn.completed",
+            usage: { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens },
+          }),
+        ].join("\n"),
+      };
+    });
+    const backend = new CodexCliManagementBackend({
+      createCodexHome: home,
+      authFile: join(f.directory, "no-auth"),
+    });
+
+    await expect(
+      backend.proposePlan(
+        request,
+        async () => {},
+        { pinnedFacts, runPolicy: policy, mediaPlanning },
+        undefined,
+        {
+          ...f.context,
+          objective: request.objective,
+          runPolicy: policy,
+          mediaPlanning,
+        },
+      ),
+    ).resolves.toMatchObject({
+      provenance: {
+        assetManifestDigest: manifestDigest,
+        mediaEgressDigest: request.media.assetEgress.policyDigest,
+      },
+    });
+    expect(mocks.run).toHaveBeenCalledOnce();
+
+    const unsupportedPlanning = {
+      ...mediaPlanning,
+      mediaInputs: [{ assetId: "reference-image", mediaType: "audio/wav", path: imagePath }],
+    };
+    await expect(
+      backend.proposePlan(
+        request,
+        async () => {},
+        { pinnedFacts, runPolicy: policy, mediaPlanning: unsupportedPlanning },
+        undefined,
+        {
+          ...f.context,
+          objective: request.objective,
+          runPolicy: policy,
+          mediaPlanning: unsupportedPlanning,
+        },
+      ),
+    ).rejects.toThrow("Codex CLI does not support compiler media input types: audio/wav");
+    expect(mocks.run).toHaveBeenCalledOnce();
+  });
+
+  it("checkpoints exact media authority provenance before advancing the evaluated draft", async () => {
+    const f = await fixture();
+    const manifestDigest = "b".repeat(64);
+    const mediaEgress = {
+      mode: "private-assets" as const,
+      maxAssets: 1,
+      deterministicReviewRuleIds: [],
+    };
+    f.context.runPolicy = {
+      ...f.context.runPolicy,
+      compilerMediaEgress: mediaEgress,
+    };
+    f.context.mediaPlanning = {
+      assetManifest: {
+        digest: manifestDigest,
+        assets: [
+          {
+            id: "reference-image",
+            mediaType: "image/png",
+            bytes: 22,
+            inspection: { kind: "raster", width: 16, height: 16, frames: 1, alpha: false },
+            visibility: "private",
+          },
+        ],
+      },
+      mediaInputs: [],
+      assetBindings: [
+        {
+          assetId: "reference-image",
+          input: {
+            manifestDigest,
+            descriptorDigest: "c".repeat(64),
+            contentDigest: "d".repeat(64),
+            storageReceiptDigest: "e".repeat(64),
+            path: `assets/${"c".repeat(64)}/reference.png`,
+            purpose: "compiler-import",
+          },
+        },
+      ],
+      assetEgress: {
+        mode: "private-assets",
+        policyDigest: compilerEvalDigest(mediaEgress),
+      },
+      producerCapabilities: [],
+      reviewRules: [],
+    };
+    f.binding.policyDigest = policyDigest(f.context.runPolicy);
+    f.proposal.workItems[0]!.obligationIds = ["core"];
+    const backend = new CodexCliManagementBackend({
+      createCodexHome: home,
+      authFile: join(f.directory, "no-auth"),
+    });
+    mocks.run.mockImplementation(async () => ({
+      exitCode: 0,
+      stderr: "",
+      stdout: [
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "agent_message",
+            text: JSON.stringify(
+              mocks.run.mock.calls.length === 1
+                ? { version: f.inventory.version, obligations: f.inventory.obligations }
+                : f.proposal,
+            ),
+          },
+        }),
+        JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens },
+        }),
+      ].join("\n"),
+    }));
+
+    await expect(
+      compileEvaluatedDraft({
+        ...f,
+        backend,
+        lease: {} as LeaseState,
+        deadlineAt: Date.now() + 60_000,
+        assertInputs: async () => {
+          if (mocks.run.mock.calls.length >= 2) throw new Error("stop after media proposal");
+        },
+        admit: async () => {},
+        recordUsage: async () => {},
+        validate: async () => {},
+      }),
+    ).rejects.toThrow("stop after media proposal");
+    expect(f.records.filter((record) => record.kind === "result")).toHaveLength(2);
+    expect(f.records.find((record) => record.kind === "validation")).toBeDefined();
+    for (const result of f.records.filter((record) => record.kind === "result"))
+      expect(result.payload.provenance).toMatchObject({
+        assetManifestDigest: manifestDigest,
+        mediaEgressDigest: compilerEvalDigest(mediaEgress),
+      });
+  });
+
   it("removes every qualification authority value from the model subprocess environment", async () => {
     const f = await fixture();
     const authorityEnvironment = {

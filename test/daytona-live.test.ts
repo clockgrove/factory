@@ -69,7 +69,10 @@ async function fixture(): Promise<{ repository: string; context: AttemptContext 
           memoryMb: 4096,
           diskMb: 8192,
         },
-        artifactContract: "clockgrove.factory/artifact",
+        deliverable: {
+          kind: "repository-change" as const,
+          contract: "clockgrove.factory/artifact" as const,
+        },
       },
       policyNetworkDestinations: ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"],
     },

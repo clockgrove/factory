@@ -47,7 +47,10 @@ function context(deadline = new Date(Date.now() + 60_000)): AttemptContext {
       conventions: [],
       baseSha: SHA,
       validationCommands: ["npm test"],
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
       requirements: {
         os: [],
         architecture: [],

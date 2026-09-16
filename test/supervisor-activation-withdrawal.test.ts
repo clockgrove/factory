@@ -278,7 +278,10 @@ describe("Supervisor activation withdrawal races", () => {
                 trust: "trusted_local" as const,
                 estimatedDurationMinutes: 1,
               },
-              artifactContract: "clockgrove.factory/artifact" as const,
+              deliverable: {
+                kind: "repository-change" as const,
+                contract: "clockgrove.factory/artifact" as const,
+              },
               delivery: { group: "adopted-8", relationship: "root" as const },
             },
           ],
@@ -715,7 +718,10 @@ describe("Supervisor activation withdrawal races", () => {
                 permittedSecretNames: [],
                 trust: "trusted_local" as const,
               },
-              artifactContract: "clockgrove.factory/artifact" as const,
+              deliverable: {
+                kind: "repository-change" as const,
+                contract: "clockgrove.factory/artifact" as const,
+              },
               delivery: { group: "adopted-8", relationship: "root" as const },
             },
           ],

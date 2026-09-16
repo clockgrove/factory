@@ -5,7 +5,11 @@ import type { GitCommitObject, LeaseManager, LeaseState } from "../src/control/l
 import { encodeEventTrailer } from "../src/control/receipts.js";
 import { attemptRef } from "../src/control/attempts.js";
 import { ReviewCheckpointManager } from "../src/control/reviews.js";
-import { renderWorkPacket, type CompiledObjective } from "../src/graph.js";
+import {
+  isCompiledRepositoryWorkItem,
+  renderWorkPacket,
+  type CompiledObjective,
+} from "../src/graph.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import type { FactoryReadSnapshot } from "../src/application/status.js";
@@ -123,7 +127,10 @@ async function fixture(topology: "regular" | "sibling" | "stack" = "regular") {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact",
+        deliverable: {
+          kind: "repository-change" as const,
+          contract: "clockgrove.factory/artifact" as const,
+        },
       },
     ],
   };
@@ -139,9 +146,12 @@ async function fixture(topology: "regular" | "sibling" | "stack" = "regular") {
           },
         };
   if (topology !== "regular") {
-    objective.workItems[0]!.delivery = { group: "feature", relationship: "root" };
+    const seed = objective.workItems[0]!;
+    if (!isCompiledRepositoryWorkItem(seed))
+      throw new Error("fixture requires a repository Work Item");
+    seed.delivery = { group: "feature", relationship: "root" };
     objective.workItems.push({
-      ...objective.workItems[0]!,
+      ...seed,
       id: "other",
       title: "Other private feature",
       scope: ["src/other.ts"],

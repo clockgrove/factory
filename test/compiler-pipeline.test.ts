@@ -38,7 +38,10 @@ const base: CompilerWorkItem = {
     permittedSecretNames: [],
     trust: "trusted_local",
   },
-  artifactContract: "clockgrove.factory/artifact",
+  deliverable: {
+    kind: "repository-change" as const,
+    contract: "clockgrove.factory/artifact" as const,
+  },
   context: {
     mustRead: ["src/a.ts"],
     searchSeeds: ["src/a.ts"],

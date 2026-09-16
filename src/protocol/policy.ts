@@ -255,6 +255,32 @@ export const DEFAULT_OBJECTIVE_PLANNING_POLICY = Object.freeze({
   maxAggregateWorkRatio: 1.5,
 });
 
+export const CompilerMediaEgressPolicySchema = z
+  .object({
+    mode: z.enum(["denied", "public-assets", "private-assets"]),
+    maxAssets: z.number().int().min(0).max(32),
+    deterministicReviewRuleIds: z
+      .array(safeId)
+      .max(16)
+      .refine((ids) => new Set(ids).size === ids.length, "review rule IDs must be unique"),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.mode === "denied") !== (value.maxAssets === 0))
+      context.addIssue({
+        code: "custom",
+        path: ["maxAssets"],
+        message:
+          "denied media egress requires zero assets; permitted egress requires a positive bound",
+      });
+  });
+
+export const DEFAULT_COMPILER_MEDIA_EGRESS_POLICY = Object.freeze({
+  mode: "denied" as const,
+  maxAssets: 0,
+  deterministicReviewRuleIds: [],
+});
+
 export const RunPolicySchema = z
   .object({
     backendOrder: z.array(safeId).min(1).max(16),
@@ -289,6 +315,7 @@ export const RunPolicySchema = z
     economics: EconomicsPolicySchema.optional(),
     compilerEvaluation: CompilerEvaluationPolicySchema.optional(),
     objectivePlanning: ObjectivePlanningPolicySchema.optional(),
+    compilerMediaEgress: CompilerMediaEgressPolicySchema,
     /** Explicit authority for bounded defect publication; absence denies automatic writes. */
     findingReporting: FindingReportingPolicySchema.optional(),
   })
@@ -320,6 +347,7 @@ export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
   managementBackend: "codex-cli/local",
   compilerEvaluation: DEFAULT_COMPILER_EVALUATION_POLICY,
   objectivePlanning: DEFAULT_OBJECTIVE_PLANNING_POLICY,
+  compilerMediaEgress: DEFAULT_COMPILER_MEDIA_EGRESS_POLICY,
   allowedNetworkDestinations: ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"],
   priority: {
     source: "subissue-order" as const,

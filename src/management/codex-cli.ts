@@ -136,6 +136,12 @@ function managementInvocationProvenance(
     model: context.modelSelection?.model ?? fallbackModel ?? null,
     reasoning: context.modelSelection?.reasoning ?? null,
     baseSha: context.baseSha,
+    ...(context.mediaPlanning
+      ? {
+          assetManifestDigest: context.mediaPlanning.assetManifest.digest,
+          mediaEgressDigest: context.mediaPlanning.assetEgress.policyDigest,
+        }
+      : {}),
   };
 }
 
@@ -731,6 +737,7 @@ export function renderCompilerProposalPrompt(
     "Use the request's planning thresholds as provisional admission signals, not execution guarantees. Clearly broad requests with independent milestones, resource or authorization boundaries, or likely total work beyond one bounded Objective must return objectives before attempting an excessive graph. A Work Item proposal that exceeds count, configured aggregate-work, or configured critical-path thresholds will be rejected for repair into Objectives. Unknown duration estimates remain null and must not be invented.",
     "An objectives result must provide independently reviewable outcomes, concrete acceptance, owned scope, prerequisite outputs, completion acceptance IDs, complete parent-obligation dispositions, evidence-bearing triggers, and a planningEstimate for every child. Each non-null child estimate must fit the request's corresponding threshold; preserve an unavailable metric as null, explain the child's concrete boundary in basis, and never report a critical path longer than known aggregate work. It only proposes Objectives; it does not create issues, activate runs, expand policy, or imply completion. A clarification result must ask concrete questions and bind them to affected obligations.",
     "For work-items, use the smallest complete acyclic set of independently deliverable Work Items. Preserve every explicit obligation through obligationIds. Do not create placeholders or copy Factory-owned publication, accounting, scheduling, or lifecycle work into the plan.",
+    "For work-items, always return mediaIntents, using [] when no media artifact materially resolves grounded ambiguity, supplies required product content, or provides required acceptance evidence. Propose only obligation-grounded media with exact Work Item and criterion bindings. Use input-to when implementation consumes the result and evidence-for when the media evaluates completed implementation. Visual references, audio, motion, and models are examples; do not infer a format or producer capability that is absent from the supplied facts. Keep repository-native diagrams, renderers, and other code-generated outputs as ordinary repository Work Items. Never name or invent a provider, model, capability, credential, store, URL, digest, path, or network destination.",
     "You own goals, criteria and their stable IDs, obligation mappings, repository-relative scopes, preconditions, exclusions, conventions, dependency intent, validation intent, exclusive-resource intent, duration, trust, and non-derivable tool, service, and network needs.",
     "Select validation evidence only through recipe IDs and finite adapter operations exposed in the request. Each criterion needs sufficient evidence; protected behavior requires mechanical or deterministic-simulation evidence. Do not reproduce commands or derive execution defaults.",
     "Factory deterministically projects identity, commands, execution requirements, repository context, change surface, economics, delivery topology, capability bindings, managed runtimes, and serialization edges after validating the proposal.",
@@ -752,11 +759,15 @@ export function renderCompilerProposalPrompt(
 export class CodexCliManagementBackend implements ManagementBackend {
   readonly id = "codex-cli/local";
   readonly supportsCompilerAdmission = true as const;
+  readonly compilerInputMediaTypes: readonly string[];
   readonly #options: CodexManagementOptions;
   readonly #transcriptRecorder: ManagementTranscriptRecorder | undefined;
 
   constructor(options: CodexManagementOptions = {}) {
     this.#options = options;
+    this.compilerInputMediaTypes = options.runStructured
+      ? []
+      : ["image/png", "image/jpeg", "image/webp", "image/gif", "image/tiff"];
     if (options.transcriptRecorder !== undefined) {
       this.#transcriptRecorder = options.transcriptRecorder ?? undefined;
     } else {
@@ -771,6 +782,18 @@ export class CodexCliManagementBackend implements ManagementBackend {
 
   async #assertCompilerContext(context: CompilationContext | undefined): Promise<void> {
     if (context) assertCompilationContextPolicyAuthority(context);
+    const supportedMediaTypes = new Set<string>(this.compilerInputMediaTypes);
+    const unsupported = context?.mediaPlanning?.mediaInputs.filter(
+      ({ mediaType }) => !supportedMediaTypes.has(mediaType),
+    );
+    if (unsupported?.length)
+      throw new Error(
+        `Codex CLI does not support compiler media input types: ${[
+          ...new Set(unsupported.map(({ mediaType }) => mediaType)),
+        ]
+          .sort()
+          .join(", ")}`,
+      );
     // runStructured is an injected test boundary and never launches Codex in the supplied cwd.
     if (this.#options.runStructured) return;
     if (!context) throw new Error("management model requires an exact-base compilation context");
@@ -844,6 +867,12 @@ export class CodexCliManagementBackend implements ManagementBackend {
       model: execution?.modelSelection?.model ?? this.#options.model ?? null,
       reasoning: execution?.modelSelection?.reasoning ?? null,
       baseSha: request.baseSha,
+      ...(execution?.mediaPlanning
+        ? {
+            assetManifestDigest: execution.mediaPlanning.assetManifest.digest,
+            mediaEgressDigest: execution.mediaPlanning.assetEgress.policyDigest,
+          }
+        : {}),
     };
     const { value, usage } = await withManagementProvenance(
       this.#run<unknown>(
@@ -855,6 +884,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
         execution?.invocationTimeoutMs ?? LEGACY_MANAGEMENT_INVOCATION_TIMEOUT_MS,
         beforeModelInvocation,
         invocationProvenance,
+        execution?.mediaPlanning?.mediaInputs.map((input) => input.path) ?? [],
       ),
       invocationProvenance,
     );
@@ -1269,6 +1299,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
     invocationTimeoutMs?: number,
     beforeModelInvocation?: CompilerModelAdmission,
     expectedProvenance?: CompilerInvocationProvenance,
+    mediaPaths: readonly string[] = [],
   ): Promise<{ value: T; usage: ManagementUsage }> {
     assertProviderStructuredOutputSchema(schema);
     assertUtf8WithinBytes(prompt, MANAGEMENT_PROMPT_MAX_BYTES, "management prompt");
@@ -1279,6 +1310,8 @@ export class CodexCliManagementBackend implements ManagementBackend {
     )
       throw new Error("compiler invocation deadline exhausted");
     if (this.#options.runStructured) {
+      if (mediaPaths.length)
+        throw new Error("structured management adapter does not support compiler media inputs");
       const admission = await beforeModelInvocation?.(expectedProvenance);
       const admittedTimeoutMs = typeof admission === "number" ? admission : admission?.timeoutMs;
       const effectiveTimeoutMs = effectiveInvocationTimeout(admittedTimeoutMs, invocationTimeoutMs);
@@ -1373,6 +1406,8 @@ export class CodexCliManagementBackend implements ManagementBackend {
       if (modelSelection?.reasoning) {
         args.push("-c", `model_reasoning_effort=${JSON.stringify(modelSelection.reasoning)}`);
       }
+      // This adapter advertises image media types, so its provider-specific transport is --image.
+      if (mediaPaths.length) args.push("--image", ...mediaPaths);
       args.push("-");
       const target = await resolveCodexCommand(this.#options.command);
       const environment = sanitizedWorkerEnvironment(

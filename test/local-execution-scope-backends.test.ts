@@ -37,7 +37,10 @@ function context(workspace = "/tmp"): AttemptContext {
       conventions: [],
       baseSha: "b".repeat(40),
       validationCommands: ["node --test"],
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
       requirements: {
         os: [],
         architecture: [],

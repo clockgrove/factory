@@ -299,6 +299,7 @@ const planCoreSchema = z
     sourceEventMaxSequence: positive,
     priorPlanDigest: digest.nullable(),
     expectedBaseSha: sha,
+    assetManifestDigest: digest.optional(),
     baseBranch: branch,
     acceptedPolicy: RunPolicySchema.strict(),
     policyDigest: digest,

@@ -185,6 +185,7 @@ export interface DurableObjectiveActivation {
   policy: unknown;
   policyDigest: string;
   baseSha: string;
+  assetManifestDigest?: string;
   requestedBy: string;
   /** Process-local scheduling revision. Never durable authority. */
   discoveryRevision?: number;
@@ -1447,7 +1448,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
                 candidate.activationRequestId === activationRequest.requestId &&
                 candidate.actor.toLowerCase() === activationRequest.requestedBy.toLowerCase() &&
                 candidate.policyDigest === activationRequest.policyDigest &&
-                candidate.baseSha === activationRequest.baseSha,
+                candidate.baseSha === activationRequest.baseSha &&
+                candidate.assetManifestDigest === activationRequest.assetManifestDigest,
             ) &&
             ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
               event.event,
@@ -1467,7 +1469,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
             event.activationRequestId === activationRequest.requestId &&
             event.requestedBy.toLowerCase() === activationRequest.requestedBy.toLowerCase() &&
             event.baseSha === activationRequest.baseSha &&
-            event.policyDigest === activationRequest.policyDigest,
+            event.policyDigest === activationRequest.policyDigest &&
+            event.assetManifestDigest === activationRequest.assetManifestDigest,
         );
     const activeRun = latestSupportedRun(events, authority);
     const currentRun =
@@ -1516,6 +1519,9 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
             policy: activationRequest.policy,
             policyDigest: activationRequest.policyDigest,
             baseSha: activationRequest.baseSha,
+            ...(activationRequest.assetManifestDigest
+              ? { assetManifestDigest: activationRequest.assetManifestDigest }
+              : {}),
             requestedBy: activationEntry!.login,
             ...(currentRun ? { resuming: true } : {}),
           }

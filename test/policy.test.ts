@@ -12,8 +12,8 @@ import {
   resolveModelSelection,
 } from "../src/protocol/policy.js";
 
-const legacyPolicy = JSON.parse(
-  readFileSync(new URL("./fixtures/legacy-run-policy.json", import.meta.url), "utf8"),
+const minimalPolicy = JSON.parse(
+  readFileSync(new URL("./fixtures/minimal-run-policy.json", import.meta.url), "utf8"),
 );
 
 const adaptiveLocal = {
@@ -37,16 +37,16 @@ const adaptiveLocal = {
 };
 
 describe("extended run policy", () => {
-  it("preserves the checked-in legacy policy shape and digest", () => {
-    const parsed = parseRunPolicy(legacyPolicy);
-    expect(parsed).toEqual(legacyPolicy);
+  it("preserves the checked-in minimal policy shape and digest", () => {
+    const parsed = parseRunPolicy(minimalPolicy);
+    expect(parsed).toEqual(minimalPolicy);
     expect(policyDigest(parsed)).toBe(
-      "e213f60a61ac8386c7af30aa54d15266cae0af5090212761f93a7306992eea40",
+      "e5156f5761d68dd384cff9e4f512b768099401d3f19ba8c23df02dd7d7a337bc",
     );
   });
 
-  it("normalizes legacy scheduling without mutating the stored shape", () => {
-    const parsed = parseRunPolicy(legacyPolicy);
+  it("normalizes omitted scheduling without mutating the stored shape", () => {
+    const parsed = parseRunPolicy(minimalPolicy);
     const before = policyDigest(parsed);
     const effective = normalizeSchedulingPolicy(parsed);
     expect(effective.priority.source).toBe("subissue-order");

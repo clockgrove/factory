@@ -70,7 +70,27 @@ Every Work Item must contain:
   `delivery` hint;
 - a conservative `economicReview` based only on known validation/runtime needs (never invent live
   paid measurements);
-- `artifactContract: "clockgrove.factory/artifact"`.
+- `deliverable: { kind: "repository-change", contract: "clockgrove.factory/artifact" }`.
+
+Every `work-items` proposal also contains `mediaIntents`. Return an empty array when no Objective
+obligation benefits from a media artifact. Otherwise describe only the semantic need: stable ID,
+kind, purpose, required/helpful necessity, cited obligations, rationale, bounded brief, opaque
+imported-asset IDs, output media types and count, any applicable typed profile constraints, review
+requirement, and directed bindings to Work Items and criteria. Raster dimensions, alpha, and
+animation belong in the optional raster profile; do not infer that profile for other media. An
+`input-to` binding means the repository Work
+Item consumes the asset; an `evidence-for` binding means the asset is produced after the repository
+change as acceptance evidence. Acceptance evidence is always required and cites criterion IDs.
+
+Never choose a media provider, model, credential, storage location, URL, network destination, or
+execution backend. Factory matches imported assets and advertised producer capabilities
+mechanically. It derives exact asset bindings, any `asset-production` Work Item, its
+`clockgrove.factory/asset-set` deliverable, and dependency edges. A required intent with no matching
+import or permitted producer is a terminal compilation result. A helpful intent may be omitted only
+when its bound obligations remain covered, and Factory records that disposition. Diagrams that are
+source-controlled SVG, Mermaid, HTML, CSS, canvas, or other code remain ordinary repository-change
+work; use a media intent for immutable reference, product, or evidence assets outside the repository
+patch.
 
 The `workItems` array is semantic. Order independent peers by the Objective's requested initial
 priority and put every dependency before its dependent. Factory preserves that dependency-aware
@@ -119,6 +139,8 @@ Before returning the object:
 - every overlapping scope pair has a dependency path, and stack parents exactly match dependencies;
 - context, conflict/resource, validation, delivery, and economic fields agree with repository facts;
 - every base SHA equals the supplied base;
+- every media intent cites known obligations, Work Items, criteria, imported IDs and authorized
+  review rules; its direction and necessity agree with its purpose;
 - validation commands are non-empty and either observed in the repository or connected to exactly
   one advertised provider generation through the dependency graph and backend requirements;
 - no field contains a secret value;

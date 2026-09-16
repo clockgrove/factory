@@ -714,6 +714,26 @@ preconditions, exclusions, repository conventions, base SHA, validation commands
 OS/architecture and resource requirements, required tools/services/network destinations, permitted
 secret names, and the output contract.
 
+The output contract is a strict deliverable union. Repository workers receive
+`repository-change` / `clockgrove.factory/artifact`; asset producers receive
+`asset-production` / `clockgrove.factory/asset-set`. Asset producers have no repository scope,
+patch, validation command, commit, or pull-request contract. The compiler model describes media
+intent and directed consumption/evidence bindings. Trusted projection alone selects exact imported
+asset digests or derives an asset producer from advertised capabilities. Code-native SVG, Mermaid,
+HTML/CSS/canvas and similar repository artifacts stay on the repository-change path.
+
+An optional Objective asset manifest is part of activation and run identity. The Supervisor reads
+that exact manifest from immutable Git refs, reconstructs verified media in private temporary
+storage, supplies safe opaque facts in the structured request, and passes media paths separately
+only to a compiler adapter that advertises each exact media type. Raster dimensions, alpha and
+animation are one nested media profile rather than fields on the canonical contract. The
+independent `compilerMediaEgress` policy controls public or private compiler input and authorized
+deterministic review rules. It grants no producer, provider, network, storage, credential, or
+execution authority. Compilation fails deterministically for a required media intent without a
+matching import or producer capability. Helpful omissions remain
+visible in the projection trace. Until the supervised asset executor is present, static graph
+preflight rejects any asset-production packet before ordinary repository dispatch.
+
 Platform, CPU, memory, artifact-storage and timeout requirements are trusted-host outputs, not model
 facts. The compiler replaces model proposals with matching rules from the pinned repository's
 `.factory/execution-requirements.json`, then immutable run-policy values, then named conservative

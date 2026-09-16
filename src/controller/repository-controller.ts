@@ -620,6 +620,9 @@ export function createGitHubRepositoryController(
                   activation: {
                     requestId: activation.requestId,
                     baseSha: activation.baseSha,
+                    ...(activation.assetManifestDigest
+                      ? { assetManifestDigest: activation.assetManifestDigest }
+                      : {}),
                   },
                 }),
             signal,

@@ -6,7 +6,11 @@ import type { GitCommitObject, LeaseManager, LeaseState } from "../src/control/l
 import { encodeEventTrailer } from "../src/control/receipts.js";
 import { attemptRef } from "../src/control/attempts.js";
 import { ReviewCheckpointManager } from "../src/control/reviews.js";
-import { renderWorkPacket, type CompiledObjective } from "../src/graph.js";
+import {
+  isCompiledRepositoryWorkItem,
+  renderWorkPacket,
+  type CompiledObjective,
+} from "../src/graph.js";
 import type { FactoryReadSnapshot } from "../src/application/status.js";
 import { type FactoryEvent, parseFactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
@@ -141,12 +145,18 @@ async function fixture(rebase = false) {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact",
+        deliverable: {
+          kind: "repository-change" as const,
+          contract: "clockgrove.factory/artifact" as const,
+        },
       },
     ],
   };
+  const seed = objective.workItems[0]!;
+  if (!isCompiledRepositoryWorkItem(seed))
+    throw new Error("fixture requires a repository Work Item");
   objective.workItems.push({
-    ...structuredClone(objective.workItems[0]!),
+    ...structuredClone(seed),
     id: "fresh",
     title: "Fresh item",
     scope: ["src/fresh.ts"],

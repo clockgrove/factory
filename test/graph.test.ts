@@ -16,6 +16,7 @@ import {
   renderWorkPacket,
   validateGraph,
   type CompiledObjective,
+  type CompiledRepositoryWorkItem,
   type CompiledWorkItem,
   type CreatedWorkItem,
   type GraphWriter,
@@ -32,7 +33,7 @@ import { fixedClockMutationScheduler } from "./helpers/mutation-scheduler.js";
 
 const NOW = new Date("2026-01-01T00:00:00Z");
 
-function workItem(over: Partial<CompiledWorkItem> = {}): CompiledWorkItem {
+function workItem(over: Partial<CompiledRepositoryWorkItem> = {}): CompiledRepositoryWorkItem {
   return {
     id: "slugify",
     title: "Add slugify",
@@ -43,6 +44,21 @@ function workItem(over: Partial<CompiledWorkItem> = {}): CompiledWorkItem {
     outOfScope: [],
     conventions: [],
     dependsOn: [],
+    baseSha: "a".repeat(40),
+    validationCommands: ["node --test"],
+    requirements: {
+      os: ["linux"],
+      architecture: [],
+      tools: ["node"],
+      services: [],
+      networkDestinations: [],
+      permittedSecretNames: [],
+      trust: "trusted_local",
+    },
+    deliverable: {
+      kind: "repository-change",
+      contract: "clockgrove.factory/artifact",
+    },
     ...over,
   };
 }
@@ -143,7 +159,10 @@ describe("validateGraph", () => {
           permittedSecretNames: [],
           trust: "trusted_local" as const,
         },
-        artifactContract: "clockgrove.factory/artifact" as const,
+        deliverable: {
+          kind: "repository-change" as const,
+          contract: "clockgrove.factory/artifact" as const,
+        },
       })),
     );
 
@@ -168,7 +187,10 @@ describe("validateGraph", () => {
           permittedSecretNames: [],
           trust: "trusted_local" as const,
         },
-        artifactContract: "clockgrove.factory/artifact" as const,
+        deliverable: {
+          kind: "repository-change" as const,
+          contract: "clockgrove.factory/artifact" as const,
+        },
       },
     ]);
     const rendered = renderCompiledGraphWorkItems(persisted)[0]!;
@@ -316,17 +338,19 @@ describe("legacy Work Item constraints", () => {
     });
     const compiled: CompiledObjective = {
       title: constraints.objectiveTitle,
-      workItems: constraints.workItems.map((item) => ({
-        id: item.compilerId,
-        title: item.title,
-        goal: item.goal,
-        acceptance: item.acceptance,
-        scope: item.scope,
-        preconditions: item.preconditions,
-        outOfScope: item.outOfScope,
-        conventions: item.conventions,
-        dependsOn: item.blockedByNumbers.map((number) => `adopted-${number}`),
-      })),
+      workItems: constraints.workItems.map((item) =>
+        workItem({
+          id: item.compilerId,
+          title: item.title,
+          goal: item.goal,
+          acceptance: item.acceptance,
+          scope: item.scope,
+          preconditions: item.preconditions,
+          outOfScope: item.outOfScope,
+          conventions: item.conventions,
+          dependsOn: item.blockedByNumbers.map((number) => `adopted-${number}`),
+        }),
+      ),
     };
 
     expect(() =>
@@ -406,7 +430,10 @@ describe("legacy Work Item constraints", () => {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact",
+        deliverable: {
+          kind: "repository-change" as const,
+          contract: "clockgrove.factory/artifact" as const,
+        },
       })),
     };
     const digest = compiledGraphDigest(compiled);
@@ -653,17 +680,19 @@ describe("GraphApplier.apply", () => {
     });
     const graph: CompiledObjective = {
       title: legacy.objectiveTitle,
-      workItems: legacy.workItems.map((item) => ({
-        id: item.compilerId,
-        title: item.title,
-        goal: item.goal,
-        acceptance: item.acceptance,
-        scope: item.scope,
-        preconditions: item.preconditions,
-        outOfScope: item.outOfScope,
-        conventions: item.conventions,
-        dependsOn: item.blockedByNumbers.map((number) => `adopted-${number}`),
-      })),
+      workItems: legacy.workItems.map((item) =>
+        workItem({
+          id: item.compilerId,
+          title: item.title,
+          goal: item.goal,
+          acceptance: item.acceptance,
+          scope: item.scope,
+          preconditions: item.preconditions,
+          outOfScope: item.outOfScope,
+          conventions: item.conventions,
+          dependsOn: item.blockedByNumbers.map((number) => `adopted-${number}`),
+        }),
+      ),
     };
     const writer = new FakeGraphWriter();
     const applied = await new GraphApplier({
@@ -783,9 +812,9 @@ describe("GraphApplier.apply", () => {
     expect(writer.calls).toEqual([]);
   });
 
-  it("preflights a 284 KB Work Item body before the first graph write", async () => {
+  it("preflights an oversized Work Item body before the first graph write", async () => {
     const dense = (label: string) =>
-      Array.from({ length: 50 }, (_, index) => `${label}-${index}-${"x".repeat(1_890)}`);
+      Array.from({ length: 11 }, (_, index) => `${label}-${index}-${"x".repeat(1_890)}`);
     const graph = objective([
       workItem({
         id: "oversized-body",
@@ -794,7 +823,7 @@ describe("GraphApplier.apply", () => {
         conventions: dense("convention"),
       }),
     ]);
-    expect(renderCompiledGraphWorkItems(graph)[0]!.bytes).toBeGreaterThan(284_000);
+    expect(renderCompiledGraphWorkItems(graph)[0]!.bytes).toBeGreaterThan(60_000);
     const writer = new FakeGraphWriter();
 
     await expect(

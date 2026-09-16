@@ -99,6 +99,7 @@ export function assertPeerActivation(
       activation.requestedBy.toLowerCase() === start.actor.toLowerCase() &&
       activation.repository.toLowerCase() === repository.toLowerCase() &&
       activation.baseSha === start.baseSha &&
+      activation.assetManifestDigest === start.assetManifestDigest &&
       activation.policyDigest === start.policyDigest &&
       policyDigest(activation.policy) === start.policyDigest &&
       time(activation) <= time(start),
@@ -110,6 +111,7 @@ export function assertPeerActivation(
     repository,
     baseSha: start.baseSha!,
     policyDigest: start.policyDigest,
+    ...(start.assetManifestDigest ? { assetManifestDigest: start.assetManifestDigest } : {}),
   });
   requirePeer(!withdrawn || time(withdrawn) >= time(start));
 }

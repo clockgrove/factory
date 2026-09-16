@@ -508,6 +508,7 @@ describe("single semantic management route", () => {
       protocol: "clockgrove.factory/compiler-proposal" as const,
       kind: "clarification" as const,
       workItems: [],
+      mediaIntents: [],
       objectives: [],
       coverage: [],
       triggers: [

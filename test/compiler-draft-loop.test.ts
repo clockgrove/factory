@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { CompiledGraphStore } from "../src/control/graphs.js";
 import { LeaseManager, type GitCommitObject, type LeaseStore } from "../src/control/lease.js";
-import type { CompiledObjective } from "../src/graph.js";
+import { isCompiledRepositoryWorkItem, type CompiledObjective } from "../src/graph.js";
 import {
   CompilerDraftManager,
   canonicalDraftJson,
@@ -174,7 +174,10 @@ function objective(goal = "Implement the feature."): CompiledObjective {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact",
+        deliverable: {
+          kind: "repository-change" as const,
+          contract: "clockgrove.factory/artifact" as const,
+        },
       },
     ],
   };
@@ -232,6 +235,19 @@ function validatedObjective(graph: CompiledObjective): ValidatedCompilerDraft {
         },
         pathCount: 1,
       },
+      media: {
+        assetManifest: null,
+        assetEgress: {
+          mode: "denied",
+          policyDigest: compilerEvalDigest({
+            mode: "denied",
+            maxAssets: 0,
+            deterministicReviewRuleIds: [],
+          }),
+        },
+        producerCapabilities: [],
+        reviewRules: [],
+      },
       constraints: {
         maxWorkItems: 100,
         planningWorkItemThreshold: 100,
@@ -259,6 +275,7 @@ function validatedObjective(graph: CompiledObjective): ValidatedCompilerDraft {
       graphDigest,
       addedEdges: [],
       adapterBindings: [],
+      mediaIntents: [],
       riskElevations: { count: 0, digest: compilerEvalDigest([]) },
     },
     report: emptyCompilerValidationReport(),
@@ -279,6 +296,7 @@ function validatedFixedObjective(graph: CompiledObjective): ValidatedCompilerDra
       graphDigest: compiledGraphDigest(graph),
       addedEdges: [],
       adapterBindings: [],
+      mediaIntents: [],
       riskElevations: { count: 0, digest: compilerEvalDigest([]) },
     },
     report: emptyCompilerValidationReport(),
@@ -592,6 +610,7 @@ describe("compiler draft durable repair", () => {
     const providerEnvelope = {
       ...planningProposal,
       workItems: [],
+      mediaIntents: [],
       objectives: [],
       coverage: [],
     };
@@ -1096,6 +1115,8 @@ describe("compiler draft durable repair", () => {
   it("journals maximum fixed-graph and source evidence in separate restart-safe records", async () => {
     const args = await setup();
     const seed = objective().workItems[0]!;
+    if (!isCompiledRepositoryWorkItem(seed))
+      throw new Error("fixture requires a repository Work Item");
     const graph: CompiledObjective = {
       ...objective(),
       workItems: Array.from({ length: 100 }, (_, index) => ({

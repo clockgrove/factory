@@ -62,6 +62,7 @@ import { z } from "zod";
 import { MAX_SUPPLIED_REPLAY_SNAPSHOTS } from "./replay/supplied.js";
 
 import { version as packageVersion } from "../package.json";
+import { RepositoryChangeDeliverableSchema } from "./assets/media-intent.js";
 
 import { resolveGitHubToken } from "./auth.js";
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
@@ -224,6 +225,7 @@ function applicationFor(
     },
     planning: {
       management,
+      assetStore: store,
       repositoryPath: checkout,
       validateCheckout: validatePlanningCheckout,
       readRepositoryLayout: (maxEntries, baseSha) =>
@@ -429,7 +431,7 @@ const CompiledWorkItemSchema = z.object({
   baseSha: z.string().regex(/^[0-9a-fA-F]{40}$/),
   validationCommands: z.array(z.string().min(1)).min(1),
   requirements: ExecutionRequirementsSchema,
-  artifactContract: z.literal("clockgrove.factory/artifact"),
+  deliverable: RepositoryChangeDeliverableSchema,
 });
 
 const CompiledObjectiveSchema = z.object({
@@ -1436,6 +1438,7 @@ type ApplicationToolInput = {
   annotations?: unknown;
   revision?: number;
   manifestDigest?: string;
+  assetManifestDigest?: string;
   assets?: Array<{
     source:
       | { kind: "local-file"; path: string; name?: string }
@@ -1571,6 +1574,13 @@ function registerApplicationTool(
                   .string()
                   .regex(/^[0-9a-fA-F]{40}$/)
                   .optional(),
+                assetManifestDigest: z
+                  .string()
+                  .regex(/^[a-f0-9]{64}$/)
+                  .optional()
+                  .describe(
+                    "Exact imported Objective asset manifest to bind to this activation and compiler run.",
+                  ),
                 policy: z
                   .record(z.unknown())
                   .optional()
@@ -1604,6 +1614,13 @@ function registerApplicationTool(
                           .string()
                           .regex(/^[0-9a-fA-F]{40}$/)
                           .optional(),
+                        assetManifestDigest: z
+                          .string()
+                          .regex(/^[a-f0-9]{64}$/)
+                          .optional()
+                          .describe(
+                            "Exact imported Objective asset manifest to bind and, when policy permits, supply separately to the compiler.",
+                          ),
                         policy: z.record(z.unknown()).optional(),
                       }
                     : {}),
@@ -1723,6 +1740,9 @@ function registerApplicationTool(
           return service.plan({
             objective: input.objectiveNumber!,
             compile: input.compile ?? false,
+            ...(input.assetManifestDigest
+              ? { assetManifestDigest: input.assetManifestDigest }
+              : {}),
             ...(input.baseSha ? { baseSha: input.baseSha } : {}),
             ...(input.policy ? { policy: input.policy } : {}),
           });
@@ -1748,6 +1768,7 @@ function registerApplicationTool(
           objective: input.objectiveNumber!,
           requestId: input.requestId,
           ...(input.baseSha ? { baseSha: input.baseSha } : {}),
+          ...(input.assetManifestDigest ? { assetManifestDigest: input.assetManifestDigest } : {}),
           ...(input.policy ? { policy: input.policy } : {}),
         });
       }

@@ -72,6 +72,7 @@ export function recoveryAdoptionEvents(
       predecessorDigest === plan.predecessor.startDigest &&
       predecessor.repository.toLowerCase() === plan.repository.toLowerCase() &&
       predecessor.baseBranch === plan.baseBranch &&
+      predecessor.assetManifestDigest === plan.assetManifestDigest &&
       predecessor.actor.toLowerCase() === input.authenticatedRequest.requestedBy.toLowerCase() &&
       policyDigest(predecessor.policy) === predecessor.policyDigest,
   );
@@ -94,6 +95,7 @@ export function recoveryAdoptionEvents(
     fork: predecessor.fork,
     baseBranch: plan.baseBranch,
     baseSha: plan.expectedBaseSha,
+    ...(plan.assetManifestDigest ? { assetManifestDigest: plan.assetManifestDigest } : {}),
     policy: plan.acceptedPolicy,
     policyDigest: plan.policyDigest,
     recoveryRequestId: plan.requestId,

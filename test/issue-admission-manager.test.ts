@@ -309,7 +309,10 @@ describe("production issue admission manager", () => {
           bundleDigest: runtimeReceipt.digest,
         },
       ],
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     });
     const activation = createManagedRuntimeActivation({
       packet,

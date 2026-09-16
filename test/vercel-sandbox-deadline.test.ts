@@ -45,7 +45,10 @@ function deadlineContext(): AttemptContext {
       conventions: [],
       baseSha: "a".repeat(40),
       validationCommands: [],
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
       requirements: {
         os: [],
         architecture: [],

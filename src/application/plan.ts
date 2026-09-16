@@ -31,12 +31,21 @@ import {
   assertLocalLfsAvailable,
   materializeLocalLfsAssets,
 } from "../repository-profiles/git-lfs.js";
+import type { ObjectiveAssetStore } from "../assets/storage.js";
+import { readObjectiveAssetManifest } from "../assets/storage.js";
+import { materializeObjectiveAssets } from "../assets/materialize.js";
+import {
+  compilerAssetManifestView,
+  compilerMediaDescriptorDigests,
+  compilerMediaInputs,
+} from "../assets/compiler-input.js";
 
 export interface PlanInput {
   objective: number;
   compile?: boolean;
   baseSha?: string;
   policy?: unknown;
+  assetManifestDigest?: string;
 }
 
 export interface PlanReport {
@@ -66,6 +75,7 @@ export interface PlanningContext {
   management?: ManagementBackend;
   /** Local checkout used only for repository-grounded compiler reads. */
   repositoryPath?: string;
+  assetStore?: ObjectiveAssetStore;
   validateCheckout?: (
     repositoryPath: string,
     baseSha: string,
@@ -139,12 +149,15 @@ function summarizeGraph(objective: CompiledObjective, observedDigest?: string) {
       id: item.id,
       title: item.title,
       dependsOn: item.dependsOn,
-      scope: item.scope,
-      validationCommands: item.validationCommands ?? [],
-      requirements: item.requirements ?? null,
-      context: item.context ?? null,
-      changeSurface: item.changeSurface ?? null,
-      delivery: item.delivery ?? null,
+      deliverable: item.deliverable,
+      scope: item.deliverable.kind === "repository-change" ? item.scope : [],
+      validationCommands:
+        item.deliverable.kind === "repository-change" ? item.validationCommands : [],
+      requirements: item.requirements,
+      context: item.deliverable.kind === "repository-change" ? (item.context ?? null) : null,
+      changeSurface:
+        item.deliverable.kind === "repository-change" ? (item.changeSurface ?? null) : null,
+      delivery: item.deliverable.kind === "repository-change" ? (item.delivery ?? null) : null,
       economicReview: item.economicReview ?? null,
     })),
   };
@@ -181,30 +194,53 @@ function inspectExistingGraph(snapshot: ApplicationSnapshot): {
   const objective: CompiledObjective = {
     title: snapshot.title,
     ...(deferredCapabilityAdapters === undefined ? {} : { deferredCapabilityAdapters }),
-    workItems: records.map(({ item, metadata, packet }) => ({
-      id: metadata.id,
-      title: item.title ?? `Work Item #${item.number}`,
-      goal: packet.goal,
-      acceptance: packet.acceptanceCriteria,
-      scope: packet.allowedPaths,
-      preconditions: packet.preconditions,
-      outOfScope: packet.outOfScope,
-      conventions: packet.conventions,
-      dependsOn: metadata.dependsOn,
-      baseSha: packet.baseSha,
-      validationCommands: packet.validationCommands,
-      requirements: packet.requirements,
-      artifactContract: packet.artifactContract,
-      ...(packet.context ? { context: packet.context } : {}),
-      ...(packet.changeSurface ? { changeSurface: packet.changeSurface } : {}),
-      ...(packet.criterionRisks ? { criterionRisks: packet.criterionRisks } : {}),
-      ...(packet.validation ? { validation: packet.validation } : {}),
-      ...(packet.delivery ? { delivery: packet.delivery } : {}),
-      ...(packet.repositoryCapabilities
-        ? { repositoryCapabilities: packet.repositoryCapabilities }
-        : {}),
-      ...(packet.managedRuntimes ? { managedRuntimes: packet.managedRuntimes } : {}),
-    })),
+    workItems: records.map(({ item, metadata, packet }) =>
+      packet.deliverable.kind === "asset-production"
+        ? {
+            id: metadata.id,
+            title: item.title ?? `Work Item #${item.number}`,
+            goal: packet.goal,
+            acceptance: packet.acceptanceCriteria,
+            preconditions: packet.preconditions,
+            outOfScope: packet.outOfScope,
+            conventions: packet.conventions,
+            dependsOn: metadata.dependsOn,
+            baseSha: packet.baseSha,
+            scope: [] as [],
+            validationCommands: [] as [],
+            requirements: packet.requirements,
+            deliverable: packet.deliverable,
+            ...(packet.assetInputs?.length ? { assetInputs: packet.assetInputs } : {}),
+          }
+        : {
+            id: metadata.id,
+            title: item.title ?? `Work Item #${item.number}`,
+            goal: packet.goal,
+            acceptance: packet.acceptanceCriteria,
+            scope: packet.allowedPaths,
+            preconditions: packet.preconditions,
+            outOfScope: packet.outOfScope,
+            conventions: packet.conventions,
+            dependsOn: metadata.dependsOn,
+            baseSha: packet.baseSha,
+            validationCommands: packet.validationCommands,
+            requirements: packet.requirements,
+            deliverable: packet.deliverable,
+            ...(packet.assetInputs?.length ? { assetInputs: packet.assetInputs } : {}),
+            ...(packet.generatedAssetRequirements?.length
+              ? { generatedAssetRequirements: packet.generatedAssetRequirements }
+              : {}),
+            ...(packet.context ? { context: packet.context } : {}),
+            ...(packet.changeSurface ? { changeSurface: packet.changeSurface } : {}),
+            ...(packet.criterionRisks ? { criterionRisks: packet.criterionRisks } : {}),
+            ...(packet.validation ? { validation: packet.validation } : {}),
+            ...(packet.delivery ? { delivery: packet.delivery } : {}),
+            ...(packet.repositoryCapabilities
+              ? { repositoryCapabilities: packet.repositoryCapabilities }
+              : {}),
+            ...(packet.managedRuntimes ? { managedRuntimes: packet.managedRuntimes } : {}),
+          },
+    ),
   };
   validateGraph(objective);
   return { objective, digest: records[0]!.metadata.graphDigest };
@@ -302,9 +338,64 @@ export async function buildPlanReport(input: {
     const modelSelection = resolveModelSelection(policy, "compile");
     const repositoryLfs = await assertLocalLfsAvailable(input.planning.repositoryPath, baseSha);
     const tree = await materializePinnedCompilationTree(input.planning.repositoryPath, baseSha);
+    let assetWorkspace: string | undefined;
     try {
       await materializeLocalLfsAssets(input.planning.repositoryPath, tree.path, baseSha);
       await sealPinnedCompilationTreeProof(tree.proof);
+      let mediaPlanning: CompilationContext["mediaPlanning"];
+      if (input.request.assetManifestDigest) {
+        if (!input.planning.assetStore)
+          throw new Error("Objective asset storage is not configured for compilation");
+        if (policy.compilerMediaEgress.mode === "denied")
+          throw new Error("compiler media asset egress is denied by immutable run policy");
+        const manifest = await readObjectiveAssetManifest({
+          store: input.planning.assetStore,
+          authority: {
+            repository: input.repository,
+            objective: input.snapshot.number,
+            baseSha,
+          },
+          digest: input.request.assetManifestDigest,
+        });
+        if (!manifest) throw new Error("Objective asset manifest was not found for compilation");
+        const compilerAssets = compilerAssetManifestView(manifest);
+        if (compilerAssets.view.assets.length > policy.compilerMediaEgress.maxAssets)
+          throw new Error("compiler media asset count exceeds immutable egress policy");
+        if (
+          policy.compilerMediaEgress.mode === "public-assets" &&
+          compilerAssets.view.assets.some((asset) => asset.visibility !== "public")
+        )
+          throw new Error(
+            "private Objective asset is not permitted by compiler media egress policy",
+          );
+        const supportedMediaTypes = management.compilerInputMediaTypes ?? [];
+        const mediaDescriptors = compilerMediaDescriptorDigests(manifest, supportedMediaTypes);
+        let mediaInputs: Array<{ assetId: string; mediaType: string; path: string }> = [];
+        if (mediaDescriptors.length) {
+          assetWorkspace = await mkdtemp(join(tmpdir(), "factory-compiler-assets-"));
+          const materialized = await materializeObjectiveAssets({
+            store: input.planning.assetStore,
+            manifest,
+            supervisorRoot: join(assetWorkspace, "materialized"),
+            descriptorDigests: mediaDescriptors,
+          });
+          mediaInputs = compilerMediaInputs(manifest, materialized.root, supportedMediaTypes);
+        }
+        mediaPlanning = {
+          assetManifest: compilerAssets.view,
+          assetBindings: compilerAssets.bindings,
+          mediaInputs,
+          assetEgress: {
+            mode: policy.compilerMediaEgress.mode,
+            policyDigest: compilerEvalDigest(policy.compilerMediaEgress),
+          },
+          producerCapabilities: [],
+          reviewRules: policy.compilerMediaEgress.deterministicReviewRuleIds.map((id) => ({
+            id,
+            kind: "deterministic-preauthorized" as const,
+          })),
+        };
+      }
       const context: CompilationContext = {
         repository: tree.path,
         objective: {
@@ -321,6 +412,7 @@ export async function buildPlanReport(input: {
         repositoryLfs,
         allowedNetworkDestinations: policy.allowedNetworkDestinations,
         runPolicy: policy,
+        ...(mediaPlanning ? { mediaPlanning } : {}),
         ...(modelSelection ? { modelSelection } : {}),
       };
       let checkpointed = false;
@@ -394,6 +486,13 @@ export async function buildPlanReport(input: {
       // The callback records paid usage before compile returns. Cleanup of this exact
       // owned tree cannot turn its successful response into a suggested new paid call.
       // Retain warnings in the returned array even when finally runs after return.
+      if (assetWorkspace)
+        await rm(assetWorkspace, { recursive: true, force: true }).catch(() => {
+          preparationDiagnostics.push({
+            status: "warning",
+            summary: `compiler asset cleanup needs attention: ${assetWorkspace}`,
+          });
+        });
       await tree.dispose().catch(() => {
         preparationDiagnostics.push({
           status: "warning",
@@ -421,3 +520,6 @@ export async function buildPlanReport(input: {
     };
   }
 }
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";

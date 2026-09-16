@@ -53,7 +53,8 @@ The Director skill uses bounded, read-only operations when the user is inspectin
   opaque-content policy, rights/visibility checks and offline materialization.
 - `factory_plan` inspects existing Work Items without model execution. Explicit `compile: true`
   compiles a proposed graph against a clean selected checkout without creating issues or starting
-  workers. Compilation consumes model quota; its usage is returned, not persisted as run authority.
+  workers. Pass `assetManifestDigest` to bind an imported manifest for media planning. Compilation
+  consumes model quota; its usage is returned, not persisted as run authority.
 - `factory_status` returns the current Objective/run state, active and queued Work Items, resource
   pressure, burst activity, and aggregate execution economics. Current GitHub response-header quota
   observations and process-local mutation counters are reported separately with their measurement
@@ -117,6 +118,11 @@ model invocation. Each use is additionally capped by the remaining authenticated
     "timeoutSeconds": 600,
     "maxObservedTokens": 500000
   },
+  "compilerMediaEgress": {
+    "mode": "denied",
+    "maxAssets": 0,
+    "deterministicReviewRuleIds": []
+  },
   "allowedNetworkDestinations": [
     "registry.npmjs.org",
     "*.npmjs.org",
@@ -157,6 +163,12 @@ model invocation. Each use is additionally capped by the remaining authenticated
   }
 }
 ```
+
+Media compiler inputs use authority separate from ordinary network policy. `denied` is the
+default. `public-assets` or `private-assets` requires a positive `maxAssets`; deterministic review
+rules must be named explicitly. Select the exact manifest on `factory_activate` with
+`assetManifestDigest` (CLI `--asset-manifest-digest`). That digest is immutable run identity and is
+checked again on resume. See [Objective input assets](OBJECTIVE-ASSETS.md#compiler-media-intents).
 
 This compiler envelope is recorded for every new activation that omits policy. Its repair count is
 shared across obligation-inventory and graph correction, and its invocation and timeout values bound

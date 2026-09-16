@@ -139,7 +139,10 @@ describe("Git-object-only symlink artifact boundary", () => {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact",
+        deliverable: {
+          kind: "repository-change" as const,
+          contract: "clockgrove.factory/artifact" as const,
+        },
       };
       const commands = vi.spyOn(processGroup, "runContainedProcess");
       await expect(

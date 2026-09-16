@@ -369,6 +369,11 @@ export function boundedPolicy(delivery = "stacked-prs", maxModelTokens = maximum
     trust: "explicitly_activated_repo",
     managementBackend: "codex-cli/local",
     allowedNetworkDestinations: ["api.openai.com"],
+    compilerMediaEgress: {
+      mode: "denied",
+      maxAssets: 0,
+      deterministicReviewRuleIds: [],
+    },
     economics: {
       maxModelTokens,
       modelTokenBudgetMode: "observed-stop",

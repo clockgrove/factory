@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
 import { WorkerAssetInputSchema } from "../assets/contracts.js";
+import {
+  AssetProductionDeliverableSchema,
+  GeneratedAssetRequirementSchema,
+  RepositoryChangeDeliverableSchema,
+} from "../assets/media-intent.js";
 
 import {
   MAX_WORKER_PACKET_BYTES,
@@ -72,7 +77,7 @@ export const ExecutionRequirementsSchema = z
             "memoryMb",
             "diskMb",
             "timeoutMinutes",
-            "artifactContract",
+            "deliverable",
           ]),
           kind: z.enum(["repository", "run-policy", "factory-default"]),
           source: boundedText(500),
@@ -379,38 +384,80 @@ export const RepositoryCapabilityBindingsSchema = z
   })
   .strict();
 
-export const WorkerPacketSchema = z
-  .object({
-    protocol: z
-      .literal("clockgrove.factory/worker-packet")
-      .default("clockgrove.factory/worker-packet"),
-    goal: boundedText(4_000),
-    acceptanceCriteria: shortList(boundedText(2_000)).min(1),
-    allowedPaths: shortList(RepositoryScopePathSchema).min(1),
-    preconditions: shortList(boundedText(2_000)).default([]),
-    outOfScope: shortList(boundedText(2_000)).default([]),
-    conventions: shortList(boundedText(2_000)).default([]),
-    retryContext: RetryContextSchema.optional(),
-    context: ContextManifestSchema.optional(),
-    changeSurface: ChangeSurfaceSchema.optional(),
-    delivery: DeliveryHintSchema.optional(),
-    criterionRisks: CriterionRiskAssessmentSchema.optional(),
-    validation: ValidationDesignSchema.optional(),
-    repositoryCapabilities: RepositoryCapabilityBindingsSchema.optional(),
-    managedRuntimes: shortList(RuntimeBundleRequirementSchema, 8).optional(),
-    assetInputs: shortList(WorkerAssetInputSchema, 32).default([]),
-    baseSha: gitSha,
-    validationCommands: shortList(boundedText(1_000), 32).min(1),
-    requirements: ExecutionRequirementsSchema,
-    artifactContract: z.literal("clockgrove.factory/artifact"),
-  })
-  .strict();
+const WorkerPacketCommon = z.object({
+  protocol: z
+    .literal("clockgrove.factory/worker-packet")
+    .default("clockgrove.factory/worker-packet"),
+  goal: boundedText(4_000),
+  acceptanceCriteria: shortList(boundedText(2_000)).min(1),
+  preconditions: shortList(boundedText(2_000)).default([]),
+  outOfScope: shortList(boundedText(2_000)).default([]),
+  conventions: shortList(boundedText(2_000)).default([]),
+  retryContext: RetryContextSchema.optional(),
+  baseSha: gitSha,
+  requirements: ExecutionRequirementsSchema,
+  assetInputs: shortList(WorkerAssetInputSchema, 32).default([]),
+});
+
+export const RepositoryChangeWorkerPacketSchema = WorkerPacketCommon.extend({
+  deliverable: RepositoryChangeDeliverableSchema,
+  allowedPaths: shortList(RepositoryScopePathSchema).min(1),
+  context: ContextManifestSchema.optional(),
+  changeSurface: ChangeSurfaceSchema.optional(),
+  delivery: DeliveryHintSchema.optional(),
+  criterionRisks: CriterionRiskAssessmentSchema.optional(),
+  validation: ValidationDesignSchema.optional(),
+  repositoryCapabilities: RepositoryCapabilityBindingsSchema.optional(),
+  managedRuntimes: shortList(RuntimeBundleRequirementSchema, 8).optional(),
+  generatedAssetRequirements: shortList(GeneratedAssetRequirementSchema, 32).default([]),
+  validationCommands: shortList(boundedText(1_000), 32).min(1),
+}).strict();
+
+export const AssetProductionWorkerPacketSchema = WorkerPacketCommon.extend({
+  deliverable: AssetProductionDeliverableSchema,
+  allowedPaths: z.tuple([]),
+  validationCommands: z.tuple([]),
+  context: z.never().optional(),
+  changeSurface: z.never().optional(),
+  delivery: z.never().optional(),
+  criterionRisks: z.never().optional(),
+  validation: z.never().optional(),
+  repositoryCapabilities: z.never().optional(),
+  managedRuntimes: z.never().optional(),
+  generatedAssetRequirements: z.never().optional(),
+}).strict();
+
+export const WorkerPacketSchema = z.union([
+  RepositoryChangeWorkerPacketSchema,
+  AssetProductionWorkerPacketSchema,
+]);
 
 export type ExecutionRequirements = z.infer<typeof ExecutionRequirementsSchema>;
-type ParsedWorkerPacket = z.output<typeof WorkerPacketSchema>;
-export type WorkerPacket = Omit<ParsedWorkerPacket, "assetInputs"> & {
-  assetInputs?: ParsedWorkerPacket["assetInputs"];
-};
+type ParsedRepositoryChangeWorkerPacket = z.output<typeof RepositoryChangeWorkerPacketSchema>;
+type ParsedAssetProductionWorkerPacket = z.output<typeof AssetProductionWorkerPacketSchema>;
+type OptionalPacketDefaults<T extends { assetInputs: unknown }> = Omit<
+  T,
+  "assetInputs" | "generatedAssetRequirements"
+> & {
+  assetInputs?: T["assetInputs"];
+} & ("generatedAssetRequirements" extends keyof T
+    ? { generatedAssetRequirements?: T["generatedAssetRequirements"] }
+    : object);
+export type RepositoryChangeWorkerPacket =
+  OptionalPacketDefaults<ParsedRepositoryChangeWorkerPacket>;
+export type AssetProductionWorkerPacket = OptionalPacketDefaults<ParsedAssetProductionWorkerPacket>;
+export type WorkerPacket = RepositoryChangeWorkerPacket | AssetProductionWorkerPacket;
+export function isRepositoryChangeWorkerPacket(
+  packet: WorkerPacket,
+): packet is RepositoryChangeWorkerPacket {
+  return packet.deliverable.kind === "repository-change";
+}
+export function assertRepositoryChangeWorkerPacket(
+  packet: WorkerPacket,
+): asserts packet is RepositoryChangeWorkerPacket {
+  if (packet.deliverable.kind !== "repository-change")
+    throw new Error("asset-production Worker Packet requires the supervised asset execution route");
+}
 export type ManagedRuntimeActivation = z.infer<typeof ManagedRuntimeActivationSchema>;
 export interface RepositoryCapabilityOperation {
   kind: string;
@@ -439,6 +486,7 @@ export interface RepositoryCapabilityBindings {
 
 /** Packets without explicit validation design conservatively retain semantic review. */
 export function semanticReviewCriteria(packet: WorkerPacket): string[] {
+  if (packet.deliverable.kind === "asset-production") return [...packet.acceptanceCriteria];
   if (!packet.validation) return [...packet.acceptanceCriteria];
   const accepted = new Set(packet.acceptanceCriteria);
   const seenTiers = new Set<string>();

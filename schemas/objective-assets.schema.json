@@ -87,7 +87,7 @@
         "metadata": {
           "oneOf": [
             { "type": "object", "additionalProperties": false, "required": ["kind", "encoding", "lines"], "properties": { "kind": { "enum": ["text", "markdown"] }, "encoding": { "const": "utf-8" }, "lines": { "type": "integer", "minimum": 1, "maximum": 1000000 } } },
-            { "type": "object", "additionalProperties": false, "required": ["kind", "format", "width", "height", "frames", "channels", "decodedBytes"], "properties": { "kind": { "const": "raster" }, "format": { "enum": ["png", "jpeg", "webp", "gif", "tiff"] }, "width": { "type": "integer", "minimum": 1 }, "height": { "type": "integer", "minimum": 1 }, "frames": { "type": "integer", "minimum": 1, "maximum": 16 }, "channels": { "type": "integer", "minimum": 1, "maximum": 16 }, "decodedBytes": { "type": "integer", "minimum": 1, "maximum": 167772160 } } },
+            { "type": "object", "additionalProperties": false, "required": ["kind", "format", "width", "height", "frames", "channels", "hasAlpha", "decodedBytes"], "properties": { "kind": { "const": "raster" }, "format": { "enum": ["png", "jpeg", "webp", "gif", "tiff"] }, "width": { "type": "integer", "minimum": 1 }, "height": { "type": "integer", "minimum": 1 }, "frames": { "type": "integer", "minimum": 1, "maximum": 16 }, "channels": { "type": "integer", "minimum": 1, "maximum": 16 }, "hasAlpha": { "type": "boolean" }, "decodedBytes": { "type": "integer", "minimum": 1, "maximum": 167772160 } } },
             { "type": "object", "additionalProperties": false, "required": ["kind", "reason"], "properties": { "kind": { "const": "opaque" }, "reason": { "type": "string", "minLength": 1, "maxLength": 500 } } }
           ]
         }

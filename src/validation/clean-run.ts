@@ -16,7 +16,11 @@ import {
 import { inspectPatchManifest } from "../runtime/artifact-patch.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import { FINDING_PROTOCOL, type FindingCandidate } from "../protocol/findings.js";
-import type { RepositoryCapabilityOperation, WorkerPacket } from "../protocol/worker-packet.js";
+import {
+  assertRepositoryChangeWorkerPacket,
+  type RepositoryCapabilityOperation,
+  type WorkerPacket,
+} from "../protocol/worker-packet.js";
 import type { IsolatedValidationResult } from "../execution/backend.js";
 import { isReviewOnlyWorkflowSurface } from "../publication/workflow-safety.js";
 import {
@@ -930,6 +934,7 @@ export async function assertBootstrapPackageValidation(
   packet: WorkerPacket,
   commands: string[],
 ): Promise<BootstrapPackageValidation | null> {
+  assertRepositoryChangeWorkerPacket(packet);
   const packageCommands = commands
     .map((command) => ({ command, parsed: pnpmPackageScriptValidationCommand(command) }))
     .filter(

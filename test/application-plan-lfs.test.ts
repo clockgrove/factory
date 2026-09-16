@@ -152,7 +152,10 @@ async function resultFor(context: CompilationContext): Promise<LegacyFixtureComp
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact",
+        deliverable: {
+          kind: "repository-change" as const,
+          contract: "clockgrove.factory/artifact" as const,
+        },
       },
     ],
   });

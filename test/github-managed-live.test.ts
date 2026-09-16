@@ -192,7 +192,10 @@ describe.skipIf(!LIVE)("live GitHub managed-agent plus isolated-validator smoke"
                 memoryMb: 1_024,
                 diskMb: 2_048,
               },
-              artifactContract: "clockgrove.factory/artifact",
+              deliverable: {
+                kind: "repository-change" as const,
+                contract: "clockgrove.factory/artifact" as const,
+              },
             },
           ],
         };
@@ -243,7 +246,10 @@ describe.skipIf(!LIVE)("live GitHub managed-agent plus isolated-validator smoke"
           baseSha: base.oid,
           validationCommands: workItem.validationCommands!,
           requirements: workItem.requirements!,
-          artifactContract: "clockgrove.factory/artifact" as const,
+          deliverable: {
+            kind: "repository-change" as const,
+            contract: "clockgrove.factory/artifact" as const,
+          },
         };
         const context: AttemptContext = {
           repository: `${target.owner}/${target.repo}`,

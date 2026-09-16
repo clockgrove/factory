@@ -8,11 +8,11 @@ import type {
 
 export const MAX_COMPILER_JUDGE_SOURCE_BYTES = 900 * 1024;
 
-export interface PersistedCompiledObjectiveJudgeItem extends CompiledWorkItem {
+export type PersistedCompiledObjectiveJudgeItem = CompiledWorkItem & {
   /** Deterministic binding IDs for judge acceptance rows; persisted text remains unchanged. */
   criteria: Array<{ id: string; text: string }>;
   obligationIds: [];
-}
+};
 
 /** Lossless report-only judge view over the complete persisted graph. */
 export interface PersistedCompiledObjectiveJudgeCandidate {

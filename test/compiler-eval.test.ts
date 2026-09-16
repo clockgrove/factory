@@ -44,6 +44,7 @@ const inventory: ObligationInventory = {
 const graph = {
   protocol: "clockgrove.factory/compiler-proposal",
   kind: "work-items",
+  mediaIntents: [],
   workItems: [
     {
       id: "api",
@@ -179,6 +180,7 @@ describe("obligation-first compiler evidence", () => {
     const serial = {
       protocol: "clockgrove.factory/compiler-proposal",
       kind: "work-items",
+      mediaIntents: [],
       workItems: [
         { id: "api", dependsOn: [], criteria: [{ id: "requested-outcome" }] },
         { id: "consumer", dependsOn: ["api"], criteria: [{ id: "consumes-api" }] },

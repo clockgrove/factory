@@ -12,6 +12,11 @@ import type {
   CompilerRequest,
   CompilerValidationReport,
 } from "../compiler/contracts.js";
+import type {
+  CompilerAssetManifestView,
+  CompilerMediaProducerCapability,
+} from "../assets/media-intent.js";
+import type { WorkerAssetInput } from "../assets/contracts.js";
 import type { CompilerProjectionContext, CompilerProjectionTrace } from "../compiler/proposal.js";
 import type { CompilerJudgeCandidate } from "../compiler/judge-context.js";
 import type { NormalizedArtifact } from "../execution/artifacts.js";
@@ -192,6 +197,19 @@ export interface CompilationContext {
   invocationTimeoutMs?: number;
   /** Trusted pinned source evidence captured once for the draft envelope. */
   repositoryEvidence?: CompilerEvidence[];
+  /** Immutable Objective assets are described textually by opaque IDs. Verified media paths and
+   * types are delivered separately to an adapter that declares those exact input media types. */
+  mediaPlanning?: {
+    assetManifest: CompilerAssetManifestView;
+    mediaInputs: Array<{ assetId: string; mediaType: string; path: string }>;
+    assetBindings: Array<{ assetId: string; input: WorkerAssetInput }>;
+    assetEgress: {
+      mode: "public-assets" | "private-assets";
+      policyDigest: string;
+    };
+    producerCapabilities: CompilerMediaProducerCapability[];
+    reviewRules: Array<{ id: string; kind: "deterministic-preauthorized" }>;
+  };
   /** Authenticated pre-v2 issue core. The compiler may enrich, never decompose or rewrite it. */
   legacyGraphConstraints?: LegacyGraphConstraints;
   /** Authenticated predecessor terminal diagnostic for a graphless compilation recovery.
@@ -218,6 +236,8 @@ export interface CompilerInvocationProvenance {
   model: string | null;
   reasoning: string | null;
   baseSha: string;
+  assetManifestDigest?: string;
+  mediaEgressDigest?: string;
 }
 
 /** Bind authoritative invocation provenance without requiring a mutable provider-owned error. */
@@ -376,6 +396,8 @@ export type CompilerModelAdmission = (
 export interface ManagementBackend {
   /** Required for evaluated drafts; older backends must not silently ignore admission. */
   readonly supportsCompilerAdmission?: true;
+  /** Exact media types the adapter can carry separately from the textual compiler request. */
+  readonly compilerInputMediaTypes?: readonly string[];
   readonly id: string;
   probe(): Promise<{ available: boolean; authenticated: boolean; reason?: string }>;
   proposePlan(

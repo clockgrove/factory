@@ -518,7 +518,10 @@ describe("host-owned publication", () => {
         permittedSecretNames: [],
         trust: "trusted_local",
       },
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     };
     const worker = await createLocalWorktree(repository, base.oid);
     await writeFile(join(worker.path, "value.txt"), "changed\n");
@@ -755,7 +758,10 @@ describe("host-owned publication", () => {
         permittedSecretNames: [],
         trust: "trusted_local",
       },
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     };
     const worker = await createLocalWorktree(repository, base.oid);
     await writeFile(join(worker.path, "value.txt"), "changed\n");
@@ -803,7 +809,10 @@ describe("host-owned publication", () => {
         permittedSecretNames: [],
         trust: "trusted_local",
       },
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     };
     const worker = await createLocalWorktree(repository, base.oid);
     await writeFile(join(worker.path, "value.txt"), "changed\n");

@@ -30,6 +30,11 @@ const POLICY = {
   trust: "explicitly_activated_repo",
   managementBackend: "codex-cli/local",
   allowedNetworkDestinations: ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"],
+  compilerMediaEgress: {
+    mode: "denied",
+    maxAssets: 0,
+    deterministicReviewRuleIds: [],
+  },
   priority: {
     source: "subissue-order",
     unsetRank: 100,

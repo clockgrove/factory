@@ -19,6 +19,13 @@ tiers, and prerequisite relationships. Each project deliberately implements a sm
 | `seeded-simulation` | Bounded seed-offset arrival simulator and deterministic trace assertions | Capacity admission/rejection and repeatable replay |
 | `visual-status` | SVG renderer, actual SVG and serialized-output assertions | Distinct paused icon/text plus visual inspection |
 
+Visual-intent regression coverage keeps nonvisual proposals at `mediaIntents: []`, rejects required
+intents without an import or advertised producer, records helpful omissions, binds exact imported
+assets to consumers, and checks derived input/evidence dependency directions. Capability tests use
+injected producer facts only; installed production qualification must still prove the separate
+asset-production executor, review, accounting, storage, activation and completion path before such
+nodes can run.
+
 The Wasm bytes are checked in losslessly as base64 for reviewability and materialized as
 `assets/answer.wasm` before discovery/compilation. This exercises an actual binary, not just an
 extension in an invented inventory. It is below 1024 bytes and deliberately non-LFS: no large-file

@@ -106,7 +106,10 @@ function item(id: string, overrides: Partial<CompilerWorkItemInput> = {}): Compi
       memoryMb: 1024,
       estimatedDurationMinutes: 10,
     },
-    artifactContract: "clockgrove.factory/artifact",
+    deliverable: {
+      kind: "repository-change" as const,
+      contract: "clockgrove.factory/artifact" as const,
+    },
     ...overrides,
   };
 }

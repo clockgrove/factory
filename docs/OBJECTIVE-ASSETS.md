@@ -38,3 +38,32 @@ does not reimplement their parsers. The build regenerates third-party notices an
 setup/doctor loads the pinned native decoder so a missing or incompatible platform package is
 reported before asset-backed execution. Factory still enforces its own byte, pixel, frame and
 aggregate limits around those libraries.
+
+## Compiler media intents
+
+An activation may select one exact imported manifest with `assetManifestDigest` (CLI:
+`--asset-manifest-digest`). The activation receipt and `FactoryRunStarted` bind that digest beside
+the base commit and run policy, so a retry or resume cannot substitute different bytes. The
+`compilerMediaEgress` policy separately controls whether no assets, public assets only, or private
+assets may reach the compiler. Factory supplies safe opaque metadata in the structured compiler
+request and passes verified media paths separately through a management adapter only when that
+adapter advertises the exact media type. The Codex CLI adapter currently maps supported raster
+types to its image-input channel. Local paths and media bytes are never embedded in the prompt or
+GitHub issue.
+
+The model may return semantic `mediaIntents` for any supported media type. Concept and layout
+references, diagrams, sprites, sounds, motion, models, and acceptance captures are representative
+kinds. Each intent cites Objective obligations and directed Work Item bindings, declares required
+or helpful necessity, sets bounded media type and count constraints, optionally adds a typed raster
+profile, and requests human review or a policy-authorized deterministic rule. It cannot select
+providers, models, credentials, stores, URLs, network access, or execution authority.
+
+Factory first matches an intent against the selected imported manifest. A matching implementation
+reference becomes an exact `assetInputs` binding on the repository Work Item. Otherwise Factory may
+derive an `asset-production` Work Item only from an advertised producer capability. That Work Item
+has a `clockgrove.factory/asset-set` deliverable, no repository scope, no validation command, and a
+directed dependency according to whether it is an input or acceptance evidence. The current
+controller deliberately refuses such a node before repository-worker dispatch; supervised asset
+production, review, activation, accounting, and completion are added by the separate execution
+workstream. Required intents without an import or producer fail compilation deterministically;
+helpful intents may be omitted with an explicit projection-trace disposition.

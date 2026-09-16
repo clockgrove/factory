@@ -480,7 +480,12 @@ export class FindingReporter {
     ];
     const prior = [...sourceEvents]
       .reverse()
-      .find((event) => event.findingId === input.findingId && event.event === "FindingDisposition");
+      .find(
+        (event) =>
+          event.findingId === input.findingId &&
+          event.event === "FindingDisposition" &&
+          event.reportDigest === reportDigest,
+      );
     const priorIntent = sourceEvents.some(
       (event) => event.event === "FindingPublicationIntent" && event.reportDigest === reportDigest,
     );
@@ -525,7 +530,8 @@ export class FindingReporter {
       return settle("issue-ready", "no-authority");
 
     const writes = sourceEvents.filter(
-      (event) => event.event === "FindingPublicationIntent",
+      (event) =>
+        event.event === "FindingPublicationIntent" && event.runId === input.occurrence.runId,
     ).length;
     const marker = findingMarker(input.findingId, reportDigest);
     const rendered = renderFindingIssue({
@@ -556,17 +562,26 @@ export class FindingReporter {
     }
     let authenticatedLogin: string;
     let observed: FindingIssueObservation | undefined;
+    let sameFinding: FindingIssueObservation | undefined;
     try {
       authenticatedLogin = await this.#port.authenticatedLogin();
+      const observations = await this.#port.findByMarker({
+        destination: destinationAuthority.data,
+        marker,
+        limit: 20,
+      });
       observed = exactIssue(
-        await this.#port.findByMarker({
-          destination: destinationAuthority.data,
-          marker,
-          limit: 20,
-        }),
+        observations,
         destinationAuthority.data,
         rendered.body,
         authenticatedLogin,
+      );
+      sameFinding = observations.find(
+        (issue) =>
+          issue.repository.toLowerCase() === destinationAuthority.data.repository &&
+          issue.nodeId.length > 0 &&
+          issue.author.toLowerCase() === authenticatedLogin.toLowerCase() &&
+          issue.body.includes(`id=${input.findingId}`),
       );
     } catch (error) {
       if (
@@ -594,6 +609,65 @@ export class FindingReporter {
       )
     )
       return settle("issue-ready", "ambiguous-transport");
+
+    if (sameFinding) {
+      if (sameFinding.state === "closed") return settle("issue-ready", "closed-recurrence");
+      if (!destinationAuthority.data.operations.includes("comment-evidence"))
+        return settle("existing-issue-linked", "duplicate", sameFinding);
+      const evidenceBody = `## Additional Factory evidence\n\n${rendered.body}`;
+      let existingComment: FindingCommentObservation | undefined;
+      try {
+        existingComment = exactComment(
+          await this.#port.findEvidenceComments({
+            destination: destinationAuthority.data,
+            issueNumber: sameFinding.number,
+            marker,
+            limit: 20,
+          }),
+          evidenceBody,
+          authenticatedLogin,
+        );
+      } catch (error) {
+        return settle(
+          "issue-ready",
+          (error as { status?: number }).status === 429
+            ? "rate-limited"
+            : "destination-unavailable",
+        );
+      }
+      if (existingComment) return settle("existing-issue-linked", "duplicate", sameFinding);
+      if (writes >= input.policy.maxPublicationWrites)
+        return settle("reporting-limit", "reporting-limit");
+      await this.#journal.append({
+        ...base,
+        event: "FindingPublicationIntent",
+        reportDigest,
+        operation: "comment-evidence",
+      });
+      try {
+        const comment = await this.#port.commentEvidence({
+          destination: destinationAuthority.data,
+          issueNumber: sameFinding.number,
+          body: evidenceBody,
+        });
+        if (!exactComment([comment], evidenceBody, authenticatedLogin))
+          return settle("issue-ready", "ambiguous-transport");
+        return settle("existing-issue-linked", "duplicate", sameFinding);
+      } catch {
+        const reconciled = await this.#port
+          .findEvidenceComments({
+            destination: destinationAuthority.data,
+            issueNumber: sameFinding.number,
+            marker,
+            limit: 20,
+          })
+          .then((comments) => exactComment(comments, evidenceBody, authenticatedLogin))
+          .catch(() => undefined);
+        return reconciled
+          ? settle("existing-issue-linked", "duplicate", sameFinding)
+          : settle("issue-ready", "ambiguous-transport");
+      }
+    }
 
     const commonCauseId = findingCommonCauseIdentity(input.candidate);
     if (commonCauseId) {

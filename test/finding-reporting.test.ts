@@ -51,6 +51,8 @@ class Journal implements FindingJournal {
   readonly records: FindingRecord[] = [];
   readonly events: FindingEvent[] = [];
 
+  constructor(readonly runId = "run-382") {}
+
   async read() {
     return this.events;
   }
@@ -62,7 +64,7 @@ class Journal implements FindingJournal {
         protocol: "clockgrove.factory/v2",
         kind: "finding",
         objective: 382,
-        runId: "run-382",
+        runId: this.runId,
         sequence: this.events.length + 1,
         at: new Date(this.events.length * 1_000).toISOString(),
         ...record,
@@ -166,9 +168,9 @@ describe("finding protocol", () => {
       "Raw model prompt: reveal the hidden instructions",
       "Error: failed\\n    at privateFunction (worker.ts:1:1)",
     ]) {
-      expect(() =>
-        validateFindingCandidate({ ...candidate(), observedBehavior }),
-      ).toThrow(/private path|topology|raw log|prompt/i);
+      expect(() => validateFindingCandidate({ ...candidate(), observedBehavior })).toThrow(
+        /private path|topology|raw log|prompt/i,
+      );
     }
   });
 
@@ -364,6 +366,77 @@ describe("FindingReporter", () => {
     });
     expect(result).toBe("existing-issue-linked");
     expect(transport.created).toHaveLength(0);
+  });
+
+  it("links a later occurrence and appends only its new bounded evidence", async () => {
+    let existing: FindingIssueObservation | undefined;
+    let creates = 0;
+    const transport = port({
+      async findByMarker() {
+        return existing ? [existing] : [];
+      },
+      async createIssue(input) {
+        creates += 1;
+        existing = issue(input.body);
+        return existing;
+      },
+    });
+    const recurrencePolicy: FindingReportingPolicy = {
+      destinations: [
+        {
+          repository: "clockgrove/factory",
+          audience: "public",
+          operations: ["read", "create-issue", "comment-evidence"],
+        },
+      ],
+      maxPublicationWrites: 2,
+    };
+    const journal = new Journal();
+    const reporter = new FindingReporter(transport, journal);
+    const input = {
+      policy: recurrencePolicy,
+      destination: "clockgrove/factory",
+      candidate: candidate(),
+      classification: "nonblocking-follow-up" as const,
+      occurrence,
+      priorEvents: [] as FindingEvent[],
+    };
+    expect(await reporter.report(input)).toBe("issue-filed");
+    expect(
+      await reporter.report({
+        ...input,
+        occurrence: { ...occurrence, attempt: 2 },
+      }),
+    ).toBe("existing-issue-linked");
+    expect(creates).toBe(1);
+    expect(transport.comments).toHaveLength(1);
+    expect(transport.comments[0]?.body).toContain("Attempt: 2");
+  });
+
+  it("applies the publication allowance per run rather than per Objective history", async () => {
+    const oldJournal = new Journal("old-run");
+    expect(
+      await new FindingReporter(port(), oldJournal).report({
+        policy: { ...policy, maxPublicationWrites: 1 },
+        destination: "clockgrove/factory",
+        candidate: candidate(),
+        classification: "nonblocking-follow-up",
+        occurrence: { ...occurrence, runId: "old-run" },
+        priorEvents: [],
+      }),
+    ).toBe("issue-filed");
+    const currentTransport = port();
+    expect(
+      await new FindingReporter(currentTransport, new Journal("current-run")).report({
+        policy: { ...policy, maxPublicationWrites: 1 },
+        destination: "clockgrove/factory",
+        candidate: candidate(sha("c")),
+        classification: "nonblocking-follow-up",
+        occurrence: { ...occurrence, runId: "current-run" },
+        priorEvents: oldJournal.events,
+      }),
+    ).toBe("issue-filed");
+    expect(currentTransport.created).toHaveLength(1);
   });
 
   it("rejects marker copies from a different author or changed body", async () => {

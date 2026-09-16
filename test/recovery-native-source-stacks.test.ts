@@ -68,7 +68,7 @@ function fixture(originals = 0, retained = 3, failedSuffix = false) {
         permittedSecretNames: [],
         trust: "trusted_local",
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
       delivery: {
         group: "a",
         relationship: index ? "continue-stack" : "root",

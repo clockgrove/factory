@@ -48,6 +48,7 @@ import {
   unprovisionedFutureToolchainReason,
 } from "../toolchains/authority.js";
 import { bindDeferredCapabilityGraph } from "../repository-capabilities/model.js";
+import type { WorkerAssetInput } from "../assets/contracts.js";
 
 export type ConflictClass = "parallel-safe" | "exclusive" | "generated" | "large-binary";
 export type ValidationTier = CriterionValidationTier;
@@ -65,7 +66,8 @@ export type CompilerWorkItem = {
   baseSha: string;
   validationCommands: string[];
   requirements: ExecutionRequirements;
-  artifactContract: "clockgrove.factory/artifact-v1";
+  artifactContract: "clockgrove.factory/artifact";
+  assetInputs?: WorkerAssetInput[];
   repositoryCapabilities?: import("../protocol/worker-packet.js").RepositoryCapabilityBindings;
   managedRuntimes?: import("../runtime/toolchain-bundle.js").RuntimeBundleRequirement[];
   context: {

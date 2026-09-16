@@ -58,6 +58,7 @@ async function fixture(): Promise<{ repository: string; context: AttemptContext 
       workspace: repository,
       deadline: new Date(Date.now() + 120_000),
       packet: {
+        protocol: "clockgrove.factory/worker-packet",
         goal: "Change value.txt.",
         acceptanceCriteria: ["value.txt contains changed"],
         allowedPaths: ["value.txt"],
@@ -78,7 +79,7 @@ async function fixture(): Promise<{ repository: string; context: AttemptContext 
           memoryMb: 2048,
           diskMb: 4096,
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       },
       policyNetworkDestinations: ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"],
     },

@@ -150,7 +150,7 @@ async function resultFor(context: CompilationContext): Promise<LegacyFixtureComp
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       },
     ],
   });

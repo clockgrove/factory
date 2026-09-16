@@ -581,7 +581,7 @@ describe("semantic proposal validation", () => {
         expect.objectContaining({
           code: "issue-body-limit",
           itemId: proposal.workItems[0]!.id,
-          observed: 73_507,
+          observed: 73_580,
         }),
       ]),
     );
@@ -1035,7 +1035,7 @@ describe("deterministic semantic projection", () => {
       outOfScope: proposal.workItems[0]!.outOfScope,
       conventions: proposal.workItems[0]!.conventions,
       baseSha: request.baseSha,
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     });
     expect(projected.objective.workItems[0]!.validationCommands).toEqual([
       request.repository.validationRecipes[0]!.command,

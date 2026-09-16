@@ -1232,7 +1232,7 @@ function semanticWorkItem(
       permittedSecretNames: [],
       trust: item.executionIntent.trust,
     },
-    artifactContract: "clockgrove.factory/artifact-v1",
+    artifactContract: "clockgrove.factory/artifact",
     exclusiveResources: [...item.exclusiveResources],
   };
 }

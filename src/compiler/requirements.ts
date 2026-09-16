@@ -173,7 +173,7 @@ export function groundExecutionRequirements(
   evidence.push({
     field: "artifactContract",
     kind: "factory-default",
-    source: "clockgrove.factory/artifact-v1",
+    source: "clockgrove.factory/artifact",
   });
 
   return ExecutionRequirementsSchema.parse({

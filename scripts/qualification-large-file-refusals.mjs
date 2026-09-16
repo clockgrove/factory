@@ -263,7 +263,7 @@ async function symlinkRetention(context, fixture, read, identity, ref, events, r
     raw[stage] = safe(await read(demand));
     const descriptor = assertQualificationCheckpoint(raw[stage], demand, parents);
     assert.ok(
-      descriptor.protocol === "clockgrove.factory/artifact-transfer-v1" &&
+      descriptor.protocol === "clockgrove.factory/artifact-transfer" &&
         descriptor.retention === "repository-audit" &&
         canonical(descriptor.identity) === canonical(identity) &&
         Array.isArray(descriptor.chunks) &&
@@ -312,7 +312,7 @@ async function symlinkRetention(context, fixture, read, identity, ref, events, r
   );
   const manifest = artifact.fileManifest;
   assert.ok(
-    manifest?.version === 1 && Array.isArray(manifest.files) && manifest.files.length === 1,
+    manifest && Array.isArray(manifest.files) && manifest.files.length === 1,
     "symlink file manifest missing",
   );
   const file = manifest.files[0];
@@ -382,7 +382,6 @@ async function symlinkRetention(context, fixture, read, identity, ref, events, r
     "symlink manifest result tree differs from exact object-only transformation",
   );
   const orderedManifest = {
-    version: 1,
     baseTreeSha: manifest.baseTreeSha,
     resultTreeSha,
     files: [expectedFile],
@@ -393,7 +392,7 @@ async function symlinkRetention(context, fixture, read, identity, ref, events, r
     .update(path)
     .update("\0")
     .update(artifact.patch)
-    .update("\0content-v1\0")
+    .update("\0content\0")
     .update(JSON.stringify({ fileManifest: orderedManifest }))
     .digest("hex");
   assert.ok(digest === artifact.digest, "symlink artifact content digest differs");

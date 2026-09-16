@@ -61,7 +61,7 @@ export function appServerCheckpointArm(authority, original, objective) {
       workItemTimeoutMinutes <= 24 * 60,
   );
   return {
-    protocol: "clockgrove.factory/app-server-checkpoint-arm-v2",
+    protocol: "clockgrove.factory/app-server-checkpoint-arm",
     repository: authority.repository,
     objective,
     activationRequestId: `${authority.namespace}-activate`,
@@ -268,7 +268,7 @@ export function assertAppServerCheckpoint(
     1048576,
   );
   assert.deepEqual(intent, ready);
-  assert.equal(ready.protocol, "clockgrove.factory/artifact-transfer-v1");
+  assert.equal(ready.protocol, "clockgrove.factory/artifact-transfer");
   assert.deepEqual(ready.identity, identity);
   assert.equal(ready.retention, "repository-audit");
   // This small fixture does not qualify externalized multi-chunk payload transport.
@@ -284,17 +284,15 @@ export function assertAppServerCheckpoint(
     .update("\0")
     .update(artifact.patch);
   if (artifact.fileManifest)
-    digest.update("\0content-v1\0").update(JSON.stringify({ fileManifest: artifact.fileManifest }));
+    digest.update("\0content\0").update(JSON.stringify({ fileManifest: artifact.fileManifest }));
   assert.equal(artifact.digest, digest.digest("hex"));
   const succeeded = one(item.filter((event) => event.event === "AttemptSucceeded"));
   assert.equal(succeeded.artifactDigest, artifact.digest);
   assert.equal(succeeded.reportedModelTokens, worker.amount);
   if (witness) {
-    assert.ok(
-      [
-        "clockgrove.factory/app-server-checkpoint-reached-v1",
-        "clockgrove.factory/app-server-checkpoint-reached-v2",
-      ].includes(witness.protocol),
+    assert.equal(
+      witness.protocol,
+      "clockgrove.factory/app-server-checkpoint-reached",
       "unsupported App Server checkpoint witness",
     );
     for (const key of keys) assert.equal(witness[key], identity[key]);
@@ -306,22 +304,20 @@ export function assertAppServerCheckpoint(
     assert.equal(witness.modelTokens, worker.amount);
     assert.equal(witness.nativeMilliseconds, native.amount);
     assert.ok(Date.parse(witness.reachedAt) >= Date.parse(native.at));
-    if (witness.protocol === "clockgrove.factory/app-server-checkpoint-reached-v2") {
-      assert.equal(witness.startedAt, start.at);
-      assert.equal(
-        Date.parse(witness.eligibleUntil),
-        Date.parse(start.at) + authority.policy.objectiveTimeoutMinutes * 60_000,
-      );
-      assert.ok(Date.parse(witness.eligibleUntil) > Date.parse(witness.reachedAt));
-      assert.equal(
-        Date.parse(witness.holdUntil) - Date.parse(witness.reachedAt),
-        authority.policy.workItemTimeoutMinutes * 60_000,
-      );
-    } else assert.ok(Date.parse(witness.expiresAt) > Date.parse(witness.reachedAt));
+    assert.equal(witness.startedAt, start.at);
+    assert.equal(
+      Date.parse(witness.eligibleUntil),
+      Date.parse(start.at) + authority.policy.objectiveTimeoutMinutes * 60_000,
+    );
+    assert.ok(Date.parse(witness.eligibleUntil) > Date.parse(witness.reachedAt));
+    assert.equal(
+      Date.parse(witness.holdUntil) - Date.parse(witness.reachedAt),
+      authority.policy.workItemTimeoutMinutes * 60_000,
+    );
   }
   assert.ok(Number.isFinite(Date.parse(verifiedAt)), "invalid verification timestamp");
   return {
-    protocol: "clockgrove.factory/app-server-checkpoint-verification-v1",
+    protocol: "clockgrove.factory/app-server-checkpoint-verification",
     verifiedAt,
     workItem: reserved.workItem,
     runId,

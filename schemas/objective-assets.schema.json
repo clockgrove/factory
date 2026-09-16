@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/clockgrove/factory/schemas/objective-assets.schema.json",
+  "title": "Factory Objective Asset Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "authority", "revision", "requestId", "assets", "totalBytes", "digest"],
+  "properties": {
+    "protocol": { "const": "clockgrove.factory/objective-asset-manifest" },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "objective", "baseSha"],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        "objective": { "type": "integer", "minimum": 1 },
+        "baseSha": { "type": "string", "pattern": "^[a-fA-F0-9]{40}$" }
+      }
+    },
+    "revision": { "type": "integer", "minimum": 1 },
+    "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "assets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["descriptor", "storage"],
+        "properties": {
+          "descriptor": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["protocol", "content", "displayName", "provenance", "visibility", "rights", "materializationPath", "digest"],
+            "properties": {
+              "protocol": { "const": "clockgrove.factory/asset-descriptor" },
+              "content": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["protocol", "digest", "bytes", "inspection"],
+                "properties": {
+                  "protocol": { "const": "clockgrove.factory/asset-content" },
+                  "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                  "bytes": { "type": "integer", "minimum": 1, "maximum": 104857600 },
+                  "inspection": { "$ref": "#/definitions/inspection" }
+                }
+              },
+              "displayName": { "type": "string", "minLength": 1, "maxLength": 255 },
+              "provenance": { "$ref": "#/definitions/provenance" },
+              "visibility": { "enum": ["public", "private"] },
+              "rights": { "$ref": "#/definitions/rights" },
+              "materializationPath": { "type": "string", "pattern": "^assets/[a-f0-9]{64}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+              "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            }
+          },
+          "storage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["protocol", "authority", "descriptorDigest", "payload", "transferRef", "transferRequestId", "intentCommit", "readyCommit", "digest"],
+            "properties": {
+              "protocol": { "const": "clockgrove.factory/asset-storage-receipt" },
+              "authority": { "$ref": "#/properties/authority" },
+              "descriptorDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "payload": { "$ref": "artifact.schema.json#/properties/payload" },
+              "transferRef": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "transferRequestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "intentCommit": { "type": "string", "pattern": "^[a-fA-F0-9]{40}$" },
+              "readyCommit": { "type": "string", "pattern": "^[a-fA-F0-9]{40}$" },
+              "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            }
+          }
+        }
+      }
+    },
+    "totalBytes": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  },
+  "definitions": {
+    "inspection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "handlerId", "handlerContract", "mediaType", "metadata"],
+      "properties": {
+        "status": { "enum": ["semantic-valid", "opaque"] },
+        "handlerId": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+\\-]+$" },
+        "handlerContract": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "mediaType": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "metadata": {
+          "oneOf": [
+            { "type": "object", "additionalProperties": false, "required": ["kind", "encoding", "lines"], "properties": { "kind": { "enum": ["text", "markdown"] }, "encoding": { "const": "utf-8" }, "lines": { "type": "integer", "minimum": 1, "maximum": 1000000 } } },
+            { "type": "object", "additionalProperties": false, "required": ["kind", "format", "width", "height", "frames", "channels", "decodedBytes"], "properties": { "kind": { "const": "raster" }, "format": { "enum": ["png", "jpeg", "webp", "gif", "tiff"] }, "width": { "type": "integer", "minimum": 1 }, "height": { "type": "integer", "minimum": 1 }, "frames": { "type": "integer", "minimum": 1, "maximum": 16 }, "channels": { "type": "integer", "minimum": 1, "maximum": 16 }, "decodedBytes": { "type": "integer", "minimum": 1, "maximum": 167772160 } } },
+            { "type": "object", "additionalProperties": false, "required": ["kind", "reason"], "properties": { "kind": { "const": "opaque" }, "reason": { "type": "string", "minLength": 1, "maxLength": 500 } } }
+          ]
+        }
+      }
+    },
+    "provenance": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "importId", "originalName"], "properties": { "kind": { "const": "local-file" }, "importId": { "type": "string", "minLength": 1, "maxLength": 160 }, "originalName": { "type": "string", "minLength": 1, "maxLength": 255 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "importId", "originalName", "host", "attachmentId"], "properties": { "kind": { "const": "github-attachment" }, "importId": { "type": "string", "minLength": 1, "maxLength": 160 }, "originalName": { "type": "string", "minLength": 1, "maxLength": 255 }, "host": { "enum": ["github.com", "user-images.githubusercontent.com"] }, "attachmentId": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[A-Za-z0-9_.-]+$" } } }
+      ]
+    },
+    "rights": {
+      "type": "object", "additionalProperties": false, "required": ["basis"],
+      "properties": { "basis": { "enum": ["user-owned", "licensed", "permission-granted", "unknown"] }, "license": { "type": "string", "minLength": 1, "maxLength": 500 }, "attribution": { "type": "string", "minLength": 1, "maxLength": 1000 } }
+    }
+  }
+}

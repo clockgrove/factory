@@ -121,6 +121,7 @@ describe("Git-object-only symlink artifact boundary", () => {
           : {}),
       });
       const packet: WorkerPacket = {
+        protocol: "clockgrove.factory/worker-packet",
         goal: "validate exact output",
         acceptanceCriteria: ["output matches"],
         allowedPaths: ["link"],
@@ -138,7 +139,7 @@ describe("Git-object-only symlink artifact boundary", () => {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       };
       const commands = vi.spyOn(processGroup, "runContainedProcess");
       await expect(

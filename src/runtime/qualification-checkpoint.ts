@@ -11,7 +11,7 @@ import { observeLocalScope } from "./local-scope.js";
 
 const Arm = z
   .object({
-    protocol: z.literal("clockgrove.factory/app-server-checkpoint-arm-v2"),
+    protocol: z.literal("clockgrove.factory/app-server-checkpoint-arm"),
     repository: z.string().regex(/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/),
     objective: z.number().int().positive(),
     activationRequestId: z.string().min(1).max(200),
@@ -137,17 +137,7 @@ export async function holdAppServerQualificationCheckpoint(args: {
     throw error;
   }
   // Any reached or malformed arm remains a refusal, never a repeatable hold.
-  const rawArm: unknown = JSON.parse(bytes.toString("utf8"));
-  if (
-    rawArm !== null &&
-    typeof rawArm === "object" &&
-    (rawArm as { protocol?: unknown }).protocol ===
-      "clockgrove.factory/app-server-checkpoint-arm-v1"
-  )
-    throw new Error(
-      "App Server qualification checkpoint arm v1 is retired; use a fresh v2 scenario",
-    );
-  const arm = Arm.parse(rawArm);
+  const arm = Arm.parse(JSON.parse(bytes.toString("utf8")));
   for (const key of ["repository", "objective", "activationRequestId", "policyDigest"] as const)
     if (arm[key] !== args[key])
       throw new Error("qualification arm differs from current activation");
@@ -202,7 +192,7 @@ export async function holdAppServerQualificationCheckpoint(args: {
     throw new Error("qualification checkpoint expired before reaching");
   const holdUntil = reachedAt + arm.holdDurationMs;
   const witness = {
-    protocol: "clockgrove.factory/app-server-checkpoint-reached-v2",
+    protocol: "clockgrove.factory/app-server-checkpoint-reached",
     armDigest: hash(bytes.toString("utf8")),
     repository: args.repository,
     objective: args.objective,

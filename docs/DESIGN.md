@@ -471,7 +471,7 @@ current recovery authorization before a new control outcome. Acknowledged accoun
 working state and does not acquire authenticated snapshot membership.
 
 Post-PR `AttemptPublished` and `PublicationRecorded` facts share one comment on the selected ordinary
-path. Inline artifacts use a single v2 ready descriptor publication because no payload handoff lies
+path. Inline artifacts use a single ready descriptor publication because no payload handoff lies
 between intent and completion; external payloads retain their separate intent and ready boundaries.
 An exact current dispatched issue owner remains non-replayable and occupied until evidence-backed
 release, so its execution outcome need not also publish a redundant terminal ledger revision.

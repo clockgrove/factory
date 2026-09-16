@@ -121,7 +121,7 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
             permittedSecretNames: [],
             trust: "trusted_local",
           },
-          artifactContract: "clockgrove.factory/artifact-v1",
+          artifactContract: "clockgrove.factory/artifact",
         },
       ],
     });

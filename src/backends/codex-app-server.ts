@@ -349,6 +349,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     },
     supportsLocalInference: false,
     supportsManagedToolchainExecution: true,
+    supportsOfflineAssetInputs: true,
     reportsModelUsage: true,
     supportsModelSelection: true,
     requiresPaidRuntime: false,

@@ -60,7 +60,7 @@ function item(
       permittedSecretNames: [],
       trust: "trusted_local",
     },
-    artifactContract: "clockgrove.factory/artifact-v1",
+    artifactContract: "clockgrove.factory/artifact",
   };
 }
 
@@ -179,7 +179,7 @@ describe("evidence-grounded compiler requirements", () => {
         {
           field: "artifactContract",
           kind: "factory-default",
-          source: "clockgrove.factory/artifact-v1",
+          source: "clockgrove.factory/artifact",
         },
       ]),
     );

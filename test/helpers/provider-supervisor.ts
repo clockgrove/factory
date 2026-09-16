@@ -537,7 +537,7 @@ wheels = [
             : "trusted_local",
         estimatedDurationMinutes: 1,
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
       delivery:
         faults.nativeStack && index === 1
           ? { group: "a", relationship: "continue-stack", parentWorkItem: "a" }
@@ -751,7 +751,7 @@ wheels = [
       trust: "trusted_local",
       estimatedDurationMinutes: 1,
     },
-    artifactContract: "clockgrove.factory/artifact-v1",
+    artifactContract: "clockgrove.factory/artifact",
     managedRuntimes: [PNPM_RUNTIME_REQUIREMENT],
     delivery: { group: "bootstrap", relationship: "root" },
     ...(faults.greenfieldLifecycle

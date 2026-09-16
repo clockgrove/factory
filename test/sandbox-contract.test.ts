@@ -35,6 +35,7 @@ function context(): AttemptContext {
     workspace: "/not-shared",
     deadline: new Date("2026-09-03T01:00:00.000Z"),
     packet: {
+      protocol: "clockgrove.factory/worker-packet",
       goal: "change one file",
       acceptanceCriteria: ["done"],
       allowedPaths: ["src/"],
@@ -52,7 +53,7 @@ function context(): AttemptContext {
         permittedSecretNames: [],
         trust: "isolated",
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     },
   };
 }

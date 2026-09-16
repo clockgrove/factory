@@ -47,10 +47,7 @@ export interface ArtifactTransferIntentCheckpoint {
 }
 const DescriptorSchema = z
   .object({
-    protocol: z.enum([
-      "clockgrove.factory/artifact-transfer-v1",
-      "clockgrove.factory/artifact-transfer-v2",
-    ]),
+    protocol: z.literal("clockgrove.factory/artifact-transfer"),
     identity: IdentitySchema,
     artifact: NormalizedArtifactSchema,
     retention: z.literal("repository-audit"),
@@ -192,7 +189,7 @@ async function retainLocalDescriptorLocked(descriptor: Descriptor): Promise<void
   await assertLocalDescriptorRoot(root);
   const marker = Buffer.from(
     JSON.stringify({
-      protocol: "clockgrove.factory/incomplete-artifact-v1",
+      protocol: "clockgrove.factory/incomplete-artifact",
       identity: descriptor.identity,
       artifactDigest: descriptor.artifact.digest,
     }),
@@ -388,7 +385,7 @@ async function readDescriptor(
   )
     throw new Error("artifact transfer provenance mismatch");
   if (
-    descriptor.protocol === "clockgrove.factory/artifact-transfer-v2" &&
+    descriptor.artifact.payload === undefined &&
     (phase !== "ready" ||
       descriptor.artifact.payload !== undefined ||
       descriptor.chunks.length !== 0 ||
@@ -422,7 +419,7 @@ export async function recoverArtifactTransfer(args: {
     if (intent) throw new ArtifactTransferIncompleteError(intent.ref);
     return null;
   }
-  if (ready.descriptor.protocol === "clockgrove.factory/artifact-transfer-v2") {
+  if (!ready.descriptor.artifact.payload) {
     if (intent) throw new Error("direct retained transfer conflicts with an upload intent");
   } else if (
     !intent ||
@@ -526,20 +523,9 @@ export async function persistArtifactTransfer(args: {
     for (const chunk of artifact.payload.chunks)
       chunks.push({ ...chunk, oid: gitBlobOid(await readContentChunk(chunk)) });
   }
-  // Existing intent or private pre-publication v1 bytes retain their original
-  // protocol. No historical descriptor is re-encoded as a direct completion.
-  const legacyIntent = artifact.payload
-    ? null
-    : await readDescriptor(args.store, identity, "intent");
-  const retained = artifact.payload ? null : await readLocalDescriptor(identity);
-  const direct =
-    !artifact.payload &&
-    !legacyIntent &&
-    retained?.protocol !== "clockgrove.factory/artifact-transfer-v1";
+  const direct = !artifact.payload;
   const descriptor: Descriptor = {
-    protocol: direct
-      ? "clockgrove.factory/artifact-transfer-v2"
-      : "clockgrove.factory/artifact-transfer-v1",
+    protocol: "clockgrove.factory/artifact-transfer",
     identity,
     artifact,
     retention: "repository-audit",

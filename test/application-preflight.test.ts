@@ -217,7 +217,7 @@ describe("read-only checkout preflight", () => {
                 permittedSecretNames: [],
                 trust: "trusted_local",
               },
-              artifactContract: "clockgrove.factory/artifact-v1",
+              artifactContract: "clockgrove.factory/artifact",
             },
           ],
         });
@@ -485,7 +485,7 @@ describe("read-only checkout preflight", () => {
             permittedSecretNames: [],
             trust: "trusted_local",
           },
-          artifactContract: "clockgrove.factory/artifact-v1",
+          artifactContract: "clockgrove.factory/artifact",
         },
       ],
     });
@@ -530,7 +530,7 @@ describe("read-only checkout preflight", () => {
         permittedSecretNames: [],
         trust: "trusted_local" as const,
       },
-      artifactContract: "clockgrove.factory/artifact-v1" as const,
+      artifactContract: "clockgrove.factory/artifact" as const,
       context: {
         mustRead: ["package.json"],
         searchSeeds: ["pnpm"],

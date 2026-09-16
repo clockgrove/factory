@@ -91,6 +91,7 @@ async function fixture() {
   const artifact = normalizeArtifact({ baseSha, patch, changedPaths: paths, outcome: "succeeded" });
   git(repository, ["reset", "--hard", baseSha]);
   const packet: WorkerPacket = {
+    protocol: "clockgrove.factory/worker-packet",
     goal: "prepare the exact sibling tree",
     acceptanceCriteria: ["exact tree"],
     allowedPaths: paths,
@@ -108,7 +109,7 @@ async function fixture() {
       permittedSecretNames: [],
       trust: "isolated",
     },
-    artifactContract: "clockgrove.factory/artifact-v1",
+    artifactContract: "clockgrove.factory/artifact",
   };
   const markers = [
     "post-checkout",

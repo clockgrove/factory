@@ -45,7 +45,12 @@ The Director skill uses bounded, read-only operations when the user is inspectin
   the issue number is omitted. It reports whether its fixed scan was complete and never reads issue
   bodies, invokes a model, changes GitHub, or grants execution authority.
 - `factory_doctor` checks the requested repository and checkout, GitHub access and branch rules,
-  available runners, repository-specific validation tools, and measured Linux resource headroom.
+  available runners, repository-specific validation tools, measured Linux resource headroom, and
+  Objective asset-handler readiness.
+- `factory_assets_import` explicitly captures bounded local files or recognized GitHub attachments
+  into an immutable Objective asset manifest. `factory_assets_inspect` reads a manifest by its
+  pinned SHA-256 digest. See [Objective input assets](OBJECTIVE-ASSETS.md) for supported handlers,
+  opaque-content policy, rights/visibility checks and offline materialization.
 - `factory_plan` inspects existing Work Items without model execution. Explicit `compile: true`
   compiles a proposed graph against a clean selected checkout without creating issues or starting
   workers. Compilation consumes model quota; its usage is returned, not persisted as run authority.

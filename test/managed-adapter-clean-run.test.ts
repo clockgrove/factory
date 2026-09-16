@@ -60,6 +60,7 @@ describe("managed adapter clean validation", () => {
       packages: {},
     });
     const packet: WorkerPacket = {
+      protocol: "clockgrove.factory/worker-packet",
       goal: "Establish Bun validation.",
       acceptanceCriteria: ["Bun validation is finite."],
       allowedPaths: ["package.json", "bun.lock", "packages/"],
@@ -101,10 +102,10 @@ describe("managed adapter clean validation", () => {
           bundleDigest: receipts.bun.digest,
         },
       ],
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     };
     const artifact = {
-      protocol: "clockgrove.factory/artifact-v1" as const,
+      protocol: "clockgrove.factory/artifact" as const,
       baseSha: packet.baseSha,
       patch: "",
       changedPaths: [],
@@ -189,6 +190,7 @@ wheels = [
     await writeFile(join(root, "uv.lock"), lock);
     await writeFile(join(root, ".python-version"), "3.14.7\n");
     const packet: WorkerPacket = {
+      protocol: "clockgrove.factory/worker-packet",
       goal: "Establish uv validation.",
       acceptanceCriteria: ["uv validation is finite."],
       allowedPaths: ["pyproject.toml", "uv.lock", ".python-version", "packages/"],
@@ -230,10 +232,10 @@ wheels = [
           bundleDigest: receipts.uv.digest,
         },
       ],
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     };
     const artifact = {
-      protocol: "clockgrove.factory/artifact-v1" as const,
+      protocol: "clockgrove.factory/artifact" as const,
       baseSha: packet.baseSha,
       patch: "",
       changedPaths: [],

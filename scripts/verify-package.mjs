@@ -53,6 +53,8 @@ const EXPECTED_TOOLS = [
   "dispatch_start",
   "evaluate_mechanical",
   "factory_activate",
+  "factory_assets_import",
+  "factory_assets_inspect",
   "factory_controller_install",
   "factory_controller_restart",
   "factory_controller_start",
@@ -370,6 +372,7 @@ const schemaFiles = [
   "run-policy.schema.json",
   "factory-event.schema.json",
   "artifact.schema.json",
+  "objective-assets.schema.json",
   "validation-evidence.schema.json",
   "replay-snapshot.schema.json",
 ];

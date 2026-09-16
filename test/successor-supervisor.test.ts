@@ -396,7 +396,7 @@ async function fixture(
           permittedSecretNames: [],
           trust: options.isolatedItem === name ? "isolated" : "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
         delivery: options.retainedPrefix
           ? {
               group: "a",

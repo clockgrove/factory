@@ -123,6 +123,7 @@ async function pnpmRepositoryFixture(): Promise<{ repository: string; baseSha: s
 
 function packet(baseSha: string, over: Partial<WorkerPacket> = {}): WorkerPacket {
   const result: WorkerPacket = {
+    protocol: "clockgrove.factory/worker-packet",
     goal: "Change the value.",
     acceptanceCriteria: ["value.txt contains changed"],
     allowedPaths: ["value.txt"],
@@ -140,7 +141,7 @@ function packet(baseSha: string, over: Partial<WorkerPacket> = {}): WorkerPacket
       permittedSecretNames: [],
       trust: "trusted_local",
     },
-    artifactContract: "clockgrove.factory/artifact-v1",
+    artifactContract: "clockgrove.factory/artifact",
     ...over,
   };
   if (over.managedRuntimes === undefined) {

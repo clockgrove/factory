@@ -226,9 +226,9 @@ try {
   }
   if (
     JSON.stringify(Object.keys(installedPackage.dependencies ?? {}).sort()) !==
-    JSON.stringify(["@openai/codex-sdk"])
+    JSON.stringify(["@openai/codex-sdk", "file-type", "ipaddr.js", "sharp"])
   ) {
-    throw new Error("the npm runtime graph must contain only the pinned Codex SDK binary provider");
+    throw new Error("the npm runtime graph must contain only the pinned SDK and asset libraries");
   }
   if (installedPackage.bin?.factory !== "dist/factory.js") {
     throw new Error("npm package does not expose the bundled factory CLI");
@@ -249,6 +249,19 @@ try {
   ) {
     throw new Error("the supported Codex SDK backend must use the pinned production dependency");
   }
+  for (const dependency of ["file-type", "ipaddr.js", "sharp"]) {
+    if (!/^\d+\.\d+\.\d+$/.test(installedPackage.dependencies?.[dependency] ?? ""))
+      throw new Error(`the Objective asset dependency ${dependency} must be exactly pinned`);
+  }
+  run(
+    process.execPath,
+    [
+      "-e",
+      "const sharp=require(process.argv[1]);if(!sharp.versions?.sharp||!sharp.versions?.vips)process.exit(1)",
+      resolve(installDirectory, "node_modules", "sharp"),
+    ],
+    { timeout: 30_000 },
+  );
   const installedGraph = await installedPackages(resolve(installDirectory, "node_modules"));
   for (const { manifest } of installedGraph) {
     const hooks = installLifecycleScripts.filter((name) => manifest.scripts?.[name]);

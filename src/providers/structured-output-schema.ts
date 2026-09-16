@@ -34,6 +34,42 @@ function schemaValueType(value: unknown): string {
   return typeof value;
 }
 
+function unsupportedRegexConstruct(
+  pattern: string,
+): "lookaround" | "numeric backreference" | "named backreference" | null {
+  let inCharacterClass = false;
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+    if (character === "\\") {
+      const escaped = pattern[index + 1];
+      if (!inCharacterClass && escaped !== undefined && /^[1-9]$/.test(escaped))
+        return "numeric backreference";
+      if (!inCharacterClass && escaped === "k" && pattern[index + 2] === "<")
+        return "named backreference";
+      index += 1;
+      continue;
+    }
+    if (character === "[") {
+      inCharacterClass = true;
+      continue;
+    }
+    if (character === "]") {
+      inCharacterClass = false;
+      continue;
+    }
+    if (
+      !inCharacterClass &&
+      character === "(" &&
+      (pattern.startsWith("(?=", index) ||
+        pattern.startsWith("(?!", index) ||
+        pattern.startsWith("(?<=", index) ||
+        pattern.startsWith("(?<!", index))
+    )
+      return "lookaround";
+  }
+  return null;
+}
+
 /** Validate the bounded JSON Schema subset accepted by Codex structured-output providers. */
 export function assertProviderStructuredOutputSchema(schema: unknown): void {
   let properties = 0;
@@ -66,6 +102,13 @@ export function assertProviderStructuredOutputSchema(schema: unknown): void {
       node.type === undefined
     )
       throw new Error(`provider schema constraint lacks type at ${path}`);
+    if (Object.hasOwn(node, "pattern")) {
+      if (typeof node.pattern !== "string")
+        throw new Error(`provider schema pattern is not a string at ${path}/pattern`);
+      const unsupported = unsupportedRegexConstruct(node.pattern);
+      if (unsupported)
+        throw new Error(`provider schema regex uses unsupported ${unsupported} at ${path}/pattern`);
+    }
     if (Object.hasOwn(node, "const")) {
       const expected = schemaValueType(node.const);
       const declared = node.type;

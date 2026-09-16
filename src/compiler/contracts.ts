@@ -396,12 +396,26 @@ const jsonScopePath = {
   maxLength: 500,
   pattern: "^(?!/)(?!.*\\\\)(?!.*//)(?!.*[*?\\[])(?!.*(?:^|/)\\.\\.?(?:/|$)).+$",
 };
+const providerJsonScopePath = {
+  type: "string",
+  minLength: 1,
+  maxLength: 500,
+  // Provider regex shapes syntax; RepositoryScopePathSchema owns segment and relativity checks.
+  pattern: "^[^\\\\*?\\[]+$",
+};
 const jsonNetworkDestination = {
   type: "string",
   minLength: 1,
   maxLength: 253,
   pattern:
     "^(?!.*(?:^|\\.)[Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]$)(?![Mm][Ee][Tt][Aa][Dd][Aa][Tt][Aa]\\.[Gg][Oo][Oo][Gg][Ll][Ee]\\.[Ii][Nn][Tt][Ee][Rr][Nn][Aa][Ll]$)(?:\\*\\.)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}$",
+};
+const providerJsonNetworkDestination = {
+  type: "string",
+  minLength: 1,
+  maxLength: 253,
+  // NetworkDestinationSchema deterministically excludes local and instance-metadata endpoints.
+  pattern: "^(?:\\*\\.)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}$",
 };
 const jsonDiagnostic = {
   type: ["null", "boolean", "number", "string", "array", "object"],
@@ -412,12 +426,12 @@ const jsonRefs = (minimum = 0) => ({
   maxItems: 128,
   items: jsonEvalId,
 });
-const intentSchema = {
+const intentSchema = (scopePath: Record<string, unknown>) => ({
   anyOf: [
     strictObject({ kind: { type: "string", const: "observed" }, recipeId: jsonId }),
     strictObject({
       kind: { type: "string", const: "scoped-node-test" },
-      targets: { type: "array", minItems: 1, maxItems: 32, items: jsonScopePath },
+      targets: { type: "array", minItems: 1, maxItems: 32, items: scopePath },
     }),
     strictObject({
       kind: { type: "string", const: "deferred" },
@@ -428,76 +442,93 @@ const intentSchema = {
       }),
     }),
   ],
-};
-
-const compilerProposalObjectSchema = strictObject({
-  protocol: { type: "string", const: "clockgrove.factory/compiler-proposal" },
-  workItems: {
-    type: "array",
-    minItems: 1,
-    maxItems: 100,
-    items: strictObject({
-      id: jsonId,
-      title: { type: "string", minLength: 1, maxLength: 256 },
-      goal: { type: "string", minLength: 1, maxLength: 4_000 },
-      obligationIds: stringArray(128, { type: "string", minLength: 1, maxLength: 160 }),
-      criteria: {
-        type: "array",
-        minItems: 1,
-        maxItems: 64,
-        items: strictObject({
-          id: jsonId,
-          text: { type: "string", minLength: 1, maxLength: 2_000 },
-          risk: {
-            type: "string",
-            enum: [
-              "ordinary",
-              "safety",
-              "security",
-              "destructive-action",
-              "accounting",
-              "recovery",
-            ],
-          },
-          validation: {
-            type: "array",
-            minItems: 1,
-            maxItems: 4,
-            items: strictObject({
-              tier: {
-                type: "string",
-                enum: ["mechanical", "semantic", "visual", "deterministic-simulation"],
-              },
-              evidence: stringArray(32, intentSchema),
-            }),
-          },
-        }),
-      },
-      scope: { type: "array", minItems: 1, maxItems: 64, items: jsonScopePath },
-      preconditions: stringArray(64, { type: "string", minLength: 1, maxLength: 2_000 }),
-      outOfScope: stringArray(64, { type: "string", minLength: 1, maxLength: 2_000 }),
-      conventions: stringArray(64, { type: "string", minLength: 1, maxLength: 2_000 }),
-      dependsOn: stringArray(50, jsonId),
-      exclusiveResources: stringArray(64, {
-        type: "string",
-        minLength: 1,
-        maxLength: 160,
-        pattern: "^(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*//)(?!.*\\/$)[a-z0-9][a-z0-9:._/-]*$",
-      }),
-      executionIntent: strictObject({
-        estimatedDurationMinutes: { type: "integer", minimum: 1, maximum: 1_440 },
-        additionalTools: stringArray(64, jsonId),
-        services: stringArray(64, jsonId),
-        additionalNetworkDestinations: stringArray(64, jsonNetworkDestination),
-        trust: { type: "string", enum: ["trusted_local", "isolated", "managed"] },
-      }),
-    }),
-  },
 });
+
+const compilerProposalObjectSchema = (
+  scopePath: Record<string, unknown>,
+  networkDestination: Record<string, unknown>,
+  exclusiveResourcePattern: string,
+) =>
+  strictObject({
+    protocol: { type: "string", const: "clockgrove.factory/compiler-proposal" },
+    workItems: {
+      type: "array",
+      minItems: 1,
+      maxItems: 100,
+      items: strictObject({
+        id: jsonId,
+        title: { type: "string", minLength: 1, maxLength: 256 },
+        goal: { type: "string", minLength: 1, maxLength: 4_000 },
+        obligationIds: stringArray(128, { type: "string", minLength: 1, maxLength: 160 }),
+        criteria: {
+          type: "array",
+          minItems: 1,
+          maxItems: 64,
+          items: strictObject({
+            id: jsonId,
+            text: { type: "string", minLength: 1, maxLength: 2_000 },
+            risk: {
+              type: "string",
+              enum: [
+                "ordinary",
+                "safety",
+                "security",
+                "destructive-action",
+                "accounting",
+                "recovery",
+              ],
+            },
+            validation: {
+              type: "array",
+              minItems: 1,
+              maxItems: 4,
+              items: strictObject({
+                tier: {
+                  type: "string",
+                  enum: ["mechanical", "semantic", "visual", "deterministic-simulation"],
+                },
+                evidence: stringArray(32, intentSchema(scopePath)),
+              }),
+            },
+          }),
+        },
+        scope: { type: "array", minItems: 1, maxItems: 64, items: scopePath },
+        preconditions: stringArray(64, { type: "string", minLength: 1, maxLength: 2_000 }),
+        outOfScope: stringArray(64, { type: "string", minLength: 1, maxLength: 2_000 }),
+        conventions: stringArray(64, { type: "string", minLength: 1, maxLength: 2_000 }),
+        dependsOn: stringArray(50, jsonId),
+        exclusiveResources: stringArray(64, {
+          type: "string",
+          minLength: 1,
+          maxLength: 160,
+          pattern: exclusiveResourcePattern,
+        }),
+        executionIntent: strictObject({
+          estimatedDurationMinutes: { type: "integer", minimum: 1, maximum: 1_440 },
+          additionalTools: stringArray(64, jsonId),
+          services: stringArray(64, jsonId),
+          additionalNetworkDestinations: stringArray(64, networkDestination),
+          trust: { type: "string", enum: ["trusted_local", "isolated", "managed"] },
+        }),
+      }),
+    },
+  });
+
+const providerCompilerProposalObjectSchema = compilerProposalObjectSchema(
+  providerJsonScopePath,
+  providerJsonNetworkDestination,
+  // CompilerProposalSchema owns traversal, empty-component, and trailing-slash rejection.
+  "^[a-z0-9][a-z0-9:._/-]*$",
+);
+const durableCompilerProposalObjectSchema = compilerProposalObjectSchema(
+  jsonScopePath,
+  jsonNetworkDestination,
+  "^(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*//)(?!.*\\/$)[a-z0-9][a-z0-9:._/-]*$",
+);
 
 export const COMPILER_PROPOSAL_JSON_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  ...compilerProposalObjectSchema,
+  ...providerCompilerProposalObjectSchema,
 } as const;
 
 const jsonEvidence = strictObject({
@@ -731,7 +762,7 @@ export const COMPILER_REQUEST_JSON_SCHEMA = {
       }),
       workItemTimeoutMinutes: { type: "integer", minimum: 1, maximum: 1_440 },
     }),
-    previousProposal: { oneOf: [{ type: "null" }, compilerProposalObjectSchema] },
+    previousProposal: { oneOf: [{ type: "null" }, durableCompilerProposalObjectSchema] },
     validationReport: jsonValidationReport,
     semanticFindings: { type: "array", maxItems: 64, items: jsonFinding },
     challenges: {

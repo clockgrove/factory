@@ -68,6 +68,22 @@ function unavailable(role: "system" | "developer") {
   };
 }
 
+/** Production JSONL scanner: diagnostics and malformed/interleaved lines are not events. */
+export function managementJsonlEvents(stdout: string): Array<Record<string, unknown>> {
+  const events: Array<Record<string, unknown>> = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim().startsWith("{")) continue;
+    try {
+      const event = JSON.parse(line) as unknown;
+      if (event !== null && typeof event === "object" && !Array.isArray(event))
+        events.push(event as Record<string, unknown>);
+    } catch {
+      // Provider JSONL can contain bounded diagnostic text or malformed diagnostic fragments.
+    }
+  }
+  return events;
+}
+
 function assistantMessages(stdout: string | undefined, hasFinalStructuredResponse: boolean) {
   if (stdout === undefined) return [];
   const messages: Array<{
@@ -76,26 +92,22 @@ function assistantMessages(stdout: string | undefined, hasFinalStructuredRespons
     content: string;
     finalStructuredResponse: boolean;
   }> = [];
-  for (const line of stdout.split(/\r?\n/)) {
-    try {
-      const event = JSON.parse(line) as {
-        type?: string;
-        item?: { type?: string; text?: unknown };
-      };
-      if (
-        event.type === "item.completed" &&
-        event.item?.type === "agent_message" &&
-        typeof event.item.text === "string"
-      ) {
-        messages.push({
-          role: "assistant",
-          availability: "observed",
-          content: event.item.text,
-          finalStructuredResponse: false,
-        });
-      }
-    } catch {
-      // The raw stream remains available below even when an interleaved line is not JSON.
+  for (const event of managementJsonlEvents(stdout)) {
+    const item =
+      event.item !== null && typeof event.item === "object" && !Array.isArray(event.item)
+        ? (event.item as Record<string, unknown>)
+        : null;
+    if (
+      event.type === "item.completed" &&
+      item?.type === "agent_message" &&
+      typeof item.text === "string"
+    ) {
+      messages.push({
+        role: "assistant",
+        availability: "observed",
+        content: item.text,
+        finalStructuredResponse: false,
+      });
     }
   }
   if (hasFinalStructuredResponse && messages.length > 0)

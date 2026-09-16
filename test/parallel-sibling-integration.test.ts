@@ -298,8 +298,10 @@ async function fixture(
     });
   }
   const now = new Date();
+  const { compilerEvaluation: _defaultCompilerEvaluation, ...oneShotFixturePolicy } =
+    DEFAULT_RUN_POLICY;
   const policy = parseRunPolicy({
-    ...DEFAULT_RUN_POLICY,
+    ...oneShotFixturePolicy,
     capacity: { ...DEFAULT_RUN_POLICY.capacity, mode: "fixed" },
     delivery: {
       mode: options.regular ? "regular-prs" : "stacked-prs",

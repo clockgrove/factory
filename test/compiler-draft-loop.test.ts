@@ -1515,6 +1515,10 @@ describe("compiler draft durable repair", () => {
           revision: 0,
           value: inventory,
           usage: { inputTokens: 7, outputTokens: 3 },
+          terminalOutcome: {
+            state: "succeeded",
+            usage: { inputTokens: 7, outputTokens: 3 },
+          },
           provenance,
           completedAt: 100,
           observedMilliseconds: 0,
@@ -1551,6 +1555,10 @@ describe("compiler draft durable repair", () => {
           revision: 0,
           value: compileValue,
           usage: { inputTokens: 11, outputTokens: 5 },
+          terminalOutcome: {
+            state: "succeeded",
+            usage: { inputTokens: 11, outputTokens: 5 },
+          },
           provenance: compileProvenance,
           completedAt: 100,
           observedMilliseconds: 0,

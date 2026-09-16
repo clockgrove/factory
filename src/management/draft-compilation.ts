@@ -14,6 +14,7 @@ import {
   runCompilerDraftLoop,
   CompilerDraftStopError,
   CompilerDraftAdmissionError,
+  CompilerDraftTerminalOutcomeError,
   type CompilerDraftOutcome,
   type DraftStage,
   type ValidatedCompilerDraft,
@@ -60,12 +61,16 @@ import {
   MANAGEMENT_PROMPT_MAX_BYTES,
   readCompilerObligationEvidence,
 } from "./codex-cli.js";
-import type {
-  CompilationContext,
-  CompilerInvocationProvenance,
-  ManagementBackend,
-  ManagementUsage,
+import {
+  assertCompilationContextPolicyAuthority,
+  managementFailureProvenance,
+  managementTerminalOutcome,
+  type CompilationContext,
+  type CompilerInvocationProvenance,
+  type ManagementBackend,
+  type ManagementUsage,
 } from "./backend.js";
+import { ProviderQuotaError } from "../providers/quota.js";
 
 interface PersistedProposalResult {
   request: CompilerRequest;
@@ -92,6 +97,10 @@ function durableInvocationProvenanceField(
 ): { provenance?: CompilerInvocationProvenance } {
   const durable = durableInvocationProvenance(provenance);
   return durable ? { provenance: durable } : {};
+}
+
+function succeededTerminalOutcome(usage: ManagementUsage) {
+  return { state: "succeeded" as const, usage: { ...usage } };
 }
 
 function persistedProposalResult(value: unknown): PersistedProposalResult {
@@ -266,6 +275,7 @@ export async function compileEvaluatedDraft(args: {
   fixedGraph?: CompiledObjective;
 }): Promise<CompilerDraftOutcome> {
   const { context, backend } = args;
+  assertCompilationContextPolicyAuthority(context);
   const evidenceStartedAt = Date.now();
   const policy = context.runPolicy.compilerEvaluation;
   if (!policy) throw new Error("compiler evaluation requires explicit immutable policy");
@@ -491,6 +501,7 @@ export async function compileEvaluatedDraft(args: {
                 checkpoint({
                   value: result.inventory,
                   usage: result.usage,
+                  terminalOutcome: succeededTerminalOutcome(result.usage),
                   ...durableInvocationProvenanceField(result.provenance),
                 }),
               beforeModelInvocation,
@@ -499,6 +510,7 @@ export async function compileEvaluatedDraft(args: {
             return {
               value: result.inventory,
               usage: result.usage,
+              terminalOutcome: succeededTerminalOutcome(result.usage),
               ...durableInvocationProvenanceField(result.provenance),
             };
           }
@@ -555,6 +567,7 @@ export async function compileEvaluatedDraft(args: {
                 checkpoint({
                   value: result.verdict,
                   usage: result.usage,
+                  terminalOutcome: succeededTerminalOutcome(result.usage),
                   ...durableInvocationProvenanceField(result.provenance),
                 }),
               beforeModelInvocation,
@@ -562,6 +575,7 @@ export async function compileEvaluatedDraft(args: {
             return {
               value: result.verdict,
               usage: result.usage,
+              terminalOutcome: succeededTerminalOutcome(result.usage),
               ...durableInvocationProvenanceField(result.provenance),
             };
           }
@@ -657,6 +671,7 @@ export async function compileEvaluatedDraft(args: {
                   provenance: result.provenance,
                 },
                 usage: result.usage,
+                terminalOutcome: succeededTerminalOutcome(result.usage),
                 ...durableInvocationProvenanceField(result.provenance),
               }),
             { pinnedFacts, runPolicy: frozenContext.runPolicy },
@@ -671,12 +686,21 @@ export async function compileEvaluatedDraft(args: {
               provenance: result.provenance,
             },
             usage: result.usage,
+            terminalOutcome: succeededTerminalOutcome(result.usage),
             ...durableInvocationProvenanceField(result.provenance),
           };
         } catch (error) {
           if (error instanceof CompilerDraftStopError) throw error;
           if (!dispatched && !(error instanceof CompilerDraftAdmissionError))
             throw new CompilerDraftAdmissionError(error);
+          const provenance = managementFailureProvenance(error);
+          if (error instanceof ProviderQuotaError) {
+            if (provenance) Object.assign(error, { provenance });
+            throw error;
+          }
+          const terminalOutcome = managementTerminalOutcome(error);
+          if (terminalOutcome)
+            throw new CompilerDraftTerminalOutcomeError(error, terminalOutcome, provenance);
           throw error;
         }
       },

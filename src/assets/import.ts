@@ -4,7 +4,7 @@ import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { request } from "node:https";
 import ipaddr from "ipaddr.js";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import {
@@ -59,6 +59,20 @@ async function pinnedAddress(host: string) {
     throw new Error("attachment host has a private, reserved, or ambiguous address set");
   return selected;
 }
+export function fixedAddressLookup(address: string, family: number) {
+  return (
+    _hostname: string,
+    options: { all?: boolean | undefined },
+    callback: (
+      error: NodeJS.ErrnoException | null,
+      result: string | Array<{ address: string; family: number }>,
+      observedFamily?: number,
+    ) => void,
+  ) => {
+    if (options.all) callback(null, [{ address, family }]);
+    else callback(null, address, family);
+  };
+}
 export function recognizedGitHubAttachment(value: string) {
   const url = new URL(value);
   if (
@@ -94,7 +108,7 @@ async function pinnedGet(url: URL): Promise<{ status: number; location?: string;
       {
         method: "GET",
         headers: { Accept: "*/*", "User-Agent": "clockgrove-factory-objective-assets" },
-        lookup: (_hostname, _options, callback) => callback(null, pinned.address, pinned.family),
+        lookup: fixedAddressLookup(pinned.address, pinned.family),
       },
       (response) => {
         const status = response.statusCode ?? 0;
@@ -170,31 +184,49 @@ async function readLocal(path: string): Promise<Buffer> {
   const parent = dirname(target);
   if ((await realpath(parent)) !== parent)
     throw new Error("local asset path contains a symlinked parent");
-  const file = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const parentHandle = await open(
+    parent,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  );
   try {
-    const before = await file.stat();
-    if (!before.isFile() || before.size < 1 || before.size > MAX_OBJECTIVE_ASSET_BYTES)
-      throw new Error("local asset must be a bounded regular file");
-    const bytes = Buffer.alloc(before.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const read = await file.read(bytes, offset, bytes.length - offset, offset);
-      if (!read.bytesRead) throw new Error("asset truncated during capture");
-      offset += read.bytesRead;
+    const parentBefore = await parentHandle.stat();
+    if (!parentBefore.isDirectory()) throw new Error("local asset parent is not a directory");
+    const anchoredParent = `/proc/self/fd/${parentHandle.fd}`;
+    if ((await realpath(anchoredParent)) !== parent)
+      throw new Error("local asset parent changed during capture");
+    const anchoredTarget = join(anchoredParent, basename(target));
+    const file = await open(anchoredTarget, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const before = await file.stat();
+      if (!before.isFile() || before.size < 1 || before.size > MAX_OBJECTIVE_ASSET_BYTES)
+        throw new Error("local asset must be a bounded regular file");
+      const bytes = Buffer.alloc(before.size);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const read = await file.read(bytes, offset, bytes.length - offset, offset);
+        if (!read.bytesRead) throw new Error("asset truncated during capture");
+        offset += read.bytesRead;
+      }
+      const after = await file.stat();
+      const pathAfter = await lstat(anchoredTarget);
+      const parentAfter = await lstat(parent);
+      if (
+        after.size !== before.size ||
+        after.mtimeMs !== before.mtimeMs ||
+        after.ctimeMs !== before.ctimeMs ||
+        pathAfter.dev !== before.dev ||
+        pathAfter.ino !== before.ino ||
+        parentAfter.isSymbolicLink() ||
+        parentAfter.dev !== parentBefore.dev ||
+        parentAfter.ino !== parentBefore.ino
+      )
+        throw new Error("asset mutated or was replaced during capture");
+      return bytes;
+    } finally {
+      await file.close();
     }
-    const after = await file.stat();
-    const pathAfter = await lstat(target);
-    if (
-      after.size !== before.size ||
-      after.mtimeMs !== before.mtimeMs ||
-      after.ctimeMs !== before.ctimeMs ||
-      pathAfter.dev !== before.dev ||
-      pathAfter.ino !== before.ino
-    )
-      throw new Error("asset mutated or was replaced during capture");
-    return bytes;
   } finally {
-    await file.close();
+    await parentHandle.close();
   }
 }
 const knownExtensions = new Map([

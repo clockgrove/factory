@@ -240,13 +240,38 @@ export class FactoryApplicationService {
       });
     }
     if (operation === "status") {
-      return buildStatusReport({
+      const status = buildStatusReport({
         repository,
         snapshot,
         ...(this.context.platformTelemetry
           ? { platformTelemetry: this.context.platformTelemetry() }
           : {}),
       });
+      if (!status.compilerEvaluation || !this.context.compilerEvaluationStore) return status;
+      try {
+        const evaluation = await inspectCompilerEvaluation({
+          repository,
+          snapshot,
+          store: this.context.compilerEvaluationStore,
+        });
+        return {
+          ...status,
+          compilerEvaluation: {
+            availability: "observed" as const,
+            policy: status.compilerEvaluation.policy,
+            invocations: evaluation.invocationStatus,
+            cumulativeUsage: evaluation.cumulativeUsage,
+          },
+        };
+      } catch {
+        return {
+          ...status,
+          compilerEvaluation: {
+            ...status.compilerEvaluation,
+            reason: "immutable compiler draft status could not be validated",
+          },
+        };
+      }
     }
     if (operation === "explain") {
       return buildExplanationReport({ repository, snapshot, ...(workItem ? { workItem } : {}) });

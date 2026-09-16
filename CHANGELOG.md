@@ -30,6 +30,10 @@ and artifacts, and record the commit SHA when installing from source.
 
 ### Fixed
 
+- Give new omitted-policy Objective activations an explicit bounded compiler auto-repair envelope,
+  preserving exact historical and caller-supplied policy authority while reporting each compiler
+  invocation and cumulative observed usage. ([#389](https://github.com/clockgrove/factory/issues/389))
+
 - Reconnect interrupted foreground calls to the exact non-terminal run and honor its durable
   cancellation before another compiler, graph, Work Item, or worker admission. Cancelled terminal
   history and unresolved model invocations now require explicit successor recovery instead of an
@@ -130,9 +134,9 @@ and artifacts, and record the commit SHA when installing from source.
   ([#283](https://github.com/clockgrove/factory/issues/283))
 
 - Make authenticated Objective and attempt deadlines authoritative across management dispatch,
-  provider creation and installed checkpoint qualification. Canonical App Server and
-  artifact-transfer arms separate Objective-bound reach eligibility from the post-proof hold.
-  Management invocations retain the explicit
+  provider creation and installed checkpoint qualification. App Server and artifact-transfer v2
+  arms now separate Objective-bound reach eligibility from the post-proof hold; reached v1 evidence
+  stays readable while unreached v1 arms fail closed. Management invocations retain the explicit
   Run Policy Work Item timeout as their inner process-stall bound while never exceeding the Objective
   remainder. Vercel cleanup uses a separate bounded stop-confirmation window and preserves timed-out
   cleanup as an unresolved provider resource. ([#309](https://github.com/clockgrove/factory/issues/309))

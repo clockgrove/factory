@@ -209,6 +209,7 @@ async function fixture(
 ) {
   const store = new MemoryStore();
   const policy = structuredClone(DEFAULT_RUN_POLICY);
+  delete policy.compilerEvaluation;
   if (options.tokenLimit !== undefined)
     policy.economics = {
       maxModelTokens: options.tokenLimit,

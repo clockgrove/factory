@@ -59,6 +59,7 @@ import {
   type ProviderQuotaGate,
 } from "../providers/quota.js";
 import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
+import { assertProviderStructuredOutputSchema } from "../providers/structured-output-schema.js";
 
 export const CODEX_WORKER_OUTPUT_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -83,6 +84,7 @@ export const CODEX_WORKER_OUTPUT_SCHEMA = {
     },
   },
 } as const;
+assertProviderStructuredOutputSchema(CODEX_WORKER_OUTPUT_SCHEMA);
 
 interface WorkerFinal {
   outcome: "succeeded" | "failed" | "declined";

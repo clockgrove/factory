@@ -4,9 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
 import Ajv from "ajv";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { importObjectiveAsset, recognizedGitHubAttachment } from "../src/assets/import.js";
+import {
+  fixedAddressLookup,
+  importObjectiveAsset,
+  recognizedGitHubAttachment,
+} from "../src/assets/import.js";
 import { inspectAssetBytes } from "../src/assets/handlers.js";
 import { materializeObjectiveAssets } from "../src/assets/materialize.js";
 import {
@@ -83,6 +87,16 @@ async function local(bytes: Buffer, name: string, importId: string) {
 }
 
 describe("Objective asset contracts and handlers", () => {
+  it("returns pinned DNS results in the callback shape requested by Node", () => {
+    const lookup = fixedAddressLookup("203.0.113.7", 4);
+    const single = vi.fn();
+    const all = vi.fn();
+    lookup("github.com", { all: false }, single);
+    lookup("github.com", { all: true }, all);
+    expect(single).toHaveBeenCalledWith(null, "203.0.113.7", 4);
+    expect(all).toHaveBeenCalledWith(null, [{ address: "203.0.113.7", family: 4 }]);
+  });
+
   it("recognizes only explicit GitHub attachment origins", () => {
     expect(
       recognizedGitHubAttachment("https://github.com/user-attachments/assets/abc-123"),
@@ -154,6 +168,29 @@ describe("Objective asset contracts and handlers", () => {
         allowOpaque: true,
       }),
     ).rejects.toThrow(/executable/);
+    await expect(
+      inspectAssetBytes(Buffer.from("print('do not run me')\n"), {
+        displayName: "payload.py",
+        allowOpaque: true,
+      }),
+    ).rejects.toThrow(/executable/);
+  });
+
+  it("refuses a local import through a symlinked path component", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-assets-test-"));
+    roots.push(root);
+    const realParent = join(root, "real");
+    const linkedParent = join(root, "linked");
+    await mkdir(realParent);
+    await writeFile(join(realParent, "note.txt"), "safe\n");
+    await symlink(realParent, linkedParent, "dir");
+    await expect(
+      importObjectiveAsset(
+        { kind: "local-file", path: join(linkedParent, "note.txt") },
+        { importId: "linked", visibility: "private", rights: { basis: "user-owned" } },
+        { repositoryPrivate: true },
+      ),
+    ).rejects.toThrow(/symlinked parent/);
   });
 
   it("refuses private or unknown-rights material before public-repository storage", async () => {

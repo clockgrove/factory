@@ -3,8 +3,10 @@ import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js"
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { assessRecoveryAccounting } from "../src/recovery/accounting.js";
 
+const { compilerEvaluation: _defaultCompilerEvaluation, ...oneShotRecoveryPolicy } =
+  DEFAULT_RUN_POLICY;
 const policy = {
-  ...DEFAULT_RUN_POLICY,
+  ...oneShotRecoveryPolicy,
   maxSandboxMinutes: 10,
   maxManagedAgentSessions: 2,
   economics: {

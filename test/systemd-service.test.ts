@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -351,6 +352,178 @@ describe("systemd installed command discovery", () => {
 });
 
 describe("systemd user service lifecycle", () => {
+  it("serializes an install/start race through the complete install transaction", async () => {
+    const f = await commandFixture();
+    let enabled = false;
+    let active = false;
+    let releaseInstall!: () => void;
+    let installPaused!: () => void;
+    const installPause = new Promise<void>((resolvePause) => {
+      installPaused = resolvePause;
+    });
+    const installRelease = new Promise<void>((resolveRelease) => {
+      releaseInstall = resolveRelease;
+    });
+    let pauseFirstReload = true;
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "daemon-reload" && pauseFirstReload) {
+        pauseFirstReload = false;
+        installPaused();
+        await installRelease;
+      }
+      if (args[0] === "enable") enabled = true;
+      if (args[0] === "start") active = true;
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(f.root, "units", args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled: installed && enabled,
+          active: installed && active,
+        });
+      }
+    };
+    const options = {
+      factoryCommand: [process.execPath, f.factoryBundle] as const,
+      unitDirectory: join(f.root, "units"),
+      commandEnvironment: () => ({ PATH: "" }),
+      currentUserManager,
+      startupHealthDelayMs: 0,
+      run,
+    };
+    const installer = new SystemdUserService(options);
+    const starter = new SystemdUserService(options);
+
+    const installing = installer.install(f.input);
+    await installPause;
+    const starting = starter.start(f.input);
+    let startSettled = false;
+    void starting.then(
+      () => {
+        startSettled = true;
+      },
+      () => {
+        startSettled = true;
+      },
+    );
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+    expect(startSettled).toBe(false);
+    releaseInstall();
+
+    await expect(installing).resolves.toMatchObject({ installed: true, enabled: true });
+    await expect(starting).resolves.toMatchObject({ active: true, healthy: true });
+  });
+
+  it("serializes an install/uninstall race to a fully absent final state", async () => {
+    const f = await commandFixture();
+    let enabled = false;
+    let releaseInstall!: () => void;
+    let installPaused!: () => void;
+    const installPause = new Promise<void>((resolvePause) => {
+      installPaused = resolvePause;
+    });
+    const installRelease = new Promise<void>((resolveRelease) => {
+      releaseInstall = resolveRelease;
+    });
+    let pauseFirstReload = true;
+    const run = async (args: readonly string[]) => {
+      if (isVersionProbe(args)) return { stdout: "259\n" };
+      if (args[0] === "daemon-reload" && pauseFirstReload) {
+        pauseFirstReload = false;
+        installPaused();
+        await installRelease;
+      }
+      if (args[0] === "enable") enabled = true;
+      if (args[0] === "disable") enabled = false;
+      if (isUnitProbe(args)) {
+        const installed = await fileExists(join(f.root, "units", args[1]!));
+        return systemdState(args[1]!, {
+          loadState: installed ? "loaded" : "not-found",
+          enabled: installed && enabled,
+        });
+      }
+    };
+    const options = {
+      factoryCommand: [process.execPath, f.factoryBundle] as const,
+      unitDirectory: join(f.root, "units"),
+      commandEnvironment: () => ({ PATH: "" }),
+      currentUserManager,
+      run,
+    };
+    const installer = new SystemdUserService(options);
+    const uninstaller = new SystemdUserService(options);
+
+    const installing = installer.install(f.input);
+    await installPause;
+    const uninstalling = uninstaller.uninstall(f.input);
+    let uninstallSettled = false;
+    void uninstalling.then(
+      () => {
+        uninstallSettled = true;
+      },
+      () => {
+        uninstallSettled = true;
+      },
+    );
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+    expect(uninstallSettled).toBe(false);
+    releaseInstall();
+
+    await expect(installing).resolves.toMatchObject({ installed: true, enabled: true });
+    await expect(uninstalling).resolves.toMatchObject({
+      installed: false,
+      enabled: false,
+      active: false,
+    });
+    await expect(readFile(installer.unitPath(f.input))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("times out deterministically on contention and recovers an abandoned process lock", async () => {
+    const f = await commandFixture();
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, f.factoryBundle],
+      unitDirectory: join(f.root, "units"),
+      currentUserManager,
+      lifecycleLockTimeoutMs: 10,
+      run: async (args) => {
+        if (isVersionProbe(args)) return { stdout: "259\n" };
+        if (isUnitProbe(args)) return systemdState(args[1]!, { loadState: "not-found" });
+      },
+    });
+    const lockPath = join(`/run/user/${testUid}`, `.${service.unitName(f.input)}.lifecycle.lock`);
+    await writeFile(lockPath, "", { flag: "a", mode: 0o600 });
+    await chmod(lockPath, 0o600);
+    const owner = spawn(
+      "/usr/bin/flock",
+      [
+        "--exclusive",
+        "--no-fork",
+        lockPath,
+        "/bin/sh",
+        "-c",
+        "printf ready; exec /usr/bin/sleep 30",
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    await once(owner.stdout, "data");
+    try {
+      await expect(
+        service.status({ ...f.input, checkout: join(f.root, "other-checkout") }),
+      ).resolves.toMatchObject({ installed: false, reasonCode: "controller-not-installed" });
+      await expect(service.status(f.input)).rejects.toThrow(
+        /controller-lifecycle-busy: status timed out after 10ms.*clockgrove-factory-/,
+      );
+    } finally {
+      owner.kill("SIGKILL");
+      await once(owner, "close");
+    }
+
+    await expect(service.status(f.input)).resolves.toMatchObject({
+      installed: false,
+      reasonCode: "controller-not-installed",
+    });
+  });
+
   it("fails before unit mutation when the current Linux user manager is unavailable", async () => {
     const directory = await mkdtemp(join(tmpdir(), "factory-systemd-no-user-bus-"));
     const bundle = join(directory, "desktop-cache", "factory.js");

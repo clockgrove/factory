@@ -1,7 +1,17 @@
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, lstat, mkdir, open, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  access,
+  type FileHandle,
+  lstat,
+  mkdir,
+  open,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -14,7 +24,9 @@ import {
 const execFileAsync = promisify(execFile);
 const FACTORY_UNIT_MARKER = "# Managed by Clockgrove Factory v2";
 const SYSTEMCTL = "/usr/bin/systemctl";
+const FLOCK = "/usr/bin/flock";
 const MINIMUM_SYSTEMD_VERSION = 254;
+const DEFAULT_LIFECYCLE_LOCK_TIMEOUT_MS = 30_000;
 const STATUS_PROPERTIES = [
   "Id",
   "LoadState",
@@ -83,6 +95,8 @@ export interface SystemdUserServiceOptions {
   commandEnvironment?: () => CommandEnvironment;
   /** A Type=simple service must remain active beyond systemctl's successful start request. */
   startupHealthDelayMs?: number;
+  /** Bounded wait for another explicit lifecycle client targeting the exact same unit. */
+  lifecycleLockTimeoutMs?: number;
 }
 
 interface CurrentUserManager {
@@ -125,6 +139,7 @@ export class SystemdUserService {
   readonly #currentUserManager: () => Promise<CurrentUserManager>;
   readonly #commandEnvironment: () => CommandEnvironment;
   readonly #startupHealthDelayMs: number;
+  readonly #lifecycleLockTimeoutMs: number;
   constructor(options: SystemdUserServiceOptions) {
     if (options.factoryCommand && options.factoryExecutable) {
       throw new Error("configure factoryCommand or factoryExecutable, not both");
@@ -152,6 +167,15 @@ export class SystemdUserService {
     this.#startupHealthDelayMs = options.startupHealthDelayMs ?? 500;
     if (!Number.isFinite(this.#startupHealthDelayMs) || this.#startupHealthDelayMs < 0)
       throw new Error("startup health delay must be a finite nonnegative number");
+    this.#lifecycleLockTimeoutMs =
+      options.lifecycleLockTimeoutMs ?? DEFAULT_LIFECYCLE_LOCK_TIMEOUT_MS;
+    if (
+      !Number.isFinite(this.#lifecycleLockTimeoutMs) ||
+      this.#lifecycleLockTimeoutMs < 0 ||
+      this.#lifecycleLockTimeoutMs > 300_000
+    ) {
+      throw new Error("lifecycle lock timeout must be between 0 and 300000 milliseconds");
+    }
   }
 
   unitName(input: SystemdServiceInput): string {
@@ -165,255 +189,305 @@ export class SystemdUserService {
   async install(input: SystemdServiceInput): Promise<SystemdStatus> {
     validateInput(input);
     const path = this.unitPath(input);
-    const old = await readOptionalFile(path);
-    if (old !== undefined && !old.startsWith(FACTORY_UNIT_MARKER)) {
+    const preflightBody = await readOptionalFile(path);
+    if (preflightBody !== undefined && !preflightBody.startsWith(FACTORY_UNIT_MARKER)) {
       throw new Error(`refusing to overwrite unmanaged unit ${path}`);
     }
-    const [environment, executableIdentity, commandAvailable, installedLauncher] =
-      await Promise.all([
+    const [environment, preflightExecutableIdentity, preflightCommandAvailable] = await Promise.all(
+      [
         this.#discoverCommandEnvironment(),
         controllerExecutableIdentity(this.#artifactPath()),
         this.#commandAvailable(),
-        old === undefined ? undefined : this.#installedLauncher(input, old),
-      ]);
-    if (!executableIdentity || !commandAvailable) {
+      ],
+    );
+    if (!preflightExecutableIdentity || !preflightCommandAvailable) {
       throw new Error(
         "controller-launcher-failure: the exact Factory launch command is unavailable; restore it before installing the controller",
       );
     }
     const manager = await this.#connectUserManager("install", input);
-    const before = await this.#managerState(input, manager, "install");
-    const beforeActiveState = classifyActiveState(before.activeState);
-    const beforeUnitFileState = classifyUnitFileState(before.unitFileState);
-    if (beforeUnitFileState === "unknown") {
-      throw new Error(
-        `controller-lifecycle-outcome-unknown: install cannot safely mutate ${this.unitName(input)} while systemd reports ActiveState=${before.activeState} and UnitFileState=${before.unitFileState || "(empty)"}; ${this.#inspectionAction(input)}`,
-      );
-    }
-    if (unmanagedUnitFileState(beforeUnitFileState)) {
-      throw new Error(
-        `controller-unit-unmanaged: ${this.unitName(input)} has UnitFileState=${before.unitFileState}, which Factory never creates or owns; ${this.#inspectionAction(input)}`,
-      );
-    }
-    if (
-      old === undefined &&
-      (before.loadState !== "not-found" ||
-        beforeUnitFileState !== "disabled" ||
-        beforeActiveState !== "stopped")
-    ) {
-      throw new Error(
-        `controller-unit-unmanaged: ${this.unitName(input)} has manager state without an owned unit file; ${this.#inspectionAction(input)}`,
-      );
-    }
-    const retainedCommand =
-      installedLauncher?.available &&
-      installedLauncher.artifactCurrent &&
-      installedLauncher.executableIdentity === executableIdentity
-        ? installedLauncher.command
-        : this.#command;
-    const body = this.#unit(input, environment, executableIdentity, retainedCommand);
-    if (
-      old !== undefined &&
-      !old.split("\n").includes(this.#execStart(input, executableIdentity, retainedCommand))
-    ) {
-      // Never arrange for an automatic restart to adopt different bytes while
-      // the old service is running, stopping, or its state cannot be verified.
-      if (before.activeState !== "inactive" && before.activeState !== "failed") {
+    const lock = await this.#acquireLifecycleLock("install", input, manager);
+    try {
+      const old = await readOptionalFile(path);
+      if (old !== undefined && !old.startsWith(FACTORY_UNIT_MARKER)) {
+        throw new Error(`refusing to overwrite unmanaged unit ${path}`);
+      }
+      const [executableIdentity, commandAvailable, installedLauncher] = await Promise.all([
+        controllerExecutableIdentity(this.#artifactPath()),
+        this.#commandAvailable(),
+        old === undefined ? undefined : this.#installedLauncher(input, old),
+      ]);
+      if (!executableIdentity || !commandAvailable) {
         throw new Error(
-          `controller-launcher-stale: ${this.unitName(input)}; settle work and owned resources, then stop the exact unit before refreshing its launcher (service state: ${before.activeState})`,
+          "controller-launcher-failure: the exact Factory launch command is unavailable; restore it before installing the controller",
         );
       }
-    }
-    if (beforeActiveState === "unsettled") {
-      throw new Error(
-        `controller-lifecycle-outcome-unknown: install cannot safely mutate ${this.unitName(input)} while systemd reports ActiveState=${before.activeState} and UnitFileState=${before.unitFileState || "(empty)"}; ${this.#inspectionAction(input)}`,
-      );
-    }
-    let mutationAttempted = false;
-    try {
-      await mkdir(dirname(path), { recursive: true });
-      if (old !== body) {
-        await atomicWrite(path, body);
+      const before = await this.#managerState(input, manager, "install");
+      const beforeActiveState = classifyActiveState(before.activeState);
+      const beforeUnitFileState = classifyUnitFileState(before.unitFileState);
+      if (beforeUnitFileState === "unknown") {
+        throw new Error(
+          `controller-lifecycle-outcome-unknown: install cannot safely mutate ${this.unitName(input)} while systemd reports ActiveState=${before.activeState} and UnitFileState=${before.unitFileState || "(empty)"}; ${this.#inspectionAction(input)}`,
+        );
+      }
+      if (unmanagedUnitFileState(beforeUnitFileState)) {
+        throw new Error(
+          `controller-unit-unmanaged: ${this.unitName(input)} has UnitFileState=${before.unitFileState}, which Factory never creates or owns; ${this.#inspectionAction(input)}`,
+        );
+      }
+      if (
+        old === undefined &&
+        (before.loadState !== "not-found" ||
+          beforeUnitFileState !== "disabled" ||
+          beforeActiveState !== "stopped")
+      ) {
+        throw new Error(
+          `controller-unit-unmanaged: ${this.unitName(input)} has manager state without an owned unit file; ${this.#inspectionAction(input)}`,
+        );
+      }
+      const retainedCommand =
+        installedLauncher?.available &&
+        installedLauncher.artifactCurrent &&
+        installedLauncher.executableIdentity === executableIdentity
+          ? installedLauncher.command
+          : this.#command;
+      const body = this.#unit(input, environment, executableIdentity, retainedCommand);
+      if (
+        old !== undefined &&
+        !old.split("\n").includes(this.#execStart(input, executableIdentity, retainedCommand))
+      ) {
+        // Never arrange for an automatic restart to adopt different bytes while
+        // the old service is running, stopping, or its state cannot be verified.
+        if (before.activeState !== "inactive" && before.activeState !== "failed") {
+          throw new Error(
+            `controller-launcher-stale: ${this.unitName(input)}; settle work and owned resources, then stop the exact unit before refreshing its launcher (service state: ${before.activeState})`,
+          );
+        }
+      }
+      if (beforeActiveState === "unsettled") {
+        throw new Error(
+          `controller-lifecycle-outcome-unknown: install cannot safely mutate ${this.unitName(input)} while systemd reports ActiveState=${before.activeState} and UnitFileState=${before.unitFileState || "(empty)"}; ${this.#inspectionAction(input)}`,
+        );
+      }
+      let mutationAttempted = false;
+      try {
+        await mkdir(dirname(path), { recursive: true });
+        if (old !== body) {
+          await atomicWrite(path, body);
+          mutationAttempted = true;
+        }
         mutationAttempted = true;
+        await this.#systemctl(["daemon-reload"], manager);
+        if (!persistentlyEnabledUnitFileState(before.unitFileState)) {
+          await this.#systemctl(["enable", this.unitName(input)], manager);
+        }
+        const [installedBody, installedState] = await Promise.all([
+          readOptionalFile(path),
+          this.#managerState(input, manager, "install verification"),
+        ]);
+        const status = await this.#statusFrom(input, installedBody, installedState);
+        if (!status.installed || !persistentlyEnabledUnitFileState(installedState.unitFileState)) {
+          throw new Error(`failed to install and enable ${status.unit}`);
+        }
+        return status;
+      } catch (error) {
+        if (!mutationAttempted) throw error;
+        return this.#rollbackInstall(input, manager, old, before, error);
       }
-      mutationAttempted = true;
-      await this.#systemctl(["daemon-reload"], manager);
-      if (!persistentlyEnabledUnitFileState(before.unitFileState)) {
-        await this.#systemctl(["enable", this.unitName(input)], manager);
-      }
-      const [installedBody, installedState] = await Promise.all([
-        readOptionalFile(path),
-        this.#managerState(input, manager, "install verification"),
-      ]);
-      const status = await this.#statusFrom(input, installedBody, installedState);
-      if (!status.installed || !persistentlyEnabledUnitFileState(installedState.unitFileState)) {
-        throw new Error(`failed to install and enable ${status.unit}`);
-      }
-      return status;
-    } catch (error) {
-      if (!mutationAttempted) throw error;
-      return this.#rollbackInstall(input, manager, old, before, error);
+    } finally {
+      await lock.close();
     }
   }
   async start(input: SystemdServiceInput): Promise<SystemdStatus> {
     validateInput(input);
     const manager = await this.#connectUserManager("start", input);
-    await this.#requireCurrentLauncher(input, manager);
-    await this.#systemctl(["start", this.unitName(input)], manager);
-    await delay(this.#startupHealthDelayMs);
-    const status = await this.#status(input, manager);
-    if (!status.healthy)
-      throw new Error(
-        `controller-start-unhealthy: ${status.unit} failed its post-start health check (${status.reasonCode ?? "unknown"}); ${status.action ?? "inspect the user service"}`,
-      );
-    return status;
+    const lock = await this.#acquireLifecycleLock("start", input, manager);
+    try {
+      await this.#requireCurrentLauncher(input, manager);
+      await this.#systemctl(["start", this.unitName(input)], manager);
+      await delay(this.#startupHealthDelayMs);
+      const status = await this.#status(input, manager);
+      if (!status.healthy)
+        throw new Error(
+          `controller-start-unhealthy: ${status.unit} failed its post-start health check (${status.reasonCode ?? "unknown"}); ${status.action ?? "inspect the user service"}`,
+        );
+      return status;
+    } finally {
+      await lock.close();
+    }
   }
   async stop(input: SystemdServiceInput): Promise<SystemdStatus> {
     validateInput(input);
     const manager = await this.#connectUserManager("stop", input);
-    const [beforeBody, beforeState] = await Promise.all([
-      readOptionalFile(this.unitPath(input)),
-      this.#managerState(input, manager, "stop"),
-    ]);
-    const beforeActiveState = classifyActiveState(beforeState.activeState);
-    const beforeUnitFileState = classifyUnitFileState(beforeState.unitFileState);
-    if (unmanagedUnitFileState(beforeUnitFileState)) {
-      throw new Error(
-        `controller-unit-unmanaged: ${this.unitName(input)} has UnitFileState=${beforeState.unitFileState}, which Factory never creates or owns; ${this.#inspectionAction(input)}`,
-      );
+    const lock = await this.#acquireLifecycleLock("stop", input, manager);
+    try {
+      const [beforeBody, beforeState] = await Promise.all([
+        readOptionalFile(this.unitPath(input)),
+        this.#managerState(input, manager, "stop"),
+      ]);
+      const beforeActiveState = classifyActiveState(beforeState.activeState);
+      const beforeUnitFileState = classifyUnitFileState(beforeState.unitFileState);
+      if (unmanagedUnitFileState(beforeUnitFileState)) {
+        throw new Error(
+          `controller-unit-unmanaged: ${this.unitName(input)} has UnitFileState=${beforeState.unitFileState}, which Factory never creates or owns; ${this.#inspectionAction(input)}`,
+        );
+      }
+      if (beforeUnitFileState === "unknown") {
+        throw new Error(
+          `controller-lifecycle-outcome-unknown: stop cannot safely mutate ${this.unitName(input)} while systemd reports UnitFileState=${beforeState.unitFileState || "(empty)"}; ${this.#inspectionAction(input)}`,
+        );
+      }
+      const managerStatePresent =
+        beforeState.loadState !== "not-found" ||
+        beforeUnitFileState !== "disabled" ||
+        beforeActiveState !== "stopped";
+      if (
+        (beforeBody === undefined && managerStatePresent) ||
+        (beforeBody !== undefined && !beforeBody.startsWith(FACTORY_UNIT_MARKER))
+      ) {
+        throw new Error(
+          `controller-unit-unmanaged: ${this.unitName(input)} cannot be stopped because its regular unit file and manager state do not prove Factory ownership; ${this.#inspectionAction(input)}`,
+        );
+      }
+      if (beforeActiveState === "stopped") {
+        return this.#statusFrom(input, beforeBody, beforeState);
+      }
+      await this.#systemctl(["stop", this.unitName(input)], manager);
+      const [body, state] = await Promise.all([
+        readOptionalFile(this.unitPath(input)),
+        this.#managerState(input, manager, "stop verification"),
+      ]);
+      if (classifyActiveState(state.activeState) !== "stopped") {
+        throw new Error(
+          `controller-lifecycle-outcome-unknown: stop did not settle ${this.unitName(input)} (systemd reports ActiveState=${state.activeState}); ${this.#inspectionAction(input)}`,
+        );
+      }
+      return this.#statusFrom(input, body, state);
+    } finally {
+      await lock.close();
     }
-    if (beforeUnitFileState === "unknown") {
-      throw new Error(
-        `controller-lifecycle-outcome-unknown: stop cannot safely mutate ${this.unitName(input)} while systemd reports UnitFileState=${beforeState.unitFileState || "(empty)"}; ${this.#inspectionAction(input)}`,
-      );
-    }
-    const managerStatePresent =
-      beforeState.loadState !== "not-found" ||
-      beforeUnitFileState !== "disabled" ||
-      beforeActiveState !== "stopped";
-    if (
-      (beforeBody === undefined && managerStatePresent) ||
-      (beforeBody !== undefined && !beforeBody.startsWith(FACTORY_UNIT_MARKER))
-    ) {
-      throw new Error(
-        `controller-unit-unmanaged: ${this.unitName(input)} cannot be stopped because its regular unit file and manager state do not prove Factory ownership; ${this.#inspectionAction(input)}`,
-      );
-    }
-    if (beforeActiveState === "stopped") {
-      return this.#statusFrom(input, beforeBody, beforeState);
-    }
-    await this.#systemctl(["stop", this.unitName(input)], manager);
-    const [body, state] = await Promise.all([
-      readOptionalFile(this.unitPath(input)),
-      this.#managerState(input, manager, "stop verification"),
-    ]);
-    if (classifyActiveState(state.activeState) !== "stopped") {
-      throw new Error(
-        `controller-lifecycle-outcome-unknown: stop did not settle ${this.unitName(input)} (systemd reports ActiveState=${state.activeState}); ${this.#inspectionAction(input)}`,
-      );
-    }
-    return this.#statusFrom(input, body, state);
   }
   async restart(input: SystemdServiceInput): Promise<SystemdStatus> {
     validateInput(input);
     const manager = await this.#connectUserManager("restart", input);
-    await this.#requireCurrentLauncher(input, manager);
-    await this.#systemctl(["restart", this.unitName(input)], manager);
-    await delay(this.#startupHealthDelayMs);
-    const status = await this.#status(input, manager);
-    if (!status.healthy)
-      throw new Error(
-        `controller-restart-unhealthy: ${status.unit} failed its post-restart health check (${status.reasonCode ?? "unknown"}); ${status.action ?? "inspect the user service"}`,
-      );
-    return status;
+    const lock = await this.#acquireLifecycleLock("restart", input, manager);
+    try {
+      await this.#requireCurrentLauncher(input, manager);
+      await this.#systemctl(["restart", this.unitName(input)], manager);
+      await delay(this.#startupHealthDelayMs);
+      const status = await this.#status(input, manager);
+      if (!status.healthy)
+        throw new Error(
+          `controller-restart-unhealthy: ${status.unit} failed its post-restart health check (${status.reasonCode ?? "unknown"}); ${status.action ?? "inspect the user service"}`,
+        );
+      return status;
+    } finally {
+      await lock.close();
+    }
   }
   async uninstall(input: SystemdServiceInput): Promise<SystemdStatus> {
     validateInput(input);
-    const unit = this.unitName(input);
     const path = this.unitPath(input);
-    const old = await readOptionalFile(path);
-    if (old !== undefined && !old.startsWith(FACTORY_UNIT_MARKER)) {
+    const preflightBody = await readOptionalFile(path);
+    if (preflightBody !== undefined && !preflightBody.startsWith(FACTORY_UNIT_MARKER)) {
       throw new Error(`refusing to remove unmanaged unit ${path}`);
     }
     const manager = await this.#connectUserManager("uninstall", input);
-    const beforeState = await this.#managerState(input, manager, "uninstall");
-    const beforeActiveState = classifyActiveState(beforeState.activeState);
-    const beforeUnitFileState = classifyUnitFileState(beforeState.unitFileState);
-    if (beforeActiveState === "unsettled") {
-      throw new Error(
-        `controller-lifecycle-busy: ${unit} cannot be uninstalled while systemd reports ActiveState=${beforeState.activeState}; ${this.#inspectionAction(input)}`,
-      );
-    }
-    if (unmanagedUnitFileState(beforeUnitFileState)) {
-      throw new Error(
-        `controller-unit-unmanaged: ${unit} has UnitFileState=${beforeState.unitFileState}, which Factory never creates or owns; ${this.#inspectionAction(input)}`,
-      );
-    }
-    const before = await this.#statusFrom(input, old, beforeState);
-    if (
-      !old &&
-      (beforeUnitFileState !== "disabled" || before.active || beforeState.loadState !== "not-found")
-    ) {
-      throw new Error(
-        `controller-unit-unmanaged: ${unit} has manager state without an owned unit file; ${this.#inspectionAction(input)}`,
-      );
-    }
-    if (!old && !before.enabled && !before.active) return before;
-    let mutationAttempted = false;
-    let runtimeContinuityLost = false;
+    const lock = await this.#acquireLifecycleLock("uninstall", input, manager);
     try {
-      if (before.active) {
-        mutationAttempted = true;
-        runtimeContinuityLost = true;
-        await this.#systemctl(["stop", unit], manager);
+      const unit = this.unitName(input);
+      const old = await readOptionalFile(path);
+      if (old !== undefined && !old.startsWith(FACTORY_UNIT_MARKER)) {
+        throw new Error(`refusing to remove unmanaged unit ${path}`);
       }
-      const disableArguments = disableUnitFileStateArguments(beforeState.unitFileState, unit);
-      if (disableArguments) {
-        mutationAttempted = true;
-        await this.#systemctl(disableArguments, manager);
+      const beforeState = await this.#managerState(input, manager, "uninstall");
+      const beforeActiveState = classifyActiveState(beforeState.activeState);
+      const beforeUnitFileState = classifyUnitFileState(beforeState.unitFileState);
+      if (beforeActiveState === "unsettled") {
+        throw new Error(
+          `controller-lifecycle-busy: ${unit} cannot be uninstalled while systemd reports ActiveState=${beforeState.activeState}; ${this.#inspectionAction(input)}`,
+        );
       }
-      mutationAttempted = true;
-      await rm(path, { force: true });
-      await this.#systemctl(["daemon-reload"], manager);
-      let afterState = await this.#managerState(input, manager, "uninstall");
+      if (unmanagedUnitFileState(beforeUnitFileState)) {
+        throw new Error(
+          `controller-unit-unmanaged: ${unit} has UnitFileState=${beforeState.unitFileState}, which Factory never creates or owns; ${this.#inspectionAction(input)}`,
+        );
+      }
+      const before = await this.#statusFrom(input, old, beforeState);
       if (
-        afterState.loadState !== "not-found" &&
-        (beforeState.activeState === "failed" ||
-          (beforeState.result !== null && beforeState.result !== "success"))
+        !old &&
+        (beforeUnitFileState !== "disabled" ||
+          before.active ||
+          beforeState.loadState !== "not-found")
       ) {
-        runtimeContinuityLost = true;
-        await this.#systemctl(["reset-failed", unit], manager);
+        throw new Error(
+          `controller-unit-unmanaged: ${unit} has manager state without an owned unit file; ${this.#inspectionAction(input)}`,
+        );
+      }
+      if (!old && !before.enabled && !before.active) return before;
+      let mutationAttempted = false;
+      let runtimeContinuityLost = false;
+      try {
+        if (before.active) {
+          mutationAttempted = true;
+          runtimeContinuityLost = true;
+          await this.#systemctl(["stop", unit], manager);
+        }
+        const disableArguments = disableUnitFileStateArguments(beforeState.unitFileState, unit);
+        if (disableArguments) {
+          mutationAttempted = true;
+          await this.#systemctl(disableArguments, manager);
+        }
+        mutationAttempted = true;
+        await rm(path, { force: true });
         await this.#systemctl(["daemon-reload"], manager);
-        afterState = await this.#managerState(input, manager, "uninstall");
+        let afterState = await this.#managerState(input, manager, "uninstall");
+        if (
+          afterState.loadState !== "not-found" &&
+          (beforeState.activeState === "failed" ||
+            (beforeState.result !== null && beforeState.result !== "success"))
+        ) {
+          runtimeContinuityLost = true;
+          await this.#systemctl(["reset-failed", unit], manager);
+          await this.#systemctl(["daemon-reload"], manager);
+          afterState = await this.#managerState(input, manager, "uninstall");
+        }
+        const body = await readOptionalFile(path);
+        const status = await this.#statusFrom(input, body, afterState);
+        if (
+          status.installed ||
+          status.enabled ||
+          status.active ||
+          afterState.loadState !== "not-found"
+        ) {
+          throw new Error(`failed to completely uninstall ${status.unit}`);
+        }
+        return status;
+      } catch (error) {
+        if (!mutationAttempted) throw error;
+        return this.#rollbackUninstall(
+          input,
+          manager,
+          old!,
+          beforeState,
+          before,
+          runtimeContinuityLost,
+          error,
+        );
       }
-      const body = await readOptionalFile(path);
-      const status = await this.#statusFrom(input, body, afterState);
-      if (
-        status.installed ||
-        status.enabled ||
-        status.active ||
-        afterState.loadState !== "not-found"
-      ) {
-        throw new Error(`failed to completely uninstall ${status.unit}`);
-      }
-      return status;
-    } catch (error) {
-      if (!mutationAttempted) throw error;
-      return this.#rollbackUninstall(
-        input,
-        manager,
-        old!,
-        beforeState,
-        before,
-        runtimeContinuityLost,
-        error,
-      );
+    } finally {
+      await lock.close();
     }
   }
   async status(input: SystemdServiceInput): Promise<SystemdStatus> {
     validateInput(input);
     const manager = await this.#connectUserManager("status", input);
-    return this.#status(input, manager);
+    const lock = await this.#acquireLifecycleLock("status", input, manager);
+    try {
+      return await this.#status(input, manager);
+    } finally {
+      await lock.close();
+    }
   }
   async #status(input: SystemdServiceInput, manager: CurrentUserManager): Promise<SystemdStatus> {
     const body = await readOptionalFile(this.unitPath(input));
@@ -523,6 +597,47 @@ export class SystemdUserService {
       throw new Error(
         `${status.reasonCode ?? "controller-disabled"}: ${status.unit}; ${status.action ?? "enable the installed controller"}`,
       );
+  }
+  async #acquireLifecycleLock(
+    operation: ControllerLifecycleOperation,
+    input: SystemdServiceInput,
+    manager: CurrentUserManager,
+  ): Promise<FileHandle> {
+    const unit = this.unitName(input);
+    const path = join(manager.runtimeDirectory, `.${unit}.lifecycle.lock`);
+    let handle: FileHandle | undefined;
+    try {
+      handle = await open(
+        path,
+        fsConstants.O_CREAT | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
+        0o600,
+      );
+      const lockState = await handle.stat();
+      if (!lockState.isFile() || lockState.uid !== manager.uid || (lockState.mode & 0o077) !== 0) {
+        throw new Error("lock file is not a private regular file owned by the effective user");
+      }
+      // flock(2) attaches to the open-file description shared with the short-lived
+      // helper. Retaining this descriptor holds the lock; close or process exit
+      // releases it without a stale owner record.
+      const result = await acquireFileLock(handle.fd, this.#lifecycleLockTimeoutMs);
+      if (result.code === 0) return handle;
+      if (result.code === 1) {
+        throw new Error(
+          `controller-lifecycle-busy: ${operation} timed out after ${this.#lifecycleLockTimeoutMs}ms waiting for another explicit lifecycle operation on ${unit}`,
+        );
+      }
+      throw new Error(
+        `controller-lifecycle-lock-unavailable: ${FLOCK} exited with status ${result.code ?? "unknown"}${result.stderr ? ` (${result.stderr})` : ""}`,
+      );
+    } catch (error) {
+      await handle?.close().catch(() => undefined);
+      if (/^controller-lifecycle-(?:busy|lock-unavailable):/.test(errorMessage(error))) {
+        throw error;
+      }
+      throw new Error(
+        `controller-lifecycle-lock-unavailable: cannot coordinate ${operation} for ${unit} as effective uid ${manager.uid}: ${errorMessage(error)}`,
+      );
+    }
   }
   async #connectUserManager(
     operation: ControllerLifecycleOperation,
@@ -1045,6 +1160,25 @@ function outputText(value: unknown): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function acquireFileLock(
+  fileDescriptor: number,
+  timeoutMs: number,
+): Promise<{ code: number | null; stderr: string }> {
+  return new Promise((resolveLock, rejectLock) => {
+    const timeoutSeconds = (timeoutMs / 1_000).toFixed(3);
+    const child = spawn(FLOCK, ["--exclusive", "--wait", timeoutSeconds, "3"], {
+      stdio: ["ignore", "ignore", "pipe", fileDescriptor],
+    });
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr = `${stderr}${chunk}`.slice(-2_000);
+    });
+    child.once("error", rejectLock);
+    child.once("close", (code) => resolveLock({ code, stderr: stderr.trim() }));
+  });
 }
 
 function shellQuote(value: string): string {

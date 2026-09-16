@@ -14,7 +14,12 @@ import {
   type CompilerJudgeVerdict,
   type ObligationInventory,
 } from "../src/evaluation/compiler-eval.js";
-import { ManagementCleanupError, type CompilationContext } from "../src/management/backend.js";
+import {
+  managementTerminalOutcome,
+  ManagementCleanupError,
+  ManagementFailureCleanupError,
+  type CompilationContext,
+} from "../src/management/backend.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import type {
   CompilerDraftBinding,
@@ -159,6 +164,7 @@ async function fixture() {
       evidenceIds: ["objective"],
     })),
     findings: [],
+    inferenceCorrections: [],
     uncertainty: [],
     decision: "accept",
   };
@@ -452,6 +458,63 @@ describe("compiler dispatch admission", () => {
     expect(mocks.run).toHaveBeenCalledOnce();
     expect(admit).toHaveBeenCalledOnce();
   });
+  it.each([
+    ["string", "primitive process rejection"],
+    ["null", null],
+  ] as const)(
+    "normalizes and durably closes a %s process-launch rejection",
+    async (_name, rejection) => {
+      const f = await fixture();
+      const backend = new CodexCliManagementBackend({
+        createCodexHome: home,
+        authFile: join(f.directory, "no-auth"),
+      });
+      mocks.run.mockRejectedValue(rejection);
+
+      const direct = await backend
+        .extractObligations(f.context, async () => {})
+        .catch((error) => error);
+      expect(direct).toBeInstanceOf(Error);
+      expect(direct).toMatchObject({
+        message: String(rejection),
+        cause: rejection,
+        provenance: { baseSha: f.context.baseSha },
+      });
+      expect(managementTerminalOutcome(direct)).toEqual({
+        state: "provider-failed",
+        usage: null,
+      });
+
+      const admit = vi.fn(async () => {});
+      const args = {
+        ...f,
+        backend,
+        lease: {} as LeaseState,
+        deadlineAt: Date.now() + 60_000,
+        assertInputs: async () => {},
+        admit,
+        recordUsage: vi.fn(async () => {}),
+        validate: async () => {},
+      };
+      await expect(compileEvaluatedDraft(args)).resolves.toMatchObject({
+        status: "stopped",
+        reason: "accounting-unavailable",
+      });
+      expect(f.records.find((record) => record.kind === "result")?.payload).toMatchObject({
+        error: String(rejection),
+        usage: null,
+        terminalOutcome: { state: "provider-failed", usage: null },
+        provenance: { baseSha: f.context.baseSha },
+      });
+      const dispatched = mocks.run.mock.calls.length;
+      await expect(compileEvaluatedDraft(args)).resolves.toMatchObject({
+        status: "stopped",
+        reason: "accounting-unavailable",
+      });
+      expect(mocks.run).toHaveBeenCalledTimes(dispatched);
+      expect(admit).toHaveBeenCalledOnce();
+    },
+  );
   it("durably closes a reserved invocation when admission proves no provider dispatch", async () => {
     const f = await fixture();
     const backend = new CodexCliManagementBackend({
@@ -512,7 +575,7 @@ describe("compiler dispatch admission", () => {
       const backend = new CodexCliManagementBackend({
         createCodexHome: home,
         removeCodexHome: async () => {
-          expect(refusalCheckpointed).toBe(true);
+          expect(refusalCheckpointed).toBe(false);
           throw cleanupFailure;
         },
         authFile: join(f.directory, "no-auth"),
@@ -539,7 +602,12 @@ describe("compiler dispatch admission", () => {
           async () => ({
             modelInvocationId: "compile-fixture",
             checkpointProviderRefusal: async (error) => {
-              expect(error).toMatchObject({ invocationId: "compile-fixture", usage });
+              expect(error).toMatchObject({
+                invocationId: "compile-fixture",
+                usage,
+                cleanupDiagnostic: cleanupFailure.message,
+                cause: cleanupFailure,
+              });
               refusalCheckpointed = true;
             },
           }),
@@ -557,6 +625,7 @@ describe("compiler dispatch admission", () => {
         usage,
         invocationId: "compile-fixture",
         cause: cleanupFailure,
+        cleanupDiagnostic: cleanupFailure.message,
       });
       expect(refusalCheckpointed).toBe(true);
     },
@@ -609,8 +678,145 @@ describe("compiler dispatch admission", () => {
       },
     });
     expect((observed as Error).cause).toBe(cleanupFailure);
+    expect(managementTerminalOutcome(observed)).toEqual({ state: "succeeded", usage });
     expect(checkpoint).not.toHaveBeenCalled();
   });
+  it.each([
+    {
+      name: "provider failure with exact usage",
+      state: "provider-failed" as const,
+      cleanup: "primitive cleanup rejection",
+      exitCode: 1,
+      stdout: [
+        JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens },
+        }),
+        JSON.stringify({ type: "turn.failed", error: { message: "provider request failed" } }),
+      ].join("\n"),
+    },
+    {
+      name: "invalid response with exact usage",
+      state: "invalid-response" as const,
+      cleanup: null,
+      exitCode: 0,
+      stdout: [
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: "not-json" },
+        }),
+        JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens },
+        }),
+      ].join("\n"),
+    },
+  ])("preserves provider and primitive cleanup causes for $name", async (testCase) => {
+    const f = await fixture();
+    const finish = vi.fn(async () => {});
+    const backend = new CodexCliManagementBackend({
+      createCodexHome: home,
+      removeCodexHome: async () => {
+        throw testCase.cleanup;
+      },
+      authFile: join(f.directory, "no-auth"),
+      transcriptRecorder: { begin: async () => ({ finish }) },
+    });
+    mocks.run.mockResolvedValue({
+      exitCode: testCase.exitCode,
+      signal: null,
+      timedOut: false,
+      durationMs: 25,
+      stderr: "",
+      stdout: testCase.stdout,
+    });
+
+    const observed = await backend
+      .proposePlan(
+        f.request,
+        async () => {},
+        semanticProjectionContext(undefined, f.context.runPolicy),
+        async () => ({
+          modelInvocationId: "cleanup-dual-cause",
+          checkpointProviderRefusal: async () => {},
+        }),
+        f.context,
+      )
+      .catch((error) => error);
+    expect(observed).toBeInstanceOf(ManagementFailureCleanupError);
+    expect(observed).toMatchObject({
+      usage,
+      cleanupError: { message: String(testCase.cleanup), cause: testCase.cleanup },
+      cleanupDiagnostic: String(testCase.cleanup),
+      provenance: { baseSha: f.request.baseSha },
+    });
+    expect(observed.cause).toBeInstanceOf(AggregateError);
+    expect((observed.cause as AggregateError).errors).toEqual([
+      observed.primaryError,
+      observed.cleanupError,
+    ]);
+    expect(managementTerminalOutcome(observed)).toEqual({
+      state: testCase.state,
+      usage,
+    });
+    await vi.waitFor(() => expect(finish).toHaveBeenCalledOnce());
+    expect(finish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        state: testCase.state,
+        usage,
+        error: observed.providerDiagnostic,
+      }),
+    );
+    expect(observed.message).toBe(observed.providerDiagnostic);
+    expect(observed.providerDiagnostic).not.toBe(observed.cleanupDiagnostic);
+  });
+
+  it.each([
+    ["string", "primitive cleanup rejection"],
+    ["null", null],
+  ] as const)(
+    "durably separates a %s cleanup rejection from an unknown-usage provider failure",
+    async (_name, cleanupRejection) => {
+      const f = await fixture();
+      const backend = new CodexCliManagementBackend({
+        createCodexHome: home,
+        removeCodexHome: async () => {
+          throw cleanupRejection;
+        },
+        authFile: join(f.directory, "no-auth"),
+      });
+      mocks.run.mockRejectedValue(new Error("provider transport unavailable"));
+      const admit = vi.fn(async () => {});
+      const args = {
+        ...f,
+        backend,
+        lease: {} as LeaseState,
+        deadlineAt: Date.now() + 60_000,
+        assertInputs: async () => {},
+        admit,
+        recordUsage: vi.fn(async () => {}),
+        validate: async () => {},
+      };
+
+      await expect(compileEvaluatedDraft(args)).resolves.toMatchObject({
+        status: "stopped",
+        reason: "accounting-unavailable",
+      });
+      expect(f.records.find((record) => record.kind === "result")?.payload).toMatchObject({
+        error: "provider transport unavailable",
+        cleanupDiagnostic: String(cleanupRejection),
+        usage: null,
+        terminalOutcome: { state: "provider-failed", usage: null },
+      });
+      const dispatched = mocks.run.mock.calls.length;
+      await expect(compileEvaluatedDraft(args)).resolves.toMatchObject({
+        status: "stopped",
+        reason: "accounting-unavailable",
+      });
+      expect(mocks.run).toHaveBeenCalledTimes(dispatched);
+      expect(admit).toHaveBeenCalledOnce();
+    },
+  );
   it.each([0, 1])(
     "preserves a structured quota failure when its durable checkpoint fails after exit %i",
     async (exitCode) => {

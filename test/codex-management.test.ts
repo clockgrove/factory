@@ -1,9 +1,96 @@
 import { describe, expect, it } from "vitest";
 import { ManagementOutputError } from "../src/management/backend.js";
 
-import { parseManagementJsonlOutput } from "../src/management/codex-cli.js";
+import {
+  classifyManagementCliProcessFailure,
+  observedManagementCompletionUsage,
+  parseManagementJsonlOutput,
+} from "../src/management/codex-cli.js";
 
 describe("Codex management backend", () => {
+  it("normalizes one completion exactly while allowing provider extension fields", () => {
+    const stdout = JSON.stringify({
+      type: "turn.completed",
+      extension: { provider: "codex" },
+      usage: {
+        input_tokens: 100,
+        output_tokens: 20,
+        cached_input_tokens: 101,
+        total_tokens: 120,
+      },
+    });
+    expect(observedManagementCompletionUsage(stdout)).toEqual({
+      inputTokens: 100,
+      outputTokens: 20,
+    });
+    expect(
+      observedManagementCompletionUsage(
+        JSON.stringify({ type: "turn.completed", usage: { input_tokens: 100 } }),
+      ),
+    ).toBeUndefined();
+    expect(observedManagementCompletionUsage(`${stdout}\n${stdout}`)).toBeUndefined();
+  });
+
+  it.each([
+    {
+      name: "progress-only nonzero",
+      process: {
+        exitCode: 2,
+        signal: null,
+        timedOut: false,
+        stdout: JSON.stringify({ type: "turn.started" }),
+      },
+      message:
+        "management backend failed: Codex CLI exited with status 2; inspect the local management transcript when enabled",
+      quota: false,
+    },
+    {
+      name: "quota error at exit zero",
+      process: {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: JSON.stringify({
+          type: "error",
+          message: "You've reached your additional usage limit for your plan.",
+        }),
+      },
+      message: "GitHub Copilot additional usage limit reached",
+      quota: true,
+    },
+    {
+      name: "signal",
+      process: {
+        exitCode: null,
+        signal: "SIGTERM",
+        timedOut: false,
+        stdout: "",
+      },
+      message:
+        "management backend failed: Codex CLI exited with status unknown after signal SIGTERM; inspect the local management transcript when enabled",
+      quota: false,
+    },
+    {
+      name: "timeout",
+      process: { exitCode: null, signal: null, timedOut: true, stdout: "" },
+      message:
+        "management backend failed: Codex CLI exited with status unknown after timeout; inspect the local management transcript when enabled",
+      quota: false,
+    },
+  ])("classifies the exact $name process terminal", ({ process, message, quota }) => {
+    const result = classifyManagementCliProcessFailure(process);
+    expect(result?.error.message).toBe(message);
+    expect(result?.providerQuota !== null).toBe(quota);
+  });
+
+  it.each([
+    { exitCode: null, signal: null, timedOut: false, stdout: "" },
+    { exitCode: 0, signal: "SIGTERM", timedOut: false, stdout: "" },
+    { exitCode: -1, signal: null, timedOut: false, stdout: "" },
+  ])("rejects impossible process terminal tuple %#", (process) => {
+    expect(() => classifyManagementCliProcessFailure(process)).toThrow(/process terminal|tuple/);
+  });
+
   it.each([undefined, null, -1, 1.5, "5", 101, Number.MAX_SAFE_INTEGER + 1])(
     "keeps invalid or absent cached usage %j unknown without losing terminal totals",
     (cached) => {

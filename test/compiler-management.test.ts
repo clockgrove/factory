@@ -4,14 +4,25 @@ import { describe, expect, it, vi } from "vitest";
 import { COMPILER_PROPOSAL_JSON_SCHEMA } from "../src/compiler/contracts.js";
 import { CompilerInvariantError } from "../src/compiler/invariant-error.js";
 import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
-import { ManagementOutputError } from "../src/management/backend.js";
+import {
+  managementFailureProvenance,
+  managementTerminalOutcome,
+  ManagementFailureCleanupError,
+  ManagementOutputError,
+  type ManagementBackend,
+} from "../src/management/backend.js";
 import {
   CodexCliManagementBackend,
   compilerProposalPrompt,
   renderCompilerProposalPrompt,
 } from "../src/management/codex-cli.js";
-import { structuralObjectiveInventory } from "../src/management/compile.js";
+import {
+  compilePlan,
+  compilePlanWithLegacyAdmission,
+  structuralObjectiveInventory,
+} from "../src/management/compile.js";
 import type { CompilationContext } from "../src/management/backend.js";
+import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import {
   CompilerRequestValidationError,
   MAX_COMPILER_REQUEST_BYTES,
@@ -31,6 +42,58 @@ import {
 } from "../src/graph.js";
 
 describe("single semantic management route", () => {
+  it.each([
+    ["generic compilePlan", false],
+    ["Supervisor legacy admission compatibility", true],
+  ] as const)("rejects split network authority before any %s effects", async (_name, legacy) => {
+    const context: CompilationContext = {
+      repository: process.cwd(),
+      objective: { number: 404, title: "Reject split authority", body: "Do not dispatch." },
+      defaultBranch: "main",
+      baseSha: "a".repeat(40),
+      repositoryFiles: [],
+      allowedNetworkDestinations: [],
+      runPolicy: DEFAULT_RUN_POLICY,
+    };
+    const legacyAdmission = vi.fn();
+    const accounting = vi.fn();
+    const journal = vi.fn();
+    const provider = vi.fn();
+    const admitCompilation = vi.fn(async () => {
+      legacyAdmission();
+      accounting();
+      journal();
+      return {
+        timeoutMs: 1_000,
+        modelInvocationId: "compile-test",
+        checkpointProviderRefusal: async () => {},
+      };
+    });
+    const proposePlan = vi.fn(async () => {
+      provider();
+      accounting();
+      journal();
+      throw new Error("backend reached");
+    });
+    const backend = { id: "arbitrary", proposePlan } as unknown as ManagementBackend;
+    const checkpoint = vi.fn(async () => {
+      journal();
+    });
+
+    await expect(
+      legacy
+        ? compilePlanWithLegacyAdmission(context, backend, checkpoint, admitCompilation)
+        : compilePlan(context, backend, checkpoint, admitCompilation),
+    ).rejects.toThrow("compilation context network authority differs from run policy");
+    expect(legacyAdmission).not.toHaveBeenCalled();
+    expect(admitCompilation).not.toHaveBeenCalled();
+    expect(proposePlan).not.toHaveBeenCalled();
+    expect(provider).not.toHaveBeenCalled();
+    expect(accounting).not.toHaveBeenCalled();
+    expect(journal).not.toHaveBeenCalled();
+    expect(checkpoint).not.toHaveBeenCalled();
+  });
+
   it("sizes a 1,151,759-byte adopted-constraint prompt before provider admission", async () => {
     const request = semanticRequest();
     const legacy: LegacyGraphConstraints = {
@@ -430,10 +493,141 @@ describe("single semantic management route", () => {
         usage: { inputTokens: 7, outputTokens: 2 },
         proposal: value,
       });
+      expect(managementTerminalOutcome(rejection)).toEqual({
+        state: "succeeded",
+        usage: { inputTokens: 7, outputTokens: 2 },
+      });
       expect(checkpoint).not.toHaveBeenCalled();
       if (value === invalid) expect(rejection.validationReport).toEqual(expectedReport);
     }
   });
+
+  it("classifies structured provider failure and returned invalid usage without inventing counters", async () => {
+    const request = semanticRequest();
+    const providerFailure = new Error("provider unavailable");
+    const failed = await new CodexCliManagementBackend({
+      runStructured: async () => {
+        throw providerFailure;
+      },
+    })
+      .proposePlan(request, async () => {}, semanticProjectionContext())
+      .catch((error) => error);
+    expect(failed).toBe(providerFailure);
+    expect(managementTerminalOutcome(failed)).toEqual({
+      state: "provider-failed",
+      usage: null,
+    });
+
+    const invalidUsage = await new CodexCliManagementBackend({
+      runStructured: async () => ({
+        value: semanticProposal(request),
+        usage: { inputTokens: -1, outputTokens: 2 },
+      }),
+    })
+      .proposePlan(request, async () => {}, semanticProjectionContext())
+      .catch((error) => error);
+    expect(invalidUsage).toBeInstanceOf(Error);
+    expect(managementTerminalOutcome(invalidUsage)).toEqual({
+      state: "invalid-response",
+      usage: null,
+    });
+  });
+
+  it.each([
+    ["string", "provider rejected as a string"],
+    ["null", null],
+  ] as const)(
+    "normalizes a structured %s rejection without losing its primitive cause",
+    async (_name, rejection) => {
+      const request = semanticRequest();
+      const failed = await new CodexCliManagementBackend({
+        runStructured: async () => {
+          throw rejection;
+        },
+      })
+        .proposePlan(request, async () => {}, semanticProjectionContext())
+        .catch((error) => error);
+
+      expect(failed).toBeInstanceOf(Error);
+      expect(failed).toMatchObject({
+        message: String(rejection),
+        cause: rejection,
+        provenance: {
+          baseSha: request.baseSha,
+          promptDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+          schemaDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+      });
+      expect(managementTerminalOutcome(failed)).toEqual({
+        state: "provider-failed",
+        usage: null,
+      });
+    },
+  );
+
+  it("preserves a structured adapter's attachable rejection identity and exact fields", async () => {
+    const request = semanticRequest();
+    const proposal = semanticProposal(request);
+    const rejection = {
+      message: "provider returned an attachable failure",
+      usage: { inputTokens: 8, outputTokens: 2, cachedInputTokens: 3 },
+      proposal,
+    };
+    const failed = await new CodexCliManagementBackend({
+      runStructured: async () => {
+        throw rejection;
+      },
+    })
+      .proposePlan(request, async () => {}, semanticProjectionContext())
+      .catch((error) => error);
+
+    expect(failed).toBe(rejection);
+    expect(failed).toMatchObject({ usage: rejection.usage, proposal });
+    expect(managementTerminalOutcome(failed)).toEqual({
+      state: "provider-failed",
+      usage: rejection.usage,
+    });
+
+    const cleanup = new ManagementFailureCleanupError(rejection, "cleanup rejected");
+    expect(cleanup).toMatchObject({
+      primaryError: rejection,
+      usage: rejection.usage,
+      proposal,
+      providerDiagnostic: rejection.message,
+      cleanupError: { message: "cleanup rejected", cause: "cleanup rejected" },
+    });
+  });
+
+  it.each(["error", "object"] as const)(
+    "preserves frozen structured %s identity through side-channel authority",
+    async (kind) => {
+      const request = semanticRequest();
+      const rejection = Object.freeze(
+        kind === "error"
+          ? new Error("frozen provider failure")
+          : { message: "frozen provider failure" },
+      );
+      const failed = await new CodexCliManagementBackend({
+        runStructured: async () => {
+          throw rejection;
+        },
+      })
+        .proposePlan(request, async () => {}, semanticProjectionContext())
+        .catch((error) => error);
+
+      expect(failed).toBe(rejection);
+      expect(Object.hasOwn(failed, "provenance")).toBe(false);
+      expect(managementFailureProvenance(failed)).toMatchObject({
+        baseSha: request.baseSha,
+        promptDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        schemaDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+      expect(managementTerminalOutcome(failed)).toEqual({
+        state: "provider-failed",
+        usage: null,
+      });
+    },
+  );
 
   it("terminates an unchanged repair report after exactly one paid repair call", async () => {
     const initial = semanticRequest();

@@ -12,12 +12,13 @@ import {
   ObligationInventorySchema,
   type ObligationInventory,
 } from "../evaluation/compiler-eval.js";
-import type {
-  CompilationContext,
-  CompilerModelAdmission,
-  CompilerProposalProvenance,
-  ManagementBackend,
-  ManagementUsage,
+import {
+  assertCompilationContextPolicyAuthority,
+  type CompilationContext,
+  type CompilerModelAdmission,
+  type CompilerProposalProvenance,
+  type ManagementBackend,
+  type ManagementUsage,
 } from "./backend.js";
 
 export interface CompiledPlanResult {
@@ -79,6 +80,7 @@ export async function compilePlan(
   checkpoint: CompiledPlanCheckpoint,
   beforeModelInvocation?: CompilerModelAdmission,
 ): Promise<CompiledPlanResult> {
+  assertCompilationContextPolicyAuthority(context);
   const prepared = await prepareCompilerRequest({
     context,
     inventory: structuralObjectiveInventory(context),
@@ -133,4 +135,16 @@ export async function compilePlan(
       `management backend returned proposal ${compilerEvalDigest(result.proposal)} without checkpoint`,
     );
   return projected;
+}
+
+/** Compatibility boundary for backends that cannot place admission at dispatch. */
+export async function compilePlanWithLegacyAdmission(
+  context: CompilationContext,
+  backend: ManagementBackend,
+  checkpoint: CompiledPlanCheckpoint,
+  admitCompilation: () => Promise<{ timeoutMs: number }>,
+): Promise<CompiledPlanResult> {
+  assertCompilationContextPolicyAuthority(context);
+  context.invocationTimeoutMs = (await admitCompilation()).timeoutMs;
+  return compilePlan(context, backend, checkpoint);
 }

@@ -280,6 +280,7 @@ function history() {
       reason: "Assessed",
       evidenceIds: ["objective"],
     })),
+    inferenceCorrections: [],
     findings: [],
     uncertainty: [],
     decision: "accept",

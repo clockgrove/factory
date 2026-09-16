@@ -11,6 +11,7 @@ import { compileObjective } from "../src/compiler/index.js";
 import { parseWorkerPacketFromIssue } from "../src/graph.js";
 import { readRepositoryFacts } from "../src/repository-profiles/index.js";
 import { readCompilerObligationEvidence } from "../src/management/codex-cli.js";
+import { bindManagementTerminalOutcome } from "../src/management/backend.js";
 import {
   COMPILER_JUDGE_DIMENSIONS,
   compilerEvalDigest,
@@ -186,6 +187,7 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
                 uncertainty: "",
               },
             ],
+      inferenceCorrections: [],
       uncertainty: [],
       decision,
     };
@@ -544,12 +546,15 @@ describe("Supervisor compiler evaluation activation boundary", () => {
         proposal.workItems[1]!.criteria[0]!.risk = "ordinary";
         const report = parseAndValidateCompilerProposal(request, proposal).report;
         reports.push(report.violations.map((violation) => violation.code));
-        throw Object.assign(new Error("invalid semantic proposal"), {
-          usage,
-          proposal,
-          validationReport: report,
-          provenance: invocationProvenance(request.baseSha),
-        });
+        throw bindManagementTerminalOutcome(
+          Object.assign(new Error("invalid semantic proposal"), {
+            usage,
+            proposal,
+            validationReport: report,
+            provenance: invocationProvenance(request.baseSha),
+          }),
+          { state: "succeeded", usage },
+        );
       };
       f.management.judgePlan = async (context, checkpoint, beforeModelInvocation) => {
         await beforeModelInvocation?.();
@@ -586,15 +591,26 @@ describe("Supervisor compiler evaluation activation boundary", () => {
             reason: "The repaired proposal is complete and bounded.",
             evidenceIds: ["objective"],
           })),
-          dependencies: context.proposal.workItems.map((item) => ({
-            itemId: item.id,
-            dependsOn: item.dependsOn,
-            reason: item.dependsOn.length
-              ? "The descendant waits for its capability provider."
-              : "The bootstrap provider is the dependency root.",
-            evidenceIds: ["objective"],
-          })),
+          dependencies: context.proposal.workItems.map((item) => {
+            const dependsOn = [
+              ...new Set([
+                ...item.dependsOn,
+                ...context.projectionTrace.addedEdges
+                  .filter((edge) => edge.itemId === item.id)
+                  .map((edge) => edge.dependsOn),
+              ]),
+            ];
+            return {
+              itemId: item.id,
+              dependsOn,
+              reason: dependsOn.length
+                ? "The descendant waits for its capability provider."
+                : "The bootstrap provider is the dependency root.",
+              evidenceIds: ["objective"],
+            };
+          }),
           findings: [],
+          inferenceCorrections: [],
           uncertainty: [],
           decision: "accept",
         };

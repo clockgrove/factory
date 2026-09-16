@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { z } from "zod";
-import { FINDING_CANDIDATE_JSON_SCHEMA, FindingCandidateSchema } from "../protocol/findings.js";
+import {
+  FINDING_CANDIDATE_JSON_SCHEMA,
+  FindingCandidateSchema,
+  normalizeProviderFindingCandidate,
+} from "../protocol/findings.js";
 
 import type { LegacyGraphConstraints } from "../graph.js";
 import {
@@ -221,7 +225,7 @@ export const CODEX_REVIEW_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",
   additionalProperties: false,
-  required: ["accepted", "summary", "unmetCriteria", "risks"],
+  required: ["accepted", "summary", "unmetCriteria", "risks", "findings"],
   properties: {
     accepted: { type: "boolean" },
     summary: { type: "string", minLength: 1, maxLength: 8000 },
@@ -237,7 +241,10 @@ const ReviewSchema = z
     summary: z.string().min(1).max(8_000),
     unmetCriteria: z.array(z.string().max(2_000)).max(64),
     risks: z.array(z.string().max(2_000)).max(64),
-    findings: z.array(FindingCandidateSchema).max(16).optional(),
+    findings: z
+      .array(z.preprocess(normalizeProviderFindingCandidate, FindingCandidateSchema))
+      .max(16)
+      .optional(),
   })
   .strict();
 

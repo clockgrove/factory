@@ -59,7 +59,9 @@ export const FINDING_CANDIDATE_JSON_SCHEMA = {
     "observedBehavior",
     "reproduction",
     "impact",
+    "possibleCause",
     "evidence",
+    "commonCauseEvidence",
   ],
   properties: {
     protocol: { type: "string", const: FINDING_PROTOCOL },
@@ -77,7 +79,9 @@ export const FINDING_CANDIDATE_JSON_SCHEMA = {
       items: { type: "string", minLength: 1, maxLength: 1000 },
     },
     impact: { type: "string", minLength: 1, maxLength: 2000 },
-    possibleCause: { type: "string", minLength: 1, maxLength: 2000 },
+    possibleCause: {
+      anyOf: [{ type: "string", minLength: 1, maxLength: 2000 }, { type: "null" }],
+    },
     evidence: {
       type: "array",
       minItems: 1,
@@ -85,7 +89,7 @@ export const FINDING_CANDIDATE_JSON_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["kind", "digest"],
+        required: ["kind", "digest", "path", "commit"],
         properties: {
           kind: {
             type: "string",
@@ -100,23 +104,53 @@ export const FINDING_CANDIDATE_JSON_SCHEMA = {
             ],
           },
           digest: { type: "string", pattern: "^[a-f0-9]{64}$" },
-          path: { type: "string", minLength: 1, maxLength: 500 },
-          commit: { type: "string", pattern: "^[a-f0-9]{40}$" },
+          path: {
+            anyOf: [{ type: "string", minLength: 1, maxLength: 500 }, { type: "null" }],
+          },
+          commit: {
+            anyOf: [{ type: "string", pattern: "^[a-f0-9]{40}$" }, { type: "null" }],
+          },
         },
       },
     },
     commonCauseEvidence: {
-      type: "array",
-      minItems: 1,
-      maxItems: 8,
-      items: { type: "string", pattern: "^[a-f0-9]{64}$" },
+      anyOf: [
+        {
+          type: "array",
+          minItems: 1,
+          maxItems: 8,
+          items: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        },
+        { type: "null" },
+      ],
     },
   },
 } as const;
 
+/** Providers emit every structured-output property and use null for absent optionals. */
+export function normalizeProviderFindingCandidate(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const candidate = { ...(value as Record<string, unknown>) };
+  if (candidate.possibleCause === null) delete candidate.possibleCause;
+  if (candidate.commonCauseEvidence === null) delete candidate.commonCauseEvidence;
+  if (Array.isArray(candidate.evidence)) {
+    candidate.evidence = candidate.evidence.map((raw) => {
+      if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return raw;
+      const evidence = { ...(raw as Record<string, unknown>) };
+      if (evidence.path === null) delete evidence.path;
+      if (evidence.commit === null) delete evidence.commit;
+      return evidence;
+    });
+  }
+  return candidate;
+}
+
 export function parseFindingCandidates(value: unknown): FindingCandidate[] | undefined {
   if (value === undefined) return undefined;
-  const parsed = z.array(FindingCandidateSchema).max(16).safeParse(value);
+  const parsed = z
+    .array(z.preprocess(normalizeProviderFindingCandidate, FindingCandidateSchema))
+    .max(16)
+    .safeParse(value);
   if (!parsed.success) return undefined;
   return parsed.data.map((candidate) => validateFindingCandidate(candidate));
 }

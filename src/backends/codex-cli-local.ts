@@ -70,7 +70,7 @@ export const CODEX_WORKER_OUTPUT_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",
   additionalProperties: false,
-  required: ["outcome", "summary", "commands"],
+  required: ["outcome", "summary", "commands", "findings"],
   properties: {
     outcome: { type: "string", enum: ["succeeded", "failed", "declined"] },
     summary: { type: "string", maxLength: 8000 },
@@ -240,7 +240,7 @@ export function workerPacketPrompt(context: AttemptContext): string {
         ]
       : []),
     `Authoritative validation will run later. You may run these checks while working:\n${packet.validationCommands.map((item) => `- ${item}`).join("\n")}`,
-    "If you directly observe a product defect that is not merely a failed implementation attempt, you may include a bounded findings array in the result. State supported behavior, observation, minimal reproduction, impact, and immutable evidence separately from any explicitly unverified possible cause. Never include credentials, personal data, private host paths/topology, raw logs, prompts, or unverified security findings. Do not choose a destination, severity, blocking status, or disposition and do not access GitHub; only the Supervisor may classify or report a finding.",
+    "Return findings as an array, empty when there are none. If you directly observe a product defect that is not merely a failed implementation attempt, include a bounded finding. State supported behavior, observation, minimal reproduction, impact, and immutable evidence separately from any explicitly unverified possible cause. Use null for absent optional finding fields. Never include credentials, personal data, private host paths/topology, raw logs, prompts, or unverified security findings. Do not choose a destination, severity, blocking status, or disposition and do not access GitHub; only the Supervisor may classify or report a finding.",
     "Return the required JSON result. Your report is informational; the host will collect and validate the filesystem artifact independently.",
   ].join("\n\n");
 }

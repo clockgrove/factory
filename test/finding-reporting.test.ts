@@ -13,6 +13,7 @@ import {
   FINDING_PROTOCOL,
   findingIdentity,
   findingReportDigest,
+  parseFindingCandidates,
   renderFindingIssue,
   validateFindingCandidate,
   type FindingCandidate,
@@ -150,6 +151,27 @@ describe("finding protocol", () => {
     expect(report.body).toContain("## Observation");
     expect(report.body).toContain("## Possible cause (unverified)");
     expect(report.body).toContain(`id=${findingId} report=${reportDigest}`);
+  });
+
+  it("normalizes provider null sentinels for optional finding fields", () => {
+    const parsed = parseFindingCandidates([
+      {
+        ...candidate(),
+        possibleCause: null,
+        commonCauseEvidence: null,
+        evidence: [
+          {
+            kind: "artifact",
+            digest: sha("a"),
+            path: null,
+            commit: null,
+          },
+        ],
+      },
+    ]);
+    expect(parsed?.[0]).not.toHaveProperty("possibleCause");
+    expect(parsed?.[0]).not.toHaveProperty("commonCauseEvidence");
+    expect(parsed?.[0]?.evidence).toEqual([{ kind: "artifact", digest: sha("a") }]);
   });
 
   it("refuses private filesystem paths before publication", () => {

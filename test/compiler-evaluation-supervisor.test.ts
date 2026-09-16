@@ -16,14 +16,22 @@ import {
   type CompilerJudgeVerdict,
   type ObligationInventory,
 } from "../src/evaluation/compiler-eval.js";
-import { GithubOctokitGraphWriter, compiledGraphDigest } from "../src/graph.js";
+import { GithubOctokitGraphWriter } from "../src/graph.js";
 import { buildRecoveryProposal } from "../src/recovery/proposal.js";
 import { recoveryReadPort } from "../src/recovery/github-read-port.js";
 import { RecoveryPlanManager } from "../src/recovery/plan.js";
 import { RecoveryClaimManager } from "../src/recovery/claims.js";
 import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
+import { proposalResultFromCompiledFixture } from "./helpers/compiler-proposal.js";
 
 const usage = { inputTokens: 20, outputTokens: 10, cachedInputTokens: 4 };
+const invocationProvenance = (baseSha: string) => ({
+  promptDigest: "a".repeat(64),
+  schemaDigest: "b".repeat(64),
+  baseSha,
+  model: null,
+  reasoning: null,
+});
 type Fixture = Awaited<ReturnType<typeof providerSupervisorFixture>>;
 function freshObjective(f: Fixture) {
   for (const ref of [...f.refs.keys()])
@@ -53,22 +61,29 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
         },
       ],
     };
-    const result = { inventory, usage };
+    const result = { inventory, provenance: invocationProvenance(context.baseSha), usage };
     await checkpoint(result);
     return result;
   };
-  f.management.compile = async (context, checkpoint, beforeModelInvocation) => {
+  f.management.proposePlan = async (
+    request,
+    checkpoint,
+    _projection,
+    beforeModelInvocation,
+    execution,
+  ) => {
     await beforeModelInvocation?.();
     calls.push("compile");
+    if (!execution) throw new Error("fixture requires compilation context");
     const criterion = "answer.txt contains the required answer";
     const objective = compileObjective({
-      title: context.objective.title,
-      baseSha: context.baseSha,
-      runPolicy: context.runPolicy,
+      title: execution.objective.title,
+      baseSha: execution.baseSha,
+      runPolicy: execution.runPolicy,
       repositoryFacts: await readRepositoryFacts(
-        context.repository,
-        context.repositoryFiles,
-        context.repositoryLfs,
+        execution.repository,
+        execution.repositoryFiles,
+        execution.repositoryLfs,
       ),
       workItems: [
         {
@@ -81,7 +96,7 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
           outOfScope: [],
           conventions: [],
           dependsOn: [],
-          baseSha: context.baseSha,
+          baseSha: execution.baseSha,
           validationCommands: ["npm test"],
           criterionRisks: [{ criterion, risk: "ordinary" }],
           validation: [
@@ -97,7 +112,7 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
             architecture: [],
             tools: ["node"],
             services: [],
-            networkDestinations: [],
+            networkDestinations: ["registry.npmjs.org"],
             permittedSecretNames: [],
             trust: "trusted_local",
           },
@@ -105,7 +120,7 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
         },
       ],
     });
-    const result = { objective, usage };
+    const result = proposalResultFromCompiledFixture(request, objective, usage);
     await checkpoint(result);
     return result;
   };
@@ -115,7 +130,7 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
     const verdict: CompilerJudgeVerdict = {
       version: 1,
       rubricVersion: 1,
-      draftDigest: compiledGraphDigest(context.objective),
+      draftDigest: context.graphDigest,
       inventoryDigest: compilerEvalDigest(context.inventory),
       coverage: [
         {
@@ -123,9 +138,7 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
           status: decision === "accept" ? "covered" : "missing",
           itemIds: decision === "accept" ? ["answer"] : [],
           acceptanceBindings:
-            decision === "accept"
-              ? [{ itemId: "answer", criterion: "answer.txt contains the required answer" }]
-              : [],
+            decision === "accept" ? [{ itemId: "answer", criterionId: "criterion-1" }] : [],
           evidenceIds: ["objective"],
           reason: "Fixture coverage assessment",
         },
@@ -144,7 +157,14 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
         reason: "Fixture evidence",
         evidenceIds: ["objective"],
       })),
-      dependencies: [],
+      dependencies: [
+        {
+          itemId: "answer",
+          dependsOn: [],
+          reason: "No prerequisite items",
+          evidenceIds: ["objective"],
+        },
+      ],
       findings:
         decision === "accept"
           ? []
@@ -165,13 +185,13 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
       uncertainty: [],
       decision,
     };
-    const result = { verdict, usage };
+    const result = {
+      verdict,
+      provenance: invocationProvenance(context.compilation.baseSha),
+      usage,
+    };
     await checkpoint(result);
     return result;
-  };
-  f.management.repairPlan = async () => {
-    calls.push("repair");
-    throw new Error("unexpected repair in bounded report fixture");
   };
   return calls;
 }
@@ -211,7 +231,7 @@ async function graphlessCompilerRecoveryFixture() {
       ...fields,
     });
   const terminalReason = "compiled Objective has 16 deterministic violations: fixture";
-  const invocationId = "compiler-inventory-1";
+  const invocationId = `compile-${f.baseSha}`;
   const predecessorStart = sourceEvent({
     kind: "run",
     event: "FactoryRunStarted",
@@ -489,9 +509,21 @@ describe("Supervisor compiler evaluation activation boundary", () => {
           f.snapshot.body += ` Concurrent change ${boundary}.`;
         };
         if (boundary === "after-evaluation") {
-          const compile = f.management.compile;
-          f.management.compile = async (context, checkpoint, beforeModelInvocation) => {
-            const result = await compile(context, checkpoint, beforeModelInvocation);
+          const proposePlan = f.management.proposePlan;
+          f.management.proposePlan = async (
+            request,
+            checkpoint,
+            projection,
+            beforeModelInvocation,
+            execution,
+          ) => {
+            const result = await proposePlan(
+              request,
+              checkpoint,
+              projection,
+              beforeModelInvocation,
+              execution,
+            );
             changeObjective();
             return result;
           };

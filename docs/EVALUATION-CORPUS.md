@@ -13,7 +13,7 @@ tiers, and prerequisite relationships. Each project deliberately implements a sm
 
 | Case | Real baseline | Requested capability |
 | --- | --- | --- |
-| `typed-cart` | Compiled TypeScript integer-cent cart and executable assertions | Validated percentage discounts, default compatibility |
+| `typed-cart` | Compiled TypeScript integer-cent cart and executable assertions | Validated percentage discounts, unchanged default-price behavior |
 | `generated-catalog` | Source JSON, generator, checked output and stale-output assertion | Additional status with deterministic regeneration |
 | `binary-module` | Actual valid eight-byte WebAssembly module and byte generator | Reproducible bounded `answer()` export |
 | `seeded-simulation` | Bounded seed-offset arrival simulator and deterministic trace assertions | Capacity admission/rejection and repeatable replay |
@@ -54,9 +54,9 @@ runtime API, model runner, or installed MCP tool. Existing qualification code ca
    `compilePreparedCorpusCase(prepared, context, backend, checkpoint)` with an explicitly
    selected management backend, real Objective number, actual base SHA, default branch,
    operator-approved network/model context, and the existing durable usage checkpoint. It passes
-   the human Objective and real file inventory to `ManagementBackend.compile`, including the
-   normal Codex backend's repository discovery/compiler validation. It rejects changed fixture
-   bytes before invocation. It neither selects a model nor fabricates/checkpoints usage itself.
+   the human Objective and real file inventory through `compilePlan`, which calls the backend's
+   single `proposePlan` route with repository discovery and compiler validation. It rejects changed
+   fixture bytes before invocation. It neither selects a model nor fabricates/checkpoints usage itself.
    The caller owns authorization, Git/base verification, model limits and truthful run evidence.
 4. A reviewer supplies `CompilerCriterionBindings`: each criterion ID maps to one or more
    `{workItemId, index}` acceptance references and a rationale. Call
@@ -95,13 +95,16 @@ assessment, and every dependency has a cited reason. All rubric dimensions are a
 explicitly unavailable/not applicable. Blocking coverage, feasibility and material efficiency
 findings cannot be averaged away; uncertain minor preferences remain advisory.
 
-The optional management methods `extractObligations`, `judgePlan`, and `repairPlan` reuse the
-Codex management backend and its strict structured outputs. Repairs return a complete candidate,
-change summary, explicit ID lineage and finding dispositions. The same mechanical grounding and
-full independent coverage review run again after each revision. Compiler self-assessment never
-establishes that a correction succeeded. `compileEvaluatedDraft` connects these methods to
-`runCompilerDraftLoop`, the Git draft journal, and existing invocation admission/accounting.
-No new model selection or provider spending authority is introduced.
+The optional management methods `extractObligations` and `judgePlan` reuse the Codex management
+backend and its strict structured outputs. Initial compilation and repairs both call the required
+`proposePlan` method with the same `CompilerRequest` / `CompilerProposal` schema. A repair request
+contains the complete prior semantic proposal, bounded closed-set validation violations, independent
+semantic findings, and cited challenges; its response is a complete replacement semantic proposal.
+The same pinned-fact validation, deterministic projection, and full independent coverage review run
+again after each revision. Compiler self-assessment never establishes that a correction succeeded.
+`compileEvaluatedDraft` connects these methods to `runCompilerDraftLoop`, the Git draft journal, and
+existing invocation admission/accounting. No new model selection or provider spending authority is
+introduced.
 
 An operator enables the integrated flow with a complete normal run policy containing:
 
@@ -118,11 +121,23 @@ An operator enables the integrated flow with a complete normal run policy contai
 ```
 
 The number above is an illustrative operator-selected observed threshold, not a measured optimal
-allowance or a hard token cap. Omitting the entire field preserves the legacy path; omitting the
-individual limits uses the bounded defaults documented in `DESIGN.md`. Report-only mode permits
+allowance or a hard token cap. Omitting the entire field preserves the ordinary single-proposal path;
+both paths use the semantic compiler and deterministic projection. Omitting the individual limits
+uses the bounded defaults documented in `DESIGN.md`. Report-only mode permits
 no repairs and no execution graph projection. The existing write-free `factory plan --compile`
 entry point remains a single response-only compilation; it does not create a durable evaluated
 run. Draft evaluation requires its explicit immutable run envelope.
+
+Deterministic regression coverage includes an executable semantic matrix across observed, absent,
+partial, mixed, policy-blocked, and unsupported toolchain evidence; concrete dependency shapes;
+criterion risk and validation tiers; deferred-provider classifications; request/proposal outcomes;
+and canonical ordering. Every row contains importable inputs and expected structured observations,
+and the matrix computes its required cross-dimension pairs from the observations produced by
+production capability, validation, and graph helpers. Named source references are navigation only.
+Focused suites separately cover pinned LFS materialization, draft recovery, projection, and public
+report boundaries. Model-backed qualification evidence must report the exact candidate, model,
+reasoning effort, calls, stages, token accounting, elapsed time, terminal result, and whether repair
+was actually observed; an initially complete proposal must never be described as naturally repaired.
 
 `factory compiler-eval OWNER/REPO#NUMBER` / `factory_compiler_eval` load existing authenticated
 run and draft evidence without writes or model calls. The JSON includes per-revision reports,

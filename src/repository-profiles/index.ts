@@ -7,7 +7,11 @@ import {
 import { assertSafeValidationCommand } from "../validation/plan.js";
 import { normalizePinnedLfsFacts, type PinnedLfsFacts } from "./git-lfs.js";
 
-export { readRepositoryFacts } from "./read.js";
+export {
+  readPinnedCompilerFacts,
+  readRepositoryFacts,
+  type PinnedRepositoryFacts,
+} from "./read.js";
 
 export const MAX_REPOSITORY_FILES = 10_000;
 export const MAX_MANIFEST_PATHS = 64;
@@ -51,6 +55,21 @@ const cleanPath = (path: string): string => {
 const uniqueSorted = (values: Iterable<string>): string[] => [...new Set(values)].sort();
 const VALIDATION_SCRIPT_NAMES = ["typecheck", "test", "lint", "check", "verify", "build"];
 
+export function observedValidationScriptNames(factsInput: RepositoryFacts): string[] {
+  const scripts = normalizeRepositoryFacts(factsInput).scripts ?? {};
+  return [
+    ...VALIDATION_SCRIPT_NAMES.filter((name) => typeof scripts[name] === "string"),
+    ...Object.keys(scripts)
+      .filter(
+        (name) =>
+          !VALIDATION_SCRIPT_NAMES.includes(name) &&
+          /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$/.test(name) &&
+          validationEntryPoint(name),
+      )
+      .sort(),
+  ];
+}
+
 // Only the documented Node test-runner recipe is specialized here. This is
 // deliberately not a shell parser or an arbitrary package-script interpreter.
 function nodeTestTargets(command: string): string[] | undefined {
@@ -66,6 +85,16 @@ function nodeTestTargets(command: string): string[] | undefined {
   )
     return undefined;
   return targets;
+}
+
+/** Format only the exact scoped specialization accepted by validation grounding. */
+export function scopedNodeTestCommand(targets: readonly string[]): string | null {
+  const command = `node --test ${targets.join(" ")}`;
+  const parsed = nodeTestTargets(command);
+  return parsed?.length === targets.length &&
+    parsed.every((target, index) => target === targets[index])
+    ? command
+    : null;
 }
 
 export function normalizeRepositoryFacts(input: RepositoryFacts): RepositoryFacts {
@@ -124,17 +153,7 @@ export function normalizeRepositoryFacts(input: RepositoryFacts): RepositoryFact
 export function discoverValidationCommands(factsInput: RepositoryFacts): string[] {
   const facts = normalizeRepositoryFacts(factsInput);
   const scripts = facts.scripts ?? {};
-  const names = [
-    ...VALIDATION_SCRIPT_NAMES.filter((name) => typeof scripts[name] === "string"),
-    ...Object.keys(scripts)
-      .filter(
-        (name) =>
-          !VALIDATION_SCRIPT_NAMES.includes(name) &&
-          /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$/.test(name) &&
-          validationEntryPoint(name),
-      )
-      .sort(),
-  ];
+  const names = observedValidationScriptNames(facts);
   const observedPaths = new Set(facts.files.map((file) => file.path));
   const recipes = names.flatMap((name) => {
     const recipe = scripts[name]!;
@@ -229,6 +248,19 @@ export function isGroundedValidationCommand(
 ): boolean {
   const observed = discoverValidationCommands(facts);
   if (observed.includes(command)) return true;
+  const canonical = futureToolchainCommand(command);
+  if (
+    canonical &&
+    observed.some((candidate) => {
+      const parsed = futureToolchainCommand(candidate);
+      return (
+        parsed?.adapter.id === canonical.adapter.id &&
+        parsed.operation.kind === canonical.operation.kind &&
+        parsed.operation.key === canonical.operation.key
+      );
+    })
+  )
+    return true;
   // A bare observed runner permits selecting a concrete existing test, or a
   // test the current Work Item is explicitly allowed to create. An observed
   // targeted recipe does not authorize replacing its targets or adding flags.

@@ -25,6 +25,17 @@ import {
   type ManagementTranscriptRecorder,
 } from "../src/management/transcripts.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
+import type { CompilationContext, CompilerProposalCheckpoint } from "../src/management/backend.js";
+import {
+  materializePinnedCompilationTree,
+  sealPinnedCompilationTreeProof,
+} from "../src/execution/pinned-compilation-tree.js";
+import {
+  semanticPinnedFacts,
+  semanticProjectionContext,
+  semanticProposal,
+  semanticRequest,
+} from "./helpers/semantic-compiler.js";
 
 const roots: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -33,6 +44,58 @@ async function root() {
   const value = await mkdtemp(join(tmpdir(), "factory-management-transcripts-"));
   roots.push(value);
   return value;
+}
+
+async function proposeWithTranscript(
+  backend: CodexCliManagementBackend,
+  repository: string,
+  checkpoint: CompilerProposalCheckpoint = async () => {},
+  exactBase = false,
+) {
+  let request = semanticRequest();
+  let pinned: Awaited<ReturnType<typeof materializePinnedCompilationTree>> | undefined;
+  if (exactBase) {
+    const git = async (...args: string[]) =>
+      (await execFileAsync("git", ["-C", repository, ...args])).stdout.trim();
+    await git("init", "-b", "main");
+    await git("config", "user.name", "Fixture");
+    await git("config", "user.email", "fixture@example.test");
+    await git("add", ".");
+    await git("commit", "-m", "fixture");
+    const baseSha = await git("rev-parse", "HEAD");
+    pinned = await materializePinnedCompilationTree(repository, baseSha);
+    await sealPinnedCompilationTreeProof(pinned.proof);
+    request = {
+      ...request,
+      baseSha,
+      inventory: { ...request.inventory, baseSha },
+    };
+  }
+  const execution: CompilationContext = {
+    repository: pinned?.path ?? repository,
+    objective: {
+      number: request.objective.number,
+      title: request.objective.title,
+      body: request.objective.body,
+    },
+    defaultBranch: "main",
+    baseSha: request.baseSha,
+    repositoryFiles: pinned?.files ?? ["package.json"],
+    ...(pinned ? { pinnedCompilationTree: pinned.proof } : {}),
+    allowedNetworkDestinations: [],
+    runPolicy: DEFAULT_RUN_POLICY,
+  };
+  try {
+    return await backend.proposePlan(
+      request,
+      checkpoint,
+      semanticProjectionContext(semanticPinnedFacts({ baseSha: request.baseSha })),
+      undefined,
+      execution,
+    );
+  } finally {
+    await pinned?.dispose();
+  }
 }
 
 afterEach(async () => {
@@ -475,18 +538,7 @@ describe("local management transcripts", () => {
     });
     let failure: unknown;
     try {
-      await backend.compile(
-        {
-          repository,
-          objective: { number: 1, title: "Test", body: "Implement the requested behavior." },
-          defaultBranch: "main",
-          baseSha: "a".repeat(40),
-          repositoryFiles: ["package.json"],
-          allowedNetworkDestinations: [],
-          runPolicy: DEFAULT_RUN_POLICY,
-        },
-        async () => {},
-      );
+      await proposeWithTranscript(backend, repository, undefined, true);
     } catch (error) {
       failure = error;
     }
@@ -542,18 +594,7 @@ describe("local management transcripts", () => {
     });
     let failure: unknown;
     try {
-      await backend.compile(
-        {
-          repository,
-          objective: { number: 1, title: "Test", body: "Implement the requested behavior." },
-          defaultBranch: "main",
-          baseSha: "a".repeat(40),
-          repositoryFiles: ["package.json"],
-          allowedNetworkDestinations: [],
-          runPolicy: DEFAULT_RUN_POLICY,
-        },
-        async () => {},
-      );
+      await proposeWithTranscript(backend, repository, undefined, true);
     } catch (error) {
       failure = error;
     }
@@ -599,20 +640,9 @@ describe("local management transcripts", () => {
           throw new Error("provider primary failure");
         },
       });
-      await expect(
-        backend.compile(
-          {
-            repository,
-            objective: { number: 1, title: "Test", body: "Implement the requested behavior." },
-            defaultBranch: "main",
-            baseSha: "a".repeat(40),
-            repositoryFiles: ["package.json"],
-            allowedNetworkDestinations: [],
-            runPolicy: DEFAULT_RUN_POLICY,
-          },
-          async () => {},
-        ),
-      ).rejects.toThrow("provider primary failure");
+      await expect(proposeWithTranscript(backend, repository)).rejects.toThrow(
+        "provider primary failure",
+      );
       await expect(access(directory)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       if (previous === undefined) delete process.env[MANAGEMENT_TRANSCRIPT_DIRECTORY_ENV];
@@ -633,20 +663,9 @@ describe("local management transcripts", () => {
       runStructured: provider,
       transcriptRecorder: new LocalManagementTranscriptRecorder(blocked),
     });
-    await expect(
-      backend.compile(
-        {
-          repository,
-          objective: { number: 1, title: "Test", body: "Implement the requested behavior." },
-          defaultBranch: "main",
-          baseSha: "a".repeat(40),
-          repositoryFiles: ["package.json"],
-          allowedNetworkDestinations: [],
-          runPolicy: DEFAULT_RUN_POLICY,
-        },
-        async () => {},
-      ),
-    ).rejects.toThrow("provider primary failure");
+    await expect(proposeWithTranscript(backend, repository)).rejects.toThrow(
+      "provider primary failure",
+    );
     expect(provider).toHaveBeenCalledOnce();
     expect(diagnostic).toHaveBeenCalledWith(
       expect.stringContaining("[factory-debug] management transcript unavailable:"),
@@ -674,20 +693,9 @@ describe("local management transcripts", () => {
       runStructured: provider,
       transcriptRecorder,
     });
-    await expect(
-      backend.compile(
-        {
-          repository,
-          objective: { number: 1, title: "Test", body: "Implement the requested behavior." },
-          defaultBranch: "main",
-          baseSha: "a".repeat(40),
-          repositoryFiles: ["package.json"],
-          allowedNetworkDestinations: [],
-          runPolicy: DEFAULT_RUN_POLICY,
-        },
-        async () => {},
-      ),
-    ).rejects.toThrow("provider primary failure");
+    await expect(proposeWithTranscript(backend, repository)).rejects.toThrow(
+      "provider primary failure",
+    );
     expect(provider).toHaveBeenCalledOnce();
     await vi.waitFor(() => {
       expect(finish).toHaveBeenCalledOnce();
@@ -712,66 +720,14 @@ describe("local management transcripts", () => {
       transcriptRecorder,
       runStructured: async () => ({
         usage,
-        value: {
-          title: "Test",
-          workItems: [
-            {
-              id: "code",
-              title: "Implement code",
-              goal: "Implement code",
-              acceptance: ["Tests pass"],
-              criterionRisks: [{ criterion: "Tests pass", risk: "ordinary" }],
-              scope: ["src/code.ts"],
-              preconditions: [],
-              outOfScope: [],
-              conventions: [],
-              dependsOn: [],
-              baseSha: "a".repeat(40),
-              validationCommands: ["npm test"],
-              validation: [
-                {
-                  tier: "mechanical",
-                  criteria: ["Tests pass"],
-                  rationale: "The repository test command establishes the criterion.",
-                  evidenceCommands: ["npm test"],
-                },
-              ],
-              requirements: {
-                os: ["linux"],
-                architecture: ["x64"],
-                cpu: 1,
-                memoryMb: 2048,
-                diskMb: 1024,
-                timeoutMinutes: 30,
-                estimatedDurationMinutes: 10,
-                tools: ["node", "npm"],
-                services: [],
-                networkDestinations: [],
-                permittedSecretNames: [],
-                trust: "trusted_local",
-              },
-              artifactContract: "clockgrove.factory/artifact-v1",
-            },
-          ],
-        },
+        value: semanticProposal(semanticRequest()),
       }),
     });
     const checkpoint = vi.fn(async () => {});
 
-    await expect(
-      backend.compile(
-        {
-          repository,
-          objective: { number: 1, title: "Test", body: "Test" },
-          defaultBranch: "main",
-          baseSha: "a".repeat(40),
-          repositoryFiles: ["src/code.ts", "package.json"],
-          allowedNetworkDestinations: [],
-          runPolicy: DEFAULT_RUN_POLICY,
-        },
-        checkpoint,
-      ),
-    ).resolves.toMatchObject({ usage });
+    await expect(proposeWithTranscript(backend, repository, checkpoint)).resolves.toMatchObject({
+      usage,
+    });
     expect(checkpoint).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(finish).toHaveBeenCalledOnce());
   });

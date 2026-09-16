@@ -5,13 +5,21 @@ import type {
   CompilerEvidence,
   CompilerCaseLabel,
 } from "../evaluation/compiler-eval.js";
-import type { CompiledObjective, LegacyGraphConstraints } from "../graph.js";
+import type { LegacyGraphConstraints } from "../graph.js";
+import type {
+  CompilerProposal,
+  CompilerRequest,
+  CompilerValidationReport,
+} from "../compiler/contracts.js";
+import type { CompilerProjectionContext, CompilerProjectionTrace } from "../compiler/proposal.js";
+import type { CompilerJudgeCandidate } from "../compiler/judge-context.js";
 import type { NormalizedArtifact } from "../execution/artifacts.js";
 import type { WorkerPacket } from "../protocol/worker-packet.js";
 import type { ValidationEvidence } from "../validation/evidence.js";
 import type { ModelSelection, RunPolicy } from "../protocol/policy.js";
 import type { CompilerWorkItem, DecompositionEvidence } from "../compiler/index.js";
 import type { PinnedLfsFacts } from "../repository-profiles/git-lfs.js";
+import type { PinnedCompilationTreeProof } from "../execution/pinned-compilation-tree.js";
 import type { ProviderQuotaCheckpoint } from "../providers/quota.js";
 
 export interface ManagementUsage {
@@ -34,12 +42,31 @@ export class ManagementOutputError extends Error {
   }
 }
 
+/** A paid output was observed, but its isolated provider home could not be proven removed. */
+export class ManagementCleanupError extends ManagementOutputError {
+  readonly provenance: CompilerInvocationProvenance | undefined;
+
+  constructor(
+    cause: unknown,
+    usage: ManagementUsage,
+    proposal: unknown,
+    provenance?: CompilerInvocationProvenance,
+  ) {
+    super(cause, usage, proposal);
+    this.name = "ManagementCleanupError";
+    this.message = "management provider output cleanup is unresolved";
+    this.provenance = provenance ? { ...provenance } : undefined;
+  }
+}
+
 export interface CompilationContext {
   repository: string;
   objective: { number: number; title: string; body: string };
   defaultBranch: string;
   baseSha: string;
   repositoryFiles: string[];
+  /** Unforgeable in-process proof that repository is an active Factory-owned exact-base tree. */
+  pinnedCompilationTree?: PinnedCompilationTreeProof;
   repositoryLfs?: PinnedLfsFacts;
   allowedNetworkDestinations: string[];
   /** Exact immutable policy activated for this compilation. */
@@ -62,9 +89,7 @@ export interface CompilationContext {
   economicEvidence?: (items: readonly CompilerWorkItem[]) => Promise<DecompositionEvidence>;
 }
 
-export interface CompilerProposalTrace {
-  rawProposal: unknown;
-  normalizationTrace: string[];
+export interface CompilerInvocationProvenance {
   promptDigest: string;
   schemaDigest: string;
   model: string | null;
@@ -72,37 +97,44 @@ export interface CompilerProposalTrace {
   baseSha: string;
 }
 
+export interface CompilerProposalProvenance extends CompilerInvocationProvenance {
+  requestDigest: string;
+}
+
+export interface CompilerProposalResult {
+  request: CompilerRequest;
+  proposal: CompilerProposal;
+  report: CompilerValidationReport;
+  provenance: CompilerProposalProvenance;
+  usage: ManagementUsage;
+}
+export type CompilerProposalCheckpoint = (result: CompilerProposalResult) => Promise<void>;
+
 export interface ObligationResult {
   inventory: ObligationInventory;
+  provenance: CompilerInvocationProvenance;
   usage: ManagementUsage;
 }
 export type ObligationCheckpoint = (result: ObligationResult) => Promise<void>;
 export interface ObligationRepairContext {
   revision: number;
-  validationFailure: string;
+  validationReport: CompilerValidationReport;
   previousProposal: unknown;
 }
 export interface PlanJudgeContext {
   challenges?: CompilerInferenceChallenge[];
   compilation: CompilationContext;
   inventory: ObligationInventory;
-  objective: CompiledObjective;
+  proposal: CompilerJudgeCandidate;
+  projectionTrace: CompilerProjectionTrace;
+  graphDigest: string;
 }
 export interface PlanJudgeResult {
   verdict: CompilerJudgeVerdict;
+  provenance: CompilerInvocationProvenance;
   usage: ManagementUsage;
 }
 export type PlanJudgeCheckpoint = (result: PlanJudgeResult) => Promise<void>;
-export interface PlanRepairContext {
-  challenges?: CompilerInferenceChallenge[];
-  compilation: CompilationContext;
-  inventory: ObligationInventory;
-  objective?: CompiledObjective;
-  verdict?: CompilerJudgeVerdict;
-  previousProposal?: unknown;
-  validationFailure?: string;
-  revision: number;
-}
 export interface CompilerCaseLabelContext {
   compilation: CompilationContext;
   caseDigest: string;
@@ -124,30 +156,6 @@ export interface CompilerCaseLabelResult {
   usage: ManagementUsage;
 }
 export type CompilerCaseLabelCheckpoint = (result: CompilerCaseLabelResult) => Promise<void>;
-export interface PlanRepairSummary {
-  changeSummary: string;
-  lineage: Array<{ itemId: string; previousItemIds: string[] }>;
-  findingDispositions: Array<{
-    findingId: string;
-    disposition: "addressed" | "challenged";
-    reason: string;
-    evidenceIds: string[];
-  }>;
-}
-
-export interface CompilationResult {
-  provenance?: CompilerProposalTrace;
-  repair?: PlanRepairSummary;
-  objective: CompiledObjective;
-  usage: ManagementUsage;
-}
-
-/**
- * The management backend must not expose a paid compilation result to its
- * caller until this callback has durably checkpointed that exact result.
- */
-export type CompilationCheckpoint = (result: CompilationResult) => Promise<void>;
-
 export interface SemanticReview {
   accepted: boolean;
   summary: string;
@@ -194,17 +202,21 @@ export interface CompilerModelAdmissionReceipt {
    */
   checkpointProviderRefusal: ProviderQuotaCheckpoint;
 }
-export type CompilerModelAdmission = () => Promise<number | void | CompilerModelAdmissionReceipt>;
+export type CompilerModelAdmission = (
+  expectedProvenance?: CompilerInvocationProvenance,
+) => Promise<number | void | CompilerModelAdmissionReceipt>;
 export interface ManagementBackend {
   /** Required for evaluated drafts; older backends must not silently ignore admission. */
   readonly supportsCompilerAdmission?: true;
   readonly id: string;
   probe(): Promise<{ available: boolean; authenticated: boolean; reason?: string }>;
-  compile(
-    context: CompilationContext,
-    checkpoint: CompilationCheckpoint,
+  proposePlan(
+    request: CompilerRequest,
+    checkpoint: CompilerProposalCheckpoint,
+    projection: CompilerProjectionContext,
     beforeModelInvocation?: CompilerModelAdmission,
-  ): Promise<CompilationResult>;
+    execution?: CompilationContext,
+  ): Promise<CompilerProposalResult>;
   /** Draft-stage calls share the compile accounting/checkpoint boundary. Legacy backends
    * may omit them; callers must refuse judge-enabled compilation when unavailable. */
   labelCompilerCase?(
@@ -222,11 +234,6 @@ export interface ManagementBackend {
     checkpoint: PlanJudgeCheckpoint,
     beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<PlanJudgeResult>;
-  repairPlan?(
-    context: PlanRepairContext,
-    checkpoint: CompilationCheckpoint,
-    beforeModelInvocation?: CompilerModelAdmission,
-  ): Promise<CompilationResult>;
   review(context: ReviewContext, checkpoint: ReviewCheckpoint): Promise<ReviewResult>;
   /** Optional local preparation boundary. The backend must call the admission
    * callback exactly once immediately before paid invocation dispatch, after

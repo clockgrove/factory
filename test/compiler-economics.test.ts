@@ -9,10 +9,6 @@ import {
 import { DEFAULT_RUN_POLICY, type RunPolicy } from "../src/protocol/policy.js";
 import type { BackendCandidate } from "../src/execution/registry.js";
 import { CapacityLedger, capacityReservationKey } from "../src/scheduling/capacity-ledger.js";
-import { CodexCliManagementBackend } from "../src/management/codex-cli.js";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 const stamp = "2026-09-06T00:00:00.000Z";
 const localId = "codex-sdk/local-worktree";
@@ -328,54 +324,5 @@ describe("grounded advisory compiler economics", () => {
     expect(assessment.configuredCriticalPathMinutes).toBeNull();
     expect(assessment.repeatedValidationCommands).toBe(1);
     expect(assessment.feedback.join(" ")).toContain("structural counts alone do not prove");
-  });
-  it("collects trusted economics after grounding and checkpoints the rationale without another model call", async () => {
-    const root = await mkdtemp(join(tmpdir(), "factory-compiler-economics-"));
-    try {
-      await writeFile(
-        join(root, "package.json"),
-        JSON.stringify({ scripts: { test: "node --test" } }),
-      );
-      const calls: string[] = [];
-      const backend = new CodexCliManagementBackend({
-        runStructured: async () => {
-          calls.push("model");
-          return {
-            value: { title: "Economics", workItems: [item("a")] },
-            usage: { inputTokens: 1, outputTokens: 1 },
-          };
-        },
-      });
-      const result = await backend.compile(
-        {
-          repository: root,
-          repositoryFiles: ["package.json"],
-          objective: { number: 100, title: "Economics", body: "Implement a" },
-          defaultBranch: "main",
-          baseSha: "a".repeat(40),
-          allowedNetworkDestinations: [],
-          runPolicy: DEFAULT_RUN_POLICY,
-          economicEvidence: async (items) => {
-            calls.push("evidence");
-            expect(items[0]!.context.mustRead).toContain("package.json");
-            expect(items[0]!.requirements.trust).toBe("trusted_local");
-            return evidence();
-          },
-        },
-        async (checkpoint) => {
-          calls.push("checkpoint");
-          expect(checkpoint.objective.workItems[0]!.economicReview!.rationale).toContain(
-            "Paid execution policy/capability: eligible-in-principle",
-          );
-          expect(
-            checkpoint.objective.workItems[0]!.economicReview!.rationale.length,
-          ).toBeLessThanOrEqual(2000);
-        },
-      );
-      expect(calls).toEqual(["model", "evidence", "checkpoint"]);
-      expect(result.usage).toEqual({ inputTokens: 1, outputTokens: 1 });
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
   });
 });

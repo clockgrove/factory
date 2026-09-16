@@ -12,12 +12,16 @@ import {
   type ManagementBackend,
   type ManagementUsage,
 } from "../management/backend.js";
+import { compilePlan } from "../management/compile.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy, resolveModelSelection } from "../protocol/policy.js";
 import { assertNewRunBudgetIntent } from "../protocol/budget-intent.js";
 import type { ApplicationSnapshot } from "./services.js";
 import { safeDiagnosticMessage } from "./doctor.js";
 import { assertCleanPlanningFiles, inspectLocalCheckout } from "./checkout.js";
-import { materializePinnedCompilationTree } from "../execution/pinned-compilation-tree.js";
+import {
+  materializePinnedCompilationTree,
+  sealPinnedCompilationTreeProof,
+} from "../execution/pinned-compilation-tree.js";
 import {
   assertLocalLfsAvailable,
   materializeLocalLfsAssets,
@@ -290,6 +294,7 @@ export async function buildPlanReport(input: {
     const tree = await materializePinnedCompilationTree(input.planning.repositoryPath, baseSha);
     try {
       await materializeLocalLfsAssets(input.planning.repositoryPath, tree.path, baseSha);
+      await sealPinnedCompilationTreeProof(tree.proof);
       const context: CompilationContext = {
         repository: tree.path,
         objective: {
@@ -302,13 +307,14 @@ export async function buildPlanReport(input: {
         // The earlier layout port proves completeness; only the actual pinned tree supplies
         // compiler facts and cwd. A mutable caller inventory cannot replace that evidence.
         repositoryFiles: tree.files,
+        pinnedCompilationTree: tree.proof,
         repositoryLfs,
         allowedNetworkDestinations: policy.allowedNetworkDestinations,
         runPolicy: policy,
         ...(modelSelection ? { modelSelection } : {}),
       };
       let checkpointed = false;
-      const result = await management.compile(context, async (candidate) => {
+      const result = await compilePlan(context, management, async (candidate) => {
         observedUsage = { ...candidate.usage };
         checkpointed = true;
       });

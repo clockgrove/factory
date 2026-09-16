@@ -38,3 +38,30 @@ Runtime observed metrics are a separate report. No historical-duration estimator
 configured first-release estimates remain the source. Comparative benefit qualification is #109.
 Regression cases are written in `test/compiler-economics.test.ts`; execution is deferred until the
 integrated implementation candidate is frozen as required by the contributor workflow.
+
+## Paired prompt and token qualification
+
+No trustworthy exact-token baseline artifact is retained for the pre-compiler commit, so the
+before/after acceptance measurement is currently unavailable. Do not infer token counts from prompt
+bytes or reuse an unbound historical run.
+
+After deterministic review freezes the candidate, run the two scenarios in
+`test/compiler-issue404-live.test.ts` once from the exact baseline SHA and once from the exact
+candidate SHA with the same model and reasoning. Bind the checked-out commit through
+`FACTORY_ISSUE404_CANDIDATE_SHA`; all live-gate authority variables use the `FACTORY_` namespace so
+the model subprocess sanitizer removes them. Retain each `ISSUE404_LIVE_EVIDENCE` object as a
+private JSON artifact. The evidence includes a stable scenario digest, exact prompt bytes from the
+bound transcript, per-invocation provenance, and provider-reported input, output, and cached-input
+tokens for every stage. Its canonical scenario specification binds the stable fixture files and
+their shared exact base SHA, Objective identity and text, network and run policy, model profile,
+and any exact qualification fault transformation. Candidate SHA and run identity remain only in
+the private evidence artifact; they never enter the pinned fixture or model-visible evidence. Then run:
+
+```sh
+node scripts/qualification-compiler-comparison.mjs baseline.json candidate.json
+```
+
+The read-only comparator rejects changed SHAs, scenarios, model settings, missing stages, and
+incomplete token evidence. It reports per-stage observations, aggregate deltas, and the measurement
+tradeoff. Passing `-` in place of `baseline.json` produces an explicit `unavailable` record; it does
+not estimate a delta. The live tests remain separately gated by their paid-provider acknowledgements.

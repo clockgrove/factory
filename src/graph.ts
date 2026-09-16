@@ -31,6 +31,7 @@ import { retryGitHubQuota, GitHubPreTransportQuotaDeferredError } from "./platfo
  */
 
 import { createHash } from "node:crypto";
+import { analyzeDependencies, overlappingScopePairs } from "./graph-analysis.js";
 
 import type { Octokit } from "@octokit/core";
 import {
@@ -57,7 +58,12 @@ import {
   type RepositoryCapabilityBindings,
   type WorkerPacket,
 } from "./protocol/worker-packet.js";
-import { assertWithinBytes } from "./protocol/limits.js";
+import {
+  assertUtf8WithinBytes,
+  assertWithinBytes,
+  MAX_GITHUB_TEXT_BYTES,
+  utf8ByteLength,
+} from "./protocol/limits.js";
 import { validateCapabilityGraphBindings } from "./repository-capabilities/model.js";
 import {
   DEFERRED_CAPABILITY_ADAPTERS,
@@ -397,33 +403,6 @@ export function assertCompiledObjectiveAdoptsLegacyConstraints(
   }
 }
 
-function scopeOverlaps(left: string, right: string): boolean {
-  const leftDirectory = left.endsWith("/");
-  const rightDirectory = right.endsWith("/");
-  if (!leftDirectory && !rightDirectory) return left === right;
-  if (leftDirectory && rightDirectory) {
-    return left.startsWith(right) || right.startsWith(left);
-  }
-  return leftDirectory ? right.startsWith(left) : left.startsWith(right);
-}
-
-function dependsTransitivelyOn(
-  byId: Map<string, CompiledWorkItem>,
-  from: string,
-  target: string,
-): boolean {
-  const pending = [...(byId.get(from)?.dependsOn ?? [])];
-  const seen = new Set<string>();
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    if (current === target) return true;
-    if (seen.has(current)) continue;
-    seen.add(current);
-    pending.push(...(byId.get(current)?.dependsOn ?? []));
-  }
-  return false;
-}
-
 /**
  * A compiler may correctly identify shared files while forgetting to order the
  * affected Work Items. That omission has one safe mechanical repair: preserve
@@ -439,25 +418,14 @@ export function addScopeSerializationEdges<T extends CompiledObjective>(objectiv
     })),
   } as T;
   const byId = new Map(normalized.workItems.map((item) => [item.id, item]));
-  for (let leftIndex = 0; leftIndex < normalized.workItems.length; leftIndex += 1) {
-    const left = normalized.workItems[leftIndex]!;
-    for (
-      let rightIndex = leftIndex + 1;
-      rightIndex < normalized.workItems.length;
-      rightIndex += 1
-    ) {
-      const right = normalized.workItems[rightIndex]!;
-      const overlapping = left.scope.some((leftPath) =>
-        right.scope.some((rightPath) => scopeOverlaps(leftPath, rightPath)),
-      );
-      if (
-        overlapping &&
-        !dependsTransitivelyOn(byId, left.id, right.id) &&
-        !dependsTransitivelyOn(byId, right.id, left.id)
-      ) {
-        right.dependsOn.push(left.id);
-      }
-    }
+  const position = new Map(normalized.workItems.map((item, index) => [item.id, index]));
+  for (const pair of overlappingScopePairs(normalized.workItems)) {
+    const [first, second] = [...pair].sort(
+      (left, right) => position.get(left)! - position.get(right)!,
+    );
+    const analysis = analyzeDependencies(normalized.workItems);
+    if (!analysis.hasPath(first!, second!) && !analysis.hasPath(second!, first!))
+      byId.get(second!)!.dependsOn.push(first!);
   }
   return normalized;
 }
@@ -524,6 +492,7 @@ const PersistedCompiledObjectiveSchema = z
 export function parsePersistedCompiledObjective(input: unknown): CompiledObjective {
   const objective = PersistedCompiledObjectiveSchema.parse(input);
   validateGraphShape(objective, true);
+  validateGraphIssueBodies(objective);
   return objective;
 }
 
@@ -559,6 +528,8 @@ function validateGraphShape(
     ids.add(wi.id);
   }
   for (const wi of objective.workItems) {
+    if (new Set(wi.dependsOn).size !== wi.dependsOn.length)
+      throw new Error(`Work Item ${wi.id} contains a duplicate dependency`);
     for (const dep of wi.dependsOn) {
       if (!ids.has(dep)) {
         throw new Error(`Work Item ${wi.id} depends on unknown id ${dep}`);
@@ -569,47 +540,20 @@ function validateGraphShape(
     }
   }
 
-  // Cycle check: a plain DFS over the dependsOn edges. Objective graphs are
-  // small enough that there is no need for anything more clever.
-  const byId = new Map(objective.workItems.map((wi) => [wi.id, wi]));
-  const state = new Map<string, "visiting" | "done">();
-  const visit = (id: string, path: string[]): void => {
-    const mark = state.get(id);
-    if (mark === "done") return;
-    if (mark === "visiting") {
-      throw new Error(`dependency cycle: ${[...path, id].join(" -> ")}`);
-    }
-    state.set(id, "visiting");
-    for (const dep of byId.get(id)!.dependsOn) {
-      visit(dep, [...path, id]);
-    }
-    state.set(id, "done");
-  };
-  for (const wi of objective.workItems) visit(wi.id, []);
+  const analysis = analyzeDependencies(objective.workItems);
+  if (analysis.cycleItems.length)
+    throw new Error(`dependency cycle: ${analysis.cycleItems.join(" -> ")}`);
 
   // Two scopes overlap when they name the same file/directory, when an exact
   // file sits below a directory scope, or when two directory scopes nest. A
   // dependency path in either direction serializes the pair. Without one,
   // both items can enter the same wave and independently publish changes to
   // the same path, so reject that graph before its first GitHub write.
-  for (let leftIndex = 0; leftIndex < objective.workItems.length; leftIndex += 1) {
-    const left = objective.workItems[leftIndex]!;
-    for (let rightIndex = leftIndex + 1; rightIndex < objective.workItems.length; rightIndex += 1) {
-      const right = objective.workItems[rightIndex]!;
-      const overlapping = left.scope.some((leftPath) =>
-        right.scope.some((rightPath) => scopeOverlaps(leftPath, rightPath)),
+  for (const [left, right] of overlappingScopePairs(objective.workItems))
+    if (!analysis.hasPath(left, right) && !analysis.hasPath(right, left))
+      throw new Error(
+        `Work Items ${left} and ${right} have overlapping scopes but no dependency path`,
       );
-      if (
-        overlapping &&
-        !dependsTransitivelyOn(byId, left.id, right.id) &&
-        !dependsTransitivelyOn(byId, right.id, left.id)
-      ) {
-        throw new Error(
-          `Work Items ${left.id} and ${right.id} have overlapping scopes but no dependency path`,
-        );
-      }
-    }
-  }
 
   if (!allowAuthenticatedLegacyOmissions && objective.deferredCapabilityAdapters === undefined)
     throw new Error("compiled Objective lacks deferred capability adapter disposition");
@@ -648,6 +592,7 @@ function validateGraphShape(
 
 export function validateGraph(objective: CompiledObjective): void {
   validateGraphShape(objective, false);
+  validateGraphIssueBodies(objective);
 }
 
 const WORKER_PACKET_MARKER = "clockgrove-factory:worker-packet";
@@ -708,10 +653,12 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
+export const MAX_COMPILED_GRAPH_BYTES = 2 * 1024 * 1024;
+
 export function serializeCompiledObjective(objective: CompiledObjective): Buffer {
   const parsed = parsePersistedCompiledObjective(objective);
   const serialized = Buffer.from(canonical(parsed), "utf8");
-  assertWithinBytes(serialized.toString("utf8"), 2 * 1024 * 1024, "compiled graph");
+  assertWithinBytes(serialized.toString("utf8"), MAX_COMPILED_GRAPH_BYTES, "compiled graph");
   return serialized;
 }
 
@@ -720,9 +667,23 @@ export function compiledGraphDigest(objective: CompiledObjective): string {
   return createHash("sha256").update(canonical(objective)).digest("hex");
 }
 
+/** Exact graph digest for diagnostics after an independent projection violation is known. */
+export function compiledGraphDigestForDiagnostics(objective: CompiledObjective): string {
+  return createHash("sha256").update(canonical(objective)).digest("hex");
+}
+
 export function encodeGraphItemMetadata(metadata: GraphItemMetadata): string {
   const value = GraphItemMetadataSchema.parse(metadata);
   return `<!-- ${GRAPH_ITEM_MARKER} ${Buffer.from(JSON.stringify(value), "utf8").toString("base64url")} -->`;
+}
+
+/** Exact diagnostic rendering for metadata that the publication schema rejects. */
+export function renderWorkPacketWithRawGraphMetadataForDiagnostics(
+  wi: CompiledWorkItem,
+  metadata: GraphItemMetadata,
+): string {
+  const encoded = `<!-- ${GRAPH_ITEM_MARKER} ${Buffer.from(JSON.stringify(metadata), "utf8").toString("base64url")} -->`;
+  return [renderWorkPacket(wi), encoded].filter(Boolean).join("\n\n");
 }
 
 export function parseGraphItemMetadata(body: string): GraphItemMetadata {
@@ -853,6 +814,47 @@ export function renderWorkPacket(wi: CompiledWorkItem, graphMetadata?: GraphItem
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+export interface RenderedGraphWorkItem {
+  item: CompiledWorkItem;
+  metadata: GraphItemMetadata;
+  body: string;
+  bytes: number;
+}
+
+/** Render and validate the exact final GitHub issue bodies for a complete graph. */
+export function renderCompiledGraphWorkItems(
+  objective: CompiledObjective,
+): RenderedGraphWorkItem[] {
+  validateGraphShape(objective, true);
+  const graphDigest = compiledGraphDigest(objective);
+  return objective.workItems.map((item, index) => {
+    const metadata: GraphItemMetadata = {
+      protocol: "clockgrove.factory/graph-v1",
+      id: item.id,
+      graphDigest,
+      graphSize: objective.workItems.length,
+      index,
+      dependsOn: item.dependsOn,
+      ...(objective.deferredCapabilityAdapters === undefined
+        ? {}
+        : { deferredCapabilityAdapters: objective.deferredCapabilityAdapters }),
+    };
+    const body = renderWorkPacket(item, metadata);
+    return { item, metadata, body, bytes: utf8ByteLength(body) };
+  });
+}
+
+export function validateGraphIssueBodies(objective: CompiledObjective): RenderedGraphWorkItem[] {
+  const renderedItems = renderCompiledGraphWorkItems(objective);
+  for (const rendered of renderedItems)
+    assertUtf8WithinBytes(
+      rendered.body,
+      MAX_GITHUB_TEXT_BYTES,
+      `Work Item ${rendered.item.id} issue body`,
+    );
+  return renderedItems;
 }
 
 /**
@@ -1084,8 +1086,10 @@ export class GraphApplier {
   ): Promise<Map<string, CreatedWorkItem>> {
     if (ctx.allowAuthenticatedLegacyOmissions || ctx.legacyGraphConstraints)
       validateGraphShape(objective, true);
-    else validateGraph(objective);
-    const digest = compiledGraphDigest(objective);
+    else validateGraphShape(objective, false);
+    // Render every exact final issue body before the first create/update/edge mutation.
+    const renderedItems = validateGraphIssueBodies(objective);
+    const renderedById = new Map(renderedItems.map((entry) => [entry.item.id, entry]));
 
     const created = new Map<string, CreatedWorkItem>();
     const observedDependencies = new Map<string, Set<number>>();
@@ -1148,24 +1152,15 @@ export class GraphApplier {
         );
       }
     }
-    for (const [index, wi] of objective.workItems.entries()) {
+    for (const wi of objective.workItems) {
       if (created.has(wi.id)) continue;
+      const rendered = renderedById.get(wi.id)!;
       const issue = await this.#call(() =>
         this.#writer.createWorkItemIssue({
           repositoryId: ctx.repositoryId,
           parentIssueId: ctx.objectiveIssueId,
           title: wi.title,
-          body: renderWorkPacket(wi, {
-            protocol: "clockgrove.factory/graph-v1",
-            id: wi.id,
-            graphDigest: digest,
-            graphSize: objective.workItems.length,
-            index,
-            dependsOn: wi.dependsOn,
-            ...(objective.deferredCapabilityAdapters === undefined
-              ? {}
-              : { deferredCapabilityAdapters: objective.deferredCapabilityAdapters }),
-          }),
+          body: rendered.body,
           ...(ctx.workItemLabelId ? { labelIds: [ctx.workItemLabelId] } : {}),
         }),
       );
@@ -1176,24 +1171,15 @@ export class GraphApplier {
     // A lost response is replayable because the authenticated envelope makes the
     // completed update observable while the remaining legacy bodies retain the
     // same immutable constraint digest.
-    for (const [index, wi] of objective.workItems.entries()) {
+    for (const wi of objective.workItems) {
       const legacy = legacyById.get(wi.id);
       if (!legacy || (ctx.existingWorkItems ?? []).some((item) => item.compilerId === wi.id))
         continue;
+      const rendered = renderedById.get(wi.id)!;
       await this.#call(() =>
         this.#writer.updateWorkItemIssue({
           issueId: legacy.issueNodeId,
-          body: renderWorkPacket(wi, {
-            protocol: "clockgrove.factory/graph-v1",
-            id: wi.id,
-            graphDigest: digest,
-            graphSize: objective.workItems.length,
-            index,
-            dependsOn: wi.dependsOn,
-            ...(objective.deferredCapabilityAdapters === undefined
-              ? {}
-              : { deferredCapabilityAdapters: objective.deferredCapabilityAdapters }),
-          }),
+          body: rendered.body,
         }),
       );
     }

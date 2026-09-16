@@ -10,7 +10,14 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import type { FactoryEvent } from "../protocol/events.js";
-import { gitSha, isoDate, safeId, sha256Digest, validatePersistable } from "../protocol/limits.js";
+import {
+  gitSha,
+  isoDate,
+  MAX_GITHUB_TEXT_BYTES,
+  safeId,
+  sha256Digest,
+  validatePersistable,
+} from "../protocol/limits.js";
 import { writerAuthority } from "./authority.js";
 import { gitBlobOid, type CompiledGraphStore } from "./graphs.js";
 import type { LeaseManager, LeaseState } from "./lease.js";
@@ -21,7 +28,7 @@ const OPEN = "<!-- clockgrove-factory:result\n";
 const CLOSE = "\n-->";
 const CONTENT_PATH = ".clockgrove-factory/control/result.json";
 // GitHub's comment limit is character-based. A conservative byte limit also bounds UTF-8.
-const MAX_COMMENT_BYTES = 60_000;
+const MAX_COMMENT_BYTES = MAX_GITHUB_TEXT_BYTES;
 
 export const ResultReceiptSchema = z
   .object({

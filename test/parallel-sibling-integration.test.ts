@@ -1250,7 +1250,7 @@ async function fixture(
   const management: ManagementBackend = {
     id: policy.managementBackend,
     probe: async () => ({ available: true, authenticated: true }),
-    compile: vi.fn(async () => {
+    proposePlan: vi.fn(async () => {
       throw new Error("unexpected compilation");
     }),
     review,

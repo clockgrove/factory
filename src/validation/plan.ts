@@ -2,10 +2,8 @@ import { createHash } from "node:crypto";
 
 import type { WorkerPacket } from "../protocol/worker-packet.js";
 import {
-  futurePackageScriptCommand,
+  packageScriptValidationCommand,
   PACKAGE_SETUP_REGISTRY,
-  PNPM_VALIDATION_SETUP_COMMAND,
-  PNPM_VERSION_COMMAND,
   validationSetupCommandCount,
 } from "../toolchains/authority.js";
 import type { ValidationEvidence } from "./evidence.js";
@@ -34,25 +32,6 @@ export interface ValidationPlan {
 }
 
 export { NPM_VALIDATION_SETUP_COMMAND } from "../toolchains/authority.js";
-export const PNPM_BOOTSTRAP_VERSION_COMMAND = PNPM_VERSION_COMMAND;
-export const PNPM_BOOTSTRAP_VALIDATION_SETUP_COMMAND = PNPM_VALIDATION_SETUP_COMMAND;
-export const PNPM_BOOTSTRAP_REGISTRY = PACKAGE_SETUP_REGISTRY;
-
-export type BootstrapPackageValidationCommand = {
-  manager: "pnpm";
-  script: string;
-};
-
-/**
- * Recognize only finite package-script entry points. The script body remains
- * untrusted until clean validation inspects the materialized package manifests.
- */
-export function bootstrapPackageValidationCommand(
-  command: string,
-): BootstrapPackageValidationCommand | null {
-  const parsed = futurePackageScriptCommand(command);
-  return parsed?.manager === "pnpm" ? { manager: "pnpm", script: parsed.script } : null;
-}
 
 /** Upper bound reserved for trusted-local validation scopes. npm may consume
  * one setup command; pnpm always proves the bundled version and installs once. */
@@ -72,12 +51,15 @@ export function assertPnpmCommandsGroundedOnManifest(
 ): boolean {
   const declared = packet.validationCommands.filter((command) => /^pnpm(?:\s|$)/.test(command));
   if (declared.length === 0) return false;
-  const parsed = declared.map((command) => bootstrapPackageValidationCommand(command));
+  const parsed = declared.map((command) => {
+    const value = packageScriptValidationCommand(command);
+    return value?.manager === "pnpm" ? value : null;
+  });
   if (parsed.some((command) => command === null))
     throw new Error("pnpm validation command is outside the finite script contract");
   if (!packet.requirements.tools.includes("pnpm"))
     throw new Error("pnpm validation is missing its declared tool requirement");
-  if (!packet.requirements.networkDestinations.includes(PNPM_BOOTSTRAP_REGISTRY))
+  if (!packet.requirements.networkDestinations.includes(PACKAGE_SETUP_REGISTRY))
     throw new Error("pnpm validation is missing registry.npmjs.org setup authority");
   if (Buffer.byteLength(manifestText) > 256 * 1024)
     throw new Error("pnpm execution-base package.json exceeds the inspection bound");

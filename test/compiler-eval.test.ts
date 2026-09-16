@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { CompilerObjective } from "../src/compiler/index.js";
+import type { CompilerProposal } from "../src/compiler/contracts.js";
 import {
   COMPILER_JUDGE_DIMENSIONS,
+  CompilerInferenceChallengeLimitError,
+  deriveCompilerInferenceChallenges,
   validateCompilerCaseLabel,
   compilerEvalDigest,
   createCompilerEvalReport,
@@ -11,6 +13,7 @@ import {
   parseObligationInventory,
   renderCompilerEvalMarkdown,
   validateCompilerJudgeVerdict,
+  validateCompilerInferenceChallenges,
   type CompilerJudgeVerdict,
   type ObligationInventory,
   type CompilerCalibrationCase,
@@ -39,11 +42,15 @@ const inventory: ObligationInventory = {
 };
 // These tests exercise evidence contracts only, not structural compilation or model quality.
 const graph = {
-  title: "API",
+  protocol: "clockgrove.factory/compiler-proposal",
   workItems: [
-    { id: "api", dependsOn: [], acceptance: ["Acceptance includes the requested outcome"] },
+    {
+      id: "api",
+      dependsOn: [],
+      criteria: [{ id: "requested-outcome" }],
+    },
   ],
-} as unknown as CompilerObjective;
+} as unknown as CompilerProposal;
 const expected = { inventory, graph, draftDigest: "c".repeat(64) };
 const verdict = (): CompilerJudgeVerdict => ({
   version: 1,
@@ -52,7 +59,7 @@ const verdict = (): CompilerJudgeVerdict => ({
   inventoryDigest: compilerEvalDigest(inventory),
   coverage: inventory.obligations.map((obligation) => ({
     obligationId: obligation.id,
-    acceptanceBindings: [{ itemId: "api", criterion: "Acceptance includes the requested outcome" }],
+    acceptanceBindings: [{ itemId: "api", criterionId: "requested-outcome" }],
     status: "covered",
     itemIds: ["api"],
     evidenceIds: ["objective"],
@@ -72,7 +79,14 @@ const verdict = (): CompilerJudgeVerdict => ({
     reason: "Grounded assessment",
     evidenceIds: ["objective"],
   })),
-  dependencies: [],
+  dependencies: [
+    {
+      itemId: "api",
+      dependsOn: [],
+      reason: "No prerequisite items",
+      evidenceIds: ["objective"],
+    },
+  ],
   findings: [],
   uncertainty: [],
   decision: "accept",
@@ -161,12 +175,12 @@ describe("obligation-first compiler evidence", () => {
       validateCompilerJudgeVerdict(verdict(), { ...expected, draftDigest: "d".repeat(64) }),
     ).toThrow("identity");
     const serial = {
-      title: "API",
+      protocol: "clockgrove.factory/compiler-proposal",
       workItems: [
-        { id: "api", dependsOn: [], acceptance: ["Acceptance includes the requested outcome"] },
-        { id: "consumer", dependsOn: ["api"], acceptance: ["Consumes API"] },
+        { id: "api", dependsOn: [], criteria: [{ id: "requested-outcome" }] },
+        { id: "consumer", dependsOn: ["api"], criteria: [{ id: "consumes-api" }] },
       ],
-    } as unknown as CompilerObjective;
+    } as unknown as CompilerProposal;
     const reviewed = verdict();
     reviewed.items.push({ ...reviewed.items[0]!, itemId: "consumer" });
     expect(() => validateCompilerJudgeVerdict(reviewed, { ...expected, graph: serial })).toThrow(
@@ -174,13 +188,50 @@ describe("obligation-first compiler evidence", () => {
     );
     reviewed.dependencies.push({
       itemId: "consumer",
-      dependsOn: "api",
+      dependsOn: ["api"],
       reason: "Consumes API",
       evidenceIds: ["objective"],
     });
     expect(validateCompilerJudgeVerdict(reviewed, { ...expected, graph: serial }).decision).toBe(
       "accept",
     );
+  });
+  it("validates grouped rationale for a 1,050-edge fixed graph", () => {
+    const workItems = Array.from({ length: 100 }, (_, index) => ({
+      id: index === 0 ? "api" : `item-${index}`,
+      dependsOn:
+        index < 50
+          ? []
+          : Array.from({ length: 21 }, (_, dependency) =>
+              dependency === 0 ? "api" : `item-${dependency}`,
+            ),
+      criteria: [{ id: "requested-outcome" }],
+    }));
+    const groupedGraph = {
+      protocol: "clockgrove.factory/compiler-proposal",
+      workItems,
+    } as unknown as CompilerProposal;
+    expect(workItems.reduce((total, item) => total + item.dependsOn.length, 0)).toBe(1_050);
+    const reviewed = verdict();
+    reviewed.items = workItems.map((item) => ({
+      itemId: item.id,
+      granularity: "cohesive",
+      reason: "Bounded fixed-graph item",
+      evidenceIds: ["objective"],
+    }));
+    reviewed.dependencies = workItems.map((item) => ({
+      itemId: item.id,
+      dependsOn: item.dependsOn,
+      reason: "Complete dependency set",
+      evidenceIds: ["objective"],
+    }));
+    expect(
+      validateCompilerJudgeVerdict(reviewed, { ...expected, graph: groupedGraph }).decision,
+    ).toBe("accept");
+    reviewed.dependencies[99]!.dependsOn = reviewed.dependencies[99]!.dependsOn.slice(1);
+    expect(() =>
+      validateCompilerJudgeVerdict(reviewed, { ...expected, graph: groupedGraph }),
+    ).toThrow("exact dependency set");
   });
   it("rejects hallucinated identities, duplicated causes and hidden blockers", () => {
     const reviewed = verdict();
@@ -501,6 +552,84 @@ it("independently corrects cited hallucinated prerequisites without waiving expl
   expect(() => validateCompilerJudgeVerdict(review, { ...context, inventory: explicit })).toThrow(
     "cannot be waived",
   );
+});
+
+describe("bounded inference challenge derivation", () => {
+  const inferredInventory = (count: number): ObligationInventory => ({
+    version: 1,
+    objectiveDigest: "d".repeat(64),
+    baseSha: "e".repeat(40),
+    evidence,
+    obligations: Array.from({ length: count }, (_, index) => ({
+      id: `inferred-${index}`,
+      text: `Inferred obligation ${index}`,
+      kind: "prerequisite" as const,
+      evidenceIds: ["objective"],
+      acceptanceEvidence: `Independently assess ${index}`,
+    })),
+  });
+  const finding = (ids: string[], id = "missing-inferences") => ({
+    id,
+    dimension: "coverage" as const,
+    severity: "blocking" as const,
+    confidence: 1,
+    obligationIds: ids,
+    itemIds: [],
+    evidenceIds: ["objective"],
+    rootCause: "Inferred prerequisites are unmapped",
+    correction: "Resolve only supported prerequisites",
+    uncertainty: "",
+  });
+
+  it.each([65, 128])("derives one deterministic challenge for each of %i obligations", (count) => {
+    const bounded = inferredInventory(count);
+    const ids = bounded.obligations.map((entry) => entry.id);
+    const challenges = deriveCompilerInferenceChallenges({
+      inventory: bounded,
+      findings: [finding(ids)],
+      proposal: { workItems: [{ obligationIds: [] }] },
+    });
+    expect(challenges).toHaveLength(count);
+    expect(challenges.map((entry) => entry.obligationId)).toEqual([...ids].sort());
+  });
+
+  it("chooses the stable finding identity for overlaps and never challenges explicit or mapped work", () => {
+    const bounded = inferredInventory(3);
+    bounded.obligations[2]!.kind = "explicit";
+    const ids = bounded.obligations.map((entry) => entry.id);
+    const forward = deriveCompilerInferenceChallenges({
+      inventory: bounded,
+      findings: [finding(ids, "z-finding"), finding(ids, "a-finding")],
+      proposal: { workItems: [{ obligationIds: [ids[1]!] }] },
+    });
+    const reverse = deriveCompilerInferenceChallenges({
+      inventory: bounded,
+      findings: [finding(ids, "a-finding"), finding(ids, "z-finding")],
+      proposal: { workItems: [{ obligationIds: [ids[1]!] }] },
+    });
+    expect(forward).toEqual(reverse);
+    expect(forward).toEqual([
+      expect.objectContaining({ findingId: "a-finding", obligationId: ids[0] }),
+    ]);
+  });
+
+  it("turns item-only overflow into a typed terminal error", () => {
+    const bounded = inferredInventory(1);
+    const itemOnly = Array.from({ length: 65 }, (_, index) => ({
+      findingId: `finding-${index}`,
+      originalFinding: {
+        dimension: "granularity" as const,
+        rootCause: "Item appears broad",
+        correction: "Reassess cohesion",
+        itemIds: ["item-1"],
+      },
+      reason: "Independent review required",
+      evidenceIds: ["objective"],
+    }));
+    expect(() => validateCompilerInferenceChallenges(itemOnly, bounded)).toThrow(
+      CompilerInferenceChallengeLimitError,
+    );
+  });
 });
 
 it("separates human, assisted and synthetic calibration outcomes including failures", () => {

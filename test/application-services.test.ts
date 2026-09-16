@@ -12,11 +12,11 @@ import { compileObjective } from "../src/compiler/index.js";
 import { compiledGraphDigest, renderWorkPacket, type CompiledObjective } from "../src/graph.js";
 import type {
   CompilationContext,
-  CompilationResult,
   ManagementBackend,
   ReviewContext,
   ReviewResult,
 } from "../src/management/backend.js";
+import { adaptFixtureCompiler } from "./helpers/compiler-proposal.js";
 import { validatePlanningCheckout, readPlanningRepositoryLayout } from "../src/application/plan.js";
 
 const snapshot = (): ApplicationSnapshot => ({
@@ -33,7 +33,7 @@ function proposedGraph(baseSha = "a".repeat(40)): CompiledObjective {
     title: "Objective",
     baseSha,
     repositoryFacts: {
-      files: [{ path: "package.json" }, { path: "src/feature.ts" }],
+      files: [{ path: "package-lock.json" }, { path: "package.json" }, { path: "src/feature.ts" }],
       scripts: { test: "vitest run" },
     },
     workItems: [
@@ -54,7 +54,7 @@ function proposedGraph(baseSha = "a".repeat(40)): CompiledObjective {
           architecture: ["x64"],
           tools: ["node", "npm"],
           services: [],
-          networkDestinations: [],
+          networkDestinations: ["registry.npmjs.org"],
           permittedSecretNames: [],
           trust: "trusted_local",
         },
@@ -72,16 +72,11 @@ class PlanningBackend implements ManagementBackend {
   async probe() {
     return { available: true, authenticated: true };
   }
-  async compile(
-    context: CompilationContext,
-    checkpoint: (result: CompilationResult) => Promise<void>,
-  ): Promise<CompilationResult> {
+  proposePlan = adaptFixtureCompiler(async (context) => {
     this.compileCalls += 1;
     this.lastContext = context;
-    const result = { objective: this.graph, usage: { inputTokens: 120, outputTokens: 30 } };
-    await checkpoint(result);
-    return result;
-  }
+    return { objective: this.graph, usage: { inputTokens: 120, outputTokens: 30 } };
+  });
   async review(_context: ReviewContext): Promise<ReviewResult> {
     throw new Error("review is outside this test");
   }
@@ -309,7 +304,11 @@ describe("FactoryApplicationService", () => {
       await mkdir(join(checkout, "src"));
       await writeFile(join(checkout, "src/feature.ts"), "export const value = 1;\n");
       await writeFile(join(checkout, "package.json"), '{"scripts":{"test":"vitest run"}}\n');
-      git("add", "package.json", "src/feature.ts");
+      await writeFile(
+        join(checkout, "package-lock.json"),
+        '{"name":"planning-fixture","lockfileVersion":3,"packages":{}}\n',
+      );
+      git("add", "package-lock.json", "package.json", "src/feature.ts");
       git("commit", "-qm", "planning fixture");
       const baseSha = git("rev-parse", "HEAD");
       const graph = proposedGraph(baseSha);
@@ -345,7 +344,11 @@ describe("FactoryApplicationService", () => {
       });
       expect(backend.compileCalls).toBe(1);
       expect(backend.lastContext?.repository).not.toBe(checkout);
-      expect(backend.lastContext?.repositoryFiles).toEqual(["package.json", "src/feature.ts"]);
+      expect(backend.lastContext?.repositoryFiles).toEqual([
+        "package-lock.json",
+        "package.json",
+        "src/feature.ts",
+      ]);
       expect(backend.lastContext?.repositoryLfs).toMatchObject({
         baseSha,
         assets: [],

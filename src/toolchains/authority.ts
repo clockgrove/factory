@@ -46,6 +46,7 @@ import {
   BUN_PACKAGE_REGISTRY,
   BUN_VERSION_COMMAND,
   bunCapabilityOperation,
+  bunValidationCommandForOperation,
   createBunManagedExecutionPlan,
   inspectBunAuthority,
 } from "./bun.js";
@@ -69,9 +70,12 @@ import {
   createUvManagedToolchainPlan,
   parseUvPytestCommand,
   UV_ADAPTER_ID,
+  uvPytestCommandForOperation,
   uvPytestOperation,
 } from "./uv.js";
 import { MANAGED_SYSTEM_TOOLS } from "../runtime/system-tools.js";
+
+type JsonSchema = Readonly<Record<string, unknown>>;
 
 export type ToolchainProvisioning =
   | "host-observed"
@@ -80,15 +84,45 @@ export type ToolchainProvisioning =
   | "unprovisioned";
 export type PackageScriptManager = "npm" | "pnpm" | "bun";
 
+export interface ToolchainCompilerContract {
+  contract: string;
+  authorityGroup?: string;
+  observedRecipeSource: "package-scripts" | "python-test" | null;
+  rootAuthorityPaths: readonly string[];
+  /** Source extensions this adapter cannot validate without observed root authority. */
+  unsupportedWithoutAuthorityExtensions?: readonly string[];
+  generationAuthorityPaths: readonly string[];
+  requiredTools: readonly string[];
+  networkDestinations: readonly string[];
+  runtimePins: ReadonlyArray<{
+    path: string;
+    fields: readonly string[];
+    source: "activated-runtime";
+  }>;
+  mixedAuthority: "reject";
+  descendants: {
+    allowed: boolean;
+    requiresTransitiveProviderAncestor: boolean;
+  };
+  operation?: {
+    kind: string;
+    keySchema: JsonSchema;
+    providerCommandCount: { min: 1; max: 1 };
+    maxProvisionedOperations: 32;
+    parse(command: string): RepositoryCapabilityRequirement["operation"] | null;
+    format(operation: RepositoryCapabilityRequirement["operation"]): string | null;
+    observed(script: string): RepositoryCapabilityRequirement["operation"] | null;
+  };
+}
+
 export interface ToolchainAuthorityAdapter {
   id: string;
   runner: string;
   provisioning: ToolchainProvisioning;
   /** Only these adapters may introduce validation recipes on a package-less base. */
   deferredOperations: boolean;
-  /** Compatibility alias while #289 call sites migrate to generic operations. */
-  futurePackageScripts: boolean;
   requiredRootPaths: readonly string[];
+  compiler?: ToolchainCompilerContract;
   setupCommands: readonly string[];
   networkDestination?: string;
   additionalNetworkDestinations?: readonly string[];
@@ -473,6 +507,76 @@ function runtimeContract(requirement: RuntimeBundleRequirement | undefined) {
   if (!requirement) return requirement;
   const { bundleDigest: _bundleDigest, ...contract } = requirement;
   return contract;
+}
+
+function compilerOperation(
+  kind: string,
+  keySchema: JsonSchema,
+  parse: (command: string) => RepositoryCapabilityRequirement["operation"] | null,
+  format: (operation: RepositoryCapabilityRequirement["operation"]) => string | null,
+  observed: (script: string) => RepositoryCapabilityRequirement["operation"] | null,
+): NonNullable<ToolchainCompilerContract["operation"]> {
+  return {
+    kind,
+    keySchema,
+    providerCommandCount: { min: 1, max: 1 },
+    maxProvisionedOperations: 32,
+    parse,
+    format,
+    observed,
+  };
+}
+
+function npmCommandForOperation(
+  operation: RepositoryCapabilityRequirement["operation"],
+): string | null {
+  const parsed = npmValidationCommandForOperation(operation);
+  if (!parsed) return null;
+  return parsed.workspace === "."
+    ? `npm run ${parsed.script}`
+    : `npm run ${parsed.script} --workspace=${parsed.workspace}`;
+}
+
+function npmCompilerOperation(
+  command: string,
+): RepositoryCapabilityRequirement["operation"] | null {
+  const packageScript = packageScriptValidationCommand(command);
+  if (packageScript?.manager === "npm")
+    return npmCapabilityOperation(`npm run ${packageScript.script}`);
+  return npmCapabilityOperation(command);
+}
+
+function pnpmOperation(command: string): RepositoryCapabilityRequirement["operation"] | null {
+  const parsed = packageScriptValidationCommand(command);
+  return parsed?.manager === "pnpm" ? { kind: "package-script", key: parsed.script } : null;
+}
+
+function pnpmCommandForOperation(
+  operation: RepositoryCapabilityRequirement["operation"],
+): string | null {
+  if (operation.kind !== "package-script") return null;
+  const command = `pnpm run ${operation.key}`;
+  return pnpmOperation(command)?.key === operation.key ? command : null;
+}
+
+function bunCommandForOperation(
+  operation: RepositoryCapabilityRequirement["operation"],
+): string | null {
+  const parsed = bunValidationCommandForOperation(operation);
+  if (!parsed) return null;
+  return parsed.workspace === "."
+    ? `bun run ${parsed.script}`
+    : `bun --cwd ${parsed.workspace} run ${parsed.script}`;
+}
+
+function uvCommandForOperation(
+  operation: RepositoryCapabilityRequirement["operation"],
+): string | null {
+  const parsed = uvPytestCommandForOperation(operation);
+  if (!parsed) return null;
+  return parsed.projectDirectory === "."
+    ? "uv run --locked --no-sync python -m pytest"
+    : `uv run --project ${parsed.projectDirectory} --locked --no-sync python -m pytest`;
 }
 
 export function managedRuntimeRequirements(
@@ -1248,8 +1352,38 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
     runner: "npm",
     provisioning: "factory-provisioned",
     deferredOperations: true,
-    futurePackageScripts: true,
     requiredRootPaths: ["package.json", "package-lock.json"],
+    compiler: {
+      contract: "clockgrove.factory/toolchain-compiler/npm",
+      authorityGroup: "javascript-package",
+      observedRecipeSource: "package-scripts",
+      rootAuthorityPaths: ["package.json", "package-lock.json"],
+      generationAuthorityPaths: ["package.json"],
+      requiredTools: ["node", "npm"],
+      networkDestinations: [NPM_PACKAGE_REGISTRY],
+      runtimePins: [
+        {
+          path: "package.json",
+          fields: ["packageManager", "devEngines.runtime", "devEngines.packageManager"],
+          source: "activated-runtime",
+        },
+      ],
+      mixedAuthority: "reject",
+      descendants: { allowed: true, requiresTransitiveProviderAncestor: true },
+      operation: compilerOperation(
+        "package-script",
+        {
+          type: "string",
+          minLength: 5,
+          maxLength: 160,
+          pattern:
+            "^[1-9][0-9]{0,2}:[A-Za-z0-9._/-]+:(?:typecheck|test|lint|check|verify|build)(?:[:._-][A-Za-z0-9][A-Za-z0-9:_.-]{0,111})?$",
+        },
+        npmCompilerOperation,
+        npmCommandForOperation,
+        (script) => npmCapabilityOperation(`npm run ${script}`),
+      ),
+    },
     setupCommands: [NPM_NODE_VERSION_COMMAND, NPM_VERSION_COMMAND, NPM_INSTALL_COMMAND],
     networkDestination: NPM_PACKAGE_REGISTRY,
     runtimeRequirement: {
@@ -1268,15 +1402,38 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
     runner: "pnpm",
     provisioning: "factory-provisioned",
     deferredOperations: true,
-    futurePackageScripts: true,
     requiredRootPaths: ["package.json", "pnpm-lock.yaml"],
+    compiler: {
+      contract: "clockgrove.factory/toolchain-compiler/pnpm",
+      authorityGroup: "javascript-package",
+      observedRecipeSource: "package-scripts",
+      rootAuthorityPaths: ["package.json", "pnpm-lock.yaml"],
+      generationAuthorityPaths: ["package.json"],
+      requiredTools: ["node", "pnpm"],
+      networkDestinations: [PACKAGE_SETUP_REGISTRY],
+      runtimePins: [
+        { path: "package.json", fields: ["packageManager"], source: "activated-runtime" },
+      ],
+      mixedAuthority: "reject",
+      descendants: { allowed: true, requiresTransitiveProviderAncestor: true },
+      operation: compilerOperation(
+        "package-script",
+        {
+          type: "string",
+          minLength: 1,
+          maxLength: 128,
+          pattern:
+            "^(?:typecheck|test|lint|check|verify|build)(?:[:._-][A-Za-z0-9][A-Za-z0-9:_.-]{0,111})?$",
+        },
+        pnpmOperation,
+        pnpmCommandForOperation,
+        (script) => pnpmOperation(`pnpm run ${script}`),
+      ),
+    },
     setupCommands: [PNPM_VERSION_COMMAND, PNPM_VALIDATION_SETUP_COMMAND],
     networkDestination: PACKAGE_SETUP_REGISTRY,
     runtimeRequirement: runtimeRequirement("pnpm", "node-pnpm"),
-    operation: (command) => {
-      const parsed = packageScriptValidationCommand(command);
-      return parsed?.manager === "pnpm" ? { kind: "package-script", key: parsed.script } : null;
-    },
+    operation: pnpmOperation,
     resolveIntegratedBase: resolvePnpmIntegratedBase,
     isolatedPlan: pnpmIsolatedPlan,
     available: async () => (await toolchainStatus("pnpm")).state === "ready",
@@ -1288,8 +1445,33 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
     runner: "bun",
     provisioning: "factory-provisioned",
     deferredOperations: true,
-    futurePackageScripts: true,
     requiredRootPaths: ["package.json", "bun.lock"],
+    compiler: {
+      contract: "clockgrove.factory/toolchain-compiler/bun",
+      authorityGroup: "javascript-package",
+      observedRecipeSource: "package-scripts",
+      rootAuthorityPaths: ["package.json", "bun.lock"],
+      generationAuthorityPaths: ["package.json"],
+      requiredTools: ["bun"],
+      networkDestinations: [BUN_PACKAGE_REGISTRY],
+      runtimePins: [
+        { path: "package.json", fields: ["packageManager"], source: "activated-runtime" },
+      ],
+      mixedAuthority: "reject",
+      descendants: { allowed: true, requiresTransitiveProviderAncestor: true },
+      operation: compilerOperation(
+        "package-script",
+        {
+          type: "string",
+          minLength: 1,
+          maxLength: 160,
+          pattern: "^[A-Za-z0-9][A-Za-z0-9:._/-]{0,159}$",
+        },
+        bunCapabilityOperation,
+        bunCommandForOperation,
+        (script) => bunCapabilityOperation(`bun run ${script}`),
+      ),
+    },
     setupCommands: [BUN_VERSION_COMMAND, BUN_INSTALL_COMMAND],
     networkDestination: BUN_PACKAGE_REGISTRY,
     runtimeRequirement: {
@@ -1308,8 +1490,38 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
     runner: "uv",
     provisioning: "factory-provisioned",
     deferredOperations: true,
-    futurePackageScripts: false,
     requiredRootPaths: ["pyproject.toml", "uv.lock", ".python-version"],
+    compiler: {
+      contract: "clockgrove.factory/toolchain-compiler/uv",
+      observedRecipeSource: "python-test",
+      rootAuthorityPaths: ["pyproject.toml", "uv.lock", ".python-version"],
+      unsupportedWithoutAuthorityExtensions: [".py"],
+      generationAuthorityPaths: ["pyproject.toml"],
+      requiredTools: ["uv", "python"],
+      networkDestinations: ["pypi.org", "files.pythonhosted.org"],
+      runtimePins: [
+        { path: ".python-version", fields: ["$"], source: "activated-runtime" },
+        {
+          path: "pyproject.toml",
+          fields: ["project.requires-python"],
+          source: "activated-runtime",
+        },
+      ],
+      mixedAuthority: "reject",
+      descendants: { allowed: true, requiresTransitiveProviderAncestor: true },
+      operation: compilerOperation(
+        "python-test",
+        {
+          type: "string",
+          minLength: 1,
+          maxLength: 160,
+          pattern: "^(?:\\.|[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*)$",
+        },
+        uvPytestOperation,
+        uvCommandForOperation,
+        () => uvPytestOperation("uv run --locked --no-sync python -m pytest"),
+      ),
+    },
     setupCommands: [
       "uv --version",
       "python --version",
@@ -1330,7 +1542,6 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
     runner: "cargo",
     provisioning: "host-observed",
     deferredOperations: false,
-    futurePackageScripts: false,
     requiredRootPaths: ["Cargo.toml", "Cargo.lock"],
     setupCommands: [],
   },
@@ -1339,7 +1550,6 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
     runner: "go",
     provisioning: "host-observed",
     deferredOperations: false,
-    futurePackageScripts: false,
     requiredRootPaths: ["go.mod", "go.sum"],
     setupCommands: [],
   },
@@ -1348,7 +1558,6 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
     runner: "python",
     provisioning: "host-observed",
     deferredOperations: false,
-    futurePackageScripts: false,
     requiredRootPaths: ["pyproject.toml"],
     setupCommands: [],
   },
@@ -1357,7 +1566,6 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
     runner: "python3",
     provisioning: "host-observed",
     deferredOperations: false,
-    futurePackageScripts: false,
     requiredRootPaths: ["pyproject.toml"],
     setupCommands: [],
   },
@@ -1535,16 +1743,11 @@ export function packageScriptValidationCommand(
   };
 }
 
-export function futurePackageScriptCommand(command: string): PackageScriptValidationCommand | null {
-  const parsed = packageScriptValidationCommand(command);
-  return parsed?.adapter.deferredOperations && parsed.adapter.operation?.(command) ? parsed : null;
-}
-
 /** Resolve a finite adapter-owned operation without interpreting shell syntax. */
 export function futureToolchainCommand(command: string): DeferredToolchainCommand | null {
   for (const adapter of TOOLCHAIN_AUTHORITY_ADAPTERS) {
-    if (!adapter.deferredOperations || !adapter.operation) continue;
-    const operation = adapter.operation(command);
+    if (!adapter.deferredOperations || !adapter.compiler?.operation) continue;
+    const operation = adapter.compiler.operation.parse(command);
     if (operation) return { adapter, runner: adapter.runner, operation };
   }
   return null;
@@ -1569,12 +1772,14 @@ export function repositoryLacksFutureToolchainAuthority(
 }
 
 export const DEFERRED_CAPABILITY_ADAPTERS: readonly DeferredCapabilityAdapter[] =
-  TOOLCHAIN_AUTHORITY_ADAPTERS.filter((adapter) => adapter.deferredOperations).map((adapter) => ({
+  TOOLCHAIN_AUTHORITY_ADAPTERS.filter(
+    (adapter) => adapter.deferredOperations && adapter.compiler?.operation,
+  ).map((adapter) => ({
     id: adapter.id,
-    rootAuthorityPaths: adapter.requiredRootPaths,
-    generationAuthorityPaths: [adapter.requiredRootPaths[0]!],
+    rootAuthorityPaths: adapter.compiler!.rootAuthorityPaths,
+    generationAuthorityPaths: adapter.compiler!.generationAuthorityPaths,
     ...(adapter.runtimeRequirement ? { runtime: adapter.runtimeRequirement } : {}),
-    operation: (command) => adapter.operation?.(command) ?? null,
+    operation: (command) => adapter.compiler!.operation!.parse(command),
   }));
 
 export function assertFutureToolchainRequirements(

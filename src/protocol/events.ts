@@ -709,7 +709,7 @@ const GraphProjected = Common.extend({
 
 const Budget = Common.extend({
   kind: z.literal("budget"),
-  event: z.enum(["BudgetReserved", "BudgetReconciled"]),
+  event: z.enum(["BudgetReserved", "BudgetReconciled", "BudgetAbandoned"]),
   workItem: z.number().int().positive().optional(),
   attempt: z.number().int().positive().optional(),
   phase: z.enum(["management", "execution", "validation"]),
@@ -733,6 +733,7 @@ const Budget = Common.extend({
 }).superRefine((event, context) => {
   if (event.modelInvocationId !== undefined) {
     const marker = event.event === "BudgetReserved";
+    const abandoned = event.event === "BudgetAbandoned";
     if (
       event.unit !== "model_tokens" ||
       event.phase === "validation" ||
@@ -745,13 +746,19 @@ const Budget = Common.extend({
           event.usageId !== `invocation-${event.modelInvocationId}` ||
           event.reportedModelUsage !== undefined ||
           event.usageEvidence !== undefined)) ||
+      (abandoned &&
+        (event.amount !== 0 ||
+          event.usageId !== `abandoned-${event.modelInvocationId}` ||
+          !event.reason ||
+          event.reportedModelUsage !== undefined ||
+          event.usageEvidence !== undefined)) ||
       (!marker && event.usageId.startsWith("invocation-"))
     )
       context.addIssue({
         code: "custom",
         path: ["modelInvocationId"],
         message:
-          "model invocation linkage requires an exact zero-valued dispatch marker or actual token reconciliation",
+          "model invocation linkage requires an exact dispatch marker, actual usage, or a bound no-dispatch abandonment",
       });
   }
   if (

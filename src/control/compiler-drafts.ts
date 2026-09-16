@@ -4,9 +4,13 @@ import { assertNoSecretMaterial } from "../protocol/limits.js";
 import type { CompiledGraphStore, CompiledGraphReadStore } from "./graphs.js";
 import type { LeaseManager, LeaseState } from "./lease.js";
 import { PlatformUnavailableError } from "../platform.js";
+import { MAX_COMPILED_GRAPH_BYTES } from "../graph.js";
 
 const PATH = ".clockgrove-factory/control/compiler-draft.json";
 const MAX_BYTES = 2 * 1024 * 1024;
+// A graph that passes the authoritative graph serializer must remain representable
+// after the immutable journal binding and record envelope are attached.
+const MAX_FIXED_GRAPH_RECORD_BYTES = MAX_COMPILED_GRAPH_BYTES + 256 * 1024;
 const BindingSchema = z
   .object({
     repository: z.string().min(1).max(300),
@@ -20,23 +24,29 @@ const BindingSchema = z
 export type CompilerDraftBinding = z.infer<typeof BindingSchema>;
 const RecordSchema = z
   .object({
-    protocol: z.literal("clockgrove.factory/compiler-draft-v1"),
+    protocol: z.literal("clockgrove.factory/compiler-draft"),
     binding: BindingSchema,
     sequence: z.number().int().min(0).max(255),
     kind: z.enum([
       "started",
+      "source-evidence",
+      "fixed-graph",
       "invocation",
       "result",
       "validation",
       "selection",
       "stopped",
       "accounting-failure",
+      "accounting-reconciled",
       "terminal-conflict",
     ]),
     payload: z.record(z.unknown()),
   })
   .strict();
 export type CompilerDraftRecord = z.infer<typeof RecordSchema>;
+function maximumRecordBytes(kind: CompilerDraftRecord["kind"]): number {
+  return kind === "fixed-graph" ? MAX_FIXED_GRAPH_RECORD_BYTES : MAX_BYTES;
+}
 export function draftDigest(value: unknown): string {
   return createHash("sha256").update(canonicalDraftJson(value)).digest("hex");
 }
@@ -77,7 +87,7 @@ export class CompilerDraftManager {
     )
       throw new Error("compiler draft lease binding mismatch");
     const record = RecordSchema.parse({
-      protocol: "clockgrove.factory/compiler-draft-v1",
+      protocol: "clockgrove.factory/compiler-draft",
       binding,
       sequence,
       kind,
@@ -99,7 +109,8 @@ export class CompilerDraftManager {
     )
       throw new Error("compiler draft append is fenced");
     const bytes = Buffer.from(text);
-    if (bytes.length > MAX_BYTES) throw new Error("compiler draft exceeds evidence bound");
+    if (bytes.length > maximumRecordBytes(kind))
+      throw new Error("compiler draft exceeds evidence bound");
     const parent =
       sequence === 0
         ? binding.baseSha
@@ -161,11 +172,13 @@ async function loadBoundCompilerDrafts(
     if (!blob) throw new Error("compiler draft evidence missing");
     const bytes = await store.readBlob(blob);
     if (
-      bytes.length > MAX_BYTES ||
+      bytes.length > MAX_FIXED_GRAPH_RECORD_BYTES ||
       createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex") !== blob
     )
       throw new Error("compiler draft blob invalid");
     const record = RecordSchema.parse(JSON.parse(bytes.toString("utf8")));
+    if (bytes.length > maximumRecordBytes(record.kind))
+      throw new Error("compiler draft exceeds evidence bound");
     if (
       record.sequence !== sequence ||
       canonicalDraftJson(record.binding) !== canonicalDraftJson(binding)

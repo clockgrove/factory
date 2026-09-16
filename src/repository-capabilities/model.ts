@@ -1,5 +1,6 @@
 import type { RepositoryCapabilityBindings } from "../protocol/worker-packet.js";
 import type { RuntimeBundleRequirement } from "../runtime/toolchain-bundle.js";
+import { analyzeDependencies } from "../graph-analysis.js";
 
 export interface CapabilityOperation {
   kind: string;
@@ -19,23 +20,6 @@ export interface CapabilityGraphItem {
   dependsOn: readonly string[];
   scope: readonly string[];
   validationCommands: readonly string[];
-}
-
-function dependencyPath(
-  byId: ReadonlyMap<string, { dependsOn: readonly string[] }>,
-  from: string,
-  to: string,
-): boolean {
-  const pending = [from];
-  const seen = new Set<string>();
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    if (current === to) return true;
-    if (seen.has(current)) continue;
-    seen.add(current);
-    pending.push(...(byId.get(current)?.dependsOn ?? []));
-  }
-  return false;
 }
 
 const operationIdentity = (operation: CapabilityOperation) => `${operation.kind}\0${operation.key}`;
@@ -72,7 +56,7 @@ export function bindDeferredCapabilityGraph(
   adapters: readonly DeferredCapabilityAdapter[],
   isDeferred: (item: CapabilityGraphItem, command: string) => boolean,
 ): Map<string, RepositoryCapabilityBindings> {
-  const byId = new Map(items.map((item) => [item.id, item]));
+  const dependencyAnalysis = analyzeDependencies(items);
   const result = new Map<string, RepositoryCapabilityBindings>(
     items.map((item) => [item.id, { provides: [], requires: [] }]),
   );
@@ -88,14 +72,15 @@ export function bindDeferredCapabilityGraph(
     for (const { item, operation } of operations) {
       const rootCandidates = items.filter(
         (candidate) =>
-          dependencyPath(byId, item.id, candidate.id) &&
+          dependencyAnalysis.hasPath(item.id, candidate.id) &&
           adapter.rootAuthorityPaths.every((path) => scopeOwnsPath(candidate.scope, path)) &&
           itemOperations(candidate, adapter).length > 0,
       );
       const roots = rootCandidates.filter(
         (candidate) =>
           !rootCandidates.some(
-            (other) => other.id !== candidate.id && dependencyPath(byId, other.id, candidate.id),
+            (other) =>
+              other.id !== candidate.id && dependencyAnalysis.hasPath(other.id, candidate.id),
           ),
       );
       if (roots.length !== 1)
@@ -106,8 +91,8 @@ export function bindDeferredCapabilityGraph(
       const candidates = items.filter(
         (candidate) =>
           (candidate.id !== item.id || item.id === root.id) &&
-          dependencyPath(byId, item.id, candidate.id) &&
-          dependencyPath(byId, candidate.id, root.id) &&
+          dependencyAnalysis.hasPath(item.id, candidate.id) &&
+          dependencyAnalysis.hasPath(candidate.id, root.id) &&
           (candidate.id === root.id ||
             (adapter.generationAuthorityPaths.every((path) =>
               scopeOwnsPath(candidate.scope, path),
@@ -120,7 +105,8 @@ export function bindDeferredCapabilityGraph(
       const closest = candidates.filter(
         (candidate) =>
           !candidates.some(
-            (other) => other.id !== candidate.id && dependencyPath(byId, other.id, candidate.id),
+            (other) =>
+              other.id !== candidate.id && dependencyAnalysis.hasPath(other.id, candidate.id),
           ),
       );
       if (closest.length !== 1)
@@ -293,6 +279,7 @@ export function validateCapabilityGraphBindings(
   }
 
   const byId = new Map(items.map((item) => [item.id, item]));
+  const dependencyAnalysis = analyzeDependencies(items);
   const generations = new Map<string, string>();
   for (const item of items) {
     for (const provision of item.repositoryCapabilities?.provides ?? []) {
@@ -336,7 +323,7 @@ export function validateCapabilityGraphBindings(
       if (requirement.activation === "artifact") {
         if (provider.id !== item.id)
           throw new Error("artifact-time repository capability must belong to its provider");
-      } else if (provider.id === item.id || !dependencyPath(byId, item.id, provider.id)) {
+      } else if (provider.id === item.id || !dependencyAnalysis.hasPath(item.id, provider.id)) {
         throw new Error(`repository capability provider is not an ancestor of consumer ${item.id}`);
       }
     }

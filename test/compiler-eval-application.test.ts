@@ -10,6 +10,7 @@ import {
 import {
   loadCompilerDrafts,
   draftDigest,
+  type CompilerDraftManager,
   type CompilerDraftRecord,
 } from "../src/control/compiler-drafts.js";
 import { loadCompiledGraph, type CompiledGraphReadStore } from "../src/control/graphs.js";
@@ -23,6 +24,16 @@ import {
 } from "../src/evaluation/compiler-eval.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import type { ApplicationSnapshot } from "../src/application/services.js";
+import { CompilerProposalSchema, CompilerRequestSchema } from "../src/compiler/contracts.js";
+import { compilerJudgeCandidateFromCompiled } from "../src/compiler/judge-context.js";
+import type { CompilerProjectionTrace } from "../src/compiler/proposal.js";
+import {
+  runCompilerDraftLoop,
+  validatePersistedCompilerDraftJournal,
+  type CompilerDraftCallbacks,
+} from "../src/evaluation/compiler-draft-loop.js";
+import { emptyCompilerValidationReport } from "../src/compiler/violations.js";
+import type { LeaseState } from "../src/control/lease.js";
 vi.mock("../src/control/compiler-drafts.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/control/compiler-drafts.js")>()),
   loadCompilerDrafts: vi.fn(),
@@ -36,13 +47,14 @@ vi.mock("../src/control/receipts.js", async (importOriginal) => ({
   latestRunReceipts: vi.fn(),
 }));
 vi.mock("../src/economics/index.js", () => ({ summarizeRun: vi.fn() }));
+const objective = { number: 236, title: "Objective", body: "Deliver change" };
 const binding = {
   repository: "clockgrove/factory",
   objective: 236,
   runId: "run",
   policyDigest: "policy",
   baseSha: "a".repeat(40),
-  inputDigest: "c".repeat(64),
+  inputDigest: compilerEvalDigest(objective),
 };
 const snapshot: ApplicationSnapshot = {
   id: "objective",
@@ -54,7 +66,7 @@ const snapshot: ApplicationSnapshot = {
 const store = {} as CompiledGraphReadStore;
 const inventory: ObligationInventory = {
   version: 1,
-  objectiveDigest: "b".repeat(64),
+  objectiveDigest: binding.inputDigest,
   baseSha: binding.baseSha,
   evidence: [
     { id: "objective", kind: "objective", identity: "original", excerpt: "Deliver change" },
@@ -73,19 +85,126 @@ const golden = JSON.parse(
   await readFile(new URL("./fixtures/compiler/golden-objective.json", import.meta.url), "utf8"),
 );
 const graph = parsePersistedCompiledObjective({ title: golden.title, workItems: golden.workItems });
+const proposal = CompilerProposalSchema.parse({
+  protocol: "clockgrove.factory/compiler-proposal",
+  workItems: graph.workItems.map((item, itemIndex) => ({
+    id: item.id,
+    title: item.title,
+    goal: item.goal,
+    obligationIds: itemIndex === 0 ? ["change"] : [],
+    criteria: item.acceptance.map((text, criterionIndex) => ({
+      id: `${item.id}-criterion-${criterionIndex + 1}`,
+      text,
+      risk: "ordinary",
+      validation: [
+        {
+          tier: "mechanical",
+          evidence: [{ kind: "observed", recipeId: "recipe-test" }],
+        },
+      ],
+    })),
+    scope: item.scope,
+    preconditions: item.preconditions,
+    outOfScope: item.outOfScope,
+    conventions: item.conventions,
+    dependsOn: item.dependsOn,
+    exclusiveResources: item.changeSurface?.exclusiveResources ?? [],
+    executionIntent: {
+      estimatedDurationMinutes: 30,
+      additionalTools: [],
+      services: [],
+      additionalNetworkDestinations: [],
+      trust: "isolated",
+    },
+  })),
+});
+const proposalRequest = CompilerRequestSchema.parse({
+  protocol: "clockgrove.factory/compiler-request",
+  revision: 1,
+  objective: { ...objective, digest: binding.inputDigest },
+  baseSha: binding.baseSha,
+  inventory,
+  inventorySource: "independent-extraction",
+  repository: {
+    manifests: ["package.json"],
+    requiredTools: [],
+    validationRecipes: [
+      {
+        id: "recipe-test",
+        command: "npm test",
+        adapterId: "node-npm",
+        requiredTools: ["node", "npm"],
+        networkDestinations: [],
+      },
+    ],
+    toolchains: [],
+    validationSurfaces: {
+      deterministicSimulation: { count: 0, digest: compilerEvalDigest([]), sample: [] },
+      visual: { count: 0, digest: compilerEvalDigest([]), sample: [] },
+      python: { count: 0, digest: compilerEvalDigest([]), sample: [] },
+      rust: { count: 0, digest: compilerEvalDigest([]), sample: [] },
+      go: { count: 0, digest: compilerEvalDigest([]), sample: [] },
+    },
+    pathCount: 1,
+  },
+  constraints: {
+    maxWorkItems: 100,
+    maxDependenciesPerItem: 50,
+    allowedNetworkDestinations: [],
+    workItemTimeoutMinutes: 30,
+  },
+  previousProposal: null,
+  validationReport: {
+    protocol: "clockgrove.factory/compiler-validation",
+    phase: "proposal",
+    status: "repairable",
+    violations: [
+      {
+        code: "schema-invalid",
+        itemId: null,
+        field: "",
+        expected: "valid proposal",
+        observed: null,
+      },
+    ],
+  },
+  semanticFindings: [],
+  challenges: [],
+});
+const projectionTrace: CompilerProjectionTrace = {
+  protocol: "clockgrove.factory/compiler-projection",
+  requestDigest: compilerEvalDigest(proposalRequest),
+  proposalDigest: compilerEvalDigest(proposal),
+  graphDigest: compiledGraphDigest(graph),
+  addedEdges: [],
+  adapterBindings: [],
+  riskElevations: { count: 0, digest: compilerEvalDigest([]) },
+};
 function history() {
   const records: CompilerDraftRecord[] = [];
   const add = (kind: CompilerDraftRecord["kind"], payload: Record<string, unknown>) =>
     records.push({
-      protocol: "clockgrove.factory/compiler-draft-v1",
+      protocol: "clockgrove.factory/compiler-draft",
       binding,
       sequence: records.length,
       kind,
       payload,
     });
-  const call = (stage: string, revision: number, value: unknown, error?: string) => {
+  const call = (
+    stage: string,
+    revision: number,
+    value: unknown,
+    error?: string,
+    invocationEvidence: Record<string, unknown> = {},
+  ) => {
     const invocationId = `${stage}-${revision}`;
-    add("invocation", { invocationId, stage, revision });
+    add("invocation", {
+      invocationId,
+      stage,
+      revision,
+      inputDigest: "0".repeat(64),
+      ...invocationEvidence,
+    });
     add("result", {
       invocationId,
       stage,
@@ -96,10 +215,35 @@ function history() {
     });
   };
   add("started", {});
-  call("inventory", 0, inventory);
+  call("inventory", 0, structuredClone(inventory));
   call("compile", 0, null, "secret-api-key=do-not-display");
-  call("repair", 1, { objective: graph });
-  add("validation", { revision: 1, valid: true, graph, graphDigest: compiledGraphDigest(graph) });
+  call(
+    "repair",
+    1,
+    {
+      request: structuredClone(proposalRequest),
+      proposal: structuredClone(proposal),
+      report: {
+        protocol: "clockgrove.factory/compiler-validation",
+        phase: "proposal",
+        status: "valid",
+        violations: [],
+      },
+      provenance: { requestDigest: projectionTrace.requestDigest },
+    },
+    undefined,
+    { compilerRequestDigest: projectionTrace.requestDigest },
+  );
+  add("validation", {
+    revision: 1,
+    valid: true,
+    graph,
+    graphDigest: compiledGraphDigest(graph),
+    proposalDigest: draftDigest(proposal),
+    traceDigest: draftDigest(projectionTrace),
+    projectionTrace: structuredClone(projectionTrace),
+    requestDigest: projectionTrace.requestDigest,
+  });
   const verdict = {
     version: 1,
     rubricVersion: 1,
@@ -111,7 +255,7 @@ function history() {
         status: "covered",
         itemIds: [graph.workItems[0]!.id],
         acceptanceBindings: [
-          { itemId: graph.workItems[0]!.id, criterion: graph.workItems[0]!.acceptance[0]! },
+          { itemId: graph.workItems[0]!.id, criterionId: proposal.workItems[0]!.criteria[0]!.id },
         ],
         evidenceIds: ["objective"],
         reason: "Mapped acceptance",
@@ -123,14 +267,12 @@ function history() {
       evidenceIds: ["objective"],
       reason: "Cohesive",
     })),
-    dependencies: graph.workItems.flatMap((item) =>
-      item.dependsOn.map((dependsOn) => ({
-        itemId: item.id,
-        dependsOn,
-        evidenceIds: ["objective"],
-        reason: "Required output",
-      })),
-    ),
+    dependencies: graph.workItems.map((item) => ({
+      itemId: item.id,
+      dependsOn: item.dependsOn,
+      evidenceIds: ["objective"],
+      reason: "Required output",
+    })),
     dimensions: COMPILER_JUDGE_DIMENSIONS.map((dimension) => ({
       dimension,
       status: "assessed",
@@ -141,14 +283,109 @@ function history() {
     uncertainty: [],
     decision: "accept",
   };
-  call("judge", 1, verdict);
+  call("judge", 1, verdict, undefined, {
+    inputDigest: draftDigest({
+      inventory,
+      previous: proposal,
+      projection: projectionTrace,
+      failure: null,
+    }),
+  });
   add("selection", {
     revision: 1,
     graphDigest: compiledGraphDigest(graph),
     inventoryDigest: draftDigest(inventory),
     verdictDigest: draftDigest(verdict),
+    proposalDigest: draftDigest(proposal),
+    requestDigest: projectionTrace.requestDigest,
+    traceDigest: draftDigest(projectionTrace),
   });
   return records;
+}
+async function emitFixedGraphHistory(): Promise<CompilerDraftRecord[]> {
+  const durable: CompilerDraftRecord[] = [];
+  const manager = {
+    load: async () => structuredClone(durable),
+    append: async (
+      _lease: LeaseState,
+      recordBinding: typeof binding,
+      sequence: number,
+      kind: CompilerDraftRecord["kind"],
+      payload: Record<string, unknown>,
+    ) => {
+      if (sequence !== durable.length || draftDigest(recordBinding) !== draftDigest(binding))
+        throw new Error("fixture journal append fence");
+      const record: CompilerDraftRecord = {
+        protocol: "clockgrove.factory/compiler-draft",
+        binding: recordBinding,
+        sequence,
+        kind,
+        payload: structuredClone(payload),
+      };
+      durable.push(record);
+      return structuredClone(record);
+    },
+  } as unknown as CompilerDraftManager;
+  const candidate = compilerJudgeCandidateFromCompiled(graph);
+  const graphDigest = compiledGraphDigest(graph);
+  const requestDigest = draftDigest({ fixedGraph: graphDigest });
+  const trace: CompilerProjectionTrace = {
+    ...projectionTrace,
+    requestDigest,
+    proposalDigest: draftDigest(candidate),
+    graphDigest,
+  };
+  const verdict = structuredClone(
+    history().find((record) => record.kind === "result" && record.payload.stage === "judge")!
+      .payload.value,
+  ) as {
+    coverage: Array<{ acceptanceBindings: Array<{ criterionId: string }> }>;
+  };
+  verdict.coverage[0]!.acceptanceBindings[0]!.criterionId = candidate.workItems[0]!.criteria[0]!.id;
+  const callbacks: CompilerDraftCallbacks = {
+    invoke: async (request, checkpoint) => {
+      const result = {
+        value:
+          request.stage === "inventory" ? structuredClone(inventory) : structuredClone(verdict),
+        usage: { inputTokens: 10, outputTokens: 2, cachedInputTokens: 7 },
+      };
+      await checkpoint(result);
+      return result;
+    },
+    recordUsage: async () => {},
+    validateInventory: (value) => value,
+    validate: () => ({
+      proposal: candidate,
+      objective: graph,
+      projectionTrace: trace,
+      report: emptyCompilerValidationReport(),
+      requestDigest,
+    }),
+    accept: () => true,
+  };
+  let now = Date.parse("2026-09-15T20:00:00.000Z");
+  const result = await runCompilerDraftLoop({
+    manager,
+    lease: {} as LeaseState,
+    binding,
+    callbacks,
+    limits: {
+      maxRepairs: 0,
+      maxInvocations: 7,
+      maxObservedTokens: Number.MAX_SAFE_INTEGER,
+      deadlineMs: 600_000,
+    },
+    now: () => ++now,
+    startedAt: now,
+    fixedGraph: graph,
+    sourceEvidence: { objective },
+  });
+  if (result.status !== "accepted") throw new Error("fixed graph fixture was not accepted");
+  return result.records;
+}
+const emittedFixedGraphHistory = await emitFixedGraphHistory();
+function fixedGraphHistory(): CompilerDraftRecord[] {
+  return structuredClone(emittedFixedGraphHistory);
 }
 beforeEach(() => {
   vi.mocked(latestRunReceipts).mockReturnValue({
@@ -160,6 +397,101 @@ beforeEach(() => {
   vi.mocked(summarizeRun).mockReturnValue(null);
 });
 describe("read-only compiler evaluation", () => {
+  it("reconstructs a successful fixed-graph report-only judgment without a semantic proposal call", async () => {
+    const records = fixedGraphHistory();
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+
+    const result = await inspectCompilerEvaluation({
+      repository: binding.repository,
+      snapshot,
+      store,
+    });
+
+    expect(result.reports).toHaveLength(1);
+    expect(result.reports[0]).toMatchObject({
+      revision: 0,
+      draftDigest: compiledGraphDigest(graph),
+      observedTotalTokens: 24,
+    });
+    expect(result.usage).toHaveLength(2);
+    expect(
+      records.some(
+        (record) => record.payload.stage === "compile" || record.payload.stage === "repair",
+      ),
+    ).toBe(false);
+    expect(result.modelInvoked).toBe(false);
+  });
+  it("rejects the former incomplete nondeterministic fixed journal before reporting usage", async () => {
+    const records = fixedGraphHistory();
+    const started = records[0]!;
+    started.payload = {
+      limits: { maxRepairs: 0 },
+      fixedGraphDigest: started.payload.fixedGraphDigest,
+    };
+    const invocation = records.find((record) => record.kind === "invocation")!;
+    const result = records.find(
+      (record) =>
+        record.kind === "result" && record.payload.invocationId === invocation.payload.invocationId,
+    )!;
+    invocation.payload.invocationId = "inventory-fixed-0";
+    result.payload.invocationId = "inventory-fixed-0";
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+
+    await expect(
+      inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+    ).rejects.toThrow();
+  });
+  it.each([1, 2])(
+    "rejects a fixed graph with maxRepairs %i in the shared grammar before reporting usage",
+    async (maxRepairs) => {
+      const records = fixedGraphHistory();
+      records[0]!.payload.limits = {
+        ...(records[0]!.payload.limits as Record<string, unknown>),
+        maxRepairs,
+      };
+
+      expect(() => validatePersistedCompilerDraftJournal(records)).toThrow("zero repairs");
+      vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+      await expect(
+        inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+      ).rejects.toThrow("zero repairs");
+    },
+  );
+  it.each([
+    [
+      "started graph digest",
+      (records: CompilerDraftRecord[]) => {
+        records[0]!.payload.fixedGraphDigest = "f".repeat(64);
+      },
+      /compiler draft policy changed/,
+    ],
+    [
+      "validation result digest",
+      (records: CompilerDraftRecord[]) => {
+        records.find((record) => record.kind === "validation")!.payload.resultDigest = "f".repeat(
+          64,
+        );
+      },
+      /compiler validation proposal binding differs/,
+    ],
+    [
+      "candidate projection digest",
+      (records: CompilerDraftRecord[]) => {
+        records.find((record) => record.kind === "validation")!.payload.proposalDigest = "f".repeat(
+          64,
+        );
+      },
+      /compiler validation proposal binding differs/,
+    ],
+  ])("rejects a malformed fixed-graph %s binding", async (_label, mutate, message) => {
+    const records = fixedGraphHistory();
+    mutate(records);
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+
+    await expect(
+      inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+    ).rejects.toThrow(message);
+  });
   it("preserves failed revisions and observed overhead without exposing provider errors", async () => {
     const result = await inspectCompilerEvaluation({
       repository: binding.repository,
@@ -189,15 +521,80 @@ describe("read-only compiler evaluation", () => {
     expect(JSON.stringify(result)).not.toContain("do-not-display");
     expect(result.modelInvoked).toBe(false);
   });
+  it("reports a pre-provider terminal as known not invoked without poisoning token completeness", async () => {
+    const records = history();
+    records.pop();
+    records.push(
+      {
+        protocol: "clockgrove.factory/compiler-draft",
+        binding,
+        sequence: records.length,
+        kind: "invocation",
+        payload: {
+          invocationId: "repair-2",
+          stage: "repair",
+          revision: 2,
+          inputDigest: "1".repeat(64),
+        },
+      },
+      {
+        protocol: "clockgrove.factory/compiler-draft",
+        binding,
+        sequence: records.length + 1,
+        kind: "result",
+        payload: {
+          invocationId: "repair-2",
+          stage: "repair",
+          revision: 2,
+          value: null,
+          usage: null,
+          error: "compiler request is too large",
+          stopReason: "compiler-request-limit: split the Objective into smaller Objectives",
+          preProviderTerminal: true,
+        },
+      },
+      {
+        protocol: "clockgrove.factory/compiler-draft",
+        binding,
+        sequence: records.length + 2,
+        kind: "stopped",
+        payload: {
+          reason: "compiler-request-limit: split the Objective into smaller Objectives",
+        },
+      },
+    );
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+    const result = await inspectCompilerEvaluation({
+      repository: binding.repository,
+      snapshot,
+      store,
+    });
+    expect(result.preProviderTerminals).toEqual([
+      expect.objectContaining({
+        invocationId: "repair-2",
+        reason: "compiler-request-limit: split the Objective into smaller Objectives",
+      }),
+    ]);
+    expect(result.unresolvedInvocations).not.toContain("repair-2");
+    expect(result.reports[0]!.observedTotalTokens).toBe(48);
+    expect(result.markdown).toContain("repair-2 (repair): provider not invoked");
+    expect(result.markdown).toContain("split the Objective into smaller Objectives");
+    expect(result.markdown).not.toContain("Unresolved compiler invocation accounting: repair-2");
+  });
   it("keeps uncertain paid calls visible and refuses a known total", async () => {
     const records = history();
     records.pop();
     records.push({
-      protocol: "clockgrove.factory/compiler-draft-v1",
+      protocol: "clockgrove.factory/compiler-draft",
       binding,
       sequence: records.length,
       kind: "invocation",
-      payload: { stage: "repair", revision: 2, invocationId: "uncertain" },
+      payload: {
+        stage: "repair",
+        revision: 2,
+        invocationId: "uncertain",
+        inputDigest: "0".repeat(64),
+      },
     });
     vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
     const result = await inspectCompilerEvaluation({
@@ -226,6 +623,75 @@ describe("read-only compiler evaluation", () => {
       inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
     ).rejects.toThrow("exact accepted");
   });
+  it.each(["proposalDigest", "traceDigest", "requestDigest"])(
+    "rejects a selection with a mismatched %s",
+    async (field) => {
+      const records = history();
+      records.at(-1)!.payload[field] = "f".repeat(64);
+      vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+      await expect(
+        inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+      ).rejects.toThrow(/exact (?:accepted|proposal|compiler request)/);
+    },
+  );
+  it.each(["proposalDigest", "requestDigest", "graphDigest"])(
+    "rejects a self-digested trace with a mismatched %s",
+    async (field) => {
+      const records = history();
+      const validation = records.find((record) => record.kind === "validation")!;
+      const trace = validation.payload.projectionTrace as Record<string, unknown>;
+      trace[field] = "f".repeat(64);
+      validation.payload.traceDigest = draftDigest(trace);
+      records.at(-1)!.payload.traceDigest = validation.payload.traceDigest;
+      vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+      await expect(
+        inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+      ).rejects.toThrow(/projection trace|exact accepted/);
+    },
+  );
+  it("rejects a proposal result whose reserved compiler request digest changed", async () => {
+    const records = history();
+    const repair = records.find(
+      (record) => record.kind === "invocation" && record.payload.stage === "repair",
+    )!;
+    repair.payload.compilerRequestDigest = "f".repeat(64);
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+
+    await expect(
+      inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+    ).rejects.toThrow("exact compiler request");
+  });
+  it("retains but never reports a judge result whose full invocation digest changed", async () => {
+    const records = history();
+    records.pop();
+    const judge = records.find(
+      (record) => record.kind === "invocation" && record.payload.stage === "judge",
+    )!;
+    judge.payload.inputDigest = "f".repeat(64);
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+
+    const result = await inspectCompilerEvaluation({
+      repository: binding.repository,
+      snapshot,
+      store,
+    });
+    expect(result.reports).toEqual([]);
+    expect(result.markdown).toContain("Invalid historical judge results retained");
+  });
+  it("rejects an inventory that is not bound to the Objective input digest", async () => {
+    const records = history();
+    const inventoryResult = records.find(
+      (record) => record.kind === "result" && record.payload.stage === "inventory",
+    )!;
+    inventoryResult.payload.value = {
+      ...(inventoryResult.payload.value as object),
+      objectiveDigest: "f".repeat(64),
+    };
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+    await expect(
+      inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+    ).rejects.toThrow("inventory repository identity mismatch");
+  });
   it("retains malformed historical judge evidence without accepting or leaking it", async () => {
     const records = history();
     records.pop();
@@ -253,7 +719,7 @@ describe("read-only compiler evaluation", () => {
     )!;
     judge.payload.value = "malformed historical judge output";
     records.push({
-      protocol: "clockgrove.factory/compiler-draft-v1",
+      protocol: "clockgrove.factory/compiler-draft",
       binding,
       sequence: records.length,
       kind: "accounting-failure",
@@ -269,6 +735,47 @@ describe("read-only compiler evaluation", () => {
     expect(result.markdown).toContain("Observed compiler token subtotal: 48");
     expect(result.markdown).toContain("complete total: unavailable");
     expect(result.markdown).not.toContain("complete total: 48");
+  });
+  it("restores exact usage authority after a durable accounting reconciliation", async () => {
+    const records = history();
+    const selection = records.pop()!;
+    const judged = records.find(
+      (record) => record.kind === "result" && record.payload.stage === "judge",
+    )!;
+    const failureSequence = records.length;
+    records.push({
+      protocol: "clockgrove.factory/compiler-draft",
+      binding,
+      sequence: failureSequence,
+      kind: "accounting-failure",
+      payload: {
+        invocationId: judged.payload.invocationId,
+        stage: "judge",
+        error: "temporary ledger failure",
+      },
+    });
+    records.push({
+      protocol: "clockgrove.factory/compiler-draft",
+      binding,
+      sequence: records.length,
+      kind: "accounting-reconciled",
+      payload: {
+        invocationId: judged.payload.invocationId,
+        stage: "judge",
+        failureSequence,
+      },
+    });
+    records.push({ ...selection, sequence: records.length });
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+
+    const result = await inspectCompilerEvaluation({
+      repository: binding.repository,
+      snapshot,
+      store,
+    });
+    expect(result.reports[0]!.observedTotalTokens).toBe(48);
+    expect(result.markdown).toContain("complete total: 48");
+    expect(result.markdown).not.toContain("ledger completeness is unavailable");
   });
   it("reports absent history without reusing historical authority", async () => {
     vi.mocked(loadCompilerDrafts).mockResolvedValue([]);
@@ -428,6 +935,23 @@ function causalFixture() {
 }
 
 describe("caller-supplied historical causal annotations", () => {
+  it("neutralizes line breaks and Markdown syntax in caller provenance sources", async () => {
+    const fixture = causalFixture();
+    fixture.annotations.provenance.source =
+      "trusted-source\r\n## Forged heading [link](https://example.invalid) *emphasis*";
+    const result = await inspectCompilerEvaluation({
+      repository: binding.repository,
+      snapshot: fixture.snapshot,
+      store,
+      annotations: fixture.annotations,
+    });
+
+    expect(result.markdown).toContain(
+      "source: trusted-source    Forged heading  link  https://example.invalid   emphasis ",
+    );
+    expect(result.markdown).not.toContain("\n## Forged heading");
+    expect(result.markdown).not.toContain("[link](https://example.invalid)");
+  });
   it.each(["compiler", "mixed"] as const)(
     "supports cited %s attribution without replacing original evidence or claiming savings",
     async (cause) => {
@@ -545,7 +1069,7 @@ it("reports disputed terminal usage as unknown while retaining the original fail
   const records = history();
   records.pop();
   records.push({
-    protocol: "clockgrove.factory/compiler-draft-v1",
+    protocol: "clockgrove.factory/compiler-draft",
     binding,
     sequence: records.length,
     kind: "terminal-conflict",

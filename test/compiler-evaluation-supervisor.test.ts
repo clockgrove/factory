@@ -182,6 +182,7 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
                 uncertainty: "",
               },
             ],
+      inferenceCorrections: [],
       uncertainty: [],
       decision,
     };

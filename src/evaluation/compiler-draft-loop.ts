@@ -27,6 +27,7 @@ import {
 } from "../control/compiler-drafts.js";
 import type { LeaseState } from "../control/lease.js";
 import { ProviderQuotaError } from "../providers/quota.js";
+import { managementFailureProvenance } from "../management/backend.js";
 import { CompilerDraftStopError } from "./compiler-draft-errors.js";
 export { CompilerDraftStopError } from "./compiler-draft-errors.js";
 
@@ -72,6 +73,15 @@ const UsageSchema = z
     (value) =>
       value.cachedInputTokens === undefined || value.cachedInputTokens <= value.inputTokens,
   );
+const DraftTerminalOutcomeSchema = z
+  .object({
+    state: z.enum(["succeeded", "provider-failed", "invalid-response"]),
+    usage: UsageSchema.nullable(),
+  })
+  .strict()
+  .refine((value) => value.state !== "succeeded" || value.usage !== null, {
+    message: "successful provider terminal outcome requires exact usage",
+  });
 const CompilerInvocationProvenanceSchema = z
   .object({
     promptDigest: z.string().regex(/^[0-9a-f]{64}$/),
@@ -101,6 +111,7 @@ const RepairableInvalidClaimsSchema = z
   })
   .strict();
 export type DraftUsage = z.infer<typeof UsageSchema>;
+export type DraftTerminalOutcome = z.infer<typeof DraftTerminalOutcomeSchema>;
 /** Admission failed before provider dispatch; absence of provider usage is not a failed paid call. */
 export class CompilerDraftAdmissionError extends Error {
   constructor(cause: unknown) {
@@ -108,6 +119,32 @@ export class CompilerDraftAdmissionError extends Error {
   }
 }
 class CompilerDraftAccountingError extends Error {}
+export class CompilerDraftTerminalOutcomeError extends Error {
+  readonly terminalOutcome: DraftTerminalOutcome;
+
+  constructor(
+    cause: unknown,
+    terminalOutcome: DraftTerminalOutcome,
+    provenance?: z.infer<typeof CompilerInvocationProvenanceSchema> | null,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "CompilerDraftTerminalOutcomeError";
+    if (typeof cause === "object" && cause !== null) Object.assign(this, cause);
+    this.terminalOutcome = DraftTerminalOutcomeSchema.parse(terminalOutcome);
+    if (provenance) Object.assign(this, { provenance });
+  }
+}
+
+function nestedCompilerDraftStop(error: unknown): CompilerDraftStopError | null {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    if (current instanceof CompilerDraftStopError) return current;
+    seen.add(current);
+    current = current.cause;
+  }
+  return null;
+}
 
 export function repairableInvalidClaimsEvidence(proposal: unknown) {
   return {
@@ -151,6 +188,7 @@ export interface DraftInvocationResult {
   value: unknown;
   usage: DraftUsage | null;
   provenance?: z.infer<typeof CompilerInvocationProvenanceSchema>;
+  terminalOutcome?: DraftTerminalOutcome;
 }
 export interface DraftReservationEvidence {
   compilerRequestDigest?: string;
@@ -494,6 +532,14 @@ export function validateCompilerDraftJournal(
       const usage = record.payload.usage === null ? null : UsageSchema.parse(record.payload.usage);
       const localTerminal = record.payload.preProviderTerminal === true;
       const hasError = typeof record.payload.error === "string";
+      const terminalOutcome =
+        record.payload.terminalOutcome === undefined
+          ? undefined
+          : DraftTerminalOutcomeSchema.parse(record.payload.terminalOutcome);
+      const cleanupDiagnostic =
+        record.payload.cleanupDiagnostic === undefined
+          ? undefined
+          : boundedText(4_000).parse(record.payload.cleanupDiagnostic);
       if (localTerminal) {
         if (
           usage !== null ||
@@ -501,7 +547,9 @@ export function validateCompilerDraftJournal(
           !hasError ||
           typeof record.payload.stopReason !== "string" ||
           record.payload.providerQuota !== undefined ||
-          record.payload.provenance !== undefined
+          record.payload.provenance !== undefined ||
+          terminalOutcome !== undefined ||
+          cleanupDiagnostic !== undefined
         )
           throw new Error("compiler pre-provider terminal payload is invalid");
       } else {
@@ -520,9 +568,25 @@ export function validateCompilerDraftJournal(
           throw new Error("compiler result terminal shape is invalid");
         if (!hasError && (record.payload.value === null || record.payload.stopReason !== undefined))
           throw new Error("compiler success terminal shape is invalid");
+        if (expected.adapterMode === "provider") {
+          if (
+            !terminalOutcome ||
+            draftDigest(terminalOutcome.usage) !== draftDigest(usage) ||
+            (!hasError && terminalOutcome.state !== "succeeded")
+          )
+            throw new Error("compiler provider terminal outcome differs");
+        } else if (terminalOutcome !== undefined) {
+          throw new Error("local compiler result claims a provider terminal outcome");
+        }
+        if (cleanupDiagnostic !== undefined && (expected.adapterMode !== "provider" || !hasError))
+          throw new Error("compiler cleanup diagnostic lacks a provider failure binding");
         if (record.payload.providerQuota !== undefined) {
           ProviderQuotaCheckpointSchema.parse(record.payload.providerQuota);
-          if (!hasError) throw new Error("compiler provider quota result lacks failure");
+          if (
+            !hasError ||
+            (expected.adapterMode === "provider" && terminalOutcome?.state !== "provider-failed")
+          )
+            throw new Error("compiler provider quota result lacks failure");
         }
       }
       results.set(invocationId, record);
@@ -941,10 +1005,17 @@ export async function runCompilerDraftLoop(args: {
       providerQuotaResult.payload.usage === null
         ? undefined
         : UsageSchema.parse(providerQuotaResult.payload.usage);
-    throw new ProviderQuotaError(gate, {
+    const cleanupDiagnostic =
+      typeof providerQuotaResult.payload.cleanupDiagnostic === "string"
+        ? boundedText(4_000).parse(providerQuotaResult.payload.cleanupDiagnostic)
+        : undefined;
+    const recovered = new ProviderQuotaError(gate, {
       invocationId,
       ...(usage ? { usage } : {}),
+      ...(cleanupDiagnostic ? { cause: new Error(cleanupDiagnostic) } : {}),
     });
+    if (cleanupDiagnostic) Object.assign(recovered, { cleanupDiagnostic });
+    throw recovered;
   }
   const conflicts = records.filter((item) => item.kind === "terminal-conflict");
   const disputedUsage = new Set(
@@ -1195,6 +1266,10 @@ export async function runCompilerDraftLoop(args: {
         result.provenance === undefined
           ? { success: true as const, data: undefined }
           : CompilerInvocationProvenanceSchema.safeParse(result.provenance);
+      const parsedTerminalOutcome =
+        result.terminalOutcome === undefined
+          ? { success: true as const, data: undefined }
+          : DraftTerminalOutcomeSchema.safeParse(result.terminalOutcome);
       const effectiveProvenance =
         parsedProvenance.success && parsedProvenance.data
           ? parsedProvenance.data
@@ -1205,12 +1280,16 @@ export async function runCompilerDraftLoop(args: {
         value: result.value,
         usage: parsedUsage.success ? parsedUsage.data : null,
         ...(effectiveProvenance ? { provenance: effectiveProvenance } : {}),
+        ...(parsedTerminalOutcome.success && parsedTerminalOutcome.data
+          ? { terminalOutcome: parsedTerminalOutcome.data }
+          : {}),
       };
       if (saved) {
         const usage = parsedUsage.success ? parsedUsage.data : null;
         if (
           !parsedUsage.success ||
           !parsedProvenance.success ||
+          !parsedTerminalOutcome.success ||
           draftDigest(saved) !== draftDigest(normalized)
         ) {
           contradictory = true;
@@ -1224,6 +1303,8 @@ export async function runCompilerDraftLoop(args: {
       if (!parsedUsage.success) throw new Error("compiler result has invalid usage evidence");
       if (!parsedProvenance.success)
         throw new Error("compiler result has invalid invocation provenance");
+      if (!parsedTerminalOutcome.success)
+        throw new Error("compiler result has invalid terminal outcome");
       if (
         reservedExpectedProvenance !== undefined &&
         (!effectiveProvenance ||
@@ -1231,6 +1312,17 @@ export async function runCompilerDraftLoop(args: {
       )
         throw new Error("compiler result provenance differs from reserved invocation");
       const usage = parsedUsage.data;
+      const terminalOutcome = parsedTerminalOutcome.data;
+      if (callbacks.reserveAtDispatch) {
+        if (
+          !terminalOutcome ||
+          terminalOutcome.state !== "succeeded" ||
+          draftDigest(terminalOutcome.usage) !== draftDigest(usage)
+        )
+          throw new Error("compiler provider success lacks its terminal outcome");
+      } else if (terminalOutcome) {
+        throw new Error("local compiler result claims a provider terminal outcome");
+      }
       try {
         await append("result", {
           invocationId,
@@ -1239,6 +1331,7 @@ export async function runCompilerDraftLoop(args: {
           value: result.value,
           usage,
           ...(effectiveProvenance ? { provenance: effectiveProvenance } : {}),
+          ...(terminalOutcome ? { terminalOutcome } : {}),
           ...timing(),
         });
       } catch (error) {
@@ -1251,6 +1344,7 @@ export async function runCompilerDraftLoop(args: {
         value: result.value,
         usage,
         ...(effectiveProvenance ? { provenance: effectiveProvenance } : {}),
+        ...(terminalOutcome ? { terminalOutcome } : {}),
       };
     };
     const checkpointProviderRefusal = async (error: ProviderQuotaError): Promise<void> => {
@@ -1258,12 +1352,21 @@ export async function runCompilerDraftLoop(args: {
       error.bindInvocation(invocationId);
       const gate = ProviderQuotaCheckpointSchema.parse(error.gate);
       const usage = error.usage ? UsageSchema.parse(error.usage) : null;
+      const cleanupDiagnostic =
+        "cleanupDiagnostic" in error && typeof error.cleanupDiagnostic === "string"
+          ? diagnostic(error.cleanupDiagnostic)
+          : undefined;
       if (savedProviderQuota) {
         if (
           draftDigest({
             gate: savedProviderQuota.gate,
             usage: savedProviderQuota.usage ?? null,
-          }) !== draftDigest({ gate, usage })
+            cleanupDiagnostic:
+              "cleanupDiagnostic" in savedProviderQuota &&
+              typeof savedProviderQuota.cleanupDiagnostic === "string"
+                ? diagnostic(savedProviderQuota.cleanupDiagnostic)
+                : null,
+          }) !== draftDigest({ gate, usage, cleanupDiagnostic: cleanupDiagnostic ?? null })
         )
           throw new Error("conflicting compiler provider refusal checkpoint");
         return;
@@ -1277,6 +1380,10 @@ export async function runCompilerDraftLoop(args: {
         ...timing(),
         error: diagnostic(error),
         providerQuota: gate,
+        ...(cleanupDiagnostic ? { cleanupDiagnostic } : {}),
+        ...(callbacks.reserveAtDispatch
+          ? { terminalOutcome: { state: "provider-failed" as const, usage } }
+          : {}),
         ...(reservedExpectedProvenance
           ? { provenance: CompilerInvocationProvenanceSchema.parse(reservedExpectedProvenance) }
           : {}),
@@ -1333,18 +1440,17 @@ export async function runCompilerDraftLoop(args: {
             ? UsageSchema.safeParse(error.usage)
             : null;
         const usage = known?.success ? known.data : null;
-        const stopCause =
-          error instanceof CompilerDraftStopError
-            ? error
-            : error instanceof Error && error.cause instanceof CompilerDraftStopError
-              ? error.cause
-              : null;
+        const terminalOutcome =
+          error instanceof CompilerDraftTerminalOutcomeError
+            ? DraftTerminalOutcomeSchema.parse(error.terminalOutcome)
+            : error instanceof ProviderQuotaError && callbacks.reserveAtDispatch
+              ? ({ state: "provider-failed", usage } as const)
+              : undefined;
+        const stopCause = nestedCompilerDraftStop(error);
         const preProviderTerminal =
           stopCause !== null &&
-          typeof error === "object" &&
-          error !== null &&
-          "preProviderTerminal" in error &&
-          error.preProviderTerminal === true;
+          "preProviderTerminal" in stopCause &&
+          stopCause.preProviderTerminal === true;
         const providerQuota =
           error instanceof ProviderQuotaError
             ? ProviderQuotaCheckpointSchema.parse(error.bindInvocation(invocationId).gate)
@@ -1362,18 +1468,31 @@ export async function runCompilerDraftLoop(args: {
           repairableInvalidClaims.data.proposalDigest === draftDigest(proposal.proposal)
             ? { repairableInvalidClaims: repairableInvalidClaims.data }
             : {};
-        const provenance =
-          typeof error === "object" && error !== null && "provenance" in error
-            ? CompilerInvocationProvenanceSchema.safeParse(error.provenance).data
-            : !callbacks.reserveAtDispatch && reservedExpectedProvenance
-              ? CompilerInvocationProvenanceSchema.parse(reservedExpectedProvenance)
-              : undefined;
+        const cleanupDiagnostic =
+          typeof error === "object" &&
+          error !== null &&
+          "cleanupDiagnostic" in error &&
+          typeof error.cleanupDiagnostic === "string"
+            ? diagnostic(error.cleanupDiagnostic)
+            : undefined;
+        const recoveredProvenance = managementFailureProvenance(error);
+        const provenance = recoveredProvenance
+          ? CompilerInvocationProvenanceSchema.safeParse(recoveredProvenance).data
+          : !callbacks.reserveAtDispatch && reservedExpectedProvenance
+            ? CompilerInvocationProvenanceSchema.parse(reservedExpectedProvenance)
+            : undefined;
         if (
           !preProviderTerminal &&
           reservedExpectedProvenance !== undefined &&
           (!provenance || draftDigest(provenance) !== draftDigest(reservedExpectedProvenance))
         )
           throw new Stop("invocation-provenance-unavailable");
+        if (
+          !preProviderTerminal &&
+          callbacks.reserveAtDispatch &&
+          (!terminalOutcome || draftDigest(terminalOutcome.usage) !== draftDigest(usage))
+        )
+          throw new Stop("invocation-terminal-outcome-unavailable");
         await append("result", {
           invocationId,
           stage,
@@ -1385,6 +1504,8 @@ export async function runCompilerDraftLoop(args: {
           ...(validationReport ? { validationReport } : {}),
           ...retainedRepairability,
           ...(!preProviderTerminal && provenance ? { provenance } : {}),
+          ...(!preProviderTerminal && terminalOutcome ? { terminalOutcome } : {}),
+          ...(cleanupDiagnostic ? { cleanupDiagnostic } : {}),
           error: diagnostic(error),
           ...(providerQuota ? { providerQuota } : {}),
           ...(stopCause ? { stopReason: diagnostic(stopCause) } : {}),

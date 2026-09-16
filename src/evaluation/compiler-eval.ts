@@ -161,8 +161,7 @@ export const CompilerJudgeVerdictSchema = z
           })
           .strict(),
       )
-      .max(MAX_COMPILER_OBLIGATION_CHALLENGES)
-      .optional(),
+      .max(MAX_COMPILER_OBLIGATION_CHALLENGES),
     uncertainty: z.array(Text).max(64),
     decision: z.enum(["accept", "repair", "abstain"]),
   })

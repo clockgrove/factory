@@ -413,14 +413,14 @@ const jsonRefs = (minimum = 0) => ({
   items: jsonEvalId,
 });
 const intentSchema = {
-  oneOf: [
-    strictObject({ kind: { const: "observed" }, recipeId: jsonId }),
+  anyOf: [
+    strictObject({ kind: { type: "string", const: "observed" }, recipeId: jsonId }),
     strictObject({
-      kind: { const: "scoped-node-test" },
+      kind: { type: "string", const: "scoped-node-test" },
       targets: { type: "array", minItems: 1, maxItems: 32, items: jsonScopePath },
     }),
     strictObject({
-      kind: { const: "deferred" },
+      kind: { type: "string", const: "deferred" },
       adapterId: jsonId,
       operation: strictObject({
         kind: jsonId,
@@ -431,7 +431,7 @@ const intentSchema = {
 };
 
 const compilerProposalObjectSchema = strictObject({
-  protocol: { const: "clockgrove.factory/compiler-proposal" },
+  protocol: { type: "string", const: "clockgrove.factory/compiler-proposal" },
   workItems: {
     type: "array",
     minItems: 1,
@@ -449,6 +449,7 @@ const compilerProposalObjectSchema = strictObject({
           id: jsonId,
           text: { type: "string", minLength: 1, maxLength: 2_000 },
           risk: {
+            type: "string",
             enum: [
               "ordinary",
               "safety",
@@ -464,6 +465,7 @@ const compilerProposalObjectSchema = strictObject({
             maxItems: 4,
             items: strictObject({
               tier: {
+                type: "string",
                 enum: ["mechanical", "semantic", "visual", "deterministic-simulation"],
               },
               evidence: stringArray(32, intentSchema),
@@ -480,14 +482,14 @@ const compilerProposalObjectSchema = strictObject({
         type: "string",
         minLength: 1,
         maxLength: 160,
-        pattern: "^(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*//)[a-z0-9][a-z0-9:._/-]*$",
+        pattern: "^(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*//)(?!.*\\/$)[a-z0-9][a-z0-9:._/-]*$",
       }),
       executionIntent: strictObject({
         estimatedDurationMinutes: { type: "integer", minimum: 1, maximum: 1_440 },
         additionalTools: stringArray(64, jsonId),
         services: stringArray(64, jsonId),
         additionalNetworkDestinations: stringArray(64, jsonNetworkDestination),
-        trust: { enum: ["trusted_local", "isolated", "managed"] },
+        trust: { type: "string", enum: ["trusted_local", "isolated", "managed"] },
       }),
     }),
   },

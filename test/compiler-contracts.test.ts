@@ -332,6 +332,16 @@ describe("strict semantic compiler contracts", () => {
     },
   );
 
+  it.each(["foo/", "foo//bar", "foo/./bar", "foo/../bar"])(
+    "keeps malformed exclusive resource %s out of both proposal schemas",
+    (resource) => {
+      const candidate = semanticProposal(semanticRequest());
+      candidate.workItems[0]!.exclusiveResources = [resource];
+      expect(CompilerProposalSchema.safeParse(candidate).success).toBe(false);
+      expect(jsonProposal(candidate)).toBe(false);
+    },
+  );
+
   it("keeps unrelated adapters eligible while rejecting exact unsupported scope", () => {
     const pinned = semanticPinnedFacts({ paths: ["go.mod", "main.go"], scripts: {} });
     const request = semanticRequest(pinned, allToolchainDestinations);

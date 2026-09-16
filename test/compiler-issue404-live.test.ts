@@ -53,6 +53,7 @@ import {
   issue404CanonicalPath,
   issue404LiveAuthority,
   issue404QualificationCompilationContext,
+  issue404SucceededTransformationFailure,
   issue404TerminalTranscriptEvidence,
   issue404TokenUsageByStage,
   type Issue404DurableRecord,
@@ -226,10 +227,13 @@ class OmittedObligationBackend extends CodexCliManagementBackend {
       proposal,
     );
     const { promptDigest, schemaDigest, baseSha, model, reasoning } = result.provenance;
-    throw Object.assign(error, {
-      validationReport: report,
-      provenance: { promptDigest, schemaDigest, baseSha, model, reasoning },
-    });
+    throw issue404SucceededTransformationFailure(
+      Object.assign(error, {
+        validationReport: report,
+        provenance: { promptDigest, schemaDigest, baseSha, model, reasoning },
+      }),
+      result.usage,
+    );
   }
 }
 

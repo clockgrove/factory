@@ -258,6 +258,23 @@ export interface FactoryStatusReport {
   };
   workItems: StatusWorkItem[];
   summary: RunSummary | null;
+  findings: Array<{
+    findingId: string;
+    workItem?: number;
+    classification: string;
+    disposition:
+      | "repaired"
+      | "issue-filed"
+      | "existing-issue-linked"
+      | "issue-ready"
+      | "reporting-refused"
+      | "reporting-limit"
+      | "pending";
+    destination: string;
+    issueNumber?: number;
+    issueUrl?: string;
+    reasonCode?: string;
+  }>;
   compilerEvaluation?:
     | {
         availability: "unavailable";
@@ -307,6 +324,43 @@ export function snapshotEvents(snapshot: FactoryReadSnapshot): FactoryEvent[] {
     ...(snapshot.factoryEvents ?? []),
     ...snapshot.workItems.flatMap((item) => item.factoryEvents ?? []),
   ]).sort((left, right) => left.sequence - right.sequence);
+}
+
+function findingStatus(events: readonly FactoryEvent[]): FactoryStatusReport["findings"] {
+  const findings = new Map<string, FactoryStatusReport["findings"][number]>();
+  for (const event of events) {
+    if (event.kind !== "finding") continue;
+    const current = findings.get(event.findingId);
+    findings.set(event.findingId, {
+      findingId: event.findingId,
+      ...(event.workItem
+        ? { workItem: event.workItem }
+        : current?.workItem
+          ? { workItem: current.workItem }
+          : {}),
+      classification: event.classification,
+      disposition: event.disposition ?? current?.disposition ?? "pending",
+      destination: event.destination,
+      ...(event.issueNumber
+        ? { issueNumber: event.issueNumber }
+        : current?.issueNumber
+          ? { issueNumber: current.issueNumber }
+          : {}),
+      ...(event.issueUrl
+        ? { issueUrl: event.issueUrl }
+        : current?.issueUrl
+          ? { issueUrl: current.issueUrl }
+          : {}),
+      ...(event.reasonCode
+        ? { reasonCode: event.reasonCode }
+        : current?.reasonCode
+          ? { reasonCode: current.reasonCode }
+          : {}),
+    });
+  }
+  return [...findings.values()].sort((left, right) =>
+    left.findingId.localeCompare(right.findingId),
+  );
 }
 
 function evidenceTime(snapshot: FactoryReadSnapshot, events: readonly FactoryEvent[]): Date {
@@ -1026,6 +1080,7 @@ export function buildStatusReport(input: {
     },
     workItems: statusItems,
     summary,
+    findings: findingStatus(events),
     ...(compilerEvaluation ? { compilerEvaluation } : {}),
     ...(input.platformTelemetry ? { github: input.platformTelemetry } : {}),
   };

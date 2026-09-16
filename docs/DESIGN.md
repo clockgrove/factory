@@ -738,6 +738,29 @@ with GitHub credentials removed and credential helpers disabled. Sandbox workers
 write credential. Workers may edit only their isolated workspace and return a content-addressed
 artifact plus bounded metadata.
 
+Finding candidates use the same boundary. A worker, deterministic validator, independent review,
+integration step, compiler, or explicit Supervisor mapping may state supported behavior, observed
+behavior, minimal reproduction, impact, immutable evidence, and a separately marked unverified
+possible cause. Producers cannot choose the destination, severity, blocking status, or disposition.
+Only the Supervisor classifies an observation as an in-scope repair, Objective blocker,
+nonblocking follow-up, issue-ready report, refused report, or exhausted reporting allowance.
+
+Automatic publication requires immutable `findingReporting` policy naming lowercase destination
+repositories, their public/private audience, allowed read/create/comment operations, and one bounded
+publication-write allowance. Finding identity includes destination, supported behavior, failure
+class, phase, reproduction, and source/artifact evidence; run and attempt identify occurrences but
+do not split retries. A separate common-cause identity exists only with explicit shared evidence.
+Title similarity never establishes identity.
+
+The authenticated Objective event journal records the decision, a pre-dispatch publication intent,
+and the final disposition. The target issue contains an exact finding/report marker. On response
+loss or restart the Supervisor searches for and validates that marker, repository, author, node,
+and body. An unproven absence is not permission to repeat create; it settles as issue-ready with an
+ambiguous-transport reason. Reporting uses the shared credential scheduler, circuit, rate limits,
+and final lease fence, but it cannot mutate the compiled graph, activate work, consume implementation
+attempts, or grant model, network, or spending authority. Ordinary reporting refuses secrets,
+personal data, private paths/topology, raw logs/prompts, and unverified security findings.
+
 The local boundary is intentionally trusted-local, not hostile-code containment. Factory redirects
 conventional home/config paths, strips conventional secret environment variables, and disables Git
 credential helpers, but the worker still runs as the operator's OS user. A process that already knows

@@ -111,6 +111,13 @@ export {
 } from "./control/graph-evidence.js";
 import { GitHubControlStore } from "./control/github-store.js";
 import {
+  decideFindingAtSupervisor,
+  FindingReporter,
+  GitHubFindingReportingPort,
+  type FindingLifecycleDisposition,
+  type FindingRecord,
+} from "./control/finding-reporting.js";
+import {
   SharedCapacitySnapshotLagError,
   sharedCapacityClaimId,
   type SharedCapacityCoordinator,
@@ -211,6 +218,7 @@ import {
   parseFactoryEvent,
   type AttemptEvent,
   type FactoryEvent,
+  type FindingEvent,
   type ProviderQuotaEvent,
   type PublicationEvent,
 } from "./protocol/events.js";
@@ -410,6 +418,7 @@ import {
 } from "./runtime/local-scope.js";
 import { LocalScopeBatchSchema, type LocalScopeBatch } from "./protocol/local-scope.js";
 import type { ValidationEvidence } from "./validation/evidence.js";
+import { FINDING_PROTOCOL, type FindingCandidate } from "./protocol/findings.js";
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
@@ -1351,6 +1360,7 @@ export class FactorySupervisor {
   readonly #siblingRefreshes: SiblingRefreshStore;
   readonly #nativeRebases: NativeRebaseCheckpointStore;
   readonly #recorder: LifecycleRecorder;
+  readonly #findingReporter: FindingReporter;
   #management: ManagementBackend;
   readonly #managementOverride: boolean;
   readonly #registry: BackendRegistry;
@@ -1487,6 +1497,39 @@ export class FactorySupervisor {
     this.#siblingRefreshes = new SiblingRefreshStore(this.#store, this.#leases);
     this.#nativeRebases = new NativeRebaseCheckpointStore(this.#store, this.#leases);
     this.#recorder = new LifecycleRecorder(this.#store, this.#leases);
+    this.#findingReporter = new FindingReporter(
+      new GitHubFindingReportingPort((route, parameters, mutating) =>
+        this.#store.stackRequest(route, parameters, mutating),
+      ),
+      {
+        read: async () => {
+          const observed = await this.#reader.readObjective(this.#options.objective);
+          return snapshotEvents(observed).filter(
+            (event): event is FindingEvent => event.kind === "finding",
+          );
+        },
+        append: async (record: FindingRecord) => {
+          await this.#lease.use(async (lease) => {
+            const sequence = this.#sequences.take();
+            const event = parseFactoryEvent({
+              protocol: PROTOCOL_V2,
+              kind: "finding",
+              objective: lease.objective,
+              runId: lease.runId,
+              sequence,
+              at: (await this.#store.serverTime()).toISOString(),
+              ...writerAuthority(lease, sequence),
+              ...record,
+            });
+            const observed = await this.#reader.readObjective(lease.objective);
+            await this.#store.addIssueComment(
+              observed.id,
+              encodeEventComment("Factory recorded a bounded defect-reporting disposition.", event),
+            );
+          });
+        },
+      },
+    );
     this.#management =
       options.managementBackend ??
       new CodexCliManagementBackend({
@@ -5347,8 +5390,42 @@ export class FactorySupervisor {
                     `Report-only compiler evaluation completed: ${outcome.status === "accepted" ? "accepted draft" : outcome.reason}. No implementation was authorized and no Work Items were projected; inspect compiler-eval for the retained evidence.`,
                   );
                 }
-                if (outcome.status !== "accepted")
+                if (outcome.status !== "accepted") {
+                  await this.#reportFindingCandidates(
+                    [
+                      {
+                        protocol: FINDING_PROTOCOL,
+                        phase: "compiler",
+                        failureClass: "compiler-evaluation-stopped",
+                        supportedBehavior:
+                          "The bounded semantic compiler produces an accepted graph or a classified report-only result.",
+                        observedBehavior:
+                          "The bounded compiler evaluation stopped without an accepted graph.",
+                        reproduction: [
+                          "Compile the originating Objective against the pinned base commit under its immutable run policy.",
+                        ],
+                        impact:
+                          "Factory cannot project the Objective into authenticated Work Items.",
+                        evidence: [
+                          {
+                            kind: "compiler-result",
+                            digest: createHash("sha256")
+                              .update(JSON.stringify({ inputDigest, records: outcome.records }))
+                              .digest("hex"),
+                            commit: base.oid,
+                          },
+                        ],
+                      },
+                    ],
+                    "blocking",
+                    {
+                      objective: snapshot.number,
+                      runId: this.#run.runId,
+                    },
+                    (snapshot.factoryEvents ?? []).filter((event) => event.kind === "finding"),
+                  );
                   throw new Error(`compiler draft stopped without projection: ${outcome.reason}`);
+                }
                 await assertInputs();
                 const usage = outcome.records
                   .filter((record) => record.kind === "result")
@@ -6976,6 +7053,52 @@ export class FactorySupervisor {
         );
       }
       const reason = failure instanceof Error ? failure.message : String(failure);
+      if (!claimed) {
+        const failureClass =
+          failure instanceof PlatformUnavailableError
+            ? "platform-unavailable"
+            : "supervisor-lifecycle-failure";
+        const failureName = failure instanceof Error ? failure.name : typeof failure;
+        await this.#reportFindingCandidates(
+          [
+            {
+              protocol: FINDING_PROTOCOL,
+              phase: "supervisor",
+              failureClass,
+              supportedBehavior:
+                "The Supervisor durably completes or classifies every Objective lifecycle transition.",
+              observedBehavior:
+                "The Supervisor reached an unexpected lifecycle or platform failure before normal terminal settlement.",
+              reproduction: [
+                "Resume the originating Objective from its authenticated run evidence under the same immutable policy.",
+              ],
+              impact: "The Objective cannot safely reach successful terminal completion.",
+              evidence: [
+                {
+                  kind: "supervisor-observation",
+                  digest: createHash("sha256")
+                    .update(
+                      JSON.stringify({
+                        objective: this.#run.objective,
+                        policyDigest: this.#run.policyDigest,
+                        failureClass,
+                        failureName,
+                      }),
+                    )
+                    .digest("hex"),
+                },
+              ],
+            },
+          ],
+          "blocking",
+          { objective: this.#run.objective, runId: this.#run.runId },
+          (snapshot.factoryEvents ?? []).filter((event) => event.kind === "finding"),
+        ).catch((reportingError) =>
+          this.#notify(
+            `Factory finding reporting could not preserve the Supervisor failure: ${reportingError instanceof Error ? reportingError.message : String(reportingError)}`,
+          ),
+        );
+      }
       return await terminalAfterDrain("FactoryRunEscalated", reason);
     } finally {
       clearInterval(heartbeat);
@@ -7022,6 +7145,56 @@ export class FactorySupervisor {
       );
     return this.#observePhase(`work-item-${item.number}`, () =>
       recovered ? execute() : this.#modelInvocations.run(execute),
+    );
+  }
+
+  async #reportFindingCandidates(
+    findings: readonly FindingCandidate[] | undefined,
+    lifecycle: FindingLifecycleDisposition,
+    occurrence: {
+      objective: number;
+      workItem?: number;
+      runId: string;
+      attempt?: number;
+    },
+    priorEvents: readonly FindingEvent[],
+  ): Promise<void> {
+    if (!findings?.length) return;
+    const currentRepository = `${this.#options.owner}/${this.#options.repo}`.toLowerCase();
+    for (const candidate of findings) {
+      const decision = decideFindingAtSupervisor({
+        candidate,
+        lifecycle,
+        currentRepository,
+        policy: this.#policy.findingReporting,
+      });
+      await this.#findingReporter.report({
+        policy: this.#policy.findingReporting,
+        destination: decision.destination,
+        candidate,
+        classification: decision.classification,
+        occurrence,
+        priorEvents,
+      });
+    }
+  }
+
+  async #reportCandidateFindings(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    findings: readonly FindingCandidate[] | undefined,
+    lifecycle: FindingLifecycleDisposition,
+  ): Promise<void> {
+    return this.#reportFindingCandidates(
+      findings,
+      lifecycle,
+      {
+        objective: reservation.objective,
+        workItem: item.number,
+        runId: reservation.runId,
+        attempt: reservation.attempt,
+      },
+      (item.factoryEvents ?? []).filter((event) => event.kind === "finding"),
     );
   }
 
@@ -7895,6 +8068,9 @@ export class FactorySupervisor {
       this.#retainArtifactContent(artifact);
       retryableArtifact = artifact;
       if (artifact.outcome !== "succeeded") {
+        await confirmExecutionCleanup("pre-finding backend cleanup");
+        if (reservation.attempt >= this.#policy.maxAttemptsPerItem)
+          await this.#reportCandidateFindings(item, reservation, artifact.findings, "blocking");
         throw new Error(artifact.reason ?? `worker ${artifact.outcome}`);
       }
       try {
@@ -7966,6 +8142,7 @@ export class FactorySupervisor {
           this.#budgetEvents.push(event);
           executionBudgetReconciled = true;
         });
+      await this.#reportCandidateFindings(item, reservation, artifact.findings, "follow-up");
       // Fresh completed siblings have the same durable continuation boundary as
       // recovered attempts: ready artifact, terminal usage, and absent compute.
       // A controller shutdown must not turn that paid work into a failed attempt.
@@ -8267,8 +8444,21 @@ export class FactorySupervisor {
         if (validator && validationBudgetUnit) validationBudgetReconciled = true;
       });
       if (!validation.evidence.passed) {
+        if (reservation.attempt >= this.#policy.maxAttemptsPerItem)
+          await this.#reportCandidateFindings(
+            item,
+            reservation,
+            validation.evidence.findings,
+            "blocking",
+          );
         throw new Error(validation.evidence.failureReason ?? "validation failed");
       }
+      await this.#reportCandidateFindings(
+        item,
+        reservation,
+        validation.evidence.findings,
+        "follow-up",
+      );
 
       const reviewIdentity: ReviewIdentity = {
         kind: "artifact",
@@ -8328,7 +8518,7 @@ export class FactorySupervisor {
               ),
           );
       }
-      await this.#reviewTransaction({
+      const reviewRecord = await this.#reviewTransaction({
         existing: existingReview,
         ...(invokeReview ? { invoke: invokeReview } : {}),
         persist: (result) =>
@@ -8354,6 +8544,15 @@ export class FactorySupervisor {
         recordUsage: (record) => this.#recordReviewUsage(record, item, reservation!),
         recordOutcome: (record) => this.#recordInitialReviewOutcome(record, item, reservation!),
       });
+      const reviewAccepted =
+        reviewRecord.review.accepted && reviewRecord.review.unmetCriteria.length === 0;
+      if (reviewAccepted || reservation.attempt >= this.#policy.maxAttemptsPerItem)
+        await this.#reportCandidateFindings(
+          item,
+          reservation,
+          reviewRecord.review.findings,
+          reviewAccepted ? "follow-up" : "blocking",
+        );
       const assertPublicationSafety = async () => {
         try {
           await this.#assertWorkflowPublicationSafety({
@@ -12704,6 +12903,7 @@ export class FactorySupervisor {
             artifact,
             packet,
             publicationBaseBranch: this.#baseBranch,
+            findingPhase: "integration",
             isolatedValidator: () =>
               this.#externalAdmission(async () => {
                 await this.#nativeRebaseAdmissionCurrent(
@@ -12734,8 +12934,15 @@ export class FactorySupervisor {
               }),
           }),
         );
-        if (!validation.evidence.passed)
+        if (!validation.evidence.passed) {
+          await this.#reportCandidateFindings(
+            item,
+            reservation,
+            validation.evidence.findings,
+            "blocking",
+          );
           throw new Error(validation.evidence.failureReason ?? "native rebase validation failed");
+        }
         record = await this.#lease.use((lease) =>
           this.#nativeRebases.persist({
             lease,
@@ -12973,6 +13180,7 @@ export class FactorySupervisor {
             artifact,
             packet,
             publicationBaseBranch: this.#baseBranch,
+            findingPhase: "integration",
             ...(scoped ? { localScope: scoped.hooks } : {}),
           }),
         );
@@ -13018,6 +13226,12 @@ export class FactorySupervisor {
     let validatedAndRecorded = false;
     try {
       if (!validation.evidence.passed) {
+        await this.#reportCandidateFindings(
+          item,
+          member.reservation,
+          validation.evidence.findings,
+          "blocking",
+        );
         throw new Error(validation.evidence.failureReason ?? "rebased stack validation failed");
       }
       const reviewIdentity: ReviewIdentity = {
@@ -14394,6 +14608,7 @@ export class FactorySupervisor {
             artifact: artifact!,
             packet,
             publicationBaseBranch: this.#baseBranch,
+            findingPhase: "integration",
             ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
             ...(validator
               ? {
@@ -14433,6 +14648,12 @@ export class FactorySupervisor {
             identityDigest,
             item,
             member.reservation,
+          );
+          await this.#reportCandidateFindings(
+            item,
+            member.reservation,
+            validation.evidence.findings,
+            "blocking",
           );
           throw new Error(validation.evidence.failureReason ?? "merge-candidate validation failed");
         }
@@ -16097,6 +16318,9 @@ export class FactorySupervisor {
               artifact: artifact!,
               packet,
               publicationBaseBranch: this.#baseBranch,
+              // This recovery path already persists the exact isolatedFailure receipt. Adding a
+              // new candidate would change that established replay digest after interruption.
+              findingPhase: false,
               ...(scope ? { localScope: scope.hooks } : {}),
               ...(isolated
                 ? {
@@ -16203,6 +16427,12 @@ export class FactorySupervisor {
               Date.parse(validation.evidence.completedAt) -
                 Date.parse(validation.evidence.startedAt),
               "validation_milliseconds",
+            );
+            await this.#reportCandidateFindings(
+              item,
+              reserved,
+              validation.evidence.findings,
+              "blocking",
             );
             throw new Error(
               validation.evidence.failureReason ?? "adopted candidate validation failed",

@@ -21,6 +21,7 @@ import type { CompilerWorkItem, DecompositionEvidence } from "../compiler/index.
 import type { PinnedLfsFacts } from "../repository-profiles/git-lfs.js";
 import type { PinnedCompilationTreeProof } from "../execution/pinned-compilation-tree.js";
 import type { ProviderQuotaCheckpoint } from "../providers/quota.js";
+import type { FindingCandidate } from "../protocol/findings.js";
 
 export interface ManagementUsage {
   inputTokens: number;
@@ -323,6 +324,7 @@ export interface SemanticReview {
   summary: string;
   unmetCriteria: string[];
   risks: string[];
+  findings?: FindingCandidate[] | undefined;
 }
 
 export interface ReviewContext {

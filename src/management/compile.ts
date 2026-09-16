@@ -1,5 +1,10 @@
 import type { CompiledObjective } from "../graph.js";
-import type { CompilerProposal, CompilerValidationReport } from "../compiler/contracts.js";
+import type {
+  CompilerObjectivesProposal,
+  CompilerClarificationProposal,
+  CompilerProposal,
+  CompilerValidationReport,
+} from "../compiler/contracts.js";
 import {
   compilerWorkItemsForEconomics,
   prepareCompilerRequest,
@@ -22,6 +27,7 @@ import {
 } from "./backend.js";
 
 export interface CompiledPlanResult {
+  kind: "work-items";
   objective: CompiledObjective;
   proposal: CompilerProposal;
   report: CompilerValidationReport;
@@ -29,6 +35,16 @@ export interface CompiledPlanResult {
   provenance: CompilerProposalProvenance;
   usage: ManagementUsage;
 }
+
+export interface ObjectivePlanningResult {
+  kind: "objectives" | "clarification";
+  proposal: CompilerObjectivesProposal | CompilerClarificationProposal;
+  report: CompilerValidationReport;
+  provenance: CompilerProposalProvenance;
+  usage: ManagementUsage;
+}
+
+export type PlanCompilationResult = CompiledPlanResult | ObjectivePlanningResult;
 
 export type CompiledPlanCheckpoint = (result: CompiledPlanResult) => Promise<void>;
 
@@ -79,7 +95,7 @@ export async function compilePlan(
   backend: ManagementBackend,
   checkpoint: CompiledPlanCheckpoint,
   beforeModelInvocation?: CompilerModelAdmission,
-): Promise<CompiledPlanResult> {
+): Promise<PlanCompilationResult> {
   assertCompilationContextPolicyAuthority(context);
   const prepared = await prepareCompilerRequest({
     context,
@@ -87,7 +103,7 @@ export async function compilePlan(
     inventorySource: "structural-source",
   });
   if (prepared.report.status !== "valid") throw new CompilerRequestValidationError(prepared.report);
-  let projected: CompiledPlanResult | undefined;
+  let projected: PlanCompilationResult | undefined;
   const result = await backend.proposePlan(
     prepared.request,
     async (proposalResult) => {
@@ -96,6 +112,16 @@ export async function compilePlan(
         proposalResult.provenance.requestDigest !== compilerEvalDigest(prepared.request)
       )
         throw new Error("management proposal differs from its exact compiler request");
+      if (proposalResult.proposal.kind !== "work-items") {
+        projected = {
+          kind: proposalResult.proposal.kind,
+          proposal: proposalResult.proposal,
+          report: proposalResult.report,
+          provenance: proposalResult.provenance,
+          usage: proposalResult.usage,
+        };
+        return;
+      }
       const economics = context.economicEvidence
         ? await context.economicEvidence(
             compilerWorkItemsForEconomics(
@@ -117,6 +143,7 @@ export async function compilePlan(
           : {}),
       });
       projected = {
+        kind: "work-items",
         objective: projection.objective,
         proposal: proposalResult.proposal,
         report: proposalResult.report,
@@ -143,7 +170,7 @@ export async function compilePlanWithLegacyAdmission(
   backend: ManagementBackend,
   checkpoint: CompiledPlanCheckpoint,
   admitCompilation: () => Promise<{ timeoutMs: number }>,
-): Promise<CompiledPlanResult> {
+): Promise<PlanCompilationResult> {
   assertCompilationContextPolicyAuthority(context);
   context.invocationTimeoutMs = (await admitCompilation()).timeoutMs;
   return compilePlan(context, backend, checkpoint);

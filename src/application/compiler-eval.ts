@@ -8,7 +8,7 @@ import { loadCompiledGraph, type CompiledGraphReadStore } from "../control/graph
 import { latestRunReceipts } from "../control/receipts.js";
 import { summarizeRun } from "../economics/index.js";
 import {
-  CompilerProposalSchema,
+  CompilerWorkItemsProposalSchema,
   CompilerRequestSchema,
   CompilerValidationReportSchema,
 } from "../compiler/contracts.js";
@@ -485,7 +485,7 @@ export async function inspectCompilerEvaluation(args: {
               throw new Error("judge result has no semantic proposal");
             const persisted = proposalResult.payload.value as Record<string, unknown>;
             const request = CompilerRequestSchema.parse(persisted.request);
-            proposal = CompilerProposalSchema.parse(persisted.proposal);
+            proposal = CompilerWorkItemsProposalSchema.parse(persisted.proposal);
             const proposalReport = CompilerValidationReportSchema.parse(persisted.report);
             const provenance = persisted.provenance as Record<string, unknown> | undefined;
             const proposalInvocation = invocations.find(

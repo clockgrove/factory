@@ -8,6 +8,7 @@ import type {
 import type { LegacyGraphConstraints } from "../graph.js";
 import type {
   CompilerProposal,
+  CompilerProposalValue,
   CompilerRequest,
   CompilerValidationReport,
 } from "../compiler/contracts.js";
@@ -266,10 +267,13 @@ export interface CompilerProposalProvenance extends CompilerInvocationProvenance
 
 export interface CompilerProposalResult {
   request: CompilerRequest;
-  proposal: CompilerProposal;
+  proposal: CompilerProposalValue;
   report: CompilerValidationReport;
   provenance: CompilerProposalProvenance;
   usage: ManagementUsage;
+}
+export interface CompilerWorkItemsProposalResult extends CompilerProposalResult {
+  proposal: CompilerProposal;
 }
 export type CompilerProposalCheckpoint = (result: CompilerProposalResult) => Promise<void>;
 

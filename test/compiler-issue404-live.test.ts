@@ -216,6 +216,8 @@ class OmittedObligationBackend extends CodexCliManagementBackend {
     const omitted = explicit.at(-1)?.id;
     if (!omitted) throw new Error("qualification inventory has no explicit obligation to omit");
     const proposal = structuredClone(result.proposal);
+    if (proposal.kind !== "work-items")
+      throw new Error("qualification mutation requires a Work Item proposal");
     for (const item of proposal.workItems)
       item.obligationIds = item.obligationIds.filter((id) => id !== omitted);
     const report = parseAndValidateCompilerProposal(request, proposal, projection).report;

@@ -15,6 +15,8 @@ import * as lfs from "../src/repository-profiles/git-lfs.js";
 import { readRepositoryFacts } from "../src/repository-profiles/read.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import { compileObjective } from "../src/compiler/index.js";
+import { parseAndValidateCompilerProposal } from "../src/compiler/proposal.js";
+import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
 import {
   ManagementOutputError,
   type CompilationContext,
@@ -176,6 +178,136 @@ function plan(f: Awaited<ReturnType<typeof fixture>>, compile: LegacyFixtureComp
 }
 
 describe("explicit plan pinned LFS preflight", () => {
+  it("returns proposed Objectives without creating a graph or implying activation", async () => {
+    const f = await fixture();
+    const management: ManagementBackend = {
+      id: "planning-result-test",
+      probe: async () => ({ available: true, authenticated: true }),
+      review: async () => {
+        throw new Error("review not expected");
+      },
+      proposePlan: async (request, checkpoint, projection) => {
+        const [first, second] = request.inventory.obligations;
+        if (!first || !second) throw new Error("fixture requires title and body obligations");
+        const proposal = {
+          protocol: "clockgrove.factory/compiler-proposal" as const,
+          kind: "objectives" as const,
+          objectives: [
+            {
+              id: "foundation",
+              title: "Deliver the foundation",
+              outcome: "The foundational behavior is independently accepted.",
+              acceptance: [
+                {
+                  id: "foundation-accepted",
+                  kind: "owned" as const,
+                  text: "The foundational behavior is demonstrably complete.",
+                },
+              ],
+              ownedScope: ["src/foundation/"],
+              obligationIds: [first.id],
+              planningEstimate: {
+                workItems: 8,
+                criticalPathMinutes: null,
+                aggregateWorkMinutes: null,
+                basis: "The foundation is bounded to one accepted output and its direct tests.",
+              },
+              outputs: [
+                {
+                  id: "foundation-output",
+                  description: "The accepted foundation used by its consumer.",
+                  completionAcceptanceIds: ["foundation-accepted"],
+                },
+              ],
+              prerequisiteOutputs: [],
+            },
+            {
+              id: "consumer",
+              title: "Deliver the consumer",
+              outcome: "The consumer integrates the accepted foundation.",
+              acceptance: [
+                {
+                  id: "consumer-accepted",
+                  kind: "owned" as const,
+                  text: "The consumer behavior is demonstrably complete.",
+                },
+              ],
+              ownedScope: ["src/consumer/"],
+              obligationIds: [second.id],
+              planningEstimate: {
+                workItems: 8,
+                criticalPathMinutes: null,
+                aggregateWorkMinutes: null,
+                basis: "The consumer is bounded to one explicit foundation handoff.",
+              },
+              outputs: [
+                {
+                  id: "consumer-output",
+                  description: "The accepted consumer integration.",
+                  completionAcceptanceIds: ["consumer-accepted"],
+                },
+              ],
+              prerequisiteOutputs: [{ objectiveId: "foundation", outputId: "foundation-output" }],
+            },
+          ],
+          coverage: [
+            {
+              obligationId: first.id,
+              disposition: "owned" as const,
+              objectiveId: "foundation",
+              acceptanceId: "foundation-accepted",
+            },
+            {
+              obligationId: second.id,
+              disposition: "owned" as const,
+              objectiveId: "consumer",
+              acceptanceId: "consumer-accepted",
+            },
+          ],
+          triggers: [
+            {
+              code: "independent-milestones" as const,
+              source: "obligation-inventory" as const,
+              availability: "observed" as const,
+              observed: "Two independently acceptable milestones with an explicit output handoff.",
+              threshold: null,
+              obligationIds: [first.id, second.id],
+              explanation: "The request contains a reviewable foundation and dependent consumer.",
+            },
+          ],
+        };
+        const report = parseAndValidateCompilerProposal(request, proposal, projection).report;
+        if (report.status !== "valid") throw new Error(JSON.stringify(report.violations));
+        const provenance = {
+          promptDigest: "1".repeat(64),
+          schemaDigest: "2".repeat(64),
+          baseSha: request.baseSha,
+          model: null,
+          reasoning: null,
+          requestDigest: compilerEvalDigest(request),
+        };
+        const result = { request, proposal, report, usage, provenance };
+        await checkpoint(result);
+        return result;
+      },
+    };
+    const report = await buildPlanReport({
+      repository: "o/r",
+      request: { objective: 7, compile: true, baseSha: f.baseSha },
+      snapshot,
+      planning: { ...f.planning, management },
+    });
+    expect(report.compilation.result, JSON.stringify(report.diagnostics)).toBe("completed");
+    expect(report.graph).toBeNull();
+    expect(report.proposedGraph).toBeUndefined();
+    expect(report.planning).toMatchObject({
+      state: "proposed-not-created-or-activated",
+      identity: expect.stringMatching(/^[a-f0-9]{64}$/),
+      result: { kind: "objectives" },
+    });
+    expect(report.usage).toEqual(usage);
+  });
+
   it("preserves actual compilation usage above an explicitly observed threshold without pretending to cap it", async () => {
     const f = await fixture();
     const compile = vi.fn(async (context: CompilationContext, checkpoint) => {

@@ -19,6 +19,20 @@
     "allowedNetworkDestinations"
   ],
   "properties": {
+    "objectivePlanning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxWorkItemsPerObjective",
+        "maxCriticalPathRatio",
+        "maxAggregateWorkRatio"
+      ],
+      "properties": {
+        "maxWorkItemsPerObjective": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "maxCriticalPathRatio": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+        "maxAggregateWorkRatio": { "type": "number", "exclusiveMinimum": 0, "maximum": 10 }
+      }
+    },
     "findingReporting": {
       "type": "object",
       "additionalProperties": false,

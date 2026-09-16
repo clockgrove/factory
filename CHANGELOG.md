@@ -12,6 +12,10 @@ and artifacts, and record the commit SHA when installing from source.
 
 ### Added
 
+- Add an explainable Objective-planning gate with strict bounded-graph, proposed-Objective, and
+  clarification outcomes. Project-sized or serial-heavy requests can now return completely covered,
+  prerequisite-linked Objective proposals without creating or activating work. ([#380](https://github.com/clockgrove/factory/issues/380))
+
 - Add media-agnostic Objective input assets with exact-byte identity, explicit local-file and
   recognized GitHub-attachment import, rights and visibility policy, static text/Markdown and
   bounded raster handlers, opaque passive transport, immutable Git-ref receipts, verified offline

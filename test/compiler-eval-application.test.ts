@@ -88,6 +88,7 @@ const golden = JSON.parse(
 const graph = parsePersistedCompiledObjective({ title: golden.title, workItems: golden.workItems });
 const proposal = CompilerProposalSchema.parse({
   protocol: "clockgrove.factory/compiler-proposal",
+  kind: "work-items",
   workItems: graph.workItems.map((item, itemIndex) => ({
     id: item.id,
     title: item.title,
@@ -150,6 +151,9 @@ const proposalRequest = CompilerRequestSchema.parse({
   },
   constraints: {
     maxWorkItems: 100,
+    planningWorkItemThreshold: 100,
+    planningCriticalPathMinutes: 43_200,
+    planningAggregateWorkMinutes: 432_000,
     maxDependenciesPerItem: 50,
     allowedNetworkDestinations: [],
     workItemTimeoutMinutes: 30,
@@ -256,7 +260,15 @@ function history() {
         status: "covered",
         itemIds: [graph.workItems[0]!.id],
         acceptanceBindings: [
-          { itemId: graph.workItems[0]!.id, criterionId: proposal.workItems[0]!.criteria[0]!.id },
+          {
+            itemId: graph.workItems[0]!.id,
+            criterionId:
+              proposal.kind === "work-items"
+                ? proposal.workItems[0]!.criteria[0]!.id
+                : (() => {
+                    throw new Error("fixture requires a Work Item proposal");
+                  })(),
+          },
         ],
         evidenceIds: ["objective"],
         reason: "Mapped acceptance",

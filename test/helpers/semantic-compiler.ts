@@ -103,6 +103,9 @@ export function semanticRequest(
     },
     constraints: {
       maxWorkItems: 100,
+      planningWorkItemThreshold: 100,
+      planningCriticalPathMinutes: 43_200,
+      planningAggregateWorkMinutes: 432_000,
       maxDependenciesPerItem: 50,
       allowedNetworkDestinations: [...allowedNetworkDestinations].sort(),
       workItemTimeoutMinutes: 30,
@@ -119,6 +122,7 @@ export function semanticProposal(request: CompilerRequest, count = 1): CompilerP
   if (!recipe) throw new Error("semantic fixture requires an observed validation recipe");
   return {
     protocol: "clockgrove.factory/compiler-proposal",
+    kind: "work-items",
     workItems: Array.from({ length: count }, (_, index) => {
       const number = index + 1;
       return {

@@ -11,6 +11,8 @@ import {
   CompilerProposalSchema,
   CompilerRequestSchema,
   CompilerValidationReportSchema,
+  type CompilerObjectivesProposal,
+  type CompilerWorkItemsProposal,
   type CompilerViolation,
 } from "../src/compiler/contracts.js";
 import {
@@ -38,6 +40,11 @@ afterEach(async () => {
 });
 
 const allToolchainDestinations = ["files.pythonhosted.org", "pypi.org", "registry.npmjs.org"];
+const workItemsProposal = (count = 1): CompilerWorkItemsProposal => {
+  const proposal = semanticProposal(semanticRequest(), count);
+  if (!("workItems" in proposal)) throw new Error("semantic fixture must return Work Items");
+  return proposal;
+};
 
 describe("adapter-owned compiler capabilities", () => {
   it("retains an unrelated observed generic recipe beside unsupported provider evidence", () => {
@@ -214,7 +221,19 @@ describe("adapter-owned compiler capabilities", () => {
 
 describe("strict semantic compiler contracts", () => {
   const ajv = new Ajv2020({ strict: false, allowUnionTypes: true });
-  const jsonProposal = ajv.compile(COMPILER_PROPOSAL_JSON_SCHEMA);
+  const jsonProviderProposal = ajv.compile(COMPILER_PROPOSAL_JSON_SCHEMA);
+  const providerEnvelope = (value: Record<string, unknown>) => ({
+    protocol: value.protocol,
+    kind: value.kind,
+    workItems: [],
+    objectives: [],
+    coverage: [],
+    triggers: [],
+    requirements: [],
+    ...value,
+  });
+  const jsonProposal = (value: unknown) =>
+    jsonProviderProposal(providerEnvelope(value as Record<string, unknown>));
   const jsonRequest = ajv.compile(COMPILER_REQUEST_JSON_SCHEMA);
 
   it.each([
@@ -241,7 +260,7 @@ describe("strict semantic compiler contracts", () => {
 
   it("keeps strict Zod and JSON schemas in parity for valid and invalid boundaries", () => {
     const request = semanticRequest();
-    const proposal = semanticProposal(semanticRequest());
+    const proposal = workItemsProposal();
     const invalidProposal = structuredClone(proposal) as Record<string, unknown>;
     (invalidProposal.workItems as Array<Record<string, unknown>>)[0]!.scope = ["src/[glob].ts"];
     const invalidRequest = structuredClone(request) as Record<string, unknown>;
@@ -266,6 +285,232 @@ describe("strict semantic compiler contracts", () => {
       expect(zod.safeParse(value).success).toBe(accepted);
       expect(json(value)).toBe(accepted);
     }
+  });
+
+  it("accepts each strict canonical proposal variant with a required discriminator", () => {
+    const workItems = workItemsProposal();
+    expect(CompilerProposalSchema.parse(workItems)).toMatchObject({ kind: "work-items" });
+    expect(jsonProposal(workItems), JSON.stringify(jsonProviderProposal.errors)).toBe(true);
+    expect(
+      parseAndValidateCompilerProposal(semanticRequest(), providerEnvelope(workItems)).proposal,
+    ).toEqual(workItems);
+    const providerWithLegacyField = {
+      ...providerEnvelope(workItems),
+      version: "v1",
+    };
+    expect(
+      parseAndValidateCompilerProposal(semanticRequest(), providerWithLegacyField).proposal,
+    ).toBeUndefined();
+    const missingKind = structuredClone(workItems) as Record<string, unknown>;
+    delete missingKind.kind;
+    expect(CompilerProposalSchema.safeParse(missingKind).success).toBe(false);
+    expect(
+      parseAndValidateCompilerProposal(semanticRequest(), missingKind).proposal,
+    ).toBeUndefined();
+
+    const trigger = {
+      code: "work-item-threshold" as const,
+      source: "projected-graph" as const,
+      availability: "estimated" as const,
+      observed: 72,
+      threshold: 50,
+      obligationIds: ["explicit-contract"],
+      explanation: "The projected graph exceeds the configured planning threshold.",
+    };
+    const objective = (id: string, prerequisiteOutputs: Array<Record<string, string>> = []) => ({
+      id,
+      title: `Deliver ${id}`,
+      outcome: `${id} is independently acceptable.`,
+      acceptance: [
+        {
+          id: `${id}-complete`,
+          kind: id === "foundation" ? ("owned" as const) : ("aggregate-integration" as const),
+          text: `${id} has its expected behavior.`,
+        },
+      ],
+      ownedScope: [`src/${id}.ts`],
+      obligationIds: id === "foundation" ? ["explicit-contract"] : [],
+      planningEstimate: {
+        workItems: 12,
+        criticalPathMinutes: null,
+        aggregateWorkMinutes: null,
+        basis: `${id} is bounded to one independently accepted output.`,
+      },
+      outputs: [
+        {
+          id: `${id}-change`,
+          description: `${id} is integrated.`,
+          completionAcceptanceIds: [`${id}-complete`],
+        },
+      ],
+      prerequisiteOutputs,
+    });
+    const objectives = {
+      protocol: "clockgrove.factory/compiler-proposal" as const,
+      kind: "objectives" as const,
+      objectives: [
+        objective("foundation"),
+        objective("consumer", [{ objectiveId: "foundation", outputId: "foundation-change" }]),
+      ],
+      coverage: [
+        {
+          obligationId: "explicit-contract",
+          disposition: "aggregate-integration" as const,
+          objectiveId: "consumer",
+          acceptanceId: "consumer-complete",
+        },
+      ],
+      triggers: [trigger],
+    };
+    const clarification = {
+      protocol: "clockgrove.factory/compiler-proposal" as const,
+      kind: "clarification" as const,
+      requirements: [
+        {
+          id: "target-platform",
+          question: "Which supported target platform must own the deployment output?",
+          reason: "The requested authorization boundary cannot be inferred from repository facts.",
+          obligationIds: ["explicit-contract"],
+        },
+      ],
+      triggers: [{ ...trigger, code: "authorization-boundary" as const, observed: null }],
+    };
+
+    for (const value of [objectives, clarification]) {
+      expect(CompilerProposalSchema.safeParse(value).success).toBe(true);
+      expect(jsonProposal(value), JSON.stringify(jsonProviderProposal.errors)).toBe(true);
+    }
+
+    const thresholdRequest = semanticRequest();
+    thresholdRequest.constraints.planningWorkItemThreshold = 24;
+    const boundedObjectives = structuredClone(objectives);
+    boundedObjectives.triggers[0]!.threshold = 24;
+    boundedObjectives.triggers[0]!.observed = 101;
+    expect(
+      parseAndValidateCompilerProposal(thresholdRequest, providerEnvelope(boundedObjectives)).report
+        .status,
+    ).toBe("valid");
+
+    const oversizedObjective = structuredClone(boundedObjectives);
+    oversizedObjective.objectives[0]!.planningEstimate.workItems = 25;
+    expect(
+      parseAndValidateCompilerProposal(thresholdRequest, providerEnvelope(oversizedObjective))
+        .report.violations,
+    ).toContainEqual(
+      expect.objectContaining({
+        code: "invalid-objective-bound",
+        itemId: "foundation",
+        field: "/objectives/0/planningEstimate",
+      }),
+    );
+
+    const contradictoryObjective = structuredClone(boundedObjectives) as CompilerObjectivesProposal;
+    contradictoryObjective.objectives[0]!.planningEstimate.criticalPathMinutes = 20;
+    contradictoryObjective.objectives[0]!.planningEstimate.aggregateWorkMinutes = 10;
+    expect(
+      parseAndValidateCompilerProposal(thresholdRequest, providerEnvelope(contradictoryObjective))
+        .report.violations,
+    ).toContainEqual(expect.objectContaining({ code: "invalid-objective-bound" }));
+
+    const thresholdClarification = {
+      ...clarification,
+      triggers: [
+        {
+          ...trigger,
+          observed: 101,
+          threshold: 24,
+        },
+      ],
+    };
+    expect(
+      parseAndValidateCompilerProposal(thresholdRequest, providerEnvelope(thresholdClarification))
+        .report.status,
+    ).toBe("valid");
+    thresholdClarification.triggers[0]!.threshold = 25;
+    expect(
+      parseAndValidateCompilerProposal(thresholdRequest, providerEnvelope(thresholdClarification))
+        .report.violations,
+    ).toContainEqual(expect.objectContaining({ code: "invalid-planning-trigger" }));
+
+    const placeholderClarification = structuredClone(clarification);
+    placeholderClarification.requirements[0]!.question = "TBD";
+    placeholderClarification.requirements[0]!.reason = "placeholder";
+    expect(
+      parseAndValidateCompilerProposal(
+        semanticRequest(),
+        providerEnvelope(placeholderClarification),
+      ).report.violations,
+    ).toContainEqual(expect.objectContaining({ code: "invalid-clarification" }));
+
+    const duplicateClarification = structuredClone(clarification);
+    duplicateClarification.requirements.push(
+      structuredClone(duplicateClarification.requirements[0]!),
+    );
+    expect(
+      parseAndValidateCompilerProposal(semanticRequest(), providerEnvelope(duplicateClarification))
+        .report.violations,
+    ).toContainEqual(expect.objectContaining({ code: "duplicate-clarification-id" }));
+
+    const unboundClarification = structuredClone(clarification);
+    unboundClarification.requirements[0]!.obligationIds = [];
+    expect(CompilerProposalSchema.safeParse(unboundClarification).success).toBe(false);
+    const unboundTrigger = structuredClone(objectives);
+    unboundTrigger.triggers[0]!.obligationIds = [];
+    expect(CompilerProposalSchema.safeParse(unboundTrigger).success).toBe(false);
+
+    const mixed = { ...objectives, workItems: workItems.workItems };
+    const vagueClarification = { ...clarification, requirements: [] };
+    const undersizedSplit = { ...objectives, objectives: objectives.objectives.slice(0, 1) };
+    for (const value of [mixed, vagueClarification, undersizedSplit]) {
+      expect(CompilerProposalSchema.safeParse(value).success).toBe(false);
+      // Provider structured output cannot express cross-field discriminator constraints;
+      // the canonical parser rejects them deterministically after transport validation.
+      expect(jsonProposal(value)).toBe(true);
+    }
+  });
+
+  it("represents unavailable duration as null without weakening the 100-item hard cap", () => {
+    const proposal = workItemsProposal();
+    proposal.workItems[0]!.executionIntent.estimatedDurationMinutes = null;
+    expect(CompilerProposalSchema.safeParse(proposal).success).toBe(true);
+    expect(jsonProposal(proposal), JSON.stringify(jsonProviderProposal.errors)).toBe(true);
+
+    const excessive = workItemsProposal(101);
+    expect(CompilerProposalSchema.safeParse(excessive).success).toBe(false);
+    expect(jsonProposal(excessive)).toBe(false);
+  });
+
+  it("keeps bounded graphs on the ordinary path and detects serial planning pressure", () => {
+    const request = semanticRequest();
+    request.constraints.planningWorkItemThreshold = 10;
+    request.constraints.planningCriticalPathMinutes = 500;
+    request.constraints.planningAggregateWorkMinutes = 2_000;
+
+    const bounded = semanticProposal(request, 2);
+    for (const item of bounded.workItems) item.executionIntent.estimatedDurationMinutes = 100;
+    expect(
+      parseAndValidateCompilerProposal(request, bounded, semanticProjectionContext()).report.status,
+    ).toBe("valid");
+
+    const serial = semanticProposal(request, 7);
+    for (const [index, item] of serial.workItems.entries()) {
+      item.executionIntent.estimatedDurationMinutes = 100;
+      item.dependsOn = index === 0 ? [] : [`item-${index}`];
+    }
+    expect(
+      parseAndValidateCompilerProposal(request, serial, semanticProjectionContext()).report
+        .violations,
+    ).toContainEqual(
+      expect.objectContaining({
+        code: "objective-planning-required",
+        observed: expect.objectContaining({ configuredCriticalPathMinutes: 700 }),
+      }),
+    );
+
+    for (const item of serial.workItems) item.executionIntent.estimatedDurationMinutes = null;
+    expect(
+      parseAndValidateCompilerProposal(request, serial, semanticProjectionContext()).report.status,
+    ).toBe("valid");
   });
 
   it("keeps every validation-report and surface cross-field refinement in JSON parity", () => {
@@ -322,13 +567,13 @@ describe("strict semantic compiler contracts", () => {
   it.each(["service.LocalHost", "Metadata.Google.Internal"])(
     "leaves forbidden network destination %s to deterministic proposal validation",
     (destination) => {
-      const proposal = semanticProposal(semanticRequest());
+      const proposal = workItemsProposal();
       const candidate = structuredClone(proposal) as unknown as {
         workItems: Array<{ executionIntent: { additionalNetworkDestinations: string[] } }>;
       };
       candidate.workItems[0]!.executionIntent.additionalNetworkDestinations = [destination];
       expect(CompilerProposalSchema.safeParse(candidate).success).toBe(false);
-      expect(jsonProposal(candidate), JSON.stringify(jsonProposal.errors)).toBe(true);
+      expect(jsonProposal(candidate), JSON.stringify(jsonProviderProposal.errors)).toBe(true);
       expect(parseAndValidateCompilerProposal(semanticRequest(), candidate).report).toMatchObject({
         status: "repairable",
         violations: expect.arrayContaining([expect.objectContaining({ code: "schema-invalid" })]),
@@ -342,7 +587,7 @@ describe("strict semantic compiler contracts", () => {
       const candidate = semanticProposal(semanticRequest());
       candidate.workItems[0]!.exclusiveResources = [resource];
       expect(CompilerProposalSchema.safeParse(candidate).success).toBe(false);
-      expect(jsonProposal(candidate), JSON.stringify(jsonProposal.errors)).toBe(true);
+      expect(jsonProposal(candidate), JSON.stringify(jsonProviderProposal.errors)).toBe(true);
       expect(parseAndValidateCompilerProposal(semanticRequest(), candidate).report).toMatchObject({
         status: "repairable",
         violations: expect.arrayContaining([expect.objectContaining({ code: "schema-invalid" })]),
@@ -356,7 +601,7 @@ describe("strict semantic compiler contracts", () => {
       const candidate = semanticProposal(semanticRequest());
       candidate.workItems[0]!.scope = [scope];
       expect(CompilerProposalSchema.safeParse(candidate).success).toBe(false);
-      expect(jsonProposal(candidate), JSON.stringify(jsonProposal.errors)).toBe(true);
+      expect(jsonProposal(candidate), JSON.stringify(jsonProviderProposal.errors)).toBe(true);
       expect(parseAndValidateCompilerProposal(semanticRequest(), candidate).report).toMatchObject({
         status: "repairable",
         violations: expect.arrayContaining([expect.objectContaining({ code: "invalid-scope" })]),
@@ -367,7 +612,7 @@ describe("strict semantic compiler contracts", () => {
   it("retains strict durable request validation for an embedded previous proposal", () => {
     const previousProposal = semanticProposal(semanticRequest());
     previousProposal.workItems[0]!.scope = ["../secret"];
-    expect(jsonProposal(previousProposal), JSON.stringify(jsonProposal.errors)).toBe(true);
+    expect(jsonProposal(previousProposal), JSON.stringify(jsonProviderProposal.errors)).toBe(true);
 
     const request = semanticRequest();
     request.previousProposal = previousProposal;
@@ -382,7 +627,7 @@ describe("strict semantic compiler contracts", () => {
     const second = validateCompilerRequest(structuredClone(request));
     expect(first).toEqual(second);
     expect(first.status).toBe("valid");
-    const proposal = semanticProposal(semanticRequest());
+    const proposal = workItemsProposal();
     proposal.workItems[0]!.scope = ["main.go"];
     expect(
       parseAndValidateCompilerProposal(request, proposal, semanticProjectionContext(pinned)).report,

@@ -150,6 +150,7 @@ async function fixture() {
   const claims = { version: 1 as const, obligations: inventory.obligations };
   const proposal: CompilerProposal = {
     protocol: "clockgrove.factory/compiler-proposal" as const,
+    kind: "work-items",
     workItems: [
       {
         id: "code",
@@ -649,6 +650,7 @@ describe("independent compiler management boundaries", () => {
       undefined,
       context,
     );
+    if (repaired.proposal.kind !== "work-items") throw new Error("fixture requires Work Items");
     expect(repaired.proposal.workItems).toHaveLength(1);
   });
 

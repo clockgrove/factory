@@ -33,7 +33,7 @@ import {
   CompilerProposalSchema,
   CompilerRequestSchema,
   CompilerValidationReportSchema,
-  type CompilerProposal,
+  type CompilerProposalValue,
   type CompilerRequest,
   type CompilerValidationReport,
 } from "../compiler/contracts.js";
@@ -74,9 +74,28 @@ import { ProviderQuotaError } from "../providers/quota.js";
 
 interface PersistedProposalResult {
   request: CompilerRequest;
-  proposal: CompilerProposal;
+  proposal: CompilerProposalValue;
   report: CompilerValidationReport;
   provenance: { requestDigest: string };
+}
+
+const planningStopPattern = /^compiler-planning-result:(objectives|clarification):([a-f0-9]{64})$/;
+
+export interface CompilerPlanningStop {
+  kind: "objectives" | "clarification";
+  identity: string;
+}
+
+export function parseCompilerPlanningStop(reason: string): CompilerPlanningStop | null {
+  const match = planningStopPattern.exec(reason);
+  if (!match) return null;
+  return { kind: match[1] as CompilerPlanningStop["kind"], identity: match[2]! };
+}
+
+function compilerPlanningStop(
+  proposal: Extract<CompilerProposalValue, { kind: "objectives" | "clarification" }>,
+) {
+  return `compiler-planning-result:${proposal.kind}:${compilerEvalDigest(proposal)}`;
 }
 
 function durableInvocationProvenance(
@@ -181,6 +200,8 @@ export function assertCompilerDraftSelection(
   if (!proposalResult || !validation || !verdictResult)
     throw new Error("compiler selection lacks proposal, projection, or judgment evidence");
   const persisted = persistedProposalResult(proposalResult.payload.value);
+  if (persisted.proposal.kind !== "work-items")
+    throw new Error("compiler selection cannot project an Objective planning result");
   const proposalIntent = records.find(
     (record) =>
       record.kind === "invocation" &&
@@ -347,6 +368,9 @@ export async function compileEvaluatedDraft(args: {
           };
         }
         const persisted = persistedProposalResult(value);
+        if (persisted.proposal.kind !== "work-items") {
+          throw new CompilerDraftStopError(compilerPlanningStop(persisted.proposal));
+        }
         if (!expectedCompilerRequestDigest)
           throw new Error("compiler proposal has no reserved request binding");
         if (persisted.provenance.requestDigest !== expectedCompilerRequestDigest)
@@ -401,6 +425,7 @@ export async function compileEvaluatedDraft(args: {
         try {
           proposal = persistedProposalResult(candidate);
         } catch {}
+        if (proposal?.proposal.kind !== "work-items") return priorReviewEvidence ?? null;
         if (!proposal || proposal.request.revision === 0) {
           const carried = validateCompilerInferenceChallenges(priorReviewEvidence ?? [], original);
           return carried.length ? carried : null;
@@ -516,8 +541,9 @@ export async function compileEvaluatedDraft(args: {
           }
           const obligations = inventory(request.inventory);
           if (request.stage === "judge") {
-            if (!request.previous || !request.projection)
+            if (!request.previous || !("workItems" in request.previous) || !request.projection)
               throw new Error("judge has no mechanically valid proposal and projection");
+            const judgeProposal = request.previous;
             const challenges = validateCompilerInferenceChallenges(
               request.reviewEvidence ?? [],
               obligations,
@@ -531,7 +557,7 @@ export async function compileEvaluatedDraft(args: {
               ...(priorCompilationFailure ? { priorCompilationFailure } : {}),
               inventory: obligations,
               challenges,
-              proposal: request.previous,
+              proposal: judgeProposal,
               projectionTrace: request.projection,
               draftDigest: request.projection.graphDigest,
               inventoryDigest: compilerEvalDigest(obligations),
@@ -558,7 +584,7 @@ export async function compileEvaluatedDraft(args: {
               {
                 compilation: frozenContext,
                 inventory: obligations,
-                proposal: request.previous,
+                proposal: judgeProposal,
                 projectionTrace: request.projection,
                 graphDigest: request.projection.graphDigest,
                 challenges,

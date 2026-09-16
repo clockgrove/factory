@@ -277,8 +277,11 @@ wheels = [
   const managed = scenario !== "daytona-burst";
   const provider =
     scenario === "copilot-objective" ? COPILOT : scenario === "codex-objective" ? CODEX : DAYTONA;
-  const { compilerEvaluation: _defaultCompilerEvaluation, ...fixtureDefaultPolicy } =
-    DEFAULT_RUN_POLICY;
+  const {
+    compilerEvaluation: _defaultCompilerEvaluation,
+    objectivePlanning: _defaultObjectivePlanning,
+    ...fixtureDefaultPolicy
+  } = DEFAULT_RUN_POLICY;
   const policy = parseRunPolicy({
     ...fixtureDefaultPolicy,
     ...(faults.compilerEvaluation ? { compilerEvaluation: faults.compilerEvaluation } : {}),

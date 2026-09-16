@@ -120,6 +120,22 @@ toolchain authority, runtime pins, provider steps, policy limits, and graph seri
 Factory-owned facts derived from the pinned base commit. Factory validates the semantic proposal,
 projects it deterministically into the execution graph, and records the request, proposal, validation,
 and projection identities. Initial proposals and bounded repairs use the same schema and entry point.
+The proposal has three strict result kinds: `work-items` for one bounded Objective, `objectives` for
+a project-sized request that must be split first, and `clarification` when required planning facts are
+missing. The hard execution graph limit remains 100 Work Items. Fresh default policies use provisional
+earlier planning thresholds of 24 Work Items, 75% of the Objective timeout for configured critical
+path, and 150% for configured aggregate work; `objectivePlanning` can set all three ratios/counts.
+These are admission signals, not completion forecasts. Missing duration estimates remain unavailable.
+
+`factory_plan` returns proposed Objective specifications with an identity digest, complete parent-
+requirement coverage, concrete outputs, completion criteria, and prerequisite-output handoffs. They
+also carry per-child Work Item, critical-path, and aggregate-work estimates checked against the
+configured planning thresholds, plus the concrete basis for each boundary. An unavailable estimate
+remains `null`; it is not invented to make a child appear bounded. These are proposals—not GitHub
+issues, activated Objectives, or completed work. Planning never expands the
+selected budget, deadline, trust, or network policy. Factory does not yet materialize or automatically
+execute a cross-Objective plan; any issue creation is a separate explicit user action, and each
+runnable Objective is compiled only after its prerequisite output is committed.
 For a new activation with no caller-supplied policy, Factory records an explicit auto-repair
 envelope: two shared repairs, seven total compiler invocations, 600 seconds, and a 500,000 observed-
 token stop threshold. The threshold is checked between calls and is not a provider-enforced hard cap;

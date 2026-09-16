@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 import { CompiledGraphManager, compiledGraphProjectionRef } from "../src/control/graphs.js";
+import { loadCompilerDrafts } from "../src/control/compiler-drafts.js";
 import { GitHubReader, cancellationRequestFromComments } from "../src/github.js";
 import { decodeEventComments, encodeEventComment } from "../src/control/receipts.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
@@ -18,6 +19,7 @@ import {
   type CompilerJudgeVerdict,
   type ObligationInventory,
 } from "../src/evaluation/compiler-eval.js";
+import { validatePersistedCompilerDraftJournal } from "../src/evaluation/compiler-draft-loop.js";
 import { GithubOctokitGraphWriter } from "../src/graph.js";
 import { buildRecoveryProposal } from "../src/recovery/proposal.js";
 import { recoveryReadPort } from "../src/recovery/github-read-port.js";
@@ -393,6 +395,180 @@ async function graphlessCompilerRecoveryFixture() {
 }
 
 describe("Supervisor compiler evaluation activation boundary", () => {
+  it("completes a planning-only result without projection or defect publication", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      compilerEvaluation: { mode: "auto-repair" },
+    });
+    try {
+      freshObjective(f);
+      f.policy.findingReporting = {
+        destinations: [
+          {
+            repository: "fixture/provider-qualification",
+            audience: "private",
+            operations: ["read", "create-issue", "comment-evidence"],
+          },
+        ],
+        maxPublicationWrites: 4,
+      };
+      const calls: string[] = [];
+      Object.assign(f.management, { supportsCompilerAdmission: true });
+      f.management.extractObligations = async (context, checkpoint, beforeModelInvocation) => {
+        await beforeModelInvocation?.(invocationProvenance(context.baseSha));
+        calls.push("inventory");
+        const inventory: ObligationInventory = {
+          version: 1,
+          objectiveDigest: compilerEvalDigest(context.objective),
+          baseSha: context.baseSha,
+          evidence: await readCompilerObligationEvidence(context),
+          obligations: [
+            {
+              id: "foundation",
+              text: "Deliver an independently accepted foundation.",
+              kind: "explicit",
+              evidenceIds: ["objective"],
+              acceptanceEvidence: "The foundation output is accepted.",
+            },
+            {
+              id: "consumer",
+              text: "Deliver a consumer of the accepted foundation.",
+              kind: "explicit",
+              evidenceIds: ["objective"],
+              acceptanceEvidence: "The consumer is accepted against the foundation output.",
+            },
+          ],
+        };
+        const result = { inventory, provenance: invocationProvenance(context.baseSha), usage };
+        await checkpoint(result);
+        return result;
+      };
+      f.management.proposePlan = async (request, checkpoint, projection, beforeModelInvocation) => {
+        await beforeModelInvocation?.(invocationProvenance(request.baseSha));
+        calls.push("compile");
+        const proposal = {
+          protocol: "clockgrove.factory/compiler-proposal" as const,
+          kind: "objectives" as const,
+          objectives: [
+            {
+              id: "foundation",
+              title: "Deliver the foundation",
+              outcome: "An independently accepted foundation is available.",
+              acceptance: [
+                {
+                  id: "foundation-accepted",
+                  kind: "owned" as const,
+                  text: "The foundation behavior and output are accepted.",
+                },
+              ],
+              ownedScope: ["src/foundation/"],
+              obligationIds: ["foundation"],
+              planningEstimate: {
+                workItems: 8,
+                criticalPathMinutes: null,
+                aggregateWorkMinutes: null,
+                basis: "The foundation is bounded to one accepted artifact and its direct tests.",
+              },
+              outputs: [
+                {
+                  id: "foundation-output",
+                  description: "The accepted foundation artifact.",
+                  completionAcceptanceIds: ["foundation-accepted"],
+                },
+              ],
+              prerequisiteOutputs: [],
+            },
+            {
+              id: "consumer",
+              title: "Deliver the consumer",
+              outcome: "The consumer uses the accepted foundation.",
+              acceptance: [
+                {
+                  id: "consumer-accepted",
+                  kind: "owned" as const,
+                  text: "The consumer behavior is accepted against the foundation.",
+                },
+              ],
+              ownedScope: ["src/consumer/"],
+              obligationIds: ["consumer"],
+              planningEstimate: {
+                workItems: 8,
+                criticalPathMinutes: null,
+                aggregateWorkMinutes: null,
+                basis: "The consumer is bounded to one accepted foundation handoff.",
+              },
+              outputs: [
+                {
+                  id: "consumer-output",
+                  description: "The accepted consumer result.",
+                  completionAcceptanceIds: ["consumer-accepted"],
+                },
+              ],
+              prerequisiteOutputs: [{ objectiveId: "foundation", outputId: "foundation-output" }],
+            },
+          ],
+          coverage: [
+            {
+              obligationId: "foundation",
+              disposition: "owned" as const,
+              objectiveId: "foundation",
+              acceptanceId: "foundation-accepted",
+            },
+            {
+              obligationId: "consumer",
+              disposition: "owned" as const,
+              objectiveId: "consumer",
+              acceptanceId: "consumer-accepted",
+            },
+          ],
+          triggers: [
+            {
+              code: "independent-milestones" as const,
+              source: "obligation-inventory" as const,
+              availability: "observed" as const,
+              observed: "The consumer requires a separately accepted foundation output.",
+              threshold: null,
+              obligationIds: ["foundation", "consumer"],
+              explanation: "The request contains two independently reviewable milestones.",
+            },
+          ],
+        };
+        const report = parseAndValidateCompilerProposal(request, proposal, projection).report;
+        expect(report.status, JSON.stringify(report.violations)).toBe("valid");
+        const result = {
+          request,
+          proposal,
+          report,
+          usage,
+          provenance: {
+            ...invocationProvenance(request.baseSha),
+            requestDigest: compilerEvalDigest(request),
+          },
+        };
+        await checkpoint(result);
+        return result;
+      };
+      f.management.judgePlan = vi.fn(async () => {
+        throw new Error("planning results must not enter judgment");
+      });
+
+      const first = await f.run();
+      expect(first).toMatchObject({
+        status: "completed",
+        reason: expect.stringMatching(/proposed/),
+      });
+      expect(calls).toEqual(["inventory", "compile"]);
+      expect(f.management.judgePlan).not.toHaveBeenCalled();
+      assertNoProjection(f);
+      expect(f.events().filter((event) => event.kind === "finding")).toEqual([]);
+      expect([...f.refs.keys()].some((ref) => ref.includes("/compiler-drafts/"))).toBe(true);
+      const records = await loadCompilerDrafts(f.storage, 7, f.runId);
+      expect(() => validatePersistedCompilerDraftJournal(records)).not.toThrow();
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
   it("repairs the observed greenfield pnpm failure shape under the omitted-policy default", async () => {
     const f = await providerSupervisorFixture("daytona-burst", {
       localOnly: true,
@@ -448,7 +624,7 @@ describe("Supervisor compiler evaluation activation boundary", () => {
         _projection,
         beforeModelInvocation,
       ) => {
-        await beforeModelInvocation?.();
+        await beforeModelInvocation?.(invocationProvenance(request.baseSha));
         calls.push(request.revision === 0 ? "compile" : "repair");
         const adapter = request.repository.toolchains.find(
           (entry) => entry.adapterId === "node-pnpm" && entry.state === "eligible-deferred",
@@ -502,6 +678,7 @@ describe("Supervisor compiler evaluation activation boundary", () => {
         });
         const proposal = CompilerProposalSchema.parse({
           protocol: "clockgrove.factory/compiler-proposal",
+          kind: "work-items",
           workItems: [
             item(
               "bootstrap",
@@ -535,6 +712,7 @@ describe("Supervisor compiler evaluation activation boundary", () => {
           await checkpoint(result);
           return result;
         }
+        if (proposal.kind !== "work-items") throw new Error("fixture requires Work Items");
         const secondOperation = parseCompilerOperation("node-pnpm", "pnpm run test");
         if (!secondOperation) throw new Error("fixture requires a finite second pnpm operation");
         proposal.workItems[0]!.criteria[0]!.validation[0]!.evidence.push({

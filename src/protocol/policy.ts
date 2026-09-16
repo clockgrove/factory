@@ -240,6 +240,21 @@ export const CompilerEvaluationPolicySchema = z
   })
   .strict();
 
+export const ObjectivePlanningPolicySchema = z
+  .object({
+    maxWorkItemsPerObjective: z.number().int().min(1).max(100),
+    maxCriticalPathRatio: z.number().positive().max(1),
+    maxAggregateWorkRatio: z.number().positive().max(10),
+  })
+  .strict();
+
+export const DEFAULT_OBJECTIVE_PLANNING_POLICY = Object.freeze({
+  // Provisional until qualification provides enough observed planning data.
+  maxWorkItemsPerObjective: 24,
+  maxCriticalPathRatio: 0.75,
+  maxAggregateWorkRatio: 1.5,
+});
+
 export const RunPolicySchema = z
   .object({
     backendOrder: z.array(safeId).min(1).max(16),
@@ -273,6 +288,7 @@ export const RunPolicySchema = z
     models: ModelsPolicySchema.optional(),
     economics: EconomicsPolicySchema.optional(),
     compilerEvaluation: CompilerEvaluationPolicySchema.optional(),
+    objectivePlanning: ObjectivePlanningPolicySchema.optional(),
     /** Explicit authority for bounded defect publication; absence denies automatic writes. */
     findingReporting: FindingReportingPolicySchema.optional(),
   })
@@ -303,6 +319,7 @@ export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
   trust: "explicitly_activated_repo",
   managementBackend: "codex-cli/local",
   compilerEvaluation: DEFAULT_COMPILER_EVALUATION_POLICY,
+  objectivePlanning: DEFAULT_OBJECTIVE_PLANNING_POLICY,
   allowedNetworkDestinations: ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"],
   priority: {
     source: "subissue-order" as const,

@@ -13,6 +13,11 @@ import {
   type ManagementUsage,
 } from "../management/backend.js";
 import { compilePlan } from "../management/compile.js";
+import { compilerEvalDigest } from "../evaluation/compiler-eval.js";
+import type {
+  CompilerClarificationProposal,
+  CompilerObjectivesProposal,
+} from "../compiler/contracts.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy, resolveModelSelection } from "../protocol/policy.js";
 import { assertNewRunBudgetIntent } from "../protocol/budget-intent.js";
 import type { ApplicationSnapshot } from "./services.js";
@@ -48,6 +53,11 @@ export interface PlanReport {
   };
   graph: ReturnType<typeof summarizeGraph> | null;
   proposedGraph?: CompiledObjective;
+  planning?: {
+    state: "proposed-not-created-or-activated";
+    identity: string;
+    result: CompilerObjectivesProposal | CompilerClarificationProposal;
+  };
   usage: ManagementUsage | null;
   diagnostics: Array<{ status: "pass" | "warning" | "fail"; summary: string }>;
 }
@@ -319,11 +329,44 @@ export async function buildPlanReport(input: {
         checkpointed = true;
       });
       if (!checkpointed)
-        throw new Error("management compiler returned without its result callback");
+        if (result.kind === "work-items")
+          throw new Error("management compiler returned without its result callback");
+      observedUsage = { ...result.usage };
+      if (result.kind !== "work-items") {
+        await input.planning.validateCheckout(
+          input.planning.repositoryPath,
+          baseSha,
+          input.repository,
+        );
+        preparationDiagnostics.push({
+          status: result.kind === "objectives" ? "warning" : "fail",
+          summary:
+            result.kind === "objectives"
+              ? "the request exceeds the configured planning envelope; bounded Objectives are proposed only and no issues or runs were created"
+              : "compilation needs the listed clarification before a Work Item graph can be proposed",
+        });
+        return {
+          ...common,
+          mode: "compilation",
+          compilation: {
+            requested: true,
+            result: "completed",
+            backend: management.id,
+            usagePersistence: "response-only",
+          },
+          graph: null,
+          planning: {
+            state: "proposed-not-created-or-activated",
+            identity: compilerEvalDigest(result.proposal),
+            result: result.proposal,
+          },
+          usage: observedUsage,
+          diagnostics: preparationDiagnostics,
+        };
+      }
       validateGraph(result.objective);
       if (result.objective.workItems.some((item) => item.baseSha?.toLowerCase() !== baseSha))
         throw new Error("proposed Work Item base does not match the inspected checkout");
-      observedUsage = { ...result.usage };
       await input.planning.validateCheckout(
         input.planning.repositoryPath,
         baseSha,

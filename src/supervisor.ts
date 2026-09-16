@@ -282,6 +282,7 @@ import { CodexCliManagementBackend } from "./management/codex-cli.js";
 import {
   compileEvaluatedDraft,
   assertCompilerDraftSelection,
+  parseCompilerPlanningStop,
 } from "./management/draft-compilation.js";
 import { CompilerDraftManager, loadCompilerDrafts } from "./control/compiler-drafts.js";
 import { compilerEvalDigest } from "./evaluation/compiler-eval.js";
@@ -775,6 +776,8 @@ export function assertManagementInvocationNotFailed(
 
 /** Report-only runs finish their evaluation purpose without committing an execution graph. */
 class CompilerDraftReportCompleted extends Error {}
+/** Planning-only results finish without graph projection or defect publication. */
+class CompilerPlanningCompleted extends Error {}
 
 export type CompilationFaultPoint =
   | "after-model-return"
@@ -4771,15 +4774,23 @@ export class FactorySupervisor {
       const escalation = errors.find(
         (error) =>
           !(error instanceof RunCancellationRequestedError) &&
-          !(error instanceof CompilerDraftReportCompleted),
+          !(error instanceof CompilerDraftReportCompleted) &&
+          !(error instanceof CompilerPlanningCompleted),
       );
       if (escalation !== undefined)
         return {
           event: "FactoryRunEscalated",
           reason: escalation instanceof Error ? escalation.message : String(escalation),
         };
-      const completed = errors.find((error) => error instanceof CompilerDraftReportCompleted);
-      if (completed instanceof CompilerDraftReportCompleted)
+      const completed = errors.find(
+        (error) =>
+          error instanceof CompilerDraftReportCompleted ||
+          error instanceof CompilerPlanningCompleted,
+      );
+      if (
+        completed instanceof CompilerDraftReportCompleted ||
+        completed instanceof CompilerPlanningCompleted
+      )
         return { event: "FactoryRunCompleted", reason: completed.message };
       return proposed;
     };
@@ -5299,9 +5310,26 @@ export class FactorySupervisor {
                         ),
                     };
                   };
+                  const requireExecutableGraph = async (
+                    result: Awaited<ReturnType<typeof compilePlan>>,
+                  ) => {
+                    if (result.kind === "work-items") return result;
+                    const identity = compilerEvalDigest(result.proposal);
+                    const reason =
+                      result.kind === "objectives"
+                        ? `Objective planning proposed bounded child Objectives (${identity}); no child Objective issues, Work Items, or child runs were created or activated. Inspect factory_plan with compile=true for the full proposal.`
+                        : `Objective compilation requires clarification (${identity}); no child Objective issues, Work Items, or child runs were created or activated. Inspect factory_plan with compile=true for the questions.`;
+                    throw new ManagementOutputError(
+                      new Error(reason),
+                      result.usage,
+                      result.proposal,
+                    );
+                  };
                   if (this.#management.supportsCompilerAdmission) {
                     return await this.#observePhase("compilation", () =>
-                      compilePlan(context, this.#management, checkpoint, admitCompilation),
+                      compilePlan(context, this.#management, checkpoint, admitCompilation).then(
+                        requireExecutableGraph,
+                      ),
                     );
                   }
                   // Compatibility for injected legacy backends that cannot place
@@ -5312,7 +5340,7 @@ export class FactorySupervisor {
                       this.#management,
                       checkpoint,
                       admitCompilation,
-                    ),
+                    ).then(requireExecutableGraph),
                   );
                 }
                 const inputDigest = compilerEvalDigest(context.objective);
@@ -5391,6 +5419,13 @@ export class FactorySupervisor {
                   );
                 }
                 if (outcome.status !== "accepted") {
+                  const planning = parseCompilerPlanningStop(outcome.reason);
+                  if (planning)
+                    throw new CompilerPlanningCompleted(
+                      planning.kind === "objectives"
+                        ? `Objective planning proposed bounded child Objectives (${planning.identity}); no child Objective issues, Work Items, or child runs were created or activated. Inspect factory_plan with compile=true for a fresh read-only proposal.`
+                        : `Objective compilation requires clarification (${planning.identity}); no child Objective issues, Work Items, or child runs were created or activated. Inspect factory_plan with compile=true for the questions.`,
+                    );
                   await this.#reportFindingCandidates(
                     [
                       {
@@ -7027,7 +7062,10 @@ export class FactorySupervisor {
           throw failure;
         }
       }
-      if (failure instanceof CompilerDraftReportCompleted)
+      if (
+        failure instanceof CompilerDraftReportCompleted ||
+        failure instanceof CompilerPlanningCompleted
+      )
         return await terminalAfterDrain("FactoryRunCompleted", failure.message);
       if (terminalVeto(failure)) {
         executionAbort.abort();

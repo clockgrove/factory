@@ -1402,6 +1402,24 @@ instead of a separate repair protocol. Only a completed response that fails dete
 schema or evidence-grounding validation may consume the next shared correction. Exact usage alone
 does not authorize a retry; provider, process, persistence, unsafe-output, and exhausted-bound failures
 remain terminal.
+
+The proposal discriminator is mandatory and has three current result kinds. `work-items` enters the
+ordinary flat execution path. `objectives` is a planning-only decomposition with complete obligation
+dispositions, concrete outputs, completion acceptance, and acyclic prerequisite-output references.
+`clarification` names the missing facts and affected obligations. Provider structured output uses one
+fully required wire object with empty arrays for irrelevant variants; Factory immediately converts it
+to the strict canonical discriminated value and rejects mixed variants. There is no pre-discriminator
+compatibility reader.
+
+Fresh policies may configure `objectivePlanning.maxWorkItemsPerObjective`,
+`maxCriticalPathRatio`, and `maxAggregateWorkRatio`. The defaults (24, 0.75, and 1.5) are provisional
+planning signals. The latter two derive minute thresholds from the immutable Objective timeout;
+configured Work Item durations remain advisory, and absent values remain unavailable. Factory checks
+the limits before accepting a projected graph, so a small but serial-heavy graph can require planning.
+The 100-item hard graph bound remains unchanged. Planning results carry no graph authority and cannot
+create issues, activate runs, enlarge policy, or spend implementation attempts. `factory_plan` exposes
+their exact identity and content read-only; automatic child-Objective materialization and execution are
+not supported.
 Historical and caller-supplied policies without `compilerEvaluation` retain one paid proposal call.
 That call receives a lossless bounded
 Objective source-coverage inventory so every source segment remains structurally visible, but Factory

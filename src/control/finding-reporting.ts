@@ -9,6 +9,7 @@ import {
   findingIdentity,
   findingMarker,
   findingReportDigest,
+  isFindingSafeForPublicReport,
   renderFindingIssue,
   validateFindingCandidate,
   type FindingCandidate,
@@ -304,6 +305,34 @@ export function classifyFinding(input: {
   return input.preventsObjectiveAcceptance ? "objective-blocker" : "nonblocking-follow-up";
 }
 
+export type FindingLifecycleDisposition = "in-scope-repair" | "blocking" | "follow-up";
+
+/** Trusted lifecycle facts choose owner and blocking state; candidates never do. */
+export function decideFindingAtSupervisor(input: {
+  candidate: FindingCandidate;
+  lifecycle: FindingLifecycleDisposition;
+  currentRepository: string;
+  policy?: FindingReportingPolicy | undefined;
+}): { destination: string; classification: FindingClassification } {
+  const candidate = validateFindingCandidate(input.candidate);
+  const destination =
+    candidate.phase === "compiler" || candidate.phase === "supervisor"
+      ? "clockgrove/factory"
+      : input.currentRepository.toLowerCase();
+  const authority = input.policy?.destinations.find((item) => item.repository === destination);
+  return {
+    destination,
+    classification: classifyFinding({
+      criterionOwnedByWorkItem: input.lifecycle === "in-scope-repair",
+      repairWithinExistingAuthority: input.lifecycle === "in-scope-repair",
+      preventsObjectiveAcceptance: input.lifecycle === "blocking",
+      safeToReport: authority?.audience !== "public" || isFindingSafeForPublicReport(candidate),
+      reportingAvailable: Boolean(authority?.operations.includes("create-issue")),
+      allowanceRemaining: (input.policy?.maxPublicationWrites ?? 0) > 0,
+    }),
+  };
+}
+
 function candidateDigest(candidate: FindingCandidate): string {
   return createHash("sha256")
     .update(canonicalFinding(validateFindingCandidate(candidate)))
@@ -385,11 +414,10 @@ export class FindingReporter {
     const id = findingIdentity(input.destination, candidate);
     const lockId = findingCommonCauseIdentity(candidate) ?? id;
     const running = this.#locks.get(lockId) ?? Promise.resolve();
-    const classification = /(?:security|vulnerability|credential-exposure)/i.test(
-      candidate.failureClass,
-    )
-      ? "reporting-refused"
-      : input.classification;
+    const classification =
+      destinationAuthority?.audience === "public" && !isFindingSafeForPublicReport(candidate)
+        ? "reporting-refused"
+        : input.classification;
     const result = running.then(() =>
       this.#reportOne({
         ...input,
@@ -450,12 +478,25 @@ export class FindingReporter {
         ]),
       ).values(),
     ];
-    const prior = sourceEvents
+    const prior = [...sourceEvents]
       .reverse()
       .find((event) => event.findingId === input.findingId && event.event === "FindingDisposition");
-    if (prior?.disposition) return prior.disposition;
+    const priorIntent = sourceEvents.some(
+      (event) => event.event === "FindingPublicationIntent" && event.reportDigest === reportDigest,
+    );
+    const reconcileAmbiguousCreate =
+      prior?.disposition === "issue-ready" &&
+      prior.reasonCode === "ambiguous-transport" &&
+      priorIntent &&
+      sourceEvents.some(
+        (event) =>
+          event.event === "FindingPublicationIntent" &&
+          event.reportDigest === reportDigest &&
+          event.operation === "create-issue",
+      );
+    if (prior?.disposition && !reconcileAmbiguousCreate) return prior.disposition;
 
-    await this.#journal.append({ ...base, event: "FindingDecision" });
+    if (!prior) await this.#journal.append({ ...base, event: "FindingDecision" });
     const settle = async (
       disposition: FindingDisposition,
       reasonCode: FindingRecord["reasonCode"],
@@ -494,6 +535,25 @@ export class FindingReporter {
       classification: input.classification,
       occurrence: input.occurrence,
     });
+    if (reconcileAmbiguousCreate) {
+      try {
+        const authenticatedLogin = await this.#port.authenticatedLogin();
+        const observed = exactIssue(
+          await this.#port.findByMarker({
+            destination: destinationAuthority.data,
+            marker,
+            limit: 20,
+          }),
+          destinationAuthority.data,
+          rendered.body,
+          authenticatedLogin,
+        );
+        if (observed) return settle("issue-filed", "filed", observed);
+      } catch {
+        // An unproven absence or unavailable read never authorizes a second create.
+      }
+      return "issue-ready";
+    }
     let authenticatedLogin: string;
     let observed: FindingIssueObservation | undefined;
     try {

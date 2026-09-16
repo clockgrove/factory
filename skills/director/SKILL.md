@@ -72,10 +72,15 @@ Collect:
 - an absolute local checkout of that exact repository for operations requiring one;
 - an optional complete run policy.
 
-If no policy was supplied, use Factory's fixed local-only default (up to two workers, further
-constrained by measured CPU and memory headroom). Adaptive local concurrency is an explicit policy
-choice until its default-enablement qualification passes. Never opt into paid backends or broaden
-trust on the user's behalf.
+If no policy was supplied, omit the policy argument. Factory records its fixed local-only default
+(up to two workers, further constrained by measured CPU and memory headroom) together with an
+explicit compiler auto-repair envelope: `maxRepairs: 2`, `maxInvocations: 7`,
+`timeoutSeconds: 600`, and `maxObservedTokens: 500000`. The token value is an observed stop checked
+between calls, not a provider hard cap; an in-flight response can overshoot it. `maxRepairs` is shared
+between obligation-inventory correction and graph repair. Status reports each compiler invocation
+and cumulative usage. Adaptive local concurrency remains an explicit policy choice until its
+default-enablement qualification passes. Never opt into paid backends or broaden trust on the user's
+behalf.
 
 A new policy containing `economics.maxModelTokens` must explicitly select
 `economics.modelTokenBudgetMode: "observed-stop"` to permit in-flight overshoot. Do not make that

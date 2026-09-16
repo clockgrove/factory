@@ -88,6 +88,7 @@ const verdict = (): CompilerJudgeVerdict => ({
     },
   ],
   findings: [],
+  inferenceCorrections: [],
   uncertainty: [],
   decision: "accept",
 });

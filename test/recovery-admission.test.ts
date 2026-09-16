@@ -26,8 +26,10 @@ const zero = (): RecoveryAdmissionDemand => ({
   managedSessions: 0,
   implementationAttempts: [],
 });
+const { compilerEvaluation: _defaultCompilerEvaluation, ...oneShotRecoveryPolicy } =
+  DEFAULT_RUN_POLICY;
 const policy: RunPolicy = {
-  ...DEFAULT_RUN_POLICY,
+  ...oneShotRecoveryPolicy,
   maxSandboxMinutes: 10,
   maxManagedAgentSessions: 2,
   economics: {

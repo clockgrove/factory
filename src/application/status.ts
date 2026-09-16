@@ -275,6 +275,46 @@ export interface FactoryStatusReport {
     issueUrl?: string;
     reasonCode?: string;
   }>;
+  compilerEvaluation?:
+    | {
+        availability: "unavailable";
+        policy: {
+          mode: "report-only" | "auto-repair";
+          maxRepairs: number;
+          maxInvocations: number;
+          timeoutSeconds: number;
+          maxObservedTokens: number | null;
+        };
+        reason: string;
+      }
+    | {
+        availability: "observed";
+        policy: {
+          mode: "report-only" | "auto-repair";
+          maxRepairs: number;
+          maxInvocations: number;
+          timeoutSeconds: number;
+          maxObservedTokens: number | null;
+        };
+        invocations: Array<{
+          invocationId: string;
+          stage: "inventory" | "compile" | "repair" | "judge";
+          revision: number;
+          state: "reserved" | "completed" | "failed" | "not-invoked";
+          inputTokens: number | null;
+          outputTokens: number | null;
+          cachedInputTokens: number | null;
+          observedTokens: number | null;
+          observedMilliseconds: number | null;
+        }>;
+        cumulativeUsage: {
+          inputTokens: number;
+          outputTokens: number;
+          cachedInputTokens: number;
+          observedTokens: number;
+          complete: boolean;
+        };
+      };
   /** Explicitly process-local telemetry; separate from durable/replayed run economics. */
   github?: GitHubMutationTelemetry;
 }
@@ -572,6 +612,20 @@ export function buildStatusReport(input: {
     .filter((event) => event.kind === "controller")
     .sort((left, right) => right.sequence - left.sequence)[0];
   const summary = summarizeRun(events, policy ?? undefined, input.snapshot.objectiveAuthority);
+  const compilerPolicy = policy?.compilerEvaluation;
+  const compilerEvaluation = compilerPolicy
+    ? {
+        availability: "unavailable" as const,
+        policy: {
+          mode: compilerPolicy.mode,
+          maxRepairs: compilerPolicy.mode === "report-only" ? 0 : (compilerPolicy.maxRepairs ?? 2),
+          maxInvocations: compilerPolicy.maxInvocations ?? 7,
+          timeoutSeconds: compilerPolicy.timeoutSeconds ?? 600,
+          maxObservedTokens: compilerPolicy.maxObservedTokens ?? null,
+        },
+        reason: "immutable compiler draft status reader is unavailable",
+      }
+    : undefined;
   const admissionGateAcknowledged = Boolean(
     commandState?.admissionGate &&
       runEvents.some(
@@ -1027,6 +1081,7 @@ export function buildStatusReport(input: {
     workItems: statusItems,
     summary,
     findings: findingStatus(events),
+    ...(compilerEvaluation ? { compilerEvaluation } : {}),
     ...(input.platformTelemetry ? { github: input.platformTelemetry } : {}),
   };
 }

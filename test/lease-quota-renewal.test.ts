@@ -68,39 +68,44 @@ describe("Objective lease renewal after quota waiting", () => {
   it.each(["serverTime", "createCommit", "compareAndSwapRef"] as const)(
     "rebuilds the complete renewal with fresh expiry after a one-hour refusal at %s",
     async (boundary) => {
-      const { store, manager, lease } = await fixture();
-      const refusal = vi.spyOn(store, boundary).mockRejectedValueOnce(quota());
-      const sleep = vi.fn(async (ms: number) => {
-        store.now = new Date(store.now.getTime() + ms);
-      });
-      const renewed = await withGitHubQuotaWait({ sleep }, () => manager.renew(lease));
-      expect(sleep).toHaveBeenCalledExactlyOnceWith(hour, undefined);
-      expect(refusal.mock.calls.length).toBeGreaterThanOrEqual(2);
-      expect(renewed).toMatchObject({
-        ...identity,
-        epoch: lease.epoch,
-        sequence: lease.sequence + 1,
-      });
-      expect(renewed.expiresAt.getTime()).toBe(store.now.getTime() + 60_000);
-      expect(store.refs.get(lease.ref)).toBe(renewed.oid);
-      const persisted = await store.readCommit(renewed.oid);
-      expect(leaseEventFromCommit(persisted)).toMatchObject({
-        event: "LeaseRenewed",
-        at: store.now.toISOString(),
-        previousOid: lease.oid,
-      });
-      // A CAS refusal leaves an unused preparation, whose pre-wait deadline must
-      // never become the published renewal after the hour has passed.
-      if (boundary === "compareAndSwapRef") {
-        const renewals = [...store.commits.values()]
-          .filter((commit) => commit.oid !== baseOid)
-          .map((commit) => ({ commit, event: leaseEventFromCommit(commit) }))
-          .filter(({ event }) => event.event === "LeaseRenewed");
-        expect(renewals).toHaveLength(2);
-        expect(Date.parse(renewals[0]!.event.expiresAt)).toBeLessThan(store.now.getTime());
-        expect(renewals[1]!.commit).toBe(persisted);
+      const wallClock = vi.spyOn(Date, "now").mockReturnValue(0);
+      try {
+        const { store, manager, lease } = await fixture();
+        const refusal = vi.spyOn(store, boundary).mockRejectedValueOnce(quota());
+        const sleep = vi.fn(async (ms: number) => {
+          store.now = new Date(store.now.getTime() + ms);
+        });
+        const renewed = await withGitHubQuotaWait({ sleep }, () => manager.renew(lease));
+        expect(sleep).toHaveBeenCalledExactlyOnceWith(hour, undefined);
+        expect(refusal.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(renewed).toMatchObject({
+          ...identity,
+          epoch: lease.epoch,
+          sequence: lease.sequence + 1,
+        });
+        expect(renewed.expiresAt.getTime()).toBe(store.now.getTime() + 60_000);
+        expect(store.refs.get(lease.ref)).toBe(renewed.oid);
+        const persisted = await store.readCommit(renewed.oid);
+        expect(leaseEventFromCommit(persisted)).toMatchObject({
+          event: "LeaseRenewed",
+          at: store.now.toISOString(),
+          previousOid: lease.oid,
+        });
+        // A CAS refusal leaves an unused preparation, whose pre-wait deadline must
+        // never become the published renewal after the hour has passed.
+        if (boundary === "compareAndSwapRef") {
+          const renewals = [...store.commits.values()]
+            .filter((commit) => commit.oid !== baseOid)
+            .map((commit) => ({ commit, event: leaseEventFromCommit(commit) }))
+            .filter(({ event }) => event.event === "LeaseRenewed");
+          expect(renewals).toHaveLength(2);
+          expect(Date.parse(renewals[0]!.event.expiresAt)).toBeLessThan(store.now.getTime());
+          expect(renewals[1]!.commit).toBe(persisted);
+        }
+        await expect(manager.assertCurrent(renewed)).resolves.toBeUndefined();
+      } finally {
+        wallClock.mockRestore();
       }
-      await expect(manager.assertCurrent(renewed)).resolves.toBeUndefined();
     },
   );
 

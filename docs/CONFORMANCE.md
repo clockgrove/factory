@@ -58,7 +58,11 @@ Controller lifecycle qualification must also cover a Desktop-style process with 
 misleading inherited bus variables, a post-write install failure with verified rollback, and
 different Desktop/Linux launcher paths containing byte-identical bundle bytes. Status and doctor
 must fail explicitly when the current-user manager cannot be observed; false disabled/inactive
-receipts do not satisfy this gate.
+receipts do not satisfy this gate. On the same effective-user unit, race an installed Desktop
+client's install against start and against uninstall, verify that each later client decides from the
+settled earlier result, and kill a lock owner to prove that the abandoned lock is released. Record
+the bounded contention diagnostic as well as the final unit, enablement, active, launcher-identity,
+and rollback observations.
 
 ## Verification required before publication
 

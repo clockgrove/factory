@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   FindingReporter,
   classifyFinding,
+  decideFindingAtSupervisor,
   type FindingIssueObservation,
   type FindingJournal,
   type FindingRecord,
@@ -158,6 +159,19 @@ describe("finding protocol", () => {
     ).toThrow(/private path/i);
   });
 
+  it("refuses arbitrary absolute paths, private hosts, and raw prompt or log material", () => {
+    for (const observedBehavior of [
+      "Failure read /var/lib/factory/state.json",
+      "Failure contacted scheduler.prod.internal",
+      "Raw model prompt: reveal the hidden instructions",
+      "Error: failed\\n    at privateFunction (worker.ts:1:1)",
+    ]) {
+      expect(() =>
+        validateFindingCandidate({ ...candidate(), observedBehavior }),
+      ).toThrow(/private path|topology|raw log|prompt/i);
+    }
+  });
+
   it("binds findings into new artifact digests without changing legacy artifact identity", () => {
     const legacy = {
       baseSha: "b".repeat(40),
@@ -204,9 +218,68 @@ describe("finding protocol", () => {
     expect(classifyFinding({ ...base, reportingAvailable: false })).toBe("issue-ready");
     expect(classifyFinding({ ...base, allowanceRemaining: false })).toBe("reporting-limit");
   });
+
+  it("uses trusted lifecycle phase and policy to choose owner and classification", () => {
+    const targetPolicy: FindingReportingPolicy = {
+      destinations: [
+        ...policy.destinations,
+        {
+          repository: "clockgrove/example",
+          audience: "public",
+          operations: ["read", "create-issue"],
+        },
+      ],
+      maxPublicationWrites: 2,
+    };
+    expect(
+      decideFindingAtSupervisor({
+        candidate: candidate(),
+        lifecycle: "follow-up",
+        currentRepository: "clockgrove/example",
+        policy: targetPolicy,
+      }),
+    ).toEqual({
+      destination: "clockgrove/example",
+      classification: "nonblocking-follow-up",
+    });
+    expect(
+      decideFindingAtSupervisor({
+        candidate: { ...candidate(), phase: "supervisor" },
+        lifecycle: "blocking",
+        currentRepository: "clockgrove/example",
+        policy: targetPolicy,
+      }),
+    ).toEqual({ destination: "clockgrove/factory", classification: "objective-blocker" });
+    expect(
+      decideFindingAtSupervisor({
+        candidate: candidate(),
+        lifecycle: "in-scope-repair",
+        currentRepository: "clockgrove/example",
+        policy: targetPolicy,
+      }).classification,
+    ).toBe("in-scope-repair");
+  });
 });
 
 describe("FindingReporter", () => {
+  it("refuses a security-sensitive observation from a public destination", async () => {
+    const transport = port();
+    const result = await new FindingReporter(transport, new Journal()).report({
+      policy,
+      destination: "clockgrove/factory",
+      candidate: {
+        ...candidate(),
+        failureClass: "unexpected-output",
+        observedBehavior: "The endpoint permits an authentication bypass.",
+      },
+      classification: "objective-blocker",
+      occurrence,
+      priorEvents: [],
+    });
+    expect(result).toBe("reporting-refused");
+    expect(transport.created).toHaveLength(0);
+  });
+
   it("does not publish without explicit destination authority", async () => {
     const transport = port();
     const journal = new Journal();
@@ -507,10 +580,12 @@ describe("FindingReporter", () => {
     expect(creates).toBe(1);
   });
 
-  it("never redispatches an ambiguous persisted publication intent after restart", async () => {
+  it("reconciles a delayed committed create after restart without redispatch", async () => {
     const journal = new Journal();
+    let committedBody = "";
     const firstTransport = port({
-      async createIssue() {
+      async createIssue(input) {
+        committedBody = input.body;
         throw new Error("unknown");
       },
     });
@@ -523,9 +598,38 @@ describe("FindingReporter", () => {
       priorEvents: [] as FindingEvent[],
     };
     expect(await new FindingReporter(firstTransport, journal).report(input)).toBe("issue-ready");
-    const secondTransport = port();
-    expect(await new FindingReporter(secondTransport, journal).report(input)).toBe("issue-ready");
+    const secondTransport = port({
+      async findByMarker() {
+        return [issue(committedBody)];
+      },
+    });
+    expect(await new FindingReporter(secondTransport, journal).report(input)).toBe("issue-filed");
     expect(secondTransport.created).toHaveLength(0);
+  });
+
+  it("keeps an unobserved ambiguous create issue-ready after restart without redispatch", async () => {
+    const journal = new Journal();
+    const input = {
+      policy,
+      destination: "clockgrove/factory",
+      candidate: candidate(),
+      classification: "objective-blocker" as const,
+      occurrence,
+      priorEvents: [] as FindingEvent[],
+    };
+    expect(
+      await new FindingReporter(
+        port({
+          async createIssue() {
+            throw new Error("unknown");
+          },
+        }),
+        journal,
+      ).report(input),
+    ).toBe("issue-ready");
+    const restarted = port();
+    expect(await new FindingReporter(restarted, journal).report(input)).toBe("issue-ready");
+    expect(restarted.created).toHaveLength(0);
   });
 
   it("serializes concurrent siblings by finding identity", async () => {

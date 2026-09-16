@@ -228,7 +228,7 @@ export const DEFAULT_CONTROLLER_POLICY: ControllerPolicy = Object.freeze({
   pollIntervalSeconds: 60,
 });
 
-/** Opt-in draft evaluation; absent historical policies retain their original semantics. */
+/** Draft evaluation authority; absent historical policies retain their original semantics. */
 export const CompilerEvaluationPolicySchema = z
   .object({
     mode: z.enum(["report-only", "auto-repair"]),
@@ -280,6 +280,16 @@ export const RunPolicySchema = z
 
 export type RunPolicy = z.infer<typeof RunPolicySchema>;
 
+/** Explicit bounded compiler envelope selected for new runs that omit policy. */
+export const DEFAULT_COMPILER_EVALUATION_POLICY = Object.freeze({
+  mode: "auto-repair" as const,
+  maxRepairs: 2,
+  maxInvocations: 7,
+  timeoutSeconds: 600,
+  /** Observed stop threshold only; providers may overshoot an in-flight call. */
+  maxObservedTokens: 500_000,
+});
+
 export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
   backendOrder: ["codex-sdk/local-worktree", "codex-cli/local-worktree"],
   maxParallel: 2,
@@ -292,6 +302,7 @@ export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
   maxManagedAgentSessions: 0,
   trust: "explicitly_activated_repo",
   managementBackend: "codex-cli/local",
+  compilerEvaluation: DEFAULT_COMPILER_EVALUATION_POLICY,
   allowedNetworkDestinations: ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"],
   priority: {
     source: "subissue-order" as const,

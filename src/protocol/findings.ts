@@ -216,19 +216,40 @@ export function findingCommonCauseIdentity(input: FindingCandidate): string | un
     : undefined;
 }
 
-const SENSITIVE_REPORT_PATTERNS = [
-  /(?:^|\s)(?:\/home\/|\/Users\/|[A-Za-z]:\\Users\\)/,
-  /\b(?:ssn|social security|passport number|private topology)\b/i,
+const PRIVATE_REPORT_PATTERNS = [
+  /(?:^|[\s("'`])(?:\/(?:[^\s/]+(?:\/[^\s]*)?)|[A-Za-z]:[\\/]|\\\\[^\\\s]+\\)/,
+  /\b(?:localhost|127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b/i,
+  /\b(?:[A-Za-z0-9-]+\.)+(?:internal|local|corp)\b/i,
+  /\b(?:ssn|social security|passport number|private topology|internal hostname|phone number)\b/i,
+  /\b(?:raw (?:model )?prompts?|raw logs?|system prompt|developer prompt)\b/i,
+  /(?:^|\n)\s*(?:system|developer|assistant|user)\s+(?:prompt|message)\s*:/i,
+  /\\[rn](?:\s|at\s|(?:error|exception)\b)/i,
+  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
+];
+
+const SECURITY_REPORT_PATTERNS = [
+  /\bCVE-\d{4}-\d{4,}\b/i,
+  /\b(?:vulnerabilit(?:y|ies)|exploit|credential(?:s| exposure)?|secret|api[- ]?key)\b/i,
+  /\b(?:authentication|authorization|auth) bypass\b/i,
+  /\b(?:remote code execution|RCE|SQL injection|cross-site scripting|XSS|path traversal)\b/i,
 ];
 
 export function validateFindingCandidate(input: FindingCandidate): FindingCandidate {
   const candidate = FindingCandidateSchema.parse(input);
   assertNoSecretMaterial(candidate, "finding candidate");
   const prose = canonicalFinding(candidate);
-  if (SENSITIVE_REPORT_PATTERNS.some((pattern) => pattern.test(prose))) {
-    throw new Error("finding candidate contains private path, personal data, or topology");
+  if (PRIVATE_REPORT_PATTERNS.some((pattern) => pattern.test(prose))) {
+    throw new Error(
+      "finding candidate contains a private path, topology, personal data, raw log, or prompt",
+    );
   }
   return candidate;
+}
+
+/** Public issue creation is fail-closed for security-sensitive observations. */
+export function isFindingSafeForPublicReport(input: FindingCandidate): boolean {
+  const candidate = validateFindingCandidate(input);
+  return !SECURITY_REPORT_PATTERNS.some((pattern) => pattern.test(canonicalFinding(candidate)));
 }
 
 export function findingReportDigest(input: {

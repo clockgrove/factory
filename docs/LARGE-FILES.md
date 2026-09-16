@@ -7,7 +7,7 @@ for the exact environments and scenarios demonstrated so far.
 
 ## Content and consumers
 
-Legacy artifact-v1 inline patches retain their original digest formula and 5 MiB ceiling. New
+Artifact inline patches retain the established digest formula and 5 MiB ceiling. New
 collection binds `fileManifest` into the digest: exact base/result Git trees, changed relative path,
 write/delete action, regular/executable mode, actual bytes, SHA-256, generated-path classification
 and known media signature. PNG/JPEG/GIF/WebP/PDF/Wasm/ZIP/WAV/MP4 signatures are recognized;
@@ -29,8 +29,7 @@ the published JSON schema represents structural constraints, not those cross-fie
 Local CLI/SDK/App Server collection, Daytona host collection, clean application, publication,
 sibling refresh and Supervisor Git-range reconstruction consume verified bytes through
 `materializeArtifactPatch`/`artifactFromGitRange`. New review context supplies the manifest and an
-independently validated checkout, not binary bytes in a prompt. Authenticated old receipt digests
-may select the exact legacy inline representation; unauthenticated fallback is not allowed.
+independently validated checkout, not binary bytes in a prompt. Only authenticated receipt digests select artifact content; unauthenticated fallback is not allowed.
 
 ## Source and provider boundaries
 
@@ -57,12 +56,10 @@ interfaces that return only inline patches do not acquire an invented large-obje
 identity, allowed paths and a fresh `assertCurrent` fence. It validates every byte and scans secrets
 before any external write, including the descriptor. It first retains private local descriptor/chunk
 bytes, then publishes immutable GitHub refs under the hashed exact identity. Artifacts with payload
-chunks retain the v1 `/intent` -> upload -> `/ready` protocol: ready is a child of intent, contains
-reachable content blobs, and binds the same descriptor. New artifacts with no external payload use
-`clockgrove.factory/artifact-transfer-v2`: one `/ready` publication contains the inline descriptor,
-has no parents, and requires no payload or chunks. Existing v1 intents and interrupted private v1
-descriptors continue under v1 without rewriting their evidence. The reader accepts both versions
-with their respective exact parent/payload rules; older readers reject v2 explicitly. Every store
+chunks use the canonical `/intent` -> upload -> `/ready` lifecycle: ready is a child of intent, contains
+reachable content blobs, and binds the same descriptor. Artifacts with no external payload use one
+`/ready` publication containing the inline descriptor, with no parents or chunks. There is one reader
+and writer for this current prerelease format, with exact parent/payload rules. Every store
 mutation uses the caller's paced GitHub store and fresh fence. No model call regenerates data.
 
 Supervisor must persist before success/cleanup and call `resumeArtifactTransfer` before replacement

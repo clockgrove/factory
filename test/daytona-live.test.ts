@@ -47,6 +47,7 @@ async function fixture(): Promise<{ repository: string; context: AttemptContext 
       workspace: repository,
       deadline: new Date(Date.now() + MAX_MINUTES * 60_000),
       packet: {
+        protocol: "clockgrove.factory/worker-packet",
         goal: "Replace the only line in value.txt with exactly: changed",
         acceptanceCriteria: ["value.txt contains exactly one line: changed"],
         allowedPaths: ["value.txt"],
@@ -68,7 +69,7 @@ async function fixture(): Promise<{ repository: string; context: AttemptContext 
           memoryMb: 4096,
           diskMb: 8192,
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       },
       policyNetworkDestinations: ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"],
     },

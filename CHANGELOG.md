@@ -10,6 +10,15 @@ they do not by themselves indicate a published or fully qualified release. The h
 [GitHub Releases](https://github.com/clockgrove/factory/releases) for published release notes
 and artifacts, and record the commit SHA when installing from source.
 
+### Added
+
+- Add media-agnostic Objective input assets with exact-byte identity, explicit local-file and
+  recognized GitHub-attachment import, rights and visibility policy, static text/Markdown and
+  bounded raster handlers, opaque passive transport, immutable Git-ref receipts, verified offline
+  materialization, and digest-only Worker Packet bindings. Replace the prerelease Worker Packet,
+  artifact and transfer contracts in place with one canonical unversioned format.
+  ([#415](https://github.com/clockgrove/factory/issues/415))
+
 ### Documentation
 
 - Replace historical run ledgers with release procedures and supported-behavior guidance;
@@ -121,9 +130,9 @@ and artifacts, and record the commit SHA when installing from source.
   ([#283](https://github.com/clockgrove/factory/issues/283))
 
 - Make authenticated Objective and attempt deadlines authoritative across management dispatch,
-  provider creation and installed checkpoint qualification. App Server and artifact-transfer v2
-  arms now separate Objective-bound reach eligibility from the post-proof hold; reached v1 evidence
-  stays readable while unreached v1 arms fail closed. Management invocations retain the explicit
+  provider creation and installed checkpoint qualification. Canonical App Server and
+  artifact-transfer arms separate Objective-bound reach eligibility from the post-proof hold.
+  Management invocations retain the explicit
   Run Policy Work Item timeout as their inner process-stall bound while never exceeding the Objective
   remainder. Vercel cleanup uses a separate bounded stop-confirmation window and preserves timed-out
   cleanup as an unresolved provider resource. ([#309](https://github.com/clockgrove/factory/issues/309))

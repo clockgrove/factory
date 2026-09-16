@@ -500,6 +500,7 @@ describe("host-owned publication", () => {
   it("uploads exactly the independently validated tree and is idempotent", async () => {
     const { repository, base } = await fixture();
     const packet: WorkerPacket = {
+      protocol: "clockgrove.factory/worker-packet",
       goal: "change value",
       acceptanceCriteria: ["value changed"],
       allowedPaths: ["value.txt"],
@@ -517,7 +518,7 @@ describe("host-owned publication", () => {
         permittedSecretNames: [],
         trust: "trusted_local",
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     };
     const worker = await createLocalWorktree(repository, base.oid);
     await writeFile(join(worker.path, "value.txt"), "changed\n");
@@ -736,6 +737,7 @@ describe("host-owned publication", () => {
   it("recovers a pull request whose create response was lost", async () => {
     const { repository, base } = await fixture();
     const packet: WorkerPacket = {
+      protocol: "clockgrove.factory/worker-packet",
       goal: "change value",
       acceptanceCriteria: ["value changed"],
       allowedPaths: ["value.txt"],
@@ -753,7 +755,7 @@ describe("host-owned publication", () => {
         permittedSecretNames: [],
         trust: "trusted_local",
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     };
     const worker = await createLocalWorktree(repository, base.oid);
     await writeFile(join(worker.path, "value.txt"), "changed\n");
@@ -783,6 +785,7 @@ describe("host-owned publication", () => {
   it("recovers a publication branch whose create response was lost", async () => {
     const { repository, base } = await fixture();
     const packet: WorkerPacket = {
+      protocol: "clockgrove.factory/worker-packet",
       goal: "change value",
       acceptanceCriteria: ["value changed"],
       allowedPaths: ["value.txt"],
@@ -800,7 +803,7 @@ describe("host-owned publication", () => {
         permittedSecretNames: [],
         trust: "trusted_local",
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     };
     const worker = await createLocalWorktree(repository, base.oid);
     await writeFile(join(worker.path, "value.txt"), "changed\n");

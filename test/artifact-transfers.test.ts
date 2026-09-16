@@ -137,7 +137,6 @@ async function artifact(baseSha: string, bytes = "safe retained transfer bytes")
     changedPaths: ["asset.dat"],
     outcome: "succeeded",
     fileManifest: {
-      version: 1,
       baseTreeSha: "c".repeat(40),
       resultTreeSha: "d".repeat(40),
       files: [
@@ -177,7 +176,7 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
       }),
     ).resolves.toMatchObject({ lifecycle: "retained" });
     expect(readCommit).not.toHaveBeenCalled();
-    expect(readRef).toHaveBeenCalledTimes(2);
+    expect(readRef).toHaveBeenCalledTimes(1);
     const prefix = artifactTransferRef(id);
     expect(memory.commits.get(memory.refs.get(`${prefix}/ready`)!)!.parentOids).toEqual([]);
     expect(memory.refs.has(`${prefix}/intent`)).toBe(false);
@@ -271,7 +270,6 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
     };
     await persistArtifactTransfer({ ...args, artifact: value("winner") });
     vi.spyOn(memory.api, "readRef")
-      .mockResolvedValueOnce(null) // No historical upload intent.
       .mockResolvedValueOnce(null) // Concurrent ready publication is initially absent.
       .mockImplementation(originalRead);
     const publish = vi.spyOn(memory.api, "createRef");
@@ -523,7 +521,7 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
     );
     expect(memory.writes).toEqual([]);
     expect(JSON.parse(await fs.readFile(join(root, "collection.json"), "utf8"))).toEqual({
-      protocol: "clockgrove.factory/incomplete-artifact-v1",
+      protocol: "clockgrove.factory/incomplete-artifact",
       identity: id,
       artifactDigest: value.digest,
     });
@@ -645,7 +643,7 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
     expect(memory.refs.size).toBe(0);
   });
 
-  it("retains exact v1 inline intent and ready semantics on cold recovery and resume", async () => {
+  it("rejects obsolete inline intent state instead of projecting it into v2", async () => {
     const memory = store(),
       id = identity();
     const value = normalizeArtifact({
@@ -656,7 +654,7 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
     });
     const bytes = Buffer.from(
       JSON.stringify({
-        protocol: "clockgrove.factory/artifact-transfer-v1",
+        protocol: "clockgrove.factory/artifact-transfer",
         identity: id,
         artifact: value,
         retention: "repository-audit",
@@ -675,21 +673,8 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
     const prefix = artifactTransferRef(id);
     await memory.api.createRef(`${prefix}/intent`, intentOid);
     await expect(recoverArtifactTransfer({ store: memory.api, identity: id })).rejects.toThrow(
-      "incomplete",
+      "direct retained transfer must have no payload, intent, or parents",
     );
-    const args = {
-      store: memory.api,
-      identity: id,
-      allowedPaths: ["asset.dat"],
-      assertCurrent: async () => {},
-    };
-    await expect(resumeArtifactTransfer(args)).resolves.toEqual(value);
-    expect(memory.refs.get(`${prefix}/intent`)).toBe(intentOid);
-    const ready = memory.commits.get(memory.refs.get(`${prefix}/ready`)!)!;
-    expect(ready.parentOids).toEqual([intentOid]);
-    await expect(recoverArtifactTransfer(args)).resolves.toEqual(value);
-    ready.parentOids = [];
-    await expect(recoverArtifactTransfer(args)).rejects.toThrow("immutable upload intent");
   });
 
   it("rejects parents and a transplanted intent on a direct v2 receipt", async () => {

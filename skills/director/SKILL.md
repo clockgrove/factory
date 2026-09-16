@@ -47,6 +47,13 @@ with `compile` omitted or `false`. Status and Work Item counts are not a substit
 the existing graph. Report a missing graph or unverified graph authority as returned; do not
 compile a replacement unless explicitly authorized.
 
+When the user explicitly supplies an Objective input file or recognized GitHub attachment, use
+`factory_assets_import` before activation and return its immutable manifest digest. Require the
+user's visibility and rights assertion and never infer `allowOpaque`. Use `factory_assets_inspect`
+for read-only manifest inspection. Do not scrape an issue for attachments, render Markdown, follow
+links embedded in content, or retry by silently refetching a source after its captured bytes are
+lost.
+
 For read-only plan inspection, omit the optional local `repository` argument. Never fill a checkout
 argument with the current directory merely because it is available. When compilation, preflight
 or execution requires a checkout, use an absolute checkout verified to belong to the selected

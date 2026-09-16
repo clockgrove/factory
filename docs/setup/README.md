@@ -42,3 +42,5 @@ controller supplies scheduling. Factory requires no GitHub workflow or hosted Fa
 backend requirements, paid authorization, probes, and cross-provider troubleshooting.
 [Credential boundaries](../CREDENTIALS.md) describes isolation; [host scheduling](../HOST-SCHEDULING.md)
 describes lifecycle and recovery. Never paste provider credentials into chat or repository files.
+For explicit local-file and GitHub-attachment inputs, read the
+[Objective asset contract](../OBJECTIVE-ASSETS.md) before import or activation.

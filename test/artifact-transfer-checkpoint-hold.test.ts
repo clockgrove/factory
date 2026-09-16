@@ -177,7 +177,7 @@ async function fixture() {
     },
   };
   const arm = {
-    protocol: "clockgrove.factory/artifact-transfer-checkpoint-arm-v2",
+    protocol: "clockgrove.factory/artifact-transfer-checkpoint-arm",
     repository: identity.repository,
     objective: 7,
     activationRequestId: args.activationRequestId,
@@ -227,7 +227,7 @@ describe("one-shot oversized transfer checkpoint", () => {
     const raw = await readFile(`${f.path}.reached`, "utf8"),
       witness = JSON.parse(raw);
     expect(witness).toMatchObject({
-      protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached-v2",
+      protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached",
       ...f.args.checkpoint.identity,
       artifactDigest: f.args.checkpoint.artifactDigest,
       intentCommitSha: f.args.checkpoint.intentCommitSha,
@@ -337,22 +337,6 @@ describe("one-shot oversized transfer checkpoint", () => {
       ArtifactTransferQualificationHeldError,
     );
     await expect(readFile(`${f.path}.reached`)).rejects.toMatchObject({ code: "ENOENT" });
-  });
-  it("rejects an unreached v1 arm without reinterpreting its expiry", async () => {
-    const f = await fixture();
-    const {
-      eligibilityDurationMs: _eligibilityDurationMs,
-      holdDurationMs: _holdDurationMs,
-      ...legacy
-    } = f.arm;
-    await f.armNow({
-      ...legacy,
-      protocol: "clockgrove.factory/artifact-transfer-checkpoint-arm-v1",
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
-    await expect(holdArtifactTransferQualificationCheckpoint(f.args)).rejects.toThrow(
-      "arm v1 is retired",
-    );
   });
   it("reaches after the former ten-minute arm window and receives the full hold", async () => {
     const f = await fixture();

@@ -34,6 +34,8 @@ export interface ExecutionBackendCapabilities {
   supportsLocalInference: boolean;
   /** Launch materializes and executes packet-managed runtime receipts exactly. */
   supportsManagedToolchainExecution?: boolean;
+  /** Backend receives Supervisor-verified files without network URLs or storage credentials. */
+  supportsOfflineAssetInputs?: boolean;
   /** Terminal observations include provider model-token counters. */
   reportsModelUsage?: boolean;
   /** Launch accepts the immutable model selection carried by AttemptContext. */
@@ -61,6 +63,8 @@ export interface AttemptContext {
   directorEpoch: number;
   policyDigest: string;
   workspace: string;
+  /** Supervisor-verified, read-only Objective inputs; never a mutable source location. */
+  assetRoot?: string;
   packet: WorkerPacket;
   /** Immutable per-phase choice resolved from RunPolicy.models. */
   modelSelection?: ModelSelection;

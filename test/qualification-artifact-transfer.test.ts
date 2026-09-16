@@ -190,7 +190,7 @@ function fixture() {
       oid: git("blob", bytes),
     }));
   const payload = {
-    kind: "git-patch-chunks-v1" as const,
+    kind: "content-chunks" as const,
     digest: hash(patch),
     bytes: patch.length,
     chunks: chunks.map(({ digest, bytes }) => ({ digest, bytes })),
@@ -201,7 +201,6 @@ function fixture() {
     patch: `# Factory content-addressed Git patch sha256:${payload.digest} bytes:${payload.bytes}\n`,
     payload,
     fileManifest: {
-      version: 1,
       baseTreeSha: "d".repeat(40),
       resultTreeSha: "e".repeat(40),
       files: [
@@ -221,7 +220,7 @@ function fixture() {
     createdAt: new Date(common.at),
   });
   const descriptor = {
-    protocol: "clockgrove.factory/artifact-transfer-v1",
+    protocol: "clockgrove.factory/artifact-transfer",
     identity,
     artifact,
     retention: "repository-audit",
@@ -384,8 +383,13 @@ function fixture() {
     chunkTree,
     chunks: chunks.map((chunk, index) => ({ ...chunk, base64: bodies[index]!.toString("base64") })),
   };
+  const policy = parseRunPolicy(authority.policy);
+  const startedAt = common.at;
+  const eligibleUntil = new Date(
+    Date.parse(startedAt) + policy.objectiveTimeoutMinutes * 60_000,
+  ).toISOString();
   const witness = {
-    protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached-v1",
+    protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached",
     ...identity,
     activationRequestId: "large-case-activate",
     artifactDigest: artifact.digest,
@@ -409,8 +413,12 @@ function fixture() {
       },
     },
     armDigest: "a".repeat(64),
+    startedAt,
+    eligibleUntil,
     reachedAt: common.at,
-    expiresAt: "2026-09-06T12:05:00.000Z",
+    holdUntil: new Date(
+      Date.parse(common.at) + policy.workItemTimeoutMinutes * 60_000,
+    ).toISOString(),
     executionCleanup: "not-proven-by-checkpoint",
     nativeUsage: "not-measured-by-checkpoint",
   };
@@ -448,7 +456,7 @@ describe("independent installed externalized artifact transfer proof", () => {
     });
     expect(ready.artifact.patch).not.toEqual(ready.patch?.toString());
   });
-  it("rejects a v2 witness reached exactly at the half-open Objective boundary", () => {
+  it("rejects a witness reached exactly at the half-open Objective boundary", () => {
     const f = fixture();
     const startedAt = String(
       f.heldObservation.receipts.find(({ event }) => event.event === "FactoryRunStarted")!.event.at,
@@ -457,10 +465,9 @@ describe("independent installed externalized artifact transfer proof", () => {
     const eligibleUntil = new Date(
       Date.parse(startedAt) + policy.objectiveTimeoutMinutes * 60_000,
     ).toISOString();
-    const { expiresAt: _expiresAt, ...legacy } = f.witness;
     const witness = {
-      ...legacy,
-      protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached-v2",
+      ...f.witness,
+      protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached",
       startedAt,
       eligibleUntil,
       reachedAt: eligibleUntil,

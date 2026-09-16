@@ -17,6 +17,7 @@ import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 const pnpmRuntime = DEFERRED_CAPABILITY_ADAPTERS.find(({ id }) => id === "node-pnpm")!.runtime!;
 
 const packet: WorkerPacket = {
+  protocol: "clockgrove.factory/worker-packet",
   goal: "Validate the capability.",
   acceptanceCriteria: ["The capability is validated."],
   allowedPaths: ["src/"],
@@ -57,7 +58,7 @@ const packet: WorkerPacket = {
     ],
   },
   managedRuntimes: [pnpmRuntime],
-  artifactContract: "clockgrove.factory/artifact-v1",
+  artifactContract: "clockgrove.factory/artifact",
 };
 
 describe("repository capability JSON Schema parity", () => {

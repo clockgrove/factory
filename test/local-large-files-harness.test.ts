@@ -70,6 +70,7 @@ function fixture(parent: string) {
   });
 }
 function scenario() {
+  const runPolicy = parseRunPolicy(authority.policy);
   const common = {
     repository,
     objective: 7,
@@ -77,6 +78,7 @@ function scenario() {
     directorEpoch: 1,
     policyDigest,
     baseSha,
+    at: "2026-09-06T12:00:00.000Z",
   };
   const events: Record<string, unknown>[] = [];
   const add = (event: string, kind: string, values: Record<string, unknown> = {}) =>
@@ -182,11 +184,19 @@ function scenario() {
     ...observe(0),
     transferCheckpoint: {
       ...common,
-      protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached-v1",
+      protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached",
       armDigest: "f".repeat(64),
       workItem: 8,
       attempt: 1,
       payloadBytes: 6 * 1024 * 1024,
+      startedAt: common.at,
+      eligibleUntil: new Date(
+        Date.parse(common.at) + runPolicy.objectiveTimeoutMinutes * 60_000,
+      ).toISOString(),
+      reachedAt: common.at,
+      holdUntil: new Date(
+        Date.parse(common.at) + runPolicy.workItemTimeoutMinutes * 60_000,
+      ).toISOString(),
       terminal: { modelTokens: 100, usageId: "worker-8-1" },
     },
   };

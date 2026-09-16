@@ -70,7 +70,7 @@ export function readContinuationInput(path, digest, maximum = 8 * 1024 * 1024) {
 }
 
 export function assertContinuationSeed(original, witness, pause, installed, now = Date.now()) {
-  assert.equal(original.protocol, "clockgrove.factory/checkpoint-restart-qualification-v1");
+  assert.equal(original.protocol, "clockgrove.factory/checkpoint-restart-qualification");
   assert.equal(original.result.result, "incomplete");
   assert.equal(original.authority.sessionRecovery, true);
   assert.equal(original.authority.phase, "exercise");
@@ -118,17 +118,12 @@ export function assertContinuationSeed(original, witness, pause, installed, now 
   assert.equal(original.authority.policy.economics.modelTokenBudgetMode, "observed-stop");
   assert.equal(original.authority.policy.objectiveTimeoutMinutes, 45);
   assert.deepEqual(original.authority.policy.allowedPaidBackends, []);
-  assert.ok(
-    [
-      "clockgrove.factory/app-server-checkpoint-reached-v1",
-      "clockgrove.factory/app-server-checkpoint-reached-v2",
-    ].includes(witness.protocol),
+  assert.equal(
+    witness.protocol,
+    "clockgrove.factory/app-server-checkpoint-reached",
     "unsupported reached checkpoint witness",
   );
-  const deadline =
-    witness.protocol === "clockgrove.factory/app-server-checkpoint-reached-v2"
-      ? Date.parse(witness.eligibleUntil)
-      : Date.parse(original.startedAt) + 2700000;
+  const deadline = Date.parse(witness.eligibleUntil);
   assert.ok(Number.isFinite(deadline) && now < deadline, "original qualification deadline expired");
   const arm = original.sessionArm;
   assert.equal(hash(JSON.stringify(arm.arm)), arm.digest);
@@ -136,29 +131,21 @@ export function assertContinuationSeed(original, witness, pause, installed, now 
   assert.equal(witness.armDigest, arm.digest);
   for (const key of ["repository", "objective", "activationRequestId", "policyDigest"])
     assert.equal(witness[key], arm.arm[key]);
-  if (witness.protocol === "clockgrove.factory/app-server-checkpoint-reached-v2") {
-    assert.equal(arm.arm.protocol, "clockgrove.factory/app-server-checkpoint-arm-v2");
-    assert.equal(
-      arm.arm.eligibilityDurationMs,
-      original.authority.policy.objectiveTimeoutMinutes * 60_000,
-    );
-    assert.equal(witness.startedAt, original.objectiveDeadline?.startedAt);
-    assert.equal(witness.eligibleUntil, original.objectiveDeadline?.deadline);
-    assert.equal(
-      Date.parse(witness.holdUntil) - Date.parse(witness.reachedAt),
-      arm.arm.holdDurationMs,
-    );
-  } else {
-    assert.equal(witness.expiresAt, arm.arm.expiresAt);
-  }
+  assert.equal(arm.arm.protocol, "clockgrove.factory/app-server-checkpoint-arm");
+  assert.equal(
+    arm.arm.eligibilityDurationMs,
+    original.authority.policy.objectiveTimeoutMinutes * 60_000,
+  );
+  assert.equal(witness.startedAt, original.objectiveDeadline?.startedAt);
+  assert.equal(witness.eligibleUntil, original.objectiveDeadline?.deadline);
+  assert.equal(
+    Date.parse(witness.holdUntil) - Date.parse(witness.reachedAt),
+    arm.arm.holdDurationMs,
+  );
   assert.equal(witness.baseSha, original.base);
   assert.equal(witness.policyDigest, activation.policyDigest);
   assert.ok(Date.parse(witness.reachedAt) >= Date.parse(arm.writtenAt));
-  const witnessEligibility =
-    witness.protocol === "clockgrove.factory/app-server-checkpoint-reached-v2"
-      ? deadline
-      : Date.parse(witness.expiresAt);
-  assert.ok(Date.parse(witness.reachedAt) < witnessEligibility, "historical hold was not timely");
+  assert.ok(Date.parse(witness.reachedAt) < deadline, "checkpoint hold was not timely");
   assert.equal(pause.event, "RunPauseRequested");
   assert.equal(pause.runId, witness.runId);
   assert.equal(pause.objective, witness.objective);
@@ -204,7 +191,7 @@ export function assertContinuationRetry(previous, input, now = Date.now()) {
   const seed = assertContinuationSeed(original, witness, pause, original.artifact, now);
   assert.match(previousSha256 ?? "", /^[a-f0-9]{64}$/);
   boundedPath(previousPath);
-  assert.equal(previous.protocol, "clockgrove.factory/checkpoint-restart-qualification-v1");
+  assert.equal(previous.protocol, "clockgrove.factory/checkpoint-restart-qualification");
   assert.equal(previous.result?.result, "incomplete", "only an evidenced refusal may retry");
   assert.deepEqual(
     previous.actions,

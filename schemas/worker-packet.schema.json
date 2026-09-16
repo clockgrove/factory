@@ -3,8 +3,9 @@
   "$id": "https://github.com/clockgrove/factory/schemas/worker-packet.schema.json",
   "title": "Factory Worker Packet",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "required": [
+    "protocol",
     "goal",
     "acceptanceCriteria",
     "allowedPaths",
@@ -17,6 +18,7 @@
     "artifactContract"
   ],
   "properties": {
+    "protocol": { "const": "clockgrove.factory/worker-packet" },
     "goal": {
       "type": "string",
       "description": "Repository-artifact outcome assigned to the worker; never a Factory-owned lifecycle or scheduling outcome.",
@@ -357,7 +359,24 @@
       "maxItems": 8,
       "items": { "$ref": "#/definitions/runtimeBundleRequirement" }
     },
-    "artifactContract": { "const": "clockgrove.factory/artifact-v1" }
+    "assetInputs": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["manifestDigest", "descriptorDigest", "contentDigest", "storageReceiptDigest", "path"],
+        "properties": {
+          "manifestDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "descriptorDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "contentDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "storageReceiptDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "path": { "type": "string", "pattern": "^assets/[a-f0-9]{64}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+          "purpose": { "type": "string", "minLength": 1, "maxLength": 500 }
+        }
+      }
+    },
+    "artifactContract": { "const": "clockgrove.factory/artifact" }
   },
   "definitions": {
     "repositoryCapabilityOperation": {

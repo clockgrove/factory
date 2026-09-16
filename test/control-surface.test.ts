@@ -42,6 +42,7 @@ describe("CLI and MCP control surface", () => {
     ]);
     const reads = new Set([
       "doctor",
+      "assets-inspect",
       "plan",
       "compiler-eval",
       "recovery-plan",

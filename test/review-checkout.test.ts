@@ -50,6 +50,7 @@ async function fixture() {
     await cleanupLocalWorktree(worker);
   }
   const packet: WorkerPacket = {
+    protocol: "clockgrove.factory/worker-packet",
     baseSha,
     goal: "Add slugify",
     acceptanceCriteria: ["named slugify export lowercases text"],
@@ -58,7 +59,7 @@ async function fixture() {
     outOfScope: [],
     conventions: [],
     validationCommands: ["node --test"],
-    artifactContract: "clockgrove.factory/artifact-v1",
+    artifactContract: "clockgrove.factory/artifact",
     requirements: {
       os: ["linux"],
       architecture: [],
@@ -138,6 +139,7 @@ async function greenfieldFixture(unsafeLifecycle = false) {
   const artifact = await collectLocalArtifact(worker);
   await cleanupLocalWorktree(worker);
   const packet: WorkerPacket = {
+    protocol: "clockgrove.factory/worker-packet",
     baseSha,
     goal: "Bootstrap the workspace",
     acceptanceCriteria: ["the workspace check is deterministic"],
@@ -153,7 +155,7 @@ async function greenfieldFixture(unsafeLifecycle = false) {
     conventions: [],
     validationCommands: ["pnpm check"],
     managedRuntimes: selectedManagedRuntimeRequirements(["pnpm check"]),
-    artifactContract: "clockgrove.factory/artifact-v1",
+    artifactContract: "clockgrove.factory/artifact",
     requirements: {
       os: ["linux"],
       architecture: [],

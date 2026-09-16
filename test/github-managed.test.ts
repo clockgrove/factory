@@ -38,6 +38,7 @@ function context(deadline = new Date(Date.now() + 60_000)): AttemptContext {
     providerBaseRef: "factory/stack-parent",
     deadline,
     packet: {
+      protocol: "clockgrove.factory/worker-packet",
       goal: "Implement the bounded change",
       acceptanceCriteria: ["tests pass"],
       allowedPaths: ["src/value.ts"],
@@ -46,7 +47,7 @@ function context(deadline = new Date(Date.now() + 60_000)): AttemptContext {
       conventions: [],
       baseSha: SHA,
       validationCommands: ["npm test"],
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
       requirements: {
         os: [],
         architecture: [],

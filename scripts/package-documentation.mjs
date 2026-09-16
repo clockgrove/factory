@@ -4,6 +4,7 @@ export const operatorDocumentation = Object.freeze([
   "docs/CREDENTIALS.md",
   "docs/CODEX-APP-SERVER-SESSIONS.md",
   "docs/LARGE-FILES.md",
+  "docs/OBJECTIVE-ASSETS.md",
   "docs/HOST-SCHEDULING.md",
   "docs/THREAT-MODEL.md",
   "docs/OPERATING-REFERENCE.md",

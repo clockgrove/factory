@@ -143,6 +143,7 @@ function attemptContext(
     workspace: fixture.repository,
     deadline: new Date(Date.now() + 10_000),
     packet: {
+      protocol: "clockgrove.factory/worker-packet",
       goal: "change value.txt",
       acceptanceCriteria: ["value.txt changed"],
       allowedPaths: ["value.txt"],
@@ -151,7 +152,7 @@ function attemptContext(
       conventions: [],
       baseSha: fixture.baseSha,
       validationCommands: ["grep -qx changed value.txt"],
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
       requirements: {
         os: [],
         architecture: [],

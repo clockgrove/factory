@@ -286,13 +286,13 @@ function descriptor(proof, ref, parents, identity, phase, externalRequired = tru
     parents,
   );
   exact(value, ["protocol", "identity", "artifact", "retention", "chunks"]);
-  assert.equal(value.protocol, "clockgrove.factory/artifact-transfer-v1");
+  assert.equal(value.protocol, "clockgrove.factory/artifact-transfer");
   assert.deepEqual(value.identity, identity);
   assert.equal(value.retention, "repository-audit");
   const artifact = value.artifact,
     payload = artifact.payload,
     manifest = artifact.fileManifest;
-  assert.equal(artifact.protocol, "clockgrove.factory/artifact-v1");
+  assert.equal(artifact.protocol, "clockgrove.factory/artifact");
   assert.equal(artifact.outcome, "succeeded");
   assert.equal(artifact.baseSha, identity.baseSha);
   digest(artifact.digest);
@@ -301,7 +301,7 @@ function descriptor(proof, ref, parents, identity, phase, externalRequired = tru
   let normalizedPayload;
   if (payload) {
     exact(payload, ["kind", "digest", "bytes", "chunks"]);
-    assert.equal(payload.kind, "git-patch-chunks-v1");
+    assert.equal(payload.kind, "content-chunks");
     digest(payload.digest);
     integer(payload.bytes, 5 * 1024 * 1024 + 1, MAX_PATCH);
     assert.ok(Array.isArray(value.chunks) && value.chunks.length > 1 && value.chunks.length <= 64);
@@ -364,8 +364,7 @@ function descriptor(proof, ref, parents, identity, phase, externalRequired = tru
   }
   let normalizedManifest;
   if (manifest) {
-    exact(manifest, ["version", "baseTreeSha", "resultTreeSha", "files"]);
-    assert.equal(manifest.version, 1);
+    exact(manifest, ["baseTreeSha", "resultTreeSha", "files"]);
     sha(manifest.baseTreeSha);
     sha(manifest.resultTreeSha);
     assert.ok(
@@ -428,7 +427,6 @@ function descriptor(proof, ref, parents, identity, phase, externalRequired = tru
     assert.equal(new Set(files.map((file) => file.path)).size, files.length);
     assert.deepEqual([...artifact.changedPaths].sort(), files.map((file) => file.path).sort());
     normalizedManifest = {
-      version: 1,
       baseTreeSha: manifest.baseTreeSha,
       resultTreeSha: manifest.resultTreeSha,
       files,
@@ -436,7 +434,7 @@ function descriptor(proof, ref, parents, identity, phase, externalRequired = tru
   }
   const content =
     normalizedPayload || normalizedManifest
-      ? `\0content-v1\0${JSON.stringify({ ...(normalizedPayload ? { payload: normalizedPayload } : {}), ...(normalizedManifest ? { fileManifest: normalizedManifest } : {}) })}`
+      ? `\0content\0${JSON.stringify({ ...(normalizedPayload ? { payload: normalizedPayload } : {}), ...(normalizedManifest ? { fileManifest: normalizedManifest } : {}) })}`
       : "";
   assert.equal(
     hash(
@@ -611,11 +609,9 @@ export function assertArtifactTransferProof(observation, authority, proof, optio
   }
   const witness = options.witness;
   if (witness) {
-    assert.ok(
-      [
-        "clockgrove.factory/artifact-transfer-checkpoint-reached-v1",
-        "clockgrove.factory/artifact-transfer-checkpoint-reached-v2",
-      ].includes(witness.protocol),
+    assert.equal(
+      witness.protocol,
+      "clockgrove.factory/artifact-transfer-checkpoint-reached",
       "unsupported artifact transfer checkpoint witness",
     );
     same(witness, identity);
@@ -649,18 +645,16 @@ export function assertArtifactTransferProof(observation, authority, proof, optio
     });
     digest(witness.armDigest);
     assert.ok(when(witness.reachedAt) >= when(worker.at));
-    if (witness.protocol === "clockgrove.factory/artifact-transfer-checkpoint-reached-v2") {
-      assert.equal(witness.startedAt, start.at);
-      assert.equal(
-        when(witness.eligibleUntil),
-        when(start.at) + authority.policy.objectiveTimeoutMinutes * 60_000,
-      );
-      assert.ok(when(witness.eligibleUntil) > when(witness.reachedAt));
-      assert.equal(
-        when(witness.holdUntil) - when(witness.reachedAt),
-        authority.policy.workItemTimeoutMinutes * 60_000,
-      );
-    } else assert.ok(when(witness.expiresAt) > when(witness.reachedAt));
+    assert.equal(witness.startedAt, start.at);
+    assert.equal(
+      when(witness.eligibleUntil),
+      when(start.at) + authority.policy.objectiveTimeoutMinutes * 60_000,
+    );
+    assert.ok(when(witness.eligibleUntil) > when(witness.reachedAt));
+    assert.equal(
+      when(witness.holdUntil) - when(witness.reachedAt),
+      authority.policy.workItemTimeoutMinutes * 60_000,
+    );
     assert.equal(witness.executionCleanup, "not-proven-by-checkpoint");
     assert.equal(witness.nativeUsage, "not-measured-by-checkpoint");
   }

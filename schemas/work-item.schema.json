@@ -115,8 +115,9 @@
       }
     },
     "artifactContract": {
-      "const": "clockgrove.factory/artifact-v1"
+      "const": "clockgrove.factory/artifact"
     },
+    "assetInputs": { "$ref": "worker-packet.schema.json#/properties/assetInputs", "default": [] },
     "context": { "$ref": "worker-packet.schema.json#/properties/context" },
     "changeSurface": { "$ref": "worker-packet.schema.json#/properties/changeSurface" },
     "delivery": { "$ref": "worker-packet.schema.json#/properties/delivery" },

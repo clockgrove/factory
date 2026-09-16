@@ -50,7 +50,7 @@ Every Work Item must contain:
   `delivery` hint;
 - a conservative `economicReview` based only on known validation/runtime needs (never invent live
   paid measurements);
-- `artifactContract: "clockgrove.factory/artifact-v1"`.
+- `artifactContract: "clockgrove.factory/artifact"`.
 
 The `workItems` array is semantic. Order independent peers by the Objective's requested initial
 priority and put every dependency before its dependent. Factory preserves that dependency-aware

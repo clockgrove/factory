@@ -106,7 +106,7 @@ function item(id: string, overrides: Partial<CompilerWorkItemInput> = {}): Compi
       memoryMb: 1024,
       estimatedDurationMinutes: 10,
     },
-    artifactContract: "clockgrove.factory/artifact-v1",
+    artifactContract: "clockgrove.factory/artifact",
     ...overrides,
   };
 }

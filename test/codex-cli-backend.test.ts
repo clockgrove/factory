@@ -144,6 +144,7 @@ function attemptContext(workspace: string, baseSha: string): AttemptContext {
     workspace,
     deadline: new Date(Date.now() + 10_000),
     packet: {
+      protocol: "clockgrove.factory/worker-packet",
       goal: "Change value.txt.",
       acceptanceCriteria: ["value.txt contains changed"],
       allowedPaths: ["value.txt"],
@@ -161,7 +162,7 @@ function attemptContext(workspace: string, baseSha: string): AttemptContext {
         permittedSecretNames: [],
         trust: "trusted_local",
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
+      artifactContract: "clockgrove.factory/artifact",
     },
   };
 }
@@ -279,6 +280,7 @@ describe("Codex CLI local backend", () => {
 
   it("frames retry feedback as untrusted diagnostic data", () => {
     const packet = {
+      protocol: "clockgrove.factory/worker-packet" as const,
       goal: "Fix it.",
       acceptanceCriteria: ["It works."],
       allowedPaths: ["src/fix.ts"],
@@ -297,7 +299,7 @@ describe("Codex CLI local backend", () => {
         trust: "trusted_local" as const,
       },
       retryContext: { attempt: 1, outcome: "failed" as const, reason: "test failed" },
-      artifactContract: "clockgrove.factory/artifact-v1" as const,
+      artifactContract: "clockgrove.factory/artifact" as const,
     };
     const prompt = workerPacketPrompt({
       repository: "clockgrove/factory",
@@ -371,6 +373,7 @@ describe("Codex CLI local backend", () => {
       workspace: worktree.path,
       deadline: new Date(Date.now() + 10_000),
       packet: {
+        protocol: "clockgrove.factory/worker-packet",
         goal: "Change value.txt.",
         acceptanceCriteria: ["value.txt contains changed"],
         allowedPaths: ["value.txt"],
@@ -388,7 +391,7 @@ describe("Codex CLI local backend", () => {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact-v1",
+        artifactContract: "clockgrove.factory/artifact",
       },
       modelSelection: {
         profile: "frontier",

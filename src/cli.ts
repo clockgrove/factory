@@ -51,6 +51,7 @@ import {
 } from "./runtime/toolchain-store.js";
 import type { ManagedToolchain } from "./runtime/toolchain-bundle.js";
 import { RuntimeBundleReceiptSchema } from "./protocol/worker-packet.js";
+import type { ObjectiveAssetImport, ObjectiveAssetImportMetadata } from "./assets/import.js";
 
 const controllerLifecycle = new SystemdControllerLifecycle(
   new SystemdUserService({
@@ -66,6 +67,8 @@ const USAGE = [
   "  factory controller run OWNER/REPO --repo DIR [--max-active-objectives N] [--max-local-workers N] [--max-paid-workers N]",
   "  factory controller install|start|stop|restart|status|uninstall OWNER/REPO --repo DIR",
   "  factory doctor OWNER/REPO#NUMBER [--repo DIR]",
+  "  factory assets-import OWNER/REPO#NUMBER --request-id ID --input FILE",
+  "  factory assets-inspect OWNER/REPO#NUMBER --base-sha SHA --manifest-digest DIGEST",
   "  factory plan OWNER/REPO#NUMBER [--compile] [--repo DIR] [--base-sha SHA] [--policy FILE]",
   "  factory compiler-eval OWNER/REPO#NUMBER [--markdown] [--annotations FILE]  (read-only draft history and post-mortem)",
   "  factory status|explain OWNER/REPO#NUMBER [--work-item NUMBER]",
@@ -171,6 +174,7 @@ function applicationFor(
     reader,
     platformTelemetry: () => mutations.telemetry(),
     compilerEvaluationStore: store,
+    assetStore: store,
     ...(recoveryInspection
       ? {
           recovery: new RecoveryRequestService({
@@ -262,6 +266,38 @@ async function applicationCommand(command: string, args: string[]): Promise<void
     command.startsWith("recovery-"),
     checkout ? resolve(checkout) : process.cwd(),
   );
+  if (command === "assets-import") {
+    const requestId = option(args, "--request-id");
+    const inputPath = option(args, "--input");
+    if (!requestId || !inputPath) fail("assets-import requires --request-id ID and --input FILE");
+    const input = JSON.parse(await readFile(resolve(inputPath), "utf8")) as {
+      baseSha?: string;
+      revision?: number;
+      assets: Array<{ source: ObjectiveAssetImport; metadata: ObjectiveAssetImportMetadata }>;
+    };
+    const result = await service.importAssets({
+      objective: target.objective,
+      requestId,
+      revision: input.revision ?? 1,
+      assets: input.assets,
+      ...(input.baseSha ? { baseSha: input.baseSha } : {}),
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  if (command === "assets-inspect") {
+    const baseSha = option(args, "--base-sha");
+    const manifestDigest = option(args, "--manifest-digest");
+    if (!baseSha || !manifestDigest)
+      fail("assets-inspect requires --base-sha SHA and --manifest-digest DIGEST");
+    const result = await service.inspectAssets({
+      objective: target.objective,
+      baseSha,
+      manifestDigest,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
   if (command === "recovery-propose" || command === "recovery-request") {
     const requestId = option(args, "--request-id");
     if (!requestId) fail(`${command} requires --request-id ID`);
@@ -680,6 +716,8 @@ export async function main(argv: string[]): Promise<void> {
     command &&
     [
       "doctor",
+      "assets-import",
+      "assets-inspect",
       "plan",
       "compiler-eval",
       "recovery-plan",

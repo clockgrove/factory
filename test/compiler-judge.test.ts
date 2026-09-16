@@ -227,4 +227,78 @@ describe("independent semantic compiler judgment", () => {
       ).not.toThrow();
     },
   );
+
+  it("does not reintroduce an adjudicated unsupported prerequisite into dimension repair", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    request.inventory.obligations.push({
+      id: "unsupported-prerequisite",
+      text: "Provision infrastructure that the Objective does not request.",
+      kind: "prerequisite",
+      evidenceIds: ["objective"],
+      acceptanceEvidence: "Infrastructure is provisioned.",
+    });
+    const proposal = semanticProposal(request);
+    const projection = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
+    });
+    const raw = acceptedVerdict(request, proposal, compiledGraphDigest(projection.objective));
+    const coverage = raw.coverage.find(
+      (entry) => entry.obligationId === "unsupported-prerequisite",
+    )!;
+    coverage.status = "missing";
+    coverage.itemIds = [];
+    coverage.acceptanceBindings = [];
+    const dimension = raw.dimensions.find((entry) => entry.dimension === "assumption-grounding")!;
+    dimension.status = "unknown";
+    dimension.reason = "The existing proposal leaves a separate assumption unclear.";
+    const challenge = {
+      findingId: "unsupported-prerequisite-finding",
+      obligationId: "unsupported-prerequisite",
+      reason: "The cited Objective does not require infrastructure provisioning.",
+      evidenceIds: ["objective"],
+    };
+    raw.inferenceCorrections = [
+      {
+        ...challenge,
+        disposition: "unsupported-inference",
+      },
+    ];
+
+    const repair = repairableCompilerJudgeVerdict(raw, {
+      draftDigest: compiledGraphDigest(projection.objective),
+      inventory: request.inventory,
+      graph: proposal,
+      addedEdges: projection.trace.addedEdges,
+      challenges: [challenge],
+    });
+
+    expect(repair).toMatchObject({
+      decision: "repair",
+      findings: [
+        {
+          id: "invalid-acceptance",
+          dimension: "assumption-grounding",
+          obligationIds: [],
+          itemIds: proposal.workItems.map((item) => item.id),
+          evidenceIds: ["objective"],
+        },
+      ],
+    });
+    expect(repair?.findings.flatMap((finding) => finding.obligationIds)).not.toContain(
+      "unsupported-prerequisite",
+    );
+    expect(() =>
+      validateCompilerJudgeVerdict(repair, {
+        draftDigest: compiledGraphDigest(projection.objective),
+        inventory: request.inventory,
+        graph: proposal,
+        addedEdges: projection.trace.addedEdges,
+        challenges: [challenge],
+      }),
+    ).not.toThrow();
+  });
 });

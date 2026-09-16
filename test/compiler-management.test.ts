@@ -502,6 +502,55 @@ describe("single semantic management route", () => {
     }
   });
 
+  it("retains the exact provider envelope when a canonical planning proposal needs repair", async () => {
+    const request = semanticRequest();
+    const providerEnvelope = {
+      protocol: "clockgrove.factory/compiler-proposal" as const,
+      kind: "clarification" as const,
+      workItems: [],
+      objectives: [],
+      coverage: [],
+      triggers: [
+        {
+          code: "independent-milestones" as const,
+          source: "obligation-inventory" as const,
+          availability: "observed" as const,
+          observed: "TBD",
+          threshold: null,
+          obligationIds: ["explicit-contract"],
+          explanation: "placeholder",
+        },
+      ],
+      requirements: [
+        {
+          id: "target",
+          question: "TBD",
+          reason: "placeholder",
+          obligationIds: ["explicit-contract"],
+        },
+      ],
+    };
+    const backend = new CodexCliManagementBackend({
+      runStructured: async () => ({
+        value: providerEnvelope,
+        usage: { inputTokens: 7, outputTokens: 2 },
+      }),
+    });
+
+    const rejection = await backend
+      .proposePlan(request, async () => {}, semanticProjectionContext())
+      .catch((error) => error);
+
+    expect(rejection).toBeInstanceOf(ManagementOutputError);
+    expect(rejection.proposal).toEqual(providerEnvelope);
+    expect(rejection.validationReport.violations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "invalid-planning-trigger" }),
+        expect.objectContaining({ code: "invalid-clarification" }),
+      ]),
+    );
+  });
+
   it("classifies structured provider failure and returned invalid usage without inventing counters", async () => {
     const request = semanticRequest();
     const providerFailure = new Error("provider unavailable");

@@ -589,6 +589,12 @@ describe("compiler draft durable repair", () => {
         },
       ],
     };
+    const providerEnvelope = {
+      ...planningProposal,
+      workItems: [],
+      objectives: [],
+      coverage: [],
+    };
     const report = createCompilerValidationReport("proposal", [
       {
         code: "invalid-clarification",
@@ -601,26 +607,37 @@ describe("compiler draft durable repair", () => {
     const invoke = vi.fn(async (request: Parameters<CompilerDraftCallbacks["invoke"]>[0]) => {
       const usage = { inputTokens: 2, outputTokens: 1 };
       if (request.stage === "inventory") return { value: { obligations: ["a"] }, usage };
-      if (request.stage === "compile") return { value: { proposal: planningProposal }, usage };
+      if (request.stage === "compile")
+        throw Object.assign(
+          new ManagementOutputError(
+            new Error("clarification is not concrete"),
+            usage,
+            providerEnvelope,
+          ),
+          { validationReport: report },
+        );
       expect(request.stage).toBe("repair");
       expect(request.previous).toEqual(planningProposal);
-      return { value: { proposal: planningProposal }, usage };
+      return { value: { proposal: providerEnvelope }, usage };
     });
     args.callbacks.invoke = invoke;
-    args.callbacks.validate = (_value, revision) => {
-      if (revision === 0)
-        throw Object.assign(new Error("clarification is not concrete"), {
-          proposal: planningProposal,
-          validationReport: report,
-        });
-      throw new CompilerDraftStopError("planning-repair-observed");
-    };
+    args.callbacks.validate = vi.fn((_value, revision) => {
+      if (revision === 1) throw new CompilerDraftStopError("planning-repair-observed");
+      throw new Error(`unexpected validation revision ${revision}`);
+    });
 
     expect(await runCompilerDraftLoop(args)).toMatchObject({
       status: "stopped",
       reason: "planning-repair-observed",
     });
     expect(invoke.mock.calls.filter(([request]) => request.stage === "repair")).toHaveLength(1);
+    const retainedResult = (await args.manager.load(args.binding)).find(
+      (record) =>
+        record.kind === "result" &&
+        record.payload.stage === "compile" &&
+        record.payload.revision === 0,
+    );
+    expect(retainedResult?.payload.proposal).toEqual(providerEnvelope);
     const callCount = invoke.mock.calls.length;
     expect(await runCompilerDraftLoop(args)).toMatchObject({
       status: "stopped",

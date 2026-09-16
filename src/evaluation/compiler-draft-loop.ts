@@ -15,6 +15,7 @@ import {
   CompilerProposalSchema,
   CompilerWorkItemsProposalSchema,
   CompilerValidationReportSchema,
+  normalizeCompilerProposalProviderOutput,
 } from "../compiler/contracts.js";
 import { CompilerInvariantError } from "../compiler/invariant-error.js";
 import type { CompilerProjectionTrace } from "../compiler/proposal.js";
@@ -466,7 +467,11 @@ export function validateCompilerDraftJournal(
             : priorProposal.payload.error
               ? failedResultEvidence(priorProposal)
               : priorValidation?.payload.failure;
-          const previous = retainedProposal(priorProposal);
+          const retainedPrevious = retainedProposal(priorProposal);
+          const canonicalPrevious = CompilerProposalSchema.safeParse(
+            normalizeCompilerProposalProviderOutput(retainedPrevious),
+          );
+          const previous = canonicalPrevious.success ? canonicalPrevious.data : retainedPrevious;
           const priorProposalIntent = invocations.get(String(priorProposal.payload.invocationId));
           if (priorProposalIntent && isProviderProposalIntent(priorProposalIntent)) {
             if (priorFailure === undefined)
@@ -479,7 +484,9 @@ export function validateCompilerDraftJournal(
             ) {
               const retained = proposalResults.get(candidateRevision);
               if (!retained) continue;
-              const parsed = CompilerProposalSchema.safeParse(retainedProposal(retained));
+              const parsed = CompilerProposalSchema.safeParse(
+                normalizeCompilerProposalProviderOutput(retainedProposal(retained)),
+              );
               if (parsed.success) latestProposal = parsed.data;
             }
             const reviewEvidence = priorJudgeIntent?.payload.reviewEvidence ?? null;
@@ -1673,10 +1680,12 @@ export async function runCompilerDraftLoop(args: {
             ? candidate.proposal
             : undefined;
         const retained = CompilerProposalSchema.safeParse(
-          candidateProposal ??
-            (typeof error === "object" && error !== null && "proposal" in error
-              ? error.proposal
-              : undefined),
+          normalizeCompilerProposalProviderOutput(
+            candidateProposal ??
+              (typeof error === "object" && error !== null && "proposal" in error
+                ? error.proposal
+                : undefined),
+          ),
         );
         if (retained.success) previousProposal = retained.data;
         if (

@@ -11,6 +11,7 @@ import {
   CompilerProposalSchema,
   CompilerRequestSchema,
   CompilerValidationReportSchema,
+  type CompilerWorkItemsProposal,
   type CompilerViolation,
 } from "../src/compiler/contracts.js";
 import {
@@ -38,6 +39,11 @@ afterEach(async () => {
 });
 
 const allToolchainDestinations = ["files.pythonhosted.org", "pypi.org", "registry.npmjs.org"];
+const workItemsProposal = (count = 1): CompilerWorkItemsProposal => {
+  const proposal = semanticProposal(semanticRequest(), count);
+  if (!("workItems" in proposal)) throw new Error("semantic fixture must return Work Items");
+  return proposal;
+};
 
 describe("adapter-owned compiler capabilities", () => {
   it("retains an unrelated observed generic recipe beside unsupported provider evidence", () => {
@@ -241,7 +247,7 @@ describe("strict semantic compiler contracts", () => {
 
   it("keeps strict Zod and JSON schemas in parity for valid and invalid boundaries", () => {
     const request = semanticRequest();
-    const proposal = semanticProposal(semanticRequest());
+    const proposal = workItemsProposal();
     const invalidProposal = structuredClone(proposal) as Record<string, unknown>;
     (invalidProposal.workItems as Array<Record<string, unknown>>)[0]!.scope = ["../secret"];
     const invalidRequest = structuredClone(request) as Record<string, unknown>;
@@ -266,6 +272,94 @@ describe("strict semantic compiler contracts", () => {
       expect(zod.safeParse(value).success).toBe(accepted);
       expect(json(value)).toBe(accepted);
     }
+  });
+
+  it("accepts each strict planning result and preserves the legacy work-items discriminator", () => {
+    const workItems = workItemsProposal();
+    expect(CompilerProposalSchema.parse(workItems)).toMatchObject({ kind: "work-items" });
+    expect(jsonProposal(workItems), JSON.stringify(jsonProposal.errors)).toBe(true);
+
+    const trigger = {
+      code: "work-item-threshold" as const,
+      source: "projected-graph" as const,
+      availability: "estimated" as const,
+      observed: 72,
+      threshold: 50,
+      obligationIds: ["explicit-contract"],
+      explanation: "The projected graph exceeds the configured planning threshold.",
+    };
+    const objective = (id: string, prerequisiteOutputs: Array<Record<string, string>> = []) => ({
+      id,
+      title: `Deliver ${id}`,
+      outcome: `${id} is independently acceptable.`,
+      acceptance: [
+        { id: "complete", kind: "owned" as const, text: `${id} has its expected behavior.` },
+      ],
+      ownedScope: [`src/${id}.ts`],
+      obligationIds: id === "foundation" ? ["explicit-contract"] : [],
+      outputs: [
+        {
+          id: "integrated-change",
+          description: `${id} is integrated.`,
+          completionAcceptanceIds: ["complete"],
+        },
+      ],
+      prerequisiteOutputs,
+    });
+    const objectives = {
+      protocol: "clockgrove.factory/compiler-proposal" as const,
+      kind: "objectives" as const,
+      objectives: [
+        objective("foundation"),
+        objective("consumer", [{ objectiveId: "foundation", outputId: "integrated-change" }]),
+      ],
+      coverage: [
+        {
+          obligationId: "explicit-contract",
+          disposition: "owned" as const,
+          objectiveId: "foundation",
+          acceptanceId: "complete",
+        },
+      ],
+      triggers: [trigger],
+    };
+    const clarification = {
+      protocol: "clockgrove.factory/compiler-proposal" as const,
+      kind: "clarification" as const,
+      requirements: [
+        {
+          id: "target-platform",
+          question: "Which supported target platform must own the deployment output?",
+          reason: "The requested authorization boundary cannot be inferred from repository facts.",
+          obligationIds: ["explicit-contract"],
+        },
+      ],
+      triggers: [{ ...trigger, code: "authorization-boundary" as const, observed: null }],
+    };
+
+    for (const value of [objectives, clarification]) {
+      expect(CompilerProposalSchema.safeParse(value).success).toBe(true);
+      expect(jsonProposal(value), JSON.stringify(jsonProposal.errors)).toBe(true);
+    }
+
+    const mixed = { ...objectives, workItems: workItems.workItems };
+    const vagueClarification = { ...clarification, requirements: [] };
+    const undersizedSplit = { ...objectives, objectives: objectives.objectives.slice(0, 1) };
+    for (const value of [mixed, vagueClarification, undersizedSplit]) {
+      expect(CompilerProposalSchema.safeParse(value).success).toBe(false);
+      expect(jsonProposal(value)).toBe(false);
+    }
+  });
+
+  it("represents unavailable duration as null without weakening the 100-item hard cap", () => {
+    const proposal = workItemsProposal();
+    proposal.workItems[0]!.executionIntent.estimatedDurationMinutes = null;
+    expect(CompilerProposalSchema.safeParse(proposal).success).toBe(true);
+    expect(jsonProposal(proposal), JSON.stringify(jsonProposal.errors)).toBe(true);
+
+    const excessive = workItemsProposal(101);
+    expect(CompilerProposalSchema.safeParse(excessive).success).toBe(false);
+    expect(jsonProposal(excessive)).toBe(false);
   });
 
   it("keeps every validation-report and surface cross-field refinement in JSON parity", () => {
@@ -322,7 +416,7 @@ describe("strict semantic compiler contracts", () => {
   it.each(["LOCALHOST", "service.LocalHost", "Metadata.Google.Internal"])(
     "keeps forbidden network destination %s out of both proposal schemas",
     (destination) => {
-      const proposal = semanticProposal(semanticRequest());
+      const proposal = workItemsProposal();
       const candidate = structuredClone(proposal) as unknown as {
         workItems: Array<{ executionIntent: { additionalNetworkDestinations: string[] } }>;
       };
@@ -339,7 +433,7 @@ describe("strict semantic compiler contracts", () => {
     const second = validateCompilerRequest(structuredClone(request));
     expect(first).toEqual(second);
     expect(first.status).toBe("valid");
-    const proposal = semanticProposal(semanticRequest());
+    const proposal = workItemsProposal();
     proposal.workItems[0]!.scope = ["main.go"];
     expect(
       parseAndValidateCompilerProposal(request, proposal, semanticProjectionContext(pinned)).report,

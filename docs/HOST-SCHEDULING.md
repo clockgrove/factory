@@ -136,6 +136,13 @@ Linux user's manager, Factory returns `controller-user-manager-unavailable` with
 command to run as that same user. No unit file, enablement, or running state is changed. Status and
 doctor report this as an unavailable manager, never as a disabled or inactive controller.
 
+After that preflight, Factory serializes lifecycle operations for the exact deterministic unit with
+a private advisory lock in that effective user's verified runtime directory. A competing explicit
+client waits for at most 30 seconds and then returns `controller-lifecycle-busy` without making a
+decision or mutation. Linux releases the lock automatically if its owning process exits, so an
+abandoned client cannot leave a stale owner record or require manual lock cleanup. The lock does not
+coordinate another user, another controller identity, an arbitrary bus, or any Windows process.
+
 `Restart=on-failure` restarts unexpected process crashes and signals. Fatal controller exits are a
 different contract: durable-state incompatibility (65), internal invariant (70), discovery failure
 (72), local configuration (78), and launcher execution failure (203) trip the service fuse and do

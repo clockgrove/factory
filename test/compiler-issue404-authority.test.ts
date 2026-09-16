@@ -1733,4 +1733,66 @@ describe("issue #404 live compiler authority", () => {
       totalTokens: null,
     });
   });
+
+  it("excludes proven local terminals from exact provider token accounting", () => {
+    const records = [
+      ...durablePair(
+        "compiler-provider-compile",
+        0,
+        { inputTokens: 10, outputTokens: 2, cachedInputTokens: 4 },
+        "compile",
+      ),
+      ...durablePair(
+        "compiler-provider-judge",
+        0,
+        { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 },
+        "judge",
+      ),
+      ...preProviderTerminalPair("compiler-local-repair"),
+    ];
+    expect(issue404InvocationTerminalEvidence(records).preProviderTerminals).toEqual([
+      expect.objectContaining({
+        invocationId: "compiler-local-repair",
+        stopReason: "compiler request is unsatisfiable",
+      }),
+    ]);
+    expect(issue404TokenUsageByStage(records)).toEqual([
+      {
+        stage: "compile",
+        revision: 0,
+        tokens: {
+          availability: "observed",
+          inputTokens: 10,
+          outputTokens: 2,
+          cachedInputTokens: 4,
+          cachedInputAvailability: "observed",
+          cachedInputIsIncludedInInput: true,
+          totalTokens: 12,
+        },
+      },
+      {
+        stage: "judge",
+        revision: 0,
+        tokens: {
+          availability: "observed",
+          inputTokens: 7,
+          outputTokens: 3,
+          cachedInputTokens: 2,
+          cachedInputAvailability: "observed",
+          cachedInputIsIncludedInInput: true,
+          totalTokens: 10,
+        },
+      },
+    ]);
+    expect(issue404AggregateTokenUsage(records)).toEqual({
+      availability: "observed",
+      inputTokens: 17,
+      outputTokens: 5,
+      observedInputTokens: 17,
+      observedOutputTokens: 5,
+      cachedInputTokens: 6,
+      cachedInputAvailability: "observed",
+      totalTokens: 22,
+    });
+  });
 });

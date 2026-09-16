@@ -1060,7 +1060,7 @@ function observedUsage(record: Issue404TokenRecord) {
 
 export function issue404TokenUsageByStage(records: readonly Issue404TokenRecord[]) {
   return records
-    .filter((record) => record.kind === "result")
+    .filter((record) => record.kind === "result" && record.payload.preProviderTerminal !== true)
     .map((record) => {
       const usage = observedUsage(record);
       return {
@@ -1083,7 +1083,9 @@ export function issue404TokenUsageByStage(records: readonly Issue404TokenRecord[
 }
 
 export function issue404AggregateTokenUsage(records: readonly Issue404TokenRecord[]) {
-  const results = records.filter((record) => record.kind === "result");
+  const results = records.filter(
+    (record) => record.kind === "result" && record.payload.preProviderTerminal !== true,
+  );
   const usages = results.map(observedUsage).filter((usage) => usage !== null);
   const observedInputTokens = usages.reduce((total, usage) => total + usage.inputTokens, 0);
   const observedOutputTokens = usages.reduce((total, usage) => total + usage.outputTokens, 0);

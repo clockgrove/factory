@@ -10,11 +10,13 @@ import {
   readCompilerObligationEvidence,
   CODEX_OBLIGATION_SCHEMA,
   CODEX_PLAN_JUDGE_SCHEMA,
+  CODEX_CASE_LABEL_SCHEMA,
 } from "../src/management/codex-cli.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import type { CompilationContext, PlanJudgeContext } from "../src/management/backend.js";
 import {
   COMPILER_JUDGE_DIMENSIONS,
+  CompilerCaseLabelSchema,
   compilerEvalDigest,
   type ObligationInventory,
   type CompilerJudgeVerdict,
@@ -228,6 +230,7 @@ function verdict(
       },
     ],
     findings: [],
+    inferenceCorrections: [],
     uncertainty: [],
     decision: "accept",
   };
@@ -858,6 +861,55 @@ it("keeps provider and runtime judge cardinality contracts aligned", async () =>
   ]) {
     expect(providerObligations(invalid)).toBe(false);
     expect(ObligationClaimsSchema.safeParse(invalid).success).toBe(false);
+  }
+});
+
+it("keeps provider and runtime case-label boundaries aligned", async () => {
+  const { default: Ajv } = await import("ajv");
+  const provider = new Ajv({ strict: false }).compile(CODEX_CASE_LABEL_SCHEMA);
+  const label = {
+    version: 1,
+    caseDigest: "a".repeat(64),
+    provenance: "llm-assisted",
+    pass: "blinded",
+    obligations: [
+      {
+        id: "required-outcome",
+        text: "Preserve the required outcome.",
+        evidenceIds: ["objective"],
+        status: "required",
+        reason: "The Objective says so.",
+      },
+    ],
+    disagreements: [
+      {
+        obligationId: "required-outcome",
+        priorStatus: "ambiguous",
+        reason: "Pinned evidence resolves it.",
+        evidenceIds: ["objective"],
+      },
+    ],
+    uncertainty: ["No remaining uncertainty."],
+  };
+  const cases = [
+    [label, true],
+    [{ ...label, caseDigest: "not-a-digest" }, false],
+    [{ ...label, obligations: [] }, false],
+    [{ ...label, obligations: [{ ...label.obligations[0]!, id: "x".repeat(161) }] }, false],
+    [{ ...label, obligations: [{ ...label.obligations[0]!, evidenceIds: [] }] }, false],
+    [
+      {
+        ...label,
+        disagreements: [{ ...label.disagreements[0]!, obligationId: "x".repeat(161) }],
+      },
+      false,
+    ],
+    [{ ...label, disagreements: [{ ...label.disagreements[0]!, evidenceIds: [] }] }, false],
+    [{ ...label, uncertainty: ["x".repeat(4_001)] }, false],
+  ] as const;
+  for (const [candidate, accepted] of cases) {
+    expect(provider(candidate), JSON.stringify(provider.errors)).toBe(accepted);
+    expect(CompilerCaseLabelSchema.safeParse(candidate).success).toBe(accepted);
   }
 });
 

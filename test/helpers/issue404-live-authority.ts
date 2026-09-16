@@ -2,13 +2,32 @@ import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import type { CompilationContext } from "../../src/management/backend.js";
+import {
+  bindManagementTerminalOutcome,
+  type CompilationContext,
+  type ManagementUsage,
+} from "../../src/management/backend.js";
+import {
+  classifyManagementCliProcessFailure,
+  observedManagementCompletionUsage,
+  parseManagementJsonlOutput,
+} from "../../src/management/codex-cli.js";
+import { managementJsonlEvents } from "../../src/management/transcripts.js";
 import { DEFAULT_RUN_POLICY } from "../../src/protocol/policy.js";
+import { ProviderQuotaError } from "../../src/providers/quota.js";
 
 export interface Issue404LiveGitIdentity {
   candidateCommitSha: string;
   headSha: string;
   worktreeStatus: string;
+}
+
+/** Qualification-only transformations retain the real successful provider terminal receipt. */
+export function issue404SucceededTransformationFailure(
+  error: Error,
+  usage: ManagementUsage,
+): object {
+  return bindManagementTerminalOutcome(error, { state: "succeeded", usage: { ...usage } });
 }
 
 export interface Issue404LiveAuthority {
@@ -186,9 +205,28 @@ export interface Issue404TranscriptEvidence {
   revision: number;
   promptBytes: number;
   provenance: DurableInvocationProvenance;
-  responseSha256: string;
-  stdoutSha256: string;
-  stderrSha256: string;
+  responseSha256: string | null;
+  stdoutSha256: string | null;
+  stderrSha256: string | null;
+  stdoutUnavailableReason: string | null;
+  stderrUnavailableReason: string | null;
+  errorSha256: string | null;
+  process: {
+    exitCode: number | null;
+    signal: string | null;
+    timedOut: boolean;
+    durationMs: number;
+  };
+  usage:
+    | { availability: "unknown" }
+    | {
+        availability: "observed";
+        inputTokens: number;
+        outputTokens: number;
+        cachedInputTokens: number | null;
+        cachedInputIsIncludedInInput: true;
+        totalTokens: number;
+      };
 }
 
 export interface DurableInvocationProvenance {
@@ -351,13 +389,29 @@ function claimsInvocation(file: Issue404TranscriptFile, invocationId: string): b
 
 interface ValidatedResponse {
   state: Issue404TranscriptEvidence["state"];
-  parsedResponse: unknown;
-  stdoutSha256: string;
-  stderrSha256: string;
+  parsedResponse: unknown | null;
+  responseSha256: string | null;
+  stdoutSha256: string | null;
+  stderrSha256: string | null;
+  stdoutUnavailableReason: string | null;
+  stderrUnavailableReason: string | null;
+  errorSha256: string | null;
+  process: Issue404TranscriptEvidence["process"];
+  usage: Issue404TranscriptEvidence["usage"];
 }
 
-function observedStream(value: unknown): { content: string; sha256: string } | null {
+function terminalStream(
+  value: unknown,
+): { content: string | null; sha256: string | null; unavailableReason: string | null } | null {
   const stream = object(value);
+  if (
+    stream &&
+    exactKeys(stream, ["availability", "reason"]) &&
+    stream.availability === "unavailable" &&
+    typeof stream.reason === "string" &&
+    stream.reason
+  )
+    return { content: null, sha256: null, unavailableReason: stream.reason };
   if (
     !stream ||
     !exactKeys(stream, ["availability", "content", "sha256", "truncatedByFactory"]) ||
@@ -368,11 +422,48 @@ function observedStream(value: unknown): { content: string; sha256: string } | n
     stream.truncatedByFactory !== false
   )
     return null;
-  return { content: stream.content, sha256: stream.sha256 };
+  return { content: stream.content, sha256: stream.sha256, unavailableReason: null };
+}
+
+function transcriptUsageEvidence(value: unknown): Issue404TranscriptEvidence["usage"] | null {
+  if (value === null) return { availability: "unknown" };
+  const usage = object(value);
+  if (
+    !usage ||
+    !exactKeys(usage, [
+      "inputTokens",
+      "outputTokens",
+      "cachedInputTokens",
+      "totalTokens",
+      "cachedInputIsIncludedInInput",
+    ]) ||
+    !Number.isSafeInteger(usage.inputTokens) ||
+    Number(usage.inputTokens) < 0 ||
+    !Number.isSafeInteger(usage.outputTokens) ||
+    Number(usage.outputTokens) < 0 ||
+    (usage.cachedInputTokens !== null &&
+      (!Number.isSafeInteger(usage.cachedInputTokens) ||
+        Number(usage.cachedInputTokens) < 0 ||
+        Number(usage.cachedInputTokens) > Number(usage.inputTokens))) ||
+    usage.totalTokens !== Number(usage.inputTokens) + Number(usage.outputTokens) ||
+    usage.cachedInputIsIncludedInInput !== true
+  )
+    return null;
+  return {
+    availability: "observed",
+    inputTokens: Number(usage.inputTokens),
+    outputTokens: Number(usage.outputTokens),
+    cachedInputTokens: usage.cachedInputTokens === null ? null : Number(usage.cachedInputTokens),
+    cachedInputIsIncludedInInput: true,
+    totalTokens: Number(usage.totalTokens),
+  };
 }
 
 function validateCliResponse(response: Record<string, unknown>, durableUsage: unknown) {
+  const state = response.state;
+  const failed = state === "provider-failed" || state === "invalid-response";
   if (
+    (state !== "succeeded" && !failed) ||
     !exactKeys(response, [
       "state",
       "availability",
@@ -382,62 +473,45 @@ function validateCliResponse(response: Record<string, unknown>, durableUsage: un
       "parsedResponse",
       "process",
       "usage",
+      ...(failed ? ["error"] : []),
     ]) ||
-    response.state !== "succeeded" ||
-    response.availability !== "observed" ||
+    (response.availability !== "observed" && response.availability !== "unavailable") ||
     !usageMatches(response.usage, durableUsage)
   )
     return null;
-  const stdout = observedStream(response.stdout);
-  const stderr = observedStream(response.stderr);
+  const stdout = terminalStream(response.stdout);
+  const stderr = terminalStream(response.stderr);
   const parsed = object(response.parsedResponse);
   const process = object(response.process);
+  const usage = transcriptUsageEvidence(response.usage);
   if (
     !stdout ||
     !stderr ||
     !parsed ||
-    !exactKeys(parsed, ["availability", "value"]) ||
-    parsed.availability !== "observed" ||
     !process ||
     !exactKeys(process, ["exitCode", "signal", "timedOut", "durationMs"]) ||
-    process.exitCode !== 0 ||
-    process.signal !== null ||
-    process.timedOut !== false ||
+    (process.exitCode !== null && !Number.isSafeInteger(process.exitCode)) ||
+    (process.signal !== null && typeof process.signal !== "string") ||
+    typeof process.timedOut !== "boolean" ||
     !Number.isSafeInteger(process.durationMs) ||
     Number(process.durationMs) < 0 ||
-    !Array.isArray(response.messages)
+    !Array.isArray(response.messages) ||
+    !usage
   )
     return null;
 
-  const events: Array<Record<string, unknown>> = [];
-  for (const line of stdout.content.split(/\r?\n/)) {
-    if (!line) continue;
-    try {
-      const event = object(JSON.parse(line));
-      if (!event) return null;
-      events.push(event);
-    } catch {
+  const events = stdout.content === null ? [] : managementJsonlEvents(stdout.content);
+  const completionUsage =
+    stdout.content === null ? undefined : observedManagementCompletionUsage(stdout.content);
+  if (usage.availability === "observed") {
+    if (
+      !completionUsage ||
+      completionUsage.inputTokens !== usage.inputTokens ||
+      completionUsage.outputTokens !== usage.outputTokens ||
+      (completionUsage.cachedInputTokens ?? null) !== usage.cachedInputTokens
+    )
       return null;
-    }
-  }
-  const completions = events.filter((event) => event.type === "turn.completed");
-  if (completions.length !== 1 || events.at(-1) !== completions[0]) return null;
-  const completionUsage = object(completions[0]!.usage);
-  const transcriptUsage = object(response.usage);
-  if (
-    !completionUsage ||
-    !transcriptUsage ||
-    !exactKeys(completions[0]!, ["type", "usage"]) ||
-    !exactKeys(completionUsage, [
-      "input_tokens",
-      "output_tokens",
-      ...(transcriptUsage.cachedInputTokens === null ? [] : ["cached_input_tokens"]),
-    ]) ||
-    completionUsage.input_tokens !== transcriptUsage.inputTokens ||
-    completionUsage.output_tokens !== transcriptUsage.outputTokens ||
-    (completionUsage.cached_input_tokens ?? null) !== transcriptUsage.cachedInputTokens
-  )
-    return null;
+  } else if (completionUsage !== undefined) return null;
 
   const assistant = events.flatMap((event) => {
     const item = object(event.item);
@@ -447,26 +521,120 @@ function validateCliResponse(response: Record<string, unknown>, durableUsage: un
       ? [item.text]
       : [];
   });
-  if (assistant.length === 0) return null;
   const expectedMessages = assistant.map((content, index) => ({
     role: "assistant",
     availability: "observed",
     content,
-    finalStructuredResponse: index === assistant.length - 1,
+    finalStructuredResponse: state === "succeeded" && index === assistant.length - 1,
   }));
   if (!sameValue(response.messages, expectedMessages)) return null;
-  let terminalValue: unknown;
-  try {
-    terminalValue = JSON.parse(assistant.at(-1)!);
-  } catch {
-    return null;
+  const processEvidence = {
+    exitCode: process.exitCode === null ? null : Number(process.exitCode),
+    signal: process.signal === null ? null : String(process.signal),
+    timedOut: Boolean(process.timedOut),
+    durationMs: Number(process.durationMs),
+  };
+  let productionValue: unknown;
+  let productionError: unknown;
+  let processFailure: ReturnType<typeof classifyManagementCliProcessFailure> = null;
+  if (stdout.content !== null) {
+    try {
+      processFailure = classifyManagementCliProcessFailure({
+        exitCode: processEvidence.exitCode,
+        signal: processEvidence.signal,
+        timedOut: processEvidence.timedOut,
+        stdout: stdout.content,
+      });
+    } catch {
+      return null;
+    }
+    try {
+      productionValue = parseManagementJsonlOutput<unknown>(stdout.content);
+    } catch (error) {
+      productionError = error;
+    }
   }
-  if (!sameValue(terminalValue, parsed.value)) return null;
+  if (state !== "succeeded") {
+    if (
+      !exactKeys(parsed, ["availability", "reason"]) ||
+      parsed.availability !== "unavailable" ||
+      parsed.reason !== "no-valid-structured-response" ||
+      typeof response.error !== "string" ||
+      !response.error
+    )
+      return null;
+    const unavailableTransport =
+      response.availability === "unavailable" &&
+      stdout.content === null &&
+      stdout.unavailableReason === "stdout-not-exposed-by-transport" &&
+      stderr.content === null &&
+      stderr.unavailableReason === "stderr-not-exposed-by-transport" &&
+      processEvidence.exitCode === null &&
+      processEvidence.signal === null &&
+      processEvidence.timedOut === false &&
+      usage.availability === "unknown" &&
+      response.messages.length === 0;
+    if (state === "provider-failed") {
+      if (!processFailure && !unavailableTransport) return null;
+      if (processFailure && processFailure.error.message !== response.error) return null;
+    }
+    if (
+      state === "invalid-response" &&
+      (processFailure !== null ||
+        stdout.content === null ||
+        productionError === undefined ||
+        productionError instanceof ProviderQuotaError ||
+        (productionError instanceof Error && productionError.message !== response.error))
+    )
+      return null;
+    return {
+      state,
+      parsedResponse: null,
+      responseSha256: null,
+      stdoutSha256: stdout.sha256,
+      stderrSha256: stderr.sha256,
+      stdoutUnavailableReason: stdout.unavailableReason,
+      stderrUnavailableReason: stderr.unavailableReason,
+      errorSha256: sha256(response.error),
+      process: processEvidence,
+      usage,
+    } satisfies ValidatedResponse;
+  }
+  if (
+    !exactKeys(parsed, ["availability", "value"]) ||
+    parsed.availability !== "observed" ||
+    process.exitCode !== 0 ||
+    process.signal !== null ||
+    process.timedOut !== false ||
+    usage.availability !== "observed" ||
+    stdout.content === null ||
+    stderr.content === null ||
+    assistant.length === 0
+  )
+    return null;
+  const parsedProduction = object(productionValue);
+  const productionUsage = object(parsedProduction?.usage);
+  if (
+    productionError !== undefined ||
+    !parsedProduction ||
+    !sameValue(parsedProduction.value, parsed.value) ||
+    !productionUsage ||
+    productionUsage.inputTokens !== usage.inputTokens ||
+    productionUsage.outputTokens !== usage.outputTokens ||
+    (productionUsage.cachedInputTokens ?? null) !== usage.cachedInputTokens
+  )
+    return null;
   return {
-    state: response.state,
+    state,
     parsedResponse: parsed.value,
+    responseSha256: valueDigest(parsed.value),
     stdoutSha256: stdout.sha256,
     stderrSha256: stderr.sha256,
+    stdoutUnavailableReason: null,
+    stderrUnavailableReason: null,
+    errorSha256: null,
+    process: processEvidence,
+    usage,
   } satisfies ValidatedResponse;
 }
 
@@ -664,17 +832,30 @@ function validateTranscript(
     return null;
 
   const response = object(record.response);
-  if (!response || expectation.transport !== "codex-cli-jsonl") return null;
+  const durableTerminal = object(result.payload.terminalOutcome);
+  if (
+    !response ||
+    expectation.transport !== "codex-cli-jsonl" ||
+    !durableTerminal ||
+    !exactKeys(durableTerminal, ["state", "usage"])
+  )
+    return null;
   const validatedResponse = validateCliResponse(response, result.payload.usage);
   if (
     !validatedResponse ||
-    !providerOutputMatchesDurableResult(
-      validatedResponse.parsedResponse,
-      result,
-      stage,
-      revision,
-      expectation,
-    )
+    durableTerminal.state !== validatedResponse.state ||
+    !sameValue(durableTerminal.usage, result.payload.usage) ||
+    (validatedResponse.state === "succeeded"
+      ? !providerOutputMatchesDurableResult(
+          validatedResponse.parsedResponse,
+          result,
+          stage,
+          revision,
+          expectation,
+        )
+      : typeof result.payload.error !== "string" ||
+        result.payload.error !== response.error ||
+        result.payload.value !== null)
   )
     return null;
   return {
@@ -685,9 +866,14 @@ function validateTranscript(
     revision,
     promptBytes: Buffer.byteLength(userContent),
     provenance,
-    responseSha256: valueDigest(validatedResponse.parsedResponse),
+    responseSha256: validatedResponse.responseSha256,
     stdoutSha256: validatedResponse.stdoutSha256,
     stderrSha256: validatedResponse.stderrSha256,
+    stdoutUnavailableReason: validatedResponse.stdoutUnavailableReason,
+    stderrUnavailableReason: validatedResponse.stderrUnavailableReason,
+    errorSha256: validatedResponse.errorSha256,
+    process: validatedResponse.process,
+    usage: validatedResponse.usage,
   };
 }
 

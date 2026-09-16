@@ -229,6 +229,19 @@ export interface Issue404TranscriptEvidence {
       };
 }
 
+export interface Issue404PreProviderTerminalEvidence {
+  invocationId: string;
+  stage: "inventory" | "compile" | "repair" | "judge";
+  revision: number;
+  error: string;
+  stopReason: string;
+}
+
+export interface Issue404InvocationTerminalEvidence {
+  providerInvocationIds: string[];
+  preProviderTerminals: Issue404PreProviderTerminalEvidence[];
+}
+
 export interface DurableInvocationProvenance {
   promptDigest: string;
   schemaDigest: string;
@@ -272,6 +285,70 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boo
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+export function issue404InvocationTerminalEvidence(
+  records: readonly Issue404DurableRecord[],
+): Issue404InvocationTerminalEvidence {
+  const invocations = records.filter((record) => record.kind === "invocation");
+  const results = records.filter((record) => record.kind === "result");
+  const seen = new Set<string>();
+  const providerInvocationIds: string[] = [];
+  const preProviderTerminals: Issue404PreProviderTerminalEvidence[] = [];
+
+  for (const invocation of invocations) {
+    const invocationId = invocation.payload.invocationId;
+    if (typeof invocationId !== "string" || !invocationId || seen.has(invocationId))
+      throw new Error("qualification invocation identity is missing or repeated");
+    seen.add(invocationId);
+    const matches = results.filter((result) => result.payload.invocationId === invocationId);
+    if (matches.length !== 1)
+      throw new Error(`qualification invocation ${invocationId} lacks one durable terminal result`);
+    const result = matches[0]!;
+    const stage = result.payload.stage;
+    const revision = result.payload.revision;
+    if (
+      invocation.protocol !== "clockgrove.factory/compiler-draft" ||
+      result.protocol !== "clockgrove.factory/compiler-draft" ||
+      invocation.binding.runId !== result.binding.runId ||
+      invocation.binding.baseSha !== result.binding.baseSha ||
+      invocation.payload.stage !== stage ||
+      invocation.payload.revision !== revision ||
+      (stage !== "inventory" && stage !== "compile" && stage !== "repair" && stage !== "judge") ||
+      !Number.isSafeInteger(revision) ||
+      Number(revision) < 0
+    )
+      throw new Error(`qualification invocation ${invocationId} has invalid terminal binding`);
+    if (result.payload.preProviderTerminal !== true) {
+      providerInvocationIds.push(invocationId);
+      continue;
+    }
+    if (
+      result.payload.usage !== null ||
+      result.payload.value !== null ||
+      typeof result.payload.error !== "string" ||
+      !result.payload.error ||
+      typeof result.payload.stopReason !== "string" ||
+      !result.payload.stopReason ||
+      result.payload.provenance !== undefined ||
+      result.payload.terminalOutcome !== undefined ||
+      result.payload.providerQuota !== undefined ||
+      result.payload.cleanupDiagnostic !== undefined
+    )
+      throw new Error(
+        `qualification invocation ${invocationId} has invalid pre-provider terminal evidence`,
+      );
+    preProviderTerminals.push({
+      invocationId,
+      stage,
+      revision: Number(revision),
+      error: result.payload.error,
+      stopReason: result.payload.stopReason,
+    });
+  }
+  if (results.length !== seen.size)
+    throw new Error("qualification journal has a terminal result without one invocation");
+  return { providerInvocationIds, preProviderTerminals };
 }
 
 export function issue404CanonicalPath(path: string): string {

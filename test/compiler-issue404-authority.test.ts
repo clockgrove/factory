@@ -8,6 +8,7 @@ import { managementTerminalOutcome, ManagementOutputError } from "../src/managem
 import {
   issue404AggregateTokenUsage,
   issue404CanonicalPath,
+  issue404InvocationTerminalEvidence,
   issue404LiveAuthority,
   issue404SucceededTransformationFailure,
   issue404TerminalTranscriptEvidence,
@@ -170,6 +171,43 @@ function durablePair(
         terminalOutcome: { state: "succeeded", usage },
         provenance,
         value: durableValue(stage, response),
+      },
+    },
+  ];
+}
+
+function preProviderTerminalPair(
+  invocationId: string,
+  overrides: Record<string, unknown> = {},
+): Issue404DurableRecord[] {
+  const binding = { runId: "fresh-run-20260915-case", baseSha: BASE_SHA };
+  return [
+    {
+      protocol: "clockgrove.factory/compiler-draft",
+      binding,
+      kind: "invocation",
+      payload: {
+        invocationId,
+        stage: "repair",
+        revision: 1,
+        startedAt: TRANSCRIPT_NOT_BEFORE + 10_500,
+      },
+    },
+    {
+      protocol: "clockgrove.factory/compiler-draft",
+      binding,
+      kind: "result",
+      payload: {
+        invocationId,
+        stage: "repair",
+        revision: 1,
+        completedAt: TRANSCRIPT_NOT_BEFORE + 11_000,
+        usage: null,
+        value: null,
+        error: "CompilerDraftStopError: compiler request is unsatisfiable",
+        stopReason: "compiler request is unsatisfiable",
+        preProviderTerminal: true,
+        ...overrides,
       },
     },
   ];
@@ -698,6 +736,68 @@ describe("issue #404 live compiler authority", () => {
         stderrSha256: transcripts[1]!.record.response.stderr.sha256,
       }),
     ]);
+  });
+
+  it("requires transcripts only for provider-dispatched terminals and retains local stop evidence", () => {
+    const providerInvocationId = "compiler-provider-terminal";
+    const localInvocationId = "compiler-local-terminal";
+    const usage = { inputTokens: 10, outputTokens: 2, cachedInputTokens: 4 };
+    const records = [
+      ...durablePair(providerInvocationId, 0, usage),
+      ...preProviderTerminalPair(localInvocationId),
+    ];
+    const terminalEvidence = issue404InvocationTerminalEvidence(records);
+
+    expect(terminalEvidence).toEqual({
+      providerInvocationIds: [providerInvocationId],
+      preProviderTerminals: [
+        {
+          invocationId: localInvocationId,
+          stage: "repair",
+          revision: 1,
+          error: "CompilerDraftStopError: compiler request is unsatisfiable",
+          stopReason: "compiler request is unsatisfiable",
+        },
+      ],
+    });
+    expect(
+      issue404TerminalTranscriptEvidence(
+        [transcriptFile(providerInvocationId, 0, usage)],
+        records,
+        transcriptExpectation(terminalEvidence.providerInvocationIds),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        modelInvocationId: providerInvocationId,
+        stage: "compile",
+        revision: 0,
+      }),
+    ]);
+  });
+
+  it("rejects incomplete or forged local pre-provider terminal evidence", () => {
+    const valid = preProviderTerminalPair("compiler-local-terminal");
+    const mutations = [
+      (records: Issue404DurableRecord[]) => {
+        records[1]!.payload.usage = { inputTokens: 0, outputTokens: 0 };
+      },
+      (records: Issue404DurableRecord[]) => {
+        delete records[1]!.payload.stopReason;
+      },
+      (records: Issue404DurableRecord[]) => {
+        records[1]!.payload.terminalOutcome = { state: "succeeded", usage: null };
+      },
+    ];
+    for (const mutate of mutations) {
+      const records = structuredClone(valid);
+      mutate(records);
+      expect(() => issue404InvocationTerminalEvidence(records)).toThrow(
+        "invalid pre-provider terminal evidence",
+      );
+    }
+    expect(() => issue404InvocationTerminalEvidence(valid.slice(0, 1))).toThrow(
+      "lacks one durable terminal result",
+    );
   });
 
   it("ignores interleaved non-JSON diagnostics in a successful production stream", () => {

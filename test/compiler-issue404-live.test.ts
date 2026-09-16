@@ -51,6 +51,7 @@ import {
   issue404AggregateTokenUsage,
   assertIssue404CanonicalFixture,
   issue404CanonicalPath,
+  issue404InvocationTerminalEvidence,
   issue404LiveAuthority,
   issue404QualificationCompilationContext,
   issue404SucceededTransformationFailure,
@@ -255,6 +256,7 @@ async function assertTerminalTranscripts(
   },
 ) {
   if (!authority) throw new Error("live compiler authority was not established");
+  if (expectation.invocationIds.length === 0) return [];
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const files = (await readdir(authority.transcriptDirectory)).filter(
       (file) => file.startsWith("factory-management-") && file.endsWith(".json"),
@@ -421,8 +423,9 @@ async function qualify(
     const invocationIds = result.records
       .filter((record) => record.kind === "invocation")
       .map((record) => String(record.payload.invocationId));
+    const terminalEvidence = issue404InvocationTerminalEvidence(result.records);
     const transcripts = await assertTerminalTranscripts(result.records, {
-      invocationIds,
+      invocationIds: terminalEvidence.providerInvocationIds,
       durableRunId: lease.runId,
       baseSha,
       canonicalCwd,
@@ -443,6 +446,8 @@ async function qualify(
       reason: result.reason,
       elapsedMilliseconds: Date.now() - started,
       invocationIds,
+      providerInvocationIds: terminalEvidence.providerInvocationIds,
+      preProviderTerminals: terminalEvidence.preProviderTerminals,
       transcripts,
       tokenUsageByStage: issue404TokenUsageByStage(result.records),
       usage: issue404AggregateTokenUsage(result.records),
@@ -472,8 +477,9 @@ async function qualify(
   expect(() => assertCompilerDraftSelection(result.records, result.graph)).not.toThrow();
   const invocations = result.records.filter((record) => record.kind === "invocation");
   const invocationIds = invocations.map((record) => String(record.payload.invocationId));
+  const terminalEvidence = issue404InvocationTerminalEvidence(result.records);
   const transcripts = await assertTerminalTranscripts(result.records, {
-    invocationIds,
+    invocationIds: terminalEvidence.providerInvocationIds,
     durableRunId: lease.runId,
     baseSha,
     canonicalCwd,
@@ -495,6 +501,8 @@ async function qualify(
     graphDigest: result.graphDigest,
     calls: invocations.length,
     invocationIds,
+    providerInvocationIds: terminalEvidence.providerInvocationIds,
+    preProviderTerminals: terminalEvidence.preProviderTerminals,
     transcripts,
     stages: invocations.map((record) => `${record.payload.stage}:${record.payload.revision}`),
     tokenUsageByStage: issue404TokenUsageByStage(result.records),

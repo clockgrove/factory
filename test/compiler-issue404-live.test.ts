@@ -49,6 +49,7 @@ import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { pinFixtureRepository } from "./helpers/compiler-proposal.js";
 import {
   issue404AggregateTokenUsage,
+  assertIssue404CanonicalFixture,
   issue404CanonicalPath,
   issue404LiveAuthority,
   issue404TerminalTranscriptEvidence,
@@ -330,7 +331,7 @@ async function qualify(
       content:
         "Qualification fixture. Source and test paths named by the Objective are intentionally new.\n",
     },
-  ].sort((left, right) => left.path.localeCompare(right.path));
+  ];
   await Promise.all(
     fixtureFiles.map((file) => writeFile(join(repository, file.path), file.content)),
   );
@@ -340,29 +341,12 @@ async function qualify(
   });
   const tree = await materializePinnedCompilationTree(repository, baseSha);
   disposePinnedTrees.push(tree.dispose);
-  const fixtureManifest = fixtureFiles.map((file) => ({
-    path: file.path,
-    mode: "100644",
-    bytes: Buffer.byteLength(file.content),
-    sha256: createHash("sha256").update(file.content).digest("hex"),
-  }));
-  const materializedManifest = await Promise.all(
-    tree.files.map(async (path) => {
-      const content = await readFile(join(tree.path, path));
-      return {
-        path,
-        mode: lstatSync(join(tree.path, path)).mode & 0o100 ? "100755" : "100644",
-        bytes: content.byteLength,
-        sha256: createHash("sha256").update(content).digest("hex"),
-      };
-    }),
-  );
-  if (
-    tree.baseSha !== baseSha ||
-    tree.files.includes(authorityMarkerPath) ||
-    compilerEvalDigest(materializedManifest) !== compilerEvalDigest(fixtureManifest)
-  )
-    throw new Error("live qualification materialized tree differs from its canonical manifest");
+  const fixtureManifest = await assertIssue404CanonicalFixture({
+    tree,
+    baseSha,
+    files: fixtureFiles,
+    forbiddenPaths: [authorityMarkerPath],
+  });
   await sealPinnedCompilationTreeProof(tree.proof);
   const canonicalCwd = issue404CanonicalPath(tree.path);
   const context: CompilationContext = {

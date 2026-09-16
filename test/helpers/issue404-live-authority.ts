@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { lstat, readFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export interface Issue404LiveGitIdentity {
   candidateCommitSha: string;
@@ -12,6 +13,96 @@ export interface Issue404LiveAuthority {
   candidateSha: string;
   runId: string;
   transcriptDirectory: string;
+}
+
+export interface Issue404FixtureFile {
+  path: string;
+  content: string | Uint8Array;
+  mode?: "100644" | "100755";
+}
+
+export interface Issue404FixtureManifestEntry {
+  path: string;
+  mode: "100644" | "100755";
+  bytes: number;
+  sha256: string;
+}
+
+function fixturePathOrder(left: string, right: string): number {
+  return left === right ? 0 : left < right ? -1 : 1;
+}
+
+export function issue404CanonicalFixtureManifest(
+  files: readonly Issue404FixtureFile[],
+): Issue404FixtureManifestEntry[] {
+  const paths = new Set<string>();
+  return files
+    .map((file) => {
+      if (paths.has(file.path))
+        throw new Error(`duplicate qualification fixture path: ${file.path}`);
+      paths.add(file.path);
+      const content = Buffer.from(file.content);
+      return {
+        path: file.path,
+        mode: file.mode ?? "100644",
+        bytes: content.byteLength,
+        sha256: createHash("sha256").update(content).digest("hex"),
+      };
+    })
+    .sort((left, right) => fixturePathOrder(left.path, right.path));
+}
+
+async function issue404MaterializedFixtureManifest(
+  root: string,
+  paths: readonly string[],
+): Promise<Issue404FixtureManifestEntry[]> {
+  const entries = await Promise.all(
+    paths.map(async (path) => {
+      const target = join(root, path);
+      const details = await lstat(target);
+      if (!details.isFile() || details.isSymbolicLink())
+        throw new Error(`qualification fixture path is not a regular file: ${path}`);
+      const content = await readFile(target);
+      return {
+        path,
+        mode: details.mode & 0o111 ? ("100755" as const) : ("100644" as const),
+        bytes: content.byteLength,
+        sha256: createHash("sha256").update(content).digest("hex"),
+      };
+    }),
+  );
+  return entries.sort((left, right) => fixturePathOrder(left.path, right.path));
+}
+
+export async function assertIssue404CanonicalFixture(input: {
+  tree: { path: string; baseSha: string; files: readonly string[] };
+  baseSha: string;
+  files: readonly Issue404FixtureFile[];
+  forbiddenPaths?: readonly string[];
+}): Promise<Issue404FixtureManifestEntry[]> {
+  if (input.tree.baseSha !== input.baseSha)
+    throw new Error("live qualification materialized tree has a different base SHA");
+  const forbidden = input.forbiddenPaths?.find((path) => input.tree.files.includes(path));
+  if (forbidden)
+    throw new Error(`live qualification materialized tree contains authority path: ${forbidden}`);
+  const expected = issue404CanonicalFixtureManifest(input.files);
+  const observed = await issue404MaterializedFixtureManifest(input.tree.path, input.tree.files);
+  if (!sameValue(observed, expected)) {
+    const expectedByPath = new Map(expected.map((entry) => [entry.path, entry]));
+    const observedByPath = new Map(observed.map((entry) => [entry.path, entry]));
+    const paths = [...new Set([...expectedByPath.keys(), ...observedByPath.keys()])].sort(
+      fixturePathOrder,
+    );
+    const path = paths.find((candidate) => {
+      const expectedEntry = expectedByPath.get(candidate);
+      const observedEntry = observedByPath.get(candidate);
+      return !expectedEntry || !observedEntry || !sameValue(expectedEntry, observedEntry);
+    });
+    throw new Error(
+      `live qualification materialized tree differs at ${path ?? "manifest"}: expected ${JSON.stringify(path ? expectedByPath.get(path) : expected)}, observed ${JSON.stringify(path ? observedByPath.get(path) : observed)}`,
+    );
+  }
+  return expected;
 }
 
 export interface Issue404TokenRecord {

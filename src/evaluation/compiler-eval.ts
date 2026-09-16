@@ -161,13 +161,114 @@ export const CompilerJudgeVerdictSchema = z
           })
           .strict(),
       )
-      .max(MAX_COMPILER_OBLIGATION_CHALLENGES)
-      .optional(),
+      .max(MAX_COMPILER_OBLIGATION_CHALLENGES),
     uncertainty: z.array(Text).max(64),
     decision: z.enum(["accept", "repair", "abstain"]),
   })
   .strict();
 export type CompilerJudgeVerdict = z.infer<typeof CompilerJudgeVerdictSchema>;
+
+export interface CompilerJudgeValidationContext {
+  draftDigest: string;
+  inventory: ObligationInventory;
+  graph: {
+    workItems: Array<{
+      id: string;
+      dependsOn: string[];
+      criteria: Array<{ id: string }>;
+    }>;
+  };
+  addedEdges?: Array<{ itemId: string; dependsOn: string }>;
+  challenges?: CompilerInferenceChallenge[];
+}
+
+/**
+ * Convert a structurally valid but self-contradictory acceptance into bounded,
+ * evidence-cited repair evidence. The raw verdict remains the durable provider
+ * output; this deterministic projection only supplies the next repair request.
+ */
+export function repairableCompilerJudgeVerdict(
+  value: unknown,
+  expected: CompilerJudgeValidationContext,
+): CompilerJudgeVerdict | null {
+  const parsed = CompilerJudgeVerdictSchema.safeParse(value);
+  if (!parsed.success || parsed.data.decision !== "accept") return null;
+  const verdict = parsed.data;
+  let unsupported: Set<string>;
+  try {
+    unsupported = unsupportedInferenceObligationIds(verdict, expected);
+  } catch {
+    return null;
+  }
+  const unresolvedCoverage = verdict.coverage.filter(
+    (entry) => entry.status !== "covered" && !unsupported.has(entry.obligationId),
+  );
+  const unknownItems = verdict.items.filter((entry) => entry.granularity === "unknown");
+  const unknownDimensions = verdict.dimensions.filter((entry) => entry.status === "unknown");
+  const materialFindings = verdict.findings.filter((entry) => entry.severity !== "advisory");
+  if (
+    unresolvedCoverage.length === 0 &&
+    unknownItems.length === 0 &&
+    unknownDimensions.length === 0 &&
+    materialFindings.length === 0
+  )
+    return null;
+
+  const findings = [...verdict.findings];
+  if (materialFindings.length === 0) {
+    if (findings.length >= 64) return null;
+    const obligationIds = [...new Set(unresolvedCoverage.map((entry) => entry.obligationId))];
+    const itemIds = [
+      ...new Set([
+        ...unresolvedCoverage.flatMap((entry) => entry.itemIds),
+        ...unknownItems.map((entry) => entry.itemId),
+      ]),
+    ];
+    // A rubric dimension assesses the whole candidate. Binding all existing
+    // items identifies that exact graph without inventing scope or obligations.
+    if (itemIds.length === 0) itemIds.push(...expected.graph.workItems.map((entry) => entry.id));
+    const evidenceIds = [
+      ...new Set(
+        [...unresolvedCoverage, ...unknownItems, ...unknownDimensions].flatMap(
+          (entry) => entry.evidenceIds,
+        ),
+      ),
+    ];
+    if (evidenceIds.length === 0 || (obligationIds.length === 0 && itemIds.length === 0))
+      return null;
+    const usedIds = new Set(findings.map((entry) => entry.id));
+    let id = "invalid-acceptance";
+    for (let suffix = 2; usedIds.has(id); suffix++) id = `invalid-acceptance-${suffix}`;
+    const unresolved = [
+      ...unresolvedCoverage.map((entry) => `coverage ${entry.obligationId} is ${entry.status}`),
+      ...unknownItems.map((entry) => `item ${entry.itemId} granularity is unknown`),
+      ...unknownDimensions.map((entry) => `dimension ${entry.dimension} is unknown`),
+    ];
+    findings.push({
+      id,
+      dimension:
+        unknownDimensions[0]?.dimension ?? (unknownItems.length ? "granularity" : "coverage"),
+      severity: "blocking",
+      confidence: 1,
+      obligationIds,
+      itemIds,
+      evidenceIds,
+      rootCause: `The judge requested acceptance while ${unresolved.join("; ")}.`.slice(0, 4000),
+      correction:
+        "Clarify the existing Work Items only where needed to resolve the cited assessment; preserve every obligation and do not add scope solely to populate the rubric.",
+      uncertainty: [...unknownItems, ...unknownDimensions]
+        .map((entry) => entry.reason)
+        .join("; ")
+        .slice(0, 4000),
+    });
+  }
+  const repair = { ...verdict, findings, decision: "repair" as const };
+  try {
+    return validateCompilerJudgeVerdict(repair, expected);
+  } catch {
+    return null;
+  }
+}
 
 /** Stable identity independent of object key insertion order; arrays retain their order. */
 export function compilerEvalDigest(value: unknown): string {
@@ -189,6 +290,53 @@ function unique(values: string[], label: string) {
 function references(ids: string[], available: Set<string>, label: string) {
   unique(ids, label);
   if (ids.some((id) => !available.has(id))) throw new Error(`unknown ${label}`);
+}
+
+function unsupportedInferenceObligationIds(
+  verdict: CompilerJudgeVerdict,
+  expected: CompilerJudgeValidationContext,
+): Set<string> {
+  const challenges = validateCompilerInferenceChallenges(
+    expected.challenges ?? [],
+    expected.inventory,
+  );
+  const corrections = verdict.inferenceCorrections ?? [];
+  unique(
+    corrections.map((entry) => `${entry.findingId}\0${entry.obligationId}`),
+    "inference correction",
+  );
+  const evidence = new Set(expected.inventory.evidence.map((entry) => entry.id));
+  const unsupported = new Set<string>();
+  for (const correction of corrections) {
+    const challenge = challenges.find(
+      (entry) =>
+        entry.findingId === correction.findingId && entry.obligationId === correction.obligationId,
+    );
+    if (!challenge) throw new Error("inference correction requires a matching compiler challenge");
+    references(correction.evidenceIds, evidence, "inference correction citation");
+    if (!correction.evidenceIds.some((id) => challenge.evidenceIds.includes(id)))
+      throw new Error("inference correction must adjudicate cited challenge evidence");
+    if (correction.disposition === "unsupported-inference") {
+      if (
+        expected.inventory.obligations.find((entry) => entry.id === correction.obligationId)
+          ?.kind === "explicit"
+      )
+        throw new Error("explicit Objective obligations cannot be waived");
+      const coverage = verdict.coverage.find(
+        (entry) => entry.obligationId === correction.obligationId,
+      );
+      if (coverage?.status !== "missing" && coverage?.status !== "unknown")
+        throw new Error("unsupported inference must preserve missing or unknown original coverage");
+      unsupported.add(correction.obligationId);
+    }
+  }
+  if (
+    corrections.some(
+      (entry) => entry.disposition === "upheld" && unsupported.has(entry.obligationId),
+    )
+  )
+    throw new Error("contradictory inference corrections");
+  return unsupported;
 }
 /** Evidence is supplied by the pinned repository reader, never by the model as authority. */
 export function parseObligationInventory(
@@ -259,19 +407,7 @@ export function hydrateObligationInventory(
 
 export function validateCompilerJudgeVerdict(
   value: unknown,
-  expected: {
-    draftDigest: string;
-    inventory: ObligationInventory;
-    graph: {
-      workItems: Array<{
-        id: string;
-        dependsOn: string[];
-        criteria: Array<{ id: string }>;
-      }>;
-    };
-    addedEdges?: Array<{ itemId: string; dependsOn: string }>;
-    challenges?: CompilerInferenceChallenge[];
-  },
+  expected: CompilerJudgeValidationContext,
 ): CompilerJudgeVerdict {
   const verdict = CompilerJudgeVerdictSchema.parse(value);
   if (
@@ -367,45 +503,7 @@ export function validateCompilerJudgeVerdict(
     if (!entry.obligationIds.length && !entry.itemIds.length)
       throw new Error("finding requires affected identity");
   }
-  const challenges = validateCompilerInferenceChallenges(
-    expected.challenges ?? [],
-    expected.inventory,
-  );
-  const corrections = verdict.inferenceCorrections ?? [];
-  unique(
-    corrections.map((entry) => `${entry.findingId}\0${entry.obligationId}`),
-    "inference correction",
-  );
-  const unsupported = new Set<string>();
-  for (const correction of corrections) {
-    const challenge = challenges.find(
-      (entry) =>
-        entry.findingId === correction.findingId && entry.obligationId === correction.obligationId,
-    );
-    if (!challenge) throw new Error("inference correction requires a matching compiler challenge");
-    references(correction.evidenceIds, evidence, "inference correction citation");
-    if (!correction.evidenceIds.some((id) => challenge.evidenceIds.includes(id)))
-      throw new Error("inference correction must adjudicate cited challenge evidence");
-    if (correction.disposition === "unsupported-inference") {
-      if (
-        expected.inventory.obligations.find((entry) => entry.id === correction.obligationId)
-          ?.kind === "explicit"
-      )
-        throw new Error("explicit Objective obligations cannot be waived");
-      const coverage = verdict.coverage.find(
-        (entry) => entry.obligationId === correction.obligationId,
-      );
-      if (coverage?.status !== "missing" && coverage?.status !== "unknown")
-        throw new Error("unsupported inference must preserve missing or unknown original coverage");
-      unsupported.add(correction.obligationId);
-    }
-  }
-  if (
-    corrections.some(
-      (entry) => entry.disposition === "upheld" && unsupported.has(entry.obligationId),
-    )
-  )
-    throw new Error("contradictory inference corrections");
+  const unsupported = unsupportedInferenceObligationIds(verdict, expected);
   if (
     verdict.decision === "accept" &&
     (verdict.coverage.some(

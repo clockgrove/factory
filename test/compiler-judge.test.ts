@@ -4,6 +4,7 @@ import { compiledGraphDigest } from "../src/graph.js";
 import {
   COMPILER_JUDGE_DIMENSIONS,
   compilerEvalDigest,
+  repairableCompilerJudgeVerdict,
   validateCompilerJudgeVerdict,
   type CompilerJudgeVerdict,
 } from "../src/evaluation/compiler-eval.js";
@@ -149,5 +150,155 @@ describe("independent semantic compiler judgment", () => {
         graph: proposal,
       }),
     ).toThrow(/unresolved coverage or blockers/);
+  });
+
+  it.each(["coverage", "item", "dimension", "finding"] as const)(
+    "derives evidence-cited repair input from an invalid accept %s predicate",
+    (predicate) => {
+      const pinned = semanticPinnedFacts();
+      const request = semanticRequest(pinned);
+      const proposal = semanticProposal(request);
+      const projection = projectCompilerProposal({
+        request,
+        proposal,
+        pinnedFacts: pinned,
+        runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
+      });
+      const raw = acceptedVerdict(request, proposal, compiledGraphDigest(projection.objective));
+      if (predicate === "coverage") raw.coverage[0]!.status = "partial";
+      if (predicate === "item") raw.items[0]!.granularity = "unknown";
+      if (predicate === "dimension") {
+        raw.dimensions.find((entry) => entry.dimension === "assumption-grounding")!.status =
+          "unknown";
+        raw.dimensions.find((entry) => entry.dimension === "assumption-grounding")!.reason =
+          "The existing proposal does not expose enough grounding to assess assumptions.";
+      }
+      if (predicate === "finding")
+        raw.findings.push({
+          id: "existing-blocker",
+          dimension: "coverage",
+          severity: "blocking",
+          confidence: 1,
+          obligationIds: [request.inventory.obligations[0]!.id],
+          itemIds: [proposal.workItems[0]!.id],
+          evidenceIds: ["objective"],
+          rootCause: "The accepted proposal still has a material defect.",
+          correction: "Correct the cited defect without adding scope.",
+          uncertainty: "",
+        });
+      const preserved = structuredClone(raw);
+
+      const repair = repairableCompilerJudgeVerdict(raw, {
+        draftDigest: compiledGraphDigest(projection.objective),
+        inventory: request.inventory,
+        graph: proposal,
+        addedEdges: projection.trace.addedEdges,
+      });
+
+      expect(raw).toEqual(preserved);
+      expect(repair?.decision).toBe("repair");
+      expect(repair?.findings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining(
+            predicate === "finding"
+              ? { id: "existing-blocker", severity: "blocking" }
+              : {
+                  id: "invalid-acceptance",
+                  dimension:
+                    predicate === "dimension"
+                      ? "assumption-grounding"
+                      : predicate === "item"
+                        ? "granularity"
+                        : "coverage",
+                  severity: "blocking",
+                  itemIds: proposal.workItems.map((item) => item.id),
+                  evidenceIds: ["objective"],
+                },
+          ),
+        ]),
+      );
+      expect(() =>
+        validateCompilerJudgeVerdict(repair, {
+          draftDigest: compiledGraphDigest(projection.objective),
+          inventory: request.inventory,
+          graph: proposal,
+          addedEdges: projection.trace.addedEdges,
+        }),
+      ).not.toThrow();
+    },
+  );
+
+  it("does not reintroduce an adjudicated unsupported prerequisite into dimension repair", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    request.inventory.obligations.push({
+      id: "unsupported-prerequisite",
+      text: "Provision infrastructure that the Objective does not request.",
+      kind: "prerequisite",
+      evidenceIds: ["objective"],
+      acceptanceEvidence: "Infrastructure is provisioned.",
+    });
+    const proposal = semanticProposal(request);
+    const projection = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
+    });
+    const raw = acceptedVerdict(request, proposal, compiledGraphDigest(projection.objective));
+    const coverage = raw.coverage.find(
+      (entry) => entry.obligationId === "unsupported-prerequisite",
+    )!;
+    coverage.status = "missing";
+    coverage.itemIds = [];
+    coverage.acceptanceBindings = [];
+    const dimension = raw.dimensions.find((entry) => entry.dimension === "assumption-grounding")!;
+    dimension.status = "unknown";
+    dimension.reason = "The existing proposal leaves a separate assumption unclear.";
+    const challenge = {
+      findingId: "unsupported-prerequisite-finding",
+      obligationId: "unsupported-prerequisite",
+      reason: "The cited Objective does not require infrastructure provisioning.",
+      evidenceIds: ["objective"],
+    };
+    raw.inferenceCorrections = [
+      {
+        ...challenge,
+        disposition: "unsupported-inference",
+      },
+    ];
+
+    const repair = repairableCompilerJudgeVerdict(raw, {
+      draftDigest: compiledGraphDigest(projection.objective),
+      inventory: request.inventory,
+      graph: proposal,
+      addedEdges: projection.trace.addedEdges,
+      challenges: [challenge],
+    });
+
+    expect(repair).toMatchObject({
+      decision: "repair",
+      findings: [
+        {
+          id: "invalid-acceptance",
+          dimension: "assumption-grounding",
+          obligationIds: [],
+          itemIds: proposal.workItems.map((item) => item.id),
+          evidenceIds: ["objective"],
+        },
+      ],
+    });
+    expect(repair?.findings.flatMap((finding) => finding.obligationIds)).not.toContain(
+      "unsupported-prerequisite",
+    );
+    expect(() =>
+      validateCompilerJudgeVerdict(repair, {
+        draftDigest: compiledGraphDigest(projection.objective),
+        inventory: request.inventory,
+        graph: proposal,
+        addedEdges: projection.trace.addedEdges,
+        challenges: [challenge],
+      }),
+    ).not.toThrow();
   });
 });

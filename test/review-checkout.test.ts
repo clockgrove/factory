@@ -326,6 +326,25 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:4, output
     });
   });
 
+  it("rejects extra provider review fields before checkpointing", async () => {
+    const input = await fixture();
+    const backend = new CodexCliManagementBackend({
+      runStructured: async () => ({
+        value: {
+          accepted: true,
+          summary: "exact candidate inspected",
+          unmetCriteria: [],
+          risks: [],
+          extra: "not in the review contract",
+        },
+        usage: { inputTokens: 4, outputTokens: 2 },
+      }),
+    });
+    const checkpoint = vi.fn(async () => {});
+    await expect(backend.review(input, checkpoint)).rejects.toThrow();
+    expect(checkpoint).not.toHaveBeenCalled();
+  });
+
   it("clamps the final admission remainder to the supplied operation-stall bound", async () => {
     const input: ReviewContext = await fixture();
     input.invocationTimeoutMs = 30 * 60_000;

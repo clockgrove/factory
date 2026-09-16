@@ -303,6 +303,17 @@ describe("bounded status, explain, and replay output", () => {
       committed: 120_000,
       remaining: 1_680_000,
     });
+    expect(report.compilerEvaluation).toEqual({
+      availability: "unavailable",
+      policy: {
+        mode: "auto-repair",
+        maxRepairs: 2,
+        maxInvocations: 7,
+        timeoutSeconds: 600,
+        maxObservedTokens: 500_000,
+      },
+      reason: "immutable compiler draft status reader is unavailable",
+    });
     expect(report.operatorAction).toMatchObject({
       required: false,
       monitoring: "continue",

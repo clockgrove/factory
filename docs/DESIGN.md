@@ -1334,10 +1334,11 @@ part of the protocol; it is not accepted as an inert field.
 
 ## Management backends
 
-An explicit immutable `compilerEvaluation` policy adds an obligation-first draft stage before
+An immutable `compilerEvaluation` policy adds an obligation-first draft stage before
 the existing graph commitment. `mode: "auto-repair"` runs extraction, initial semantic proposal,
 mechanical grounding, and independent whole-Objective judgment; it permits at most two repairs
-by default. The default envelope is seven model invocations and 600 seconds. Optional
+by default. New activations that omit policy persist the complete standard envelope: two repairs,
+seven model invocations, 600 seconds, and a 500,000 observed-token stop threshold. Optional
 `maxRepairs` (0–2), `maxInvocations` (1–7), `timeoutSeconds` (1–3600), and
 `maxObservedTokens` configure that bounded envelope. The normal run deadline and observed-token admission
 remain additional limits. Observed tokens are not a provider-enforced hard cap. Every phase
@@ -1378,7 +1379,8 @@ instead of a separate repair protocol. Only a completed response that fails dete
 schema or evidence-grounding validation may consume the next shared correction. Exact usage alone
 does not authorize a retry; provider, process, persistence, unsafe-output, and exhausted-bound failures
 remain terminal.
-Runs without `compilerEvaluation` retain one paid proposal call. That call receives a lossless bounded
+Historical and caller-supplied policies without `compilerEvaluation` retain one paid proposal call.
+That call receives a lossless bounded
 Objective source-coverage inventory so every source segment remains structurally visible, but Factory
 does not claim those syntactic boundaries are independently extracted semantic obligations. Only the
 explicit evaluation path adds the separately dispatched obligation extraction and independent judge.
@@ -1394,11 +1396,13 @@ semantic needs with adapter and policy-derived execution requirements, and recor
 of adapter bindings, added edges, and risk elevations. The existing graph validators and this projection share dependency, overlap, and exclusive-
 resource analysis so they cannot silently implement different graph semantics.
 
-This is an opt-in policy extension, not a change to existing immutable policies or the current
-release candidate's defaults. Runs without the field retain their original compilation path.
-Upgrade the plugin and controller together before enabling it; older controllers do not
-understand draft-stage authority and cannot safely resume these enabled runs. Default enablement
-and quality/efficiency claims require separate measured calibration and comparative evidence.
+Default selection changes only fresh omitted-policy activation. Existing immutable policies, exact
+request replays, and caller-supplied policies are never rewritten or given nested defaults; runs
+without the field retain their original compilation path and digest. Upgrade the plugin and controller
+together before starting a defaulted run; older controllers do not understand draft-stage authority
+and cannot safely resume these enabled runs. Status reads the immutable draft journal to show every
+compiler invocation and cumulative observed usage without replaying model work. Quality and efficiency
+claims require separate measured calibration and comparative evidence.
 Historical reports preserve missing originals, unresolved usage and unknown causal attribution;
 they cannot reconstruct absent evidence or revive a terminal run. See
 [the evaluation contract](EVALUATION-CORPUS.md#independent-draft-review-and-post-mortems).

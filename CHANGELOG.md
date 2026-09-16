@@ -21,6 +21,10 @@ and artifacts, and record the commit SHA when installing from source.
 
 ### Fixed
 
+- Give new omitted-policy Objective activations an explicit bounded compiler auto-repair envelope,
+  preserving exact historical and caller-supplied policy authority while reporting each compiler
+  invocation and cumulative observed usage. ([#389](https://github.com/clockgrove/factory/issues/389))
+
 - Reconnect interrupted foreground calls to the exact non-terminal run and honor its durable
   cancellation before another compiler, graph, Work Item, or worker admission. Cancelled terminal
   history and unresolved model invocations now require explicit successor recovery instead of an

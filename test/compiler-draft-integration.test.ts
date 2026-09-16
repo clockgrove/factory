@@ -145,6 +145,7 @@ function proposal(request: CompilerRequest, repaired = false) {
   const recipe = request.repository.validationRecipes[0]!;
   return {
     protocol: "clockgrove.factory/compiler-proposal" as const,
+    kind: "work-items" as const,
     workItems: [
       {
         id: "feature",

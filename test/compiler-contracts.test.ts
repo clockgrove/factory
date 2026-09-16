@@ -11,6 +11,7 @@ import {
   CompilerProposalSchema,
   CompilerRequestSchema,
   CompilerValidationReportSchema,
+  type CompilerObjectivesProposal,
   type CompilerWorkItemsProposal,
   type CompilerViolation,
 } from "../src/compiler/contracts.js";
@@ -321,15 +322,25 @@ describe("strict semantic compiler contracts", () => {
       title: `Deliver ${id}`,
       outcome: `${id} is independently acceptable.`,
       acceptance: [
-        { id: "complete", kind: "owned" as const, text: `${id} has its expected behavior.` },
+        {
+          id: `${id}-complete`,
+          kind: id === "foundation" ? ("owned" as const) : ("aggregate-integration" as const),
+          text: `${id} has its expected behavior.`,
+        },
       ],
       ownedScope: [`src/${id}.ts`],
       obligationIds: id === "foundation" ? ["explicit-contract"] : [],
+      planningEstimate: {
+        workItems: 12,
+        criticalPathMinutes: null,
+        aggregateWorkMinutes: null,
+        basis: `${id} is bounded to one independently accepted output.`,
+      },
       outputs: [
         {
-          id: "integrated-change",
+          id: `${id}-change`,
           description: `${id} is integrated.`,
-          completionAcceptanceIds: ["complete"],
+          completionAcceptanceIds: [`${id}-complete`],
         },
       ],
       prerequisiteOutputs,
@@ -339,14 +350,14 @@ describe("strict semantic compiler contracts", () => {
       kind: "objectives" as const,
       objectives: [
         objective("foundation"),
-        objective("consumer", [{ objectiveId: "foundation", outputId: "integrated-change" }]),
+        objective("consumer", [{ objectiveId: "foundation", outputId: "foundation-change" }]),
       ],
       coverage: [
         {
           obligationId: "explicit-contract",
-          disposition: "owned" as const,
-          objectiveId: "foundation",
-          acceptanceId: "complete",
+          disposition: "aggregate-integration" as const,
+          objectiveId: "consumer",
+          acceptanceId: "consumer-complete",
         },
       ],
       triggers: [trigger],
@@ -372,6 +383,35 @@ describe("strict semantic compiler contracts", () => {
 
     const thresholdRequest = semanticRequest();
     thresholdRequest.constraints.planningWorkItemThreshold = 24;
+    const boundedObjectives = structuredClone(objectives);
+    boundedObjectives.triggers[0]!.threshold = 24;
+    boundedObjectives.triggers[0]!.observed = 101;
+    expect(
+      parseAndValidateCompilerProposal(thresholdRequest, providerEnvelope(boundedObjectives)).report
+        .status,
+    ).toBe("valid");
+
+    const oversizedObjective = structuredClone(boundedObjectives);
+    oversizedObjective.objectives[0]!.planningEstimate.workItems = 25;
+    expect(
+      parseAndValidateCompilerProposal(thresholdRequest, providerEnvelope(oversizedObjective))
+        .report.violations,
+    ).toContainEqual(
+      expect.objectContaining({
+        code: "invalid-objective-bound",
+        itemId: "foundation",
+        field: "/objectives/0/planningEstimate",
+      }),
+    );
+
+    const contradictoryObjective = structuredClone(boundedObjectives) as CompilerObjectivesProposal;
+    contradictoryObjective.objectives[0]!.planningEstimate.criticalPathMinutes = 20;
+    contradictoryObjective.objectives[0]!.planningEstimate.aggregateWorkMinutes = 10;
+    expect(
+      parseAndValidateCompilerProposal(thresholdRequest, providerEnvelope(contradictoryObjective))
+        .report.violations,
+    ).toContainEqual(expect.objectContaining({ code: "invalid-objective-bound" }));
+
     const thresholdClarification = {
       ...clarification,
       triggers: [
@@ -391,6 +431,32 @@ describe("strict semantic compiler contracts", () => {
       parseAndValidateCompilerProposal(thresholdRequest, providerEnvelope(thresholdClarification))
         .report.violations,
     ).toContainEqual(expect.objectContaining({ code: "invalid-planning-trigger" }));
+
+    const placeholderClarification = structuredClone(clarification);
+    placeholderClarification.requirements[0]!.question = "TBD";
+    placeholderClarification.requirements[0]!.reason = "placeholder";
+    expect(
+      parseAndValidateCompilerProposal(
+        semanticRequest(),
+        providerEnvelope(placeholderClarification),
+      ).report.violations,
+    ).toContainEqual(expect.objectContaining({ code: "invalid-clarification" }));
+
+    const duplicateClarification = structuredClone(clarification);
+    duplicateClarification.requirements.push(
+      structuredClone(duplicateClarification.requirements[0]!),
+    );
+    expect(
+      parseAndValidateCompilerProposal(semanticRequest(), providerEnvelope(duplicateClarification))
+        .report.violations,
+    ).toContainEqual(expect.objectContaining({ code: "duplicate-clarification-id" }));
+
+    const unboundClarification = structuredClone(clarification);
+    unboundClarification.requirements[0]!.obligationIds = [];
+    expect(CompilerProposalSchema.safeParse(unboundClarification).success).toBe(false);
+    const unboundTrigger = structuredClone(objectives);
+    unboundTrigger.triggers[0]!.obligationIds = [];
+    expect(CompilerProposalSchema.safeParse(unboundTrigger).success).toBe(false);
 
     const mixed = { ...objectives, workItems: workItems.workItems };
     const vagueClarification = { ...clarification, requirements: [] };

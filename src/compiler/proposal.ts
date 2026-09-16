@@ -62,7 +62,7 @@ import {
   type CompilerViolation,
   type ValidationIntentRef,
 } from "./contracts.js";
-import { validateObjectivePlan } from "./objective-planning.js";
+import { isMeaningfulPlanningText, validateObjectivePlan } from "./objective-planning.js";
 import { createCompilerValidationReport, emptyCompilerValidationReport } from "./violations.js";
 import { CompilerInvariantError } from "./invariant-error.js";
 export { CompilerInvariantError } from "./invariant-error.js";
@@ -608,6 +608,9 @@ export function parseAndValidateCompilerProposal(
             configuredThreshold !== undefined &&
             trigger.availability !== "unavailable" &&
             (typeof trigger.observed !== "number" || trigger.observed <= configuredThreshold);
+          const placeholderEvidence =
+            !isMeaningfulPlanningText(trigger.explanation) ||
+            (typeof trigger.observed === "string" && !isMeaningfulPlanningText(trigger.observed));
           return [
             ...(invalidObligations.length
               ? [
@@ -619,7 +622,10 @@ export function parseAndValidateCompilerProposal(
                   ),
                 ]
               : []),
-            ...(availabilityMismatch || thresholdMismatch || nonTriggeringObservation
+            ...(availabilityMismatch ||
+            thresholdMismatch ||
+            nonTriggeringObservation ||
+            placeholderEvidence
               ? [
                   violation(
                     "invalid-planning-trigger",
@@ -642,19 +648,100 @@ export function parseAndValidateCompilerProposal(
       proposal,
       request.inventory.obligations.map((entry) => entry.id),
     ) as CompilerViolation[];
+    const objectiveBoundViolations = proposal.objectives.flatMap(
+      (objective, index): CompilerViolation[] => {
+        const { planningEstimate } = objective;
+        const exceeded = [
+          planningEstimate.workItems !== null &&
+          planningEstimate.workItems > request.constraints.planningWorkItemThreshold
+            ? {
+                metric: "workItems",
+                observed: planningEstimate.workItems,
+                maximum: request.constraints.planningWorkItemThreshold,
+              }
+            : null,
+          planningEstimate.criticalPathMinutes !== null &&
+          planningEstimate.criticalPathMinutes > request.constraints.planningCriticalPathMinutes
+            ? {
+                metric: "criticalPathMinutes",
+                observed: planningEstimate.criticalPathMinutes,
+                maximum: request.constraints.planningCriticalPathMinutes,
+              }
+            : null,
+          planningEstimate.aggregateWorkMinutes !== null &&
+          planningEstimate.aggregateWorkMinutes > request.constraints.planningAggregateWorkMinutes
+            ? {
+                metric: "aggregateWorkMinutes",
+                observed: planningEstimate.aggregateWorkMinutes,
+                maximum: request.constraints.planningAggregateWorkMinutes,
+              }
+            : null,
+          planningEstimate.criticalPathMinutes !== null &&
+          planningEstimate.aggregateWorkMinutes !== null &&
+          planningEstimate.criticalPathMinutes > planningEstimate.aggregateWorkMinutes
+            ? {
+                metric: "durationConsistency",
+                observed: {
+                  criticalPathMinutes: planningEstimate.criticalPathMinutes,
+                  aggregateWorkMinutes: planningEstimate.aggregateWorkMinutes,
+                },
+                maximum: "criticalPathMinutes <= aggregateWorkMinutes",
+              }
+            : null,
+        ].filter((entry) => entry !== null);
+        return exceeded.length === 0
+          ? []
+          : [
+              violation(
+                "invalid-objective-bound",
+                pointer("objectives", index, "planningEstimate"),
+                {
+                  maximumWorkItems: request.constraints.planningWorkItemThreshold,
+                  maximumCriticalPathMinutes: request.constraints.planningCriticalPathMinutes,
+                  maximumAggregateWorkMinutes: request.constraints.planningAggregateWorkMinutes,
+                  unavailableEstimates: "null",
+                },
+                exceeded,
+                objective.id,
+              ),
+            ];
+      },
+    );
     const report = createCompilerValidationReport("proposal", [
       ...planningTriggerViolations,
       ...planningViolations,
+      ...objectiveBoundViolations,
     ]);
     return { proposal, report };
   }
   if (proposal.kind === "clarification") {
     const covered = new Set(proposal.requirements.flatMap((entry) => entry.obligationIds));
     const unknown = [...covered].filter((id) => !inventory.has(id));
+    const clarificationIds = new Map<string, number>();
+    for (const requirement of proposal.requirements)
+      clarificationIds.set(requirement.id, (clarificationIds.get(requirement.id) ?? 0) + 1);
     const violations: CompilerViolation[] = [
       ...planningTriggerViolations,
       ...unknown.map((id) =>
         violation("unknown-obligation", "/requirements", [...inventory].sort(), id),
+      ),
+      ...[...clarificationIds]
+        .filter(([, count]) => count > 1)
+        .map(([id]) =>
+          violation("duplicate-clarification-id", "/requirements", "unique clarification IDs", id),
+        ),
+      ...proposal.requirements.flatMap((requirement, index) =>
+        isMeaningfulPlanningText(requirement.question) &&
+        isMeaningfulPlanningText(requirement.reason)
+          ? []
+          : [
+              violation(
+                "invalid-clarification",
+                pointer("requirements", index),
+                "a concrete non-placeholder question and reason",
+                { question: requirement.question, reason: requirement.reason },
+              ),
+            ],
       ),
     ];
     if (covered.size === 0)

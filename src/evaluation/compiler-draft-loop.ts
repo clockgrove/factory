@@ -10,7 +10,7 @@ import {
   parsePersistedCompiledObjective,
   type CompiledObjective,
 } from "../graph.js";
-import type { CompilerProposal, CompilerValidationReport } from "../compiler/contracts.js";
+import type { CompilerProposalValue, CompilerValidationReport } from "../compiler/contracts.js";
 import {
   CompilerProposalSchema,
   CompilerWorkItemsProposalSchema,
@@ -188,7 +188,7 @@ export interface DraftInvocation {
   stage: DraftStage;
   revision: number;
   inventory: unknown;
-  previous: CompilerJudgeCandidate | null;
+  previous: CompilerProposalValue | CompilerJudgeCandidate | null;
   projection: CompilerProjectionTrace | null;
   failure: unknown;
   reviewEvidence?: unknown;
@@ -471,7 +471,7 @@ export function validateCompilerDraftJournal(
           if (priorProposalIntent && isProviderProposalIntent(priorProposalIntent)) {
             if (priorFailure === undefined)
               throw new Error("compiler repair lacks its exact prior failure");
-            let latestProposal: CompilerProposal | null = null;
+            let latestProposal: CompilerProposalValue | null = null;
             for (
               let candidateRevision = 0;
               candidateRevision <= priorRevision;
@@ -479,7 +479,7 @@ export function validateCompilerDraftJournal(
             ) {
               const retained = proposalResults.get(candidateRevision);
               if (!retained) continue;
-              const parsed = CompilerWorkItemsProposalSchema.safeParse(retainedProposal(retained));
+              const parsed = CompilerProposalSchema.safeParse(retainedProposal(retained));
               if (parsed.success) latestProposal = parsed.data;
             }
             const reviewEvidence = priorJudgeIntent?.payload.reviewEvidence ?? null;
@@ -1179,7 +1179,7 @@ export async function runCompilerDraftLoop(args: {
     stage: DraftStage,
     revision: number,
     inventory: unknown,
-    previous: CompilerJudgeCandidate | null,
+    previous: DraftInvocation["previous"],
     failure: unknown,
     reviewEvidence: unknown = null,
     projection: DraftInvocation["projection"] = null,
@@ -1608,7 +1608,7 @@ export async function runCompilerDraftLoop(args: {
         inventoryRepairs += 1;
       }
     }
-    let previousProposal: CompilerProposal | null = null;
+    let previousProposal: CompilerProposalValue | null = null;
     let failure: unknown = null;
     let reviewEvidence: unknown = null;
     const seen = new Set<string>();
@@ -1672,7 +1672,7 @@ export async function runCompilerDraftLoop(args: {
           candidate && typeof candidate === "object" && "proposal" in candidate
             ? candidate.proposal
             : undefined;
-        const retained = CompilerWorkItemsProposalSchema.safeParse(
+        const retained = CompilerProposalSchema.safeParse(
           candidateProposal ??
             (typeof error === "object" && error !== null && "proposal" in error
               ? error.proposal

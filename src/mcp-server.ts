@@ -1651,7 +1651,7 @@ function registerApplicationTool(
           : operation === "doctor"
             ? "Run bounded, secret-safe repository, authentication, toolchain, controller, backend, branch-policy, stack, and host-resource diagnostics. Read-only: creates no GitHub records or paid resources and never runs a model."
             : operation === "plan"
-              ? "Inspect an existing compiled graph mechanically. Set compile=true to explicitly request bounded planning and receive either one Work Item graph, proposed prerequisite-linked Objectives, or concrete clarification with observed model usage. Proposed Objectives include an identity digest but are not created, activated, or completed; this tool never writes GitHub."
+              ? "Inspect an existing compiled graph mechanically. Set compile=true to explicitly request bounded planning and receive either one Work Item graph, proposed prerequisite-linked Objectives, or concrete clarification with observed model usage. Proposed Objectives include an identity digest but are not created, activated, or completed. Never activates work or writes GitHub."
               : operation === "recovery-plan"
                 ? "Read-only assessment of historical work, graph and PR evidence, and cumulative usage. Does not authorize successor execution, reset budgets, or modify GitHub."
                 : operation === "recovery-propose"

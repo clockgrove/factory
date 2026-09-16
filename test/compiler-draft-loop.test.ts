@@ -564,6 +564,70 @@ describe("compiler draft durable repair", () => {
     expect(await runCompilerDraftLoop(args)).toMatchObject({ status: "accepted", revision: 2 });
     expect(secondRepair).toHaveBeenCalledOnce();
   });
+  it("retains an invalid planning proposal as exact repair and replay evidence", async () => {
+    const args = await setup();
+    const planningProposal = {
+      protocol: "clockgrove.factory/compiler-proposal" as const,
+      kind: "clarification" as const,
+      requirements: [
+        {
+          id: "target",
+          question: "TBD",
+          reason: "placeholder",
+          obligationIds: ["a"],
+        },
+      ],
+      triggers: [
+        {
+          code: "independent-milestones" as const,
+          source: "obligation-inventory" as const,
+          availability: "observed" as const,
+          observed: "TBD",
+          threshold: null,
+          obligationIds: ["a"],
+          explanation: "placeholder",
+        },
+      ],
+    };
+    const report = createCompilerValidationReport("proposal", [
+      {
+        code: "invalid-clarification",
+        itemId: null,
+        field: "/requirements/0",
+        expected: "a concrete clarification",
+        observed: planningProposal.requirements[0]!.question,
+      },
+    ]);
+    const invoke = vi.fn(async (request: Parameters<CompilerDraftCallbacks["invoke"]>[0]) => {
+      const usage = { inputTokens: 2, outputTokens: 1 };
+      if (request.stage === "inventory") return { value: { obligations: ["a"] }, usage };
+      if (request.stage === "compile") return { value: { proposal: planningProposal }, usage };
+      expect(request.stage).toBe("repair");
+      expect(request.previous).toEqual(planningProposal);
+      return { value: { proposal: planningProposal }, usage };
+    });
+    args.callbacks.invoke = invoke;
+    args.callbacks.validate = (_value, revision) => {
+      if (revision === 0)
+        throw Object.assign(new Error("clarification is not concrete"), {
+          proposal: planningProposal,
+          validationReport: report,
+        });
+      throw new CompilerDraftStopError("planning-repair-observed");
+    };
+
+    expect(await runCompilerDraftLoop(args)).toMatchObject({
+      status: "stopped",
+      reason: "planning-repair-observed",
+    });
+    expect(invoke.mock.calls.filter(([request]) => request.stage === "repair")).toHaveLength(1);
+    const callCount = invoke.mock.calls.length;
+    expect(await runCompilerDraftLoop(args)).toMatchObject({
+      status: "stopped",
+      reason: "planning-repair-observed",
+    });
+    expect(invoke).toHaveBeenCalledTimes(callCount);
+  });
   it("terminates a Factory projection invariant without persisting failure or buying repair", async () => {
     const args = await setup();
     const invariant = new CompilerInvariantError("economic projection assertion");

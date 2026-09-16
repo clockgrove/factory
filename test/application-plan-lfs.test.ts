@@ -206,6 +206,12 @@ describe("explicit plan pinned LFS preflight", () => {
               ],
               ownedScope: ["src/foundation/"],
               obligationIds: [first.id],
+              planningEstimate: {
+                workItems: 8,
+                criticalPathMinutes: null,
+                aggregateWorkMinutes: null,
+                basis: "The foundation is bounded to one accepted output and its direct tests.",
+              },
               outputs: [
                 {
                   id: "foundation-output",
@@ -228,6 +234,12 @@ describe("explicit plan pinned LFS preflight", () => {
               ],
               ownedScope: ["src/consumer/"],
               obligationIds: [second.id],
+              planningEstimate: {
+                workItems: 8,
+                criticalPathMinutes: null,
+                aggregateWorkMinutes: null,
+                basis: "The consumer is bounded to one explicit foundation handoff.",
+              },
               outputs: [
                 {
                   id: "consumer-output",

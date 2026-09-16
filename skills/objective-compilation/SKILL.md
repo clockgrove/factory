@@ -18,7 +18,10 @@ threshold, affected obligations, and explanation.
 
 For a multi-Objective proposal, every proposed Objective needs an independently reviewable outcome,
 concrete acceptance, owned repository scope, named outputs, completion acceptance IDs, and exact
-prerequisite outputs. Account for every parent obligation exactly once through owned acceptance,
+prerequisite outputs. Include per-child Work Item, critical-path, and aggregate-work estimates plus a
+concrete boundary basis. Every known estimate must remain within its request threshold, a known
+critical path cannot exceed known aggregate work, and unavailable metrics remain `null`. Account for
+every parent obligation exactly once through owned acceptance,
 aggregate integration acceptance, or an explicit deferral. Reject omissions, unresolved outputs,
 cycles, unordered prerequisites, and fake empty milestones. These are proposals only: do not create
 issues, activate work, expand policy, or claim completion. Factory currently requires an explicit

@@ -20,6 +20,12 @@ function validPlan(): CompilerObjectivesProposal {
         acceptance: [{ id: "core-works", kind: "owned", text: "The core behavior is observable." }],
         ownedScope: ["src/core/"],
         obligationIds: ["core-behavior"],
+        planningEstimate: {
+          workItems: 8,
+          criticalPathMinutes: 240,
+          aggregateWorkMinutes: 360,
+          basis: "The foundation is bounded to one accepted core artifact and its direct tests.",
+        },
         outputs: [
           {
             id: "core-artifact",
@@ -47,6 +53,13 @@ function validPlan(): CompilerObjectivesProposal {
         ],
         ownedScope: ["src/consumer/"],
         obligationIds: ["consumer-behavior"],
+        planningEstimate: {
+          workItems: 6,
+          criticalPathMinutes: null,
+          aggregateWorkMinutes: null,
+          basis:
+            "The integration milestone is bounded to the consumer and the accepted core handoff; duration is not yet available.",
+        },
         outputs: [
           {
             id: "integrated-artifact",
@@ -104,10 +117,10 @@ describe("Objective plan semantic validation", () => {
       { length: 101 },
       (_, index) => `requirement-${index + 1}`,
     );
-    const objectives = Array.from({ length: 4 }, (_, index) => {
+    const objectives = Array.from({ length: 5 }, (_, index) => {
       const id = `milestone-${index + 1}`;
       const owned = projectObligations.filter(
-        (_, obligationIndex) => obligationIndex % 4 === index,
+        (_, obligationIndex) => obligationIndex % 5 === index,
       );
       return {
         id,
@@ -122,6 +135,12 @@ describe("Objective plan semantic validation", () => {
         ],
         ownedScope: [`src/${id}/`],
         obligationIds: owned,
+        planningEstimate: {
+          workItems: owned.length,
+          criticalPathMinutes: null,
+          aggregateWorkMinutes: null,
+          basis: `Milestone ${index + 1} is bounded to ${owned.length} inventoried obligations and one independently accepted output.`,
+        },
         outputs: [
           {
             id: `${id}-output`,
@@ -162,6 +181,23 @@ describe("Objective plan semantic validation", () => {
 
   it("accepts a complete dependency-ordered plan", () => {
     expect(validateObjectivePlan(validPlan(), obligations)).toEqual([]);
+  });
+
+  it("allows one broad parent obligation to decompose through a prerequisite support Objective", () => {
+    const plan = validPlan();
+    plan.objectives[0]!.obligationIds = ["broad-outcome"];
+    plan.objectives[1]!.obligationIds = [];
+    plan.coverage = [
+      {
+        obligationId: "broad-outcome",
+        disposition: "aggregate-integration",
+        objectiveId: "consumer",
+        acceptanceId: "integrates-core",
+      },
+    ];
+    plan.triggers[0]!.obligationIds = ["broad-outcome"];
+
+    expect(validateObjectivePlan(plan, ["broad-outcome"])).toEqual([]);
   });
 
   it("reports globally duplicated Objective, acceptance, and output IDs", () => {
@@ -280,6 +316,14 @@ describe("Objective plan semantic validation", () => {
     expect(codes(root)).toEqual(
       expect.arrayContaining(["root-integration-acceptance", "invalid-integration-acceptance"]),
     );
+
+    const omittedFromOutput = validPlan();
+    omittedFromOutput.objectives[1]!.outputs[0]!.completionAcceptanceIds = ["consumer-works"];
+    expect(codes(omittedFromOutput)).toContain("invalid-integration-acceptance");
+
+    const ownedOmittedFromOutput = validPlan();
+    ownedOmittedFromOutput.objectives[0]!.outputs[0]!.completionAcceptanceIds = [];
+    expect(codes(ownedOmittedFromOutput)).toContain("invalid-obligation-disposition");
   });
 
   it("requires overlapping owned scopes to be prerequisite ordered", () => {

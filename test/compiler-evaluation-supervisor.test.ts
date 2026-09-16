@@ -463,6 +463,12 @@ describe("Supervisor compiler evaluation activation boundary", () => {
               ],
               ownedScope: ["src/foundation/"],
               obligationIds: ["foundation"],
+              planningEstimate: {
+                workItems: 8,
+                criticalPathMinutes: null,
+                aggregateWorkMinutes: null,
+                basis: "The foundation is bounded to one accepted artifact and its direct tests.",
+              },
               outputs: [
                 {
                   id: "foundation-output",
@@ -485,6 +491,12 @@ describe("Supervisor compiler evaluation activation boundary", () => {
               ],
               ownedScope: ["src/consumer/"],
               obligationIds: ["consumer"],
+              planningEstimate: {
+                workItems: 8,
+                criticalPathMinutes: null,
+                aggregateWorkMinutes: null,
+                basis: "The consumer is bounded to one accepted foundation handoff.",
+              },
               outputs: [
                 {
                   id: "consumer-output",

@@ -129,7 +129,10 @@ These are admission signals, not completion forecasts. Missing duration estimate
 
 `factory_plan` returns proposed Objective specifications with an identity digest, complete parent-
 requirement coverage, concrete outputs, completion criteria, and prerequisite-output handoffs. They
-are proposals—not GitHub issues, activated Objectives, or completed work. Planning never expands the
+also carry per-child Work Item, critical-path, and aggregate-work estimates checked against the
+configured planning thresholds, plus the concrete basis for each boundary. An unavailable estimate
+remains `null`; it is not invented to make a child appear bounded. These are proposals—not GitHub
+issues, activated Objectives, or completed work. Planning never expands the
 selected budget, deadline, trust, or network policy. Factory does not yet materialize or automatically
 execute a cross-Objective plan; any issue creation is a separate explicit user action, and each
 runnable Objective is compiled only after its prerequisite output is committed.

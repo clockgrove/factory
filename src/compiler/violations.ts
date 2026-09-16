@@ -216,6 +216,10 @@ export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule
     "empty-objective-milestone",
     "A proposed Objective is not an owned or integration milestone.",
   ),
+  "invalid-objective-bound": rule(
+    "invalid-objective-bound",
+    "A proposed Objective exceeds a configured planning threshold or lacks concrete boundary evidence.",
+  ),
   "invalid-planning-trigger": rule(
     "invalid-planning-trigger",
     "Planning evidence or its threshold is inconsistent.",
@@ -223,6 +227,14 @@ export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule
   "clarification-coverage": rule(
     "clarification-coverage",
     "Clarification requirements do not account for the affected obligations.",
+  ),
+  "invalid-clarification": rule(
+    "invalid-clarification",
+    "A clarification question or reason is not concrete.",
+  ),
+  "duplicate-clarification-id": rule(
+    "duplicate-clarification-id",
+    "Clarification requirements repeat an identity.",
   ),
   "objective-planning-required": rule(
     "objective-planning-required",

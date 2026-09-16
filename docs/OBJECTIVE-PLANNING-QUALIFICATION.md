@@ -20,7 +20,10 @@ test/application-plan-lfs.test.ts` on the exact candidate. The covered scenarios
 - one indivisible Work Item and a bounded feature remain on the ordinary Objective path;
 - a seven-item serial graph crosses its configured critical-path threshold;
 - null duration estimates do not become zero or invented forecasts;
-- 101 parent requirements produce separately bounded proposed Objectives with complete coverage;
+- 101 parent requirements produce five separately bounded proposed Objectives whose per-child
+  Work Item estimates remain below the configured threshold, with complete coverage;
+- a proposed child above a configured threshold and contradictory known duration estimates are
+  rejected, while unavailable estimates remain `null`;
 - omissions, invalid aggregate integration, unresolved prerequisite outputs, cycles, and overlapping
   unordered scope are rejected;
 - read-only planning returns the exact proposal identity and usage without a graph, issue creation,

@@ -97,8 +97,11 @@ export const COMPILER_VIOLATION_CODES = [
   "overlapping-objective-scope",
   "root-integration-acceptance",
   "empty-objective-milestone",
+  "invalid-objective-bound",
   "invalid-planning-trigger",
   "clarification-coverage",
+  "invalid-clarification",
+  "duplicate-clarification-id",
   "objective-planning-required",
   "report-truncated",
 ] as const;
@@ -270,6 +273,15 @@ export const ProposedObjectivePrerequisiteOutputSchema = z
   .object({ objectiveId: Id, outputId: Id })
   .strict();
 
+export const ProposedObjectivePlanningEstimateSchema = z
+  .object({
+    workItems: z.number().int().min(1).max(100).nullable(),
+    criticalPathMinutes: z.number().positive().max(43_200).nullable(),
+    aggregateWorkMinutes: z.number().positive().max(432_000).nullable(),
+    basis: Text,
+  })
+  .strict();
+
 export const ProposedObjectiveSchema = z
   .object({
     id: Id,
@@ -278,6 +290,7 @@ export const ProposedObjectiveSchema = z
     acceptance: z.array(ProposedObjectiveAcceptanceSchema).min(1).max(64),
     ownedScope: z.array(RepositoryScopePathSchema).min(1).max(64),
     obligationIds: z.array(z.string().min(1).max(160)).max(128),
+    planningEstimate: ProposedObjectivePlanningEstimateSchema,
     outputs: z.array(ProposedObjectiveOutputSchema).min(1).max(64),
     prerequisiteOutputs: z.array(ProposedObjectivePrerequisiteOutputSchema).max(64),
   })
@@ -326,7 +339,7 @@ export const PlanningTriggerSchema = z
     availability: z.enum(["observed", "estimated", "unavailable"]),
     observed: z.union([z.number().finite(), z.string().min(1).max(2_000), z.null()]),
     threshold: z.number().finite().nullable(),
-    obligationIds: z.array(z.string().min(1).max(160)).max(128),
+    obligationIds: z.array(z.string().min(1).max(160)).min(1).max(128),
     explanation: Text,
   })
   .strict();
@@ -337,7 +350,7 @@ export const ClarificationRequirementSchema = z
     id: Id,
     question: z.string().min(1).max(2_000),
     reason: Text,
-    obligationIds: z.array(z.string().min(1).max(160)).max(128),
+    obligationIds: z.array(z.string().min(1).max(160)).min(1).max(128),
   })
   .strict();
 export type ClarificationRequirement = z.infer<typeof ClarificationRequirementSchema>;
@@ -720,7 +733,10 @@ const jsonPlanningTrigger = strictObject({
   availability: { type: "string", enum: ["observed", "estimated", "unavailable"] },
   observed: { type: ["number", "string", "null"], minLength: 1, maxLength: 2_000 },
   threshold: { type: ["number", "null"] },
-  obligationIds: stringArray(128, { type: "string", minLength: 1, maxLength: 160 }),
+  obligationIds: {
+    ...stringArray(128, { type: "string", minLength: 1, maxLength: 160 }),
+    minItems: 1,
+  },
   explanation: jsonText,
 });
 const jsonProposedObjectiveAcceptance = strictObject({
@@ -740,6 +756,20 @@ const jsonProposedObjective = strictObject({
   },
   ownedScope: { type: "array", minItems: 1, maxItems: 64, items: providerJsonScopePath },
   obligationIds: stringArray(128, { type: "string", minLength: 1, maxLength: 160 }),
+  planningEstimate: strictObject({
+    workItems: { type: ["integer", "null"], minimum: 1, maximum: 100 },
+    criticalPathMinutes: {
+      type: ["number", "null"],
+      exclusiveMinimum: 0,
+      maximum: 43_200,
+    },
+    aggregateWorkMinutes: {
+      type: ["number", "null"],
+      exclusiveMinimum: 0,
+      maximum: 432_000,
+    },
+    basis: jsonText,
+  }),
   outputs: {
     type: "array",
     minItems: 1,
@@ -803,7 +833,7 @@ const compilerProposalSchemas = (
     id: jsonId,
     question: { type: "string", minLength: 1, maxLength: 2_000 },
     reason: jsonText,
-    obligationIds: stringArray(128, jsonEvalId),
+    obligationIds: { ...stringArray(128, jsonEvalId), minItems: 1 },
   });
   const variants = [
     strictObject({

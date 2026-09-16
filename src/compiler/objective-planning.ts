@@ -93,7 +93,7 @@ function nonemptyText(value: string): boolean {
   return /[\p{L}\p{N}]/u.test(value.trim());
 }
 
-function meaningfulText(value: string): boolean {
+export function isMeaningfulPlanningText(value: string): boolean {
   const normalized = value.trim();
   return nonemptyText(normalized) && !fakeText.test(normalized);
 }
@@ -180,9 +180,10 @@ export function validateObjectivePlan(
     const content: Array<[string, string]> = [
       ["title", objective.title],
       ["outcome", objective.outcome],
+      ["planningEstimate/basis", objective.planningEstimate.basis],
     ];
     for (const [field, text] of content)
-      if (!meaningfulText(text))
+      if (!isMeaningfulPlanningText(text))
         violations.push(
           violation(
             "invalid-objective-content",
@@ -224,7 +225,7 @@ export function validateObjectivePlan(
       );
 
     for (const [acceptanceIndex, acceptance] of objective.acceptance.entries())
-      if (!meaningfulText(acceptance.text))
+      if (!isMeaningfulPlanningText(acceptance.text))
         violations.push(
           violation(
             "invalid-objective-content",
@@ -246,7 +247,7 @@ export function validateObjectivePlan(
           ),
         );
     for (const [outputIndex, output] of objective.outputs.entries()) {
-      if (!meaningfulText(output.description))
+      if (!isMeaningfulPlanningText(output.description))
         violations.push(
           violation(
             "invalid-objective-content",
@@ -460,7 +461,7 @@ export function validateObjectivePlan(
         ),
       );
     if (entry.disposition === "deferred") {
-      if (!meaningfulText(entry.reason))
+      if (!isMeaningfulPlanningText(entry.reason))
         violations.push(
           violation(
             "invalid-obligation-disposition",
@@ -494,6 +495,22 @@ export function validateObjectivePlan(
           field,
           `${entry.disposition} acceptance`,
           acceptance.kind,
+          entry.objectiveId,
+        ),
+      );
+    if (
+      !objective.outputs.some((output) =>
+        output.completionAcceptanceIds.includes(entry.acceptanceId),
+      )
+    )
+      violations.push(
+        violation(
+          entry.disposition === "aggregate-integration"
+            ? "invalid-integration-acceptance"
+            : "invalid-obligation-disposition",
+          field,
+          "coverage-bound acceptance included in an output completion contract",
+          { objectiveId: entry.objectiveId, acceptanceId: entry.acceptanceId },
           entry.objectiveId,
         ),
       );
@@ -538,19 +555,22 @@ export function validateObjectivePlan(
 
   for (const [objectiveIndex, objective] of proposal.objectives.entries())
     for (const obligationId of objective.obligationIds) {
-      const owned = proposal.coverage.filter(
+      const covered = proposal.coverage.filter(
         (entry) =>
           entry.obligationId === obligationId &&
-          entry.disposition === "owned" &&
-          entry.objectiveId === objective.id,
+          entry.disposition !== "deferred" &&
+          ((entry.disposition === "owned" && entry.objectiveId === objective.id) ||
+            (entry.disposition === "aggregate-integration" &&
+              (entry.objectiveId === objective.id ||
+                dependencyAnalysis.hasPath(entry.objectiveId, objective.id)))),
       );
-      if (owned.length !== 1)
+      if (covered.length !== 1)
         violations.push(
           violation(
             "invalid-obligation-disposition",
             pointer("objectives", objectiveIndex, "obligationIds"),
-            "exactly one matching owned coverage disposition",
-            { obligationId, matches: owned.length },
+            "exactly one matching owned or downstream aggregate coverage disposition",
+            { obligationId, matches: covered.length },
             objective.id,
           ),
         );

@@ -541,8 +541,9 @@ export async function compileEvaluatedDraft(args: {
           }
           const obligations = inventory(request.inventory);
           if (request.stage === "judge") {
-            if (!request.previous || !request.projection)
+            if (!request.previous || !("workItems" in request.previous) || !request.projection)
               throw new Error("judge has no mechanically valid proposal and projection");
+            const judgeProposal = request.previous;
             const challenges = validateCompilerInferenceChallenges(
               request.reviewEvidence ?? [],
               obligations,
@@ -556,7 +557,7 @@ export async function compileEvaluatedDraft(args: {
               ...(priorCompilationFailure ? { priorCompilationFailure } : {}),
               inventory: obligations,
               challenges,
-              proposal: request.previous,
+              proposal: judgeProposal,
               projectionTrace: request.projection,
               draftDigest: request.projection.graphDigest,
               inventoryDigest: compilerEvalDigest(obligations),
@@ -583,7 +584,7 @@ export async function compileEvaluatedDraft(args: {
               {
                 compilation: frozenContext,
                 inventory: obligations,
-                proposal: request.previous,
+                proposal: judgeProposal,
                 projectionTrace: request.projection,
                 graphDigest: request.projection.graphDigest,
                 challenges,

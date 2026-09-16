@@ -50,6 +50,7 @@ const RasterMetadataSchema = z
     height: z.number().int().positive(),
     frames: z.number().int().positive().max(MAX_OBJECTIVE_ASSET_FRAMES),
     channels: z.number().int().positive().max(16),
+    hasAlpha: z.boolean(),
     decodedBytes: z.number().int().positive().max(MAX_OBJECTIVE_ASSET_DECODED_BYTES),
   })
   .strict();

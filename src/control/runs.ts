@@ -41,6 +41,29 @@ export interface RunState {
   recoveryPlanDigest?: string;
 }
 
+function recoveredRunState(
+  start: Extract<FactoryEvent, { kind: "run"; event: "FactoryRunStarted" }>,
+  sequence: number,
+  recoveryPlanDigest: string,
+): RunState {
+  return {
+    objective: start.objective,
+    runId: start.runId,
+    sequence,
+    actor: start.actor,
+    policy: start.policy,
+    policyDigest: start.policyDigest,
+    startedAt: new Date(start.at),
+    ...(start.recordProtocol ? { recordProtocol: start.recordProtocol } : {}),
+    ...(start.assetManifestDigest ? { assetManifestDigest: start.assetManifestDigest } : {}),
+    ...(start.baseSha ? { baseSha: start.baseSha } : {}),
+    ...(start.repository ? { repository: start.repository } : {}),
+    ...(start.baseBranch ? { baseBranch: start.baseBranch } : {}),
+    ...(start.fork !== undefined ? { fork: start.fork } : {}),
+    recoveryPlanDigest,
+  };
+}
+
 export class RunManager {
   constructor(private readonly store: RunEventStore) {}
 
@@ -52,21 +75,11 @@ export class RunManager {
     if (!reconciliation.mergedSources.length)
       throw new Error("no verified completed source merge requires reconciliation");
     const start = reconciliation.controllingRun;
-    const run: RunState = {
-      objective: start.objective,
-      runId: start.runId,
-      sequence: Math.max(...reconciliation.events.map((event) => event.sequence)),
-      actor: start.actor,
-      policy: start.policy,
-      policyDigest: start.policyDigest,
-      startedAt: new Date(start.at),
-      ...(start.recordProtocol ? { recordProtocol: start.recordProtocol } : {}),
-      ...(start.baseSha ? { baseSha: start.baseSha } : {}),
-      repository: start.repository,
-      baseBranch: start.baseBranch,
-      fork: start.fork,
-      recoveryPlanDigest: reconciliation.planRecord.digest,
-    };
+    const run = recoveredRunState(
+      start,
+      Math.max(...reconciliation.events.map((event) => event.sequence)),
+      reconciliation.planRecord.digest,
+    );
     return { reconciliationOnly: true as const, run, reconciliation };
   }
 
@@ -88,21 +101,11 @@ export class RunManager {
     const start = runtime.controllingRun;
     return {
       runtime,
-      run: {
-        objective: start.objective,
-        runId: start.runId,
-        sequence: Math.max(...runtime.currentEvents.map((event) => event.sequence)),
-        actor: start.actor,
-        policy: start.policy,
-        policyDigest: start.policyDigest,
-        startedAt: new Date(start.at),
-        ...(start.recordProtocol ? { recordProtocol: start.recordProtocol } : {}),
-        ...(start.baseSha ? { baseSha: start.baseSha } : {}),
-        ...(start.repository ? { repository: start.repository } : {}),
-        ...(start.baseBranch ? { baseBranch: start.baseBranch } : {}),
-        ...(start.fork !== undefined ? { fork: start.fork } : {}),
-        recoveryPlanDigest: runtime.planRecord.digest,
-      },
+      run: recoveredRunState(
+        start,
+        Math.max(...runtime.currentEvents.map((event) => event.sequence)),
+        runtime.planRecord.digest,
+      ),
     };
   }
 

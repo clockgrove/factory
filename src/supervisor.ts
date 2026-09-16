@@ -1012,6 +1012,7 @@ function hasCancellationRequest(snapshot: Snapshot, runId: string): boolean {
       repository: start.repository,
       baseSha: start.baseSha,
       policyDigest: start.policyDigest,
+      ...(start.assetManifestDigest ? { assetManifestDigest: start.assetManifestDigest } : {}),
     })
   )
     return true;
@@ -3655,6 +3656,7 @@ export class FactorySupervisor {
         repository: run.repository,
         baseSha: run.baseSha,
         policyDigest: run.policyDigest,
+        ...(run.assetManifestDigest ? { assetManifestDigest: run.assetManifestDigest } : {}),
       };
     }
     const readCancellation = async () => {
@@ -19370,6 +19372,9 @@ export class FactorySupervisor {
           repository: `${this.#options.owner}/${this.#options.repo}`,
           baseSha: activation.baseSha,
           policyDigest: policyDigest(this.#policy),
+          ...(activation.assetManifestDigest
+            ? { assetManifestDigest: activation.assetManifestDigest }
+            : {}),
         });
         durableReason = prior.reason;
       }

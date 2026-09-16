@@ -111,6 +111,7 @@ export function assertPeerActivation(
     repository,
     baseSha: start.baseSha!,
     policyDigest: start.policyDigest,
+    ...(start.assetManifestDigest ? { assetManifestDigest: start.assetManifestDigest } : {}),
   });
   requirePeer(!withdrawn || time(withdrawn) >= time(start));
 }

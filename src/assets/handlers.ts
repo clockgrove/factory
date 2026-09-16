@@ -63,6 +63,7 @@ const rasterHandler: AssetHandler = {
       height,
       frames,
       channels: decoded.info.channels,
+      hasAlpha: metadata.hasAlpha ?? false,
       decodedBytes: decoded.data.length,
     };
   },

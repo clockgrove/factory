@@ -44,7 +44,7 @@ export function compilerAssetManifestView(manifestInput: ObjectiveAssetManifest)
                 width: raster.width,
                 height: raster.height,
                 frames: raster.frames,
-                alpha: raster.channels === 2 || raster.channels === 4,
+                alpha: raster.hasAlpha,
               }
             : { kind: "opaque" as const },
           visibility: descriptor.visibility,

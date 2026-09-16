@@ -15,6 +15,7 @@ import {
   type CompiledGraphStore,
 } from "../src/control/graphs.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "../src/control/lease.js";
+import { RunManager } from "../src/control/runs.js";
 import { decodeEventComments, encodeEventTrailer } from "../src/control/receipts.js";
 import { attemptRef } from "../src/control/attempts.js";
 import {
@@ -242,6 +243,7 @@ async function fixture(
     controllerObservation?: boolean;
     graphless?: boolean;
     compileFailure?: boolean;
+    assetManifestDigest?: string;
   } = {},
 ) {
   const store = new MemoryStore();
@@ -368,6 +370,7 @@ async function fixture(
     baseSha: base.oid,
     policy,
     policyDigest: policyDigest(policy),
+    ...(options.assetManifestDigest ? { assetManifestDigest: options.assetManifestDigest } : {}),
     ...(options.activated ? { activationRequestId: "original-activation" } : {}),
   });
   const terminal = event({
@@ -482,6 +485,9 @@ async function fixture(
         baseSha: base.oid,
         policy,
         policyDigest: policyDigest(policy),
+        ...(options.assetManifestDigest
+          ? { assetManifestDigest: options.assetManifestDigest }
+          : {}),
         controllerProtocolMin: "clockgrove.factory/v2",
         controllerProtocolMax: "clockgrove.factory/v2",
       }),
@@ -649,6 +655,7 @@ async function fixture(
     sourceEventMaxSequence: 10,
     priorPlanDigest: null,
     expectedBaseSha: base.oid,
+    ...(options.assetManifestDigest ? { assetManifestDigest: options.assetManifestDigest } : {}),
     baseBranch: "main",
     graph: options.compileFailure
       ? {
@@ -746,6 +753,7 @@ async function fixture(
       successorRunId: "successor",
       policyDigest: plan.policyDigest,
       baseSha: base.oid,
+      ...(options.assetManifestDigest ? { assetManifestDigest: options.assetManifestDigest } : {}),
     }),
   );
   store.onComment = (receipt) => snapshot.factoryEvents!.push(receipt);
@@ -842,6 +850,25 @@ async function addAttempt(f: Awaited<ReturnType<typeof adopted>>, attempt = 1) {
 }
 
 describe("verified successor runtime loader", () => {
+  it("retains immutable media authority in the resumed run state", async () => {
+    const assetManifestDigest = "9".repeat(64);
+    const f = await adopted({ assetManifestDigest });
+    const resumed = await new RunManager(f.store).resumeRecovery({
+      objective: 7,
+      runId: "successor",
+      store: f.store,
+      readSnapshot: async () => ({
+        snapshot: structuredClone(f.snapshot),
+        historyComplete: f.state.historyComplete,
+      }),
+    });
+    expect(resumed.run).toMatchObject({
+      runId: "successor",
+      assetManifestDigest,
+      recoveryPlanDigest: f.planRecord.digest,
+    });
+  });
+
   it.each(["base", "policy"] as const)(
     "fails closed instead of returning a retained compiler reason on %s mismatch",
     async (mismatch) => {

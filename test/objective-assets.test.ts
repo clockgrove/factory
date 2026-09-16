@@ -28,6 +28,7 @@ import {
 } from "../src/control/content-transfers.js";
 import { ObjectiveAssetManifestSchema } from "../src/assets/contracts.js";
 import {
+  compilerAssetManifestView,
   compilerMediaDescriptorDigests,
   compilerMediaInputs,
 } from "../src/assets/compiler-input.js";
@@ -131,7 +132,7 @@ describe("Objective asset contracts and handlers", () => {
     ).resolves.toMatchObject({
       status: "semantic-valid",
       handlerId: "sharp-raster",
-      metadata: { kind: "raster", width: 3, height: 2 },
+      metadata: { kind: "raster", width: 3, height: 2, hasAlpha: true },
     });
     await expect(
       inspectAssetBytes(png.subarray(0, 20), { displayName: "broken.png", allowOpaque: false }),
@@ -150,6 +151,40 @@ describe("Objective asset contracts and handlers", () => {
         metadata: { kind: "raster", width: 2, height: 2 },
       });
     }
+
+    const cmyk = await sharp({
+      create: { width: 2, height: 2, channels: 3, background: "blue" },
+    })
+      .toColourspace("cmyk")
+      .jpeg()
+      .toBuffer();
+    await expect(
+      inspectAssetBytes(cmyk, { displayName: "four-channel-colour.jpg", allowOpaque: false }),
+    ).resolves.toMatchObject({ metadata: { kind: "raster", hasAlpha: false } });
+    const memory = memoryStore();
+    const persisted = await persistObjectiveAssetManifest({
+      store: memory.store,
+      authority: { repository: "Fixture/Project", objective: 7, baseSha: "a".repeat(40) },
+      requestId: "raster-alpha-request",
+      revision: 1,
+      assets: [
+        await local(cmyk, "four-channel-colour.jpg", "cmyk"),
+        await local(png, "transparent.png", "rgba"),
+      ],
+      assertCurrent: async () => {},
+    });
+    expect(compilerAssetManifestView(persisted.manifest).view.assets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          mediaType: "image/jpeg",
+          inspection: expect.objectContaining({ kind: "raster", alpha: false }),
+        }),
+        expect.objectContaining({
+          mediaType: "image/png",
+          inspection: expect.objectContaining({ kind: "raster", alpha: true }),
+        }),
+      ]),
+    );
   });
 
   it("requires explicit opaque transport and refuses executable content", async () => {

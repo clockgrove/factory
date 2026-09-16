@@ -17,7 +17,10 @@ import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../src/protoco
 import { publicationBranch } from "../src/publication/publisher.js";
 import type { RecoveryReadStore } from "../src/recovery/assessment.js";
 import { recoveryEventDigest } from "../src/recovery/identity.js";
-import { verifyRecoveryPeerTrunkIntegration } from "../src/recovery/peer-trunk.js";
+import {
+  assertPeerActivation,
+  verifyRecoveryPeerTrunkIntegration,
+} from "../src/recovery/peer-trunk.js";
 import { buildRecoveryProposal } from "../src/recovery/proposal.js";
 import { RecoveryPlanManager } from "../src/recovery/plan.js";
 import { resolveRecoveryEvidence } from "../src/recovery/evidence.js";
@@ -33,6 +36,67 @@ const accepted = {
   review: { accepted: true, summary: "Exact criterion accepted", unmetCriteria: [], risks: [] },
   usage: { inputTokens: 10, outputTokens: 5 },
 };
+
+it("authenticates a media-bound peer activation cancellation", () => {
+  const assetManifestDigest = digest("peer-assets");
+  const acceptedPolicyDigest = policyDigest(DEFAULT_RUN_POLICY);
+  const activation = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "run",
+    event: "ActivationRequested",
+    objective: 7,
+    runId: "asset-activation",
+    sequence: 1,
+    at,
+    requestedBy: "operator",
+    requestId: "asset-activation",
+    repository: "o/r",
+    baseSha: sha("base"),
+    assetManifestDigest,
+    policy: DEFAULT_RUN_POLICY,
+    policyDigest: acceptedPolicyDigest,
+    controllerProtocolMin: "clockgrove.factory/v2",
+    controllerProtocolMax: "clockgrove.factory/v2",
+  });
+  const start = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "run",
+    event: "FactoryRunStarted",
+    objective: 7,
+    runId: "asset-run",
+    sequence: 1,
+    at: "2026-09-07T00:00:01.000Z",
+    actor: "operator",
+    repository: "o/r",
+    objectiveAuthor: "operator",
+    fork: false,
+    baseBranch: "main",
+    baseSha: sha("base"),
+    assetManifestDigest,
+    policy: DEFAULT_RUN_POLICY,
+    policyDigest: acceptedPolicyDigest,
+    activationRequestId: "asset-activation",
+  });
+  const cancellation = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "run",
+    event: "ActivationCancellationRequested",
+    objective: 7,
+    runId: "asset-activation",
+    sequence: 2,
+    at: "2026-09-07T00:00:02.000Z",
+    activationRequestId: "asset-activation",
+    requestId: "cancel-asset-activation",
+    repository: "o/r",
+    requestedBy: "operator",
+    baseSha: sha("base"),
+    assetManifestDigest,
+    policyDigest: acceptedPolicyDigest,
+  });
+  if (start.kind !== "run" || start.event !== "FactoryRunStarted")
+    throw new Error("fixture start is invalid");
+  expect(() => assertPeerActivation(start, [activation, start, cancellation], "o/r")).not.toThrow();
+});
 
 /** Captured regular-PR peer shape; all immutable records use production writers.
  * The map transport simulates GitHub storage, not actor authentication or live qualification. */

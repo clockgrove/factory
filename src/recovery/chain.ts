@@ -351,6 +351,7 @@ export function verifyRecoveryChain(input: {
           terminal[0]!.sequence <= plan.sourceEventMaxSequence &&
           observation.digestOf(start) === entry.startDigest &&
           start.policyDigest === entry.policyDigest &&
+          start.assetManifestDigest === plan.assetManifestDigest &&
           observation.digestOf(terminal[0]!) === entry.terminalDigest &&
           terminal[0]!.event === entry.terminalEvent &&
           terminal[0]!.sequence ===
@@ -429,6 +430,7 @@ export function verifyRecoveryChain(input: {
       if (previous)
         require(plan.predecessor.runId === previous.plan.successorRunId &&
           plan.baseBranch === previous.plan.baseBranch &&
+          plan.assetManifestDigest === previous.plan.assetManifestDigest &&
           continuesGraphAuthority(
             previous.plan,
             plan,
@@ -443,6 +445,7 @@ export function verifyRecoveryChain(input: {
           start.recoveryPlanDigest === digest &&
           start.predecessorRunId === plan.predecessor.runId &&
           start.policyDigest === plan.policyDigest &&
+          start.assetManifestDigest === plan.assetManifestDigest &&
           start.baseSha === plan.expectedBaseSha &&
           start.baseBranch === plan.baseBranch &&
           start.actor.toLowerCase() === request.requestedBy.toLowerCase() &&

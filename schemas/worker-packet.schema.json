@@ -441,6 +441,7 @@
         "importedAssetIds": {
           "type": "array",
           "maxItems": 32,
+          "uniqueItems": true,
           "items": { "$ref": "#/definitions/safeId" }
         },
         "output": {
@@ -541,6 +542,7 @@
               "criterionIds": {
                 "type": "array",
                 "maxItems": 64,
+                "uniqueItems": true,
                 "items": { "$ref": "#/definitions/safeId" }
               }
             },

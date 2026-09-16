@@ -769,7 +769,7 @@ const jsonMediaIntent = strictObject({
   obligationIds: { ...stringArray(128, jsonEvalId), minItems: 1 },
   rationale: { type: "string", minLength: 1, maxLength: 2_000 },
   brief: jsonText,
-  importedAssetIds: stringArray(32, jsonId),
+  importedAssetIds: { ...stringArray(32, jsonId), uniqueItems: true },
   output: strictObject({
     mediaTypes: {
       type: "array",
@@ -815,7 +815,7 @@ const jsonMediaIntent = strictObject({
     items: strictObject({
       workItemId: jsonId,
       direction: { type: "string", enum: ["input-to", "evidence-for"] },
-      criterionIds: stringArray(64, jsonId),
+      criterionIds: { ...stringArray(64, jsonId), uniqueItems: true },
     }),
   },
 });

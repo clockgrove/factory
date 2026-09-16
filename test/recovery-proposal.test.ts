@@ -2279,8 +2279,18 @@ describe("bounded read-only immutable recovery proposals", () => {
 
   it("reconstructs a consumed prior-plan edge and carries its allowance without reset", async () => {
     const f = await fixture(false);
+    const assetManifestDigest = digest("9");
+    const sourceStartIndex = f.snapshot.factoryEvents!.findIndex(
+      (event) => event.event === "FactoryRunStarted" && event.runId === "source",
+    );
+    const predecessorStart = f.event({
+      ...f.snapshot.factoryEvents![sourceStartIndex]!,
+      assetManifestDigest,
+    });
+    f.snapshot.factoryEvents![sourceStartIndex] = predecessorStart;
     const proposed = await f.build({ successorRunId: "first-successor" });
     expect(proposed.blockers).toEqual([]);
+    expect(proposed.plan!.assetManifestDigest).toBe(assetManifestDigest);
     const record = await new RecoveryPlanManager(f.storage, f.leases).persist({
       lease: { ...f.lease, runId: "first-successor" },
       plan: proposed.plan!,
@@ -2317,8 +2327,9 @@ describe("bounded read-only immutable recovery proposals", () => {
       planRecord: record,
       claim,
       authenticatedRequest: request,
-      predecessorStart: f.start as Extract<FactoryEvent, { event: "FactoryRunStarted" }>,
+      predecessorStart: predecessorStart as Extract<FactoryEvent, { event: "FactoryRunStarted" }>,
     });
+    expect(transaction[0].assetManifestDigest).toBe(assetManifestDigest);
     const pending = await f.build({ successorRunId: "first-successor" });
     expect(pending.status).toBe("blocked");
     expect(pending.blockers[0]!.code).toBe("candidate-predecessor-claimed");
@@ -2337,6 +2348,7 @@ describe("bounded read-only immutable recovery proposals", () => {
     });
     expect(result.blockers).toEqual([]);
     expect(result.plan!.priorPlanDigest).toBe(record.digest);
+    expect(result.plan!.assetManifestDigest).toBe(assetManifestDigest);
     expect(result.plan!.allowance.before).toEqual(record.plan.allowance.after);
     expect(result.plan!.history).toHaveLength(2);
     expect(result.plan!.predecessor.startDigest).toBe(recoveryEventDigest(transaction[0]));

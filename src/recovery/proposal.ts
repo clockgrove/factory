@@ -801,6 +801,9 @@ export async function buildRecoveryProposal(input: {
         sourceEventMaxSequence,
         priorPlanDigest: null,
         expectedBaseSha: base.oid,
+        ...(predecessorStart.assetManifestDigest
+          ? { assetManifestDigest: predecessorStart.assetManifestDigest }
+          : {}),
         baseBranch: snapshot.defaultBranch,
         graph: {
           mode: "compile-objective",
@@ -1735,6 +1738,9 @@ export async function buildRecoveryProposal(input: {
       sourceEventMaxSequence,
       priorPlanDigest: priorDigest,
       expectedBaseSha: base.oid,
+      ...(predecessorStart.assetManifestDigest
+        ? { assetManifestDigest: predecessorStart.assetManifestDigest }
+        : {}),
       baseBranch: snapshot.defaultBranch,
       graph:
         priorAdoptionGraph && !continueGraphBootstrap

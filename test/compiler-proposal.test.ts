@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import type { CompilerProposal, CompilerRequest } from "../src/compiler/contracts.js";
+import {
+  CompilerProposalSchema,
+  type CompilerProposal,
+  type CompilerRequest,
+} from "../src/compiler/contracts.js";
 import {
   compilerEvalDigest,
   deriveCompilerInferenceChallenges,
@@ -89,6 +93,22 @@ function mediaIntent(
     ...overrides,
   };
 }
+
+it("rejects duplicate imported asset identities before media projection", () => {
+  const proposal = semanticProposal(semanticRequest());
+  proposal.mediaIntents = [
+    mediaIntent({
+      importedAssetIds: ["asset-1", "asset-1"],
+      output: {
+        mediaTypes: ["image/png"],
+        minimumCount: 2,
+        maximumCount: 2,
+        raster: null,
+      },
+    }),
+  ];
+  expect(() => CompilerProposalSchema.parse(proposal)).toThrow("reference IDs must be unique");
+});
 
 function judgeSourceBytes(
   request: CompilerRequest,

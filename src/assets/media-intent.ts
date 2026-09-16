@@ -2,7 +2,11 @@ import { z } from "zod";
 
 import { boundedText, safeId, sha256Digest } from "../protocol/limits.js";
 
-const referenceIds = (maximum: number) => z.array(safeId).max(maximum);
+const referenceIds = (maximum: number) =>
+  z
+    .array(safeId)
+    .max(maximum)
+    .refine((ids) => new Set(ids).size === ids.length, "reference IDs must be unique");
 
 export const MediaIntentKindSchema = z.enum([
   "concept-reference",

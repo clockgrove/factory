@@ -43,6 +43,7 @@ import {
   compilerWorkItemsForEconomics,
   MAX_COMPILER_REQUEST_BYTES,
   projectCompilerProposal,
+  type CompilerProjectionContext,
   type CompilerProjectionTrace,
 } from "../compiler/proposal.js";
 import {
@@ -109,6 +110,10 @@ function durableInvocationProvenance(
     baseSha: provenance.baseSha,
     model: provenance.model,
     reasoning: provenance.reasoning,
+    ...(provenance.assetManifestDigest
+      ? { assetManifestDigest: provenance.assetManifestDigest }
+      : {}),
+    ...(provenance.mediaEgressDigest ? { mediaEgressDigest: provenance.mediaEgressDigest } : {}),
   };
 }
 
@@ -318,6 +323,19 @@ export async function compileEvaluatedDraft(args: {
     context.repositoryFiles,
     context.repositoryLfs,
   );
+  const projectionContext: CompilerProjectionContext = {
+    pinnedFacts,
+    runPolicy: frozenContext.runPolicy,
+    ...(frozenContext.mediaPlanning
+      ? {
+          mediaPlanning: {
+            assetBindings: frozenContext.mediaPlanning.assetBindings,
+            producerCapabilities: frozenContext.mediaPlanning.producerCapabilities,
+            reviewRules: frozenContext.mediaPlanning.reviewRules,
+          },
+        }
+      : {}),
+  };
   const prior = await args.manager.load(args.binding);
   const startedAt = Number(prior[0]?.payload.startedAt ?? evidenceStartedAt);
   const deadlineAt = Math.min(args.deadlineAt, startedAt + (policy.timeoutSeconds ?? 600) * 1000);
@@ -409,8 +427,7 @@ export async function compileEvaluatedDraft(args: {
         const projected = projectCompilerProposal({
           request: prepared.request,
           proposal: persisted.proposal,
-          pinnedFacts,
-          runPolicy: frozenContext.runPolicy,
+          ...projectionContext,
           ...(economics ? { economicEvidence: economics } : {}),
           ...(prepared.legacyGraphConstraints
             ? { legacyGraphConstraints: prepared.legacyGraphConstraints }
@@ -706,7 +723,7 @@ export async function compileEvaluatedDraft(args: {
                 terminalOutcome: succeededTerminalOutcome(result.usage),
                 ...durableInvocationProvenanceField(result.provenance),
               }),
-            { pinnedFacts, runPolicy: frozenContext.runPolicy },
+            projectionContext,
             beforeModelInvocation,
             frozenContext,
           );

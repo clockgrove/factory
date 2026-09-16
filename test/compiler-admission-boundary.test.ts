@@ -359,6 +359,103 @@ describe("compiler dispatch admission", () => {
     expect(mocks.run).toHaveBeenCalledOnce();
   });
 
+  it("checkpoints exact media authority provenance before advancing the evaluated draft", async () => {
+    const f = await fixture();
+    const manifestDigest = "b".repeat(64);
+    const mediaEgress = {
+      mode: "private-assets" as const,
+      maxAssets: 1,
+      deterministicReviewRuleIds: [],
+    };
+    f.context.runPolicy = {
+      ...f.context.runPolicy,
+      compilerMediaEgress: mediaEgress,
+    };
+    f.context.mediaPlanning = {
+      assetManifest: {
+        digest: manifestDigest,
+        assets: [
+          {
+            id: "reference-image",
+            mediaType: "image/png",
+            bytes: 22,
+            inspection: { kind: "raster", width: 16, height: 16, frames: 1, alpha: false },
+            visibility: "private",
+          },
+        ],
+      },
+      mediaInputs: [],
+      assetBindings: [
+        {
+          assetId: "reference-image",
+          input: {
+            manifestDigest,
+            descriptorDigest: "c".repeat(64),
+            contentDigest: "d".repeat(64),
+            storageReceiptDigest: "e".repeat(64),
+            path: `assets/${"c".repeat(64)}/reference.png`,
+            purpose: "compiler-import",
+          },
+        },
+      ],
+      assetEgress: {
+        mode: "private-assets",
+        policyDigest: compilerEvalDigest(mediaEgress),
+      },
+      producerCapabilities: [],
+      reviewRules: [],
+    };
+    f.binding.policyDigest = policyDigest(f.context.runPolicy);
+    f.proposal.workItems[0]!.obligationIds = ["core"];
+    const backend = new CodexCliManagementBackend({
+      createCodexHome: home,
+      authFile: join(f.directory, "no-auth"),
+    });
+    mocks.run.mockImplementation(async () => ({
+      exitCode: 0,
+      stderr: "",
+      stdout: [
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "agent_message",
+            text: JSON.stringify(
+              mocks.run.mock.calls.length === 1
+                ? { version: f.inventory.version, obligations: f.inventory.obligations }
+                : f.proposal,
+            ),
+          },
+        }),
+        JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens },
+        }),
+      ].join("\n"),
+    }));
+
+    await expect(
+      compileEvaluatedDraft({
+        ...f,
+        backend,
+        lease: {} as LeaseState,
+        deadlineAt: Date.now() + 60_000,
+        assertInputs: async () => {
+          if (mocks.run.mock.calls.length >= 2) throw new Error("stop after media proposal");
+        },
+        admit: async () => {},
+        recordUsage: async () => {},
+        validate: async () => {},
+      }),
+    ).rejects.toThrow("stop after media proposal");
+    expect(f.records.filter((record) => record.kind === "result")).toHaveLength(2);
+    expect(f.records.find((record) => record.kind === "validation")).toBeDefined();
+    for (const result of f.records.filter((record) => record.kind === "result"))
+      expect(result.payload.provenance).toMatchObject({
+        assetManifestDigest: manifestDigest,
+        mediaEgressDigest: compilerEvalDigest(mediaEgress),
+      });
+  });
+
   it("removes every qualification authority value from the model subprocess environment", async () => {
     const f = await fixture();
     const authorityEnvironment = {

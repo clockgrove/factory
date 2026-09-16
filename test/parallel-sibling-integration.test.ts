@@ -89,6 +89,10 @@ async function fixture(
     staleRefreshedHeadReads?: number;
   } = {},
 ) {
+  // This integration fixture validates graph and publication behavior. Keep it
+  // independent of ambient user-manager scopes; the one scope-accounting case
+  // below opts back into a deterministic mocked host explicitly.
+  vi.spyOn(localScopes, "discoverLocalScopeHost").mockResolvedValue(null);
   const repository = await mkdtemp(join(tmpdir(), "factory-sibling-integration-"));
   directories.push(repository);
   let currentBranch: string | undefined;
@@ -1455,7 +1459,7 @@ describe("Supervisor parallel independent sibling integration", () => {
 
   it("records a complete candidate scope batch before any test command without per-command writes", async () => {
     const f = await fixture();
-    vi.spyOn(localScopes, "discoverLocalScopeHost").mockResolvedValue({
+    vi.mocked(localScopes.discoverLocalScopeHost).mockResolvedValue({
       hostIdentity: "b".repeat(64),
       producerPid: 123,
       producerStartTicks: "456",

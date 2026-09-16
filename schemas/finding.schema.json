@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/clockgrove/factory/schemas/finding.schema.json",
+  "title": "Factory Finding Candidate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "phase",
+    "failureClass",
+    "supportedBehavior",
+    "observedBehavior",
+    "reproduction",
+    "impact",
+    "evidence"
+  ],
+  "properties": {
+    "protocol": { "const": "clockgrove.factory/finding-v1" },
+    "phase": { "enum": ["worker", "validation", "review", "integration", "compiler", "supervisor"] },
+    "failureClass": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,159}$" },
+    "supportedBehavior": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "observedBehavior": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "reproduction": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    },
+    "impact": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "possibleCause": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": { "$ref": "#/definitions/evidenceReference" }
+    },
+    "commonCauseEvidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    }
+  },
+  "definitions": {
+    "evidenceReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "digest"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "worker-packet",
+            "artifact",
+            "validation",
+            "review",
+            "integration-candidate",
+            "compiler-result",
+            "supervisor-observation"
+          ]
+        },
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "path": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "commit": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" }
+      }
+    }
+  }
+}

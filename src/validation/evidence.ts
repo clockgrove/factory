@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { assertNoSecretMaterial, gitSha, isoDate, sha256Digest } from "../protocol/limits.js";
 import { CommandResultSchema } from "../execution/artifacts.js";
+import { FindingCandidateSchema } from "../protocol/findings.js";
 
 export const ValidationEvidenceSchema = z
   .object({
@@ -17,6 +18,7 @@ export const ValidationEvidenceSchema = z
     startedAt: isoDate,
     completedAt: isoDate,
     environmentIdentity: z.string().min(1).max(500).optional(),
+    findings: z.array(FindingCandidateSchema).max(16).optional(),
     digest: sha256Digest,
   })
   .passthrough();

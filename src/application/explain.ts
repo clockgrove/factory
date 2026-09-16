@@ -86,6 +86,33 @@ export function buildExplanationReport(input: {
     );
   }
   const explanations: Array<Explanation & { workItem?: number }> = [];
+  const findingCodes = {
+    repaired: EXPLANATION_CODES.findingRepaired,
+    "issue-filed": EXPLANATION_CODES.findingIssueFiled,
+    "existing-issue-linked": EXPLANATION_CODES.findingExistingIssueLinked,
+    "issue-ready": EXPLANATION_CODES.findingIssueReady,
+    "reporting-refused": EXPLANATION_CODES.findingReportingRefused,
+    "reporting-limit": EXPLANATION_CODES.findingReportingLimit,
+    pending: EXPLANATION_CODES.findingPending,
+  } as const;
+  for (const finding of status.findings) {
+    if (input.workItem && finding.workItem !== input.workItem) continue;
+    explanations.push({
+      code: findingCodes[finding.disposition],
+      category: "finding",
+      disposition:
+        finding.disposition === "repaired"
+          ? "complete"
+          : finding.disposition === "issue-ready" ||
+              finding.disposition === "reporting-refused" ||
+              finding.disposition === "reporting-limit"
+            ? "blocked"
+            : "informational",
+      summary: `Finding ${finding.findingId} is ${finding.disposition}.`,
+      ...(finding.workItem ? { workItem: finding.workItem } : {}),
+      evidence: { ...finding },
+    });
+  }
   if (status.operatorAction.code === "activation-rejected") {
     explanations.push({
       code: EXPLANATION_CODES.authorityActivationRejected,

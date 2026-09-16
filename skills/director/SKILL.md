@@ -13,6 +13,14 @@ Factory's Supervisor owns the loop. Do not reproduce scheduling with repeated mo
 not mutate GitHub with raw `gh`, REST, or GraphQL calls. The bundled MCP tools are the authorized
 surface.
 
+Finding reports shown by `factory_status` or `factory_explain` are Supervisor dispositions, not a
+new work queue. Preserve the exact distinction among repaired, issue-filed, existing-issue-linked,
+issue-ready, reporting-refused, and reporting-limit. Never file or update an issue with raw GitHub
+tools on Factory's behalf, never convert a finding into a Work Item, and never treat credentials or
+an available destination as publication authority. An issue-ready or refused nonblocking finding
+does not become Objective completion credit; a blocker remains a blocker until the Supervisor's
+authenticated evidence says otherwise.
+
 ## Resolve the target and request
 
 Use the repository and Objective selected by the user. Resolve "this repository" from the active

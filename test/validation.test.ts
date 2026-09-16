@@ -501,7 +501,29 @@ jobs:
     });
     expect(result.evidence.passed).toBe(false);
     expect(result.evidence.failureReason).toMatch(/validation failed/);
+    expect(result.evidence.findings).toEqual([
+      expect.objectContaining({
+        protocol: "clockgrove.factory/finding-v1",
+        phase: "validation",
+        failureClass: "deterministic-validation-failed",
+        evidence: [{ kind: "artifact", digest: artifact.digest, commit: artifact.baseSha }],
+      }),
+    ]);
     await discardValidationResult(result);
+
+    const integration = await validateArtifactClean({
+      repository: fixture.repository,
+      artifact,
+      packet: packet(fixture.baseSha),
+      findingPhase: "integration",
+    });
+    expect(integration.evidence.findings).toEqual([
+      expect.objectContaining({
+        phase: "integration",
+        failureClass: "integration-validation-failed",
+      }),
+    ]);
+    await discardValidationResult(integration);
   });
 
   it("installs locked npm dependencies before authoritative commands", async () => {

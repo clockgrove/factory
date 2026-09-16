@@ -28,6 +28,11 @@ import {
 import type { LeaseState } from "../control/lease.js";
 import { ProviderQuotaError } from "../providers/quota.js";
 import { managementFailureProvenance } from "../management/backend.js";
+import {
+  ObligationInventorySchema,
+  repairableCompilerJudgeVerdict,
+  validateCompilerInferenceChallenges,
+} from "./compiler-eval.js";
 import { CompilerDraftStopError } from "./compiler-draft-errors.js";
 export { CompilerDraftStopError } from "./compiler-draft-errors.js";
 
@@ -427,9 +432,30 @@ export function validateCompilerDraftJournal(
           const priorJudgeIntent = priorJudge
             ? invocations.get(String(priorJudge.payload.invocationId))
             : undefined;
+          const priorInventory = ObligationInventorySchema.safeParse(inventoryResult.payload.value);
+          const priorCandidate = CompilerProposalSchema.safeParse(retainedProposal(priorProposal));
+          const priorTrace = priorValidation?.payload.projectionTrace as
+            | CompilerProjectionTrace
+            | undefined;
+          const structuredJudgeFailure =
+            priorJudge?.payload.error &&
+            priorInventory.success &&
+            priorCandidate.success &&
+            priorTrace
+              ? repairableCompilerJudgeVerdict(priorJudge.payload.proposal, {
+                  draftDigest: String(priorValidation?.payload.graphDigest),
+                  inventory: priorInventory.data,
+                  graph: priorCandidate.data,
+                  addedEdges: priorTrace.addedEdges,
+                  challenges: validateCompilerInferenceChallenges(
+                    priorJudgeIntent?.payload.reviewEvidence ?? [],
+                    priorInventory.data,
+                  ),
+                })
+              : null;
           const priorFailure = priorJudge
             ? priorJudge.payload.error
-              ? { error: String(priorJudge.payload.error) }
+              ? (structuredJudgeFailure ?? { error: String(priorJudge.payload.error) })
               : priorJudge.payload.value
             : priorProposal.payload.error
               ? failedResultEvidence(priorProposal)
@@ -1790,9 +1816,24 @@ export async function runCompilerDraftLoop(args: {
           error instanceof ProviderQuotaError
         )
           throw error;
-        failure = {
-          error: diagnostic(error),
-        };
+        const rawVerdict =
+          typeof error === "object" && error !== null && "proposal" in error
+            ? error.proposal
+            : undefined;
+        failure =
+          repairableCompilerJudgeVerdict(rawVerdict, {
+            draftDigest: graphDigest,
+            inventory: ObligationInventorySchema.parse(inventory),
+            graph: draft.proposal,
+            addedEdges: draft.projectionTrace.addedEdges,
+            challenges: validateCompilerInferenceChallenges(
+              reviewEvidence ?? [],
+              ObligationInventorySchema.parse(inventory),
+            ),
+          }) ??
+          ({
+            error: diagnostic(error),
+          } as const);
       }
     }
     return await stop("repair-limit-unresolved");

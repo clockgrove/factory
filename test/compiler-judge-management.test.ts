@@ -127,7 +127,7 @@ async function fixture() {
     defaultBranch: "main",
     repositoryFiles: ["package.json"],
     allowedNetworkDestinations: [],
-    runPolicy: DEFAULT_RUN_POLICY,
+    runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
   };
   context.repositoryEvidence = compilerObligationEvidence(context);
   const inventory: ObligationInventory = {

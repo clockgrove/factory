@@ -63,7 +63,11 @@ import {
   CompilerDraftStopError,
   repairableInvalidClaimsEvidence,
 } from "../evaluation/compiler-draft-loop.js";
-import { ManagementCleanupError, ManagementOutputError } from "./backend.js";
+import {
+  assertCompilationContextPolicyAuthority,
+  ManagementCleanupError,
+  ManagementOutputError,
+} from "./backend.js";
 import { preserveProviderQuotaError, ProviderQuotaError } from "../providers/quota.js";
 import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
 import {
@@ -647,6 +651,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
   }
 
   async #assertCompilerContext(context: CompilationContext | undefined): Promise<void> {
+    if (context) assertCompilationContextPolicyAuthority(context);
     // runStructured is an injected test boundary and never launches Codex in the supplied cwd.
     if (this.#options.runStructured) return;
     if (!context) throw new Error("management model requires an exact-base compilation context");

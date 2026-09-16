@@ -63,13 +63,13 @@ const USAGE = [
   "usage:",
   "  factory run OWNER/REPO#NUMBER --until-terminal [--repo DIR] [--policy FILE]",
   "  factory recover OWNER/REPO#NUMBER --until-terminal [--repo DIR] [--policy FILE]  (non-terminal restart only)",
-  "  factory activate OWNER/REPO#NUMBER --request-id ID [--base-sha SHA] [--policy FILE]",
+  "  factory activate OWNER/REPO#NUMBER --request-id ID [--base-sha SHA] [--asset-manifest-digest DIGEST] [--policy FILE]",
   "  factory controller run OWNER/REPO --repo DIR [--max-active-objectives N] [--max-local-workers N] [--max-paid-workers N]",
   "  factory controller install|start|stop|restart|status|uninstall OWNER/REPO --repo DIR",
   "  factory doctor OWNER/REPO#NUMBER [--repo DIR]",
   "  factory assets-import OWNER/REPO#NUMBER --request-id ID --input FILE",
   "  factory assets-inspect OWNER/REPO#NUMBER --base-sha SHA --manifest-digest DIGEST",
-  "  factory plan OWNER/REPO#NUMBER [--compile] [--repo DIR] [--base-sha SHA] [--policy FILE]",
+  "  factory plan OWNER/REPO#NUMBER [--compile] [--repo DIR] [--base-sha SHA] [--asset-manifest-digest DIGEST] [--policy FILE]",
   "  factory compiler-eval OWNER/REPO#NUMBER [--markdown] [--annotations FILE]  (read-only draft history and post-mortem)",
   "  factory status|explain OWNER/REPO#NUMBER [--work-item NUMBER]",
   "  factory replay OWNER/REPO#NUMBER [--snapshots FILE]  (caller-supplied simulations; read-only)",
@@ -211,6 +211,7 @@ function applicationFor(
     },
     planning: {
       management,
+      assetStore: store,
       repositoryPath: checkout,
       validateCheckout: validatePlanningCheckout,
       readRepositoryLayout: (maxEntries, baseSha) =>
@@ -342,6 +343,9 @@ async function applicationCommand(command: string, args: string[]): Promise<void
               objective: target.objective,
               compile: args.includes("--compile"),
               ...(option(args, "--base-sha") ? { baseSha: option(args, "--base-sha")! } : {}),
+              ...(option(args, "--asset-manifest-digest")
+                ? { assetManifestDigest: option(args, "--asset-manifest-digest")! }
+                : {}),
               ...(option(args, "--policy")
                 ? { policy: JSON.parse(await readFile(option(args, "--policy")!, "utf8")) }
                 : {}),
@@ -368,6 +372,7 @@ async function applicationCommand(command: string, args: string[]): Promise<void
   if (!requestId) fail(`${command} requires --request-id ID`);
   if (command === "activate") {
     const baseSha = option(args, "--base-sha");
+    const assetManifestDigest = option(args, "--asset-manifest-digest");
     const policyPath = option(args, "--policy");
     const policy = policyPath
       ? parseRunPolicy(JSON.parse(await readFile(policyPath, "utf8")))
@@ -378,6 +383,7 @@ async function applicationCommand(command: string, args: string[]): Promise<void
           objective: target.objective,
           requestId,
           ...(baseSha ? { baseSha } : {}),
+          ...(assetManifestDigest ? { assetManifestDigest } : {}),
           ...(policy ? { policy } : {}),
         }),
         null,

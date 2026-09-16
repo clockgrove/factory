@@ -123,7 +123,10 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
             permittedSecretNames: [],
             trust: "trusted_local",
           },
-          artifactContract: "clockgrove.factory/artifact",
+          deliverable: {
+            kind: "repository-change" as const,
+            contract: "clockgrove.factory/artifact" as const,
+          },
         },
       ],
     });
@@ -679,6 +682,7 @@ describe("Supervisor compiler evaluation activation boundary", () => {
         const proposal = CompilerProposalSchema.parse({
           protocol: "clockgrove.factory/compiler-proposal",
           kind: "work-items",
+          mediaIntents: [],
           workItems: [
             item(
               "bootstrap",

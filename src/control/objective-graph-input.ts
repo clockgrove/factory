@@ -179,30 +179,45 @@ export function inspectObjectiveGraphInput(
     ...(deferredCapabilityAdapters === undefined ? {} : { deferredCapabilityAdapters }),
     workItems: parsed.map(({ item, metadata }) => {
       const packet = parseWorkerPacketFromIssue(item.body);
-      return {
+      const common = {
         id: metadata.id,
         title: item.title,
         goal: packet.goal,
         acceptance: packet.acceptanceCriteria,
-        scope: packet.allowedPaths,
         preconditions: packet.preconditions,
         outOfScope: packet.outOfScope,
         conventions: packet.conventions,
         dependsOn: metadata.dependsOn,
         baseSha: packet.baseSha,
-        validationCommands: packet.validationCommands,
         requirements: packet.requirements,
-        artifactContract: packet.artifactContract,
-        ...(packet.context ? { context: packet.context } : {}),
-        ...(packet.changeSurface ? { changeSurface: packet.changeSurface } : {}),
-        ...(packet.criterionRisks ? { criterionRisks: packet.criterionRisks } : {}),
-        ...(packet.delivery ? { delivery: packet.delivery } : {}),
-        ...(packet.validation ? { validation: packet.validation } : {}),
-        ...(packet.repositoryCapabilities
-          ? { repositoryCapabilities: packet.repositoryCapabilities }
-          : {}),
-        ...(packet.managedRuntimes ? { managedRuntimes: packet.managedRuntimes } : {}),
+        deliverable: packet.deliverable,
+        ...(packet.assetInputs?.length ? { assetInputs: packet.assetInputs } : {}),
       };
+      return packet.deliverable.kind === "asset-production"
+        ? {
+            ...common,
+            deliverable: packet.deliverable,
+            scope: [] as [],
+            validationCommands: [] as [],
+          }
+        : {
+            ...common,
+            deliverable: packet.deliverable,
+            scope: packet.allowedPaths,
+            validationCommands: packet.validationCommands,
+            ...(packet.generatedAssetRequirements?.length
+              ? { generatedAssetRequirements: packet.generatedAssetRequirements }
+              : {}),
+            ...(packet.context ? { context: packet.context } : {}),
+            ...(packet.changeSurface ? { changeSurface: packet.changeSurface } : {}),
+            ...(packet.criterionRisks ? { criterionRisks: packet.criterionRisks } : {}),
+            ...(packet.delivery ? { delivery: packet.delivery } : {}),
+            ...(packet.validation ? { validation: packet.validation } : {}),
+            ...(packet.repositoryCapabilities
+              ? { repositoryCapabilities: packet.repositoryCapabilities }
+              : {}),
+            ...(packet.managedRuntimes ? { managedRuntimes: packet.managedRuntimes } : {}),
+          };
     }),
   };
   const reconstructable = compiledGraphDigest(completeObjective) === expectedDigest;

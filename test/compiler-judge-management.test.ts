@@ -98,6 +98,10 @@ it("preserves a fixed graph's exact execution design for independent judgment", 
         },
         criterionRisks: [{ criterion: "The exact command remains bound.", risk: "recovery" }],
         delivery: { group: "fixed-group", relationship: "root" },
+        deliverable: {
+          kind: "repository-change",
+          contract: "clockgrove.factory/artifact",
+        },
       },
     ],
   };
@@ -151,6 +155,7 @@ async function fixture() {
   const proposal: CompilerProposal = {
     protocol: "clockgrove.factory/compiler-proposal" as const,
     kind: "work-items",
+    mediaIntents: [],
     workItems: [
       {
         id: "code",
@@ -257,6 +262,7 @@ function judgeContext(
       graphDigest,
       addedEdges: [],
       adapterBindings: [],
+      mediaIntents: [],
       riskElevations: { count: 0, digest: compilerEvalDigest([]) },
     },
   };
@@ -560,6 +566,7 @@ describe("independent compiler management boundaries", () => {
         graphDigest,
         addedEdges,
         adapterBindings: [],
+        mediaIntents: [],
         riskElevations: { count: 0, digest: compilerEvalDigest([]) },
       },
     };

@@ -17,6 +17,7 @@ import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import {
   compiledGraphDigest,
   executionWorkerPacketFromCompiled,
+  isCompiledRepositoryWorkItem,
   parsePersistedCompiledObjective,
   renderWorkPacket,
   serializeCompiledObjective as serializePersistedGraph,
@@ -169,7 +170,10 @@ function objective(goal = "Implement the feature."): CompiledObjective {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact",
+        deliverable: {
+          kind: "repository-change" as const,
+          contract: "clockgrove.factory/artifact" as const,
+        },
       },
     ],
   };
@@ -614,8 +618,11 @@ describe("durable compiled graph", () => {
       base,
     );
     const manager = new CompiledGraphManager(store, leases);
+    const baseItem = objective().workItems[0]!;
+    if (!isCompiledRepositoryWorkItem(baseItem))
+      throw new Error("fixture requires a repository Work Item");
     const workItem = {
-      ...objective().workItems[0]!,
+      ...baseItem,
       context: {
         mustRead: ["src/feature.ts"],
         searchSeeds: ["feature"],

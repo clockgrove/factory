@@ -43,10 +43,50 @@ function codes(request: CompilerRequest, proposal: unknown, pinned?: PinnedRepos
 }
 
 function projectionPolicy(request: CompilerRequest) {
+  const compilerMediaEgress =
+    request.media.assetEgress.mode === "denied"
+      ? DEFAULT_RUN_POLICY.compilerMediaEgress
+      : {
+          mode: request.media.assetEgress.mode,
+          maxAssets: 32,
+          deterministicReviewRuleIds: request.media.reviewRules.map(({ id }) => id).sort(),
+        };
   return {
     ...DEFAULT_RUN_POLICY,
     workItemTimeoutMinutes: request.constraints.workItemTimeoutMinutes,
     allowedNetworkDestinations: [...request.constraints.allowedNetworkDestinations],
+    compilerMediaEgress,
+  };
+}
+
+function mediaIntent(
+  overrides: Partial<CompilerProposal["mediaIntents"][number]> = {},
+): CompilerProposal["mediaIntents"][number] {
+  return {
+    id: "primary-media",
+    kind: "layout-reference",
+    purpose: "implementation-reference",
+    necessity: "required",
+    obligationIds: ["explicit-contract"],
+    rationale: "The implementation requires an exact media reference.",
+    brief: "Produce a bounded layout reference that shows the required contract.",
+    importedAssetIds: [],
+    output: {
+      mediaTypes: ["image/png"],
+      minimumCount: 1,
+      maximumCount: 1,
+      raster: {
+        minimumWidth: 640,
+        maximumWidth: 1024,
+        minimumHeight: 480,
+        maximumHeight: 768,
+        alpha: "allowed",
+        animation: "forbidden",
+      },
+    },
+    review: { kind: "human-required" },
+    bindings: [{ workItemId: "item-1", direction: "input-to", criterionIds: [] }],
+    ...overrides,
   };
 }
 
@@ -581,7 +621,7 @@ describe("semantic proposal validation", () => {
         expect.objectContaining({
           code: "issue-body-limit",
           itemId: proposal.workItems[0]!.id,
-          observed: 73_580,
+          observed: 73_736,
         }),
       ]),
     );
@@ -791,6 +831,433 @@ describe("semantic proposal validation", () => {
   );
 });
 
+describe("media intent compilation", () => {
+  it("fails deterministically when required media has neither an import nor a producer", () => {
+    const request = semanticRequest();
+    const proposal = semanticProposal(request);
+    proposal.mediaIntents = [mediaIntent()];
+    expect(codes(request, proposal)).toContainEqual(
+      expect.objectContaining({
+        code: "media-producer-unavailable",
+        itemId: "primary-media",
+        field: "/mediaIntents/0/output",
+      }),
+    );
+  });
+
+  it("omits helpful unavailable media while retaining an explicit trace disposition", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request);
+    proposal.mediaIntents = [mediaIntent({ necessity: "helpful" })];
+    const result = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      runPolicy: projectionPolicy(request),
+    });
+    expect(result.objective.workItems).toHaveLength(1);
+    expect(result.trace.mediaIntents).toEqual([
+      {
+        intentId: "primary-media",
+        disposition: "omitted-helpful",
+        producerWorkItemId: null,
+      },
+    ]);
+  });
+
+  it("binds an exact imported raster directly to its repository consumer", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const manifestDigest = "b".repeat(64);
+    const policy = {
+      ...projectionPolicy(request),
+      compilerMediaEgress: {
+        mode: "private-assets" as const,
+        maxAssets: 32,
+        deterministicReviewRuleIds: [],
+      },
+    };
+    request.media = {
+      assetManifest: {
+        digest: manifestDigest,
+        assets: [
+          {
+            id: "asset-1",
+            mediaType: "image/png",
+            bytes: 4096,
+            inspection: {
+              kind: "raster",
+              width: 800,
+              height: 600,
+              frames: 1,
+              alpha: false,
+            },
+            visibility: "private",
+          },
+        ],
+      },
+      assetEgress: {
+        mode: "private-assets",
+        policyDigest: compilerEvalDigest(policy.compilerMediaEgress),
+      },
+      producerCapabilities: [],
+      reviewRules: [],
+    };
+    const input = {
+      manifestDigest,
+      descriptorDigest: "c".repeat(64),
+      contentDigest: "d".repeat(64),
+      storageReceiptDigest: "e".repeat(64),
+      path: `assets/${"c".repeat(64)}/reference.png`,
+      purpose: "compiler-import",
+    };
+    const proposal = semanticProposal(request);
+    proposal.mediaIntents = [mediaIntent({ importedAssetIds: ["asset-1"] })];
+    const result = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      runPolicy: policy,
+      mediaPlanning: {
+        assetBindings: [{ assetId: "asset-1", input }],
+        producerCapabilities: [],
+        reviewRules: [],
+      },
+    });
+    expect(result.objective.workItems[0]!.assetInputs).toEqual([input]);
+    expect(result.trace.mediaIntents[0]).toMatchObject({
+      intentId: "primary-media",
+      disposition: "imported",
+      producerWorkItemId: null,
+    });
+  });
+
+  it("binds exact opaque non-raster media without raster inspection fields", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const manifestDigest = "b".repeat(64);
+    const policy = {
+      ...projectionPolicy(request),
+      compilerMediaEgress: {
+        mode: "private-assets" as const,
+        maxAssets: 32,
+        deterministicReviewRuleIds: [],
+      },
+    };
+    request.media = {
+      assetManifest: {
+        digest: manifestDigest,
+        assets: [
+          {
+            id: "sound-1",
+            mediaType: "audio/wav",
+            bytes: 4096,
+            inspection: { kind: "opaque" },
+            visibility: "private",
+          },
+        ],
+      },
+      assetEgress: {
+        mode: "private-assets",
+        policyDigest: compilerEvalDigest(policy.compilerMediaEgress),
+      },
+      producerCapabilities: [],
+      reviewRules: [],
+    };
+    const input = {
+      manifestDigest,
+      descriptorDigest: "c".repeat(64),
+      contentDigest: "d".repeat(64),
+      storageReceiptDigest: "e".repeat(64),
+      path: `assets/${"c".repeat(64)}/reference.wav`,
+      purpose: "compiler-import",
+    };
+    const proposal = semanticProposal(request);
+    proposal.mediaIntents = [
+      mediaIntent({
+        id: "interaction-sound",
+        kind: "sound-reference",
+        importedAssetIds: ["sound-1"],
+        output: {
+          mediaTypes: ["audio/wav"],
+          minimumCount: 1,
+          maximumCount: 16,
+          raster: null,
+        },
+      }),
+    ];
+    const result = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      runPolicy: policy,
+      mediaPlanning: {
+        assetBindings: [{ assetId: "sound-1", input }],
+        producerCapabilities: [],
+        reviewRules: [],
+      },
+    });
+
+    expect(result.objective.workItems[0]!.assetInputs).toEqual([input]);
+    expect(result.trace.mediaIntents).toEqual([
+      {
+        intentId: "interaction-sound",
+        disposition: "imported",
+        producerWorkItemId: null,
+      },
+    ]);
+  });
+
+  it("derives one asset producer and directed input and evidence dependencies", () => {
+    const pinned = semanticPinnedFacts({
+      paths: ["package.json", "package-lock.json", "src/item-1.ts", "src/item-2.ts"],
+    });
+    const request = semanticRequest(pinned);
+    const capability = {
+      id: "raster-producer",
+      kinds: ["layout-reference" as const],
+      purposes: ["implementation-reference" as const],
+      mediaTypes: ["image/png" as const],
+      maximumCount: 4,
+      raster: {
+        maximumWidth: 2048,
+        maximumHeight: 2048,
+        supportsAlpha: true,
+        supportsAnimation: false,
+      },
+    };
+    request.media.producerCapabilities = [capability];
+    const proposal = semanticProposal(request, 2);
+    proposal.workItems[1]!.dependsOn = [];
+    proposal.mediaIntents = [
+      mediaIntent({
+        bindings: [
+          { workItemId: "item-1", direction: "input-to", criterionIds: [] },
+          { workItemId: "item-2", direction: "evidence-for", criterionIds: ["implemented"] },
+        ],
+      }),
+    ];
+    const result = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      runPolicy: projectionPolicy(request),
+      mediaPlanning: {
+        assetBindings: [],
+        producerCapabilities: [capability],
+        reviewRules: [],
+      },
+    });
+    const producer = result.objective.workItems.find(
+      ({ deliverable }) => deliverable.kind === "asset-production",
+    );
+    expect(producer?.scope).toEqual([]);
+    expect(producer?.validationCommands).toEqual([]);
+    expect(producer?.dependsOn).toEqual(["item-2"]);
+    expect(result.objective.workItems.find(({ id }) => id === "item-1")!.dependsOn).toContain(
+      producer!.id,
+    );
+    expect(result.objective.workItems.map(({ id }) => id)).toEqual([
+      "item-2",
+      producer!.id,
+      "item-1",
+    ]);
+    expect(result.trace.addedEdges).toEqual(
+      expect.arrayContaining([
+        { itemId: "item-1", dependsOn: producer!.id, reason: "media-input" },
+        { itemId: producer!.id, dependsOn: "item-2", reason: "media-evidence" },
+      ]),
+    );
+    expect(workerPacketFromCompiled(producer!).deliverable).toMatchObject({
+      kind: "asset-production",
+      contract: "clockgrove.factory/asset-set",
+      producerCapabilityId: "raster-producer",
+    });
+  });
+
+  it("projects non-raster media without inventing image constraints", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const capability = {
+      id: "audio-producer",
+      kinds: ["sound-reference" as const],
+      purposes: ["implementation-reference" as const],
+      mediaTypes: ["audio/wav"],
+      maximumCount: 2,
+      raster: null,
+    };
+    request.media.producerCapabilities = [capability];
+    const proposal = semanticProposal(request);
+    proposal.mediaIntents = [
+      mediaIntent({
+        id: "interaction-sound",
+        kind: "sound-reference",
+        brief: "Produce the bounded interaction sound reference.",
+        output: {
+          mediaTypes: ["audio/wav"],
+          minimumCount: 1,
+          maximumCount: 1,
+          raster: null,
+        },
+      }),
+    ];
+
+    const result = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      runPolicy: projectionPolicy(request),
+      mediaPlanning: {
+        assetBindings: [],
+        producerCapabilities: [capability],
+        reviewRules: [],
+      },
+    });
+    const producer = result.objective.workItems.find(
+      ({ deliverable }) => deliverable.kind === "asset-production",
+    );
+
+    expect(producer?.deliverable).toMatchObject({
+      kind: "asset-production",
+      producerCapabilityId: "audio-producer",
+      intent: {
+        id: "interaction-sound",
+        output: { mediaTypes: ["audio/wav"], raster: null },
+      },
+    });
+    expect(result.trace.mediaIntents).toEqual([
+      {
+        intentId: "interaction-sound",
+        disposition: "producer",
+        producerWorkItemId: producer!.id,
+      },
+    ]);
+  });
+
+  it("rejects a raster minimum beyond the producer's declared bound", () => {
+    const request = semanticRequest();
+    request.media.producerCapabilities = [
+      {
+        id: "small-raster-producer",
+        kinds: ["layout-reference"],
+        purposes: ["implementation-reference"],
+        mediaTypes: ["image/png"],
+        maximumCount: 4,
+        raster: {
+          maximumWidth: 1024,
+          maximumHeight: 1024,
+          supportsAlpha: true,
+          supportsAnimation: false,
+        },
+      },
+    ];
+    const proposal = semanticProposal(request);
+    const intent = mediaIntent();
+    proposal.mediaIntents = [
+      mediaIntent({
+        output: {
+          ...intent.output,
+          raster: { ...intent.output.raster!, minimumWidth: 2048, maximumWidth: null },
+        },
+      }),
+    ];
+
+    expect(codes(request, proposal)).toContainEqual(
+      expect.objectContaining({
+        code: "incompatible-media-output",
+        itemId: "primary-media",
+      }),
+    );
+  });
+
+  it("reports a structured cycle when derived media ordering closes a dependency loop", () => {
+    const pinned = semanticPinnedFacts({
+      paths: ["package.json", "package-lock.json", "src/item-1.ts", "src/item-2.ts"],
+    });
+    const request = semanticRequest(pinned);
+    const capability = {
+      id: "raster-producer",
+      kinds: ["layout-reference" as const],
+      purposes: ["implementation-reference" as const],
+      mediaTypes: ["image/png" as const],
+      maximumCount: 4,
+      raster: {
+        maximumWidth: 2048,
+        maximumHeight: 2048,
+        supportsAlpha: true,
+        supportsAnimation: false,
+      },
+    };
+    request.media.producerCapabilities = [capability];
+    const proposal = semanticProposal(request, 2);
+    proposal.mediaIntents = [
+      mediaIntent({
+        bindings: [
+          { workItemId: "item-1", direction: "input-to", criterionIds: [] },
+          { workItemId: "item-2", direction: "evidence-for", criterionIds: ["implemented"] },
+        ],
+      }),
+    ];
+    expect(
+      parseAndValidateCompilerProposal(request, proposal, {
+        pinnedFacts: pinned,
+        runPolicy: projectionPolicy(request),
+        mediaPlanning: {
+          assetBindings: [],
+          producerCapabilities: [capability],
+          reviewRules: [],
+        },
+      }).report.violations,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "media-dependency-cycle",
+          field: "/mediaIntents",
+        }),
+      ]),
+    );
+  });
+
+  it("rejects provider and storage authority smuggled into a media intent", () => {
+    const request = semanticRequest();
+    const proposal = semanticProposal(request) as unknown as {
+      mediaIntents: Array<Record<string, unknown>>;
+    };
+    proposal.mediaIntents = [{ ...mediaIntent(), provider: "invented-provider" }];
+    expect(codes(request, proposal)).toContainEqual(
+      expect.objectContaining({ code: "schema-invalid", field: "/mediaIntents/0" }),
+    );
+  });
+
+  it("canonicalizes intent, import, media, binding, and criterion order", () => {
+    const request = semanticRequest();
+    const proposal = semanticProposal(request, 2);
+    proposal.mediaIntents = [
+      mediaIntent({
+        id: "z-intent",
+        necessity: "helpful",
+        obligationIds: ["explicit-contract"],
+        output: { ...mediaIntent().output, mediaTypes: ["image/webp", "image/png"] },
+        bindings: [
+          { workItemId: "item-2", direction: "input-to", criterionIds: ["implemented"] },
+          { workItemId: "item-1", direction: "input-to", criterionIds: [] },
+        ],
+      }),
+      mediaIntent({ id: "a-intent", necessity: "helpful" }),
+    ];
+    const parsed = parseAndValidateCompilerProposal(request, proposal);
+    expect(parsed.report.status).toBe("valid");
+    if (parsed.proposal?.kind !== "work-items") throw new Error("expected Work Item proposal");
+    expect(parsed.proposal.mediaIntents.map(({ id }) => id)).toEqual(["a-intent", "z-intent"]);
+    expect(parsed.proposal.mediaIntents[1]!.output.mediaTypes).toEqual(["image/png", "image/webp"]);
+    expect(parsed.proposal.mediaIntents[1]!.bindings.map(({ workItemId }) => workItemId)).toEqual([
+      "item-1",
+      "item-2",
+    ]);
+  });
+});
+
 function deferredFixture() {
   const allowed = ["files.pythonhosted.org", "pypi.org", "registry.npmjs.org"];
   const pinned = semanticPinnedFacts({ paths: ["README.md"], scripts: {} });
@@ -844,6 +1311,7 @@ describe("deferred capability provider validation", () => {
     const proposal: CompilerProposal = {
       protocol: "clockgrove.factory/compiler-proposal",
       kind: "work-items",
+      mediaIntents: [],
       workItems: [
         item("provider", ["package.json", "package-lock.json"], []),
         item("child", ["src/child.ts"], ["provider"]),
@@ -859,6 +1327,7 @@ describe("deferred capability provider validation", () => {
     const proposal: CompilerProposal = {
       protocol: "clockgrove.factory/compiler-proposal",
       kind: "work-items",
+      mediaIntents: [],
       workItems: [
         item("provider", ["package.json", "package-lock.json"], []),
         later,
@@ -901,6 +1370,7 @@ describe("deferred capability provider validation", () => {
     const proposal: CompilerProposal = {
       protocol: "clockgrove.factory/compiler-proposal",
       kind: "work-items",
+      mediaIntents: [],
       workItems: build(item),
     };
     expect(codes(request, proposal)).toContainEqual(
@@ -922,6 +1392,7 @@ describe("deferred capability provider validation", () => {
     const proposal: CompilerProposal = {
       protocol: "clockgrove.factory/compiler-proposal",
       kind: "work-items",
+      mediaIntents: [],
       workItems: [provider, ...consumers],
     };
     const boundary = structuredClone(proposal);
@@ -958,6 +1429,7 @@ describe("deferred capability provider validation", () => {
       codes(request, {
         protocol: "clockgrove.factory/compiler-proposal",
         kind: "work-items",
+        mediaIntents: [],
         workItems: [provider],
       }),
     ).toContainEqual(
@@ -1043,7 +1515,10 @@ describe("deterministic semantic projection", () => {
       outOfScope: proposal.workItems[0]!.outOfScope,
       conventions: proposal.workItems[0]!.conventions,
       baseSha: request.baseSha,
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     });
     expect(projected.objective.workItems[0]!.validationCommands).toEqual([
       request.repository.validationRecipes[0]!.command,
@@ -1283,6 +1758,7 @@ describe("deterministic semantic projection", () => {
       graphDigest: "2".repeat(64),
       addedEdges: [],
       adapterBindings: [],
+      mediaIntents: [],
       riskElevations: { count: 0, digest: compilerEvalDigest([]) },
     };
     const challenges = deriveCompilerInferenceChallenges({

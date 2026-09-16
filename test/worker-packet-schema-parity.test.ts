@@ -58,7 +58,10 @@ const packet: WorkerPacket = {
     ],
   },
   managedRuntimes: [pnpmRuntime],
-  artifactContract: "clockgrove.factory/artifact",
+  deliverable: {
+    kind: "repository-change" as const,
+    contract: "clockgrove.factory/artifact" as const,
+  },
 };
 
 describe("repository capability JSON Schema parity", () => {
@@ -79,6 +82,99 @@ describe("repository capability JSON Schema parity", () => {
   it("accepts the same canonical capability packet", () => {
     expect(validate(packet), JSON.stringify(validate.errors)).toBe(true);
     expect(acceptedByZod(packet)).toBe(true);
+  });
+
+  it("accepts the strict asset-production shape and rejects repository and retired fields", () => {
+    const intent = {
+      id: "primary-media",
+      kind: "layout-reference" as const,
+      purpose: "implementation-reference" as const,
+      necessity: "required" as const,
+      obligationIds: ["visual-contract"],
+      rationale: "The implementation needs an exact visual reference.",
+      brief: "Produce a bounded interface wireframe.",
+      importedAssetIds: [],
+      output: {
+        mediaTypes: ["image/png" as const],
+        minimumCount: 1,
+        maximumCount: 1,
+        raster: {
+          minimumWidth: 640,
+          maximumWidth: 1024,
+          minimumHeight: 480,
+          maximumHeight: 768,
+          alpha: "allowed" as const,
+          animation: "forbidden" as const,
+        },
+      },
+      review: { kind: "human-required" as const },
+      bindings: [{ workItemId: "consumer", direction: "input-to" as const, criterionIds: [] }],
+    };
+    const assetPacket: WorkerPacket = {
+      protocol: "clockgrove.factory/worker-packet",
+      goal: "Produce the approved visual reference.",
+      acceptanceCriteria: ["One immutable PNG variant satisfies the media intent."],
+      allowedPaths: [],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      baseSha: "a".repeat(40),
+      validationCommands: [],
+      requirements: {
+        os: ["linux"],
+        architecture: [],
+        tools: [],
+        services: [],
+        networkDestinations: [],
+        permittedSecretNames: [],
+        trust: "managed",
+      },
+      deliverable: {
+        kind: "asset-production",
+        contract: "clockgrove.factory/asset-set",
+        intent,
+        producerCapabilityId: "raster-producer",
+      },
+    };
+    expect(validate(assetPacket), JSON.stringify(validate.errors)).toBe(true);
+    expect(acceptedByZod(assetPacket)).toBe(true);
+
+    const repositoryField = { ...structuredClone(assetPacket), context: {} };
+    expect(validate(repositoryField)).toBe(false);
+    expect(acceptedByZod(repositoryField)).toBe(false);
+    const retired = {
+      ...structuredClone(packet),
+      artifactContract: "clockgrove.factory/artifact",
+    };
+    delete (retired as Partial<typeof retired>).deliverable;
+    expect(validate(retired)).toBe(false);
+    expect(acceptedByZod(retired)).toBe(false);
+
+    const workItemSchema = JSON.parse(
+      readFileSync(new URL("../schemas/work-item.schema.json", import.meta.url), "utf8"),
+    );
+    const ajv = new Ajv({ strict: false });
+    ajv.addSchema(schema);
+    const validateWorkItem = ajv.compile(workItemSchema);
+    const workItem = {
+      id: "asset-primary-media",
+      title: "Produce the interface wireframe",
+      goal: assetPacket.goal,
+      acceptance: assetPacket.acceptanceCriteria,
+      scope: [],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      dependsOn: [],
+      baseSha: assetPacket.baseSha,
+      validationCommands: [],
+      requirements: assetPacket.requirements,
+      deliverable: assetPacket.deliverable,
+    };
+    expect(validateWorkItem(workItem), JSON.stringify(validateWorkItem.errors)).toBe(true);
+    expect(() =>
+      parsePersistedCompiledObjective({ title: "Visual", workItems: [workItem] }),
+    ).not.toThrow();
   });
 
   it.each([
@@ -161,7 +257,7 @@ describe("repository capability JSON Schema parity", () => {
       requirements: rootPacket.requirements,
       repositoryCapabilities: rootPacket.repositoryCapabilities,
       managedRuntimes: rootPacket.managedRuntimes,
-      artifactContract: rootPacket.artifactContract,
+      deliverable: rootPacket.deliverable,
     };
     const workerSchema = JSON.parse(
       readFileSync(new URL("../schemas/worker-packet.schema.json", import.meta.url), "utf8"),

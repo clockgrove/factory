@@ -89,6 +89,7 @@ const graph = parsePersistedCompiledObjective({ title: golden.title, workItems: 
 const proposal = CompilerProposalSchema.parse({
   protocol: "clockgrove.factory/compiler-proposal",
   kind: "work-items",
+  mediaIntents: [],
   workItems: graph.workItems.map((item, itemIndex) => ({
     id: item.id,
     title: item.title,
@@ -149,6 +150,19 @@ const proposalRequest = CompilerRequestSchema.parse({
     },
     pathCount: 1,
   },
+  media: {
+    assetManifest: null,
+    assetEgress: {
+      mode: "denied",
+      policyDigest: compilerEvalDigest({
+        mode: "denied",
+        maxAssets: 0,
+        deterministicReviewRuleIds: [],
+      }),
+    },
+    producerCapabilities: [],
+    reviewRules: [],
+  },
   constraints: {
     maxWorkItems: 100,
     planningWorkItemThreshold: 100,
@@ -183,6 +197,7 @@ const projectionTrace: CompilerProjectionTrace = {
   graphDigest: compiledGraphDigest(graph),
   addedEdges: [],
   adapterBindings: [],
+  mediaIntents: [],
   riskElevations: { count: 0, digest: compilerEvalDigest([]) },
 };
 function history() {

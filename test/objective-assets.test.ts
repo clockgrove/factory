@@ -27,6 +27,10 @@ import {
   resumeContentTransfer,
 } from "../src/control/content-transfers.js";
 import { ObjectiveAssetManifestSchema } from "../src/assets/contracts.js";
+import {
+  compilerMediaDescriptorDigests,
+  compilerMediaInputs,
+} from "../src/assets/compiler-input.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -266,6 +270,18 @@ describe("Objective asset contracts and handlers", () => {
     const selected = persisted.manifest.assets[0]!.descriptor;
     expect(await readFile(join(materialized.root, selected.materializationPath))).toHaveLength(
       selected.content.bytes,
+    );
+    const selectedMediaType = selected.content.inspection.mediaType;
+    expect(compilerMediaDescriptorDigests(persisted.manifest, [selectedMediaType])).toContain(
+      selected.digest,
+    );
+    expect(
+      compilerMediaInputs(persisted.manifest, materialized.root, [selectedMediaType]),
+    ).toContainEqual(
+      expect.objectContaining({
+        mediaType: selectedMediaType,
+        path: join(materialized.root, selected.materializationPath),
+      }),
     );
     await expect(
       readFile(

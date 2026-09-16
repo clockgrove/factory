@@ -43,7 +43,10 @@ const objective = {
         permittedSecretNames: [],
         trust: "trusted_local" as const,
       },
-      artifactContract: "clockgrove.factory/artifact" as const,
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     },
   ],
 };

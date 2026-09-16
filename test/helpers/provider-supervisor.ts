@@ -29,7 +29,19 @@ import {
   type RunPolicy,
 } from "../../src/protocol/policy.js";
 import { parseFactoryEvent } from "../../src/protocol/events.js";
-import { renderWorkPacket, type CompiledObjective } from "../../src/graph.js";
+import {
+  isCompiledRepositoryWorkItem,
+  renderWorkPacket,
+  type CompiledObjective,
+  type CompiledRepositoryWorkItem,
+  type CompiledWorkItem,
+} from "../../src/graph.js";
+
+function repositoryWorkItem(item: CompiledWorkItem): CompiledRepositoryWorkItem {
+  if (!isCompiledRepositoryWorkItem(item))
+    throw new Error("provider Supervisor fixture requires repository Work Items");
+  return item;
+}
 import { BackendRegistry } from "../../src/execution/registry.js";
 import { normalizeArtifact } from "../../src/execution/artifacts.js";
 import type {
@@ -540,7 +552,10 @@ wheels = [
             : "trusted_local",
         estimatedDurationMinutes: 1,
       },
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
       delivery:
         faults.nativeStack && index === 1
           ? { group: "a", relationship: "continue-stack", parentWorkItem: "a" }
@@ -555,6 +570,7 @@ wheels = [
             },
     })),
   };
+  const ordinaryItems = ordinaryGraph.workItems.map(repositoryWorkItem);
   const capabilityAdapter =
     faults.capabilityAdapter === "npm"
       ? "node-npm"
@@ -617,7 +633,7 @@ wheels = [
     deferredCapabilityAdapters: [capabilityAdapter],
     workItems: [
       {
-        ...ordinaryGraph.workItems[0]!,
+        ...ordinaryItems[0]!,
         id: "provider",
         title: "Integrate provider ancestry",
         goal: "Create provider.txt containing provider",
@@ -625,7 +641,7 @@ wheels = [
         scope: ["provider.txt", ...capabilityAuthorityPaths, "test/"],
         validationCommands: [capabilityTestCommand],
         requirements: {
-          ...ordinaryGraph.workItems[0]!.requirements!,
+          ...ordinaryItems[0]!.requirements,
           tools: ["node", capabilityRunner],
           networkDestinations:
             faults.capabilityAdapter === "uv"
@@ -665,7 +681,7 @@ wheels = [
         },
       },
       {
-        ...ordinaryGraph.workItems[1]!,
+        ...ordinaryItems[1]!,
         id: "consumer",
         title: "Consume provider check",
         goal: "Create consumer.txt containing consumer",
@@ -673,7 +689,7 @@ wheels = [
         scope: ["consumer.txt"],
         validationCommands: [capabilityCheckCommand],
         requirements: {
-          ...ordinaryGraph.workItems[1]!.requirements!,
+          ...ordinaryItems[1]!.requirements,
           tools: ["node", capabilityRunner],
           networkDestinations:
             faults.capabilityAdapter === "uv"
@@ -705,7 +721,7 @@ wheels = [
         },
       },
       {
-        ...ordinaryGraph.workItems[2]!,
+        ...ordinaryItems[2]!,
         id: "independent",
         title: "Implement independent",
         goal: "Create independent.txt containing independent",
@@ -720,7 +736,7 @@ wheels = [
   const workflowGraph: CompiledObjective = {
     ...ordinaryGraph,
     title: "Workflow publication-boundary qualification",
-    workItems: ordinaryGraph.workItems.map((item, index) =>
+    workItems: ordinaryItems.map((item, index) =>
       index === 0
         ? {
             ...item,
@@ -754,7 +770,10 @@ wheels = [
       trust: "trusted_local",
       estimatedDurationMinutes: 1,
     },
-    artifactContract: "clockgrove.factory/artifact",
+    deliverable: {
+      kind: "repository-change" as const,
+      contract: "clockgrove.factory/artifact" as const,
+    },
     managedRuntimes: [PNPM_RUNTIME_REQUIREMENT],
     delivery: { group: "bootstrap", relationship: "root" },
     ...(faults.greenfieldLifecycle
@@ -802,7 +821,7 @@ wheels = [
                         ? "consumer"
                         : `descendant-${index - 1}`;
                   return {
-                    ...ordinaryGraph.workItems[1]!,
+                    ...ordinaryItems[1]!,
                     id,
                     title: `Use integrated workspace check in ${id}`,
                     goal: `Create ${id}.txt containing ${id}`,
@@ -811,7 +830,7 @@ wheels = [
                     dependsOn: [dependency],
                     validationCommands: ["pnpm check"],
                     requirements: {
-                      ...ordinaryGraph.workItems[1]!.requirements!,
+                      ...ordinaryItems[1]!.requirements,
                       tools: ["node", "pnpm"],
                       networkDestinations: ["registry.npmjs.org"],
                     },

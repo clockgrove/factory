@@ -25,7 +25,11 @@ import {
   normalizeExecutionUsage,
 } from "../execution/session.js";
 import { normalizeArtifact, type NormalizedArtifact } from "../execution/artifacts.js";
-import { ContextManifestSchema, type ExecutionRequirements } from "../protocol/worker-packet.js";
+import {
+  ContextManifestSchema,
+  assertRepositoryChangeWorkerPacket,
+  type ExecutionRequirements,
+} from "../protocol/worker-packet.js";
 import {
   FINDING_CANDIDATE_JSON_SCHEMA,
   parseFindingCandidates,
@@ -192,6 +196,7 @@ export async function probeLocalCapabilities(
 
 export function workerPacketPrompt(context: AttemptContext): string {
   const packet = context.packet;
+  assertRepositoryChangeWorkerPacket(packet);
   const manifest = packet.context ? ContextManifestSchema.parse(packet.context) : undefined;
   const bootstrapValidation =
     packet.validationCommands.length === 1 && packet.allowedPaths.includes("package.json")

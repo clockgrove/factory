@@ -101,6 +101,15 @@ export function semanticRequest(
       validationSurfaces: summarizeCompilerValidationSurfaces(pinned.relevantPaths),
       pathCount: pinned.relevantPaths.length,
     },
+    media: {
+      assetManifest: null,
+      assetEgress: {
+        mode: DEFAULT_RUN_POLICY.compilerMediaEgress.mode,
+        policyDigest: compilerEvalDigest(DEFAULT_RUN_POLICY.compilerMediaEgress),
+      },
+      producerCapabilities: [],
+      reviewRules: [],
+    },
     constraints: {
       maxWorkItems: 100,
       planningWorkItemThreshold: 100,
@@ -123,6 +132,7 @@ export function semanticProposal(request: CompilerRequest, count = 1): CompilerP
   return {
     protocol: "clockgrove.factory/compiler-proposal",
     kind: "work-items",
+    mediaIntents: [],
     workItems: Array.from({ length: count }, (_, index) => {
       const number = index + 1;
       return {

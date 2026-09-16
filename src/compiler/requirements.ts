@@ -171,9 +171,9 @@ export function groundExecutionRequirements(
       source: `workItemTimeoutMinutes cap (${policy.workItemTimeoutMinutes})`,
     });
   evidence.push({
-    field: "artifactContract",
+    field: "deliverable",
     kind: "factory-default",
-    source: "clockgrove.factory/artifact",
+    source: "repository-change:clockgrove.factory/artifact",
   });
 
   return ExecutionRequirementsSchema.parse({

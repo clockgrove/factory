@@ -27,6 +27,7 @@ import { parseFactoryEvent } from "../src/protocol/events.js";
 import {
   renderWorkPacket,
   parseWorkerPacketFromIssue,
+  isCompiledRepositoryWorkItem,
   type CompiledObjective,
 } from "../src/graph.js";
 import { planDelivery } from "../src/publication/delivery.js";
@@ -464,7 +465,10 @@ async function fixture(
         permittedSecretNames: [],
         trust: "trusted_local",
       },
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
       delivery: { group: name, relationship: "root" },
     })),
   };
@@ -733,15 +737,18 @@ async function fixture(
     mainHead = peerMergeSha;
     const peerTree = (await readCommit(peerHead)).treeOid;
     const peerLease = { ...lease, objective: 6, runId: "peer" };
+    const peerSeed = graph.workItems[0]!;
+    if (!isCompiledRepositoryWorkItem(peerSeed))
+      throw new Error("fixture requires a repository Work Item");
     const peerItem = {
-      ...graph.workItems[0]!,
+      ...peerSeed,
       id: "peer",
       title: "peer",
       goal: "Add peer",
       scope: ["peer.txt"],
       delivery: { group: "peer", relationship: "root" as const },
       requirements: {
-        ...graph.workItems[0]!.requirements!,
+        ...peerSeed.requirements,
         ...(options.peerIsolated ? { trust: "isolated" as const } : {}),
       },
     };

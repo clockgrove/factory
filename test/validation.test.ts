@@ -8,7 +8,7 @@ import * as localScopeRuntime from "../src/runtime/local-scope.js";
 import { runContainedProcess } from "../src/runtime/process-group.js";
 
 import { normalizeArtifact } from "../src/execution/artifacts.js";
-import type { WorkerPacket } from "../src/protocol/worker-packet.js";
+import type { RepositoryChangeWorkerPacket } from "../src/protocol/worker-packet.js";
 import {
   cleanupLocalWorktree,
   collectLocalArtifact,
@@ -121,8 +121,11 @@ async function pnpmRepositoryFixture(): Promise<{ repository: string; baseSha: s
   };
 }
 
-function packet(baseSha: string, over: Partial<WorkerPacket> = {}): WorkerPacket {
-  const result: WorkerPacket = {
+function packet(
+  baseSha: string,
+  over: Partial<RepositoryChangeWorkerPacket> = {},
+): RepositoryChangeWorkerPacket {
+  const result: RepositoryChangeWorkerPacket = {
     protocol: "clockgrove.factory/worker-packet",
     goal: "Change the value.",
     acceptanceCriteria: ["value.txt contains changed"],
@@ -141,7 +144,10 @@ function packet(baseSha: string, over: Partial<WorkerPacket> = {}): WorkerPacket
       permittedSecretNames: [],
       trust: "trusted_local",
     },
-    artifactContract: "clockgrove.factory/artifact",
+    deliverable: {
+      kind: "repository-change" as const,
+      contract: "clockgrove.factory/artifact" as const,
+    },
     ...over,
   };
   if (over.managedRuntimes === undefined) {

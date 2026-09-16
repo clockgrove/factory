@@ -97,6 +97,18 @@ export async function compilePlan(
   beforeModelInvocation?: CompilerModelAdmission,
 ): Promise<PlanCompilationResult> {
   assertCompilationContextPolicyAuthority(context);
+  const supportedMediaTypes = new Set(backend.compilerInputMediaTypes ?? []);
+  const unsupportedMediaTypes = [
+    ...new Set(
+      (context.mediaPlanning?.mediaInputs ?? [])
+        .map(({ mediaType }) => mediaType)
+        .filter((mediaType) => !supportedMediaTypes.has(mediaType)),
+    ),
+  ].sort();
+  if (unsupportedMediaTypes.length)
+    throw new Error(
+      `management compiler does not support separately bound media inputs: ${unsupportedMediaTypes.join(", ")}`,
+    );
   const prepared = await prepareCompilerRequest({
     context,
     inventory: structuralObjectiveInventory(context),
@@ -137,6 +149,15 @@ export async function compilePlan(
         proposal: proposalResult.proposal,
         pinnedFacts: prepared.pinnedFacts,
         runPolicy: context.runPolicy,
+        ...(context.mediaPlanning
+          ? {
+              mediaPlanning: {
+                assetBindings: context.mediaPlanning.assetBindings,
+                producerCapabilities: context.mediaPlanning.producerCapabilities,
+                reviewRules: context.mediaPlanning.reviewRules,
+              },
+            }
+          : {}),
         ...(economics ? { economicEvidence: economics } : {}),
         ...(prepared.legacyGraphConstraints
           ? { legacyGraphConstraints: prepared.legacyGraphConstraints }
@@ -153,7 +174,19 @@ export async function compilePlan(
       };
       await checkpoint(projected);
     },
-    { pinnedFacts: prepared.pinnedFacts, runPolicy: context.runPolicy },
+    {
+      pinnedFacts: prepared.pinnedFacts,
+      runPolicy: context.runPolicy,
+      ...(context.mediaPlanning
+        ? {
+            mediaPlanning: {
+              assetBindings: context.mediaPlanning.assetBindings,
+              producerCapabilities: context.mediaPlanning.producerCapabilities,
+              reviewRules: context.mediaPlanning.reviewRules,
+            },
+          }
+        : {}),
+    },
     beforeModelInvocation,
     context,
   );

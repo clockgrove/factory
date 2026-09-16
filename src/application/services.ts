@@ -430,6 +430,7 @@ export class FactoryApplicationService {
     objective: number;
     requestId: string;
     baseSha?: string;
+    assetManifestDigest?: string;
     policy?: unknown;
   }): Promise<FactoryEvent> {
     if (!this.context.store?.ensureObjectiveLabel)
@@ -453,11 +454,13 @@ export class FactoryApplicationService {
         assertNewRunBudgetIntent(policy);
       const baseSha =
         input.baseSha ?? activation?.baseSha ?? (await this.requireBaseSha(current.defaultBranch));
+      const assetManifestDigest = input.assetManifestDigest ?? activation?.assetManifestDigest;
       return {
         event: "ActivationRequested",
         runId: input.requestId,
         repository: `${this.context.owner}/${this.context.repo}`,
         baseSha,
+        ...(assetManifestDigest ? { assetManifestDigest } : {}),
         policy,
         policyDigest: policyDigest(policy),
         controllerProtocolMin: PROTOCOL_V2,
@@ -491,6 +494,9 @@ export class FactoryApplicationService {
             repository: prior.repository,
             baseSha: prior.baseSha,
             policyDigest: prior.policyDigest,
+            ...(prior.assetManifestDigest
+              ? { assetManifestDigest: prior.assetManifestDigest }
+              : {}),
             ...(input.reason ? { reason: input.reason } : {}),
           };
         const active = latestSupportedRun(current.factoryEvents ?? [], current.objectiveAuthority);
@@ -513,7 +519,8 @@ export class FactoryApplicationService {
                   event.runId === activation.runId &&
                   event.requestedBy.toLowerCase() === activation.requestedBy.toLowerCase() &&
                   event.baseSha === activation.baseSha &&
-                  event.policyDigest === activation.policyDigest)),
+                  event.policyDigest === activation.policyDigest &&
+                  event.assetManifestDigest === activation.assetManifestDigest)),
           )
         )
           throw new Error(
@@ -526,6 +533,9 @@ export class FactoryApplicationService {
           repository: activation.repository,
           baseSha: activation.baseSha,
           policyDigest: activation.policyDigest,
+          ...(activation.assetManifestDigest
+            ? { assetManifestDigest: activation.assetManifestDigest }
+            : {}),
           ...(input.reason ? { reason: input.reason } : {}),
         };
       });
@@ -676,7 +686,8 @@ export class FactoryApplicationService {
         fields.runId !== activation.runId ||
         fields.repository !== activation.repository ||
         fields.baseSha !== activation.baseSha ||
-        fields.policyDigest !== activation.policyDigest
+        fields.policyDigest !== activation.policyDigest ||
+        fields.assetManifestDigest !== activation.assetManifestDigest
       )
         throw new Error("activation cancellation differs from its immutable activation binding");
     }
@@ -687,6 +698,7 @@ export class FactoryApplicationService {
         "repository",
         "activationRequestId",
         "baseSha",
+        "assetManifestDigest",
         "policyDigest",
         "workItem",
         "priorityRank",
@@ -808,6 +820,7 @@ export class FactoryApplicationService {
           ? event.activationRequestId === activation.requestId &&
             event.baseSha === activation.baseSha &&
             event.policyDigest === activation.policyDigest &&
+            event.assetManifestDigest === activation.assetManifestDigest &&
             event.actor.toLowerCase() === activation.requestedBy.toLowerCase()
           : event.runId === request.runId),
     );
@@ -819,6 +832,9 @@ export class FactoryApplicationService {
         repository: activation.repository,
         baseSha: activation.baseSha,
         policyDigest: activation.policyDigest,
+        ...(activation.assetManifestDigest
+          ? { assetManifestDigest: activation.assetManifestDigest }
+          : {}),
       };
       const withdrawal = activationCancellation(events, binding);
       if (withdrawal || activationRejection(events, binding)) {

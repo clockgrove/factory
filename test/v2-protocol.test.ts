@@ -450,7 +450,10 @@ describe("Worker Packet", () => {
       baseSha: SHA,
       validationCommands: ["npm test -- invitations"],
       requirements: { trust: "trusted_local" },
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     });
     expect(packet.requirements.networkDestinations).toEqual([]);
   });
@@ -467,7 +470,10 @@ describe("Worker Packet", () => {
         trust: "isolated",
         permittedSecretNames: ["OPENAI_API_KEY"],
       },
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     };
     expect(parseWorkerPacket(base).requirements.permittedSecretNames).toEqual(["OPENAI_API_KEY"]);
     expect(() => parseWorkerPacket({ ...base, conventions: [`sk-${"x".repeat(40)}`] })).toThrow(
@@ -483,7 +489,10 @@ describe("Worker Packet", () => {
       baseSha: SHA,
       validationCommands: ["npm test"],
       requirements: { trust: "trusted_local" },
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     };
     for (const path of ["/etc/passwd", "../outside", "src/*", "src\\file.ts"]) {
       expect(() => parseWorkerPacket({ ...base, allowedPaths: [path] })).toThrow(/scope/i);
@@ -516,7 +525,10 @@ describe("Worker Packet", () => {
         relationship: "continue-stack",
         parentWorkItem: "policy",
       },
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     });
     expect(packet.context?.mustRead).toEqual(["docs/DESIGN.md"]);
     expect(packet.requirements.estimatedDurationMinutes).toBe(20);
@@ -531,7 +543,10 @@ describe("Worker Packet", () => {
       baseSha: SHA,
       validationCommands: ["npm test"],
       requirements: { trust: "trusted_local" },
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     };
     expect(() =>
       parseWorkerPacket({

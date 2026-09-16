@@ -152,7 +152,10 @@ function attemptContext(
       conventions: [],
       baseSha: fixture.baseSha,
       validationCommands: ["grep -qx changed value.txt"],
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
       requirements: {
         os: [],
         architecture: [],

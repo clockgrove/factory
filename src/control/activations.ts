@@ -20,6 +20,7 @@ export interface ActivationBinding {
   requestedBy: string;
   baseSha: string;
   policyDigest: string;
+  assetManifestDigest?: string | undefined;
 }
 
 export function latestActivation(
@@ -55,7 +56,8 @@ export function activationCancellation(
       event.runId !== binding.requestId ||
       event.repository.toLowerCase() !== binding.repository.toLowerCase() ||
       event.baseSha !== binding.baseSha ||
-      event.policyDigest !== binding.policyDigest
+      event.policyDigest !== binding.policyDigest ||
+      event.assetManifestDigest !== binding.assetManifestDigest
     )
       throw new Error("activation cancellation differs from its immutable activation binding");
     return true;
@@ -79,7 +81,8 @@ export function activationRejection(
     if (
       event.requestedBy.toLowerCase() !== binding.requestedBy.toLowerCase() ||
       event.baseSha !== binding.baseSha ||
-      event.policyDigest !== binding.policyDigest
+      event.policyDigest !== binding.policyDigest ||
+      event.assetManifestDigest !== binding.assetManifestDigest
     )
       throw new Error("activation rejection differs from its immutable activation binding");
     return true;

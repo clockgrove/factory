@@ -162,7 +162,10 @@ function attemptContext(workspace: string, baseSha: string): AttemptContext {
         permittedSecretNames: [],
         trust: "trusted_local",
       },
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     },
   };
 }
@@ -299,7 +302,10 @@ describe("Codex CLI local backend", () => {
         trust: "trusted_local" as const,
       },
       retryContext: { attempt: 1, outcome: "failed" as const, reason: "test failed" },
-      artifactContract: "clockgrove.factory/artifact" as const,
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     };
     const prompt = workerPacketPrompt({
       repository: "clockgrove/factory",
@@ -391,7 +397,10 @@ describe("Codex CLI local backend", () => {
           permittedSecretNames: [],
           trust: "trusted_local",
         },
-        artifactContract: "clockgrove.factory/artifact",
+        deliverable: {
+          kind: "repository-change" as const,
+          contract: "clockgrove.factory/artifact" as const,
+        },
       },
       modelSelection: {
         profile: "frontier",

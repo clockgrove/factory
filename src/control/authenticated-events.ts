@@ -85,7 +85,8 @@ export function bindAuthenticatedRunActors(
         activation.requestedBy.toLowerCase() !== event.actor.toLowerCase() ||
         activation.repository.toLowerCase() !== event.repository.toLowerCase() ||
         activation.policyDigest !== event.policyDigest ||
-        activation.baseSha !== event.baseSha
+        activation.baseSha !== event.baseSha ||
+        activation.assetManifestDigest !== event.assetManifestDigest
       ) {
         throw new Error(`Factory run ${event.runId} does not match its authenticated activation`);
       }

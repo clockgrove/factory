@@ -53,7 +53,10 @@ function context(): AttemptContext {
         permittedSecretNames: [],
         trust: "isolated",
       },
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     },
   };
 }

@@ -14,8 +14,15 @@ import {
 import { reconcileAdmissionForSuccessor } from "./control/admission-reassignment.js";
 import { observeLocalScopeBatch } from "./recovery/scope-resources.js";
 import { dirname, join, resolve } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { readObjectiveAssetManifest } from "./assets/storage.js";
 import { materializeObjectiveAssets } from "./assets/materialize.js";
+import {
+  compilerAssetManifestView,
+  compilerMediaDescriptorDigests,
+  compilerMediaInputs,
+} from "./assets/compiler-input.js";
 
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
 import { CodexSdkLocalBackend } from "./backends/codex-sdk-local.js";
@@ -237,6 +244,7 @@ import {
   type RunPolicy,
 } from "./protocol/policy.js";
 import {
+  assertRepositoryChangeWorkerPacket,
   parseWorkerPacket,
   workerPacketDigest,
   type WorkerPacket,
@@ -489,7 +497,7 @@ export interface SupervisorOptions {
   /** A service stop releases ownership without durably cancelling the run. */
   shutdownBehavior?: "cancel-run" | "release-lease";
   /** Durable controller activation fence. Foreground runs omit this. */
-  activation?: { requestId: string; baseSha: string };
+  activation?: { requestId: string; baseSha: string; assetManifestDigest?: string };
   /** Exact acknowledged successor; selects complete authenticated recovery history reads. */
   recovery?: { requestId: string; planDigest: string; successorRunId: string };
   /** Current fenced repository-controller identity, sampled for durable status.
@@ -896,6 +904,77 @@ async function prepareObjectiveAssetRoot(args: {
       descriptorDigests: bindings.map(({ descriptorDigest }) => descriptorDigest),
     })
   ).root;
+}
+
+async function prepareCompilerMediaInputs(args: {
+  store: GitHubControlStore;
+  repository: string;
+  objective: number;
+  baseSha: string;
+  manifestDigest: string;
+  policy: RunPolicy;
+  supportedMediaTypes: readonly string[];
+}): Promise<{
+  mediaPlanning: NonNullable<CompilationContext["mediaPlanning"]>;
+  dispose(): Promise<void>;
+}> {
+  if (args.policy.compilerMediaEgress.mode === "denied")
+    throw new Error("compiler media asset egress is denied by immutable run policy");
+  const manifest = await readObjectiveAssetManifest({
+    store: args.store,
+    authority: {
+      repository: args.repository,
+      objective: args.objective,
+      baseSha: args.baseSha,
+    },
+    digest: args.manifestDigest,
+  });
+  if (!manifest) throw new Error("activated Objective asset manifest is unavailable");
+  const compilerAssets = compilerAssetManifestView(manifest);
+  if (compilerAssets.view.assets.length > args.policy.compilerMediaEgress.maxAssets)
+    throw new Error("compiler media asset count exceeds immutable egress policy");
+  if (
+    args.policy.compilerMediaEgress.mode === "public-assets" &&
+    compilerAssets.view.assets.some((asset) => asset.visibility !== "public")
+  )
+    throw new Error("private Objective asset is not permitted by compiler media egress policy");
+  const mediaDescriptors = compilerMediaDescriptorDigests(manifest, args.supportedMediaTypes);
+  let workspace: string | undefined;
+  let mediaInputs: Array<{ assetId: string; mediaType: string; path: string }> = [];
+  try {
+    if (mediaDescriptors.length) {
+      workspace = await mkdtemp(join(tmpdir(), "factory-compiler-assets-"));
+      const materialized = await materializeObjectiveAssets({
+        store: args.store,
+        manifest,
+        supervisorRoot: join(workspace, "materialized"),
+        descriptorDigests: mediaDescriptors,
+      });
+      mediaInputs = compilerMediaInputs(manifest, materialized.root, args.supportedMediaTypes);
+    }
+    return {
+      mediaPlanning: {
+        assetManifest: compilerAssets.view,
+        assetBindings: compilerAssets.bindings,
+        mediaInputs,
+        assetEgress: {
+          mode: args.policy.compilerMediaEgress.mode,
+          policyDigest: compilerEvalDigest(args.policy.compilerMediaEgress),
+        },
+        producerCapabilities: [],
+        reviewRules: args.policy.compilerMediaEgress.deterministicReviewRuleIds.map((id) => ({
+          id,
+          kind: "deterministic-preauthorized" as const,
+        })),
+      },
+      dispose: async () => {
+        if (workspace) await rm(workspace, { recursive: true, force: true });
+      },
+    };
+  } catch (error) {
+    if (workspace) await rm(workspace, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 /** Resolve constructor-time resources from the same authenticated observation
@@ -1652,6 +1731,9 @@ export class FactorySupervisor {
       repository: this.#run.repository,
       baseSha: this.#run.baseSha,
       policyDigest: this.#run.policyDigest,
+      ...(this.#run.assetManifestDigest
+        ? { assetManifestDigest: this.#run.assetManifestDigest }
+        : {}),
     };
   }
 
@@ -1675,6 +1757,9 @@ export class FactorySupervisor {
           repository,
           baseSha: activation.baseSha,
           policyDigest: policyDigest(this.#policy),
+          ...(activation.assetManifestDigest
+            ? { assetManifestDigest: activation.assetManifestDigest }
+            : {}),
         }),
     );
   }
@@ -3625,6 +3710,7 @@ export class FactorySupervisor {
         activation.repository.toLowerCase() !== binding.repository.toLowerCase() ||
         activation.requestedBy.toLowerCase() !== binding.requestedBy.toLowerCase() ||
         activation.baseSha !== binding.baseSha ||
+        activation.assetManifestDigest !== binding.assetManifestDigest ||
         activation.policyDigest !== binding.policyDigest ||
         policyDigest(activation.policy) !== binding.policyDigest
       )
@@ -4210,7 +4296,8 @@ export class FactorySupervisor {
         (!this.#options.recovery &&
           this.#options.activation !== undefined &&
           (resumedRun.activationRequestId !== this.#options.activation.requestId ||
-            resumedRun.baseSha !== this.#options.activation.baseSha))
+            resumedRun.baseSha !== this.#options.activation.baseSha ||
+            resumedRun.assetManifestDigest !== this.#options.activation.assetManifestDigest))
       ) {
         throw new Error(
           "active run receipt does not match the current Objective, repository, branch, fork, or activation fence",
@@ -4679,6 +4766,7 @@ export class FactorySupervisor {
               event.requestId === activation.requestId &&
               event.runId === activation.requestId &&
               event.baseSha === activation.baseSha &&
+              event.assetManifestDigest === activation.assetManifestDigest &&
               event.repository.toLowerCase() === facts.fullName.toLowerCase() &&
               event.requestedBy.toLowerCase() === actor.toLowerCase() &&
               event.policyDigest === policyDigest(this.#policy) &&
@@ -4709,6 +4797,9 @@ export class FactorySupervisor {
             ? {
                 activationRequestId: this.#options.activation.requestId,
                 baseSha: this.#options.activation.baseSha,
+                ...(this.#options.activation.assetManifestDigest
+                  ? { assetManifestDigest: this.#options.activation.assetManifestDigest }
+                  : {}),
               }
             : {}),
         }));
@@ -5200,9 +5291,13 @@ export class FactorySupervisor {
             observedGraph.hasReceipt
               ? undefined
               : compilerEvalDigest({
-                  number: snapshot.number,
-                  title: snapshot.title,
-                  body: snapshot.body,
+                  objective: {
+                    number: snapshot.number,
+                    title: snapshot.title,
+                    body: snapshot.body,
+                  },
+                  assetManifestDigest: this.#run.assetManifestDigest ?? null,
+                  compilerMediaEgress: this.#policy.compilerMediaEgress,
                 }),
           );
           if (
@@ -5246,9 +5341,22 @@ export class FactorySupervisor {
                 this.#options.repository,
                 base.oid,
               );
+              let compilerMediaInputs:
+                | Awaited<ReturnType<typeof prepareCompilerMediaInputs>>
+                | undefined;
               try {
                 await materializeLocalLfsAssets(this.#options.repository, tree.path, base.oid);
                 await sealPinnedCompilationTreeProof(tree.proof);
+                if (this.#run.assetManifestDigest)
+                  compilerMediaInputs = await prepareCompilerMediaInputs({
+                    store: this.#store,
+                    repository: `${this.#options.owner}/${this.#options.repo}`,
+                    objective: snapshot.number,
+                    baseSha: base.oid,
+                    manifestDigest: this.#run.assetManifestDigest,
+                    policy: this.#policy,
+                    supportedMediaTypes: this.#management.compilerInputMediaTypes ?? [],
+                  });
                 const observedCapacity = await this.#capacitySnapshot();
                 const context: CompilationContext = {
                   repository: tree.path,
@@ -5271,6 +5379,9 @@ export class FactorySupervisor {
                   repositoryLfs,
                   allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
                   runPolicy: this.#policy,
+                  ...(compilerMediaInputs
+                    ? { mediaPlanning: compilerMediaInputs.mediaPlanning }
+                    : {}),
                   invocationTimeoutMs: Math.min(
                     deadline - Date.now(),
                     this.#policy.workItemTimeoutMinutes * 60_000,
@@ -5343,7 +5454,11 @@ export class FactorySupervisor {
                     ).then(requireExecutableGraph),
                   );
                 }
-                const inputDigest = compilerEvalDigest(context.objective);
+                const inputDigest = compilerEvalDigest({
+                  objective: context.objective,
+                  assetManifestDigest: this.#run.assetManifestDigest ?? null,
+                  compilerMediaEgress: this.#policy.compilerMediaEgress,
+                });
                 const assertInputs = async () => {
                   await this.#externalAdmission(async () => {});
                   if (this.#options.signal?.aborted)
@@ -5360,9 +5475,13 @@ export class FactorySupervisor {
                   this.#fenceSnapshot(fresh);
                   if (
                     compilerEvalDigest({
-                      number: fresh.number,
-                      title: fresh.title,
-                      body: fresh.body,
+                      objective: {
+                        number: fresh.number,
+                        title: fresh.title,
+                        body: fresh.body,
+                      },
+                      assetManifestDigest: this.#run.assetManifestDigest ?? null,
+                      compilerMediaEgress: this.#policy.compilerMediaEgress,
                     }) !== inputDigest
                   )
                     throw new Error(
@@ -5478,6 +5597,9 @@ export class FactorySupervisor {
                 await checkpoint(result);
                 return result;
               } finally {
+                await compilerMediaInputs
+                  ?.dispose()
+                  .catch(() => this.#notify("compiler media input cleanup needs attention"));
                 // A durable successful checkpoint must not become a repeated paid call
                 // merely because this exact owned temporary directory could not be removed.
                 await tree
@@ -5702,7 +5824,11 @@ export class FactorySupervisor {
             assertCompilerDraftSelection(
               records,
               compiled,
-              compilerEvalDigest({ number: fresh.number, title: fresh.title, body: fresh.body }),
+              compilerEvalDigest({
+                objective: { number: fresh.number, title: fresh.title, body: fresh.body },
+                assetManifestDigest: this.#run.assetManifestDigest ?? null,
+                compilerMediaEgress: this.#policy.compilerMediaEgress,
+              }),
             );
           }
           await this.#lease.use(async (lease) => {
@@ -11141,6 +11267,10 @@ export class FactorySupervisor {
 
   #validateCompiledGraphStatic(graph: CompiledObjective): void {
     for (const item of graph.workItems) {
+      if (item.deliverable.kind === "asset-production")
+        throw new Error(
+          `compiled graph includes asset-production Work Item ${item.id}, but this controller has no supervised asset-production execution route`,
+        );
       const packet = executionWorkerPacketFromCompiled(item);
       if (
         JSON.stringify(packet.managedRuntimes ?? []) !==
@@ -16792,6 +16922,7 @@ export class FactorySupervisor {
     siblingRefresh?: SiblingRefreshRecord,
   ): Promise<boolean> {
     const packet = this.#packetFor(item.number);
+    assertRepositoryChangeWorkerPacket(packet);
     const bootstrapCommand =
       packet.validationCommands.length === 1
         ? packageScriptValidationCommand(packet.validationCommands[0]!)
@@ -19219,6 +19350,9 @@ export class FactorySupervisor {
           requestedBy: actor,
           baseSha: activation.baseSha,
           policyDigest: policyDigest(this.#policy),
+          ...(activation.assetManifestDigest
+            ? { assetManifestDigest: activation.assetManifestDigest }
+            : {}),
           reason: durableReason,
         });
         await this.#store.addIssueComment(

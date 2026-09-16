@@ -99,6 +99,14 @@ const CompilerInvocationProvenanceSchema = z
     baseSha: z.string().regex(/^[0-9a-f]{40,64}$/),
     model: z.string().min(1).max(200).nullable(),
     reasoning: z.string().min(1).max(200).nullable(),
+    assetManifestDigest: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
+    mediaEgressDigest: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
   })
   .strict();
 const ProviderQuotaCheckpointSchema = z

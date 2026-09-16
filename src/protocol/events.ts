@@ -49,6 +49,8 @@ const RunStarted = Common.extend({
   policyDigest: sha256Digest,
   recordProtocol: z.literal("clockgrove.factory/transition-receipt-v1").optional(),
   activationRequestId: safeId.optional(),
+  /** Exact optional Objective asset manifest selected for compiler media input. */
+  assetManifestDigest: sha256Digest.optional(),
   baseSha: gitSha.optional(),
   recoveryRequestId: safeId.optional(),
   recoveryPlanDigest: sha256Digest.optional(),
@@ -232,6 +234,8 @@ const ActivationRequested = Common.extend({
   requestId: safeId,
   repository: boundedText(300),
   baseSha: gitSha,
+  /** Exact optional Objective asset manifest selected for compiler media input. */
+  assetManifestDigest: sha256Digest.optional(),
   policy: RunPolicySchema,
   policyDigest: sha256Digest,
   controllerProtocolMin: boundedText(80),
@@ -245,6 +249,7 @@ const ActivationRejected = Common.extend({
   requestedBy: boundedText(160),
   baseSha: gitSha,
   policyDigest: sha256Digest,
+  assetManifestDigest: sha256Digest.optional(),
   reason: boundedText(8_000),
 });
 
@@ -257,6 +262,7 @@ const ActivationCancellationRequested = Common.extend({
   repository: boundedText(300),
   baseSha: gitSha,
   policyDigest: sha256Digest,
+  assetManifestDigest: sha256Digest.optional(),
   reason: boundedText(8_000).optional(),
 }).superRefine((value, context) => {
   if (value.runId !== value.activationRequestId)

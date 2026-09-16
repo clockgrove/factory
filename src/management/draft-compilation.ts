@@ -1,5 +1,6 @@
 import {
   compiledGraphDigest,
+  isCompiledAssetProductionWorkItem,
   parsePersistedCompiledObjective,
   type CompiledObjective,
 } from "../graph.js";
@@ -156,6 +157,11 @@ function fixedProjectionTrace(
         operation: { ...binding.operation },
       })),
     ),
+    mediaIntents: graph.workItems.filter(isCompiledAssetProductionWorkItem).map((item) => ({
+      intentId: item.deliverable.intent.id,
+      disposition: "producer" as const,
+      producerWorkItemId: item.id,
+    })),
     riskElevations: { count: 0, digest: compilerEvalDigest([]) },
   };
 }

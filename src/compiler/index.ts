@@ -66,7 +66,10 @@ export type CompilerWorkItem = {
   baseSha: string;
   validationCommands: string[];
   requirements: ExecutionRequirements;
-  artifactContract: "clockgrove.factory/artifact";
+  deliverable: {
+    kind: "repository-change";
+    contract: "clockgrove.factory/artifact";
+  };
   assetInputs?: WorkerAssetInput[];
   repositoryCapabilities?: import("../protocol/worker-packet.js").RepositoryCapabilityBindings;
   managedRuntimes?: import("../runtime/toolchain-bundle.js").RuntimeBundleRequirement[];

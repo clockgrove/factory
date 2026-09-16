@@ -33,6 +33,7 @@ export interface RunState {
   policyDigest: string;
   startedAt: Date;
   activationRequestId?: string;
+  assetManifestDigest?: string;
   baseSha?: string;
   repository?: string;
   baseBranch?: string;
@@ -133,6 +134,7 @@ export class RunManager {
       startedAt: new Date(active.at),
       ...(active.recordProtocol ? { recordProtocol: active.recordProtocol } : {}),
       ...(active.activationRequestId ? { activationRequestId: active.activationRequestId } : {}),
+      ...(active.assetManifestDigest ? { assetManifestDigest: active.assetManifestDigest } : {}),
       ...(active.baseSha ? { baseSha: active.baseSha } : {}),
       repository: active.repository,
       baseBranch: active.baseBranch,
@@ -153,6 +155,7 @@ export class RunManager {
     runId?: string;
     sequence?: number;
     activationRequestId?: string;
+    assetManifestDigest?: string;
     baseSha?: string;
     writer?: LeaseState;
     recordProtocol?: "clockgrove.factory/transition-receipt-v1";
@@ -190,6 +193,7 @@ export class RunManager {
       policy,
       policyDigest: digest,
       ...(args.activationRequestId ? { activationRequestId: args.activationRequestId } : {}),
+      ...(args.assetManifestDigest ? { assetManifestDigest: args.assetManifestDigest } : {}),
       ...(args.baseSha ? { baseSha: args.baseSha } : {}),
     });
     if (event.kind !== "run" || event.event !== "FactoryRunStarted") {
@@ -209,6 +213,7 @@ export class RunManager {
       startedAt: now,
       ...(event.recordProtocol ? { recordProtocol: event.recordProtocol } : {}),
       ...(event.activationRequestId ? { activationRequestId: event.activationRequestId } : {}),
+      ...(event.assetManifestDigest ? { assetManifestDigest: event.assetManifestDigest } : {}),
       ...(event.baseSha ? { baseSha: event.baseSha } : {}),
       repository: event.repository,
       baseBranch: event.baseBranch,

@@ -99,7 +99,7 @@
           "items": {
             "type": "object", "additionalProperties": false, "required": ["field", "kind", "source"],
             "properties": {
-              "field": { "enum": ["os", "architecture", "cpu", "memoryMb", "diskMb", "timeoutMinutes", "artifactContract"] },
+              "field": { "enum": ["os", "architecture", "cpu", "memoryMb", "diskMb", "timeoutMinutes", "deliverable"] },
               "kind": { "enum": ["repository", "run-policy", "factory-default"] },
               "source": { "type": "string", "minLength": 1, "maxLength": 500 }
             }

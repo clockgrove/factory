@@ -102,7 +102,10 @@ describe("managed adapter clean validation", () => {
           bundleDigest: receipts.bun.digest,
         },
       ],
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     };
     const artifact = {
       protocol: "clockgrove.factory/artifact" as const,
@@ -232,7 +235,10 @@ wheels = [
           bundleDigest: receipts.uv.digest,
         },
       ],
-      artifactContract: "clockgrove.factory/artifact",
+      deliverable: {
+        kind: "repository-change" as const,
+        contract: "clockgrove.factory/artifact" as const,
+      },
     };
     const artifact = {
       protocol: "clockgrove.factory/artifact" as const,

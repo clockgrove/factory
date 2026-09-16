@@ -39,6 +39,15 @@ const ProjectionTrace = z
     graphDigest: z.string().regex(/^[a-f0-9]{64}$/),
     addedEdges: z.array(z.object({ itemId: z.string(), dependsOn: z.string() }).passthrough()),
     adapterBindings: z.array(z.record(z.unknown())),
+    mediaIntents: z.array(
+      z
+        .object({
+          intentId: z.string().min(1).max(64),
+          disposition: z.enum(["imported", "producer", "omitted-helpful"]),
+          producerWorkItemId: z.string().min(1).max(64).nullable(),
+        })
+        .strict(),
+    ),
     riskElevations: z
       .object({
         count: z.number().int().nonnegative(),

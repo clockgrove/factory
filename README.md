@@ -127,6 +127,16 @@ earlier planning thresholds of 24 Work Items, 75% of the Objective timeout for c
 path, and 150% for configured aggregate work; `objectivePlanning` can set all three ratios/counts.
 These are admission signals, not completion forecasts. Missing duration estimates remain unavailable.
 
+For media work, a `work-items` proposal always includes `mediaIntents` (empty when the Objective
+needs none). The model describes purpose, cited obligations, media and typed profile constraints,
+review, and whether the asset is an input to implementation or evidence produced afterward. Factory
+keeps provider, model, storage, credentials, network authority, exact imported digests, and graph
+edges on the trusted side. An activation can bind one imported Objective asset manifest; safe
+metadata enters the structured request and verified files reach only an adapter that advertises
+their exact media types. The Codex CLI maps its supported raster types to image inputs. Required
+media fails deterministically when no import or permitted producer can satisfy it. See
+[Objective input assets](docs/OBJECTIVE-ASSETS.md#compiler-media-intents).
+
 `factory_plan` returns proposed Objective specifications with an identity digest, complete parent-
 requirement coverage, concrete outputs, completion criteria, and prerequisite-output handoffs. They
 also carry per-child Work Item, critical-path, and aggregate-work estimates checked against the

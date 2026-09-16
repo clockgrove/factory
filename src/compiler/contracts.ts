@@ -12,6 +12,7 @@ import {
   type ObligationInventory,
 } from "../evaluation/compiler-eval.js";
 import { NetworkDestinationSchema, RepositoryScopePathSchema } from "../protocol/worker-packet.js";
+import { CompilerMediaFactsSchema, MediaIntentSchema } from "../assets/media-intent.js";
 
 export type JsonSchema = Readonly<Record<string, unknown>>;
 
@@ -78,6 +79,18 @@ export const COMPILER_VIOLATION_CODES = [
   "judge-context-limit",
   "denied-network-destination",
   "legacy-constraint-mismatch",
+  "duplicate-media-intent-id",
+  "unknown-media-obligation",
+  "unknown-media-work-item",
+  "unknown-media-criterion",
+  "unknown-imported-asset",
+  "unconsumed-media-intent",
+  "ungrounded-media-intent",
+  "incompatible-media-output",
+  "unauthorized-media-review",
+  "inconsistent-media-necessity",
+  "media-producer-unavailable",
+  "media-dependency-cycle",
   "objective-count",
   "duplicate-objective-id",
   "duplicate-acceptance-id",
@@ -109,7 +122,7 @@ export const CompilerViolationCodeSchema = z.enum(COMPILER_VIOLATION_CODES);
 export type CompilerViolationCode = z.infer<typeof CompilerViolationCodeSchema>;
 
 export const COMPILER_TERMINAL_VIOLATION_PHASES: Readonly<
-  Partial<Record<CompilerViolationCode, readonly ["request"]>>
+  Partial<Record<CompilerViolationCode, readonly ("request" | "proposal")[]>>
 > = {
   "schema-invalid": ["request"],
   "partial-toolchain-authority": ["request"],
@@ -120,6 +133,7 @@ export const COMPILER_TERMINAL_VIOLATION_PHASES: Readonly<
   "compiler-prompt-limit": ["request"],
   "judge-context-limit": ["request"],
   "denied-network-destination": ["request"],
+  "media-producer-unavailable": ["proposal"],
 };
 
 export const CompilerViolationSchema = z
@@ -360,6 +374,7 @@ export const CompilerWorkItemsProposalSchema = z
     protocol: z.literal("clockgrove.factory/compiler-proposal"),
     kind: z.literal("work-items"),
     workItems: z.array(CompilerWorkItemProposalSchema).min(1).max(100),
+    mediaIntents: z.array(MediaIntentSchema).max(32),
   })
   .strict();
 const CompilerObjectivesProposalSchema = z
@@ -396,7 +411,14 @@ export type CompilerClarificationProposal = z.infer<typeof CompilerClarification
 export function normalizeCompilerProposalProviderOutput(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const candidate = value as Record<string, unknown>;
-  const arrays = ["workItems", "objectives", "coverage", "triggers", "requirements"] as const;
+  const arrays = [
+    "workItems",
+    "mediaIntents",
+    "objectives",
+    "coverage",
+    "triggers",
+    "requirements",
+  ] as const;
   if (!arrays.every((field) => Array.isArray(candidate[field]))) return value;
   const providerKeys = ["protocol", "kind", ...arrays].sort();
   if (
@@ -418,8 +440,14 @@ export function normalizeCompilerProposalProviderOutput(value: unknown): unknown
       protocol: candidate.protocol,
       kind: candidate.kind,
       workItems: candidate.workItems,
+      mediaIntents: candidate.mediaIntents,
     };
-  if (candidate.kind === "objectives" && empty("workItems") && empty("requirements"))
+  if (
+    candidate.kind === "objectives" &&
+    empty("workItems") &&
+    empty("mediaIntents") &&
+    empty("requirements")
+  )
     return {
       protocol: candidate.protocol,
       kind: candidate.kind,
@@ -430,6 +458,7 @@ export function normalizeCompilerProposalProviderOutput(value: unknown): unknown
   if (
     candidate.kind === "clarification" &&
     empty("workItems") &&
+    empty("mediaIntents") &&
     empty("objectives") &&
     empty("coverage")
   )
@@ -552,6 +581,7 @@ export const CompilerRequestSchema = z
         pathCount: z.number().int().min(0).max(10_000),
       })
       .strict(),
+    media: CompilerMediaFactsSchema,
     constraints: z
       .object({
         maxWorkItems: z.number().int().min(1).max(100),
@@ -713,6 +743,176 @@ const jsonCompilerWorkItemProposal = (
       trust: { type: "string", enum: ["trusted_local", "isolated", "managed"] },
     }),
   });
+const jsonMediaIntent = strictObject({
+  id: jsonId,
+  kind: {
+    type: "string",
+    enum: [
+      "concept-reference",
+      "layout-reference",
+      "state-diagram",
+      "spatial-map",
+      "style-reference",
+      "sprite-sheet",
+      "reference-board",
+      "sound-reference",
+      "motion-reference",
+      "model-reference",
+      "acceptance-capture",
+    ],
+  },
+  purpose: {
+    type: "string",
+    enum: ["decision-input", "implementation-reference", "product-asset", "acceptance-evidence"],
+  },
+  necessity: { type: "string", enum: ["required", "helpful"] },
+  obligationIds: { ...stringArray(128, jsonEvalId), minItems: 1 },
+  rationale: { type: "string", minLength: 1, maxLength: 2_000 },
+  brief: jsonText,
+  importedAssetIds: stringArray(32, jsonId),
+  output: strictObject({
+    mediaTypes: {
+      type: "array",
+      minItems: 1,
+      maxItems: 16,
+      items: {
+        type: "string",
+        minLength: 1,
+        maxLength: 160,
+        pattern:
+          "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$",
+      },
+    },
+    minimumCount: { type: "integer", minimum: 1, maximum: 16 },
+    maximumCount: { type: "integer", minimum: 1, maximum: 16 },
+    raster: {
+      anyOf: [
+        { type: "null" },
+        strictObject({
+          minimumWidth: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
+          maximumWidth: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
+          minimumHeight: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
+          maximumHeight: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
+          alpha: { type: "string", enum: ["allowed", "required", "forbidden"] },
+          animation: { type: "string", enum: ["allowed", "required", "forbidden"] },
+        }),
+      ],
+    },
+  }),
+  review: {
+    anyOf: [
+      strictObject({ kind: { type: "string", const: "human-required" } }),
+      strictObject({
+        kind: { type: "string", const: "deterministic-preauthorized" },
+        ruleId: jsonId,
+      }),
+    ],
+  },
+  bindings: {
+    type: "array",
+    minItems: 1,
+    maxItems: 64,
+    items: strictObject({
+      workItemId: jsonId,
+      direction: { type: "string", enum: ["input-to", "evidence-for"] },
+      criterionIds: stringArray(64, jsonId),
+    }),
+  },
+});
+const jsonCompilerMediaFacts = strictObject({
+  assetManifest: {
+    anyOf: [
+      { type: "null" },
+      strictObject({
+        digest: jsonDigest,
+        assets: {
+          type: "array",
+          minItems: 1,
+          maxItems: 32,
+          items: strictObject({
+            id: jsonId,
+            mediaType: {
+              type: "string",
+              minLength: 1,
+              maxLength: 160,
+              pattern:
+                "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$",
+            },
+            bytes: { type: "integer", minimum: 1, maximum: 100 * 1024 * 1024 },
+            inspection: {
+              anyOf: [
+                strictObject({ kind: { type: "string", const: "opaque" } }),
+                strictObject({
+                  kind: { type: "string", const: "raster" },
+                  width: { type: "integer", minimum: 1, maximum: 16_384 },
+                  height: { type: "integer", minimum: 1, maximum: 16_384 },
+                  frames: { type: "integer", minimum: 1, maximum: 16 },
+                  alpha: { type: "boolean" },
+                }),
+              ],
+            },
+            visibility: { type: "string", enum: ["public", "private"] },
+          }),
+        },
+      }),
+    ],
+  },
+  assetEgress: strictObject({
+    mode: { type: "string", enum: ["denied", "public-assets", "private-assets"] },
+    policyDigest: jsonDigest,
+  }),
+  producerCapabilities: {
+    type: "array",
+    maxItems: 16,
+    items: strictObject({
+      id: jsonId,
+      kinds: {
+        type: "array",
+        minItems: 1,
+        maxItems: 8,
+        items: jsonMediaIntent.properties.kind,
+      },
+      purposes: {
+        type: "array",
+        minItems: 1,
+        maxItems: 4,
+        items: jsonMediaIntent.properties.purpose,
+      },
+      mediaTypes: {
+        type: "array",
+        minItems: 1,
+        maxItems: 16,
+        items: {
+          type: "string",
+          minLength: 1,
+          maxLength: 160,
+          pattern:
+            "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$",
+        },
+      },
+      maximumCount: { type: "integer", minimum: 1, maximum: 16 },
+      raster: {
+        anyOf: [
+          { type: "null" },
+          strictObject({
+            maximumWidth: { type: "integer", minimum: 1, maximum: 16_384 },
+            maximumHeight: { type: "integer", minimum: 1, maximum: 16_384 },
+            supportsAlpha: { type: "boolean" },
+            supportsAnimation: { type: "boolean" },
+          }),
+        ],
+      },
+    }),
+  },
+  reviewRules: {
+    type: "array",
+    maxItems: 16,
+    items: strictObject({
+      id: jsonId,
+      kind: { type: "string", const: "deterministic-preauthorized" },
+    }),
+  },
+});
 const jsonPlanningTrigger = strictObject({
   code: {
     type: "string",
@@ -840,6 +1040,7 @@ const compilerProposalSchemas = (
       protocol: { type: "string", const: "clockgrove.factory/compiler-proposal" },
       kind: { type: "string", const: "work-items" },
       workItems: { type: "array", minItems: 1, maxItems: 100, items: workItem },
+      mediaIntents: { type: "array", maxItems: 32, items: jsonMediaIntent },
     }),
     strictObject({
       protocol: { type: "string", const: "clockgrove.factory/compiler-proposal" },
@@ -864,6 +1065,7 @@ const compilerProposalSchemas = (
     protocol: { type: "string", const: "clockgrove.factory/compiler-proposal" },
     kind: { type: "string", enum: ["work-items", "objectives", "clarification"] },
     workItems: { type: "array", maxItems: 100, items: workItem },
+    mediaIntents: { type: "array", maxItems: 32, items: jsonMediaIntent },
     objectives: { type: "array", maxItems: 32, items: proposedObjective },
     coverage: { type: "array", maxItems: 128, items: jsonRequirementDisposition },
     triggers: { type: "array", maxItems: 32, items: jsonPlanningTrigger },
@@ -1109,6 +1311,7 @@ export const COMPILER_REQUEST_JSON_SCHEMA = {
       }),
       pathCount: { type: "integer", minimum: 0, maximum: 10_000 },
     }),
+    media: jsonCompilerMediaFacts,
     constraints: strictObject({
       maxWorkItems: { type: "integer", minimum: 1, maximum: 100 },
       planningWorkItemThreshold: { type: "integer", minimum: 1, maximum: 100 },

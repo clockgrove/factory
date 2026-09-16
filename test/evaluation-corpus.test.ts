@@ -104,7 +104,10 @@ function item(
       timeoutMinutes: 5,
       estimatedDurationMinutes: 5,
     },
-    artifactContract: "clockgrove.factory/artifact",
+    deliverable: {
+      kind: "repository-change" as const,
+      contract: "clockgrove.factory/artifact" as const,
+    },
   };
 }
 function combined(value: PreparedCompilerCase, baseSha = sha) {

@@ -226,6 +226,7 @@ describe("strict semantic compiler contracts", () => {
     protocol: value.protocol,
     kind: value.kind,
     workItems: [],
+    mediaIntents: [],
     objectives: [],
     coverage: [],
     triggers: [],

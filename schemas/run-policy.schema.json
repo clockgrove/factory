@@ -16,17 +16,41 @@
     "maxManagedAgentSessions",
     "trust",
     "managementBackend",
-    "allowedNetworkDestinations"
+    "allowedNetworkDestinations",
+    "compilerMediaEgress"
   ],
   "properties": {
+    "compilerMediaEgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "maxAssets", "deterministicReviewRuleIds"],
+      "properties": {
+        "mode": { "enum": ["denied", "public-assets", "private-assets"] },
+        "maxAssets": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "deterministicReviewRuleIds": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^[A-Za-z0-9._:/+\\-]+$"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "denied" } } },
+          "then": { "properties": { "maxAssets": { "const": 0 } } },
+          "else": { "properties": { "maxAssets": { "minimum": 1 } } }
+        }
+      ]
+    },
     "objectivePlanning": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "maxWorkItemsPerObjective",
-        "maxCriticalPathRatio",
-        "maxAggregateWorkRatio"
-      ],
+      "required": ["maxWorkItemsPerObjective", "maxCriticalPathRatio", "maxAggregateWorkRatio"],
       "properties": {
         "maxWorkItemsPerObjective": { "type": "integer", "minimum": 1, "maximum": 100 },
         "maxCriticalPathRatio": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },

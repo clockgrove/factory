@@ -73,7 +73,10 @@ function item(id: string, options: Partial<CompilerWorkItemInput> = {}): Compile
       trust: "trusted_local",
       estimatedDurationMinutes: 10,
     },
-    artifactContract: "clockgrove.factory/artifact",
+    deliverable: {
+      kind: "repository-change" as const,
+      contract: "clockgrove.factory/artifact" as const,
+    },
     ...options,
   };
 }

@@ -60,6 +60,13 @@ import {
 } from "./protocol/worker-packet.js";
 import { WorkerAssetInputSchema, type WorkerAssetInput } from "./assets/contracts.js";
 import {
+  AssetProductionDeliverableSchema,
+  GeneratedAssetRequirementSchema,
+  RepositoryChangeDeliverableSchema,
+  type GeneratedAssetRequirement,
+  type WorkItemDeliverable,
+} from "./assets/media-intent.js";
+import {
   assertUtf8WithinBytes,
   assertWithinBytes,
   MAX_GITHUB_TEXT_BYTES,
@@ -86,24 +93,34 @@ import {
  * it exists only so `dependsOn` can reference a sibling before either has a
  * real issue number.
  */
-export interface CompiledWorkItem {
+interface CompiledWorkItemCommon {
   id: string;
   title: string;
   goal: string;
   acceptance: string[];
-  scope: string[];
   preconditions: string[];
   outOfScope: string[];
   conventions: string[];
   dependsOn: string[];
-  /** V2 execution fields. Optional only while reading legacy v1 compiler output. */
-  baseSha?: string | undefined;
-  validationCommands?: string[] | undefined;
-  requirements?: ExecutionRequirements | undefined;
-  artifactContract?: "clockgrove.factory/artifact" | undefined;
+  baseSha: string;
+  requirements: ExecutionRequirements;
+  deliverable: WorkItemDeliverable;
   /** Immutable Objective inputs selected by the compiler; raw source locations are forbidden. */
   assetInputs?: WorkerAssetInput[] | undefined;
-  /** Compiler analysis fields are optional only for persisted pre-vNext graphs. */
+  economicReview?:
+    | {
+        conservative: boolean;
+        rationale: string;
+        paidMeasurementRequired: boolean;
+      }
+    | undefined;
+}
+
+export interface CompiledRepositoryWorkItem extends CompiledWorkItemCommon {
+  deliverable: { kind: "repository-change"; contract: "clockgrove.factory/artifact" };
+  scope: string[];
+  validationCommands: string[];
+  generatedAssetRequirements?: GeneratedAssetRequirement[] | undefined;
   context?: z.infer<typeof ContextManifestSchema> | undefined;
   changeSurface?: z.infer<typeof ChangeSurfaceSchema> | undefined;
   criterionRisks?:
@@ -121,15 +138,36 @@ export interface CompiledWorkItem {
       }>
     | undefined;
   delivery?: z.infer<typeof DeliveryHintSchema> | undefined;
-  economicReview?:
-    | {
-        conservative: boolean;
-        rationale: string;
-        paidMeasurementRequired: boolean;
-      }
-    | undefined;
   repositoryCapabilities?: RepositoryCapabilityBindings | undefined;
   managedRuntimes?: z.infer<typeof RuntimeBundleRequirementSchema>[] | undefined;
+}
+
+export interface CompiledAssetProductionWorkItem extends CompiledWorkItemCommon {
+  deliverable: z.infer<typeof AssetProductionDeliverableSchema>;
+  scope: [];
+  validationCommands: [];
+  generatedAssetRequirements?: never;
+  context?: never;
+  changeSurface?: never;
+  criterionRisks?: never;
+  validation?: never;
+  delivery?: never;
+  repositoryCapabilities?: never;
+  managedRuntimes?: never;
+}
+
+export type CompiledWorkItem = CompiledRepositoryWorkItem | CompiledAssetProductionWorkItem;
+
+export function isCompiledRepositoryWorkItem(
+  item: CompiledWorkItem,
+): item is CompiledRepositoryWorkItem {
+  return item.deliverable.kind === "repository-change";
+}
+
+export function isCompiledAssetProductionWorkItem(
+  item: CompiledWorkItem,
+): item is CompiledAssetProductionWorkItem {
+  return item.deliverable.kind === "asset-production";
 }
 
 /** Matches `schemas/objective.schema.json` — the objective-compilation skill's output. */
@@ -379,6 +417,8 @@ export function assertCompiledObjectiveAdoptsLegacyConstraints(
     const actual = objective.workItems[index];
     if (!actual)
       throw new Error(`compiled Objective omitted legacy Work Item #${expected.issueNumber}`);
+    if (actual.deliverable.kind !== "repository-change")
+      throw new Error(`compiled Objective changed legacy Work Item #${expected.issueNumber}`);
     const actualCore = {
       id: actual.id,
       title: actual.title,
@@ -422,7 +462,10 @@ export function addScopeSerializationEdges<T extends CompiledObjective>(objectiv
   } as T;
   const byId = new Map(normalized.workItems.map((item) => [item.id, item]));
   const position = new Map(normalized.workItems.map((item, index) => [item.id, index]));
-  for (const pair of overlappingScopePairs(normalized.workItems)) {
+  const repositoryItems = normalized.workItems.filter(
+    (item): item is CompiledRepositoryWorkItem => item.deliverable.kind === "repository-change",
+  );
+  for (const pair of overlappingScopePairs(repositoryItems)) {
     const [first, second] = [...pair].sort(
       (left, right) => position.get(left)! - position.get(right)!,
     );
@@ -433,49 +476,64 @@ export function addScopeSerializationEdges<T extends CompiledObjective>(objectiv
   return normalized;
 }
 
-const PersistedCompiledWorkItemSchema = z
-  .object({
-    id: z
-      .string()
-      .regex(/^[a-z0-9][a-z0-9-]*$/)
-      .max(64),
-    title: z.string().min(1).max(256),
-    goal: z.string().min(1).max(4_000),
-    acceptance: z.array(z.string().min(1).max(2_000)).min(1).max(64),
-    scope: z.array(RepositoryScopePathSchema).min(1).max(64),
-    preconditions: z.array(z.string().min(1).max(2_000)).max(64),
-    outOfScope: z.array(z.string().min(1).max(2_000)).max(64),
-    conventions: z.array(z.string().min(1).max(2_000)).max(64),
-    dependsOn: z
-      .array(
-        z
-          .string()
-          .regex(/^[a-z0-9][a-z0-9-]*$/)
-          .max(64),
-      )
-      .max(50),
-    baseSha: z.string().regex(/^[0-9a-f]{40}$/i),
-    validationCommands: z.array(z.string().min(1).max(1_000)).min(1).max(32),
-    requirements: ExecutionRequirementsSchema,
-    artifactContract: z.literal("clockgrove.factory/artifact"),
-    assetInputs: z.array(WorkerAssetInputSchema).max(32).optional(),
-    context: ContextManifestSchema.optional(),
-    changeSurface: ChangeSurfaceSchema.optional(),
-    criterionRisks: CriterionRiskAssessmentSchema.optional(),
-    validation: ValidationDesignSchema.optional(),
-    delivery: DeliveryHintSchema.optional(),
-    economicReview: z
-      .object({
-        conservative: z.boolean(),
-        rationale: z.string().min(1).max(2_000),
-        paidMeasurementRequired: z.boolean(),
-      })
-      .strict()
-      .optional(),
-    repositoryCapabilities: RepositoryCapabilityBindingsSchema.optional(),
-    managedRuntimes: z.array(RuntimeBundleRequirementSchema).min(1).max(8).optional(),
-  })
-  .strict();
+const PersistedCompiledWorkItemCommonSchema = z.object({
+  id: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9-]*$/)
+    .max(64),
+  title: z.string().min(1).max(256),
+  goal: z.string().min(1).max(4_000),
+  acceptance: z.array(z.string().min(1).max(2_000)).min(1).max(64),
+  preconditions: z.array(z.string().min(1).max(2_000)).max(64),
+  outOfScope: z.array(z.string().min(1).max(2_000)).max(64),
+  conventions: z.array(z.string().min(1).max(2_000)).max(64),
+  dependsOn: z
+    .array(
+      z
+        .string()
+        .regex(/^[a-z0-9][a-z0-9-]*$/)
+        .max(64),
+    )
+    .max(50),
+  baseSha: z.string().regex(/^[0-9a-f]{40}$/i),
+  requirements: ExecutionRequirementsSchema,
+  assetInputs: z.array(WorkerAssetInputSchema).max(32).optional(),
+  economicReview: z
+    .object({
+      conservative: z.boolean(),
+      rationale: z.string().min(1).max(2_000),
+      paidMeasurementRequired: z.boolean(),
+    })
+    .strict()
+    .optional(),
+});
+
+const PersistedCompiledRepositoryWorkItemSchema = PersistedCompiledWorkItemCommonSchema.extend({
+  deliverable: RepositoryChangeDeliverableSchema,
+  scope: z.array(RepositoryScopePathSchema).min(1).max(64),
+  validationCommands: z.array(z.string().min(1).max(1_000)).min(1).max(32),
+  generatedAssetRequirements: z.array(GeneratedAssetRequirementSchema).max(32).optional(),
+  context: ContextManifestSchema.optional(),
+  changeSurface: ChangeSurfaceSchema.optional(),
+  criterionRisks: CriterionRiskAssessmentSchema.optional(),
+  validation: ValidationDesignSchema.optional(),
+  delivery: DeliveryHintSchema.optional(),
+  repositoryCapabilities: RepositoryCapabilityBindingsSchema.optional(),
+  managedRuntimes: z.array(RuntimeBundleRequirementSchema).min(1).max(8).optional(),
+}).strict();
+
+const PersistedCompiledAssetProductionWorkItemSchema = PersistedCompiledWorkItemCommonSchema.extend(
+  {
+    deliverable: AssetProductionDeliverableSchema,
+    scope: z.tuple([]),
+    validationCommands: z.tuple([]),
+  },
+).strict();
+
+const PersistedCompiledWorkItemSchema = z.union([
+  PersistedCompiledRepositoryWorkItemSchema,
+  PersistedCompiledAssetProductionWorkItemSchema,
+]);
 
 const PersistedCompiledObjectiveSchema = z
   .object({
@@ -553,7 +611,10 @@ function validateGraphShape(
   // dependency path in either direction serializes the pair. Without one,
   // both items can enter the same wave and independently publish changes to
   // the same path, so reject that graph before its first GitHub write.
-  for (const [left, right] of overlappingScopePairs(objective.workItems))
+  const repositoryItems = objective.workItems.filter(
+    (item): item is CompiledRepositoryWorkItem => item.deliverable.kind === "repository-change",
+  );
+  for (const [left, right] of overlappingScopePairs(repositoryItems))
     if (!analysis.hasPath(left, right) && !analysis.hasPath(right, left))
       throw new Error(
         `Work Items ${left} and ${right} have overlapping scopes but no dependency path`,
@@ -562,13 +623,13 @@ function validateGraphShape(
   if (!allowAuthenticatedLegacyOmissions && objective.deferredCapabilityAdapters === undefined)
     throw new Error("compiled Objective lacks deferred capability adapter disposition");
   validateCapabilityGraphBindings(
-    objective.workItems,
+    repositoryItems,
     DEFERRED_CAPABILITY_ADAPTERS,
     objective.deferredCapabilityAdapters,
   );
 
   for (const wi of objective.workItems) {
-    if (wi.validationCommands) {
+    if (wi.deliverable.kind === "repository-change") {
       const expectedRuntimes = managedRuntimeRequirements(
         wi.validationCommands,
         wi.repositoryCapabilities,
@@ -587,10 +648,7 @@ function validateGraphShape(
           `Work Item ${wi.id} managed runtime contract differs from canonical host derivation: observed ${JSON.stringify(wi.managedRuntimes ?? [])}; expected ${JSON.stringify(expectedRuntimes)}`,
         );
     }
-    const v2Fields = [wi.baseSha, wi.validationCommands, wi.requirements, wi.artifactContract];
-    if (v2Fields.some((value) => value !== undefined)) {
-      workerPacketFromCompiled(wi);
-    }
+    workerPacketFromCompiled(wi);
   }
 }
 
@@ -702,27 +760,30 @@ export function parseGraphItemMetadata(body: string): GraphItemMetadata {
 }
 
 export function workerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
-  if (
-    wi.baseSha === undefined ||
-    wi.validationCommands === undefined ||
-    wi.requirements === undefined ||
-    wi.artifactContract === undefined
-  ) {
-    throw new Error(`Work Item ${wi.id} has an incomplete Worker Packet`);
-  }
-  return parseWorkerPacket({
+  const common = {
     protocol: "clockgrove.factory/worker-packet",
     goal: wi.goal,
     acceptanceCriteria: wi.acceptance,
-    allowedPaths: wi.scope,
     preconditions: wi.preconditions,
     outOfScope: wi.outOfScope,
     conventions: wi.conventions,
     baseSha: wi.baseSha,
-    validationCommands: wi.validationCommands,
     requirements: wi.requirements,
-    artifactContract: wi.artifactContract,
     assetInputs: wi.assetInputs ?? [],
+  };
+  if (wi.deliverable.kind === "asset-production")
+    return parseWorkerPacket({
+      ...common,
+      deliverable: wi.deliverable,
+      allowedPaths: [],
+      validationCommands: [],
+    });
+  return parseWorkerPacket({
+    ...common,
+    deliverable: wi.deliverable,
+    allowedPaths: wi.scope,
+    validationCommands: wi.validationCommands,
+    generatedAssetRequirements: wi.generatedAssetRequirements ?? [],
     ...(wi.context ? { context: wi.context } : {}),
     ...(wi.changeSurface ? { changeSurface: wi.changeSurface } : {}),
     ...(wi.criterionRisks ? { criterionRisks: wi.criterionRisks } : {}),
@@ -742,6 +803,7 @@ export function workerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
  */
 export function executionWorkerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
   const packet = workerPacketFromCompiled(wi);
+  if (wi.deliverable.kind === "asset-production") return packet;
   if (wi.managedRuntimes !== undefined) return packet;
   const managedRuntimes = managedRuntimeRequirements(
     packet.validationCommands,
@@ -778,22 +840,25 @@ export function renderWorkPacket(wi: CompiledWorkItem, graphMetadata?: GraphItem
   const section = (heading: string, items: string[]): string =>
     items.length > 0 ? `## ${heading}\n\n${items.map((i) => `- ${i}`).join("\n")}\n` : "";
 
-  const validation = wi.validation?.length
-    ? `## Validation design\n\n${wi.validation
-        .map(
-          (entry) =>
-            `- **${entry.tier}** — ${entry.rationale ?? "Selected for the listed acceptance criteria."}${entry.evidenceCommands?.length ? ` Evidence: ${entry.evidenceCommands.map((command) => `\`${command}\``).join(", ")}.` : ""}\n${entry.criteria.map((criterion) => `  - ${criterion}`).join("\n")}`,
-        )
-        .join("\n")}\n`
-    : "";
-  const criterionRisks = wi.criterionRisks?.length
-    ? `## Criterion risks\n\n${wi.criterionRisks.map((entry) => `- **${entry.risk}** — ${entry.criterion}`).join("\n")}\n`
-    : "";
+  const validation =
+    wi.deliverable.kind === "repository-change" && wi.validation?.length
+      ? `## Validation design\n\n${wi.validation
+          .map(
+            (entry) =>
+              `- **${entry.tier}** — ${entry.rationale ?? "Selected for the listed acceptance criteria."}${entry.evidenceCommands?.length ? ` Evidence: ${entry.evidenceCommands.map((command) => `\`${command}\``).join(", ")}.` : ""}\n${entry.criteria.map((criterion) => `  - ${criterion}`).join("\n")}`,
+          )
+          .join("\n")}\n`
+      : "";
+  const criterionRisks =
+    wi.deliverable.kind === "repository-change" && wi.criterionRisks?.length
+      ? `## Criterion risks\n\n${wi.criterionRisks.map((entry) => `- **${entry.risk}** — ${entry.criterion}`).join("\n")}\n`
+      : "";
 
   const rendered = [
     `## Goal\n\n${wi.goal}\n`,
+    `## Deliverable\n\n- ${wi.deliverable.kind}${wi.deliverable.kind === "asset-production" ? `: ${wi.deliverable.intent.kind} (${wi.deliverable.intent.purpose})` : ""}\n`,
     section("Acceptance", wi.acceptance),
-    section("Scope", wi.scope),
+    section("Scope", wi.deliverable.kind === "repository-change" ? wi.scope : []),
     section("Preconditions", wi.preconditions),
     section("Out of scope", wi.outOfScope),
     section("Conventions", wi.conventions),
@@ -808,14 +873,9 @@ export function renderWorkPacket(wi: CompiledWorkItem, graphMetadata?: GraphItem
   ]
     .filter((s) => s.length > 0)
     .join("\n");
-  const hasV2 =
-    wi.baseSha !== undefined ||
-    wi.validationCommands !== undefined ||
-    wi.requirements !== undefined ||
-    wi.artifactContract !== undefined;
   return [
     rendered,
-    hasV2 ? encodeWorkerPacket(workerPacketFromCompiled(wi)) : "",
+    encodeWorkerPacket(workerPacketFromCompiled(wi)),
     graphMetadata ? encodeGraphItemMetadata(graphMetadata) : "",
   ]
     .filter(Boolean)

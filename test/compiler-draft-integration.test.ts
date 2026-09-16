@@ -146,6 +146,7 @@ function proposal(request: CompilerRequest, repaired = false) {
   return {
     protocol: "clockgrove.factory/compiler-proposal" as const,
     kind: "work-items" as const,
+    mediaIntents: [],
     workItems: [
       {
         id: "feature",

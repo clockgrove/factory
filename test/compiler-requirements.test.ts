@@ -60,7 +60,10 @@ function item(
       permittedSecretNames: [],
       trust: "trusted_local",
     },
-    artifactContract: "clockgrove.factory/artifact",
+    deliverable: {
+      kind: "repository-change" as const,
+      contract: "clockgrove.factory/artifact" as const,
+    },
   };
 }
 
@@ -177,9 +180,9 @@ describe("evidence-grounded compiler requirements", () => {
           source: ".factory/execution-requirements.json scopes[0] (src/native/)",
         },
         {
-          field: "artifactContract",
+          field: "deliverable",
           kind: "factory-default",
-          source: "clockgrove.factory/artifact",
+          source: "repository-change:clockgrove.factory/artifact",
         },
       ]),
     );

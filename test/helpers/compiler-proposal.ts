@@ -104,6 +104,7 @@ export function proposalFromCompiledFixture(
   return CompilerWorkItemsProposalSchema.parse({
     protocol: "clockgrove.factory/compiler-proposal",
     kind: "work-items",
+    mediaIntents: [],
     workItems: objective.workItems.map((item, itemIndex) => ({
       id: item.id,
       title: item.title,
@@ -217,6 +218,7 @@ export function validatedDraftFromCompiledFixture(
       graphDigest: compiledGraphDigest(objective),
       addedEdges: [],
       adapterBindings: [],
+      mediaIntents: [],
       riskElevations: { count: 0, digest: compilerEvalDigest([]) },
     },
     report: emptyCompilerValidationReport(),

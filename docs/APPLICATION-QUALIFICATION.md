@@ -104,7 +104,7 @@ installed or paid-provider qualification.
   tool version, and capture command.
 - Factory records capture digests and bounded diffs with the exact validated commit.
 - Mechanical comparison may accept unchanged or threshold-bounded output. A deliberate change in
-  visual intent remains a legitimate human review boundary unless the Objective pre-authorized an
+  media intent remains a legitimate human review boundary unless the Objective pre-authorized an
   exact replacement fixture.
 - Screenshots, rendered frames, audio summaries, and other evidence are attachments or artifact
   references, not a reason to add a Factory-specific UI.

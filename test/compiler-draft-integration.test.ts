@@ -194,6 +194,7 @@ async function setup(
     mechanicallyInvalidFirst?: boolean;
     schemaInvalidFirst?: boolean;
     acceptFirst?: boolean;
+    invalidAcceptUnknownFirst?: boolean;
     primitiveCompileFailure?: "string" | "null";
     frozenCompileFailure?: "error" | "object";
   } = {},
@@ -280,7 +281,11 @@ async function setup(
         draftDigest: string;
         inventoryDigest: string;
       };
-      const accept = (options.acceptFirst === true || repairs > 0) && !options.rejectAll;
+      const accept =
+        (options.acceptFirst === true ||
+          options.invalidAcceptUnknownFirst === true ||
+          repairs > 0) &&
+        !options.rejectAll;
       const verdict: CompilerJudgeVerdict = {
         version: 1,
         rubricVersion: 1,
@@ -346,6 +351,14 @@ async function setup(
         verdict.findings[0]!.rootCause = "Prefer a shorter item title";
         verdict.findings[0]!.correction = "Shorten the title";
         verdict.decision = "repair";
+      }
+      if (options.invalidAcceptUnknownFirst && repairs === 0) {
+        expect(prompt).toContain("If any dimension remains unknown, choose repair or abstain");
+        const dimension = verdict.dimensions.find(
+          (entry) => entry.dimension === "assumption-grounding",
+        )!;
+        dimension.status = "unknown";
+        dimension.reason = "The existing proposal leaves its assumptions unclear.";
       }
       return { value: verdict, usage };
     }
@@ -541,6 +554,54 @@ describe("production compiler draft adapter", () => {
     expect(() => assertCompilerDraftSelection(changedReservation, result.graph)).toThrow(
       "reserved request binding",
     );
+  });
+
+  it("repairs a schema-valid accept verdict with an unknown dimension and replays without spend", async () => {
+    const f = await setup({ invalidAcceptUnknownFirst: true });
+    const result = await compileEvaluatedDraft(f.args);
+    expect(result).toMatchObject({ status: "accepted", revision: 1 });
+    expect(f.stages).toEqual(["inventory", "compile", "judge", "repair", "judge"]);
+    const rawJudge = result.records.find(
+      (record) =>
+        record.kind === "result" &&
+        record.payload.stage === "judge" &&
+        record.payload.revision === 0,
+    );
+    expect(rawJudge).toMatchObject({
+      payload: {
+        usage: { inputTokens: 11, outputTokens: 3, cachedInputTokens: 4 },
+        terminalOutcome: {
+          state: "succeeded",
+          usage: { inputTokens: 11, outputTokens: 3, cachedInputTokens: 4 },
+        },
+        provenance: expect.objectContaining({ baseSha: f.args.context.baseSha }),
+        proposal: {
+          decision: "accept",
+          dimensions: expect.arrayContaining([
+            expect.objectContaining({ dimension: "assumption-grounding", status: "unknown" }),
+          ]),
+        },
+      },
+    });
+    const repairPrompt = f.prompts.find((prompt) => prompt.includes("This is a repair"))!;
+    const repairRequest = JSON.parse(repairPrompt.split("\n\n").at(-1)!) as CompilerRequest;
+    expect(repairRequest.semanticFindings).toEqual([
+      expect.objectContaining({
+        id: "invalid-acceptance",
+        dimension: "assumption-grounding",
+        severity: "blocking",
+        obligationIds: [],
+        itemIds: ["feature"],
+        evidenceIds: ["objective"],
+      }),
+    ]);
+    expect(() => validatePersistedCompilerDraftJournal(result.records)).not.toThrow();
+    const calls = f.runStructured.mock.calls.length;
+    await expect(compileEvaluatedDraft(f.args)).resolves.toMatchObject({
+      status: "accepted",
+      revision: 1,
+    });
+    expect(f.runStructured).toHaveBeenCalledTimes(calls);
   });
   it("never produces accepted projection authority for report-only rejected plans", async () => {
     const f = await setup({ reportOnly: true });

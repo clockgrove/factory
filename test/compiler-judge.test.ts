@@ -4,6 +4,7 @@ import { compiledGraphDigest } from "../src/graph.js";
 import {
   COMPILER_JUDGE_DIMENSIONS,
   compilerEvalDigest,
+  repairableCompilerJudgeVerdict,
   validateCompilerJudgeVerdict,
   type CompilerJudgeVerdict,
 } from "../src/evaluation/compiler-eval.js";
@@ -150,4 +151,80 @@ describe("independent semantic compiler judgment", () => {
       }),
     ).toThrow(/unresolved coverage or blockers/);
   });
+
+  it.each(["coverage", "item", "dimension", "finding"] as const)(
+    "derives evidence-cited repair input from an invalid accept %s predicate",
+    (predicate) => {
+      const pinned = semanticPinnedFacts();
+      const request = semanticRequest(pinned);
+      const proposal = semanticProposal(request);
+      const projection = projectCompilerProposal({
+        request,
+        proposal,
+        pinnedFacts: pinned,
+        runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
+      });
+      const raw = acceptedVerdict(request, proposal, compiledGraphDigest(projection.objective));
+      if (predicate === "coverage") raw.coverage[0]!.status = "partial";
+      if (predicate === "item") raw.items[0]!.granularity = "unknown";
+      if (predicate === "dimension") {
+        raw.dimensions.find((entry) => entry.dimension === "assumption-grounding")!.status =
+          "unknown";
+        raw.dimensions.find((entry) => entry.dimension === "assumption-grounding")!.reason =
+          "The existing proposal does not expose enough grounding to assess assumptions.";
+      }
+      if (predicate === "finding")
+        raw.findings.push({
+          id: "existing-blocker",
+          dimension: "coverage",
+          severity: "blocking",
+          confidence: 1,
+          obligationIds: [request.inventory.obligations[0]!.id],
+          itemIds: [proposal.workItems[0]!.id],
+          evidenceIds: ["objective"],
+          rootCause: "The accepted proposal still has a material defect.",
+          correction: "Correct the cited defect without adding scope.",
+          uncertainty: "",
+        });
+      const preserved = structuredClone(raw);
+
+      const repair = repairableCompilerJudgeVerdict(raw, {
+        draftDigest: compiledGraphDigest(projection.objective),
+        inventory: request.inventory,
+        graph: proposal,
+        addedEdges: projection.trace.addedEdges,
+      });
+
+      expect(raw).toEqual(preserved);
+      expect(repair?.decision).toBe("repair");
+      expect(repair?.findings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining(
+            predicate === "finding"
+              ? { id: "existing-blocker", severity: "blocking" }
+              : {
+                  id: "invalid-acceptance",
+                  dimension:
+                    predicate === "dimension"
+                      ? "assumption-grounding"
+                      : predicate === "item"
+                        ? "granularity"
+                        : "coverage",
+                  severity: "blocking",
+                  itemIds: proposal.workItems.map((item) => item.id),
+                  evidenceIds: ["objective"],
+                },
+          ),
+        ]),
+      );
+      expect(() =>
+        validateCompilerJudgeVerdict(repair, {
+          draftDigest: compiledGraphDigest(projection.objective),
+          inventory: request.inventory,
+          graph: proposal,
+          addedEdges: projection.trace.addedEdges,
+        }),
+      ).not.toThrow();
+    },
+  );
 });

@@ -55,6 +55,44 @@ describe("provider structured-output schema subset", () => {
   });
 
   it.each([
+    ["positive lookahead", "^(?=x)x$"],
+    ["negative lookahead", "^(?!x)y$"],
+    ["positive lookbehind", "^(?<=x)y$"],
+    ["negative lookbehind", "^(?<!x)y$"],
+  ])("rejects nested %s with its exact schema path", (_name, pattern) => {
+    expect(() =>
+      assertProviderStructuredOutputSchema(
+        objectSchema({ type: "array", items: { type: "string", pattern } }),
+      ),
+    ).toThrow(
+      "provider schema regex uses unsupported lookaround at $/properties/value/items/pattern",
+    );
+  });
+
+  it.each([
+    ["numeric", "^([a-z]+)-\\1$"],
+    ["named", "^(?<word>[a-z]+)-\\k<word>$"],
+  ])("rejects nested %s backreferences with their exact schema path", (kind, pattern) => {
+    expect(() =>
+      assertProviderStructuredOutputSchema(objectSchema({ type: "string", pattern })),
+    ).toThrow(
+      `provider schema regex uses unsupported ${kind} backreference at $/properties/value/pattern`,
+    );
+  });
+
+  it("does not ban ordinary groups, escaped literals, or character-class escapes", () => {
+    expect(() =>
+      assertProviderStructuredOutputSchema(
+        objectSchema({ type: "string", pattern: "^(?:ordinary|group)$" }),
+      ),
+    ).not.toThrow();
+    for (const pattern of [String.raw`^\\1$`, String.raw`^[\1]+$`, String.raw`^\(\?=literal\)$`])
+      expect(() =>
+        assertProviderStructuredOutputSchema(objectSchema({ type: "string", pattern })),
+      ).not.toThrow();
+  });
+
+  it.each([
     ["typeless const", objectSchema({ const: "x" })],
     ["typeless enum", objectSchema({ enum: ["x"] })],
     ["untyped constraint", objectSchema({ maxLength: 4 })],

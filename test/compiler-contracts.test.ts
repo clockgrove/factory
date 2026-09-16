@@ -243,7 +243,7 @@ describe("strict semantic compiler contracts", () => {
     const request = semanticRequest();
     const proposal = semanticProposal(semanticRequest());
     const invalidProposal = structuredClone(proposal) as Record<string, unknown>;
-    (invalidProposal.workItems as Array<Record<string, unknown>>)[0]!.scope = ["../secret"];
+    (invalidProposal.workItems as Array<Record<string, unknown>>)[0]!.scope = ["src/[glob].ts"];
     const invalidRequest = structuredClone(request) as Record<string, unknown>;
     invalidRequest.unexpected = true;
     const multiPointer = structuredClone(request);
@@ -319,8 +319,8 @@ describe("strict semantic compiler contracts", () => {
     }
   });
 
-  it.each(["LOCALHOST", "service.LocalHost", "Metadata.Google.Internal"])(
-    "keeps forbidden network destination %s out of both proposal schemas",
+  it.each(["service.LocalHost", "Metadata.Google.Internal"])(
+    "leaves forbidden network destination %s to deterministic proposal validation",
     (destination) => {
       const proposal = semanticProposal(semanticRequest());
       const candidate = structuredClone(proposal) as unknown as {
@@ -328,19 +328,52 @@ describe("strict semantic compiler contracts", () => {
       };
       candidate.workItems[0]!.executionIntent.additionalNetworkDestinations = [destination];
       expect(CompilerProposalSchema.safeParse(candidate).success).toBe(false);
-      expect(jsonProposal(candidate)).toBe(false);
+      expect(jsonProposal(candidate), JSON.stringify(jsonProposal.errors)).toBe(true);
+      expect(parseAndValidateCompilerProposal(semanticRequest(), candidate).report).toMatchObject({
+        status: "repairable",
+        violations: expect.arrayContaining([expect.objectContaining({ code: "schema-invalid" })]),
+      });
     },
   );
 
   it.each(["foo/", "foo//bar", "foo/./bar", "foo/../bar"])(
-    "keeps malformed exclusive resource %s out of both proposal schemas",
+    "leaves malformed exclusive resource %s to deterministic proposal validation",
     (resource) => {
       const candidate = semanticProposal(semanticRequest());
       candidate.workItems[0]!.exclusiveResources = [resource];
       expect(CompilerProposalSchema.safeParse(candidate).success).toBe(false);
-      expect(jsonProposal(candidate)).toBe(false);
+      expect(jsonProposal(candidate), JSON.stringify(jsonProposal.errors)).toBe(true);
+      expect(parseAndValidateCompilerProposal(semanticRequest(), candidate).report).toMatchObject({
+        status: "repairable",
+        violations: expect.arrayContaining([expect.objectContaining({ code: "schema-invalid" })]),
+      });
     },
   );
+
+  it.each(["/absolute", "../secret", "src//nested.ts", "src/./nested.ts"])(
+    "leaves malformed scope path %s to deterministic proposal validation",
+    (scope) => {
+      const candidate = semanticProposal(semanticRequest());
+      candidate.workItems[0]!.scope = [scope];
+      expect(CompilerProposalSchema.safeParse(candidate).success).toBe(false);
+      expect(jsonProposal(candidate), JSON.stringify(jsonProposal.errors)).toBe(true);
+      expect(parseAndValidateCompilerProposal(semanticRequest(), candidate).report).toMatchObject({
+        status: "repairable",
+        violations: expect.arrayContaining([expect.objectContaining({ code: "invalid-scope" })]),
+      });
+    },
+  );
+
+  it("retains strict durable request validation for an embedded previous proposal", () => {
+    const previousProposal = semanticProposal(semanticRequest());
+    previousProposal.workItems[0]!.scope = ["../secret"];
+    expect(jsonProposal(previousProposal), JSON.stringify(jsonProposal.errors)).toBe(true);
+
+    const request = semanticRequest();
+    request.previousProposal = previousProposal;
+    expect(CompilerRequestSchema.safeParse(request).success).toBe(false);
+    expect(jsonRequest(request)).toBe(false);
+  });
 
   it("keeps unrelated adapters eligible while rejecting exact unsupported scope", () => {
     const pinned = semanticPinnedFacts({ paths: ["go.mod", "main.go"], scripts: {} });

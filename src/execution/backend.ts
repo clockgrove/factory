@@ -250,6 +250,8 @@ export interface ValidationResourceIdentity {
   requestIdentityDigest: string;
 }
 
+export type ValidationResourceCleanupObservation = "cleaned" | "absent";
+
 export interface IsolatedValidationResult {
   outputTreeSha: string;
   commands: Array<{ command: string; exitCode: number; durationMs: number }>;
@@ -310,6 +312,10 @@ export interface ExecutionBackend {
   validate?(context: IsolatedValidationContext): Promise<IsolatedValidationResult>;
   /** Observe and checkpoint an exact retained capture validation before any replacement. */
   recoverValidation?(context: IsolatedValidationContext): Promise<IsolatedValidationResult | null>;
+  /** Stop the exact bound validation resource without collecting a result. */
+  cleanupValidationResource?(
+    context: IsolatedValidationContext,
+  ): Promise<ValidationResourceCleanupObservation>;
   /** Validation does not require a model credential, so it has a distinct probe. */
   probeValidation?(): Promise<BackendProbe>;
   /** Immutable environment authority bound before repository validation dispatch. */

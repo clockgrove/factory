@@ -614,6 +614,15 @@ describe("Daytona supported provider contract", () => {
     expect(recovered?.captures?.locator.resourceId).toBe("sandbox-1");
     expect(refusedCheckpoint.deleted).toContain("sandbox-1");
     await releaseIsolatedValidationCaptures(recovered?.captures);
+
+    await expect(refusedBackend.validate(refusedValidation)).rejects.toThrow(
+      /durable capture checkpoint/,
+    );
+    const deletedBeforeBoundCleanup = refusedCheckpoint.deleted.length;
+    await expect(refusedBackend.cleanupValidationResource(refusedValidation)).resolves.toBe(
+      "cleaned",
+    );
+    expect(refusedCheckpoint.deleted).toHaveLength(deletedBeforeBoundCleanup + 1);
     await releasePayload(expectedPayload);
   });
 

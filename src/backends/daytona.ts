@@ -1125,6 +1125,52 @@ export class DaytonaBackend implements ExecutionBackend {
     return result;
   }
 
+  async cleanupValidationResource(
+    context: IsolatedValidationContext,
+  ): Promise<"cleaned" | "absent"> {
+    const captureRequest = parseIsolatedValidationCaptureRequest(context);
+    if (!captureRequest || captureRequest.environmentIdentity !== this.#image)
+      throw new Error("validation cleanup requires its exact Daytona capture invocation");
+    const resourceName = sandboxResourceName(context, "validation");
+    const invocationOwner = validationInvocationOwnership(context)!;
+    let tracked = [...this.#resources.values()].find(
+      (resource) => resource.resourceName === resourceName,
+    );
+    if (!tracked) {
+      const daytona = this.#createClient();
+      let sandbox: Sandbox | null;
+      try {
+        sandbox = await this.#findWithBoundedVisibility(daytona, resourceName);
+      } catch (error) {
+        throw new DaytonaResourceCleanupError({
+          resourceId: resourceName,
+          resourceName,
+          operation: "bound validation cleanup lookup",
+          cause: error,
+        });
+      }
+      if (!sandbox) return "absent";
+      tracked = { sandbox, resourceName, phase: "validation" };
+      this.#track(tracked);
+    }
+    if (
+      tracked.phase !== "validation" ||
+      tracked.sandbox.name !== resourceName ||
+      tracked.sandbox.labels?.invocationOwner !== invocationOwner
+    )
+      throw new DaytonaResourceCleanupError({
+        resourceId: tracked.sandbox.id,
+        resourceName,
+        operation: "bound validation cleanup ownership",
+        cause: "refusing cleanup of a resource outside the exact validation invocation",
+      });
+    await this.#deleteTracked(tracked, "bound validation cleanup");
+    const priorCapture = this.#uncheckpointedCaptures.get(tracked.sandbox.id);
+    this.#uncheckpointedCaptures.delete(tracked.sandbox.id);
+    await releaseIsolatedValidationCaptures(priorCapture);
+    return "cleaned";
+  }
+
   async reconcileStale(identity: StaleAttemptIdentity): Promise<void> {
     const invocationOwner = validationInvocationOwnership(identity);
     const resourceName = sandboxResourceName(identity, identity.phase);

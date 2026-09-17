@@ -14,6 +14,7 @@ export interface RemoteValidationDispatchState<TDispatch extends RemoteValidatio
 }
 
 export type RemoteValidationSettlementEvidence = "provider-cleanup" | "post-fence-exact-absence";
+export type RemoteValidationCleanupObservation = "cleaned" | "absent";
 
 type PreparedEvent = Extract<FactoryEvent, { event: "ValidationInvocationPrepared" }>;
 type DispatchEvent = Extract<FactoryEvent, { event: "ValidationInvocationRemoteDispatchStarted" }>;
@@ -185,6 +186,8 @@ export async function runRemoteValidationInvocationTransaction<
   observeDispatch(): Promise<RemoteValidationDispatchState<TDispatch>>;
   persistDispatch(): Promise<TDispatch>;
   observeResource(): Promise<TResult | null>;
+  cleanupResource(): Promise<RemoteValidationCleanupObservation>;
+  terminalDeadlineFailure(): Promise<TResult>;
   persistRebound(dispatch: TDispatch): Promise<void>;
   persistSettlement(
     dispatch: TDispatch,
@@ -213,27 +216,39 @@ export async function runRemoteValidationInvocationTransaction<
     await args.persistSettlement(dispatch, evidence);
     return persisted;
   };
-  const settleObservedResource = async (dispatch: TDispatch) => {
-    const recovered = await args.observeResource();
-    return recovered ? settle(dispatch, "provider-cleanup", recovered) : null;
-  };
-  const settleExactAbsence = async (dispatch: TDispatch, result: TResult) => {
-    const now = await args.now();
-    if (now.getTime() < Date.parse(dispatch.noHandleReplacementNotBefore)) return null;
-    await args.persistSettlement(dispatch, "post-fence-exact-absence");
+  const settleDurable = async (
+    dispatch: TDispatch,
+    evidence: RemoteValidationSettlementEvidence,
+    result: TResult,
+  ) => {
+    await args.persistSettlement(dispatch, evidence);
     return result;
+  };
+  const afterFence = async (dispatch: TDispatch) =>
+    (await args.now()).getTime() >= Date.parse(dispatch.noHandleReplacementNotBefore);
+  const cleanupDurableResult = async (dispatch: TDispatch, result: TResult) => {
+    if (!(await afterFence(dispatch)))
+      throw new Error(
+        "remote validation result is durable but its resource is unsettled before the no-handle fence",
+      );
+    const cleanup = await args.cleanupResource();
+    return settleDurable(
+      dispatch,
+      cleanup === "cleaned" ? "provider-cleanup" : "post-fence-exact-absence",
+      result,
+    );
+  };
+  const expireAfterCleanup = async (dispatch: TDispatch) => {
+    const cleanup = await args.cleanupResource();
+    return settle(
+      dispatch,
+      cleanup === "cleaned" ? "provider-cleanup" : "post-fence-exact-absence",
+      await args.terminalDeadlineFailure(),
+    );
   };
 
   if (durableResult) {
-    const recovered = await settleObservedResource(state.dispatch!);
-    if (recovered) return recovered;
-    state = await args.observeDispatch();
-    if (state.settled) return durableResult;
-    const absent = await settleExactAbsence(state.dispatch!, durableResult);
-    if (absent) return absent;
-    throw new Error(
-      "remote validation result is durable but its resource is unsettled before the no-handle fence",
-    );
+    return cleanupDurableResult(state.dispatch!, durableResult);
   }
 
   let launchFailure: unknown;
@@ -245,53 +260,42 @@ export async function runRemoteValidationInvocationTransaction<
       return await settle(dispatch, "provider-cleanup", await args.launch());
     } catch (error) {
       launchFailure = error;
-      const recovered = await settleObservedResource(dispatch);
-      if (recovered) return recovered;
       durableResult = await args.observeResult();
       state = await args.observeDispatch();
       if (state.settled && durableResult) return durableResult;
-      if (durableResult) {
-        const absent = await settleExactAbsence(state.dispatch!, durableResult);
-        if (absent) return absent;
-      }
-    }
-  } else {
-    const recovered = await settleObservedResource(state.dispatch);
-    if (recovered) return recovered;
-    durableResult = await args.observeResult();
-    state = await args.observeDispatch();
-    if (state.settled && durableResult) return durableResult;
-    if (durableResult) {
-      const absent = await settleExactAbsence(state.dispatch!, durableResult);
-      if (absent) return absent;
-      throw new Error(
-        "remote validation result is durable but its resource is unsettled before the no-handle fence",
-      );
+      if (durableResult) return cleanupDurableResult(state.dispatch!, durableResult);
     }
   }
-  if (state.rebound)
-    throw new Error("remote validation invocation remains absent after its single durable rebound");
-  const now = await args.now();
-  if (now.getTime() < Date.parse(state.dispatch!.noHandleReplacementNotBefore))
+  if (!(await afterFence(state.dispatch!)))
     throw (
       launchFailure ??
       new Error(
-        "remote validation resource is not visible before its durable no-handle fence; replay is refused",
+        "remote validation resource observation cannot begin before its durable no-handle fence",
       )
     );
-  if (now.getTime() >= Date.parse(args.validationDeadline))
-    throw new Error("remote validation invocation deadline is exhausted; replay is refused");
+  if ((await args.now()).getTime() >= Date.parse(args.validationDeadline))
+    return expireAfterCleanup(state.dispatch!);
+
+  const recovered = await args.observeResource();
+  if (recovered) return settle(state.dispatch!, "provider-cleanup", recovered);
+  durableResult = await args.observeResult();
+  state = await args.observeDispatch();
+  if (state.settled && durableResult) return durableResult;
+  if (durableResult) return cleanupDurableResult(state.dispatch!, durableResult);
+  if (state.rebound)
+    throw new Error("remote validation invocation remains absent after its single durable rebound");
+  if ((await args.now()).getTime() >= Date.parse(args.validationDeadline))
+    return expireAfterCleanup(state.dispatch!);
   await args.persistRebound(state.dispatch!);
   try {
     return await settle(state.dispatch!, "provider-cleanup", await args.launch());
   } catch (error) {
-    const recovered = await settleObservedResource(state.dispatch!);
-    if (recovered) return recovered;
     durableResult = await args.observeResult();
-    if (durableResult) {
-      const absent = await settleExactAbsence(state.dispatch!, durableResult);
-      if (absent) return absent;
-    }
+    if (durableResult) return cleanupDurableResult(state.dispatch!, durableResult);
+    if ((await args.now()).getTime() >= Date.parse(args.validationDeadline))
+      return expireAfterCleanup(state.dispatch!);
+    const reboundRecovery = await args.observeResource();
+    if (reboundRecovery) return settle(state.dispatch!, "provider-cleanup", reboundRecovery);
     throw error;
   }
 }

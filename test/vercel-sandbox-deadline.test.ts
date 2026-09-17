@@ -281,6 +281,15 @@ it("downloads retained capture bytes through the bounded Vercel stream channel",
     expect(provider.get).toHaveBeenCalledTimes(3);
     expect(stop).toHaveBeenCalledOnce();
     await sandboxCommon.releaseIsolatedValidationCaptures(recovered?.captures);
+
+    stop.mockClear();
+    context.checkpointCaptureResult = async () => {
+      throw new Error("durable capture checkpoint refused again");
+    };
+    await expect(backend.validate(context)).rejects.toThrow(/durable capture checkpoint/);
+    expect(stop).not.toHaveBeenCalled();
+    await expect(backend.cleanupValidationResource(context)).resolves.toBe("cleaned");
+    expect(stop).toHaveBeenCalledOnce();
   } finally {
     await sandboxCommon.releaseIsolatedValidationCaptures(result.captures);
     await releasePayload(expectedPayload);

@@ -811,6 +811,53 @@ export class VercelSandboxBackend implements ExecutionBackend {
     return result;
   }
 
+  async cleanupValidationResource(
+    context: IsolatedValidationContext,
+  ): Promise<"cleaned" | "absent"> {
+    const captureRequest = parseIsolatedValidationCaptureRequest(context);
+    if (
+      !captureRequest ||
+      !this.#image ||
+      !/@sha256:[0-9a-f]{64}$/.test(this.#image) ||
+      captureRequest.environmentIdentity !== this.#image
+    )
+      throw new Error("validation cleanup requires its exact digest-pinned Vercel invocation");
+    const resourceName = sandboxResourceName(context, "validation");
+    let sandbox: Sandbox | undefined;
+    for (let attempt = 0; attempt < this.#createVisibilityAttempts; attempt += 1) {
+      try {
+        sandbox = await this.#withinDeadline(
+          new Date(this.#now() + this.#cleanupTimeoutMs),
+          `Vercel bound validation cleanup lookup exceeded its ${this.#cleanupTimeoutMs} ms operation bound`,
+          () => Sandbox.get({ name: resourceName }),
+        );
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/\b(?:404|not[ -]?found)\b/i.test(message))
+          throw new VercelResourceCleanupError({
+            resourceName,
+            operation: "bound validation cleanup lookup",
+            cause: error,
+          });
+        if (attempt + 1 < this.#createVisibilityAttempts)
+          await this.#sleep(this.#createVisibilityDelayMs);
+      }
+    }
+    if (!sandbox) return "absent";
+    if (sandbox.name !== resourceName)
+      throw new VercelResourceCleanupError({
+        resourceName,
+        operation: "bound validation cleanup ownership",
+        cause: "refusing cleanup of a resource outside the exact validation invocation",
+      });
+    await this.#stopSandbox(sandbox, "bound validation cleanup");
+    const priorCapture = this.#uncheckpointedCaptures.get(resourceName);
+    this.#uncheckpointedCaptures.delete(resourceName);
+    await releaseIsolatedValidationCaptures(priorCapture);
+    return "cleaned";
+  }
+
   async reconcileStale(identity: StaleAttemptIdentity): Promise<void> {
     const resourceName = sandboxResourceName(identity);
     const replacementNotBefore = this.#replacementFence(identity);

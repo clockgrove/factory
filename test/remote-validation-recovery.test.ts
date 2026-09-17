@@ -148,6 +148,9 @@ function ports(args: {
   result?: string | null;
   observation?: string | null;
   observeResource?: () => Promise<string | null>;
+  cleanupObservation?: "cleaned" | "absent";
+  cleanupResource?: () => Promise<"cleaned" | "absent">;
+  terminalFailure?: () => Promise<string>;
   launch?: () => Promise<string>;
 }) {
   const stages: string[] = [];
@@ -182,6 +185,18 @@ function ports(args: {
         (async () => {
           stages.push("observe");
           return args.observation ?? null;
+        }),
+      cleanupResource:
+        args.cleanupResource ??
+        (async () => {
+          stages.push("cleanup");
+          return args.cleanupObservation ?? "absent";
+        }),
+      terminalDeadlineFailure:
+        args.terminalFailure ??
+        (async () => {
+          stages.push("terminal");
+          return "deadline-failure";
         }),
       persistRebound: async () => {
         stages.push("rebound");
@@ -482,9 +497,23 @@ describe.each(providers)("%s remote validation recovery", (provider) => {
   it("does not turn response loss or eventual 404 into replay before the fence", async () => {
     const fixture = ports({ dispatch: true, observation: null });
     await expect(runRemoteValidationInvocationTransaction(fixture.input)).rejects.toThrow(
-      /before its durable no-handle fence/,
+      /observation cannot begin before its durable no-handle fence/,
     );
-    expect(fixture.stages).toEqual(["observe"]);
+    expect(fixture.stages).toEqual([]);
+  });
+
+  it("does not authorize absence when the clock crosses the fence after a pre-fence restart", async () => {
+    const observeResource = vi.fn(async () => null);
+    const launch = vi.fn(async () => "duplicate");
+    const fixture = ports({ dispatch: true, observeResource, launch });
+    const times = [new Date("2026-09-17T00:00:59.999Z"), new Date("2026-09-17T00:01:00.001Z")];
+    fixture.input.now = async () => times.shift() ?? new Date("2026-09-17T00:01:00.001Z");
+    await expect(runRemoteValidationInvocationTransaction(fixture.input)).rejects.toThrow(
+      /observation cannot begin before its durable no-handle fence/,
+    );
+    expect(observeResource).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+    expect(fixture.stages).toEqual([]);
   });
 
   it("self-heals a lost create response after post-fence exact absence", async () => {
@@ -530,16 +559,35 @@ describe.each(providers)("%s remote validation recovery", (provider) => {
     ]);
   });
 
-  it("refuses rebound after the original immutable deadline", async () => {
+  it("cleans and records deterministic terminal failure after the immutable deadline", async () => {
     const fixture = ports({
       dispatch: true,
       observation: null,
+      cleanupObservation: "cleaned",
       now: deadline,
     });
-    await expect(runRemoteValidationInvocationTransaction(fixture.input)).rejects.toThrow(
-      /deadline is exhausted/,
+    await expect(runRemoteValidationInvocationTransaction(fixture.input)).resolves.toBe(
+      "deadline-failure",
     );
-    expect(fixture.stages).toEqual(["observe"]);
+    expect(fixture.stages).toEqual(["cleanup", "terminal", "result", "settle-provider-cleanup"]);
+  });
+
+  it("cleans an exact live resource for a durable result after deadline without result recovery", async () => {
+    const observeResource = vi.fn(async () => {
+      throw new Error("expired result collection must not run");
+    });
+    const fixture = ports({
+      dispatch: true,
+      result: "checkpointed",
+      cleanupObservation: "cleaned",
+      observeResource,
+      now: deadline,
+    });
+    await expect(runRemoteValidationInvocationTransaction(fixture.input)).resolves.toBe(
+      "checkpointed",
+    );
+    expect(observeResource).not.toHaveBeenCalled();
+    expect(fixture.stages).toEqual(["cleanup", "settle-provider-cleanup"]);
   });
 
   it("refuses an expired prepared invocation before writing its first dispatch", async () => {
@@ -562,7 +610,7 @@ describe.each(providers)("%s remote validation recovery", (provider) => {
         },
       };
       await expect(runRemoteValidationInvocationTransaction(input)).rejects.toThrow(
-        /before its durable no-handle fence/,
+        /observation cannot begin before its durable no-handle fence/,
       );
     }
     expect(seen).toEqual([deadline, deadline]);
@@ -588,15 +636,16 @@ describe.each(providers)("%s remote validation recovery", (provider) => {
     const fixture = ports({
       dispatch: true,
       result: "checkpointed",
-      observeResource: async () => {
-        fixture.stages.push("observe-live");
+      now: "2026-09-17T00:02:00.000Z",
+      cleanupResource: async () => {
+        fixture.stages.push("cleanup-live");
         throw new Error("provider cleanup failed while resource remains live");
       },
     });
     await expect(runRemoteValidationInvocationTransaction(fixture.input)).rejects.toThrow(
       /cleanup failed.*remains live/,
     );
-    expect(fixture.stages).toEqual(["observe-live"]);
+    expect(fixture.stages).toEqual(["cleanup-live"]);
   });
 
   it("settles a cleanup-before-receipt crash from durable result and exact post-fence absence", async () => {
@@ -609,7 +658,7 @@ describe.each(providers)("%s remote validation recovery", (provider) => {
     await expect(runRemoteValidationInvocationTransaction(fixture.input)).resolves.toBe(
       "checkpointed",
     );
-    expect(fixture.stages).toEqual(["observe", "settle-post-fence-exact-absence"]);
+    expect(fixture.stages).toEqual(["cleanup", "settle-post-fence-exact-absence"]);
   });
 
   it("keeps a durable result unsettled until exact absence crosses the visibility fence", async () => {
@@ -617,11 +666,15 @@ describe.each(providers)("%s remote validation recovery", (provider) => {
     await expect(runRemoteValidationInvocationTransaction(fixture.input)).rejects.toThrow(
       /resource is unsettled before the no-handle fence/,
     );
-    expect(fixture.stages).toEqual(["observe"]);
+    expect(fixture.stages).toEqual([]);
   });
 
   it("records provider cleanup settlement after exact recovery of a live resource", async () => {
-    const fixture = ports({ dispatch: true, observation: "recovered" });
+    const fixture = ports({
+      dispatch: true,
+      observation: "recovered",
+      now: "2026-09-17T00:02:00.000Z",
+    });
     await expect(runRemoteValidationInvocationTransaction(fixture.input)).resolves.toBe(
       "recovered",
     );

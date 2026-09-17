@@ -12009,7 +12009,10 @@ export class FactorySupervisor {
             : undefined;
         if (
           egress === "third-party" &&
-          (!args.validator || !args.validator.recoverValidation || !remoteIdentity)
+          (!args.validator ||
+            !args.validator.recoverValidation ||
+            !args.validator.cleanupValidationResource ||
+            !remoteIdentity)
         )
           throw new Error(
             "remote repository capture requires exact resource identity and recovery observation",
@@ -12207,6 +12210,28 @@ export class FactorySupervisor {
             },
             persistDispatch: recordRemoteDispatch,
             observeResource: observeRemote,
+            cleanupResource: () =>
+              this.#externalAdmission(() =>
+                args.validator!.cleanupValidationResource!(remoteContext),
+              ),
+            terminalDeadlineFailure: async () => ({
+              validation: normalizeValidation({
+                outputTreeSha: input.invocation.outputTreeSha,
+                commands: [
+                  {
+                    command: input.invocation.validationCommands[0]!,
+                    exitCode: 124,
+                    durationMs: 0,
+                  },
+                ],
+                passed: false,
+                failureReason:
+                  "remote validation deadline expired before a recoverable provider result",
+                startedAt: input.invocation.validationDeadline,
+                completedAt: input.invocation.validationDeadline,
+                environmentIdentity,
+              }),
+            }),
             persistRebound: async (dispatch) => {
               await recordRemoteRebound(dispatch);
             },
@@ -20142,7 +20167,12 @@ export class FactorySupervisor {
       original.requirements.trust,
     );
     const remote = stored.invocation.toolEnvironment.egress === "third-party";
-    if (remote && (!args.backend?.recoverValidation || !args.backend.validate))
+    if (
+      remote &&
+      (!args.backend?.recoverValidation ||
+        !args.backend.cleanupValidationResource ||
+        !args.backend.validate)
+    )
       throw new Error(
         "repository capture backend cannot recover or rebound its prepared validation",
       );

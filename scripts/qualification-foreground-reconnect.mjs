@@ -36,7 +36,7 @@ const POLICY = {
     deterministicReviewRuleIds: [],
   },
   repositoryCaptureEgress: {
-    validation: { mode: "denied", maxAssets: 0, deterministicGateIds: [] },
+    deterministicGateIds: [],
     review: { mode: "denied", maxAssets: 0, reviewerCapabilityIds: [] },
   },
   priority: {

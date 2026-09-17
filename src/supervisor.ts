@@ -24,7 +24,7 @@ import {
   compilerMediaInputs,
 } from "./assets/compiler-input.js";
 import { policyMediaCompilerCapabilities } from "./media/adapter.js";
-import { defaultMediaAdapterRegistry } from "./media/adapter.js";
+import { defaultMediaAdapterRegistry, type MediaAdapterRegistry } from "./media/adapter.js";
 import { assetDigest, canonicalAssetJson, type AssetManifestEntry } from "./assets/contracts.js";
 import {
   activateWorkerPacket,
@@ -517,6 +517,9 @@ export interface SupervisorOptions {
   signal?: AbortSignal;
   managementBackend?: ManagementBackend;
   backendRegistry?: BackendRegistry;
+  /** Installed media capabilities. Tests and embedded hosts may supply the same
+   * explicit registry boundary used by production discovery. */
+  mediaAdapterRegistry?: MediaAdapterRegistry;
   /** RepositoryController supplies one instance to every Objective. */
   repositoryResources?: RepositorySupervisorResources;
   /** Durable repository-wide capacity authority supplied by production hosts. */
@@ -670,6 +673,15 @@ class ProviderQuotaDrainIncompleteError extends Error {
   }
 }
 
+class MediaTerminalDrainIncompleteError extends Error {
+  constructor() {
+    super(
+      "durable media usage, cleanup, capacity, checkpoint, or issue admission remains unsettled",
+    );
+    this.name = "MediaTerminalDrainIncompleteError";
+  }
+}
+
 function terminalizationVeto(error: unknown): boolean {
   return (
     error instanceof LeaseLostError ||
@@ -679,6 +691,7 @@ function terminalizationVeto(error: unknown): boolean {
     error instanceof ArtifactCompletionUnavailableError ||
     error instanceof ArtifactCollectionCheckpointError ||
     error instanceof MediaExecutionPhaseError ||
+    error instanceof MediaTerminalDrainIncompleteError ||
     error instanceof ProviderQuotaDrainIncompleteError ||
     error instanceof ProviderResourceCleanupError ||
     error instanceof CancellationAccountingPublicationError ||
@@ -1496,7 +1509,7 @@ export class FactorySupervisor {
   #management: ManagementBackend;
   readonly #managementOverride: boolean;
   readonly #registry: BackendRegistry;
-  readonly #mediaRegistry = defaultMediaAdapterRegistry();
+  readonly #mediaRegistry: MediaAdapterRegistry;
   readonly #mediaReviewRegistry = defaultMediaReviewRegistry();
   readonly #breaker: CircuitBreaker;
   readonly #concurrency: ConcurrencyLimiter;
@@ -1558,6 +1571,7 @@ export class FactorySupervisor {
     this.#policy = this.#initialSnapshot
       ? foregroundRunPolicyFromSnapshot(this.#initialSnapshot, options.policy)
       : parseRunPolicy(options.policy);
+    this.#mediaRegistry = options.mediaAdapterRegistry ?? defaultMediaAdapterRegistry();
     this.#notify = options.onStatus ?? (() => {});
     const shared = options.repositoryResources;
     const quota = shared ?? createGitHubMutationScope(options.token);
@@ -8002,6 +8016,7 @@ export class FactorySupervisor {
       fields?: Record<string, unknown>,
       reason?: string,
     ): Promise<unknown>;
+    assertCurrent?: () => Promise<void>;
   }): Promise<void> {
     const review = args.packet.deliverable.intent.review;
     if (review.kind !== "deterministic-preauthorized") return;
@@ -8039,7 +8054,7 @@ export class FactorySupervisor {
       authority: args.authority,
       decision,
       parentOids: [storedSet.commit],
-      assertCurrent: () => this.#externalAdmission(async () => {}),
+      assertCurrent: args.assertCurrent ?? (() => this.#externalAdmission(async () => {})),
     });
     let storedActivation: Awaited<ReturnType<typeof persistAssetActivation>> | undefined;
     if (decision.kind === "approved") {
@@ -8056,7 +8071,7 @@ export class FactorySupervisor {
           storedDecision.commit,
           ...activation.selected.map(({ storage }) => storage.readyCommit),
         ],
-        assertCurrent: () => this.#externalAdmission(async () => {}),
+        assertCurrent: args.assertCurrent ?? (() => this.#externalAdmission(async () => {})),
       });
     }
     const priorDecision = args.existingEvents.find(
@@ -18849,6 +18864,19 @@ export class FactorySupervisor {
     objectiveItems: readonly DerivedWorkItem[],
     terminalEvent: "AttemptCancelled" | "AttemptTimedOut" | "AttemptDeferred",
   ): Promise<void> {
+    const reservations = await this.#attempts.list(this.#run.objective, item.number);
+    const reservation = reservations
+      .filter((candidate) => candidate.runId === this.#run.runId)
+      .sort((left, right) => right.attempt - left.attempt)[0];
+    if (!reservation)
+      throw new Error(`Work Item #${item.number} has recoverable state but no attempt ref`);
+    // Media dispatch has its own durable handle, checkpoint, usage, cleanup and
+    // admission protocol. Never ask a repository execution backend to classify it.
+    if (reservation.mediaInvocation) {
+      if (await this.#recoverUndispatchedAdmission(item, reservation)) return;
+      await this.#recoverInterruptedMedia(item, reservation, terminalEvent);
+      return;
+    }
     if (
       (item.factoryEvents ?? []).some(
         (event) =>
@@ -18860,12 +18888,6 @@ export class FactorySupervisor {
       await this.#recoverInterrupted(item, this.#run.startedAt.getTime(), objectiveItems);
       return;
     }
-    const reservations = await this.#attempts.list(this.#run.objective, item.number);
-    const reservation = reservations
-      .filter((candidate) => candidate.runId === this.#run.runId)
-      .sort((left, right) => right.attempt - left.attempt)[0];
-    if (!reservation)
-      throw new Error(`Work Item #${item.number} has recoverable state but no attempt ref`);
     const events = (item.factoryEvents ?? [])
       .filter(
         (event) =>
@@ -19824,6 +19846,7 @@ export class FactorySupervisor {
   async #recoverInterruptedMedia(
     item: DerivedWorkItem,
     reservation: AttemptReservation,
+    terminalEvent?: "AttemptCancelled" | "AttemptTimedOut" | "AttemptDeferred",
   ): Promise<void> {
     const invocation = reservation.mediaInvocation;
     if (!invocation) throw new Error("media recovery requires its reserved invocation");
@@ -19938,7 +19961,9 @@ export class FactorySupervisor {
         "retained",
       ),
       adapter,
-      assertCurrent: () => this.#externalAdmission(async () => {}),
+      assertCurrent: terminalEvent
+        ? () => this.#lease.assert()
+        : () => this.#externalAdmission(async () => {}),
       hooks: {
         markDispatching: async () => {
           throw new Error("media recovery cannot rearm dispatch");
@@ -20031,6 +20056,7 @@ export class FactorySupervisor {
           authority,
           request,
           reservationOid: reservation.oid,
+          ...(terminalEvent ? { signal: AbortSignal.abort() } : {}),
         });
       }
       while (result.state === "running") {
@@ -20040,6 +20066,7 @@ export class FactorySupervisor {
           request,
           reservationOid: reservation.oid,
           receipt: result.dispatchReceipt,
+          ...(terminalEvent ? { signal: AbortSignal.abort() } : {}),
         });
       }
     } finally {
@@ -20055,6 +20082,7 @@ export class FactorySupervisor {
         assetSet: result.assetSet,
         existingEvents: item.factoryEvents ?? [],
         recordMedia,
+        ...(terminalEvent ? { assertCurrent: () => this.#lease.assert() } : {}),
       });
     }
     if (
@@ -20069,7 +20097,10 @@ export class FactorySupervisor {
       (result.state === "failed" || result.state === "cancelled") &&
       !existing.some(
         (event) =>
-          event.kind === "attempt" && ["AttemptFailed", "AttemptCancelled"].includes(event.event),
+          event.kind === "attempt" &&
+          ["AttemptFailed", "AttemptCancelled", "AttemptTimedOut", "AttemptDeferred"].includes(
+            event.event,
+          ),
       )
     )
       await this.#lease.use((lease) =>
@@ -20077,9 +20108,17 @@ export class FactorySupervisor {
           lease,
           workItemNodeId: item.id,
           reservation,
-          event: result.state === "failed" ? "AttemptFailed" : "AttemptCancelled",
+          event:
+            result.state === "failed" ? "AttemptFailed" : (terminalEvent ?? "AttemptCancelled"),
           sequence: this.#sequences.take(),
-          reason: `media invocation ${result.state}`,
+          reason:
+            result.state === "failed"
+              ? "media invocation failed"
+              : terminalEvent === "AttemptTimedOut"
+                ? "objective deadline interrupted the recovered media invocation"
+                : terminalEvent === "AttemptDeferred"
+                  ? "controller retirement deferred the recovered media invocation"
+                  : "media invocation cancelled",
           allowRecovery: true,
         }),
       );
@@ -20115,6 +20154,115 @@ export class FactorySupervisor {
         "AttemptIntegrated",
       ].includes(event.event),
     );
+  }
+
+  async #hasUnsettledMediaTerminalLiability(item: DerivedWorkItem): Promise<boolean> {
+    const packet = parseWorkerPacketFromIssue(item.body ?? "");
+    if (packet.deliverable.kind !== "asset-production") return false;
+    const reservation = (await this.#attempts.list(this.#run.objective, item.number))
+      .filter((candidate) => candidate.runId === this.#run.runId)
+      .sort((left, right) => right.attempt - left.attempt)[0];
+    if (!reservation) return false;
+    if (!reservation.mediaInvocation)
+      throw new Error("asset-production reservation lacks its immutable media invocation");
+    const admission = (await this.#attempts.ledger.read(item.number))?.history.find(
+      (entry) => entry.reservation.oid === reservation.oid,
+    );
+    if (!admission || admission.disposition !== "released") return true;
+    const capacity = await this.#capacitySnapshot();
+    if (
+      capacity.reservations.some(
+        (claim) =>
+          claim.objective === reservation.objective &&
+          claim.workItem === reservation.workItem &&
+          claim.attempt === reservation.attempt,
+      )
+    )
+      return true;
+    if (!admission.dispatchPossible) return false;
+    const events = (item.factoryEvents ?? []).filter(
+      (event) =>
+        event.runId === reservation.runId &&
+        "attempt" in event &&
+        event.attempt === reservation.attempt,
+    );
+    const media = events.filter(
+      (event): event is Extract<FactoryEvent, { kind: "media" }> =>
+        event.kind === "media" &&
+        event.reservationOid === reservation.oid &&
+        event.invocationDigest === reservation.mediaInvocation!.digest,
+    );
+    const dispatches = media.filter((event) => event.event === "MediaDispatchRecorded");
+    const usage = media.filter((event) => event.event === "MediaUsageSettled");
+    const accounting = usage[0]?.accounting;
+    if (
+      dispatches.length !== 1 ||
+      usage.length !== 1 ||
+      !accounting ||
+      accounting.providerRequests === null ||
+      accounting.variants === null ||
+      accounting.generatedBytes === null ||
+      accounting.storageBytes === null ||
+      accounting.native.some(({ amount }) => amount === null)
+    )
+      return true;
+    const cleanup = [...media]
+      .reverse()
+      .find((event) => ["MediaCleanupCompleted", "MediaCleanupFailed"].includes(event.event));
+    if (cleanup?.event !== "MediaCleanupCompleted") return true;
+    const terminal = events.filter(
+      (event) =>
+        event.kind === "attempt" &&
+        [
+          "AttemptSucceeded",
+          "AttemptFailed",
+          "AttemptCancelled",
+          "AttemptTimedOut",
+          "AttemptDeferred",
+        ].includes(event.event),
+    );
+    if (terminal.length !== 1) return true;
+    if (terminal[0]?.event !== "AttemptSucceeded") return false;
+    const ready = media.filter((event) => event.event === "AssetSetReady");
+    if (ready.length !== 1 || ready[0]?.assetSetDigest !== terminal[0].artifactDigest) return true;
+    if (packet.deliverable.intent.review.kind !== "deterministic-preauthorized") return false;
+    const decisions = media.filter(
+      (event) =>
+        event.event === "AssetDecisionRecorded" &&
+        event.assetSetDigest === ready[0]?.assetSetDigest,
+    );
+    if (decisions.length !== 1) return true;
+    if (decisions[0]?.decisionKind !== "approved") return false;
+    return !media.some(
+      (event) =>
+        event.event === "AssetActivated" &&
+        event.assetSetDigest === ready[0]?.assetSetDigest &&
+        event.decisionDigest === decisions[0]?.decisionDigest,
+    );
+  }
+
+  async #reconcileMediaBeforeTerminal(
+    snapshot: Snapshot,
+    terminalEvent: "AttemptCancelled" | "AttemptTimedOut" | "AttemptDeferred",
+  ): Promise<Snapshot> {
+    const objective = this.#deriveObjective(snapshot);
+    const unsettled: DerivedWorkItem[] = [];
+    for (const item of objective.items)
+      if (await this.#hasUnsettledMediaTerminalLiability(item)) unsettled.push(item);
+    for (const item of unsettled)
+      await this.#reconcileInterruptedForEarlyTerminal(item, objective.items, terminalEvent);
+    if (unsettled.length === 0) return snapshot;
+    const refreshed = await this.#reader.readObjective(snapshot.number);
+    this.#fenceSnapshot(refreshed);
+    this.#sequences.observe(snapshotEvents(refreshed));
+    const observed = await this.#observeCapacity(
+      refreshed,
+      this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+    );
+    for (const item of this.#deriveObjective(observed).items)
+      if (await this.#hasUnsettledMediaTerminalLiability(item))
+        throw new MediaTerminalDrainIncompleteError();
+    return observed;
   }
 
   async #needsDurableAttemptRecovery(
@@ -20394,6 +20542,14 @@ export class FactorySupervisor {
     snapshot = await this.#observeCapacity(
       snapshot,
       this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+    );
+    snapshot = await this.#reconcileMediaBeforeTerminal(
+      snapshot,
+      event === "FactoryRunCancelled"
+        ? "AttemptCancelled"
+        : event === "FactoryRunEscalated" && reason === "Objective timeout exhausted"
+          ? "AttemptTimedOut"
+          : "AttemptDeferred",
     );
     // Deadline-only recovery skips normal admission, but its fresh terminal
     // receipt still needs this writer's boundary. Ordinary runs reuse the

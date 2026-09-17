@@ -22,7 +22,7 @@ import {
 } from "../controller/failure.js";
 
 const execFileAsync = promisify(execFile);
-const FACTORY_UNIT_MARKER = "# Managed by Clockgrove Factory v2";
+const FACTORY_UNIT_MARKER = "# Managed by Clockgrove Factory";
 const SYSTEMCTL = "/usr/bin/systemctl";
 const FLOCK = "/usr/bin/flock";
 const MINIMUM_SYSTEMD_VERSION = 254;

@@ -5,6 +5,7 @@ import {
   APPLICATION_OPERATIONS,
   APPLICATION_TOOL_DEFINITIONS,
   AssetApprovalInputSchema,
+  AssetExportInputSchema,
   AssetRejectionInputSchema,
   AssetRevisionInputSchema,
 } from "../src/application/index.js";
@@ -79,6 +80,25 @@ describe("CLI and MCP control surface", () => {
   it("keeps media review commands discriminated and identical across CLI and MCP", async () => {
     const digest = "a".repeat(64);
     expect(
+      AssetExportInputSchema.parse({
+        objective: 7,
+        assetSetDigest: digest,
+        descriptorDigest: "b".repeat(64),
+      }),
+    ).toEqual({
+      objective: 7,
+      assetSetDigest: digest,
+      descriptorDigest: "b".repeat(64),
+    });
+    expect(() =>
+      AssetExportInputSchema.parse({
+        objective: 7,
+        assetSetDigest: digest,
+        descriptorDigest: "b".repeat(64),
+        path: "/tmp/caller-selected",
+      }),
+    ).toThrow();
+    expect(
       AssetApprovalInputSchema.parse({
         objective: 7,
         requestId: "review-1",
@@ -133,8 +153,13 @@ describe("CLI and MCP control surface", () => {
       readFile(new URL("../src/mcp-server.ts", import.meta.url), "utf8"),
     ]);
     expect(cli).toContain("--descriptor-digest DIGEST");
+    expect(cli).toContain(
+      'assertExactCliOptions(args, ["--asset-set-digest", "--descriptor-digest", "--repo"])',
+    );
+    expect(cli).not.toContain("asset-export OWNER/REPO#NUMBER --output");
     expect(cli).not.toContain("--descriptor DIGEST [--descriptor DIGEST...]");
     expect(mcp).toContain("AssetApprovalInputSchema.shape.selectedDescriptorDigests");
+    expect(mcp).toContain("AssetExportInputSchema.shape.descriptorDigest");
     expect(mcp).toContain("AssetRejectionInputSchema.shape.reason");
     expect(mcp).toContain("AssetRevisionInputSchema.shape.reason");
     expect(mcp).not.toContain("producerReservationOid");

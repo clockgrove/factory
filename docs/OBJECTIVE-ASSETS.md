@@ -96,12 +96,24 @@ keeps the issue admission and capacity obligation occupied.
 Review uses authenticated, request-ID commands:
 
 - `factory asset-status OWNER/REPO#OBJECTIVE --asset-set-digest DIGEST`
+- `factory asset-export OWNER/REPO#OBJECTIVE --asset-set-digest DIGEST --descriptor-digest DIGEST`
 - `factory asset-approve OWNER/REPO#OBJECTIVE --request-id ID --asset-set-digest DIGEST --descriptor-digest DIGEST`
 - `factory asset-reject OWNER/REPO#OBJECTIVE --request-id ID --asset-set-digest DIGEST --reason TEXT`
 - `factory asset-revise OWNER/REPO#OBJECTIVE --request-id ID --asset-set-digest DIGEST --reason TEXT`
 
-The equivalent MCP tools are `factory_asset_status`, `factory_asset_approve`,
-`factory_asset_reject`, and `factory_asset_revise`. Factory resolves run, producer attempt,
+The equivalent MCP tools are `factory_asset_status`, `factory_asset_export`,
+`factory_asset_approve`, `factory_asset_reject`, and `factory_asset_revise`. `asset-export`
+recovers one exact variant from its immutable produced-content transfer. Factory reauthenticates
+the ready event, reservation, Asset Set, storage manifest, descriptor, receipt, content digest, and
+byte count, and requires the authenticated caller to be the activating run actor before writing a
+read-only file under its private local review directory. The result
+returns that verified local path and the complete descriptor and storage receipt. It does not
+return inline bytes, follow a provider URL, or interpret the media format. The private path is
+content-addressed; only the schema-validated basename is preserved so ordinary viewers can identify
+the format, while the descriptor's logical materialization path never selects the destination.
+Repeating the exact export after a restart verifies and returns the same local materialization.
+
+Factory resolves run, producer attempt,
 reservation, invocation, and base authority from the authenticated `AssetSetReady` event; callers do
 not supply them. The same request ID and exact decision returns the original record. Reusing a
 request ID with changed selection or text, or deciding the same Asset Set twice, fails closed.

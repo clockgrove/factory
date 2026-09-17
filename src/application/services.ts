@@ -60,6 +60,7 @@ import {
 } from "../assets/contracts.js";
 import { createAssetDecision } from "../media/lifecycle.js";
 import type { AssetActivation, AssetDecision, AssetSet } from "../media/contracts.js";
+import { materializeProducedAssetForReview } from "../media/review-export.js";
 import {
   createAssetActivation,
   createMediaDecisionRequest,
@@ -89,6 +90,14 @@ export const AssetStatusInputSchema = z
   .object({
     objective: z.number().int().positive(),
     assetSetDigest: sha256Digest,
+  })
+  .strict();
+
+export const AssetExportInputSchema = z
+  .object({
+    objective: z.number().int().positive(),
+    assetSetDigest: sha256Digest,
+    descriptorDigest: sha256Digest,
   })
   .strict();
 
@@ -128,6 +137,7 @@ export const APPLICATION_OPERATIONS = [
   "assets-import",
   "assets-inspect",
   "asset-status",
+  "asset-export",
   "asset-approve",
   "asset-reject",
   "asset-revise",
@@ -243,6 +253,7 @@ export interface ServiceContext {
   planning?: PlanningContext;
   compilerEvaluationStore?: CompiledGraphReadStore;
   assetStore?: ObjectiveAssetStore;
+  assetReviewRoot?: string;
   platformTelemetry?: () => GitHubMutationTelemetry;
 }
 
@@ -656,6 +667,59 @@ export class FactoryApplicationService {
               ),
             }
           : null,
+      },
+    };
+  }
+
+  async assetExport(input: {
+    objective: number;
+    assetSetDigest: string;
+    descriptorDigest: string;
+  }) {
+    const command = AssetExportInputSchema.parse(input);
+    if (!this.context.assetStore || !this.context.store)
+      throw new Error("authenticated media export storage is not configured");
+    const snapshot = await this.context.reader.readObjective(command.objective);
+    const resolved = await this.resolveReadyAssetSet(snapshot, command.assetSetDigest);
+    const actor = await this.context.store.getAuthenticatedLogin();
+    if (resolved.start.actor.toLowerCase() !== actor.toLowerCase())
+      throw new Error("only the activating actor may export private produced media");
+    const selected = resolved.assetSet.variants.find(
+      ({ descriptor }) => descriptor.digest === command.descriptorDigest,
+    );
+    if (!selected) throw new Error("descriptor does not belong to the authenticated Asset Set");
+    const manifest = await readObjectiveAssetManifest({
+      store: this.context.assetStore,
+      authority: resolved.authority,
+      digest: resolved.assetSet.storageManifestDigest,
+    });
+    if (
+      !manifest ||
+      canonicalAssetJson(manifest.assets) !== canonicalAssetJson(resolved.assetSet.variants)
+    )
+      throw new Error("produced asset storage manifest differs from the authenticated Asset Set");
+    const exported = await materializeProducedAssetForReview({
+      store: this.context.assetStore,
+      manifest,
+      assetSetDigest: resolved.assetSet.digest,
+      descriptorDigest: command.descriptorDigest,
+      ...(this.context.assetReviewRoot ? { reviewRoot: this.context.assetReviewRoot } : {}),
+    });
+    if (canonicalAssetJson(exported.entry) !== canonicalAssetJson(selected))
+      throw new Error("exported asset differs from the authenticated descriptor and receipt");
+    return {
+      operation: "asset-export" as const,
+      repository: resolved.authority.repository,
+      objective: command.objective,
+      runId: resolved.ready.runId,
+      assetSetDigest: resolved.assetSet.digest,
+      descriptor: selected.descriptor,
+      storageReceipt: selected.storage,
+      materialization: {
+        path: exported.path,
+        digest: selected.descriptor.content.digest,
+        bytes: selected.descriptor.content.bytes,
+        readOnly: true as const,
       },
     };
   }
@@ -1253,14 +1317,14 @@ export class FactoryApplicationService {
       committedReservation.mediaInvocation?.digest !== ready.invocationDigest ||
       start.repository.toLowerCase() !==
         `${this.context.owner}/${this.context.repo}`.toLowerCase() ||
-      start.baseSha !== reservation.baseSha ||
+      committedReservation.mediaInvocation?.authorityBaseSha !== start.baseSha ||
       start.policyDigest !== reservation.policyDigest
     )
       throw new Error("asset set producer reservation commit differs from authenticated evidence");
     const authority = {
       repository: `${this.context.owner}/${this.context.repo}`,
       objective: snapshot.number,
-      baseSha: reservation.baseSha,
+      baseSha: committedReservation.mediaInvocation.authorityBaseSha,
     };
     const stored = await readAssetSet({
       store: this.context.assetStore,

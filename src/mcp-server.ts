@@ -101,6 +101,7 @@ import { GitHubControlStore } from "./control/github-store.js";
 import {
   APPLICATION_TOOL_DEFINITIONS,
   AssetApprovalInputSchema,
+  AssetExportInputSchema,
   AssetRejectionInputSchema,
   AssetRevisionInputSchema,
   AssetStatusInputSchema,
@@ -1444,6 +1445,7 @@ type ApplicationToolInput = {
   manifestDigest?: string;
   assetManifestDigest?: string;
   assetSetDigest?: string;
+  descriptorDigest?: string;
   selectedDescriptorDigests?: string[];
   assets?: Array<{
     source:
@@ -1469,6 +1471,7 @@ function registerApplicationTool(
     | "assets-import"
     | "assets-inspect"
     | "asset-status"
+    | "asset-export"
     | "asset-approve"
     | "asset-reject"
     | "asset-revise"
@@ -1566,10 +1569,16 @@ function registerApplicationTool(
             baseSha: z.string().regex(/^[0-9a-fA-F]{40}$/),
             manifestDigest: z.string().regex(/^[a-f0-9]{64}$/),
           }
-        : operation === "asset-status"
+        : operation === "asset-status" || operation === "asset-export"
           ? {
               ...ObjectiveToolShape,
-              assetSetDigest: AssetStatusInputSchema.shape.assetSetDigest,
+              assetSetDigest:
+                operation === "asset-export"
+                  ? AssetExportInputSchema.shape.assetSetDigest
+                  : AssetStatusInputSchema.shape.assetSetDigest,
+              ...(operation === "asset-export"
+                ? { descriptorDigest: AssetExportInputSchema.shape.descriptorDigest }
+                : {}),
             }
           : operation === "asset-approve"
             ? {
@@ -1767,6 +1776,15 @@ function registerApplicationTool(
         return service.assetStatus({
           objective: input.objectiveNumber!,
           assetSetDigest: input.assetSetDigest,
+        });
+      }
+      if (operation === "asset-export") {
+        if (!input.assetSetDigest || !input.descriptorDigest)
+          throw new Error("assetSetDigest and descriptorDigest are required");
+        return service.assetExport({
+          objective: input.objectiveNumber!,
+          assetSetDigest: input.assetSetDigest,
+          descriptorDigest: input.descriptorDigest,
         });
       }
       if (

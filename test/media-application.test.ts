@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { assetDigest, canonicalAssetJson, withAssetDigest } from "../src/assets/contracts.js";
+import { persistProducedAssetManifest } from "../src/assets/storage.js";
 import { FactoryApplicationService, type ApplicationSnapshot } from "../src/application/index.js";
 import { attemptRef } from "../src/control/attempts.js";
 import { decodeEventComments, encodeEventTrailer } from "../src/control/receipts.js";
@@ -63,7 +67,12 @@ function memoryStore() {
       return true;
     },
   };
-  return { store, refs, refWrites: () => refWrites };
+  return {
+    store,
+    refs,
+    refWrites: () => refWrites,
+    corruptBlob: (oid: string, bytes: Buffer) => blobs.set(oid, Buffer.from(bytes)),
+  };
 }
 
 const capability = MediaProducerCapabilitySchema.parse({
@@ -163,10 +172,7 @@ function packet(): AssetProductionWorkerPacket {
   };
 }
 
-function entry(
-  index: number,
-  authority: { repository: string; objective: number; baseSha: string },
-) {
+function entry(index: number, opaque = false) {
   const bytes = Buffer.from(`variant-${index}`);
   const contentDigest = createHash("sha256").update(bytes).digest("hex");
   const descriptor = withAssetDigest({
@@ -175,22 +181,30 @@ function entry(
       protocol: "clockgrove.factory/asset-content" as const,
       digest: contentDigest,
       bytes: bytes.length,
-      inspection: {
-        status: "semantic-valid" as const,
-        handlerId: "fixture-png",
-        handlerContract: 1,
-        mediaType: "image/png",
-        metadata: {
-          kind: "raster" as const,
-          format: "png" as const,
-          width: 32,
-          height: 32,
-          frames: 1,
-          channels: 4,
-          hasAlpha: true,
-          decodedBytes: 4_096,
-        },
-      },
+      inspection: opaque
+        ? {
+            status: "opaque" as const,
+            handlerId: "fixture-opaque",
+            handlerContract: 1,
+            mediaType: "application/octet-stream",
+            metadata: { kind: "opaque" as const, reason: "No semantic handler is registered." },
+          }
+        : {
+            status: "semantic-valid" as const,
+            handlerId: "fixture-png",
+            handlerContract: 1,
+            mediaType: "image/png",
+            metadata: {
+              kind: "raster" as const,
+              format: "png" as const,
+              width: 32,
+              height: 32,
+              frames: 1,
+              channels: 4,
+              hasAlpha: true,
+              decodedBytes: 4_096,
+            },
+          },
     },
     displayName: `variant-${index}.png`,
     provenance: {
@@ -202,28 +216,19 @@ function entry(
     },
     visibility: "private" as const,
     rights: { basis: "unknown" as const },
-    materializationPath: `assets/${contentDigest}/variant-${index}.png`,
+    materializationPath: `assets/${contentDigest}/${opaque ? "asset.bin" : `variant-${index}.png`}`,
   });
-  const storage = withAssetDigest({
-    protocol: "clockgrove.factory/asset-storage-receipt" as const,
-    authority,
-    descriptorDigest: descriptor.digest,
-    transferDomain: "produced-asset" as const,
-    payload: {
-      kind: "content-chunks" as const,
-      digest: contentDigest,
-      bytes: bytes.length,
-      chunks: [{ digest: contentDigest, bytes: bytes.length }],
-    },
-    transferRef: `refs/fixture/transfer-${index}`,
-    transferRequestId: `fixture-transfer-${index}`,
-    intentCommit: `${index + 2}`.repeat(40),
-    readyCommit: `${index}`.repeat(40),
-  });
-  return { descriptor, storage };
+  return { descriptor, bytes };
 }
 
-async function fixture(options: { maxAttemptsPerItem?: number } = {}) {
+async function fixture(
+  options: {
+    maxAttemptsPerItem?: number;
+    opaqueFirst?: boolean;
+    schedulingBaseSha?: string;
+    assetReviewRoot?: string;
+  } = {},
+) {
   const memory = memoryStore();
   const authority = { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) };
   const runPolicy = {
@@ -274,7 +279,7 @@ async function fixture(options: { maxAttemptsPerItem?: number } = {}) {
     workItem: 17,
     attempt: 1,
     backend: capability.id,
-    baseSha: authority.baseSha,
+    baseSha: options.schedulingBaseSha ?? authority.baseSha,
     directorEpoch: 1,
     policyDigest: policyDigest(runPolicy),
     mediaInvocation: invocation,
@@ -282,14 +287,20 @@ async function fixture(options: { maxAttemptsPerItem?: number } = {}) {
   const emptyTree = await memory.store.createTree({ entries: [] });
   const reservationOid = await memory.store.createCommit({
     treeOid: emptyTree,
-    parentOids: [authority.baseSha],
+    parentOids: [options.schedulingBaseSha ?? authority.baseSha],
     message: `Factory attempt reservation\n\n${encodeEventTrailer(reserved)}`,
   });
   await memory.store.createRef(attemptRef(7, 17, 1), reservationOid);
 
-  const variants = [entry(1, authority), entry(2, authority)].sort((left, right) =>
-    left.descriptor.digest.localeCompare(right.descriptor.digest),
-  );
+  const storedManifest = await persistProducedAssetManifest({
+    store: memory.store,
+    authority,
+    requestId: "fixture-produced-media",
+    revision: 1,
+    assets: [entry(1, options.opaqueFirst), entry(2)],
+    assertCurrent: async () => {},
+  });
+  const variants = storedManifest.manifest.assets;
   const assetSet = AssetSetSchema.parse(
     withMediaDigest({
       protocol: "clockgrove.factory/asset-set-v1" as const,
@@ -303,7 +314,7 @@ async function fixture(options: { maxAttemptsPerItem?: number } = {}) {
       dispatchReceiptDigest: "d".repeat(64),
       providerResponseId: null,
       productionReceiptDigest: "e".repeat(64),
-      storageManifestDigest: "f".repeat(64),
+      storageManifestDigest: storedManifest.manifest.digest,
       variants,
       usage: [],
       totalGeneratedBytes: variants.reduce(
@@ -364,6 +375,7 @@ async function fixture(options: { maxAttemptsPerItem?: number } = {}) {
       repo: "project",
       reader: { readObjective: async () => structuredClone(current) },
       assetStore: memory.store,
+      ...(options.assetReviewRoot ? { assetReviewRoot: options.assetReviewRoot } : {}),
       store: {
         getAuthenticatedLogin: async () => login,
         serverTime: async () => new Date("2026-01-01T00:03:00.000Z"),
@@ -388,6 +400,8 @@ async function fixture(options: { maxAttemptsPerItem?: number } = {}) {
     serviceForRestart,
     current,
     assetSet,
+    assetStore: memory.store,
+    storageManifest: storedManifest,
     comments,
     refWrites: memory.refWrites,
     setLogin: (value: string) => {
@@ -399,10 +413,154 @@ async function fixture(options: { maxAttemptsPerItem?: number } = {}) {
     failCommentEvent: (event: FactoryEvent["event"]) => {
       failCommentEvent = event;
     },
+    corruptBlob: memory.corruptBlob,
   };
 }
 
 describe("media application commands", () => {
+  it("exports private verified bytes to one stable read-only path across restarts", async () => {
+    const reviewRoot = await mkdtemp(join(tmpdir(), "factory-media-review-test-"));
+    try {
+      const test = await fixture({
+        assetReviewRoot: reviewRoot,
+        schedulingBaseSha: "c".repeat(40),
+      });
+      const selected = test.assetSet.variants[0]!;
+      const input = {
+        objective: 7,
+        assetSetDigest: test.assetSet.digest,
+        descriptorDigest: selected.descriptor.digest,
+      };
+      const first = await test.service.assetExport(input);
+      expect(first).toMatchObject({
+        operation: "asset-export",
+        assetSetDigest: test.assetSet.digest,
+        descriptor: {
+          digest: selected.descriptor.digest,
+          visibility: "private",
+          content: {
+            digest: selected.descriptor.content.digest,
+            bytes: selected.descriptor.content.bytes,
+            inspection: { mediaType: "image/png" },
+          },
+        },
+        storageReceipt: {
+          digest: selected.storage.digest,
+          transferDomain: "produced-asset",
+          readyCommit: selected.storage.readyCommit,
+        },
+        materialization: {
+          digest: selected.descriptor.content.digest,
+          bytes: selected.descriptor.content.bytes,
+          readOnly: true,
+        },
+      });
+      expect(first.materialization.path).toContain(selected.descriptor.digest);
+      expect(first.materialization.path).toMatch(/variant-\d+\.png$/);
+      expect(selected.descriptor.provenance.kind).toBe("produced");
+      if (selected.descriptor.provenance.kind !== "produced")
+        throw new Error("fixture descriptor is not produced media");
+      expect(await readFile(first.materialization.path)).toEqual(
+        Buffer.from(`variant-${selected.descriptor.provenance.outputIndex + 1}`),
+      );
+      expect((await stat(first.materialization.path)).mode & 0o222).toBe(0);
+      expect(await test.serviceForRestart().assetExport(input)).toEqual(first);
+    } finally {
+      await rm(reviewRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an unknown descriptor and tampered immutable content", async () => {
+    const reviewRoot = await mkdtemp(join(tmpdir(), "factory-media-review-test-"));
+    try {
+      const test = await fixture({ assetReviewRoot: reviewRoot });
+      test.setLogin("intruder");
+      await expect(
+        test.service.assetExport({
+          objective: 7,
+          assetSetDigest: test.assetSet.digest,
+          descriptorDigest: test.assetSet.variants[0]!.descriptor.digest,
+        }),
+      ).rejects.toThrow(/only the activating actor/);
+      test.setLogin("reviewer");
+      await expect(
+        test.service.assetExport({
+          objective: 7,
+          assetSetDigest: test.assetSet.digest,
+          descriptorDigest: "9".repeat(64),
+        }),
+      ).rejects.toThrow(/does not belong/);
+      const selected = test.assetSet.variants[0]!;
+      const ready = await test.assetStore.readCommit(selected.storage.readyCommit);
+      const chunk = selected.storage.payload.chunks[0]!;
+      const chunkOid = await test.assetStore.readTreeEntry(ready.treeOid, `chunks/${chunk.digest}`);
+      expect(chunkOid).toBeTruthy();
+      test.corruptBlob(chunkOid!, Buffer.from("tampered"));
+      await expect(
+        test.service.assetExport({
+          objective: 7,
+          assetSetDigest: test.assetSet.digest,
+          descriptorDigest: selected.descriptor.digest,
+        }),
+      ).rejects.toThrow(/identity mismatch/);
+    } finally {
+      await rm(reviewRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a tampered storage receipt before materialization", async () => {
+    const reviewRoot = await mkdtemp(join(tmpdir(), "factory-media-review-test-"));
+    try {
+      const test = await fixture({ assetReviewRoot: reviewRoot });
+      const commit = await test.assetStore.readCommit(test.storageManifest.commit);
+      const manifestBlob = await test.assetStore.readTreeEntry(
+        commit.treeOid,
+        "objective-assets.json",
+      );
+      expect(manifestBlob).toBeTruthy();
+      const tampered = JSON.parse(
+        (await test.assetStore.readBlob(manifestBlob!)).toString("utf8"),
+      ) as { assets: Array<{ storage: { readyCommit: string } }> };
+      tampered.assets[0]!.storage.readyCommit = "9".repeat(40);
+      test.corruptBlob(manifestBlob!, Buffer.from(JSON.stringify(tampered)));
+      await expect(
+        test.service.assetExport({
+          objective: 7,
+          assetSetDigest: test.assetSet.digest,
+          descriptorDigest: test.assetSet.variants[0]!.descriptor.digest,
+        }),
+      ).rejects.toThrow(/Git identity mismatch/);
+    } finally {
+      await rm(reviewRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("exports opaque non-raster content without semantic interpretation", async () => {
+    const reviewRoot = await mkdtemp(join(tmpdir(), "factory-media-review-test-"));
+    try {
+      const test = await fixture({ assetReviewRoot: reviewRoot, opaqueFirst: true });
+      const selected = test.assetSet.variants.find(
+        ({ descriptor }) => descriptor.content.inspection.status === "opaque",
+      )!;
+      const result = await test.service.assetExport({
+        objective: 7,
+        assetSetDigest: test.assetSet.digest,
+        descriptorDigest: selected.descriptor.digest,
+      });
+      expect(result.descriptor.content.inspection).toMatchObject({
+        status: "opaque",
+        mediaType: "application/octet-stream",
+        metadata: { kind: "opaque" },
+      });
+      expect(result.materialization.path).toMatch(/asset\.bin$/);
+      expect(await readFile(result.materialization.path)).toHaveLength(
+        selected.descriptor.content.bytes,
+      );
+    } finally {
+      await rm(reviewRoot, { recursive: true, force: true });
+    }
+  });
+
   it("approves an exact multi-variant selection and replays it after run termination", async () => {
     const test = await fixture();
     const selectedDescriptorDigests = test.assetSet.variants.map(

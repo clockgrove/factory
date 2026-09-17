@@ -34,6 +34,7 @@ export const APPLICATION_TOOL_DEFINITIONS: ReadonlyArray<
   ["factory_assets_import", "assets-import", WRITE],
   ["factory_assets_inspect", "assets-inspect", READ],
   ["factory_asset_status", "asset-status", READ],
+  ["factory_asset_export", "asset-export", WRITE],
   ["factory_asset_approve", "asset-approve", WRITE],
   ["factory_asset_reject", "asset-reject", DESTRUCTIVE],
   ["factory_asset_revise", "asset-revise", WRITE],

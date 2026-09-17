@@ -309,6 +309,7 @@ import {
   AssetProductionWorkerPacketSchema,
   implementationAssetInputs,
   parseWorkerPacket,
+  repositoryCaptureProfileForOutput,
   workerPacketDigest,
   type WorkerPacket,
 } from "./protocol/worker-packet.js";
@@ -11803,7 +11804,8 @@ export class FactorySupervisor {
         for (const { recipe, expected } of expectedByRecipe) {
           const profiles =
             profileIdsByDescriptor.get(expected.binding.descriptorDigest) ?? new Set();
-          if (recipe.profile) profiles.add(recipe.profile.kind);
+          const profile = repositoryCaptureProfileForOutput(recipe, recipe.comparison.outputRoleId);
+          if (profile) profiles.add(profile.kind);
           profileIdsByDescriptor.set(expected.binding.descriptorDigest, profiles);
         }
         return createValidationInvocation({

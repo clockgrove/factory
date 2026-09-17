@@ -36,6 +36,7 @@ import { RepositoryCaptureEgressPolicySchema } from "../protocol/policy.js";
 import {
   RepositoryCaptureProfileSchema,
   RepositoryCaptureRecipeSchema,
+  repositoryCaptureProfileForOutput,
   type RepositoryCaptureProfile,
   type RepositoryCaptureRecipe,
 } from "../protocol/worker-packet.js";
@@ -227,11 +228,11 @@ function validateCaptureOutputAuthorities(
       });
     const expectedProfiles = [
       ...new Set(
-        invocation.repositoryCaptureRecipes.flatMap((recipe) =>
-          recipe.comparison.expectedDescriptorDigest === input.descriptorDigest && recipe.profile
-            ? [recipe.profile.kind]
-            : [],
-        ),
+        invocation.repositoryCaptureRecipes.flatMap((recipe) => {
+          if (recipe.comparison.expectedDescriptorDigest !== input.descriptorDigest) return [];
+          const profile = repositoryCaptureProfileForOutput(recipe, recipe.comparison.outputRoleId);
+          return profile ? [profile.kind] : [];
+        }),
       ),
     ].sort();
     if (canonicalJson(input.profileIds) !== canonicalJson(expectedProfiles))
@@ -577,7 +578,8 @@ export function verifyRepositoryCaptureEvidenceBinding(
       canonicalJson(use.criterionIds) !== canonicalJson(recipe.criterionIds) ||
       use.scenarioId !== recipe.scenario.id ||
       use.sourcePath !== collectedFile.path ||
-      canonicalJson(use.profile) !== canonicalJson(recipe.profile) ||
+      canonicalJson(use.profile) !==
+        canonicalJson(repositoryCaptureProfileForOutput(recipe, output.roleId)) ||
       descriptor.validationInvocationDigest !== invocation.digest ||
       descriptor.content.digest !== collectedFile.digest ||
       descriptor.content.bytes !== collectedFile.bytes ||
@@ -771,7 +773,7 @@ async function mechanicalResult(
     comparator: recipe.comparison.comparator,
     metric: recipe.comparison.policy.metric,
     mediaType: output.mediaType,
-    profile: recipe.profile,
+    profile: repositoryCaptureProfileForOutput(recipe, recipe.comparison.outputRoleId),
     expected: expectedBytes,
     observed: observedBytes,
   });
@@ -863,6 +865,7 @@ export async function persistRepositoryCaptures(args: {
     const mechanicalResults: Array<z.infer<typeof CaptureMechanicalResultSchema>> = [];
     for (const recipe of invocation.repositoryCaptureRecipes) {
       for (const output of recipe.outputs) {
+        const profile = repositoryCaptureProfileForOutput(recipe, output.roleId);
         const identityKey = captureKey(recipe.id, output.roleId);
         const capture = collected.get(identityKey);
         const authority = authorities.get(identityKey);
@@ -881,10 +884,10 @@ export async function persistRepositoryCaptures(args: {
         )
           throw new Error("repository capture download differs from its bounded manifest");
         const inspection = await inspectDeclaredAssetBytes(bytes, output.mediaType, {
-          allowOpaque: recipe.profile === null,
-          displayName: safeDisplayName(capture.path, recipe.profile === null),
+          allowOpaque: profile === null,
+          displayName: safeDisplayName(capture.path, profile === null),
         });
-        assertProfile(recipe.profile, output.mediaType, inspection);
+        assertProfile(profile, output.mediaType, inspection);
         const contentDigest = createHash("sha256").update(bytes).digest("hex");
         const descriptorCore = CaptureDescriptorCoreSchema.parse({
           protocol: "clockgrove.factory/evidence-capture-descriptor",
@@ -916,7 +919,7 @@ export async function persistRepositoryCaptures(args: {
             scenarioId: recipe.scenario.id,
             outputRole: output.roleId,
             sourcePath: capture.path,
-            profile: recipe.profile,
+            profile,
           }),
         );
         if (!entriesByDescriptor.has(descriptor.digest)) {
@@ -1266,8 +1269,10 @@ export async function materializeRepositoryCaptureReviewBundle(args: {
       input.inspection.status !== "semantic-valid" ||
       input.inspection.mediaType !== input.declaredMediaType ||
       !reviewerSupportsInspection(capability, input.inspection) ||
-      associations.some(({ profile }) => profile && !capability.profiles.includes(profile.kind)) ||
-      (associations.some(({ profile }) => profile === null) && !capability.allowUnprofiled) ||
+      associations.some((recipe) => {
+        const profile = repositoryCaptureProfileForOutput(recipe, recipe.comparison.outputRoleId);
+        return profile ? !capability.profiles.includes(profile.kind) : !capability.allowUnprofiled;
+      }) ||
       !capability.visibilities.includes(input.visibility) ||
       !capability.rightsBases.includes(input.rights.basis) ||
       (args.policy.mode === "public-assets" && input.visibility === "private")
@@ -1381,7 +1386,8 @@ export async function materializeRepositoryCaptureReviewBundle(args: {
           descriptorDigest: input.descriptorDigest,
           recipeId: recipe.id,
           sourceName: input.displayName,
-          profileId: recipe.profile?.kind ?? null,
+          profileId:
+            repositoryCaptureProfileForOutput(recipe, recipe.comparison.outputRoleId)?.kind ?? null,
           outputRole: null,
         });
     }

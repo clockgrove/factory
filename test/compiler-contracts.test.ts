@@ -241,6 +241,46 @@ describe("adapter-owned compiler capabilities", () => {
     expect(RepositoryCaptureCatalogSchema.safeParse(duplicateRole).success).toBe(false);
   });
 
+  it("rejects non-raster MIME only when its exact output role is raster-profiled", () => {
+    const catalog = {
+      captures: [
+        {
+          command: "npm run capture",
+          comparisonOutput: { roleId: "capture", mediaType: "image/png" },
+          auxiliaryOutputs: [
+            { roleId: "report", mediaType: "application/json" },
+            { roleId: "log", mediaType: "text/plain" },
+            { roleId: "payload", mediaType: "application/octet-stream" },
+          ],
+          profile: {
+            kind: "raster" as const,
+            viewport: { width: 800, height: 600 },
+            output: { width: 4, height: 3 },
+            diffOutput: { roleId: "diff", mediaType: "image/png" },
+            previewOutput: { roleId: "preview", mediaType: "image/png" },
+          },
+          humanReview: false,
+          exactDeterministicGates: [],
+          thresholdComparisons: [],
+        },
+      ],
+    };
+    expect(RepositoryCaptureCatalogSchema.safeParse(catalog).success).toBe(true);
+    expect(
+      RepositoryCaptureCatalogSchema.safeParse({
+        captures: [
+          {
+            ...catalog.captures[0],
+            profile: {
+              ...catalog.captures[0]!.profile,
+              diffOutput: { roleId: "diff", mediaType: "application/json" },
+            },
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
   it("retains an unrelated observed generic recipe beside unsupported provider evidence", () => {
     const fixture = (paths: string[]) =>
       semanticPinnedFacts({

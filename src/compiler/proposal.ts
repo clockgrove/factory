@@ -22,7 +22,10 @@ import {
   normalizeSchedulingPolicy,
   type RunPolicy,
 } from "../protocol/policy.js";
-import { RepositoryScopePathSchema } from "../protocol/worker-packet.js";
+import {
+  repositoryCaptureProfileForOutput,
+  RepositoryScopePathSchema,
+} from "../protocol/worker-packet.js";
 import type { RepositoryCaptureRecipe } from "../protocol/worker-packet.js";
 import { MAX_GITHUB_TEXT_BYTES, MAX_WORKER_PACKET_BYTES } from "../protocol/limits.js";
 import {
@@ -1176,10 +1179,16 @@ function repositoryCaptureAuthorityReasons(
             )))
       )
         reasons.push("semantic reviewer lacks the exact MIME or inspection handler");
+      const outputProfiles = capture.outputs.map(({ roleId }) =>
+        repositoryCaptureProfileForOutput(capture, roleId),
+      );
+      const typedProfileKinds = new Set(
+        outputProfiles.flatMap((outputProfile) => (outputProfile ? [outputProfile.kind] : [])),
+      );
       if (
-        capture.profile
-          ? !reviewer.profiles.includes(capture.profile.kind)
-          : !reviewer.allowUnprofiled
+        (outputProfiles.some((outputProfile) => outputProfile === null) &&
+          !reviewer.allowUnprofiled) ||
+        [...typedProfileKinds].some((kind) => !reviewer.profiles.includes(kind))
       )
         reasons.push("semantic reviewer lacks the exact capture profile");
       if (

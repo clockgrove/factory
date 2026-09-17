@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
 import { WorkerAssetInputSchema } from "../assets/contracts.js";
+import { declaredAssetHandlerContract } from "../assets/handlers.js";
 import { WorkerMediaIntentUseSchema } from "../media/contracts.js";
 import {
   AssetProductionDeliverableSchema,
@@ -206,6 +207,25 @@ export const RepositoryCaptureProfileSchema = z.discriminatedUnion("kind", [
     })
     .strict(),
 ]);
+export type RepositoryCaptureProfile = z.infer<typeof RepositoryCaptureProfileSchema>;
+
+/** Resolve the typed inspection authority for one exact recipe output role.
+ * Auxiliary roles are deliberately unprofiled even when their recipe has a
+ * typed comparison profile. */
+export function repositoryCaptureProfileForOutput<
+  TProfile extends {
+    kind: string;
+    captureRoleId: string;
+    diffRoleId: string | null;
+    previewRoleId: string | null;
+  },
+>(recipe: Readonly<{ profile: TProfile | null }>, roleId: string): TProfile | null {
+  const profile = recipe.profile;
+  if (!profile) return null;
+  return [profile.captureRoleId, profile.diffRoleId, profile.previewRoleId].includes(roleId)
+    ? profile
+    : null;
+}
 
 const RepositoryCaptureComparisonSchema = z.discriminatedUnion("kind", [
   z
@@ -366,18 +386,42 @@ export const RepositoryCaptureRecipeSchema = RepositoryCaptureRecipeCoreSchema.e
         path: ["outputs"],
         message: "capture output roles are duplicated",
       });
-    if (value.profile)
-      for (const roleId of [
+    if (value.profile) {
+      const profiledRoleIds = [
         value.profile.captureRoleId,
         value.profile.diffRoleId,
         value.profile.previewRoleId,
-      ])
-        if (roleId !== null && !roles.includes(roleId))
+      ].filter((roleId): roleId is string => roleId !== null);
+      if (new Set(profiledRoleIds).size !== profiledRoleIds.length)
+        context.addIssue({
+          code: "custom",
+          path: ["profile"],
+          message: "raster profile output roles are duplicated",
+        });
+      for (const roleId of profiledRoleIds)
+        if (!roles.includes(roleId))
           context.addIssue({
             code: "custom",
             path: ["profile"],
             message: "raster profile references an undeclared output role",
           });
+    }
+    value.outputs.forEach((output, index) => {
+      const profile = repositoryCaptureProfileForOutput(value, output.roleId);
+      if (!profile) return;
+      let handlerId: string | null = null;
+      try {
+        handlerId = declaredAssetHandlerContract(output.mediaType).id;
+      } catch {
+        // Active or executable MIME is never valid capture evidence.
+      }
+      if (profile.kind === "raster" && handlerId !== "sharp-raster")
+        context.addIssue({
+          code: "custom",
+          path: ["outputs", index, "mediaType"],
+          message: "raster profile output requires the installed raster handler",
+        });
+    });
     if (!roles.includes(value.comparison.outputRoleId))
       context.addIssue({
         code: "custom",
@@ -415,7 +459,8 @@ export const RepositoryCaptureRecipeSchema = RepositoryCaptureRecipeCoreSchema.e
         canonicalJson(value.scenario) !== canonicalJson(authority.scenario) ||
         canonicalJson([...value.criterionIds].sort()) !==
           canonicalJson([...authority.criterionIds].sort()) ||
-        (value.profile?.kind ?? null) !== authority.profileId ||
+        (repositoryCaptureProfileForOutput(value, value.comparison.outputRoleId)?.kind ?? null) !==
+          authority.profileId ||
         !comparisonMatches
       )
         context.addIssue({
@@ -835,7 +880,6 @@ export type RepositoryChangeWorkerPacket =
 export type AssetProductionWorkerPacket = OptionalPacketDefaults<ParsedAssetProductionWorkerPacket>;
 export type WorkerPacket = RepositoryChangeWorkerPacket | AssetProductionWorkerPacket;
 export type RepositoryCaptureRecipe = z.infer<typeof RepositoryCaptureRecipeSchema>;
-export type RepositoryCaptureProfile = z.infer<typeof RepositoryCaptureProfileSchema>;
 export function isRepositoryChangeWorkerPacket(
   packet: WorkerPacket,
 ): packet is RepositoryChangeWorkerPacket {

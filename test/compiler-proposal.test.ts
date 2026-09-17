@@ -15,7 +15,10 @@ import {
   MAX_COMPILER_JUDGE_SOURCE_BYTES,
 } from "../src/compiler/judge-context.js";
 import { workerPacketFromCompiled } from "../src/graph.js";
-import { semanticReviewCriteria } from "../src/protocol/worker-packet.js";
+import {
+  repositoryCaptureProfileForOutput,
+  semanticReviewCriteria,
+} from "../src/protocol/worker-packet.js";
 import type { PinnedRepositoryFacts } from "../src/repository-profiles/read.js";
 import {
   parseAndValidateCompilerProposal,
@@ -1238,6 +1241,173 @@ describe("media intent compilation", () => {
       }),
     ]);
     expect(() => workerPacketFromCompiled(item)).not.toThrow();
+  });
+
+  it("projects mixed typed and unprofiled capture roles through deterministic authority", () => {
+    const profile = {
+      kind: "raster" as const,
+      viewport: { width: 1280, height: 720 },
+      output: { width: 800, height: 600 },
+      captureRoleId: "capture",
+      diffRoleId: "diff",
+      previewRoleId: "preview",
+    };
+    const outputs = [
+      { roleId: "capture", mediaType: "image/png" },
+      { roleId: "diff", mediaType: "image/png" },
+      { roleId: "preview", mediaType: "image/png" },
+      { roleId: "report", mediaType: "application/json" },
+      { roleId: "log", mediaType: "text/plain" },
+      { roleId: "payload", mediaType: "application/octet-stream" },
+    ];
+    const pinned = capturePinnedFacts({ outputs, profile, deterministic: true });
+    const request = semanticRequest(pinned);
+    for (const command of request.repositoryCapture.execution.commands) command.local = null;
+    request.repositoryCapture.egress.deterministicGateIds = ["exact-result"];
+    request.repositoryCapture.egress.policyDigest = compilerEvalDigest({
+      deterministicGateIds: request.repositoryCapture.egress.deterministicGateIds,
+      review: request.repositoryCapture.egress.review,
+    });
+    const captureRecipe = request.repository.validationRecipes.find(
+      ({ capture }) => capture?.kind === "capture",
+    )!;
+    const expected = expectedAssetBinding("image/png");
+    request.media.assetManifest = { digest: expected.manifestDigest, assets: [expected.asset] };
+    const proposal = semanticProposal(request);
+    proposal.mediaIntents = [
+      mediaIntent({
+        role: "acceptance-capture",
+        purpose: "acceptance-evidence",
+        fulfillment: { kind: "imported", assetIds: [expected.asset.id] },
+        review: null,
+        repositoryCapture: {
+          gate: { kind: "deterministic-preauthorized", authorityId: "exact-result" },
+          expectedAssetId: expected.asset.id,
+          scenario: { id: "default", fixture: "fixtures/result.json", seed: null },
+          captureRecipeId: captureRecipe.id,
+          comparison: { kind: "exact" },
+        },
+        bindings: [
+          { workItemId: "item-1", direction: "evidence-for", criterionIds: ["implemented"] },
+        ],
+      }),
+    ];
+
+    const result = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
+      runPolicy: projectionPolicy(request),
+      mediaPlanning: {
+        assetBindings: [{ assetId: expected.asset.id, input: expected.input }],
+        producerCapabilities: [],
+        reviewRules: [],
+      },
+    });
+    const item = result.objective.workItems[0]!;
+    const recipe = item.repositoryCaptureRecipes![0]!;
+    expect(recipe.outputs).toHaveLength(outputs.length);
+    expect(recipe.outputs).toEqual(expect.arrayContaining(outputs));
+    expect(
+      Object.fromEntries(
+        recipe.outputs.map(({ roleId }) => [
+          roleId,
+          repositoryCaptureProfileForOutput(recipe, roleId)?.kind ?? null,
+        ]),
+      ),
+    ).toEqual({
+      capture: "raster",
+      diff: "raster",
+      preview: "raster",
+      report: null,
+      log: null,
+      payload: null,
+    });
+    expect(() => workerPacketFromCompiled(item)).not.toThrow();
+  });
+
+  it("requires human review authority for every mixed typed and unprofiled output role", () => {
+    const profile = {
+      kind: "raster" as const,
+      viewport: { width: 1280, height: 720 },
+      output: { width: 800, height: 600 },
+      captureRoleId: "capture",
+      diffRoleId: null,
+      previewRoleId: null,
+    };
+    const pinned = capturePinnedFacts({
+      outputs: [
+        { roleId: "capture", mediaType: "image/png" },
+        { roleId: "report", mediaType: "application/json" },
+        { roleId: "log", mediaType: "text/plain" },
+      ],
+      profile,
+    });
+    const request = semanticRequest(pinned);
+    const captureRecipe = request.repository.validationRecipes.find(
+      ({ capture }) => capture?.kind === "capture",
+    )!;
+    const expected = expectedAssetBinding("image/png");
+    request.media.assetManifest = { digest: expected.manifestDigest, assets: [expected.asset] };
+    const proposal = semanticProposal(request);
+    proposal.mediaIntents = [
+      mediaIntent({
+        role: "acceptance-capture",
+        purpose: "acceptance-evidence",
+        fulfillment: { kind: "imported", assetIds: [expected.asset.id] },
+        review: null,
+        repositoryCapture: {
+          gate: { kind: "human-required" },
+          expectedAssetId: expected.asset.id,
+          scenario: { id: "default", fixture: null, seed: null },
+          captureRecipeId: captureRecipe.id,
+          comparison: { kind: "exact" },
+        },
+        bindings: [
+          { workItemId: "item-1", direction: "evidence-for", criterionIds: ["implemented"] },
+        ],
+      }),
+    ];
+    const context = {
+      pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
+      runPolicy: projectionPolicy(request),
+      mediaPlanning: {
+        assetBindings: [{ assetId: expected.asset.id, input: expected.input }],
+        producerCapabilities: [],
+        reviewRules: [],
+      },
+    };
+    const profileViolation = (profiles: string[], allowUnprofiled: boolean) => {
+      const candidate = structuredClone(request);
+      candidate.repositoryCapture.reviewer = {
+        ...candidate.repositoryCapture.reviewer!,
+        profiles,
+        allowUnprofiled,
+      };
+      return parseAndValidateCompilerProposal(candidate, proposal, {
+        ...context,
+        runPolicy: projectionPolicy(candidate),
+      }).report.violations.find(
+        ({ observed }) =>
+          Array.isArray(observed) &&
+          observed.includes("semantic reviewer lacks the exact capture profile"),
+      );
+    };
+    expect(profileViolation(["raster"], false)).toMatchObject({
+      observed: expect.arrayContaining(["semantic reviewer lacks the exact capture profile"]),
+    });
+    expect(profileViolation([], true)).toMatchObject({
+      observed: expect.arrayContaining(["semantic reviewer lacks the exact capture profile"]),
+    });
+
+    expect(parseAndValidateCompilerProposal(request, proposal, context).report).toMatchObject({
+      status: "valid",
+      violations: [],
+    });
+    const result = projectCompilerProposal({ request, proposal, ...context });
+    expect(() => workerPacketFromCompiled(result.objective.workItems[0]!)).not.toThrow();
   });
 
   it("converges in one repair when the model selects a bad capture recipe", () => {

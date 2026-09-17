@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import sharp from "sharp";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { inspectDeclaredAssetBytes } from "../src/assets/handlers.js";
 import type { ContentTransferStore } from "../src/control/content-transfers.js";
 import type { GitCommitObject } from "../src/control/lease.js";
 import { releaseAllArtifactContent } from "../src/execution/artifact-content.js";
@@ -21,8 +22,12 @@ import {
   cleanupLocalWorktree,
   createLocalWorktree,
 } from "../src/runtime/local-worktree.js";
-import type { RepositoryChangeWorkerPacket } from "../src/protocol/worker-packet.js";
-import type { RepositoryCaptureRecipe } from "../src/protocol/worker-packet.js";
+import {
+  RepositoryCaptureRecipeSchema,
+  repositoryCaptureProfileForOutput,
+  type RepositoryCaptureRecipe,
+  type RepositoryChangeWorkerPacket,
+} from "../src/protocol/worker-packet.js";
 import { discardValidationResult, validateArtifactClean } from "../src/validation/clean-run.js";
 import {
   createValidationInvocation,
@@ -33,6 +38,7 @@ import {
   persistRepositoryCaptures,
   RepositoryCaptureEvidenceSchema,
   runValidationInvocationTransaction,
+  ValidationInvocationSchema,
   verifyRepositoryCaptureEvidenceBinding,
   type CollectedRepositoryCapture,
   type ValidationInvocation,
@@ -141,6 +147,7 @@ function exactRecipe(args: {
   id?: string;
   roleId?: string;
   mediaType?: string;
+  outputs?: Array<{ roleId: string; mediaType: string }>;
   expectedDescriptorDigest: string;
   profile?: RepositoryCaptureRecipe["profile"];
   command?: string;
@@ -148,6 +155,11 @@ function exactRecipe(args: {
 }): RepositoryCaptureRecipe {
   const id = args.id ?? "capture-report";
   const commandDigest = sha(`capture-command:${id}`);
+  const outputs = args.outputs ?? [
+    { roleId: args.roleId ?? "result", mediaType: args.mediaType ?? "text/plain" },
+  ];
+  const comparisonRoleId = args.roleId ?? outputs[0]!.roleId;
+  const comparisonMediaType = outputs.find(({ roleId }) => roleId === comparisonRoleId)!.mediaType;
   const recipeCore = {
     id,
     mediaUse: { intentId: "intent-result-evidence", direction: "evidence-for" },
@@ -158,11 +170,11 @@ function exactRecipe(args: {
       recipeDigest: commandDigest,
       command: args.command ?? "npm run capture",
     },
-    outputs: [{ roleId: args.roleId ?? "result", mediaType: args.mediaType ?? "text/plain" }],
+    outputs,
     profile: args.profile ?? null,
     comparison: {
       kind: "exact",
-      outputRoleId: args.roleId ?? "result",
+      outputRoleId: comparisonRoleId,
       expectedDescriptorDigest: args.expectedDescriptorDigest,
       policy: { kind: "exact-bytes" },
     },
@@ -183,11 +195,9 @@ function exactRecipe(args: {
           captureCommand: recipeCore.captureCommand,
           comparison: { kind: "exact" as const },
           expectedDescriptorDigest: args.expectedDescriptorDigest,
-          expectedMediaType: args.mediaType ?? "text/plain",
+          expectedMediaType: comparisonMediaType,
           expectedDescriptorClass:
-            (args.mediaType ?? "text/plain") === "text/plain"
-              ? ("semantic" as const)
-              : ("opaque" as const),
+            comparisonMediaType === "text/plain" ? ("semantic" as const) : ("opaque" as const),
           expectedVisibility: "private" as const,
           expectedRightsBasis: "unknown" as const,
           observedVisibility: "private" as const,
@@ -219,6 +229,10 @@ function invocationFor(args: {
   const declaredMediaType = args.recipe.outputs.find(
     ({ roleId }) => roleId === args.recipe.comparison.outputRoleId,
   )!.mediaType;
+  const comparisonProfile = repositoryCaptureProfileForOutput(
+    args.recipe,
+    args.recipe.comparison.outputRoleId,
+  );
   return createValidationInvocation({
     protocol: "clockgrove.factory/validation-invocation",
     repository: "Fixture/Repository",
@@ -284,7 +298,7 @@ function invocationFor(args: {
                   reason: "no registered declared-type semantic validator",
                 },
               },
-        profileIds: args.recipe.profile ? [args.recipe.profile.kind] : [],
+        profileIds: comparisonProfile ? [comparisonProfile.kind] : [],
         visibility: "private",
         rights: { basis: "unknown" },
       },
@@ -860,6 +874,295 @@ describe("repository result capture evidence", () => {
       }),
     ).rejects.toThrow(/result tree changed/);
     expect(memory.refs.size).toBe(0);
+  });
+
+  it("binds typed profiles to exact roles across mixed output persistence and restart", async () => {
+    const png = await sharp({
+      create: { width: 4, height: 3, channels: 4, background: "#336699" },
+    })
+      .png()
+      .toBuffer();
+    const json = Buffer.from('{"status":"ready"}\n');
+    const text = Buffer.from("capture complete\n");
+    const opaque = Buffer.from([0, 1, 2, 3, 255]);
+    const recipe = exactRecipe({
+      expectedDescriptorDigest: sha("mixed-raster-reference"),
+      deterministicGateId: "exact-result",
+      roleId: "capture",
+      outputs: [
+        { roleId: "capture", mediaType: "image/png" },
+        { roleId: "diff", mediaType: "image/png" },
+        { roleId: "preview", mediaType: "image/png" },
+        { roleId: "report", mediaType: "application/json" },
+        { roleId: "log", mediaType: "text/plain" },
+        { roleId: "payload", mediaType: "application/octet-stream" },
+      ],
+      profile: {
+        kind: "raster",
+        viewport: { width: 800, height: 600 },
+        output: { width: 4, height: 3 },
+        captureRoleId: "capture",
+        diffRoleId: "diff",
+        previewRoleId: "preview",
+        constraints: {
+          kind: "raster",
+          minimumWidth: 4,
+          maximumWidth: 4,
+          minimumHeight: 3,
+          maximumHeight: 3,
+          alpha: "required",
+          animation: "forbidden",
+        },
+      },
+    });
+    expect(() => RepositoryCaptureRecipeSchema.parse(recipe)).not.toThrow();
+    expect(
+      recipe.outputs.map(({ roleId }) => [
+        roleId,
+        repositoryCaptureProfileForOutput(recipe, roleId)?.kind ?? null,
+      ]),
+    ).toEqual([
+      ["capture", "raster"],
+      ["diff", "raster"],
+      ["preview", "raster"],
+      ["report", null],
+      ["log", null],
+      ["payload", null],
+    ]);
+
+    const invocation = invocationFor({ recipe, expectedBytes: png });
+    const evidence = await persistCaptureBytes({
+      store: memoryStore().store,
+      invocation,
+      captures: [
+        { recipeId: recipe.id, roleId: "capture", path: "captures/frame.png", bytes: png },
+        { recipeId: recipe.id, roleId: "diff", path: "captures/diff.png", bytes: png },
+        { recipeId: recipe.id, roleId: "preview", path: "captures/preview.png", bytes: png },
+        { recipeId: recipe.id, roleId: "report", path: "captures/report.json", bytes: json },
+        { recipeId: recipe.id, roleId: "log", path: "captures/log.txt", bytes: text },
+        {
+          recipeId: recipe.id,
+          roleId: "payload",
+          path: "captures/payload.bin",
+          bytes: opaque,
+        },
+      ],
+      assertCurrent: async () => undefined,
+      assertOutputTree: async () => undefined,
+    });
+    expect(
+      Object.fromEntries(
+        evidence.uses.map(({ outputRole, profile }) => [outputRole, profile?.kind ?? null]),
+      ),
+    ).toEqual({
+      capture: "raster",
+      diff: "raster",
+      preview: "raster",
+      report: null,
+      log: null,
+      payload: null,
+    });
+    expect(
+      evidence.manifest.entries.map(({ descriptor }) => [
+        descriptor.content.declaredMediaType,
+        descriptor.content.inspection.status,
+      ]),
+    ).toEqual(
+      expect.arrayContaining([
+        ["image/png", "semantic-valid"],
+        ["application/json", "semantic-valid"],
+        ["text/plain", "semantic-valid"],
+        ["application/octet-stream", "opaque"],
+      ]),
+    );
+
+    const restartedInvocation = ValidationInvocationSchema.parse(
+      JSON.parse(JSON.stringify(invocation)),
+    );
+    const restartedEvidence = RepositoryCaptureEvidenceSchema.parse(
+      JSON.parse(JSON.stringify(evidence)),
+    );
+    expect(() =>
+      verifyRepositoryCaptureEvidenceBinding(restartedEvidence, restartedInvocation),
+    ).not.toThrow();
+
+    const { digest: _evidenceDigest, ...evidenceCore } = restartedEvidence;
+    const substitutedCore = {
+      ...evidenceCore,
+      uses: evidenceCore.uses.map((use) =>
+        use.outputRole === "report" ? { ...use, profile: recipe.profile } : use,
+      ),
+    };
+    const substituted = RepositoryCaptureEvidenceSchema.parse({
+      ...substitutedCore,
+      digest: sha(canonical(substitutedCore)),
+    });
+    expect(() => verifyRepositoryCaptureEvidenceBinding(substituted, restartedInvocation)).toThrow(
+      /recipe or authority/,
+    );
+  });
+
+  it("requires both typed and unprofiled authority for a mixed human review bundle", async () => {
+    const png = await sharp({
+      create: { width: 4, height: 3, channels: 4, background: "#336699" },
+    })
+      .png()
+      .toBuffer();
+    const json = Buffer.from('{"status":"ready"}\n');
+    const text = Buffer.from("capture complete\n");
+    const recipe = exactRecipe({
+      expectedDescriptorDigest: sha("mixed-human-reference"),
+      roleId: "capture",
+      outputs: [
+        { roleId: "capture", mediaType: "image/png" },
+        { roleId: "report", mediaType: "application/json" },
+        { roleId: "log", mediaType: "text/plain" },
+      ],
+      profile: {
+        kind: "raster",
+        viewport: null,
+        output: { width: 4, height: 3 },
+        captureRoleId: "capture",
+        diffRoleId: null,
+        previewRoleId: null,
+        constraints: {
+          kind: "raster",
+          minimumWidth: 4,
+          maximumWidth: 4,
+          minimumHeight: 3,
+          maximumHeight: 3,
+          alpha: "required",
+          animation: "forbidden",
+        },
+      },
+    });
+    const template = invocationFor({ recipe, expectedBytes: png });
+    const { digest: _templateDigest, ...templateCore } = template;
+    const expectedInspection = await inspectDeclaredAssetBytes(png, "image/png", {
+      allowOpaque: false,
+      displayName: "expected.png",
+    });
+    const invocation = createValidationInvocation({
+      ...templateCore,
+      mediaInputs: [
+        {
+          ...template.mediaInputs[0]!,
+          displayName: "expected.png",
+          inspection: expectedInspection,
+        },
+      ],
+    });
+    const memory = memoryStore();
+    const evidence = await persistCaptureBytes({
+      store: memory.store,
+      invocation,
+      captures: [
+        { recipeId: recipe.id, roleId: "capture", path: "captures/frame.png", bytes: png },
+        { recipeId: recipe.id, roleId: "report", path: "captures/report.json", bytes: json },
+        { recipeId: recipe.id, roleId: "log", path: "captures/log.txt", bytes: text },
+      ],
+      assertCurrent: async () => undefined,
+      assertOutputTree: async () => undefined,
+    });
+    const capability = {
+      id: "mixed-reviewer",
+      mediaTypes: ["image/png", "application/json", "text/plain"],
+      profiles: ["raster"],
+      allowUnprofiled: true,
+      visibilities: ["private"] as Array<"private" | "public">,
+      rightsBases: ["unknown"] as Array<
+        "unknown" | "user-owned" | "licensed" | "permission-granted"
+      >,
+      semanticHandlers: [
+        { id: "sharp-raster", contract: 1 },
+        { id: "json", contract: 1 },
+        { id: "utf8-text", contract: 1 },
+      ],
+      networkDestinations: [] as string[],
+      maximumAssets: 4,
+    };
+    const policy = {
+      mode: "private-assets" as const,
+      maxAssets: 4,
+      reviewerCapabilityIds: [capability.id],
+      allowedNetworkDestinations: [] as string[],
+    };
+    const bundle = (suffix: string, overrides: Partial<typeof capability>) =>
+      materializeRepositoryCaptureReviewBundle({
+        store: memory.store,
+        invocation,
+        evidence,
+        capability: { ...capability, ...overrides },
+        policy,
+        supervisorRoot: join("/tmp", `factory-capture-mixed-review-${suffix}-${Date.now()}`),
+        downloadExpected: async () => png,
+      });
+    await expect(bundle("no-unprofiled", { allowUnprofiled: false })).rejects.toThrow(
+      /profile is outside reviewer capability/,
+    );
+    await expect(bundle("no-raster", { profiles: [] })).rejects.toThrow(
+      /profile is outside reviewer capability/,
+    );
+
+    const root = join("/tmp", `factory-capture-mixed-review-ok-${Date.now()}`);
+    roots.push(root);
+    const materialized = await materializeRepositoryCaptureReviewBundle({
+      store: memory.store,
+      invocation,
+      evidence,
+      capability,
+      policy,
+      supervisorRoot: root,
+      downloadExpected: async () => png,
+    });
+    expect(new Set(materialized.files.map(({ mediaType }) => mediaType))).toEqual(
+      new Set(["image/png", "application/json", "text/plain"]),
+    );
+    expect(
+      materialized.files
+        .find(({ mediaType }) => mediaType === "image/png")!
+        .uses.map(({ kind, profileId, outputRole }) => ({ kind, profileId, outputRole })),
+    ).toEqual(
+      expect.arrayContaining([
+        { kind: "observed", profileId: "raster", outputRole: "capture" },
+        { kind: "expected", profileId: "raster", outputRole: null },
+      ]),
+    );
+    for (const mediaType of ["application/json", "text/plain"])
+      expect(
+        materialized.files
+          .find((file) => file.mediaType === mediaType)!
+          .uses.map(({ kind, profileId }) => ({ kind, profileId })),
+      ).toEqual([{ kind: "observed", profileId: null }]);
+  });
+
+  it("rejects non-raster MIME for an exact raster-profiled role", () => {
+    const recipe = exactRecipe({
+      expectedDescriptorDigest: sha("invalid-profiled-mime"),
+      roleId: "capture",
+      outputs: [
+        { roleId: "capture", mediaType: "image/png" },
+        { roleId: "diff", mediaType: "application/json" },
+      ],
+      profile: {
+        kind: "raster",
+        viewport: null,
+        output: null,
+        captureRoleId: "capture",
+        diffRoleId: "diff",
+        previewRoleId: null,
+        constraints: {
+          kind: "raster",
+          minimumWidth: null,
+          maximumWidth: null,
+          minimumHeight: null,
+          maximumHeight: null,
+          alpha: "allowed",
+          animation: "allowed",
+        },
+      },
+    });
+    expect(() => RepositoryCaptureRecipeSchema.parse(recipe)).toThrow(/installed raster handler/);
   });
 
   it("journals the exact invocation before clean validation and captures only the result tree", async () => {
@@ -1444,7 +1747,7 @@ describe("validation invocation no-replay transaction", () => {
           sourcePath: captures.find(
             (capture) => capture.recipeId === recipe.id && capture.roleId === output.roleId,
           )!.path,
-          profile: recipe.profile,
+          profile: repositoryCaptureProfileForOutput(recipe, output.roleId),
         })),
       ),
     };

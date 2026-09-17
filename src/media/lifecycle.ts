@@ -61,12 +61,19 @@ export function createMediaInvocation(args: {
   packet: AssetProductionWorkerPacket;
   capability: MediaProducerCapability;
   inputEntries: unknown[];
+  authorityBaseSha: string;
   deadline: string;
   policyDigest: string;
   model?: string;
   quality?: string;
   outputVisibility: unknown;
   outputRights: unknown;
+  revisionContext?: {
+    priorAssetSetDigest: string;
+    priorDecisionDigest: string;
+    feedback: string;
+    feedbackDigest: string;
+  } | null;
 }): MediaInvocation {
   const packet = AssetProductionWorkerPacketSchema.parse(args.packet);
   const capability = MediaProducerCapabilitySchema.parse(args.capability);
@@ -96,6 +103,11 @@ export function createMediaInvocation(args: {
   )
     throw new Error("non-raster output requires the media-agnostic binary profile");
   const inputEntries = args.inputEntries.map((value) => AssetManifestEntrySchema.parse(value));
+  if (
+    packet.assetInputs.length < capability.inputRequirement.minimumCount ||
+    packet.assetInputs.length > capability.inputRequirement.maximumCount
+  )
+    throw new Error("media input count is outside the producer capability");
   const byDescriptor = new Map(inputEntries.map((entry) => [entry.descriptor.digest, entry]));
   const inputAssets = packet.assetInputs.map((input) => {
     const entry = byDescriptor.get(input.descriptorDigest);
@@ -110,10 +122,12 @@ export function createMediaInvocation(args: {
     if (!capability.inputMediaTypes.includes(mediaType))
       throw new Error(`producer capability does not accept input MIME ${mediaType}`);
     return {
+      manifestDigest: input.manifestDigest,
       descriptorDigest: entry.descriptor.digest,
       contentDigest: entry.descriptor.content.digest,
       storageReceiptDigest: entry.storage.digest,
       mediaType,
+      path: input.path,
     };
   });
   const model = args.model ?? capability.models[0] ?? null;
@@ -131,8 +145,11 @@ export function createMediaInvocation(args: {
     runId: args.runId,
     workItem: args.workItem,
     attempt: args.attempt,
+    authorityBaseSha: args.authorityBaseSha,
     reservationRef: attemptRef(args.objective, args.workItem, args.attempt),
     intentId: intent.id,
+    intentKind: intent.kind,
+    intentPurpose: intent.purpose,
     intentDigest: assetDigest(intent),
     workerPacketDigest: workerPacketDigest(packet),
     adapterId: capability.id,
@@ -148,11 +165,16 @@ export function createMediaInvocation(args: {
     outputRights: AssetRightsSchema.parse(args.outputRights),
     deadline: args.deadline,
     policyDigest: args.policyDigest,
-    providerRequests: 1,
     requestedVariants,
-    maximumVariants: Math.min(intent.output.maximumCount, capability.limits.variants),
-    maximumGeneratedBytes: capability.limits.generatedBytes,
-    maximumStorageBytes: capability.limits.storageBytes,
+    usageReservation: withMediaDigest({
+      protocol: "clockgrove.factory/media-usage-reservation-v1" as const,
+      providerRequests: capability.limits.providerRequests,
+      variants: Math.min(intent.output.maximumCount, capability.limits.variants),
+      generatedBytes: capability.limits.generatedBytes,
+      storageBytes: capability.limits.storageBytes,
+      nativeUnits: [...capability.nativeUsageKeys].sort(),
+    }),
+    revisionContext: args.revisionContext ?? null,
     networkDestinations: capability.network.destinations,
     thirdPartyEgress: capability.network.thirdPartyEgress,
   };

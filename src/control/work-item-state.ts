@@ -74,6 +74,13 @@ export function deriveWorkItemState(
       .reverse()
       .find((event) => ["MediaCleanupFailed", "MediaCleanupCompleted"].includes(event.event));
     if (cleanup?.event === "MediaCleanupFailed") return "in_flight";
+    const attemptEvents = events.filter((event) => event.kind === "attempt");
+    const terminalAttempt = [...attemptEvents]
+      .reverse()
+      .find((event) =>
+        ["AttemptFailed", "AttemptTimedOut", "AttemptCancelled"].includes(event.event),
+      );
+    if (terminalAttempt) return "failed";
     const activation = mediaEvents.find((event) => event.event === "AssetActivated");
     if (activation) return workItem.closed ? "done" : "for_review";
     if (workItem.closed) return "inconsistent";

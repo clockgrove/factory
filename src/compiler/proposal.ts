@@ -655,6 +655,8 @@ function mediaCapabilitySupports(
     capability.kinds.includes(intent.kind) &&
     capability.purposes.includes(intent.purpose) &&
     output.mediaTypes.some((mediaType) => capability.mediaTypes.includes(mediaType)) &&
+    intent.importedAssetIds.length >= capability.inputRequirement.minimumCount &&
+    intent.importedAssetIds.length <= capability.inputRequirement.maximumCount &&
     output.minimumCount <= capability.maximumCount &&
     (raster === null ||
       (capabilityRaster !== null &&
@@ -715,6 +717,16 @@ function canonicalMediaIntent(intent: MediaIntent): MediaIntent {
           JSON.stringify(left.criterionIds).localeCompare(JSON.stringify(right.criterionIds)),
       ),
   };
+}
+
+function projectedMediaProducerCount(request: CompilerRequest, proposal: CompilerProposal): number {
+  return proposal.mediaIntents.filter(
+    (intent) =>
+      !importedAssetsSatisfyMediaIntent(request, intent) &&
+      request.media.producerCapabilities.some((capability) =>
+        mediaCapabilitySupports(capability, intent),
+      ),
+  ).length;
 }
 
 function mediaIntentViolations(
@@ -1105,13 +1117,15 @@ export function parseAndValidateCompilerProposal(
   const projectionFacts = projectionContext
     ? compilerProjectionFactsFromPinned(projectionContext.pinnedFacts)
     : undefined;
-  if (proposal.workItems.length > request.constraints.maxWorkItems)
+  const finalProjectedWorkItemCount =
+    proposal.workItems.length + projectedMediaProducerCount(request, proposal);
+  if (finalProjectedWorkItemCount > request.constraints.maxWorkItems)
     violations.push(
       violation(
         "work-item-count",
         "/workItems",
         request.constraints.maxWorkItems,
-        proposal.workItems.length,
+        finalProjectedWorkItemCount,
       ),
     );
   const analysis = analyzeDependencies(proposal.workItems);
@@ -1691,8 +1705,10 @@ export function parseAndValidateCompilerProposal(
           projectionContext.runPolicy,
         ),
       );
+      const assessedProjectedWorkItems =
+        assessment.workItems + projectedMediaProducerCount(request, proposal);
       const exceeded =
-        assessment.workItems > request.constraints.planningWorkItemThreshold ||
+        assessedProjectedWorkItems > request.constraints.planningWorkItemThreshold ||
         (assessment.configuredCriticalPathMinutes !== null &&
           assessment.configuredCriticalPathMinutes >
             request.constraints.planningCriticalPathMinutes) ||
@@ -1709,7 +1725,7 @@ export function parseAndValidateCompilerProposal(
               maximumAggregateWorkMinutes: request.constraints.planningAggregateWorkMinutes,
             },
             {
-              workItems: assessment.workItems,
+              workItems: assessedProjectedWorkItems,
               configuredCriticalPathMinutes: assessment.configuredCriticalPathMinutes,
               configuredAggregateWorkMinutes: assessment.configuredWorkMinutes,
             },

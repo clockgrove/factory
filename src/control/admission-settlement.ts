@@ -196,8 +196,8 @@ export function buildAdmissionSettlementEvidence(args: {
   )
     throw new Error("admission accounting contradicts original epoch or policy");
   if (entry.mediaInvocation) {
-    if (nonExecution || artifactConsumer)
-      throw new Error("dispatched media admission cannot use non-execution settlement");
+    if (artifactConsumer)
+      throw new Error("media admission cannot use artifact-consumer settlement");
     const invocation = entry.mediaInvocation;
     const media = scoped.filter(
       (event): event is MediaEvent =>
@@ -205,16 +205,40 @@ export function buildAdmissionSettlementEvidence(args: {
         event.reservationOid === entry.reservation.oid &&
         event.invocationDigest === invocation.digest,
     );
+    const usage = [...media]
+      .reverse()
+      .find((event) => event.event === "MediaUsageSettled")?.accounting;
+    if (nonExecution) {
+      if (
+        !usage ||
+        usage.providerRequests !== 0 ||
+        usage.variants !== 0 ||
+        usage.generatedBytes !== 0 ||
+        usage.storageBytes !== 0 ||
+        usage.native.some(({ amount }) => amount !== 0) ||
+        media.some((event) => event.event === "MediaDispatchRecorded")
+      )
+        throw new Error("media non-execution settlement lacks exact zero usage");
+      return {
+        reservationOid: entry.reservation.oid,
+        resourceIdentity: entry.resourceIdentity,
+        capacityReservationId: entry.capacityReservationId,
+        budgetReservationId: entry.budgetReservationId,
+        producerStopped: true,
+        resourcesReleased: true,
+        capacityReleased: true,
+        accountingSettled: true,
+        evidenceOid: nonExecution.evidenceOid,
+      };
+    }
     const mediaCleanup = [...media]
       .reverse()
       .find((event) => ["MediaCleanupCompleted", "MediaCleanupFailed"].includes(event.event));
     if (mediaCleanup?.event !== "MediaCleanupCompleted")
       throw new Error("media admission has no exact successful cleanup receipt");
-    const usage = [...media]
-      .reverse()
-      .find((event) => event.event === "MediaUsageSettled")?.accounting;
     if (
       !usage ||
+      usage.providerRequests === null ||
       usage.variants === null ||
       usage.generatedBytes === null ||
       usage.storageBytes === null ||

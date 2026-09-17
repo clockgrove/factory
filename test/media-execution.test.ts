@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { assetDigest } from "../src/assets/contracts.js";
+import { assetDigest, withAssetDigest } from "../src/assets/contracts.js";
 import type { GitCommitObject } from "../src/control/lease.js";
 import { releaseAllArtifactContent } from "../src/execution/artifact-content.js";
 import {
@@ -27,7 +27,6 @@ import {
   persistAssetDecision,
   readAssetActivation,
   readAssetDecisionByAssetSet,
-  readAssetDecisionByRequest,
   readMediaDispatchReceiptByInvocation,
 } from "../src/media/storage.js";
 import type { MediaStore } from "../src/media/storage.js";
@@ -41,6 +40,62 @@ afterEach(async () => {
 
 const gitOid = (bytes: Buffer) =>
   createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+
+const REFERENCE_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEUlEQVQImWPgUbL4D8IMMAYALGgFlcy8lt0AAAAASUVORK5CYII=",
+  "base64",
+);
+const REFERENCE_DIGEST = createHash("sha256").update(REFERENCE_PNG).digest("hex");
+const REFERENCE_DESCRIPTOR = withAssetDigest({
+  protocol: "clockgrove.factory/asset-descriptor" as const,
+  content: {
+    protocol: "clockgrove.factory/asset-content" as const,
+    digest: REFERENCE_DIGEST,
+    bytes: REFERENCE_PNG.length,
+    inspection: {
+      status: "semantic-valid" as const,
+      handlerId: "sharp-raster",
+      handlerContract: 1,
+      mediaType: "image/png",
+      metadata: {
+        kind: "raster" as const,
+        format: "png" as const,
+        width: 2,
+        height: 2,
+        frames: 1,
+        channels: 4,
+        hasAlpha: true,
+        decodedBytes: 16,
+      },
+    },
+  },
+  displayName: "composition.png",
+  provenance: {
+    kind: "local-file" as const,
+    importId: "composition",
+    originalName: "composition.png",
+  },
+  visibility: "private" as const,
+  rights: { basis: "user-owned" as const },
+  materializationPath: `assets/${REFERENCE_DIGEST}/composition.png`,
+});
+const REFERENCE_STORAGE = withAssetDigest({
+  protocol: "clockgrove.factory/asset-storage-receipt" as const,
+  authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
+  descriptorDigest: REFERENCE_DESCRIPTOR.digest,
+  transferDomain: "objective-asset" as const,
+  payload: {
+    kind: "content-chunks" as const,
+    digest: REFERENCE_DIGEST,
+    bytes: REFERENCE_PNG.length,
+    chunks: [{ digest: REFERENCE_DIGEST, bytes: REFERENCE_PNG.length }],
+  },
+  transferRef: "refs/clockgrove-factory/artifact-transfers/reference",
+  transferRequestId: "reference",
+  intentCommit: "1".repeat(40),
+  readyCommit: "2".repeat(40),
+});
+const REFERENCE_ENTRY = { descriptor: REFERENCE_DESCRIPTOR, storage: REFERENCE_STORAGE };
 
 function memoryStore() {
   const blobs = new Map<string, Buffer>();
@@ -106,7 +161,15 @@ function packet(capabilityDigest = assetDigest(SHARP_RASTER_MEDIA_CAPABILITY)) {
       permittedSecretNames: [],
       trust: "managed" as const,
     },
-    assetInputs: [],
+    assetInputs: [
+      {
+        manifestDigest: "3".repeat(64),
+        descriptorDigest: REFERENCE_DESCRIPTOR.digest,
+        contentDigest: REFERENCE_DIGEST,
+        storageReceiptDigest: REFERENCE_STORAGE.digest,
+        path: REFERENCE_DESCRIPTOR.materializationPath,
+      },
+    ],
     deliverable: {
       kind: "asset-production" as const,
       contract: "clockgrove.factory/asset-set" as const,
@@ -120,7 +183,7 @@ function packet(capabilityDigest = assetDigest(SHARP_RASTER_MEDIA_CAPABILITY)) {
         obligationIds: ["visual-contract"],
         rationale: "The implementation consumes this exact reference.",
         brief: "Produce a deterministic two-pixel visual reference.",
-        importedAssetIds: [],
+        importedAssetIds: ["composition"],
         output: {
           mediaTypes: ["image/png" as const],
           minimumCount: 1,
@@ -147,7 +210,11 @@ function packet(capabilityDigest = assetDigest(SHARP_RASTER_MEDIA_CAPABILITY)) {
   } satisfies AssetProductionWorkerPacket;
 }
 
-function invocation(packetInput = packet(), deadline = "2099-01-01T00:00:00.000Z") {
+function invocation(
+  packetInput = packet(),
+  deadline = "2099-01-01T00:00:00.000Z",
+  capability = SHARP_RASTER_MEDIA_CAPABILITY,
+) {
   return createMediaInvocation({
     repository: "fixture/project",
     objective: 7,
@@ -155,13 +222,37 @@ function invocation(packetInput = packet(), deadline = "2099-01-01T00:00:00.000Z
     workItem: 17,
     attempt: 1,
     packet: packetInput,
-    capability: SHARP_RASTER_MEDIA_CAPABILITY,
-    inputEntries: [],
+    capability,
+    authorityBaseSha: "b".repeat(40),
+    inputEntries: [REFERENCE_ENTRY],
     deadline,
     policyDigest: "c".repeat(64),
     outputVisibility: "private",
     outputRights: { basis: "unknown" },
   });
+}
+
+async function requestFor(exact: ReturnType<typeof invocation>) {
+  const root = await mkdtemp(join(tmpdir(), "factory-media-input-"));
+  roots.push(root);
+  const path = join(root, REFERENCE_DESCRIPTOR.materializationPath);
+  await mkdir(join(root, `assets/${REFERENCE_DIGEST}`), { recursive: true });
+  await writeFile(path, REFERENCE_PNG, { mode: 0o444 });
+  const runtimePacket = packet(exact.capabilityDigest);
+  runtimePacket.deliverable.producerCapabilityId = exact.adapterId;
+  return {
+    invocation: exact,
+    packet: runtimePacket,
+    inputRoot: root,
+    inputs: [
+      {
+        descriptorDigest: REFERENCE_DESCRIPTOR.digest,
+        contentDigest: REFERENCE_DIGEST,
+        mediaType: "image/png",
+        path,
+      },
+    ],
+  };
 }
 
 function hooks() {
@@ -220,7 +311,7 @@ describe("media production execution", () => {
     const exact = invocation();
     const result = await executor.runPrepared({
       authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
-      invocation: exact,
+      request: await requestFor(exact),
       reservationOid: "a".repeat(40),
     });
     expect(result).toMatchObject({ state: "for-review", cleanupPending: false });
@@ -233,7 +324,7 @@ describe("media production execution", () => {
     expect(recorded.calls.sets).toHaveLength(1);
     expect(recorded.calls.accounting).toEqual([
       expect.objectContaining({
-        providerRequests: 1,
+        providerRequests: 0,
         variants: 1,
         native: [
           { unit: "generated_bytes", amount: expect.any(Number) },
@@ -279,20 +370,27 @@ describe("media production execution", () => {
     await expect(
       executor.runPrepared({
         authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
-        invocation: invocation(),
+        request: await requestFor(invocation()),
         reservationOid: "a".repeat(40),
       }),
-    ).rejects.toThrow(/before dispatch/);
+    ).resolves.toMatchObject({ state: "failed", definitiveNonExecution: true });
     expect(launches).toBe(0);
     expect(recorded.calls.dispatching).toBe(0);
   });
 
   it("records unknown after a possible dispatch and never launches during recovery", async () => {
     const memory = memoryStore();
-    const exact = invocation();
+    const paidCapability = {
+      ...SHARP_RASTER_MEDIA_CAPABILITY,
+      id: "fixture/remote-raster-v1",
+      limits: { ...SHARP_RASTER_MEDIA_CAPABILITY.limits, providerRequests: 1 },
+    };
+    const paidPacket = packet(assetDigest(paidCapability));
+    paidPacket.deliverable.producerCapabilityId = paidCapability.id;
+    const exact = invocation(paidPacket, "2099-01-01T00:00:00.000Z", paidCapability);
     let launches = 0;
     const adapter: MediaProducerAdapter = {
-      capability: SHARP_RASTER_MEDIA_CAPABILITY,
+      capability: paidCapability,
       probe: async () => ({ available: true, authenticated: true }),
       dispatch: async () => {
         launches += 1;
@@ -318,7 +416,7 @@ describe("media production execution", () => {
     await expect(
       executor.runPrepared({
         authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
-        invocation: exact,
+        request: await requestFor(exact),
         reservationOid: "a".repeat(40),
       }),
     ).resolves.toMatchObject({ state: "unknown", dispatchReceipt: null });
@@ -334,7 +432,7 @@ describe("media production execution", () => {
     await expect(
       recovery.resumeDispatched({
         authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
-        invocation: exact,
+        request: await requestFor(exact),
         reservationOid: "a".repeat(40),
       }),
     ).resolves.toMatchObject({ state: "unknown", dispatchReceipt: null });
@@ -343,7 +441,7 @@ describe("media production execution", () => {
       expect.objectContaining({
         state: "unknown",
         accounting: expect.objectContaining({
-          providerRequests: 1,
+          providerRequests: null,
           variants: null,
           generatedBytes: null,
           storageBytes: null,
@@ -380,7 +478,7 @@ describe("media production execution", () => {
     await expect(
       executor.resumeDispatched({
         authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
-        invocation: invocation(),
+        request: await requestFor(invocation()),
         reservationOid: "a".repeat(40),
       }),
     ).resolves.toMatchObject({ state: "for-review", cleanupPending: false });
@@ -421,7 +519,7 @@ describe("media production execution", () => {
       assertCurrent: async () => {},
     }).resumeDispatched({
       authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
-      invocation: invocation(packet(), "2026-01-01T00:00:00.000Z"),
+      request: await requestFor(invocation(packet(), "2026-01-01T00:00:00.000Z")),
       reservationOid: "a".repeat(40),
     });
     expect(result).toMatchObject({ state: "cancelled", cleanupPending: false });
@@ -435,6 +533,11 @@ describe("media production execution", () => {
       ...SHARP_RASTER_MEDIA_CAPABILITY,
       id: "fixture/local-audio-v1",
       inputMediaTypes: [] as string[],
+      inputRequirement: {
+        minimumCount: 0,
+        maximumCount: 0,
+        semantics: "none" as const,
+      },
       outputMediaTypes: ["audio/wav"],
       intentKinds: ["sound-reference" as const],
       profiles: [{ kind: "binary" as const }],
@@ -443,7 +546,9 @@ describe("media production execution", () => {
       packet(assetDigest(binaryCapability)),
     ) as unknown as AssetProductionWorkerPacket;
     binaryPacket.deliverable.producerCapabilityId = binaryCapability.id;
+    binaryPacket.assetInputs = [];
     binaryPacket.deliverable.intent.kind = "sound-reference";
+    binaryPacket.deliverable.intent.importedAssetIds = [];
     binaryPacket.deliverable.intent.output = {
       mediaTypes: ["audio/wav"],
       minimumCount: 1,
@@ -458,6 +563,7 @@ describe("media production execution", () => {
       attempt: 1,
       packet: binaryPacket,
       capability: binaryCapability,
+      authorityBaseSha: "b".repeat(40),
       inputEntries: [],
       deadline: "2099-01-01T00:00:00.000Z",
       policyDigest: "c".repeat(64),
@@ -496,7 +602,7 @@ describe("media production execution", () => {
       assertCurrent: async () => {},
     }).runPrepared({
       authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
-      invocation: exact,
+      request: await requestFor(exact),
       reservationOid: "a".repeat(40),
     });
     expect(result.state).toBe("for-review");
@@ -533,7 +639,7 @@ describe("media production execution", () => {
       assertCurrent: async () => {},
     }).runPrepared({
       authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
-      invocation: exact,
+      request: await requestFor(exact),
       reservationOid: "a".repeat(40),
     });
     if (result.state !== "for-review") throw new Error("expected reviewable asset set");
@@ -563,14 +669,6 @@ describe("media production execution", () => {
       assertCurrent: async () => {},
     });
     expect(repeated.commit).toBe(first.commit);
-    expect(
-      await readAssetDecisionByRequest({
-        store: memory.store,
-        authority,
-        runId: exact.runId,
-        requestId: decision.requestId,
-      }),
-    ).toMatchObject({ decision: { digest: decision.digest } });
     expect(
       await readAssetDecisionByAssetSet({
         store: memory.store,

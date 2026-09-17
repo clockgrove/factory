@@ -868,6 +868,20 @@ export function renderWorkPacket(wi: CompiledWorkItem, graphMetadata?: GraphItem
     section("Out of scope", wi.outOfScope),
     section("Conventions", wi.conventions),
     section(
+      "Media uses",
+      (wi.mediaUses ?? []).map(
+        (use) =>
+          `${use.intentId}: ${use.kind}/${use.purpose} ${use.direction}; criteria ${use.criterionIds.join(", ") || "none"}; descriptors ${use.descriptorDigests.join(", ")}`,
+      ),
+    ),
+    section(
+      "Generated media requirements",
+      (wi.generatedAssetRequirements ?? []).map(
+        (requirement) =>
+          `${requirement.intentId}: ${requirement.kind}/${requirement.purpose} from ${requirement.producerWorkItemId}; criteria ${requirement.criterionIds.join(", ") || "none"}`,
+      ),
+    ),
+    section(
       "Execution requirement evidence",
       wi.requirements?.evidence?.map(
         (evidence) => `${evidence.field}: ${evidence.kind} — ${evidence.source}`,

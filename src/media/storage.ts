@@ -33,8 +33,6 @@ const recordRef = (
   collection: "dispatches" | "asset-sets" | "decisions" | "activations",
   digest: string,
 ) => `refs/clockgrove-factory/media/${scopeKey(authority, runId)}/${collection}/${digest}`;
-export const mediaDecisionRequestRef = (authority: unknown, runId: string, requestId: string) =>
-  `refs/clockgrove-factory/media/${scopeKey(authority, runId)}/decision-requests/${assetDigest(requestId)}`;
 export const mediaAssetSetDecisionRef = (
   authority: unknown,
   runId: string,
@@ -59,6 +57,7 @@ async function publishRecord(args: {
   parentOids: string[];
   primaryRef?: string;
   aliasRefs?: string[];
+  publishDigestRef?: boolean;
   assertCurrent(): Promise<void>;
 }) {
   const bytes = Buffer.from(canonicalAssetJson(args.record));
@@ -85,7 +84,10 @@ async function publishRecord(args: {
     return oid;
   };
   const ensureAliases = async (commit: string) => {
-    for (const alias of new Set([ref, ...(args.aliasRefs ?? [])])) {
+    for (const alias of new Set([
+      ...(args.publishDigestRef === false ? [] : [ref]),
+      ...(args.aliasRefs ?? []),
+    ])) {
       const existing = await args.store.readRef(alias);
       if (existing && existing !== commit)
         throw new Error("immutable media record alias conflicted");
@@ -101,7 +103,7 @@ async function publishRecord(args: {
           throw new Error("immutable media record alias publication is unresolved");
       }
     }
-    return { ref, commit };
+    return { ref: args.publishDigestRef === false ? primaryRef : ref, commit };
   };
   const existing = await args.store.readRef(primaryRef);
   if (existing) return ensureAliases(await verify(existing));
@@ -183,12 +185,13 @@ export async function persistMediaDispatchReceipt(args: {
       record: receipt,
       parentOids: args.parentOids ?? [],
       primaryRef: mediaInvocationDispatchRef(authority, args.runId, receipt.invocationDigest),
+      publishDigestRef: false,
       assertCurrent: args.assertCurrent,
     })),
   };
 }
 
-async function readDecisionAlias(args: {
+async function readAssetSetDecision(args: {
   store: MediaStore;
   authority: unknown;
   runId: string;
@@ -202,24 +205,9 @@ async function readDecisionAlias(args: {
   const bytes = await args.store.readBlob(blob);
   if (gitOid(bytes) !== blob) throw new Error("immutable asset decision Git identity mismatch");
   const decision = AssetDecisionSchema.parse(JSON.parse(bytes.toString("utf8")));
-  const canonical = await args.store.readRef(
-    recordRef(args.authority, args.runId, "decisions", decision.digest),
-  );
-  if (canonical !== null && canonical !== oid)
-    throw new Error("asset decision alias differs from canonical record");
+  if (decision.assetSetDigest !== args.ref.split("/").at(-1))
+    throw new Error("asset decision differs from its Asset Set authority");
   return { decision, ref: args.ref, commit: oid };
-}
-
-export function readAssetDecisionByRequest(args: {
-  store: MediaStore;
-  authority: unknown;
-  runId: string;
-  requestId: string;
-}) {
-  return readDecisionAlias({
-    ...args,
-    ref: mediaDecisionRequestRef(args.authority, args.runId, args.requestId),
-  });
 }
 
 export function readAssetDecisionByAssetSet(args: {
@@ -228,23 +216,9 @@ export function readAssetDecisionByAssetSet(args: {
   runId: string;
   assetSetDigest: string;
 }) {
-  return readDecisionAlias({
+  return readAssetSetDecision({
     ...args,
     ref: mediaAssetSetDecisionRef(args.authority, args.runId, args.assetSetDigest),
-  });
-}
-
-export function readMediaDispatchReceipt(args: {
-  store: MediaStore;
-  authority: unknown;
-  runId: string;
-  digest: string;
-}) {
-  return readRecord({
-    ...args,
-    collection: "dispatches",
-    filename: "media-dispatch.json",
-    parse: (value) => MediaDispatchReceiptSchema.parse(value),
   });
 }
 
@@ -265,10 +239,6 @@ export async function readMediaDispatchReceiptByInvocation(args: {
   const receipt = MediaDispatchReceiptSchema.parse(JSON.parse(bytes.toString("utf8")));
   if (receipt.invocationDigest !== args.invocationDigest)
     throw new Error("media dispatch index differs from its invocation");
-  const canonical = await args.store.readRef(
-    recordRef(args.authority, args.runId, "dispatches", receipt.digest),
-  );
-  if (canonical !== oid) throw new Error("media dispatch index differs from canonical receipt");
   return { receipt, ref, commit: oid };
 }
 
@@ -291,14 +261,17 @@ export async function persistAssetSet(args: {
   if (
     args.collection.variants.length < 1 ||
     args.collection.variants.length !== invocation.requestedVariants ||
-    args.collection.variants.length > invocation.maximumVariants
+    args.collection.variants.length > invocation.usageReservation.variants
   )
     throw new Error("collected media variant count differs from invocation");
   const totalBytes = args.collection.variants.reduce(
     (total, variant) => total + variant.bytes.length,
     0,
   );
-  if (totalBytes > invocation.maximumGeneratedBytes || totalBytes > invocation.maximumStorageBytes)
+  if (
+    totalBytes > invocation.usageReservation.generatedBytes ||
+    totalBytes > invocation.usageReservation.storageBytes
+  )
     throw new Error("collected media bytes exceed invocation limits");
   const usage = new Map(args.collection.usage.map((entry) => [entry.unit, entry.amount]));
   const capabilityUsage = new Set(args.collection.usage.map((entry) => entry.unit));
@@ -385,24 +358,10 @@ export async function persistAssetDecision(args: {
       record: decision,
       parentOids: args.parentOids ?? [],
       primaryRef: mediaAssetSetDecisionRef(authority, decision.runId, decision.assetSetDigest),
-      aliasRefs: [mediaDecisionRequestRef(authority, decision.runId, decision.requestId)],
+      publishDigestRef: false,
       assertCurrent: args.assertCurrent,
     })),
   };
-}
-
-export function readAssetDecision(args: {
-  store: MediaStore;
-  authority: unknown;
-  runId: string;
-  digest: string;
-}) {
-  return readRecord({
-    ...args,
-    collection: "decisions",
-    filename: "asset-decision.json",
-    parse: (value) => AssetDecisionSchema.parse(value),
-  });
 }
 
 export function createAssetActivation(args: {

@@ -150,6 +150,13 @@ export const CompilerMediaProducerCapabilitySchema = z
     kinds: z.array(MediaIntentKindSchema).min(1).max(8),
     purposes: z.array(MediaIntentPurposeSchema).min(1).max(4),
     mediaTypes: z.array(MediaTypeSchema).min(1).max(16),
+    inputRequirement: z
+      .object({
+        minimumCount: z.number().int().min(0).max(32),
+        maximumCount: z.number().int().min(0).max(32),
+        semantics: z.enum(["none", "directional-reference"]),
+      })
+      .strict(),
     maximumCount: z.number().int().min(1).max(16),
     raster: z
       .object({
@@ -161,7 +168,11 @@ export const CompilerMediaProducerCapabilitySchema = z
       .strict()
       .nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.inputRequirement.minimumCount > value.inputRequirement.maximumCount)
+      context.addIssue({ code: "custom", message: "producer input cardinality is inverted" });
+  });
 
 export const CompilerMediaReviewRuleSchema = z
   .object({ id: safeId, kind: z.literal("deterministic-preauthorized") })

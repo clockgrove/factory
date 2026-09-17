@@ -25,7 +25,7 @@ import {
 } from "./assets/compiler-input.js";
 import { policyMediaCompilerCapabilities } from "./media/adapter.js";
 import { defaultMediaAdapterRegistry } from "./media/adapter.js";
-import { assetDigest, type AssetManifestEntry } from "./assets/contracts.js";
+import { assetDigest, canonicalAssetJson, type AssetManifestEntry } from "./assets/contracts.js";
 import {
   activateRepositoryWorkerPacket,
   createAssetDecision,
@@ -37,6 +37,7 @@ import {
   persistAssetActivation,
   persistAssetDecision,
   readAssetActivation,
+  readAssetDecisionByAssetSet,
   readAssetSet,
 } from "./media/storage.js";
 import {
@@ -3387,7 +3388,9 @@ export class FactorySupervisor {
       if (
         current.some(
           (event) =>
-            ["attempt", "capacity", "budget", "validation", "publication"].includes(event.kind) &&
+            ["attempt", "capacity", "budget", "validation", "publication", "media"].includes(
+              event.kind,
+            ) &&
             (!Number.isFinite(Date.parse(event.at)) || Date.parse(event.at) > deadline),
         )
       )
@@ -3395,6 +3398,40 @@ export class FactorySupervisor {
       // Every completed Work Item needs its real, on-time integration receipt. A
       // closed issue or an observed merge without the receipt cannot use this path.
       for (const item of objective.items) {
+        const packet = this.#packetFor(item.number);
+        if (packet.deliverable.kind === "asset-production") {
+          const activations = current.filter(
+            (event) =>
+              event.kind === "media" &&
+              event.event === "AssetActivated" &&
+              event.workItem === item.number,
+          );
+          const ready = current.filter(
+            (event) =>
+              event.kind === "media" &&
+              event.event === "AssetSetReady" &&
+              event.workItem === item.number &&
+              event.assetSetDigest === activations[0]?.assetSetDigest &&
+              event.attempt === activations[0]?.attempt,
+          );
+          const usage = current.filter(
+            (event) =>
+              event.kind === "media" &&
+              event.event === "MediaUsageSettled" &&
+              event.workItem === item.number &&
+              event.attempt === activations[0]?.attempt,
+          );
+          if (
+            activations.length !== 1 ||
+            ready.length !== 1 ||
+            usage.length !== 1 ||
+            Date.parse(activations[0]!.at) > deadline ||
+            Date.parse(ready[0]!.at) > deadline ||
+            Date.parse(usage[0]!.at) > deadline
+          )
+            return false;
+          continue;
+        }
         const source = completedSources.get(item.number);
         const own = current.filter(
           (event) => event.event === "AttemptIntegrated" && event.workItem === item.number,
@@ -3409,6 +3446,7 @@ export class FactorySupervisor {
       }
       for (const started of current) {
         if (started.event !== "AttemptStarted") continue;
+        if (this.#packetFor(started.workItem!).deliverable.kind === "asset-production") continue;
         const terminal = current.filter(
           (event) =>
             event.kind === "attempt" &&
@@ -6687,7 +6725,9 @@ export class FactorySupervisor {
         );
         if (
           activeExecutions.size === 0 &&
-          runnable.length > 0 &&
+          runnable.some(
+            (item) => this.#packetFor(item.number).deliverable.kind === "repository-change",
+          ) &&
           availableBudget.modelTokens !== null &&
           availableBudget.modelTokens <= 0
         )
@@ -6916,22 +6956,102 @@ export class FactorySupervisor {
                   );
                   if (!reservationEvent || reservationEvent.kind !== "attempt")
                     throw new Error("generated media activation lacks producer reservation");
+                  if (
+                    reservationEvent.oid !== activationEvent.reservationOid ||
+                    !reservationEvent.mediaInvocation ||
+                    reservationEvent.mediaInvocation.authorityBaseSha !==
+                      (this.#run.baseSha ?? original.baseSha)
+                  )
+                    throw new Error("generated media activation changed its immutable run base");
+                  const activationAuthority = {
+                    repository: `${this.#options.owner}/${this.#options.repo}`,
+                    objective: this.#run.objective,
+                    baseSha: reservationEvent.mediaInvocation.authorityBaseSha,
+                  };
                   const storedActivation = await readAssetActivation({
                     store: this.#store,
-                    authority: {
-                      repository: `${this.#options.owner}/${this.#options.repo}`,
-                      objective: this.#run.objective,
-                      baseSha: reservationEvent.baseSha,
-                    },
+                    authority: activationAuthority,
                     runId: activationEvent.runId,
                     digest: String(activationEvent.activationDigest),
                   });
                   if (
                     !storedActivation ||
                     storedActivation.commit !== activationEvent.activationCommitOid ||
-                    storedActivation.record.producerWorkItem !== binding.issueNumber
+                    storedActivation.record.producerWorkItem !== binding.issueNumber ||
+                    storedActivation.record.producerAttempt !== activationEvent.attempt ||
+                    storedActivation.record.producerReservationOid !== reservationEvent.oid ||
+                    storedActivation.record.runId !== this.#run.runId ||
+                    storedActivation.record.intentId !== requirement.intentId ||
+                    storedActivation.record.assetSetDigest !== activationEvent.assetSetDigest ||
+                    storedActivation.record.decisionDigest !== activationEvent.decisionDigest
                   )
                     throw new Error("generated media activation record differs from its event");
+                  const readyEvents = (producer.factoryEvents ?? []).filter(
+                    (event) =>
+                      event.kind === "media" &&
+                      event.event === "AssetSetReady" &&
+                      event.runId === this.#run.runId &&
+                      event.attempt === activationEvent.attempt &&
+                      event.reservationOid === reservationEvent.oid &&
+                      event.invocationDigest === reservationEvent.mediaInvocation!.digest &&
+                      event.assetSetDigest === storedActivation.record.assetSetDigest,
+                  );
+                  if (readyEvents.length !== 1)
+                    throw new Error("generated media activation lacks one exact Asset Set receipt");
+                  const storedSet = await readAssetSet({
+                    store: this.#store,
+                    authority: activationAuthority,
+                    runId: this.#run.runId,
+                    digest: storedActivation.record.assetSetDigest,
+                  });
+                  if (
+                    !storedSet ||
+                    storedSet.commit !== readyEvents[0]!.assetSetCommitOid ||
+                    storedSet.record.workItem !== producer.number ||
+                    storedSet.record.attempt !== activationEvent.attempt ||
+                    storedSet.record.invocationDigest !== reservationEvent.mediaInvocation.digest ||
+                    storedSet.record.intentId !== requirement.intentId
+                  )
+                    throw new Error(
+                      "generated media Asset Set differs from its authenticated receipt",
+                    );
+                  const storedDecision = await readAssetDecisionByAssetSet({
+                    store: this.#store,
+                    authority: activationAuthority,
+                    runId: this.#run.runId,
+                    assetSetDigest: storedSet.record.digest,
+                  });
+                  const decisionEvents = (producer.factoryEvents ?? []).filter(
+                    (event) =>
+                      event.kind === "media" &&
+                      event.event === "AssetDecisionRecorded" &&
+                      event.runId === this.#run.runId &&
+                      event.attempt === activationEvent.attempt &&
+                      event.reservationOid === reservationEvent.oid &&
+                      event.invocationDigest === reservationEvent.mediaInvocation!.digest &&
+                      event.assetSetDigest === storedSet.record.digest &&
+                      event.decisionDigest === storedActivation.record.decisionDigest,
+                  );
+                  if (
+                    !storedDecision ||
+                    decisionEvents.length !== 1 ||
+                    storedDecision.decision.kind !== "approved" ||
+                    storedDecision.decision.digest !== storedActivation.record.decisionDigest ||
+                    storedDecision.decision.producerReservationOid !== reservationEvent.oid ||
+                    storedDecision.decision.invocationDigest !==
+                      reservationEvent.mediaInvocation.digest ||
+                    canonicalAssetJson(storedDecision.decision.selectedDescriptorDigests) !==
+                      canonicalAssetJson(
+                        storedActivation.record.selected.map(({ descriptor }) => descriptor.digest),
+                      ) ||
+                    storedActivation.record.selected.some((entry) => {
+                      const source = storedSet.record.variants.find(
+                        ({ descriptor }) => descriptor.digest === entry.descriptor.digest,
+                      );
+                      return !source || canonicalAssetJson(source) !== canonicalAssetJson(entry);
+                    })
+                  )
+                    throw new Error("generated media approval chain is incomplete or changed");
                   activations.push(storedActivation.record);
                 }
                 const activated = activateRepositoryWorkerPacket({
@@ -6950,32 +7070,35 @@ export class FactorySupervisor {
                   );
                 assetActivationBundles.set(priority.item.number, activated.bundle);
               }
-              const capabilitySourceRef = `refs/heads/${deliveryBases.get(priority.item.number)!.branch}`;
-              const providerIdentities = await this.#capabilityProviderIdentities(
-                packet,
-                objective.items,
-                executionBase.oid,
-              );
-              packet = await activateManagedRuntimePacket(packet, (id) =>
-                providerIdentities.get(id),
-              );
-              const proofs = await this.#resolveExecutionBaseCapabilities(
-                priority.item,
-                packet,
-                executionBase,
-                capabilitySourceRef,
-                objective.items,
-                providerIdentities,
-              );
-              repositoryCapabilityProofs.set(priority.item.number, proofs);
               activatedPackets.set(priority.item.number, packet);
-              const activation = createManagedRuntimeActivation({
-                packet,
-                baseSha: executionBase.oid,
-                sourceRef: capabilitySourceRef,
-                proofDigests: proofs.map(({ digest }) => digest),
-              });
-              if (activation) managedRuntimeActivations.set(priority.item.number, activation);
+              if (packet.deliverable.kind === "repository-change") {
+                const capabilitySourceRef = `refs/heads/${deliveryBases.get(priority.item.number)!.branch}`;
+                const providerIdentities = await this.#capabilityProviderIdentities(
+                  packet,
+                  objective.items,
+                  executionBase.oid,
+                );
+                packet = await activateManagedRuntimePacket(packet, (id) =>
+                  providerIdentities.get(id),
+                );
+                const proofs = await this.#resolveExecutionBaseCapabilities(
+                  priority.item,
+                  packet,
+                  executionBase,
+                  capabilitySourceRef,
+                  objective.items,
+                  providerIdentities,
+                );
+                repositoryCapabilityProofs.set(priority.item.number, proofs);
+                activatedPackets.set(priority.item.number, packet);
+                const activation = createManagedRuntimeActivation({
+                  packet,
+                  baseSha: executionBase.oid,
+                  sourceRef: capabilitySourceRef,
+                  proofDigests: proofs.map(({ digest }) => digest),
+                });
+                if (activation) managedRuntimeActivations.set(priority.item.number, activation);
+              }
             } catch (error) {
               capabilityBlocker =
                 error instanceof Error ? error.message : `repository capability refusal: ${error}`;
@@ -6995,16 +7118,64 @@ export class FactorySupervisor {
                 ),
               ) + 1;
             const queued = queuedState(priority.item, this.#run.runId);
-            const backends = applyCloudPause(
-              await this.#registry.evaluate({
-                policy: this.#policy,
-                requirements: packet.requirements,
-                requiresManagedToolchain: Boolean(packet.managedRuntimes?.length),
-                requiresOfflineAssetInputs: Boolean(packet.assetInputs?.length),
-                nowMs,
-              }),
-              commandState.cloudPaused,
-            );
+            const mediaDeliverable =
+              packet.deliverable.kind === "asset-production" ? packet.deliverable : null;
+            const mediaAdapter = mediaDeliverable
+              ? this.#mediaRegistry.get(mediaDeliverable.producerCapabilityId)
+              : null;
+            const backends: BackendCandidate[] = mediaAdapter
+              ? [
+                  {
+                    id: mediaAdapter.capability.id,
+                    registered: true,
+                    backend: null,
+                    capabilities: null,
+                    probe: {
+                      ...(await mediaAdapter.probe()),
+                      measuredAt: new Date(nowMs).toISOString(),
+                    },
+                    costClass: "local",
+                    local: true,
+                    paid: false,
+                    permanentReasons:
+                      assetDigest(mediaAdapter.capability) ===
+                      mediaDeliverable!.producerCapabilityDigest
+                        ? []
+                        : ["media producer capability changed"],
+                    transientReasons: [],
+                  },
+                ]
+              : packet.deliverable.kind === "asset-production"
+                ? [
+                    {
+                      id: mediaDeliverable!.producerCapabilityId,
+                      registered: false,
+                      backend: null,
+                      capabilities: null,
+                      probe: null,
+                      costClass: "local",
+                      local: true,
+                      paid: false,
+                      permanentReasons: ["media producer is not registered"],
+                      transientReasons: [],
+                    },
+                  ]
+                : applyCloudPause(
+                    await this.#registry.evaluate({
+                      policy: this.#policy,
+                      requirements: packet.requirements,
+                      requiresManagedToolchain: Boolean(packet.managedRuntimes?.length),
+                      requiresOfflineAssetInputs: Boolean(packet.assetInputs?.length),
+                      nowMs,
+                    }),
+                    commandState.cloudPaused,
+                  );
+            if (mediaAdapter && backends[0]?.probe) {
+              if (!backends[0].probe.available)
+                backends[0].transientReasons.push(backends[0].probe.reason ?? "unavailable");
+              else if (!backends[0].probe.authenticated)
+                backends[0].transientReasons.push(backends[0].probe.reason ?? "not authenticated");
+            }
             if (capabilityBlocker)
               for (const candidate of backends) candidate.permanentReasons.push(capabilityBlocker);
             const mayChangeExecutionAuthority = packet.allowedPaths.some(
@@ -7038,17 +7209,22 @@ export class FactorySupervisor {
               }
             }
             return {
+              executionKind:
+                packet.deliverable.kind === "asset-production" ? "media" : "repository",
               priority,
               requirements: packet.requirements,
               backends,
-              validators: applyCloudPause(
-                await this.#registry.evaluateIsolatedValidators({
-                  policy: this.#policy,
-                  requirements: packet.requirements,
-                  nowMs,
-                }),
-                commandState.cloudPaused,
-              ),
+              validators:
+                packet.deliverable.kind === "asset-production"
+                  ? []
+                  : applyCloudPause(
+                      await this.#registry.evaluateIsolatedValidators({
+                        policy: this.#policy,
+                        requirements: packet.requirements,
+                        nowMs,
+                      }),
+                      commandState.cloudPaused,
+                    ),
               nextAttempt,
               estimatedDurationMs: timeoutMs,
               ...(packet.requirements.estimatedDurationMinutes === undefined
@@ -7485,12 +7661,14 @@ export class FactorySupervisor {
     if (!adapter || assetDigest(adapter.capability) !== packet.deliverable.producerCapabilityDigest)
       throw new Error("asset producer capability changed before reservation");
     const base = await this.#store.readCommit(packet.baseSha);
+    const authorityBaseSha = this.#run.baseSha ?? this.#packetFor(item.number).baseSha;
     const authority = {
       repository: `${this.#options.owner}/${this.#options.repo}`,
       objective: this.#run.objective,
-      baseSha: packet.baseSha,
+      baseSha: authorityBaseSha,
     };
     const inputEntries: AssetManifestEntry[] = [];
+    const inputManifests = [];
     for (const manifestDigest of new Set(
       (packet.assetInputs ?? []).map(({ manifestDigest }) => manifestDigest),
     )) {
@@ -7500,6 +7678,7 @@ export class FactorySupervisor {
         digest: manifestDigest,
       });
       if (!manifest) throw new Error("media producer input manifest is unavailable");
+      inputManifests.push(manifest);
       for (const input of packet.assetInputs ?? []) {
         if (input.manifestDigest !== manifestDigest) continue;
         const entry = manifest.assets.find(
@@ -7508,6 +7687,59 @@ export class FactorySupervisor {
         if (!entry) throw new Error("media producer input descriptor is unavailable");
         inputEntries.push(entry);
       }
+    }
+    const outputVisibility = inputEntries.some(
+      ({ descriptor }) => descriptor.visibility === "private",
+    )
+      ? "private"
+      : "public";
+    const distinctRights = new Map(
+      inputEntries.map(({ descriptor }) => [JSON.stringify(descriptor.rights), descriptor.rights]),
+    );
+    const outputRights =
+      distinctRights.size === 1
+        ? structuredClone([...distinctRights.values()][0]!)
+        : ({ basis: "unknown" } as const);
+    const revisionEvent = [...(item.factoryEvents ?? [])]
+      .reverse()
+      .find(
+        (event) =>
+          event.kind === "media" &&
+          event.event === "AssetDecisionRecorded" &&
+          event.runId === this.#run.runId &&
+          event.decisionKind === "revision-requested",
+      );
+    let revisionContext:
+      | {
+          priorAssetSetDigest: string;
+          priorDecisionDigest: string;
+          feedback: string;
+          feedbackDigest: string;
+        }
+      | undefined;
+    if (revisionEvent?.kind === "media") {
+      if (!revisionEvent.assetSetDigest || !revisionEvent.decisionDigest || !revisionEvent.reason)
+        throw new Error("revision request lacks its exact prior result and feedback");
+      const prior = await readAssetDecisionByAssetSet({
+        store: this.#store,
+        authority,
+        runId: this.#run.runId,
+        assetSetDigest: revisionEvent.assetSetDigest,
+      });
+      const feedbackDigest = createHash("sha256").update(revisionEvent.reason).digest("hex");
+      if (
+        !prior ||
+        prior.decision.digest !== revisionEvent.decisionDigest ||
+        prior.decision.kind !== "revision-requested" ||
+        prior.decision.feedbackDigest !== feedbackDigest
+      )
+        throw new Error("revision request differs from its immutable decision");
+      revisionContext = {
+        priorAssetSetDigest: revisionEvent.assetSetDigest,
+        priorDecisionDigest: revisionEvent.decisionDigest,
+        feedback: revisionEvent.reason,
+        feedbackDigest,
+      };
     }
     let reservation: AttemptReservation | undefined;
     await this.#lease.use(async (lease) => {
@@ -7552,6 +7784,7 @@ export class FactorySupervisor {
             packet,
             capability: adapter.capability,
             inputEntries,
+            authorityBaseSha,
             deadline: new Date(
               Math.min(
                 objectiveDeadline,
@@ -7559,8 +7792,9 @@ export class FactorySupervisor {
               ),
             ).toISOString(),
             policyDigest: this.#run.policyDigest,
-            outputVisibility: "private",
-            outputRights: { basis: "unknown" },
+            outputVisibility,
+            outputRights,
+            ...(revisionContext ? { revisionContext } : {}),
           });
           return {
             graphDigest: projection.graphDigest,
@@ -7584,6 +7818,29 @@ export class FactorySupervisor {
     if (!reservation?.mediaInvocation)
       throw new Error("media reservation did not retain invocation");
     await commitExecutionCapacity?.();
+    const inputWorkspace = await mkdtemp(join(tmpdir(), "clockgrove-factory-media-inputs-"));
+    const inputRoot =
+      (packet.assetInputs?.length ?? 0) > 0
+        ? (
+            await materializeWorkerAssetInputs({
+              store: this.#store,
+              manifests: inputManifests,
+              bindings: packet.assetInputs ?? [],
+              supervisorRoot: join(inputWorkspace, "materialized"),
+            })
+          ).root
+        : null;
+    const request = {
+      invocation: reservation.mediaInvocation,
+      packet,
+      inputRoot,
+      inputs: reservation.mediaInvocation.inputAssets.map((input) => ({
+        descriptorDigest: input.descriptorDigest,
+        contentDigest: input.contentDigest,
+        mediaType: input.mediaType,
+        path: inputRoot ? join(inputRoot, input.path) : input.path,
+      })),
+    };
     const recordMedia = async (
       event: Parameters<LifecycleRecorder["media"]>[0]["event"],
       fields?: Record<string, unknown>,
@@ -7621,8 +7878,10 @@ export class FactorySupervisor {
             dispatchReceiptDigest: receipt.digest,
             dispatchCommitOid: commitOid,
           }).then(() => {}),
-        recordTerminalFailure: ({ state, reason, accounting }) =>
-          recordMedia("MediaUsageSettled", { accounting }, `${state}: ${reason}`).then(() => {}),
+        recordTerminalFailure: ({ phase, state, reason, accounting }) =>
+          recordMedia("MediaUsageSettled", { accounting }, `${phase}/${state}: ${reason}`).then(
+            () => {},
+          ),
         recordAssetSet: async (assetSet, commitOid) => {
           await recordMedia("AssetSetReady", {
             assetSetDigest: assetSet.digest,
@@ -7646,12 +7905,27 @@ export class FactorySupervisor {
         recordCleanupCompleted: () => recordMedia("MediaCleanupCompleted").then(() => {}),
       },
     });
-    const result = await executor.runPrepared({
-      authority,
-      invocation: reservation.mediaInvocation,
-      reservationOid: reservation.oid,
-      ...(executionSignal ? { signal: executionSignal } : {}),
-    });
+    let result;
+    try {
+      result = await executor.runPrepared({
+        authority,
+        request,
+        reservationOid: reservation.oid,
+        ...(executionSignal ? { signal: executionSignal } : {}),
+      });
+      while (result.state === "running") {
+        await sleep(250, executionSignal);
+        result = await executor.resume({
+          authority,
+          request,
+          reservationOid: reservation.oid,
+          receipt: result.dispatchReceipt,
+          ...(executionSignal ? { signal: executionSignal } : {}),
+        });
+      }
+    } finally {
+      await rm(inputWorkspace, { recursive: true, force: true });
+    }
     if (result.state === "for-review" && !result.cleanupPending)
       await this.#applyDeterministicMediaReview({
         packet,
@@ -7663,7 +7937,6 @@ export class FactorySupervisor {
         existingEvents: item.factoryEvents ?? [],
         recordMedia,
       });
-    if (result.state === "running") throw new ArtifactCompletionUnavailableError();
     if (
       result.state === "unknown" ||
       ((result.state === "for-review" ||
@@ -7686,7 +7959,9 @@ export class FactorySupervisor {
     await releaseExecutionCapacity();
     await this.#settleIssueAdmission(item, reservation, {
       cleanupConfirmed: true,
-      definitiveNonExecution: false,
+      definitiveNonExecution:
+        (result.state === "failed" || result.state === "cancelled") &&
+        result.definitiveNonExecution,
       modelUsageExpected: false,
     });
   }
@@ -19535,7 +19810,7 @@ export class FactorySupervisor {
     const authority = {
       repository: invocation.repository,
       objective: invocation.objective,
-      baseSha: reservation.baseSha,
+      baseSha: invocation.authorityBaseSha,
     };
     const existing = (item.factoryEvents ?? []).filter(
       (event) =>
@@ -19588,6 +19863,44 @@ export class FactorySupervisor {
           ...(reason ? { reason } : {}),
         }),
       );
+    const packet = AssetProductionWorkerPacketSchema.parse(this.#packetFor(item.number));
+    if (workerPacketDigest(packet) !== invocation.workerPacketDigest)
+      throw new Error("recovery media Worker Packet differs from its reserved invocation");
+    const manifests = await Promise.all(
+      [...new Set(invocation.inputAssets.map(({ manifestDigest }) => manifestDigest))].map(
+        async (digest) => {
+          const manifest = await readObjectiveAssetManifest({
+            store: this.#store,
+            authority,
+            digest,
+          });
+          if (!manifest) throw new Error("recovery media input manifest is unavailable");
+          return manifest;
+        },
+      ),
+    );
+    const inputWorkspace = await mkdtemp(join(tmpdir(), "clockgrove-factory-media-inputs-"));
+    const inputRoot = packet.assetInputs.length
+      ? (
+          await materializeWorkerAssetInputs({
+            store: this.#store,
+            manifests,
+            bindings: packet.assetInputs,
+            supervisorRoot: join(inputWorkspace, "materialized"),
+          })
+        ).root
+      : null;
+    const request = {
+      invocation,
+      packet,
+      inputRoot,
+      inputs: invocation.inputAssets.map((input) => ({
+        descriptorDigest: input.descriptorDigest,
+        contentDigest: input.contentDigest,
+        mediaType: input.mediaType,
+        path: inputRoot ? join(inputRoot, input.path) : input.path,
+      })),
+    };
     const executor = new MediaProductionExecutor({
       store: this.#store,
       retentionRoot: join(
@@ -19614,9 +19927,9 @@ export class FactorySupervisor {
               dispatchCommitOid: commitOid,
             });
         },
-        recordTerminalFailure: async ({ state, reason, accounting }) => {
+        recordTerminalFailure: async ({ phase, state, reason, accounting }) => {
           if (!hasMedia("MediaUsageSettled"))
-            await recordMedia("MediaUsageSettled", { accounting }, `${state}: ${reason}`);
+            await recordMedia("MediaUsageSettled", { accounting }, `${phase}/${state}: ${reason}`);
         },
         recordAssetSet: async (assetSet, commitOid) => {
           if (!hasMedia("AssetSetReady", (event) => event.assetSetDigest === assetSet.digest))
@@ -19657,15 +19970,54 @@ export class FactorySupervisor {
         },
       },
     });
-    const result = await executor.resumeDispatched({
-      authority,
-      invocation,
-      reservationOid: reservation.oid,
-    });
+    let result;
+    try {
+      const readyEvents = existing.filter(
+        (event) =>
+          event.kind === "media" &&
+          event.event === "AssetSetReady" &&
+          event.reservationOid === reservation.oid &&
+          event.invocationDigest === invocation.digest,
+      );
+      if (readyEvents.length > 1)
+        throw new Error("media recovery found competing Asset Set receipts");
+      if (readyEvents.length === 1) {
+        const ready = readyEvents[0]!;
+        const stored = await readAssetSet({
+          store: this.#store,
+          authority,
+          runId: invocation.runId,
+          digest: String(ready.assetSetDigest),
+        });
+        if (!stored || stored.commit !== ready.assetSetCommitOid)
+          throw new Error("media recovery Asset Set differs from its authenticated receipt");
+        result = await executor.resumeStoredAssetSet({
+          authority,
+          request,
+          reservationOid: reservation.oid,
+          assetSet: stored.record,
+          assetSetCommitOid: stored.commit,
+        });
+      } else {
+        result = await executor.resumeDispatched({
+          authority,
+          request,
+          reservationOid: reservation.oid,
+        });
+      }
+      while (result.state === "running") {
+        await sleep(250);
+        result = await executor.resume({
+          authority,
+          request,
+          reservationOid: reservation.oid,
+          receipt: result.dispatchReceipt,
+        });
+      }
+    } finally {
+      await rm(inputWorkspace, { recursive: true, force: true });
+    }
     if (result.state === "for-review" && !result.cleanupPending) {
-      const packet = AssetProductionWorkerPacketSchema.parse(this.#packetFor(item.number));
-      if (workerPacketDigest(packet) !== invocation.workerPacketDigest)
-        throw new Error("recovery media Worker Packet differs from its reserved invocation");
       await this.#applyDeterministicMediaReview({
         packet,
         reservation: reservation as AttemptReservation & {
@@ -19678,7 +20030,6 @@ export class FactorySupervisor {
       });
     }
     if (
-      result.state === "running" ||
       result.state === "unknown" ||
       ((result.state === "for-review" ||
         result.state === "failed" ||

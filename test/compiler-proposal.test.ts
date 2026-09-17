@@ -1037,6 +1037,7 @@ describe("media intent compilation", () => {
     const capability = {
       id: "raster-producer",
       capabilityDigest: "1".repeat(64),
+      inputRequirement: { minimumCount: 0, maximumCount: 0, semantics: "none" as const },
       kinds: ["layout-reference" as const],
       purposes: ["implementation-reference" as const],
       mediaTypes: ["image/png" as const],
@@ -1103,6 +1104,7 @@ describe("media intent compilation", () => {
     const capability = {
       id: "audio-producer",
       capabilityDigest: "2".repeat(64),
+      inputRequirement: { minimumCount: 0, maximumCount: 0, semantics: "none" as const },
       kinds: ["sound-reference" as const],
       purposes: ["implementation-reference" as const],
       mediaTypes: ["audio/wav"],
@@ -1163,6 +1165,7 @@ describe("media intent compilation", () => {
       {
         id: "small-raster-producer",
         capabilityDigest: "3".repeat(64),
+        inputRequirement: { minimumCount: 0, maximumCount: 0, semantics: "none" },
         kinds: ["layout-reference"],
         purposes: ["implementation-reference"],
         mediaTypes: ["image/png"],
@@ -1202,6 +1205,7 @@ describe("media intent compilation", () => {
     const capability = {
       id: "raster-producer",
       capabilityDigest: "4".repeat(64),
+      inputRequirement: { minimumCount: 0, maximumCount: 0, semantics: "none" as const },
       kinds: ["layout-reference" as const],
       purposes: ["implementation-reference" as const],
       mediaTypes: ["image/png" as const],

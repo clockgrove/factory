@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { createHash } from "node:crypto";
 
 import {
   type AssetDescriptorSchema,
@@ -63,6 +64,13 @@ export const MediaProducerCapabilitySchema = z
     id: safeId,
     adapterVersion: boundedText(80),
     inputMediaTypes: unique(MediaTypeSchema, 32),
+    inputRequirement: z
+      .object({
+        minimumCount: z.number().int().min(0).max(32),
+        maximumCount: z.number().int().min(0).max(32),
+        semantics: z.enum(["none", "directional-reference"]),
+      })
+      .strict(),
     outputMediaTypes: unique(MediaTypeSchema, 32, 1),
     intentKinds: unique(MediaIntentKindSchema, 16, 1),
     purposes: unique(MediaIntentPurposeSchema, 4, 1),
@@ -79,7 +87,7 @@ export const MediaProducerCapabilitySchema = z
     qualities: unique(boundedText(80), 16),
     limits: z
       .object({
-        providerRequests: z.number().int().min(1).max(64),
+        providerRequests: z.number().int().min(0).max(64),
         variants: z.number().int().min(1).max(32),
         generatedBytes: z
           .number()
@@ -109,7 +117,16 @@ export const MediaProducerCapabilitySchema = z
       .strict(),
     nativeUsageKeys: unique(safeId, 32),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.inputRequirement.minimumCount > value.inputRequirement.maximumCount)
+      context.addIssue({ code: "custom", message: "media input cardinality is inverted" });
+    if (
+      value.inputRequirement.semantics === "none" &&
+      (value.inputRequirement.minimumCount !== 0 || value.inputRequirement.maximumCount !== 0)
+    )
+      context.addIssue({ code: "custom", message: "input-free media capability accepts inputs" });
+  });
 
 export const MediaReviewCapabilitySchema = z
   .object({
@@ -135,6 +152,36 @@ export const MediaUsageSchema = z
   })
   .strict();
 
+const MediaUsageReservationCoreSchema = z
+  .object({
+    protocol: z.literal("clockgrove.factory/media-usage-reservation-v1"),
+    providerRequests: z.number().int().min(0).max(64),
+    variants: z.number().int().min(1).max(32),
+    generatedBytes: z
+      .number()
+      .int()
+      .min(1)
+      .max(512 * 1024 * 1024),
+    storageBytes: z
+      .number()
+      .int()
+      .min(1)
+      .max(512 * 1024 * 1024),
+    nativeUnits: unique(safeId, 32),
+  })
+  .strict();
+export const MediaUsageReservationSchema = MediaUsageReservationCoreSchema.extend({
+  digest: sha256Digest,
+})
+  .strict()
+  .superRefine((value, context) => {
+    const { digest, ...core } = value;
+    if (digest !== assetDigest(core))
+      context.addIssue({ code: "custom", message: "media usage reservation digest mismatch" });
+    if (canonicalAssetJson([...value.nativeUnits].sort()) !== canonicalAssetJson(value.nativeUnits))
+      context.addIssue({ code: "custom", message: "media usage units are not canonical" });
+  });
+
 const MediaInvocationCoreSchema = z
   .object({
     protocol: z.literal("clockgrove.factory/media-invocation-v1"),
@@ -143,8 +190,11 @@ const MediaInvocationCoreSchema = z
     runId: safeId,
     workItem: z.number().int().positive(),
     attempt: z.number().int().positive(),
+    authorityBaseSha: gitSha,
     reservationRef: boundedText(500),
     intentId: safeId,
+    intentKind: MediaIntentKindSchema,
+    intentPurpose: MediaIntentPurposeSchema,
     intentDigest: sha256Digest,
     workerPacketDigest: sha256Digest,
     adapterId: safeId,
@@ -158,10 +208,12 @@ const MediaInvocationCoreSchema = z
       .array(
         z
           .object({
+            manifestDigest: sha256Digest,
             descriptorDigest: sha256Digest,
             contentDigest: sha256Digest,
             storageReceiptDigest: sha256Digest,
             mediaType: MediaTypeSchema,
+            path: boundedText(500),
           })
           .strict(),
       )
@@ -171,19 +223,17 @@ const MediaInvocationCoreSchema = z
     outputRights: AssetRightsSchema,
     deadline: z.string().datetime(),
     policyDigest: sha256Digest,
-    providerRequests: z.number().int().min(1).max(64),
     requestedVariants: z.number().int().min(1).max(32),
-    maximumVariants: z.number().int().min(1).max(32),
-    maximumGeneratedBytes: z
-      .number()
-      .int()
-      .min(1)
-      .max(512 * 1024 * 1024),
-    maximumStorageBytes: z
-      .number()
-      .int()
-      .min(1)
-      .max(512 * 1024 * 1024),
+    usageReservation: MediaUsageReservationSchema,
+    revisionContext: z
+      .object({
+        priorAssetSetDigest: sha256Digest,
+        priorDecisionDigest: sha256Digest,
+        feedback: boundedText(4_000),
+        feedbackDigest: sha256Digest,
+      })
+      .strict()
+      .nullable(),
     networkDestinations: unique(boundedText(253), 32),
     thirdPartyEgress: z.enum(["denied", "provider-only", "provider-and-input-assets"]),
   })
@@ -197,8 +247,14 @@ export const MediaInvocationSchema = MediaInvocationCoreSchema.extend({ digest: 
       context.addIssue({ code: "custom", message: "media invocation digest mismatch" });
     if (value.repository !== value.repository.toLowerCase())
       context.addIssue({ code: "custom", message: "media invocation repository is not canonical" });
-    if (value.requestedVariants > value.maximumVariants)
+    if (value.requestedVariants > value.usageReservation.variants)
       context.addIssue({ code: "custom", message: "requested variants exceed invocation limit" });
+    if (
+      value.revisionContext &&
+      createHash("sha256").update(value.revisionContext.feedback).digest("hex") !==
+        value.revisionContext.feedbackDigest
+    )
+      context.addIssue({ code: "custom", message: "revision feedback digest mismatch" });
   });
 
 export const MediaDispatchReceiptSchema = z
@@ -388,6 +444,7 @@ export const WorkerMediaIntentUseSchema = z.discriminatedUnion("source", [
 
 export type MediaProductionProfile = z.infer<typeof MediaProductionProfileSchema>;
 export type MediaProducerCapability = z.infer<typeof MediaProducerCapabilitySchema>;
+export type MediaUsageReservation = z.infer<typeof MediaUsageReservationSchema>;
 export type MediaReviewCapability = z.infer<typeof MediaReviewCapabilitySchema>;
 export type MediaInvocation = z.infer<typeof MediaInvocationSchema>;
 export type MediaDispatchReceipt = z.infer<typeof MediaDispatchReceiptSchema>;

@@ -43,6 +43,7 @@ export class LocalPrivateMediaReviewer implements DeterministicMediaReviewer {
     const assetSet = AssetSetSchema.parse(assetSetInput);
     if (
       assetSet.invocationDigest !== invocation.digest ||
+      !["decision-input", "implementation-reference"].includes(invocation.intentPurpose) ||
       assetSet.variants.length > this.capability.maximumVariants ||
       invocation.profile?.kind !== "raster" ||
       assetSet.variants.some(

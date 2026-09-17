@@ -31,6 +31,13 @@ const RetainedCollectionSchema = z
 
 export type RetainedMediaCollection = z.infer<typeof RetainedCollectionSchema>;
 
+export class MediaCollectionValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MediaCollectionValidationError";
+  }
+}
+
 const sha256 = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
 
 async function ensurePrivateDirectory(path: string): Promise<void> {
@@ -80,7 +87,9 @@ async function validateVariant(
     descriptor.visibility !== invocation.outputVisibility ||
     canonicalAssetJson(descriptor.rights) !== canonicalAssetJson(invocation.outputRights)
   )
-    throw new Error("produced media bytes, visibility, or rights differ from the invocation");
+    throw new MediaCollectionValidationError(
+      "produced media bytes, visibility, or rights differ from the invocation",
+    );
   const inspection = await inspectAssetBytes(bytes, {
     allowOpaque: invocation.profile?.kind === "binary",
     displayName: descriptor.displayName,
@@ -89,7 +98,9 @@ async function validateVariant(
     inspection.mediaType !== invocation.outputMediaType ||
     canonicalAssetJson(inspection) !== canonicalAssetJson(descriptor.content.inspection)
   )
-    throw new Error("produced media MIME or inspection differs from its descriptor");
+    throw new MediaCollectionValidationError(
+      "produced media MIME or inspection differs from its descriptor",
+    );
   if (
     invocation.profile?.kind === "raster" &&
     (inspection.metadata.kind !== "raster" ||
@@ -98,7 +109,9 @@ async function validateVariant(
       inspection.metadata.hasAlpha !== invocation.profile.alpha ||
       inspection.metadata.frames > 1 !== invocation.profile.animation)
   )
-    throw new Error("produced media differs from the exact raster profile");
+    throw new MediaCollectionValidationError(
+      "produced media differs from the exact raster profile",
+    );
   return descriptor;
 }
 
@@ -111,14 +124,16 @@ export async function retainMediaCollection(args: {
   const invocation = MediaInvocationSchema.parse(args.invocation);
   if (
     args.collection.variants.length !== invocation.requestedVariants ||
-    args.collection.variants.length > invocation.maximumVariants
+    args.collection.variants.length > invocation.usageReservation.variants
   )
-    throw new Error("produced media variant count differs from the invocation");
+    throw new MediaCollectionValidationError(
+      "produced media variant count differs from the invocation",
+    );
   if (new Set(args.collection.usage.map(({ unit }) => unit)).size !== args.collection.usage.length)
-    throw new Error("produced media usage units are duplicated");
+    throw new MediaCollectionValidationError("produced media usage units are duplicated");
   const supportedUsage = new Set(args.collection.usage.map(({ unit }) => unit));
   if (supportedUsage.size !== args.collection.usage.length)
-    throw new Error("produced media usage is ambiguous");
+    throw new MediaCollectionValidationError("produced media usage is ambiguous");
   const directory = mediaRetentionDirectory(args.root, invocation.digest);
   await ensurePrivateDirectory(args.root);
   await ensurePrivateDirectory(directory);
@@ -128,10 +143,10 @@ export async function retainMediaCollection(args: {
     const descriptor = await validateVariant(invocation, variant.descriptor, variant.bytes);
     totalBytes += variant.bytes.length;
     if (
-      totalBytes > invocation.maximumGeneratedBytes ||
-      totalBytes > invocation.maximumStorageBytes
+      totalBytes > invocation.usageReservation.generatedBytes ||
+      totalBytes > invocation.usageReservation.storageBytes
     )
-      throw new Error("produced media exceeds the invocation byte limits");
+      throw new MediaCollectionValidationError("produced media exceeds the invocation byte limits");
     const filename = `${index}-${descriptor.content.digest}.bin`;
     const path = join(directory, filename);
     try {

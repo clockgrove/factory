@@ -966,7 +966,7 @@ const Media = Common.extend({
   activationCommitOid: gitSha.optional(),
   accounting: z
     .object({
-      providerRequests: z.number().int().min(0).max(64),
+      providerRequests: z.number().int().min(0).max(64).nullable(),
       variants: z.number().int().nonnegative().max(32).nullable(),
       generatedBytes: z
         .number()

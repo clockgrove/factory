@@ -641,7 +641,7 @@ describe("semantic proposal validation", () => {
         expect.objectContaining({
           code: "issue-body-limit",
           itemId: proposal.workItems[0]!.id,
-          observed: 73_736,
+          observed: 73_756,
         }),
       ]),
     );
@@ -1036,6 +1036,7 @@ describe("media intent compilation", () => {
     const request = semanticRequest(pinned);
     const capability = {
       id: "raster-producer",
+      capabilityDigest: "1".repeat(64),
       kinds: ["layout-reference" as const],
       purposes: ["implementation-reference" as const],
       mediaTypes: ["image/png" as const],
@@ -1101,6 +1102,7 @@ describe("media intent compilation", () => {
     const request = semanticRequest(pinned);
     const capability = {
       id: "audio-producer",
+      capabilityDigest: "2".repeat(64),
       kinds: ["sound-reference" as const],
       purposes: ["implementation-reference" as const],
       mediaTypes: ["audio/wav"],
@@ -1160,6 +1162,7 @@ describe("media intent compilation", () => {
     request.media.producerCapabilities = [
       {
         id: "small-raster-producer",
+        capabilityDigest: "3".repeat(64),
         kinds: ["layout-reference"],
         purposes: ["implementation-reference"],
         mediaTypes: ["image/png"],
@@ -1198,6 +1201,7 @@ describe("media intent compilation", () => {
     const request = semanticRequest(pinned);
     const capability = {
       id: "raster-producer",
+      capabilityDigest: "4".repeat(64),
       kinds: ["layout-reference" as const],
       purposes: ["implementation-reference" as const],
       mediaTypes: ["image/png" as const],

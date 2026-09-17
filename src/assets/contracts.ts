@@ -92,6 +92,15 @@ export const AssetProvenanceSchema = z.discriminatedUnion("kind", [
     host: z.enum(["github.com", "user-images.githubusercontent.com"]),
     attachmentId: boundedText(255).regex(/^[A-Za-z0-9_.-]+$/),
   }).strict(),
+  z
+    .object({
+      kind: z.literal("produced"),
+      invocationId: safeId,
+      outputIndex: z.number().int().nonnegative().max(31),
+      provider: safeId.nullable(),
+      providerRequestId: boundedText(500).nullable(),
+    })
+    .strict(),
 ]);
 export const AssetVisibilitySchema = z.enum(["public", "private"]);
 export const AssetRightsSchema = z
@@ -131,6 +140,7 @@ const ReceiptCore = z
     protocol: z.literal("clockgrove.factory/asset-storage-receipt"),
     authority: ObjectiveAssetAuthoritySchema,
     descriptorDigest: sha256Digest,
+    transferDomain: z.enum(["objective-asset", "produced-asset"]),
     payload: ArtifactPayloadSchema,
     transferRef: boundedText(500),
     transferRequestId: safeId,
@@ -199,6 +209,9 @@ export const WorkerAssetInputSchema = z
 
 export type AssetContent = z.infer<typeof AssetContentSchema>;
 export type AssetDescriptor = z.infer<typeof AssetDescriptorSchema>;
+export type AssetManifestEntry = z.infer<typeof AssetManifestEntrySchema>;
+export type AssetVisibility = z.infer<typeof AssetVisibilitySchema>;
+export type AssetRights = z.infer<typeof AssetRightsSchema>;
 export type AssetStorageReceipt = z.infer<typeof AssetStorageReceiptSchema>;
 export type ObjectiveAssetManifest = z.infer<typeof ObjectiveAssetManifestSchema>;
 export type ObjectiveAssetAuthority = z.infer<typeof ObjectiveAssetAuthoritySchema>;

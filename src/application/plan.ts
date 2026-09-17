@@ -39,6 +39,8 @@ import {
   compilerMediaDescriptorDigests,
   compilerMediaInputs,
 } from "../assets/compiler-input.js";
+import { policyMediaCompilerCapabilities } from "../media/adapter.js";
+import { policyMediaReviewRules } from "../media/review.js";
 
 export interface PlanInput {
   objective: number;
@@ -230,6 +232,7 @@ function inspectExistingGraph(snapshot: ApplicationSnapshot): {
             ...(packet.generatedAssetRequirements?.length
               ? { generatedAssetRequirements: packet.generatedAssetRequirements }
               : {}),
+            ...(packet.mediaUses?.length ? { mediaUses: packet.mediaUses } : {}),
             ...(packet.context ? { context: packet.context } : {}),
             ...(packet.changeSurface ? { changeSurface: packet.changeSurface } : {}),
             ...(packet.criterionRisks ? { criterionRisks: packet.criterionRisks } : {}),
@@ -342,7 +345,17 @@ export async function buildPlanReport(input: {
     try {
       await materializeLocalLfsAssets(input.planning.repositoryPath, tree.path, baseSha);
       await sealPinnedCompilationTreeProof(tree.proof);
-      let mediaPlanning: CompilationContext["mediaPlanning"];
+      let mediaPlanning: NonNullable<CompilationContext["mediaPlanning"]> = {
+        assetManifest: null,
+        assetBindings: [],
+        mediaInputs: [],
+        assetEgress: {
+          mode: policy.compilerMediaEgress.mode,
+          policyDigest: compilerEvalDigest(policy.compilerMediaEgress),
+        },
+        producerCapabilities: policyMediaCompilerCapabilities(policy),
+        reviewRules: policyMediaReviewRules(policy),
+      };
       if (input.request.assetManifestDigest) {
         if (!input.planning.assetStore)
           throw new Error("Objective asset storage is not configured for compilation");
@@ -389,11 +402,8 @@ export async function buildPlanReport(input: {
             mode: policy.compilerMediaEgress.mode,
             policyDigest: compilerEvalDigest(policy.compilerMediaEgress),
           },
-          producerCapabilities: [],
-          reviewRules: policy.compilerMediaEgress.deterministicReviewRuleIds.map((id) => ({
-            id,
-            kind: "deterministic-preauthorized" as const,
-          })),
+          producerCapabilities: policyMediaCompilerCapabilities(policy),
+          reviewRules: policyMediaReviewRules(policy),
         };
       }
       const context: CompilationContext = {
@@ -412,7 +422,7 @@ export async function buildPlanReport(input: {
         repositoryLfs,
         allowedNetworkDestinations: policy.allowedNetworkDestinations,
         runPolicy: policy,
-        ...(mediaPlanning ? { mediaPlanning } : {}),
+        mediaPlanning,
         ...(modelSelection ? { modelSelection } : {}),
       };
       let checkpointed = false;

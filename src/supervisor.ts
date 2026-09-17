@@ -17,12 +17,34 @@ import { dirname, join, resolve } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { readObjectiveAssetManifest } from "./assets/storage.js";
-import { materializeObjectiveAssets } from "./assets/materialize.js";
+import { materializeObjectiveAssets, materializeWorkerAssetInputs } from "./assets/materialize.js";
 import {
   compilerAssetManifestView,
   compilerMediaDescriptorDigests,
   compilerMediaInputs,
 } from "./assets/compiler-input.js";
+import { policyMediaCompilerCapabilities } from "./media/adapter.js";
+import { defaultMediaAdapterRegistry } from "./media/adapter.js";
+import { assetDigest, type AssetManifestEntry } from "./assets/contracts.js";
+import {
+  activateRepositoryWorkerPacket,
+  createAssetDecision,
+  createMediaInvocation,
+} from "./media/lifecycle.js";
+import { MediaProductionExecutor } from "./media/execution.js";
+import {
+  createAssetActivation,
+  persistAssetActivation,
+  persistAssetDecision,
+  readAssetActivation,
+  readAssetSet,
+} from "./media/storage.js";
+import {
+  defaultMediaReviewRegistry,
+  mediaReviewRuleDigest,
+  policyMediaReviewRules,
+} from "./media/review.js";
+import type { AssetActivationBundle } from "./media/contracts.js";
 
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
 import { CodexSdkLocalBackend } from "./backends/codex-sdk-local.js";
@@ -245,7 +267,9 @@ import {
 } from "./protocol/policy.js";
 import {
   assertRepositoryChangeWorkerPacket,
+  AssetProductionWorkerPacketSchema,
   parseWorkerPacket,
+  RepositoryChangeWorkerPacketSchema,
   workerPacketDigest,
   type WorkerPacket,
 } from "./protocol/worker-packet.js";
@@ -283,6 +307,7 @@ import {
   GithubOctokitGraphWriter,
   legacyGraphConstraintsDigest,
   parseGraphItemMetadata,
+  parseWorkerPacketFromIssue,
   type CompiledObjective,
 } from "./graph.js";
 import { GitHubReader, type GitHubOptions, type RunCancellationRequest } from "./github.js";
@@ -872,36 +897,27 @@ async function prepareObjectiveAssetRoot(args: {
   const bindings = args.packet.assetInputs ?? [];
   if (!bindings.length) return undefined;
   const manifestDigests = [...new Set(bindings.map(({ manifestDigest }) => manifestDigest))];
-  if (manifestDigests.length !== 1)
-    throw new Error("one Worker Packet may bind assets from exactly one Objective manifest");
-  const manifest = await readObjectiveAssetManifest({
-    store: args.store,
-    authority: {
-      repository: args.repository,
-      objective: args.objective,
-      baseSha: args.authorityBaseSha,
-    },
-    digest: manifestDigests[0]!,
-  });
-  if (!manifest) throw new Error("Worker Packet Objective asset manifest is unavailable");
-  for (const binding of bindings) {
-    const entry = manifest.assets.find(
-      ({ descriptor }) => descriptor.digest === binding.descriptorDigest,
-    );
-    if (
-      !entry ||
-      entry.descriptor.content.digest !== binding.contentDigest ||
-      entry.storage.digest !== binding.storageReceiptDigest ||
-      entry.descriptor.materializationPath !== binding.path
-    )
-      throw new Error("Worker Packet Objective asset binding differs from its immutable manifest");
-  }
+  const manifests = await Promise.all(
+    manifestDigests.map(async (digest) => {
+      const manifest = await readObjectiveAssetManifest({
+        store: args.store,
+        authority: {
+          repository: args.repository,
+          objective: args.objective,
+          baseSha: args.authorityBaseSha,
+        },
+        digest,
+      });
+      if (!manifest) throw new Error("Worker Packet Objective asset manifest is unavailable");
+      return manifest;
+    }),
+  );
   return (
-    await materializeObjectiveAssets({
+    await materializeWorkerAssetInputs({
       store: args.store,
-      manifest,
+      manifests,
       supervisorRoot: join(args.attemptWorkspace, ".factory-objective-assets"),
-      descriptorDigests: bindings.map(({ descriptorDigest }) => descriptorDigest),
+      bindings,
     })
   ).root;
 }
@@ -961,11 +977,8 @@ async function prepareCompilerMediaInputs(args: {
           mode: args.policy.compilerMediaEgress.mode,
           policyDigest: compilerEvalDigest(args.policy.compilerMediaEgress),
         },
-        producerCapabilities: [],
-        reviewRules: args.policy.compilerMediaEgress.deterministicReviewRuleIds.map((id) => ({
-          id,
-          kind: "deterministic-preauthorized" as const,
-        })),
+        producerCapabilities: policyMediaCompilerCapabilities(args.policy),
+        reviewRules: policyMediaReviewRules(args.policy),
       },
       dispose: async () => {
         if (workspace) await rm(workspace, { recursive: true, force: true });
@@ -1465,6 +1478,8 @@ export class FactorySupervisor {
   #management: ManagementBackend;
   readonly #managementOverride: boolean;
   readonly #registry: BackendRegistry;
+  readonly #mediaRegistry = defaultMediaAdapterRegistry();
+  readonly #mediaReviewRegistry = defaultMediaReviewRegistry();
   readonly #breaker: CircuitBreaker;
   readonly #concurrency: ConcurrencyLimiter;
   readonly #mutations: MutationScheduler;
@@ -5405,9 +5420,17 @@ export class FactorySupervisor {
                   repositoryLfs,
                   allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
                   runPolicy: this.#policy,
-                  ...(compilerMediaInputs
-                    ? { mediaPlanning: compilerMediaInputs.mediaPlanning }
-                    : {}),
+                  mediaPlanning: compilerMediaInputs?.mediaPlanning ?? {
+                    assetManifest: null,
+                    assetBindings: [],
+                    mediaInputs: [],
+                    assetEgress: {
+                      mode: this.#policy.compilerMediaEgress.mode,
+                      policyDigest: compilerEvalDigest(this.#policy.compilerMediaEgress),
+                    },
+                    producerCapabilities: policyMediaCompilerCapabilities(this.#policy),
+                    reviewRules: policyMediaReviewRules(this.#policy, this.#mediaReviewRegistry),
+                  },
                   invocationTimeoutMs: Math.min(
                     deadline - Date.now(),
                     this.#policy.workItemTimeoutMinutes * 60_000,
@@ -6448,9 +6471,29 @@ export class FactorySupervisor {
           );
         }
 
+        let activatedMediaClosed = false;
+        for (const item of objective.items) {
+          if (item.state !== "for_review" || item.closed || activeExecutions.has(item.number))
+            continue;
+          const packet = parseWorkerPacketFromIssue(item.body ?? "");
+          if (packet.deliverable.kind !== "asset-production") continue;
+          const activation = (item.factoryEvents ?? []).find(
+            (event) =>
+              event.kind === "media" &&
+              event.event === "AssetActivated" &&
+              event.runId === this.#run.runId &&
+              event.workItem === item.number,
+          );
+          if (!activation) continue;
+          await this.#externalAdmission(() => this.#store.closeIssue(item.number));
+          activatedMediaClosed = true;
+          break;
+        }
+        if (activatedMediaClosed) continue;
         const reviews = objective.items.filter(
           (item) =>
             item.state === "for_review" &&
+            parseWorkerPacketFromIssue(item.body ?? "").deliverable.kind === "repository-change" &&
             !activeExecutions.has(item.number) &&
             !deferredAdoptions.has(item.number),
         );
@@ -6680,6 +6723,7 @@ export class FactorySupervisor {
         >();
         const repositoryCapabilityProofs = new Map<number, RepositoryCapabilityProof[]>();
         const activatedPackets = new Map<number, WorkerPacket>();
+        const assetActivationBundles = new Map<number, AssetActivationBundle>();
         const managedRuntimeActivations = new Map<number, ManagedRuntimeActivation>();
         const executionHead = runnable.length
           ? await this.#store.getBranchHead(this.#baseBranch)
@@ -6832,13 +6876,87 @@ export class FactorySupervisor {
             let packet = graphPacket;
             let capabilityBlocker: string | undefined;
             try {
+              if (
+                packet.deliverable.kind === "repository-change" &&
+                (packet.generatedAssetRequirements?.length ?? 0) > 0
+              ) {
+                if (!this.#compiledProjection)
+                  throw new Error("generated media activation requires graph projection evidence");
+                const activations = [];
+                const producerIssueNumbers: Record<string, number> = {};
+                for (const requirement of packet.generatedAssetRequirements ?? []) {
+                  const binding = this.#compiledProjection.bindings.find(
+                    ({ compilerId }) => compilerId === requirement.producerWorkItemId,
+                  );
+                  if (!binding)
+                    throw new Error("generated media producer lacks projected issue identity");
+                  producerIssueNumbers[requirement.producerWorkItemId] = binding.issueNumber;
+                  const producer = objective.items.find(
+                    ({ number }) => number === binding.issueNumber,
+                  );
+                  if (!producer) throw new Error("generated media producer issue is unavailable");
+                  const activationEvents = (producer.factoryEvents ?? []).filter(
+                    (event) =>
+                      event.kind === "media" &&
+                      event.event === "AssetActivated" &&
+                      event.runId === this.#run.runId &&
+                      event.workItem === producer.number &&
+                      event.activationDigest,
+                  );
+                  if (activationEvents.length !== 1)
+                    throw new Error("generated media requires exactly one approved activation");
+                  const activationEvent = activationEvents[0]!;
+                  const reservationEvent = (producer.factoryEvents ?? []).find(
+                    (event) =>
+                      event.kind === "attempt" &&
+                      event.event === "AttemptReserved" &&
+                      event.runId === activationEvent.runId &&
+                      event.attempt === activationEvent.attempt &&
+                      event.mediaInvocation?.digest === activationEvent.invocationDigest,
+                  );
+                  if (!reservationEvent || reservationEvent.kind !== "attempt")
+                    throw new Error("generated media activation lacks producer reservation");
+                  const storedActivation = await readAssetActivation({
+                    store: this.#store,
+                    authority: {
+                      repository: `${this.#options.owner}/${this.#options.repo}`,
+                      objective: this.#run.objective,
+                      baseSha: reservationEvent.baseSha,
+                    },
+                    runId: activationEvent.runId,
+                    digest: String(activationEvent.activationDigest),
+                  });
+                  if (
+                    !storedActivation ||
+                    storedActivation.commit !== activationEvent.activationCommitOid ||
+                    storedActivation.record.producerWorkItem !== binding.issueNumber
+                  )
+                    throw new Error("generated media activation record differs from its event");
+                  activations.push(storedActivation.record);
+                }
+                const activated = activateRepositoryWorkerPacket({
+                  sourcePacket: (() => {
+                    assertRepositoryChangeWorkerPacket(packet);
+                    return packet;
+                  })(),
+                  consumerWorkItemId: priority.item.id,
+                  activations,
+                  producerIssueNumbers,
+                });
+                packet = activated.packet;
+                if (!activated.bundle)
+                  throw new Error(
+                    "generated media activation did not produce a reservation bundle",
+                  );
+                assetActivationBundles.set(priority.item.number, activated.bundle);
+              }
               const capabilitySourceRef = `refs/heads/${deliveryBases.get(priority.item.number)!.branch}`;
               const providerIdentities = await this.#capabilityProviderIdentities(
-                graphPacket,
+                packet,
                 objective.items,
                 executionBase.oid,
               );
-              packet = await activateManagedRuntimePacket(graphPacket, (id) =>
+              packet = await activateManagedRuntimePacket(packet, (id) =>
                 providerIdentities.get(id),
               );
               const proofs = await this.#resolveExecutionBaseCapabilities(
@@ -7134,6 +7252,7 @@ export class FactorySupervisor {
                   repositoryCapabilityProofs.get(item.number) ?? [],
                   activatedPackets.get(item.number),
                   managedRuntimeActivations.get(item.number),
+                  assetActivationBundles.get(item.number),
                   undefined,
                   commitExecutionCapacity,
                 );
@@ -7314,9 +7433,23 @@ export class FactorySupervisor {
     repositoryCapabilityProofs: readonly RepositoryCapabilityProof[] = [],
     activatedPacket?: WorkerPacket,
     managedRuntimeActivation?: ManagedRuntimeActivation,
+    assetActivationBundle?: AssetActivationBundle,
     recovered?: CollectedAttemptContinuation,
     commitExecutionCapacity?: () => Promise<void>,
   ): Promise<void> {
+    const mediaPacket = activatedPacket ?? parseWorkerPacketFromIssue(item.body ?? "");
+    if (mediaPacket.deliverable.kind === "asset-production") {
+      if (recovered) throw new Error("media recovery must resume its exact invocation receipt");
+      return this.#executeMedia(
+        item,
+        objectiveDeadline,
+        admission,
+        AssetProductionWorkerPacketSchema.parse(mediaPacket),
+        releaseExecutionCapacity,
+        executionSignal,
+        commitExecutionCapacity,
+      );
+    }
     const execute = () =>
       withArtifactContentScope(() =>
         this.#executeWithArtifactContent(
@@ -7329,6 +7462,7 @@ export class FactorySupervisor {
           repositoryCapabilityProofs,
           activatedPacket,
           managedRuntimeActivation,
+          assetActivationBundle,
           recovered,
           commitExecutionCapacity,
         ),
@@ -7336,6 +7470,337 @@ export class FactorySupervisor {
     return this.#observePhase(`work-item-${item.number}`, () =>
       recovered ? execute() : this.#modelInvocations.run(execute),
     );
+  }
+
+  async #executeMedia(
+    item: DerivedWorkItem,
+    objectiveDeadline: number,
+    admission: AdmissionProposal,
+    packet: Extract<WorkerPacket, { deliverable: { kind: "asset-production" } }>,
+    releaseExecutionCapacity: (alreadyReleased?: boolean) => Promise<void>,
+    executionSignal?: AbortSignal,
+    commitExecutionCapacity?: () => Promise<void>,
+  ): Promise<void> {
+    const adapter = this.#mediaRegistry.get(packet.deliverable.producerCapabilityId);
+    if (!adapter || assetDigest(adapter.capability) !== packet.deliverable.producerCapabilityDigest)
+      throw new Error("asset producer capability changed before reservation");
+    const base = await this.#store.readCommit(packet.baseSha);
+    const authority = {
+      repository: `${this.#options.owner}/${this.#options.repo}`,
+      objective: this.#run.objective,
+      baseSha: packet.baseSha,
+    };
+    const inputEntries: AssetManifestEntry[] = [];
+    for (const manifestDigest of new Set(
+      (packet.assetInputs ?? []).map(({ manifestDigest }) => manifestDigest),
+    )) {
+      const manifest = await readObjectiveAssetManifest({
+        store: this.#store,
+        authority,
+        digest: manifestDigest,
+      });
+      if (!manifest) throw new Error("media producer input manifest is unavailable");
+      for (const input of packet.assetInputs ?? []) {
+        if (input.manifestDigest !== manifestDigest) continue;
+        const entry = manifest.assets.find(
+          ({ descriptor }) => descriptor.digest === input.descriptorDigest,
+        );
+        if (!entry) throw new Error("media producer input descriptor is unavailable");
+        inputEntries.push(entry);
+      }
+    }
+    let reservation: AttemptReservation | undefined;
+    await this.#lease.use(async (lease) => {
+      const reassignmentAuthorityReceiptOid = await this.#reconcileIssueAdmissionHistory(
+        item,
+        lease,
+        base,
+      );
+      reservation = await this.#attempts.reserve({
+        ...(reassignmentAuthorityReceiptOid ? { reassignmentAuthorityReceiptOid } : {}),
+        lease,
+        workItem: item.number,
+        workItemNodeId: item.id,
+        backend: adapter.capability.id,
+        base,
+        sequence: this.#sequences.take(),
+        admission: {
+          admissionClass: admission.admissionClass,
+          admissionReason: admission.admissionReason,
+          requestedCpu: admission.requirements.cpu,
+          requestedMemoryMb: admission.requirements.memoryMb,
+          priorityRank: admission.priority.rank,
+          prioritySource: admission.priority.source,
+          subIssuePosition: admission.priority.subIssuePosition,
+          criticalPathLength: admission.priority.criticalPathLength,
+          unfinishedDownstream: admission.priority.unfinishedDownstream,
+        },
+        binding: async (attempt) => {
+          if (attempt !== admission.reservation.attempt)
+            throw new Error("media issue admission advanced after planning");
+          const projection = this.#compiledProjection;
+          if (!projection) throw new Error("media admission requires its graph projection");
+          const projectionCommit = await this.#store.readCommit(projection.commitOid);
+          if (projectionCommit.parentOids.length !== 1)
+            throw new Error("media graph projection ancestry is invalid");
+          const invocation = createMediaInvocation({
+            repository: authority.repository,
+            objective: authority.objective,
+            runId: this.#run.runId,
+            workItem: item.number,
+            attempt,
+            packet,
+            capability: adapter.capability,
+            inputEntries,
+            deadline: new Date(
+              Math.min(
+                objectiveDeadline,
+                Date.now() + this.#policy.workItemTimeoutMinutes * 60_000,
+              ),
+            ).toISOString(),
+            policyDigest: this.#run.policyDigest,
+            outputVisibility: "private",
+            outputRights: { basis: "unknown" },
+          });
+          return {
+            graphDigest: projection.graphDigest,
+            graphCommitOid: projectionCommit.parentOids[0]!,
+            projectionCommitOid: projection.commitOid,
+            capacityReservationId: admission.reservation.key,
+            budgetReservationId: `${this.#run.runId}:${item.number}:${attempt}:media`,
+            resourceIdentity: JSON.stringify([
+              this.#run.objective,
+              this.#run.runId,
+              item.number,
+              attempt,
+              adapter.capability.id,
+              invocation.digest,
+            ]),
+            mediaInvocation: invocation,
+          };
+        },
+      });
+    });
+    if (!reservation?.mediaInvocation)
+      throw new Error("media reservation did not retain invocation");
+    await commitExecutionCapacity?.();
+    const recordMedia = async (
+      event: Parameters<LifecycleRecorder["media"]>[0]["event"],
+      fields?: Record<string, unknown>,
+      reason?: string,
+    ) =>
+      this.#lease.use((lease) =>
+        this.#recorder.media({
+          lease,
+          workItemNodeId: item.id,
+          sequence: this.#sequences.take(),
+          event,
+          workItem: item.number,
+          attempt: reservation!.attempt,
+          reservationOid: reservation!.oid,
+          invocationDigest: reservation!.mediaInvocation!.digest,
+          ...(fields ? { fields } : {}),
+          ...(reason ? { reason } : {}),
+        }),
+      );
+    const executor = new MediaProductionExecutor({
+      store: this.#store,
+      retentionRoot: join(
+        tmpdir(),
+        "clockgrove-factory-media",
+        createHash("sha256").update(authority.repository).digest("hex"),
+        this.#run.runId,
+      ),
+      adapter,
+      assertCurrent: () => this.#externalAdmission(async () => {}),
+      hooks: {
+        markDispatching: () =>
+          this.#lease.use((lease) => this.#attempts.markDispatching(lease, reservation!)),
+        recordDispatch: (receipt, commitOid) =>
+          recordMedia("MediaDispatchRecorded", {
+            dispatchReceiptDigest: receipt.digest,
+            dispatchCommitOid: commitOid,
+          }).then(() => {}),
+        recordTerminalFailure: ({ state, reason, accounting }) =>
+          recordMedia("MediaUsageSettled", { accounting }, `${state}: ${reason}`).then(() => {}),
+        recordAssetSet: async (assetSet, commitOid) => {
+          await recordMedia("AssetSetReady", {
+            assetSetDigest: assetSet.digest,
+            assetSetCommitOid: commitOid,
+          });
+          await this.#lease.use((lease) =>
+            this.#attempts.record({
+              lease,
+              workItemNodeId: item.id,
+              reservation: reservation!,
+              event: "AttemptSucceeded",
+              sequence: this.#sequences.take(),
+              artifactDigest: assetSet.digest,
+            }),
+          );
+        },
+        recordUsageSettled: (_invocation, accounting) =>
+          recordMedia("MediaUsageSettled", { accounting }).then(() => {}),
+        recordCleanupFailure: (_invocation, reason) =>
+          recordMedia("MediaCleanupFailed", undefined, reason).then(() => {}),
+        recordCleanupCompleted: () => recordMedia("MediaCleanupCompleted").then(() => {}),
+      },
+    });
+    const result = await executor.runPrepared({
+      authority,
+      invocation: reservation.mediaInvocation,
+      reservationOid: reservation.oid,
+      ...(executionSignal ? { signal: executionSignal } : {}),
+    });
+    if (result.state === "for-review" && !result.cleanupPending)
+      await this.#applyDeterministicMediaReview({
+        packet,
+        reservation: reservation as AttemptReservation & {
+          mediaInvocation: NonNullable<AttemptReservation["mediaInvocation"]>;
+        },
+        authority,
+        assetSet: result.assetSet,
+        existingEvents: item.factoryEvents ?? [],
+        recordMedia,
+      });
+    if (result.state === "running") throw new ArtifactCompletionUnavailableError();
+    if (
+      result.state === "unknown" ||
+      ((result.state === "for-review" ||
+        result.state === "failed" ||
+        result.state === "cancelled") &&
+        result.cleanupPending)
+    )
+      throw new ArtifactCompletionUnavailableError();
+    if (result.state === "failed" || result.state === "cancelled")
+      await this.#lease.use((lease) =>
+        this.#attempts.record({
+          lease,
+          workItemNodeId: item.id,
+          reservation: reservation!,
+          event: result.state === "failed" ? "AttemptFailed" : "AttemptCancelled",
+          sequence: this.#sequences.take(),
+          reason: `media invocation ${result.state}`,
+        }),
+      );
+    await releaseExecutionCapacity();
+    await this.#settleIssueAdmission(item, reservation, {
+      cleanupConfirmed: true,
+      definitiveNonExecution: false,
+      modelUsageExpected: false,
+    });
+  }
+
+  async #applyDeterministicMediaReview(args: {
+    packet: Extract<WorkerPacket, { deliverable: { kind: "asset-production" } }>;
+    reservation: AttemptReservation & {
+      mediaInvocation: NonNullable<AttemptReservation["mediaInvocation"]>;
+    };
+    authority: { repository: string; objective: number; baseSha: string };
+    assetSet: import("./media/contracts.js").AssetSet;
+    existingEvents: readonly FactoryEvent[];
+    recordMedia(
+      event: Parameters<LifecycleRecorder["media"]>[0]["event"],
+      fields?: Record<string, unknown>,
+      reason?: string,
+    ): Promise<unknown>;
+  }): Promise<void> {
+    const review = args.packet.deliverable.intent.review;
+    if (review.kind !== "deterministic-preauthorized") return;
+    const ruleId = review.ruleId;
+    if (!this.#policy.compilerMediaEgress.deterministicReviewRuleIds.includes(ruleId))
+      throw new Error("deterministic media review rule is not authorized by run policy");
+    const reviewer = this.#mediaReviewRegistry.get(ruleId);
+    if (!reviewer) throw new Error(`deterministic media review rule ${ruleId} is not registered`);
+    const reviewed = reviewer.review(args.reservation.mediaInvocation, args.assetSet);
+    const reasonDigest = reviewed.reason
+      ? createHash("sha256").update(reviewed.reason).digest("hex")
+      : undefined;
+    const decision = createAssetDecision({
+      kind: reviewed.kind,
+      requestId: `review-${assetDigest([args.assetSet.digest, ruleId]).slice(0, 48)}`,
+      requestedBy: `rule:${ruleId}`,
+      assetSet: args.assetSet,
+      producerReservationOid: args.reservation.oid,
+      selectedDescriptorDigests: reviewed.selectedDescriptorDigests,
+      rule: { id: ruleId, digest: mediaReviewRuleDigest(reviewer) },
+      ...(reviewed.kind === "rejected" && reasonDigest ? { reasonDigest } : {}),
+      ...(reviewed.kind === "revision-requested" && reasonDigest
+        ? { feedbackDigest: reasonDigest }
+        : {}),
+    });
+    const storedSet = await readAssetSet({
+      store: this.#store,
+      authority: args.authority,
+      runId: args.assetSet.runId,
+      digest: args.assetSet.digest,
+    });
+    if (!storedSet) throw new Error("deterministic review lost its immutable Asset Set");
+    const storedDecision = await persistAssetDecision({
+      store: this.#store,
+      authority: args.authority,
+      decision,
+      parentOids: [storedSet.commit],
+      assertCurrent: () => this.#externalAdmission(async () => {}),
+    });
+    let storedActivation: Awaited<ReturnType<typeof persistAssetActivation>> | undefined;
+    if (decision.kind === "approved") {
+      const activation = createAssetActivation({
+        assetSet: args.assetSet,
+        decision,
+        producerReservationOid: args.reservation.oid,
+      });
+      storedActivation = await persistAssetActivation({
+        store: this.#store,
+        authority: args.authority,
+        activation,
+        parentOids: [
+          storedDecision.commit,
+          ...activation.selected.map(({ storage }) => storage.readyCommit),
+        ],
+        assertCurrent: () => this.#externalAdmission(async () => {}),
+      });
+    }
+    const priorDecision = args.existingEvents.find(
+      (event) =>
+        event.kind === "media" &&
+        event.event === "AssetDecisionRecorded" &&
+        event.assetSetDigest === args.assetSet.digest,
+    );
+    if (priorDecision && priorDecision.decisionDigest !== decision.digest)
+      throw new Error("deterministic media decision changed during recovery");
+    if (!priorDecision)
+      await args.recordMedia(
+        "AssetDecisionRecorded",
+        {
+          assetSetDigest: args.assetSet.digest,
+          decisionDigest: decision.digest,
+          decisionKind: decision.kind,
+          requestId: decision.requestId,
+          requestedBy: decision.requestedBy,
+        },
+        reviewed.reason ?? undefined,
+      );
+    if (storedActivation) {
+      const priorActivation = args.existingEvents.find(
+        (event) =>
+          event.kind === "media" &&
+          event.event === "AssetActivated" &&
+          event.decisionDigest === decision.digest,
+      );
+      if (
+        priorActivation &&
+        priorActivation.activationDigest !== storedActivation.activation.digest
+      )
+        throw new Error("deterministic media activation changed during recovery");
+      if (!priorActivation)
+        await args.recordMedia("AssetActivated", {
+          assetSetDigest: args.assetSet.digest,
+          decisionDigest: decision.digest,
+          activationDigest: storedActivation.activation.digest,
+          activationCommitOid: storedActivation.commit,
+        });
+    }
   }
 
   async #reportFindingCandidates(
@@ -7398,6 +7863,7 @@ export class FactorySupervisor {
     repositoryCapabilityProofs: readonly RepositoryCapabilityProof[] = [],
     activatedPacket?: WorkerPacket,
     managedRuntimeActivation?: ManagedRuntimeActivation,
+    assetActivationBundle?: AssetActivationBundle,
     recovered?: CollectedAttemptContinuation,
     commitExecutionCapacity?: () => Promise<void>,
   ): Promise<void> {
@@ -7496,7 +7962,7 @@ export class FactorySupervisor {
           throw new Error("stack parent branch changed before child admission");
         }
       }
-      const graphPacket =
+      const sourceGraphPacket =
         recovered?.packet ??
         parseWorkerPacket({
           ...originalPacket,
@@ -7512,6 +7978,22 @@ export class FactorySupervisor {
               : {}),
           },
         });
+      const reservedAssetBundle = recovered
+        ? reservation?.assetActivationBundle
+        : assetActivationBundle;
+      let graphPacket = sourceGraphPacket;
+      if (reservedAssetBundle && !recovered) {
+        if (reservedAssetBundle.consumerWorkItemId !== item.id)
+          throw new Error("asset activation bundle belongs to another consumer");
+        const activated = activateRepositoryWorkerPacket({
+          sourcePacket: RepositoryChangeWorkerPacketSchema.parse(sourceGraphPacket),
+          consumerWorkItemId: item.id,
+          activations: reservedAssetBundle.activations,
+        });
+        if (!activated.bundle || activated.bundle.digest !== reservedAssetBundle.digest)
+          throw new Error("reserved asset activation bundle changed during packet reconstruction");
+        graphPacket = activated.packet;
+      }
       const packet = packetWithManagedRuntimeActivation(
         graphPacket,
         recovered ? reservation?.managedRuntimeActivation : managedRuntimeActivation,
@@ -7746,8 +8228,10 @@ export class FactorySupervisor {
                   lease.epoch,
                   lease.policyDigest,
                   managedRuntimeActivation?.digest ?? null,
+                  assetActivationBundle?.digest ?? null,
                 ]),
                 ...(managedRuntimeActivation ? { managedRuntimeActivation } : {}),
+                ...(assetActivationBundle ? { assetActivationBundle } : {}),
               };
             },
             prepareLocalScope: async (attempt) => {
@@ -9620,6 +10104,7 @@ export class FactorySupervisor {
       repositoryCapabilityProofs,
       packet,
       reservation.managedRuntimeActivation,
+      reservation.assetActivationBundle,
       recovered,
     );
   }
@@ -11293,10 +11778,17 @@ export class FactorySupervisor {
 
   #validateCompiledGraphStatic(graph: CompiledObjective): void {
     for (const item of graph.workItems) {
-      if (item.deliverable.kind === "asset-production")
-        throw new Error(
-          `compiled graph includes asset-production Work Item ${item.id}, but this controller has no supervised asset-production execution route`,
-        );
+      if (item.deliverable.kind === "asset-production") {
+        const adapter = this.#mediaRegistry.get(item.deliverable.producerCapabilityId);
+        if (
+          !adapter ||
+          assetDigest(adapter.capability) !== item.deliverable.producerCapabilityDigest
+        )
+          throw new Error(
+            `compiled asset producer capability is unavailable or changed for ${item.id}`,
+          );
+        continue;
+      }
       const packet = executionWorkerPacketFromCompiled(item);
       if (
         JSON.stringify(packet.managedRuntimes ?? []) !==
@@ -11322,6 +11814,19 @@ export class FactorySupervisor {
     const budgets = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
     for (const item of graph.workItems) {
       const packet = executionWorkerPacketFromCompiled(item);
+      if (packet.deliverable.kind === "asset-production") {
+        const adapter = this.#mediaRegistry.get(packet.deliverable.producerCapabilityId);
+        if (!adapter)
+          throw new Error(
+            `media adapter ${packet.deliverable.producerCapabilityId} is unavailable`,
+          );
+        const probe = await adapter.probe();
+        if (!probe.available || !probe.authenticated)
+          throw new Error(
+            `media adapter ${adapter.capability.id} failed preflight: ${probe.reason ?? "unavailable"}`,
+          );
+        continue;
+      }
       const requirements = {
         ...packet.requirements,
         ...(this.#policy.trust === "sandbox_untrusted" &&
@@ -11508,6 +12013,36 @@ export class FactorySupervisor {
       );
       if (!reservation) throw new Error("issue admission original reservation unavailable");
       if (await this.#recoverUndispatchedAdmission(item, reservation)) continue;
+      if (reservation.mediaInvocation) {
+        const invocation = reservation.mediaInvocation;
+        const media = events.filter(
+          (event) =>
+            event.kind === "media" &&
+            event.runId === reservation.runId &&
+            event.workItem === reservation.workItem &&
+            event.attempt === reservation.attempt &&
+            event.reservationOid === reservation.oid &&
+            event.invocationDigest === invocation.digest,
+        );
+        const cleanup = [...media]
+          .reverse()
+          .find((event) => ["MediaCleanupCompleted", "MediaCleanupFailed"].includes(event.event));
+        if (cleanup?.event !== "MediaCleanupCompleted") continue;
+        const capacity = await this.#capacitySnapshot();
+        for (const held of capacity.reservations.filter(
+          (claim) =>
+            claim.objective === reservation.objective &&
+            claim.workItem === reservation.workItem &&
+            claim.attempt === reservation.attempt,
+        ))
+          await this.#releaseCapacity(held.key);
+        await this.#settleIssueAdmission(item, reservation, {
+          cleanupConfirmed: true,
+          definitiveNonExecution: false,
+          modelUsageExpected: false,
+        });
+        continue;
+      }
       let producerClosed = hasOriginalAdmissionProducerCompletion(entry, events);
       if (!producerClosed && reservation.localScopeBatch) {
         producerClosed =
@@ -11838,13 +12373,26 @@ export class FactorySupervisor {
     ];
     let failure: unknown;
     for (const candidateTrust of trusts) {
-      const graphPacket = parseWorkerPacket({
+      let graphPacket = parseWorkerPacket({
         ...original,
         baseSha: reservation.baseSha,
         ...(context ? { retryContext: context } : {}),
         requirements: { ...original.requirements, trust: candidateTrust },
       });
       try {
+        if (reservation.assetActivationBundle) {
+          const activated = activateRepositoryWorkerPacket({
+            sourcePacket: RepositoryChangeWorkerPacketSchema.parse(graphPacket),
+            consumerWorkItemId: item.id,
+            activations: reservation.assetActivationBundle.activations,
+          });
+          if (
+            !activated.bundle ||
+            activated.bundle.digest !== reservation.assetActivationBundle.digest
+          )
+            throw new Error("durable asset activation bundle changed");
+          graphPacket = activated.packet;
+        }
         const admitted = packetWithManagedRuntimeActivation(
           graphPacket,
           reservation.managedRuntimeActivation,
@@ -18199,6 +18747,10 @@ export class FactorySupervisor {
     // AttemptSucceeded receipt means it is no longer an undispatched intent.
     if (!adoptedArtifactConsumer && (await this.#recoverUndispatchedAdmission(item, reservation)))
       return;
+    if (reservation.mediaInvocation) {
+      await this.#recoverInterruptedMedia(item, reservation);
+      return;
+    }
     const backend = this.#registry.get(reservation.backend);
     if (!backend) {
       throw new Error(`cannot reconcile unavailable backend ${reservation.backend}`);
@@ -18969,6 +19521,202 @@ export class FactorySupervisor {
         await this.#store.readCommit(reservation.baseSha),
       ),
     );
+  }
+
+  async #recoverInterruptedMedia(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+  ): Promise<void> {
+    const invocation = reservation.mediaInvocation;
+    if (!invocation) throw new Error("media recovery requires its reserved invocation");
+    const adapter = this.#mediaRegistry.get(invocation.adapterId);
+    if (!adapter || assetDigest(adapter.capability) !== invocation.capabilityDigest)
+      throw new Error(`cannot reconcile unavailable media adapter ${invocation.adapterId}`);
+    const authority = {
+      repository: invocation.repository,
+      objective: invocation.objective,
+      baseSha: reservation.baseSha,
+    };
+    const existing = (item.factoryEvents ?? []).filter(
+      (event) =>
+        event.runId === reservation.runId &&
+        "attempt" in event &&
+        event.attempt === reservation.attempt,
+    );
+    const priorUnknown = [...existing]
+      .reverse()
+      .find(
+        (event) =>
+          event.kind === "media" &&
+          event.event === "MediaUsageSettled" &&
+          event.reservationOid === reservation.oid &&
+          event.invocationDigest === invocation.digest &&
+          (event.accounting?.variants === null ||
+            event.accounting?.generatedBytes === null ||
+            event.accounting?.storageBytes === null ||
+            event.accounting?.native.some(({ amount }) => amount === null)),
+      );
+    if (priorUnknown) throw new ArtifactCompletionUnavailableError();
+    const hasMedia = (
+      event: string,
+      predicate?: (value: Extract<FactoryEvent, { kind: "media" }>) => boolean,
+    ) =>
+      existing.some(
+        (value) =>
+          value.kind === "media" &&
+          value.event === event &&
+          value.reservationOid === reservation.oid &&
+          value.invocationDigest === invocation.digest &&
+          (!predicate || predicate(value)),
+      );
+    const recordMedia = async (
+      event: Parameters<LifecycleRecorder["media"]>[0]["event"],
+      fields?: Record<string, unknown>,
+      reason?: string,
+    ) =>
+      this.#lease.use((lease) =>
+        this.#recorder.media({
+          lease,
+          workItemNodeId: item.id,
+          sequence: this.#sequences.take(),
+          event,
+          workItem: item.number,
+          attempt: reservation.attempt,
+          reservationOid: reservation.oid,
+          invocationDigest: invocation.digest,
+          ...(fields ? { fields } : {}),
+          ...(reason ? { reason } : {}),
+        }),
+      );
+    const executor = new MediaProductionExecutor({
+      store: this.#store,
+      retentionRoot: join(
+        tmpdir(),
+        "clockgrove-factory-media",
+        createHash("sha256").update(authority.repository).digest("hex"),
+        reservation.runId,
+      ),
+      adapter,
+      assertCurrent: () => this.#externalAdmission(async () => {}),
+      hooks: {
+        markDispatching: async () => {
+          throw new Error("media recovery cannot rearm dispatch");
+        },
+        recordDispatch: async (receipt, commitOid) => {
+          if (
+            !hasMedia(
+              "MediaDispatchRecorded",
+              (event) => event.dispatchReceiptDigest === receipt.digest,
+            )
+          )
+            await recordMedia("MediaDispatchRecorded", {
+              dispatchReceiptDigest: receipt.digest,
+              dispatchCommitOid: commitOid,
+            });
+        },
+        recordTerminalFailure: async ({ state, reason, accounting }) => {
+          if (!hasMedia("MediaUsageSettled"))
+            await recordMedia("MediaUsageSettled", { accounting }, `${state}: ${reason}`);
+        },
+        recordAssetSet: async (assetSet, commitOid) => {
+          if (!hasMedia("AssetSetReady", (event) => event.assetSetDigest === assetSet.digest))
+            await recordMedia("AssetSetReady", {
+              assetSetDigest: assetSet.digest,
+              assetSetCommitOid: commitOid,
+            });
+          if (
+            !existing.some(
+              (event) =>
+                event.kind === "attempt" &&
+                event.event === "AttemptSucceeded" &&
+                event.artifactDigest === assetSet.digest,
+            )
+          )
+            await this.#lease.use((lease) =>
+              this.#attempts.record({
+                lease,
+                workItemNodeId: item.id,
+                reservation,
+                event: "AttemptSucceeded",
+                sequence: this.#sequences.take(),
+                artifactDigest: assetSet.digest,
+                allowRecovery: true,
+              }),
+            );
+        },
+        recordUsageSettled: async (_invocation, accounting) => {
+          if (!hasMedia("MediaUsageSettled"))
+            await recordMedia("MediaUsageSettled", { accounting });
+        },
+        recordCleanupFailure: async (_invocation, reason) => {
+          if (!hasMedia("MediaCleanupFailed"))
+            await recordMedia("MediaCleanupFailed", undefined, reason);
+        },
+        recordCleanupCompleted: async () => {
+          if (!hasMedia("MediaCleanupCompleted")) await recordMedia("MediaCleanupCompleted");
+        },
+      },
+    });
+    const result = await executor.resumeDispatched({
+      authority,
+      invocation,
+      reservationOid: reservation.oid,
+    });
+    if (result.state === "for-review" && !result.cleanupPending) {
+      const packet = AssetProductionWorkerPacketSchema.parse(this.#packetFor(item.number));
+      if (workerPacketDigest(packet) !== invocation.workerPacketDigest)
+        throw new Error("recovery media Worker Packet differs from its reserved invocation");
+      await this.#applyDeterministicMediaReview({
+        packet,
+        reservation: reservation as AttemptReservation & {
+          mediaInvocation: NonNullable<AttemptReservation["mediaInvocation"]>;
+        },
+        authority,
+        assetSet: result.assetSet,
+        existingEvents: item.factoryEvents ?? [],
+        recordMedia,
+      });
+    }
+    if (
+      result.state === "running" ||
+      result.state === "unknown" ||
+      ((result.state === "for-review" ||
+        result.state === "failed" ||
+        result.state === "cancelled") &&
+        result.cleanupPending)
+    )
+      throw new ArtifactCompletionUnavailableError();
+    if (
+      (result.state === "failed" || result.state === "cancelled") &&
+      !existing.some(
+        (event) =>
+          event.kind === "attempt" && ["AttemptFailed", "AttemptCancelled"].includes(event.event),
+      )
+    )
+      await this.#lease.use((lease) =>
+        this.#attempts.record({
+          lease,
+          workItemNodeId: item.id,
+          reservation,
+          event: result.state === "failed" ? "AttemptFailed" : "AttemptCancelled",
+          sequence: this.#sequences.take(),
+          reason: `media invocation ${result.state}`,
+          allowRecovery: true,
+        }),
+      );
+    const capacity = await this.#capacitySnapshot();
+    for (const held of capacity.reservations.filter(
+      (claim) =>
+        claim.objective === reservation.objective &&
+        claim.workItem === reservation.workItem &&
+        claim.attempt === reservation.attempt,
+    ))
+      await this.#releaseCapacity(held.key);
+    await this.#settleIssueAdmission(item, reservation, {
+      cleanupConfirmed: true,
+      definitiveNonExecution: false,
+      modelUsageExpected: false,
+    });
   }
 
   #hasUnfinishedAttempt(item: DerivedWorkItem): boolean {

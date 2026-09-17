@@ -1,4 +1,4 @@
-import type { FactoryEvent } from "../protocol/events.js";
+import type { FactoryEvent, MediaEvent } from "../protocol/events.js";
 import { unreconciledBudgetReservations } from "./budget.js";
 import { unreconciledCapacityReservations } from "../scheduling/capacity-ledger.js";
 import { deduplicateFactoryEvents, hasCurrentWriterAuthority } from "./receipts.js";
@@ -195,6 +195,71 @@ export function buildAdmissionSettlementEvidence(args: {
     )
   )
     throw new Error("admission accounting contradicts original epoch or policy");
+  if (entry.mediaInvocation) {
+    if (nonExecution || artifactConsumer)
+      throw new Error("dispatched media admission cannot use non-execution settlement");
+    const invocation = entry.mediaInvocation;
+    const media = scoped.filter(
+      (event): event is MediaEvent =>
+        event.kind === "media" &&
+        event.reservationOid === entry.reservation.oid &&
+        event.invocationDigest === invocation.digest,
+    );
+    const mediaCleanup = [...media]
+      .reverse()
+      .find((event) => ["MediaCleanupCompleted", "MediaCleanupFailed"].includes(event.event));
+    if (mediaCleanup?.event !== "MediaCleanupCompleted")
+      throw new Error("media admission has no exact successful cleanup receipt");
+    const usage = [...media]
+      .reverse()
+      .find((event) => event.event === "MediaUsageSettled")?.accounting;
+    if (
+      !usage ||
+      usage.variants === null ||
+      usage.generatedBytes === null ||
+      usage.storageBytes === null ||
+      usage.native.some(({ amount }) => amount === null)
+    )
+      throw new Error("media admission accounting remains unknown");
+    const ready = [...media].reverse().find((event) => event.event === "AssetSetReady");
+    const successful = ready
+      ? scoped.some(
+          (event) =>
+            event.kind === "attempt" &&
+            event.event === "AttemptSucceeded" &&
+            event.artifactDigest === ready.assetSetDigest,
+        )
+      : false;
+    const failed = scoped.some(
+      (event) =>
+        event.kind === "attempt" &&
+        ["AttemptFailed", "AttemptCancelled", "AttemptTimedOut"].includes(event.event),
+    );
+    if (!successful && !failed)
+      throw new Error("media admission has no exact terminal production outcome");
+    if (
+      scoped.some(
+        (event) =>
+          event.kind === "budget" &&
+          event.event === "BudgetReserved" &&
+          event.phase === "execution",
+      )
+    )
+      throw new Error("media admission unexpectedly used repository execution accounting");
+    if (unreconciledCapacityReservations(scoped).length)
+      throw new Error("media admission capacity remains reserved");
+    return {
+      reservationOid: entry.reservation.oid,
+      resourceIdentity: entry.resourceIdentity,
+      capacityReservationId: entry.capacityReservationId,
+      budgetReservationId: entry.budgetReservationId,
+      producerStopped: true,
+      resourcesReleased: true,
+      capacityReleased: true,
+      accountingSettled: true,
+      evidenceOid: args.cleanup.evidenceOid,
+    };
+  }
   const unreconciled = unreconciledBudgetReservations(scoped);
   const retainedUnknownModelInvocationId = args.retainedUnknownModelInvocationId;
   if (unreconciled.length) {

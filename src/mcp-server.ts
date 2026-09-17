@@ -1439,6 +1439,9 @@ type ApplicationToolInput = {
   revision?: number;
   manifestDigest?: string;
   assetManifestDigest?: string;
+  assetSetDigest?: string;
+  producerReservationOid?: string;
+  selectedDescriptorDigests?: string[];
   assets?: Array<{
     source:
       | { kind: "local-file"; path: string; name?: string }
@@ -1462,6 +1465,10 @@ function registerApplicationTool(
     | "doctor"
     | "assets-import"
     | "assets-inspect"
+    | "asset-status"
+    | "asset-approve"
+    | "asset-reject"
+    | "asset-revise"
     | "plan"
     | "compiler-eval"
     | "recovery-plan"
@@ -1556,108 +1563,124 @@ function registerApplicationTool(
             baseSha: z.string().regex(/^[0-9a-fA-F]{40}$/),
             manifestDigest: z.string().regex(/^[a-f0-9]{64}$/),
           }
-        : operation === "recovery-propose" || operation === "recovery-request"
+        : ["asset-status", "asset-approve", "asset-reject", "asset-revise"].includes(operation)
           ? {
-              ...RequestToolShape,
-              allowanceIncrement: RecoveryProposalInputSchema.shape.allowanceIncrement,
-              compilerEvaluation: RecoveryProposalInputSchema.shape.compilerEvaluation,
-              unknownUsageAcknowledgementDigest:
-                RecoveryProposalInputSchema.shape.unknownUsageAcknowledgementDigest,
-              ...(operation === "recovery-request"
-                ? { planDigest: z.string().regex(/^[0-9a-f]{64}$/) }
-                : {}),
+              ...(operation === "asset-status" ? ObjectiveToolShape : RequestToolShape),
+              assetSetDigest: z.string().regex(/^[a-f0-9]{64}$/),
+              ...(operation === "asset-status"
+                ? {}
+                : {
+                    selectedDescriptorDigests: z
+                      .array(z.string().regex(/^[a-f0-9]{64}$/))
+                      .max(32)
+                      .optional(),
+                    ...(operation === "asset-reject" || operation === "asset-revise"
+                      ? { reason: z.string().min(1).max(8_000) }
+                      : {}),
+                  }),
             }
-          : operation === "activate"
+          : operation === "recovery-propose" || operation === "recovery-request"
             ? {
                 ...RequestToolShape,
-                baseSha: z
-                  .string()
-                  .regex(/^[0-9a-fA-F]{40}$/)
-                  .optional(),
-                assetManifestDigest: z
-                  .string()
-                  .regex(/^[a-f0-9]{64}$/)
-                  .optional()
-                  .describe(
-                    "Exact imported Objective asset manifest to bind to this activation and compiler run.",
-                  ),
-                policy: z
-                  .record(z.unknown())
-                  .optional()
-                  .describe(
-                    "Complete immutable run policy. Omit for fixed local-only execution up to two workers with physical resource safeguards. Adaptive concurrency is explicit; paid backends are never inferred.",
-                  ),
+                allowanceIncrement: RecoveryProposalInputSchema.shape.allowanceIncrement,
+                compilerEvaluation: RecoveryProposalInputSchema.shape.compilerEvaluation,
+                unknownUsageAcknowledgementDigest:
+                  RecoveryProposalInputSchema.shape.unknownUsageAcknowledgementDigest,
+                ...(operation === "recovery-request"
+                  ? { planDigest: z.string().regex(/^[0-9a-f]{64}$/) }
+                  : {}),
               }
-            : [
-                  "doctor",
-                  "plan",
-                  "compiler-eval",
-                  "recovery-plan",
-                  "status",
-                  "explain",
-                  "replay",
-                ].includes(operation)
+            : operation === "activate"
               ? {
-                  ...ObjectiveToolShape,
-                  ...(operation === "doctor" ? { repository: z.string().min(1).optional() } : {}),
-                  ...(operation === "plan"
-                    ? {
-                        repository: z.string().min(1).optional(),
-                        compile: z
-                          .boolean()
-                          .optional()
-                          .default(false)
-                          .describe(
-                            "Explicitly invoke bounded management compilation. False only inspects an existing graph.",
-                          ),
-                        baseSha: z
-                          .string()
-                          .regex(/^[0-9a-fA-F]{40}$/)
-                          .optional(),
-                        assetManifestDigest: z
-                          .string()
-                          .regex(/^[a-f0-9]{64}$/)
-                          .optional()
-                          .describe(
-                            "Exact imported Objective asset manifest to bind and, when policy permits, supply separately to the compiler.",
-                          ),
-                        policy: z.record(z.unknown()).optional(),
-                      }
-                    : {}),
-                  ...(operation === "compiler-eval"
-                    ? {
-                        annotations: CompilerCausalAnnotationsSchema.optional().describe(
-                          "Optional caller-supplied causal claims bound to exact run/draft/revision and cited runtime receipts. Claims remain unauthenticated conclusions; no model work or writes.",
-                        ),
-                      }
-                    : {}),
-                  ...(operation === "explain"
-                    ? { workItemNumber: z.number().int().positive().optional() }
-                    : {}),
-                  ...(operation === "replay"
-                    ? {
-                        pinnedAdmissionSnapshots: z
-                          .array(z.unknown())
-                          .max(MAX_SUPPLIED_REPLAY_SNAPSHOTS)
-                          .optional()
-                          .describe(
-                            "Caller-supplied replay-v1 snapshots, at most 8 and 1 MiB total. Validated against replay-snapshot.schema.json and their digests. Simulations are not authenticated historical facts or execution authority.",
-                          ),
-                      }
-                    : {}),
-                }
-              : {
                   ...RequestToolShape,
-                  ...(operation === "retry" || operation === "priority"
-                    ? { workItemNumber: z.number().int().positive() }
-                    : {}),
-                  ...(operation === "priority"
-                    ? { priorityRank: z.number().int().min(0).max(1_000) }
-                    : {}),
-                  ...(["pause", "drain", "cloud-pause", "retry", "cancel"].includes(operation)
-                    ? { reason: z.string().min(1).max(8_000).optional() }
-                    : {}),
-                };
+                  baseSha: z
+                    .string()
+                    .regex(/^[0-9a-fA-F]{40}$/)
+                    .optional(),
+                  assetManifestDigest: z
+                    .string()
+                    .regex(/^[a-f0-9]{64}$/)
+                    .optional()
+                    .describe(
+                      "Exact imported Objective asset manifest to bind to this activation and compiler run.",
+                    ),
+                  policy: z
+                    .record(z.unknown())
+                    .optional()
+                    .describe(
+                      "Complete immutable run policy. Omit for fixed local-only execution up to two workers with physical resource safeguards. Adaptive concurrency is explicit; paid backends are never inferred.",
+                    ),
+                }
+              : [
+                    "doctor",
+                    "plan",
+                    "compiler-eval",
+                    "recovery-plan",
+                    "status",
+                    "explain",
+                    "replay",
+                  ].includes(operation)
+                ? {
+                    ...ObjectiveToolShape,
+                    ...(operation === "doctor" ? { repository: z.string().min(1).optional() } : {}),
+                    ...(operation === "plan"
+                      ? {
+                          repository: z.string().min(1).optional(),
+                          compile: z
+                            .boolean()
+                            .optional()
+                            .default(false)
+                            .describe(
+                              "Explicitly invoke bounded management compilation. False only inspects an existing graph.",
+                            ),
+                          baseSha: z
+                            .string()
+                            .regex(/^[0-9a-fA-F]{40}$/)
+                            .optional(),
+                          assetManifestDigest: z
+                            .string()
+                            .regex(/^[a-f0-9]{64}$/)
+                            .optional()
+                            .describe(
+                              "Exact imported Objective asset manifest to bind and, when policy permits, supply separately to the compiler.",
+                            ),
+                          policy: z.record(z.unknown()).optional(),
+                        }
+                      : {}),
+                    ...(operation === "compiler-eval"
+                      ? {
+                          annotations: CompilerCausalAnnotationsSchema.optional().describe(
+                            "Optional caller-supplied causal claims bound to exact run/draft/revision and cited runtime receipts. Claims remain unauthenticated conclusions; no model work or writes.",
+                          ),
+                        }
+                      : {}),
+                    ...(operation === "explain"
+                      ? { workItemNumber: z.number().int().positive().optional() }
+                      : {}),
+                    ...(operation === "replay"
+                      ? {
+                          pinnedAdmissionSnapshots: z
+                            .array(z.unknown())
+                            .max(MAX_SUPPLIED_REPLAY_SNAPSHOTS)
+                            .optional()
+                            .describe(
+                              "Caller-supplied replay-v1 snapshots, at most 8 and 1 MiB total. Validated against replay-snapshot.schema.json and their digests. Simulations are not authenticated historical facts or execution authority.",
+                            ),
+                        }
+                      : {}),
+                  }
+                : {
+                    ...RequestToolShape,
+                    ...(operation === "retry" || operation === "priority"
+                      ? { workItemNumber: z.number().int().positive() }
+                      : {}),
+                    ...(operation === "priority"
+                      ? { priorityRank: z.number().int().min(0).max(1_000) }
+                      : {}),
+                    ...(["pause", "drain", "cloud-pause", "retry", "cancel"].includes(operation)
+                      ? { reason: z.string().min(1).max(8_000).optional() }
+                      : {}),
+                  };
   server.registerTool(
     name,
     {
@@ -1720,6 +1743,36 @@ function registerApplicationTool(
           objective: input.objectiveNumber!,
           baseSha: input.baseSha,
           manifestDigest: input.manifestDigest,
+        });
+      }
+      if (operation === "asset-status") {
+        if (!input.assetSetDigest) throw new Error("assetSetDigest is required");
+        return service.assetStatus({
+          objective: input.objectiveNumber!,
+          assetSetDigest: input.assetSetDigest,
+        });
+      }
+      if (
+        operation === "asset-approve" ||
+        operation === "asset-reject" ||
+        operation === "asset-revise"
+      ) {
+        if (!input.requestId || !input.assetSetDigest)
+          throw new Error("complete media decision identity is required");
+        return service.assetDecision({
+          objective: input.objectiveNumber!,
+          requestId: input.requestId,
+          assetSetDigest: input.assetSetDigest,
+          kind:
+            operation === "asset-approve"
+              ? "approved"
+              : operation === "asset-reject"
+                ? "rejected"
+                : "revision-requested",
+          ...(input.selectedDescriptorDigests
+            ? { selectedDescriptorDigests: input.selectedDescriptorDigests }
+            : {}),
+          ...(input.reason ? { reason: input.reason } : {}),
         });
       }
       if (

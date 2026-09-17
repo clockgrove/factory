@@ -84,6 +84,57 @@ describe("repository capability JSON Schema parity", () => {
     expect(acceptedByZod(packet)).toBe(true);
   });
 
+  it("preserves distinct media uses while deduplicating immutable transport inputs", () => {
+    const descriptorDigest = "1".repeat(64);
+    const withUses = {
+      ...structuredClone(packet),
+      assetInputs: [
+        {
+          manifestDigest: "2".repeat(64),
+          descriptorDigest,
+          contentDigest: "3".repeat(64),
+          storageReceiptDigest: "4".repeat(64),
+          path: `assets/${"3".repeat(64)}/reference.png`,
+        },
+      ],
+      mediaUses: [
+        {
+          source: "imported",
+          intentId: "layout-input",
+          kind: "layout-reference",
+          brief: "Use the reference for implementation layout.",
+          purpose: "implementation-reference",
+          necessity: "required",
+          obligationIds: ["layout"],
+          rationale: "The layout must follow the reference.",
+          direction: "input-to",
+          criterionIds: [],
+          descriptorDigests: [descriptorDigest],
+          manifestDigest: "2".repeat(64),
+        },
+        {
+          source: "imported",
+          intentId: "layout-evidence",
+          kind: "acceptance-capture",
+          brief: "Use the same bytes as acceptance evidence.",
+          purpose: "acceptance-evidence",
+          necessity: "required",
+          obligationIds: ["visual-proof"],
+          rationale: "The criterion requires exact visual evidence.",
+          direction: "evidence-for",
+          criterionIds: ["visual-proof"],
+          descriptorDigests: [descriptorDigest],
+          manifestDigest: "2".repeat(64),
+        },
+      ],
+    };
+    expect(validate(withUses), JSON.stringify(validate.errors)).toBe(true);
+    const parsed = parseWorkerPacket(withUses);
+    expect(parsed.assetInputs).toHaveLength(1);
+    expect(parsed.deliverable.kind).toBe("repository-change");
+    if (parsed.deliverable.kind === "repository-change") expect(parsed.mediaUses).toHaveLength(2);
+  });
+
   it("accepts the strict asset-production shape and rejects repository and retired fields", () => {
     const intent = {
       id: "primary-media",
@@ -134,6 +185,7 @@ describe("repository capability JSON Schema parity", () => {
         contract: "clockgrove.factory/asset-set",
         intent,
         producerCapabilityId: "raster-producer",
+        producerCapabilityDigest: "1".repeat(64),
       },
     };
     expect(validate(assetPacket), JSON.stringify(validate.errors)).toBe(true);

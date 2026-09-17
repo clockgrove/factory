@@ -51,6 +51,11 @@ The Director skill uses bounded, read-only operations when the user is inspectin
   into an immutable Objective asset manifest. `factory_assets_inspect` reads a manifest by its
   pinned SHA-256 digest. See [Objective input assets](OBJECTIVE-ASSETS.md) for supported handlers,
   opaque-content policy, rights/visibility checks and offline materialization.
+- `factory_asset_status` inspects one authenticated immutable Asset Set. `factory_asset_approve`,
+  `factory_asset_reject`, and `factory_asset_revise` record a request-indexed review decision;
+  approval also publishes the exact activation used by dependent Worker Packets. The CLI forms are
+  `factory asset-status`, `asset-approve`, `asset-reject`, and `asset-revise`. See
+  [produced asset lifecycle](OBJECTIVE-ASSETS.md#produced-asset-lifecycle).
 - `factory_plan` inspects existing Work Items without model execution. Explicit `compile: true`
   compiles a proposed graph against a clean selected checkout without creating issues or starting
   workers. Pass `assetManifestDigest` to bind an imported manifest for media planning. Compilation

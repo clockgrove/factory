@@ -43,6 +43,7 @@ describe("CLI and MCP control surface", () => {
     const reads = new Set([
       "doctor",
       "assets-inspect",
+      "asset-status",
       "plan",
       "compiler-eval",
       "recovery-plan",
@@ -52,7 +53,12 @@ describe("CLI and MCP control surface", () => {
       "replay",
       "controller-status",
     ]);
-    const destructive = new Set(["cancel", "controller-stop", "controller-uninstall"]);
+    const destructive = new Set([
+      "asset-reject",
+      "cancel",
+      "controller-stop",
+      "controller-uninstall",
+    ]);
     for (const [name, operation, annotations] of APPLICATION_TOOL_DEFINITIONS) {
       expect(name).toMatch(/^factory_/);
       expect(annotations).toEqual({

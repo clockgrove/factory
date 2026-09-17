@@ -136,12 +136,14 @@ function managementInvocationProvenance(
     model: context.modelSelection?.model ?? fallbackModel ?? null,
     reasoning: context.modelSelection?.reasoning ?? null,
     baseSha: context.baseSha,
-    ...(context.mediaPlanning
+    ...(context.mediaPlanning?.assetManifest
       ? {
           assetManifestDigest: context.mediaPlanning.assetManifest.digest,
           mediaEgressDigest: context.mediaPlanning.assetEgress.policyDigest,
         }
-      : {}),
+      : context.mediaPlanning
+        ? { mediaEgressDigest: context.mediaPlanning.assetEgress.policyDigest }
+        : {}),
   };
 }
 
@@ -867,12 +869,14 @@ export class CodexCliManagementBackend implements ManagementBackend {
       model: execution?.modelSelection?.model ?? this.#options.model ?? null,
       reasoning: execution?.modelSelection?.reasoning ?? null,
       baseSha: request.baseSha,
-      ...(execution?.mediaPlanning
+      ...(execution?.mediaPlanning?.assetManifest
         ? {
             assetManifestDigest: execution.mediaPlanning.assetManifest.digest,
             mediaEgressDigest: execution.mediaPlanning.assetEgress.policyDigest,
           }
-        : {}),
+        : execution?.mediaPlanning
+          ? { mediaEgressDigest: execution.mediaPlanning.assetEgress.policyDigest }
+          : {}),
     };
     const { value, usage } = await withManagementProvenance(
       this.#run<unknown>(

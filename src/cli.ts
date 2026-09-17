@@ -69,6 +69,9 @@ const USAGE = [
   "  factory doctor OWNER/REPO#NUMBER [--repo DIR]",
   "  factory assets-import OWNER/REPO#NUMBER --request-id ID --input FILE",
   "  factory assets-inspect OWNER/REPO#NUMBER --base-sha SHA --manifest-digest DIGEST",
+  "  factory asset-status OWNER/REPO#NUMBER --asset-set-digest DIGEST",
+  "  factory asset-approve OWNER/REPO#NUMBER --request-id ID --asset-set-digest DIGEST --descriptor DIGEST [--descriptor DIGEST...]",
+  "  factory asset-reject|asset-revise OWNER/REPO#NUMBER --request-id ID --asset-set-digest DIGEST --reason TEXT",
   "  factory plan OWNER/REPO#NUMBER [--compile] [--repo DIR] [--base-sha SHA] [--asset-manifest-digest DIGEST] [--policy FILE]",
   "  factory compiler-eval OWNER/REPO#NUMBER [--markdown] [--annotations FILE]  (read-only draft history and post-mortem)",
   "  factory status|explain OWNER/REPO#NUMBER [--work-item NUMBER]",
@@ -299,6 +302,42 @@ async function applicationCommand(command: string, args: string[]): Promise<void
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
+  if (command === "asset-status") {
+    const assetSetDigest = option(args, "--asset-set-digest");
+    if (!assetSetDigest) fail("asset-status requires --asset-set-digest DIGEST");
+    const result = await service.assetStatus({
+      objective: target.objective,
+      assetSetDigest,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  if (["asset-approve", "asset-reject", "asset-revise"].includes(command)) {
+    const requestId = option(args, "--request-id");
+    const assetSetDigest = option(args, "--asset-set-digest");
+    const selectedDescriptorDigests = options(args, "--descriptor");
+    const reason = option(args, "--reason");
+    if (!requestId || !assetSetDigest)
+      fail(`${command} requires --request-id ID and --asset-set-digest DIGEST`);
+    if (command === "asset-approve" && selectedDescriptorDigests.length === 0)
+      fail("asset-approve requires at least one --descriptor DIGEST");
+    if (command !== "asset-approve" && !reason) fail(`${command} requires --reason TEXT`);
+    const result = await service.assetDecision({
+      objective: target.objective,
+      requestId,
+      assetSetDigest,
+      kind:
+        command === "asset-approve"
+          ? "approved"
+          : command === "asset-reject"
+            ? "rejected"
+            : "revision-requested",
+      ...(selectedDescriptorDigests.length ? { selectedDescriptorDigests } : {}),
+      ...(reason ? { reason } : {}),
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
   if (command === "recovery-propose" || command === "recovery-request") {
     const requestId = option(args, "--request-id");
     if (!requestId) fail(`${command} requires --request-id ID`);
@@ -417,6 +456,17 @@ function option(args: string[], name: string): string | undefined {
   const value = args[index + 1];
   if (!value || value.startsWith("--")) fail(`${name} requires a value`);
   return value;
+}
+
+function options(args: string[], name: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] !== name) continue;
+    const value = args[index + 1];
+    if (!value || value.startsWith("--")) fail(`${name} requires a value`);
+    values.push(value);
+  }
+  return values;
 }
 
 async function inspect(owner: string, repo: string, number: number): Promise<void> {
@@ -724,6 +774,10 @@ export async function main(argv: string[]): Promise<void> {
       "doctor",
       "assets-import",
       "assets-inspect",
+      "asset-status",
+      "asset-approve",
+      "asset-reject",
+      "asset-revise",
       "plan",
       "compiler-eval",
       "recovery-plan",

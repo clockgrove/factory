@@ -12,7 +12,7 @@ import type { GitCommitObject } from "./lease.js";
 
 export const ContentTransferIdentitySchema = z
   .object({
-    domain: z.enum(["worker-artifact", "objective-asset"]),
+    domain: z.enum(["worker-artifact", "objective-asset", "produced-asset"]),
     repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
     objective: z.number().int().positive(),
     baseSha: gitSha,

@@ -866,6 +866,7 @@ const jsonCompilerMediaFacts = strictObject({
     maxItems: 16,
     items: strictObject({
       id: jsonId,
+      capabilityDigest: jsonDigest,
       kinds: {
         type: "array",
         minItems: 1,

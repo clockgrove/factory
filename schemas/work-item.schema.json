@@ -184,6 +184,10 @@
       "$ref": "worker-packet.schema.json#/properties/generatedAssetRequirements",
       "default": []
     },
+    "mediaUses": {
+      "$ref": "worker-packet.schema.json#/properties/mediaUses",
+      "default": []
+    },
     "context": { "$ref": "worker-packet.schema.json#/properties/context" },
     "changeSurface": { "$ref": "worker-packet.schema.json#/properties/changeSurface" },
     "delivery": { "$ref": "worker-packet.schema.json#/properties/delivery" },
@@ -255,7 +259,8 @@
           { "required": ["validation"] },
           { "required": ["repositoryCapabilities"] },
           { "required": ["managedRuntimes"] },
-          { "required": ["generatedAssetRequirements"] }
+          { "required": ["generatedAssetRequirements"] },
+          { "required": ["mediaUses"] }
         ]
       }
     }

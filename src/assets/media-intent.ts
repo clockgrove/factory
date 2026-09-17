@@ -146,6 +146,7 @@ export const CompilerAssetManifestViewSchema = z
 export const CompilerMediaProducerCapabilitySchema = z
   .object({
     id: safeId,
+    capabilityDigest: sha256Digest,
     kinds: z.array(MediaIntentKindSchema).min(1).max(8),
     purposes: z.array(MediaIntentPurposeSchema).min(1).max(4),
     mediaTypes: z.array(MediaTypeSchema).min(1).max(16),
@@ -184,7 +185,14 @@ export const GeneratedAssetRequirementSchema = z
   .object({
     intentId: safeId,
     producerWorkItemId: safeId,
+    kind: MediaIntentKindSchema,
     purpose: MediaIntentPurposeSchema,
+    necessity: z.enum(["required", "helpful"]),
+    obligationIds: z.array(boundedText(160)).min(1).max(128),
+    brief: boundedText(4_000),
+    rationale: boundedText(2_000),
+    direction: z.literal("input-to"),
+    criterionIds: referenceIds(64),
   })
   .strict();
 
@@ -201,6 +209,7 @@ export const AssetProductionDeliverableSchema = z
     contract: z.literal("clockgrove.factory/asset-set"),
     intent: MediaIntentSchema,
     producerCapabilityId: safeId,
+    producerCapabilityDigest: sha256Digest,
   })
   .strict();
 

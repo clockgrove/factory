@@ -485,11 +485,11 @@ export async function prepareCompilerRequest(input: {
       context.mediaPlanning.assetEgress.policyDigest !== mediaEgressDigest
     )
       throw new Error("compiler media asset egress differs from immutable run policy");
-    if (context.mediaPlanning.assetManifest.assets.length > mediaEgress.maxAssets)
+    if ((context.mediaPlanning.assetManifest?.assets.length ?? 0) > mediaEgress.maxAssets)
       throw new Error("compiler media asset count exceeds immutable egress policy");
     if (
       mediaEgress.mode === "public-assets" &&
-      context.mediaPlanning.assetManifest.assets.some((asset) => asset.visibility !== "public")
+      context.mediaPlanning.assetManifest?.assets.some((asset) => asset.visibility !== "public")
     )
       throw new Error("private Objective asset is not permitted by compiler media egress policy");
   }
@@ -1888,6 +1888,23 @@ function projectMediaIntents(
           ...current,
           ...selectedInputs.filter((entry) => !known.has(entry.descriptorDigest)),
         ].sort((left, right) => left.descriptorDigest.localeCompare(right.descriptorDigest));
+        consumer.mediaUses = [
+          ...(consumer.mediaUses ?? []),
+          {
+            source: "imported" as const,
+            intentId: intent.id,
+            kind: intent.kind,
+            brief: intent.brief,
+            purpose: intent.purpose,
+            necessity: intent.necessity,
+            obligationIds: [...intent.obligationIds],
+            rationale: intent.rationale,
+            direction: binding.direction,
+            criterionIds: [...binding.criterionIds],
+            descriptorDigests: selectedInputs.map(({ descriptorDigest }) => descriptorDigest),
+            manifestDigest: selectedInputs[0]!.manifestDigest,
+          },
+        ];
       }
       disposition.push({
         intentId: intent.id,
@@ -1959,6 +1976,7 @@ function projectMediaIntents(
         contract: "clockgrove.factory/asset-set",
         intent: structuredClone(intent),
         producerCapabilityId: capability.id,
+        producerCapabilityDigest: capability.capabilityDigest,
       },
       ...(selectedInputs.length ? { assetInputs: selectedInputs } : {}),
       economicReview: {
@@ -1977,7 +1995,18 @@ function projectMediaIntents(
       consumer.dependsOn.sort();
       consumer.generatedAssetRequirements = [
         ...(consumer.generatedAssetRequirements ?? []),
-        { intentId: intent.id, producerWorkItemId: producerId, purpose: intent.purpose },
+        {
+          intentId: intent.id,
+          producerWorkItemId: producerId,
+          kind: intent.kind,
+          purpose: intent.purpose,
+          necessity: intent.necessity,
+          obligationIds: [...intent.obligationIds],
+          brief: intent.brief,
+          rationale: intent.rationale,
+          direction: "input-to" as const,
+          criterionIds: [...binding.criterionIds],
+        },
       ].sort((left, right) => left.intentId.localeCompare(right.intentId));
     }
     disposition.push({

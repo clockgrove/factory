@@ -1,0 +1,280 @@
+import {
+  AssetManifestEntrySchema,
+  AssetRightsSchema,
+  AssetVisibilitySchema,
+  assetDigest,
+  canonicalAssetJson,
+} from "../assets/contracts.js";
+import { MediaIntentSchema, RasterMediaConstraintsSchema } from "../assets/media-intent.js";
+import { attemptRef } from "../control/attempts.js";
+import {
+  AssetProductionWorkerPacketSchema,
+  RepositoryChangeWorkerPacketSchema,
+  workerPacketDigest,
+  type AssetProductionWorkerPacket,
+  type RepositoryChangeWorkerPacket,
+} from "../protocol/worker-packet.js";
+import {
+  AssetActivationBundleSchema,
+  AssetActivationSchema,
+  AssetDecisionSchema,
+  AssetSetSchema,
+  MediaInvocationSchema,
+  MediaProducerCapabilitySchema,
+  withMediaDigest,
+  type AssetActivation,
+  type AssetActivationBundle,
+  type AssetDecision,
+  type AssetSet,
+  type MediaInvocation,
+  type MediaProducerCapability,
+} from "./contracts.js";
+
+function exactRasterProfile(rasterInput: unknown, capabilityInput: MediaProducerCapability) {
+  const capability = MediaProducerCapabilitySchema.parse(capabilityInput);
+  const supported = capability.profiles.find((profile) => profile.kind === "raster");
+  if (!supported) return null;
+  const raster = rasterInput ? RasterMediaConstraintsSchema.parse(rasterInput) : null;
+  const width = Math.min(raster?.maximumWidth ?? 1_024, supported.maximumWidth);
+  const height = Math.min(raster?.maximumHeight ?? 1_024, supported.maximumHeight);
+  if ((raster?.minimumWidth ?? 1) > width || (raster?.minimumHeight ?? 1) > height)
+    throw new Error("media raster dimensions exceed producer capability");
+  if (raster?.alpha === "required" && !supported.supportsAlpha)
+    throw new Error("media intent requires unsupported alpha output");
+  if (raster?.animation === "required" && !supported.supportsAnimation)
+    throw new Error("media intent requires unsupported animation");
+  return {
+    kind: "raster" as const,
+    width,
+    height,
+    alpha: raster?.alpha === "required",
+    animation: raster?.animation === "required",
+  };
+}
+
+export function createMediaInvocation(args: {
+  repository: string;
+  objective: number;
+  runId: string;
+  workItem: number;
+  attempt: number;
+  packet: AssetProductionWorkerPacket;
+  capability: MediaProducerCapability;
+  inputEntries: unknown[];
+  deadline: string;
+  policyDigest: string;
+  model?: string;
+  quality?: string;
+  outputVisibility: unknown;
+  outputRights: unknown;
+}): MediaInvocation {
+  const packet = AssetProductionWorkerPacketSchema.parse(args.packet);
+  const capability = MediaProducerCapabilitySchema.parse(args.capability);
+  const intent = MediaIntentSchema.parse(packet.deliverable.intent);
+  if (
+    packet.deliverable.producerCapabilityId !== capability.id ||
+    packet.deliverable.producerCapabilityDigest !== assetDigest(capability)
+  )
+    throw new Error("Worker Packet producer capability changed before invocation");
+  if (
+    !capability.intentKinds.includes(intent.kind) ||
+    !capability.purposes.includes(intent.purpose)
+  )
+    throw new Error("producer capability does not apply to the media intent");
+  const outputMediaType = [...intent.output.mediaTypes]
+    .sort()
+    .find((mediaType) => capability.outputMediaTypes.includes(mediaType));
+  if (!outputMediaType) throw new Error("producer capability has no exact output MIME match");
+  const raster = outputMediaType.startsWith("image/")
+    ? exactRasterProfile(intent.output.raster, capability)
+    : null;
+  if (outputMediaType.startsWith("image/") && !raster)
+    throw new Error("raster output requires a matching typed producer profile");
+  if (
+    !outputMediaType.startsWith("image/") &&
+    !capability.profiles.some(({ kind }) => kind === "binary")
+  )
+    throw new Error("non-raster output requires the media-agnostic binary profile");
+  const inputEntries = args.inputEntries.map((value) => AssetManifestEntrySchema.parse(value));
+  const byDescriptor = new Map(inputEntries.map((entry) => [entry.descriptor.digest, entry]));
+  const inputAssets = packet.assetInputs.map((input) => {
+    const entry = byDescriptor.get(input.descriptorDigest);
+    if (
+      !entry ||
+      entry.descriptor.content.digest !== input.contentDigest ||
+      entry.storage.digest !== input.storageReceiptDigest ||
+      entry.descriptor.materializationPath !== input.path
+    )
+      throw new Error("media input differs from its immutable descriptor and storage receipt");
+    const mediaType = entry.descriptor.content.inspection.mediaType;
+    if (!capability.inputMediaTypes.includes(mediaType))
+      throw new Error(`producer capability does not accept input MIME ${mediaType}`);
+    return {
+      descriptorDigest: entry.descriptor.digest,
+      contentDigest: entry.descriptor.content.digest,
+      storageReceiptDigest: entry.storage.digest,
+      mediaType,
+    };
+  });
+  const model = args.model ?? capability.models[0] ?? null;
+  const quality = args.quality ?? capability.qualities[0] ?? null;
+  if (model && !capability.models.includes(model)) throw new Error("unsupported media model");
+  if (quality && !capability.qualities.includes(quality))
+    throw new Error("unsupported media quality");
+  const requestedVariants = intent.output.minimumCount;
+  if (requestedVariants > capability.limits.variants)
+    throw new Error("requested variants exceed producer capability");
+  const core = {
+    protocol: "clockgrove.factory/media-invocation-v1" as const,
+    repository: args.repository.toLowerCase(),
+    objective: args.objective,
+    runId: args.runId,
+    workItem: args.workItem,
+    attempt: args.attempt,
+    reservationRef: attemptRef(args.objective, args.workItem, args.attempt),
+    intentId: intent.id,
+    intentDigest: assetDigest(intent),
+    workerPacketDigest: workerPacketDigest(packet),
+    adapterId: capability.id,
+    adapterVersion: capability.adapterVersion,
+    capabilityDigest: assetDigest(capability),
+    invocationId: `media-${args.workItem}-${args.attempt}-${assetDigest([args.runId, intent.id]).slice(0, 24)}`,
+    model,
+    quality,
+    profile: raster ?? { kind: "binary" as const },
+    inputAssets,
+    outputMediaType,
+    outputVisibility: AssetVisibilitySchema.parse(args.outputVisibility),
+    outputRights: AssetRightsSchema.parse(args.outputRights),
+    deadline: args.deadline,
+    policyDigest: args.policyDigest,
+    providerRequests: 1,
+    requestedVariants,
+    maximumVariants: Math.min(intent.output.maximumCount, capability.limits.variants),
+    maximumGeneratedBytes: capability.limits.generatedBytes,
+    maximumStorageBytes: capability.limits.storageBytes,
+    networkDestinations: capability.network.destinations,
+    thirdPartyEgress: capability.network.thirdPartyEgress,
+  };
+  return MediaInvocationSchema.parse(withMediaDigest(core));
+}
+
+export function createAssetDecision(args: {
+  kind: "approved" | "rejected" | "revision-requested";
+  requestId: string;
+  requestedBy: string;
+  assetSet: AssetSet;
+  producerReservationOid: string;
+  selectedDescriptorDigests?: string[];
+  rule?: { id: string; digest: string };
+  reasonDigest?: string;
+  feedbackDigest?: string;
+}): AssetDecision {
+  const set = AssetSetSchema.parse(args.assetSet);
+  const selected = [...new Set(args.selectedDescriptorDigests ?? [])].sort();
+  if (
+    selected.some((digest) => !set.variants.some(({ descriptor }) => descriptor.digest === digest))
+  )
+    throw new Error("asset decision selected a descriptor outside the asset set");
+  return AssetDecisionSchema.parse(
+    withMediaDigest({
+      protocol: "clockgrove.factory/asset-decision-v1" as const,
+      kind: args.kind,
+      requestId: args.requestId,
+      requestedBy: args.requestedBy,
+      runId: set.runId,
+      intentId: set.intentId,
+      intentDigest: set.intentDigest,
+      producerWorkItem: set.workItem,
+      producerAttempt: set.attempt,
+      producerReservationOid: args.producerReservationOid,
+      assetSetDigest: set.digest,
+      invocationDigest: set.invocationDigest,
+      storageManifestDigest: set.storageManifestDigest,
+      selectedDescriptorDigests: selected,
+      ruleId: args.rule?.id ?? null,
+      ruleDigest: args.rule?.digest ?? null,
+      reasonDigest: args.reasonDigest ?? null,
+      feedbackDigest: args.feedbackDigest ?? null,
+    }),
+  );
+}
+
+export function activateRepositoryWorkerPacket(args: {
+  sourcePacket: RepositoryChangeWorkerPacket;
+  consumerWorkItemId: string;
+  activations: readonly AssetActivation[];
+  producerIssueNumbers?: Readonly<Record<string, number>>;
+}): { packet: RepositoryChangeWorkerPacket; bundle: AssetActivationBundle | null } {
+  const source = RepositoryChangeWorkerPacketSchema.parse(args.sourcePacket);
+  if (!source.generatedAssetRequirements.length) return { packet: source, bundle: null };
+  const activationByIntent = new Map(
+    args.activations.map((value) => {
+      const activation = AssetActivationSchema.parse(value);
+      return [activation.intentId, activation] as const;
+    }),
+  );
+  const assetInputs = new Map(source.assetInputs.map((input) => [input.descriptorDigest, input]));
+  const mediaUses = [...source.mediaUses];
+  const selectedActivations: AssetActivation[] = [];
+  for (const requirement of source.generatedAssetRequirements) {
+    const activation = activationByIntent.get(requirement.intentId);
+    if (!activation || activation.intentId !== requirement.intentId)
+      throw new Error(`generated media intent ${requirement.intentId} has no exact activation`);
+    const expectedProducer = args.producerIssueNumbers?.[requirement.producerWorkItemId];
+    if (expectedProducer !== undefined && activation.producerWorkItem !== expectedProducer)
+      throw new Error("generated media activation belongs to another projected producer");
+    selectedActivations.push(activation);
+    const descriptorDigests: string[] = [];
+    for (const entry of activation.selected) {
+      const input = {
+        manifestDigest: activation.storageManifestDigest,
+        descriptorDigest: entry.descriptor.digest,
+        contentDigest: entry.descriptor.content.digest,
+        storageReceiptDigest: entry.storage.digest,
+        path: entry.descriptor.materializationPath,
+      };
+      const prior = assetInputs.get(input.descriptorDigest);
+      if (prior && canonicalAssetJson(prior) !== canonicalAssetJson(input))
+        throw new Error("activated descriptor collides with another immutable asset input");
+      assetInputs.set(input.descriptorDigest, input);
+      descriptorDigests.push(input.descriptorDigest);
+    }
+    mediaUses.push({
+      source: "activated",
+      intentId: requirement.intentId,
+      kind: requirement.kind,
+      brief: requirement.brief,
+      purpose: requirement.purpose,
+      necessity: requirement.necessity,
+      obligationIds: [...requirement.obligationIds],
+      rationale: requirement.rationale,
+      direction: requirement.direction,
+      criterionIds: [...requirement.criterionIds],
+      producerWorkItemId: requirement.producerWorkItemId,
+      activationDigest: activation.digest,
+      descriptorDigests,
+    });
+  }
+  const packet = RepositoryChangeWorkerPacketSchema.parse({
+    ...source,
+    assetInputs: [...assetInputs.values()].sort((left, right) =>
+      left.descriptorDigest.localeCompare(right.descriptorDigest),
+    ),
+    generatedAssetRequirements: [],
+    mediaUses,
+  });
+  const core = {
+    protocol: "clockgrove.factory/asset-activation-bundle-v1" as const,
+    consumerWorkItemId: args.consumerWorkItemId,
+    sourcePacketDigest: workerPacketDigest(source),
+    activatedPacketDigest: workerPacketDigest(packet),
+    activations: selectedActivations.sort((left, right) =>
+      left.intentId.localeCompare(right.intentId),
+    ),
+  };
+  return {
+    packet,
+    bundle: AssetActivationBundleSchema.parse(withMediaDigest(core)),
+  };
+}

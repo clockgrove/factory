@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { ArtifactConsumerBindingSchema } from "../protocol/events.js";
 import { ManagedRuntimeActivationSchema } from "../protocol/worker-packet.js";
+import { AssetActivationBundleSchema, MediaInvocationSchema } from "../media/contracts.js";
 import { gitSha } from "../protocol/limits.js";
 import type { GitCommitContent, LeaseStore } from "./lease.js";
 
@@ -29,6 +30,8 @@ const identitySchema = z
     compatibilityClaimOid: gitSha,
     artifactConsumer: ArtifactConsumerBindingSchema.optional(),
     managedRuntimeActivation: ManagedRuntimeActivationSchema.optional(),
+    mediaInvocation: MediaInvocationSchema.optional(),
+    assetActivationBundle: AssetActivationBundleSchema.optional(),
   })
   .strict();
 const evidenceSchema = z

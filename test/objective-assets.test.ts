@@ -12,7 +12,10 @@ import {
   recognizedGitHubAttachment,
 } from "../src/assets/import.js";
 import { inspectAssetBytes } from "../src/assets/handlers.js";
-import { materializeObjectiveAssets } from "../src/assets/materialize.js";
+import {
+  materializeObjectiveAssets,
+  materializeWorkerAssetInputs,
+} from "../src/assets/materialize.js";
 import {
   persistObjectiveAssetManifest,
   readObjectiveAssetManifest,
@@ -340,6 +343,59 @@ describe("Objective asset contracts and handlers", () => {
     const tampered = structuredClone(persisted.manifest);
     tampered.assets[0]!.storage.descriptorDigest = "f".repeat(64);
     expect(() => ObjectiveAssetManifestSchema.parse(tampered)).toThrow(/receipt descriptor/);
+  });
+
+  it("materializes exact Worker Packet bindings from several immutable manifests", async () => {
+    const memory = memoryStore();
+    const authority = { repository: "Fixture/Project", objective: 7, baseSha: "a".repeat(40) };
+    const first = await persistObjectiveAssetManifest({
+      store: memory.store,
+      authority,
+      requestId: "first-manifest",
+      revision: 1,
+      assets: [await local(Buffer.from("first asset\n"), "first.txt", "first")],
+      assertCurrent: async () => {},
+    });
+    const second = await persistObjectiveAssetManifest({
+      store: memory.store,
+      authority,
+      requestId: "second-manifest",
+      revision: 1,
+      assets: [await local(Buffer.from("second asset\n"), "second.txt", "second")],
+      assertCurrent: async () => {},
+    });
+    const bindings = [first, second].map(({ manifest }) => {
+      const entry = manifest.assets[0]!;
+      return {
+        manifestDigest: manifest.digest,
+        descriptorDigest: entry.descriptor.digest,
+        contentDigest: entry.descriptor.content.digest,
+        storageReceiptDigest: entry.storage.digest,
+        path: entry.descriptor.materializationPath,
+      };
+    });
+    const output = await mkdtemp(join(tmpdir(), "factory-assets-multiple-"));
+    roots.push(output);
+    const materialized = await materializeWorkerAssetInputs({
+      store: memory.store,
+      manifests: [first.manifest, second.manifest],
+      bindings,
+      supervisorRoot: join(output, "materialized"),
+    });
+    await expect(readFile(join(materialized.root, bindings[0]!.path), "utf8")).resolves.toBe(
+      "first asset\n",
+    );
+    await expect(readFile(join(materialized.root, bindings[1]!.path), "utf8")).resolves.toBe(
+      "second asset\n",
+    );
+    await expect(
+      materializeWorkerAssetInputs({
+        store: memory.store,
+        manifests: [first.manifest, second.manifest],
+        bindings: [bindings[0]!, { ...bindings[1]!, path: bindings[0]!.path }],
+        supervisorRoot: join(output, "conflict"),
+      }),
+    ).rejects.toThrow(/path collision/);
   });
 
   it("resumes an intent from immutable uploaded blobs without the source cache", async () => {

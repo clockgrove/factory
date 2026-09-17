@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
 import { WorkerAssetInputSchema } from "../assets/contracts.js";
+import { WorkerMediaIntentUseSchema } from "../media/contracts.js";
 import {
   AssetProductionDeliverableSchema,
   GeneratedAssetRequirementSchema,
@@ -410,8 +411,21 @@ export const RepositoryChangeWorkerPacketSchema = WorkerPacketCommon.extend({
   repositoryCapabilities: RepositoryCapabilityBindingsSchema.optional(),
   managedRuntimes: shortList(RuntimeBundleRequirementSchema, 8).optional(),
   generatedAssetRequirements: shortList(GeneratedAssetRequirementSchema, 32).default([]),
+  mediaUses: shortList(WorkerMediaIntentUseSchema, 64).default([]),
   validationCommands: shortList(boundedText(1_000), 32).min(1),
-}).strict();
+})
+  .strict()
+  .superRefine((packet, context) => {
+    const descriptors = new Set(packet.assetInputs.map(({ descriptorDigest }) => descriptorDigest));
+    for (const [index, use] of packet.mediaUses.entries()) {
+      if (use.descriptorDigests.some((digest: string) => !descriptors.has(digest)))
+        context.addIssue({
+          code: "custom",
+          path: ["mediaUses", index, "descriptorDigests"],
+          message: "media use references a descriptor absent from immutable asset inputs",
+        });
+    }
+  });
 
 export const AssetProductionWorkerPacketSchema = WorkerPacketCommon.extend({
   deliverable: AssetProductionDeliverableSchema,
@@ -425,6 +439,7 @@ export const AssetProductionWorkerPacketSchema = WorkerPacketCommon.extend({
   repositoryCapabilities: z.never().optional(),
   managedRuntimes: z.never().optional(),
   generatedAssetRequirements: z.never().optional(),
+  mediaUses: z.never().optional(),
 }).strict();
 
 export const WorkerPacketSchema = z.union([
@@ -437,11 +452,14 @@ type ParsedRepositoryChangeWorkerPacket = z.output<typeof RepositoryChangeWorker
 type ParsedAssetProductionWorkerPacket = z.output<typeof AssetProductionWorkerPacketSchema>;
 type OptionalPacketDefaults<T extends { assetInputs: unknown }> = Omit<
   T,
-  "assetInputs" | "generatedAssetRequirements"
+  "assetInputs" | "generatedAssetRequirements" | "mediaUses"
 > & {
   assetInputs?: T["assetInputs"];
 } & ("generatedAssetRequirements" extends keyof T
-    ? { generatedAssetRequirements?: T["generatedAssetRequirements"] }
+    ? {
+        generatedAssetRequirements?: T["generatedAssetRequirements"];
+        mediaUses?: "mediaUses" extends keyof T ? T["mediaUses"] : never;
+      }
     : object);
 export type RepositoryChangeWorkerPacket =
   OptionalPacketDefaults<ParsedRepositoryChangeWorkerPacket>;

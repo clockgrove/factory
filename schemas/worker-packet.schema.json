@@ -388,6 +388,11 @@
       "type": "array",
       "maxItems": 32,
       "items": { "$ref": "#/definitions/generatedAssetRequirement" }
+    },
+    "mediaUses": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/definitions/workerMediaIntentUse" }
     }
   },
   "definitions": {
@@ -570,12 +575,13 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "contract", "intent", "producerCapabilityId"],
+          "required": ["kind", "contract", "intent", "producerCapabilityId", "producerCapabilityDigest"],
           "properties": {
             "kind": { "const": "asset-production" },
             "contract": { "const": "clockgrove.factory/asset-set" },
             "intent": { "$ref": "#/definitions/mediaIntent" },
-            "producerCapabilityId": { "$ref": "#/definitions/safeId" }
+            "producerCapabilityId": { "$ref": "#/definitions/safeId" },
+            "producerCapabilityDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
           }
         }
       ]
@@ -583,12 +589,101 @@
     "generatedAssetRequirement": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["intentId", "producerWorkItemId", "purpose"],
+      "required": [
+        "intentId",
+        "producerWorkItemId",
+        "kind",
+        "purpose",
+        "necessity",
+        "obligationIds",
+        "brief",
+        "rationale",
+        "direction",
+        "criterionIds"
+      ],
       "properties": {
         "intentId": { "$ref": "#/definitions/safeId" },
         "producerWorkItemId": { "$ref": "#/definitions/safeId" },
-        "purpose": { "$ref": "#/definitions/mediaIntentPurpose" }
+        "kind": { "$ref": "#/definitions/mediaIntentKind" },
+        "purpose": { "$ref": "#/definitions/mediaIntentPurpose" },
+        "necessity": { "enum": ["required", "helpful"] },
+        "obligationIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": { "type": "string", "minLength": 1, "maxLength": 160 }
+        },
+        "brief": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "rationale": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "direction": { "const": "input-to" },
+        "criterionIds": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/safeId" }
+        }
       }
+    },
+    "workerMediaIntentUse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "intentId",
+        "kind",
+        "brief",
+        "purpose",
+        "necessity",
+        "obligationIds",
+        "rationale",
+        "direction",
+        "criterionIds",
+        "descriptorDigests"
+      ],
+      "properties": {
+        "source": { "enum": ["imported", "activated"] },
+        "intentId": { "$ref": "#/definitions/safeId" },
+        "kind": { "$ref": "#/definitions/mediaIntentKind" },
+        "brief": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "purpose": { "$ref": "#/definitions/mediaIntentPurpose" },
+        "necessity": { "enum": ["required", "helpful"] },
+        "obligationIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": { "type": "string", "minLength": 1, "maxLength": 160 }
+        },
+        "rationale": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "direction": { "enum": ["input-to", "evidence-for"] },
+        "criterionIds": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/safeId" }
+        },
+        "descriptorDigests": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        },
+        "manifestDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "producerWorkItemId": { "$ref": "#/definitions/safeId" },
+        "activationDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      },
+      "oneOf": [
+        {
+          "properties": { "source": { "const": "imported" } },
+          "required": ["manifestDigest"],
+          "not": { "anyOf": [{ "required": ["producerWorkItemId"] }, { "required": ["activationDigest"] }] }
+        },
+        {
+          "properties": { "source": { "const": "activated" } },
+          "required": ["producerWorkItemId", "activationDigest"],
+          "not": { "required": ["manifestDigest"] }
+        }
+      ]
     },
     "safeId": {
       "type": "string",
@@ -666,7 +761,8 @@
           { "required": ["validation"] },
           { "required": ["repositoryCapabilities"] },
           { "required": ["managedRuntimes"] },
-          { "required": ["generatedAssetRequirements"] }
+          { "required": ["generatedAssetRequirements"] },
+          { "required": ["mediaUses"] }
         ]
       }
     }

@@ -62,8 +62,69 @@ Factory first matches an intent against the selected imported manifest. A matchi
 reference becomes an exact `assetInputs` binding on the repository Work Item. Otherwise Factory may
 derive an `asset-production` Work Item only from an advertised producer capability. That Work Item
 has a `clockgrove.factory/asset-set` deliverable, no repository scope, no validation command, and a
-directed dependency according to whether it is an input or acceptance evidence. The current
-controller deliberately refuses such a node before repository-worker dispatch; supervised asset
-production, review, activation, accounting, and completion are added by the separate execution
-workstream. Required intents without an import or producer fail compilation deterministically;
-helpful intents may be omitted with an explicit projection-trace disposition.
+directed dependency according to whether it is an input or acceptance evidence. Required intents
+without an import or producer fail compilation deterministically; helpful intents may be omitted
+with an explicit projection-trace disposition.
+
+## Produced asset lifecycle
+
+Asset production uses its own adapter contract and never enters the repository artifact, validation,
+or pull-request pipeline. The supported route is `sharp/local-raster-v1`, a deterministic local PNG
+producer with no network or paid provider call. Producer capabilities bind exact input and output
+MIME types, typed profiles, request and byte limits, egress, observation, cancellation, result
+collection, and native usage units. The compiler receives only the intersection of those registered
+capabilities with the immutable run policy. A compiled producer binds both the capability ID and
+digest, so a later adapter change cannot silently execute an older graph.
+
+Before dispatch, `AttemptReserved` and the issue admission ledger bind the complete media invocation:
+the run, Work Item, attempt, intent and Worker Packet digests, adapter capability, exact inputs,
+model, quality, typed profile, deadline, policy, egress, and all limits. The admission transition to
+`dispatching` is the single launch marker. A refusal before it proves zero requests. After it, Factory
+never launches the invocation again. Recovery observes and collects the same invocation through its
+durable receipt or the local route's invocation identity. If exact observation is unavailable,
+consumption stays unknown and replacement remains blocked.
+
+A successful adapter response is intermediate. Factory validates every variant against its MIME,
+profile, visibility, rights, count, and byte bounds, then fsyncs the exact bytes into private local
+retention. It uploads those retained bytes through the existing immutable content-transfer substrate.
+Only when every storage receipt is ready does Factory publish an immutable Asset Set and move the
+producer to review. Mutable provider URLs are never storage authority. A restart resumes retained
+bytes or existing transfer intents; it does not regenerate the output. Exact native usage is
+recorded by declared unit, and unavailable values remain `null`. Failed cleanup or unknown usage
+keeps the issue admission and capacity obligation occupied.
+
+Review uses authenticated, request-ID commands:
+
+- `factory asset-status OWNER/REPO#OBJECTIVE --asset-set-digest DIGEST`
+- `factory asset-approve OWNER/REPO#OBJECTIVE --request-id ID --asset-set-digest DIGEST --descriptor-digest DIGEST`
+- `factory asset-reject OWNER/REPO#OBJECTIVE --request-id ID --asset-set-digest DIGEST --reason TEXT`
+- `factory asset-revise OWNER/REPO#OBJECTIVE --request-id ID --asset-set-digest DIGEST --reason TEXT`
+
+The equivalent MCP tools are `factory_asset_status`, `factory_asset_approve`,
+`factory_asset_reject`, and `factory_asset_revise`. Factory resolves run, producer attempt,
+reservation, invocation, and base authority from the authenticated `AssetSetReady` event; callers do
+not supply them. The same request ID and exact decision returns the original record. Reusing a
+request ID with changed selection or text, or deciding the same Asset Set twice, fails closed.
+Approval first persists an immutable decision and activation, then publishes their authenticated
+events. Rejection is terminal review evidence. Revision binds the prior Asset Set and feedback and
+permits a separately admitted bounded producer attempt; it never mutates or reuses the prior
+invocation.
+
+The registered deterministic rule `factory/local-private-reference-v1` may be named in
+`compilerMediaEgress.deterministicReviewRuleIds`. It approves all verified private PNG variants from
+the local raster route for internal references. Factory binds the rule capability digest in the same
+canonical decision shape used by a human approval and resumes a partially published decision or
+activation without reviewing or producing again. The rule does not grant public visibility or rights.
+
+An activation carries each selected descriptor and full storage receipt. Before admitting a
+dependent repository Work Item, Factory resolves every generated requirement to the exact projected
+producer activation and records an activation bundle in `AttemptReserved`. The runtime Worker Packet
+contains deduplicated `assetInputs` for byte transport and a separate `mediaUses` entry for every
+consumer intent, purpose, direction, obligation, criterion set, producer, and activation. The same
+descriptor can therefore serve several semantic uses without duplicating its bytes. Recovery rebuilds
+that exact activated packet from the reservation and refuses a changed descriptor, receipt,
+activation, producer, or consumer identity.
+
+The local route currently publishes produced descriptors as private with unknown rights. A later
+product-delivery stage must obtain policy-grounded public visibility and rights before public-repository
+delivery; it must not reinterpret these descriptors as publishable.

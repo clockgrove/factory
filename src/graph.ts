@@ -59,6 +59,7 @@ import {
   type WorkerPacket,
 } from "./protocol/worker-packet.js";
 import { WorkerAssetInputSchema, type WorkerAssetInput } from "./assets/contracts.js";
+import { WorkerMediaIntentUseSchema, type WorkerMediaIntentUse } from "./media/contracts.js";
 import {
   AssetProductionDeliverableSchema,
   GeneratedAssetRequirementSchema,
@@ -121,6 +122,7 @@ export interface CompiledRepositoryWorkItem extends CompiledWorkItemCommon {
   scope: string[];
   validationCommands: string[];
   generatedAssetRequirements?: GeneratedAssetRequirement[] | undefined;
+  mediaUses?: WorkerMediaIntentUse[] | undefined;
   context?: z.infer<typeof ContextManifestSchema> | undefined;
   changeSurface?: z.infer<typeof ChangeSurfaceSchema> | undefined;
   criterionRisks?:
@@ -147,6 +149,7 @@ export interface CompiledAssetProductionWorkItem extends CompiledWorkItemCommon 
   scope: [];
   validationCommands: [];
   generatedAssetRequirements?: never;
+  mediaUses?: never;
   context?: never;
   changeSurface?: never;
   criterionRisks?: never;
@@ -513,6 +516,7 @@ const PersistedCompiledRepositoryWorkItemSchema = PersistedCompiledWorkItemCommo
   scope: z.array(RepositoryScopePathSchema).min(1).max(64),
   validationCommands: z.array(z.string().min(1).max(1_000)).min(1).max(32),
   generatedAssetRequirements: z.array(GeneratedAssetRequirementSchema).max(32).optional(),
+  mediaUses: z.array(WorkerMediaIntentUseSchema).max(64).optional(),
   context: ContextManifestSchema.optional(),
   changeSurface: ChangeSurfaceSchema.optional(),
   criterionRisks: CriterionRiskAssessmentSchema.optional(),
@@ -784,6 +788,7 @@ export function workerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
     allowedPaths: wi.scope,
     validationCommands: wi.validationCommands,
     generatedAssetRequirements: wi.generatedAssetRequirements ?? [],
+    mediaUses: wi.mediaUses ?? [],
     ...(wi.context ? { context: wi.context } : {}),
     ...(wi.changeSurface ? { changeSurface: wi.changeSurface } : {}),
     ...(wi.criterionRisks ? { criterionRisks: wi.criterionRisks } : {}),

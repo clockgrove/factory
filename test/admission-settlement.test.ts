@@ -8,6 +8,7 @@ import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js"
 import { PROTOCOL_V2 } from "../src/protocol/limits.js";
 import { objectiveAuthorityObservation, writerAuthority } from "../src/control/authority.js";
 import type { LeaseState } from "../src/control/lease.js";
+import { MediaInvocationSchema, withMediaDigest } from "../src/media/contracts.js";
 
 const sha = "a".repeat(40),
   digest = "b".repeat(64);
@@ -111,6 +112,123 @@ function settle(
 }
 
 describe("admission settlement evidence", () => {
+  it("settles media only after exact usage and successful cleanup", () => {
+    const mediaInvocation = MediaInvocationSchema.parse(
+      withMediaDigest({
+        protocol: "clockgrove.factory/media-invocation-v1" as const,
+        repository: "fixture/project",
+        objective: 1,
+        runId: "run",
+        workItem: 2,
+        attempt: 1,
+        reservationRef: "refs/media-attempt",
+        intentId: "layout",
+        intentDigest: digest,
+        workerPacketDigest: digest,
+        adapterId: "fixture/media",
+        adapterVersion: "1",
+        capabilityDigest: digest,
+        invocationId: "media-2-1",
+        model: null,
+        quality: null,
+        profile: { kind: "raster" as const, width: 2, height: 2, alpha: true, animation: false },
+        inputAssets: [],
+        outputMediaType: "image/png",
+        outputVisibility: "private",
+        outputRights: { basis: "unknown" as const },
+        deadline: "2026-09-08T01:00:00Z",
+        policyDigest: digest,
+        providerRequests: 1,
+        requestedVariants: 1,
+        maximumVariants: 1,
+        maximumGeneratedBytes: 1024,
+        maximumStorageBytes: 1024,
+        networkDestinations: [],
+        thirdPartyEgress: "denied" as const,
+      }),
+    );
+    const mediaEntry: IssueAdmissionEntry = {
+      ...entry,
+      reservation: { ...entry.reservation, backend: mediaInvocation.adapterId },
+      mediaInvocation,
+    };
+    const reserved = parseFactoryEvent({
+      ...common,
+      kind: "attempt",
+      event: "AttemptReserved",
+      sequence: 1,
+      backend: mediaInvocation.adapterId,
+      baseSha: sha,
+      mediaInvocation,
+    });
+    const succeeded = parseFactoryEvent({
+      ...common,
+      kind: "attempt",
+      event: "AttemptSucceeded",
+      sequence: 5,
+      backend: mediaInvocation.adapterId,
+      baseSha: sha,
+      artifactDigest: digest,
+    });
+    const media = (event: string, sequence: number, extra: object = {}) =>
+      parseFactoryEvent({
+        ...common,
+        kind: "media",
+        event,
+        sequence,
+        reservationOid: sha,
+        invocationDigest: mediaInvocation.digest,
+        ...extra,
+      });
+    const exactAccounting = {
+      providerRequests: 1,
+      variants: 1,
+      generatedBytes: 80,
+      storageBytes: 80,
+      native: [{ unit: "generated_bytes", amount: 80 }],
+    };
+    const observed = [
+      reserved,
+      media("AssetSetReady", 2, { assetSetDigest: digest, assetSetCommitOid: sha }),
+      media("MediaUsageSettled", 3, { accounting: exactAccounting }),
+      media("MediaCleanupCompleted", 4),
+      succeeded,
+    ];
+    expect(
+      buildAdmissionSettlementEvidence({
+        entry: mediaEntry,
+        events: observed,
+        cleanup,
+        capacity,
+      }),
+    ).toMatchObject({ accountingSettled: true });
+    const unavailable = observed.map((event) =>
+      event.kind === "media" && event.event === "MediaUsageSettled"
+        ? media("MediaUsageSettled", 3, {
+            accounting: { ...exactAccounting, generatedBytes: null },
+          })
+        : event,
+    );
+    expect(() =>
+      buildAdmissionSettlementEvidence({
+        entry: mediaEntry,
+        events: unavailable,
+        cleanup,
+        capacity,
+      }),
+    ).toThrow("accounting remains unknown");
+    expect(() =>
+      buildAdmissionSettlementEvidence({
+        entry: mediaEntry,
+        events: observed.filter(
+          (event) => !(event.kind === "media" && event.event === "MediaCleanupCompleted"),
+        ),
+        cleanup,
+        capacity,
+      }),
+    ).toThrow("cleanup receipt");
+  });
+
   it("settles only exact known accounting plus positive cleanup/capacity evidence", () => {
     expect(settle()).toMatchObject({
       accountingSettled: true,

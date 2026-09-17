@@ -993,7 +993,7 @@ describe("compiler dispatch admission", () => {
 
     (result.payload.terminalOutcome as { state: string }).state = "succeeded";
     await expect(compileEvaluatedDraft(args)).rejects.toThrow(
-      "compiler provider terminal outcome differs",
+      "compiler timeout diagnostic differs from terminal evidence",
     );
     expect(mocks.run).toHaveBeenCalledOnce();
     expect(recordUsage).toHaveBeenCalledTimes(2);

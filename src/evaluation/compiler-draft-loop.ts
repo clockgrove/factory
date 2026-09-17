@@ -665,8 +665,7 @@ export function validateCompilerDraftJournal(
           if (
             !terminalOutcome ||
             draftDigest(terminalOutcome.usage) !== draftDigest(usage) ||
-            (!hasError && terminalOutcome.state !== "succeeded") ||
-            (hasError && terminalOutcome.state === "succeeded")
+            (!hasError && terminalOutcome.state !== "succeeded")
           )
             throw new Error("compiler provider terminal outcome differs");
         } else if (terminalOutcome !== undefined) {

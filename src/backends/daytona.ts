@@ -47,6 +47,7 @@ import {
   retainIsolatedValidationCaptures,
   sandboxBootstrapFiles,
   sandboxResourceName,
+  sandboxValidationResourceIdentity,
   sandboxValidationFiles,
 } from "./sandbox-common.js";
 
@@ -1075,6 +1076,10 @@ export class DaytonaBackend implements ExecutionBackend {
     return result;
   }
 
+  validationResourceIdentity(context: IsolatedValidationContext) {
+    return sandboxValidationResourceIdentity(context, this.capabilities.id);
+  }
+
   async recoverValidation(
     context: IsolatedValidationContext,
   ): Promise<IsolatedValidationResult | null> {
@@ -1087,15 +1092,10 @@ export class DaytonaBackend implements ExecutionBackend {
     const resourceName = sandboxResourceName(context, "validation");
     const invocationOwner = validationInvocationOwnership(context)!;
     const daytona = this.#createClient();
-    let sandbox: Sandbox;
+    let sandbox: Sandbox | null;
     try {
-      sandbox = await this.#withinDeadline(
-        context.deadline,
-        "Daytona capture recovery lookup exceeded the validation deadline",
-        () => daytona.get(resourceName),
-      );
+      sandbox = await this.#findWithBoundedVisibility(daytona, resourceName);
     } catch (error) {
-      if (isNotFound(error)) return null;
       throw new DaytonaResourceCleanupError({
         resourceId: resourceName,
         resourceName,
@@ -1103,6 +1103,7 @@ export class DaytonaBackend implements ExecutionBackend {
         cause: error,
       });
     }
+    if (!sandbox) return null;
     if (sandbox.name !== resourceName || sandbox.labels?.invocationOwner !== invocationOwner)
       throw new DaytonaResourceCleanupError({
         resourceId: sandbox.id,

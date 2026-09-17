@@ -35,6 +35,7 @@ import {
   repositoryArchive,
   sandboxBootstrapFiles,
   sandboxResourceName,
+  sandboxValidationResourceIdentity,
   sandboxValidationFiles,
 } from "./sandbox-common.js";
 
@@ -765,6 +766,10 @@ export class VercelSandboxBackend implements ExecutionBackend {
     return retainedResult;
   }
 
+  validationResourceIdentity(context: IsolatedValidationContext) {
+    return sandboxValidationResourceIdentity(context, this.capabilities.id);
+  }
+
   async recoverValidation(
     context: IsolatedValidationContext,
   ): Promise<IsolatedValidationResult | null> {
@@ -779,22 +784,28 @@ export class VercelSandboxBackend implements ExecutionBackend {
     )
       throw new Error("Vercel capture recovery requires its exact digest-pinned image");
     const resourceName = sandboxResourceName(context, "validation");
-    let sandbox: Sandbox;
-    try {
-      sandbox = await this.#withinDeadline(
-        context.deadline,
-        "Vercel capture recovery lookup exceeded the validation deadline",
-        () => Sandbox.get({ name: resourceName }),
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (/\b(?:404|not[ -]?found)\b/i.test(message)) return null;
-      throw new VercelResourceCleanupError({
-        resourceName,
-        operation: "capture recovery lookup",
-        cause: error,
-      });
+    let sandbox: Sandbox | undefined;
+    for (let attempt = 0; attempt < this.#createVisibilityAttempts; attempt += 1) {
+      try {
+        sandbox = await this.#withinDeadline(
+          new Date(this.#now() + this.#cleanupTimeoutMs),
+          `Vercel capture recovery lookup exceeded its ${this.#cleanupTimeoutMs} ms observation bound`,
+          () => Sandbox.get({ name: resourceName }),
+        );
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/\b(?:404|not[ -]?found)\b/i.test(message))
+          throw new VercelResourceCleanupError({
+            resourceName,
+            operation: "capture recovery lookup",
+            cause: error,
+          });
+        if (attempt + 1 < this.#createVisibilityAttempts)
+          await this.#sleep(this.#createVisibilityDelayMs);
+      }
     }
+    if (!sandbox) return null;
     if (sandbox.name !== resourceName)
       throw new VercelResourceCleanupError({
         resourceName,

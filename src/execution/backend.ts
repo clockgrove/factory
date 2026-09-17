@@ -189,6 +189,7 @@ export interface IsolatedValidationContext extends AttemptContext {
 export interface IsolatedValidationCaptureRequest {
   protocol: "clockgrove.factory/repository-capture-request";
   validationInvocationDigest: string;
+  validationDeadline: string;
   environmentIdentity: string;
   expectedInputs: Array<{
     descriptorDigest: string;
@@ -258,6 +259,11 @@ export interface IntegrationValidationInvocation {
   baseSha: string;
 }
 
+export interface ValidationResourceIdentity {
+  resourceName: string;
+  requestIdentityDigest: string;
+}
+
 export interface IsolatedValidationResult {
   outputTreeSha: string;
   commands: Array<{ command: string; exitCode: number; durationMs: number }>;
@@ -322,6 +328,8 @@ export interface ExecutionBackend {
   probeValidation?(): Promise<BackendProbe>;
   /** Immutable environment authority bound before repository validation dispatch. */
   validationEnvironmentIdentity?(): string | null;
+  /** Deterministic paid-resource and request identity journaled before provider creation. */
+  validationResourceIdentity?(context: IsolatedValidationContext): ValidationResourceIdentity;
   /** Ensure a prior Director's resource is absent before a replacement attempt. */
   reconcileStale?(identity: StaleAttemptIdentity): Promise<void>;
   /** Reattach only when the durable identity can be proven to belong to this attempt. */

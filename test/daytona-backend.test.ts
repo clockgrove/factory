@@ -497,6 +497,7 @@ describe("Daytona supported provider contract", () => {
       captureRequest: {
         protocol: "clockgrove.factory/repository-capture-request",
         validationInvocationDigest,
+        validationDeadline: source.context.deadline.toISOString(),
         environmentIdentity: DAYTONA_DEFAULT_IMAGE,
         expectedInputs: [
           {
@@ -592,6 +593,20 @@ describe("Daytona supported provider contract", () => {
     );
     expect(refusedCheckpoint.deleted).not.toContain("sandbox-1");
     let recoveredCheckpoint = false;
+    const recoveryIdentity = refusedBackend.validationResourceIdentity(refusedValidation);
+    expect(refusedBackend.validationResourceIdentity(refusedValidation)).toEqual(recoveryIdentity);
+    expect(
+      refusedBackend.validationResourceIdentity({
+        ...refusedValidation,
+        deadline: new Date(refusedValidation.deadline.getTime() + 1),
+        captureRequest: {
+          ...refusedValidation.captureRequest!,
+          validationDeadline: new Date(refusedValidation.deadline.getTime() + 1).toISOString(),
+        },
+      }).requestIdentityDigest,
+    ).not.toBe(recoveryIdentity.requestIdentityDigest);
+    const lookupsBeforeRecovery = refusedCheckpoint.lookedUp.length;
+    refusedCheckpoint.delayVisibility(recoveryIdentity.resourceName, 2);
     const recovered = await refusedBackend.recoverValidation({
       ...refusedValidation,
       checkpointCaptureResult: async (checkpoint) => {
@@ -601,6 +616,11 @@ describe("Daytona supported provider contract", () => {
       },
     });
     expect(recoveredCheckpoint).toBe(true);
+    expect(
+      refusedCheckpoint.lookedUp
+        .slice(lookupsBeforeRecovery)
+        .filter((name) => name === recoveryIdentity.resourceName),
+    ).toHaveLength(3);
     expect(recovered?.captures?.locator.resourceId).toBe("sandbox-1");
     expect(refusedCheckpoint.deleted).toContain("sandbox-1");
     await releaseIsolatedValidationCaptures(recovered?.captures);

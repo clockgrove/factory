@@ -12,6 +12,7 @@ import type {
   IsolatedValidationContext,
   IsolatedValidationResult,
   StaleAttemptIdentity,
+  ValidationResourceIdentity,
 } from "../execution/backend.js";
 import {
   ArtifactPayloadSchema,
@@ -56,6 +57,7 @@ export const IsolatedValidationCaptureRequestSchema = z
   .object({
     protocol: z.literal("clockgrove.factory/repository-capture-request"),
     validationInvocationDigest: digest,
+    validationDeadline: z.string().datetime({ offset: true }),
     environmentIdentity: z.string().min(1).max(500),
     expectedInputs: z
       .array(
@@ -228,9 +230,10 @@ export function parseIsolatedValidationCaptureRequest(
   const request = IsolatedValidationCaptureRequestSchema.parse(context.captureRequest);
   if (
     !context.validationInvocation ||
-    request.validationInvocationDigest !== context.validationInvocation.identityDigest
+    request.validationInvocationDigest !== context.validationInvocation.identityDigest ||
+    request.validationDeadline !== context.deadline.toISOString()
   )
-    throw new Error("capture request differs from its validation invocation");
+    throw new Error("capture request differs from its validation invocation or deadline");
   const captureCommands = new Set(request.recipes.map((recipe) => recipe.command));
   const comparisonCommands = new Set(
     request.recipes.flatMap((recipe) =>
@@ -754,6 +757,54 @@ export function sandboxResourceName(
   }
   const identity = sandboxIdentity(context);
   return phase === "validation" ? `${identity.slice(0, 54)}-validate` : identity;
+}
+
+function canonicalResourceIdentityJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalResourceIdentityJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalResourceIdentityJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** Exact deterministic remote validation request identity. Host filesystem paths and
+ * provider cleanup clocks are deliberately excluded from provider-create authority. */
+export function sandboxValidationResourceIdentity(
+  context: IsolatedValidationContext,
+  backendId: string,
+): ValidationResourceIdentity {
+  const resourceName = sandboxResourceName(context, "validation");
+  const request = {
+    backendId,
+    resourceName,
+    repository: context.repository.toLowerCase(),
+    objective: context.objective,
+    workItem: context.workItem,
+    attempt: context.attempt,
+    runId: context.runId,
+    directorEpoch: context.directorEpoch,
+    policyDigest: context.policyDigest,
+    validationDeadline: context.deadline.toISOString(),
+    validationInvocation: context.validationInvocation,
+    artifactDigest: context.artifact.digest,
+    artifactBaseSha: context.artifact.baseSha,
+    packetDigest: createHash("sha256")
+      .update(canonicalResourceIdentityJson(context.packet))
+      .digest("hex"),
+    policyNetworkDestinations: [...(context.policyNetworkDestinations ?? [])].sort(),
+    captureRequest: context.captureRequest,
+  };
+  return {
+    resourceName,
+    requestIdentityDigest: createHash("sha256")
+      .update(canonicalResourceIdentityJson(request))
+      .digest("hex"),
+  };
 }
 
 export async function repositoryArchive(

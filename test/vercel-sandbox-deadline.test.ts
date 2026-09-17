@@ -191,6 +191,7 @@ it("downloads retained capture bytes through the bounded Vercel stream channel",
   context.captureRequest = {
     protocol: "clockgrove.factory/repository-capture-request",
     validationInvocationDigest: context.validationInvocation.identityDigest,
+    validationDeadline: context.deadline.toISOString(),
     environmentIdentity: captureImage,
     expectedInputs: [
       {
@@ -260,7 +261,21 @@ it("downloads retained capture bytes through the bounded Vercel stream channel",
     };
     await expect(backend.validate(context)).rejects.toThrow(/durable capture checkpoint/);
     expect(stop).not.toHaveBeenCalled();
+    const recoveryIdentity = backend.validationResourceIdentity(context);
+    expect(backend.validationResourceIdentity(context)).toEqual(recoveryIdentity);
+    expect(
+      backend.validationResourceIdentity({
+        ...context,
+        deadline: new Date(context.deadline.getTime() + 1),
+        captureRequest: {
+          ...context.captureRequest!,
+          validationDeadline: new Date(context.deadline.getTime() + 1).toISOString(),
+        },
+      }).requestIdentityDigest,
+    ).not.toBe(recoveryIdentity.requestIdentityDigest);
+    let recoveryVisibilityMisses = 2;
     provider.get.mockImplementation(async ({ name }: { name: string }) => {
+      if (recoveryVisibilityMisses-- > 0) throw new Error("404 not found");
       if (name !== resourceName || !createdSandbox) throw new Error("404 not found");
       return createdSandbox;
     });
@@ -273,6 +288,7 @@ it("downloads retained capture bytes through the bounded Vercel stream channel",
     const recovered = await backend.recoverValidation(context);
     expect(recovered?.captures?.locator.resourceId).toBe(resourceName);
     expect(recoveredCheckpoint).toBe(true);
+    expect(provider.get).toHaveBeenCalledTimes(3);
     expect(stop).toHaveBeenCalledOnce();
     await sandboxCommon.releaseIsolatedValidationCaptures(recovered?.captures);
   } finally {

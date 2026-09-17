@@ -125,6 +125,16 @@ const ValidationInvocationCoreObject = z
     runId: safeId,
     workItem: z.number().int().positive(),
     attempt: z.number().int().positive(),
+    attemptAuthority: z
+      .object({
+        reservationRef: boundedText(500),
+        reservationOid: gitSha,
+        reservationReceiptDigest: sha256Digest,
+        directorEpoch: z.number().int().positive(),
+        policyDigest: sha256Digest,
+      })
+      .strict(),
+    validationDeadline: z.string().datetime({ offset: true }),
     artifactDigest: sha256Digest,
     baseSha: gitSha,
     outputTreeSha: gitSha,

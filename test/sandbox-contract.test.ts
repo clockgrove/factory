@@ -185,6 +185,7 @@ async function runIsolatedCaptureValidation(threshold = false) {
     captureRequest: {
       protocol: "clockgrove.factory/repository-capture-request",
       validationInvocationDigest,
+      validationDeadline: base.deadline.toISOString(),
       environmentIdentity: "fixture/image@sha256:" + "1".repeat(64),
       expectedInputs: threshold
         ? [

@@ -349,6 +349,34 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     return this.#publicationSafetyFence.run(fence, operation);
   }
 
+  /** Prepare one admission-ref CAS for the surrounding publication request.
+   * The returned mutation is legal only inside that request's transport fence,
+   * where it reuses the already-held scheduler and concurrency permits. */
+  async prepareCompareAndSwapRefAtPublicationBoundary(args: {
+    ref: string;
+    beforeOid: string;
+    afterOid: string;
+  }): Promise<() => Promise<boolean>> {
+    const repositoryId = await this.#getRepositoryId();
+    return async () => {
+      if (!this.#transportFenceContext.getStore()) return this.compareAndSwapRef(args);
+      try {
+        await this.#octokit.graphql(UPDATE_REFS, {
+          repositoryId,
+          name: args.ref,
+          beforeOid: args.beforeOid,
+          afterOid: args.afterOid,
+        });
+        return true;
+      } catch (error) {
+        const current = await this.readRef(args.ref);
+        if (current === args.afterOid) return true;
+        if (current !== args.beforeOid) return false;
+        throw error;
+      }
+    };
+  }
+
   mutationOperationTelemetry() {
     return {
       measurementScope: "process-local-transport-boundary" as const,

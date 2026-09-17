@@ -166,6 +166,46 @@ it("runs publication safety after the queued Objective fence and before transpor
   ]);
 });
 
+it("publishes a prepared admission marker after the final safety read and before the request", async () => {
+  const order: string[] = [];
+  const store = new GitHubControlStore({
+    token: "prepared-boundary-fixture",
+    owner: "fixture",
+    repo: "project",
+    mutationScheduler: scheduler(),
+    concurrency: new ConcurrencyLimiter(1),
+    requestFetch: async (input, init) => {
+      const request = new Request(input, init);
+      if (new URL(request.url).pathname === "/graphql") {
+        const { query } = (await request.json()) as { query: string };
+        if (query.includes("FactoryRepositoryId")) {
+          order.push("repository-id");
+          return Response.json({ data: { repository: { id: "R_fixture" } } });
+        }
+        order.push("admission-cas");
+        return Response.json({ data: { updateRefs: { clientMutationId: null } } });
+      }
+      order.push("request");
+      return response();
+    },
+  });
+  const markDispatched = await store.prepareCompareAndSwapRefAtPublicationBoundary({
+    ref: "refs/clockgrove-factory/integration-admissions/main",
+    beforeOid: "a".repeat(40),
+    afterOid: "b".repeat(40),
+  });
+
+  await store.withPublicationSafetyFence(
+    async () => {
+      order.push("final-remote-proof");
+      expect(await markDispatched()).toBe(true);
+    },
+    () => publish(store, "native-request"),
+  );
+
+  expect(order).toEqual(["repository-id", "final-remote-proof", "admission-cas", "request"]);
+});
+
 it("releases quota admission at dispatch so independent Objectives overlap remote writes", async () => {
   const mutations = scheduler();
   const firstStarted = deferred(),

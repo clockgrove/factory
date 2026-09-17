@@ -58,6 +58,13 @@ import { RecoveryPlanManager } from "../src/recovery/plan.js";
 import { RecoveryClaimManager } from "../src/recovery/claims.js";
 import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
 import { normalizeArtifact } from "../src/execution/artifacts.js";
+import { releaseAllArtifactContent, sha256 } from "../src/execution/artifact-content.js";
+import { artifactFromGitRange } from "../src/runtime/artifact-patch.js";
+import {
+  finalizeLfsArtifact,
+  GitLfsOutputTransport,
+  type LfsOutputTransport,
+} from "../src/publication/git-lfs-output.js";
 import { parseWorkerPacket, workerPacketDigest } from "../src/protocol/worker-packet.js";
 import { loadRecoveryRuntime } from "../src/recovery/runtime.js";
 import * as siblingRefreshProof from "../src/recovery/sibling-refresh.js";
@@ -89,6 +96,7 @@ async function retireFixtureRuns() {
 
 afterEach(async () => {
   await retireFixtureRuns();
+  await releaseAllArtifactContent();
   vi.restoreAllMocks();
   for (const directory of directories.splice(0))
     await rm(directory, { recursive: true, force: true });
@@ -108,6 +116,7 @@ async function fixture(
     tokenLimit?: number;
     artifactOnly?: boolean;
     interruptedRetainedArtifact?: boolean;
+    interruptedRetainedLfs?: boolean;
     successorSandboxUntrusted?: boolean;
     loseArtifactConsumerSuccessResponse?: boolean;
     loseArtifactConsumerSettlementResponse?: boolean;
@@ -153,6 +162,12 @@ async function fixture(
   git("config", "user.email", "fixture@example.invalid");
   git("remote", "add", "origin", "https://github.com/o/r.git");
   await writeFile(join(repository, "README.md"), "Fixture\n");
+  if (options.interruptedRetainedLfs) {
+    git("config", "filter.lfs.clean", "cat");
+    git("config", "filter.lfs.smudge", "cat");
+    git("config", "filter.lfs.required", "false");
+    await writeFile(join(repository, ".gitattributes"), "*.txt filter=lfs diff=lfs -text\n");
+  }
   if (options.compilerNpmAuthority) {
     await writeFile(
       join(repository, "package.json"),
@@ -195,6 +210,14 @@ async function fixture(
     DEFAULT_RUN_POLICY;
   const policy = parseRunPolicy({
     ...oneShotFixturePolicy,
+    ...(options.interruptedRetainedLfs
+      ? {
+          allowedNetworkDestinations: [
+            ...oneShotFixturePolicy.allowedNetworkDestinations,
+            "github.com",
+          ],
+        }
+      : {}),
     ...(options.successorSandboxUntrusted ? { trust: "sandbox_untrusted" as const } : {}),
     ...(options.failC ? { maxAttemptsPerItem: 1 } : {}),
     ...(options.tokenLimit === undefined
@@ -1222,6 +1245,56 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
     (_, index) => 18 + index,
   ).filter((number) => !options.omitMergedNativePrefix || number !== 18);
   const store = new GitHubControlStore({ token: "fixture-token", owner: "o", repo: "r" });
+  let remoteLfsFailure: "missing" | "changed" | "unavailable" | null = null;
+  const retainedLfsBytes = Buffer.from("b\n");
+  const retainedLfsOid = sha256(retainedLfsBytes);
+  const lfsPreflight = vi.fn<LfsOutputTransport["preflight"]>(async () => ({
+    toolVersion: "git-lfs/3.7.0",
+    remoteDigest: "9".repeat(64),
+    remoteHost: "github.com",
+    endpoint: "https://github.com/o/r.git/info/lfs",
+  }));
+  const lfsUpload = vi.fn<LfsOutputTransport["upload"]>(async () => "uploaded");
+  const lfsRead = vi.fn<LfsOutputTransport["read"]>(async ({ object }) => {
+    if (object.oid !== retainedLfsOid) throw new Error("unexpected retained LFS object");
+    if (remoteLfsFailure === "unavailable")
+      throw new PlatformUnavailableError(
+        { kind: "server_error", retryAfterMs: 1_000 },
+        new Error("retained LFS read response lost"),
+      );
+    if (remoteLfsFailure === "missing") throw new Error("remote LFS object missing");
+    if (remoteLfsFailure === "changed") return Buffer.alloc(retainedLfsBytes.length, 120);
+    return Buffer.from(retainedLfsBytes);
+  });
+  const lfsTransport: LfsOutputTransport = {
+    preflight: lfsPreflight,
+    upload: lfsUpload,
+    read: lfsRead,
+  };
+  vi.spyOn(
+    GitHubControlStore.prototype,
+    "prepareCompareAndSwapRefAtPublicationBoundary",
+  ).mockImplementation(async function (this: GitHubControlStore, args) {
+    return () => this.compareAndSwapRef(args);
+  });
+  vi.spyOn(GitHubControlStore.prototype, "withPublicationSafetyFence").mockImplementation(
+    async (fence, operation) => {
+      await fence();
+      return operation();
+    },
+  );
+  if (options.interruptedRetainedLfs) {
+    vi.spyOn(GitLfsOutputTransport.prototype, "preflight").mockImplementation((...args) =>
+      lfsPreflight(...args),
+    );
+    vi.spyOn(GitLfsOutputTransport.prototype, "upload").mockImplementation(async (args) => {
+      await lfsUpload(args);
+      return "uploaded";
+    });
+    vi.spyOn(GitLfsOutputTransport.prototype, "read").mockImplementation(async (args) =>
+      Buffer.from(new Uint8Array(await lfsRead(args))),
+    );
+  }
   if (options.premergedNativeRoot)
     vi.spyOn(GitHubStacks.prototype, "get").mockImplementation(async (number) => ({
       number,
@@ -1628,12 +1701,36 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
       },
     });
     if (scopedReserved.kind !== "attempt") throw new Error("scoped reservation fixture");
-    const artifact = normalizeArtifact({
-      baseSha: reserved.baseSha,
-      changedPaths: ["b.txt"],
-      patch: `${f.git("diff", "--binary", reserved.baseSha, f.heads[1]!)}\n`,
-      outcome: "succeeded",
-    });
+    const artifact = options.interruptedRetainedLfs
+      ? await finalizeLfsArtifact({
+          store: f.storage,
+          artifact: await artifactFromGitRange({
+            repository: f.repository,
+            sourceBaseSha: reserved.baseSha,
+            headSha: f.heads[1]!,
+            baseSha: reserved.baseSha,
+            changedPaths: ["b.txt"],
+          }),
+          authority: {
+            repository: "o/r",
+            objective: 7,
+            workItem: item.number,
+            attempt: scopedReserved.attempt,
+            runId: scopedReserved.runId,
+            directorEpoch: scopedReserved.directorEpoch,
+            policyDigest: scopedReserved.policyDigest,
+          },
+          repositoryPath: f.repository,
+          allowedNetworkDestinations: f.policy.allowedNetworkDestinations,
+          assertCurrent: async () => {},
+          transport: lfsTransport,
+        })
+      : normalizeArtifact({
+          baseSha: reserved.baseSha,
+          changedPaths: ["b.txt"],
+          patch: `${f.git("diff", "--binary", reserved.baseSha, f.heads[1]!)}\n`,
+          outcome: "succeeded",
+        });
     item.factoryEvents = [
       scopedReserved,
       f.event({
@@ -2025,12 +2122,21 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
     original,
     runtime,
     runRecovery: f.run,
-    run: () =>
-      f.run({
-        requestId: planRecord.plan.requestId,
-        planDigest: planRecord.digest,
-        successorRunId: "successor",
-      }),
+    lfsPreflight,
+    lfsUpload,
+    lfsRead,
+    failRemoteLfs: (failure: "missing" | "changed" | "unavailable" | null) => {
+      remoteLfsFailure = failure;
+    },
+    run: (signal?: AbortSignal) =>
+      f.run(
+        {
+          requestId: planRecord.plan.requestId,
+          planDigest: planRecord.digest,
+          successorRunId: "successor",
+        },
+        signal,
+      ),
   };
 }
 
@@ -2377,6 +2483,40 @@ describe("Supervisor adopted isolated candidate validation", () => {
     expect(f.review).toHaveBeenCalledTimes(3);
     expect(f.snapshot.workItems.every((item) => item.closed)).toBe(true);
   }, 90_000); // Full coverage load exceeded the former 60 s bound by 417 ms.
+
+  it("rechecks retained LFS bytes before recovered publication creates its ref", async () => {
+    const f = await successorFixture({
+      interruptedRetainedArtifact: true,
+      interruptedRetainedLfs: true,
+    });
+    const createRef = vi.mocked(GitHubControlStore.prototype.createRef);
+    createRef.mockClear();
+    f.lfsPreflight.mockClear();
+    f.lfsUpload.mockClear();
+    f.lfsRead.mockClear();
+    f.failRemoteLfs("changed");
+
+    const retirement = new AbortController();
+    const running = f.run(retirement.signal);
+    await vi.waitFor(() => expect(f.lfsRead).toHaveBeenCalledOnce(), { timeout: 30_000 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    retirement.abort(new Error("fixture observed the recovered publication LFS fence"));
+    await running.catch(() => undefined);
+
+    expect(f.lfsPreflight).toHaveBeenCalledOnce();
+    expect(f.lfsUpload).not.toHaveBeenCalled();
+    expect(f.lfsRead).toHaveBeenCalledOnce();
+    expect(
+      createRef.mock.calls.some(
+        ([ref]) =>
+          ref === `refs/heads/${publicationBranch(7, 9, 1)}` ||
+          ref === `refs/heads/${publicationBranch(7, 9, 2)}`,
+      ),
+    ).toBe(false);
+    expect(f.refs.has(`refs/heads/${publicationBranch(7, 9, 1)}`)).toBe(false);
+    expect(f.refs.has(`refs/heads/${publicationBranch(7, 9, 2)}`)).toBe(false);
+    expect(f.snapshot.workItems[1]!.linkedPullRequests).toEqual([]);
+  }, 90_000);
 
   it("refuses retained-artifact local validation under a tightened successor trust policy", async () => {
     const f = await successorFixture({

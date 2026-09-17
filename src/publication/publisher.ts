@@ -357,7 +357,7 @@ export async function publishValidated(args: {
             if (args.artifact.lfsObjects?.length && !args.repositoryPath)
               throw new Error("LFS publication requires the authenticated repository path");
             await assertRemoteLfsObjectsCurrent({
-              artifacts: [args.artifact],
+              subjects: [{ artifact: args.artifact }],
               repositoryPath: args.repositoryPath ?? "",
               allowedNetworkDestinations: args.allowedNetworkDestinations ?? [],
               ...(args.lfsTransport ? { transport: args.lfsTransport } : {}),

@@ -16,11 +16,22 @@ import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/gr
 import { LeaseManager, type GitCommitObject, type LeaseState } from "../src/control/lease.js";
 import { attemptRef } from "../src/control/attempts.js";
 import {
+  persistArtifactTransfer,
+  resumeArtifactTransfer,
+} from "../src/control/artifact-transfers.js";
+import { releaseAllArtifactContent, sha256 } from "../src/execution/artifact-content.js";
+import {
   MergeCandidateCheckpointStore,
   mergeCandidateIdentityDigest,
 } from "../src/control/merge-candidates.js";
 import { ReviewCheckpointManager, reviewIdentityDigest } from "../src/control/reviews.js";
-import { normalizeArtifact } from "../src/execution/artifacts.js";
+import { normalizeArtifact, type NormalizedArtifact } from "../src/execution/artifacts.js";
+import {
+  finalizeLfsArtifact,
+  GitLfsOutputTransport,
+  type LfsOutputTransport,
+} from "../src/publication/git-lfs-output.js";
+import { artifactFromPatchFile, type CollectedArtifact } from "../src/runtime/artifact-patch.js";
 import { decodeEventComments, encodeEventTrailer } from "../src/control/receipts.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../src/protocol/policy.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
@@ -31,6 +42,7 @@ import {
   type CompiledObjective,
 } from "../src/graph.js";
 import { planDelivery } from "../src/publication/delivery.js";
+import { GitHubStacks } from "../src/publication/github-stacks.js";
 import { publicationBranch } from "../src/publication/publisher.js";
 import { bindValidationToPublishedHead } from "../src/validation/plan.js";
 import { createValidationEvidence } from "../src/validation/evidence.js";
@@ -52,6 +64,7 @@ const directories: string[] = [];
 afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  await releaseAllArtifactContent();
   for (const directory of directories.splice(0))
     await rm(directory, { recursive: true, force: true });
 });
@@ -88,6 +101,10 @@ async function fixture(
     loseRefreshResponse?: boolean;
     foreignRefreshHead?: boolean;
     staleRefreshedHeadReads?: number;
+    lfs?: boolean;
+    adoptedLfs?: boolean;
+    nativeStack?: boolean;
+    atomicStack?: boolean;
   } = {},
 ) {
   // This integration fixture validates graph and publication behavior. Keep it
@@ -256,6 +273,17 @@ async function fixture(
       sha: writeGitObject("blob", Buffer.from("Fixture\n")),
     },
   ];
+  if (options.lfs) {
+    git("config", "filter.lfs.clean", "cat");
+    git("config", "filter.lfs.smudge", "cat");
+    git("config", "filter.lfs.required", "false");
+    baseEntries.push({
+      path: ".gitattributes",
+      mode: "100644",
+      type: "blob",
+      sha: writeGitObject("blob", Buffer.from("*.txt filter=lfs diff=lfs -text\n")),
+    });
+  }
   if (options.failCombinedTests)
     baseEntries.push({
       path: "combined.test.mjs",
@@ -286,36 +314,158 @@ async function fixture(
   mainHead = baseSha;
   const readMainHead = () => mainHead ?? git("rev-parse", "main");
   const heads: string[] = [];
+  const sourceBases: string[] = [];
+  const collectedSources: Array<CollectedArtifact | undefined> = [];
+  const sourceArtifacts: NormalizedArtifact[] = [];
+  const rawLfsObjects = new Map<string, Buffer>();
   const names = options.thirdSibling ? ["a", "b", "c"] : ["a", "b"];
   for (const name of names) {
-    const blob = writeGitObject("blob", Buffer.from(`${name}\n`));
-    const tree = writeGitTree([
-      ...baseEntries,
-      { path: `${name}.txt`, mode: "100644", type: "blob", sha: blob },
-    ]);
-    const head = writeGitCommit({ treeOid: tree, parentOids: [baseSha], message: name });
+    const sourceBase = options.nativeStack && heads.length ? heads.at(-1)! : baseSha;
+    sourceBases.push(sourceBase);
+    git("reset", "-q", "--hard", sourceBase);
+    let tree: string;
+    if (options.lfs) {
+      const path = `${name}.txt`;
+      const raw = Buffer.from(`${name}-remote-lfs-object\n`);
+      const rawOid = sha256(raw);
+      rawLfsObjects.set(rawOid, raw);
+      const cacheDirectory = join(
+        repository,
+        ".git",
+        "lfs",
+        "objects",
+        rawOid.slice(0, 2),
+        rawOid.slice(2, 4),
+      );
+      mkdirSync(cacheDirectory, { recursive: true });
+      writeFileSync(join(cacheDirectory, rawOid), raw);
+      await writeFile(join(repository, path), raw);
+      git("add", "--intent-to-add", "--", path);
+      const patchPath = join(repository, `.artifact-${name}.patch`);
+      await writeFile(
+        patchPath,
+        execFileSync("git", ["diff", "--binary", "--no-ext-diff", sourceBase, "--", path], {
+          cwd: repository,
+        }),
+      );
+      const collected = await artifactFromPatchFile({
+        repository,
+        patchPath,
+        outputRoot: repository,
+        baseSha: sourceBase,
+        changedPaths: [path],
+        outcome: "succeeded",
+      });
+      collectedSources.push(collected);
+      tree = collected.fileManifest!.resultTreeSha;
+      await rm(patchPath, { force: true });
+      git("reset", "-q", "--hard", sourceBase);
+    } else {
+      const blob = writeGitObject("blob", Buffer.from(`${name}\n`));
+      tree = writeGitTree([
+        ...baseEntries,
+        { path: `${name}.txt`, mode: "100644", type: "blob", sha: blob },
+      ]);
+      collectedSources.push(undefined);
+    }
+    const head = writeGitCommit({ treeOid: tree, parentOids: [sourceBase], message: name });
     heads.push(head);
     seededCommits.set(head, {
       oid: head,
       treeOid: tree,
-      parentOids: [baseSha],
+      parentOids: [sourceBase],
       message: name,
       serverTime: new Date(),
     });
   }
+  git("reset", "-q", "--hard", baseSha);
   const now = new Date();
   const { compilerEvaluation: _defaultCompilerEvaluation, ...oneShotFixturePolicy } =
     DEFAULT_RUN_POLICY;
   const policy = parseRunPolicy({
     ...oneShotFixturePolicy,
+    ...(options.lfs
+      ? {
+          allowedNetworkDestinations: [
+            ...oneShotFixturePolicy.allowedNetworkDestinations,
+            "github.com",
+          ],
+        }
+      : {}),
     capacity: { ...DEFAULT_RUN_POLICY.capacity, mode: "fixed" },
     delivery: {
       mode: options.regular ? "regular-prs" : "stacked-prs",
       onUnavailable: "escalate",
-      merge: "bottom-up",
+      merge: options.atomicStack ? "atomic-stack" : "bottom-up",
     },
   });
   const pd = policyDigest(policy);
+  type RemoteLfsFailure = "missing" | "changed" | "misrouted" | "unavailable";
+  let remoteLfsFailure: RemoteLfsFailure | null = null;
+  let remoteLfsFailureAfterPreflight: RemoteLfsFailure | null = null;
+  let allowedFailureReads = 0;
+  const lfsPreflight = vi.fn<LfsOutputTransport["preflight"]>(async () => {
+    const remote = {
+      toolVersion: "git-lfs/3.7.0",
+      remoteDigest: (remoteLfsFailure === "misrouted" ? "7" : "9").repeat(64),
+      remoteHost: "github.com",
+      endpoint: "https://github.com/o/r.git/info/lfs",
+    };
+    if (remoteLfsFailureAfterPreflight) {
+      remoteLfsFailure = remoteLfsFailureAfterPreflight;
+      remoteLfsFailureAfterPreflight = null;
+    }
+    return remote;
+  });
+  const lfsUpload = vi.fn<LfsOutputTransport["upload"]>(async () => "uploaded");
+  const lfsRead = vi.fn<LfsOutputTransport["read"]>(async ({ object }) => {
+    const bytes = rawLfsObjects.get(object.oid);
+    if (!bytes) throw new Error("fixture remote LFS object is unknown");
+    const failure = remoteLfsFailure;
+    if (failure && allowedFailureReads > 0) {
+      allowedFailureReads -= 1;
+      return Buffer.from(bytes);
+    }
+    if (failure === "unavailable")
+      throw new PlatformUnavailableError(
+        { kind: "server_error", retryAfterMs: 1_000 },
+        new Error("remote LFS object read response lost"),
+      );
+    if (failure === "missing") throw new Error("remote LFS object missing");
+    if (failure === "changed") return Buffer.alloc(bytes.length, 120);
+    return Buffer.from(bytes);
+  });
+  const lfsTransport: LfsOutputTransport = {
+    preflight: lfsPreflight,
+    upload: lfsUpload,
+    read: lfsRead,
+  };
+  vi.spyOn(
+    GitHubControlStore.prototype,
+    "prepareCompareAndSwapRefAtPublicationBoundary",
+  ).mockImplementation(async function (this: GitHubControlStore, args) {
+    return () => this.compareAndSwapRef(args);
+  });
+  // The fixture replaces the final GitHub mutation methods, so reproduce the
+  // concrete store's transport-bound safety callback before those replacements.
+  vi.spyOn(GitHubControlStore.prototype, "withPublicationSafetyFence").mockImplementation(
+    async (fence, operation) => {
+      await fence();
+      return operation();
+    },
+  );
+  if (options.lfs) {
+    vi.spyOn(GitLfsOutputTransport.prototype, "preflight").mockImplementation((...args) =>
+      lfsPreflight(...args),
+    );
+    vi.spyOn(GitLfsOutputTransport.prototype, "upload").mockImplementation(async (args) => {
+      await lfsUpload(args);
+      return "uploaded";
+    });
+    vi.spyOn(GitLfsOutputTransport.prototype, "read").mockImplementation(async (args) =>
+      Buffer.from(new Uint8Array(await lfsRead(args))),
+    );
+  }
   let sequence = 1;
   const event = (fields: Record<string, unknown>) =>
     parseFactoryEvent({
@@ -445,7 +595,7 @@ async function fixture(
   const graph: CompiledObjective = {
     deferredCapabilityAdapters: [],
     title: "Parallel siblings",
-    workItems: names.map((name) => ({
+    workItems: names.map((name, index) => ({
       id: name,
       title: name,
       goal: `Add ${name}`,
@@ -454,8 +604,8 @@ async function fixture(
       preconditions: [],
       outOfScope: [],
       conventions: [],
-      dependsOn: [],
-      baseSha,
+      dependsOn: options.nativeStack && index ? [names[index - 1]!] : [],
+      baseSha: sourceBases[index]!,
       validationCommands: ["node --test"],
       requirements: {
         os: ["linux"],
@@ -470,7 +620,14 @@ async function fixture(
         kind: "repository-change" as const,
         contract: "clockgrove.factory/artifact" as const,
       },
-      delivery: { group: name, relationship: "root" },
+      delivery:
+        options.nativeStack && index
+          ? {
+              group: names[0]!,
+              relationship: "continue-stack" as const,
+              parentWorkItem: names[index - 1]!,
+            }
+          : { group: options.nativeStack ? names[0]! : name, relationship: "root" as const },
     })),
   };
   const graphManager = new CompiledGraphManager(storage, leases);
@@ -492,7 +649,11 @@ async function fixture(
     graph.workItems.map((item) => ({
       id: item.id,
       dependsOn: item.dependsOn,
-      delivery: { group: item.delivery!.group, relationship: item.delivery!.relationship },
+      delivery: {
+        group: item.delivery!.group,
+        relationship: item.delivery!.relationship,
+        ...(item.delivery!.parentWorkItem ? { parentWorkItem: item.delivery!.parentWorkItem } : {}),
+      },
     })),
   );
   if (delivery.result !== "supported") throw new Error("fixture delivery unsupported");
@@ -553,17 +714,44 @@ async function fixture(
   for (const [index, item] of graph.workItems.entries()) {
     const number = 8 + index;
     const head = heads[index]!;
+    const sourceBase = sourceBases[index]!;
     refs.set(`refs/heads/${publicationBranch(7, number, 1)}`, head);
     const tree = (await readCommit(head)).treeOid;
     const validationDigest = createHash("sha256").update(item.id).digest("hex");
+    const collectedSource = collectedSources[index];
+    const sourceArtifact = collectedSource
+      ? await finalizeLfsArtifact({
+          store: storage,
+          artifact: collectedSource,
+          authority: {
+            repository: "o/r",
+            objective: 7,
+            workItem: number,
+            attempt: 1,
+            runId: options.adoptedLfs ? "predecessor" : "parallel",
+            directorEpoch: options.adoptedLfs ? 7 : 1,
+            policyDigest: pd,
+          },
+          repositoryPath: repository,
+          allowedNetworkDestinations: policy.allowedNetworkDestinations,
+          assertCurrent,
+          transport: lfsTransport,
+        })
+      : normalizeArtifact({
+          baseSha: sourceBase,
+          patch: "",
+          changedPaths: [`${item.id}.txt`],
+          outcome: "succeeded",
+        });
+    sourceArtifacts.push(sourceArtifact);
     const reviewIdentity = {
       kind: "artifact" as const,
       runId: "parallel",
       objective: 7,
       workItem: number,
       attempt: 1,
-      artifactDigest: validationDigest,
-      baseSha,
+      artifactDigest: sourceArtifact.digest,
+      baseSha: sourceBase,
       outputTreeSha: tree,
       evidenceDigest: validationDigest,
     };
@@ -581,8 +769,13 @@ async function fixture(
       },
     });
     const exact = bindValidationToPublishedHead({
-      validation: { passed: true, digest: validationDigest, baseSha, outputTreeSha: tree },
-      publishedBaseSha: baseSha,
+      validation: {
+        passed: true,
+        digest: validationDigest,
+        baseSha: sourceBase,
+        outputTreeSha: tree,
+      },
+      publishedBaseSha: sourceBase,
       publishedTreeSha: tree,
       publishedHeadSha: head,
     });
@@ -592,7 +785,7 @@ async function fixture(
         workItem: number,
         attempt: 1,
         backend: "codex-sdk/local-worktree",
-        baseSha,
+        baseSha: sourceBase,
         directorEpoch: 1,
         policyDigest: pd,
         ...fields,
@@ -601,8 +794,8 @@ async function fixture(
     // These pre-existing attempts were admitted by the legacy controller:
     // retain its original issue ownership for the compatibility import.
     const ownerOid = await storage.createCommit({
-      treeOid: (await readCommit(baseSha)).treeOid,
-      parentOids: [baseSha],
+      treeOid: (await readCommit(sourceBase)).treeOid,
+      parentOids: [sourceBase],
       message: `Factory-Repository-Claim: ${Buffer.from(
         JSON.stringify({
           objective: 7,
@@ -614,11 +807,27 @@ async function fixture(
     });
     refs.set(`refs/clockgrove-factory/repository/work-items/work-item-${number}`, ownerOid);
     const reservationOid = await storage.createCommit({
-      treeOid: (await readCommit(baseSha)).treeOid,
-      parentOids: [baseSha],
+      treeOid: (await readCommit(sourceBase)).treeOid,
+      parentOids: [sourceBase],
       message: encodeEventTrailer(reserved),
     });
     refs.set(attemptRef(7, number, 1), reservationOid);
+    await persistArtifactTransfer({
+      store: storage,
+      identity: {
+        repository: "o/r",
+        objective: 7,
+        workItem: number,
+        attempt: 1,
+        runId: "parallel",
+        directorEpoch: 1,
+        policyDigest: pd,
+        baseSha: sourceBase,
+      },
+      artifact: sourceArtifact,
+      allowedPaths: [`${item.id}.txt`],
+      assertCurrent,
+    });
     const plan = delivery.items.find((entry) => entry.itemId === item.id)!;
     const pull: LinkedPullRequest = {
       id: `PR_${number}`,
@@ -650,13 +859,16 @@ async function fixture(
         graphDigest: record.graphDigest,
         graphSize: names.length,
         index,
-        dependsOn: [],
+        dependsOn: item.dependsOn,
         deferredCapabilityAdapters: graph.deferredCapabilityAdapters,
       }),
       closed: false,
       assignees: [],
       labels: [],
-      blockedBy: [],
+      blockedBy: item.dependsOn.map((dependency) => ({
+        number: 8 + graph.workItems.findIndex((candidate) => candidate.id === dependency),
+        closed: false,
+      })),
       linkedPullRequests: [pull],
       copilotAssignments: [],
       factoryEvents: [
@@ -678,7 +890,7 @@ async function fixture(
           event: "ValidationRecorded",
           workItem: number,
           attempt: 1,
-          baseSha,
+          baseSha: sourceBase,
           outputTreeSha: tree,
           evidenceDigest: validationDigest,
           passed: true,
@@ -693,8 +905,12 @@ async function fixture(
           amount: 15,
           usageId: `review-${reviewIdentityDigest(reviewIdentity)}`,
         }),
-        attempt({ event: "AttemptValidated", artifactDigest: validationDigest }),
-        attempt({ event: "AttemptPublished", headSha: head, artifactDigest: validationDigest }),
+        attempt({ event: "AttemptValidated", artifactDigest: sourceArtifact.digest }),
+        attempt({
+          event: "AttemptPublished",
+          headSha: head,
+          artifactDigest: sourceArtifact.digest,
+        }),
         event({
           kind: "publication",
           event: "PublicationRecorded",
@@ -704,9 +920,10 @@ async function fixture(
           itemId: item.id,
           mode: options.regular ? "regular-prs" : "native-stacks",
           position: plan.position,
+          ...(plan.parentItemId ? { parentItemId: plan.parentItemId } : {}),
           branch: publicationBranch(7, number, 1),
-          baseBranch: "main",
-          baseSha,
+          baseBranch: options.nativeStack && index ? publicationBranch(7, number - 1, 1) : "main",
+          baseSha: sourceBase,
           headSha: head,
           pullRequest: pull.number,
           capabilityVersion: "2026-03-10",
@@ -1137,7 +1354,7 @@ async function fixture(
       const pull = findPull(number);
       const lag = staleRefreshHeads.get(number);
       const observedHead = lag && lag.remaining-- > 0 ? lag.head : pull.headSha;
-      const currentBase = readMainHead();
+      const currentBase = options.nativeStack ? sourceBases[number - 18]! : readMainHead();
       const previewState = number === 19 ? options.previewState?.() : "fresh";
       const oneShotStaleParents =
         options.stalePreviewOnce &&
@@ -1190,7 +1407,7 @@ async function fixture(
         mergeable: true,
         mergeableState: "clean",
         headSha: observedHead,
-        baseRef: "main",
+        baseRef: options.nativeStack && number > 18 ? publicationBranch(7, number - 11, 1) : "main",
         baseSha: previewState === "stale-base" ? baseSha : currentBase,
         mergeCommitSha:
           number === 88 && options.peerPullFault === "different-merge"
@@ -1248,6 +1465,41 @@ async function fixture(
       options.afterMerge?.(number);
       return merged;
     });
+  const nativeRequest = vi.spyOn(GitHubStacks.prototype, "requestMerge");
+  if (options.nativeStack) {
+    const observedStack = () => ({
+      number: 90,
+      baseRef: "main",
+      open: true,
+      pullRequests: names.map((_, index) => ({
+        number: 18 + index,
+        state: "open" as const,
+        draft: false,
+        mergedAt: null,
+        headRef: publicationBranch(7, 8 + index, 1),
+        headSha: heads[index]!,
+        baseRef: index ? publicationBranch(7, 7 + index, 1) : "main",
+        baseSha: sourceBases[index]!,
+      })),
+    });
+    vi.spyOn(GitHubStacks.prototype, "list").mockResolvedValue([]);
+    vi.spyOn(GitHubStacks.prototype, "get").mockImplementation(async (number) => {
+      expect(number).toBe(90);
+      return observedStack();
+    });
+    vi.spyOn(GitHubStacks.prototype, "ensureStack").mockImplementation(async (numbers) => {
+      expect(numbers).toEqual(names.map((_, index) => 18 + index));
+      return observedStack();
+    });
+    nativeRequest.mockImplementation(async (input) => ({
+      state: "merged",
+      mergeSha: await merge({
+        number: input.pullRequest,
+        headSha: input.expectedHeadSha,
+        commitTitle: input.title,
+      }),
+    }));
+  }
   const review = vi.fn<ManagementBackend["review"]>(async (_context, checkpoint) => {
     const result = {
       review: {
@@ -1303,6 +1555,7 @@ async function fixture(
     refs,
     blobs,
     merge,
+    nativeRequest,
     mergeShas,
     review,
     launch,
@@ -1313,6 +1566,19 @@ async function fixture(
     validate,
     pullReads,
     renewLease,
+    lfsPreflight,
+    lfsUpload,
+    lfsRead,
+    sourceArtifacts,
+    failRemoteLfs: (failure: RemoteLfsFailure | null) => {
+      remoteLfsFailure = failure;
+    },
+    failRemoteLfsAfterNextPreflight: (failure: RemoteLfsFailure | null) => {
+      remoteLfsFailureAfterPreflight = failure;
+    },
+    allowRemoteLfsReads: (count: number) => {
+      allowedFailureReads = count;
+    },
     stalePreviewObserved: () => stalePreviewServed,
     storage,
     lease,
@@ -1321,6 +1587,160 @@ async function fixture(
 }
 
 describe("Supervisor parallel independent sibling integration", () => {
+  it("keeps ordinary native integration off artifact reconstruction and LFS transport", async () => {
+    const f = await fixture();
+    const result = await f.run();
+    expect(result, result.reason).toMatchObject({ status: "completed" });
+    expect(f.lfsPreflight).not.toHaveBeenCalled();
+    expect(f.lfsUpload).not.toHaveBeenCalled();
+    expect(f.lfsRead).not.toHaveBeenCalled();
+    // The two existing sibling-refresh derivations remain; the final native
+    // mutation fence must not add an ordinary-member reconstruction pass.
+    expect(
+      vi
+        .mocked(processGroup.runContainedProcess)
+        .mock.calls.filter(
+          ([input]) =>
+            input.command === "git" &&
+            input.args?.[0] === "diff" &&
+            input.args?.[1] === "--name-only" &&
+            input.args?.[2] === "-z",
+        ),
+    ).toHaveLength(2);
+    expect(
+      vi
+        .mocked(processGroup.runContainedProcess)
+        .mock.calls.some(([input]) => input.command === "git" && input.args?.[0] === "fetch"),
+    ).toBe(false);
+  });
+
+  it("does not repair an adopted LFS object deleted after native preflight", async () => {
+    const f = await fixture({
+      lfs: true,
+      adoptedLfs: true,
+      nativeStack: true,
+      atomicStack: true,
+    });
+    expect(f.sourceArtifacts.map((artifact) => artifact.lfsObjects?.length)).toEqual([1, 1]);
+    await expect(
+      resumeArtifactTransfer({
+        store: f.storage,
+        identity: {
+          repository: "o/r",
+          objective: 7,
+          workItem: 8,
+          attempt: 1,
+          runId: "parallel",
+          directorEpoch: 1,
+          policyDigest: f.lease.policyDigest,
+          baseSha: f.baseSha,
+        },
+        allowedPaths: ["a.txt"],
+        assertCurrent: async () => {},
+      }),
+    ).resolves.toMatchObject({ lfsObjects: [expect.any(Object)] });
+    f.lfsPreflight.mockClear();
+    f.lfsUpload.mockClear();
+    f.lfsRead.mockClear();
+    f.failRemoteLfsAfterNextPreflight("missing");
+    const result = await f.run();
+    expect(result).toMatchObject({
+      status: "escalated",
+      reason: expect.stringContaining("remote LFS object missing"),
+    });
+    expect(f.merge).not.toHaveBeenCalled();
+    expect(f.nativeRequest).not.toHaveBeenCalled();
+    expect(f.lfsUpload).not.toHaveBeenCalled();
+    expect(f.lfsRead).toHaveBeenCalled();
+    const admissionOid = f.refs.get(integrationAdmissionRef("o/r", "main"));
+    expect(admissionOid).toBeDefined();
+    const admission = JSON.parse(
+      Buffer.from(
+        (await f.storage.readCommit(admissionOid!)).message
+          .split(/\r?\n/)
+          .find((line) => line.startsWith("Factory-Integration: "))!
+          .slice(21),
+        "base64url",
+      ).toString("utf8"),
+    );
+    expect(admission).toMatchObject({
+      state: "released",
+      identity: { pullRequest: 19 },
+      outcome: { kind: "not-dispatched" },
+    });
+  });
+
+  it.each(["missing", "changed", "misrouted", "unavailable"] as const)(
+    "refuses a %s LFS object before regular default-branch integration",
+    async (failure) => {
+      const f = await fixture({ regular: true, lfs: true });
+      const originalMain = f.git("rev-parse", "main");
+      f.merge.mockClear();
+      f.nativeRequest.mockClear();
+      f.lfsPreflight.mockClear();
+      f.lfsUpload.mockClear();
+      f.lfsRead.mockClear();
+      f.failRemoteLfs(failure);
+
+      if (failure === "unavailable") {
+        await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+      } else {
+        const result = await f.run();
+        expect(result).toMatchObject({ status: "escalated" });
+      }
+
+      expect(f.merge).not.toHaveBeenCalled();
+      expect(f.nativeRequest).not.toHaveBeenCalled();
+      expect(f.git("rev-parse", "main")).toBe(originalMain);
+      expect(f.lfsUpload).not.toHaveBeenCalled();
+      expect(f.lfsPreflight).toHaveBeenCalledOnce();
+      if (failure === "misrouted") expect(f.lfsRead).not.toHaveBeenCalled();
+      else expect(f.lfsRead).toHaveBeenCalledOnce();
+      const admissionOid = f.refs.get(integrationAdmissionRef("o/r", "main"));
+      expect(admissionOid).toBeDefined();
+      const admission = JSON.parse(
+        Buffer.from(
+          (await f.storage.readCommit(admissionOid!)).message
+            .split(/\r?\n/)
+            .find((line) => line.startsWith("Factory-Integration: "))!
+            .slice(21),
+          "base64url",
+        ).toString("utf8"),
+      );
+      expect(admission).toMatchObject({
+        state: "released",
+        identity: { pullRequest: 18 },
+        outcome: { kind: "not-dispatched" },
+      });
+    },
+    60_000,
+  );
+
+  it("rechecks a rebound LFS receipt before a resumed sibling refresh CAS", async () => {
+    const f = await fixture({ regular: true, lfs: true });
+    f.lfsPreflight.mockClear();
+    f.lfsUpload.mockClear();
+    f.lfsRead.mockClear();
+    f.failRemoteLfs("unavailable");
+    // A's newly required regular-integration proof and B's receipt-finalizing
+    // read succeed; the sibling CAS fence is the unavailable third read.
+    f.allowRemoteLfsReads(2);
+    await expect(f.run()).rejects.toThrow(PlatformUnavailableError);
+    expect(f.refresh).not.toHaveBeenCalled();
+    const uploads = f.lfsUpload.mock.calls.length;
+    expect(uploads).toBeGreaterThan(0);
+
+    f.failRemoteLfs("missing");
+    const result = await f.run();
+    expect(result).toMatchObject({
+      status: "escalated",
+      reason: expect.stringContaining("remote LFS object missing"),
+    });
+    expect(f.lfsUpload).toHaveBeenCalledTimes(uploads);
+    expect(f.refresh).not.toHaveBeenCalled();
+    expect(f.snapshot.workItems[1]!.linkedPullRequests[0]!.headSha).toBe(f.heads[1]);
+  });
+
   it("integrates concurrent regular publications through exact refresh and candidate validation", async () => {
     const f = await fixture({ regular: true });
     const result = await f.run();

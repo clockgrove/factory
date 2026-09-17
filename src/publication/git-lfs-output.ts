@@ -559,21 +559,42 @@ export function assertLfsReceiptRemoteIdentity(
     throw new Error("Git LFS remote identity changed after artifact verification");
 }
 
+export interface RemoteLfsObjectSubject {
+  /** Immutable artifact that authenticates the upload receipts and raw bytes. */
+  artifact: NormalizedArtifact;
+  /** Exact tree about to cross the mutable publication boundary. */
+  resultTreeSha?: string;
+  /** Exact parent used only to construct the isolated LFS verification commit. */
+  baseSha?: string;
+}
+
 /** Recheck the exact authenticated remote objects at the mutable ref boundary.
  * Upload receipts remain immutable historical evidence; this assertion proves
  * that their objects are still readable immediately before publication. */
 export async function assertRemoteLfsObjectsCurrent(args: {
-  artifacts: readonly NormalizedArtifact[];
+  subjects: readonly RemoteLfsObjectSubject[];
   repositoryPath: string;
   allowedNetworkDestinations: string[];
   transport?: LfsOutputTransport;
 }): Promise<void> {
-  const artifacts = args.artifacts.map((artifact) => verifyArtifact(artifact));
-  const withLfs = artifacts.filter((artifact) => artifact.lfsObjects?.length);
+  const subjects = args.subjects.map((subject) => {
+    const artifact = verifyArtifact(subject.artifact);
+    const resultTreeSha = subject.resultTreeSha ?? artifact.fileManifest?.resultTreeSha;
+    const baseSha = subject.baseSha ?? artifact.baseSha;
+    if (artifact.lfsObjects?.length && !resultTreeSha)
+      throw new Error("LFS publication artifact lacks its exact result tree");
+    if (
+      (resultTreeSha && !/^[a-f0-9]{40}$/i.test(resultTreeSha)) ||
+      !/^[a-f0-9]{40}$/i.test(baseSha)
+    )
+      throw new Error("LFS publication requires exact Git tree and base identities");
+    return { artifact, resultTreeSha, baseSha };
+  });
+  const withLfs = subjects.filter(({ artifact }) => artifact.lfsObjects?.length);
   if (withLfs.length === 0) return;
 
   const repositories = new Set(
-    withLfs.flatMap((artifact) =>
+    withLfs.flatMap(({ artifact }) =>
       artifact.lfsObjects!.map((receipt) => receipt.rawTransfer.identity.repository.toLowerCase()),
     ),
   );
@@ -590,24 +611,25 @@ export async function assertRemoteLfsObjectsCurrent(args: {
     throw new Error("Git LFS publication endpoint is outside run-policy egress");
 
   const checked = new Set<string>();
-  for (const artifact of withLfs) {
+  for (const { artifact, resultTreeSha, baseSha } of withLfs) {
     assertLfsReceiptRemoteIdentity(artifact, remote);
-    const resultTreeSha = artifact.fileManifest?.resultTreeSha;
-    if (!resultTreeSha) throw new Error("LFS publication artifact lacks its exact result tree");
     for (const receipt of artifact.lfsObjects!) {
       const objectIdentity = JSON.stringify({
         repository: expectedRepository,
         remoteDigest: receipt.remoteDigest,
         oid: receipt.oid,
         size: receipt.size,
+        path: receipt.path,
+        resultTreeSha,
+        baseSha,
       });
       if (checked.has(objectIdentity)) continue;
       checked.add(objectIdentity);
       const bytes = await transport.read({
         repository: args.repositoryPath,
         object: receipt,
-        resultTreeSha,
-        baseSha: artifact.baseSha,
+        resultTreeSha: resultTreeSha!,
+        baseSha,
         endpoint: remote.endpoint,
       });
       if (bytes.length !== receipt.size || sha256(bytes) !== receipt.oid)

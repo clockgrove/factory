@@ -18,6 +18,7 @@ import { bindValidationToPublishedHead } from "../src/validation/plan.js";
 import { createValidationEvidence } from "../src/validation/evidence.js";
 import { bindMergeCandidateValidation } from "../src/publication/merge-candidate.js";
 import type { WorkerPacket } from "../src/protocol/worker-packet.js";
+import { finalizeLfsArtifact, type LfsOutputTransport } from "../src/publication/git-lfs-output.js";
 
 function git(repository: string, args: string[], input?: Buffer | string): string {
   return execFileSync("git", args, {
@@ -41,13 +42,19 @@ function exactHeadValidation(headSha: string) {
   });
 }
 
-async function fixture() {
+async function fixture(lfs = false) {
   const repository = await mkdtemp(join(tmpdir(), "factory-publication-"));
   git(repository, ["init", "-q", "-b", "main"]);
   git(repository, ["config", "user.name", "Factory Test"]);
   git(repository, ["config", "user.email", "factory@example.invalid"]);
+  if (lfs) {
+    git(repository, ["config", "filter.lfs.clean", "cat"]);
+    git(repository, ["config", "filter.lfs.smudge", "cat"]);
+    git(repository, ["config", "filter.lfs.required", "false"]);
+    await writeFile(join(repository, ".gitattributes"), "*.bin filter=lfs diff=lfs -text\n");
+  }
   await writeFile(join(repository, "value.txt"), "base\n");
-  git(repository, ["add", "value.txt"]);
+  git(repository, ["add", "."]);
   git(repository, ["commit", "-q", "-m", "base"]);
   const oid = git(repository, ["rev-parse", "HEAD"]);
   const treeOid = git(repository, ["rev-parse", "HEAD^{tree}"]);
@@ -115,24 +122,47 @@ class GitObjectStore implements PublicationStore {
   async createBlob(content: Buffer): Promise<string> {
     return git(this.repository, ["hash-object", "-w", "--stdin"], content);
   }
+  async readBlob(oid: string): Promise<Buffer> {
+    return execFileSync("git", ["cat-file", "blob", oid], { cwd: this.repository });
+  }
+  async readTreeEntry(treeOid: string, path: string): Promise<string | null> {
+    const output = execFileSync("git", ["ls-tree", "-z", treeOid, "--", path], {
+      cwd: this.repository,
+      encoding: "utf8",
+    });
+    const match = /^[0-7]{6} blob ([0-9a-f]{40})\t[^\0]+\0$/.exec(output);
+    return match?.[1] ?? null;
+  }
   async createTree(args: {
-    baseTreeOid: string;
+    baseTreeOid?: string;
     entries: Array<{
       path: string;
       mode: "100644" | "100755" | "120000";
       type: "blob";
-      sha: string | null;
+      sha?: string | null;
+      content?: string;
     }>;
   }): Promise<string> {
     const index = join(this.repository, ".git", `factory-index-${Date.now()}-${Math.random()}`);
     const env = { ...process.env, GIT_INDEX_FILE: index };
     try {
-      execFileSync("git", ["read-tree", args.baseTreeOid], { cwd: this.repository, env });
+      execFileSync(
+        "git",
+        args.baseTreeOid ? ["read-tree", args.baseTreeOid] : ["read-tree", "--empty"],
+        {
+          cwd: this.repository,
+          env,
+        },
+      );
       for (const entry of args.entries) {
-        if (entry.sha) {
+        const sha =
+          entry.content === undefined
+            ? entry.sha
+            : git(this.repository, ["hash-object", "-w", "--stdin"], entry.content);
+        if (sha) {
           execFileSync(
             "git",
-            ["update-index", "--add", "--cacheinfo", entry.mode, entry.sha, entry.path],
+            ["update-index", "--add", "--cacheinfo", entry.mode, sha, entry.path],
             { cwd: this.repository, env },
           );
         } else {
@@ -496,6 +526,103 @@ describe("host-owned publication", () => {
       });
     },
   );
+
+  it("does not create the initial publication ref after its LFS object disappears", async () => {
+    const { repository, base } = await fixture(true);
+    let validation: Awaited<ReturnType<typeof validateArtifactClean>> | undefined;
+    try {
+      const packet: WorkerPacket = {
+        protocol: "clockgrove.factory/worker-packet",
+        goal: "add an LFS asset",
+        acceptanceCriteria: ["asset exists"],
+        allowedPaths: ["asset.bin"],
+        preconditions: [],
+        outOfScope: [],
+        conventions: [],
+        baseSha: base.oid,
+        validationCommands: ["test -f asset.bin"],
+        requirements: {
+          os: ["linux"],
+          architecture: [],
+          tools: ["git"],
+          services: [],
+          networkDestinations: ["github.com"],
+          permittedSecretNames: [],
+          trust: "trusted_local",
+        },
+        deliverable: {
+          kind: "repository-change",
+          contract: "clockgrove.factory/artifact",
+        },
+      };
+      const raw = Buffer.from("initial-publication-lfs-object");
+      const worker = await createLocalWorktree(repository, base.oid);
+      await writeFile(join(worker.path, "asset.bin"), raw);
+      const collected = await collectLocalArtifact(worker);
+      await cleanupLocalWorktree(worker);
+      const store = new GitObjectStore(repository, base.oid);
+      let missing = false;
+      const read = vi.fn(async () => {
+        if (missing) throw new Error("remote LFS object missing");
+        return raw;
+      });
+      const transport: LfsOutputTransport = {
+        preflight: vi.fn(async () => ({
+          toolVersion: "git-lfs/3.7.0",
+          remoteDigest: "9".repeat(64),
+          remoteHost: "github.com",
+          endpoint: "https://github.com/o/r.git/info/lfs",
+        })),
+        upload: vi.fn(async () => "uploaded" as const),
+        read,
+      };
+      const artifact = await finalizeLfsArtifact({
+        store,
+        artifact: collected,
+        authority: {
+          repository: "o/r",
+          objective: 1,
+          workItem: 2,
+          attempt: 1,
+          runId: "initial-lfs",
+          directorEpoch: 1,
+          policyDigest: "8".repeat(64),
+        },
+        repositoryPath: repository,
+        allowedNetworkDestinations: ["github.com"],
+        assertCurrent: async () => {},
+        transport,
+      });
+      validation = await validateArtifactClean({ repository, artifact, packet });
+      read.mockClear();
+      missing = true;
+      await expect(
+        publishValidated({
+          store,
+          assertLease: async () => {},
+          base,
+          validation,
+          artifact,
+          objective: 1,
+          workItem: 2,
+          attempt: 1,
+          title: "Add LFS asset",
+          baseBranch: "main",
+          repositoryPath: repository,
+          allowedNetworkDestinations: ["github.com"],
+          lfsTransport: transport,
+        }),
+      ).rejects.toThrow(/remote LFS object missing/);
+      expect(read).toHaveBeenCalledOnce();
+      expect([...store.refs.keys()].filter((ref) => ref.startsWith("refs/heads/"))).toEqual([
+        "refs/heads/main",
+      ]);
+      expect(store.pull).toBeNull();
+    } finally {
+      if (validation) await discardValidationResult(validation);
+      await rm(repository, { recursive: true, force: true });
+    }
+  });
 
   it("uploads exactly the independently validated tree and is idempotent", async () => {
     const { repository, base } = await fixture();

@@ -291,7 +291,7 @@ describe("preconfigured Git LFS output normalization", () => {
 
     await expect(
       assertRemoteLfsObjectsCurrent({
-        artifacts: [finalized, rebound],
+        subjects: [{ artifact: finalized }, { artifact: rebound }],
         repositoryPath: value.repository,
         allowedNetworkDestinations: ["github.com"],
         transport: fake.value,
@@ -306,13 +306,15 @@ describe("preconfigured Git LFS output normalization", () => {
     const ordinaryTransport = transport(bytes);
     await expect(
       assertRemoteLfsObjectsCurrent({
-        artifacts: [
-          normalizeArtifact({
-            baseSha: value.baseSha,
-            patch: "",
-            changedPaths: [],
-            outcome: "succeeded",
-          }),
+        subjects: [
+          {
+            artifact: normalizeArtifact({
+              baseSha: value.baseSha,
+              patch: "",
+              changedPaths: [],
+              outcome: "succeeded",
+            }),
+          },
         ],
         repositoryPath: value.repository,
         allowedNetworkDestinations: [],
@@ -351,7 +353,7 @@ describe("preconfigured Git LFS output normalization", () => {
 
       await expect(
         assertRemoteLfsObjectsCurrent({
-          artifacts: [finalized],
+          subjects: [{ artifact: finalized }],
           repositoryPath: value.repository,
           allowedNetworkDestinations: ["github.com"],
           transport: changed.value,
@@ -366,6 +368,47 @@ describe("preconfigured Git LFS output normalization", () => {
       if (failure === "misrouted") expect(changed.read).not.toHaveBeenCalled();
     },
   );
+
+  it("checks an authenticated source receipt against an exact delivery tree without uploading", async () => {
+    const value = await fixture();
+    const bytes = Buffer.from("adopted delivery bytes");
+    const fake = transport(bytes);
+    const source = await finalizeLfsArtifact({
+      store: memoryStore(),
+      artifact: await collectRaw(value, "asset.bin", bytes),
+      authority,
+      repositoryPath: value.repository,
+      allowedNetworkDestinations: ["github.com"],
+      assertCurrent: async () => {},
+      transport: fake.value,
+    });
+    fake.upload.mockClear();
+    fake.read.mockClear();
+    const resultTreeSha = "a".repeat(40);
+    const baseSha = "b".repeat(40);
+
+    await expect(
+      assertRemoteLfsObjectsCurrent({
+        subjects: [{ artifact: source, resultTreeSha, baseSha }],
+        repositoryPath: value.repository,
+        allowedNetworkDestinations: ["github.com"],
+        transport: fake.value,
+      }),
+    ).resolves.toBeUndefined();
+    expect(fake.upload).not.toHaveBeenCalled();
+    expect(fake.read).toHaveBeenCalledWith(
+      expect.objectContaining({
+        object: expect.objectContaining({
+          oid: sha256(bytes),
+          size: bytes.length,
+          path: "asset.bin",
+        }),
+        resultTreeSha,
+        baseSha,
+        endpoint: "https://github.com/fixture/project.git/info/lfs",
+      }),
+    );
+  });
 
   it("reconstructs a native Git range from authenticated raw bytes and issues target-base receipts", async () => {
     const value = await fixture();

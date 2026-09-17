@@ -28,6 +28,29 @@ import type { PinnedLfsFacts } from "../repository-profiles/git-lfs.js";
 import type { PinnedCompilationTreeProof } from "../execution/pinned-compilation-tree.js";
 import type { ProviderQuotaCheckpoint } from "../providers/quota.js";
 import type { FindingCandidate } from "../protocol/findings.js";
+import type { RepositoryCaptureReviewerCapability } from "../validation/repository-capture.js";
+
+export interface RepositoryCaptureReviewFile {
+  kind: "expected" | "observed";
+  descriptorDigest: string;
+  digest: string;
+  bytes: number;
+  mediaType: string;
+  sourceName: string;
+  handlerId: string;
+  handlerContract: number;
+  profileIds: string[];
+  path: string;
+  recipeIds: string[];
+  outputRole: string | null;
+}
+
+export interface RepositoryCaptureReviewBundle {
+  validationInvocationDigest: string;
+  evidenceDigest: string;
+  root: string;
+  files: RepositoryCaptureReviewFile[];
+}
 
 export interface ManagementUsage {
   inputTokens: number;
@@ -360,6 +383,7 @@ export interface ReviewContext {
   packet: WorkerPacket;
   artifact: NormalizedArtifact;
   evidence: ValidationEvidence;
+  repositoryCaptureBundle?: RepositoryCaptureReviewBundle;
   publicationBaseBranch?: string;
   modelSelection?: ModelSelection;
   /** Remaining per-invocation operation-stall bound for legacy review adapters.
@@ -398,6 +422,7 @@ export interface ManagementBackend {
   readonly supportsCompilerAdmission?: true;
   /** Exact media types the adapter can carry separately from the textual compiler request. */
   readonly compilerInputMediaTypes?: readonly string[];
+  readonly repositoryCaptureReviewerCapability?: RepositoryCaptureReviewerCapability | undefined;
   readonly id: string;
   probe(): Promise<{ available: boolean; authenticated: boolean; reason?: string }>;
   proposePlan(

@@ -292,7 +292,7 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:4, output
       path = cwd;
       expect(prompt).toContain("This is a pre-publication artifact review");
       expect(prompt).toContain("Evaluate only packet.acceptanceCriteria");
-      expect(prompt).toContain("criterion-specific semantic/visual subset");
+      expect(prompt).toContain("criterion-specific semantic subset");
       expect(prompt).toContain("must not be reviewed again");
       expect(prompt).toContain(semanticCriterion);
       expect(prompt).not.toContain(deterministicCriterion);

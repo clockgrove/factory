@@ -317,6 +317,7 @@ jobs:
           afterStop: async (identity) => {
             stages.push(`stop-${identity.commandIndex}`);
           },
+          observe: async () => "absent",
         },
       });
       expect(stages).toEqual(["fence-0", "run-0", "stop-0", "fence-1", "run-1", "stop-1"]);
@@ -379,6 +380,7 @@ jobs:
                 if (failure === "fence") throw new Error("fence lost");
               },
               afterStop,
+              observe: async () => "absent",
             },
           }),
         ).rejects.toThrow(
@@ -642,6 +644,7 @@ jobs:
           deadline: new Date(Date.now() + 60_000).toISOString(),
           beforeLaunch: async () => {},
           afterStop: async () => {},
+          observe: async () => "absent",
         },
       });
       expect(result.evidence.commands.map(({ command }) => command)).toEqual([
@@ -810,6 +813,7 @@ jobs:
           deadline: new Date(Date.now() + 60_000).toISOString(),
           beforeLaunch: async () => {},
           afterStop: async () => {},
+          observe: async () => "absent",
         },
       });
       expect(result.evidence.passed).toBe(true);
@@ -1047,6 +1051,7 @@ jobs:
           deadline: new Date(Date.now() + 60_000).toISOString(),
           beforeLaunch: async () => {},
           afterStop: async () => {},
+          observe: async () => "absent",
         },
       });
       expect(result.evidence).toMatchObject({

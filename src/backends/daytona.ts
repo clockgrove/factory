@@ -471,6 +471,10 @@ export class DaytonaBackend implements ExecutionBackend {
     };
   }
 
+  validationEnvironmentIdentity(): string {
+    return this.#image;
+  }
+
   async #refreshManagedTools(): Promise<void> {
     const statuses = await Promise.all(DAYTONA_MANAGED_TOOLS.map((tool) => toolchainStatus(tool)));
     this.capabilities.supportedTools = [

@@ -15,5 +15,9 @@
     "maxAssets": 0,
     "deterministicReviewRuleIds": []
   },
+  "repositoryCaptureEgress": {
+    "validation": { "mode": "denied", "maxAssets": 0 },
+    "review": { "mode": "denied", "maxAssets": 0, "reviewerCapabilityIds": [] }
+  },
   "allowedNetworkDestinations": ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"]
 }

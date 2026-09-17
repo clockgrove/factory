@@ -332,6 +332,10 @@ export class VercelSandboxBackend implements ExecutionBackend {
     };
   }
 
+  validationEnvironmentIdentity(): string | null {
+    return this.#image ?? null;
+  }
+
   async launch(context: AttemptContext): Promise<BackendHandle> {
     remainingBeforeAttemptDeadline(
       context.deadline,

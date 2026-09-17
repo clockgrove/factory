@@ -281,6 +281,48 @@ export const DEFAULT_COMPILER_MEDIA_EGRESS_POLICY = Object.freeze({
   deterministicReviewRuleIds: [],
 });
 
+const repositoryCaptureEgressPhase = <T extends z.ZodRawShape>(extra: T) =>
+  z
+    .object({
+      mode: z.enum(["denied", "public-assets", "private-assets"]),
+      maxAssets: z.number().int().min(0).max(544),
+      ...extra,
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if ((value.mode === "denied") !== (value.maxAssets === 0))
+        context.addIssue({
+          code: "custom",
+          path: ["maxAssets"],
+          message: "denied repository capture egress requires zero assets",
+        });
+    });
+
+const RepositoryCaptureEgressPhaseSchema = repositoryCaptureEgressPhase({});
+
+/** Independent authority for exposing validation-only repository captures.
+ * Validation covers an isolated execution backend; review covers a semantic
+ * reviewer. Neither permission is inherited from compiler input egress. */
+export const RepositoryCaptureEgressPolicySchema = z
+  .object({
+    validation: RepositoryCaptureEgressPhaseSchema,
+    review: repositoryCaptureEgressPhase({
+      reviewerCapabilityIds: z
+        .array(safeId)
+        .max(32)
+        .refine(
+          (ids) => new Set(ids).size === ids.length,
+          "reviewer capability IDs must be unique",
+        ),
+    }),
+  })
+  .strict();
+
+export const DEFAULT_REPOSITORY_CAPTURE_EGRESS_POLICY = Object.freeze({
+  validation: { mode: "denied" as const, maxAssets: 0 },
+  review: { mode: "denied" as const, maxAssets: 0, reviewerCapabilityIds: [] },
+});
+
 export const RunPolicySchema = z
   .object({
     backendOrder: z.array(safeId).min(1).max(16),
@@ -316,6 +358,7 @@ export const RunPolicySchema = z
     compilerEvaluation: CompilerEvaluationPolicySchema.optional(),
     objectivePlanning: ObjectivePlanningPolicySchema.optional(),
     compilerMediaEgress: CompilerMediaEgressPolicySchema,
+    repositoryCaptureEgress: RepositoryCaptureEgressPolicySchema,
     /** Explicit authority for bounded defect publication; absence denies automatic writes. */
     findingReporting: FindingReportingPolicySchema.optional(),
   })
@@ -348,6 +391,7 @@ export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
   compilerEvaluation: DEFAULT_COMPILER_EVALUATION_POLICY,
   objectivePlanning: DEFAULT_OBJECTIVE_PLANNING_POLICY,
   compilerMediaEgress: DEFAULT_COMPILER_MEDIA_EGRESS_POLICY,
+  repositoryCaptureEgress: DEFAULT_REPOSITORY_CAPTURE_EGRESS_POLICY,
   allowedNetworkDestinations: ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"],
   priority: {
     source: "subissue-order" as const,

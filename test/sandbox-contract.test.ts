@@ -186,19 +186,21 @@ async function runIsolatedCaptureValidation(threshold = false) {
       protocol: "clockgrove.factory/repository-capture-request",
       validationInvocationDigest,
       environmentIdentity: "fixture/image@sha256:" + "1".repeat(64),
-      expectedInputs: [
-        {
-          descriptorDigest: expectedDescriptorDigest,
-          contentDigest: expectedContentDigest,
-          storageReceiptDigest: "f".repeat(64),
-          payload: {
-            kind: "content-chunks",
-            digest: expectedContentDigest,
-            bytes: expectedContent.byteLength,
-            chunks: [{ digest: expectedContentDigest, bytes: expectedContent.byteLength }],
-          },
-        },
-      ],
+      expectedInputs: threshold
+        ? [
+            {
+              descriptorDigest: expectedDescriptorDigest,
+              contentDigest: expectedContentDigest,
+              storageReceiptDigest: "f".repeat(64),
+              payload: {
+                kind: "content-chunks" as const,
+                digest: expectedContentDigest,
+                bytes: expectedContent.byteLength,
+                chunks: [{ digest: expectedContentDigest, bytes: expectedContent.byteLength }],
+              },
+            },
+          ]
+        : [],
       recipes: ["primary", "secondary"].map((id) => ({
         id,
         digest: createHash("sha256").update(id).digest("hex"),

@@ -42,6 +42,13 @@ const TextMetadataSchema = z
     lines: z.number().int().positive().max(1_000_000),
   })
   .strict();
+const JsonMetadataSchema = z
+  .object({
+    kind: z.literal("json"),
+    encoding: z.literal("utf-8"),
+    root: z.enum(["array", "object", "scalar"]),
+  })
+  .strict();
 const RasterMetadataSchema = z
   .object({
     kind: z.literal("raster"),
@@ -59,6 +66,7 @@ const OpaqueMetadataSchema = z
   .strict();
 export const AssetValidationMetadataSchema = z.discriminatedUnion("kind", [
   TextMetadataSchema,
+  JsonMetadataSchema,
   RasterMetadataSchema,
   OpaqueMetadataSchema,
 ]);

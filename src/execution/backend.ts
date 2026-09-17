@@ -252,7 +252,7 @@ export interface IsolatedValidationCaptures {
 }
 
 export interface IntegrationValidationInvocation {
-  kind: "integration-candidate" | "native-stack-rebase";
+  kind: "integration-candidate" | "native-stack-rebase" | "repository-capture";
   identityDigest: string;
   artifactDigest: string;
   baseSha: string;
@@ -320,6 +320,8 @@ export interface ExecutionBackend {
   recoverValidation?(context: IsolatedValidationContext): Promise<IsolatedValidationResult | null>;
   /** Validation does not require a model credential, so it has a distinct probe. */
   probeValidation?(): Promise<BackendProbe>;
+  /** Immutable environment authority bound before repository validation dispatch. */
+  validationEnvironmentIdentity?(): string | null;
   /** Ensure a prior Director's resource is absent before a replacement attempt. */
   reconcileStale?(identity: StaleAttemptIdentity): Promise<void>;
   /** Reattach only when the durable identity can be proven to belong to this attempt. */

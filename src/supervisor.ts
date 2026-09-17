@@ -14,9 +14,9 @@ import {
 import { reconcileAdmissionForSuccessor } from "./control/admission-reassignment.js";
 import { observeLocalScopeBatch } from "./recovery/scope-resources.js";
 import { dirname, join, resolve } from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import { readObjectiveAssetManifest } from "./assets/storage.js";
+import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { arch, homedir, platform, tmpdir } from "node:os";
+import { readObjectiveAssetManifest, recoverObjectiveAsset } from "./assets/storage.js";
 import { materializeObjectiveAssets, materializeWorkerAssetInputs } from "./assets/materialize.js";
 import {
   compilerAssetManifestView,
@@ -26,6 +26,11 @@ import {
 import { policyMediaCompilerCapabilities } from "./media/adapter.js";
 import { defaultMediaAdapterRegistry, type MediaAdapterRegistry } from "./media/adapter.js";
 import { assetDigest, canonicalAssetJson, type AssetManifestEntry } from "./assets/contracts.js";
+import {
+  MAX_CONTENT_BYTES,
+  MAX_CONTENT_FILE_BYTES,
+  materializePayload,
+} from "./execution/artifact-content.js";
 import {
   activateWorkerPacket,
   createAssetDecision,
@@ -46,6 +51,28 @@ import {
   policyMediaReviewRules,
 } from "./media/review.js";
 import type { AssetActivationBundle } from "./media/contracts.js";
+import {
+  createValidationInvocation,
+  createRepositoryCaptureCollection,
+  materializeRepositoryCaptureReviewBundle,
+  persistRepositoryCaptures,
+  runValidationInvocationTransaction,
+  type RepositoryCaptureEvidence,
+  type ValidationInvocation,
+} from "./validation/repository-capture.js";
+import {
+  executeLocalRepositoryCaptures,
+  inspectLocalRepositoryCaptureDispatchState,
+  LocalRepositoryCaptureCommandFailure,
+  observeLocalValidationResult,
+  persistLocalValidationResult,
+} from "./validation/local-capture-runtime.js";
+import {
+  persistValidationInvocation,
+  persistValidationInvocationResult,
+  readValidationInvocation,
+  readValidationInvocationResult,
+} from "./validation/invocation-storage.js";
 
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
 import { CodexSdkLocalBackend } from "./backends/codex-sdk-local.js";
@@ -269,6 +296,7 @@ import {
 import {
   assertRepositoryChangeWorkerPacket,
   AssetProductionWorkerPacketSchema,
+  implementationAssetInputs,
   parseWorkerPacket,
   workerPacketDigest,
   type WorkerPacket,
@@ -285,6 +313,8 @@ import type {
   BackendObservation,
   ExecutionBackend,
   ExecutionUsage,
+  IsolatedValidationResult,
+  IsolatedValidationCaptureRequest,
 } from "./execution/backend.js";
 import { ProviderResourceCleanupError } from "./execution/backend.js";
 import {
@@ -450,7 +480,11 @@ import {
   observeLocalScope,
   stopLocalScope,
 } from "./runtime/local-scope.js";
-import { LocalScopeBatchSchema, type LocalScopeBatch } from "./protocol/local-scope.js";
+import {
+  LocalScopeBatchSchema,
+  localScopeBatchDigest,
+  type LocalScopeBatch,
+} from "./protocol/local-scope.js";
 import type { ValidationEvidence } from "./validation/evidence.js";
 import { FINDING_PROTOCOL, type FindingCandidate } from "./protocol/findings.js";
 import {
@@ -511,6 +545,8 @@ export interface SupervisorOptions {
   repository: string;
   /** Private durable state for dispatched media checkpoints and retained exact bytes. */
   mediaCheckpointRoot?: string;
+  /** Private durable controller state for local repository validation capture. */
+  validationCheckpointRoot?: string;
   policy: unknown;
   pollIntervalMs?: number;
   onStatus?: (message: string) => void;
@@ -554,6 +590,21 @@ function mediaControllerStateRoot(
       process.env["XDG_DATA_HOME"]?.trim() || join(homedir(), ".local", "share"),
       "clockgrove-factory",
       "media",
+    );
+  return join(resolve(dataRoot), createHash("sha256").update(repository).digest("hex"), runId);
+}
+
+function validationControllerStateRoot(
+  options: Pick<SupervisorOptions, "validationCheckpointRoot">,
+  repository: string,
+  runId: string,
+) {
+  const dataRoot =
+    options.validationCheckpointRoot ??
+    join(
+      process.env["XDG_DATA_HOME"]?.trim() || join(homedir(), ".local", "share"),
+      "clockgrove-factory",
+      "validation",
     );
   return join(resolve(dataRoot), createHash("sha256").update(repository).digest("hex"), runId);
 }
@@ -925,7 +976,7 @@ async function prepareObjectiveAssetRoot(args: {
   packet: WorkerPacket;
   attemptWorkspace: string;
 }): Promise<string | undefined> {
-  const bindings = args.packet.assetInputs ?? [];
+  const bindings = implementationAssetInputs(args.packet);
   if (!bindings.length) return undefined;
   const manifestDigests = [...new Set(bindings.map(({ manifestDigest }) => manifestDigest))];
   const manifests = await Promise.all(
@@ -951,6 +1002,104 @@ async function prepareObjectiveAssetRoot(args: {
       bindings,
     })
   ).root;
+}
+
+async function resolveValidationCaptureAssets(args: {
+  store: GitHubControlStore;
+  repository: string;
+  objective: number;
+  authorityBaseSha: string;
+  packet: WorkerPacket;
+}) {
+  if (args.packet.deliverable.kind !== "repository-change") return new Map();
+  const expectedDescriptors = new Set(
+    (args.packet.repositoryCaptureRecipes ?? []).map(
+      ({ comparison }) => comparison.expectedDescriptorDigest,
+    ),
+  );
+  const bindings = (args.packet.assetInputs ?? []).filter(({ descriptorDigest }) =>
+    expectedDescriptors.has(descriptorDigest),
+  );
+  if (bindings.length !== expectedDescriptors.size)
+    throw new Error("repository capture comparison lacks its validation-only packet asset");
+  const manifests = new Map();
+  for (const manifestDigest of new Set(bindings.map(({ manifestDigest }) => manifestDigest))) {
+    const manifest = await readObjectiveAssetManifest({
+      store: args.store,
+      authority: {
+        repository: args.repository,
+        objective: args.objective,
+        baseSha: args.authorityBaseSha,
+      },
+      digest: manifestDigest,
+    });
+    if (!manifest) throw new Error("repository capture expected asset manifest is unavailable");
+    manifests.set(manifestDigest, manifest);
+  }
+  const resolved = new Map<
+    string,
+    {
+      binding: (typeof bindings)[number];
+      manifest: NonNullable<Awaited<ReturnType<typeof readObjectiveAssetManifest>>>;
+      entry: AssetManifestEntry;
+      activationDigest: string | null;
+    }
+  >();
+  for (const binding of bindings) {
+    const manifest = manifests.get(binding.manifestDigest);
+    const entry = manifest?.assets.find(
+      ({ descriptor }: AssetManifestEntry) => descriptor.digest === binding.descriptorDigest,
+    );
+    if (
+      !manifest ||
+      !entry ||
+      entry.descriptor.content.digest !== binding.contentDigest ||
+      entry.storage.digest !== binding.storageReceiptDigest
+    )
+      throw new Error("repository capture expected asset differs from its Worker Packet binding");
+    const activationDigests = new Set(
+      (args.packet.mediaUses ?? []).flatMap((use) =>
+        use.direction === "evidence-for" &&
+        use.descriptorDigests.includes(binding.descriptorDigest) &&
+        use.source === "activated"
+          ? [use.activationDigest]
+          : [],
+      ),
+    );
+    if (activationDigests.size > 1)
+      throw new Error("repository capture expected asset has conflicting activation authority");
+    resolved.set(binding.descriptorDigest, {
+      binding,
+      manifest,
+      entry,
+      activationDigest: [...activationDigests][0] ?? null,
+    });
+  }
+  return resolved;
+}
+
+function mergeValidationCommandResults(
+  order: readonly string[],
+  groups: ReadonlyArray<readonly { command: string; exitCode: number; durationMs: number }[]>,
+) {
+  const remaining = new Map<
+    string,
+    Array<{ command: string; exitCode: number; durationMs: number }>
+  >();
+  for (const result of groups.flat()) {
+    const entries = remaining.get(result.command) ?? [];
+    entries.push(result);
+    remaining.set(result.command, entries);
+  }
+  const merged = order.map((command) => {
+    const entries = remaining.get(command);
+    const result = entries?.shift();
+    if (!result) throw new Error(`validation command result is missing: ${command}`);
+    return result;
+  });
+  if ([...remaining.values()].some((entries) => entries.length > 0))
+    throw new Error("validation runtime returned an unplanned command result");
+  return merged;
 }
 
 async function prepareCompilerMediaInputs(args: {
@@ -2399,6 +2548,7 @@ export class FactorySupervisor {
           });
         },
         afterStop: async () => {},
+        observe: async (identity) => (await observeLocalScope(identity)).status,
       },
     };
   }
@@ -7199,7 +7349,7 @@ export class FactorySupervisor {
                       policy: this.#policy,
                       requirements: packet.requirements,
                       requiresManagedToolchain: Boolean(packet.managedRuntimes?.length),
-                      requiresOfflineAssetInputs: Boolean(packet.assetInputs?.length),
+                      requiresOfflineAssetInputs: implementationAssetInputs(packet).length > 0,
                       nowMs,
                     }),
                     commandState.cloudPaused,
@@ -9338,6 +9488,13 @@ export class FactorySupervisor {
         }),
       );
 
+      const repositoryCaptureRuntime = await this.#repositoryCaptureRuntime({
+        item,
+        reservation: reservation!,
+        packet,
+        ...(validator ? { validator } : {}),
+        ...(scopedValidation ? { localScopeBatch: scopedValidation.batch } : {}),
+      });
       const validationStarted = Date.now();
       validationStartedAt = validationStarted;
       validation = await this.#observePhase("validation", () =>
@@ -9347,10 +9504,11 @@ export class FactorySupervisor {
             artifact,
             packet,
             publicationBaseBranch: this.#baseBranch,
+            ...(repositoryCaptureRuntime ? { repositoryCaptureRuntime } : {}),
             ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
             ...(validator
               ? {
-                  isolatedValidator: () =>
+                  isolatedValidator: (capture) =>
                     this.#externalAdmission(() =>
                       validator!.validate!({
                         repository: `${this.#options.owner}/${this.#options.repo}`,
@@ -9364,11 +9522,53 @@ export class FactorySupervisor {
                         packet,
                         policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
                         artifact,
+                        ...(capture
+                          ? {
+                              validationInvocation: {
+                                kind: "repository-capture" as const,
+                                identityDigest: capture.captureRequest.validationInvocationDigest,
+                                artifactDigest: artifact.digest,
+                                baseSha: artifact.baseSha,
+                              },
+                            }
+                          : {}),
+                        ...(capture ?? {}),
                         deadline: new Date(
                           new Date(validationNoHandleReplacementNotBefore!).getTime() - 60_000,
                         ),
                       }),
                     ),
+                  ...(validator.recoverValidation
+                    ? {
+                        isolatedValidationRecovery: (capture) =>
+                          this.#externalAdmission(() =>
+                            validator!.recoverValidation!({
+                              repository: `${this.#options.owner}/${this.#options.repo}`,
+                              objective: this.#run.objective,
+                              workItem: item.number,
+                              attempt: reservation!.attempt,
+                              runId: this.#run.runId,
+                              directorEpoch: reservation!.directorEpoch,
+                              policyDigest: reservation!.policyDigest,
+                              workspace: worker!.path,
+                              packet,
+                              policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                              artifact,
+                              validationInvocation: {
+                                kind: "repository-capture" as const,
+                                identityDigest: capture.captureRequest.validationInvocationDigest,
+                                artifactDigest: artifact.digest,
+                                baseSha: artifact.baseSha,
+                              },
+                              ...capture,
+                              deadline: new Date(
+                                new Date(validationNoHandleReplacementNotBefore!).getTime() -
+                                  60_000,
+                              ),
+                            }),
+                          ),
+                      }
+                    : {}),
                 }
               : {}),
           }),
@@ -9459,6 +9659,7 @@ export class FactorySupervisor {
         evidenceDigest: validation.evidence.digest,
       };
       const existingReview = await this.#reviews.load(reviewIdentity);
+      let repositoryCaptureBundle: ReviewContext["repositoryCaptureBundle"];
       let invokeReview:
         | ((
             checkpoint: Parameters<ManagementBackend["review"]>[1],
@@ -9480,6 +9681,7 @@ export class FactorySupervisor {
               packet,
               artifact,
               evidence: validation!.evidence,
+              ...(repositoryCaptureBundle ? { repositoryCaptureBundle } : {}),
               publicationBaseBranch: this.#baseBranch,
               requiresIsolation:
                 this.#policy.trust === "sandbox_untrusted" ||
@@ -9504,33 +9706,43 @@ export class FactorySupervisor {
                 reservation!,
               ),
           );
+        repositoryCaptureBundle = await this.#prepareRepositoryCaptureReviewBundle(
+          packet,
+          validation.evidence,
+        );
       }
-      const reviewRecord = await this.#reviewTransaction({
-        existing: existingReview,
-        ...(invokeReview ? { invoke: invokeReview } : {}),
-        persist: (result) =>
-          this.#lease.use((lease) =>
-            this.#persistReviewResult(lease, reviewIdentity, result, item, reservation!),
-          ),
-        recover: () => this.#reviews.load(reviewIdentity),
-        recordFailureUsage: (usage) =>
-          this.#recordManagementUsage(
-            `review-${reviewIdentityDigest(reviewIdentity)}`,
-            usage,
-            item.id,
-            reservation!,
-          ),
-        recordProviderGate: (error) =>
-          this.#recordProviderQuotaGate(
-            error,
-            item.id,
-            "management",
-            this.#management.id,
-            reservation!,
-          ),
-        recordUsage: (record) => this.#recordReviewUsage(record, item, reservation!),
-        recordOutcome: (record) => this.#recordInitialReviewOutcome(record, item, reservation!),
-      });
+      let reviewRecord: NonNullable<typeof existingReview>;
+      try {
+        reviewRecord = await this.#reviewTransaction({
+          existing: existingReview,
+          ...(invokeReview ? { invoke: invokeReview } : {}),
+          persist: (result) =>
+            this.#lease.use((lease) =>
+              this.#persistReviewResult(lease, reviewIdentity, result, item, reservation!),
+            ),
+          recover: () => this.#reviews.load(reviewIdentity),
+          recordFailureUsage: (usage) =>
+            this.#recordManagementUsage(
+              `review-${reviewIdentityDigest(reviewIdentity)}`,
+              usage,
+              item.id,
+              reservation!,
+            ),
+          recordProviderGate: (error) =>
+            this.#recordProviderQuotaGate(
+              error,
+              item.id,
+              "management",
+              this.#management.id,
+              reservation!,
+            ),
+          recordUsage: (record) => this.#recordReviewUsage(record, item, reservation!),
+          recordOutcome: (record) => this.#recordInitialReviewOutcome(record, item, reservation!),
+        });
+      } finally {
+        if (repositoryCaptureBundle)
+          await rm(repositoryCaptureBundle.root, { recursive: true, force: true });
+      }
       const reviewAccepted =
         reviewRecord.review.accepted && reviewRecord.review.unmetCriteria.length === 0;
       if (reviewAccepted || reservation.attempt >= this.#policy.maxAttemptsPerItem)
@@ -11129,6 +11341,599 @@ export class FactorySupervisor {
     return record;
   }
 
+  async #prepareRepositoryCaptureReviewBundle(
+    packet: WorkerPacket,
+    evidence: CleanValidationResult["evidence"],
+  ) {
+    if (!evidence.repositoryCapture || !evidence.validationInvocationDigest) return undefined;
+    const stored = await readValidationInvocation({
+      store: this.#store,
+      digest: evidence.validationInvocationDigest,
+    });
+    if (!stored) throw new Error("semantic review lacks its durable validation invocation intent");
+    if (
+      !stored.invocation.repositoryCaptureRecipes.some(({ gate }) => gate.kind === "human-required")
+    )
+      return undefined;
+    const capability = this.#management.repositoryCaptureReviewerCapability;
+    if (!capability)
+      throw new Error("selected semantic reviewer has no repository-capture capability");
+    const resolved = await resolveValidationCaptureAssets({
+      store: this.#store,
+      repository: `${this.#options.owner}/${this.#options.repo}`,
+      objective: this.#run.objective,
+      authorityBaseSha: this.#run.baseSha ?? packet.baseSha,
+      packet,
+    });
+    const stagingRoot = validationControllerStateRoot(
+      this.#options,
+      this.#options.repository,
+      this.#run.runId,
+    );
+    return materializeRepositoryCaptureReviewBundle({
+      store: this.#store,
+      invocation: stored.invocation,
+      evidence: evidence.repositoryCapture,
+      capability,
+      policy: {
+        ...this.#policy.repositoryCaptureEgress.review,
+        allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+      },
+      supervisorRoot: join(stagingRoot, "review-bundles"),
+      downloadExpected: async (input) => {
+        const expected = resolved.get(input.descriptorDigest);
+        if (
+          !expected ||
+          expected.binding.contentDigest !== input.contentDigest ||
+          expected.binding.storageReceiptDigest !== input.storageReceiptDigest ||
+          expected.entry.descriptor.visibility !== input.visibility ||
+          canonicalAssetJson(expected.entry.descriptor.rights) !== canonicalAssetJson(input.rights)
+        )
+          throw new Error("semantic review expected input differs from validation invocation");
+        const recovered = await recoverObjectiveAsset({
+          store: this.#store,
+          manifest: expected.manifest,
+          descriptorDigest: input.descriptorDigest,
+        });
+        const temporary = await mkdtemp(join(tmpdir(), "factory-review-expected-"));
+        try {
+          const path = join(temporary, "content");
+          await materializePayload(recovered.payload, path);
+          return await readFile(path);
+        } finally {
+          await rm(temporary, { recursive: true, force: true });
+        }
+      },
+    });
+  }
+
+  async #repositoryCaptureRuntime(args: {
+    item: DerivedWorkItem;
+    reservation: AttemptReservation;
+    packet: WorkerPacket;
+    validator?: ExecutionBackend;
+    localScopeBatch?: LocalScopeBatch;
+  }): Promise<CleanValidationInput["repositoryCaptureRuntime"] | undefined> {
+    if (
+      args.packet.deliverable.kind !== "repository-change" ||
+      (args.packet.repositoryCaptureRecipes ?? []).length === 0
+    )
+      return undefined;
+    if (!args.validator && !args.localScopeBatch?.identity.producerUnit)
+      throw new Error(
+        "local repository capture requires a manager-owned recoverable validation scope",
+      );
+    const captureAssets = await resolveValidationCaptureAssets({
+      store: this.#store,
+      repository: `${this.#options.owner}/${this.#options.repo}`,
+      objective: this.#run.objective,
+      authorityBaseSha: this.#run.baseSha ?? args.packet.baseSha,
+      packet: args.packet,
+    });
+    const retainedExpectedInputs = new Map(
+      await Promise.all(
+        [...captureAssets.entries()].map(async ([descriptorDigest, expected]) => {
+          const recovered = await recoverObjectiveAsset({
+            store: this.#store,
+            manifest: expected.manifest,
+            descriptorDigest,
+          });
+          return [descriptorDigest, recovered.payload] as const;
+        }),
+      ),
+    );
+    const backendId = args.validator?.capabilities.id ?? "factory/local-validation";
+    const toolReceiptDigests = [
+      ...new Set(
+        (args.packet.managedRuntimes ?? []).flatMap(({ bundleDigest }) =>
+          bundleDigest ? [bundleDigest] : [],
+        ),
+      ),
+    ].sort();
+    if (!args.validator && toolReceiptDigests.length === 0)
+      throw new Error(
+        "local repository capture requires an exact managed toolchain receipt before dispatch",
+      );
+    const environmentIdentity = args.validator
+      ? args.validator.validationEnvironmentIdentity?.()
+      : `local:${createHash("sha256")
+          .update(
+            canonicalAssetJson({
+              platform: platform(),
+              architecture: arch(),
+              node: process.version,
+              backendId,
+              toolReceiptDigests,
+            }),
+          )
+          .digest("hex")}`;
+    if (!environmentIdentity)
+      throw new Error(
+        `repository capture validator ${backendId} lacks an immutable environment identity`,
+      );
+    const egress =
+      args.validator &&
+      (!args.validator.capabilities.hostExecution ||
+        args.validator.capabilities.requiresPaidRuntime)
+        ? ("third-party" as const)
+        : ("local" as const);
+    const stagingRoot = validationControllerStateRoot(
+      this.#options,
+      this.#options.repository,
+      this.#run.runId,
+    );
+    const findPreparedEvent = async (invocation: ValidationInvocation) => {
+      const observed = await this.#reader.readObjective(this.#run.objective);
+      this.#fenceSnapshot(observed);
+      const matches = snapshotEvents(observed).filter(
+        (event) =>
+          event.kind === "validation-invocation" &&
+          event.event === "ValidationInvocationPrepared" &&
+          event.runId === args.reservation.runId &&
+          event.workItem === args.reservation.workItem &&
+          event.attempt === args.reservation.attempt &&
+          event.invocationDigest === invocation.digest,
+      );
+      if (matches.length > 1)
+        throw new Error("validation invocation has conflicting prepared events");
+      return matches[0] ?? null;
+    };
+    const observeIntent = async (invocation: ValidationInvocation) => {
+      const stored = await readValidationInvocation({
+        store: this.#store,
+        digest: invocation.digest,
+      });
+      if (!stored) return null;
+      const event = await findPreparedEvent(invocation);
+      if (!event) return null;
+      if (
+        event.invocationRef !== stored.ref ||
+        event.invocationCommitOid !== stored.commit ||
+        event.artifactDigest !== invocation.artifactDigest ||
+        event.baseSha !== invocation.baseSha ||
+        event.outputTreeSha !== invocation.outputTreeSha ||
+        event.backend !== invocation.toolEnvironment.backendId ||
+        event.backendLocator !== invocation.toolEnvironment.backendLocator
+      )
+        throw new Error("validation invocation event differs from its durable intent");
+      return stored.invocation;
+    };
+    const persistIntent = async (invocation: ValidationInvocation) => {
+      const stored = await persistValidationInvocation({
+        store: this.#store,
+        invocation,
+        assertCurrent: () => this.#lease.assert(),
+      });
+      if (await findPreparedEvent(invocation)) return;
+      await this.#lease.use(async (lease) => {
+        await this.#attempts.assertReservation(lease, args.reservation, args.item.id);
+        if (await findPreparedEvent(invocation)) return;
+        await this.#recorder.validationInvocation({
+          lease,
+          workItemNodeId: args.item.id,
+          reservation: args.reservation,
+          invocation,
+          invocationRef: stored.ref,
+          invocationCommitOid: stored.commit,
+          sequence: this.#sequences.take(),
+        });
+      });
+    };
+    type RuntimeValidation = Omit<IsolatedValidationResult, "environmentIdentity"> & {
+      environmentIdentity: string;
+    };
+    type RuntimeResult = {
+      validation: RuntimeValidation;
+      repositoryCapture?: RepositoryCaptureEvidence;
+    };
+    const normalizeValidation = (validation: {
+      outputTreeSha: string;
+      commands: Array<{ command: string; exitCode: number; durationMs: number }>;
+      passed: boolean;
+      failureReason?: string | undefined;
+      startedAt: string;
+      completedAt: string;
+      environmentIdentity?: string | undefined;
+    }): RuntimeValidation => ({
+      outputTreeSha: validation.outputTreeSha,
+      commands: validation.commands,
+      passed: validation.passed,
+      ...(validation.failureReason ? { failureReason: validation.failureReason } : {}),
+      startedAt: validation.startedAt,
+      completedAt: validation.completedAt,
+      environmentIdentity: validation.environmentIdentity ?? environmentIdentity,
+    });
+    const persistedResult = async (
+      invocation: ValidationInvocation,
+    ): Promise<RuntimeResult | null> => {
+      const stored = await readValidationInvocationResult({ store: this.#store, invocation });
+      if (!stored) return null;
+      return {
+        validation: normalizeValidation(stored.result.validation),
+        ...(stored.result.repositoryCapture
+          ? { repositoryCapture: stored.result.repositoryCapture }
+          : {}),
+      };
+    };
+    const persistResult = async (
+      invocation: ValidationInvocation,
+      result: RuntimeResult,
+    ): Promise<RuntimeResult> => {
+      const stored = await persistValidationInvocationResult({
+        store: this.#store,
+        invocation,
+        validation: normalizeValidation(result.validation),
+        ...(result.repositoryCapture ? { repositoryCapture: result.repositoryCapture } : {}),
+        assertCurrent: () => this.#lease.assert(),
+      });
+      return {
+        validation: normalizeValidation(stored.result.validation),
+        ...(stored.result.repositoryCapture
+          ? { repositoryCapture: stored.result.repositoryCapture }
+          : {}),
+      };
+    };
+
+    return {
+      createInvocation: ({ artifactDigest, baseSha, outputTreeSha, validationCommands }) => {
+        const recipes =
+          args.packet.deliverable.kind === "repository-change"
+            ? (args.packet.repositoryCaptureRecipes ?? [])
+            : [];
+        const expectedByRecipe = recipes.map((recipe) => {
+          const expected = captureAssets.get(recipe.comparison.expectedDescriptorDigest);
+          const expectedType = recipe.outputs.find(
+            (output: { roleId: string; mediaType: string }) =>
+              output.roleId === recipe.comparison.outputRoleId,
+          )?.mediaType;
+          if (!expected || !expectedType)
+            throw new Error("repository capture comparison authority is incomplete");
+          if (expected.entry.descriptor.content.inspection.mediaType !== expectedType)
+            throw new Error("repository capture expected asset MIME differs from its subject role");
+          return { recipe, expected };
+        });
+        const uniqueInputs = new Map(
+          expectedByRecipe.map(({ expected }) => [expected.binding.descriptorDigest, expected]),
+        );
+        const profileIdsByDescriptor = new Map<string, Set<string>>();
+        for (const { recipe, expected } of expectedByRecipe) {
+          const profiles =
+            profileIdsByDescriptor.get(expected.binding.descriptorDigest) ?? new Set();
+          if (recipe.profile) profiles.add(recipe.profile.kind);
+          profileIdsByDescriptor.set(expected.binding.descriptorDigest, profiles);
+        }
+        return createValidationInvocation({
+          protocol: "clockgrove.factory/validation-invocation",
+          repository: `${this.#options.owner}/${this.#options.repo}`,
+          objective: this.#run.objective,
+          runId: args.reservation.runId,
+          workItem: args.reservation.workItem,
+          attempt: args.reservation.attempt,
+          artifactDigest,
+          baseSha,
+          outputTreeSha,
+          validationCommands,
+          repositoryCaptureRecipes: recipes,
+          captureOutputAuthorities: recipes.flatMap((recipe) =>
+            recipe.outputs.map((output: { roleId: string }) => ({
+              recipeId: recipe.id,
+              roleId: output.roleId,
+              visibility: "private" as const,
+              rights: { basis: "unknown" as const },
+            })),
+          ),
+          comparisonAuthorities: expectedByRecipe.map(({ recipe, expected }) => ({
+            recipeId: recipe.id,
+            expectedDescriptorDigest: expected.binding.descriptorDigest,
+            expectedContentDigest: expected.binding.contentDigest,
+            expectedStorageReceiptDigest: expected.binding.storageReceiptDigest,
+          })),
+          mediaInputs: [...uniqueInputs.values()].map((expected) => ({
+            descriptorDigest: expected.binding.descriptorDigest,
+            contentDigest: expected.binding.contentDigest,
+            storageReceiptDigest: expected.binding.storageReceiptDigest,
+            activationDigest: expected.activationDigest,
+            displayName: expected.entry.descriptor.displayName,
+            declaredMediaType: expected.entry.descriptor.content.inspection.mediaType,
+            inspection: expected.entry.descriptor.content.inspection,
+            profileIds: [
+              ...(profileIdsByDescriptor.get(expected.binding.descriptorDigest) ?? []),
+            ].sort(),
+            visibility: expected.entry.descriptor.visibility,
+            rights: expected.entry.descriptor.rights,
+          })),
+          egressPolicy: this.#policy.repositoryCaptureEgress,
+          toolEnvironment: {
+            backendId,
+            backendLocator: environmentIdentity,
+            environmentIdentity,
+            egress,
+            toolReceiptDigests,
+          },
+        });
+      },
+      execute: async (input) => {
+        const thresholdExpected = new Set(
+          input.invocation.repositoryCaptureRecipes.flatMap((recipe) =>
+            recipe.comparison.kind === "threshold"
+              ? [recipe.comparison.expectedDescriptorDigest]
+              : [],
+          ),
+        );
+        const isolatedCaptureRequest: IsolatedValidationCaptureRequest = {
+          protocol: "clockgrove.factory/repository-capture-request",
+          validationInvocationDigest: input.invocation.digest,
+          environmentIdentity: input.invocation.toolEnvironment.environmentIdentity,
+          expectedInputs: input.invocation.mediaInputs
+            .filter(({ descriptorDigest }) => thresholdExpected.has(descriptorDigest))
+            .map((expected) => {
+              const payload = retainedExpectedInputs.get(expected.descriptorDigest);
+              if (!payload || payload.digest !== expected.contentDigest || payload.bytes <= 0)
+                throw new Error("isolated expected input differs from validation invocation");
+              return {
+                descriptorDigest: expected.descriptorDigest,
+                contentDigest: expected.contentDigest,
+                storageReceiptDigest: expected.storageReceiptDigest,
+                payload,
+              };
+            }),
+          recipes: input.invocation.repositoryCaptureRecipes.map((recipe) => ({
+            id: recipe.id,
+            digest: recipe.digest,
+            command: recipe.captureCommand.command,
+            scenario: recipe.scenario,
+            outputs: recipe.outputs.map((output) => ({
+              roleId: output.roleId,
+              mediaType: output.mediaType,
+              maxBytes: MAX_CONTENT_FILE_BYTES,
+            })),
+            comparison:
+              recipe.comparison.kind === "exact"
+                ? {
+                    kind: "exact" as const,
+                    outputRoleId: recipe.comparison.outputRoleId,
+                    expectedDescriptorDigest: recipe.comparison.expectedDescriptorDigest,
+                  }
+                : {
+                    kind: "threshold" as const,
+                    command: recipe.comparison.command.command,
+                    outputRoleId: recipe.comparison.outputRoleId,
+                    expectedDescriptorDigest: recipe.comparison.expectedDescriptorDigest,
+                    metric: recipe.comparison.policy.metric,
+                    maximumDifference: recipe.comparison.policy.maximumDifference,
+                  },
+          })),
+          maximumTotalBytes: MAX_CONTENT_BYTES,
+        };
+        const checkpointIsolated = async (validation: IsolatedValidationResult) => {
+          if (
+            validation.outputTreeSha !== input.invocation.outputTreeSha ||
+            validation.environmentIdentity !==
+              input.invocation.toolEnvironment.environmentIdentity ||
+            validation.captures?.validationInvocationDigest !== input.invocation.digest
+          )
+            throw new Error("isolated capture result differs from validation invocation");
+          const captures = validation.captures;
+          if (!captures)
+            throw new Error("isolated capture checkpoint omitted retained output payloads");
+          const comparisons = new Map(
+            captures.comparisons.map((comparison) => [comparison.recipeId, comparison]),
+          );
+          const collection = createRepositoryCaptureCollection({
+            invocation: input.invocation,
+            files: captures.files.map((file) => {
+              const recipe = input.invocation.repositoryCaptureRecipes.find(
+                ({ id }) => id === file.recipeId,
+              );
+              const comparison = comparisons.get(file.recipeId);
+              const comparisonCommand =
+                recipe?.comparison.kind === "threshold" ? recipe.comparison.command.command : null;
+              return {
+                recipeId: file.recipeId,
+                roleId: file.roleId,
+                path: file.sourcePath,
+                mediaType: file.mediaType,
+                bytes: file.bytes,
+                digest: file.digest,
+                ...(recipe?.comparison.kind === "threshold" &&
+                recipe.comparison.outputRoleId === file.roleId &&
+                comparison
+                  ? {
+                      threshold: {
+                        observedDifference: comparison.observedDifference,
+                        exitCode:
+                          validation.commands.find(({ command }) => command === comparisonCommand)
+                            ?.exitCode ?? 1,
+                      },
+                    }
+                  : {}),
+              };
+            }),
+          });
+          const retainedRoot = join(stagingRoot, input.invocation.digest, "isolated-captures");
+          const repositoryCapture = await persistRepositoryCaptures({
+            store: this.#store,
+            invocation: input.invocation,
+            collection,
+            downloadCapture: async (file) => {
+              const retained = captures.files.find(
+                (candidate) =>
+                  candidate.recipeId === file.recipeId && candidate.roleId === file.roleId,
+              );
+              if (!retained) throw new Error("isolated capture payload is unavailable");
+              const destination = join(
+                retainedRoot,
+                createHash("sha256").update(`${file.recipeId}\0${file.roleId}`).digest("hex"),
+              );
+              await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+              await materializePayload(retained.payload, destination);
+              const bytes = await readFile(destination);
+              if (
+                bytes.length !== file.bytes ||
+                createHash("sha256").update(bytes).digest("hex") !== file.digest
+              )
+                throw new Error("isolated retained capture differs from its manifest");
+              return bytes;
+            },
+            assertCurrent: () => this.#lease.assert(),
+            assertOutputTree: async (outputTreeSha) => {
+              if (outputTreeSha !== input.invocation.outputTreeSha)
+                throw new Error("isolated capture checkpoint requested another output tree");
+              await input.assertOutputTree();
+            },
+          });
+          await persistResult(input.invocation, {
+            validation: normalizeValidation(validation),
+            repositoryCapture,
+          });
+          await rm(retainedRoot, { recursive: true, force: true });
+        };
+        const isolatedHooks = {
+          captureRequest: isolatedCaptureRequest,
+          checkpointCaptureResult: checkpointIsolated,
+        };
+        const completeLocal = async (validation: IsolatedValidationResult) => {
+          const retainedValidation = await persistLocalValidationResult({
+            stagingRoot,
+            invocation: input.invocation,
+            validation: {
+              ...validation,
+              environmentIdentity,
+            },
+          });
+          if (!retainedValidation.passed)
+            return { validation: normalizeValidation(retainedValidation) };
+          let captured;
+          try {
+            captured = await executeLocalRepositoryCaptures({
+              stagingRoot,
+              invocation: input.invocation,
+              resultTreeRoot: input.resultRoot,
+              environment: process.env,
+              runCommand: input.runCaptureCommand,
+              observeCommand: input.observeCaptureCommand,
+              commandDeadline: input.captureObservationDeadline,
+              materializeExpected: async ({
+                descriptorDigest,
+                contentDigest,
+                storageReceiptDigest,
+                destination,
+              }) => {
+                const expected = captureAssets.get(descriptorDigest);
+                if (
+                  !expected ||
+                  expected.binding.contentDigest !== contentDigest ||
+                  expected.binding.storageReceiptDigest !== storageReceiptDigest
+                )
+                  throw new Error("threshold expected-byte request differs from invocation");
+                const recovered = await recoverObjectiveAsset({
+                  store: this.#store,
+                  manifest: expected.manifest,
+                  descriptorDigest,
+                });
+                await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+                await materializePayload(recovered.payload, destination);
+                await chmod(destination, 0o400);
+              },
+              assertOutputTree: input.assertOutputTree,
+            });
+          } catch (error) {
+            if (!(error instanceof LocalRepositoryCaptureCommandFailure)) throw error;
+            return {
+              validation: {
+                ...normalizeValidation(retainedValidation),
+                commands: mergeValidationCommandResults(input.invocation.validationCommands, [
+                  retainedValidation.commands,
+                  error.commandResults,
+                ]),
+                passed: false,
+                failureReason: error.message,
+              },
+            };
+          }
+          const repositoryCapture = await persistRepositoryCaptures({
+            store: this.#store,
+            invocation: input.invocation,
+            collection: captured.collection,
+            downloadCapture: captured.downloadCapture,
+            assertCurrent: () => this.#lease.assert(),
+            assertOutputTree: async (outputTreeSha) => {
+              if (outputTreeSha !== input.invocation.outputTreeSha)
+                throw new Error("capture persistence requested another output tree");
+              await input.assertOutputTree();
+            },
+          });
+          return {
+            validation: {
+              ...normalizeValidation(retainedValidation),
+              commands: mergeValidationCommandResults(input.invocation.validationCommands, [
+                retainedValidation.commands,
+                captured.commandResults,
+              ]),
+            },
+            repositoryCapture,
+          };
+        };
+        return runValidationInvocationTransaction({
+          invocation: input.invocation,
+          observeFinal: () => persistedResult(input.invocation),
+          observeIntent: () => observeIntent(input.invocation),
+          persistIntent,
+          observe: async () => {
+            if (egress === "third-party") {
+              const durable = await persistedResult(input.invocation);
+              if (durable) return durable;
+              const recovered = await input.recoverValidation?.(isolatedHooks);
+              if (!recovered) return null;
+              return (
+                (await persistedResult(input.invocation)) ?? {
+                  validation: normalizeValidation(recovered),
+                }
+              );
+            }
+            const validation = await observeLocalValidationResult({
+              stagingRoot,
+              invocation: input.invocation,
+            });
+            return validation ? completeLocal(validation) : null;
+          },
+          launch: async () => {
+            if (egress === "third-party") {
+              const launched = await input.launchValidation(isolatedHooks);
+              return (
+                (await persistedResult(input.invocation)) ?? {
+                  validation: normalizeValidation(launched),
+                }
+              );
+            }
+            return completeLocal(await input.launchValidation());
+          },
+          persistFinal: (result) => persistResult(input.invocation, result),
+        });
+      },
+    };
+  }
+
   async #persistValidationResult(
     lease: LeaseState,
     reservation: AttemptReservation,
@@ -11136,6 +11941,35 @@ export class FactorySupervisor {
     evidence: CleanValidationResult["evidence"],
     item: DerivedWorkItem,
   ): Promise<void> {
+    if (evidence.validationInvocationDigest) {
+      const intent = await readValidationInvocation({
+        store: this.#store,
+        digest: evidence.validationInvocationDigest,
+      });
+      if (
+        !intent ||
+        intent.invocation.runId !== reservation.runId ||
+        intent.invocation.workItem !== reservation.workItem ||
+        intent.invocation.attempt !== reservation.attempt ||
+        intent.invocation.artifactDigest !== artifactDigest ||
+        intent.invocation.baseSha !== evidence.baseSha ||
+        intent.invocation.outputTreeSha !== evidence.outputTreeSha
+      )
+        throw new Error("validation evidence differs from its durable invocation intent");
+      const result = await readValidationInvocationResult({
+        store: this.#store,
+        invocation: intent.invocation,
+      });
+      if (
+        !result ||
+        result.result.validation.outputTreeSha !== evidence.outputTreeSha ||
+        result.result.validation.environmentIdentity !== evidence.environmentIdentity ||
+        result.result.repositoryCapture?.digest !== evidence.repositoryCapture?.digest
+      )
+        throw new Error("validation evidence lacks its exact durable invocation result");
+    } else if (evidence.repositoryCapture) {
+      throw new Error("repository capture evidence lacks a durable validation invocation");
+    }
     const identity = this.#validationIdentity(reservation, artifactDigest);
     if (this.#run.recordProtocol !== RESULT_RECORD_PROTOCOL) {
       await this.#validations.persist({ lease, identity, evidence });
@@ -11277,6 +12111,7 @@ export class FactorySupervisor {
           checkpoint: Parameters<ManagementBackend["review"]>[1],
         ) => ReturnType<ManagementBackend["review"]>)
       | undefined;
+    let repositoryCaptureBundle: ReviewContext["repositoryCaptureBundle"];
     if (!existing) {
       const checkpoint = await this.#validations.load(
         this.#validationIdentity(reservation, artifactDigest),
@@ -11328,6 +12163,10 @@ export class FactorySupervisor {
         this.#deliverySelection.selected === "native-stacks"
           ? this.#deliveryPlan?.items.find((entry) => entry.itemId === metadata.id)
           : undefined;
+      repositoryCaptureBundle = await this.#prepareRepositoryCaptureReviewBundle(
+        packet,
+        checkpoint.evidence,
+      );
       invoke = (reviewCheckpoint) =>
         this.#invokeSemanticReview(
           {
@@ -11337,6 +12176,7 @@ export class FactorySupervisor {
             packet,
             artifact,
             evidence: checkpoint.evidence,
+            ...(repositoryCaptureBundle ? { repositoryCaptureBundle } : {}),
             publicationBaseBranch: this.#baseBranch,
             requiresIsolation:
               this.#policy.trust === "sandbox_untrusted" ||
@@ -11357,32 +12197,38 @@ export class FactorySupervisor {
             ),
         );
     }
-    const record = await this.#reviewTransaction({
-      existing,
-      ...(invoke ? { invoke } : {}),
-      persist: (result) =>
-        this.#lease.use((lease) =>
-          this.#persistReviewResult(lease, reviewIdentity, result, item, reservation),
-        ),
-      recover: () => this.#reviews.load(reviewIdentity),
-      recordFailureUsage: (usage) =>
-        this.#recordManagementUsage(
-          `review-${reviewIdentityDigest(reviewIdentity)}`,
-          usage,
-          item.id,
-          reservation,
-        ),
-      recordProviderGate: (error) =>
-        this.#recordProviderQuotaGate(
-          error,
-          item.id,
-          "management",
-          this.#management.id,
-          reservation,
-        ),
-      recordUsage: (record) => this.#recordReviewUsage(record, item, reservation),
-      recordOutcome: (record) => this.#recordInitialReviewOutcome(record, item, reservation),
-    });
+    let record: NonNullable<typeof existing>;
+    try {
+      record = await this.#reviewTransaction({
+        existing,
+        ...(invoke ? { invoke } : {}),
+        persist: (result) =>
+          this.#lease.use((lease) =>
+            this.#persistReviewResult(lease, reviewIdentity, result, item, reservation),
+          ),
+        recover: () => this.#reviews.load(reviewIdentity),
+        recordFailureUsage: (usage) =>
+          this.#recordManagementUsage(
+            `review-${reviewIdentityDigest(reviewIdentity)}`,
+            usage,
+            item.id,
+            reservation,
+          ),
+        recordProviderGate: (error) =>
+          this.#recordProviderQuotaGate(
+            error,
+            item.id,
+            "management",
+            this.#management.id,
+            reservation,
+          ),
+        recordUsage: (record) => this.#recordReviewUsage(record, item, reservation),
+        recordOutcome: (record) => this.#recordInitialReviewOutcome(record, item, reservation),
+      });
+    } finally {
+      if (repositoryCaptureBundle)
+        await rm(repositoryCaptureBundle.root, { recursive: true, force: true });
+    }
     return record.review.accepted;
   }
 
@@ -13952,6 +14798,12 @@ export class FactorySupervisor {
         const deadline = new Date(
           Math.min(Date.parse(budget.at) + budget.amount, objectiveDeadline),
         );
+        const repositoryCaptureRuntime = await this.#repositoryCaptureRuntime({
+          item,
+          reservation,
+          packet,
+          validator: validator.backend,
+        });
         validation = await this.#externalAdmission(() =>
           validateArtifactClean({
             repository: this.#options.repository,
@@ -13959,7 +14811,8 @@ export class FactorySupervisor {
             packet,
             publicationBaseBranch: this.#baseBranch,
             findingPhase: "integration",
-            isolatedValidator: () =>
+            ...(repositoryCaptureRuntime ? { repositoryCaptureRuntime } : {}),
+            isolatedValidator: (capture) =>
               this.#externalAdmission(async () => {
                 await this.#nativeRebaseAdmissionCurrent(
                   member,
@@ -13982,11 +14835,50 @@ export class FactorySupervisor {
                   artifact,
                   policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
                   deadline,
-                  validationInvocation: nativeRebaseValidationInvocation(identity, artifact.digest),
+                  validationInvocation: capture
+                    ? {
+                        kind: "repository-capture" as const,
+                        identityDigest: capture.captureRequest.validationInvocationDigest,
+                        artifactDigest: artifact.digest,
+                        baseSha: artifact.baseSha,
+                      }
+                    : nativeRebaseValidationInvocation(identity, artifact.digest),
+                  ...(capture ?? {}),
                 });
                 providerCompleted = new Date();
                 return result;
               }),
+            ...(repositoryCaptureRuntime && validator.backend.recoverValidation
+              ? {
+                  isolatedValidationRecovery: (capture: {
+                    captureRequest: IsolatedValidationCaptureRequest;
+                    checkpointCaptureResult(result: IsolatedValidationResult): Promise<void>;
+                  }) =>
+                    this.#externalAdmission(() =>
+                      validator.backend.recoverValidation!({
+                        repository: identity.repository,
+                        objective: reservation.objective,
+                        workItem: item.number,
+                        attempt: reservation.attempt,
+                        runId: reservation.runId,
+                        directorEpoch: reservation.directorEpoch,
+                        policyDigest: reservation.policyDigest,
+                        workspace: this.#options.repository,
+                        packet,
+                        artifact,
+                        policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                        deadline,
+                        validationInvocation: {
+                          kind: "repository-capture" as const,
+                          identityDigest: capture.captureRequest.validationInvocationDigest,
+                          artifactDigest: artifact.digest,
+                          baseSha: artifact.baseSha,
+                        },
+                        ...capture,
+                      }),
+                    ),
+                }
+              : {}),
           }),
         );
         if (!validation.evidence.passed) {
@@ -14229,6 +15121,12 @@ export class FactorySupervisor {
       try {
         await recordCapacity("CapacityReserved");
         capacityRecorded = true;
+        const repositoryCaptureRuntime = await this.#repositoryCaptureRuntime({
+          item,
+          reservation: member.reservation,
+          packet,
+          ...(scoped ? { localScopeBatch: scoped.batch } : {}),
+        });
         validation = await this.#externalAdmission(() =>
           validateArtifactClean({
             repository: this.#options.repository,
@@ -14236,6 +15134,7 @@ export class FactorySupervisor {
             packet,
             publicationBaseBranch: this.#baseBranch,
             findingPhase: "integration",
+            ...(repositoryCaptureRuntime ? { repositoryCaptureRuntime } : {}),
             ...(scoped ? { localScope: scoped.hooks } : {}),
           }),
         );
@@ -14279,6 +15178,7 @@ export class FactorySupervisor {
       ? { evidence: remoteRecord.validation }
       : localResult!.validation;
     let validatedAndRecorded = false;
+    let repositoryCaptureBundle: ReviewContext["repositoryCaptureBundle"];
     try {
       if (!validation.evidence.passed) {
         await this.#reportCandidateFindings(
@@ -14330,6 +15230,7 @@ export class FactorySupervisor {
               packet,
               artifact,
               evidence: validation.evidence,
+              ...(repositoryCaptureBundle ? { repositoryCaptureBundle } : {}),
               publicationBaseBranch: this.#baseBranch,
               requiresIsolation: isolated || this.#policy.trust === "sandbox_untrusted",
               ...(reviewModel ? { modelSelection: reviewModel } : {}),
@@ -14373,6 +15274,11 @@ export class FactorySupervisor {
         exactHeadValidation,
         state: "published",
       };
+      if (!existingReview)
+        repositoryCaptureBundle = await this.#prepareRepositoryCaptureReviewBundle(
+          packet,
+          validation.evidence,
+        );
       await this.#reviewTransaction({
         existing: existingReview,
         ...(invokeReview ? { invoke: invokeReview } : {}),
@@ -14408,7 +15314,12 @@ export class FactorySupervisor {
       });
       validatedAndRecorded = true;
     } finally {
-      if (localResult) await localResult.finish(validatedAndRecorded);
+      try {
+        if (repositoryCaptureBundle)
+          await rm(repositoryCaptureBundle.root, { recursive: true, force: true });
+      } finally {
+        if (localResult) await localResult.finish(validatedAndRecorded);
+      }
     }
   }
 
@@ -15602,6 +16513,13 @@ export class FactorySupervisor {
                 ),
               ),
             );
+        const repositoryCaptureRuntime = await this.#repositoryCaptureRuntime({
+          item,
+          reservation: member.reservation,
+          packet,
+          ...(validator ? { validator } : {}),
+          ...(scopedValidation ? { localScopeBatch: scopedValidation.batch } : {}),
+        });
         await this.#lease.use((lease) =>
           this.#attempts.recordCapacity({
             lease,
@@ -15664,10 +16582,11 @@ export class FactorySupervisor {
             packet,
             publicationBaseBranch: this.#baseBranch,
             findingPhase: "integration",
+            ...(repositoryCaptureRuntime ? { repositoryCaptureRuntime } : {}),
             ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
             ...(validator
               ? {
-                  isolatedValidator: () =>
+                  isolatedValidator: (capture) =>
                     this.#externalAdmission(async () => {
                       providerStarted = new Date();
                       const result = await validator!.validate!({
@@ -15683,16 +16602,55 @@ export class FactorySupervisor {
                         artifact: artifact!,
                         policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
                         deadline: validationDeadline,
-                        validationInvocation: {
-                          kind: "integration-candidate",
-                          identityDigest,
-                          artifactDigest: artifact!.digest,
-                          baseSha: targetBaseSha,
-                        },
+                        validationInvocation: capture
+                          ? {
+                              kind: "repository-capture" as const,
+                              identityDigest: capture.captureRequest.validationInvocationDigest,
+                              artifactDigest: artifact!.digest,
+                              baseSha: artifact!.baseSha,
+                            }
+                          : {
+                              kind: "integration-candidate" as const,
+                              identityDigest,
+                              artifactDigest: artifact!.digest,
+                              baseSha: targetBaseSha,
+                            },
+                        ...(capture ?? {}),
                       });
                       providerCompleted = new Date();
                       return result;
                     }),
+                  ...(repositoryCaptureRuntime && validator.recoverValidation
+                    ? {
+                        isolatedValidationRecovery: (capture: {
+                          captureRequest: IsolatedValidationCaptureRequest;
+                          checkpointCaptureResult(result: IsolatedValidationResult): Promise<void>;
+                        }) =>
+                          this.#externalAdmission(() =>
+                            validator!.recoverValidation!({
+                              repository: `${this.#options.owner}/${this.#options.repo}`,
+                              objective: member.reservation.objective,
+                              workItem: item.number,
+                              attempt: member.reservation.attempt,
+                              runId: member.reservation.runId,
+                              directorEpoch: member.reservation.directorEpoch,
+                              policyDigest: member.reservation.policyDigest,
+                              workspace: this.#options.repository,
+                              packet,
+                              artifact: artifact!,
+                              policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                              deadline: validationDeadline,
+                              validationInvocation: {
+                                kind: "repository-capture" as const,
+                                identityDigest: capture.captureRequest.validationInvocationDigest,
+                                artifactDigest: artifact!.digest,
+                                baseSha: artifact!.baseSha,
+                              },
+                              ...capture,
+                            }),
+                          ),
+                      }
+                    : {}),
                 }
               : {}),
           });
@@ -15786,6 +16744,7 @@ export class FactorySupervisor {
     if (refresh) await this.#assertSiblingRefreshCurrent(member, refresh, merged);
     const reviewIdentity = this.#mergeCandidateReviewIdentity(record);
     const existingReview = await this.#reviews.load(reviewIdentity);
+    let repositoryCaptureBundle: ReviewContext["repositoryCaptureBundle"];
     const invocationId = `integration-review-${reviewIdentityDigest(reviewIdentity)}`;
     if (!existingReview && merged)
       throw new Error("merged sibling has no pre-merge semantic review checkpoint");
@@ -15815,6 +16774,7 @@ export class FactorySupervisor {
             packet,
             artifact: artifact!,
             evidence: record.validation,
+            ...(repositoryCaptureBundle ? { repositoryCaptureBundle } : {}),
             publicationBaseBranch: this.#baseBranch,
             requiresIsolation: isolated || this.#policy.trust === "sandbox_untrusted",
             ...(reviewModel ? { modelSelection: reviewModel } : {}),
@@ -15832,32 +16792,42 @@ export class FactorySupervisor {
             ),
         );
     }
-    await this.#reviewTransaction({
-      existing: existingReview,
-      ...(invokeReview ? { invoke: invokeReview } : {}),
-      persist: (result) =>
-        this.#lease.use((lease) =>
-          this.#persistReviewResult(lease, reviewIdentity, result, item, member.reservation),
-        ),
-      recover: () => this.#reviews.load(reviewIdentity),
-      recordUsage: (review) => this.#recordReviewUsage(review, item, member.reservation),
-      recordFailureUsage: (usage) =>
-        this.#recordManagementUsage(invocationId, usage, item.id, member.reservation),
-      recordProviderGate: (error) =>
-        this.#recordProviderQuotaGate(
-          error,
-          item.id,
-          "management",
-          this.#management.id,
-          member.reservation,
-        ),
-      recordOutcome: async (review) => {
-        if (!review.review.accepted || review.review.unmetCriteria.length > 0)
-          throw new Error(
-            `integration-candidate semantic review rejected: ${review.review.summary}; ${review.review.unmetCriteria.join("; ")}`,
-          );
-      },
-    });
+    if (!existingReview)
+      repositoryCaptureBundle = await this.#prepareRepositoryCaptureReviewBundle(
+        packet,
+        record.validation,
+      );
+    try {
+      await this.#reviewTransaction({
+        existing: existingReview,
+        ...(invokeReview ? { invoke: invokeReview } : {}),
+        persist: (result) =>
+          this.#lease.use((lease) =>
+            this.#persistReviewResult(lease, reviewIdentity, result, item, member.reservation),
+          ),
+        recover: () => this.#reviews.load(reviewIdentity),
+        recordUsage: (review) => this.#recordReviewUsage(review, item, member.reservation),
+        recordFailureUsage: (usage) =>
+          this.#recordManagementUsage(invocationId, usage, item.id, member.reservation),
+        recordProviderGate: (error) =>
+          this.#recordProviderQuotaGate(
+            error,
+            item.id,
+            "management",
+            this.#management.id,
+            member.reservation,
+          ),
+        recordOutcome: async (review) => {
+          if (!review.review.accepted || review.review.unmetCriteria.length > 0)
+            throw new Error(
+              `integration-candidate semantic review rejected: ${review.review.summary}; ${review.review.unmetCriteria.join("; ")}`,
+            );
+        },
+      });
+    } finally {
+      if (repositoryCaptureBundle)
+        await rm(repositoryCaptureBundle.root, { recursive: true, force: true });
+    }
     return record;
   }
 
@@ -17361,6 +18331,13 @@ export class FactorySupervisor {
               }),
             );
           }
+          const repositoryCaptureRuntime = await this.#repositoryCaptureRuntime({
+            item,
+            reservation: reserved,
+            packet,
+            ...(adoptedValidator ? { validator: adoptedValidator } : {}),
+            ...(scope ? { localScopeBatch: scope.batch } : {}),
+          });
           validation = await this.#externalAdmission(async () => {
             if (siblingRefresh)
               await this.#assertSiblingRefreshCurrent(
@@ -17376,10 +18353,11 @@ export class FactorySupervisor {
               // This recovery path already persists the exact isolatedFailure receipt. Adding a
               // new candidate would change that established replay digest after interruption.
               findingPhase: false,
+              ...(repositoryCaptureRuntime ? { repositoryCaptureRuntime } : {}),
               ...(scope ? { localScope: scope.hooks } : {}),
               ...(isolated
                 ? {
-                    isolatedValidator: () =>
+                    isolatedValidator: (capture) =>
                       this.#externalAdmission(async () => {
                         await remoteAdmissionOpen(true);
                         if (Date.now() >= validationDeadline.getTime())
@@ -17406,12 +18384,53 @@ export class FactorySupervisor {
                           artifact: artifact!,
                           policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
                           deadline: validationDeadline,
-                          validationInvocation: invocation(artifact!.digest),
+                          validationInvocation: capture
+                            ? {
+                                kind: "repository-capture" as const,
+                                identityDigest: capture.captureRequest.validationInvocationDigest,
+                                artifactDigest: artifact!.digest,
+                                baseSha: artifact!.baseSha,
+                              }
+                            : invocation(artifact!.digest),
+                          ...(capture ?? {}),
                         });
                         providerCompleted = new Date();
                         providerResult = result;
                         return result;
                       }),
+                    ...(repositoryCaptureRuntime && adoptedValidator!.recoverValidation
+                      ? {
+                          isolatedValidationRecovery: (capture: {
+                            captureRequest: IsolatedValidationCaptureRequest;
+                            checkpointCaptureResult(
+                              result: IsolatedValidationResult,
+                            ): Promise<void>;
+                          }) =>
+                            this.#externalAdmission(() =>
+                              adoptedValidator!.recoverValidation!({
+                                repository: `${this.#options.owner}/${this.#options.repo}`,
+                                objective: reserved.objective,
+                                workItem: item.number,
+                                attempt: reserved.attempt,
+                                runId: reserved.runId,
+                                directorEpoch: remoteReservation!.directorEpoch,
+                                policyDigest: reserved.policyDigest,
+                                workspace: this.#options.repository,
+                                packet,
+                                artifact: artifact!,
+                                policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                                deadline: validationDeadline,
+                                validationInvocation: {
+                                  kind: "repository-capture" as const,
+                                  identityDigest: capture.captureRequest.validationInvocationDigest,
+                                  artifactDigest: artifact!.digest,
+                                  baseSha: artifact!.baseSha,
+                                },
+                                ...capture,
+                              }),
+                            ),
+                        }
+                      : {}),
                   }
                 : {}),
             });
@@ -17575,6 +18594,7 @@ export class FactorySupervisor {
       }
       const reviewIdentity = this.#mergeCandidateReviewIdentity(candidate);
       const existing = await this.#reviews.load(reviewIdentity);
+      let repositoryCaptureBundle: ReviewContext["repositoryCaptureBundle"];
       if (!existing && observed.merged)
         throw new Error("merged adopted source lacks pre-merge semantic review");
       const invocationId = `integration-review-${reviewIdentityDigest(reviewIdentity)}`;
@@ -17599,6 +18619,7 @@ export class FactorySupervisor {
               packet,
               artifact: artifact!,
               evidence: candidate!.validation,
+              ...(repositoryCaptureBundle ? { repositoryCaptureBundle } : {}),
               publicationBaseBranch: this.#baseBranch,
               requiresIsolation:
                 requiresIsolatedCandidate || this.#policy.trust === "sandbox_untrusted",
@@ -17618,42 +18639,52 @@ export class FactorySupervisor {
               ),
           );
       }
-      await this.#reviewTransaction({
-        existing,
-        ...(invoke ? { invoke } : {}),
-        persist: (result) =>
-          this.#lease.use((lease) =>
-            this.#persistReviewResult(lease, reviewIdentity, result, item),
-          ),
-        recover: () => this.#reviews.load(reviewIdentity),
-        recordUsage: (review) =>
-          this.#sourceUsage(
-            item,
-            invocationId,
-            review.usage.inputTokens + review.usage.outputTokens,
-            "model_tokens",
-          ),
-        recordFailureUsage: (usage) =>
-          this.#sourceUsage(
-            item,
-            `failed-${invocationId}`,
-            usage.inputTokens + usage.outputTokens,
-            "model_tokens",
-          ),
-        recordProviderGate: (error) =>
-          this.#recordProviderQuotaGate(
-            error,
-            item.id,
-            "management",
-            this.#management.id,
-            undefined,
-            item.number,
-          ),
-        recordOutcome: async (review) => {
-          if (!review.review.accepted || review.review.unmetCriteria.length > 0)
-            throw new Error("adopted candidate semantic review rejected");
-        },
-      });
+      if (!existing)
+        repositoryCaptureBundle = await this.#prepareRepositoryCaptureReviewBundle(
+          packet,
+          candidate.validation,
+        );
+      try {
+        await this.#reviewTransaction({
+          existing,
+          ...(invoke ? { invoke } : {}),
+          persist: (result) =>
+            this.#lease.use((lease) =>
+              this.#persistReviewResult(lease, reviewIdentity, result, item),
+            ),
+          recover: () => this.#reviews.load(reviewIdentity),
+          recordUsage: (review) =>
+            this.#sourceUsage(
+              item,
+              invocationId,
+              review.usage.inputTokens + review.usage.outputTokens,
+              "model_tokens",
+            ),
+          recordFailureUsage: (usage) =>
+            this.#sourceUsage(
+              item,
+              `failed-${invocationId}`,
+              usage.inputTokens + usage.outputTokens,
+              "model_tokens",
+            ),
+          recordProviderGate: (error) =>
+            this.#recordProviderQuotaGate(
+              error,
+              item.id,
+              "management",
+              this.#management.id,
+              undefined,
+              item.number,
+            ),
+          recordOutcome: async (review) => {
+            if (!review.review.accepted || review.review.unmetCriteria.length > 0)
+              throw new Error("adopted candidate semantic review rejected");
+          },
+        });
+      } finally {
+        if (repositoryCaptureBundle)
+          await rm(repositoryCaptureBundle.root, { recursive: true, force: true });
+      }
     } else if (!observed.merged && target !== runtime.planRecord.plan.expectedBaseSha) {
       await this.#assertOwnTrunkAdvance(
         runtime.planRecord.plan.expectedBaseSha,
@@ -18499,7 +19530,7 @@ export class FactorySupervisor {
     reservation: AttemptReservation,
     events: readonly FactoryEvent[],
   ): Promise<void> {
-    const validationFinished = events.some(
+    let validationFinished = events.some(
       (event) =>
         event.kind === "validation" &&
         event.workItem === item.number &&
@@ -18518,7 +19549,55 @@ export class FactorySupervisor {
           "integration-candidate capacity requires its exact completion checkpoint; ordinary validation cannot reconcile it",
         );
       }
-      if (!validationFinished && capacity.backend !== "factory/local-validation") {
+      const prepared = events.find(
+        (event): event is Extract<FactoryEvent, { event: "ValidationInvocationPrepared" }> =>
+          event.kind === "validation-invocation" &&
+          event.event === "ValidationInvocationPrepared" &&
+          event.workItem === reservation.workItem &&
+          event.attempt === reservation.attempt,
+      );
+      if (!validationFinished && prepared) {
+        const recoveryBackend =
+          capacity.backend === "factory/local-validation"
+            ? undefined
+            : this.#registry.get(capacity.backend);
+        const originalLocalScopes = events.filter(
+          (event): event is Extract<FactoryEvent, { kind: "capacity" }> =>
+            event.kind === "capacity" &&
+            event.event === "CapacityReserved" &&
+            event.phase === "validation" &&
+            event.workItem === reservation.workItem &&
+            event.attempt === reservation.attempt &&
+            Boolean(event.localScopeBatch),
+        );
+        if (originalLocalScopes.length > 1)
+          throw new Error("repository capture validation has conflicting capacity scope batches");
+        const originalLocalScopeBatch = originalLocalScopes[0]?.localScopeBatch;
+        const scopeRebounds = events.filter(
+          (event): event is Extract<FactoryEvent, { event: "ValidationInvocationScopeRebound" }> =>
+            event.kind === "validation-invocation" &&
+            event.event === "ValidationInvocationScopeRebound" &&
+            event.runId === reservation.runId &&
+            event.workItem === reservation.workItem &&
+            event.attempt === reservation.attempt &&
+            event.invocationDigest === prepared.invocationDigest,
+        );
+        if (scopeRebounds.length > 1)
+          throw new Error("repository capture validation has more than one scope rebound");
+        validationFinished = await this.#recoverPreparedRepositoryCaptureValidation({
+          item,
+          reservation,
+          prepared,
+          ...(recoveryBackend ? { backend: recoveryBackend } : {}),
+          ...(originalLocalScopeBatch ? { originalLocalScopeBatch } : {}),
+          ...(scopeRebounds[0] ? { scopeRebound: scopeRebounds[0] } : {}),
+        });
+        if (!validationFinished)
+          throw new Error(
+            "repository capture validation has no exact recoverable terminal result; stale cleanup is blocked",
+          );
+      }
+      if (capacity.backend !== "factory/local-validation") {
         const backend = this.#registry.get(capacity.backend);
         if (!backend?.reconcileStale) {
           throw new Error(
@@ -18549,6 +19628,17 @@ export class FactorySupervisor {
           runId: reservation.runId,
           directorEpoch: reservation.directorEpoch,
           phase: "validation",
+          ...(prepared
+            ? {
+                validationInvocation: {
+                  kind: "repository-capture" as const,
+                  identityDigest: prepared.invocationDigest,
+                  artifactDigest: prepared.artifactDigest,
+                  baseSha: prepared.baseSha,
+                },
+                policyDigest: reservation.policyDigest,
+              }
+            : {}),
           ...(noHandleReplacementNotBefore ? { noHandleReplacementNotBefore } : {}),
         });
       }
@@ -18569,6 +19659,233 @@ export class FactorySupervisor {
           allowRecovery: true,
         }),
       );
+    }
+  }
+
+  async #recoverPreparedRepositoryCaptureValidation(args: {
+    item: DerivedWorkItem;
+    reservation: AttemptReservation;
+    prepared: Extract<FactoryEvent, { event: "ValidationInvocationPrepared" }>;
+    backend?: ExecutionBackend;
+    originalLocalScopeBatch?: LocalScopeBatch;
+    scopeRebound?: Extract<FactoryEvent, { event: "ValidationInvocationScopeRebound" }>;
+  }): Promise<boolean> {
+    const stored = await readValidationInvocation({
+      store: this.#store,
+      digest: args.prepared.invocationDigest,
+    });
+    if (
+      !stored ||
+      stored.ref !== args.prepared.invocationRef ||
+      stored.commit !== args.prepared.invocationCommitOid ||
+      stored.invocation.artifactDigest !== args.prepared.artifactDigest ||
+      stored.invocation.baseSha !== args.prepared.baseSha ||
+      stored.invocation.outputTreeSha !== args.prepared.outputTreeSha ||
+      stored.invocation.runId !== args.reservation.runId ||
+      stored.invocation.workItem !== args.reservation.workItem ||
+      stored.invocation.attempt !== args.reservation.attempt
+    )
+      throw new Error("prepared repository capture invocation authority is invalid");
+    const artifact = await resumeArtifactTransfer({
+      store: this.#store,
+      identity: this.#artifactTransferIdentity(args.reservation),
+      allowedPaths: this.#packetFor(args.item.number).allowedPaths,
+      assertCurrent: () => this.#externalAdmission(async () => {}),
+    });
+    if (
+      !artifact ||
+      artifact.outcome !== "succeeded" ||
+      artifact.digest !== stored.invocation.artifactDigest ||
+      artifact.baseSha !== stored.invocation.baseSha
+    )
+      throw new Error("prepared repository capture lacks its exact retained artifact");
+    this.#retainArtifactContent(artifact);
+    const original = this.#packetFor(args.item.number);
+    const packet = this.#packetBoundToReservation(
+      args.item,
+      args.reservation,
+      stored.invocation.baseSha,
+      original.requirements.trust,
+    );
+    const remote = stored.invocation.toolEnvironment.egress === "third-party";
+    if (remote && !args.backend?.recoverValidation)
+      throw new Error("repository capture backend cannot observe its prepared validation");
+    const originalLocalScopeBatch = args.originalLocalScopeBatch
+      ? LocalScopeBatchSchema.parse(args.originalLocalScopeBatch)
+      : undefined;
+    let localScopeBatch = args.scopeRebound
+      ? LocalScopeBatchSchema.parse(args.scopeRebound.localScopeBatch)
+      : originalLocalScopeBatch;
+    let scopedHooks: NonNullable<CleanValidationInput["localScope"]> | undefined;
+    if (!remote) {
+      if (
+        !originalLocalScopeBatch?.identity.producerUnit ||
+        !localScopeBatch?.identity.producerUnit
+      )
+        throw new Error(
+          "prepared local repository capture lacks its exact manager-owned scope batch",
+        );
+      if (args.scopeRebound) {
+        const originalIdentity = originalLocalScopeBatch.identity;
+        const reboundIdentity = localScopeBatch.identity;
+        if (
+          args.scopeRebound.reservationOid !== args.reservation.oid ||
+          args.scopeRebound.artifactDigest !== stored.invocation.artifactDigest ||
+          args.scopeRebound.backend !== stored.invocation.toolEnvironment.backendId ||
+          args.scopeRebound.previousScopeBatchDigest !==
+            localScopeBatchDigest(originalLocalScopeBatch) ||
+          localScopeBatch.commandCount !== originalLocalScopeBatch.commandCount ||
+          localScopeBatch.deadline !== originalLocalScopeBatch.deadline ||
+          reboundIdentity.repository !== originalIdentity.repository ||
+          reboundIdentity.objective !== originalIdentity.objective ||
+          reboundIdentity.runId !== originalIdentity.runId ||
+          reboundIdentity.workItem !== originalIdentity.workItem ||
+          reboundIdentity.attempt !== originalIdentity.attempt ||
+          reboundIdentity.policyDigest !== originalIdentity.policyDigest ||
+          reboundIdentity.phase !== originalIdentity.phase ||
+          reboundIdentity.commandIndex !== originalIdentity.commandIndex ||
+          reboundIdentity.invocationDigest !== originalIdentity.invocationDigest ||
+          reboundIdentity.directorEpoch !== args.scopeRebound.directorEpoch
+        )
+          throw new Error("repository capture scope rebound breaks its immutable chain");
+      }
+      const dispatchState = await inspectLocalRepositoryCaptureDispatchState({
+        stagingRoot: validationControllerStateRoot(
+          this.#options,
+          this.#options.repository,
+          stored.invocation.runId,
+        ),
+        invocation: stored.invocation,
+      });
+      const observed = await observeLocalScopeBatch(localScopeBatch);
+      if (observed.status === "unknown")
+        throw new Error("prepared local repository capture scope cannot be observed exactly");
+      if (observed.status === "absent" && dispatchState === "rebound-safe") {
+        if (args.scopeRebound)
+          throw new Error(
+            "repository capture recovery scope retired before launch; compounded rebound is blocked",
+          );
+        const recoveryDeadline = new Date(originalLocalScopeBatch.deadline);
+        if (recoveryDeadline.getTime() <= Date.now())
+          throw new Error("repository capture recovery deadline is exhausted");
+        const replacement = await this.#scopedValidation(
+          args.reservation,
+          artifact,
+          packet,
+          recoveryDeadline,
+        );
+        if (!replacement?.batch.identity.producerUnit)
+          throw new Error("repository capture recovery lacks a manager-owned scope generation");
+        if (
+          replacement.batch.commandCount !== originalLocalScopeBatch.commandCount ||
+          replacement.batch.deadline !== originalLocalScopeBatch.deadline ||
+          replacement.batch.identity.repository !== originalLocalScopeBatch.identity.repository ||
+          replacement.batch.identity.objective !== originalLocalScopeBatch.identity.objective ||
+          replacement.batch.identity.runId !== originalLocalScopeBatch.identity.runId ||
+          replacement.batch.identity.workItem !== originalLocalScopeBatch.identity.workItem ||
+          replacement.batch.identity.attempt !== originalLocalScopeBatch.identity.attempt ||
+          replacement.batch.identity.policyDigest !==
+            originalLocalScopeBatch.identity.policyDigest ||
+          replacement.batch.identity.phase !== originalLocalScopeBatch.identity.phase ||
+          replacement.batch.identity.invocationDigest !==
+            originalLocalScopeBatch.identity.invocationDigest
+        )
+          throw new Error("repository capture recovery scope changes immutable batch authority");
+        await this.#lease.use((lease) =>
+          this.#recorder.validationInvocationScopeRebound({
+            lease,
+            workItemNodeId: args.item.id,
+            reservation: args.reservation,
+            invocation: stored.invocation,
+            sequence: this.#sequences.take(),
+            backend: stored.invocation.toolEnvironment.backendId,
+            previousScopeBatchDigest: localScopeBatchDigest(originalLocalScopeBatch),
+            localScopeBatch: replacement.batch,
+          }),
+        );
+        localScopeBatch = replacement.batch;
+        scopedHooks = replacement.hooks;
+      }
+    }
+    scopedHooks ??= localScopeBatch
+      ? {
+          identity: localScopeBatch.identity,
+          deadline: localScopeBatch.deadline,
+          beforeLaunch: async (identity: Parameters<typeof observeLocalScope>[0]) => {
+            if (identity.commandIndex >= localScopeBatch.commandCount)
+              throw new Error("recovered local capture exceeds its original scope batch");
+            await this.#lease.assert();
+          },
+          afterStop: async () => undefined,
+          observe: async (identity: Parameters<typeof observeLocalScope>[0]) =>
+            (await observeLocalScope(identity)).status,
+        }
+      : undefined;
+    const runtime = await this.#repositoryCaptureRuntime({
+      item: args.item,
+      reservation: args.reservation,
+      packet,
+      ...(remote && args.backend ? { validator: args.backend } : {}),
+      ...(localScopeBatch ? { localScopeBatch } : {}),
+    });
+    if (!runtime) throw new Error("prepared repository capture lacks its runtime recipe");
+    let validation: CleanValidationResult | undefined;
+    try {
+      validation = await validateArtifactClean({
+        repository: this.#options.repository,
+        artifact,
+        packet,
+        publicationBaseBranch: this.#baseBranch,
+        findingPhase: false,
+        repositoryCaptureRuntime: runtime,
+        ...(scopedHooks ? { localScope: scopedHooks } : {}),
+        ...(remote
+          ? {
+              isolatedValidator: async () => {
+                throw new Error(
+                  "prepared repository capture may only observe its exact invocation",
+                );
+              },
+              isolatedValidationRecovery: (capture: {
+                captureRequest: IsolatedValidationCaptureRequest;
+                checkpointCaptureResult(result: IsolatedValidationResult): Promise<void>;
+              }) =>
+                args.backend!.recoverValidation!({
+                  repository: `${this.#options.owner}/${this.#options.repo}`,
+                  objective: args.reservation.objective,
+                  workItem: args.reservation.workItem,
+                  attempt: args.reservation.attempt,
+                  runId: args.reservation.runId,
+                  directorEpoch: args.reservation.directorEpoch,
+                  policyDigest: args.reservation.policyDigest,
+                  workspace: this.#options.repository,
+                  packet,
+                  artifact,
+                  policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                  deadline: new Date(Date.now() + this.#policy.workItemTimeoutMinutes * 60_000),
+                  validationInvocation: {
+                    kind: "repository-capture",
+                    identityDigest: stored.invocation.digest,
+                    artifactDigest: artifact.digest,
+                    baseSha: artifact.baseSha,
+                  },
+                  ...capture,
+                }),
+            }
+          : {}),
+      });
+      await this.#lease.use((lease) =>
+        this.#persistValidationResult(
+          lease,
+          args.reservation,
+          artifact.digest,
+          validation!.evidence,
+          args.item,
+        ),
+      );
+      return true;
+    } finally {
+      if (validation) await discardValidationResult(validation);
     }
   }
 

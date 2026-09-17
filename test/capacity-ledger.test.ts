@@ -12,6 +12,7 @@ import {
 } from "../src/scheduling/capacity-ledger.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { policyDigest, DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
+import { localScopeBatchDigest } from "../src/protocol/local-scope.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const DIGEST = policyDigest(DEFAULT_RUN_POLICY);
@@ -565,6 +566,98 @@ describe("repository-wide capacity ledger", () => {
         capacity("CapacityReserved", 3),
       ]),
     ).toMatchObject([{ event: "CapacityReserved", sequence: 3 }]);
+  });
+
+  it("keeps scope rebound evidence outside the one capacity reserve/reconcile pair", () => {
+    const originalBatch = {
+      identity: {
+        protocol: "clockgrove.factory/local-scope-v1" as const,
+        repository: "fixture/repository",
+        objective: 1,
+        workItem: 10,
+        attempt: 1,
+        runId: "run-1",
+        directorEpoch: 1,
+        policyDigest: DIGEST,
+        phase: "validation" as const,
+        commandIndex: 0,
+        invocationDigest: "a".repeat(64),
+        hostIdentity: "b".repeat(64),
+        producerUnit: "factory.service",
+        producerInvocationId: "c".repeat(32),
+      },
+      commandCount: 2,
+      producerPid: 100,
+      producerStartTicks: "200",
+      deadline: "2026-09-04T00:10:00.000Z",
+    };
+    const reboundBatch = {
+      ...originalBatch,
+      identity: {
+        ...originalBatch.identity,
+        directorEpoch: 2,
+        producerInvocationId: "d".repeat(32),
+      },
+      producerPid: 101,
+      producerStartTicks: "201",
+    };
+    const reserved = parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      kind: "capacity",
+      event: "CapacityReserved",
+      objective: 1,
+      runId: "run-1",
+      sequence: 1,
+      at: "2026-09-04T00:00:01.000Z",
+      workItem: 10,
+      attempt: 1,
+      phase: "validation",
+      backend: "factory/local-validation",
+      requestedCpu: 1,
+      requestedMemoryMb: 2_048,
+      directorEpoch: 1,
+      policyDigest: DIGEST,
+      localScopeBatch: originalBatch,
+    });
+    const rebound = parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      kind: "validation-invocation",
+      event: "ValidationInvocationScopeRebound",
+      objective: 1,
+      runId: "run-1",
+      sequence: 2,
+      at: "2026-09-04T00:00:02.000Z",
+      workItem: 10,
+      attempt: 1,
+      artifactDigest: originalBatch.identity.invocationDigest,
+      invocationDigest: "e".repeat(64),
+      reservationOid: SHA,
+      backend: "factory/local-validation",
+      previousScopeBatchDigest: localScopeBatchDigest(originalBatch),
+      localScopeBatch: reboundBatch,
+      directorEpoch: 2,
+      policyDigest: DIGEST,
+    });
+    const reconciled = parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      kind: "capacity",
+      event: "CapacityReconciled",
+      objective: 1,
+      runId: "run-1",
+      sequence: 3,
+      at: "2026-09-04T00:00:03.000Z",
+      workItem: 10,
+      attempt: 1,
+      phase: "validation",
+      backend: "factory/local-validation",
+      requestedCpu: 1,
+      requestedMemoryMb: 2_048,
+      directorEpoch: 1,
+      recoveryEpoch: 2,
+      policyDigest: DIGEST,
+    });
+    expect(unreconciledCapacityReservations([reserved, rebound])).toEqual([reserved]);
+    expect(unreconciledCapacityReservations([reserved, rebound, reconciled])).toEqual([]);
   });
 
   it.each([

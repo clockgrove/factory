@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { safeId, sha256Digest, isoDate } from "./limits.js";
 
@@ -51,3 +52,8 @@ export const LocalScopeBatchSchema = z
   .strict()
   .refine((value) => value.identity.commandIndex === 0, "scope batch starts at command zero");
 export type LocalScopeBatch = z.infer<typeof LocalScopeBatchSchema>;
+export function localScopeBatchDigest(input: LocalScopeBatch): string {
+  return createHash("sha256")
+    .update(JSON.stringify(LocalScopeBatchSchema.parse(input)))
+    .digest("hex");
+}

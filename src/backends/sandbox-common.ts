@@ -36,8 +36,8 @@ import { validationInvocationOwnership } from "./validation-invocation.js";
 
 const MAX_SOURCE_ARCHIVE_BYTES = 64 * 1024 * 1024;
 export const MAX_ISOLATED_VALIDATION_RESULT_BYTES = 64 * 1024;
-export const MAX_ISOLATED_CAPTURE_MANIFEST_BYTES = 64 * 1024;
-export const MAX_ISOLATED_CAPTURE_FILES = 128;
+export const MAX_ISOLATED_CAPTURE_MANIFEST_BYTES = 1024 * 1024;
+export const MAX_ISOLATED_CAPTURE_FILES = 512;
 export const ISOLATED_CAPTURE_MANIFEST_PATH = "factory/capture-manifest.json";
 export const SANDBOX_CODEX_PACKAGE = "@openai/codex@0.153.0";
 
@@ -145,6 +145,15 @@ export const IsolatedValidationCaptureRequestSchema = z
         code: z.ZodIssueCode.custom,
         message: "duplicate expected capture input",
       });
+    if (
+      value.expectedInputs.reduce((total, input) => total + input.payload.bytes, 0) >
+      MAX_CONTENT_BYTES
+    )
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["expectedInputs"],
+        message: "expected capture inputs exceed the aggregate byte limit",
+      });
     for (const [index, input] of value.expectedInputs.entries())
       if (input.contentDigest !== input.payload.digest)
         context.addIssue({
@@ -155,8 +164,9 @@ export const IsolatedValidationCaptureRequestSchema = z
     for (const [index, recipe] of value.recipes.entries())
       if (
         !recipe.outputs.some((output) => output.roleId === recipe.comparison.outputRoleId) ||
-        !expectedInputs.has(recipe.comparison.expectedDescriptorDigest) ||
-        (recipe.comparison.kind === "threshold" && captureCommands.has(recipe.comparison.command))
+        (recipe.comparison.kind === "threshold" &&
+          (!expectedInputs.has(recipe.comparison.expectedDescriptorDigest) ||
+            captureCommands.has(recipe.comparison.command)))
       )
         context.addIssue({
           code: z.ZodIssueCode.custom,
@@ -1231,16 +1241,15 @@ function runCaptures(outputTreeSha) {
       return { ...output, outputPath };
     }),
     comparison: (() => {
+      if (recipe.comparison.kind === "exact") return recipe.comparison;
       const expected = captureRequest.expectedInputs.find(input => input.descriptorDigest === recipe.comparison.expectedDescriptorDigest);
-      if (!expected) throw new Error("capture comparison lacks its expected input");
-      return recipe.comparison.kind === "threshold"
-        ? {
-            ...recipe.comparison,
-            expected,
-            expectedPath: resolve(root, expected.sourcePath.slice("factory/".length)),
-            resultPath: resolve(root, "captures", captureRequest.validationInvocationDigest, recipe.id, ".comparison-result.json"),
-          }
-        : { ...recipe.comparison, expected };
+      if (!expected) throw new Error("threshold capture comparison lacks its expected input");
+      return {
+        ...recipe.comparison,
+        expected,
+        expectedPath: resolve(root, expected.sourcePath.slice("factory/".length)),
+        resultPath: resolve(root, "captures", captureRequest.validationInvocationDigest, recipe.id, ".comparison-result.json"),
+      };
     })(),
   }));
   const commandOrder = config.captureCommands;

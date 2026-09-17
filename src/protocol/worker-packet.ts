@@ -752,6 +752,24 @@ export function assertRepositoryChangeWorkerPacket(
   if (packet.deliverable.kind !== "repository-change")
     throw new Error("asset-production Worker Packet requires the supervised asset execution route");
 }
+
+/** Descriptors visible to implementation workers are derived from semantic
+ * input uses. Evidence-only expected results stay in the canonical packet for
+ * the independent validator but never enter an implementation workspace. */
+export function implementationAssetInputs(packet: WorkerPacket) {
+  const descriptors = new Set(
+    (packet.mediaUses ?? [])
+      .filter(({ direction }) => direction === "input-to")
+      .flatMap(({ descriptorDigests }) => descriptorDigests),
+  );
+  return (packet.assetInputs ?? []).filter(({ descriptorDigest }) =>
+    descriptors.has(descriptorDigest),
+  );
+}
+
+export function implementationMediaUses(packet: WorkerPacket) {
+  return (packet.mediaUses ?? []).filter(({ direction }) => direction === "input-to");
+}
 export type ManagedRuntimeActivation = z.infer<typeof ManagedRuntimeActivationSchema>;
 export interface RepositoryCapabilityOperation {
   kind: string;
@@ -781,6 +799,8 @@ export interface RepositoryCapabilityBindings {
 /** Packets without explicit validation design conservatively retain semantic review. */
 export function semanticReviewCriteria(packet: WorkerPacket): string[] {
   if (packet.deliverable.kind === "asset-production") return [...packet.acceptanceCriteria];
+  if ((packet.repositoryCaptureRecipes ?? []).some(({ gate }) => gate.kind === "human-required"))
+    return [...packet.acceptanceCriteria];
   if (!packet.validation) return [...packet.acceptanceCriteria];
   const accepted = new Set(packet.acceptanceCriteria);
   const seenTiers = new Set<string>();

@@ -9,6 +9,8 @@ import { encodeEventBatchComment, encodeEventComment } from "./receipts.js";
 import type { AttemptReservation } from "./attempts.js";
 import type { LeaseManager, LeaseState } from "./lease.js";
 import type { ValidationEvidence } from "../validation/evidence.js";
+import type { ValidationInvocation } from "../validation/repository-capture.js";
+import type { LocalScopeBatch } from "../protocol/local-scope.js";
 import type { DeliverySelection } from "../publication/delivery.js";
 import type { PublicationReceipt } from "../publication/stack-manager.js";
 import { writerAuthority } from "./authority.js";
@@ -421,6 +423,89 @@ export class LifecycleRecorder {
         args.evidence.passed
           ? `Factory independently validated attempt ${args.reservation.attempt}.`
           : `Factory validation failed for attempt ${args.reservation.attempt}: ${args.evidence.failureReason ?? "validation failed"}`,
+        event,
+      ),
+    );
+    return event;
+  }
+
+  async validationInvocation(args: {
+    lease: LeaseState;
+    workItemNodeId: string;
+    reservation: AttemptReservation;
+    invocation: ValidationInvocation;
+    invocationRef: string;
+    invocationCommitOid: string;
+    sequence: number;
+  }): Promise<FactoryEvent> {
+    await this.leases.assertMutationAuthorized(args.lease);
+    assertReservationLease(args.reservation, args.lease);
+    const now = await this.store.serverTime();
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "validation-invocation",
+      ...writerAuthority(args.lease, args.sequence),
+      event: "ValidationInvocationPrepared",
+      objective: args.reservation.objective,
+      runId: args.reservation.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      workItem: args.reservation.workItem,
+      attempt: args.reservation.attempt,
+      artifactDigest: args.invocation.artifactDigest,
+      baseSha: args.invocation.baseSha,
+      outputTreeSha: args.invocation.outputTreeSha,
+      invocationDigest: args.invocation.digest,
+      invocationRef: args.invocationRef,
+      invocationCommitOid: args.invocationCommitOid,
+      backend: args.invocation.toolEnvironment.backendId,
+      backendLocator: args.invocation.toolEnvironment.backendLocator,
+    });
+    await this.store.addIssueComment(
+      args.workItemNodeId,
+      encodeEventComment(
+        `Factory prepared validation invocation ${args.invocation.digest.slice(0, 12)}.`,
+        event,
+      ),
+    );
+    return event;
+  }
+
+  async validationInvocationScopeRebound(args: {
+    lease: LeaseState;
+    workItemNodeId: string;
+    reservation: AttemptReservation;
+    invocation: ValidationInvocation;
+    backend: string;
+    previousScopeBatchDigest: string;
+    localScopeBatch: LocalScopeBatch;
+    sequence: number;
+  }): Promise<FactoryEvent> {
+    await this.leases.assertMutationAuthorized(args.lease);
+    assertReservationLease(args.reservation, args.lease);
+    const now = await this.store.serverTime();
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "validation-invocation",
+      ...writerAuthority(args.lease, args.sequence),
+      event: "ValidationInvocationScopeRebound",
+      objective: args.reservation.objective,
+      runId: args.reservation.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      workItem: args.reservation.workItem,
+      attempt: args.reservation.attempt,
+      artifactDigest: args.invocation.artifactDigest,
+      invocationDigest: args.invocation.digest,
+      reservationOid: args.reservation.oid,
+      backend: args.backend,
+      previousScopeBatchDigest: args.previousScopeBatchDigest,
+      localScopeBatch: args.localScopeBatch,
+    });
+    await this.store.addIssueComment(
+      args.workItemNodeId,
+      encodeEventComment(
+        `Factory rebound validation invocation ${args.invocation.digest.slice(0, 12)} to its recovery scope.`,
         event,
       ),
     );

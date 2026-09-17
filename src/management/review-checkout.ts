@@ -1,5 +1,5 @@
-import { access, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { access, chmod, copyFile, mkdir, readFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { executionAffectingReason } from "../approval.js";
 import {
   assertArtifactScope,
@@ -8,6 +8,7 @@ import {
 } from "../execution/artifacts.js";
 import {
   assertFilesystemArtifactManifest,
+  inspectContentFile,
   verifyMaterializedFiles,
 } from "../execution/artifact-content.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
@@ -44,7 +45,10 @@ export function reviewCheckoutCleanupFailure(
  * stale validation directory is review evidence. */
 export async function withVerifiedReviewCheckout<T>(
   input: ReviewContext & { requiresIsolation: boolean },
-  review: (repository: string) => Promise<T>,
+  review: (
+    repository: string,
+    captureBundle?: ReviewContext["repositoryCaptureBundle"],
+  ) => Promise<T>,
 ): Promise<T> {
   if (input.requiresIsolation || input.packet.requirements.trust !== "trusted_local")
     throw new Error(
@@ -149,7 +153,32 @@ export async function withVerifiedReviewCheckout<T>(
     const packageValidation = pnpmValidation;
     if (sensitive.length > 0 && !isPermittedSensitiveArtifactSurface(sensitive, packageValidation))
       throw new Error("semantic review artifact touches a sensitive surface");
-    return await review(worktree.path);
+    let captureBundle: ReviewContext["repositoryCaptureBundle"];
+    if (input.repositoryCaptureBundle) {
+      if (
+        input.repositoryCaptureBundle.evidenceDigest !== input.evidence.repositoryCapture?.digest ||
+        input.repositoryCaptureBundle.validationInvocationDigest !==
+          input.evidence.validationInvocationDigest
+      )
+        throw new Error("semantic review capture bundle differs from validation evidence");
+      const root = join(worktree.path, ".factory-review-evidence");
+      await mkdir(root, { recursive: true, mode: 0o700 });
+      const files = [];
+      for (const [index, file] of input.repositoryCaptureBundle.files.entries()) {
+        const name = basename(file.sourceName)
+          .replace(/[^A-Za-z0-9._-]+/g, "-")
+          .slice(0, 120);
+        const destination = join(root, `${index}-${name || "capture.bin"}`);
+        await copyFile(file.path, destination);
+        const observed = await inspectContentFile(destination, file.bytes);
+        if (observed.digest !== file.digest || observed.bytes !== file.bytes)
+          throw new Error("semantic review capture bundle changed during checkout materialization");
+        await chmod(destination, 0o400);
+        files.push({ ...file, path: destination });
+      }
+      captureBundle = { ...input.repositoryCaptureBundle, root, files };
+    }
+    return await review(worktree.path, captureBundle);
   } catch (error) {
     reviewFailure = error;
     throw error;

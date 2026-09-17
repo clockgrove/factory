@@ -743,6 +743,50 @@ const Validation = Common.extend({
   evidenceDigest: sha256Digest,
 });
 
+const ValidationInvocationPrepared = Common.extend({
+  kind: z.literal("validation-invocation"),
+  event: z.literal("ValidationInvocationPrepared"),
+  workItem: z.number().int().positive(),
+  attempt: z.number().int().positive(),
+  artifactDigest: sha256Digest,
+  baseSha: gitSha,
+  outputTreeSha: gitSha,
+  invocationDigest: sha256Digest,
+  invocationRef: boundedText(500),
+  invocationCommitOid: gitSha,
+  backend: safeId,
+  backendLocator: boundedText(500).nullable(),
+});
+
+const ValidationInvocationScopeRebound = Common.extend({
+  kind: z.literal("validation-invocation"),
+  event: z.literal("ValidationInvocationScopeRebound"),
+  workItem: z.number().int().positive(),
+  attempt: z.number().int().positive(),
+  artifactDigest: sha256Digest,
+  invocationDigest: sha256Digest,
+  reservationOid: gitSha,
+  backend: safeId,
+  previousScopeBatchDigest: sha256Digest,
+  localScopeBatch: LocalScopeBatchSchema,
+}).superRefine((event, context) => {
+  const scope = event.localScopeBatch.identity;
+  if (
+    scope.phase !== "validation" ||
+    scope.objective !== event.objective ||
+    scope.runId !== event.runId ||
+    scope.workItem !== event.workItem ||
+    scope.attempt !== event.attempt ||
+    scope.policyDigest !== event.policyDigest ||
+    scope.directorEpoch !== event.directorEpoch ||
+    scope.invocationDigest !== event.artifactDigest
+  )
+    context.addIssue({
+      code: "custom",
+      message: "validation invocation scope rebound differs from its writer and attempt authority",
+    });
+});
+
 const GraphCompiled = Common.extend({
   kind: z.literal("graph"),
   event: z.literal("GraphCompiled"),
@@ -1050,6 +1094,8 @@ export const FactoryEventSchema = z.union([
   Delivery,
   Publication,
   Validation,
+  ValidationInvocationPrepared,
+  ValidationInvocationScopeRebound,
   GraphCompiled,
   GraphProjected,
   Budget,

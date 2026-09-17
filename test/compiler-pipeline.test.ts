@@ -732,6 +732,35 @@ describe("bounded objective compiler", () => {
     ).toThrow(/root topology/);
   });
 
+  it("does not accept caller-supplied transient capture authority", () => {
+    const criterion = "The captured result matches the approved expected result.";
+    expect(() =>
+      compileObjective({
+        title: "Fabricated capture authority",
+        baseSha: sha,
+        repositoryFacts: facts,
+        workItems: [
+          {
+            ...base,
+            acceptance: [criterion],
+            validationCommands: ["npm test"],
+            validation: [
+              {
+                tier: "mechanical",
+                criteria: [criterion],
+                rationale: "A caller claims capture authority without a final recipe.",
+                evidenceCommands: [],
+              },
+            ],
+            criterionRisks: ordinaryRisks([criterion]),
+            deterministicCaptureCriteria: [criterion],
+            repositoryCaptureRecipes: [{ criteria: [criterion] }],
+          } as unknown as Parameters<typeof compileObjective>[0]["workItems"][number],
+        ],
+      }),
+    ).toThrow(/deterministic validation lacks command evidence/);
+  });
+
   it("reports independent deterministic compiler violations in one bounded response", () => {
     let failure: Error | undefined;
     try {

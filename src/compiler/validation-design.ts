@@ -1,3 +1,5 @@
+import type { RepositoryCaptureRecipe } from "../protocol/worker-packet.js";
+
 export type CriterionValidationTier = "mechanical" | "semantic" | "deterministic-simulation";
 
 export type CriterionValidationDesign = {
@@ -53,6 +55,7 @@ export function validateCriterionValidationDesign(args: {
   validation: readonly CriterionValidationDesign[];
   criterionRisks: readonly CriterionRiskAssessment[];
   deterministicSimulation: boolean;
+  repositoryCaptureRecipes?: readonly RepositoryCaptureRecipe[];
 }): void {
   const { itemId, acceptance, validationCommands, validation, criterionRisks } = args;
   if (validation.length < 1 || validation.length > 4)
@@ -60,6 +63,13 @@ export function validateCriterionValidationDesign(args: {
   if (new Set(validation.map((entry) => entry.tier)).size !== validation.length)
     throw new Error(`invalid validation design in ${itemId}: duplicate tier`);
   const accepted = new Set(acceptance);
+  const deterministicCaptureCriteria = new Set(
+    (args.repositoryCaptureRecipes ?? [])
+      .filter(({ gate }) => gate.kind === "deterministic-preauthorized")
+      .flatMap(({ criteria }) => criteria),
+  );
+  if ([...deterministicCaptureCriteria].some((criterion) => !accepted.has(criterion)))
+    throw new Error(`capture validation references unknown acceptance criterion in ${itemId}`);
   const associated = new Set<string>();
   for (const entry of validation) {
     if (
@@ -78,7 +88,14 @@ export function validateCriterionValidationDesign(args: {
       throw new Error(`validation design references unknown acceptance criterion in ${itemId}`);
     if (entry.evidenceCommands.some((command) => !validationCommands.includes(command)))
       throw new Error(`validation design references ungrounded command in ${itemId}`);
-    if (entry.tier !== "semantic" && entry.evidenceCommands.length === 0)
+    if (
+      entry.tier !== "semantic" &&
+      entry.evidenceCommands.length === 0 &&
+      !(
+        entry.tier === "mechanical" &&
+        entry.criteria.every((criterion) => deterministicCaptureCriteria.has(criterion))
+      )
+    )
       throw new Error(`deterministic validation lacks command evidence in ${itemId}`);
     if (entry.tier === "deterministic-simulation" && !args.deterministicSimulation)
       throw new Error(`deterministic simulation is not repository-grounded in ${itemId}`);

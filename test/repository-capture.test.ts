@@ -164,6 +164,7 @@ function exactRecipe(args: {
     id,
     mediaUse: { intentId: "intent-result-evidence", direction: "evidence-for" },
     criterionIds: ["criterion-result"],
+    criteria: ["The repository capture satisfies its bound criterion."],
     scenario: { id: "scenario-fixed", fixture: sha("fixture"), seed: null },
     captureCommand: {
       recipeId: `catalog-${id}`,

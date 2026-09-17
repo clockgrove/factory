@@ -18,6 +18,9 @@ import { inspectLocalCheckout } from "./checkout.js";
 import { inspectObjectiveGraphInput } from "../control/objective-graph-input.js";
 import { legacyGraphConstraintsDigest } from "../graph.js";
 import { probeAssetHandlers } from "../assets/handlers.js";
+import { compilerEvalDigest } from "../evaluation/compiler-eval.js";
+import { inspectRepositoryCaptureCatalogForRepository } from "../toolchains/compiler-capabilities.js";
+import type { RepositoryCaptureCatalogValidationReport } from "../validation/repository-capture-catalog.js";
 
 export type DiagnosticStatus = "pass" | "warning" | "fail";
 
@@ -111,11 +114,22 @@ export async function probeHostToolchain(checkout?: string): Promise<{
   node: string;
   validationCommands: string[];
   commands: Record<string, { available: boolean; version?: string; reason?: string }>;
+  repositoryCapture: RepositoryCaptureCatalogValidationReport;
 }> {
   if (!checkout) throw new Error("toolchain grounding requires a checkout path");
   const local = await inspectLocalCheckout(checkout);
   const facts = await readRepositoryFacts(local.root, local.files);
   const validationCommands = discoverValidationCommands(facts);
+  const unsigned = {
+    baseSha: local.head,
+    repository: facts,
+    manifests: [] as string[],
+    relevantPaths: local.files,
+  };
+  const repositoryCapture = inspectRepositoryCaptureCatalogForRepository(
+    { ...unsigned, digest: compilerEvalDigest(unsigned) },
+    [],
+  );
   const runners = [
     ...new Set([
       "git",
@@ -151,6 +165,7 @@ export async function probeHostToolchain(checkout?: string): Promise<{
     node: process.version,
     validationCommands,
     commands: Object.fromEntries(commands),
+    repositoryCapture,
   };
 }
 
@@ -266,6 +281,7 @@ export async function buildDoctorReport(input: {
         platform?: string;
         commands?: Record<string, { available?: boolean }>;
         validationCommands?: string[];
+        repositoryCapture?: RepositoryCaptureCatalogValidationReport;
       };
       const missing = Object.entries(observed.commands ?? {})
         .filter(([, value]) => value.available !== true)
@@ -279,17 +295,24 @@ export async function buildDoctorReport(input: {
           (command) => observed.commands?.[command.split(" ")[0]!]?.available === true,
         );
       const coreReady = observed.commands?.git?.available === true;
+      const captureReady = observed.repositoryCapture?.status !== "invalid";
       return {
         summary: !supported
           ? `unsupported host platform ${observed.platform}`
-          : !grounded
-            ? "no repository-grounded validation commands were observed; provide an observed validation recipe"
-            : !coreReady || !runnable
-              ? `toolchain commands unavailable: ${missing.join(", ")}; install them on the Factory host PATH or use a checkout with a supported validation recipe`
-              : "repository validation runners are available; tool behavior and dependencies remain unverified",
+          : !captureReady
+            ? `repository capture catalog is invalid (${observed.repositoryCapture!.diagnostics.length} bounded diagnostic(s))`
+            : !grounded
+              ? "no repository-grounded validation commands were observed; provide an observed validation recipe"
+              : !coreReady || !runnable
+                ? `toolchain commands unavailable: ${missing.join(", ")}; install them on the Factory host PATH or use a checkout with a supported validation recipe`
+                : "repository validation runners are available; tool behavior and dependencies remain unverified",
         details,
         status:
-          supported && grounded && coreReady && runnable ? ("pass" as const) : ("warning" as const),
+          supported && captureReady && grounded && coreReady && runnable
+            ? ("pass" as const)
+            : captureReady
+              ? ("warning" as const)
+              : ("fail" as const),
       };
     }),
     check("management", async () => {

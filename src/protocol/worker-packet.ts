@@ -340,6 +340,10 @@ const RepositoryCaptureRecipeCoreSchema = z
     id: safeId,
     mediaUse: z.object({ intentId: safeId, direction: z.literal("evidence-for") }).strict(),
     criterionIds: shortList(safeId, 64).min(1),
+    /** Exact final acceptance text for each criterion ID. The compiler derives
+     * this binding while projecting the final Work Item; workers and validators
+     * never infer it from an out-of-band proposal. */
+    criteria: shortList(boundedText(2_000), 64).min(1),
     scenario: z
       .object({
         id: safeId,
@@ -378,6 +382,15 @@ export const RepositoryCaptureRecipeSchema = RepositoryCaptureRecipeCoreSchema.e
         code: "custom",
         path: ["criterionIds"],
         message: "capture criteria are duplicated",
+      });
+    if (
+      value.criteria.length !== value.criterionIds.length ||
+      new Set(value.criteria).size !== value.criteria.length
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["criteria"],
+        message: "capture criterion text must bind each unique criterion ID exactly once",
       });
     const roles = value.outputs.map(({ roleId }) => roleId);
     if (new Set(roles).size !== roles.length)
@@ -773,6 +786,14 @@ export const RepositoryChangeWorkerPacketSchema = WorkerPacketCommon.extend({
           path: ["repositoryCaptureRecipes", index, "mediaUse"],
           message: "capture recipe does not bind its exact evidence media use",
         });
+      if (
+        recipe.criteria.some((criterion: string) => !packet.acceptanceCriteria.includes(criterion))
+      )
+        context.addIssue({
+          code: "custom",
+          path: ["repositoryCaptureRecipes", index, "criteria"],
+          message: "capture recipe references acceptance text absent from the Work Item",
+        });
       if (!inputs.has(recipe.comparison.expectedDescriptorDigest))
         context.addIssue({
           code: "custom",
@@ -958,13 +979,23 @@ export function semanticReviewCriteria(packet: WorkerPacket): string[] {
   }
   return packet.acceptanceCriteria.filter((criterion) => {
     const routes = mapped.get(criterion);
-    if (!routes?.length) return true;
+    const captureRoutes = (packet.repositoryCaptureRecipes ?? []).filter(({ criteria }) =>
+      criteria.includes(criterion),
+    );
+    if (captureRoutes.some(({ gate }) => gate.kind === "human-required")) return true;
+    const deterministicCapture = captureRoutes.some(
+      ({ gate }) => gate.kind === "deterministic-preauthorized",
+    );
+    if (!routes?.length) return !deterministicCapture;
     if (routes.some((entry) => entry.tier === "semantic")) return true;
-    return !routes.some(
-      (entry) =>
-        (entry.tier === "mechanical" || entry.tier === "deterministic-simulation") &&
-        entry.evidenceCommands!.length > 0 &&
-        entry.evidenceCommands!.every((command) => packet.validationCommands.includes(command)),
+    return !(
+      deterministicCapture ||
+      routes.some(
+        (entry) =>
+          (entry.tier === "mechanical" || entry.tier === "deterministic-simulation") &&
+          entry.evidenceCommands!.length > 0 &&
+          entry.evidenceCommands!.every((command) => packet.validationCommands.includes(command)),
+      )
     );
   });
 }

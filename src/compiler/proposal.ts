@@ -51,6 +51,7 @@ import {
   acceptanceTextProblem,
   assessDecomposition,
   compileObjective,
+  validateCompiledObjective,
   type DecompositionEvidence,
   type CompilerWorkItem,
   type CompilerWorkItemInput,
@@ -77,6 +78,7 @@ import { CompilerInvariantError } from "./invariant-error.js";
 import type { WorkerAssetInput } from "../assets/contracts.js";
 import { declaredAssetHandlerContract } from "../assets/handlers.js";
 import type { CompilerMediaProducerCapability, MediaIntent } from "../assets/media-intent.js";
+import { evaluateBoundRepositoryCaptureCapabilities } from "../validation/repository-capture-catalog.js";
 export { CompilerInvariantError } from "./invariant-error.js";
 
 export class CompilerRequestValidationError extends Error {
@@ -571,6 +573,23 @@ export function validateCompilerRequest(requestInput: unknown): CompilerValidati
         ),
       );
   }
+  const captureAuthority = evaluateBoundRepositoryCaptureCapabilities({
+    validationRecipes: request.repository.validationRecipes,
+    repositoryComparators: request.repositoryCapture.comparators,
+    deterministicCaptureGates: request.repositoryCapture.deterministicGates,
+  });
+  for (const diagnostic of captureAuthority.report.diagnostics)
+    violations.push(
+      violation(
+        "schema-invalid",
+        `/repositoryCapture/catalog${diagnostic.field}`,
+        {
+          diagnostic: diagnostic.code,
+          capability: diagnostic.expected as CompilerDiagnosticValue,
+        },
+        diagnostic.observed as CompilerDiagnosticValue,
+      ),
+    );
   const eligible = request.repository.toolchains.filter(
     (toolchain) => toolchain.state === "eligible-deferred",
   );
@@ -1290,6 +1309,34 @@ function repositoryCaptureUnavailableReasons(
     if (identities.size > 1)
       reasons.push(`validation command ${command} has conflicting phase or recipe identity`);
   return reasons;
+}
+
+function repositoryCaptureCriterionBindings(
+  request: CompilerRequest,
+  proposal: CompilerProposal,
+  workItemId: string,
+  criterionId: string,
+): Array<{ tier: "mechanical" | "semantic"; command: string }> {
+  return proposal.mediaIntents.flatMap((intent) => {
+    const capture = intent.repositoryCapture;
+    if (!capture || repositoryCaptureUnavailableReasons(request, proposal, intent).length > 0)
+      return [];
+    const binding = intent.bindings.find(
+      (candidate) =>
+        candidate.workItemId === workItemId && candidate.criterionIds.includes(criterionId),
+    );
+    if (!binding) return [];
+    const recipe = request.repository.validationRecipes.find(
+      ({ id }) => id === capture.captureRecipeId,
+    );
+    if (recipe?.capture?.kind !== "capture") return [];
+    return [
+      {
+        tier: capture.gate.kind === "deterministic-preauthorized" ? "mechanical" : "semantic",
+        command: recipe.command,
+      },
+    ];
+  });
 }
 
 function repositoryCaptureHasSatisfiableAuthority(
@@ -2212,10 +2259,22 @@ export function parseAndValidateCompilerProposal(
             item.id,
           ),
         );
+      const captureBindings = repositoryCaptureCriterionBindings(
+        request,
+        proposal,
+        item.id,
+        criterion.id,
+      );
+      const authoredEvidenceCount = criterion.validation.reduce(
+        (count, validation) => count + validation.evidence.length,
+        0,
+      );
+      const captureOnly = authoredEvidenceCount === 0 && captureBindings.length > 0;
       const deterministicRisk = inferCriterionRisk(criterion.text);
       if (
         (criterion.risk !== "ordinary" || deterministicRisk !== "ordinary") &&
-        !criterionHasDeterministicValidation(criterion)
+        !criterionHasDeterministicValidation(criterion) &&
+        !captureBindings.some(({ tier }) => tier === "mechanical")
       )
         violations.push(
           violation(
@@ -2233,7 +2292,7 @@ export function parseAndValidateCompilerProposal(
                 scopeOwnsPath(item.scope, path),
               )
             : true;
-        if (!groundedTier)
+        if (!captureOnly && !groundedTier)
           violations.push(
             violation(
               "ungrounded-validation-tier",
@@ -2251,7 +2310,7 @@ export function parseAndValidateCompilerProposal(
               item.id,
             ),
           );
-        if (validation.tier !== "semantic" && validation.evidence.length === 0)
+        if (!captureOnly && validation.tier !== "semantic" && validation.evidence.length === 0)
           violations.push(
             violation(
               "uncovered-criterion",
@@ -2362,6 +2421,7 @@ export function parseAndValidateCompilerProposal(
           }
         }
       }
+      itemEvidenceCount += captureBindings.length;
     }
     if (itemEvidenceCount === 0)
       violations.push(
@@ -2663,45 +2723,57 @@ function validationDesign(
   request: CompilerRequest,
   proposal: CompilerProposal,
   item: CompilerProposal["workItems"][number],
+  finalCaptureAuthority = false,
 ): NonNullable<CompilerWorkItemInput["validation"]> {
   const tiers = new Map<
     CompilerProposal["workItems"][number]["criteria"][number]["validation"][number]["tier"],
     { criteria: string[]; commands: string[] }
   >();
-  for (const criterion of item.criteria)
-    for (const validation of criterion.validation) {
-      const current = tiers.get(validation.tier) ?? { criteria: [], commands: [] };
-      if (!current.criteria.includes(criterion.text)) current.criteria.push(criterion.text);
-      for (const reference of validation.evidence) {
-        const command = validationCommand(request, reference);
-        if (command && !current.commands.includes(command)) current.commands.push(command);
+  const captureTiers = new Set<"mechanical" | "semantic">();
+  for (const criterion of item.criteria) {
+    const captureBindings = repositoryCaptureCriterionBindings(
+      request,
+      proposal,
+      item.id,
+      criterion.id,
+    );
+    const captureOnly =
+      captureBindings.length > 0 &&
+      criterion.validation.every(({ evidence }) => evidence.length === 0);
+    if (captureOnly && !finalCaptureAuthority) {
+      for (const binding of captureBindings) {
+        captureTiers.add(binding.tier);
+        const current = tiers.get(binding.tier) ?? { criteria: [], commands: [] };
+        if (!current.criteria.includes(criterion.text)) current.criteria.push(criterion.text);
+        if (binding.tier === "mechanical" && !current.commands.includes(binding.command))
+          current.commands.push(binding.command);
+        tiers.set(binding.tier, current);
       }
-      tiers.set(validation.tier, current);
+      continue;
     }
-  const humanCaptureCriterionIds = new Set(
-    proposal.mediaIntents.flatMap((intent) =>
-      intent.repositoryCapture !== null &&
-      intent.repositoryCapture.gate.kind === "human-required" &&
-      repositoryCaptureUnavailableReasons(request, proposal, intent).length === 0
-        ? intent.bindings
-            .filter(({ workItemId }) => workItemId === item.id)
-            .flatMap(({ criterionIds }) => criterionIds)
-        : [],
-    ),
-  );
-  if (humanCaptureCriterionIds.size > 0) {
-    const semantic = tiers.get("semantic") ?? { criteria: [], commands: [] };
-    for (const criterion of item.criteria)
-      if (humanCaptureCriterionIds.has(criterion.id) && !semantic.criteria.includes(criterion.text))
-        semantic.criteria.push(criterion.text);
-    tiers.set("semantic", semantic);
+    if (!captureOnly)
+      for (const validation of criterion.validation) {
+        const current = tiers.get(validation.tier) ?? { criteria: [], commands: [] };
+        if (!current.criteria.includes(criterion.text)) current.criteria.push(criterion.text);
+        for (const reference of validation.evidence) {
+          const command = validationCommand(request, reference);
+          if (command && !current.commands.includes(command)) current.commands.push(command);
+        }
+        tiers.set(validation.tier, current);
+      }
+    for (const binding of captureBindings) {
+      captureTiers.add(binding.tier);
+      const current = tiers.get(binding.tier) ?? { criteria: [], commands: [] };
+      if (!current.criteria.includes(criterion.text)) current.criteria.push(criterion.text);
+      tiers.set(binding.tier, current);
+    }
   }
   return [...tiers].map(([tier, value]) => ({
     tier,
     criteria: value.criteria,
     rationale:
-      tier === "semantic" && humanCaptureCriterionIds.size > 0
-        ? "Human-required repository capture gates retain semantic review for their exact bound criteria."
+      tier !== "deterministic-simulation" && captureTiers.has(tier)
+        ? "Repository-observed capture authority applies only to its exact bound criterion IDs; independent validation evidence remains additive."
         : `Criterion IDs select ${tier} evidence through the pinned compiler request.`,
     evidenceCommands: value.commands,
   }));
@@ -2864,6 +2936,7 @@ function projectedRepositoryCaptureRecipe(
   intent: MediaIntent,
   binding: MediaIntent["bindings"][number],
   expected: WorkerAssetInput,
+  criteria: readonly { id: string; text: string }[],
 ): RepositoryCaptureRecipe {
   const captureRequest = intent.repositoryCapture;
   if (!captureRequest) throw new Error(`media intent ${intent.id} lacks capture semantics`);
@@ -2907,10 +2980,17 @@ function projectedRepositoryCaptureRecipe(
             },
           };
         })(captureRequest.comparison.policyId);
+  const criterionBindings = [...criteria].sort((left, right) => left.id.localeCompare(right.id));
+  if (
+    criterionBindings.length !== binding.criterionIds.length ||
+    criterionBindings.some(({ id }, index) => id !== [...binding.criterionIds].sort()[index])
+  )
+    throw new Error(`media intent ${intent.id} lacks exact criterion text bindings`);
   const core = {
     id: `capture-${compilerEvalDigest({ intentId: intent.id, workItemId: binding.workItemId }).slice(0, 16)}`,
     mediaUse: { intentId: intent.id, direction: "evidence-for" as const },
-    criterionIds: [...binding.criterionIds].sort(),
+    criterionIds: criterionBindings.map(({ id }) => id),
+    criteria: criterionBindings.map(({ text }) => text),
     scenario: structuredClone(captureRequest.scenario),
     captureCommand: commandIdentity(captureRecipe),
     outputs: structuredClone(captureCapability.outputs),
@@ -3014,7 +3094,15 @@ function projectMediaIntents(
         ];
         consumer.repositoryCaptureRecipes = [
           ...(consumer.repositoryCaptureRecipes ?? []),
-          projectedRepositoryCaptureRecipe(request, intent, binding, expected),
+          projectedRepositoryCaptureRecipe(
+            request,
+            intent,
+            binding,
+            expected,
+            (proposal.workItems.find(({ id }) => id === binding.workItemId)?.criteria ?? []).filter(
+              ({ id }) => binding.criterionIds.includes(id),
+            ),
+          ),
         ].sort((left, right) => left.id.localeCompare(right.id));
       }
       disposition.push({
@@ -3237,6 +3325,20 @@ function projectMediaIntents(
   return disposition;
 }
 
+function finalizeProjectedValidationDesign(
+  request: CompilerRequest,
+  proposal: CompilerProposal,
+  projected: CompiledObjective,
+): void {
+  const proposalById = new Map(proposal.workItems.map((item) => [item.id, item]));
+  for (const item of projected.workItems) {
+    if (item.deliverable.kind !== "repository-change") continue;
+    const authored = proposalById.get(item.id);
+    if (!authored) continue;
+    item.validation = validationDesign(request, proposal, authored, true);
+  }
+}
+
 function orderProjectedWorkItemsByDependency(projected: CompiledObjective): void {
   const analysis = analyzeDependencies(projected.workItems);
   if (
@@ -3366,6 +3468,10 @@ function projectedEnvelopeViolations(
       projectionContext,
       projected as CompiledObjective,
     );
+    finalizeProjectedValidationDesign(request, proposal, projected as CompiledObjective);
+    validateCompiledObjective(projected, [
+      ...new Set(workItems.flatMap((item) => item.validationCommands)),
+    ]);
   } catch (error) {
     const violations: CompilerViolation[] = [];
     for (const [itemIndex, item] of proposal.workItems.entries()) {
@@ -3653,7 +3759,11 @@ export function projectCompilerProposal(input: {
       },
       projected,
     );
+    finalizeProjectedValidationDesign(input.request, validated.proposal, projected);
     orderProjectedWorkItemsByDependency(projected);
+    validateCompiledObjective(projected, [
+      ...new Set(semantic.flatMap((item) => item.validationCommands)),
+    ]);
     validateGraph(projected);
     if (input.legacyGraphConstraints)
       assertCompiledObjectiveAdoptsLegacyConstraints(projected, input.legacyGraphConstraints);

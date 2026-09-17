@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile, access } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, access, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -318,6 +318,53 @@ describe("read-only checkout preflight", () => {
       effectiveCpu: expect.any(Number),
       availableMemoryMb: expect.any(Number),
       source: expect.stringMatching(/^(host|cgroup-v[12])$/),
+    });
+  });
+  it("reports repository capture authority failures through the doctor toolchain probe", async () => {
+    const f = await fixture(true);
+    await mkdir(join(f.root, ".factory"));
+    await writeFile(
+      join(f.root, ".factory", "validation-captures.json"),
+      JSON.stringify({
+        captures: [
+          {
+            command: "npm run capture",
+            comparisonOutput: { roleId: "capture", mediaType: "application/json" },
+            auxiliaryOutputs: [],
+            profile: null,
+            humanReview: false,
+            exactDeterministicGates: [],
+            thresholdComparisons: [],
+          },
+        ],
+      }),
+    );
+    await f.git("add", ".factory/validation-captures.json");
+    await f.git("commit", "-m", "add invalid capture catalog");
+
+    const toolchain = await probeHostToolchain(f.root);
+    expect(toolchain.repositoryCapture).toMatchObject({
+      status: "invalid",
+      diagnostics: [
+        expect.objectContaining({
+          code: "capture-command-unobserved",
+          field: "/captures/0/command",
+        }),
+      ],
+    });
+    const report = await buildDoctorReport({
+      repository: "o/r",
+      objective: 7,
+      checkout: f.root,
+      readObjective: async () => snapshot,
+      checks: {
+        ...healthyChecks(),
+        toolchainProbe: () => probeHostToolchain(f.root),
+      },
+    });
+    expect(report.diagnostics.find(({ area }) => area === "toolchain")).toMatchObject({
+      status: "fail",
+      summary: expect.stringContaining("repository capture catalog is invalid"),
     });
   });
   it("does not report ready for a mismatched checkout, missing resource data, or insufficient cgroup headroom", async () => {

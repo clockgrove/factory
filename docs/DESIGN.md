@@ -729,7 +729,8 @@ or produced media with imported and upstream-intent inputs assigned to named rol
 projection resolves exact descriptor digests and derives an asset producer from advertised
 capabilities. An `evidence-for` intent never derives an asset producer. Trusted projection instead
 binds a pinned `.factory/validation-captures.json` entry to the target `repository-change` Work
-Item's `repositoryCaptureRecipes`. The recipe contains exact intent and criterion references,
+Item's `repositoryCaptureRecipes`. The recipe contains exact intent references plus host-derived
+criterion ID-to-final-acceptance-text bindings,
 repository-observed command identities, bounded scenario inputs, declared output roles and MIME
 identities, an optional typed raster profile, exact-byte or grounded threshold comparison naming
 one subject output role, and a capture-specific gate selected from explicit repository policy. The comparison subject's declared MIME must equal
@@ -758,7 +759,14 @@ without a matching import or producer capability, and for required repository ev
 grounded capture authority. Helpful omissions remain visible in the projection trace.
 Validation commands have one canonical phase order: ordinary commands, then capture commands, with
 stable first-occurrence deduplication inside each phase. Threshold policies select Factory-installed
-comparators and never add repository commands. A
+comparators and never add repository commands. One side-effect-free catalog evaluator is
+authoritative for CLI validation, doctor/setup diagnostics, compiler capability projection, and
+proposal validation. It binds only repository-observed commands, checks comparator applicability
+against the exact comparison output MIME and per-output profile, and constrains thresholds to the
+installed comparator's declared result domain. Its diagnostics are bounded and omit command and
+source text. Deterministic capture authority contributes mechanical validation only to the exact
+criterion IDs on its binding; capture-only designs are derived by trusted projection, and ordinary
+evidence remains additive. A
 command string cannot carry conflicting phase or recipe identity. A human-required capture gate
 retains semantic review only for the exact criterion IDs on that capture binding.
 

@@ -71,7 +71,8 @@ repository scope, and no validation command. The current produced-media path sup
 inputs to downstream implementation or decisions. An `evidence-for` intent always remains on its
 bound `repository-change` Work Item. Trusted projection resolves `.factory/validation-captures.json`
 against commands observed from the pinned checkout and emits a digest-bound
-`repositoryCaptureRecipes` entry with the exact intent and criterion references, scenario input,
+`repositoryCaptureRecipes` entry with the exact intent and host-derived criterion
+ID-to-final-acceptance-text bindings, scenario input,
 declared output roles and MIME types, optional typed raster profile, exact-byte or bounded-threshold
 comparison with one explicit subject output role, and capture-specific gate. Comparisons have no
 repository command. The subject role names one declared output whose MIME exactly matches the
@@ -95,14 +96,22 @@ structural JSON shape is
 [`schemas/validation-captures.schema.json`](../schemas/validation-captures.schema.json). Draft-07
 cannot express global uniqueness by identity; run
 `factory validate-captures` from the repository root for the canonical structural and semantic
-check before committing the file.
+check before committing the file. The executable check uses the same pure evaluator as `doctor`,
+compiler capability projection, and proposal validation. It verifies that each command is an
+observed repository validation recipe, resolves every threshold against the installed comparator
+for the exact subject MIME and per-output profile, and bounds the threshold to that comparator's
+result domain. Diagnostics contain a derived recipe identity, field, expected capability, and
+observed value; they never echo capture command text or repository source.
 Capture recipes are format-neutral: outputs may be structured JSON, opaque binary, raster, or any
 other bounded MIME identity. Runtime trees, artifacts, environments, captured bytes, receipts, and
 decisions are execution results and never recipe fields.
 Worker validation commands are unique and ordered by phase: ordinary validation first, then all
 capture commands. Reusing command text across recipe identities is rejected. A human-required
 capture gate forces semantic review for the exact criteria
-named by each capture binding.
+named by each capture binding. A deterministic capture gate supplies mechanical evidence only for
+those same criterion IDs. Trusted projection can therefore derive a complete capture-only
+validation design, while ordinary commands remain additive and an unrelated criterion cannot
+borrow capture authority.
 
 ## Repository-result capture
 

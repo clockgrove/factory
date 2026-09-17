@@ -52,7 +52,10 @@ import {
 import type { ManagedToolchain } from "./runtime/toolchain-bundle.js";
 import { RuntimeBundleReceiptSchema } from "./protocol/worker-packet.js";
 import type { ObjectiveAssetImport, ObjectiveAssetImportMetadata } from "./assets/import.js";
-import { RepositoryCaptureCatalogSchema } from "./compiler/contracts.js";
+import { inspectLocalCheckout } from "./application/checkout.js";
+import { readRepositoryFacts } from "./repository-profiles/index.js";
+import { compilerEvalDigest } from "./evaluation/compiler-eval.js";
+import { inspectRepositoryCaptureCatalogForRepository } from "./toolchains/compiler-capabilities.js";
 
 const controllerLifecycle = new SystemdControllerLifecycle(
   new SystemdUserService({
@@ -745,10 +748,23 @@ async function probeManagement(): Promise<void> {
 async function validateCaptureCatalog(args: string[]): Promise<void> {
   if (args.length > 1) fail("usage: factory validate-captures [FILE]");
   const path = resolve(args[0] ?? ".factory/validation-captures.json");
-  const catalog = RepositoryCaptureCatalogSchema.parse(JSON.parse(await readFile(path, "utf8")));
-  process.stdout.write(
-    `${JSON.stringify({ valid: true, path, captures: catalog.captures.length }, null, 2)}\n`,
+  const checkout = await inspectLocalCheckout(process.cwd());
+  const repository = await readRepositoryFacts(checkout.root, checkout.files);
+  const unsigned = {
+    baseSha: checkout.head,
+    repository,
+    manifests: [] as string[],
+    relevantPaths: checkout.files,
+  };
+  const report = inspectRepositoryCaptureCatalogForRepository(
+    { ...unsigned, digest: compilerEvalDigest(unsigned) },
+    [],
+    await readFile(path, "utf8"),
   );
+  process.stdout.write(
+    `${JSON.stringify({ valid: report.status === "valid", path, report }, null, 2)}\n`,
+  );
+  if (report.status !== "valid") process.exitCode = 1;
 }
 
 async function inspectPriorityFields(args: string[]): Promise<void> {

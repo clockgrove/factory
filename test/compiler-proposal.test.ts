@@ -24,6 +24,7 @@ import {
   parseAndValidateCompilerProposal,
   projectCompilerProposal,
 } from "../src/compiler/proposal.js";
+import { validateCompiledObjective } from "../src/compiler/index.js";
 import {
   analyzeDependencies,
   exclusiveResourcePairs,
@@ -232,6 +233,56 @@ function expectedAssetBinding(mediaType: string) {
       purpose: "Expected repository validation result.",
     },
   };
+}
+
+function exactCaptureProposalFixture() {
+  const pinned = capturePinnedFacts({
+    outputs: [{ roleId: "capture", mediaType: "application/json" }],
+    profile: null,
+    deterministic: true,
+  });
+  const request = semanticRequest(pinned);
+  const captureRecipe = request.repository.validationRecipes.find(
+    ({ capture }) => capture?.kind === "capture",
+  )!;
+  const expected = expectedAssetBinding("application/json");
+  request.media.assetManifest = { digest: expected.manifestDigest, assets: [expected.asset] };
+  const proposal = semanticProposal(request);
+  proposal.mediaIntents = [
+    mediaIntent({
+      role: "acceptance-capture",
+      purpose: "acceptance-evidence",
+      fulfillment: { kind: "imported", assetIds: [expected.asset.id] },
+      output: {
+        mediaTypes: ["application/json"],
+        minimumCount: 1,
+        maximumCount: 1,
+        profile: null,
+      },
+      review: null,
+      repositoryCapture: {
+        gate: { kind: "deterministic-preauthorized", authorityId: "exact-result" },
+        expectedAssetId: expected.asset.id,
+        scenario: { id: "default", fixture: "fixtures/result.json", seed: null },
+        captureRecipeId: captureRecipe.id,
+        comparison: { kind: "exact" },
+      },
+      bindings: [
+        { workItemId: "item-1", direction: "evidence-for", criterionIds: ["implemented"] },
+      ],
+    }),
+  ];
+  const projectionContext = {
+    pinnedFacts: pinned,
+    repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
+    runPolicy: projectionPolicy(request),
+    mediaPlanning: {
+      assetBindings: [{ assetId: expected.asset.id, input: expected.input }],
+      producerCapabilities: [],
+      reviewRules: [],
+    },
+  };
+  return { pinned, request, proposal, projectionContext };
 }
 
 it("rejects duplicate imported asset identities before media projection", () => {
@@ -1006,6 +1057,90 @@ describe("media intent compilation", () => {
       ),
     ).toBe(true);
     expect(result.trace.mediaIntents).toEqual([]);
+  });
+
+  it("mechanically derives a complete validation design for a capture-only criterion", () => {
+    const fixture = exactCaptureProposalFixture();
+    const criterion = fixture.proposal.workItems[0]!.criteria[0]!;
+    criterion.text = "The captured access-control result exactly matches the approved result.";
+    criterion.risk = "security";
+    criterion.validation = [{ tier: "mechanical", evidence: [] }];
+
+    expect(
+      parseAndValidateCompilerProposal(fixture.request, fixture.proposal, fixture.projectionContext)
+        .report,
+    ).toMatchObject({ status: "valid", violations: [] });
+
+    const result = projectCompilerProposal({
+      request: fixture.request,
+      proposal: fixture.proposal,
+      ...fixture.projectionContext,
+    });
+    const item = result.objective.workItems[0]!;
+    expect(item.validationCommands).toEqual(["npm run capture"]);
+    expect(item.validation).toEqual([
+      {
+        tier: "mechanical",
+        criteria: [fixture.proposal.workItems[0]!.criteria[0]!.text],
+        rationale: expect.stringContaining("exact bound criterion IDs"),
+        evidenceCommands: [],
+      },
+    ]);
+    expect(item.repositoryCaptureRecipes).toHaveLength(1);
+    expect(item.repositoryCaptureRecipes![0]!.criteria).toEqual([
+      fixture.proposal.workItems[0]!.criteria[0]!.text,
+    ]);
+    expect(() => validateCompiledObjective(result.objective)).not.toThrow();
+  });
+
+  it("keeps ordinary checks additive and does not lend capture authority to another criterion", () => {
+    const fixture = exactCaptureProposalFixture();
+    const ordinaryCriterion = fixture.proposal.workItems[0]!.criteria[0]!;
+    ordinaryCriterion.id = "ordinary-check";
+    fixture.proposal.workItems[0]!.criteria.push({
+      id: "implemented",
+      text: "The captured repository result matches the expected result.",
+      risk: "ordinary",
+      validation: [{ tier: "mechanical", evidence: [] }],
+    });
+
+    expect(
+      parseAndValidateCompilerProposal(fixture.request, fixture.proposal, fixture.projectionContext)
+        .report.status,
+    ).toBe("valid");
+    const item = projectCompilerProposal({
+      request: fixture.request,
+      proposal: fixture.proposal,
+      ...fixture.projectionContext,
+    }).objective.workItems[0]!;
+    expect(item.validationCommands).toEqual(["npm run test", "npm run capture"]);
+    expect(item.validation).toEqual([
+      expect.objectContaining({
+        tier: "mechanical",
+        criteria: [
+          ordinaryCriterion.text,
+          "The captured repository result matches the expected result.",
+        ],
+        evidenceCommands: ["npm run test"],
+      }),
+    ]);
+
+    fixture.proposal.workItems[0]!.criteria.push({
+      id: "unrelated",
+      text: "An unrelated contract is mechanically verified.",
+      risk: "ordinary",
+      validation: [{ tier: "mechanical", evidence: [] }],
+    });
+    expect(
+      parseAndValidateCompilerProposal(fixture.request, fixture.proposal, fixture.projectionContext)
+        .report.violations,
+    ).toContainEqual(
+      expect.objectContaining({
+        code: "uncovered-criterion",
+        itemId: "item-1",
+        field: "/workItems/0/criteria/2/validation/0",
+      }),
+    );
   });
 
   it.each([

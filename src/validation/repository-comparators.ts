@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-import type { RepositoryCaptureProfile } from "../protocol/worker-packet.js";
 import { safeId } from "../protocol/limits.js";
 
 const ComparatorIdentitySchema = z
@@ -10,27 +9,54 @@ const ComparatorIdentitySchema = z
 export type RepositoryComparatorIdentity = z.infer<typeof ComparatorIdentitySchema>;
 
 const installed = [
-  { id: "byte-difference", contract: 1 },
-  { id: "pixel-difference", contract: 1 },
+  {
+    identity: { id: "byte-difference", contract: 1 },
+    resultDomain: { minimum: 0, maximum: 1 },
+  },
+  {
+    identity: { id: "pixel-difference", contract: 1 },
+    resultDomain: { minimum: 0, maximum: 1 },
+  },
 ] as const;
 
 export const repositoryComparatorContracts: RepositoryComparatorIdentity[] = installed.map(
-  (identity) => ComparatorIdentitySchema.parse(identity),
+  ({ identity }) => ComparatorIdentitySchema.parse(identity),
 );
+
+export interface RepositoryComparatorCapability {
+  identity: RepositoryComparatorIdentity;
+  resultDomain: { minimum: number; maximum: number };
+}
+
+type RepositoryComparatorProfile = Readonly<{ kind: string }>;
+
+/** Resolve an installed comparator for one exact output contract. The same
+ * capability describes compile-time applicability and the runtime scalar
+ * domain, so repository configuration cannot widen either boundary. */
+export function repositoryComparatorCapability(args: {
+  metric: string;
+  mediaType: string;
+  profile: RepositoryComparatorProfile | null;
+}): RepositoryComparatorCapability {
+  const capability = installed.find(({ identity }) => identity.id === args.metric);
+  if (!capability) throw new Error(`no installed repository comparator supports ${args.metric}`);
+  if (
+    capability.identity.id === "pixel-difference" &&
+    (args.profile?.kind !== "raster" || !args.mediaType.startsWith("image/"))
+  )
+    throw new Error("pixel-difference requires the installed raster profile and image MIME");
+  return {
+    identity: ComparatorIdentitySchema.parse(capability.identity),
+    resultDomain: { ...capability.resultDomain },
+  };
+}
 
 export function repositoryComparatorIdentity(args: {
   metric: string;
   mediaType: string;
-  profile: RepositoryCaptureProfile | null;
+  profile: RepositoryComparatorProfile | null;
 }): RepositoryComparatorIdentity {
-  const identity = repositoryComparatorContracts.find(({ id }) => id === args.metric);
-  if (!identity) throw new Error(`no installed repository comparator supports ${args.metric}`);
-  if (
-    identity.id === "pixel-difference" &&
-    (args.profile?.kind !== "raster" || !args.mediaType.startsWith("image/"))
-  )
-    throw new Error("pixel-difference requires the installed raster profile and image MIME");
-  return identity;
+  return repositoryComparatorCapability(args).identity;
 }
 
 function normalizedByteDifference(expected: Buffer, observed: Buffer): number {
@@ -80,26 +106,30 @@ export async function compareRepositoryCaptureBytes(args: {
   comparator: RepositoryComparatorIdentity;
   metric: string;
   mediaType: string;
-  profile: RepositoryCaptureProfile | null;
+  profile: RepositoryComparatorProfile | null;
   expected: Buffer;
   observed: Buffer;
 }): Promise<number> {
-  const selected = repositoryComparatorIdentity({
+  const selected = repositoryComparatorCapability({
     metric: args.metric,
     mediaType: args.mediaType,
     profile: args.profile,
   });
   if (
-    selected.id !== args.comparator.id ||
-    selected.contract !== args.comparator.contract ||
-    args.metric !== selected.id
+    selected.identity.id !== args.comparator.id ||
+    selected.identity.contract !== args.comparator.contract ||
+    args.metric !== selected.identity.id
   )
     throw new Error("repository comparator differs from the installed contract");
   const difference =
-    selected.id === "pixel-difference"
+    selected.identity.id === "pixel-difference"
       ? await normalizedPixelDifference(args.expected, args.observed)
       : normalizedByteDifference(args.expected, args.observed);
-  if (!Number.isFinite(difference) || difference < 0 || difference > 1)
+  if (
+    !Number.isFinite(difference) ||
+    difference < selected.resultDomain.minimum ||
+    difference > selected.resultDomain.maximum
+  )
     throw new Error("installed repository comparator returned an invalid difference");
   return difference;
 }

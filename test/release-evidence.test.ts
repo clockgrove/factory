@@ -86,6 +86,47 @@ describe("release evidence and publication boundary", () => {
         })),
       }),
     );
+  const bindEvidenceToCurrentManifest = () => {
+    const releaseManifestSha256 = hash(readFileSync(join(root, "release/release-manifest.json")));
+    for (let index = 0; index < gates.length; index += 1) {
+      const record = evidence(index);
+      record.releaseManifestSha256 = releaseManifestSha256;
+      write(`release/evidence/${index}.json`, JSON.stringify(record));
+    }
+    refreshIndex();
+  };
+  const rewriteChecksums = (bytes: string) => {
+    write("release/SHA256SUMS", bytes);
+    const manifestPath = "release/release-manifest.json";
+    const manifest = JSON.parse(readFileSync(join(root, manifestPath), "utf8"));
+    manifest.checksums.sha256 = hash(bytes);
+    write(manifestPath, JSON.stringify(manifest));
+    bindEvidenceToCurrentManifest();
+  };
+  const rewriteSbom = (bytes: string) => {
+    const manifestPath = "release/release-manifest.json";
+    const manifest = JSON.parse(readFileSync(join(root, manifestPath), "utf8"));
+    write(`release/${manifest.sbom.file}`, bytes);
+    manifest.sbom.sha256 = hash(bytes);
+
+    const provenancePath = `release/${manifest.provenance.file}`;
+    const provenance = JSON.parse(readFileSync(join(root, provenancePath), "utf8"));
+    const subject = provenance.subjects.find(
+      ({ file }: { file: string }) => file === manifest.sbom.file,
+    );
+    subject.sha256 = manifest.sbom.sha256;
+    const provenanceBytes = JSON.stringify(provenance);
+    write(provenancePath, provenanceBytes);
+    manifest.provenance.sha256 = hash(provenanceBytes);
+
+    const checksums = [manifest.tarball, manifest.sbom, manifest.provenance]
+      .map(({ file, sha256 }: { file: string; sha256: string }) => `${sha256}  ${file}`)
+      .join("\n");
+    write("release/SHA256SUMS", `${checksums}\n`);
+    manifest.checksums.sha256 = hash(`${checksums}\n`);
+    write(manifestPath, JSON.stringify(manifest));
+    bindEvidenceToCurrentManifest();
+  };
   const changeProvider = (index: number, change: (record: ManagedObservation) => void) => {
     const gate = evidence(4);
     const descriptor = gate.managedProviders[index].evidence;
@@ -114,7 +155,7 @@ describe("release evidence and publication boundary", () => {
     };
     const policy = providerPolicy(authority);
     const installedArtifact = {
-      version: "2.0.26",
+      version: "2.0.27-beta.0",
       inventorySha256: hash(readFileSync(join(root, "dist/bundle-inventory.json"))),
       bundles: ["factory.js", "mcp-server.js"].map((file) => {
         const bytes = readFileSync(join(root, "dist", file));
@@ -277,8 +318,35 @@ describe("release evidence and publication boundary", () => {
       "package.json",
       JSON.stringify({
         name: "@clockgrove/factory",
-        version: "2.0.26",
-        publishConfig: { tag: "latest", access: "public" },
+        version: "2.0.27-beta.0",
+        publishConfig: { tag: "beta", access: "public" },
+      }),
+    );
+    write(
+      "package-lock.json",
+      JSON.stringify({
+        name: "@clockgrove/factory",
+        version: "2.0.27-beta.0",
+        lockfileVersion: 3,
+        packages: {
+          "": { name: "@clockgrove/factory", version: "2.0.27-beta.0" },
+        },
+      }),
+    );
+    write("plugin.json", JSON.stringify({ name: "factory", version: "2.0.27-beta.0" }));
+    write(
+      ".codex-plugin/plugin.json",
+      JSON.stringify({ name: "factory", version: "2.0.27-beta.0" }),
+    );
+    write(
+      ".claude-plugin/plugin.json",
+      JSON.stringify({ name: "factory", version: "2.0.27-beta.0" }),
+    );
+    write(
+      ".github/plugin/marketplace.json",
+      JSON.stringify({
+        metadata: { version: "2.0.27-beta.0" },
+        plugins: [{ name: "factory", version: "2.0.27-beta.0" }],
       }),
     );
     write("THIRD_PARTY_NOTICES.txt", "fixture notices\n");
@@ -297,6 +365,7 @@ describe("release evidence and publication boundary", () => {
       "qualification-receipts.mjs",
       "qualification-merge-proof.mjs",
       "qualification-model-accounting.mjs",
+      "release-integrity.mjs",
     ]) {
       copyFileSync(new URL(`../scripts/${name}`, import.meta.url), join(root, "scripts", name));
     }
@@ -386,7 +455,7 @@ describe("release evidence and publication boundary", () => {
     );
     write("release/evidence/4.json", JSON.stringify(managed));
     refreshIndex();
-    git("tag", "v2.0.26");
+    git("tag", "v2.0.27-beta.0");
   });
 
   afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -594,8 +663,8 @@ describe("release evidence and publication boundary", () => {
     write("uncommitted.txt", "not committed\n");
     expect(verify().stderr).toContain("requires a clean Git worktree");
     rmSync(join(root, "uncommitted.txt"));
-    git("tag", "-d", "v2.0.26");
-    expect(verify().stderr).toContain("requires immutable tag v2.0.26");
+    git("tag", "-d", "v2.0.27-beta.0");
+    expect(verify().stderr).toContain("requires immutable tag v2.0.27-beta.0");
   });
 
   it.each(["missing", "duplicate", "extra"])("rejects %s gates in the index", (fault) => {
@@ -648,6 +717,76 @@ describe("release evidence and publication boundary", () => {
     expect(publish().stdout).not.toContain("npm-stub");
   });
 
+  it.each(["missing", "extra", "duplicate", "malformed", "stale"])(
+    "rejects a %s canonical checksum set even when its manifest digest is rebound",
+    (fault) => {
+      const original = readFileSync(join(root, "release/SHA256SUMS"), "utf8");
+      const lines = original.trimEnd().split("\n");
+      let changed = original;
+      if (fault === "missing") changed = `${lines.slice(0, -1).join("\n")}\n`;
+      if (fault === "extra") changed = `${original}${"0".repeat(64)}  extra.tgz\n`;
+      if (fault === "duplicate") changed = `${original}${lines[0]}\n`;
+      if (fault === "malformed") changed = "not-a-checksum\n";
+      if (fault === "stale")
+        changed = `${"0".repeat(64)}${lines[0]!.slice(64)}\n${lines.slice(1).join("\n")}\n`;
+      rewriteChecksums(changed);
+      expect(verify().stderr).toContain("release checksums differ from the canonical artifact set");
+    },
+  );
+
+  it("rejects an artifact filename that injects another checksum record", () => {
+    const manifestPath = "release/release-manifest.json";
+    const manifest = JSON.parse(readFileSync(join(root, manifestPath), "utf8"));
+    manifest.tarball.file = `factory.tgz\n${"0".repeat(64)}  injected.tgz`;
+    write(manifestPath, JSON.stringify(manifest));
+    bindEvidenceToCurrentManifest();
+    expect(verify().stderr).toContain("invalid artifact descriptor");
+  });
+
+  it("rejects an additional provenance subject after every digest is rebound", () => {
+    const provenancePath = "release/factory.provenance.json";
+    const provenance = JSON.parse(readFileSync(join(root, provenancePath), "utf8"));
+    provenance.subjects.push({ file: "unverified.txt", sha256: "0".repeat(64) });
+    const provenanceBytes = JSON.stringify(provenance);
+    write(provenancePath, provenanceBytes);
+
+    const manifestPath = "release/release-manifest.json";
+    const manifest = JSON.parse(readFileSync(join(root, manifestPath), "utf8"));
+    manifest.provenance.sha256 = hash(provenanceBytes);
+    const checksums = [manifest.tarball, manifest.sbom, manifest.provenance]
+      .map(({ file, sha256 }: { file: string; sha256: string }) => `${sha256}  ${file}`)
+      .join("\n");
+    write("release/SHA256SUMS", `${checksums}\n`);
+    manifest.checksums.sha256 = hash(`${checksums}\n`);
+    write(manifestPath, JSON.stringify(manifest));
+    bindEvidenceToCurrentManifest();
+
+    expect(verify().stderr).toContain("exact manifest subject set");
+  });
+
+  it.each(["non-json", "wrong-root"])(
+    "rejects a %s final SBOM after every digest is rebound",
+    (fault) => {
+      const bytes =
+        fault === "non-json"
+          ? "not-json"
+          : JSON.stringify({
+              metadata: {
+                component: {
+                  name: "other",
+                  version: "2.0.27-beta.0",
+                  "bom-ref": "other@2.0.27-beta.0",
+                  purl: "pkg:npm/other@2.0.27-beta.0",
+                },
+              },
+            });
+      rewriteSbom(bytes);
+      const result = verify();
+      expect(result.status).not.toBe(0);
+      if (fault === "wrong-root") expect(result.stderr).toContain("release SBOM root identity");
+    },
+  );
+
   it("rejects symlinked release artifacts", () => {
     rmSync(join(root, "release/factory.tgz"));
     symlinkSync(join(root, "release/factory.cdx.json"), join(root, "release/factory.tgz"));
@@ -680,7 +819,17 @@ describe("release evidence and publication boundary", () => {
 
   const stageArtifacts = (sourceCommit: string) => {
     const tarball = { file: "factory.tgz", sha256: hash("tarball") };
-    const sbom = { file: "factory.cdx.json", sha256: hash("sbom") };
+    const sbomBytes = JSON.stringify({
+      metadata: {
+        component: {
+          name: "@clockgrove/factory",
+          version: "2.0.27-beta.0",
+          "bom-ref": "@clockgrove/factory@2.0.27-beta.0",
+          purl: "pkg:npm/%40clockgrove/factory@2.0.27-beta.0",
+        },
+      },
+    });
+    const sbom = { file: "factory.cdx.json", sha256: hash(sbomBytes) };
     const bundleInventory = {
       file: "dist/bundle-inventory.json",
       sha256: hash(readFileSync(join(root, "dist/bundle-inventory.json"))),
@@ -692,18 +841,20 @@ describe("release evidence and publication boundary", () => {
     const provenance = JSON.stringify({
       protocol: "clockgrove.factory/release-provenance-v1",
       source: { commit: sourceCommit, dirty: false },
-      package: { name: "@clockgrove/factory", version: "2.0.26", distTag: "latest" },
+      package: { name: "@clockgrove/factory", version: "2.0.27-beta.0", distTag: "beta" },
       subjects: [tarball, sbom, bundleInventory, thirdPartyNotices],
     });
     write("release/factory.tgz", "tarball");
-    write("release/factory.cdx.json", "sbom");
+    write("release/factory.cdx.json", sbomBytes);
     write("release/factory.provenance.json", provenance);
+    const checksums = `${tarball.sha256}  ${tarball.file}\n${sbom.sha256}  ${sbom.file}\n${hash(provenance)}  factory.provenance.json\n`;
+    write("release/SHA256SUMS", checksums);
     write(
       "release/release-manifest.json",
       JSON.stringify({
         name: "@clockgrove/factory",
-        version: "2.0.26",
-        distTag: "latest",
+        version: "2.0.27-beta.0",
+        distTag: "beta",
         tarball,
         sbom,
         bundleInventory,
@@ -714,6 +865,7 @@ describe("release evidence and publication boundary", () => {
           sourceCommit,
           sourceDirty: false,
         },
+        checksums: { file: "SHA256SUMS", sha256: hash(checksums) },
       }),
     );
     write(
@@ -757,14 +909,14 @@ describe("release evidence and publication boundary", () => {
       export async function verifyPublishReadiness() {
         writeFileSync(new URL("../release/release-manifest.json", import.meta.url),
           JSON.stringify({ tarball: { file: "../unverified.tgz" }, distTag: "unverified" }));
-        return { tarball: ${JSON.stringify(join(root, "release/factory.tgz"))}, access: "public", distTag: "latest" };
+        return { tarball: ${JSON.stringify(join(root, "release/factory.tgz"))}, access: "public", distTag: "beta" };
       }
     `,
     );
     const result = publish();
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(join(root, "release/factory.tgz"));
-    expect(result.stdout).toContain("--tag latest");
+    expect(result.stdout).toContain("--tag beta");
     expect(result.stdout).not.toContain("unverified");
   });
 
@@ -774,6 +926,6 @@ describe("release evidence and publication boundary", () => {
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("npm-stub publish");
-    expect(result.stdout).toContain("--tag latest --dry-run");
+    expect(result.stdout).toContain("--tag beta --dry-run");
   });
 });

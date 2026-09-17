@@ -2,8 +2,16 @@ import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, resolve, sep } from "node:path";
+import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  assertInitialBetaIdentity,
+  assertNormalizedSbomRootIdentity,
+  assertReleaseArtifactBasename,
+  assertSynchronizedReleaseManifests,
+  canonicalChecksumBytes,
+  sha256,
+} from "./release-integrity.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export async function verifyPublishReadiness() {
@@ -332,6 +340,24 @@ export async function verifyPublishReadiness() {
   }
 
   const packageManifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+  const packageLock = JSON.parse(await readFile(resolve(root, "package-lock.json"), "utf8"));
+  assertInitialBetaIdentity(packageManifest, packageLock);
+  const pluginManifest = JSON.parse(await readFile(resolve(root, "plugin.json"), "utf8"));
+  const codexManifest = JSON.parse(
+    await readFile(resolve(root, ".codex-plugin", "plugin.json"), "utf8"),
+  );
+  const claudeManifest = JSON.parse(
+    await readFile(resolve(root, ".claude-plugin", "plugin.json"), "utf8"),
+  );
+  const marketplace = JSON.parse(
+    await readFile(resolve(root, ".github", "plugin", "marketplace.json"), "utf8"),
+  );
+  assertSynchronizedReleaseManifests(packageManifest, {
+    plugin: pluginManifest,
+    codex: codexManifest,
+    claude: claudeManifest,
+    marketplace,
+  });
   if (
     manifest.name !== packageManifest.name ||
     manifest.version !== packageManifest.version ||
@@ -341,25 +367,27 @@ export async function verifyPublishReadiness() {
   }
 
   const verifyArtifact = async (descriptor) => {
-    if (
-      typeof descriptor?.file !== "string" ||
-      !descriptor.file ||
-      basename(descriptor.file) !== descriptor.file ||
-      !/^[0-9a-f]{64}$/.test(descriptor.sha256 ?? "")
-    ) {
+    if (!descriptor || !/^[0-9a-f]{64}$/.test(descriptor.sha256 ?? "")) {
       throw new Error("release manifest contains an invalid artifact descriptor");
     }
-    const path = resolve(releaseDirectory, descriptor.file);
+    let file;
+    try {
+      file = assertReleaseArtifactBasename(descriptor.file);
+    } catch {
+      throw new Error("release manifest contains an invalid artifact descriptor");
+    }
+    const path = resolve(releaseDirectory, file);
     if (hash(await readRegularFile(path)) !== descriptor.sha256) {
-      throw new Error(
-        `release artifact ${descriptor.file} does not match its verified SHA-256 digest`,
-      );
+      throw new Error(`release artifact ${file} does not match its verified SHA-256 digest`);
     }
     return path;
   };
   const tarball = await verifyArtifact(manifest.tarball);
-  await verifyArtifact(manifest.sbom);
+  const sbomPath = await verifyArtifact(manifest.sbom);
   const provenancePath = await verifyArtifact(manifest.provenance);
+  const checksumsPath = await verifyArtifact(manifest.checksums);
+  const sbom = JSON.parse((await readRegularFile(sbomPath)).toString("utf8"));
+  assertNormalizedSbomRootIdentity(sbom, packageManifest, "release SBOM");
   const provenance = JSON.parse((await readRegularFile(provenancePath)).toString("utf8"));
   if (
     manifest.provenance.sourceDirty !== false ||
@@ -373,12 +401,18 @@ export async function verifyPublishReadiness() {
   ) {
     throw new Error("release artifacts were not generated from the current clean release commit");
   }
-  for (const descriptor of [
+  const provenanceSubjects = [
     manifest.tarball,
     manifest.sbom,
     manifest.bundleInventory,
     manifest.thirdPartyNotices,
-  ]) {
+  ];
+  if (
+    !Array.isArray(provenance.subjects) ||
+    provenance.subjects.length !== provenanceSubjects.length
+  )
+    throw new Error("release provenance must contain the exact manifest subject set");
+  for (const descriptor of provenanceSubjects) {
     const matches = provenance.subjects?.filter(
       (subject) => subject.file === descriptor?.file && subject.sha256 === descriptor?.sha256,
     );
@@ -395,6 +429,17 @@ export async function verifyPublishReadiness() {
     ) {
       throw new Error(`release subject ${expectedPath} differs from the current source`);
     }
+  }
+  const expectedChecksums = canonicalChecksumBytes([
+    manifest.tarball,
+    manifest.sbom,
+    manifest.provenance,
+  ]);
+  if (
+    (await readRegularFile(checksumsPath)).toString("utf8") !== expectedChecksums ||
+    manifest.checksums.sha256 !== sha256(expectedChecksums)
+  ) {
+    throw new Error("release checksums differ from the canonical artifact set");
   }
 
   const releaseTag = `v${packageManifest.version}`;

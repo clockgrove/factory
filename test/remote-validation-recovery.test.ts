@@ -632,6 +632,65 @@ describe.each(providers)("%s remote validation recovery", (provider) => {
     expect(fixture.stages).toEqual(["observe"]);
   });
 
+  it("settles an already-rebounded invocation when absence observation crosses the deadline", async () => {
+    const fixture = ports({
+      dispatch: true,
+      rebound: true,
+      observation: null,
+      cleanupObservation: "cleaned",
+    });
+    const times = [
+      new Date("2026-09-17T00:01:00.000Z"),
+      new Date("2026-09-17T00:09:59.999Z"),
+      new Date(deadline),
+    ];
+    fixture.input.now = async () => times.shift() ?? new Date(deadline);
+    await expect(runRemoteValidationInvocationTransaction(fixture.input)).resolves.toBe(
+      "deadline-failure",
+    );
+    expect(fixture.stages).toEqual([
+      "observe",
+      "cleanup",
+      "terminal",
+      "result",
+      "settle-provider-cleanup",
+    ]);
+  });
+
+  it("settles a failed rebound when its final absence observation crosses the deadline", async () => {
+    const fixture = ports({
+      dispatch: true,
+      observation: null,
+      cleanupObservation: "cleaned",
+      launch: async () => {
+        fixture.stages.push("launch-failed");
+        throw new Error("rebound create failed");
+      },
+    });
+    const times = [
+      new Date("2026-09-17T00:01:00.000Z"),
+      new Date("2026-09-17T00:09:59.996Z"),
+      new Date("2026-09-17T00:09:59.997Z"),
+      new Date("2026-09-17T00:09:59.998Z"),
+      new Date("2026-09-17T00:09:59.999Z"),
+      new Date(deadline),
+    ];
+    fixture.input.now = async () => times.shift() ?? new Date(deadline);
+    await expect(runRemoteValidationInvocationTransaction(fixture.input)).resolves.toBe(
+      "deadline-failure",
+    );
+    expect(fixture.stages).toEqual([
+      "observe",
+      "rebound",
+      "launch-failed",
+      "observe",
+      "cleanup",
+      "terminal",
+      "result",
+      "settle-provider-cleanup",
+    ]);
+  });
+
   it("does not let a durable result mask cleanup failure for a live resource", async () => {
     const fixture = ports({
       dispatch: true,

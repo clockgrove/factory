@@ -278,6 +278,8 @@ export async function runRemoteValidationInvocationTransaction<
 
   const recovered = await args.observeResource();
   if (recovered) return settle(state.dispatch!, "provider-cleanup", recovered);
+  if ((await args.now()).getTime() >= Date.parse(args.validationDeadline))
+    return expireAfterCleanup(state.dispatch!);
   durableResult = await args.observeResult();
   state = await args.observeDispatch();
   if (state.settled && durableResult) return durableResult;
@@ -296,6 +298,8 @@ export async function runRemoteValidationInvocationTransaction<
       return expireAfterCleanup(state.dispatch!);
     const reboundRecovery = await args.observeResource();
     if (reboundRecovery) return settle(state.dispatch!, "provider-cleanup", reboundRecovery);
+    if ((await args.now()).getTime() >= Date.parse(args.validationDeadline))
+      return expireAfterCleanup(state.dispatch!);
     throw error;
   }
 }

@@ -63,6 +63,7 @@ describe("canonical product-file byte limit", () => {
           protocol: "clockgrove.factory/repository-capture-request",
           validationInvocationDigest: digest,
           environmentIdentity: `fixture@sha256:${digest}`,
+          validationDeadline: "2026-09-17T00:01:00.000Z",
           recipes: [
             {
               id: "capture",
@@ -141,6 +142,7 @@ describe("canonical product-file byte limit", () => {
         protocol: "clockgrove.factory/repository-capture-request",
         validationInvocationDigest: digest,
         environmentIdentity: `fixture@sha256:${digest}`,
+        validationDeadline: "2026-09-17T00:01:00.000Z",
         recipes: [
           {
             id: "capture",

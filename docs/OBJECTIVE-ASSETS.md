@@ -126,8 +126,10 @@ persisting captured bytes, so a valid capture cannot be paired with a different 
 Exact and threshold comparisons share the same trust boundary. The validator receives no expected
 bytes. After capture commands exit, the trusted Factory host compares either the captured SHA-256
 or the immutable expected and observed payloads with the installed comparator named by the policy.
-Repository code never supplies the comparison scalar. All captured outputs return to the host, are checked against their declared MIME and optional typed
-profile, and are retained through immutable `validation-evidence` content transfers. An opaque
+Repository code never supplies the comparison scalar. All captured outputs return to the host and
+are checked against their declared MIME. A typed profile applies only to its named comparison,
+diff, and preview roles; every auxiliary role is explicitly unprofiled. Each output's resolved
+profile binding is retained through immutable `validation-evidence` content transfers. An opaque
 unprofiled output may establish an exact byte match, but it carries no semantic-validity claim.
 
 Mechanical validation and semantic review are separate gates. Exact equality, a grounded threshold

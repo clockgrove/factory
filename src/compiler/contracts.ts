@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { declaredAssetHandlerContract } from "../assets/handlers.js";
 
 import {
   CompilerInferenceChallengesSchema,
@@ -515,7 +516,63 @@ const CompilerCaptureRecipeSchema = z
       .nullable(),
     humanReview: z.boolean(),
   })
-  .strict();
+  .strict()
+  .superRefine((recipe, context) => {
+    const roles = recipe.outputs.map(({ roleId }) => roleId);
+    if (new Set(roles).size !== roles.length)
+      context.addIssue({
+        code: "custom",
+        path: ["outputs"],
+        message: "capture output roles are duplicated",
+      });
+    if (!roles.includes(recipe.comparisonOutputRoleId))
+      context.addIssue({
+        code: "custom",
+        path: ["comparisonOutputRoleId"],
+        message: "capture comparison references an undeclared output role",
+      });
+    if (!recipe.profile) return;
+    const profiledRoleIds = [
+      recipe.profile.captureRoleId,
+      recipe.profile.diffRoleId,
+      recipe.profile.previewRoleId,
+    ].filter((roleId): roleId is string => roleId !== null);
+    if (new Set(profiledRoleIds).size !== profiledRoleIds.length)
+      context.addIssue({
+        code: "custom",
+        path: ["profile"],
+        message: "raster profile output roles are duplicated",
+      });
+    if (recipe.profile.captureRoleId !== recipe.comparisonOutputRoleId)
+      context.addIssue({
+        code: "custom",
+        path: ["profile", "captureRoleId"],
+        message: "raster capture and comparison output roles differ",
+      });
+    for (const roleId of profiledRoleIds)
+      if (!roles.includes(roleId))
+        context.addIssue({
+          code: "custom",
+          path: ["profile"],
+          message: "raster profile references an undeclared output role",
+        });
+    const profiledRoles = new Set(profiledRoleIds);
+    recipe.outputs.forEach((output, index) => {
+      if (!profiledRoles.has(output.roleId)) return;
+      let handlerId: string | null = null;
+      try {
+        handlerId = declaredAssetHandlerContract(output.mediaType).id;
+      } catch {
+        // Active or executable MIME is never valid capture evidence.
+      }
+      if (handlerId !== "sharp-raster")
+        context.addIssue({
+          code: "custom",
+          path: ["outputs", index, "mediaType"],
+          message: "raster profile output requires the installed raster handler",
+        });
+    });
+  });
 const RepositoryThresholdPolicySchema = z
   .object({
     id: Id,
@@ -744,6 +801,34 @@ export const RepositoryCaptureCatalogSchema = z
           path: ["captures", index],
           message: "capture declares more than 16 outputs",
         });
+      if (capture.profile) {
+        const profiledOutputs = [
+          { output: capture.comparisonOutput, path: ["comparisonOutput", "mediaType"] },
+          {
+            output: capture.profile.diffOutput,
+            path: ["profile", "diffOutput", "mediaType"],
+          },
+          {
+            output: capture.profile.previewOutput,
+            path: ["profile", "previewOutput", "mediaType"],
+          },
+        ];
+        for (const { output, path } of profiledOutputs) {
+          if (!output) continue;
+          let handlerId: string | null = null;
+          try {
+            handlerId = declaredAssetHandlerContract(output.mediaType).id;
+          } catch {
+            // Active or executable MIME is never valid capture evidence.
+          }
+          if (handlerId !== "sharp-raster")
+            context.addIssue({
+              code: "custom",
+              path: ["captures", index, ...path],
+              message: "raster profile output requires the installed raster handler",
+            });
+        }
+      }
       const captureGates = [
         ...capture.exactDeterministicGates,
         ...capture.thresholdComparisons.flatMap(({ deterministicGates }) => deterministicGates),

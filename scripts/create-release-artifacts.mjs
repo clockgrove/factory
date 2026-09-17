@@ -1,9 +1,17 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  assertInitialBetaIdentity,
+  assertNormalizedSbomRootIdentity,
+  assertSbomRootIdentity,
+  assertSynchronizedReleaseManifests,
+  canonicalChecksumBytes,
+  normalizeSbomRootIdentity,
+  sha256,
+} from "./release-integrity.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outputDirectory = resolve(process.argv[2] ?? resolve(root, "release"));
@@ -37,176 +45,242 @@ function runGit(args) {
   return result.stdout.trim();
 }
 
-const hash = (value) => createHash("sha256").update(value).digest("hex");
 const initialCommit = runGit(["rev-parse", "HEAD"]);
 const initiallyDirty = runGit(["status", "--porcelain"]).length > 0;
-await mkdir(outputDirectory, { recursive: true });
-
-const packed = JSON.parse(runNpm(["pack", "--json", "--pack-destination", outputDirectory]))[0];
-if (!packed?.filename) throw new Error("npm pack did not return an artifact");
-const tarballPath = resolve(outputDirectory, packed.filename);
-const tarballHash = hash(await readFile(tarballPath));
-
-const inventoryPath = resolve(root, "dist", "bundle-inventory.json");
-const inventoryBytes = await readFile(inventoryPath);
-const inventory = JSON.parse(inventoryBytes.toString("utf8"));
-if (inventory.protocol !== "clockgrove.factory/bundle-inventory-v1") {
-  throw new Error("dist/bundle-inventory.json uses an unsupported protocol");
-}
-for (const record of inventory.bundles ?? []) {
-  const bytes = await readFile(resolve(root, "dist", record.file));
-  if (record.bytes !== bytes.length || record.sha256 !== hash(bytes)) {
-    throw new Error(`bundle inventory does not match dist/${record.file}`);
-  }
-}
-
-const productionSbom = JSON.parse(
-  runNpm(["sbom", "--sbom-format=cyclonedx", "--omit=dev", "--package-lock-only"]),
-);
-const completeLockSbom = JSON.parse(
-  runNpm(["sbom", "--sbom-format=cyclonedx", "--package-lock-only"]),
-);
-const componentKey = (component) => `${component.name}@${component.version}`;
-const bundledKeys = new Set(inventory.components.map(componentKey));
-const components = new Map();
-for (const component of productionSbom.components ?? []) {
-  components.set(component["bom-ref"], component);
-}
-for (const component of completeLockSbom.components ?? []) {
-  if (!bundledKeys.has(componentKey(component))) continue;
-  components.set(component["bom-ref"], {
-    ...component,
-    scope: "required",
-    properties: [
-      ...(component.properties ?? []).filter(
-        (property) => property.name !== "clockgrove.factory:embedded",
-      ),
-      { name: "clockgrove.factory:embedded", value: "true" },
-    ],
-  });
-  bundledKeys.delete(componentKey(component));
-}
-if (bundledKeys.size > 0) {
-  throw new Error(
-    `bundle inventory components are missing from the lock SBOM: ${[...bundledKeys]}`,
-  );
-}
-
-const rootRef = productionSbom.metadata?.component?.["bom-ref"];
-const allowedRefs = new Set([rootRef, ...components.keys()]);
-const dependencies = new Map();
-for (const document of [productionSbom, completeLockSbom]) {
-  for (const dependency of document.dependencies ?? []) {
-    if (!allowedRefs.has(dependency.ref)) continue;
-    const current = dependencies.get(dependency.ref) ?? new Set();
-    for (const target of dependency.dependsOn ?? []) {
-      if (allowedRefs.has(target)) current.add(target);
-    }
-    dependencies.set(dependency.ref, current);
-  }
-}
-const rootDependencies = dependencies.get(rootRef) ?? new Set();
-for (const component of completeLockSbom.components ?? []) {
-  if (
-    components
-      .get(component["bom-ref"])
-      ?.properties?.some(
-        (property) => property.name === "clockgrove.factory:embedded" && property.value === "true",
-      )
-  ) {
-    rootDependencies.add(component["bom-ref"]);
-  }
-}
-dependencies.set(rootRef, rootDependencies);
-
-const sbom = {
-  ...productionSbom,
-  components: [...components.values()],
-  dependencies: [...dependencies].map(([ref, dependsOn]) => ({ ref, dependsOn: [...dependsOn] })),
-};
-delete sbom.serialNumber;
-if (sbom.metadata) delete sbom.metadata.timestamp;
-sbom.components?.sort((left, right) =>
-  String(left["bom-ref"]).localeCompare(String(right["bom-ref"])),
-);
-sbom.dependencies?.sort((left, right) => String(left.ref).localeCompare(String(right.ref)));
-for (const dependency of sbom.dependencies ?? []) dependency.dependsOn?.sort();
-
+if (initiallyDirty) throw new Error("release artifacts require a clean Git worktree");
 const packageManifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
-const sbomName = `${packageManifest.name.split("/").at(-1)}-${packageManifest.version}.cdx.json`;
-const sbomPath = resolve(outputDirectory, sbomName);
-const sbomBytes = `${JSON.stringify(sbom, null, 2)}\n`;
-await writeFile(sbomPath, sbomBytes);
-const sbomHash = hash(sbomBytes);
-const inventoryHash = hash(inventoryBytes);
-const noticesName = "THIRD_PARTY_NOTICES.txt";
-const noticesHash = hash(await readFile(resolve(root, noticesName)));
-
-const repository = String(packageManifest.repository?.url ?? "").replace(/^git\+/, "");
-const sourceCommit = runGit(["rev-parse", "HEAD"]);
-if (sourceCommit !== initialCommit) {
-  throw new Error(
-    "release source commit changed while creating artifacts; discard and regenerate them",
-  );
-}
-const sourceDirty = initiallyDirty || runGit(["status", "--porcelain"]).length > 0;
-const provenanceName = `${packageManifest.name.split("/").at(-1)}-${packageManifest.version}.provenance.json`;
-const provenance = {
-  protocol: "clockgrove.factory/release-provenance-v1",
-  source: { repository, commit: sourceCommit, dirty: sourceDirty },
-  package: {
-    name: packageManifest.name,
-    version: packageManifest.version,
-    distTag: packageManifest.publishConfig?.tag ?? "latest",
-  },
-  subjects: [
-    { file: packed.filename, sha256: tarballHash },
-    { file: sbomName, sha256: sbomHash },
-    { file: "dist/bundle-inventory.json", sha256: inventoryHash },
-    { file: noticesName, sha256: noticesHash },
-  ],
-};
-const provenanceBytes = `${JSON.stringify(provenance, null, 2)}\n`;
-await writeFile(resolve(outputDirectory, provenanceName), provenanceBytes);
-const provenanceHash = hash(provenanceBytes);
-
-await writeFile(
-  resolve(outputDirectory, "SHA256SUMS"),
-  `${tarballHash}  ${packed.filename}\n${sbomHash}  ${sbomName}\n${provenanceHash}  ${provenanceName}\n`,
+const packageLock = JSON.parse(await readFile(resolve(root, "package-lock.json"), "utf8"));
+assertInitialBetaIdentity(packageManifest, packageLock);
+const pluginManifest = JSON.parse(await readFile(resolve(root, "plugin.json"), "utf8"));
+const codexManifest = JSON.parse(
+  await readFile(resolve(root, ".codex-plugin", "plugin.json"), "utf8"),
 );
-await writeFile(
-  resolve(outputDirectory, "release-manifest.json"),
-  `${JSON.stringify(
-    {
+const claudeManifest = JSON.parse(
+  await readFile(resolve(root, ".claude-plugin", "plugin.json"), "utf8"),
+);
+const marketplace = JSON.parse(
+  await readFile(resolve(root, ".github", "plugin", "marketplace.json"), "utf8"),
+);
+assertSynchronizedReleaseManifests(packageManifest, {
+  plugin: pluginManifest,
+  codex: codexManifest,
+  claude: claudeManifest,
+  marketplace,
+});
+try {
+  await lstat(outputDirectory);
+  throw new Error(`release output already exists: ${outputDirectory}`);
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
+await mkdir(dirname(outputDirectory), { recursive: true });
+const stagingDirectory = await mkdtemp(
+  resolve(dirname(outputDirectory), `.${basename(outputDirectory)}.tmp-`),
+);
+const stagingRelative = relative(root, stagingDirectory);
+const statusIgnoringStaging = () => {
+  const args = ["status", "--porcelain", "--untracked-files=all"];
+  if (
+    stagingRelative &&
+    stagingRelative !== ".." &&
+    !stagingRelative.startsWith(`..${sep}`) &&
+    !resolve(root, stagingRelative).startsWith(`${resolve(root, "node_modules")}${sep}`)
+  ) {
+    const normalized = stagingRelative.split(sep).join("/");
+    args.push("--", ".", `:(exclude)${normalized}/**`);
+  }
+  return runGit(args);
+};
+
+let completed = false;
+try {
+  const packed = JSON.parse(runNpm(["pack", "--json", "--pack-destination", stagingDirectory]))[0];
+  if (!packed?.filename) throw new Error("npm pack did not return an artifact");
+  const tarballPath = resolve(stagingDirectory, packed.filename);
+  const tarballHash = sha256(await readFile(tarballPath));
+
+  const inventoryPath = resolve(root, "dist", "bundle-inventory.json");
+  const inventoryBytes = await readFile(inventoryPath);
+  const inventory = JSON.parse(inventoryBytes.toString("utf8"));
+  if (inventory.protocol !== "clockgrove.factory/bundle-inventory-v1") {
+    throw new Error("dist/bundle-inventory.json uses an unsupported protocol");
+  }
+  for (const record of inventory.bundles ?? []) {
+    const bytes = await readFile(resolve(root, "dist", record.file));
+    if (record.bytes !== bytes.length || record.sha256 !== sha256(bytes)) {
+      throw new Error(`bundle inventory does not match dist/${record.file}`);
+    }
+  }
+
+  const productionSbom = JSON.parse(
+    runNpm(["sbom", "--sbom-format=cyclonedx", "--omit=dev", "--package-lock-only"]),
+  );
+  const completeLockSbom = JSON.parse(
+    runNpm(["sbom", "--sbom-format=cyclonedx", "--package-lock-only"]),
+  );
+  assertSbomRootIdentity(productionSbom, packageManifest, "production SBOM");
+  assertSbomRootIdentity(completeLockSbom, packageManifest, "complete-lock SBOM");
+  const componentKey = (component) => `${component.name}@${component.version}`;
+  const bundledKeys = new Set(inventory.components.map(componentKey));
+  const components = new Map();
+  for (const component of productionSbom.components ?? []) {
+    components.set(component["bom-ref"], component);
+  }
+  for (const component of completeLockSbom.components ?? []) {
+    if (!bundledKeys.has(componentKey(component))) continue;
+    components.set(component["bom-ref"], {
+      ...component,
+      scope: "required",
+      properties: [
+        ...(component.properties ?? []).filter(
+          (property) => property.name !== "clockgrove.factory:embedded",
+        ),
+        { name: "clockgrove.factory:embedded", value: "true" },
+      ],
+    });
+    bundledKeys.delete(componentKey(component));
+  }
+  if (bundledKeys.size > 0) {
+    throw new Error(
+      `bundle inventory components are missing from the lock SBOM: ${[...bundledKeys]}`,
+    );
+  }
+
+  const rootRef = productionSbom.metadata?.component?.["bom-ref"];
+  const allowedRefs = new Set([rootRef, ...components.keys()]);
+  const dependencies = new Map();
+  for (const document of [productionSbom, completeLockSbom]) {
+    for (const dependency of document.dependencies ?? []) {
+      if (!allowedRefs.has(dependency.ref)) continue;
+      const current = dependencies.get(dependency.ref) ?? new Set();
+      for (const target of dependency.dependsOn ?? []) {
+        if (allowedRefs.has(target)) current.add(target);
+      }
+      dependencies.set(dependency.ref, current);
+    }
+  }
+  const rootDependencies = dependencies.get(rootRef) ?? new Set();
+  for (const component of completeLockSbom.components ?? []) {
+    if (
+      components
+        .get(component["bom-ref"])
+        ?.properties?.some(
+          (property) =>
+            property.name === "clockgrove.factory:embedded" && property.value === "true",
+        )
+    ) {
+      rootDependencies.add(component["bom-ref"]);
+    }
+  }
+  dependencies.set(rootRef, rootDependencies);
+
+  const sbom = {
+    ...productionSbom,
+    components: [...components.values()],
+    dependencies: [...dependencies].map(([ref, dependsOn]) => ({ ref, dependsOn: [...dependsOn] })),
+  };
+  normalizeSbomRootIdentity(sbom, packageManifest, "release SBOM");
+  delete sbom.serialNumber;
+  if (sbom.metadata) delete sbom.metadata.timestamp;
+  sbom.components?.sort((left, right) =>
+    String(left["bom-ref"]).localeCompare(String(right["bom-ref"])),
+  );
+  sbom.dependencies?.sort((left, right) => String(left.ref).localeCompare(String(right.ref)));
+  for (const dependency of sbom.dependencies ?? []) dependency.dependsOn?.sort();
+
+  assertNormalizedSbomRootIdentity(sbom, packageManifest, "release SBOM");
+  const sbomName = `${packageManifest.name.split("/").at(-1)}-${packageManifest.version}.cdx.json`;
+  const sbomPath = resolve(stagingDirectory, sbomName);
+  const sbomBytes = `${JSON.stringify(sbom, null, 2)}\n`;
+  await writeFile(sbomPath, sbomBytes);
+  const sbomHash = sha256(sbomBytes);
+  const inventoryHash = sha256(inventoryBytes);
+  const noticesName = "THIRD_PARTY_NOTICES.txt";
+  const noticesHash = sha256(await readFile(resolve(root, noticesName)));
+
+  const repository = String(packageManifest.repository?.url ?? "").replace(/^git\+/, "");
+  const sourceCommit = runGit(["rev-parse", "HEAD"]);
+  if (sourceCommit !== initialCommit) {
+    throw new Error(
+      "release source commit changed while creating artifacts; discard and regenerate them",
+    );
+  }
+  const sourceDirty = false;
+  const provenanceName = `${packageManifest.name.split("/").at(-1)}-${packageManifest.version}.provenance.json`;
+  const provenance = {
+    protocol: "clockgrove.factory/release-provenance-v1",
+    source: { repository, commit: sourceCommit, dirty: sourceDirty },
+    package: {
       name: packageManifest.name,
       version: packageManifest.version,
       distTag: packageManifest.publishConfig?.tag ?? "latest",
-      tarball: {
-        file: packed.filename,
-        integrity: packed.integrity,
-        npmShasum: packed.shasum,
-        packedBytes: packed.size,
-        sha256: tarballHash,
-        unpackedBytes: packed.unpackedSize,
-      },
-      sbom: { file: sbomName, format: "CycloneDX 1.5", sha256: sbomHash },
-      bundleInventory: {
-        file: "dist/bundle-inventory.json",
-        components: inventory.components.length,
-        sha256: inventoryHash,
-      },
-      thirdPartyNotices: { file: noticesName, sha256: noticesHash },
-      provenance: {
-        file: provenanceName,
-        protocol: provenance.protocol,
-        sha256: provenanceHash,
-        sourceCommit,
-        sourceDirty,
-      },
     },
-    null,
-    2,
-  )}\n`,
-);
+    subjects: [
+      { file: packed.filename, sha256: tarballHash },
+      { file: sbomName, sha256: sbomHash },
+      { file: "dist/bundle-inventory.json", sha256: inventoryHash },
+      { file: noticesName, sha256: noticesHash },
+    ],
+  };
+  const provenanceBytes = `${JSON.stringify(provenance, null, 2)}\n`;
+  await writeFile(resolve(stagingDirectory, provenanceName), provenanceBytes);
+  const provenanceHash = sha256(provenanceBytes);
 
-process.stdout.write(`created release artifacts in ${outputDirectory}\n`);
+  const checksumsName = "SHA256SUMS";
+  const checksumsBytes = canonicalChecksumBytes([
+    { file: packed.filename, sha256: tarballHash },
+    { file: sbomName, sha256: sbomHash },
+    { file: provenanceName, sha256: provenanceHash },
+  ]);
+  await writeFile(resolve(stagingDirectory, checksumsName), checksumsBytes);
+  const checksumsHash = sha256(checksumsBytes);
+  if (runGit(["rev-parse", "HEAD"]) !== initialCommit) {
+    throw new Error(
+      "release source commit changed while creating artifacts; discard and regenerate them",
+    );
+  }
+  if (statusIgnoringStaging().length > 0) {
+    throw new Error("release source changed while creating artifacts; discard and regenerate them");
+  }
+  await writeFile(
+    resolve(stagingDirectory, "release-manifest.json"),
+    `${JSON.stringify(
+      {
+        name: packageManifest.name,
+        version: packageManifest.version,
+        distTag: packageManifest.publishConfig?.tag ?? "latest",
+        tarball: {
+          file: packed.filename,
+          integrity: packed.integrity,
+          npmShasum: packed.shasum,
+          packedBytes: packed.size,
+          sha256: tarballHash,
+          unpackedBytes: packed.unpackedSize,
+        },
+        sbom: { file: sbomName, format: "CycloneDX 1.5", sha256: sbomHash },
+        bundleInventory: {
+          file: "dist/bundle-inventory.json",
+          components: inventory.components.length,
+          sha256: inventoryHash,
+        },
+        thirdPartyNotices: { file: noticesName, sha256: noticesHash },
+        provenance: {
+          file: provenanceName,
+          protocol: provenance.protocol,
+          sha256: provenanceHash,
+          sourceCommit,
+          sourceDirty,
+        },
+        checksums: { file: checksumsName, sha256: checksumsHash },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  await rename(stagingDirectory, outputDirectory);
+  completed = true;
+  process.stdout.write(`created release artifacts in ${outputDirectory}\n`);
+} finally {
+  if (!completed) await rm(stagingDirectory, { recursive: true, force: true });
+}

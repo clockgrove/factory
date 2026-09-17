@@ -473,24 +473,29 @@ budget exhaustion never widens policy and never silently switches providers.
 
 ## Live qualification
 
-Run these gates in disposable repositories and paid provider accounts with explicit spend approval:
+The Initial Beta live gate uses these WSL2 cases. Run paid-provider cases only in disposable
+repositories and accounts with explicit spend approval:
 
 1. Reorder native sub-issues through GitHub, verify the GraphQL order changes, and verify the next
    Factory admission follows it.
-2. Enable the organization Priority field, change an option while Factory runs, and verify the next
-   admission observes its stable field/option IDs.
-3. Run CPU- and memory-heavy local fixtures on native Linux, Windows WSL2, and a Linux guest hosted
-   by macOS under host-only, cgroup v2, and constrained cgroup configurations. Verify admissions stop
-   before configured headroom is crossed.
-4. Kill and restart the Supervisor with local and provider attempts in each lifecycle phase. Verify
+2. Run CPU- and memory-heavy local fixtures on Windows WSL2 under host-only, cgroup v2, and
+   constrained cgroup configurations. Verify admissions stop before configured headroom is crossed.
+3. Kill and restart the Supervisor with local and provider attempts in each lifecycle phase. Verify
    no duplicate worker, slot, attempt, or budget reservation.
-5. Burst a bounded Objective to Daytona. Verify local-first placement, provider concurrency, TTL,
-   egress, credential brokerage, cost reconciliation, and cleanup. Vercel Sandbox may run the same
-   matrix as a Labs qualification but does not block release.
-6. Exhaust sandbox minutes and cloud concurrency while local is full. Verify work remains queued and
-   later returns to local rather than escalating or spending past the ceiling.
-7. Run two Directors against the same Objective. Verify the lease and attempt refs admit each Work
+4. Run two Directors against the same Objective. Verify the lease and attempt refs admit each Work
    Item once.
+
+Later host, organization-field, and provider qualification retains these cases:
+
+1. Enable the organization Priority field, change an option while Factory runs, and verify the next
+   admission observes its stable field/option IDs.
+2. Reuse the resource-admission scenario on native Linux and a Linux guest hosted by macOS for their
+   host gates.
+3. For the Daytona provider gate, burst a bounded Objective and verify local-first placement,
+   provider concurrency, TTL, egress, credential brokerage, cost reconciliation, and cleanup.
+   Vercel Sandbox may run the same matrix as a Labs qualification.
+4. Exhaust sandbox minutes and cloud concurrency while local is full. Verify work remains queued and
+   later returns to local rather than escalating or spending past the ceiling.
 
 `DEFAULT_RUN_POLICY` uses fixed local-only concurrency capped at two, with physical headroom guards.
 The seven-case live matrix is not complete, so adaptive scheduling has not earned default promotion.
@@ -511,8 +516,8 @@ Qualification requires all of the following:
   trust, concurrency, and budget authority.
 - Temporary capacity never burns an implementation attempt or causes a false escalation.
 - Admission, restart, cancellation, lease-race, provider-ambiguity, and budget fault tests pass.
-- Native Linux, Windows WSL2, and a Linux guest hosted by macOS pass the live local matrix, and one
-  real Daytona burst run passes.
+- Windows WSL2 passes the Initial Beta live local matrix. Native Linux, a Linux guest hosted by
+  macOS, and one real Daytona burst remain required before a later release claims those routes.
 - `npm run typecheck`, the full test suite, package verification, production audit, and clean-install
   MCP startup pass.
 - Candidate-bound evidence passes the publication verifier; Factory is not published until the

@@ -54,12 +54,12 @@ export async function verifyPublishReadiness() {
   const releaseManifestSha256 = hash(manifestBytes);
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
   const requiredBeforePublish = [
-    "Linux environment matrix",
+    "WSL2 environment matrix",
     "Live adaptive scheduling matrix",
     "Live native-stack matrix",
-    "Real Daytona Objective",
-    "Managed-provider capability boundaries",
     "Objective-level adversarial E2E",
+    "Managed-provider capability boundaries",
+    "Installed application qualification",
   ];
 
   const index = JSON.parse((await readEvidence("index.json")).toString("utf8"));

@@ -5,6 +5,10 @@ macOS. It installs the staged npm package and plugin into fresh temporary locati
 their installed entry points and disposable local host resources. It runs no models, paid workers,
 GitHub requests, or real Factory controller. It does not publish packages.
 
+Initial Beta requires the WSL2 case. Native Linux and a Linux guest hosted by macOS use this same
+runner for their later portability qualification; an unrun later host does not block Initial Beta
+and must not be reported as supported.
+
 ```bash
 node scripts/verify-portable-qualification.mjs --output /absolute/path/new-evidence.json --host-class wsl2
 ```

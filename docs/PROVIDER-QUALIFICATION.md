@@ -12,12 +12,13 @@ pre-artifact identity or automated termination requires an explicit operator bou
 execution is currently unavailable until a real provider-specific identity/lifecycle interface is
 implemented and qualified. An unsupported third-party feature is not a global Factory release blocker.
 
-The publication row **Managed-provider capability boundaries** requires exact evidence for claimed
-behavior and explicit unavailable/limited capabilities. It does not require both managed providers to
-complete the same scenario when their APIs do not support it. The other five rows, including real
-Daytona qualification, local/stack/adversarial behavior and published installation, remain intact.
-No provider execution support is claimed without its applicable live qualification, and no old failure
-is promoted by this policy change.
+The Initial Beta publication row **Managed-provider capability boundaries** requires exact evidence
+for claimed behavior and explicit unavailable/limited capabilities. It does not require both managed
+providers to complete the same scenario when their APIs do not support it. Daytona qualification is
+tracked separately for a later provider milestone rather than asserted by Initial Beta. Local,
+stack, adversarial, application, and published-installation acceptance remain intact. No provider
+execution support is claimed without its applicable live qualification, and no old failure is
+promoted by this policy change.
 
 ## Credential-free acceptance
 

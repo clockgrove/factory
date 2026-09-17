@@ -2,25 +2,15 @@ import { z } from "zod";
 
 import { boundedText, safeId, sha256Digest } from "../protocol/limits.js";
 
-const referenceIds = (maximum: number) =>
+const referenceIds = (maximum: number, minimum = 0) =>
   z
     .array(safeId)
+    .min(minimum)
     .max(maximum)
     .refine((ids) => new Set(ids).size === ids.length, "reference IDs must be unique");
 
-export const MediaIntentKindSchema = z.enum([
-  "concept-reference",
-  "layout-reference",
-  "state-diagram",
-  "spatial-map",
-  "style-reference",
-  "sprite-sheet",
-  "reference-board",
-  "sound-reference",
-  "motion-reference",
-  "model-reference",
-  "acceptance-capture",
-]);
+/** Capability-advertised semantic role. The core does not own a closed media taxonomy. */
+export const MediaIntentRoleSchema = safeId;
 
 export const MediaIntentPurposeSchema = z.enum([
   "decision-input",
@@ -94,22 +84,53 @@ export const MediaReviewRequestSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("deterministic-preauthorized"), ruleId: safeId }).strict(),
 ]);
 
+export const MediaInputRoleBindingSchema = z
+  .object({
+    roleId: safeId,
+    importedAssetIds: referenceIds(32),
+    inputIntentIds: referenceIds(32),
+  })
+  .strict();
+
+export const MediaIntentFulfillmentSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("imported"),
+      assetIds: referenceIds(32, 1),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("produced"),
+      inputRoleBindings: z.array(MediaInputRoleBindingSchema).max(8),
+    })
+    .strict(),
+]);
+
 /** The complete model-owned semantic surface. Provider and storage authority are excluded. */
 export const MediaIntentSchema = z
   .object({
     id: safeId,
-    kind: MediaIntentKindSchema,
+    role: MediaIntentRoleSchema,
     purpose: MediaIntentPurposeSchema,
     necessity: z.enum(["required", "helpful"]),
     obligationIds: z.array(boundedText(160)).min(1).max(128),
     rationale: boundedText(2_000),
     brief: boundedText(4_000),
-    importedAssetIds: referenceIds(32),
+    fulfillment: MediaIntentFulfillmentSchema,
     output: MediaOutputConstraintsSchema,
     review: MediaReviewRequestSchema,
-    bindings: z.array(MediaIntentBindingSchema).min(1).max(64),
+    bindings: z.array(MediaIntentBindingSchema).max(64),
   })
-  .strict();
+  .strict()
+  .superRefine((intent, context) => {
+    if (intent.fulfillment.kind !== "produced") return;
+    if (
+      new Set(intent.fulfillment.inputRoleBindings.map(({ roleId }) => roleId)).size !==
+      intent.fulfillment.inputRoleBindings.length
+    )
+      context.addIssue({ code: "custom", message: "media input role is duplicated" });
+  });
 
 export const CompilerMediaAssetFactSchema = z
   .object({
@@ -147,16 +168,24 @@ export const CompilerMediaProducerCapabilitySchema = z
   .object({
     id: safeId,
     capabilityDigest: sha256Digest,
-    kinds: z.array(MediaIntentKindSchema).min(1).max(8),
+    roles: z.array(MediaIntentRoleSchema).min(1).max(8),
     purposes: z.array(MediaIntentPurposeSchema).min(1).max(4),
     mediaTypes: z.array(MediaTypeSchema).min(1).max(16),
-    inputRequirement: z
-      .object({
-        minimumCount: z.number().int().min(0).max(32),
-        maximumCount: z.number().int().min(0).max(32),
-        semantics: z.enum(["none", "directional-reference"]),
-      })
-      .strict(),
+    outputVisibility: z.enum(["public", "private"]),
+    outputRightsBasis: z.enum(["user-owned", "licensed", "permission-granted", "unknown"]),
+    inputRoles: z
+      .array(
+        z
+          .object({
+            id: safeId,
+            mediaTypes: z.array(MediaTypeSchema).min(1).max(16),
+            minimumCount: z.number().int().min(0).max(32),
+            maximumCount: z.number().int().min(0).max(32),
+            semantics: safeId,
+          })
+          .strict(),
+      )
+      .max(8),
     maximumCount: z.number().int().min(1).max(16),
     raster: z
       .object({
@@ -170,12 +199,33 @@ export const CompilerMediaProducerCapabilitySchema = z
   })
   .strict()
   .superRefine((value, context) => {
-    if (value.inputRequirement.minimumCount > value.inputRequirement.maximumCount)
-      context.addIssue({ code: "custom", message: "producer input cardinality is inverted" });
+    if (new Set(value.inputRoles.map(({ id }) => id)).size !== value.inputRoles.length)
+      context.addIssue({ code: "custom", message: "producer input roles are duplicated" });
+    if (value.inputRoles.some((role) => role.minimumCount > role.maximumCount))
+      context.addIssue({ code: "custom", message: "producer input role cardinality is inverted" });
   });
 
 export const CompilerMediaReviewRuleSchema = z
-  .object({ id: safeId, kind: z.literal("deterministic-preauthorized") })
+  .object({
+    id: safeId,
+    kind: z.literal("deterministic-preauthorized"),
+    producerCapabilityIds: z.array(safeId).min(1).max(16),
+    roles: z.array(MediaIntentRoleSchema).min(1).max(16),
+    purposes: z.array(MediaIntentPurposeSchema).min(1).max(4),
+    mediaTypes: z.array(MediaTypeSchema).min(1).max(32),
+    profiles: z
+      .array(z.enum(["binary", "raster"]))
+      .min(1)
+      .max(2),
+    outputVisibilities: z
+      .array(z.enum(["public", "private"]))
+      .min(1)
+      .max(2),
+    rightsBases: z
+      .array(z.enum(["user-owned", "licensed", "permission-granted", "unknown"]))
+      .min(1)
+      .max(4),
+  })
   .strict();
 
 export const CompilerMediaFactsSchema = z
@@ -196,7 +246,7 @@ export const GeneratedAssetRequirementSchema = z
   .object({
     intentId: safeId,
     producerWorkItemId: safeId,
-    kind: MediaIntentKindSchema,
+    role: MediaIntentRoleSchema,
     purpose: MediaIntentPurposeSchema,
     necessity: z.enum(["required", "helpful"]),
     obligationIds: z.array(boundedText(160)).min(1).max(128),
@@ -204,6 +254,7 @@ export const GeneratedAssetRequirementSchema = z
     rationale: boundedText(2_000),
     direction: z.literal("input-to"),
     criterionIds: referenceIds(64),
+    inputRoleId: safeId.nullable(),
   })
   .strict();
 
@@ -214,6 +265,17 @@ export const RepositoryChangeDeliverableSchema = z
   })
   .strict();
 
+export const MediaActivationSelectionSchema = z
+  .object({
+    minimumCount: z.number().int().min(1).max(16),
+    maximumCount: z.number().int().min(1).max(16),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.minimumCount > value.maximumCount)
+      context.addIssue({ code: "custom", message: "media activation selection is inverted" });
+  });
+
 export const AssetProductionDeliverableSchema = z
   .object({
     kind: z.literal("asset-production"),
@@ -221,6 +283,7 @@ export const AssetProductionDeliverableSchema = z
     intent: MediaIntentSchema,
     producerCapabilityId: safeId,
     producerCapabilityDigest: sha256Digest,
+    activationSelection: MediaActivationSelectionSchema,
   })
   .strict();
 

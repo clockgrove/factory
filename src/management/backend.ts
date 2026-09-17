@@ -208,7 +208,7 @@ export interface CompilationContext {
       policyDigest: string;
     };
     producerCapabilities: CompilerMediaProducerCapability[];
-    reviewRules: Array<{ id: string; kind: "deterministic-preauthorized" }>;
+    reviewRules: CompilerRequest["media"]["reviewRules"];
   };
   /** Authenticated pre-v2 issue core. The compiler may enrich, never decompose or rewrite it. */
   legacyGraphConstraints?: LegacyGraphConstraints;

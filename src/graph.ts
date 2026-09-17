@@ -148,8 +148,8 @@ export interface CompiledAssetProductionWorkItem extends CompiledWorkItemCommon 
   deliverable: z.infer<typeof AssetProductionDeliverableSchema>;
   scope: [];
   validationCommands: [];
-  generatedAssetRequirements?: never;
-  mediaUses?: never;
+  generatedAssetRequirements?: GeneratedAssetRequirement[] | undefined;
+  mediaUses?: WorkerMediaIntentUse[] | undefined;
   context?: never;
   changeSurface?: never;
   criterionRisks?: never;
@@ -531,6 +531,8 @@ const PersistedCompiledAssetProductionWorkItemSchema = PersistedCompiledWorkItem
     deliverable: AssetProductionDeliverableSchema,
     scope: z.tuple([]),
     validationCommands: z.tuple([]),
+    generatedAssetRequirements: z.array(GeneratedAssetRequirementSchema).max(32).optional(),
+    mediaUses: z.array(WorkerMediaIntentUseSchema).max(64).optional(),
   },
 ).strict();
 
@@ -781,6 +783,8 @@ export function workerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
       deliverable: wi.deliverable,
       allowedPaths: [],
       validationCommands: [],
+      generatedAssetRequirements: wi.generatedAssetRequirements ?? [],
+      mediaUses: wi.mediaUses ?? [],
     });
   return parseWorkerPacket({
     ...common,
@@ -861,7 +865,7 @@ export function renderWorkPacket(wi: CompiledWorkItem, graphMetadata?: GraphItem
 
   const rendered = [
     `## Goal\n\n${wi.goal}\n`,
-    `## Deliverable\n\n- ${wi.deliverable.kind}${wi.deliverable.kind === "asset-production" ? `: ${wi.deliverable.intent.kind} (${wi.deliverable.intent.purpose})` : ""}\n`,
+    `## Deliverable\n\n- ${wi.deliverable.kind}${wi.deliverable.kind === "asset-production" ? `: ${wi.deliverable.intent.role} (${wi.deliverable.intent.purpose})` : ""}\n`,
     section("Acceptance", wi.acceptance),
     section("Scope", wi.deliverable.kind === "repository-change" ? wi.scope : []),
     section("Preconditions", wi.preconditions),
@@ -871,14 +875,14 @@ export function renderWorkPacket(wi: CompiledWorkItem, graphMetadata?: GraphItem
       "Media uses",
       (wi.mediaUses ?? []).map(
         (use) =>
-          `${use.intentId}: ${use.kind}/${use.purpose} ${use.direction}; criteria ${use.criterionIds.join(", ") || "none"}; descriptors ${use.descriptorDigests.join(", ")}`,
+          `${use.intentId}: ${use.role}/${use.purpose} ${use.direction}; criteria ${use.criterionIds.join(", ") || "none"}; descriptors ${use.descriptorDigests.join(", ")}`,
       ),
     ),
     section(
       "Generated media requirements",
       (wi.generatedAssetRequirements ?? []).map(
         (requirement) =>
-          `${requirement.intentId}: ${requirement.kind}/${requirement.purpose} from ${requirement.producerWorkItemId}; criteria ${requirement.criterionIds.join(", ") || "none"}`,
+          `${requirement.intentId}: ${requirement.role}/${requirement.purpose} from ${requirement.producerWorkItemId}; criteria ${requirement.criterionIds.join(", ") || "none"}`,
       ),
     ),
     section(

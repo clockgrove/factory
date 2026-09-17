@@ -470,6 +470,7 @@ export async function persistAssetSet(args: {
     providerResponseId: args.collection.providerResponseId,
     productionReceiptDigest: args.collection.productionReceiptDigest,
     storageManifestDigest: manifest.manifest.digest,
+    activationSelection: invocation.activationSelection,
     variants: manifest.manifest.assets,
     usage: [...usage]
       .map(([unit, amount]) => ({ unit, amount }))

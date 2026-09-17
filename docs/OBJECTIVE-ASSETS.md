@@ -55,8 +55,9 @@ The model may return semantic `mediaIntents` for supported media types and produ
 in the compiler request. Each intent cites Objective obligations and directed Work Item bindings,
 declares required or helpful necessity, sets bounded media type and count constraints, optionally
 adds a typed raster profile, and requests human review or a policy-authorized deterministic rule.
-The model selects imported manifest asset IDs and prior intent IDs under the capability-advertised
-roles in `inputRoleBindings`; Factory resolves those IDs and derives the exact descriptor digests.
+The model selects one strict fulfillment: exact imported manifest asset IDs, or produced media whose
+imported and prior-intent inputs are assigned to capability-advertised roles in
+`inputRoleBindings`. Factory resolves those IDs and derives the exact descriptor digests.
 The model cannot select providers, models, credentials, stores, URLs, network access, descriptor
 digests, or execution authority.
 
@@ -80,7 +81,8 @@ rights. Producer capabilities bind exact input and output MIME types, typed prof
 byte limits, egress, observation, cancellation, result collection, and native usage units. The
 compiler receives only the intersection of those registered capabilities with the immutable run
 policy. A compiled producer binds both the capability ID and digest, so a later adapter change cannot
-silently execute an older graph.
+silently execute an older graph. It also binds the nonempty activation-selection interval shared by
+all downstream consumers; approval cannot select a count outside that interval.
 
 Before dispatch, `AttemptReserved` and the issue admission ledger bind the complete media invocation:
 the run, Work Item, attempt, intent and Worker Packet digests, adapter capability, exact inputs,

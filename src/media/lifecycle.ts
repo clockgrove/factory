@@ -9,10 +9,11 @@ import { MediaIntentSchema, RasterMediaConstraintsSchema } from "../assets/media
 import { attemptRef } from "../control/attempts.js";
 import {
   AssetProductionWorkerPacketSchema,
-  RepositoryChangeWorkerPacketSchema,
+  WorkerPacketSchema,
   workerPacketDigest,
   type AssetProductionWorkerPacket,
   type RepositoryChangeWorkerPacket,
+  type WorkerPacket,
 } from "../protocol/worker-packet.js";
 import {
   AssetActivationBundleSchema,
@@ -66,8 +67,6 @@ export function createMediaInvocation(args: {
   policyDigest: string;
   model?: string;
   quality?: string;
-  outputVisibility: unknown;
-  outputRights: unknown;
   revisionContext?: {
     priorAssetSetDigest: string;
     priorDecisionDigest: string;
@@ -84,7 +83,7 @@ export function createMediaInvocation(args: {
   )
     throw new Error("Worker Packet producer capability changed before invocation");
   if (
-    !capability.intentKinds.includes(intent.kind) ||
+    !capability.intentRoles.includes(intent.role) ||
     !capability.purposes.includes(intent.purpose)
   )
     throw new Error("producer capability does not apply to the media intent");
@@ -92,24 +91,40 @@ export function createMediaInvocation(args: {
     .sort()
     .find((mediaType) => capability.outputMediaTypes.includes(mediaType));
   if (!outputMediaType) throw new Error("producer capability has no exact output MIME match");
-  const raster = outputMediaType.startsWith("image/")
-    ? exactRasterProfile(intent.output.raster, capability)
-    : null;
-  if (outputMediaType.startsWith("image/") && !raster)
+  const raster = intent.output.raster ? exactRasterProfile(intent.output.raster, capability) : null;
+  if (intent.output.raster && !raster)
     throw new Error("raster output requires a matching typed producer profile");
-  if (
-    !outputMediaType.startsWith("image/") &&
-    !capability.profiles.some(({ kind }) => kind === "binary")
-  )
+  if (!intent.output.raster && !capability.profiles.some(({ kind }) => kind === "binary"))
     throw new Error("non-raster output requires the media-agnostic binary profile");
   const inputEntries = args.inputEntries.map((value) => AssetManifestEntrySchema.parse(value));
+  const associations = new Map<string, { roleId: string; descriptorDigest: string }>();
+  for (const use of packet.mediaUses) {
+    if (!use.inputRoleId) continue;
+    if (!capability.inputRoles.some(({ id }) => id === use.inputRoleId))
+      throw new Error("media input names an unadvertised capability role");
+    for (const descriptorDigest of use.descriptorDigests)
+      associations.set(`${use.inputRoleId}:${descriptorDigest}`, {
+        roleId: use.inputRoleId,
+        descriptorDigest,
+      });
+  }
+  const roleCounts = new Map<string, number>();
+  for (const { roleId } of associations.values())
+    roleCounts.set(roleId, (roleCounts.get(roleId) ?? 0) + 1);
   if (
-    packet.assetInputs.length < capability.inputRequirement.minimumCount ||
-    packet.assetInputs.length > capability.inputRequirement.maximumCount
+    capability.inputRoles.some((role) => {
+      const count = roleCounts.get(role.id) ?? 0;
+      return count < role.minimumCount || count > role.maximumCount;
+    })
   )
-    throw new Error("media input count is outside the producer capability");
+    throw new Error("media input role count is outside the producer capability");
   const byDescriptor = new Map(inputEntries.map((entry) => [entry.descriptor.digest, entry]));
-  const inputAssets = packet.assetInputs.map((input) => {
+  const packetInputs = new Map(packet.assetInputs.map((input) => [input.descriptorDigest, input]));
+  if (packetInputs.size > 0 && associations.size === 0)
+    throw new Error("media inputs lack exact semantic role bindings");
+  const inputAssets = [...associations.values()].map(({ roleId, descriptorDigest }) => {
+    const input = packetInputs.get(descriptorDigest);
+    if (!input) throw new Error("media role binding refers to a missing immutable asset input");
     const entry = byDescriptor.get(input.descriptorDigest);
     if (
       !entry ||
@@ -119,14 +134,18 @@ export function createMediaInvocation(args: {
     )
       throw new Error("media input differs from its immutable descriptor and storage receipt");
     const mediaType = entry.descriptor.content.inspection.mediaType;
-    if (!capability.inputMediaTypes.includes(mediaType))
-      throw new Error(`producer capability does not accept input MIME ${mediaType}`);
+    const role = capability.inputRoles.find(({ id }) => id === roleId)!;
+    if (!role.mediaTypes.includes(mediaType))
+      throw new Error(
+        `producer capability role ${role.id} does not accept input MIME ${mediaType}`,
+      );
     return {
       manifestDigest: input.manifestDigest,
       descriptorDigest: entry.descriptor.digest,
       contentDigest: entry.descriptor.content.digest,
       storageReceiptDigest: entry.storage.digest,
       mediaType,
+      roleId,
       path: input.path,
     };
   });
@@ -135,9 +154,15 @@ export function createMediaInvocation(args: {
   if (model && !capability.models.includes(model)) throw new Error("unsupported media model");
   if (quality && !capability.qualities.includes(quality))
     throw new Error("unsupported media quality");
-  const requestedVariants = intent.output.minimumCount;
+  const activationSelection = packet.deliverable.activationSelection;
+  if (activationSelection.maximumCount > intent.output.maximumCount)
+    throw new Error("activation selection exceeds produced media maximum");
+  const requestedVariants = Math.max(intent.output.minimumCount, activationSelection.minimumCount);
   if (requestedVariants > capability.limits.variants)
     throw new Error("requested variants exceed producer capability");
+  const outputRights = AssetRightsSchema.parse(capability.outputAuthority.rights);
+  if (intent.purpose === "product-asset" && outputRights.basis === "unknown")
+    throw new Error("product media production requires authenticated lawful output rights");
   const core = {
     protocol: "clockgrove.factory/media-invocation-v1" as const,
     repository: args.repository.toLowerCase(),
@@ -148,7 +173,7 @@ export function createMediaInvocation(args: {
     authorityBaseSha: args.authorityBaseSha,
     reservationRef: attemptRef(args.objective, args.workItem, args.attempt),
     intentId: intent.id,
-    intentKind: intent.kind,
+    intentRole: intent.role,
     intentPurpose: intent.purpose,
     intentDigest: assetDigest(intent),
     workerPacketDigest: workerPacketDigest(packet),
@@ -161,11 +186,12 @@ export function createMediaInvocation(args: {
     profile: raster ?? { kind: "binary" as const },
     inputAssets,
     outputMediaType,
-    outputVisibility: AssetVisibilitySchema.parse(args.outputVisibility),
-    outputRights: AssetRightsSchema.parse(args.outputRights),
+    outputVisibility: AssetVisibilitySchema.parse(capability.outputAuthority.visibility),
+    outputRights,
     deadline: args.deadline,
     policyDigest: args.policyDigest,
     requestedVariants,
+    activationSelection,
     usageReservation: withMediaDigest({
       protocol: "clockgrove.factory/media-usage-reservation-v1" as const,
       providerRequests: capability.limits.providerRequests,
@@ -198,6 +224,12 @@ export function createAssetDecision(args: {
     selected.some((digest) => !set.variants.some(({ descriptor }) => descriptor.digest === digest))
   )
     throw new Error("asset decision selected a descriptor outside the asset set");
+  if (
+    args.kind === "approved" &&
+    (selected.length < set.activationSelection.minimumCount ||
+      selected.length > set.activationSelection.maximumCount)
+  )
+    throw new Error("asset approval selection is outside the compiled activation interval");
   return AssetDecisionSchema.parse(
     withMediaDigest({
       protocol: "clockgrove.factory/asset-decision-v1" as const,
@@ -222,13 +254,30 @@ export function createAssetDecision(args: {
   );
 }
 
-export function activateRepositoryWorkerPacket(args: {
-  sourcePacket: RepositoryChangeWorkerPacket;
+type ActivationArgs<T extends WorkerPacket> = {
+  sourcePacket: T;
   consumerWorkItemId: string;
   activations: readonly AssetActivation[];
   producerIssueNumbers?: Readonly<Record<string, number>>;
-}): { packet: RepositoryChangeWorkerPacket; bundle: AssetActivationBundle | null } {
-  const source = RepositoryChangeWorkerPacketSchema.parse(args.sourcePacket);
+};
+
+export function activateWorkerPacket(args: ActivationArgs<RepositoryChangeWorkerPacket>): {
+  packet: RepositoryChangeWorkerPacket;
+  bundle: AssetActivationBundle | null;
+};
+export function activateWorkerPacket(args: ActivationArgs<AssetProductionWorkerPacket>): {
+  packet: AssetProductionWorkerPacket;
+  bundle: AssetActivationBundle | null;
+};
+export function activateWorkerPacket(args: ActivationArgs<WorkerPacket>): {
+  packet: WorkerPacket;
+  bundle: AssetActivationBundle | null;
+};
+export function activateWorkerPacket(args: ActivationArgs<WorkerPacket>): {
+  packet: WorkerPacket;
+  bundle: AssetActivationBundle | null;
+} {
+  const source = WorkerPacketSchema.parse(args.sourcePacket);
   if (!source.generatedAssetRequirements.length) return { packet: source, bundle: null };
   const activationByIntent = new Map(
     args.activations.map((value) => {
@@ -238,7 +287,7 @@ export function activateRepositoryWorkerPacket(args: {
   );
   const assetInputs = new Map(source.assetInputs.map((input) => [input.descriptorDigest, input]));
   const mediaUses = [...source.mediaUses];
-  const selectedActivations: AssetActivation[] = [];
+  const selectedActivations = new Map<string, AssetActivation>();
   for (const requirement of source.generatedAssetRequirements) {
     const activation = activationByIntent.get(requirement.intentId);
     if (!activation || activation.intentId !== requirement.intentId)
@@ -246,7 +295,7 @@ export function activateRepositoryWorkerPacket(args: {
     const expectedProducer = args.producerIssueNumbers?.[requirement.producerWorkItemId];
     if (expectedProducer !== undefined && activation.producerWorkItem !== expectedProducer)
       throw new Error("generated media activation belongs to another projected producer");
-    selectedActivations.push(activation);
+    selectedActivations.set(activation.intentId, activation);
     const descriptorDigests: string[] = [];
     for (const entry of activation.selected) {
       const input = {
@@ -265,7 +314,8 @@ export function activateRepositoryWorkerPacket(args: {
     mediaUses.push({
       source: "activated",
       intentId: requirement.intentId,
-      kind: requirement.kind,
+      role: requirement.role,
+      inputRoleId: requirement.inputRoleId,
       brief: requirement.brief,
       purpose: requirement.purpose,
       necessity: requirement.necessity,
@@ -278,7 +328,7 @@ export function activateRepositoryWorkerPacket(args: {
       descriptorDigests,
     });
   }
-  const packet = RepositoryChangeWorkerPacketSchema.parse({
+  const packet = WorkerPacketSchema.parse({
     ...source,
     assetInputs: [...assetInputs.values()].sort((left, right) =>
       left.descriptorDigest.localeCompare(right.descriptorDigest),
@@ -291,7 +341,7 @@ export function activateRepositoryWorkerPacket(args: {
     consumerWorkItemId: args.consumerWorkItemId,
     sourcePacketDigest: workerPacketDigest(source),
     activatedPacketDigest: workerPacketDigest(packet),
-    activations: selectedActivations.sort((left, right) =>
+    activations: [...selectedActivations.values()].sort((left, right) =>
       left.intentId.localeCompare(right.intentId),
     ),
   };

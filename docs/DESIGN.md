@@ -698,10 +698,10 @@ unstarted     dependencies clear; no active attempt
 reserved      attempt ref exists; backend has not started
 in_flight     trusted start exists; no terminal attempt event
 validating    output collected; independent validation is running
-for_review    meaningful diff; validation passed; checks settled
+for_review    validated repository diff or immutable Asset Set awaits review
 failed        terminal failure, timeout, stale reservation, no-op, or bad validation
 escalated     terminal handoff plus human assignment
-done          linked pull request merged and Work Item closed
+done          repository PR merged, or approved Asset Activation published; Work Item closed
 ```
 
 An attempt remains pinned to the data format and backend that created it. Inconsistent mixed state
@@ -717,9 +717,13 @@ secret names, and the output contract.
 The output contract is a strict deliverable union. Repository workers receive
 `repository-change` / `clockgrove.factory/artifact`; asset producers receive
 `asset-production` / `clockgrove.factory/asset-set`. Asset producers have no repository scope,
-patch, validation command, commit, or pull-request contract. The compiler model describes media
-intent and directed consumption/evidence bindings. Trusted projection alone selects exact imported
-asset digests or derives an asset producer from advertised capabilities. Code-native SVG, Mermaid,
+patch, validation command, commit, or pull-request contract. The compiler model describes a bounded
+media intent, capability-advertised semantic role, named input-role bindings, and directed
+implementation consumers. Its strict fulfillment selects either exact imported manifest asset IDs,
+or produced media with imported and upstream-intent inputs assigned to named roles; trusted
+projection resolves exact descriptor digests and derives an asset producer from advertised
+capabilities. Repository-result evidence remains part of ordinary repository validation, and a
+required unsupported evidence intent fails before graph publication. Code-native SVG, Mermaid,
 HTML/CSS/canvas and similar repository artifacts stay on the repository-change path.
 
 An optional Objective asset manifest is part of activation and run identity. The Supervisor reads
@@ -730,9 +734,12 @@ animation are one nested media profile rather than fields on the canonical contr
 independent `compilerMediaEgress` policy controls public or private compiler input and authorized
 deterministic review rules. It grants no producer, provider, network, storage, credential, or
 execution authority. Compilation fails deterministically for a required media intent without a
-matching import or producer capability. Helpful omissions remain
-visible in the projection trace. Until the supervised asset executor is present, static graph
-preflight rejects any asset-production packet before ordinary repository dispatch.
+matching import or producer capability. Helpful omissions remain visible in the projection trace.
+The Supervisor routes `asset-production` through its own capability, admission, execution,
+accounting, storage, review, activation, and recovery lifecycle before ordinary repository backend
+selection. A later repository consumer reserves the exact activation bundle and activated packet.
+The compiled producer carries the intersection of downstream activation-selection cardinalities;
+the immutable Asset Set repeats that interval and approval rejects a selection outside it.
 
 Platform, CPU, memory, artifact-storage and timeout requirements are trusted-host outputs, not model
 facts. The compiler replaces model proposals with matching rules from the pinned repository's

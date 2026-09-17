@@ -11,7 +11,8 @@ import {
   canonicalAssetJson,
 } from "../assets/contracts.js";
 import {
-  MediaIntentKindSchema,
+  MediaActivationSelectionSchema,
+  MediaIntentRoleSchema,
   MediaIntentPurposeSchema,
   MediaTypeSchema,
 } from "../assets/media-intent.js";
@@ -63,16 +64,24 @@ export const MediaProducerCapabilitySchema = z
     protocol: z.literal("clockgrove.factory/media-producer-capability-v1"),
     id: safeId,
     adapterVersion: boundedText(80),
-    inputMediaTypes: unique(MediaTypeSchema, 32),
-    inputRequirement: z
-      .object({
-        minimumCount: z.number().int().min(0).max(32),
-        maximumCount: z.number().int().min(0).max(32),
-        semantics: z.enum(["none", "directional-reference"]),
-      })
-      .strict(),
+    inputRoles: z
+      .array(
+        z
+          .object({
+            id: safeId,
+            mediaTypes: unique(MediaTypeSchema, 16, 1),
+            minimumCount: z.number().int().min(0).max(32),
+            maximumCount: z.number().int().min(0).max(32),
+            semantics: safeId,
+          })
+          .strict(),
+      )
+      .max(8),
     outputMediaTypes: unique(MediaTypeSchema, 32, 1),
-    intentKinds: unique(MediaIntentKindSchema, 16, 1),
+    outputAuthority: z
+      .object({ visibility: AssetVisibilitySchema, rights: AssetRightsSchema })
+      .strict(),
+    intentRoles: unique(MediaIntentRoleSchema, 16, 1),
     purposes: unique(MediaIntentPurposeSchema, 4, 1),
     profiles: z
       .array(
@@ -119,21 +128,23 @@ export const MediaProducerCapabilitySchema = z
   })
   .strict()
   .superRefine((value, context) => {
-    if (value.inputRequirement.minimumCount > value.inputRequirement.maximumCount)
-      context.addIssue({ code: "custom", message: "media input cardinality is inverted" });
-    if (
-      value.inputRequirement.semantics === "none" &&
-      (value.inputRequirement.minimumCount !== 0 || value.inputRequirement.maximumCount !== 0)
-    )
-      context.addIssue({ code: "custom", message: "input-free media capability accepts inputs" });
+    if (new Set(value.inputRoles.map(({ id }) => id)).size !== value.inputRoles.length)
+      context.addIssue({ code: "custom", message: "media input roles are duplicated" });
+    if (value.inputRoles.some((role) => role.minimumCount > role.maximumCount))
+      context.addIssue({ code: "custom", message: "media input role cardinality is inverted" });
   });
 
 export const MediaReviewCapabilitySchema = z
   .object({
     protocol: z.literal("clockgrove.factory/media-review-capability-v1"),
     id: safeId,
+    producerCapabilityIds: unique(safeId, 16, 1),
+    applicableRoles: unique(MediaIntentRoleSchema, 16, 1),
+    applicablePurposes: unique(MediaIntentPurposeSchema, 4, 1),
     applicableMediaTypes: unique(MediaTypeSchema, 32, 1),
-    profiles: z.array(z.object({ kind: z.literal("raster") }).strict()).max(1),
+    profiles: unique(z.enum(["binary", "raster"]), 2, 1),
+    outputVisibilities: unique(AssetVisibilitySchema, 2, 1),
+    rightsBases: unique(z.enum(["user-owned", "licensed", "permission-granted", "unknown"]), 4, 1),
     decisionKinds: unique(z.enum(["human", "deterministic-preauthorized"]), 2, 1),
     maximumVariants: z.number().int().min(1).max(32),
     network: z
@@ -193,7 +204,7 @@ const MediaInvocationCoreSchema = z
     authorityBaseSha: gitSha,
     reservationRef: boundedText(500),
     intentId: safeId,
-    intentKind: MediaIntentKindSchema,
+    intentRole: MediaIntentRoleSchema,
     intentPurpose: MediaIntentPurposeSchema,
     intentDigest: sha256Digest,
     workerPacketDigest: sha256Digest,
@@ -213,17 +224,19 @@ const MediaInvocationCoreSchema = z
             contentDigest: sha256Digest,
             storageReceiptDigest: sha256Digest,
             mediaType: MediaTypeSchema,
+            roleId: safeId,
             path: boundedText(500),
           })
           .strict(),
       )
-      .max(32),
+      .max(256),
     outputMediaType: MediaTypeSchema,
     outputVisibility: AssetVisibilitySchema,
     outputRights: AssetRightsSchema,
     deadline: z.string().datetime(),
     policyDigest: sha256Digest,
     requestedVariants: z.number().int().min(1).max(32),
+    activationSelection: MediaActivationSelectionSchema,
     usageReservation: MediaUsageReservationSchema,
     revisionContext: z
       .object({
@@ -287,6 +300,7 @@ const AssetSetCoreSchema = z
     providerResponseId: boundedText(500).nullable(),
     productionReceiptDigest: sha256Digest,
     storageManifestDigest: sha256Digest,
+    activationSelection: MediaActivationSelectionSchema,
     variants: z.array(AssetManifestEntrySchema).min(1).max(32),
     usage: z.array(MediaUsageSchema).max(32),
     totalGeneratedBytes: z
@@ -420,7 +434,8 @@ export const AssetActivationBundleSchema = AssetActivationBundleCoreSchema.exten
 
 const WorkerMediaIntentUseCommonSchema = z.object({
   intentId: safeId,
-  kind: MediaIntentKindSchema,
+  role: MediaIntentRoleSchema,
+  inputRoleId: safeId.nullable(),
   brief: boundedText(4_000),
   purpose: MediaIntentPurposeSchema,
   necessity: z.enum(["required", "helpful"]),

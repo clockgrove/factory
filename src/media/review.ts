@@ -22,8 +22,13 @@ export interface DeterministicMediaReviewer {
 export const LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY = MediaReviewCapabilitySchema.parse({
   protocol: "clockgrove.factory/media-review-capability-v1",
   id: "factory/local-private-reference-v1",
+  producerCapabilityIds: ["sharp/local-raster-derivative-v1"],
+  applicableRoles: ["raster-derivative"],
+  applicablePurposes: ["decision-input", "implementation-reference"],
   applicableMediaTypes: ["image/png"],
-  profiles: [{ kind: "raster" }],
+  profiles: ["raster"],
+  outputVisibilities: ["private"],
+  rightsBases: ["unknown"],
   decisionKinds: ["deterministic-preauthorized"],
   maximumVariants: 16,
   network: { destinations: [], thirdPartyEgress: "denied" },
@@ -43,14 +48,20 @@ export class LocalPrivateMediaReviewer implements DeterministicMediaReviewer {
     const assetSet = AssetSetSchema.parse(assetSetInput);
     if (
       assetSet.invocationDigest !== invocation.digest ||
-      !["decision-input", "implementation-reference"].includes(invocation.intentPurpose) ||
+      !this.capability.producerCapabilityIds.includes(invocation.adapterId) ||
+      !this.capability.applicableRoles.includes(invocation.intentRole) ||
+      !this.capability.applicablePurposes.includes(invocation.intentPurpose) ||
+      !this.capability.outputVisibilities.includes(invocation.outputVisibility) ||
+      !this.capability.rightsBases.includes(invocation.outputRights.basis) ||
       assetSet.variants.length > this.capability.maximumVariants ||
-      invocation.profile?.kind !== "raster" ||
+      !invocation.profile ||
+      !this.capability.profiles.includes(invocation.profile.kind) ||
       assetSet.variants.some(
         ({ descriptor }) =>
-          descriptor.visibility !== "private" ||
-          descriptor.content.inspection.mediaType !== "image/png" ||
-          descriptor.content.inspection.metadata.kind !== "raster",
+          !this.capability.outputVisibilities.includes(descriptor.visibility) ||
+          !this.capability.rightsBases.includes(descriptor.rights.basis) ||
+          !this.capability.applicableMediaTypes.includes(descriptor.content.inspection.mediaType) ||
+          descriptor.content.inspection.metadata.kind !== invocation.profile!.kind,
       )
     )
       return {
@@ -89,6 +100,13 @@ export class MediaReviewRegistry {
       .map(({ capability }) => ({
         id: capability.id,
         kind: "deterministic-preauthorized" as const,
+        producerCapabilityIds: capability.producerCapabilityIds,
+        roles: capability.applicableRoles,
+        purposes: capability.applicablePurposes,
+        mediaTypes: capability.applicableMediaTypes,
+        profiles: capability.profiles,
+        outputVisibilities: capability.outputVisibilities,
+        rightsBases: capability.rightsBases,
       }))
       .sort((left, right) => left.id.localeCompare(right.id));
   }

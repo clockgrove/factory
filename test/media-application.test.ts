@@ -79,10 +79,10 @@ const capability = MediaProducerCapabilitySchema.parse({
   protocol: "clockgrove.factory/media-producer-capability-v1",
   id: "fixture/media-v1",
   adapterVersion: "1",
-  inputMediaTypes: [],
-  inputRequirement: { minimumCount: 0, maximumCount: 0, semantics: "none" },
+  inputRoles: [],
   outputMediaTypes: ["image/png"],
-  intentKinds: ["layout-reference"],
+  outputAuthority: { visibility: "private", rights: { basis: "unknown" } },
+  intentRoles: ["layout-reference"],
   purposes: ["implementation-reference"],
   profiles: [
     {
@@ -137,15 +137,16 @@ function packet(): AssetProductionWorkerPacket {
       contract: "clockgrove.factory/asset-set",
       producerCapabilityId: capability.id,
       producerCapabilityDigest: assetDigest(capability),
+      activationSelection: { minimumCount: 1, maximumCount: 2 },
       intent: {
         id: "raccoon-world-layout",
-        kind: "layout-reference",
+        role: "layout-reference",
         purpose: "implementation-reference",
         necessity: "required",
         obligationIds: ["world-layout"],
         rationale: "A human chooses the exact immutable variant.",
         brief: "Create two distinct Raccoon World layout references.",
-        importedAssetIds: [],
+        fulfillment: { kind: "produced", inputRoleBindings: [] },
         output: {
           mediaTypes: ["image/png"],
           minimumCount: 2,
@@ -248,8 +249,6 @@ async function fixture(
     authorityBaseSha: authority.baseSha,
     deadline: "2099-01-01T00:00:00.000Z",
     policyDigest: policyDigest(runPolicy),
-    outputVisibility: "private",
-    outputRights: { basis: "unknown" },
   });
   const started = parseFactoryEvent({
     protocol: "clockgrove.factory/v2",
@@ -315,6 +314,7 @@ async function fixture(
       providerResponseId: null,
       productionReceiptDigest: "e".repeat(64),
       storageManifestDigest: storedManifest.manifest.digest,
+      activationSelection: invocation.activationSelection,
       variants,
       usage: [],
       totalGeneratedBytes: variants.reduce(

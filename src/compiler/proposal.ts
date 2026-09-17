@@ -123,7 +123,7 @@ export interface CompilerProjectionContext {
   mediaPlanning?: {
     assetBindings: Array<{ assetId: string; input: WorkerAssetInput }>;
     producerCapabilities: CompilerMediaProducerCapability[];
-    reviewRules: Array<{ id: string; kind: "deterministic-preauthorized" }>;
+    reviewRules: CompilerRequest["media"]["reviewRules"];
   };
 }
 
@@ -644,19 +644,65 @@ function criterionHasDeterministicValidation(
   );
 }
 
+const intentFulfillmentAssetIds = (intent: MediaIntent) =>
+  intent.fulfillment.kind === "imported" ? intent.fulfillment.assetIds : [];
+const intentProducerInputAssetIds = (intent: MediaIntent) =>
+  intent.fulfillment.kind === "produced"
+    ? intent.fulfillment.inputRoleBindings.flatMap(({ importedAssetIds }) => importedAssetIds)
+    : [];
+const intentInputIntentIds = (intent: MediaIntent) =>
+  intent.fulfillment.kind === "produced"
+    ? intent.fulfillment.inputRoleBindings.flatMap(({ inputIntentIds }) => inputIntentIds)
+    : [];
+
 function mediaCapabilitySupports(
+  request: CompilerRequest,
+  proposal: CompilerProposal,
   capability: CompilerMediaProducerCapability,
   intent: MediaIntent,
 ): boolean {
   const output = intent.output;
   const raster = output.raster;
   const capabilityRaster = capability.raster;
+  const intentById = new Map(proposal.mediaIntents.map((entry) => [entry.id, entry]));
+  const importedById = new Map(
+    (request.media.assetManifest?.assets ?? []).map((asset) => [asset.id, asset]),
+  );
+  if (intent.fulfillment.kind !== "produced") return false;
+  const inputRoleBindings = intent.fulfillment.inputRoleBindings;
+  const rolesMatch =
+    inputRoleBindings.every((binding) => {
+      if (binding.inputIntentIds.length > 1) return false;
+      const role = capability.inputRoles.find(({ id }) => id === binding.roleId);
+      if (!role) return false;
+      const imported = binding.importedAssetIds.map((id) => importedById.get(id));
+      if (imported.some((asset) => !asset || !role.mediaTypes.includes(asset.mediaType)))
+        return false;
+      const produced = binding.inputIntentIds.map((id) => intentById.get(id));
+      if (
+        produced.some(
+          (source) =>
+            !source ||
+            !source.output.mediaTypes.some((mediaType) => role.mediaTypes.includes(mediaType)),
+        )
+      )
+        return false;
+      const minimumCount = imported.length + produced.length;
+      const maximumCount =
+        imported.length +
+        produced.reduce((total, source) => total + (source?.output.maximumCount ?? 32), 0);
+      return minimumCount <= role.maximumCount && maximumCount >= role.minimumCount;
+    }) &&
+    capability.inputRoles.every(
+      (role) =>
+        role.minimumCount === 0 || inputRoleBindings.some((binding) => binding.roleId === role.id),
+    );
   return (
-    capability.kinds.includes(intent.kind) &&
+    intent.bindings.every(({ direction }) => direction === "input-to") &&
+    capability.roles.includes(intent.role) &&
     capability.purposes.includes(intent.purpose) &&
     output.mediaTypes.some((mediaType) => capability.mediaTypes.includes(mediaType)) &&
-    intent.importedAssetIds.length >= capability.inputRequirement.minimumCount &&
-    intent.importedAssetIds.length <= capability.inputRequirement.maximumCount &&
+    rolesMatch &&
     output.minimumCount <= capability.maximumCount &&
     (raster === null ||
       (capabilityRaster !== null &&
@@ -667,17 +713,45 @@ function mediaCapabilitySupports(
   );
 }
 
+function activationSelectionForIntent(
+  request: CompilerRequest,
+  proposal: CompilerProposal,
+  source: MediaIntent,
+) {
+  let minimumCount = 1;
+  let maximumCount = source.output.maximumCount;
+  for (const consumer of proposal.mediaIntents) {
+    if (consumer.fulfillment.kind !== "produced") continue;
+    const capability = [...request.media.producerCapabilities]
+      .filter((candidate) => mediaCapabilitySupports(request, proposal, candidate, consumer))
+      .sort((left, right) => left.id.localeCompare(right.id))[0];
+    if (!capability) continue;
+    for (const binding of consumer.fulfillment.inputRoleBindings) {
+      if (!binding.inputIntentIds.includes(source.id)) continue;
+      const role = capability.inputRoles.find(({ id }) => id === binding.roleId);
+      if (!role) continue;
+      const importedCount = binding.importedAssetIds.length;
+      minimumCount = Math.max(minimumCount, role.minimumCount - importedCount, 1);
+      maximumCount = Math.min(maximumCount, role.maximumCount - importedCount);
+    }
+  }
+  return { minimumCount, maximumCount };
+}
+
 function importedAssetsSatisfyMediaIntent(request: CompilerRequest, intent: MediaIntent): boolean {
   if (
-    intent.importedAssetIds.length === 0 ||
+    intent.fulfillment.kind !== "imported" ||
+    intentFulfillmentAssetIds(intent).length === 0 ||
     !request.media.assetManifest ||
     intent.bindings.some((binding) => binding.direction !== "input-to")
   )
     return false;
   const byId = new Map(request.media.assetManifest.assets.map((asset) => [asset.id, asset]));
-  const assets = intent.importedAssetIds.map((id) => byId.get(id)).filter((asset) => asset);
+  const assets = intentFulfillmentAssetIds(intent)
+    .map((id) => byId.get(id))
+    .filter((asset) => asset);
   if (
-    assets.length !== intent.importedAssetIds.length ||
+    assets.length !== intentFulfillmentAssetIds(intent).length ||
     assets.length < intent.output.minimumCount ||
     assets.length > intent.output.maximumCount
   )
@@ -706,7 +780,19 @@ function canonicalMediaIntent(intent: MediaIntent): MediaIntent {
   return {
     ...intent,
     obligationIds: [...intent.obligationIds].sort(),
-    importedAssetIds: [...intent.importedAssetIds].sort(),
+    fulfillment:
+      intent.fulfillment.kind === "imported"
+        ? { kind: "imported", assetIds: [...intent.fulfillment.assetIds].sort() }
+        : {
+            kind: "produced",
+            inputRoleBindings: intent.fulfillment.inputRoleBindings
+              .map((binding) => ({
+                ...binding,
+                importedAssetIds: [...binding.importedAssetIds].sort(),
+                inputIntentIds: [...binding.inputIntentIds].sort(),
+              }))
+              .sort((left, right) => left.roleId.localeCompare(right.roleId)),
+          },
     output: { ...intent.output, mediaTypes: [...intent.output.mediaTypes].sort() },
     bindings: intent.bindings
       .map((binding) => ({ ...binding, criterionIds: [...binding.criterionIds].sort() }))
@@ -724,9 +810,89 @@ function projectedMediaProducerCount(request: CompilerRequest, proposal: Compile
     (intent) =>
       !importedAssetsSatisfyMediaIntent(request, intent) &&
       request.media.producerCapabilities.some((capability) =>
-        mediaCapabilitySupports(capability, intent),
+        mediaCapabilitySupports(request, proposal, capability, intent),
       ),
   ).length;
+}
+
+function projectedWorkItemsForEconomics(
+  request: CompilerRequest,
+  proposal: CompilerProposal,
+  projectionContext: CompilerProjectionContext,
+): Parameters<typeof assessDecomposition>[0] {
+  const authored: Parameters<typeof assessDecomposition>[0][number][] =
+    compilerWorkItemsForEconomics(
+      request,
+      proposal,
+      projectionContext.pinnedFacts,
+      projectionContext.runPolicy,
+    );
+  const existingIds = new Set(authored.map(({ id }) => id));
+  const producerIds = new Map<string, string>();
+  for (const intent of proposal.mediaIntents) {
+    if (
+      !importedAssetsSatisfyMediaIntent(request, intent) &&
+      request.media.producerCapabilities.some((capability) =>
+        mediaCapabilitySupports(request, proposal, capability, intent),
+      )
+    ) {
+      const id = derivedMediaProducerId(intent.id, existingIds);
+      existingIds.add(id);
+      producerIds.set(intent.id, id);
+    }
+  }
+  const scheduling = normalizeSchedulingPolicy(projectionContext.runPolicy);
+  const produced = proposal.mediaIntents.flatMap((intent) => {
+    const id = producerIds.get(intent.id);
+    if (!id) return [];
+    return [
+      {
+        id,
+        goal: intent.brief,
+        acceptance: [
+          `Produce ${intent.output.minimumCount}-${intent.output.maximumCount} immutable media rendition(s).`,
+        ],
+        scope: [],
+        preconditions: [],
+        outOfScope: [],
+        conventions: [],
+        dependsOn: [
+          ...new Set([
+            ...intent.bindings
+              .filter(({ direction }) => direction === "evidence-for")
+              .map(({ workItemId }) => workItemId),
+            ...intentInputIntentIds(intent)
+              .map((inputId) => producerIds.get(inputId))
+              .filter((inputId): inputId is string => Boolean(inputId)),
+          ]),
+        ].sort(),
+        requirements: {
+          os: ["linux"],
+          architecture: [],
+          cpu: scheduling.capacity.local.defaultCpu,
+          memoryMb: scheduling.capacity.local.defaultMemoryMb,
+          diskMb: 1,
+          timeoutMinutes: request.constraints.workItemTimeoutMinutes,
+          tools: [],
+          services: [],
+          networkDestinations: [],
+          permittedSecretNames: [],
+          trust: "managed" as const,
+          evidence: [
+            {
+              field: "deliverable" as const,
+              kind: "factory-default" as const,
+              source: "asset-production planning estimate unavailable until provider admission",
+            },
+          ],
+        },
+        context: { mustRead: [], searchSeeds: [], dependencyEvidence: [] },
+        validationCommands: [],
+        changeSurface: { mergeClass: "large-binary" as const, exclusiveResources: [] },
+      },
+    ];
+  });
+  return [...authored, ...produced];
 }
 
 function mediaIntentViolations(
@@ -737,14 +903,29 @@ function mediaIntentViolations(
   const obligations = new Set(request.inventory.obligations.map((entry) => entry.id));
   const workItems = new Map(proposal.workItems.map((item) => [item.id, item]));
   const imported = new Set(request.media.assetManifest?.assets.map((asset) => asset.id) ?? []);
-  const reviewRules = new Set(request.media.reviewRules.map((rule) => rule.id));
+  const reviewRules = new Map(request.media.reviewRules.map((rule) => [rule.id, rule]));
   const intentIds = new Set<string>();
+  const knownIntentIds = new Set(proposal.mediaIntents.map(({ id }) => id));
+  const intentById = new Map(proposal.mediaIntents.map((intent) => [intent.id, intent]));
   const projectedDependencies = proposal.workItems.map((item) => ({
     id: item.id,
     dependsOn: [...item.dependsOn],
   }));
   const projectedById = new Map(projectedDependencies.map((item) => [item.id, item]));
   const projectedIds = new Set(projectedById.keys());
+  const producerIdByIntent = new Map<string, string>();
+  for (const intent of proposal.mediaIntents) {
+    if (
+      !importedAssetsSatisfyMediaIntent(request, intent) &&
+      request.media.producerCapabilities.some((capability) =>
+        mediaCapabilitySupports(request, proposal, capability, intent),
+      )
+    ) {
+      const producerId = derivedMediaProducerId(intent.id, projectedIds);
+      projectedIds.add(producerId);
+      producerIdByIntent.set(intent.id, producerId);
+    }
+  }
   for (const [intentIndex, intent] of proposal.mediaIntents.entries()) {
     const base = pointer("mediaIntents", intentIndex);
     if (intentIds.has(intent.id))
@@ -752,6 +933,82 @@ function mediaIntentViolations(
         violation("duplicate-media-intent-id", `${base}/id`, "unique media intent IDs", intent.id),
       );
     intentIds.add(intent.id);
+    const inputRoleBindings =
+      intent.fulfillment.kind === "produced" ? intent.fulfillment.inputRoleBindings : [];
+    for (const [inputBindingIndex, inputBinding] of inputRoleBindings.entries()) {
+      const inputPath = `${base}/fulfillment/inputRoleBindings/${inputBindingIndex}/inputIntentIds`;
+      const unknownInputIntents = inputBinding.inputIntentIds.filter(
+        (id) => !knownIntentIds.has(id),
+      );
+      if (inputBinding.inputIntentIds.length > 1)
+        violations.push(
+          violation(
+            "incompatible-media-output",
+            inputPath,
+            "at most one upstream Asset Set per producer input role",
+            inputBinding.inputIntentIds,
+            intent.id,
+          ),
+        );
+      if (unknownInputIntents.length)
+        violations.push(
+          violation(
+            "unknown-media-work-item",
+            inputPath,
+            [...knownIntentIds].sort(),
+            unknownInputIntents,
+            intent.id,
+          ),
+        );
+      if (inputBinding.inputIntentIds.includes(intent.id))
+        violations.push(
+          violation(
+            "media-dependency-cycle",
+            inputPath,
+            "other produced media intents",
+            inputBinding.inputIntentIds,
+            intent.id,
+          ),
+        );
+      for (const inputId of inputBinding.inputIntentIds) {
+        const input = intentById.get(inputId);
+        if (!input) continue;
+        if (!producerIdByIntent.has(inputId))
+          violations.push(
+            violation(
+              "media-producer-unavailable",
+              inputPath,
+              "an upstream intent projected to an approved producer",
+              inputId,
+              intent.id,
+            ),
+          );
+      }
+      const unknownImports = inputBinding.importedAssetIds.filter((id) => !imported.has(id));
+      if (unknownImports.length)
+        violations.push(
+          violation(
+            "unknown-imported-asset",
+            `${base}/fulfillment/inputRoleBindings/${inputBindingIndex}/importedAssetIds`,
+            [...imported].sort(),
+            unknownImports,
+            intent.id,
+          ),
+        );
+    }
+    if (intent.fulfillment.kind === "imported") {
+      const unknownImports = intent.fulfillment.assetIds.filter((id) => !imported.has(id));
+      if (unknownImports.length)
+        violations.push(
+          violation(
+            "unknown-imported-asset",
+            `${base}/fulfillment/assetIds`,
+            [...imported].sort(),
+            unknownImports,
+            intent.id,
+          ),
+        );
+    }
     const unknownObligations = intent.obligationIds.filter((id) => !obligations.has(id));
     if (unknownObligations.length)
       violations.push(
@@ -763,19 +1020,12 @@ function mediaIntentViolations(
           intent.id,
         ),
       );
-    const unknownImports = intent.importedAssetIds.filter((id) => !imported.has(id));
-    if (unknownImports.length)
-      violations.push(
-        violation(
-          "unknown-imported-asset",
-          `${base}/importedAssetIds`,
-          [...imported].sort(),
-          unknownImports,
-          intent.id,
-        ),
-      );
     const seenBindings = new Set<string>();
-    let grounded = false;
+    let grounded = proposal.mediaIntents.some(
+      (consumer) =>
+        intentInputIntentIds(consumer).includes(intent.id) &&
+        consumer.obligationIds.some((id) => intent.obligationIds.includes(id)),
+    );
     for (const [bindingIndex, binding] of intent.bindings.entries()) {
       const item = workItems.get(binding.workItemId);
       if (!item) {
@@ -834,11 +1084,39 @@ function mediaIntentViolations(
         violation(
           "unauthorized-media-review",
           `${base}/review`,
-          [...reviewRules].sort(),
+          [...reviewRules.keys()].sort(),
           intent.review.ruleId,
           intent.id,
         ),
       );
+    if (intent.review.kind === "deterministic-preauthorized") {
+      const rule = reviewRules.get(intent.review.ruleId);
+      const compatibleCapability = request.media.producerCapabilities.find(
+        (capability) =>
+          mediaCapabilitySupports(request, proposal, capability, intent) &&
+          rule?.producerCapabilityIds.includes(capability.id),
+      );
+      const profile = intent.output.raster ? "raster" : "binary";
+      if (
+        rule &&
+        (!compatibleCapability ||
+          !rule.roles.includes(intent.role) ||
+          !rule.purposes.includes(intent.purpose) ||
+          !rule.profiles.includes(profile) ||
+          !intent.output.mediaTypes.every((mediaType) => rule.mediaTypes.includes(mediaType)) ||
+          !rule.outputVisibilities.includes(compatibleCapability.outputVisibility) ||
+          !rule.rightsBases.includes(compatibleCapability.outputRightsBasis))
+      )
+        violations.push(
+          violation(
+            "unauthorized-media-review",
+            `${base}/review`,
+            "a deterministic reviewer applicable to the exact producer, role, purpose, MIME, and profile",
+            intent.review.ruleId,
+            intent.id,
+          ),
+        );
+    }
     const criterionRequired =
       intent.purpose === "acceptance-evidence" ||
       intent.bindings.some((binding) => binding.direction === "evidence-for");
@@ -867,7 +1145,7 @@ function mediaIntentViolations(
       );
     const satisfiedByImport = importedAssetsSatisfyMediaIntent(request, intent);
     const compatible = request.media.producerCapabilities.filter((capability) =>
-      mediaCapabilitySupports(capability, intent),
+      mediaCapabilitySupports(request, proposal, capability, intent),
     );
     if (!satisfiedByImport && compatible.length === 0 && intent.necessity === "required")
       violations.push(
@@ -878,24 +1156,45 @@ function mediaIntentViolations(
           `${base}/output`,
           "an imported exact asset or permitted producer satisfying the media contract",
           {
-            importedAssetIds: intent.importedAssetIds,
+            manifestAssetIds: [
+              ...intentFulfillmentAssetIds(intent),
+              ...intentProducerInputAssetIds(intent),
+            ],
             producerCapabilities: request.media.producerCapabilities.map((entry) => entry.id),
           },
           intent.id,
         ),
       );
+    const selection = activationSelectionForIntent(request, proposal, intent);
+    if (
+      !satisfiedByImport &&
+      compatible.length > 0 &&
+      selection.minimumCount > selection.maximumCount
+    )
+      violations.push(
+        violation(
+          "incompatible-media-output",
+          `${base}/output`,
+          "a nonempty activation-selection interval shared by every downstream consumer",
+          selection,
+          intent.id,
+        ),
+      );
     if (!satisfiedByImport && compatible.length > 0) {
-      const producerId = derivedMediaProducerId(intent.id, projectedIds);
-      projectedIds.add(producerId);
+      const producerId = producerIdByIntent.get(intent.id)!;
       projectedDependencies.push({
         id: producerId,
-        dependsOn: intent.bindings
-          .filter(
-            (binding) =>
-              binding.direction === "evidence-for" && projectedById.has(binding.workItemId),
-          )
-          .map((binding) => binding.workItemId)
-          .sort(),
+        dependsOn: [
+          ...intent.bindings
+            .filter(
+              (binding) =>
+                binding.direction === "evidence-for" && projectedById.has(binding.workItemId),
+            )
+            .map((binding) => binding.workItemId),
+          ...intentInputIntentIds(intent)
+            .map((id) => producerIdByIntent.get(id))
+            .filter((id): id is string => Boolean(id)),
+        ].sort(),
       });
       for (const binding of intent.bindings.filter((entry) => entry.direction === "input-to")) {
         const consumer = projectedById.get(binding.workItemId);
@@ -904,6 +1203,21 @@ function mediaIntentViolations(
       }
     }
   }
+  const mediaIntentDependencies = analyzeDependencies(
+    proposal.mediaIntents.map((intent) => ({
+      id: intent.id,
+      dependsOn: intentInputIntentIds(intent),
+    })),
+  );
+  if (mediaIntentDependencies.cycleItems.length)
+    violations.push(
+      violation(
+        "media-dependency-cycle",
+        "/mediaIntents",
+        "an acyclic media intent input graph",
+        mediaIntentDependencies.cycleItems,
+      ),
+    );
   const mediaDependencyAnalysis = analyzeDependencies(projectedDependencies);
   if (mediaDependencyAnalysis.cycleItems.length)
     violations.push(
@@ -1126,6 +1440,23 @@ export function parseAndValidateCompilerProposal(
         "/workItems",
         request.constraints.maxWorkItems,
         finalProjectedWorkItemCount,
+      ),
+    );
+  if (finalProjectedWorkItemCount > 100)
+    violations.push(
+      violation(
+        "objective-planning-required",
+        "/workItems",
+        {
+          maximumWorkItems: request.constraints.planningWorkItemThreshold,
+          maximumCriticalPathMinutes: request.constraints.planningCriticalPathMinutes,
+          maximumAggregateWorkMinutes: request.constraints.planningAggregateWorkMinutes,
+        },
+        {
+          workItems: finalProjectedWorkItemCount,
+          configuredCriticalPathMinutes: null,
+          configuredAggregateWorkMinutes: null,
+        },
       ),
     );
   const analysis = analyzeDependencies(proposal.workItems);
@@ -1694,25 +2025,24 @@ export function parseAndValidateCompilerProposal(
     else economicContracts.set(digest, item.id);
   }
   if (projectionContext) {
-    const projected = projectedEnvelopeViolations(request, proposal, projectionContext);
+    const projected =
+      finalProjectedWorkItemCount <= 100
+        ? projectedEnvelopeViolations(request, proposal, projectionContext)
+        : [];
     violations.push(...projected);
-    if (projected.length === 0) {
+    if (projected.length === 0 && finalProjectedWorkItemCount <= 100) {
       const assessment = assessDecomposition(
-        compilerWorkItemsForEconomics(
-          request,
-          proposal,
-          projectionContext.pinnedFacts,
-          projectionContext.runPolicy,
-        ),
+        projectedWorkItemsForEconomics(request, proposal, projectionContext),
       );
-      const assessedProjectedWorkItems =
-        assessment.workItems + projectedMediaProducerCount(request, proposal);
+      const assessedProjectedWorkItems = finalProjectedWorkItemCount;
       const exceeded =
         assessedProjectedWorkItems > request.constraints.planningWorkItemThreshold ||
-        (assessment.configuredCriticalPathMinutes !== null &&
+        (assessment?.configuredCriticalPathMinutes !== null &&
+          assessment?.configuredCriticalPathMinutes !== undefined &&
           assessment.configuredCriticalPathMinutes >
             request.constraints.planningCriticalPathMinutes) ||
-        (assessment.configuredWorkMinutes !== null &&
+        (assessment?.configuredWorkMinutes !== null &&
+          assessment?.configuredWorkMinutes !== undefined &&
           assessment.configuredWorkMinutes > request.constraints.planningAggregateWorkMinutes);
       if (exceeded)
         violations.push(
@@ -1726,8 +2056,8 @@ export function parseAndValidateCompilerProposal(
             },
             {
               workItems: assessedProjectedWorkItems,
-              configuredCriticalPathMinutes: assessment.configuredCriticalPathMinutes,
-              configuredAggregateWorkMinutes: assessment.configuredWorkMinutes,
+              configuredCriticalPathMinutes: assessment?.configuredCriticalPathMinutes ?? null,
+              configuredAggregateWorkMinutes: assessment?.configuredWorkMinutes ?? null,
             },
           ),
         );
@@ -1886,9 +2216,26 @@ function projectMediaIntents(
   );
   const existingIds = new Set(byId.keys());
   const scheduling = normalizeSchedulingPolicy(projectionContext.runPolicy);
+  const intentById = new Map(proposal.mediaIntents.map((intent) => [intent.id, intent]));
+  const producerIdByIntent = new Map<string, string>();
+  for (const intent of proposal.mediaIntents) {
+    if (
+      !importedAssetsSatisfyMediaIntent(request, intent) &&
+      request.media.producerCapabilities.some((candidate) =>
+        mediaCapabilitySupports(request, proposal, candidate, intent),
+      )
+    ) {
+      const producerId = derivedMediaProducerId(intent.id, existingIds);
+      existingIds.add(producerId);
+      producerIdByIntent.set(intent.id, producerId);
+    }
+  }
   for (const intent of proposal.mediaIntents) {
     const imported = importedAssetsSatisfyMediaIntent(request, intent);
-    const selectedInputs = intent.importedAssetIds.map((assetId) => {
+    const selectedAssetIds = imported
+      ? intentFulfillmentAssetIds(intent)
+      : intentProducerInputAssetIds(intent);
+    const selectedInputs = selectedAssetIds.map((assetId) => {
       const input = assetBindings.get(assetId);
       if (!input) throw new Error(`media intent ${intent.id} lacks imported asset authority`);
       return structuredClone(input);
@@ -1909,7 +2256,8 @@ function projectMediaIntents(
           {
             source: "imported" as const,
             intentId: intent.id,
-            kind: intent.kind,
+            role: intent.role,
+            inputRoleId: null,
             brief: intent.brief,
             purpose: intent.purpose,
             necessity: intent.necessity,
@@ -1930,7 +2278,7 @@ function projectMediaIntents(
       continue;
     }
     const capability = [...request.media.producerCapabilities]
-      .filter((candidate) => mediaCapabilitySupports(candidate, intent))
+      .filter((candidate) => mediaCapabilitySupports(request, proposal, candidate, intent))
       .sort((left, right) => left.id.localeCompare(right.id))[0];
     if (!capability) {
       if (intent.necessity === "required")
@@ -1942,15 +2290,67 @@ function projectMediaIntents(
       });
       continue;
     }
-    const producerId = derivedMediaProducerId(intent.id, existingIds);
-    existingIds.add(producerId);
+    const producerId = producerIdByIntent.get(intent.id);
+    if (!producerId) throw new Error(`media intent ${intent.id} lacks its projected producer`);
+    if (intent.fulfillment.kind !== "produced")
+      throw new Error(`media intent ${intent.id} imported fulfillment was not satisfied`);
+    const inputRequirements = intent.fulfillment.inputRoleBindings.flatMap((binding) =>
+      binding.inputIntentIds.map((inputIntentId) => {
+        const inputIntent = intentById.get(inputIntentId);
+        const inputProducerId = producerIdByIntent.get(inputIntentId);
+        if (!inputIntent || !inputProducerId)
+          throw new Error(`media intent ${intent.id} lacks produced input ${inputIntentId}`);
+        return {
+          intentId: inputIntent.id,
+          producerWorkItemId: inputProducerId,
+          role: inputIntent.role,
+          purpose: inputIntent.purpose,
+          necessity: inputIntent.necessity,
+          obligationIds: [...inputIntent.obligationIds],
+          brief: inputIntent.brief,
+          rationale: inputIntent.rationale,
+          direction: "input-to" as const,
+          criterionIds: [] as string[],
+          inputRoleId: binding.roleId,
+        };
+      }),
+    );
+    const inputsByAssetId = new Map(
+      intentProducerInputAssetIds(intent).map(
+        (assetId, index) => [assetId, selectedInputs[index]!] as const,
+      ),
+    );
+    const producerInputs = [
+      ...new Map(selectedInputs.map((input) => [input.descriptorDigest, input])).values(),
+    ].map((input) => structuredClone(input));
+    const producerMediaUses = intent.fulfillment.inputRoleBindings.flatMap((binding) =>
+      binding.importedAssetIds.map((assetId) => {
+        const input = inputsByAssetId.get(assetId);
+        if (!input) throw new Error(`media input ${assetId} lacks immutable asset authority`);
+        return {
+          source: "imported" as const,
+          intentId: intent.id,
+          role: intent.role,
+          inputRoleId: binding.roleId,
+          brief: intent.brief,
+          purpose: intent.purpose,
+          necessity: intent.necessity,
+          obligationIds: [...intent.obligationIds],
+          rationale: intent.rationale,
+          direction: "input-to" as const,
+          criterionIds: [] as string[],
+          descriptorDigests: [input.descriptorDigest],
+          manifestDigest: input.manifestDigest,
+        };
+      }),
+    );
     const evidenceDependencies = intent.bindings
       .filter((binding) => binding.direction === "evidence-for")
       .map((binding) => binding.workItemId)
       .sort();
     const producer: CompiledAssetProductionWorkItem = {
       id: producerId,
-      title: `Produce ${intent.kind.replaceAll("-", " ")}: ${intent.id}`.slice(0, 256),
+      title: `Produce ${intent.role.replaceAll("-", " ")}: ${intent.id}`.slice(0, 256),
       goal: intent.brief,
       acceptance: [
         `Produce ${intent.output.minimumCount}-${intent.output.maximumCount} immutable ${intent.output.mediaTypes.join(" or ")} variant(s) satisfying the declared media constraints.`,
@@ -1963,7 +2363,12 @@ function projectMediaIntents(
       conventions: [
         "Preserve exact imported asset identities and return only bounded immutable variant descriptors.",
       ],
-      dependsOn: evidenceDependencies,
+      dependsOn: [
+        ...new Set([
+          ...evidenceDependencies,
+          ...inputRequirements.map(({ producerWorkItemId }) => producerWorkItemId),
+        ]),
+      ].sort(),
       baseSha: request.baseSha,
       scope: [],
       validationCommands: [],
@@ -1993,8 +2398,12 @@ function projectMediaIntents(
         intent: structuredClone(intent),
         producerCapabilityId: capability.id,
         producerCapabilityDigest: capability.capabilityDigest,
+        activationSelection: activationSelectionForIntent(request, proposal, intent),
       },
-      ...(selectedInputs.length ? { assetInputs: selectedInputs } : {}),
+      ...(producerInputs.length ? { assetInputs: producerInputs } : {}),
+      ...(inputRequirements.length || producerMediaUses.length
+        ? { generatedAssetRequirements: inputRequirements, mediaUses: producerMediaUses }
+        : {}),
       economicReview: {
         conservative: true,
         rationale: "Provider economics remain unresolved until supervised asset execution.",
@@ -2014,7 +2423,7 @@ function projectMediaIntents(
         {
           intentId: intent.id,
           producerWorkItemId: producerId,
-          kind: intent.kind,
+          role: intent.role,
           purpose: intent.purpose,
           necessity: intent.necessity,
           obligationIds: [...intent.obligationIds],
@@ -2022,6 +2431,7 @@ function projectMediaIntents(
           rationale: intent.rationale,
           direction: "input-to" as const,
           criterionIds: [...binding.criterionIds],
+          inputRoleId: null,
         },
       ].sort((left, right) => left.intentId.localeCompare(right.intentId));
     }

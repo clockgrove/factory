@@ -129,8 +129,9 @@ These are admission signals, not completion forecasts. Missing duration estimate
 
 For media work, a `work-items` proposal always includes `mediaIntents` (empty when the Objective
 needs none). The model selects a capability-advertised semantic role, purpose, cited obligations,
-media constraints, imported manifest asset IDs, and `inputRoleBindings`; Factory resolves those IDs
-and derives the exact descriptor digests. Factory keeps provider, model, storage, credentials,
+media constraints, and a strict fulfillment: exact imported manifest asset IDs, or produced media
+with named `inputRoleBindings`. Factory resolves those IDs and derives the exact descriptor digests.
+Factory keeps provider, model, storage, credentials,
 network authority, exact imported digests, and graph edges on the trusted side. An activation can
 bind one imported Objective asset manifest; safe metadata enters the structured request and verified
 files reach only an adapter that advertises their exact media types. The Codex CLI maps its supported

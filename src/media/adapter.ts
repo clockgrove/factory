@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 
-import { AssetDescriptorSchema, assetDigest, withAssetDigest } from "../assets/contracts.js";
+import {
+  AssetDescriptorSchema,
+  assetDigest,
+  canonicalAssetJson,
+  withAssetDigest,
+} from "../assets/contracts.js";
 import { inspectAssetBytes } from "../assets/handlers.js";
 import type { CompilerMediaProducerCapability } from "../assets/media-intent.js";
 import {
@@ -51,10 +57,13 @@ export interface MediaAdapterRuntimeRequest {
   invocation: MediaInvocation;
   packet: AssetProductionWorkerPacket;
   inputRoot: string | null;
+  /** Private durable controller-owned state; excluded from invocation identity. */
+  checkpointRoot: string;
   inputs: Array<{
     descriptorDigest: string;
     contentDigest: string;
     mediaType: string;
+    roleId: string;
     path: string;
   }>;
 }
@@ -71,13 +80,16 @@ function exactRuntimeRequest(request: MediaAdapterRuntimeRequest): MediaAdapterR
     descriptorDigest: input.descriptorDigest,
     contentDigest: input.contentDigest,
     mediaType: input.mediaType,
+    roleId: input.roleId,
     path: request.inputRoot ? `${request.inputRoot}/${input.path}` : input.path,
   }));
-  if (JSON.stringify(request.inputs) !== JSON.stringify(expected))
+  if (canonicalAssetJson(request.inputs) !== canonicalAssetJson(expected))
     throw new Error("media runtime request differs from its materialized inputs");
   if (expected.length > 0 !== Boolean(request.inputRoot))
     throw new Error("media runtime input root does not match its immutable bindings");
-  return { invocation, packet, inputRoot: request.inputRoot, inputs: expected };
+  const checkpointRoot = resolve(request.checkpointRoot);
+  if (!checkpointRoot.startsWith("/")) throw new Error("media checkpoint root must be absolute");
+  return { invocation, packet, inputRoot: request.inputRoot, checkpointRoot, inputs: expected };
 }
 
 async function runtimeSeed(requestInput: MediaAdapterRuntimeRequest): Promise<Buffer> {
@@ -90,7 +102,7 @@ async function runtimeSeed(requestInput: MediaAdapterRuntimeRequest): Promise<Bu
     const bytes = await readFile(input.path);
     if (createHash("sha256").update(bytes).digest("hex") !== input.contentDigest)
       throw new Error("materialized media input differs from its reserved content digest");
-    hash.update(input.descriptorDigest).update(bytes);
+    hash.update(input.roleId).update(input.descriptorDigest).update(bytes);
   }
   return hash.digest();
 }
@@ -120,10 +132,12 @@ export function compilerProducerCapability(
   return {
     id: capability.id,
     capabilityDigest: assetDigest(capability),
-    kinds: capability.intentKinds,
+    roles: capability.intentRoles,
     purposes: capability.purposes,
     mediaTypes: capability.outputMediaTypes,
-    inputRequirement: capability.inputRequirement,
+    outputVisibility: capability.outputAuthority.visibility,
+    outputRightsBasis: capability.outputAuthority.rights.basis,
+    inputRoles: capability.inputRoles,
     maximumCount: capability.limits.variants,
     raster: raster
       ? {
@@ -187,24 +201,19 @@ export const SHARP_RASTER_MEDIA_CAPABILITY = MediaProducerCapabilitySchema.parse
   protocol: "clockgrove.factory/media-producer-capability-v1",
   id: "sharp/local-raster-derivative-v1",
   adapterVersion: "1",
-  inputMediaTypes: DIRECTIONAL_RASTER_INPUTS,
-  inputRequirement: {
-    minimumCount: 1,
-    maximumCount: 8,
-    semantics: "directional-reference",
-  },
-  outputMediaTypes: ["image/png"],
-  intentKinds: [
-    "concept-reference",
-    "layout-reference",
-    "state-diagram",
-    "spatial-map",
-    "style-reference",
-    "sprite-sheet",
-    "reference-board",
-    "acceptance-capture",
+  inputRoles: [
+    {
+      id: "source",
+      mediaTypes: DIRECTIONAL_RASTER_INPUTS,
+      minimumCount: 1,
+      maximumCount: 8,
+      semantics: "directional-reference",
+    },
   ],
-  purposes: ["decision-input", "implementation-reference", "product-asset", "acceptance-evidence"],
+  outputMediaTypes: ["image/png"],
+  outputAuthority: { visibility: "private", rights: { basis: "unknown" } },
+  intentRoles: ["raster-derivative"],
+  purposes: ["decision-input", "implementation-reference"],
   profiles: [
     {
       kind: "raster",
@@ -240,9 +249,15 @@ function assertAdapterRequest(
   const invocation = request.invocation;
   if (
     invocation.adapterId !== capability.id ||
-    request.inputs.length < capability.inputRequirement.minimumCount ||
-    request.inputs.length > capability.inputRequirement.maximumCount ||
-    request.inputs.some((input) => !capability.inputMediaTypes.includes(input.mediaType))
+    capability.inputRoles.some((role) => {
+      const inputs = request.inputs.filter((input) => input.roleId === role.id);
+      return (
+        inputs.length < role.minimumCount ||
+        inputs.length > role.maximumCount ||
+        inputs.some((input) => !role.mediaTypes.includes(input.mediaType))
+      );
+    }) ||
+    request.inputs.some((input) => !capability.inputRoles.some((role) => role.id === input.roleId))
   )
     throw new Error("media runtime request is outside the selected adapter capability");
   return request;
@@ -266,6 +281,153 @@ function localObservation(invocation: MediaInvocation): MediaAdapterObservation 
       { unit: "output_count", amount: invocation.requestedVariants },
     ],
   };
+}
+
+type LocalCheckpoint = {
+  protocol: "clockgrove.factory/local-media-checkpoint-v1";
+  invocationDigest: string;
+  handle: MediaAdapterHandle;
+  providerResponseId: string;
+  productionReceiptDigest: string;
+  variants: Array<{ file: string; descriptor: ProducedVariant["descriptor"] }>;
+  usage: Array<{ unit: string; amount: number | null }>;
+};
+
+type LocalPreparedCheckpoint = {
+  protocol: "clockgrove.factory/local-media-prepared-v1";
+  invocationDigest: string;
+  handle: MediaAdapterHandle;
+};
+
+const localCheckpointRoot = (request: MediaAdapterRuntimeRequest) =>
+  join(resolve(request.checkpointRoot), request.invocation.digest);
+
+async function ensurePrivateCheckpointRoot(root: string) {
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  await chmod(root, 0o700);
+  const info = await lstat(root);
+  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.())
+    throw new Error("local media checkpoint root is not private owned storage");
+}
+
+async function syncPath(path: string) {
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readLocalCheckpoint(request: MediaAdapterRuntimeRequest): Promise<{
+  checkpoint: LocalCheckpoint;
+  collection: MediaAdapterCollection;
+} | null> {
+  const { invocation } = request;
+  const root = localCheckpointRoot(request);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(join(root, "ready.json"), "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (!parsed || typeof parsed !== "object") throw new Error("local media checkpoint is invalid");
+  const checkpoint = parsed as LocalCheckpoint;
+  if (
+    checkpoint.protocol !== "clockgrove.factory/local-media-checkpoint-v1" ||
+    checkpoint.invocationDigest !== invocation.digest ||
+    checkpoint.handle.invocationId !== invocation.invocationId ||
+    !Array.isArray(checkpoint.variants) ||
+    !Array.isArray(checkpoint.usage)
+  )
+    throw new Error("local media checkpoint differs from its invocation");
+  const variants: ProducedVariant[] = [];
+  for (const value of checkpoint.variants) {
+    const descriptor = AssetDescriptorSchema.parse(value.descriptor);
+    const bytes = await readFile(join(root, value.file));
+    if (
+      createHash("sha256").update(bytes).digest("hex") !== descriptor.content.digest ||
+      bytes.length !== descriptor.content.bytes
+    )
+      throw new Error("local media checkpoint bytes differ from their descriptor");
+    variants.push({ descriptor, bytes });
+  }
+  return {
+    checkpoint,
+    collection: {
+      providerResponseId: checkpoint.providerResponseId,
+      productionReceiptDigest: checkpoint.productionReceiptDigest,
+      variants,
+      usage: checkpoint.usage,
+    },
+  };
+}
+
+async function readLocalPrepared(
+  request: MediaAdapterRuntimeRequest,
+): Promise<LocalPreparedCheckpoint | null> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(join(localCheckpointRoot(request), "prepared.json"), "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (!value || typeof value !== "object")
+    throw new Error("local media prepared checkpoint is invalid");
+  const prepared = value as LocalPreparedCheckpoint;
+  if (
+    prepared.protocol !== "clockgrove.factory/local-media-prepared-v1" ||
+    prepared.invocationDigest !== request.invocation.digest ||
+    prepared.handle.invocationId !== request.invocation.invocationId ||
+    prepared.handle.providerRequestId !== null
+  )
+    throw new Error("local media prepared checkpoint differs from its invocation");
+  return prepared;
+}
+
+async function persistLocalCheckpoint(
+  request: MediaAdapterRuntimeRequest,
+  handle: MediaAdapterHandle,
+  collection: MediaAdapterCollection,
+) {
+  const { invocation } = request;
+  const root = localCheckpointRoot(request);
+  await ensurePrivateCheckpointRoot(resolve(request.checkpointRoot));
+  await ensurePrivateCheckpointRoot(root);
+  const variants: LocalCheckpoint["variants"] = [];
+  for (const [index, variant] of collection.variants.entries()) {
+    const file = `variant-${index + 1}.bin`;
+    const target = join(root, file);
+    try {
+      const existing = await readFile(target);
+      if (!existing.equals(variant.bytes))
+        throw new Error("local media checkpoint variant changed during exact recovery");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const temporary = join(root, `${file}.${process.pid}.tmp`);
+      await writeFile(temporary, variant.bytes, { mode: 0o600 });
+      await syncPath(temporary);
+      await rename(temporary, target);
+    }
+    variants.push({ file, descriptor: variant.descriptor });
+  }
+  const checkpoint: LocalCheckpoint = {
+    protocol: "clockgrove.factory/local-media-checkpoint-v1",
+    invocationDigest: invocation.digest,
+    handle,
+    providerResponseId: collection.providerResponseId ?? `local:${invocation.digest}`,
+    productionReceiptDigest: collection.productionReceiptDigest,
+    variants,
+    usage: collection.usage,
+  };
+  const temporary = join(root, `ready.${process.pid}.tmp`);
+  await writeFile(temporary, `${canonicalAssetJson(checkpoint)}\n`, { mode: 0o600 });
+  await syncPath(temporary);
+  await rename(temporary, join(root, "ready.json"));
+  await syncPath(root);
+  return checkpoint;
 }
 
 function producedDescriptor(args: {
@@ -302,28 +464,50 @@ function producedDescriptor(args: {
 
 abstract class LocalMediaAdapter implements MediaProducerAdapter {
   abstract readonly capability: MediaProducerCapability;
-  abstract collect(
-    request: MediaAdapterRuntimeRequest,
-    handle: MediaAdapterHandle,
-  ): Promise<MediaAdapterCollection>;
+  protected abstract generate(request: MediaAdapterRuntimeRequest): Promise<MediaAdapterCollection>;
 
   async probe(): Promise<MediaAdapterProbe> {
     return { available: true, authenticated: true };
   }
 
   async dispatch(requestInput: MediaAdapterRuntimeRequest): Promise<MediaAdapterHandle> {
-    const { invocation } = assertAdapterRequest(requestInput, this.capability);
+    const request = assertAdapterRequest(requestInput, this.capability);
+    const { invocation } = request;
     if (Date.parse(invocation.deadline) <= Date.now())
       throw new Error("media invocation deadline expired before dispatch");
-    return localHandle(invocation);
+    const existing = await readLocalCheckpoint(request);
+    if (existing) return existing.checkpoint.handle;
+    if (await readLocalPrepared(request))
+      throw new Error("local media invocation is already prepared; recover the same handle");
+    const root = localCheckpointRoot(request);
+    await ensurePrivateCheckpointRoot(resolve(request.checkpointRoot));
+    await ensurePrivateCheckpointRoot(root);
+    const handle = localHandle(invocation);
+    const prepared: LocalPreparedCheckpoint = {
+      protocol: "clockgrove.factory/local-media-prepared-v1",
+      invocationDigest: invocation.digest,
+      handle,
+    };
+    const preparedPath = join(root, "prepared.json");
+    await writeFile(preparedPath, `${canonicalAssetJson(prepared)}\n`, { mode: 0o600 });
+    await syncPath(preparedPath);
+    await syncPath(root);
+    const collection = await this.generate(request);
+    await persistLocalCheckpoint(request, handle, collection);
+    return handle;
   }
 
-  async recoverHandle(requestInput: MediaAdapterRuntimeRequest): Promise<MediaAdapterHandle> {
-    const { invocation } = assertAdapterRequest(requestInput, this.capability);
-    return {
-      ...localHandle(invocation),
-      dispatchedAt: new Date(Date.parse(invocation.deadline) - 1).toISOString(),
-    };
+  async recoverHandle(
+    requestInput: MediaAdapterRuntimeRequest,
+  ): Promise<MediaAdapterHandle | null> {
+    const request = assertAdapterRequest(requestInput, this.capability);
+    const ready = await readLocalCheckpoint(request);
+    if (ready) return ready.checkpoint.handle;
+    const prepared = await readLocalPrepared(request);
+    if (!prepared) return null;
+    const collection = await this.generate(request);
+    await persistLocalCheckpoint(request, prepared.handle, collection);
+    return prepared.handle;
   }
 
   async observe(
@@ -333,7 +517,13 @@ abstract class LocalMediaAdapter implements MediaProducerAdapter {
     const { invocation } = assertAdapterRequest(requestInput, this.capability);
     if (handle.invocationId !== invocation.invocationId)
       throw new Error("media handle belongs to another invocation");
-    return localObservation(invocation);
+    const retained = await readLocalCheckpoint(requestInput);
+    if (!retained) return { ...localObservation(invocation), state: "unknown", usage: [] };
+    return {
+      ...localObservation(invocation),
+      providerResponseId: retained.collection.providerResponseId,
+      usage: retained.collection.usage,
+    };
   }
 
   async cancel(
@@ -349,7 +539,21 @@ abstract class LocalMediaAdapter implements MediaProducerAdapter {
     requestInput: MediaAdapterRuntimeRequest,
     handle: MediaAdapterHandle,
   ): Promise<void> {
-    return this.cancel(requestInput, handle);
+    await this.cancel(requestInput, handle);
+    await rm(localCheckpointRoot(requestInput), { recursive: true, force: true });
+  }
+
+  async collect(
+    requestInput: MediaAdapterRuntimeRequest,
+    handle: MediaAdapterHandle,
+  ): Promise<MediaAdapterCollection> {
+    const { invocation } = assertAdapterRequest(requestInput, this.capability);
+    if (handle.invocationId !== invocation.invocationId)
+      throw new Error("media handle belongs to another invocation");
+    const retained = await readLocalCheckpoint(requestInput);
+    if (!retained || retained.checkpoint.handle.invocationId !== handle.invocationId)
+      throw new Error("local media checkpoint is unavailable for exact collection");
+    return retained.collection;
   }
 }
 
@@ -372,27 +576,27 @@ export class SharpRasterMediaAdapter extends LocalMediaAdapter {
     }
   }
 
-  async collect(
+  protected async generate(
     requestInput: MediaAdapterRuntimeRequest,
-    handle: MediaAdapterHandle,
   ): Promise<MediaAdapterCollection> {
     const request = assertAdapterRequest(requestInput, this.capability);
     const { invocation } = request;
-    if (handle.invocationId !== invocation.invocationId)
-      throw new Error("media handle belongs to another invocation");
     if (invocation.profile?.kind !== "raster" || !request.inputs[0])
       throw new Error("local raster derivative requires an exact raster profile and input");
     const sharp = (await import("sharp")).default;
     const seed = await runtimeSeed(request);
     const variants: ProducedVariant[] = [];
     for (let index = 0; index < invocation.requestedVariants; index++) {
-      const bytes = await sharp(await readFile(request.inputs[index % request.inputs.length]!.path))
+      const pipeline = sharp(await readFile(request.inputs[index % request.inputs.length]!.path))
         .resize(invocation.profile.width, invocation.profile.height, { fit: "cover" })
         .modulate({
           brightness: 0.9 + (seed[index % seed.length]! % 21) / 100,
           hue: seed[(index + 1) % seed.length]! % 24,
-        })
-        .ensureAlpha(invocation.profile.alpha ? 0.85 : 1)
+        });
+      const bytes = await (invocation.profile.alpha
+        ? pipeline.ensureAlpha(0.85)
+        : pipeline.removeAlpha()
+      )
         .png()
         .toBuffer();
       const inspection = await inspectAssetBytes(bytes, {
@@ -422,103 +626,8 @@ export class SharpRasterMediaAdapter extends LocalMediaAdapter {
   }
 }
 
-export const LOCAL_AUDIO_MEDIA_CAPABILITY = MediaProducerCapabilitySchema.parse({
-  protocol: "clockgrove.factory/media-producer-capability-v1",
-  id: "factory/local-audio-derivative-v1",
-  adapterVersion: "1",
-  inputMediaTypes: DIRECTIONAL_RASTER_INPUTS,
-  inputRequirement: {
-    minimumCount: 1,
-    maximumCount: 8,
-    semantics: "directional-reference",
-  },
-  outputMediaTypes: ["audio/wav"],
-  intentKinds: ["sound-reference"],
-  purposes: ["decision-input", "implementation-reference", "product-asset", "acceptance-evidence"],
-  profiles: [{ kind: "binary" }],
-  models: ["factory-deterministic-tone-v1"],
-  qualities: ["deterministic"],
-  limits: {
-    providerRequests: 0,
-    variants: 16,
-    generatedBytes: 32 * 1024 * 1024,
-    storageBytes: 32 * 1024 * 1024,
-  },
-  network: { destinations: [], thirdPartyEgress: "denied" },
-  recovery: {
-    observation: true,
-    idempotency: true,
-    cancellation: true,
-    resultCollection: "same-invocation",
-  },
-  nativeUsageKeys: ["generated_bytes", "output_count"],
-});
-
-function wavTone(seed: Buffer, index: number): Buffer {
-  const sampleRate = 8_000;
-  const samples = 2_000;
-  const dataBytes = samples * 2;
-  const output = Buffer.alloc(44 + dataBytes);
-  output.write("RIFF", 0, "ascii");
-  output.writeUInt32LE(36 + dataBytes, 4);
-  output.write("WAVEfmt ", 8, "ascii");
-  output.writeUInt32LE(16, 16);
-  output.writeUInt16LE(1, 20);
-  output.writeUInt16LE(1, 22);
-  output.writeUInt32LE(sampleRate, 24);
-  output.writeUInt32LE(sampleRate * 2, 28);
-  output.writeUInt16LE(2, 32);
-  output.writeUInt16LE(16, 34);
-  output.write("data", 36, "ascii");
-  output.writeUInt32LE(dataBytes, 40);
-  const frequency = 180 + (seed[index % seed.length]! % 80) * 4;
-  for (let sample = 0; sample < samples; sample++) {
-    const value = Math.round(Math.sin((sample * Math.PI * 2 * frequency) / sampleRate) * 8_000);
-    output.writeInt16LE(value, 44 + sample * 2);
-  }
-  return output;
-}
-
-export class LocalAudioMediaAdapter extends LocalMediaAdapter {
-  readonly capability = LOCAL_AUDIO_MEDIA_CAPABILITY;
-
-  async collect(
-    requestInput: MediaAdapterRuntimeRequest,
-    handle: MediaAdapterHandle,
-  ): Promise<MediaAdapterCollection> {
-    const request = assertAdapterRequest(requestInput, this.capability);
-    const { invocation } = request;
-    if (handle.invocationId !== invocation.invocationId)
-      throw new Error("media handle belongs to another invocation");
-    const seed = await runtimeSeed(request);
-    const variants: ProducedVariant[] = [];
-    for (let index = 0; index < invocation.requestedVariants; index++) {
-      const bytes = wavTone(seed, index);
-      const inspection = await inspectAssetBytes(bytes, {
-        allowOpaque: true,
-        displayName: `variant-${index + 1}.wav`,
-      });
-      variants.push({
-        bytes,
-        descriptor: producedDescriptor({ invocation, index, extension: "wav", bytes, inspection }),
-      });
-    }
-    const generatedBytes = variants.reduce((total, variant) => total + variant.bytes.length, 0);
-    return {
-      providerResponseId: `local:${invocation.digest}`,
-      productionReceiptDigest: assetDigest({ invocation: invocation.digest, generatedBytes }),
-      variants,
-      usage: [
-        { unit: "generated_bytes", amount: generatedBytes },
-        { unit: "output_count", amount: variants.length },
-      ],
-    };
-  }
-}
-
 export function defaultMediaAdapterRegistry(): MediaAdapterRegistry {
   const registry = new MediaAdapterRegistry();
   registry.register(new SharpRasterMediaAdapter());
-  registry.register(new LocalAudioMediaAdapter());
   return registry;
 }

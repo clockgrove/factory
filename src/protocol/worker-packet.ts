@@ -438,9 +438,21 @@ export const AssetProductionWorkerPacketSchema = WorkerPacketCommon.extend({
   validation: z.never().optional(),
   repositoryCapabilities: z.never().optional(),
   managedRuntimes: z.never().optional(),
-  generatedAssetRequirements: z.never().optional(),
-  mediaUses: z.never().optional(),
-}).strict();
+  generatedAssetRequirements: shortList(GeneratedAssetRequirementSchema, 32).default([]),
+  mediaUses: shortList(WorkerMediaIntentUseSchema, 64).default([]),
+})
+  .strict()
+  .superRefine((packet, context) => {
+    const descriptors = new Set(packet.assetInputs.map(({ descriptorDigest }) => descriptorDigest));
+    for (const [index, use] of packet.mediaUses.entries()) {
+      if (use.descriptorDigests.some((digest: string) => !descriptors.has(digest)))
+        context.addIssue({
+          code: "custom",
+          path: ["mediaUses", index, "descriptorDigests"],
+          message: "media use references a descriptor absent from immutable asset inputs",
+        });
+    }
+  });
 
 export const WorkerPacketSchema = z.union([
   RepositoryChangeWorkerPacketSchema,

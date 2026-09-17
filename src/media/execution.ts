@@ -130,6 +130,8 @@ const zeroAccounting = (invocation: MediaInvocation): MediaExecutionAccounting =
   native: invocation.usageReservation.nativeUnits.map((unit) => ({ unit, amount: 0 })),
 });
 
+const boundedReason = (value: unknown) => String(value).slice(0, 8_000);
+
 function verifyRequest(adapter: MediaProducerAdapter, request: MediaAdapterRuntimeRequest) {
   const invocation = MediaInvocationSchema.parse(request.invocation);
   if (
@@ -191,11 +193,35 @@ export class MediaProductionExecutor {
         invocation,
         phase: "prepared",
         state: "failed",
-        reason: `media adapter refused before dispatch: ${probe.reason ?? "unavailable"}`,
+        reason: boundedReason(
+          `media adapter refused before dispatch: ${probe.reason ?? "unavailable"}`,
+        ),
         accounting: zeroAccounting(invocation),
       });
       return {
         state: "failed",
+        dispatchReceipt: null,
+        cleanupPending: false,
+        definitiveNonExecution: true,
+      };
+    }
+    const immediatePreDispatchState = args.signal?.aborted
+      ? { state: "cancelled" as const, reason: "media invocation aborted before dispatch" }
+      : Date.parse(invocation.deadline) <= Date.now()
+        ? {
+            state: "cancelled" as const,
+            reason: "media invocation deadline expired before dispatch",
+          }
+        : null;
+    if (immediatePreDispatchState) {
+      await this.options.hooks.recordTerminalFailure({
+        invocation,
+        phase: "prepared",
+        ...immediatePreDispatchState,
+        accounting: zeroAccounting(invocation),
+      });
+      return {
+        state: immediatePreDispatchState.state,
         dispatchReceipt: null,
         cleanupPending: false,
         definitiveNonExecution: true,
@@ -207,23 +233,23 @@ export class MediaProductionExecutor {
       handle = await this.options.adapter.dispatch(request);
     } catch (error) {
       const ambiguous = invocation.usageReservation.providerRequests > 0;
-      await this.options.hooks.recordTerminalFailure({
-        invocation,
-        phase: "dispatch",
-        state: ambiguous ? "unknown" : "failed",
-        reason: ambiguous
-          ? `media dispatch may have crossed its provider boundary: ${String(error)}`
-          : `local media dispatch failed before any provider request: ${String(error)}`,
-        accounting: ambiguous ? unavailableAccounting(invocation) : zeroAccounting(invocation),
-      });
-      return ambiguous
-        ? { state: "unknown", phase: "dispatch", dispatchReceipt: null }
-        : {
-            state: "failed",
-            dispatchReceipt: null,
-            cleanupPending: false,
-            definitiveNonExecution: false,
-          };
+      if (ambiguous) {
+        await this.options.hooks.recordTerminalFailure({
+          invocation,
+          phase: "dispatch",
+          state: "unknown",
+          reason: boundedReason(
+            `media dispatch may have crossed its provider boundary: ${String(error)}`,
+          ),
+          accounting: unavailableAccounting(invocation),
+        });
+        return { state: "unknown", phase: "dispatch", dispatchReceipt: null };
+      }
+      throw new MediaExecutionPhaseError(
+        "dispatch",
+        "local media dispatch failed after its durable marker; exact checkpoint recovery is required",
+        { cause: error },
+      );
     }
     const receipt = createMediaDispatchReceipt(invocation, handle);
     let persisted: Awaited<ReturnType<typeof persistMediaDispatchReceipt>>;
@@ -459,7 +485,9 @@ export class MediaProductionExecutor {
           invocation,
           phase: "observe",
           state: "unknown",
-          reason: observation.reason ?? "exact media invocation outcome is unavailable",
+          reason: boundedReason(
+            observation.reason ?? "exact media invocation outcome is unavailable",
+          ),
           accounting: unavailableAccounting(invocation),
         });
         return { state: "unknown", phase: "observe", dispatchReceipt: receipt };
@@ -476,7 +504,7 @@ export class MediaProductionExecutor {
           invocation,
           phase: "observe",
           state: observation.state,
-          reason: observation.reason ?? `media invocation ${observation.state}`,
+          reason: boundedReason(observation.reason ?? `media invocation ${observation.state}`),
           accounting,
         });
         const cleanupPending = !(await this.cleanup(request, handle));
@@ -494,7 +522,8 @@ export class MediaProductionExecutor {
           cause: error,
         });
       }
-      let native: Array<{ unit: string; amount: number | null }> = [];
+      let native: Array<{ unit: string; amount: number | null }> =
+        invocation.usageReservation.nativeUnits.map((unit) => ({ unit, amount: null }));
       try {
         native = exactUsage(invocation, collection.usage);
         await retainMediaCollection({
@@ -515,7 +544,7 @@ export class MediaProductionExecutor {
           invocation,
           phase: "retain",
           state: "failed",
-          reason: error.message,
+          reason: boundedReason(error.message),
           accounting: {
             providerRequests: invocation.usageReservation.providerRequests,
             variants: collection.variants.length,
@@ -586,7 +615,7 @@ export class MediaProductionExecutor {
     } catch (error) {
       await this.options.hooks.recordCleanupFailure(
         invocation,
-        `cleanup phase retained its resource fence: ${String(error)}`,
+        boundedReason(`cleanup phase retained its resource fence: ${String(error)}`),
       );
       return false;
     }

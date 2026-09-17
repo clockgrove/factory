@@ -15,7 +15,7 @@ import { reconcileAdmissionForSuccessor } from "./control/admission-reassignment
 import { observeLocalScopeBatch } from "./recovery/scope-resources.js";
 import { dirname, join, resolve } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { readObjectiveAssetManifest } from "./assets/storage.js";
 import { materializeObjectiveAssets, materializeWorkerAssetInputs } from "./assets/materialize.js";
 import {
@@ -27,11 +27,11 @@ import { policyMediaCompilerCapabilities } from "./media/adapter.js";
 import { defaultMediaAdapterRegistry } from "./media/adapter.js";
 import { assetDigest, canonicalAssetJson, type AssetManifestEntry } from "./assets/contracts.js";
 import {
-  activateRepositoryWorkerPacket,
+  activateWorkerPacket,
   createAssetDecision,
   createMediaInvocation,
 } from "./media/lifecycle.js";
-import { MediaProductionExecutor } from "./media/execution.js";
+import { MediaExecutionPhaseError, MediaProductionExecutor } from "./media/execution.js";
 import {
   createAssetActivation,
   persistAssetActivation,
@@ -270,7 +270,6 @@ import {
   assertRepositoryChangeWorkerPacket,
   AssetProductionWorkerPacketSchema,
   parseWorkerPacket,
-  RepositoryChangeWorkerPacketSchema,
   workerPacketDigest,
   type WorkerPacket,
 } from "./protocol/worker-packet.js";
@@ -510,6 +509,8 @@ export interface SupervisorOptions {
   repo: string;
   objective: number;
   repository: string;
+  /** Private durable state for dispatched media checkpoints and retained exact bytes. */
+  mediaCheckpointRoot?: string;
   policy: unknown;
   pollIntervalMs?: number;
   onStatus?: (message: string) => void;
@@ -537,6 +538,21 @@ export interface ControllerObservation {
   epoch: number;
   expiresAt: string;
   controllerPolicyDigest: string;
+}
+
+function mediaControllerStateRoot(
+  options: Pick<SupervisorOptions, "mediaCheckpointRoot">,
+  repository: string,
+  runId: string,
+) {
+  const dataRoot =
+    options.mediaCheckpointRoot ??
+    join(
+      process.env["XDG_DATA_HOME"]?.trim() || join(homedir(), ".local", "share"),
+      "clockgrove-factory",
+      "media",
+    );
+  return join(resolve(dataRoot), createHash("sha256").update(repository).digest("hex"), runId);
 }
 
 export interface RepositorySupervisorResources {
@@ -662,6 +678,7 @@ function terminalizationVeto(error: unknown): boolean {
     error instanceof SafeArtifactCheckpointHeldError ||
     error instanceof ArtifactCompletionUnavailableError ||
     error instanceof ArtifactCollectionCheckpointError ||
+    error instanceof MediaExecutionPhaseError ||
     error instanceof ProviderQuotaDrainIncompleteError ||
     error instanceof ProviderResourceCleanupError ||
     error instanceof CancellationAccountingPublicationError ||
@@ -6900,7 +6917,10 @@ export class FactorySupervisor {
             );
             const graphPacket = parseWorkerPacket({
               ...original,
-              baseSha: executionBase.oid,
+              baseSha:
+                original.deliverable.kind === "asset-production"
+                  ? (this.#run.baseSha ?? original.baseSha)
+                  : executionBase.oid,
               ...(retryContext(priority.item, this.#run.runId)
                 ? { retryContext: retryContext(priority.item, this.#run.runId) }
                 : {}),
@@ -6916,10 +6936,7 @@ export class FactorySupervisor {
             let packet = graphPacket;
             let capabilityBlocker: string | undefined;
             try {
-              if (
-                packet.deliverable.kind === "repository-change" &&
-                (packet.generatedAssetRequirements?.length ?? 0) > 0
-              ) {
+              if ((packet.generatedAssetRequirements?.length ?? 0) > 0) {
                 if (!this.#compiledProjection)
                   throw new Error("generated media activation requires graph projection evidence");
                 const activations = [];
@@ -7054,11 +7071,8 @@ export class FactorySupervisor {
                     throw new Error("generated media approval chain is incomplete or changed");
                   activations.push(storedActivation.record);
                 }
-                const activated = activateRepositoryWorkerPacket({
-                  sourcePacket: (() => {
-                    assertRepositoryChangeWorkerPacket(packet);
-                    return packet;
-                  })(),
+                const activated = activateWorkerPacket({
+                  sourcePacket: packet,
                   consumerWorkItemId: priority.item.id,
                   activations,
                   producerIssueNumbers,
@@ -7123,6 +7137,10 @@ export class FactorySupervisor {
             const mediaAdapter = mediaDeliverable
               ? this.#mediaRegistry.get(mediaDeliverable.producerCapabilityId)
               : null;
+            const mediaAdmissionSupported =
+              mediaAdapter?.capability.limits.providerRequests === 0 &&
+              mediaAdapter.capability.network.thirdPartyEgress === "denied" &&
+              mediaAdapter.capability.network.destinations.length === 0;
             const backends: BackendCandidate[] = mediaAdapter
               ? [
                   {
@@ -7138,10 +7156,12 @@ export class FactorySupervisor {
                     local: true,
                     paid: false,
                     permanentReasons:
-                      assetDigest(mediaAdapter.capability) ===
+                      assetDigest(mediaAdapter.capability) !==
                       mediaDeliverable!.producerCapabilityDigest
-                        ? []
-                        : ["media producer capability changed"],
+                        ? ["media producer capability changed"]
+                        : !mediaAdmissionSupported
+                          ? ["media admission supports only exact local zero-provider capabilities"]
+                          : [],
                     transientReasons: [],
                   },
                 ]
@@ -7621,6 +7641,7 @@ export class FactorySupervisor {
         objectiveDeadline,
         admission,
         AssetProductionWorkerPacketSchema.parse(mediaPacket),
+        assetActivationBundle,
         releaseExecutionCapacity,
         executionSignal,
         commitExecutionCapacity,
@@ -7653,6 +7674,7 @@ export class FactorySupervisor {
     objectiveDeadline: number,
     admission: AdmissionProposal,
     packet: Extract<WorkerPacket, { deliverable: { kind: "asset-production" } }>,
+    assetActivationBundle: AssetActivationBundle | undefined,
     releaseExecutionCapacity: (alreadyReleased?: boolean) => Promise<void>,
     executionSignal?: AbortSignal,
     commitExecutionCapacity?: () => Promise<void>,
@@ -7660,6 +7682,14 @@ export class FactorySupervisor {
     const adapter = this.#mediaRegistry.get(packet.deliverable.producerCapabilityId);
     if (!adapter || assetDigest(adapter.capability) !== packet.deliverable.producerCapabilityDigest)
       throw new Error("asset producer capability changed before reservation");
+    if (
+      adapter.capability.limits.providerRequests !== 0 ||
+      adapter.capability.network.thirdPartyEgress !== "denied" ||
+      adapter.capability.network.destinations.length !== 0
+    )
+      throw new Error(
+        "this media admission plane supports only exact local zero-provider capabilities",
+      );
     const base = await this.#store.readCommit(packet.baseSha);
     const authorityBaseSha = this.#run.baseSha ?? this.#packetFor(item.number).baseSha;
     const authority = {
@@ -7688,18 +7718,6 @@ export class FactorySupervisor {
         inputEntries.push(entry);
       }
     }
-    const outputVisibility = inputEntries.some(
-      ({ descriptor }) => descriptor.visibility === "private",
-    )
-      ? "private"
-      : "public";
-    const distinctRights = new Map(
-      inputEntries.map(({ descriptor }) => [JSON.stringify(descriptor.rights), descriptor.rights]),
-    );
-    const outputRights =
-      distinctRights.size === 1
-        ? structuredClone([...distinctRights.values()][0]!)
-        : ({ basis: "unknown" } as const);
     const revisionEvent = [...(item.factoryEvents ?? [])]
       .reverse()
       .find(
@@ -7792,8 +7810,6 @@ export class FactorySupervisor {
               ),
             ).toISOString(),
             policyDigest: this.#run.policyDigest,
-            outputVisibility,
-            outputRights,
             ...(revisionContext ? { revisionContext } : {}),
           });
           return {
@@ -7809,8 +7825,10 @@ export class FactorySupervisor {
               attempt,
               adapter.capability.id,
               invocation.digest,
+              assetActivationBundle?.digest ?? null,
             ]),
             mediaInvocation: invocation,
+            ...(assetActivationBundle ? { assetActivationBundle } : {}),
           };
         },
       });
@@ -7834,7 +7852,12 @@ export class FactorySupervisor {
       invocation: reservation.mediaInvocation,
       packet,
       inputRoot,
+      checkpointRoot: join(
+        mediaControllerStateRoot(this.#options, authority.repository, this.#run.runId),
+        "dispatch",
+      ),
       inputs: reservation.mediaInvocation.inputAssets.map((input) => ({
+        roleId: input.roleId,
         descriptorDigest: input.descriptorDigest,
         contentDigest: input.contentDigest,
         mediaType: input.mediaType,
@@ -7857,16 +7880,14 @@ export class FactorySupervisor {
           reservationOid: reservation!.oid,
           invocationDigest: reservation!.mediaInvocation!.digest,
           ...(fields ? { fields } : {}),
-          ...(reason ? { reason } : {}),
+          ...(reason ? { reason: reason.slice(0, 8_000) } : {}),
         }),
       );
     const executor = new MediaProductionExecutor({
       store: this.#store,
       retentionRoot: join(
-        tmpdir(),
-        "clockgrove-factory-media",
-        createHash("sha256").update(authority.repository).digest("hex"),
-        this.#run.runId,
+        mediaControllerStateRoot(this.#options, authority.repository, this.#run.runId),
+        "retained",
       ),
       adapter,
       assertCurrent: () => this.#externalAdmission(async () => {}),
@@ -7914,7 +7935,9 @@ export class FactorySupervisor {
         ...(executionSignal ? { signal: executionSignal } : {}),
       });
       while (result.state === "running") {
-        await sleep(250, executionSignal);
+        // The exact invocation must receive cancellation/observation even when the
+        // controller signal changes while waiting; resume owns that transition.
+        await sleep(250);
         result = await executor.resume({
           authority,
           request,
@@ -8260,8 +8283,8 @@ export class FactorySupervisor {
       if (reservedAssetBundle && !recovered) {
         if (reservedAssetBundle.consumerWorkItemId !== item.id)
           throw new Error("asset activation bundle belongs to another consumer");
-        const activated = activateRepositoryWorkerPacket({
-          sourcePacket: RepositoryChangeWorkerPacketSchema.parse(sourceGraphPacket),
+        const activated = activateWorkerPacket({
+          sourcePacket: sourceGraphPacket,
           consumerWorkItemId: item.id,
           activations: reservedAssetBundle.activations,
         });
@@ -11538,7 +11561,7 @@ export class FactorySupervisor {
           amount,
           usageId,
           ...link,
-          ...(reason ? { reason } : {}),
+          ...(reason ? { reason: reason.slice(0, 8_000) } : {}),
           reportedModelUsage: reportedModelUsage(usage)!,
         };
         return reservation
@@ -12656,8 +12679,8 @@ export class FactorySupervisor {
       });
       try {
         if (reservation.assetActivationBundle) {
-          const activated = activateRepositoryWorkerPacket({
-            sourcePacket: RepositoryChangeWorkerPacketSchema.parse(graphPacket),
+          const activated = activateWorkerPacket({
+            sourcePacket: graphPacket,
             consumerWorkItemId: item.id,
             activations: reservation.assetActivationBundle.activations,
           });
@@ -19863,7 +19886,9 @@ export class FactorySupervisor {
           ...(reason ? { reason } : {}),
         }),
       );
-    const packet = AssetProductionWorkerPacketSchema.parse(this.#packetFor(item.number));
+    const packet = AssetProductionWorkerPacketSchema.parse(
+      this.#packetBoundToReservation(item, reservation, invocation.authorityBaseSha),
+    );
     if (workerPacketDigest(packet) !== invocation.workerPacketDigest)
       throw new Error("recovery media Worker Packet differs from its reserved invocation");
     const manifests = await Promise.all(
@@ -19894,7 +19919,12 @@ export class FactorySupervisor {
       invocation,
       packet,
       inputRoot,
+      checkpointRoot: join(
+        mediaControllerStateRoot(this.#options, authority.repository, reservation.runId),
+        "dispatch",
+      ),
       inputs: invocation.inputAssets.map((input) => ({
+        roleId: input.roleId,
         descriptorDigest: input.descriptorDigest,
         contentDigest: input.contentDigest,
         mediaType: input.mediaType,
@@ -19904,10 +19934,8 @@ export class FactorySupervisor {
     const executor = new MediaProductionExecutor({
       store: this.#store,
       retentionRoot: join(
-        tmpdir(),
-        "clockgrove-factory-media",
-        createHash("sha256").update(authority.repository).digest("hex"),
-        reservation.runId,
+        mediaControllerStateRoot(this.#options, authority.repository, reservation.runId),
+        "retained",
       ),
       adapter,
       assertCurrent: () => this.#externalAdmission(async () => {}),
@@ -20094,6 +20122,22 @@ export class FactorySupervisor {
     providerGates: readonly ProviderQuotaEvent[],
     includeAnyUnsettledAdmission = false,
   ): Promise<boolean> {
+    if (item.state === "for_review") {
+      const packet = parseWorkerPacketFromIssue(item.body ?? "");
+      if (packet.deliverable.kind === "asset-production") {
+        if (await this.#hasUnsettledIssueAdmission(item)) return true;
+        if (
+          packet.deliverable.intent.review.kind === "deterministic-preauthorized" &&
+          !(item.factoryEvents ?? []).some(
+            (event) =>
+              event.kind === "media" &&
+              event.runId === this.#run.runId &&
+              ["AssetDecisionRecorded", "AssetActivated"].includes(event.event),
+          )
+        )
+          return true;
+      }
+    }
     if (includeAnyUnsettledAdmission) {
       const consumerSuccess = [...(item.factoryEvents ?? [])]
         .reverse()

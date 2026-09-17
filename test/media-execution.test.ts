@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -13,8 +13,11 @@ import {
   type MediaProducerAdapter,
 } from "../src/media/adapter.js";
 import { MediaProductionExecutor, type MediaExecutionHooks } from "../src/media/execution.js";
-import { createMediaInvocation } from "../src/media/lifecycle.js";
-import { createAssetDecision } from "../src/media/lifecycle.js";
+import {
+  activateWorkerPacket,
+  createAssetDecision,
+  createMediaInvocation,
+} from "../src/media/lifecycle.js";
 import {
   LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY,
   LocalPrivateMediaReviewer,
@@ -175,15 +178,21 @@ function packet(capabilityDigest = assetDigest(SHARP_RASTER_MEDIA_CAPABILITY)) {
       contract: "clockgrove.factory/asset-set" as const,
       producerCapabilityId: SHARP_RASTER_MEDIA_CAPABILITY.id,
       producerCapabilityDigest: capabilityDigest,
+      activationSelection: { minimumCount: 1, maximumCount: 1 },
       intent: {
         id: "hero-reference",
-        kind: "layout-reference" as const,
+        role: "raster-derivative" as const,
         purpose: "implementation-reference" as const,
         necessity: "required" as const,
         obligationIds: ["visual-contract"],
         rationale: "The implementation consumes this exact reference.",
         brief: "Produce a deterministic two-pixel visual reference.",
-        importedAssetIds: ["composition"],
+        fulfillment: {
+          kind: "produced" as const,
+          inputRoleBindings: [
+            { roleId: "source", importedAssetIds: ["composition"], inputIntentIds: [] },
+          ],
+        },
         output: {
           mediaTypes: ["image/png" as const],
           minimumCount: 1,
@@ -207,11 +216,29 @@ function packet(capabilityDigest = assetDigest(SHARP_RASTER_MEDIA_CAPABILITY)) {
         ],
       },
     },
+    generatedAssetRequirements: [],
+    mediaUses: [
+      {
+        source: "imported",
+        intentId: "hero-reference",
+        role: "raster-derivative",
+        inputRoleId: "source",
+        brief: "Produce a deterministic two-pixel visual reference.",
+        purpose: "implementation-reference",
+        necessity: "required",
+        obligationIds: ["visual-contract"],
+        rationale: "The implementation consumes this exact reference.",
+        direction: "input-to",
+        criterionIds: [],
+        descriptorDigests: [REFERENCE_DESCRIPTOR.digest],
+        manifestDigest: "3".repeat(64),
+      },
+    ],
   } satisfies AssetProductionWorkerPacket;
 }
 
 function invocation(
-  packetInput = packet(),
+  packetInput: AssetProductionWorkerPacket = packet(),
   deadline = "2099-01-01T00:00:00.000Z",
   capability = SHARP_RASTER_MEDIA_CAPABILITY,
 ) {
@@ -227,25 +254,28 @@ function invocation(
     inputEntries: [REFERENCE_ENTRY],
     deadline,
     policyDigest: "c".repeat(64),
-    outputVisibility: "private",
-    outputRights: { basis: "unknown" },
   });
 }
 
-async function requestFor(exact: ReturnType<typeof invocation>) {
+async function requestFor(
+  exact: ReturnType<typeof invocation>,
+  packetInput: AssetProductionWorkerPacket = packet(exact.capabilityDigest),
+) {
   const root = await mkdtemp(join(tmpdir(), "factory-media-input-"));
   roots.push(root);
   const path = join(root, REFERENCE_DESCRIPTOR.materializationPath);
   await mkdir(join(root, `assets/${REFERENCE_DIGEST}`), { recursive: true });
   await writeFile(path, REFERENCE_PNG, { mode: 0o444 });
-  const runtimePacket = packet(exact.capabilityDigest);
+  const runtimePacket = structuredClone(packetInput);
   runtimePacket.deliverable.producerCapabilityId = exact.adapterId;
   return {
     invocation: exact,
     packet: runtimePacket,
     inputRoot: root,
+    checkpointRoot: join(root, "dispatch-checkpoints"),
     inputs: [
       {
+        roleId: "source",
         descriptorDigest: REFERENCE_DESCRIPTOR.digest,
         contentDigest: REFERENCE_DIGEST,
         mediaType: "image/png",
@@ -340,6 +370,124 @@ describe("media production execution", () => {
         invocationDigest: exact.digest,
       }),
     ).toMatchObject({ receipt: { invocationDigest: exact.digest } });
+  });
+
+  it("recovers the same local invocation after its prepared checkpoint", async () => {
+    const adapter = new SharpRasterMediaAdapter();
+    const exact = invocation();
+    const request = await requestFor(exact);
+    const directory = join(request.checkpointRoot, exact.digest);
+    await mkdir(directory, { recursive: true });
+    const handle = {
+      invocationId: exact.invocationId,
+      providerRequestId: null,
+      dispatchedAt: "2026-01-01T00:00:00.000Z",
+    };
+    await writeFile(
+      join(directory, "prepared.json"),
+      JSON.stringify({
+        protocol: "clockgrove.factory/local-media-prepared-v1",
+        invocationDigest: exact.digest,
+        handle,
+      }),
+    );
+    await expect(adapter.recoverHandle(request)).resolves.toEqual(handle);
+    await expect(adapter.collect(request, handle)).resolves.toMatchObject({
+      variants: [expect.objectContaining({ bytes: expect.any(Buffer) })],
+    });
+  });
+
+  it("keeps completed local variant bytes while finishing a partial checkpoint", async () => {
+    const adapter = new SharpRasterMediaAdapter();
+    const twoVariantPacket = structuredClone(packet()) as AssetProductionWorkerPacket;
+    twoVariantPacket.deliverable.intent.output.minimumCount = 2;
+    twoVariantPacket.deliverable.intent.output.maximumCount = 2;
+    const exact = invocation(twoVariantPacket);
+    const source = await requestFor(exact, twoVariantPacket);
+    const handle = await adapter.dispatch(source);
+    const sourceDirectory = join(source.checkpointRoot, exact.digest);
+    const firstBytes = await readFile(join(sourceDirectory, "variant-1.bin"));
+    const target = await requestFor(exact, twoVariantPacket);
+    const targetDirectory = join(target.checkpointRoot, exact.digest);
+    await mkdir(targetDirectory, { recursive: true });
+    await writeFile(
+      join(targetDirectory, "prepared.json"),
+      JSON.stringify({
+        protocol: "clockgrove.factory/local-media-prepared-v1",
+        invocationDigest: exact.digest,
+        handle,
+      }),
+    );
+    await writeFile(join(targetDirectory, "variant-1.bin"), firstBytes);
+    await expect(adapter.recoverHandle(target)).resolves.toEqual(handle);
+    expect(await readFile(join(targetDirectory, "variant-1.bin"))).toEqual(firstBytes);
+    await expect(adapter.collect(target, handle)).resolves.toMatchObject({
+      variants: [{}, {}],
+    });
+  });
+
+  it("keeps unavailable native usage nullable after invalid adapter accounting", async () => {
+    const base = new SharpRasterMediaAdapter();
+    const adapter: MediaProducerAdapter = {
+      capability: base.capability,
+      probe: () => base.probe(),
+      dispatch: (value) => base.dispatch(value),
+      recoverHandle: (value) => base.recoverHandle(value),
+      observe: (value, handle) => base.observe(value, handle),
+      collect: async (value, handle) => ({
+        ...(await base.collect(value, handle)),
+        usage: [{ unit: "output_count", amount: 1 }],
+      }),
+      cancel: (value, handle) => base.cancel(value, handle),
+      cleanup: (value, handle) => base.cleanup(value, handle),
+    };
+    const recorded = hooks();
+    const result = await new MediaProductionExecutor({
+      store: memoryStore().store,
+      retentionRoot: await retentionRoot(),
+      adapter,
+      hooks: recorded.hooks,
+      assertCurrent: async () => {},
+    }).runPrepared({
+      authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
+      request: await requestFor(invocation()),
+      reservationOid: "a".repeat(40),
+    });
+    expect(result).toMatchObject({ state: "failed" });
+    expect(recorded.calls.failures).toEqual([
+      expect.objectContaining({
+        accounting: expect.objectContaining({
+          native: [
+            { unit: "generated_bytes", amount: null },
+            { unit: "output_count", amount: null },
+          ],
+        }),
+      }),
+    ]);
+  });
+
+  it("honors a raster profile that forbids alpha", async () => {
+    const forbidden = structuredClone(packet()) as AssetProductionWorkerPacket;
+    if (!forbidden.deliverable.intent.output.raster) throw new Error("expected raster intent");
+    forbidden.deliverable.intent.output.raster.alpha = "forbidden";
+    const exact = invocation(forbidden);
+    const result = await new MediaProductionExecutor({
+      store: memoryStore().store,
+      retentionRoot: await retentionRoot(),
+      adapter: new SharpRasterMediaAdapter(),
+      hooks: hooks().hooks,
+      assertCurrent: async () => {},
+    }).runPrepared({
+      authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
+      request: await requestFor(exact, forbidden),
+      reservationOid: "a".repeat(40),
+    });
+    expect(result.state).toBe("for-review");
+    if (result.state !== "for-review") throw new Error("expected reviewable result");
+    expect(result.assetSet.variants[0]!.descriptor.content.inspection.metadata).toMatchObject({
+      kind: "raster",
+      hasAlpha: false,
+    });
   });
 
   it("refuses before the dispatch marker without launching", async () => {
@@ -475,10 +623,13 @@ describe("media production execution", () => {
       hooks: recorded.hooks,
       assertCurrent: async () => {},
     });
+    const exact = invocation();
+    const prepared = await requestFor(exact);
+    await base.dispatch(prepared);
     await expect(
       executor.resumeDispatched({
         authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
-        request: await requestFor(invocation()),
+        request: prepared,
         reservationOid: "a".repeat(40),
       }),
     ).resolves.toMatchObject({ state: "for-review", cleanupPending: false });
@@ -495,7 +646,11 @@ describe("media production execution", () => {
       capability: base.capability,
       probe: () => base.probe(),
       dispatch: (value) => base.dispatch(value),
-      recoverHandle: (value) => base.recoverHandle(value),
+      recoverHandle: async (value) => ({
+        invocationId: value.invocation.invocationId,
+        providerRequestId: null,
+        dispatchedAt: "2025-12-31T23:59:59.000Z",
+      }),
       observe: async () => ({
         state: "cancelled",
         observedAt: new Date().toISOString(),
@@ -532,14 +687,9 @@ describe("media production execution", () => {
     const binaryCapability = {
       ...SHARP_RASTER_MEDIA_CAPABILITY,
       id: "fixture/local-audio-v1",
-      inputMediaTypes: [] as string[],
-      inputRequirement: {
-        minimumCount: 0,
-        maximumCount: 0,
-        semantics: "none" as const,
-      },
+      inputRoles: [] as never[],
       outputMediaTypes: ["audio/wav"],
-      intentKinds: ["sound-reference" as const],
+      intentRoles: ["sound-reference" as const],
       profiles: [{ kind: "binary" as const }],
     };
     const binaryPacket = structuredClone(
@@ -547,8 +697,12 @@ describe("media production execution", () => {
     ) as unknown as AssetProductionWorkerPacket;
     binaryPacket.deliverable.producerCapabilityId = binaryCapability.id;
     binaryPacket.assetInputs = [];
-    binaryPacket.deliverable.intent.kind = "sound-reference";
-    binaryPacket.deliverable.intent.importedAssetIds = [];
+    binaryPacket.deliverable.intent.role = "sound-reference";
+    binaryPacket.deliverable.intent.fulfillment = {
+      kind: "produced",
+      inputRoleBindings: [],
+    };
+    binaryPacket.mediaUses = [];
     binaryPacket.deliverable.intent.output = {
       mediaTypes: ["audio/wav"],
       minimumCount: 1,
@@ -567,12 +721,51 @@ describe("media production execution", () => {
       inputEntries: [],
       deadline: "2099-01-01T00:00:00.000Z",
       policyDigest: "c".repeat(64),
-      outputVisibility: "private",
-      outputRights: { basis: "unknown" },
     });
     expect(exact.profile).toEqual({ kind: "binary" });
     expect(exact.outputMediaType).toBe("audio/wav");
     expect(exact.profile).not.toHaveProperty("width");
+    const svgCapability = {
+      ...binaryCapability,
+      id: "fixture/local-vector-v1",
+      outputMediaTypes: ["image/svg+xml"],
+      intentRoles: ["vector-reference"],
+    };
+    const svgPacket = structuredClone(
+      packet(assetDigest(svgCapability)),
+    ) as unknown as AssetProductionWorkerPacket;
+    svgPacket.deliverable.producerCapabilityId = svgCapability.id;
+    svgPacket.assetInputs = [];
+    svgPacket.mediaUses = [];
+    svgPacket.deliverable.intent.role = "vector-reference";
+    svgPacket.deliverable.intent.fulfillment = { kind: "produced", inputRoleBindings: [] };
+    svgPacket.deliverable.intent.output = {
+      mediaTypes: ["image/svg+xml"],
+      minimumCount: 1,
+      maximumCount: 1,
+      raster: null,
+    };
+    expect(
+      createMediaInvocation({
+        repository: "fixture/project",
+        objective: 7,
+        runId: "run-media",
+        workItem: 17,
+        attempt: 1,
+        packet: svgPacket,
+        capability: svgCapability,
+        authorityBaseSha: "b".repeat(40),
+        inputEntries: [],
+        deadline: "2099-01-01T00:00:00.000Z",
+        policyDigest: "c".repeat(64),
+      }),
+    ).toMatchObject({ profile: { kind: "binary" }, outputMediaType: "image/svg+xml" });
+  });
+
+  it("refuses product production without authenticated output rights", () => {
+    const productPacket = structuredClone(packet()) as AssetProductionWorkerPacket;
+    productPacket.deliverable.intent.purpose = "product-asset";
+    expect(() => invocation(productPacket)).toThrow(/does not apply/);
   });
 
   it("advertises only registered authorized review rules and uses the canonical decision", async () => {
@@ -589,6 +782,13 @@ describe("media production execution", () => {
       {
         id: LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY.id,
         kind: "deterministic-preauthorized",
+        producerCapabilityIds: LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY.producerCapabilityIds,
+        roles: LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY.applicableRoles,
+        purposes: LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY.applicablePurposes,
+        mediaTypes: LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY.applicableMediaTypes,
+        profiles: LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY.profiles,
+        outputVisibilities: LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY.outputVisibilities,
+        rightsBases: LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY.rightsBases,
       },
     ]);
     const memory = memoryStore();
@@ -725,5 +925,159 @@ describe("media production execution", () => {
       },
       commit: stored.commit,
     });
+  });
+
+  it("rejects an approval outside the compiled activation-selection interval", async () => {
+    const memory = memoryStore();
+    const twoVariantPacket: AssetProductionWorkerPacket = structuredClone(packet());
+    twoVariantPacket.deliverable.intent.output.minimumCount = 2;
+    twoVariantPacket.deliverable.intent.output.maximumCount = 2;
+    twoVariantPacket.deliverable.activationSelection = { minimumCount: 2, maximumCount: 2 };
+    const exact = invocation(twoVariantPacket);
+    const result = await new MediaProductionExecutor({
+      store: memory.store,
+      retentionRoot: await retentionRoot(),
+      adapter: new SharpRasterMediaAdapter(),
+      hooks: hooks().hooks,
+      assertCurrent: async () => {},
+    }).runPrepared({
+      authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
+      request: await requestFor(exact, twoVariantPacket),
+      reservationOid: "a".repeat(40),
+    });
+    if (result.state !== "for-review") throw new Error("expected reviewable asset set");
+    expect(result.assetSet.activationSelection).toEqual({ minimumCount: 2, maximumCount: 2 });
+    expect(() =>
+      createAssetDecision({
+        kind: "approved",
+        requestId: "undersized-approval",
+        requestedBy: "fixture-actor",
+        assetSet: result.assetSet,
+        producerReservationOid: "a".repeat(40),
+        selectedDescriptorDigests: [result.assetSet.variants[0]!.descriptor.digest],
+      }),
+    ).toThrow(/compiled activation interval/);
+    expect(
+      createAssetDecision({
+        kind: "approved",
+        requestId: "bounded-approval",
+        requestedBy: "fixture-actor",
+        assetSet: result.assetSet,
+        producerReservationOid: "a".repeat(40),
+        selectedDescriptorDigests: result.assetSet.variants.map(
+          ({ descriptor }) => descriptor.digest,
+        ),
+      }).selectedDescriptorDigests,
+    ).toHaveLength(2);
+  });
+
+  it("deduplicates activated transport bytes while preserving two producer input roles", async () => {
+    const memory = memoryStore();
+    const exact = invocation();
+    const result = await new MediaProductionExecutor({
+      store: memory.store,
+      retentionRoot: await retentionRoot(),
+      adapter: new SharpRasterMediaAdapter(),
+      hooks: hooks().hooks,
+      assertCurrent: async () => {},
+    }).runPrepared({
+      authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
+      request: await requestFor(exact),
+      reservationOid: "a".repeat(40),
+    });
+    if (result.state !== "for-review") throw new Error("expected reviewable asset set");
+    const decision = createAssetDecision({
+      kind: "approved",
+      requestId: "two-role-approval",
+      requestedBy: "fixture-actor",
+      assetSet: result.assetSet,
+      producerReservationOid: "a".repeat(40),
+      selectedDescriptorDigests: [result.assetSet.variants[0]!.descriptor.digest],
+    });
+    const activation = createAssetActivation({
+      assetSet: result.assetSet,
+      decision,
+      producerReservationOid: "a".repeat(40),
+    });
+    const twoRoleCapability = {
+      ...SHARP_RASTER_MEDIA_CAPABILITY,
+      id: "fixture/two-role-raster-derivative-v1",
+      inputRoles: [
+        {
+          id: "source",
+          mediaTypes: ["image/png" as const],
+          minimumCount: 1,
+          maximumCount: 1,
+          semantics: "directional-reference",
+        },
+        {
+          id: "style",
+          mediaTypes: ["image/png" as const],
+          minimumCount: 1,
+          maximumCount: 1,
+          semantics: "directional-reference",
+        },
+      ],
+    };
+    const source: AssetProductionWorkerPacket = structuredClone(
+      packet(assetDigest(twoRoleCapability)),
+    );
+    source.assetInputs = [];
+    source.mediaUses = [];
+    source.deliverable.producerCapabilityId = twoRoleCapability.id;
+    source.deliverable.intent.id = "derived-output";
+    source.deliverable.intent.fulfillment = {
+      kind: "produced",
+      inputRoleBindings: [
+        { roleId: "source", importedAssetIds: [], inputIntentIds: [activation.intentId] },
+        { roleId: "style", importedAssetIds: [], inputIntentIds: [activation.intentId] },
+      ],
+    };
+    const requirement = {
+      intentId: activation.intentId,
+      producerWorkItemId: "media-producer",
+      role: "raster-derivative",
+      purpose: "implementation-reference" as const,
+      necessity: "required" as const,
+      obligationIds: ["visual-contract"],
+      brief: "Use the exact approved upstream rendition.",
+      rationale: "One immutable descriptor intentionally satisfies two semantic roles.",
+      direction: "input-to" as const,
+      criterionIds: [] as string[],
+    };
+    source.generatedAssetRequirements = [
+      { ...requirement, inputRoleId: "source" },
+      { ...requirement, inputRoleId: "style" },
+    ];
+    const activated = activateWorkerPacket({
+      sourcePacket: source,
+      consumerWorkItemId: "derived-producer",
+      activations: [activation],
+      producerIssueNumbers: { "media-producer": 17 },
+    });
+    expect(activated.packet.assetInputs).toHaveLength(1);
+    expect(activated.packet.mediaUses).toMatchObject([
+      { inputRoleId: "source", descriptorDigests: [activation.selected[0]!.descriptor.digest] },
+      { inputRoleId: "style", descriptorDigests: [activation.selected[0]!.descriptor.digest] },
+    ]);
+    expect(activated.bundle?.activations).toHaveLength(1);
+
+    const chained = createMediaInvocation({
+      repository: "fixture/project",
+      objective: 7,
+      runId: exact.runId,
+      workItem: 18,
+      attempt: 1,
+      packet: activated.packet,
+      capability: twoRoleCapability,
+      inputEntries: activation.selected,
+      authorityBaseSha: "b".repeat(40),
+      deadline: "2099-01-01T00:00:00.000Z",
+      policyDigest: "c".repeat(64),
+    });
+    expect(chained.inputAssets).toMatchObject([
+      { roleId: "source", descriptorDigest: activation.selected[0]!.descriptor.digest },
+      { roleId: "style", descriptorDigest: activation.selected[0]!.descriptor.digest },
+    ]);
   });
 });

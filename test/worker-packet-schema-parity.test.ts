@@ -101,7 +101,8 @@ describe("repository capability JSON Schema parity", () => {
         {
           source: "imported",
           intentId: "layout-input",
-          kind: "layout-reference",
+          role: "layout-reference",
+          inputRoleId: null,
           brief: "Use the reference for implementation layout.",
           purpose: "implementation-reference",
           necessity: "required",
@@ -115,7 +116,8 @@ describe("repository capability JSON Schema parity", () => {
         {
           source: "imported",
           intentId: "layout-evidence",
-          kind: "acceptance-capture",
+          role: "acceptance-capture",
+          inputRoleId: null,
           brief: "Use the same bytes as acceptance evidence.",
           purpose: "acceptance-evidence",
           necessity: "required",
@@ -138,13 +140,13 @@ describe("repository capability JSON Schema parity", () => {
   it("accepts the strict asset-production shape and rejects repository and retired fields", () => {
     const intent = {
       id: "primary-media",
-      kind: "layout-reference" as const,
+      role: "layout-reference" as const,
       purpose: "implementation-reference" as const,
       necessity: "required" as const,
       obligationIds: ["visual-contract"],
       rationale: "The implementation needs an exact visual reference.",
       brief: "Produce a bounded interface wireframe.",
-      importedAssetIds: [],
+      fulfillment: { kind: "produced" as const, inputRoleBindings: [] },
       output: {
         mediaTypes: ["image/png" as const],
         minimumCount: 1,
@@ -186,6 +188,7 @@ describe("repository capability JSON Schema parity", () => {
         intent,
         producerCapabilityId: "raster-producer",
         producerCapabilityDigest: "1".repeat(64),
+        activationSelection: { minimumCount: 1, maximumCount: 1 },
       },
     };
     expect(validate(assetPacket), JSON.stringify(validate.errors)).toBe(true);

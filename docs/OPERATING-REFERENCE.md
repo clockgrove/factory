@@ -26,7 +26,8 @@ Factory's target capabilities are:
   automation; Codex managed execution remains unavailable pending a real identity/lifecycle interface;
 - local-to-cloud burst through Daytona, with hard TTL, concurrency, credential, and cost boundaries;
 - independent validation, crash recovery, cancellation, replay, explanation, and economic evidence.
-- verified local LFS assets, content-bound binary/media manifests, and bounded large-file transport.
+- verified local LFS assets, content-bound input and repository-result manifests, and bounded
+  large-file transport across passive formats.
 
 Labs contains Vercel Sandbox and additional harness/provider adapters. Labs
 features are bundled where useful but are not part of the initial delivery scope. Coordinating
@@ -131,6 +132,17 @@ model invocation. Each use is additionally capped by the remaining authenticated
     "maxAssets": 0,
     "deterministicReviewRuleIds": []
   },
+  "repositoryCaptureEgress": {
+    "validation": {
+      "mode": "denied",
+      "maxAssets": 0
+    },
+    "review": {
+      "mode": "denied",
+      "maxAssets": 0,
+      "reviewerCapabilityIds": []
+    }
+  },
   "allowedNetworkDestinations": [
     "registry.npmjs.org",
     "*.npmjs.org",
@@ -177,6 +189,26 @@ default. `public-assets` or `private-assets` requires a positive `maxAssets`; de
 rules must be named explicitly. Select the exact manifest on `factory_activate` with
 `assetManifestDigest` (CLI `--asset-manifest-digest`). That digest is immutable run identity and is
 checked again on resume. See [Objective input assets](OBJECTIVE-ASSETS.md#compiler-media-intents).
+
+Repository-result capture has separate validation and review egress phases, both denied by default.
+Local capture and local comparison do not disclose bytes and need no egress grant. An isolated exact
+comparison also receives no expected bytes: the trusted host compares the returned content digest.
+An isolated threshold comparison receives only the expected inputs used by its grounded comparison
+recipes. Set `validation.mode` to `public-assets` or `private-assets` with a sufficient `maxAssets`
+only when the selected validator must receive those inputs. The ordinary backend and network policy
+must still authorize the provider destination.
+
+Semantic review uses the independent `review` gate. Name the selected management adapter's exact
+reviewer capability ID and bound the complete deduplicated expected-plus-observed bundle. The
+installed Codex CLI adapter advertises `codex-cli-repository-capture`, at most 64 assets, and semantic
+handlers for JSON, inert UTF-8 text/Markdown, and supported raster files. Its capability also declares
+allowed MIME types, optional typed profiles, visibility classes, rights bases and the `api.openai.com`
+destination. Factory intersects every field with the immutable run policy before reading or
+materializing any review byte. `public-assets` excludes private content. `private-assets` permits its
+disclosure only when the adapter supports the exact visibility, rights basis, handler and MIME type
+and `allowedNetworkDestinations` includes every adapter destination. Opaque bytes can satisfy exact
+mechanical equality but cannot enter semantic review without an installed semantic handler. See
+[repository-result capture](OBJECTIVE-ASSETS.md#repository-result-capture).
 
 This compiler envelope is recorded for every new activation that omits policy. Its repair count is
 shared across obligation-inventory and graph correction, and its invocation and timeout values bound
@@ -240,6 +272,41 @@ Probe without creating paid resources:
 ```bash
 node dist/factory.js backends probe
 ```
+
+## Repository-result validation and delivery
+
+An `evidence-for` recipe validates the repository artifact already produced by its Work Item. It
+does not create an asset-production Work Item or another product. Factory runs ordinary validation,
+then repository capture commands, then grounded threshold commands. The recipe declares bounded
+output roles and MIME identities; installed handlers supply any semantic parsing. Shared capture,
+storage, policy and recovery contracts remain format-neutral. Raster is one optional typed profile,
+and visual application fixtures exercise the same path as structured data or other bounded passive
+outputs.
+
+Before running capture commands, Factory journals an immutable invocation containing the exact
+artifact, base, result tree, recipes, expected content identities, environment and egress policy.
+The final invocation result, capture manifest, immutable content-transfer receipts and ordinary
+validation evidence all bind that invocation and result tree. Semantic review has a separate durable
+receipt that binds the validation evidence digest. A restart first looks for that exact result. For a
+retained isolated validator, it recovers and checkpoints captured bytes before provider cleanup or
+capacity reconciliation. Missing or ambiguous terminal command evidence blocks replay instead of
+running the same command again.
+
+Product delivery follows repository transport rather than capture MIME. Outputs within the ordinary
+artifact bounds use Git blobs. A changed path may use Git LFS only when the pinned base already
+assigns that exact path `filter=lfs`. Factory requires the installed Git LFS CLI, the repository's
+authenticated effective endpoint, a destination allowed by `allowedNetworkDestinations`, and
+preflighted credentials. It retains the raw output through the normal immutable artifact transfer,
+uploads the exact SHA-256 object, independently reads and verifies it, and commits the canonical LFS
+pointer. Artifact identity includes the assignment, tool, endpoint, raw transfer, upload and read-back
+receipts.
+
+Factory does not add or modify LFS tracking, accept pointer-only worker output, use custom transfer
+agents, or infer LFS from file type. Repository-capture evidence continues through the separate
+validation-evidence store. The current LFS output hydration and validation path is host-local;
+Daytona and Vercel validators reject an artifact with LFS output receipts before provider creation.
+See [large-file support](LARGE-FILES.md#existing-lfs-repositories) for exact size and repository
+preconditions.
 
 ## Safety and escalation
 

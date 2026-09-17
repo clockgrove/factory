@@ -855,6 +855,71 @@ at the recorded base, rechecks scope and sensitive surfaces, runs the declared v
 required trust boundary, records evidence bound to exact input and output SHAs, and only then creates
 the publication commit and pull request.
 
+Repository-result capture extends that validation plan without adding a deliverable kind. An
+`evidence-for` recipe observes the exact result tree of a `repository-change` artifact after ordinary
+validation. Recipes declare bounded scenarios, output roles, MIME identities and comparisons; those
+roles carry repository semantics and are not an adapter whitelist. The shared invocation, execution,
+transport, evidence, review and recovery contracts are format-neutral. Installed semantic handlers
+may add typed profiles; raster geometry and alpha/animation constraints are the currently installed
+example. Visual game fixtures such as Raccoon World exercise the abstraction but do not define it.
+
+Before any capture command runs, the Supervisor persists one immutable validation invocation. It
+binds repository, Objective, run, Work Item and attempt; artifact, base and output tree; the ordered
+ordinary/capture/comparison plan; recipe and output authority; exact expected descriptors, content
+and storage receipts; selected environment and tool receipts; and the complete repository-capture
+egress policy. The immutable result commit is a child of that exact intent. Validation evidence binds
+the invocation digest; each capture descriptor additionally binds its recipe, output role, artifact,
+base, result tree, declared content identity, visibility and rights. Content storage uses the existing
+immutable transfer substrate under the validation-evidence domain. Host verification checks the
+result tree before and after persistence and refuses undeclared, missing, changed or duplicated
+outputs.
+
+Exact comparison requires no expected-byte disclosure to the execution adapter. The host compares
+the captured SHA-256 with the invocation's expected content digest. A threshold comparison executes
+the repository-observed comparison recipe and needs private expected-byte materialization. Local
+validation keeps those bytes in owned staging. Isolated validation receives only the expected inputs
+referenced by threshold recipes and only within the validation egress mode, visibility and count
+limits. All isolated outputs return under bounded manifests and are rehashed and inspected by the
+host before they become evidence. An unprofiled passive output may remain opaque and establish exact
+byte equality; that result does not assert semantic validity.
+
+Mechanical evidence and semantic review remain distinct authorities. Deterministic equality,
+threshold and typed-handler results are recomputed from the invocation and observed bytes rather than
+accepted from a command's assertion. When criteria still require judgment, the reviewer receives a
+private read-only bundle containing the exact expected and observed bytes. Materialization begins
+only after the immutable review policy and selected management adapter capability admit every MIME
+type, optional typed profile, semantic handler, visibility, rights basis, network destination and
+deduplicated byte count. The reviewer treats the repository and bundle as untrusted inputs. Its
+durable receipt remains separate from validation evidence and binds the same evidence digest and
+result tree, so semantic acceptance cannot migrate to another artifact or invocation.
+
+`repositoryCaptureEgress` has independent validation and review grants. Both default to `denied`, and
+compiler input egress grants neither. The validation asset count covers threshold expected inputs
+sent to a third-party validator. The review count covers all deduplicated expected and observed files
+and also requires an explicit reviewer capability ID. `public-assets` permits only public content;
+`private-assets` still requires the adapter's matching visibility, rights, handler and MIME
+capabilities plus ordinary network-destination authority. Capability mismatch fails before content
+materialization or provider dispatch.
+
+Capture recovery follows observe-before-replay. Local command dispatch and terminal observations are
+durable; a started command without a terminal observation is ambiguous and cannot be relaunched.
+For an isolated validator, restart first recovers the exact invocation-owned resource, downloads and
+verifies retained capture outputs, and checkpoints the invocation result and validation evidence.
+Only after that checkpoint may adapter cleanup and validation-capacity reconciliation proceed.
+Adapters refuse cleanup while retained outputs are known but not checkpointed. A recovered result
+retains its original commands, timestamps, environment and result tree.
+
+Repository product transport is orthogonal to repository capture. Bounded ordinary outputs use Git
+blobs and the normal artifact path regardless of MIME. When the pinned base already assigns a changed
+path to Git LFS, the existing-repository LFS adapter can retain the raw output through the same
+immutable worker-artifact transfer, upload it through the exact authenticated effective endpoint,
+read and verify the object independently, and publish the canonical pointer tree. The artifact binds
+the pinned path assignment, LFS tool and endpoint, raw transfer, upload outcome and read-back receipt.
+MIME and capture profiles never select LFS. New tracking rules, changed attributes, pointer-only
+worker output and custom transfer agents are refused. Validation capture bytes remain separate
+validation evidence. The current raw LFS hydration seam is host-local; isolated validators fail
+before provider creation for artifacts carrying LFS output receipts.
+
 Validation commands normally must already be observed at the frozen base. A provider-neutral
 repository-capability model handles the narrower case where an immutable graph must refer to an
 operation that an ancestor artifact will create. Adapters define the operation grammar, authority

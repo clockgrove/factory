@@ -95,6 +95,68 @@ capture commands, then all threshold comparisons. Reusing command text across ph
 identities is rejected. A human-required capture gate forces semantic review across the bound Work
 Item's complete acceptance set.
 
+## Repository-result capture
+
+Repository-result capture is part of independent validation, not a third deliverable type. A
+repository Work Item still produces one `clockgrove.factory/artifact`; `evidence-for` recipes observe
+that artifact's exact independently validated result tree. Captured files may be JSON, text, audio,
+documents, raster output, or other bounded passive bytes. Output roles are recipe-defined semantics,
+not a format whitelist. Raster dimensions and alpha/animation constraints are one optional typed
+profile implemented by an installed handler. A game or visual-application scenario such as Raccoon
+World is a qualification fixture for this composition, not an architecture boundary.
+
+Before capture execution, Factory persists one immutable validation invocation. It binds repository,
+Objective, run, Work Item and attempt identity; artifact, base and result-tree identity; ordered
+ordinary, capture and comparison commands; recipes and output authorities; expected descriptor,
+content and storage-receipt digests; the selected validation environment; and the complete
+`repositoryCaptureEgress` policy. A result is an immutable child of that intent. Capture descriptors,
+storage receipts, mechanical comparison results and validation evidence all repeat the invocation
+digest and artifact/base/result-tree identities. Factory checks the result tree before and after
+persisting captured bytes, so a valid capture cannot be paired with a different repository result.
+
+Exact and threshold comparisons use different byte flows. For an exact comparison, the trusted host
+compares the captured SHA-256 with the expected content digest; the validator never needs the
+expected bytes. A threshold recipe runs its repository-observed comparison command and therefore
+receives the expected bytes in private staging. An isolated validator receives only the expected
+inputs used by threshold recipes, subject to the validation egress mode, visibility and count bound.
+All captured outputs return to the host, are checked against their declared MIME and optional typed
+profile, and are retained through immutable `validation-evidence` content transfers. An opaque
+unprofiled output may establish an exact byte match, but it carries no semantic-validity claim.
+
+Mechanical validation and semantic review are separate gates. Exact equality, a grounded threshold,
+declared content identity and a typed handler check can produce mechanical evidence. When an
+acceptance criterion still requires judgment, Factory may materialize the expected and observed
+bytes for the independent reviewer only after the immutable review policy and the selected
+management adapter's reviewer capability both allow every MIME type, typed profile, semantic handler,
+visibility, rights basis, network destination and deduplicated asset count. The files are rehashed,
+placed in private read-only staging and supplied separately from the textual prompt. Repository files
+and every evidence byte remain untrusted reviewer input. The durable review receipt stays separate
+from validation evidence and binds its exact evidence digest and result tree.
+
+`repositoryCaptureEgress.validation` and `repositoryCaptureEgress.review` are independent and deny
+external disclosure by default. Compiler input egress does not grant either permission. The
+validation count covers only threshold expected inputs sent to a third-party validator. The review
+count covers the complete deduplicated expected-plus-observed bundle and additionally requires an
+explicit reviewer capability ID. `public-assets` excludes private bytes; `private-assets` permits
+both visibility classes but still requires compatible rights, handlers, adapter capabilities and
+ordinary network-destination policy.
+
+Recovery observes the exact invocation before considering another launch. Local commands have
+durable dispatch and terminal records, and ambiguous dispatch without a terminal record fails closed.
+For isolated validation, Factory first recovers retained outputs, downloads and verifies them, and
+persists the invocation result and capture evidence. Only then may it delete the provider resource or
+reconcile validation capacity. A provider adapter must refuse stale-resource cleanup while it knows
+of uncheckpointed captured bytes. Recovery never regenerates evidence or substitutes a new result
+tree.
+
+Repository delivery remains independent of capture format. Ordinary bounded outputs are committed as
+ordinary Git blobs. In a repository whose pinned base already assigns a changed path to Git LFS,
+Factory may use the existing authenticated LFS endpoint as an artifact transport adapter: it retains
+the raw bytes in the ordinary content-transfer substrate, uploads and independently reads back the
+exact object, then commits the canonical pointer. The artifact binds the assignment, tool, endpoint,
+transfer and verification receipts. Factory does not turn an output MIME type or capture profile into
+LFS policy, add tracking rules, or route validation evidence through product delivery.
+
 ## Produced asset lifecycle
 
 Asset production uses its own adapter contract and never enters the repository artifact, validation,

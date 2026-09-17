@@ -124,7 +124,11 @@ import {
   type ArtifactTransferIdentity,
   type ArtifactTransferIntentCheckpoint,
 } from "./control/artifact-transfers.js";
-import { finalizeLfsArtifact, restoreLfsArtifactContent } from "./publication/git-lfs-output.js";
+import {
+  finalizeLfsArtifact,
+  reconstructNativeLfsArtifact,
+  restoreLfsArtifactContent,
+} from "./publication/git-lfs-output.js";
 import {
   activationCancellation,
   activationRejection,
@@ -413,7 +417,6 @@ import {
   type LocalWorktree,
 } from "./runtime/local-worktree.js";
 import { runContainedProcess } from "./runtime/process-group.js";
-import { artifactFromGitRange } from "./runtime/artifact-patch.js";
 import { allDone, derive, queuedState, ready, type DerivedWorkItem } from "./state.js";
 import { queuedReasonCode } from "./explanations/index.js";
 import { COPILOT_ASSIGNEE_LOGIN } from "./types.js";
@@ -10960,6 +10963,95 @@ export class FactorySupervisor {
     };
   }
 
+  /** Native publication rewrites contain committed LFS pointers, not worker raw
+   * bytes. Recover those bytes only through the original immutable artifact
+   * transfer, then issue receipts bound to the rewritten target base. */
+  async #reconstructNativeArtifact(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    range: {
+      sourceBaseSha: string;
+      headSha: string;
+      baseSha: string;
+      changedPaths: string[];
+      emptyReason?: string;
+    },
+  ): Promise<NormalizedArtifact> {
+    const adopted = reservation.runId !== this.#run.runId;
+    const assertCurrent = adopted
+      ? () =>
+          this.#externalAdmission(async () => {
+            const source = this.#plannedRecoveryItem(item.number)?.source;
+            const observed = (await this.#attempts.list(this.#run.objective, item.number)).find(
+              (candidate) => candidate.oid === reservation.oid,
+            );
+            if (
+              !source ||
+              source.runId !== reservation.runId ||
+              source.attempt !== reservation.attempt ||
+              source.reservationRef !== reservation.ref ||
+              source.reservationCommitOid !== reservation.oid ||
+              !observed ||
+              observed.ref !== reservation.ref ||
+              observed.runId !== reservation.runId ||
+              observed.attempt !== reservation.attempt ||
+              observed.policyDigest !== reservation.policyDigest ||
+              observed.baseSha !== reservation.baseSha
+            )
+              throw new Error(
+                "adopted native LFS source no longer matches its current recovery authority",
+              );
+          })
+      : () =>
+          this.#lease.use(async (lease) => {
+            await this.#attempts.assertReservation(lease, reservation, item.id);
+          });
+    const successorEpoch = adopted
+      ? await this.#lease.use(async (lease) => {
+          if (lease.objective !== this.#run.objective || lease.runId !== this.#run.runId)
+            throw new Error("adopted native LFS target has no current successor lease");
+          return lease.epoch;
+        })
+      : reservation.directorEpoch;
+    const artifact = await reconstructNativeLfsArtifact({
+      store: this.#store,
+      authority: {
+        repository: `${this.#options.owner}/${this.#options.repo}`,
+        objective: this.#run.objective,
+        workItem: item.number,
+        attempt: reservation.attempt,
+        runId: adopted ? this.#run.runId : reservation.runId,
+        directorEpoch: successorEpoch,
+        policyDigest: adopted ? this.#run.policyDigest : reservation.policyDigest,
+      },
+      repositoryPath: this.#options.repository,
+      allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+      assertCurrent,
+      range,
+      loadSourceArtifact: async () => {
+        const originalPacket = this.#packetBoundToReservation(item, reservation);
+        const source = await resumeArtifactTransfer({
+          store: this.#store,
+          identity: this.#artifactTransferIdentity(reservation),
+          allowedPaths: originalPacket.allowedPaths,
+          assertCurrent,
+        });
+        if (!source)
+          throw new Error(
+            "native LFS reconstruction requires the original immutable artifact transfer",
+          );
+        const adoptedDigest = adopted
+          ? this.#plannedRecoveryItem(item.number)?.source?.artifactDigest
+          : null;
+        if (adopted && (!adoptedDigest || source.digest !== adoptedDigest))
+          throw new Error("adopted native LFS artifact differs from its accepted recovery source");
+        this.#retainArtifactContent(source);
+        return source;
+      },
+    });
+    return this.#retainArtifactContent(artifact);
+  }
+
   async #recoverRetainedArtifact(
     item: DerivedWorkItem,
     reservation: AttemptReservation,
@@ -15253,33 +15345,13 @@ export class FactorySupervisor {
     )
       .split("\0")
       .filter(Boolean);
-    const priorNative = isolated
-      ? await this.#nativeRebases.load({
-          repository: `${this.#options.owner}/${this.#options.repo}`,
-          runId: member.reservation.runId,
-          objective: member.reservation.objective,
-          workItem: item.number,
-          attempt: member.reservation.attempt,
-          directorEpoch: member.reservation.directorEpoch,
-          policyDigest: member.reservation.policyDigest,
-          pullRequest: member.pull.number,
-          sourceHeadSha: member.pull.commitSha,
-          sourceExactHeadValidationDigest: member.pull.exactHeadValidation.digest,
-          headSha,
-          baseSha,
-        })
-      : null;
-    const artifact = this.#retainArtifactContent(
-      await artifactFromGitRange({
-        repository: this.#options.repository,
-        sourceBaseSha: baseSha,
-        headSha,
-        baseSha,
-        changedPaths,
-        emptyReason: "rebased stack layer has no diff",
-        authenticatedLegacyDigest: priorNative?.validation.artifactDigest,
-      }),
-    );
+    const artifact = await this.#reconstructNativeArtifact(item, member.reservation, {
+      sourceBaseSha: baseSha,
+      headSha,
+      baseSha,
+      changedPaths,
+      emptyReason: "rebased stack layer has no diff",
+    });
     const packet = this.#packetBoundToReservation(item, member.reservation, baseSha);
     // Keep local scoped capacity separate from the isolated provider checkpoint.
     const prepareLocal = async () => {
@@ -15772,6 +15844,7 @@ export class FactorySupervisor {
   }
 
   async #siblingArtifact(
+    item: DerivedWorkItem,
     member: NativeStackMember,
     targetBaseSha: string,
   ): Promise<NormalizedArtifact> {
@@ -15789,15 +15862,12 @@ export class FactorySupervisor {
     )
       .split("\0")
       .filter(Boolean);
-    return this.#retainArtifactContent(
-      await artifactFromGitRange({
-        repository: this.#options.repository,
-        sourceBaseSha: source[0]!,
-        headSha: source[1]!,
-        baseSha: targetBaseSha,
-        changedPaths,
-      }),
-    );
+    return await this.#reconstructNativeArtifact(item, member.reservation, {
+      sourceBaseSha: source[0]!,
+      headSha: source[1]!,
+      baseSha: targetBaseSha,
+      changedPaths,
+    });
   }
 
   async #assertSiblingRefreshCurrent(
@@ -15914,7 +15984,7 @@ export class FactorySupervisor {
       const budget = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
       if (budget.modelTokens !== null && budget.modelTokens <= 0)
         throw new Error("model-token budget exhausted before sibling refresh");
-      const artifact = await this.#siblingArtifact(member, targetBaseSha);
+      const artifact = await this.#siblingArtifact(item, member, targetBaseSha);
       const packet = this.#packetBoundToReservation(item, member.reservation, targetBaseSha);
       const outputTreeSha = await prepareSiblingRefreshTree({
         repository: this.#options.repository,
@@ -16692,16 +16762,12 @@ export class FactorySupervisor {
       )
         .split("\0")
         .filter(Boolean);
-      return this.#retainArtifactContent(
-        await artifactFromGitRange({
-          repository: this.#options.repository,
-          sourceBaseSha: source[0]!,
-          headSha: source[1]!,
-          baseSha: targetBaseSha,
-          changedPaths,
-          authenticatedLegacyDigest: record?.validation.artifactDigest,
-        }),
-      );
+      return await this.#reconstructNativeArtifact(item, member.reservation, {
+        sourceBaseSha: source[0]!,
+        headSha: source[1]!,
+        baseSha: targetBaseSha,
+        changedPaths,
+      });
     };
     if (!record) {
       const effective = normalizeSchedulingPolicy(this.#policy);
@@ -18253,16 +18319,12 @@ export class FactorySupervisor {
         )
           .split("\0")
           .filter(Boolean);
-        return this.#retainArtifactContent(
-          await artifactFromGitRange({
-            repository: this.#options.repository,
-            sourceBaseSha: range[0]!,
-            headSha: range[1]!,
-            baseSha: target,
-            changedPaths,
-            authenticatedLegacyDigest: candidate?.validation.artifactDigest,
-          }),
-        );
+        return await this.#reconstructNativeArtifact(item, reserved, {
+          sourceBaseSha: range[0]!,
+          headSha: range[1]!,
+          baseSha: target,
+          changedPaths,
+        });
       };
       const outstanding = unreconciledCapacityReservations([...runtime.events]).filter(
         (event) =>

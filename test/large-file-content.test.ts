@@ -20,11 +20,7 @@ import {
   artifactFromPatchFile,
   streamGitFile,
 } from "../src/runtime/artifact-patch.js";
-import {
-  materializeArtifactPatch,
-  normalizeArtifact,
-  verifyArtifact,
-} from "../src/execution/artifacts.js";
+import { materializeArtifactPatch, verifyArtifact } from "../src/execution/artifacts.js";
 import { repositoryArchiveFile, sourceContentUploads } from "../src/backends/source-content.js";
 import {
   cleanupLocalWorktree,
@@ -124,10 +120,7 @@ describe("bounded content-addressed artifacts", () => {
     };
     const candidate = await artifactFromGitRange(range);
     await releaseAllArtifactContent();
-    const reconstructed = await artifactFromGitRange({
-      ...range,
-      authenticatedLegacyDigest: candidate.digest,
-    });
+    const reconstructed = await artifactFromGitRange(range);
     expect(reconstructed.digest).toBe(candidate.digest);
     await materializeArtifactPatch(reconstructed, join(f.repository, "recovered-candidate.patch"));
   }, 120_000);
@@ -215,7 +208,7 @@ describe("bounded content-addressed artifacts", () => {
     );
   });
 
-  it("refuses pointer-only output without a verified raw receipt and retains legacy inline digest compatibility", async () => {
+  it("refuses pointer-only output without a verified raw receipt", async () => {
     const f = await fixture();
     await writeFile(
       join(f.repository, "new.dat"),
@@ -233,15 +226,6 @@ describe("bounded content-addressed artifacts", () => {
         outcome: "succeeded",
       }),
     ).rejects.toThrow("pointer-only LFS output");
-    const legacy = normalizeArtifact({
-      baseSha: f.base,
-      patch: "",
-      changedPaths: [],
-      outcome: "declined",
-      reason: "no changes",
-    });
-    expect(verifyArtifact(legacy).digest).toBe(legacy.digest);
-    expect(legacy).not.toHaveProperty("payload");
   });
 
   it("streams an exact source archive above 64 MiB using a local SDK upload path and remote digest guard", async () => {

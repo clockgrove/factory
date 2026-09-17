@@ -302,6 +302,13 @@ uploads the exact SHA-256 object, independently reads and verifies it, and commi
 pointer. Artifact identity includes the assignment, tool, endpoint, raw transfer, upload and read-back
 receipts.
 
+Native rebase, sibling, merge-candidate and adopted-source reconstruction authenticates the original
+artifact receipt and raw transfer under the source attempt reservation. Factory verifies the exact
+canonical pointer and then creates a fresh receipt bound to the candidate target base and current
+run. Adopted-source reads remain predecessor-bound while writes require the accepted recovery plan
+and current successor lease. Stale authority or a pointer-only Git range is refused before LFS
+upload or publication.
+
 Factory does not add or modify LFS tracking, accept pointer-only worker output, use custom transfer
 agents, or infer LFS from file type. Repository-capture evidence continues through the separate
 validation-evidence store. The current LFS output hydration and validation path is host-local;

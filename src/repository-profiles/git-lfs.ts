@@ -23,10 +23,7 @@ export interface PinnedLfsFacts {
 export const MAX_LOCAL_LFS_FILE_BYTES = MAX_PRODUCT_FILE_BYTES;
 export const MAX_LOCAL_LFS_TOTAL_BYTES = 256 * 1024 * 1024;
 const MAX_LFS_ASSETS = 256;
-const versions = new Set([
-  "https://git-lfs.github.com/spec/v1",
-  "https://hawser.github.com/spec/v1",
-]);
+const canonicalVersion = "https://git-lfs.github.com/spec/v1";
 const safePath = (path: string) =>
   !!path &&
   !isAbsolute(path) &&
@@ -43,13 +40,13 @@ const safePath = (path: string) =>
  * extension transforms are a capability boundary, not ordinary source contents. */
 export function parseLfsPointer(bytes: Buffer): { oid: string; size: number } | null {
   const text = bytes.toString("utf8");
-  if (!/^version https:\/\/(?:git-lfs\.github\.com|hawser\.github\.com)\//.test(text)) return null;
+  if (!text.startsWith("version https://")) return null;
   if (bytes.length >= 1024 || !Buffer.from(text).equals(bytes))
     throw new Error("LFS pointer exceeds its format bound or is not UTF-8");
   const lines = text.split("\n");
   if (
     lines.length !== 4 ||
-    !versions.has(lines[0]!.slice("version ".length)) ||
+    lines[0]!.slice("version ".length) !== canonicalVersion ||
     !/^oid sha256:[0-9a-f]{64}$/.test(lines[1]!) ||
     !/^size (?:0|[1-9][0-9]*)$/.test(lines[2]!) ||
     lines[3] !== ""

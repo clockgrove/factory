@@ -19,6 +19,7 @@ import {
 } from "../src/execution/artifacts.js";
 import {
   finalizeLfsArtifact,
+  reconstructNativeLfsArtifact,
   resolvedGitLfsEndpoint,
   restoreLfsArtifactContent,
   assertLfsReceiptRemoteIdentity,
@@ -257,6 +258,139 @@ describe("preconfigured Git LFS output normalization", () => {
     expect(value.git("show", `${finalized.fileManifest!.resultTreeSha}:asset.bin`)).toBe(
       pointer.toString("utf8").trim(),
     );
+  });
+
+  it("reconstructs a native Git range from authenticated raw bytes and issues target-base receipts", async () => {
+    const value = await fixture();
+    const bytes = Buffer.from("authenticated native reconstruction");
+    const store = memoryStore();
+    const source = await finalizeLfsArtifact({
+      store,
+      artifact: await collectRaw(value, "asset.bin", bytes),
+      authority,
+      repositoryPath: value.repository,
+      allowedNetworkDestinations: ["github.com"],
+      assertCurrent: async () => {},
+      transport: transport(bytes).value,
+    });
+    await writeFile(
+      join(value.repository, "asset.bin"),
+      canonicalLfsPointer(sha256(bytes), bytes.length),
+    );
+    value.git("add", "asset.bin");
+    value.git("commit", "-qm", "source pointer");
+    const sourceHeadSha = value.git("rev-parse", "HEAD");
+    value.git("checkout", "-qb", "target", value.baseSha);
+    await writeFile(join(value.repository, "target.txt"), "advanced target\n");
+    value.git("add", "target.txt");
+    value.git("commit", "-qm", "advance target");
+    const targetBaseSha = value.git("rev-parse", "HEAD");
+    const loadSourceArtifact = vi.fn(async () => source);
+    const targetTransport = transport(bytes);
+    const successorAuthority = {
+      ...authority,
+      runId: "successor-run",
+      directorEpoch: 2,
+      policyDigest: "7".repeat(64),
+    };
+    const target = await reconstructNativeLfsArtifact({
+      store,
+      authority: successorAuthority,
+      repositoryPath: value.repository,
+      allowedNetworkDestinations: ["github.com"],
+      assertCurrent: async () => {},
+      loadSourceArtifact,
+      range: {
+        sourceBaseSha: value.baseSha,
+        headSha: sourceHeadSha,
+        baseSha: targetBaseSha,
+        changedPaths: ["asset.bin"],
+      },
+      transport: targetTransport.value,
+    });
+    expect(loadSourceArtifact).toHaveBeenCalledTimes(1);
+    expect(target.baseSha).toBe(targetBaseSha);
+    expect(target.lfsObjects![0]!.rawTransfer.identity.baseSha).toBe(targetBaseSha);
+    expect(target.lfsObjects![0]!.assignmentDigest).not.toBe(
+      source.lfsObjects![0]!.assignmentDigest,
+    );
+    expect(target.lfsObjects![0]!.receiptRef).not.toBe(source.lfsObjects![0]!.receiptRef);
+    expect(target.lfsObjects![0]!.digest).not.toBe(source.lfsObjects![0]!.digest);
+    await expect(restoreLfsArtifactContent({ store, artifact: target })).resolves.toBeUndefined();
+    const predecessorTarget = await reconstructNativeLfsArtifact({
+      store,
+      authority,
+      repositoryPath: value.repository,
+      allowedNetworkDestinations: ["github.com"],
+      assertCurrent: async () => {},
+      loadSourceArtifact: async () => source,
+      range: {
+        sourceBaseSha: value.baseSha,
+        headSha: sourceHeadSha,
+        baseSha: targetBaseSha,
+        changedPaths: ["asset.bin"],
+      },
+      transport: transport(bytes).value,
+    });
+    expect(target.lfsObjects![0]!.receiptRef).not.toBe(
+      predecessorTarget.lfsObjects![0]!.receiptRef,
+    );
+    expect(target.lfsObjects![0]!.rawTransfer.identity.requestId).not.toBe(
+      predecessorTarget.lfsObjects![0]!.rawTransfer.identity.requestId,
+    );
+
+    const assertCurrent = vi.fn(async () => {
+      throw new Error("attempt reservation changed");
+    });
+    const staleSource = vi.fn(async () => source);
+    const staleTransport = transport(bytes);
+    await expect(
+      reconstructNativeLfsArtifact({
+        store,
+        authority: successorAuthority,
+        repositoryPath: value.repository,
+        allowedNetworkDestinations: ["github.com"],
+        assertCurrent,
+        loadSourceArtifact: staleSource,
+        range: {
+          sourceBaseSha: value.baseSha,
+          headSha: sourceHeadSha,
+          baseSha: targetBaseSha,
+          changedPaths: ["asset.bin"],
+        },
+        transport: staleTransport.value,
+      }),
+    ).rejects.toThrow(/reservation changed/);
+    expect(assertCurrent).toHaveBeenCalledTimes(1);
+    expect(staleSource).not.toHaveBeenCalled();
+    expect(staleTransport.value.preflight).not.toHaveBeenCalled();
+
+    value.git("checkout", "-qb", "mismatched-source", value.baseSha);
+    await writeFile(
+      join(value.repository, "asset.bin"),
+      canonicalLfsPointer("b".repeat(64), bytes.length),
+    );
+    value.git("add", "asset.bin");
+    value.git("commit", "-qm", "mismatched source pointer");
+    const mismatchTransport = transport(bytes);
+    await expect(
+      reconstructNativeLfsArtifact({
+        store,
+        authority: successorAuthority,
+        repositoryPath: value.repository,
+        allowedNetworkDestinations: ["github.com"],
+        assertCurrent: async () => {},
+        loadSourceArtifact: async () => source,
+        range: {
+          sourceBaseSha: value.baseSha,
+          headSha: value.git("rev-parse", "HEAD"),
+          baseSha: targetBaseSha,
+          changedPaths: ["asset.bin"],
+        },
+        transport: mismatchTransport.value,
+      }),
+    ).rejects.toThrow(/pointer differs from its authenticated raw object receipt/);
+    expect(mismatchTransport.value.preflight).not.toHaveBeenCalled();
   });
 
   it("accepts only the effective LFS endpoint for the authenticated repository", () => {

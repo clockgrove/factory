@@ -29,7 +29,11 @@ import {
 } from "../control/content-transfers.js";
 import { runContainedProcess } from "../runtime/process-group.js";
 import { resolveGitLfsTool } from "../repository-profiles/git-lfs.js";
-import type { CollectedArtifact, PendingLfsObject } from "../runtime/artifact-patch.js";
+import {
+  artifactFromGitRange,
+  type CollectedArtifact,
+  type PendingLfsObject,
+} from "../runtime/artifact-patch.js";
 import { destinationAllowedByPolicy } from "../protocol/policy.js";
 
 const gitOid = (value: Buffer) =>
@@ -327,6 +331,50 @@ export async function finalizeLfsArtifact(args: {
     ...(artifact.reason ? { reason: artifact.reason } : {}),
     ...(artifact.findings ? { findings: artifact.findings } : {}),
     createdAt: new Date(artifact.createdAt),
+  });
+}
+
+/** Reconstruct a native rebase/sibling candidate from committed pointers only
+ * after the source artifact's durable raw transfers have been authenticated.
+ * The result is finalized again so every receipt names the target base. */
+export async function reconstructNativeLfsArtifact(args: {
+  store: LfsObjectStore;
+  authority: LfsArtifactAuthority;
+  repositoryPath: string;
+  allowedNetworkDestinations: string[];
+  assertCurrent(): Promise<void>;
+  loadSourceArtifact(): Promise<NormalizedArtifact>;
+  range: {
+    sourceBaseSha: string;
+    headSha: string;
+    baseSha: string;
+    changedPaths: string[];
+    emptyReason?: string;
+  };
+  transport?: LfsOutputTransport;
+}): Promise<NormalizedArtifact> {
+  let sourceArtifact: Promise<NormalizedArtifact> | undefined;
+  const collected = await artifactFromGitRange({
+    repository: args.repositoryPath,
+    ...args.range,
+    resolveSourceLfsObjects: async () => {
+      await args.assertCurrent();
+      sourceArtifact ??= args.loadSourceArtifact();
+      const artifact = verifyArtifact(await sourceArtifact);
+      await args.assertCurrent();
+      await restoreLfsArtifactContent({ store: args.store, artifact });
+      return artifact.lfsObjects ?? [];
+    },
+  });
+  if (collected.pendingLfsObjects?.length) await args.assertCurrent();
+  return finalizeLfsArtifact({
+    store: args.store,
+    artifact: collected,
+    authority: args.authority,
+    repositoryPath: args.repositoryPath,
+    allowedNetworkDestinations: args.allowedNetworkDestinations,
+    assertCurrent: args.assertCurrent,
+    ...(args.transport ? { transport: args.transport } : {}),
   });
 }
 

@@ -83,14 +83,16 @@ async function fixture() {
     'import {test} from "node:test";\ntest("sample",()=>{});\n',
   );
   const assets = [];
-  for (const [name, version] of [
-    ["canonical", "https://git-lfs.github.com/spec/v1"],
-    ["legacy", "https://hawser.github.com/spec/v1"],
-  ] as const) {
+  for (const name of ["primary", "secondary"] as const) {
     const bytes = Buffer.from("Synthetic " + name + " cached content, not a credential.\n");
     const oid = createHash("sha256").update(bytes).digest("hex");
     const path = name + ".bin";
-    const pointer = "version " + version + "\noid sha256:" + oid + "\nsize " + bytes.length + "\n";
+    const pointer =
+      "version https://git-lfs.github.com/spec/v1\noid sha256:" +
+      oid +
+      "\nsize " +
+      bytes.length +
+      "\n";
     await writeFile(join(repository, path), pointer);
     const cache = join(repository, ".git", "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid);
     await mkdir(dirname(cache), { recursive: true });
@@ -369,11 +371,11 @@ describe("explicit plan pinned LFS preflight", () => {
           expect(context.baseSha).toBe(f.baseSha);
           expect(context.repositoryFiles).toEqual([
             ".gitattributes",
-            "canonical.bin",
-            "legacy.bin",
             "package-lock.json",
             "package.json",
+            "primary.bin",
             "sample.test.mjs",
+            "secondary.bin",
           ]);
           expect(context.repositoryLfs).toMatchObject({
             baseSha: f.baseSha,

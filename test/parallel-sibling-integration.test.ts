@@ -213,8 +213,9 @@ async function fixture(
       const stdout = execFileSync("git", args, {
         cwd: input.cwd,
         env: input.env,
+        input: input.stdin?.text,
         encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
         timeout: input.timeoutMs,
         maxBuffer: input.maxOutputBytes,
       });

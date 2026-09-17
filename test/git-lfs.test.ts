@@ -76,13 +76,11 @@ afterEach(async () => {
 });
 
 describe("pinned LFS detection and local hydration", () => {
-  it("accepts canonical and legacy pointers and rejects malformed or extension transforms", () => {
+  it("accepts canonical pointers and rejects alternate formats or extension transforms", () => {
     expect(parseLfsPointer(Buffer.from(pointer))).toEqual({ oid, size: bytes.length });
-    expect(
-      parseLfsPointer(Buffer.from(pointer.replace("git-lfs.github.com", "hawser.github.com"))),
-    ).toEqual({ oid, size: bytes.length });
     expect(parseLfsPointer(bytes)).toBeNull();
     for (const invalid of [
+      pointer.replace("git-lfs.github.com", "hawser.github.com"),
       pointer.replace(/\n/g, "\r\n"),
       pointer.trimEnd(),
       pointer.replace("size 6", "size 9007199254740992"),

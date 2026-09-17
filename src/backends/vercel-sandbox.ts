@@ -1,4 +1,5 @@
 import { Sandbox, type Command, type CommandFinished, type NetworkPolicy } from "@vercel/sandbox";
+import { open } from "node:fs/promises";
 import type {
   AttemptContext,
   BackendHandle,

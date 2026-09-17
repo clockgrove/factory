@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const LARGE_FILE_RECIPE_VERSION = "factory-large-files-fixture-v2";
+export const LARGE_FILE_RECIPE_VERSION = "factory-large-files-fixture";
 export const LARGE_FILE_VALIDATION_SCRIPT = "test:large-file-fixture";
 export const LARGE_FILE_VALIDATION_COMMAND = `npm run ${LARGE_FILE_VALIDATION_SCRIPT}`;
 export const LARGE_FILE_AUDIO_BYTES = 6 * 1024 * 1024 + 44;
@@ -42,8 +42,8 @@ export function largeFilePaths(namespace) {
     attributes: `${prefix}/.gitattributes`,
     recipe: `${prefix}/large-files-recipe.mjs`,
     test: `${prefix}/large-files.test.mjs`,
-    canonical: `${prefix}/lfs/canonical.bin`,
-    legacy: `${prefix}/lfs/legacy.bin`,
+    primary: `${prefix}/lfs/primary.bin`,
+    secondary: `${prefix}/lfs/secondary.bin`,
     payload: `${prefix}/generated/qualification-audio.wav`,
     executable: `${prefix}/tools/qualification-check.mjs`,
     metadata: `${prefix}/generated/qualification-metadata.json`,
@@ -211,7 +211,7 @@ function recipeOutput(root, namespace, scenario, phase) {
     exclusiveFile(root, paths.payload, bytes);
   } else if (scenario === "symlink") {
     safeDirectory(root, dirname(paths.payload));
-    fs.symlinkSync("../lfs/canonical.bin", join(root, paths.payload));
+    fs.symlinkSync("../lfs/primary.bin", join(root, paths.payload));
   } else {
     assert.fail("unknown output scenario");
   }
@@ -247,14 +247,14 @@ function baselineFiles(namespace) {
   const paths = largeFilePaths(namespace);
   const lfs = [
     {
-      path: paths.canonical,
+      path: paths.primary,
       version: "https://git-lfs.github.com/spec/v1",
-      content: Buffer.from("Factory qualification canonical LFS object; public synthetic bytes.\n"),
+      content: Buffer.from("Factory qualification primary LFS object; public synthetic bytes.\n"),
     },
     {
-      path: paths.legacy,
-      version: "https://hawser.github.com/spec/v1",
-      content: Buffer.from("Factory qualification legacy LFS object; public synthetic bytes.\n"),
+      path: paths.secondary,
+      version: "https://git-lfs.github.com/spec/v1",
+      content: Buffer.from("Factory qualification secondary LFS object; public synthetic bytes.\n"),
     },
   ];
   for (const asset of lfs) {
@@ -670,7 +670,7 @@ export function assertLargeFileRefusal(observation) {
 
 export function largeFileObjectiveBody(namespace) {
   const p = largeFilePaths(namespace);
-  return `Qualify deterministic large-file handling for namespace ${namespace}. Create exactly three linear Work Items in this order, never parallel roots. Use existing committed ${p.recipe}; do not rewrite the recipe, test, attributes, or LFS files. Do not fetch/install/upload LFS or add dependencies.\n\n1. Payload (the sole root): run node ${p.recipe} payload. Create only ${p.payload}, exactly 6291500 bytes of valid PCM WAV from the existing bounded deterministic recipe. It must produce a genuine binary Git patch above 5 MiB.\n2. Metadata (depends on Payload): run node ${p.recipe} metadata. Create only ${p.executable} (Git mode 100755) and ${p.metadata}, with exact recipe bytes.\n3. Verification join (depends on Payload and Metadata): run node ${p.recipe} join. Create only ${p.result}; run node ${p.recipe} verify to check all generated content.\n\nEach Work Item validates with ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest recipe scoped to ${p.test}. The final result must preserve both existing canonical and legacy LFS pointers in Git, while their unchanged locally provisioned objects remain available. No other paths may change. Real installed workers and independent validation/review are required; fixture generation alone is not an execution pass.\n`;
+  return `Qualify deterministic large-file handling for namespace ${namespace}. Create exactly three linear Work Items in this order, never parallel roots. Use existing committed ${p.recipe}; do not rewrite the recipe, test, attributes, or LFS files. Do not fetch/install/upload LFS or add dependencies.\n\n1. Payload (the sole root): run node ${p.recipe} payload. Create only ${p.payload}, exactly 6291500 bytes of valid PCM WAV from the existing bounded deterministic recipe. It must produce a genuine binary Git patch above 5 MiB.\n2. Metadata (depends on Payload): run node ${p.recipe} metadata. Create only ${p.executable} (Git mode 100755) and ${p.metadata}, with exact recipe bytes.\n3. Verification join (depends on Payload and Metadata): run node ${p.recipe} join. Create only ${p.result}; run node ${p.recipe} verify to check all generated content.\n\nEach Work Item validates with ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest recipe scoped to ${p.test}. The final result must preserve both existing canonical LFS pointers in Git, while their unchanged locally provisioned objects remain available. No other paths may change. Real installed workers and independent validation/review are required; fixture generation alone is not an execution pass.\n`;
 }
 
 export function observeLargeFileTree({

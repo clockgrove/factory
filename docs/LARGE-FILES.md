@@ -113,7 +113,7 @@ model. Runtime candidate consumers hold the same per-operation content leases as
 
 ## Existing LFS repositories
 
-Preflight detects canonical and legacy LFS pointers, requires `git-lfs`, and hashes existing standard
+Preflight accepts canonical Git LFS pointers, requires `git-lfs`, and hashes existing standard
 local objects before a paid management/worker call. Bounds are 256 assets, 100 MiB per asset and
 256 MiB total. Pointer extensions are refused. Provision authorized content into the standard local
 cache beforehand. No fetch, smudge/clean hook, config edit, attribute rewrite or migration occurs.
@@ -123,6 +123,15 @@ only after hashing bytes and checking size. For a changed path, Factory asks Git
 against the pinned base in isolated metadata. Output is eligible only when that exact path already
 has `filter=lfs`; `.gitattributes` changes, pointer-only worker output, custom transfer agents and
 automatic tracking remain refused.
+
+Native rebases, sibling refreshes, merge candidates and adopted-source candidates may encounter the
+canonical pointers committed by an earlier Factory artifact. Reconstruction recovers the original
+receipt and raw transfer under its immutable source authority, verifies the pointer, mode, object
+digest and size, and then issues a new upload/read-back receipt bound to the target base and current
+run authority. Adopted sources use the predecessor reservation only to read its immutable transfer;
+the successor lease and accepted recovery plan authorize the reconstructed candidate. Pointer bytes
+alone never authorize reconstruction, and stale authority fails before raw transfer reads or LFS
+network preflight.
 
 Eligible raw bytes use the same durable `worker-artifact` content transfer as other artifact content.
 Factory uploads the SHA-256 object with the installed authenticated Git LFS CLI, reads it back into

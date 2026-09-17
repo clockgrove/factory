@@ -281,7 +281,7 @@ async function symlinkRetention(context, fixture, read, identity, ref, events, r
     ready = await load("ready", [raw.intent.commit.oid]);
   assert.ok(canonical(intent) === canonical(ready), "symlink ready changed the retained intent");
   const artifact = ready.artifact,
-    target = "../lfs/canonical.bin",
+    target = "../lfs/primary.bin",
     path = fixture.paths.payload;
   assert.ok(
     artifact.baseSha === identity.baseSha &&

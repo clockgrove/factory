@@ -922,6 +922,13 @@ worker output and custom transfer agents are refused. Validation capture bytes r
 validation evidence. The current raw LFS hydration seam is host-local; isolated validators fail
 before provider creation for artifacts carrying LFS output receipts.
 
+Native publication reconstruction is a separate authenticated pointer consumer. It recovers the
+source artifact's durable receipt and raw transfer under the exact attempt reservation, validates
+the committed canonical pointer against those bytes, and finalizes a new receipt whose transfer and
+assignment identities name the target base and current run. An adopted predecessor is read-only
+source authority; its accepted recovery plan and current successor lease authorize the new receipt.
+A pointer, source receipt, or cached payload by itself cannot certify the rewritten artifact.
+
 Validation commands normally must already be observed at the frozen base. A provider-neutral
 repository-capability model handles the narrower case where an immutable graph must refer to an
 operation that an ancestor artifact will create. Adapters define the operation grammar, authority

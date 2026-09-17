@@ -230,7 +230,9 @@ export class MediaProductionExecutor {
     await this.options.hooks.markDispatching(invocation);
     let handle: MediaAdapterHandle;
     try {
-      handle = await this.options.adapter.dispatch(request);
+      handle = await this.options.adapter.dispatch(request, {
+        ...(args.signal ? { signal: args.signal } : {}),
+      });
     } catch (error) {
       const ambiguous = invocation.usageReservation.providerRequests > 0;
       if (ambiguous) {
@@ -328,7 +330,9 @@ export class MediaProductionExecutor {
     }
     let handle: MediaAdapterHandle | null;
     try {
-      handle = await this.options.adapter.recoverHandle(request);
+      handle = await this.options.adapter.recoverHandle(request, {
+        ...(args.signal ? { signal: args.signal } : {}),
+      });
     } catch (error) {
       throw new MediaExecutionPhaseError(
         "dispatch-receipt",
@@ -495,9 +499,9 @@ export class MediaProductionExecutor {
       if (observation.state === "failed" || observation.state === "cancelled") {
         const accounting = {
           providerRequests: invocation.usageReservation.providerRequests,
-          variants: 0,
-          generatedBytes: 0,
-          storageBytes: 0,
+          variants: observation.output?.variants ?? null,
+          generatedBytes: observation.output?.generatedBytes ?? null,
+          storageBytes: observation.output?.storageBytes ?? null,
           native: exactUsage(invocation, observation.usage),
         };
         await this.options.hooks.recordTerminalFailure({

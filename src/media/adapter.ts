@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
@@ -41,6 +41,15 @@ export interface MediaAdapterObservation {
   providerResponseId: string | null;
   reason?: string;
   usage: Array<{ unit: string; amount: number | null }>;
+  output?: {
+    variants: number | null;
+    generatedBytes: number | null;
+    storageBytes: number | null;
+  };
+}
+
+export interface MediaAdapterExecutionControl {
+  signal?: AbortSignal;
 }
 
 export interface MediaAdapterCollection {
@@ -110,8 +119,14 @@ async function runtimeSeed(requestInput: MediaAdapterRuntimeRequest): Promise<Bu
 export interface MediaProducerAdapter {
   readonly capability: MediaProducerCapability;
   probe(): Promise<MediaAdapterProbe>;
-  dispatch(request: MediaAdapterRuntimeRequest): Promise<MediaAdapterHandle>;
-  recoverHandle?(request: MediaAdapterRuntimeRequest): Promise<MediaAdapterHandle | null>;
+  dispatch(
+    request: MediaAdapterRuntimeRequest,
+    control?: MediaAdapterExecutionControl,
+  ): Promise<MediaAdapterHandle>;
+  recoverHandle?(
+    request: MediaAdapterRuntimeRequest,
+    control?: MediaAdapterExecutionControl,
+  ): Promise<MediaAdapterHandle | null>;
   observe(
     request: MediaAdapterRuntimeRequest,
     handle: MediaAdapterHandle,
@@ -271,18 +286,6 @@ function localHandle(invocation: MediaInvocation): MediaAdapterHandle {
   };
 }
 
-function localObservation(invocation: MediaInvocation): MediaAdapterObservation {
-  return {
-    state: "succeeded",
-    observedAt: new Date().toISOString(),
-    providerResponseId: `local:${invocation.digest}`,
-    usage: [
-      { unit: "generated_bytes", amount: null },
-      { unit: "output_count", amount: invocation.requestedVariants },
-    ],
-  };
-}
-
 type LocalCheckpoint = {
   protocol: "clockgrove.factory/local-media-checkpoint-v1";
   invocationDigest: string;
@@ -297,6 +300,24 @@ type LocalPreparedCheckpoint = {
   protocol: "clockgrove.factory/local-media-prepared-v1";
   invocationDigest: string;
   handle: MediaAdapterHandle;
+};
+
+type LocalVariantCheckpoint = {
+  protocol: "clockgrove.factory/local-media-variant-v1";
+  invocationDigest: string;
+  index: number;
+  file: string;
+  descriptor: ProducedVariant["descriptor"];
+};
+
+type LocalCancelledCheckpoint = {
+  protocol: "clockgrove.factory/local-media-cancelled-v1";
+  invocationDigest: string;
+  handle: MediaAdapterHandle;
+  reason: string;
+  variants: number;
+  generatedBytes: number;
+  usage: Array<{ unit: string; amount: number | null }>;
 };
 
 const localCheckpointRoot = (request: MediaAdapterRuntimeRequest) =>
@@ -317,6 +338,18 @@ async function syncPath(path: string) {
   } finally {
     await handle.close();
   }
+}
+
+async function atomicWrite(root: string, name: string, bytes: Buffer | string) {
+  const temporary = join(root, `${name}.${process.pid}.${randomUUID()}.tmp`);
+  await writeFile(temporary, bytes, { mode: 0o600 });
+  await syncPath(temporary);
+  await rename(temporary, join(root, name));
+  await syncPath(root);
+}
+
+async function atomicWriteJson(root: string, name: string, value: unknown) {
+  await atomicWrite(root, name, `${canonicalAssetJson(value)}\n`);
 }
 
 async function readLocalCheckpoint(request: MediaAdapterRuntimeRequest): Promise<{
@@ -366,12 +399,14 @@ async function readLocalCheckpoint(request: MediaAdapterRuntimeRequest): Promise
 
 async function readLocalPrepared(
   request: MediaAdapterRuntimeRequest,
-): Promise<LocalPreparedCheckpoint | null> {
+): Promise<{ checkpoint: LocalPreparedCheckpoint | null; torn: boolean }> {
   let value: unknown;
   try {
     value = JSON.parse(await readFile(join(localCheckpointRoot(request), "prepared.json"), "utf8"));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+      return { checkpoint: null, torn: false };
+    if (error instanceof SyntaxError) return { checkpoint: null, torn: true };
     throw error;
   }
   if (!value || typeof value !== "object")
@@ -384,7 +419,171 @@ async function readLocalPrepared(
     prepared.handle.providerRequestId !== null
   )
     throw new Error("local media prepared checkpoint differs from its invocation");
-  return prepared;
+  return { checkpoint: prepared, torn: false };
+}
+
+async function persistLocalPrepared(
+  request: MediaAdapterRuntimeRequest,
+  handle: MediaAdapterHandle,
+) {
+  const { invocation } = request;
+  const root = localCheckpointRoot(request);
+  await ensurePrivateCheckpointRoot(resolve(request.checkpointRoot));
+  await ensurePrivateCheckpointRoot(root);
+  const prepared: LocalPreparedCheckpoint = {
+    protocol: "clockgrove.factory/local-media-prepared-v1",
+    invocationDigest: invocation.digest,
+    handle,
+  };
+  await atomicWriteJson(root, "prepared.json", prepared);
+}
+
+async function readLocalVariant(
+  request: MediaAdapterRuntimeRequest,
+  index: number,
+): Promise<ProducedVariant | null> {
+  const root = localCheckpointRoot(request);
+  const checkpointName = `variant-${index + 1}.json`;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(join(root, checkpointName), "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError)
+      return null;
+    throw error;
+  }
+  if (!parsed || typeof parsed !== "object")
+    throw new Error("local media variant checkpoint is invalid");
+  const checkpoint = parsed as LocalVariantCheckpoint;
+  if (
+    checkpoint.protocol !== "clockgrove.factory/local-media-variant-v1" ||
+    checkpoint.invocationDigest !== request.invocation.digest ||
+    checkpoint.index !== index ||
+    checkpoint.file !== `variant-${index + 1}.bin`
+  )
+    throw new Error("local media variant checkpoint differs from its invocation");
+  const descriptor = AssetDescriptorSchema.parse(checkpoint.descriptor);
+  if (
+    descriptor.provenance.kind !== "produced" ||
+    descriptor.provenance.invocationId !== request.invocation.invocationId ||
+    descriptor.provenance.outputIndex !== index
+  )
+    throw new Error("local media variant descriptor differs from its work unit");
+  const bytes = await readFile(join(root, checkpoint.file));
+  if (
+    createHash("sha256").update(bytes).digest("hex") !== descriptor.content.digest ||
+    bytes.length !== descriptor.content.bytes
+  )
+    throw new Error("local media variant bytes differ from their descriptor");
+  return { descriptor, bytes };
+}
+
+async function persistLocalVariant(
+  request: MediaAdapterRuntimeRequest,
+  index: number,
+  variant: ProducedVariant,
+) {
+  const root = localCheckpointRoot(request);
+  const file = `variant-${index + 1}.bin`;
+  const target = join(root, file);
+  try {
+    const existing = await readFile(target);
+    if (!existing.equals(variant.bytes))
+      throw new Error("local media checkpoint variant changed during exact recovery");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    await atomicWrite(root, file, variant.bytes);
+  }
+  const checkpoint: LocalVariantCheckpoint = {
+    protocol: "clockgrove.factory/local-media-variant-v1",
+    invocationDigest: request.invocation.digest,
+    index,
+    file,
+    descriptor: variant.descriptor,
+  };
+  await atomicWriteJson(root, `variant-${index + 1}.json`, checkpoint);
+}
+
+async function durableLocalVariants(request: MediaAdapterRuntimeRequest) {
+  const variants: ProducedVariant[] = [];
+  for (let index = 0; index < request.invocation.requestedVariants; index++) {
+    const variant = await readLocalVariant(request, index);
+    if (!variant) break;
+    variants.push(variant);
+  }
+  return variants;
+}
+
+function localCollection(request: MediaAdapterRuntimeRequest, variants: ProducedVariant[]) {
+  const generatedBytes = variants.reduce((total, variant) => total + variant.bytes.length, 0);
+  return {
+    providerResponseId: `local:${request.invocation.digest}`,
+    productionReceiptDigest: assetDigest({
+      invocationDigest: request.invocation.digest,
+      variants: variants.map(({ descriptor }) => descriptor.digest),
+    }),
+    variants,
+    usage: [
+      { unit: "generated_bytes", amount: generatedBytes },
+      { unit: "output_count", amount: variants.length },
+    ],
+  } satisfies MediaAdapterCollection;
+}
+
+async function readLocalCancelled(
+  request: MediaAdapterRuntimeRequest,
+): Promise<LocalCancelledCheckpoint | null> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(
+      await readFile(join(localCheckpointRoot(request), "cancelled.json"), "utf8"),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (!parsed || typeof parsed !== "object")
+    throw new Error("local media cancellation checkpoint is invalid");
+  const checkpoint = parsed as LocalCancelledCheckpoint;
+  if (
+    checkpoint.protocol !== "clockgrove.factory/local-media-cancelled-v1" ||
+    checkpoint.invocationDigest !== request.invocation.digest ||
+    checkpoint.handle.invocationId !== request.invocation.invocationId ||
+    checkpoint.handle.providerRequestId !== null ||
+    !Number.isInteger(checkpoint.variants) ||
+    !Number.isInteger(checkpoint.generatedBytes) ||
+    !Array.isArray(checkpoint.usage)
+  )
+    throw new Error("local media cancellation checkpoint differs from its invocation");
+  return checkpoint;
+}
+
+async function persistLocalCancelled(
+  request: MediaAdapterRuntimeRequest,
+  handle: MediaAdapterHandle,
+  reason: string,
+) {
+  await ensurePrivateCheckpointRoot(resolve(request.checkpointRoot));
+  await ensurePrivateCheckpointRoot(localCheckpointRoot(request));
+  const existing = await readLocalCancelled(request);
+  if (existing) return existing;
+  if (await readLocalCheckpoint(request)) return null;
+  const variants = await durableLocalVariants(request);
+  const generatedBytes = variants.reduce((total, variant) => total + variant.bytes.length, 0);
+  const checkpoint: LocalCancelledCheckpoint = {
+    protocol: "clockgrove.factory/local-media-cancelled-v1",
+    invocationDigest: request.invocation.digest,
+    handle,
+    reason,
+    variants: variants.length,
+    generatedBytes,
+    usage: [
+      { unit: "generated_bytes", amount: generatedBytes },
+      { unit: "output_count", amount: variants.length },
+    ],
+  };
+  await atomicWriteJson(localCheckpointRoot(request), "cancelled.json", checkpoint);
+  return checkpoint;
 }
 
 async function persistLocalCheckpoint(
@@ -394,25 +593,10 @@ async function persistLocalCheckpoint(
 ) {
   const { invocation } = request;
   const root = localCheckpointRoot(request);
-  await ensurePrivateCheckpointRoot(resolve(request.checkpointRoot));
-  await ensurePrivateCheckpointRoot(root);
-  const variants: LocalCheckpoint["variants"] = [];
-  for (const [index, variant] of collection.variants.entries()) {
-    const file = `variant-${index + 1}.bin`;
-    const target = join(root, file);
-    try {
-      const existing = await readFile(target);
-      if (!existing.equals(variant.bytes))
-        throw new Error("local media checkpoint variant changed during exact recovery");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      const temporary = join(root, `${file}.${process.pid}.tmp`);
-      await writeFile(temporary, variant.bytes, { mode: 0o600 });
-      await syncPath(temporary);
-      await rename(temporary, target);
-    }
-    variants.push({ file, descriptor: variant.descriptor });
-  }
+  const variants = collection.variants.map((variant, index) => ({
+    file: `variant-${index + 1}.bin`,
+    descriptor: variant.descriptor,
+  }));
   const checkpoint: LocalCheckpoint = {
     protocol: "clockgrove.factory/local-media-checkpoint-v1",
     invocationDigest: invocation.digest,
@@ -422,11 +606,7 @@ async function persistLocalCheckpoint(
     variants,
     usage: collection.usage,
   };
-  const temporary = join(root, `ready.${process.pid}.tmp`);
-  await writeFile(temporary, `${canonicalAssetJson(checkpoint)}\n`, { mode: 0o600 });
-  await syncPath(temporary);
-  await rename(temporary, join(root, "ready.json"));
-  await syncPath(root);
+  await atomicWriteJson(root, "ready.json", checkpoint);
   return checkpoint;
 }
 
@@ -464,50 +644,99 @@ function producedDescriptor(args: {
 
 abstract class LocalMediaAdapter implements MediaProducerAdapter {
   abstract readonly capability: MediaProducerCapability;
-  protected abstract generate(request: MediaAdapterRuntimeRequest): Promise<MediaAdapterCollection>;
+  protected abstract generateVariant(
+    request: MediaAdapterRuntimeRequest,
+    index: number,
+  ): Promise<ProducedVariant>;
 
   async probe(): Promise<MediaAdapterProbe> {
     return { available: true, authenticated: true };
   }
 
-  async dispatch(requestInput: MediaAdapterRuntimeRequest): Promise<MediaAdapterHandle> {
+  async dispatch(
+    requestInput: MediaAdapterRuntimeRequest,
+    control: MediaAdapterExecutionControl = {},
+  ): Promise<MediaAdapterHandle> {
     const request = assertAdapterRequest(requestInput, this.capability);
     const { invocation } = request;
-    if (Date.parse(invocation.deadline) <= Date.now())
-      throw new Error("media invocation deadline expired before dispatch");
     const existing = await readLocalCheckpoint(request);
     if (existing) return existing.checkpoint.handle;
-    if (await readLocalPrepared(request))
+    const cancelled = await readLocalCancelled(request);
+    if (cancelled) return cancelled.handle;
+    const prepared = await readLocalPrepared(request);
+    if (prepared.checkpoint)
       throw new Error("local media invocation is already prepared; recover the same handle");
     const root = localCheckpointRoot(request);
     await ensurePrivateCheckpointRoot(resolve(request.checkpointRoot));
     await ensurePrivateCheckpointRoot(root);
     const handle = localHandle(invocation);
-    const prepared: LocalPreparedCheckpoint = {
-      protocol: "clockgrove.factory/local-media-prepared-v1",
-      invocationDigest: invocation.digest,
-      handle,
-    };
-    const preparedPath = join(root, "prepared.json");
-    await writeFile(preparedPath, `${canonicalAssetJson(prepared)}\n`, { mode: 0o600 });
-    await syncPath(preparedPath);
-    await syncPath(root);
-    const collection = await this.generate(request);
-    await persistLocalCheckpoint(request, handle, collection);
+    await persistLocalPrepared(request, handle);
+    await this.completePrepared(request, handle, control);
     return handle;
   }
 
   async recoverHandle(
     requestInput: MediaAdapterRuntimeRequest,
+    control: MediaAdapterExecutionControl = {},
   ): Promise<MediaAdapterHandle | null> {
     const request = assertAdapterRequest(requestInput, this.capability);
     const ready = await readLocalCheckpoint(request);
     if (ready) return ready.checkpoint.handle;
+    const cancelled = await readLocalCancelled(request);
+    if (cancelled) return cancelled.handle;
     const prepared = await readLocalPrepared(request);
-    if (!prepared) return null;
-    const collection = await this.generate(request);
-    await persistLocalCheckpoint(request, prepared.handle, collection);
-    return prepared.handle;
+    if (!prepared.checkpoint && !prepared.torn) return null;
+    const handle = prepared.checkpoint?.handle ?? localHandle(request.invocation);
+    if (prepared.torn) await persistLocalPrepared(request, handle);
+    await this.completePrepared(request, handle, control);
+    return handle;
+  }
+
+  private async completePrepared(
+    request: MediaAdapterRuntimeRequest,
+    handle: MediaAdapterHandle,
+    control: MediaAdapterExecutionControl,
+  ) {
+    const { invocation } = request;
+    const variants: ProducedVariant[] = [];
+    for (let index = 0; index < invocation.requestedVariants; index++) {
+      const retained = await readLocalVariant(request, index);
+      if (retained) {
+        variants.push(retained);
+        continue;
+      }
+      const existingCancellation = await readLocalCancelled(request);
+      const stopReason = existingCancellation
+        ? existingCancellation.reason
+        : control.signal?.aborted
+          ? "media invocation aborted between local work units"
+          : Date.parse(invocation.deadline) <= Date.now()
+            ? "media invocation deadline expired between local work units"
+            : null;
+      if (stopReason) {
+        if (!existingCancellation) await persistLocalCancelled(request, handle, stopReason);
+        return;
+      }
+      const variant = await this.generateVariant(request, index);
+      if (control.signal?.aborted || Date.parse(invocation.deadline) <= Date.now()) {
+        await persistLocalCancelled(
+          request,
+          handle,
+          control.signal?.aborted
+            ? "media invocation aborted during a local work unit"
+            : "media invocation deadline expired during a local work unit",
+        );
+        return;
+      }
+      const generatedBytes =
+        variants.reduce((total, value) => total + value.bytes.length, 0) + variant.bytes.length;
+      if (generatedBytes > invocation.usageReservation.generatedBytes)
+        throw new Error("generated variants exceed the invocation byte limit");
+      await persistLocalVariant(request, index, variant);
+      variants.push(variant);
+    }
+    if (await readLocalCancelled(request)) return;
+    await persistLocalCheckpoint(request, handle, localCollection(request, variants));
   }
 
   async observe(
@@ -518,11 +747,43 @@ abstract class LocalMediaAdapter implements MediaProducerAdapter {
     if (handle.invocationId !== invocation.invocationId)
       throw new Error("media handle belongs to another invocation");
     const retained = await readLocalCheckpoint(requestInput);
-    if (!retained) return { ...localObservation(invocation), state: "unknown", usage: [] };
+    if (!retained) {
+      const cancelled = await readLocalCancelled(requestInput);
+      if (cancelled)
+        return {
+          state: "cancelled",
+          observedAt: new Date().toISOString(),
+          providerResponseId: null,
+          reason: cancelled.reason,
+          usage: cancelled.usage,
+          output: {
+            variants: cancelled.variants,
+            generatedBytes: cancelled.generatedBytes,
+            storageBytes: 0,
+          },
+        };
+      const prepared = await readLocalPrepared(requestInput);
+      return {
+        state: prepared.checkpoint || prepared.torn ? "running" : "unknown",
+        observedAt: new Date().toISOString(),
+        providerResponseId: null,
+        usage: invocation.usageReservation.nativeUnits.map((unit) => ({ unit, amount: null })),
+        output: { variants: null, generatedBytes: null, storageBytes: null },
+      };
+    }
     return {
-      ...localObservation(invocation),
+      state: "succeeded",
+      observedAt: new Date().toISOString(),
       providerResponseId: retained.collection.providerResponseId,
       usage: retained.collection.usage,
+      output: {
+        variants: retained.collection.variants.length,
+        generatedBytes: retained.collection.variants.reduce(
+          (total, variant) => total + variant.bytes.length,
+          0,
+        ),
+        storageBytes: null,
+      },
     };
   }
 
@@ -533,6 +794,7 @@ abstract class LocalMediaAdapter implements MediaProducerAdapter {
     const { invocation } = assertAdapterRequest(requestInput, this.capability);
     if (handle.invocationId !== invocation.invocationId)
       throw new Error("media handle belongs to another invocation");
+    await persistLocalCancelled(requestInput, handle, "local media invocation cancelled");
   }
 
   async cleanup(
@@ -576,52 +838,35 @@ export class SharpRasterMediaAdapter extends LocalMediaAdapter {
     }
   }
 
-  protected async generate(
+  protected async generateVariant(
     requestInput: MediaAdapterRuntimeRequest,
-  ): Promise<MediaAdapterCollection> {
+    index: number,
+  ): Promise<ProducedVariant> {
     const request = assertAdapterRequest(requestInput, this.capability);
     const { invocation } = request;
     if (invocation.profile?.kind !== "raster" || !request.inputs[0])
       throw new Error("local raster derivative requires an exact raster profile and input");
     const sharp = (await import("sharp")).default;
     const seed = await runtimeSeed(request);
-    const variants: ProducedVariant[] = [];
-    for (let index = 0; index < invocation.requestedVariants; index++) {
-      const pipeline = sharp(await readFile(request.inputs[index % request.inputs.length]!.path))
-        .resize(invocation.profile.width, invocation.profile.height, { fit: "cover" })
-        .modulate({
-          brightness: 0.9 + (seed[index % seed.length]! % 21) / 100,
-          hue: seed[(index + 1) % seed.length]! % 24,
-        });
-      const bytes = await (invocation.profile.alpha
-        ? pipeline.ensureAlpha(0.85)
-        : pipeline.removeAlpha()
-      )
-        .png()
-        .toBuffer();
-      const inspection = await inspectAssetBytes(bytes, {
-        allowOpaque: false,
-        displayName: `variant-${index + 1}.png`,
+    const pipeline = sharp(await readFile(request.inputs[index % request.inputs.length]!.path))
+      .resize(invocation.profile.width, invocation.profile.height, { fit: "cover" })
+      .modulate({
+        brightness: 0.9 + (seed[index % seed.length]! % 21) / 100,
+        hue: seed[(index + 1) % seed.length]! % 24,
       });
-      variants.push({
-        bytes,
-        descriptor: producedDescriptor({ invocation, index, extension: "png", bytes, inspection }),
-      });
-    }
-    const generatedBytes = variants.reduce((total, variant) => total + variant.bytes.length, 0);
-    if (generatedBytes > invocation.usageReservation.generatedBytes)
-      throw new Error("generated variants exceed the invocation byte limit");
+    const bytes = await (invocation.profile.alpha
+      ? pipeline.ensureAlpha(0.85)
+      : pipeline.removeAlpha()
+    )
+      .png()
+      .toBuffer();
+    const inspection = await inspectAssetBytes(bytes, {
+      allowOpaque: false,
+      displayName: `variant-${index + 1}.png`,
+    });
     return {
-      providerResponseId: `local:${invocation.digest}`,
-      productionReceiptDigest: assetDigest({
-        invocationDigest: invocation.digest,
-        variants: variants.map(({ descriptor }) => descriptor.digest),
-      }),
-      variants,
-      usage: [
-        { unit: "generated_bytes", amount: generatedBytes },
-        { unit: "output_count", amount: variants.length },
-      ],
+      bytes,
+      descriptor: producedDescriptor({ invocation, index, extension: "png", bytes, inspection }),
     };
   }
 }

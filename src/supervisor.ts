@@ -63,7 +63,9 @@ import {
 import { repositoryCapturePlanningCapabilities } from "./validation/repository-capture-capabilities.js";
 import {
   executeLocalRepositoryCaptures,
+  executeLocalValidationCommand,
   inspectLocalRepositoryCaptureDispatchState,
+  localRepositoryCaptureScopeRecoveryAction,
   LocalRepositoryCaptureCommandFailure,
   observeLocalValidationResult,
   persistLocalValidationResult,
@@ -79,6 +81,7 @@ import {
   runRemoteValidationInvocationTransaction,
   type RemoteValidationSettlementEvidence,
 } from "./validation/remote-invocation-recovery.js";
+import { inspectLocalValidationScopeReboundChain } from "./validation/local-invocation-recovery.js";
 
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
 import { CodexSdkLocalBackend } from "./backends/codex-sdk-local.js";
@@ -11565,6 +11568,7 @@ export class FactorySupervisor {
     deadline: Date;
     validator?: ExecutionBackend;
     localScopeBatch?: LocalScopeBatch;
+    localRecoveryMode?: "launch-authorized" | "observe-only";
   }): Promise<CleanValidationInput["repositoryCaptureRuntime"] | undefined> {
     if (
       args.packet.deliverable.kind !== "repository-change" ||
@@ -11750,6 +11754,8 @@ export class FactorySupervisor {
     const persistedResult = async (
       invocation: ValidationInvocation,
     ): Promise<RuntimeResult | null> => {
+      if (!(await readValidationInvocation({ store: this.#store, digest: invocation.digest })))
+        return null;
       const stored = await readValidationInvocationResult({ store: this.#store, invocation });
       if (!stored) return null;
       return {
@@ -11864,6 +11870,12 @@ export class FactorySupervisor {
           },
         });
       },
+      executeLocalValidationCommand: (input) =>
+        executeLocalValidationCommand({
+          stagingRoot,
+          ...input,
+          allowLaunch: args.localRecoveryMode !== "observe-only",
+        }),
       execute: async (input) => {
         const downloadExpected = async (
           expectedInput: ValidationInvocation["mediaInputs"][number],
@@ -12139,6 +12151,7 @@ export class FactorySupervisor {
               runCommand: input.runCaptureCommand,
               observeCommand: input.observeCaptureCommand,
               commandDeadline: input.captureObservationDeadline,
+              allowLaunch: args.localRecoveryMode !== "observe-only",
               assertOutputTree: input.assertOutputTree,
             });
           } catch (error) {
@@ -12197,6 +12210,28 @@ export class FactorySupervisor {
               }
             );
           };
+          const replayRemoteReplacement = args.validator?.replayValidationReplacement
+            ? async () => {
+                const state = await remoteDispatchState();
+                if (!state.dispatch || !state.rebound)
+                  throw new Error(
+                    "remote validation replacement lacks its authenticated rebound authority",
+                  );
+                const launched = await this.#externalAdmission(() =>
+                  args.validator!.replayValidationReplacement!(remoteContext, {
+                    originalDispatchOperationId: state.dispatch!.writerOperationId,
+                    reboundOperationId: state.rebound!.writerOperationId,
+                    resourceName: state.dispatch!.resourceName,
+                    requestIdentityDigest: state.dispatch!.requestIdentityDigest,
+                  }),
+                );
+                return (
+                  (await persistedResult(input.invocation)) ?? {
+                    validation: normalizeValidation(launched),
+                  }
+                );
+              }
+            : undefined;
           return runRemoteValidationInvocationTransaction<
             RuntimeResult,
             Extract<FactoryEvent, { event: "ValidationInvocationRemoteDispatchStarted" }>
@@ -12245,6 +12280,7 @@ export class FactorySupervisor {
               await recordRemoteSettlement(dispatch, evidence);
             },
             launch: launchRemote,
+            ...(replayRemoteReplacement ? { replayReplacement: replayRemoteReplacement } : {}),
             persistResult: (result) => persistResult(input.invocation, result),
           });
         }
@@ -12264,6 +12300,11 @@ export class FactorySupervisor {
           launch: async () => {
             return completeLocal(await input.launchValidation());
           },
+          ...(args.localRecoveryMode
+            ? {
+                resume: async () => completeLocal(await input.launchValidation()),
+              }
+            : {}),
           persistFinal: (result) => persistResult(input.invocation, result),
         });
       },
@@ -19941,30 +19982,6 @@ export class FactorySupervisor {
           capacity.backend === "factory/local-validation"
             ? undefined
             : this.#registry.get(capacity.backend);
-        const originalLocalScopes = events.filter(
-          (event): event is Extract<FactoryEvent, { kind: "capacity" }> =>
-            event.kind === "capacity" &&
-            event.event === "CapacityReserved" &&
-            event.phase === "validation" &&
-            event.workItem === reservation.workItem &&
-            event.attempt === reservation.attempt &&
-            event.sequence === capacity.sequence &&
-            Boolean(event.localScopeBatch),
-        );
-        if (originalLocalScopes.length > 1)
-          throw new Error("repository capture validation has conflicting capacity scope batches");
-        const originalLocalScopeBatch = originalLocalScopes[0]?.localScopeBatch;
-        const scopeRebounds = events.filter(
-          (event): event is Extract<FactoryEvent, { event: "ValidationInvocationScopeRebound" }> =>
-            event.kind === "validation-invocation" &&
-            event.event === "ValidationInvocationScopeRebound" &&
-            event.runId === reservation.runId &&
-            event.workItem === reservation.workItem &&
-            event.attempt === reservation.attempt &&
-            event.invocationDigest === prepared.invocationDigest,
-        );
-        if (scopeRebounds.length > 1)
-          throw new Error("repository capture validation has more than one scope rebound");
         validationFinished = await this.#recoverPreparedRepositoryCaptureValidation({
           item,
           reservation,
@@ -19972,8 +19989,6 @@ export class FactorySupervisor {
           capacityReservationSequence: capacity.sequence,
           validationAlreadyRecorded: validationFinished,
           ...(recoveryBackend ? { backend: recoveryBackend } : {}),
-          ...(originalLocalScopeBatch ? { originalLocalScopeBatch } : {}),
-          ...(scopeRebounds[0] ? { scopeRebound: scopeRebounds[0] } : {}),
         });
         if (!validationFinished)
           throw new Error(
@@ -20115,8 +20130,6 @@ export class FactorySupervisor {
     capacityReservationSequence: number;
     validationAlreadyRecorded: boolean;
     backend?: ExecutionBackend;
-    originalLocalScopeBatch?: LocalScopeBatch;
-    scopeRebound?: Extract<FactoryEvent, { event: "ValidationInvocationScopeRebound" }>;
   }): Promise<boolean> {
     const stored = await readValidationInvocation({
       store: this.#store,
@@ -20150,6 +20163,42 @@ export class FactorySupervisor {
       args.prepared.capacityReservationSequence !== args.capacityReservationSequence
     )
       throw new Error("prepared repository capture changed its attempt or deadline authority");
+    const remote = stored.invocation.toolEnvironment.egress === "third-party";
+    let originalLocalScopeBatch: LocalScopeBatch | undefined;
+    let scopeRebound:
+      | Extract<FactoryEvent, { event: "ValidationInvocationScopeRebound" }>
+      | undefined;
+    if (!remote) {
+      const observed = await this.#reader.readObjective(this.#run.objective);
+      this.#fenceSnapshot(observed);
+      if (!observed.objectiveAuthority)
+        throw new Error("local validation invocation lacks current Objective authority");
+      const events = snapshotEvents(observed);
+      const capacities = events.filter(
+        (event): event is Extract<FactoryEvent, { kind: "capacity" }> =>
+          event.kind === "capacity" &&
+          event.event === "CapacityReserved" &&
+          event.runId === args.reservation.runId &&
+          event.workItem === args.reservation.workItem &&
+          event.attempt === args.reservation.attempt &&
+          event.phase === "validation" &&
+          event.sequence === args.capacityReservationSequence,
+      );
+      if (capacities.length !== 1)
+        throw new Error("local validation invocation lacks its exact capacity reservation");
+      const chain = inspectLocalValidationScopeReboundChain({
+        events,
+        reservation: args.reservation,
+        invocation: stored.invocation,
+        capacity: capacities[0]!,
+        isWriterAuthorized: (event) =>
+          hasHistoricalWriterAuthority(event, observed.objectiveAuthority!),
+      });
+      if (chain.prepared.sequence !== args.prepared.sequence)
+        throw new Error("local validation prepared event changed during recovery");
+      originalLocalScopeBatch = chain.originalScopeBatch;
+      scopeRebound = chain.rebound;
+    }
     const artifact = await resumeArtifactTransfer({
       store: this.#store,
       identity: this.#artifactTransferIdentity(args.reservation),
@@ -20172,7 +20221,6 @@ export class FactorySupervisor {
       stored.invocation.baseSha,
       original.requirements.trust,
     );
-    const remote = stored.invocation.toolEnvironment.egress === "third-party";
     if (
       remote &&
       (!args.backend?.recoverValidation ||
@@ -20182,13 +20230,12 @@ export class FactorySupervisor {
       throw new Error(
         "repository capture backend cannot recover or rebound its prepared validation",
       );
-    const originalLocalScopeBatch = args.originalLocalScopeBatch
-      ? LocalScopeBatchSchema.parse(args.originalLocalScopeBatch)
-      : undefined;
-    let localScopeBatch = args.scopeRebound
-      ? LocalScopeBatchSchema.parse(args.scopeRebound.localScopeBatch)
+    let localScopeBatch = scopeRebound
+      ? LocalScopeBatchSchema.parse(scopeRebound.localScopeBatch)
       : originalLocalScopeBatch;
     let scopedHooks: NonNullable<CleanValidationInput["localScope"]> | undefined;
+    let successorProducerInvocationId: string | undefined;
+    let localRecoveryMode: "launch-authorized" | "observe-only" = "observe-only";
     if (!remote) {
       if (
         !originalLocalScopeBatch?.identity.producerUnit ||
@@ -20197,30 +20244,6 @@ export class FactorySupervisor {
         throw new Error(
           "prepared local repository capture lacks its exact manager-owned scope batch",
         );
-      if (args.scopeRebound) {
-        const originalIdentity = originalLocalScopeBatch.identity;
-        const reboundIdentity = localScopeBatch.identity;
-        if (
-          args.scopeRebound.reservationOid !== args.reservation.oid ||
-          args.scopeRebound.artifactDigest !== stored.invocation.artifactDigest ||
-          args.scopeRebound.backend !== stored.invocation.toolEnvironment.backendId ||
-          args.scopeRebound.previousScopeBatchDigest !==
-            localScopeBatchDigest(originalLocalScopeBatch) ||
-          localScopeBatch.commandCount !== originalLocalScopeBatch.commandCount ||
-          localScopeBatch.deadline !== originalLocalScopeBatch.deadline ||
-          reboundIdentity.repository !== originalIdentity.repository ||
-          reboundIdentity.objective !== originalIdentity.objective ||
-          reboundIdentity.runId !== originalIdentity.runId ||
-          reboundIdentity.workItem !== originalIdentity.workItem ||
-          reboundIdentity.attempt !== originalIdentity.attempt ||
-          reboundIdentity.policyDigest !== originalIdentity.policyDigest ||
-          reboundIdentity.phase !== originalIdentity.phase ||
-          reboundIdentity.commandIndex !== originalIdentity.commandIndex ||
-          reboundIdentity.invocationDigest !== originalIdentity.invocationDigest ||
-          reboundIdentity.directorEpoch !== args.scopeRebound.directorEpoch
-        )
-          throw new Error("repository capture scope rebound breaks its immutable chain");
-      }
       const dispatchState = await inspectLocalRepositoryCaptureDispatchState({
         stagingRoot: validationControllerStateRoot(
           this.#options,
@@ -20230,16 +20253,19 @@ export class FactorySupervisor {
         invocation: stored.invocation,
       });
       const observed = await observeLocalScopeBatch(localScopeBatch);
-      if (observed.status === "unknown")
-        throw new Error("prepared local repository capture scope cannot be observed exactly");
-      if (observed.status === "absent" && dispatchState === "rebound-safe") {
-        if (args.scopeRebound)
-          throw new Error(
-            "repository capture recovery scope retired before launch; compounded rebound is blocked",
-          );
-        const recoveryDeadline = new Date(originalLocalScopeBatch.deadline);
-        if (recoveryDeadline.getTime() <= Date.now())
-          throw new Error("repository capture recovery deadline is exhausted");
+      const recoveryAction = localRepositoryCaptureScopeRecoveryAction({
+        scopeStatus: observed.status,
+        dispatchState,
+        reboundPersisted: Boolean(scopeRebound),
+        validationDeadline: stored.invocation.validationDeadline,
+        now: new Date(),
+      });
+      if (recoveryAction === "wait")
+        throw new Error(
+          "prepared local repository capture producer or exact command scope remains active",
+        );
+      if (recoveryAction === "persist-rebound") {
+        const recoveryDeadline = new Date(stored.invocation.validationDeadline);
         const replacement = await this.#scopedValidation(
           args.reservation,
           artifact,
@@ -20277,12 +20303,29 @@ export class FactorySupervisor {
         );
         localScopeBatch = replacement.batch;
         scopedHooks = replacement.hooks;
+        localRecoveryMode = "launch-authorized";
+      } else if (recoveryAction === "resume-rebound") {
+        const successorHost = await discoverLocalScopeHost();
+        if (
+          !successorHost?.producerUnit ||
+          !successorHost.producerInvocationId ||
+          !localScopeBatch.identity.producerInvocationId ||
+          successorHost.hostIdentity !== localScopeBatch.identity.hostIdentity ||
+          successorHost.producerUnit !== localScopeBatch.identity.producerUnit ||
+          successorHost.producerInvocationId === localScopeBatch.identity.producerInvocationId
+        )
+          throw new Error(
+            "repository capture rebound lacks its exact active successor producer generation",
+          );
+        successorProducerInvocationId = successorHost.producerInvocationId;
+        localRecoveryMode = "launch-authorized";
       }
     }
     scopedHooks ??= localScopeBatch
       ? {
           identity: localScopeBatch.identity,
-          deadline: localScopeBatch.deadline,
+          deadline: stored.invocation.validationDeadline,
+          ...(successorProducerInvocationId ? { successorProducerInvocationId } : {}),
           beforeLaunch: async (identity: Parameters<typeof observeLocalScope>[0]) => {
             if (identity.commandIndex >= localScopeBatch.commandCount)
               throw new Error("recovered local capture exceeds its original scope batch");
@@ -20301,6 +20344,7 @@ export class FactorySupervisor {
       deadline: new Date(stored.invocation.validationDeadline),
       ...(remote && args.backend ? { validator: args.backend } : {}),
       ...(localScopeBatch ? { localScopeBatch } : {}),
+      ...(!remote ? { localRecoveryMode } : {}),
     });
     if (!runtime) throw new Error("prepared repository capture lacks its runtime recipe");
     let validation: CleanValidationResult | undefined;

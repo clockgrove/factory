@@ -863,7 +863,7 @@ const ValidationInvocationRemoteSettled = AuthenticatedCommon.extend({
     });
 });
 
-const ValidationInvocationScopeRebound = Common.extend({
+const ValidationInvocationScopeRebound = AuthenticatedCommon.extend({
   kind: z.literal("validation-invocation"),
   event: z.literal("ValidationInvocationScopeRebound"),
   workItem: z.number().int().positive(),
@@ -882,8 +882,8 @@ const ValidationInvocationScopeRebound = Common.extend({
     scope.runId !== event.runId ||
     scope.workItem !== event.workItem ||
     scope.attempt !== event.attempt ||
-    scope.policyDigest !== event.policyDigest ||
-    scope.directorEpoch !== event.directorEpoch ||
+    scope.policyDigest !== event.writerPolicyDigest ||
+    scope.directorEpoch !== event.writerEpoch ||
     scope.invocationDigest !== event.artifactDigest
   )
     context.addIssue({

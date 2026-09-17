@@ -250,6 +250,15 @@ export interface ValidationResourceIdentity {
   requestIdentityDigest: string;
 }
 
+/** Authenticated durable authority for replaying one exact remote validation
+ * replacement. An adapter implementing replayValidationReplacement must bind
+ * its provider idempotency receipt to reboundOperationId and guarantee that
+ * repeated calls cannot create more than one billed replacement resource. */
+export interface ValidationReplacementAuthority extends ValidationResourceIdentity {
+  originalDispatchOperationId: string;
+  reboundOperationId: string;
+}
+
 export type ValidationResourceCleanupObservation = "cleaned" | "absent";
 
 export interface IsolatedValidationResult {
@@ -312,6 +321,12 @@ export interface ExecutionBackend {
   validate?(context: IsolatedValidationContext): Promise<IsolatedValidationResult>;
   /** Observe and checkpoint an exact retained capture validation before any replacement. */
   recoverValidation?(context: IsolatedValidationContext): Promise<IsolatedValidationResult | null>;
+  /** Replay the one durable rebound through a provider idempotency/receipt
+   * primitive. Exact absence by itself never satisfies this contract. */
+  replayValidationReplacement?(
+    context: IsolatedValidationContext,
+    authority: ValidationReplacementAuthority,
+  ): Promise<IsolatedValidationResult>;
   /** Stop the exact bound validation resource without collecting a result. */
   cleanupValidationResource?(
     context: IsolatedValidationContext,

@@ -194,6 +194,9 @@ export async function runRemoteValidationInvocationTransaction<
     evidence: RemoteValidationSettlementEvidence,
   ): Promise<void>;
   launch(): Promise<TResult>;
+  /** Provider-backed replay of the exact authenticated rebound. Repeated calls
+   * must resolve one logical replacement and never create another paid use. */
+  replayReplacement?: () => Promise<TResult>;
   persistResult(result: TResult): Promise<TResult>;
 }): Promise<TResult> {
   let durableResult = await args.observeResult();
@@ -282,15 +285,25 @@ export async function runRemoteValidationInvocationTransaction<
     return expireAfterCleanup(state.dispatch!);
   durableResult = await args.observeResult();
   state = await args.observeDispatch();
-  if (state.settled && durableResult) return durableResult;
+  if (state.settled) {
+    if (!durableResult)
+      throw new Error("remote validation settlement lacks its exact durable result or dispatch");
+    return durableResult;
+  }
   if (durableResult) return cleanupDurableResult(state.dispatch!, durableResult);
-  if (state.rebound)
-    throw new Error("remote validation invocation remains absent after its single durable rebound");
   if ((await args.now()).getTime() >= Date.parse(args.validationDeadline))
     return expireAfterCleanup(state.dispatch!);
-  await args.persistRebound(state.dispatch!);
+  // The rebound event is the provider idempotency authority for one deterministic
+  // replacement. Ordinary launch is forbidden after this point: a prelaunch
+  // marker cannot distinguish a crash before provider submission from a lost
+  // response after submission.
+  if (!state.rebound) await args.persistRebound(state.dispatch!);
+  if (!args.replayReplacement)
+    throw new Error(
+      "remote validation backend lacks provider-idempotent replacement dispatch capability",
+    );
   try {
-    return await settle(state.dispatch!, "provider-cleanup", await args.launch());
+    return await settle(state.dispatch!, "provider-cleanup", await args.replayReplacement());
   } catch (error) {
     durableResult = await args.observeResult();
     if (durableResult) return cleanupDurableResult(state.dispatch!, durableResult);

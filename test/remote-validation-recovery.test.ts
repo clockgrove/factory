@@ -4,6 +4,7 @@ import {
   inspectRemoteValidationEventChain,
   runRemoteValidationInvocationTransaction,
 } from "../src/validation/remote-invocation-recovery.js";
+import { inspectLocalValidationScopeReboundChain } from "../src/validation/local-invocation-recovery.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import { createValidationInvocation } from "../src/validation/repository-capture.js";
 import { DEFAULT_REPOSITORY_CAPTURE_EGRESS_POLICY } from "../src/protocol/policy.js";
@@ -12,6 +13,7 @@ import {
   hasHistoricalWriterAuthority,
   writerAuthority,
 } from "../src/control/authority.js";
+import { localScopeBatchDigest } from "../src/protocol/local-scope.js";
 
 const providers = ["codex-cli/daytona", "codex-cli/vercel-sandbox"] as const;
 const deadline = "2026-09-17T00:10:00.000Z";
@@ -152,6 +154,8 @@ function ports(args: {
   cleanupResource?: () => Promise<"cleaned" | "absent">;
   terminalFailure?: () => Promise<string>;
   launch?: () => Promise<string>;
+  replayReplacement?: (() => Promise<string>) | null;
+  afterPersistRebound?: () => Promise<void>;
 }) {
   const stages: string[] = [];
   const dispatch = { noHandleReplacementNotBefore: fence };
@@ -201,6 +205,7 @@ function ports(args: {
       persistRebound: async () => {
         stages.push("rebound");
         rebound = true;
+        await args.afterPersistRebound?.();
       },
       persistSettlement: async (_dispatch: typeof dispatch, evidence: string) => {
         stages.push(`settle-${evidence}`);
@@ -212,6 +217,16 @@ function ports(args: {
           stages.push("launch");
           return "launched";
         }),
+      ...(args.replayReplacement === null
+        ? {}
+        : {
+            replayReplacement:
+              args.replayReplacement ??
+              (async () => {
+                stages.push("replay");
+                return "launched";
+              }),
+          }),
       persistResult: async (result: string) => {
         stages.push("result");
         durableResult = result;
@@ -486,6 +501,291 @@ it("accepts monotonic Director takeover chains and refuses forged or regressing 
   ).toThrow(/changed holder/);
 });
 
+function authenticatedLocalChainFixture() {
+  const reservation = {
+    ref: "refs/clockgrove-factory/attempts/objective-418/work-item-7/attempt-1",
+    oid: "1".repeat(40),
+    objective: 418,
+    workItem: 7,
+    attempt: 1,
+    backend: "codex-cli/local-worktree",
+    baseSha: "6".repeat(40),
+    runId: writer.runId,
+    directorEpoch: 1,
+    policyDigest: writer.policyDigest,
+    sequence: 1,
+    receiptDigest: "4".repeat(64),
+    createdAt: new Date("2026-09-17T00:00:00.000Z"),
+  };
+  const invocation = createValidationInvocation({
+    protocol: "clockgrove.factory/validation-invocation",
+    repository: "clockgrove/factory",
+    objective: reservation.objective,
+    runId: reservation.runId,
+    workItem: reservation.workItem,
+    attempt: reservation.attempt,
+    attemptAuthority: {
+      reservationRef: reservation.ref,
+      reservationOid: reservation.oid,
+      reservationReceiptDigest: reservation.receiptDigest,
+      directorEpoch: reservation.directorEpoch,
+      policyDigest: reservation.policyDigest,
+    },
+    validationDeadline: deadline,
+    artifactDigest: "2".repeat(64),
+    baseSha: reservation.baseSha,
+    outputTreeSha: "7".repeat(40),
+    validationCommands: ["npm test"],
+    repositoryCaptureRecipes: [],
+    captureOutputAuthorities: [],
+    comparisonAuthorities: [],
+    mediaInputs: [],
+    egressPolicy: DEFAULT_REPOSITORY_CAPTURE_EGRESS_POLICY,
+    toolEnvironment: {
+      backendId: "factory/local-validation",
+      backendLocator: `local:${"9".repeat(64)}`,
+      environmentIdentity: `local:${"9".repeat(64)}`,
+      egress: "local",
+      toolReceiptDigests: ["8".repeat(64)],
+    },
+  });
+  const originalScopeBatch = {
+    identity: {
+      protocol: "clockgrove.factory/local-scope-v1" as const,
+      repository: invocation.repository,
+      objective: reservation.objective,
+      runId: reservation.runId,
+      workItem: reservation.workItem,
+      attempt: reservation.attempt,
+      directorEpoch: 1,
+      policyDigest: reservation.policyDigest,
+      phase: "validation" as const,
+      commandIndex: 0,
+      invocationDigest: invocation.artifactDigest,
+      hostIdentity: "a".repeat(64),
+      producerUnit: "factory.service",
+      producerInvocationId: "b".repeat(32),
+    },
+    commandCount: 2,
+    producerPid: 100,
+    producerStartTicks: "200",
+    deadline,
+  };
+  const capacity = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "capacity",
+    event: "CapacityReserved",
+    ...writerAuthority(writer, 10),
+    objective: reservation.objective,
+    runId: reservation.runId,
+    sequence: 10,
+    at: "2026-09-17T00:00:00.000Z",
+    workItem: reservation.workItem,
+    attempt: reservation.attempt,
+    phase: "validation",
+    backend: invocation.toolEnvironment.backendId,
+    requestedCpu: 1,
+    requestedMemoryMb: 512,
+    directorEpoch: reservation.directorEpoch,
+    policyDigest: reservation.policyDigest,
+    localScopeBatch: originalScopeBatch,
+  });
+  if (capacity.kind !== "capacity") throw new Error("fixture capacity did not parse");
+  const prepared = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "validation-invocation",
+    event: "ValidationInvocationPrepared",
+    ...writerAuthority(writer, 11),
+    objective: reservation.objective,
+    runId: reservation.runId,
+    sequence: 11,
+    at: "2026-09-17T00:00:00.000Z",
+    workItem: reservation.workItem,
+    attempt: reservation.attempt,
+    reservationRef: reservation.ref,
+    reservationOid: reservation.oid,
+    reservationReceiptDigest: reservation.receiptDigest,
+    attemptDirectorEpoch: reservation.directorEpoch,
+    attemptPolicyDigest: reservation.policyDigest,
+    validationDeadline: deadline,
+    capacityReservationSequence: capacity.sequence,
+    artifactDigest: invocation.artifactDigest,
+    baseSha: invocation.baseSha,
+    outputTreeSha: invocation.outputTreeSha,
+    invocationDigest: invocation.digest,
+    invocationRef: "refs/clockgrove-factory/validation-invocations/test/local-intent",
+    invocationCommitOid: "8".repeat(40),
+    backend: invocation.toolEnvironment.backendId,
+    backendLocator: invocation.toolEnvironment.backendLocator,
+  });
+  const directorB = { ...writer, holder: "director-b", epoch: 2 };
+  const reboundScopeBatch = {
+    ...originalScopeBatch,
+    identity: {
+      ...originalScopeBatch.identity,
+      directorEpoch: 2,
+      producerInvocationId: "c".repeat(32),
+    },
+    producerPid: 101,
+    producerStartTicks: "201",
+  };
+  const rebound = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "validation-invocation",
+    event: "ValidationInvocationScopeRebound",
+    ...writerAuthority(directorB, 12),
+    objective: reservation.objective,
+    runId: reservation.runId,
+    sequence: 12,
+    at: "2026-09-17T00:02:00.000Z",
+    workItem: reservation.workItem,
+    attempt: reservation.attempt,
+    artifactDigest: invocation.artifactDigest,
+    invocationDigest: invocation.digest,
+    reservationOid: reservation.oid,
+    backend: invocation.toolEnvironment.backendId,
+    previousScopeBatchDigest: localScopeBatchDigest(originalScopeBatch),
+    localScopeBatch: reboundScopeBatch,
+  });
+  return {
+    reservation,
+    invocation,
+    capacity,
+    prepared,
+    rebound,
+    originalScopeBatch,
+    reboundScopeBatch,
+    directorB,
+  };
+}
+
+it("authenticates one monotonic local capacity, preparation, and scope rebound chain", () => {
+  const fixture = authenticatedLocalChainFixture();
+  const observation = {
+    ...authority,
+    holder: fixture.directorB.holder,
+    epoch: fixture.directorB.epoch,
+  };
+  const inspect = (events: ReturnType<typeof parseFactoryEvent>[], capacity = fixture.capacity) =>
+    inspectLocalValidationScopeReboundChain({
+      ...fixture,
+      capacity,
+      events,
+      isWriterAuthorized: (event) => hasHistoricalWriterAuthority(event, observation),
+    });
+  expect(inspect([fixture.capacity, fixture.prepared, fixture.rebound]).rebound?.writerHolder).toBe(
+    "director-b",
+  );
+
+  const {
+    writerEpoch: _writerEpoch,
+    writerOperationId: _writerOperationId,
+    writerHolder: _writerHolder,
+    writerPolicyDigest: _writerPolicyDigest,
+    ...writerlessRebound
+  } = fixture.rebound;
+  expect(() => parseFactoryEvent(writerlessRebound)).toThrow();
+
+  const forgedWriter = parseFactoryEvent({
+    ...fixture.rebound,
+    writerOperationId: "f".repeat(64),
+  });
+  expect(() => inspect([fixture.capacity, fixture.prepared, forgedWriter])).toThrow(
+    /unauthenticated writer authority/,
+  );
+  const forgedCapacity = parseFactoryEvent({
+    ...fixture.capacity,
+    writerOperationId: "e".repeat(64),
+  });
+  expect(() =>
+    inspect(
+      [forgedCapacity, fixture.prepared, fixture.rebound],
+      forgedCapacity.kind === "capacity" ? forgedCapacity : fixture.capacity,
+    ),
+  ).toThrow(/unauthenticated writer authority/);
+  const deadlineTamperedBatch = {
+    ...fixture.originalScopeBatch,
+    deadline: "2026-09-17T00:09:59.999Z",
+  };
+  const deadlineTamperedCapacity = parseFactoryEvent({
+    ...fixture.capacity,
+    localScopeBatch: deadlineTamperedBatch,
+  });
+  expect(() =>
+    inspect(
+      [deadlineTamperedCapacity, fixture.prepared, fixture.rebound],
+      deadlineTamperedCapacity.kind === "capacity" ? deadlineTamperedCapacity : fixture.capacity,
+    ),
+  ).toThrow(/exact capacity reservation/);
+  const changedDigest = parseFactoryEvent({
+    ...fixture.rebound,
+    previousScopeBatchDigest: "d".repeat(64),
+  });
+  expect(() => inspect([fixture.capacity, fixture.prepared, changedDigest])).toThrow(
+    /breaks its immutable writer and scope chain/,
+  );
+  const staleSequence = parseFactoryEvent({
+    ...fixture.rebound,
+    sequence: fixture.prepared.sequence,
+    ...writerAuthority(fixture.directorB, fixture.prepared.sequence),
+  });
+  expect(() => inspect([fixture.capacity, fixture.prepared, staleSequence])).toThrow(
+    /breaks its immutable writer and scope chain/,
+  );
+  const futureWriter = { ...fixture.directorB, holder: "director-c", epoch: 3 };
+  const futureRebound = parseFactoryEvent({
+    ...fixture.rebound,
+    localScopeBatch: {
+      ...fixture.reboundScopeBatch,
+      identity: { ...fixture.reboundScopeBatch.identity, directorEpoch: 3 },
+    },
+    ...writerAuthority(futureWriter, fixture.rebound.sequence),
+  });
+  expect(() => inspect([fixture.capacity, fixture.prepared, futureRebound])).toThrow(
+    /unauthenticated writer authority/,
+  );
+});
+
+it("refuses a stale local rebound writer after capacity and preparation takeover", () => {
+  const fixture = authenticatedLocalChainFixture();
+  const originalAtB = {
+    ...fixture.originalScopeBatch,
+    identity: { ...fixture.originalScopeBatch.identity, directorEpoch: 2 },
+  };
+  const capacityB = parseFactoryEvent({
+    ...fixture.capacity,
+    recoveryEpoch: 2,
+    localScopeBatch: originalAtB,
+    ...writerAuthority(fixture.directorB, fixture.capacity.sequence),
+  });
+  const preparedB = parseFactoryEvent({
+    ...fixture.prepared,
+    ...writerAuthority(fixture.directorB, fixture.prepared.sequence),
+  });
+  const staleRebound = parseFactoryEvent({
+    ...fixture.rebound,
+    previousScopeBatchDigest: localScopeBatchDigest(originalAtB),
+    localScopeBatch: {
+      ...fixture.reboundScopeBatch,
+      identity: { ...fixture.reboundScopeBatch.identity, directorEpoch: 1 },
+    },
+    ...writerAuthority(writer, fixture.rebound.sequence),
+  });
+  const observation = {
+    ...authority,
+    holder: fixture.directorB.holder,
+    epoch: fixture.directorB.epoch,
+  };
+  expect(() =>
+    inspectLocalValidationScopeReboundChain({
+      ...fixture,
+      capacity: capacityB.kind === "capacity" ? capacityB : fixture.capacity,
+      events: [capacityB, preparedB, staleRebound],
+      isWriterAuthorized: (event) => hasHistoricalWriterAuthority(event, observation),
+    }),
+  ).toThrow(/breaks its immutable writer and scope chain/);
+});
+
 describe.each(providers)("%s remote validation recovery", (provider) => {
   it("recovers a pre-create crash by durably starting the initial dispatch before launch", async () => {
     const fixture = ports({ intent: true, dispatch: false });
@@ -517,27 +817,28 @@ describe.each(providers)("%s remote validation recovery", (provider) => {
   });
 
   it("self-heals a lost create response after post-fence exact absence", async () => {
-    let launches = 0;
     const fixture = ports({
       dispatch: false,
       observation: null,
       now: "2026-09-17T00:02:00.000Z",
+      replayReplacement: async () => {
+        fixture.stages.push("idempotent-replay");
+        return "recovered-launch";
+      },
     });
     fixture.input.launch = async () => {
-      launches += 1;
-      fixture.stages.push(`launch-${launches}`);
-      if (launches === 1) throw new Error("provider create response lost");
-      return "recovered-launch";
+      fixture.stages.push("initial-launch");
+      throw new Error("provider create response lost");
     };
     await expect(runRemoteValidationInvocationTransaction(fixture.input)).resolves.toBe(
       "recovered-launch",
     );
     expect(fixture.stages).toEqual([
       "dispatch",
-      "launch-1",
+      "initial-launch",
       "observe",
       "rebound",
-      "launch-2",
+      "idempotent-replay",
       "result",
       "settle-provider-cleanup",
     ]);
@@ -553,7 +854,7 @@ describe.each(providers)("%s remote validation recovery", (provider) => {
     expect(fixture.stages).toEqual([
       "observe",
       "rebound",
-      "launch",
+      "replay",
       "result",
       "settle-provider-cleanup",
     ]);
@@ -616,7 +917,84 @@ describe.each(providers)("%s remote validation recovery", (provider) => {
     expect(seen).toEqual([deadline, deadline]);
   });
 
-  it("refuses a second rebound", async () => {
+  it("resumes the exact replacement after a crash immediately after its rebound event", async () => {
+    const replayReplacement = vi.fn(async () => "replacement");
+    const fixture = ports({
+      dispatch: true,
+      rebound: true,
+      observation: null,
+      now: "2026-09-17T00:02:00.000Z",
+      replayReplacement,
+    });
+    await expect(runRemoteValidationInvocationTransaction(fixture.input)).resolves.toBe(
+      "replacement",
+    );
+    expect(replayReplacement).toHaveBeenCalledOnce();
+    expect(fixture.stages).toEqual(["observe", "result", "settle-provider-cleanup"]);
+  });
+
+  it("replays one provider-idempotent replacement after a crash that persisted its rebound", async () => {
+    let crashAfterRebound = true;
+    const launch = vi.fn(async () => "forbidden");
+    const replayReplacement = vi.fn(async () => "replacement");
+    const fixture = ports({
+      dispatch: true,
+      observation: null,
+      now: "2026-09-17T00:02:00.000Z",
+      launch,
+      replayReplacement,
+      afterPersistRebound: async () => {
+        if (crashAfterRebound) throw new Error("controller crashed after rebound");
+      },
+    });
+    await expect(runRemoteValidationInvocationTransaction(fixture.input)).rejects.toThrow(
+      /crashed after rebound/,
+    );
+    crashAfterRebound = false;
+    await expect(runRemoteValidationInvocationTransaction(fixture.input)).resolves.toBe(
+      "replacement",
+    );
+    expect(launch).not.toHaveBeenCalled();
+    expect(replayReplacement).toHaveBeenCalledOnce();
+    expect(fixture.stages.filter((stage) => stage === "rebound")).toHaveLength(1);
+  });
+
+  it("reuses one provider receipt across restarts after a replacement response is lost", async () => {
+    let replayCalls = 0;
+    let billedReplacements = 0;
+    const launch = vi.fn(async () => "forbidden");
+    const replayReplacement = vi.fn(async () => {
+      replayCalls += 1;
+      if (replayCalls === 1) {
+        billedReplacements += 1;
+        throw new Error("replacement response lost after provider acceptance");
+      }
+      return "same-provider-receipt";
+    });
+    const fixture = ports({
+      dispatch: true,
+      rebound: true,
+      observation: null,
+      now: "2026-09-17T00:02:00.000Z",
+      launch,
+      replayReplacement,
+    });
+    await expect(runRemoteValidationInvocationTransaction(fixture.input)).rejects.toThrow(
+      /response lost/,
+    );
+    await expect(runRemoteValidationInvocationTransaction(fixture.input)).resolves.toBe(
+      "same-provider-receipt",
+    );
+    await expect(runRemoteValidationInvocationTransaction(fixture.input)).resolves.toBe(
+      "same-provider-receipt",
+    );
+    expect(launch).not.toHaveBeenCalled();
+    expect(replayReplacement).toHaveBeenCalledTimes(2);
+    expect(billedReplacements).toBe(1);
+    expect(fixture.stages.filter((stage) => stage.startsWith("settle-"))).toHaveLength(1);
+  });
+
+  it("fails deterministically when a persisted rebound has no provider idempotency primitive", async () => {
     const launch = vi.fn(async () => "duplicate");
     const fixture = ports({
       dispatch: true,
@@ -624,12 +1002,41 @@ describe.each(providers)("%s remote validation recovery", (provider) => {
       observation: null,
       now: "2026-09-17T00:02:00.000Z",
       launch,
+      replayReplacement: null,
     });
+    for (let restart = 0; restart < 2; restart += 1) {
+      await expect(runRemoteValidationInvocationTransaction(fixture.input)).rejects.toThrow(
+        /lacks provider-idempotent replacement dispatch capability/,
+      );
+    }
+    expect(launch).not.toHaveBeenCalled();
+    expect(fixture.stages.filter((stage) => stage === "rebound")).toHaveLength(0);
+  });
+
+  it("does not resume a persisted rebound before the original no-handle fence", async () => {
+    const launch = vi.fn(async () => "duplicate");
+    const fixture = ports({ dispatch: true, rebound: true, observation: null, launch });
     await expect(runRemoteValidationInvocationTransaction(fixture.input)).rejects.toThrow(
-      /single durable rebound/,
+      /observation cannot begin before its durable no-handle fence/,
     );
     expect(launch).not.toHaveBeenCalled();
-    expect(fixture.stages).toEqual(["observe"]);
+    expect(fixture.stages).toEqual([]);
+  });
+
+  it("recovers an already-running replacement instead of launching it again", async () => {
+    const launch = vi.fn(async () => "duplicate");
+    const fixture = ports({
+      dispatch: true,
+      rebound: true,
+      observation: "replacement-result",
+      now: "2026-09-17T00:02:00.000Z",
+      launch,
+    });
+    await expect(runRemoteValidationInvocationTransaction(fixture.input)).resolves.toBe(
+      "replacement-result",
+    );
+    expect(launch).not.toHaveBeenCalled();
+    expect(fixture.stages).toEqual(["observe", "result", "settle-provider-cleanup"]);
   });
 
   it("settles an already-rebounded invocation when absence observation crosses the deadline", async () => {
@@ -662,8 +1069,8 @@ describe.each(providers)("%s remote validation recovery", (provider) => {
       dispatch: true,
       observation: null,
       cleanupObservation: "cleaned",
-      launch: async () => {
-        fixture.stages.push("launch-failed");
+      replayReplacement: async () => {
+        fixture.stages.push("replay-failed");
         throw new Error("rebound create failed");
       },
     });
@@ -682,7 +1089,7 @@ describe.each(providers)("%s remote validation recovery", (provider) => {
     expect(fixture.stages).toEqual([
       "observe",
       "rebound",
-      "launch-failed",
+      "replay-failed",
       "observe",
       "cleanup",
       "terminal",

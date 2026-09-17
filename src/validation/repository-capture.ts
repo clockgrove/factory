@@ -1408,6 +1408,9 @@ export async function runValidationInvocationTransaction<T>(args: {
   persistIntent(invocation: ValidationInvocation): Promise<void>;
   observe(invocation: ValidationInvocation): Promise<T | null>;
   launch(invocation: ValidationInvocation): Promise<T>;
+  /** Recovery-only continuation whose own durable per-command journal proves
+   * whether each action is absent, terminal, active, or ambiguous. */
+  resume?(invocation: ValidationInvocation): Promise<T>;
   persistFinal(result: T): Promise<T>;
 }): Promise<T> {
   const invocation = ValidationInvocationSchema.parse(args.invocation);
@@ -1419,10 +1422,11 @@ export async function runValidationInvocationTransaction<T>(args: {
   if (!prepared) await args.persistIntent(invocation);
   const observed = await args.observe(invocation);
   if (observed) return args.persistFinal(observed);
-  if (prepared)
+  if (prepared && !args.resume)
     throw new Error("prepared validation invocation has no observable result; replay is refused");
+  const execute = prepared ? args.resume! : args.launch;
   try {
-    return await args.persistFinal(await args.launch(invocation));
+    return await args.persistFinal(await execute(invocation));
   } catch (error) {
     const recovered = await args.observe(invocation);
     if (recovered) return args.persistFinal(recovered);

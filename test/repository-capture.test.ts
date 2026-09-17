@@ -39,8 +39,10 @@ import {
 } from "../src/validation/repository-capture.js";
 import { createValidationEvidence, verifyValidationEvidence } from "../src/validation/evidence.js";
 import {
+  executeLocalValidationCommand,
   executeLocalRepositoryCaptures,
   inspectLocalRepositoryCaptureDispatchState,
+  localRepositoryCaptureScopeRecoveryAction,
   observeLocalValidationResult,
   persistLocalValidationResult,
 } from "../src/validation/local-capture-runtime.js";
@@ -54,6 +56,35 @@ const roots: string[] = [];
 afterEach(async () => {
   await releaseAllArtifactContent();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+
+describe("local repository capture scope rebound recovery", () => {
+  const recovery = (args: {
+    scopeStatus?: "absent" | "active" | "unknown";
+    dispatchState?: "rebound-safe" | "ambiguous" | "complete";
+    reboundPersisted?: boolean;
+    now?: string;
+  }) =>
+    localRepositoryCaptureScopeRecoveryAction({
+      scopeStatus: args.scopeStatus ?? "absent",
+      dispatchState: args.dispatchState ?? "rebound-safe",
+      reboundPersisted: args.reboundPersisted ?? true,
+      validationDeadline: "2026-09-17T00:10:00.000Z",
+      now: new Date(args.now ?? "2026-09-17T00:02:00.000Z"),
+    });
+
+  it("resumes the persisted exact rebound after a crash before local launch", () => {
+    expect(recovery({})).toBe("resume-rebound");
+    expect(recovery({ reboundPersisted: false })).toBe("persist-rebound");
+  });
+
+  it("preserves ambiguity, active-scope, and immutable-deadline fences", () => {
+    expect(recovery({ dispatchState: "ambiguous" })).toBe("observe-only");
+    expect(recovery({ dispatchState: "complete" })).toBe("adopt-only");
+    expect(recovery({ scopeStatus: "active" })).toBe("wait");
+    expect(() => recovery({ now: "2026-09-17T00:10:00.000Z" })).toThrow(/deadline is exhausted/);
+    expect(() => recovery({ scopeStatus: "unknown" })).toThrow(/cannot be observed exactly/);
+  });
 });
 
 const sha = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
@@ -73,13 +104,19 @@ const oid = (bytes: Buffer) =>
 
 async function checkpointMockCommand(env: NodeJS.ProcessEnv, command: string) {
   await checkpointMockStart(env, command);
+  const requestDigest = sha(await readFile(env["FACTORY_CAPTURE_REQUEST"]!));
   await writeFile(
     env["FACTORY_CAPTURE_TERMINAL_RECEIPT"]!,
     JSON.stringify({
       protocol: "clockgrove.factory/local-capture-command-terminal",
       commandDigest: sha(command),
+      requestDigest,
       exitCode: 0,
       durationMs: 1,
+      startedAt: "2026-09-16T00:00:00.000Z",
+      completedAt: "2026-09-16T00:00:00.001Z",
+      stdout: "",
+      stderr: "",
     }),
   );
 }
@@ -95,6 +132,73 @@ async function checkpointMockStart(env: NodeJS.ProcessEnv, command: string) {
       requestDigest: sha(await readFile(request)),
     }),
   );
+}
+
+async function checkpointMockValidation(root: string, invocation: ValidationInvocation) {
+  const captureCommands = new Set(
+    invocation.repositoryCaptureRecipes.map((recipe) => recipe.captureCommand.command),
+  );
+  await persistLocalValidationResult({
+    stagingRoot: root,
+    invocation,
+    validation: {
+      outputTreeSha: invocation.outputTreeSha,
+      commands: invocation.validationCommands
+        .filter((command) => !captureCommands.has(command))
+        .map((command) => ({ command, exitCode: 0, durationMs: 1 })),
+      passed: true,
+      startedAt: "2026-09-16T00:00:00.000Z",
+      completedAt: "2026-09-16T00:00:01.000Z",
+      environmentIdentity: invocation.toolEnvironment.environmentIdentity,
+    },
+  });
+}
+
+async function checkpointValidationCommand(args: {
+  wrapperArgs: string[];
+  command: string;
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
+}) {
+  const requestPath = args.wrapperArgs[1]!;
+  const terminalPath = args.wrapperArgs[2]!;
+  const startedPath = args.wrapperArgs[3]!;
+  const commandDigest = args.wrapperArgs[4]!;
+  const requestDigest = args.wrapperArgs[5]!;
+  expect(commandDigest).toBe(sha(args.command));
+  expect(requestDigest).toBe(sha(await readFile(requestPath)));
+  await writeFile(
+    startedPath,
+    JSON.stringify({
+      protocol: "clockgrove.factory/local-capture-command-started",
+      commandDigest,
+      requestDigest,
+    }),
+  );
+  await writeFile(
+    terminalPath,
+    JSON.stringify({
+      protocol: "clockgrove.factory/local-capture-command-terminal",
+      commandDigest,
+      requestDigest,
+      exitCode: args.exitCode ?? 0,
+      durationMs: 1,
+      startedAt: "2026-09-17T00:00:00.000Z",
+      completedAt: "2026-09-17T00:00:00.001Z",
+      stdout: args.stdout ?? "",
+      stderr: args.stderr ?? "",
+    }),
+  );
+}
+
+function localValidationInvocation(recipe: RepositoryCaptureRecipe, expectedBytes: Buffer) {
+  const template = invocationFor({ recipe, expectedBytes });
+  const { digest: _digest, ...core } = template;
+  return createValidationInvocation({
+    ...core,
+    validationDeadline: "2099-09-17T00:10:00.000Z",
+  });
 }
 
 function memoryStore() {
@@ -967,6 +1071,7 @@ describe("repository result capture evidence", () => {
                 },
                 observeCommand: async () => "absent",
                 commandDeadline: null,
+                allowLaunch: true,
                 assertOutputTree,
               });
               const repositoryCapture = await persistRepositoryCaptures({
@@ -1140,6 +1245,7 @@ describe("repository result capture evidence", () => {
               },
               observeCommand: async () => "absent",
               commandDeadline: null,
+              allowLaunch: true,
               assertOutputTree,
             });
             const repositoryCapture = await persistRepositoryCaptures({
@@ -1548,6 +1654,204 @@ describe("validation invocation no-replay transaction", () => {
 });
 
 describe("local validation and capture staging", () => {
+  const ordinaryCommandExecution = {
+    executable: "/bin/sh",
+    args: ["-c", "npm test"],
+    cwd: ".",
+    timeoutMs: 60_000,
+  };
+
+  const executeOrdinaryCommand = (args: {
+    stagingRoot: string;
+    invocation: ValidationInvocation;
+    runCommand: Parameters<typeof executeLocalValidationCommand>[0]["runCommand"];
+    observeCommand?: Parameters<typeof executeLocalValidationCommand>[0]["observeCommand"];
+    allowLaunch?: boolean;
+  }) =>
+    executeLocalValidationCommand({
+      stagingRoot: args.stagingRoot,
+      invocation: args.invocation,
+      commandIndex: 0,
+      plannedCommand: "npm test",
+      execution: ordinaryCommandExecution,
+      cwd: args.stagingRoot,
+      environment: {},
+      runCommand: args.runCommand,
+      observeCommand: args.observeCommand ?? (async () => "absent"),
+      commandDeadline: args.invocation.validationDeadline,
+      allowLaunch: args.allowLaunch ?? true,
+    });
+
+  it("retries an ordinary command only when the durable dispatch receipt is absent", async () => {
+    const bytes = Buffer.from("ordinary-safe-retry\n");
+    const recipe = exactRecipe({ expectedDescriptorDigest: sha("descriptor") });
+    const invocation = localValidationInvocation(recipe, bytes);
+    const root = await mkdtemp(join(tmpdir(), "factory-local-validation-safe-retry-"));
+    roots.push(root);
+    const command = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("scope refused before wrapper start"))
+      .mockImplementationOnce(async ({ args }: { args: string[] }) => {
+        await checkpointValidationCommand({ wrapperArgs: args, command: "npm test" });
+        return { exitCode: 0, durationMs: 1, stdout: "", stderr: "" };
+      });
+
+    await expect(
+      executeOrdinaryCommand({ stagingRoot: root, invocation, runCommand: command }),
+    ).rejects.toThrow(/before wrapper start/);
+    await expect(
+      inspectLocalRepositoryCaptureDispatchState({ stagingRoot: root, invocation }),
+    ).resolves.toBe("rebound-safe");
+    await expect(
+      executeOrdinaryCommand({ stagingRoot: root, invocation, runCommand: command }),
+    ).resolves.toMatchObject({ command: "npm test", exitCode: 0 });
+    expect(command).toHaveBeenCalledTimes(2);
+  });
+
+  it("adopts an ordinary command terminal after response loss without relaunching", async () => {
+    const bytes = Buffer.from("ordinary-terminal-adoption\n");
+    const recipe = exactRecipe({ expectedDescriptorDigest: sha("descriptor") });
+    const invocation = localValidationInvocation(recipe, bytes);
+    const root = await mkdtemp(join(tmpdir(), "factory-local-validation-terminal-"));
+    roots.push(root);
+    const command = vi.fn(async ({ args }: { args: string[] }) => {
+      await checkpointValidationCommand({
+        wrapperArgs: args,
+        command: "npm test",
+        stdout: "passed\n",
+      });
+      throw new Error("controller lost the wrapper response");
+    });
+
+    await expect(
+      executeOrdinaryCommand({ stagingRoot: root, invocation, runCommand: command }),
+    ).rejects.toThrow(/lost the wrapper response/);
+    const adopted = await executeOrdinaryCommand({
+      stagingRoot: root,
+      invocation,
+      runCommand: command,
+      allowLaunch: false,
+    });
+    expect(adopted).toMatchObject({ command: "npm test", exitCode: 0, stdout: "passed\n" });
+    expect(command).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed after an ordinary command start without terminal evidence", async () => {
+    const bytes = Buffer.from("ordinary-ambiguous\n");
+    const recipe = exactRecipe({ expectedDescriptorDigest: sha("descriptor") });
+    const invocation = localValidationInvocation(recipe, bytes);
+    const root = await mkdtemp(join(tmpdir(), "factory-local-validation-ambiguous-"));
+    roots.push(root);
+    const command = vi.fn(async ({ args }: { args: string[] }) => {
+      const requestPath = args[1]!;
+      await writeFile(
+        args[3]!,
+        JSON.stringify({
+          protocol: "clockgrove.factory/local-capture-command-started",
+          commandDigest: args[4]!,
+          requestDigest: sha(await readFile(requestPath)),
+        }),
+      );
+      throw new Error("controller crashed after dispatch");
+    });
+
+    await expect(
+      executeOrdinaryCommand({ stagingRoot: root, invocation, runCommand: command }),
+    ).rejects.toThrow(/crashed after dispatch/);
+    await expect(
+      inspectLocalRepositoryCaptureDispatchState({ stagingRoot: root, invocation }),
+    ).resolves.toBe("ambiguous");
+    await expect(
+      executeOrdinaryCommand({
+        stagingRoot: root,
+        invocation,
+        runCommand: command,
+        allowLaunch: false,
+      }),
+    ).rejects.toThrow(/dispatch-authorized/);
+    expect(command).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an ordinary command whose immutable invocation deadline expired", async () => {
+    const bytes = Buffer.from("ordinary-deadline\n");
+    const recipe = exactRecipe({ expectedDescriptorDigest: sha("descriptor") });
+    const template = localValidationInvocation(recipe, bytes);
+    const { digest: _digest, ...core } = template;
+    const invocation = createValidationInvocation({
+      ...core,
+      validationDeadline: "2000-01-01T00:00:00.000Z",
+    });
+    const root = await mkdtemp(join(tmpdir(), "factory-local-validation-deadline-"));
+    roots.push(root);
+    const command = vi.fn();
+
+    await expect(
+      executeOrdinaryCommand({ stagingRoot: root, invocation, runCommand: command }),
+    ).rejects.toThrow(/deadline is exhausted before dispatch/);
+    expect(command).not.toHaveBeenCalled();
+  });
+
+  it("keeps observation-only recovery non-dispatching when no start exists", async () => {
+    const bytes = Buffer.from("ordinary-observe-only\n");
+    const recipe = exactRecipe({ expectedDescriptorDigest: sha("descriptor") });
+    const invocation = localValidationInvocation(recipe, bytes);
+    const root = await mkdtemp(join(tmpdir(), "factory-local-validation-observe-only-"));
+    roots.push(root);
+    const command = vi.fn();
+
+    await expect(
+      executeOrdinaryCommand({
+        stagingRoot: root,
+        invocation,
+        runCommand: command,
+        allowLaunch: false,
+      }),
+    ).rejects.toThrow(/launch is forbidden during observation-only recovery/);
+    expect(command).not.toHaveBeenCalled();
+  });
+
+  it("resumes a prepared transaction by adopting the ordinary terminal exactly once", async () => {
+    const bytes = Buffer.from("ordinary-transaction-adoption\n");
+    const recipe = exactRecipe({ expectedDescriptorDigest: sha("descriptor") });
+    const invocation = localValidationInvocation(recipe, bytes);
+    const root = await mkdtemp(join(tmpdir(), "factory-local-validation-transaction-"));
+    roots.push(root);
+    const command = vi.fn(async ({ args }: { args: string[] }) => {
+      await checkpointValidationCommand({ wrapperArgs: args, command: "npm test" });
+      throw new Error("controller crashed before validation checkpoint");
+    });
+    const resume = async () =>
+      executeOrdinaryCommand({
+        stagingRoot: root,
+        invocation,
+        runCommand: command,
+        allowLaunch: false,
+      });
+    const persistFinal = vi.fn(async (result) => result);
+    const transaction = () =>
+      runValidationInvocationTransaction({
+        invocation,
+        observeFinal: async () => null,
+        observeIntent: async () => invocation,
+        persistIntent: async () => {
+          throw new Error("intent already exists");
+        },
+        observe: async () => null,
+        launch: async () => {
+          throw new Error("initial launch may not run during recovery");
+        },
+        resume,
+        persistFinal,
+      });
+
+    await expect(
+      executeOrdinaryCommand({ stagingRoot: root, invocation, runCommand: command }),
+    ).rejects.toThrow(/crashed before validation checkpoint/);
+    await expect(transaction()).resolves.toMatchObject({ command: "npm test", exitCode: 0 });
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(persistFinal).toHaveBeenCalledTimes(1);
+  });
+
   it("observes a durable validation result and completed capture without replay", async () => {
     const bytes = Buffer.from("captured\n");
     const recipe = exactRecipe({ expectedDescriptorDigest: sha("descriptor") });
@@ -1581,6 +1885,7 @@ describe("local validation and capture staging", () => {
       runCommand: command,
       observeCommand: async () => "absent",
       commandDeadline: null,
+      allowLaunch: true,
       assertOutputTree: async () => undefined,
     });
     expect(await first.downloadCapture(first.collection.files[0]!)).toEqual(bytes);
@@ -1592,6 +1897,7 @@ describe("local validation and capture staging", () => {
       runCommand: command,
       observeCommand: async () => "absent",
       commandDeadline: null,
+      allowLaunch: true,
       assertOutputTree: async () => undefined,
     });
     expect(second.collection).toEqual(first.collection);
@@ -1604,6 +1910,7 @@ describe("local validation and capture staging", () => {
     const invocation = invocationFor({ recipe, expectedBytes: bytes });
     const root = await mkdtemp(join(tmpdir(), "factory-local-partial-capture-"));
     roots.push(root);
+    await checkpointMockValidation(root, invocation);
     const command = vi.fn(async ({ env }: { env: NodeJS.ProcessEnv }) => {
       const request = JSON.parse(await readFile(env["FACTORY_CAPTURE_REQUEST"]!, "utf8"));
       await checkpointMockStart(env, recipe.captureCommand.command);
@@ -1619,6 +1926,7 @@ describe("local validation and capture staging", () => {
         runCommand: command,
         observeCommand: async () => "absent",
         commandDeadline: null,
+        allowLaunch: true,
         assertOutputTree: async () => undefined,
       });
     await expect(execute()).rejects.toThrow(/simulated crash/);
@@ -1635,6 +1943,7 @@ describe("local validation and capture staging", () => {
     const invocation = invocationFor({ recipe, expectedBytes: bytes });
     const root = await mkdtemp(join(tmpdir(), "factory-local-before-scope-launch-"));
     roots.push(root);
+    await checkpointMockValidation(root, invocation);
     const command = vi
       .fn()
       .mockRejectedValueOnce(new Error("scope launch refused before wrapper start"))
@@ -1653,6 +1962,7 @@ describe("local validation and capture staging", () => {
         runCommand: command,
         observeCommand: async () => "absent",
         commandDeadline: null,
+        allowLaunch: true,
         assertOutputTree: async () => undefined,
       });
     await expect(execute()).rejects.toThrow(/scope launch refused/);
@@ -1671,6 +1981,7 @@ describe("local validation and capture staging", () => {
     const invocation = invocationFor({ recipe, expectedBytes: bytes });
     const root = await mkdtemp(join(tmpdir(), "factory-local-active-scope-"));
     roots.push(root);
+    await checkpointMockValidation(root, invocation);
     let retainedEnv: NodeJS.ProcessEnv | undefined;
     const command = vi.fn(async ({ env }: { env: NodeJS.ProcessEnv }) => {
       retainedEnv = env;
@@ -1688,6 +1999,7 @@ describe("local validation and capture staging", () => {
         runCommand: command,
         observeCommand: async () => "absent",
         commandDeadline: null,
+        allowLaunch: true,
         assertOutputTree: async () => undefined,
       });
     await expect(first()).rejects.toThrow(/scope remained active/);
@@ -1705,6 +2017,7 @@ describe("local validation and capture staging", () => {
         return "active";
       },
       commandDeadline: new Date(Date.now() + 5_000).toISOString(),
+      allowLaunch: true,
       assertOutputTree: async () => undefined,
     });
     expect(await recovered.downloadCapture(recovered.collection.files[0]!)).toEqual(bytes);
@@ -1717,6 +2030,7 @@ describe("local validation and capture staging", () => {
     const invocation = invocationFor({ recipe, expectedBytes: bytes });
     const root = await mkdtemp(join(tmpdir(), "factory-local-terminal-adoption-"));
     roots.push(root);
+    await checkpointMockValidation(root, invocation);
     const command = vi.fn(async ({ env }: { env: NodeJS.ProcessEnv }) => {
       const request = JSON.parse(await readFile(env["FACTORY_CAPTURE_REQUEST"]!, "utf8"));
       await writeFile(request.recipes[0].outputs[0].path, bytes);
@@ -1732,6 +2046,7 @@ describe("local validation and capture staging", () => {
         runCommand: command,
         observeCommand: async () => "absent",
         commandDeadline: null,
+        allowLaunch: true,
         assertOutputTree: async () => undefined,
       });
     await expect(execute()).rejects.toThrow(/simulated controller crash/);
@@ -1773,6 +2088,7 @@ describe("local validation and capture staging", () => {
     const invocation = invocationFor({ recipe, expectedBytes });
     const root = await mkdtemp(join(tmpdir(), "factory-local-between-actions-"));
     roots.push(root);
+    await checkpointMockValidation(root, invocation);
     const command = vi.fn(async ({ env }: { env: NodeJS.ProcessEnv }) => {
       const requestBytes = await readFile(env["FACTORY_CAPTURE_REQUEST"]!);
       expect(requestBytes.includes(expectedBytes)).toBe(false);
@@ -1790,6 +2106,7 @@ describe("local validation and capture staging", () => {
       runCommand: command,
       observeCommand: async () => "absent",
       commandDeadline: null,
+      allowLaunch: true,
       assertOutputTree: async () => undefined,
     });
     const evidence = await persistRepositoryCaptures({

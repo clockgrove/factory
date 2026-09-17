@@ -1,4 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
 
 const provider = vi.hoisted(() => ({ create: vi.fn(), get: vi.fn() }));
 vi.mock("@vercel/sandbox", () => ({
@@ -16,6 +18,7 @@ import type {
 } from "../src/execution/backend.js";
 import * as sandboxCommon from "../src/backends/sandbox-common.js";
 import * as lfs from "../src/repository-profiles/git-lfs.js";
+import { cachePayloadBytes, releasePayload } from "../src/execution/artifact-content.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -89,6 +92,195 @@ function staleIdentity(
   };
 }
 
+it("downloads retained capture bytes through the bounded Vercel stream channel", async () => {
+  vi.spyOn(lfs, "inspectPinnedLfs").mockResolvedValue({ assets: [] } as never);
+  vi.spyOn(sandboxCommon, "repositoryArchive").mockResolvedValue(Buffer.alloc(0));
+  const remote = new Map<string, Buffer>();
+  const stop = vi.fn(async () => undefined);
+  let createdSandbox: Record<string, unknown> | undefined;
+  provider.create.mockImplementation(async ({ name }: { name: string }) => {
+    createdSandbox = {
+      name,
+      writeFiles: async (uploads: Array<{ path: string; content: Buffer }>) => {
+        for (const upload of uploads) remote.set(upload.path, Buffer.from(upload.content));
+      },
+      runCommand: async () => {
+        const request = JSON.parse(
+          remote.get("factory/capture-request.json")!.toString("utf8"),
+        ) as {
+          validationInvocationDigest: string;
+          recipes: Array<{
+            id: string;
+            command: string;
+            outputs: Array<{ roleId: string; sourcePath: string; mediaType: string }>;
+          }>;
+        };
+        const files = request.recipes.flatMap((recipe) =>
+          recipe.outputs.map((output) => {
+            const content = Buffer.from(`${recipe.id}:${output.roleId}`);
+            remote.set(output.sourcePath, content);
+            return {
+              recipeId: recipe.id,
+              roleId: output.roleId,
+              sourcePath: output.sourcePath,
+              mediaType: output.mediaType,
+              bytes: content.byteLength,
+              digest: createHash("sha256").update(content).digest("hex"),
+            };
+          }),
+        );
+        const identity = {
+          protocol: "clockgrove.factory/repository-capture-manifest",
+          validationInvocationDigest: request.validationInvocationDigest,
+          files,
+          comparisons: [],
+        };
+        remote.set(
+          "factory/capture-manifest.json",
+          Buffer.from(
+            JSON.stringify({
+              ...identity,
+              manifestDigest: createHash("sha256").update(JSON.stringify(identity)).digest("hex"),
+            }),
+          ),
+        );
+        const config = JSON.parse(remote.get("factory/config.json")!.toString("utf8")) as {
+          commands: string[];
+          captureCommands: string[];
+        };
+        remote.set(
+          "factory/validation-result.json",
+          Buffer.from(
+            JSON.stringify({
+              outputTreeSha: "d".repeat(40),
+              commands: [...config.commands, ...config.captureCommands].map((command) => ({
+                command,
+                exitCode: 0,
+                durationMs: 1,
+              })),
+              passed: true,
+              startedAt: "2026-09-04T00:00:00.000Z",
+              completedAt: "2026-09-04T00:00:01.000Z",
+            }),
+          ),
+        );
+        return { wait: async () => ({ exitCode: 0 }) };
+      },
+      readFileToBuffer: async ({ path }: { path: string }) => remote.get(path) ?? null,
+      readFile: async ({ path }: { path: string }) => {
+        const content = remote.get(path);
+        return content ? Readable.from([content]) : null;
+      },
+      stop,
+    };
+    return createdSandbox;
+  });
+  const context = deadlineContext() as IsolatedValidationContext;
+  const captureCommand = "node scripts/capture-fixture.mjs";
+  const captureImage = `vcr.example/factory-capture@sha256:${"1".repeat(64)}`;
+  const expectedPayload = await cachePayloadBytes(Buffer.from("expected opaque fixture"));
+  const expectedDescriptorDigest = "e".repeat(64);
+  let checkpointed = false;
+  context.packet.validationCommands = ["true", captureCommand];
+  context.validationInvocation = {
+    kind: "integration-candidate",
+    identityDigest: "c".repeat(64),
+    artifactDigest: context.artifact.digest,
+    baseSha: context.artifact.baseSha,
+  };
+  context.captureRequest = {
+    protocol: "clockgrove.factory/repository-capture-request",
+    validationInvocationDigest: context.validationInvocation.identityDigest,
+    environmentIdentity: captureImage,
+    expectedInputs: [
+      {
+        descriptorDigest: expectedDescriptorDigest,
+        contentDigest: expectedPayload.digest,
+        storageReceiptDigest: "a".repeat(64),
+        payload: expectedPayload,
+      },
+    ],
+    recipes: [
+      {
+        id: "opaque",
+        digest: "d".repeat(64),
+        command: captureCommand,
+        scenario: { id: "default", fixture: "fixture.bin", seed: null },
+        outputs: [{ roleId: "result", mediaType: "application/octet-stream", maxBytes: 100 }],
+        comparison: {
+          kind: "exact",
+          outputRoleId: "result",
+          expectedDescriptorDigest,
+        },
+      },
+    ],
+    maximumTotalBytes: 1_000,
+  };
+  context.checkpointCaptureResult = async (checkpoint) => {
+    expect(checkpoint.captures?.files).toHaveLength(1);
+    expect(stop).not.toHaveBeenCalled();
+    checkpointed = true;
+  };
+  const unpinned = new VercelSandboxBackend({ repository: "/tmp/factory-vercel-deadline" });
+  await expect(unpinned.validate(context)).rejects.toThrow(/digest-pinned image/);
+  expect(provider.create).not.toHaveBeenCalled();
+  const backend = new VercelSandboxBackend({
+    repository: "/tmp/factory-vercel-deadline",
+    image: captureImage,
+    now: () => 1_000,
+    deadlineSignal: () => {
+      const controller = new AbortController();
+      return { signal: controller.signal, dispose: () => undefined };
+    },
+  });
+  const resourceName = sandboxCommon.sandboxResourceName(context, "validation");
+  const missingCheckpoint = { ...context };
+  delete missingCheckpoint.checkpointCaptureResult;
+  await expect(backend.validate(missingCheckpoint)).rejects.toThrow(/durable checkpoint callback/);
+  expect(provider.create).not.toHaveBeenCalled();
+
+  const result = await backend.validate(context);
+  try {
+    expect(result.captures).toMatchObject({
+      validationInvocationDigest: "c".repeat(64),
+      locator: {
+        backendId: "codex-cli/vercel-sandbox",
+        resourceId: resourceName,
+      },
+      comparisons: [],
+      files: [{ recipeId: "opaque", roleId: "result" }],
+    });
+    expect(result.captures?.files[0]?.payload.digest).toBe(result.captures?.files[0]?.digest);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(checkpointed).toBe(true);
+
+    stop.mockClear();
+    context.checkpointCaptureResult = async () => {
+      throw new Error("durable capture checkpoint refused");
+    };
+    await expect(backend.validate(context)).rejects.toThrow(/durable capture checkpoint/);
+    expect(stop).not.toHaveBeenCalled();
+    provider.get.mockImplementation(async ({ name }: { name: string }) => {
+      if (name !== resourceName || !createdSandbox) throw new Error("404 not found");
+      return createdSandbox;
+    });
+    let recoveredCheckpoint = false;
+    context.checkpointCaptureResult = async (checkpoint) => {
+      expect(checkpoint.environmentIdentity).toBe(captureImage);
+      expect(checkpoint.captures?.manifestDigest).toMatch(/^[0-9a-f]{64}$/);
+      recoveredCheckpoint = true;
+    };
+    const recovered = await backend.recoverValidation(context);
+    expect(recovered?.captures?.locator.resourceId).toBe(resourceName);
+    expect(recoveredCheckpoint).toBe(true);
+    expect(stop).toHaveBeenCalledOnce();
+    await sandboxCommon.releaseIsolatedValidationCaptures(recovered?.captures);
+  } finally {
+    await sandboxCommon.releaseIsolatedValidationCaptures(result.captures);
+    await releasePayload(expectedPayload);
+  }
+});
+
 it.each([
   [
     "execution",
@@ -134,14 +326,14 @@ it.each([
     vi.spyOn(sandboxCommon, "repositoryArchive").mockResolvedValue(Buffer.alloc(0));
     const runCommand = vi.fn();
     const stop = vi.fn(async () => undefined);
-    provider.create.mockResolvedValue({
-      name: "deadline-sandbox",
+    provider.create.mockImplementation(async ({ name }: { name: string }) => ({
+      name,
       writeFiles: async () => {
         now = 2_000;
       },
       runCommand,
       stop,
-    });
+    }));
     const backend = new VercelSandboxBackend({ repository: "/tmp/factory-vercel-deadline" });
     const context = deadlineContext();
 
@@ -169,8 +361,8 @@ it.each([
   let commandAttempts = 0;
   let resumeAttempts = 0;
   const stop = vi.fn(async () => undefined);
-  provider.create.mockResolvedValue({
-    name: "deadline-sandbox",
+  provider.create.mockImplementation(async ({ name }: { name: string }) => ({
+    name,
     writeFiles: async () => undefined,
     runCommand: async ({ signal }: { signal?: AbortSignal }) => {
       commandAttempts += 1;
@@ -181,7 +373,7 @@ it.each([
       throw new Error("Vercel SDK resumed after deadline");
     },
     stop,
-  });
+  }));
   const backend = new VercelSandboxBackend({
     repository: "/tmp/factory-vercel-deadline",
     now: () => 1_000,
@@ -205,8 +397,8 @@ it("bounds detached validation command completion before cleanup", async () => {
   vi.spyOn(sandboxCommon, "repositoryArchive").mockResolvedValue(Buffer.alloc(0));
   let completionController: AbortController | undefined;
   const stop = vi.fn(async () => undefined);
-  provider.create.mockResolvedValue({
-    name: "deadline-sandbox",
+  provider.create.mockImplementation(async ({ name }: { name: string }) => ({
+    name,
     writeFiles: async () => undefined,
     runCommand: async () => ({
       wait: () => {
@@ -215,7 +407,7 @@ it("bounds detached validation command completion before cleanup", async () => {
       },
     }),
     stop,
-  });
+  }));
   const backend = new VercelSandboxBackend({
     repository: "/tmp/factory-vercel-deadline",
     now: () => 1_000,
@@ -237,15 +429,15 @@ it("uses bounded stderr when the validation diagnostic file is empty", async () 
   vi.spyOn(sandboxCommon, "repositoryArchive").mockResolvedValue(Buffer.alloc(0));
   const stop = vi.fn(async () => undefined);
   const stderr = vi.fn(async () => "validator stderr fallback");
-  provider.create.mockResolvedValue({
-    name: "deadline-sandbox",
+  provider.create.mockImplementation(async ({ name }: { name: string }) => ({
+    name,
     writeFiles: async () => undefined,
     runCommand: async () => ({
       wait: async () => ({ exitCode: 1, stderr }),
     }),
     readFileToBuffer: async () => Buffer.alloc(0),
     stop,
-  });
+  }));
   const backend = new VercelSandboxBackend({
     repository: "/tmp/factory-vercel-deadline",
     now: () => 1_000,
@@ -273,8 +465,8 @@ it("bounds failed execution observation and retains the known terminal exit", as
     return new Promise<never>(() => undefined);
   });
   const stop = vi.fn(async () => undefined);
-  provider.create.mockResolvedValue({
-    name: "deadline-sandbox",
+  provider.create.mockImplementation(async ({ name }: { name: string }) => ({
+    name,
     writeFiles: async () => undefined,
     runCommand: async () => ({
       cmdId: "command-1",
@@ -282,7 +474,7 @@ it("bounds failed execution observation and retains the known terminal exit", as
       kill: async () => undefined,
     }),
     stop,
-  });
+  }));
   const backend = new VercelSandboxBackend({
     repository: "/tmp/factory-vercel-deadline",
     now: () => 1_000,
@@ -387,14 +579,14 @@ it("surfaces uncertain validation cleanup after a post-preparation expiry", asyn
   const stop = vi.fn(async () => {
     throw new Error("provider stop unavailable");
   });
-  provider.create.mockResolvedValue({
-    name: "deadline-sandbox",
+  provider.create.mockImplementation(async ({ name }: { name: string }) => ({
+    name,
     writeFiles: async () => {
       now = 2_000;
     },
     runCommand,
     stop,
-  });
+  }));
   const backend = new VercelSandboxBackend({ repository: "/tmp/factory-vercel-deadline" });
 
   const failure = await backend

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -13,13 +14,19 @@ import {
   DaytonaBackend,
   DaytonaResourceCleanupError,
 } from "../src/backends/daytona.js";
+import { releaseIsolatedValidationCaptures } from "../src/backends/sandbox-common.js";
 import * as sourceContent from "../src/backends/source-content.js";
 import { normalizeArtifact } from "../src/execution/artifacts.js";
-import { MAX_CONTENT_BYTES } from "../src/execution/artifact-content.js";
-import type { AttemptContext } from "../src/execution/backend.js";
+import {
+  cachePayloadBytes,
+  MAX_CONTENT_BYTES,
+  releasePayload,
+} from "../src/execution/artifact-content.js";
+import type { AttemptContext, IsolatedValidationContext } from "../src/execution/backend.js";
 import { BackendRegistry } from "../src/execution/registry.js";
 import { MAX_LOG_BYTES } from "../src/protocol/limits.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
+import type { RepositoryChangeWorkerPacket } from "../src/protocol/worker-packet.js";
 import { managedRuntimeRequirements } from "../src/toolchains/authority.js";
 import { activeRuntimeBundleSync } from "../src/runtime/toolchain-store.js";
 
@@ -140,6 +147,7 @@ function fakeProvider() {
   let workerResult = "ok";
   let workerStdout = "worker complete\n";
   let validationError: Buffer | undefined;
+  let omitCaptureManifest = false;
   let afterUpload: (() => void) | undefined;
   let afterMetadataRead: ((path: string) => void) | undefined;
   const stalledDownloads = new Map<string, () => void>();
@@ -246,18 +254,67 @@ function fakeProvider() {
             if (workerExitCode !== 0 && validationError) {
               files.set("factory/validation-error.txt", validationError);
             } else {
+              const captureRequestBytes = files.get("factory/capture-request.json");
+              const captureRequest = captureRequestBytes
+                ? (JSON.parse(captureRequestBytes.toString("utf8")) as {
+                    validationInvocationDigest: string;
+                    recipes: Array<{
+                      id: string;
+                      command: string;
+                      outputs: Array<{
+                        roleId: string;
+                        sourcePath: string;
+                        mediaType: string;
+                      }>;
+                    }>;
+                  })
+                : undefined;
+              const captureFiles =
+                captureRequest?.recipes.flatMap((recipe) =>
+                  recipe.outputs.map((output) => {
+                    const content = Buffer.from(`${recipe.id}:${output.roleId}`);
+                    files.set(output.sourcePath, content);
+                    return {
+                      recipeId: recipe.id,
+                      roleId: output.roleId,
+                      sourcePath: output.sourcePath,
+                      mediaType: output.mediaType,
+                      bytes: content.byteLength,
+                      digest: createHash("sha256").update(content).digest("hex"),
+                    };
+                  }),
+                ) ?? [];
+              if (captureRequest && !omitCaptureManifest) {
+                const identity = {
+                  protocol: "clockgrove.factory/repository-capture-manifest",
+                  validationInvocationDigest: captureRequest.validationInvocationDigest,
+                  files: captureFiles,
+                  comparisons: [],
+                };
+                files.set(
+                  "factory/capture-manifest.json",
+                  Buffer.from(
+                    JSON.stringify({
+                      ...identity,
+                      manifestDigest: createHash("sha256")
+                        .update(JSON.stringify(identity))
+                        .digest("hex"),
+                    }),
+                  ),
+                );
+              }
+              const validationConfig = JSON.parse(
+                files.get("factory/config.json")?.toString("utf8") ?? "{}",
+              ) as { commands?: string[]; captureCommands?: string[] };
               files.set(
                 "factory/validation-result.json",
                 Buffer.from(
                   JSON.stringify({
                     outputTreeSha: "d".repeat(40),
                     commands: [
-                      {
-                        command: "grep -qx changed value.txt",
-                        exitCode: 0,
-                        durationMs: 3,
-                      },
-                    ],
+                      ...(validationConfig.commands ?? ["grep -qx changed value.txt"]),
+                      ...(validationConfig.captureCommands ?? []),
+                    ].map((command) => ({ command, exitCode: 0, durationMs: 3 })),
                     passed: true,
                     startedAt: "2026-09-04T00:00:00.000Z",
                     completedAt: "2026-09-04T00:00:01.000Z",
@@ -376,6 +433,9 @@ function fakeProvider() {
     setValidationError: (error: string) => {
       validationError = Buffer.from(error);
     },
+    omitCaptureManifest: () => {
+      omitCaptureManifest = true;
+    },
     delayVisibility: (name: string, misses: number) => {
       visibilityMisses.set(name, misses);
     },
@@ -398,6 +458,155 @@ function fakeProvider() {
 }
 
 describe("Daytona supported provider contract", () => {
+  it("downloads capture manifests and bytes through the retained provider-neutral channel", async () => {
+    const source = await fixture();
+    const provider = fakeProvider();
+    const backend = new DaytonaBackend({
+      repository: source.repository,
+      createClient: () => provider.client,
+      credentialAvailable: () => true,
+    });
+    const artifact = normalizeArtifact({
+      baseSha: source.context.packet.baseSha,
+      patch: "",
+      changedPaths: [],
+      outcome: "declined",
+      reason: "capture transport fixture",
+    });
+    const validationInvocationDigest = "c".repeat(64);
+    const captureCommand = "node scripts/capture-fixture.mjs";
+    const expectedPayload = await cachePayloadBytes(Buffer.from("expected opaque fixture"));
+    const expectedDescriptorDigest = "e".repeat(64);
+    let checkpointed = false;
+    if (source.context.packet.deliverable.kind !== "repository-change")
+      throw new Error("fixture must use a repository-change packet");
+    const packet = source.context.packet as RepositoryChangeWorkerPacket;
+    const validation: IsolatedValidationContext = {
+      ...source.context,
+      packet: {
+        ...packet,
+        validationCommands: [...packet.validationCommands, captureCommand],
+      },
+      artifact,
+      validationInvocation: {
+        kind: "integration-candidate",
+        identityDigest: validationInvocationDigest,
+        artifactDigest: artifact.digest,
+        baseSha: artifact.baseSha,
+      },
+      captureRequest: {
+        protocol: "clockgrove.factory/repository-capture-request",
+        validationInvocationDigest,
+        environmentIdentity: DAYTONA_DEFAULT_IMAGE,
+        expectedInputs: [
+          {
+            descriptorDigest: expectedDescriptorDigest,
+            contentDigest: expectedPayload.digest,
+            storageReceiptDigest: "a".repeat(64),
+            payload: expectedPayload,
+          },
+        ],
+        recipes: [
+          {
+            id: "opaque-result",
+            digest: "d".repeat(64),
+            command: captureCommand,
+            scenario: { id: "default", fixture: "fixtures/opaque.bin", seed: null },
+            outputs: [{ roleId: "result", mediaType: "application/octet-stream", maxBytes: 100 }],
+            comparison: {
+              kind: "exact",
+              outputRoleId: "result",
+              expectedDescriptorDigest,
+            },
+          },
+        ],
+        maximumTotalBytes: 1_000,
+      },
+      checkpointCaptureResult: async (checkpoint) => {
+        expect(checkpoint.captures?.files).toHaveLength(1);
+        expect(provider.deleted).not.toContain("sandbox-1");
+        checkpointed = true;
+      },
+    };
+
+    const result = await backend.validate(validation);
+    try {
+      expect(result.commands.map(({ command }) => command)).toEqual(
+        validation.packet.validationCommands,
+      );
+      expect(result.captures).toMatchObject({
+        validationInvocationDigest,
+        locator: {
+          backendId: "codex-cli/daytona",
+          resourceId: "sandbox-1",
+          manifestPath: "factory/capture-manifest.json",
+        },
+        comparisons: [],
+        files: [
+          {
+            recipeId: "opaque-result",
+            roleId: "result",
+            mediaType: "application/octet-stream",
+          },
+        ],
+      });
+      expect(result.captures?.files[0]?.payload.digest).toBe(result.captures?.files[0]?.digest);
+      expect(provider.streamed).toEqual(
+        expect.arrayContaining([
+          "factory/capture-manifest.json",
+          expect.stringMatching(/^factory\/captures\/[0-9a-f]{64}\/opaque-result\/result$/),
+        ]),
+      );
+      expect(provider.deleted).toContain("sandbox-1");
+      expect(checkpointed).toBe(true);
+    } finally {
+      await releaseIsolatedValidationCaptures(result.captures);
+    }
+
+    const missing = fakeProvider();
+    missing.omitCaptureManifest();
+    const missingBackend = new DaytonaBackend({
+      repository: source.repository,
+      createClient: () => missing.client,
+      credentialAvailable: () => true,
+    });
+    await expect(missingBackend.validate(validation)).rejects.toThrow(
+      /codex-cli\/daytona\/sandbox-1\/factory\/capture-manifest\.json/,
+    );
+    expect(missing.deleted).not.toContain("sandbox-1");
+
+    const refusedCheckpoint = fakeProvider();
+    const refusedBackend = new DaytonaBackend({
+      repository: source.repository,
+      createClient: () => refusedCheckpoint.client,
+      credentialAvailable: () => true,
+    });
+    const refusedValidation = {
+      ...validation,
+      checkpointCaptureResult: async () => {
+        throw new Error("durable capture checkpoint refused");
+      },
+    };
+    await expect(refusedBackend.validate(refusedValidation)).rejects.toThrow(
+      /durable capture checkpoint/,
+    );
+    expect(refusedCheckpoint.deleted).not.toContain("sandbox-1");
+    let recoveredCheckpoint = false;
+    const recovered = await refusedBackend.recoverValidation({
+      ...refusedValidation,
+      checkpointCaptureResult: async (checkpoint) => {
+        expect(checkpoint.environmentIdentity).toBe(DAYTONA_DEFAULT_IMAGE);
+        expect(checkpoint.captures?.manifestDigest).toMatch(/^[0-9a-f]{64}$/);
+        recoveredCheckpoint = true;
+      },
+    });
+    expect(recoveredCheckpoint).toBe(true);
+    expect(recovered?.captures?.locator.resourceId).toBe("sandbox-1");
+    expect(refusedCheckpoint.deleted).toContain("sandbox-1");
+    await releaseIsolatedValidationCaptures(recovered?.captures);
+    await releasePayload(expectedPayload);
+  });
+
   it.each(["integration-candidate", "native-stack-rebase"] as const)(
     "isolates repeated %s validations and binds cleanup to exact ownership",
     async (kind) => {
@@ -1150,8 +1359,8 @@ describe("Daytona supported provider contract", () => {
     expect(validation).toMatchObject({
       passed: true,
       outputTreeSha: "d".repeat(40),
-      environmentIdentity: DAYTONA_DEFAULT_IMAGE,
     });
+    expect(validation).not.toHaveProperty("environmentIdentity");
     expect(provider.creates).toHaveLength(2);
     const validator = provider.creates[1]!.params;
     expect(validator).toMatchObject({

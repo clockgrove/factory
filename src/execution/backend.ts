@@ -2,6 +2,7 @@ import type { ModelSelection, RunPolicy } from "../protocol/policy.js";
 import type { ExecutionRequirements, WorkerPacket } from "../protocol/worker-packet.js";
 import { workerPacketDigest } from "../protocol/worker-packet.js";
 import type { NormalizedArtifact } from "./artifacts.js";
+import type { ArtifactPayload } from "./artifact-content.js";
 import { LocalScopeBatchSchema, type LocalScopeBatch } from "../protocol/local-scope.js";
 import type { AppServerSessionJournal } from "./app-server-session.js";
 import type { ProviderQuotaCheckpoint, ProviderQuotaGate } from "../providers/quota.js";
@@ -179,6 +180,75 @@ export interface IsolatedValidationContext extends AttemptContext {
   artifact: NormalizedArtifact;
   /** Distinct immutable integration validation; never an implementation-attempt retry. */
   validationInvocation?: IntegrationValidationInvocation;
+  /** Derived execution request for repository-result captures; compiler data is not authority here. */
+  captureRequest?: IsolatedValidationCaptureRequest;
+  /** Durable host checkpoint written after verified capture download and before provider cleanup. */
+  checkpointCaptureResult?: (result: IsolatedValidationResult) => Promise<void>;
+}
+
+export interface IsolatedValidationCaptureRequest {
+  protocol: "clockgrove.factory/repository-capture-request";
+  validationInvocationDigest: string;
+  environmentIdentity: string;
+  expectedInputs: Array<{
+    descriptorDigest: string;
+    contentDigest: string;
+    storageReceiptDigest: string;
+    payload: ArtifactPayload;
+  }>;
+  recipes: Array<{
+    id: string;
+    digest: string;
+    command: string;
+    scenario: {
+      id: string;
+      fixture: string | null;
+      seed: string | null;
+    };
+    outputs: Array<{
+      roleId: string;
+      mediaType: string;
+      maxBytes: number;
+    }>;
+    comparison:
+      | { kind: "exact"; outputRoleId: string; expectedDescriptorDigest: string }
+      | {
+          kind: "threshold";
+          command: string;
+          outputRoleId: string;
+          expectedDescriptorDigest: string;
+          metric: string;
+          maximumDifference: number;
+        };
+  }>;
+  maximumTotalBytes: number;
+}
+
+export interface IsolatedValidationCaptures {
+  validationInvocationDigest: string;
+  manifestDigest: string;
+  /** Diagnostic recovery locator only; never capture or review authority. */
+  locator: {
+    backendId: string;
+    resourceId: string;
+    manifestPath: string;
+  };
+  files: Array<{
+    recipeId: string;
+    roleId: string;
+    sourcePath: string;
+    mediaType: string;
+    bytes: number;
+    digest: string;
+    payload: ArtifactPayload;
+  }>;
+  comparisons: Array<{
+    recipeId: string;
+    metric: string;
+    maximumDifference: number;
+    observedDifference: number;
+    passed: boolean;
+  }>;
 }
 
 export interface IntegrationValidationInvocation {
@@ -197,6 +267,8 @@ export interface IsolatedValidationResult {
   completedAt: string;
   /** Exact immutable provider snapshot or image identity used for validation. */
   environmentIdentity?: string;
+  /** Separately downloaded, host-retained capture bytes bound to this validation invocation. */
+  captures?: IsolatedValidationCaptures;
 }
 
 export interface StaleAttemptIdentity {
@@ -244,6 +316,8 @@ export interface ExecutionBackend {
   cleanup(handle: BackendHandle): Promise<void>;
   /** Run declared checks in a fresh resource, independent of the worker resource. */
   validate?(context: IsolatedValidationContext): Promise<IsolatedValidationResult>;
+  /** Observe and checkpoint an exact retained capture validation before any replacement. */
+  recoverValidation?(context: IsolatedValidationContext): Promise<IsolatedValidationResult | null>;
   /** Validation does not require a model credential, so it has a distinct probe. */
   probeValidation?(): Promise<BackendProbe>;
   /** Ensure a prior Director's resource is absent before a replacement attempt. */

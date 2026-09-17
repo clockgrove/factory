@@ -6,8 +6,10 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  ISOLATED_CAPTURE_MANIFEST_PATH,
   MAX_ISOLATED_VALIDATION_RESULT_BYTES,
   SANDBOX_CODEX_PACKAGE,
+  parseIsolatedValidationCaptureManifest,
   parseIsolatedValidationResult,
   sandboxBootstrapFiles,
   sandboxManagedToolchainFiles,
@@ -115,6 +117,145 @@ async function runUnmanagedIsolatedValidation(firstCommand: string) {
     result: parseIsolatedValidationResult(
       await readFile(join(root, "factory", "validation-result.json")),
     ),
+    dispose: () => rm(root, { recursive: true, force: true }),
+  };
+}
+
+async function runIsolatedCaptureValidation(threshold = false) {
+  const root = await mkdtemp(join(tmpdir(), "factory-sandbox-capture-"));
+  const source = join(root, "source");
+  await mkdir(source);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: source });
+  execFileSync("git", ["config", "user.name", "Factory Test"], { cwd: source });
+  execFileSync("git", ["config", "user.email", "factory@example.invalid"], { cwd: source });
+  await writeFile(join(source, "tracked.txt"), "before\n");
+  execFileSync("git", ["add", "tracked.txt"], { cwd: source });
+  execFileSync("git", ["commit", "-qm", "base"], { cwd: source });
+  const baseSha = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: source,
+    encoding: "utf8",
+  }).trim();
+  const archive = execFileSync("git", ["archive", "HEAD"], { cwd: source });
+  await writeFile(join(source, "tracked.txt"), "after\n");
+  const patch = execFileSync("git", ["diff", "--binary", "HEAD", "--"], {
+    cwd: source,
+    encoding: "utf8",
+  });
+  const captureScript = [
+    'const fs=require("node:fs"),p=require("node:path")',
+    "const request=JSON.parse(fs.readFileSync(process.env.FACTORY_CAPTURE_REQUEST,'utf8'))",
+    "const count=p.join(p.dirname(process.env.FACTORY_CAPTURE_REQUEST),'capture-count')",
+    "fs.writeFileSync(count,String(Number(fs.existsSync(count)?fs.readFileSync(count,'utf8'):0)+1))",
+    "for(const recipe of request.recipes)for(const output of recipe.outputs)fs.writeFileSync(output.outputPath,recipe.id+':'+output.roleId)",
+  ].join(";");
+  const captureCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(captureScript)}`;
+  const comparisonScript = [
+    'const fs=require("node:fs")',
+    "const request=JSON.parse(fs.readFileSync(process.env.FACTORY_CAPTURE_REQUEST,'utf8'))",
+    "for(const recipe of request.recipes)fs.writeFileSync(recipe.comparison.comparisonResultPath,JSON.stringify({observedDifference:0.25}))",
+  ].join(";");
+  const comparisonCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(comparisonScript)}`;
+  const base = context();
+  base.packet.baseSha = baseSha;
+  base.packet.allowedPaths = ["tracked.txt"];
+  base.packet.validationCommands = [
+    "true",
+    captureCommand,
+    ...(threshold ? [comparisonCommand] : []),
+  ];
+  const artifact = normalizeArtifact({
+    baseSha,
+    patch,
+    changedPaths: ["tracked.txt"],
+    outcome: "succeeded",
+  });
+  const validationInvocationDigest = "c".repeat(64);
+  const expectedContent = Buffer.from("expected fixture");
+  const expectedContentDigest = createHash("sha256").update(expectedContent).digest("hex");
+  const expectedDescriptorDigest = "e".repeat(64);
+  const validation: IsolatedValidationContext = {
+    ...base,
+    artifact,
+    validationInvocation: {
+      kind: "integration-candidate",
+      identityDigest: validationInvocationDigest,
+      artifactDigest: artifact.digest,
+      baseSha,
+    },
+    captureRequest: {
+      protocol: "clockgrove.factory/repository-capture-request",
+      validationInvocationDigest,
+      environmentIdentity: "fixture/image@sha256:" + "1".repeat(64),
+      expectedInputs: [
+        {
+          descriptorDigest: expectedDescriptorDigest,
+          contentDigest: expectedContentDigest,
+          storageReceiptDigest: "f".repeat(64),
+          payload: {
+            kind: "content-chunks",
+            digest: expectedContentDigest,
+            bytes: expectedContent.byteLength,
+            chunks: [{ digest: expectedContentDigest, bytes: expectedContent.byteLength }],
+          },
+        },
+      ],
+      recipes: ["primary", "secondary"].map((id) => ({
+        id,
+        digest: createHash("sha256").update(id).digest("hex"),
+        command: captureCommand,
+        scenario: {
+          id: `${id}-scenario`,
+          fixture: `fixtures/${id}.json`,
+          seed: null,
+        },
+        outputs: [{ roleId: "result", mediaType: "application/octet-stream", maxBytes: 100 }],
+        comparison: threshold
+          ? {
+              kind: "threshold" as const,
+              command: comparisonCommand,
+              outputRoleId: "result",
+              expectedDescriptorDigest,
+              metric: "difference",
+              maximumDifference: id === "primary" ? 0.2 : 0.3,
+            }
+          : {
+              kind: "exact" as const,
+              outputRoleId: "result",
+              expectedDescriptorDigest,
+            },
+      })),
+      maximumTotalBytes: 1_000,
+    },
+  };
+  const files = sandboxValidationFiles(validation, archive);
+  for (const file of files) {
+    const path = join(root, file.path);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, file.content);
+    if (file.mode !== undefined) await chmod(path, file.mode);
+  }
+  const expectedPath = join(
+    root,
+    "factory",
+    "capture-inputs",
+    validationInvocationDigest,
+    expectedDescriptorDigest,
+  );
+  await mkdir(dirname(expectedPath), { recursive: true });
+  await writeFile(expectedPath, expectedContent);
+  execFileSync(process.execPath, [join(root, "factory", "validate.mjs")], { cwd: root });
+  const result = parseIsolatedValidationResult(
+    await readFile(join(root, "factory", "validation-result.json")),
+  );
+  const manifestBytes = await readFile(join(root, ISOLATED_CAPTURE_MANIFEST_PATH));
+  return {
+    root,
+    captureCommand,
+    comparisonCommand,
+    validation,
+    result,
+    manifestBytes,
+    manifest: parseIsolatedValidationCaptureManifest(manifestBytes, validation.captureRequest!),
     dispose: () => rm(root, { recursive: true, force: true }),
   };
 }
@@ -261,6 +402,124 @@ describe("sandbox bootstrap contracts", () => {
       expect(run.result.passed).toBe(true);
       expect(() => assertIsolatedValidationMatchesPlan(run.result, run.commands)).not.toThrow();
       await expect(access(run.marker)).resolves.toBeUndefined();
+    } finally {
+      await run.dispose();
+    }
+  });
+
+  it("runs a shared capture command once after ordinary checks and emits a separate bounded manifest", async () => {
+    const run = await runIsolatedCaptureValidation();
+    try {
+      expect(run.result.commands).toEqual([
+        expect.objectContaining({ command: "true", exitCode: 0 }),
+        expect.objectContaining({ command: run.captureCommand, exitCode: 0 }),
+      ]);
+      expect(() =>
+        assertIsolatedValidationMatchesPlan(run.result, ["true", run.captureCommand]),
+      ).not.toThrow();
+      expect(await readFile(join(run.root, "factory", "capture-count"), "utf8")).toBe("1");
+      expect(run.manifest.files).toHaveLength(2);
+      expect(run.manifest.files.map((file) => file.sourcePath)).toEqual([
+        expect.stringMatching(/^factory\/captures\/[0-9a-f]{64}\/primary\/result$/),
+        expect.stringMatching(/^factory\/captures\/[0-9a-f]{64}\/secondary\/result$/),
+      ]);
+      expect(run.result).not.toHaveProperty("captures");
+      expect(run.manifestBytes.byteLength).toBeLessThan(MAX_ISOLATED_VALIDATION_RESULT_BYTES);
+    } finally {
+      await run.dispose();
+    }
+  });
+
+  it("rejects missing, duplicate, traversing, and digest-substituted capture manifests", async () => {
+    const run = await runIsolatedCaptureValidation();
+    try {
+      const manifest = JSON.parse(run.manifestBytes.toString("utf8")) as {
+        protocol: string;
+        validationInvocationDigest: string;
+        files: Array<Record<string, unknown>>;
+        comparisons: Array<Record<string, unknown>>;
+        manifestDigest: string;
+      };
+      const encode = (value: typeof manifest) => {
+        const identity = {
+          protocol: value.protocol,
+          validationInvocationDigest: value.validationInvocationDigest,
+          files: value.files,
+          comparisons: value.comparisons,
+        };
+        return Buffer.from(
+          JSON.stringify({
+            ...identity,
+            manifestDigest: createHash("sha256").update(JSON.stringify(identity)).digest("hex"),
+          }),
+        );
+      };
+      expect(() =>
+        parseIsolatedValidationCaptureManifest(
+          encode({ ...manifest, files: manifest.files.slice(0, 1) }),
+          run.validation.captureRequest!,
+        ),
+      ).toThrow(/output count/);
+      expect(() =>
+        parseIsolatedValidationCaptureManifest(
+          encode({ ...manifest, files: [manifest.files[0]!, manifest.files[0]!] }),
+          run.validation.captureRequest!,
+        ),
+      ).toThrow(/differs from its request/);
+      expect(() =>
+        parseIsolatedValidationCaptureManifest(
+          encode({
+            ...manifest,
+            files: [{ ...manifest.files[0], bytes: 101 }, manifest.files[1]!],
+          }),
+          run.validation.captureRequest!,
+        ),
+      ).toThrow(/requested byte limit/);
+      expect(() =>
+        parseIsolatedValidationCaptureManifest(
+          encode({
+            ...manifest,
+            files: [{ ...manifest.files[0], sourcePath: "factory/captures/../escaped" }],
+          }),
+          run.validation.captureRequest!,
+        ),
+      ).toThrow(/malformed/);
+      expect(() =>
+        parseIsolatedValidationCaptureManifest(
+          Buffer.from(JSON.stringify({ ...manifest, manifestDigest: "0".repeat(64) })),
+          run.validation.captureRequest!,
+        ),
+      ).toThrow(/digest mismatch/);
+    } finally {
+      await run.dispose();
+    }
+  });
+
+  it("runs grounded threshold comparison after capture and records one observation per recipe", async () => {
+    const run = await runIsolatedCaptureValidation(true);
+    try {
+      expect(run.result.commands.map(({ command }) => command)).toEqual([
+        "true",
+        run.captureCommand,
+        run.comparisonCommand,
+      ]);
+      expect(run.manifest.comparisons).toEqual([
+        {
+          recipeId: "primary",
+          metric: "difference",
+          maximumDifference: 0.2,
+          observedDifference: 0.25,
+          passed: false,
+        },
+        {
+          recipeId: "secondary",
+          metric: "difference",
+          maximumDifference: 0.3,
+          observedDifference: 0.25,
+          passed: true,
+        },
+      ]);
+      expect(run.result.passed).toBe(true);
     } finally {
       await run.dispose();
     }

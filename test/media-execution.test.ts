@@ -13,6 +13,7 @@ import {
   type MediaProducerAdapter,
 } from "../src/media/adapter.js";
 import { MediaProductionExecutor, type MediaExecutionHooks } from "../src/media/execution.js";
+import { AssetActivationSchema, withMediaDigest } from "../src/media/contracts.js";
 import {
   activateWorkerPacket,
   createAssetDecision,
@@ -33,7 +34,10 @@ import {
   readMediaDispatchReceiptByInvocation,
 } from "../src/media/storage.js";
 import type { MediaStore } from "../src/media/storage.js";
-import type { AssetProductionWorkerPacket } from "../src/protocol/worker-packet.js";
+import type {
+  AssetProductionWorkerPacket,
+  RepositoryChangeWorkerPacket,
+} from "../src/protocol/worker-packet.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -925,6 +929,80 @@ describe("media production execution", () => {
       },
       commit: stored.commit,
     });
+
+    // The shared Supervisor fixture constructs repository-only graphs and its backend mocks assume
+    // every graph item emits a patch. FactorySupervisor also owns the concrete media registry and
+    // authenticated asset stores rather than accepting fixture injection. Expanding that harness
+    // would recreate the scheduler and Git authority machinery. Exercise the exact boundary the
+    // scheduler calls instead: a real retained Asset Set, decision, and activation become the
+    // immutable repository packet/bundle reserved before ordinary backend admission.
+    const repositorySource: RepositoryChangeWorkerPacket = {
+      protocol: "clockgrove.factory/worker-packet",
+      goal: "Consume the exact approved media input.",
+      acceptanceCriteria: ["The repository consumer receives the approved descriptor."],
+      allowedPaths: ["src/"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      baseSha: exact.authorityBaseSha,
+      validationCommands: ["node --test"],
+      requirements: {
+        os: ["linux"],
+        architecture: [],
+        tools: ["node"],
+        services: [],
+        networkDestinations: [],
+        permittedSecretNames: [],
+        trust: "trusted_local",
+      },
+      assetInputs: [],
+      deliverable: {
+        kind: "repository-change",
+        contract: "clockgrove.factory/artifact",
+      },
+      generatedAssetRequirements: [
+        {
+          intentId: activation.intentId,
+          producerWorkItemId: "asset-producer",
+          role: "raster-derivative",
+          purpose: "implementation-reference",
+          necessity: "required",
+          obligationIds: ["visual-contract"],
+          brief: "Use the approved immutable media input.",
+          rationale: "The repository implementation is grounded in the reviewed bytes.",
+          direction: "input-to",
+          criterionIds: ["approved-media"],
+          inputRoleId: null,
+        },
+      ],
+      mediaUses: [],
+    };
+    const consumer = activateWorkerPacket({
+      sourcePacket: repositorySource,
+      consumerWorkItemId: "repository-consumer",
+      activations: [activation],
+      producerIssueNumbers: { "asset-producer": exact.workItem },
+    });
+    expect(consumer.packet.assetInputs).toEqual([
+      {
+        manifestDigest: activation.storageManifestDigest,
+        descriptorDigest: activation.selected[0]!.descriptor.digest,
+        contentDigest: activation.selected[0]!.descriptor.content.digest,
+        storageReceiptDigest: activation.selected[0]!.storage.digest,
+        path: activation.selected[0]!.descriptor.materializationPath,
+      },
+    ]);
+    expect(consumer.packet.mediaUses).toEqual([
+      expect.objectContaining({
+        source: "activated",
+        activationDigest: activation.digest,
+        descriptorDigests: [activation.selected[0]!.descriptor.digest],
+      }),
+    ]);
+    expect(consumer.bundle).toMatchObject({
+      consumerWorkItemId: "repository-consumer",
+      activations: [{ digest: activation.digest }],
+    });
   });
 
   it("rejects an approval outside the compiled activation-selection interval", async () => {
@@ -1079,5 +1157,132 @@ describe("media production execution", () => {
       { roleId: "source", descriptorDigest: activation.selected[0]!.descriptor.digest },
       { roleId: "style", descriptorDigest: activation.selected[0]!.descriptor.digest },
     ]);
+  });
+
+  it("preserves sixty-four semantic uses while deduplicating thirty-two transport inputs", () => {
+    const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+    const importedInputs = Array.from({ length: 16 }, (_, index) => ({
+      manifestDigest: hash(`import-manifest-${index}`),
+      descriptorDigest: hash(`import-descriptor-${index}`),
+      contentDigest: hash(`import-content-${index}`),
+      storageReceiptDigest: hash(`import-storage-${index}`),
+      path: `assets/${hash(`import-content-${index}`)}/import-${index}.bin`,
+    }));
+    const importedUses = importedInputs.flatMap((input, index) =>
+      ["direction", "style"].map((inputRoleId) => ({
+        source: "imported" as const,
+        intentId: `import-${index}`,
+        role: "opaque-reference",
+        inputRoleId,
+        brief: `Use imported input ${index} as ${inputRoleId}.`,
+        purpose: "implementation-reference" as const,
+        necessity: "required" as const,
+        obligationIds: [`import-obligation-${index}`],
+        rationale: "The same immutable bytes retain two distinct semantic uses.",
+        direction: "input-to" as const,
+        criterionIds: [] as string[],
+        descriptorDigests: [input.descriptorDigest],
+        manifestDigest: input.manifestDigest,
+      })),
+    );
+    const activations = Array.from({ length: 16 }, (_, index) => {
+      const contentDigest = hash(`activated-content-${index}`);
+      const descriptor = withAssetDigest({
+        protocol: "clockgrove.factory/asset-descriptor" as const,
+        content: {
+          protocol: "clockgrove.factory/asset-content" as const,
+          digest: contentDigest,
+          bytes: 1,
+          inspection: {
+            status: "opaque" as const,
+            handlerId: "fixture-opaque",
+            handlerContract: 1,
+            mediaType: "application/octet-stream",
+            metadata: { kind: "opaque" as const, reason: "Scale fixture bytes." },
+          },
+        },
+        displayName: `activated-${index}.bin`,
+        provenance: {
+          kind: "produced" as const,
+          invocationId: `scale-invocation-${index}`,
+          outputIndex: 0,
+          provider: null,
+          providerRequestId: null,
+        },
+        visibility: "private" as const,
+        rights: { basis: "unknown" as const },
+        materializationPath: `assets/${contentDigest}/activated-${index}.bin`,
+      });
+      const storage = withAssetDigest({
+        protocol: "clockgrove.factory/asset-storage-receipt" as const,
+        authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
+        descriptorDigest: descriptor.digest,
+        transferDomain: "produced-asset" as const,
+        payload: {
+          kind: "content-chunks" as const,
+          digest: contentDigest,
+          bytes: 1,
+          chunks: [{ digest: contentDigest, bytes: 1 }],
+        },
+        transferRef: `refs/clockgrove-factory/artifact-transfers/scale-${index}`,
+        transferRequestId: `scale-${index}`,
+        intentCommit: hash(`intent-${index}`).slice(0, 40),
+        readyCommit: hash(`ready-${index}`).slice(0, 40),
+      });
+      return AssetActivationSchema.parse(
+        withMediaDigest({
+          protocol: "clockgrove.factory/asset-activation-v1" as const,
+          runId: "scale-run",
+          intentId: `produced-${index}`,
+          intentDigest: hash(`intent-digest-${index}`),
+          producerWorkItem: 100 + index,
+          producerAttempt: 1,
+          producerReservationOid: hash(`reservation-${index}`).slice(0, 40),
+          assetSetDigest: hash(`asset-set-${index}`),
+          storageManifestDigest: hash(`storage-manifest-${index}`),
+          decisionDigest: hash(`decision-${index}`),
+          selected: [{ descriptor, storage }],
+        }),
+      );
+    });
+    const requirements = activations.flatMap((activation, index) =>
+      ["source", "style"].map((inputRoleId) => ({
+        intentId: activation.intentId,
+        producerWorkItemId: `producer-${index}`,
+        role: "opaque-product-part",
+        purpose: "implementation-reference" as const,
+        necessity: "required" as const,
+        obligationIds: [`produced-obligation-${index}`],
+        brief: `Use produced part ${index} as ${inputRoleId}.`,
+        rationale: "Each role must survive independent of byte transport deduplication.",
+        direction: "input-to" as const,
+        criterionIds: [] as string[],
+        inputRoleId,
+      })),
+    );
+    const source: AssetProductionWorkerPacket = {
+      ...structuredClone(packet()),
+      assetInputs: importedInputs,
+      mediaUses: importedUses,
+      generatedAssetRequirements: requirements,
+    };
+    const activated = activateWorkerPacket({
+      sourcePacket: source,
+      consumerWorkItemId: "scale-join",
+      activations,
+      producerIssueNumbers: Object.fromEntries(
+        activations.map((activation, index) => [`producer-${index}`, activation.producerWorkItem]),
+      ),
+    });
+    expect(activated.packet.assetInputs ?? []).toHaveLength(32);
+    expect(
+      new Set((activated.packet.assetInputs ?? []).map(({ descriptorDigest }) => descriptorDigest))
+        .size,
+    ).toBe(32);
+    expect(activated.packet.mediaUses ?? []).toHaveLength(64);
+    expect(
+      (activated.packet.mediaUses ?? []).filter(({ source }) => source === "activated"),
+    ).toHaveLength(32);
+    expect(activated.bundle?.activations).toHaveLength(16);
   });
 });

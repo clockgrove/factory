@@ -930,6 +930,66 @@ describe("media intent compilation", () => {
     );
   });
 
+  it("projects sixteen four-variant producers without collapsing their semantic intents", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const capability = {
+      id: "bounded-opaque-producer",
+      capabilityDigest: "7".repeat(64),
+      ...privateUnknownOutput,
+      inputRoles: [],
+      roles: ["opaque-product-part"],
+      purposes: ["implementation-reference" as const],
+      mediaTypes: ["application/octet-stream"],
+      maximumCount: 4,
+      raster: null,
+    };
+    request.media.producerCapabilities = [capability];
+    const proposal = semanticProposal(request);
+    proposal.mediaIntents = Array.from({ length: 16 }, (_, index) =>
+      mediaIntent({
+        id: `part-${index + 1}`,
+        role: "opaque-product-part",
+        brief: `Produce bounded opaque part ${index + 1}.`,
+        output: {
+          mediaTypes: ["application/octet-stream"],
+          minimumCount: 4,
+          maximumCount: 4,
+          raster: null,
+        },
+      }),
+    );
+    const projected = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      runPolicy: projectionPolicy(request),
+      mediaPlanning: {
+        assetBindings: [],
+        producerCapabilities: [capability],
+        reviewRules: [],
+      },
+    });
+    const producers = projected.objective.workItems.filter(
+      (item) => item.deliverable.kind === "asset-production",
+    );
+    expect(producers).toHaveLength(16);
+    expect(
+      producers.every(
+        (item) =>
+          item.deliverable.kind === "asset-production" &&
+          item.deliverable.intent.output.minimumCount === 4 &&
+          item.deliverable.intent.output.maximumCount === 4 &&
+          item.deliverable.activationSelection.minimumCount === 1 &&
+          item.deliverable.activationSelection.maximumCount === 4,
+      ),
+    ).toBe(true);
+    expect(
+      projected.objective.workItems.find((item) => item.id === "item-1")
+        ?.generatedAssetRequirements,
+    ).toHaveLength(16);
+  });
+
   it("fails deterministically when required media has neither an import nor a producer", () => {
     const request = semanticRequest();
     const proposal = semanticProposal(request);

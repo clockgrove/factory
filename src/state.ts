@@ -19,7 +19,7 @@ import {
   type WorkItemSnapshot,
   type WorkItemState,
 } from "./types.js";
-import { deriveV2State } from "./control/v2-state.js";
+import { deriveWorkItemState } from "./control/work-item-state.js";
 
 /**
  * A PR that changed nothing (§5.1).
@@ -363,7 +363,7 @@ export function currentOpenPullRequest(wi: WorkItemSnapshot): LinkedPullRequest 
  *     dependency-blocked item as ready.
  */
 export function deriveState(wi: WorkItemSnapshot, now: Date): WorkItemState {
-  if (wi.factoryEvents !== undefined) return deriveV2State(wi, now);
+  if (wi.factoryEvents !== undefined) return deriveWorkItemState(wi, now);
   if (wi.closed) return "done";
 
   const merged = wi.linkedPullRequests.filter((p) => p.state === "MERGED");

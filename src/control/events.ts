@@ -1,6 +1,7 @@
 import {
   parseFactoryEvent,
   type FactoryEvent,
+  type MediaEvent,
   type ReportedModelUsage,
 } from "../protocol/events.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
@@ -85,6 +86,46 @@ export class LifecycleRecorder {
     private readonly store: LifecycleEventStore,
     private readonly leases: LeaseManager,
   ) {}
+
+  async media(args: {
+    lease: LeaseState;
+    workItemNodeId: string;
+    sequence: number;
+    event: MediaEvent["event"];
+    workItem: number;
+    attempt: number;
+    reservationOid: string;
+    invocationDigest: string;
+    fields?: Record<string, unknown>;
+    reason?: string;
+  }): Promise<MediaEvent> {
+    const mutationClass = args.event.includes("Cleanup") ? "cleanup" : "normal";
+    await this.leases.assertMutationAuthorized(args.lease);
+    const now = await this.store.serverTime(mutationClass);
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "media",
+      event: args.event,
+      ...writerAuthority(args.lease, args.sequence),
+      objective: args.lease.objective,
+      runId: args.lease.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      workItem: args.workItem,
+      attempt: args.attempt,
+      reservationOid: args.reservationOid,
+      invocationDigest: args.invocationDigest,
+      ...(args.fields ?? {}),
+      ...(args.reason ? { reason: args.reason } : {}),
+    });
+    if (event.kind !== "media") throw new Error("media recorder produced another event kind");
+    await this.store.addIssueComment(
+      args.workItemNodeId,
+      encodeEventComment(`Factory recorded ${args.event}.`, event),
+      mutationClass,
+    );
+    return event;
+  }
 
   async controller(args: {
     lease: LeaseState;

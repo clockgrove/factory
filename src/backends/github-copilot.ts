@@ -183,7 +183,7 @@ function safeDiagnostic(value: unknown, label: string): string {
   }
 }
 
-function asLegacy(item: DerivedWorkItem, now: Date): DerivedWorkItem {
+function asProviderObservedSnapshot(item: DerivedWorkItem, now: Date): DerivedWorkItem {
   const {
     factoryEvents: _events,
     state: _state,
@@ -409,7 +409,7 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
         reason: error instanceof Error ? error.message : String(error),
       };
     }
-    const item = asLegacy(attemptItem, objective.readAt);
+    const item = asProviderObservedSnapshot(attemptItem, objective.readAt);
     const pull = currentOpenPullRequest(item);
     if (item.state === "for_review") {
       if (!pull?.headSha) {

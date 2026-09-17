@@ -59,6 +59,7 @@ import {
   type WorkerPacket,
 } from "./protocol/worker-packet.js";
 import { WorkerAssetInputSchema, type WorkerAssetInput } from "./assets/contracts.js";
+import { WorkerMediaIntentUseSchema, type WorkerMediaIntentUse } from "./media/contracts.js";
 import {
   AssetProductionDeliverableSchema,
   GeneratedAssetRequirementSchema,
@@ -121,6 +122,7 @@ export interface CompiledRepositoryWorkItem extends CompiledWorkItemCommon {
   scope: string[];
   validationCommands: string[];
   generatedAssetRequirements?: GeneratedAssetRequirement[] | undefined;
+  mediaUses?: WorkerMediaIntentUse[] | undefined;
   context?: z.infer<typeof ContextManifestSchema> | undefined;
   changeSurface?: z.infer<typeof ChangeSurfaceSchema> | undefined;
   criterionRisks?:
@@ -146,7 +148,8 @@ export interface CompiledAssetProductionWorkItem extends CompiledWorkItemCommon 
   deliverable: z.infer<typeof AssetProductionDeliverableSchema>;
   scope: [];
   validationCommands: [];
-  generatedAssetRequirements?: never;
+  generatedAssetRequirements?: GeneratedAssetRequirement[] | undefined;
+  mediaUses?: WorkerMediaIntentUse[] | undefined;
   context?: never;
   changeSurface?: never;
   criterionRisks?: never;
@@ -513,6 +516,7 @@ const PersistedCompiledRepositoryWorkItemSchema = PersistedCompiledWorkItemCommo
   scope: z.array(RepositoryScopePathSchema).min(1).max(64),
   validationCommands: z.array(z.string().min(1).max(1_000)).min(1).max(32),
   generatedAssetRequirements: z.array(GeneratedAssetRequirementSchema).max(32).optional(),
+  mediaUses: z.array(WorkerMediaIntentUseSchema).max(64).optional(),
   context: ContextManifestSchema.optional(),
   changeSurface: ChangeSurfaceSchema.optional(),
   criterionRisks: CriterionRiskAssessmentSchema.optional(),
@@ -527,6 +531,8 @@ const PersistedCompiledAssetProductionWorkItemSchema = PersistedCompiledWorkItem
     deliverable: AssetProductionDeliverableSchema,
     scope: z.tuple([]),
     validationCommands: z.tuple([]),
+    generatedAssetRequirements: z.array(GeneratedAssetRequirementSchema).max(32).optional(),
+    mediaUses: z.array(WorkerMediaIntentUseSchema).max(64).optional(),
   },
 ).strict();
 
@@ -777,6 +783,8 @@ export function workerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
       deliverable: wi.deliverable,
       allowedPaths: [],
       validationCommands: [],
+      generatedAssetRequirements: wi.generatedAssetRequirements ?? [],
+      mediaUses: wi.mediaUses ?? [],
     });
   return parseWorkerPacket({
     ...common,
@@ -784,6 +792,7 @@ export function workerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
     allowedPaths: wi.scope,
     validationCommands: wi.validationCommands,
     generatedAssetRequirements: wi.generatedAssetRequirements ?? [],
+    mediaUses: wi.mediaUses ?? [],
     ...(wi.context ? { context: wi.context } : {}),
     ...(wi.changeSurface ? { changeSurface: wi.changeSurface } : {}),
     ...(wi.criterionRisks ? { criterionRisks: wi.criterionRisks } : {}),
@@ -856,12 +865,26 @@ export function renderWorkPacket(wi: CompiledWorkItem, graphMetadata?: GraphItem
 
   const rendered = [
     `## Goal\n\n${wi.goal}\n`,
-    `## Deliverable\n\n- ${wi.deliverable.kind}${wi.deliverable.kind === "asset-production" ? `: ${wi.deliverable.intent.kind} (${wi.deliverable.intent.purpose})` : ""}\n`,
+    `## Deliverable\n\n- ${wi.deliverable.kind}${wi.deliverable.kind === "asset-production" ? `: ${wi.deliverable.intent.role} (${wi.deliverable.intent.purpose})` : ""}\n`,
     section("Acceptance", wi.acceptance),
     section("Scope", wi.deliverable.kind === "repository-change" ? wi.scope : []),
     section("Preconditions", wi.preconditions),
     section("Out of scope", wi.outOfScope),
     section("Conventions", wi.conventions),
+    section(
+      "Media uses",
+      (wi.mediaUses ?? []).map(
+        (use) =>
+          `${use.intentId}: ${use.role}/${use.purpose} ${use.direction}; criteria ${use.criterionIds.join(", ") || "none"}; descriptors ${use.descriptorDigests.join(", ")}`,
+      ),
+    ),
+    section(
+      "Generated media requirements",
+      (wi.generatedAssetRequirements ?? []).map(
+        (requirement) =>
+          `${requirement.intentId}: ${requirement.role}/${requirement.purpose} from ${requirement.producerWorkItemId}; criteria ${requirement.criterionIds.join(", ") || "none"}`,
+      ),
+    ),
     section(
       "Execution requirement evidence",
       wi.requirements?.evidence?.map(

@@ -16,7 +16,7 @@ export * from "./control/lease.js";
 export * from "./control/mutation-observation.js";
 export * from "./control/receipts.js";
 export * from "./control/runs.js";
-export * from "./control/v2-state.js";
+export * from "./control/work-item-state.js";
 export * from "./execution/artifacts.js";
 export * from "./execution/backend.js";
 export * from "./execution/registry.js";

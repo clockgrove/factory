@@ -1,7 +1,14 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
-import { APPLICATION_OPERATIONS, APPLICATION_TOOL_DEFINITIONS } from "../src/application/index.js";
+import {
+  APPLICATION_OPERATIONS,
+  APPLICATION_TOOL_DEFINITIONS,
+  AssetApprovalInputSchema,
+  AssetExportInputSchema,
+  AssetRejectionInputSchema,
+  AssetRevisionInputSchema,
+} from "../src/application/index.js";
 
 describe("CLI and MCP control surface", () => {
   it("routes the complete operation contract through the shared service", async () => {
@@ -43,6 +50,7 @@ describe("CLI and MCP control surface", () => {
     const reads = new Set([
       "doctor",
       "assets-inspect",
+      "asset-status",
       "plan",
       "compiler-eval",
       "recovery-plan",
@@ -52,7 +60,12 @@ describe("CLI and MCP control surface", () => {
       "replay",
       "controller-status",
     ]);
-    const destructive = new Set(["cancel", "controller-stop", "controller-uninstall"]);
+    const destructive = new Set([
+      "asset-reject",
+      "cancel",
+      "controller-stop",
+      "controller-uninstall",
+    ]);
     for (const [name, operation, annotations] of APPLICATION_TOOL_DEFINITIONS) {
       expect(name).toMatch(/^factory_/);
       expect(annotations).toEqual({
@@ -62,5 +75,93 @@ describe("CLI and MCP control surface", () => {
         openWorldHint: true,
       });
     }
+  });
+
+  it("keeps media review commands discriminated and identical across CLI and MCP", async () => {
+    const digest = "a".repeat(64);
+    expect(
+      AssetExportInputSchema.parse({
+        objective: 7,
+        assetSetDigest: digest,
+        descriptorDigest: "b".repeat(64),
+      }),
+    ).toEqual({
+      objective: 7,
+      assetSetDigest: digest,
+      descriptorDigest: "b".repeat(64),
+    });
+    expect(() =>
+      AssetExportInputSchema.parse({
+        objective: 7,
+        assetSetDigest: digest,
+        descriptorDigest: "b".repeat(64),
+        path: "/tmp/caller-selected",
+      }),
+    ).toThrow();
+    expect(
+      AssetApprovalInputSchema.parse({
+        objective: 7,
+        requestId: "review-1",
+        assetSetDigest: digest,
+        kind: "approved",
+        selectedDescriptorDigests: ["b".repeat(64), "c".repeat(64)],
+      }),
+    ).toMatchObject({ kind: "approved" });
+    expect(() =>
+      AssetApprovalInputSchema.parse({
+        objective: 7,
+        requestId: "review-1",
+        assetSetDigest: digest,
+        kind: "approved",
+        selectedDescriptorDigests: ["b".repeat(64)],
+        reason: "approve it",
+      }),
+    ).toThrow();
+    expect(() =>
+      AssetApprovalInputSchema.parse({
+        objective: 7,
+        requestId: "review-1",
+        assetSetDigest: digest,
+        kind: "approved",
+        selectedDescriptorDigests: ["b".repeat(64), "b".repeat(64)],
+      }),
+    ).toThrow(/unique/);
+    for (const schema of [AssetRejectionInputSchema, AssetRevisionInputSchema]) {
+      expect(() =>
+        schema.parse({
+          objective: 7,
+          requestId: "review-1",
+          assetSetDigest: digest,
+          kind: schema === AssetRejectionInputSchema ? "rejected" : "revision-requested",
+          reason: "x".repeat(8_001),
+        }),
+      ).toThrow();
+      expect(() =>
+        schema.parse({
+          objective: 7,
+          requestId: "review-1",
+          assetSetDigest: digest,
+          kind: schema === AssetRejectionInputSchema ? "rejected" : "revision-requested",
+          reason: "Please revise the framing.",
+          selectedDescriptorDigests: ["b".repeat(64)],
+        }),
+      ).toThrow();
+    }
+
+    const [cli, mcp] = await Promise.all([
+      readFile(new URL("../src/cli.ts", import.meta.url), "utf8"),
+      readFile(new URL("../src/mcp-server.ts", import.meta.url), "utf8"),
+    ]);
+    expect(cli).toContain("--descriptor-digest DIGEST");
+    expect(cli).toContain(
+      'assertExactCliOptions(args, ["--asset-set-digest", "--descriptor-digest", "--repo"])',
+    );
+    expect(cli).not.toContain("asset-export OWNER/REPO#NUMBER --output");
+    expect(cli).not.toContain("--descriptor DIGEST [--descriptor DIGEST...]");
+    expect(mcp).toContain("AssetApprovalInputSchema.shape.selectedDescriptorDigests");
+    expect(mcp).toContain("AssetExportInputSchema.shape.descriptorDigest");
+    expect(mcp).toContain("AssetRejectionInputSchema.shape.reason");
+    expect(mcp).toContain("AssetRevisionInputSchema.shape.reason");
+    expect(mcp).not.toContain("producerReservationOid");
   });
 });

@@ -273,7 +273,8 @@
         "budget",
         "provider",
         "recovery",
-        "finding"
+        "finding",
+        "media"
       ]
     },
     "event": { "type": "string" },
@@ -283,6 +284,16 @@
     "at": { "type": "string", "format": "date-time" },
     "workItem": { "type": "integer", "minimum": 1 },
     "attempt": { "type": "integer", "minimum": 1 },
+    "reservationOid": { "$ref": "#/definitions/gitSha" },
+    "invocationDigest": { "$ref": "#/definitions/digest" },
+    "dispatchReceiptDigest": { "$ref": "#/definitions/digest" },
+    "dispatchCommitOid": { "$ref": "#/definitions/gitSha" },
+    "assetSetDigest": { "$ref": "#/definitions/digest" },
+    "assetSetCommitOid": { "$ref": "#/definitions/gitSha" },
+    "decisionDigest": { "$ref": "#/definitions/digest" },
+    "decisionKind": { "enum": ["approved", "rejected", "revision-requested"] },
+    "activationDigest": { "$ref": "#/definitions/digest" },
+    "activationCommitOid": { "$ref": "#/definitions/gitSha" },
     "findingId": { "$ref": "#/definitions/digest" },
     "commonCauseId": { "$ref": "#/definitions/digest" },
     "destination": { "type": "string", "minLength": 1, "maxLength": 200 },
@@ -585,10 +596,87 @@
       "pattern": "^https://",
       "maxLength": 2048
     },
-    "accounting": { "enum": ["exact", "unknown"] },
+    "accounting": {
+      "oneOf": [
+        { "enum": ["exact", "unknown"] },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["providerRequests", "variants", "generatedBytes", "storageBytes", "native"],
+          "properties": {
+            "providerRequests": { "type": "integer", "minimum": 0, "maximum": 64 },
+            "variants": { "type": ["integer", "null"], "minimum": 0, "maximum": 32 },
+            "generatedBytes": { "type": ["integer", "null"], "minimum": 0, "maximum": 536870912 },
+            "storageBytes": { "type": ["integer", "null"], "minimum": 0, "maximum": 536870912 },
+            "native": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["unit", "amount"],
+                "properties": {
+                  "unit": { "$ref": "#/definitions/safeId" },
+                  "amount": { "type": ["number", "null"], "minimum": 0 }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
     "amount": { "type": "number", "minimum": 0 }
   },
   "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "media" } } },
+      "then": {
+        "required": ["workItem", "attempt", "reservationOid", "invocationDigest"],
+        "properties": {
+          "event": {
+            "enum": [
+              "MediaDispatchRecorded",
+              "AssetSetReady",
+              "AssetDecisionRecorded",
+              "AssetActivated",
+              "MediaUsageSettled",
+              "MediaCleanupCompleted",
+              "MediaCleanupFailed"
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "event": { "const": "MediaDispatchRecorded" } } },
+            "then": { "required": ["dispatchReceiptDigest", "dispatchCommitOid"] }
+          },
+          {
+            "if": { "properties": { "event": { "const": "AssetSetReady" } } },
+            "then": { "required": ["assetSetDigest", "assetSetCommitOid"] }
+          },
+          {
+            "if": { "properties": { "event": { "const": "AssetDecisionRecorded" } } },
+            "then": {
+              "required": ["assetSetDigest", "decisionDigest", "decisionKind", "requestId", "requestedBy"]
+            }
+          },
+          {
+            "if": { "properties": { "event": { "const": "AssetActivated" } } },
+            "then": {
+              "required": ["assetSetDigest", "decisionDigest", "activationDigest", "activationCommitOid"]
+            }
+          },
+          {
+            "if": { "properties": { "event": { "const": "MediaUsageSettled" } } },
+            "then": { "required": ["accounting"] }
+          },
+          {
+            "if": { "properties": { "event": { "const": "MediaCleanupFailed" } } },
+            "then": { "required": ["reason"] }
+          }
+        ]
+      }
+    },
     {
       "if": { "properties": { "kind": { "const": "finding" } } },
       "then": {

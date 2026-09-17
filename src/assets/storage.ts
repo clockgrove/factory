@@ -106,6 +106,7 @@ async function persistObjectiveAssetManifestScoped(args: {
   revision: number;
   assets: Array<{ descriptor: AssetDescriptor; bytes: Buffer }>;
   assertCurrent(): Promise<void>;
+  transferDomain?: "objective-asset" | "produced-asset";
 }) {
   const authority = ObjectiveAssetAuthoritySchema.parse(args.authority);
   const descriptors = args.assets.map(({ descriptor }) => AssetDescriptorSchema.parse(descriptor));
@@ -128,7 +129,7 @@ async function persistObjectiveAssetManifestScoped(args: {
       throw new Error("Objective asset bytes differ from descriptor");
     const payload = await cachePayloadBytes(asset.bytes);
     const identity = {
-      domain: "objective-asset" as const,
+      domain: args.transferDomain ?? ("objective-asset" as const),
       repository: authority.repository,
       objective: authority.objective,
       baseSha: authority.baseSha,
@@ -146,6 +147,7 @@ async function persistObjectiveAssetManifestScoped(args: {
         protocol: "clockgrove.factory/asset-storage-receipt" as const,
         authority,
         descriptorDigest: asset.descriptor.digest,
+        transferDomain: identity.domain,
         transferRequestId: identity.requestId,
         ...transfer,
       }),
@@ -173,6 +175,16 @@ export function persistObjectiveAssetManifest(
   args: Parameters<typeof persistObjectiveAssetManifestScoped>[0],
 ) {
   return withArtifactContentScope(() => persistObjectiveAssetManifestScoped(args));
+}
+
+/** Produced variants reuse the exact resumable content-transfer and manifest
+ * substrate while retaining their distinct storage-accounting domain. */
+export function persistProducedAssetManifest(
+  args: Omit<Parameters<typeof persistObjectiveAssetManifestScoped>[0], "transferDomain">,
+) {
+  return withArtifactContentScope(() =>
+    persistObjectiveAssetManifestScoped({ ...args, transferDomain: "produced-asset" }),
+  );
 }
 
 export async function readObjectiveAssetManifest(args: {
@@ -246,7 +258,7 @@ export async function recoverObjectiveAsset(args: {
   );
   if (!entry) throw new Error("Objective asset descriptor is not in the manifest");
   const identity = {
-    domain: "objective-asset" as const,
+    domain: entry.storage.transferDomain,
     repository: args.manifest.authority.repository,
     objective: args.manifest.authority.objective,
     baseSha: args.manifest.authority.baseSha,

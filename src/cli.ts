@@ -69,6 +69,10 @@ const USAGE = [
   "  factory doctor OWNER/REPO#NUMBER [--repo DIR]",
   "  factory assets-import OWNER/REPO#NUMBER --request-id ID --input FILE",
   "  factory assets-inspect OWNER/REPO#NUMBER --base-sha SHA --manifest-digest DIGEST",
+  "  factory asset-status OWNER/REPO#NUMBER --asset-set-digest DIGEST",
+  "  factory asset-export OWNER/REPO#NUMBER --asset-set-digest DIGEST --descriptor-digest DIGEST",
+  "  factory asset-approve OWNER/REPO#NUMBER --request-id ID --asset-set-digest DIGEST --descriptor-digest DIGEST [--descriptor-digest DIGEST...]",
+  "  factory asset-reject|asset-revise OWNER/REPO#NUMBER --request-id ID --asset-set-digest DIGEST --reason TEXT",
   "  factory plan OWNER/REPO#NUMBER [--compile] [--repo DIR] [--base-sha SHA] [--asset-manifest-digest DIGEST] [--policy FILE]",
   "  factory compiler-eval OWNER/REPO#NUMBER [--markdown] [--annotations FILE]  (read-only draft history and post-mortem)",
   "  factory status|explain OWNER/REPO#NUMBER [--work-item NUMBER]",
@@ -246,6 +250,8 @@ function controllerApplicationFor(owner: string, repo: string): FactoryApplicati
 async function applicationCommand(command: string, args: string[]): Promise<void> {
   if (!args[0]) fail(`usage: factory ${command} OWNER/REPO#NUMBER`);
   const target = parseTarget(args[0]);
+  if (command === "asset-export")
+    assertExactCliOptions(args, ["--asset-set-digest", "--descriptor-digest", "--repo"]);
   const checkout = option(args, "--repo");
   let pinnedAdmissionSnapshots;
   if (args.includes("--snapshots")) {
@@ -296,6 +302,72 @@ async function applicationCommand(command: string, args: string[]): Promise<void
       baseSha,
       manifestDigest,
     });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  if (command === "asset-status") {
+    const assetSetDigest = option(args, "--asset-set-digest");
+    if (!assetSetDigest) fail("asset-status requires --asset-set-digest DIGEST");
+    const result = await service.assetStatus({
+      objective: target.objective,
+      assetSetDigest,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  if (command === "asset-export") {
+    const assetSetDigest = option(args, "--asset-set-digest");
+    const descriptorDigest = option(args, "--descriptor-digest");
+    if (!assetSetDigest || !descriptorDigest)
+      fail("asset-export requires --asset-set-digest DIGEST and --descriptor-digest DIGEST");
+    const result = await service.assetExport({
+      objective: target.objective,
+      assetSetDigest,
+      descriptorDigest,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  if (["asset-approve", "asset-reject", "asset-revise"].includes(command)) {
+    const requestId = option(args, "--request-id");
+    const assetSetDigest = option(args, "--asset-set-digest");
+    if (args.includes("--descriptor"))
+      fail("--descriptor is not supported; use --descriptor-digest DIGEST");
+    const selectedDescriptorDigests = options(args, "--descriptor-digest");
+    const reason = option(args, "--reason");
+    if (!requestId || !assetSetDigest)
+      fail(`${command} requires --request-id ID and --asset-set-digest DIGEST`);
+    if (command === "asset-approve" && selectedDescriptorDigests.length === 0)
+      fail("asset-approve requires at least one --descriptor-digest DIGEST");
+    if (command === "asset-approve" && reason !== undefined)
+      fail("asset-approve does not accept --reason");
+    if (command !== "asset-approve" && selectedDescriptorDigests.length)
+      fail(`${command} does not accept --descriptor-digest`);
+    if (command !== "asset-approve" && !reason) fail(`${command} requires --reason TEXT`);
+    const result =
+      command === "asset-approve"
+        ? await service.assetDecision({
+            objective: target.objective,
+            requestId,
+            assetSetDigest,
+            kind: "approved",
+            selectedDescriptorDigests,
+          })
+        : command === "asset-reject"
+          ? await service.assetDecision({
+              objective: target.objective,
+              requestId,
+              assetSetDigest,
+              kind: "rejected",
+              reason: reason!,
+            })
+          : await service.assetDecision({
+              objective: target.objective,
+              requestId,
+              assetSetDigest,
+              kind: "revision-requested",
+              reason: reason!,
+            });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
@@ -417,6 +489,30 @@ function option(args: string[], name: string): string | undefined {
   const value = args[index + 1];
   if (!value || value.startsWith("--")) fail(`${name} requires a value`);
   return value;
+}
+
+function assertExactCliOptions(args: string[], allowedOptions: readonly string[]): void {
+  const allowed = new Set(allowedOptions);
+  const observed = new Set<string>();
+  for (let index = 1; index < args.length; index += 2) {
+    const name = args[index];
+    const value = args[index + 1];
+    if (!name?.startsWith("--") || !allowed.has(name)) fail(`unsupported option ${name ?? ""}`);
+    if (observed.has(name)) fail(`${name} may be supplied only once`);
+    if (!value || value.startsWith("--")) fail(`${name} requires a value`);
+    observed.add(name);
+  }
+}
+
+function options(args: string[], name: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] !== name) continue;
+    const value = args[index + 1];
+    if (!value || value.startsWith("--")) fail(`${name} requires a value`);
+    values.push(value);
+  }
+  return values;
 }
 
 async function inspect(owner: string, repo: string, number: number): Promise<void> {
@@ -724,6 +820,11 @@ export async function main(argv: string[]): Promise<void> {
       "doctor",
       "assets-import",
       "assets-inspect",
+      "asset-status",
+      "asset-export",
+      "asset-approve",
+      "asset-reject",
+      "asset-revise",
       "plan",
       "compiler-eval",
       "recovery-plan",

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { FactoryEvent } from "../protocol/events.js";
 import { deduplicateFactoryEvents } from "./receipts.js";
 
@@ -14,6 +16,17 @@ type CommandEvent = FactoryEvent & {
   kind: "run";
   requestedBy: string;
   requestId: string;
+};
+
+type MediaRevisionDecisionEvent = FactoryEvent & {
+  kind: "media";
+  event: "AssetDecisionRecorded";
+  workItem: number;
+  decisionDigest: string;
+  decisionKind: "revision-requested";
+  requestId: string;
+  requestedBy: string;
+  reason: string;
 };
 
 export interface RetryCommand {
@@ -59,6 +72,18 @@ function isCommandEvent(event: FactoryEvent): event is CommandEvent {
   );
 }
 
+function isMediaRevisionDecision(event: FactoryEvent): event is MediaRevisionDecisionEvent {
+  return (
+    event.kind === "media" &&
+    event.event === "AssetDecisionRecorded" &&
+    event.decisionKind === "revision-requested" &&
+    typeof event.decisionDigest === "string" &&
+    typeof event.requestId === "string" &&
+    typeof event.requestedBy === "string" &&
+    typeof event.reason === "string"
+  );
+}
+
 function commandFingerprint(event: CommandEvent): string {
   return JSON.stringify({
     event: event.event,
@@ -68,7 +93,41 @@ function commandFingerprint(event: CommandEvent): string {
     workItem: "workItem" in event ? event.workItem : undefined,
     priorityRank: "priorityRank" in event ? event.priorityRank : undefined,
     reason: "reason" in event ? event.reason : undefined,
+    mediaRevision: "mediaRevision" in event ? event.mediaRevision : undefined,
   });
+}
+
+function assertMediaRevisionRetry(event: CommandEvent, events: readonly FactoryEvent[]) {
+  if (
+    event.event !== "WorkItemRetryRequested" ||
+    !("mediaRevision" in event) ||
+    !event.mediaRevision
+  )
+    return;
+  const reason = "reason" in event && typeof event.reason === "string" ? event.reason : null;
+  const binding = event.mediaRevision;
+  const decisions = deduplicateFactoryEvents(
+    events.filter(
+      (candidate) =>
+        candidate.kind === "media" &&
+        candidate.event === "AssetDecisionRecorded" &&
+        candidate.objective === event.objective &&
+        candidate.runId === event.runId &&
+        candidate.workItem === event.workItem &&
+        candidate.requestId === binding.decisionRequestId &&
+        candidate.assetSetDigest === binding.assetSetDigest &&
+        candidate.decisionDigest === binding.decisionDigest &&
+        candidate.decisionKind === "revision-requested" &&
+        candidate.requestedBy?.toLowerCase() === event.requestedBy.toLowerCase(),
+    ),
+  );
+  if (
+    !reason ||
+    createHash("sha256").update(reason).digest("hex") !== binding.feedbackDigest ||
+    decisions.length !== 1 ||
+    decisions[0]?.reason !== reason
+  )
+    throw new Error("media revision retry differs from its authenticated review decision");
 }
 
 /**
@@ -107,6 +166,7 @@ export function deriveDurableCommandState(args: {
 
   const idempotent = new Map<string, { fingerprint: string; event: CommandEvent }>();
   for (const event of candidates) {
+    assertMediaRevisionRetry(event, args.events);
     const fingerprint = commandFingerprint(event);
     const prior = idempotent.get(event.requestId);
     if (prior) {
@@ -125,6 +185,27 @@ export function deriveDurableCommandState(args: {
   let latestSequence: number | null = null;
   const retries = new Map<number, RetryCommand>();
   const priorities = new Map<number, PriorityCommand>();
+  const revisionDecisionSequence = new Map<string, number>();
+  for (const decision of deduplicateFactoryEvents(
+    args.events.filter(
+      (event): event is MediaRevisionDecisionEvent =>
+        isMediaRevisionDecision(event) &&
+        event.objective === args.objective &&
+        event.runId === args.runId &&
+        event.sequence > args.runStartSequence &&
+        event.requestedBy.toLowerCase() === args.runActor.toLowerCase(),
+    ),
+  )
+    .filter(isMediaRevisionDecision)
+    .sort((left, right) => left.sequence - right.sequence)) {
+    revisionDecisionSequence.set(decision.decisionDigest, decision.sequence);
+    retries.set(decision.workItem, {
+      workItem: decision.workItem,
+      sequence: decision.sequence,
+      requestedBy: decision.requestedBy,
+      requestId: decision.requestId,
+    });
+  }
   const commands = [...idempotent.values()].map(({ event }) => event);
   const sequences = [...new Set(commands.map((event) => event.sequence))].sort(
     (left, right) => left - right,
@@ -174,6 +255,12 @@ export function deriveDurableCommandState(args: {
         "workItem" in event &&
         typeof event.workItem === "number"
       ) {
+        const sequence =
+          "mediaRevision" in event && event.mediaRevision
+            ? revisionDecisionSequence.get(event.mediaRevision.decisionDigest)
+            : event.sequence;
+        if (sequence === undefined)
+          throw new Error("media revision retry has no authenticated review decision");
         retries.set(event.workItem, {
           workItem: event.workItem,
           sequence,

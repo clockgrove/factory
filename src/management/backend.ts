@@ -200,15 +200,15 @@ export interface CompilationContext {
   /** Immutable Objective assets are described textually by opaque IDs. Verified media paths and
    * types are delivered separately to an adapter that declares those exact input media types. */
   mediaPlanning?: {
-    assetManifest: CompilerAssetManifestView;
+    assetManifest: CompilerAssetManifestView | null;
     mediaInputs: Array<{ assetId: string; mediaType: string; path: string }>;
     assetBindings: Array<{ assetId: string; input: WorkerAssetInput }>;
     assetEgress: {
-      mode: "public-assets" | "private-assets";
+      mode: "denied" | "public-assets" | "private-assets";
       policyDigest: string;
     };
     producerCapabilities: CompilerMediaProducerCapability[];
-    reviewRules: Array<{ id: string; kind: "deterministic-preauthorized" }>;
+    reviewRules: CompilerRequest["media"]["reviewRules"];
   };
   /** Authenticated pre-v2 issue core. The compiler may enrich, never decompose or rewrite it. */
   legacyGraphConstraints?: LegacyGraphConstraints;

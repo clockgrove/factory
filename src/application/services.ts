@@ -1,7 +1,16 @@
 import { publishLocalWake } from "../control/local-wake.js";
+import { createHash } from "node:crypto";
+import { z } from "zod";
+import { attemptRef } from "../control/attempts.js";
+import { decodeEventTrailer } from "../control/receipts.js";
 import type { DiscoveryLocatorStore } from "../control/discovery-locators.js";
-import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
-import { PROTOCOL_V2 } from "../protocol/limits.js";
+import {
+  parseFactoryEvent,
+  type AttemptEvent,
+  type FactoryEvent,
+  type MediaEvent,
+} from "../protocol/events.js";
+import { boundedText, PROTOCOL_V2, safeId, sha256Digest } from "../protocol/limits.js";
 import { implicitRestartBlocker } from "../control/recovery.js";
 import {
   activationCancellation,
@@ -44,12 +53,94 @@ import {
   type ObjectiveAssetImportMetadata,
 } from "../assets/import.js";
 import { withArtifactContentScope } from "../execution/artifact-content-scope.js";
-import { MAX_OBJECTIVE_ASSETS, MAX_OBJECTIVE_ASSET_TOTAL_BYTES } from "../assets/contracts.js";
+import {
+  canonicalAssetJson,
+  MAX_OBJECTIVE_ASSETS,
+  MAX_OBJECTIVE_ASSET_TOTAL_BYTES,
+} from "../assets/contracts.js";
+import { createAssetDecision } from "../media/lifecycle.js";
+import type { AssetActivation, AssetDecision, AssetSet } from "../media/contracts.js";
+import { materializeProducedAssetForReview } from "../media/review-export.js";
+import {
+  createAssetActivation,
+  createMediaDecisionRequest,
+  persistAssetActivation,
+  persistAssetDecision,
+  persistMediaDecisionRequest,
+  readAssetActivation,
+  readAssetDecisionByAssetSet,
+  readAssetSet,
+  readMediaDecisionRequest,
+  type MediaDecisionRequest,
+} from "../media/storage.js";
+
+const uniqueDigests = z
+  .array(sha256Digest)
+  .min(1)
+  .max(32)
+  .refine((values) => new Set(values).size === values.length, "descriptor digests must be unique");
+
+const AssetDecisionInputCommon = {
+  objective: z.number().int().positive(),
+  requestId: safeId,
+  assetSetDigest: sha256Digest,
+};
+
+export const AssetStatusInputSchema = z
+  .object({
+    objective: z.number().int().positive(),
+    assetSetDigest: sha256Digest,
+  })
+  .strict();
+
+export const AssetExportInputSchema = z
+  .object({
+    objective: z.number().int().positive(),
+    assetSetDigest: sha256Digest,
+    descriptorDigest: sha256Digest,
+  })
+  .strict();
+
+export const AssetApprovalInputSchema = z
+  .object({
+    ...AssetDecisionInputCommon,
+    kind: z.literal("approved"),
+    selectedDescriptorDigests: uniqueDigests,
+  })
+  .strict();
+
+export const AssetRejectionInputSchema = z
+  .object({
+    ...AssetDecisionInputCommon,
+    kind: z.literal("rejected"),
+    reason: boundedText(8_000),
+  })
+  .strict();
+
+export const AssetRevisionInputSchema = z
+  .object({
+    ...AssetDecisionInputCommon,
+    kind: z.literal("revision-requested"),
+    reason: boundedText(8_000),
+  })
+  .strict();
+
+export const AssetDecisionInputSchema = z.discriminatedUnion("kind", [
+  AssetApprovalInputSchema,
+  AssetRejectionInputSchema,
+  AssetRevisionInputSchema,
+]);
+export type AssetDecisionInput = z.infer<typeof AssetDecisionInputSchema>;
 
 export const APPLICATION_OPERATIONS = [
   "doctor",
   "assets-import",
   "assets-inspect",
+  "asset-status",
+  "asset-export",
+  "asset-approve",
+  "asset-reject",
+  "asset-revise",
   "plan",
   "compiler-eval",
   "recovery-plan",
@@ -162,12 +253,14 @@ export interface ServiceContext {
   planning?: PlanningContext;
   compilerEvaluationStore?: CompiledGraphReadStore;
   assetStore?: ObjectiveAssetStore;
+  assetReviewRoot?: string;
   platformTelemetry?: () => GitHubMutationTelemetry;
 }
 
 export type ReadOperation =
   | "doctor"
   | "assets-inspect"
+  | "asset-status"
   | "plan"
   | "compiler-eval"
   | "recovery-plan"
@@ -389,6 +482,874 @@ export class FactoryApplicationService {
     });
     if (!manifest) throw new Error("Objective asset manifest was not found");
     return { operation: "assets-inspect", manifest };
+  }
+
+  async assetStatus(input: { objective: number; assetSetDigest: string }) {
+    const command = AssetStatusInputSchema.parse(input);
+    if (!this.context.assetStore) throw new Error("media asset storage is not configured");
+    const snapshot = await this.context.reader.readObjective(command.objective);
+    const resolved = await this.resolveReadyAssetSet(snapshot, command.assetSetDigest);
+    const events = this.allEvents(snapshot);
+    const decisionEvents = events.filter(
+      (event) =>
+        event.kind === "media" &&
+        event.assetSetDigest === command.assetSetDigest &&
+        event.event === "AssetDecisionRecorded",
+    ) as MediaEvent[];
+    if (decisionEvents.length > 1)
+      throw new Error("asset set has multiple authenticated review decisions");
+    const storedDecision = await readAssetDecisionByAssetSet({
+      store: this.context.assetStore,
+      authority: resolved.authority,
+      runId: resolved.ready.runId,
+      assetSetDigest: resolved.assetSet.digest,
+    });
+    const decisionEvent = decisionEvents[0];
+    if (decisionEvent && !storedDecision)
+      throw new Error("authenticated media decision has no durable record");
+    let storedRequest: Awaited<ReturnType<typeof readMediaDecisionRequest>> = null;
+    if (storedDecision) {
+      this.assertDecisionBinding(storedDecision.decision, resolved);
+      if (storedDecision.decision.ruleId === null) {
+        storedRequest = await readMediaDecisionRequest({
+          store: this.context.assetStore,
+          repository: resolved.authority.repository,
+          objective: command.objective,
+          requestId: storedDecision.decision.requestId,
+        });
+        if (!storedRequest)
+          throw new Error("human media decision has no immutable request journal");
+        this.assertDecisionRequest(storedRequest.request, storedDecision.decision, resolved);
+        await this.assertCommitParents(storedRequest.commit, [resolved.stored.commit]);
+      }
+      await this.assertCommitParents(storedDecision.commit, [
+        resolved.stored.commit,
+        ...(storedRequest ? [storedRequest.commit] : []),
+      ]);
+      if (decisionEvent) this.assertDecisionEvent(decisionEvent, storedDecision.decision, resolved);
+    }
+    const retryEvents = storedRequest?.request.retry
+      ? (events.filter(
+          (event) =>
+            event.kind === "run" &&
+            event.event === "WorkItemRetryRequested" &&
+            event.requestId === storedRequest!.request.retry!.requestId,
+        ) as FactoryEvent[])
+      : [];
+    if (retryEvents.length > 1)
+      throw new Error("media revision has multiple authenticated retry commands");
+    const retryEvent = retryEvents[0];
+    if (storedRequest?.request.retry && retryEvent)
+      this.assertRevisionRetryEvent(retryEvent, storedRequest.request);
+    const activationEvents = events.filter(
+      (event) =>
+        event.kind === "media" &&
+        event.event === "AssetActivated" &&
+        event.assetSetDigest === resolved.assetSet.digest,
+    ) as MediaEvent[];
+    if (activationEvents.length > 1)
+      throw new Error("asset set has multiple authenticated activation receipts");
+    let activation: {
+      record: AssetActivation;
+      ref: string;
+      commit: string;
+    } | null = null;
+    if (storedDecision?.decision.kind === "approved") {
+      const expected = createAssetActivation({
+        assetSet: resolved.assetSet,
+        decision: storedDecision.decision,
+        producerReservationOid: resolved.ready.reservationOid,
+      });
+      activation = await readAssetActivation({
+        store: this.context.assetStore,
+        authority: resolved.authority,
+        runId: resolved.ready.runId,
+        digest: expected.digest,
+      });
+      if (activation && canonicalAssetJson(activation.record) !== canonicalAssetJson(expected))
+        throw new Error("durable media activation differs from the approved selection");
+      if (activation)
+        await this.assertCommitParents(activation.commit, [
+          storedDecision.commit,
+          ...activation.record.selected.map(({ storage }) => storage.readyCommit),
+        ]);
+      if (activationEvents[0] && !activation)
+        throw new Error("authenticated media activation has no durable record");
+      if (activation && activationEvents[0])
+        this.assertActivationEvent(
+          activationEvents[0],
+          activation.record,
+          activation.commit,
+          resolved,
+        );
+    } else if (activationEvents.length) {
+      throw new Error("non-approved asset set has an authenticated activation receipt");
+    }
+    const state = !storedDecision
+      ? "for-review"
+      : !decisionEvent
+        ? "decision-publication-pending"
+        : storedRequest?.request.retry && !retryEvent
+          ? "retry-publication-pending"
+          : storedDecision.decision.kind !== "approved"
+            ? storedDecision.decision.kind
+            : !activation || !activationEvents[0]
+              ? "activation-publication-pending"
+              : "approved";
+    return {
+      operation: "asset-status" as const,
+      repository: resolved.authority.repository,
+      objective: command.objective,
+      runId: resolved.ready.runId,
+      producer: {
+        workItem: resolved.ready.workItem,
+        attempt: resolved.ready.attempt,
+        reservationOid: resolved.ready.reservationOid,
+      },
+      assetSet: {
+        digest: resolved.assetSet.digest,
+        ref: resolved.stored.ref,
+        commit: resolved.stored.commit,
+        variants: resolved.assetSet.variants.map(({ descriptor }) => ({
+          descriptorDigest: descriptor.digest,
+          name: descriptor.displayName,
+          mediaType: descriptor.content.inspection.mediaType,
+          bytes: descriptor.content.bytes,
+          path: descriptor.materializationPath,
+        })),
+      },
+      review: {
+        state,
+        decision: storedDecision
+          ? {
+              digest: storedDecision.decision.digest,
+              ref: storedDecision.ref,
+              commit: storedDecision.commit,
+              kind: storedDecision.decision.kind,
+              requestId: storedDecision.decision.requestId,
+              requestedBy: storedDecision.decision.requestedBy,
+              selectedDescriptorDigests: storedDecision.decision.selectedDescriptorDigests,
+              ...(storedRequest?.request.reason
+                ? { reason: storedRequest.request.reason }
+                : decisionEvent?.reason
+                  ? { reason: decisionEvent.reason }
+                  : {}),
+              ...(storedRequest
+                ? {
+                    requestJournal: {
+                      digest: storedRequest.request.digest,
+                      ref: storedRequest.ref,
+                      commit: storedRequest.commit,
+                    },
+                  }
+                : {}),
+              ...(storedRequest?.request.retry
+                ? {
+                    retry: {
+                      requestId: storedRequest.request.retry.requestId,
+                      workItem: storedRequest.request.retry.workItem,
+                      priorAssetSetDigest: storedRequest.request.retry.priorAssetSetDigest,
+                      priorDecisionDigest: storedRequest.request.retry.priorDecisionDigest,
+                      feedbackDigest: storedRequest.request.retry.feedbackDigest,
+                      published: Boolean(retryEvent),
+                    },
+                  }
+                : {}),
+            }
+          : null,
+        activation: activation
+          ? {
+              digest: activation.record.digest,
+              ref: activation.ref,
+              commit: activation.commit,
+              selectedDescriptorDigests: activation.record.selected.map(
+                ({ descriptor }) => descriptor.digest,
+              ),
+            }
+          : null,
+      },
+    };
+  }
+
+  async assetExport(input: {
+    objective: number;
+    assetSetDigest: string;
+    descriptorDigest: string;
+  }) {
+    const command = AssetExportInputSchema.parse(input);
+    if (!this.context.assetStore || !this.context.store)
+      throw new Error("authenticated media export storage is not configured");
+    const snapshot = await this.context.reader.readObjective(command.objective);
+    const resolved = await this.resolveReadyAssetSet(snapshot, command.assetSetDigest);
+    const actor = await this.context.store.getAuthenticatedLogin();
+    if (resolved.start.actor.toLowerCase() !== actor.toLowerCase())
+      throw new Error("only the activating actor may export private produced media");
+    const selected = resolved.assetSet.variants.find(
+      ({ descriptor }) => descriptor.digest === command.descriptorDigest,
+    );
+    if (!selected) throw new Error("descriptor does not belong to the authenticated Asset Set");
+    const manifest = await readObjectiveAssetManifest({
+      store: this.context.assetStore,
+      authority: resolved.authority,
+      digest: resolved.assetSet.storageManifestDigest,
+    });
+    if (
+      !manifest ||
+      canonicalAssetJson(manifest.assets) !== canonicalAssetJson(resolved.assetSet.variants)
+    )
+      throw new Error("produced asset storage manifest differs from the authenticated Asset Set");
+    const exported = await materializeProducedAssetForReview({
+      store: this.context.assetStore,
+      manifest,
+      assetSetDigest: resolved.assetSet.digest,
+      descriptorDigest: command.descriptorDigest,
+      ...(this.context.assetReviewRoot ? { reviewRoot: this.context.assetReviewRoot } : {}),
+    });
+    if (canonicalAssetJson(exported.entry) !== canonicalAssetJson(selected))
+      throw new Error("exported asset differs from the authenticated descriptor and receipt");
+    return {
+      operation: "asset-export" as const,
+      repository: resolved.authority.repository,
+      objective: command.objective,
+      runId: resolved.ready.runId,
+      assetSetDigest: resolved.assetSet.digest,
+      descriptor: selected.descriptor,
+      storageReceipt: selected.storage,
+      materialization: {
+        path: exported.path,
+        digest: selected.descriptor.content.digest,
+        bytes: selected.descriptor.content.bytes,
+        readOnly: true as const,
+      },
+    };
+  }
+
+  async assetDecision(input: AssetDecisionInput) {
+    const command = AssetDecisionInputSchema.parse(input);
+    if (!this.context.assetStore || !this.context.store)
+      throw new Error("media decision storage is not configured");
+    return this.serialize(command.objective, async () => {
+      const snapshot = await this.context.reader.readObjective(command.objective);
+      const events = this.allEvents(snapshot);
+      const resolved = await this.resolveReadyAssetSet(snapshot, command.assetSetDigest);
+      const runId = resolved.ready.runId;
+      const actor = await this.context.store!.getAuthenticatedLogin();
+      if (resolved.start.actor.toLowerCase() !== actor.toLowerCase())
+        throw new Error("only the activating actor may decide produced media");
+      const workItem = snapshot.workItems.find(({ number }) => number === resolved.ready.workItem);
+      if (!workItem) throw new Error("media producer does not belong to this Objective");
+      if (!workItem.id) throw new Error("media producer issue identity is unavailable");
+      const { authority, assetSet, stored: storedSet } = resolved;
+      const reason = command.kind === "approved" ? undefined : command.reason;
+      const reasonDigest = reason ? createHash("sha256").update(reason).digest("hex") : undefined;
+      const decision = createAssetDecision({
+        kind: command.kind,
+        requestId: command.requestId,
+        requestedBy: actor,
+        assetSet,
+        producerReservationOid: resolved.ready.reservationOid,
+        ...(command.kind === "approved"
+          ? { selectedDescriptorDigests: command.selectedDescriptorDigests }
+          : {}),
+        ...(command.kind === "rejected" && reasonDigest ? { reasonDigest } : {}),
+        ...(command.kind === "revision-requested" && reasonDigest
+          ? { feedbackDigest: reasonDigest }
+          : {}),
+      });
+      const request = createMediaDecisionRequest({
+        authority,
+        decision,
+        ...(reason ? { reason } : {}),
+      });
+      const priorRequest = await readMediaDecisionRequest({
+        store: this.context.assetStore!,
+        repository: authority.repository,
+        objective: command.objective,
+        requestId: command.requestId,
+      });
+      if (priorRequest && canonicalAssetJson(priorRequest.request) !== canonicalAssetJson(request))
+        throw new Error(
+          `idempotency key ${command.requestId} was already used for a different request`,
+        );
+      if (
+        !priorRequest &&
+        decision.kind === "revision-requested" &&
+        assetSet.attempt >= resolved.start.policy.maxAttemptsPerItem
+      )
+        throw new Error("media revision cannot exceed the run's maximum attempts per Work Item");
+      const requestEvents = events.filter(
+        (event) =>
+          event.kind === "media" &&
+          event.event === "AssetDecisionRecorded" &&
+          event.requestId === command.requestId,
+      ) as MediaEvent[];
+      if (requestEvents.some((event) => !this.isExactDecisionEvent(event, decision, resolved)))
+        throw new Error(
+          `idempotency key ${command.requestId} was already used for a different request`,
+        );
+      const setEvents = events.filter(
+        (event) =>
+          event.kind === "media" &&
+          event.event === "AssetDecisionRecorded" &&
+          event.assetSetDigest === assetSet.digest,
+      ) as MediaEvent[];
+      if (setEvents.some((event) => !this.isExactDecisionEvent(event, decision, resolved)))
+        throw new Error("this asset set already has an immutable review decision");
+      const existingEvent = setEvents[0];
+      if ((requestEvents.length || existingEvent) && !priorRequest)
+        throw new Error("authenticated human media decision has no immutable request journal");
+      const priorBySet = await readAssetDecisionByAssetSet({
+        store: this.context.assetStore!,
+        authority,
+        runId,
+        assetSetDigest: assetSet.digest,
+      });
+      if (priorBySet && priorBySet.decision.digest !== decision.digest)
+        throw new Error("this asset set already has an immutable review decision");
+      if (priorBySet) {
+        this.assertDecisionBinding(priorBySet.decision, resolved);
+        if (!priorRequest)
+          throw new Error("durable human media decision has no immutable request journal");
+        await this.assertCommitParents(priorRequest.commit, [storedSet.commit]);
+        await this.assertCommitParents(priorBySet.commit, [storedSet.commit, priorRequest.commit]);
+      }
+      const exactReplay = Boolean(priorRequest);
+      const assertCurrent = async (requireActive: boolean) => {
+        const current = await this.context.reader.readObjective(command.objective);
+        const currentEvents = this.allEvents(current);
+        const currentRequest = await readMediaDecisionRequest({
+          store: this.context.assetStore!,
+          repository: authority.repository,
+          objective: command.objective,
+          requestId: command.requestId,
+        });
+        if (
+          currentRequest &&
+          canonicalAssetJson(currentRequest.request) !== canonicalAssetJson(request)
+        )
+          throw new Error(
+            `idempotency key ${command.requestId} was already used for a different request`,
+          );
+        if (requireActive && !currentRequest) {
+          const active = latestSupportedRun(
+            current.factoryEvents ?? [],
+            current.objectiveAuthority,
+          );
+          if (active?.runId !== runId)
+            throw new Error("Factory run authority changed before media decision publication");
+        }
+        const currentResolved = await this.resolveReadyAssetSet(current, command.assetSetDigest);
+        if (currentResolved.start.actor.toLowerCase() !== actor.toLowerCase())
+          throw new Error("media decision actor authority changed before publication");
+        if (
+          currentEvents.some(
+            (event) =>
+              event.kind === "media" &&
+              event.event === "AssetDecisionRecorded" &&
+              event.assetSetDigest === assetSet.digest &&
+              (event.decisionDigest !== decision.digest || event.requestId !== decision.requestId),
+          )
+        )
+          throw new Error("this asset set already has another authenticated review decision");
+        const durableDecision = await readAssetDecisionByAssetSet({
+          store: this.context.assetStore!,
+          authority,
+          runId,
+          assetSetDigest: assetSet.digest,
+        });
+        if (durableDecision && durableDecision.decision.digest !== decision.digest)
+          throw new Error("this asset set already has another durable review decision");
+        if (durableDecision) {
+          this.assertDecisionBinding(durableDecision.decision, currentResolved);
+          if (!currentRequest)
+            throw new Error("durable human media decision has no immutable request journal");
+          await this.assertCommitParents(currentRequest.commit, [currentResolved.stored.commit]);
+          await this.assertCommitParents(durableDecision.commit, [
+            currentResolved.stored.commit,
+            currentRequest.commit,
+          ]);
+        }
+      };
+      if (!exactReplay) {
+        const active = latestSupportedRun(
+          snapshot.factoryEvents ?? [],
+          snapshot.objectiveAuthority,
+        );
+        if (active?.runId !== runId)
+          throw new Error(
+            `Objective #${snapshot.number} has no active Factory run for this asset set`,
+          );
+      }
+      let storedRequest: Awaited<ReturnType<typeof persistMediaDecisionRequest>>;
+      try {
+        storedRequest = await persistMediaDecisionRequest({
+          store: this.context.assetStore!,
+          request,
+          parentOids: [storedSet.commit],
+          assertCurrent: () => assertCurrent(true),
+        });
+      } catch (error) {
+        const winner = await readMediaDecisionRequest({
+          store: this.context.assetStore!,
+          repository: authority.repository,
+          objective: command.objective,
+          requestId: command.requestId,
+        });
+        if (!winner) throw error;
+        if (canonicalAssetJson(winner.request) !== canonicalAssetJson(request))
+          throw new Error(
+            `idempotency key ${command.requestId} was already used for a different request`,
+            { cause: error },
+          );
+        storedRequest = { request: winner.request, ref: winner.ref, commit: winner.commit };
+      }
+      this.assertDecisionRequest(storedRequest.request, decision, resolved);
+      await this.assertCommitParents(storedRequest.commit, [storedSet.commit]);
+      const storedDecision = await persistAssetDecision({
+        store: this.context.assetStore!,
+        authority,
+        decision,
+        parentOids: [storedSet.commit, storedRequest.commit],
+        assertCurrent: () => assertCurrent(false),
+      });
+      let activationRecord: AssetActivation | undefined;
+      let activationResult:
+        | { digest: string; ref: string; commit: string; selectedDescriptorDigests: string[] }
+        | undefined;
+      if (decision.kind === "approved") {
+        const activation = createAssetActivation({
+          assetSet,
+          decision,
+          producerReservationOid: resolved.ready.reservationOid,
+        });
+        const existingActivation = await readAssetActivation({
+          store: this.context.assetStore!,
+          authority,
+          runId,
+          digest: activation.digest,
+        });
+        if (
+          existingActivation &&
+          canonicalAssetJson(existingActivation.record) !== canonicalAssetJson(activation)
+        )
+          throw new Error("durable media activation differs from the approved selection");
+        if (existingActivation)
+          await this.assertCommitParents(existingActivation.commit, [
+            storedDecision.commit,
+            ...activation.selected.map(({ storage }) => storage.readyCommit),
+          ]);
+        const storedActivation =
+          existingActivation ??
+          (await persistAssetActivation({
+            store: this.context.assetStore!,
+            authority,
+            activation,
+            parentOids: [
+              storedDecision.commit,
+              ...activation.selected.map(({ storage }) => storage.readyCommit),
+            ],
+            assertCurrent: () => assertCurrent(false),
+          }));
+        activationRecord = activation;
+        activationResult = {
+          digest: activation.digest,
+          ref: storedActivation.ref,
+          commit: storedActivation.commit,
+          selectedDescriptorDigests: activation.selected.map(({ descriptor }) => descriptor.digest),
+        };
+      }
+      const now = await this.context.store!.serverTime();
+      const event =
+        existingEvent ??
+        parseFactoryEvent({
+          protocol: PROTOCOL_V2,
+          kind: "media",
+          event: "AssetDecisionRecorded",
+          objective: command.objective,
+          runId,
+          sequence: nextEventSequence(events),
+          at: now.toISOString(),
+          workItem: resolved.ready.workItem,
+          attempt: assetSet.attempt,
+          reservationOid: resolved.ready.reservationOid,
+          invocationDigest: assetSet.invocationDigest,
+          assetSetDigest: assetSet.digest,
+          decisionDigest: decision.digest,
+          decisionKind: decision.kind,
+          requestId: command.requestId,
+          requestedBy: actor,
+          ...(reason ? { reason } : {}),
+        });
+      if (!existingEvent) {
+        await assertCurrent(false);
+        await this.context.store!.addIssueComment(
+          workItem.id,
+          encodeEventComment(`Factory recorded media decision \`${decision.kind}\`.`, event),
+        );
+      }
+      if (decision.kind === "approved" && activationResult && activationRecord) {
+        const activationSnapshot = await this.context.reader.readObjective(command.objective);
+        const activationEvents = this.allEvents(activationSnapshot);
+        const priorActivation = activationEvents.find(
+          (candidate) =>
+            candidate.kind === "media" &&
+            candidate.event === "AssetActivated" &&
+            candidate.decisionDigest === decision.digest,
+        );
+        if (priorActivation && priorActivation.activationDigest !== activationResult.digest)
+          throw new Error("media approval activation identity changed");
+        if (priorActivation)
+          this.assertActivationEvent(
+            priorActivation as MediaEvent,
+            activationRecord,
+            activationResult.commit,
+            resolved,
+          );
+        if (!priorActivation) {
+          await assertCurrent(false);
+          const fresh = await this.context.reader.readObjective(command.objective);
+          const activationEvent = parseFactoryEvent({
+            protocol: PROTOCOL_V2,
+            kind: "media",
+            event: "AssetActivated",
+            objective: command.objective,
+            runId,
+            sequence: nextEventSequence(this.allEvents(fresh)),
+            at: now.toISOString(),
+            workItem: resolved.ready.workItem,
+            attempt: assetSet.attempt,
+            reservationOid: resolved.ready.reservationOid,
+            invocationDigest: assetSet.invocationDigest,
+            assetSetDigest: assetSet.digest,
+            decisionDigest: decision.digest,
+            activationDigest: activationResult.digest,
+            activationCommitOid: activationResult.commit,
+          });
+          await this.context.store!.addIssueComment(
+            workItem.id,
+            encodeEventComment(
+              "Factory activated the approved immutable asset selection.",
+              activationEvent,
+            ),
+          );
+        }
+      }
+      let retryResult:
+        | {
+            requestId: string;
+            workItem: number;
+            priorAssetSetDigest: string;
+            priorDecisionDigest: string;
+            feedbackDigest: string;
+          }
+        | undefined;
+      if (storedRequest.request.retry) {
+        const retry = storedRequest.request.retry;
+        let retrySnapshot = await this.context.reader.readObjective(command.objective);
+        let retryEvents = this.allEvents(retrySnapshot).filter(
+          (candidate) => "requestId" in candidate && candidate.requestId === retry.requestId,
+        );
+        for (const candidate of retryEvents)
+          this.assertRevisionRetryEvent(candidate, storedRequest.request);
+        let retryEvent = retryEvents[0];
+        if (!retryEvent) {
+          await assertCurrent(false);
+          retrySnapshot = await this.context.reader.readObjective(command.objective);
+          retryEvents = this.allEvents(retrySnapshot).filter(
+            (candidate) => "requestId" in candidate && candidate.requestId === retry.requestId,
+          );
+          for (const candidate of retryEvents)
+            this.assertRevisionRetryEvent(candidate, storedRequest.request);
+          retryEvent = retryEvents[0];
+          if (!retryEvent) {
+            retryEvent = parseFactoryEvent({
+              protocol: PROTOCOL_V2,
+              kind: "run",
+              event: "WorkItemRetryRequested",
+              objective: command.objective,
+              runId,
+              sequence: nextEventSequence(this.allEvents(retrySnapshot)),
+              at: now.toISOString(),
+              requestedBy: actor,
+              requestId: retry.requestId,
+              workItem: retry.workItem,
+              reason: retry.feedback,
+              mediaRevision: {
+                decisionRequestId: decision.requestId,
+                assetSetDigest: retry.priorAssetSetDigest,
+                decisionDigest: retry.priorDecisionDigest,
+                feedbackDigest: retry.feedbackDigest,
+              },
+            });
+            await this.context.store!.addIssueComment(
+              retrySnapshot.id,
+              encodeEventComment(
+                "Factory authorized the bounded retry for this media revision.",
+                retryEvent,
+              ),
+            );
+          }
+        }
+        await this.notifyRequest(retryEvent);
+        retryResult = {
+          requestId: retry.requestId,
+          workItem: retry.workItem,
+          priorAssetSetDigest: retry.priorAssetSetDigest,
+          priorDecisionDigest: retry.priorDecisionDigest,
+          feedbackDigest: retry.feedbackDigest,
+        };
+      }
+      await this.notifyRequest(event);
+      return {
+        operation: this.assetDecisionOperation(decision.kind),
+        repository: authority.repository,
+        objective: command.objective,
+        runId,
+        producer: {
+          workItem: resolved.ready.workItem,
+          attempt: resolved.ready.attempt,
+          reservationOid: resolved.ready.reservationOid,
+        },
+        assetSetDigest: assetSet.digest,
+        decision: {
+          digest: decision.digest,
+          ref: storedDecision.ref,
+          commit: storedDecision.commit,
+          kind: decision.kind,
+          requestId: decision.requestId,
+          requestedBy: actor,
+          selectedDescriptorDigests: decision.selectedDescriptorDigests,
+          ...(reason ? { reason } : {}),
+        },
+        requestJournal: {
+          digest: storedRequest.request.digest,
+          ref: storedRequest.ref,
+          commit: storedRequest.commit,
+        },
+        ...(activationResult ? { activation: activationResult } : {}),
+        ...(retryResult ? { retry: retryResult } : {}),
+      };
+    });
+  }
+
+  private assetDecisionOperation(kind: AssetDecision["kind"]) {
+    if (kind === "approved") return "asset-approve" as const;
+    if (kind === "rejected") return "asset-reject" as const;
+    return "asset-revise" as const;
+  }
+
+  private assertDecisionRequest(
+    request: MediaDecisionRequest,
+    decision: AssetDecision,
+    resolved: { assetSet: AssetSet },
+  ) {
+    const expected = createMediaDecisionRequest({
+      authority: resolved.assetSet.authority,
+      decision,
+      ...(request.reason ? { reason: request.reason } : {}),
+    });
+    if (canonicalAssetJson(request) !== canonicalAssetJson(expected))
+      throw new Error("immutable media decision request differs from its Asset Set and decision");
+  }
+
+  private assertRevisionRetryEvent(event: FactoryEvent, request: MediaDecisionRequest) {
+    const retry = request.retry;
+    if (
+      !retry ||
+      event.kind !== "run" ||
+      event.event !== "WorkItemRetryRequested" ||
+      event.objective !== request.authority.objective ||
+      event.runId !== request.decision.runId ||
+      event.requestId !== retry.requestId ||
+      event.requestedBy.toLowerCase() !== request.decision.requestedBy.toLowerCase() ||
+      event.workItem !== retry.workItem ||
+      event.reason !== retry.feedback ||
+      canonicalAssetJson(event.mediaRevision) !==
+        canonicalAssetJson({
+          decisionRequestId: request.decision.requestId,
+          assetSetDigest: retry.priorAssetSetDigest,
+          decisionDigest: retry.priorDecisionDigest,
+          feedbackDigest: retry.feedbackDigest,
+        })
+    )
+      throw new Error("media revision retry differs from its immutable decision request");
+  }
+
+  private assertDecisionBinding(
+    decision: AssetDecision,
+    resolved: {
+      ready: MediaEvent;
+      assetSet: AssetSet;
+    },
+  ) {
+    const { ready, assetSet } = resolved;
+    if (
+      decision.runId !== ready.runId ||
+      decision.intentId !== assetSet.intentId ||
+      decision.intentDigest !== assetSet.intentDigest ||
+      decision.producerWorkItem !== ready.workItem ||
+      decision.producerAttempt !== ready.attempt ||
+      decision.producerReservationOid !== ready.reservationOid ||
+      decision.assetSetDigest !== assetSet.digest ||
+      decision.invocationDigest !== ready.invocationDigest ||
+      decision.storageManifestDigest !== assetSet.storageManifestDigest
+    )
+      throw new Error("durable media decision differs from authenticated asset-set authority");
+  }
+
+  private isExactDecisionEvent(
+    event: MediaEvent,
+    decision: AssetDecision,
+    resolved: { ready: MediaEvent; assetSet: AssetSet },
+  ) {
+    const reasonDigest = event.reason
+      ? createHash("sha256").update(event.reason).digest("hex")
+      : null;
+    return (
+      event.event === "AssetDecisionRecorded" &&
+      event.objective === resolved.ready.objective &&
+      event.runId === decision.runId &&
+      event.workItem === decision.producerWorkItem &&
+      event.attempt === decision.producerAttempt &&
+      event.reservationOid === decision.producerReservationOid &&
+      event.invocationDigest === decision.invocationDigest &&
+      event.assetSetDigest === decision.assetSetDigest &&
+      event.decisionDigest === decision.digest &&
+      event.decisionKind === decision.kind &&
+      event.requestId === decision.requestId &&
+      event.requestedBy?.toLowerCase() === decision.requestedBy.toLowerCase() &&
+      (decision.kind === "approved"
+        ? event.reason === undefined
+        : decision.kind === "rejected"
+          ? reasonDigest === decision.reasonDigest
+          : reasonDigest === decision.feedbackDigest)
+    );
+  }
+
+  private assertDecisionEvent(
+    event: MediaEvent,
+    decision: AssetDecision,
+    resolved: { ready: MediaEvent; assetSet: AssetSet },
+  ) {
+    if (!this.isExactDecisionEvent(event, decision, resolved))
+      throw new Error("authenticated media decision differs from its durable record");
+  }
+
+  private assertActivationEvent(
+    event: MediaEvent,
+    activation: AssetActivation,
+    activationCommit: string,
+    resolved: { ready: MediaEvent; assetSet: AssetSet },
+  ) {
+    if (
+      event.event !== "AssetActivated" ||
+      event.objective !== resolved.ready.objective ||
+      event.runId !== activation.runId ||
+      event.workItem !== activation.producerWorkItem ||
+      event.attempt !== activation.producerAttempt ||
+      event.reservationOid !== activation.producerReservationOid ||
+      event.invocationDigest !== resolved.assetSet.invocationDigest ||
+      event.assetSetDigest !== activation.assetSetDigest ||
+      event.decisionDigest !== activation.decisionDigest ||
+      event.activationDigest !== activation.digest ||
+      event.activationCommitOid !== activationCommit
+    )
+      throw new Error("authenticated media activation differs from its durable record");
+  }
+
+  private async assertCommitParents(commitOid: string, expectedParentOids: string[]) {
+    if (!this.context.assetStore) throw new Error("media asset storage is not configured");
+    const commit = await this.context.assetStore.readCommit(commitOid);
+    const observed = [...commit.parentOids].sort();
+    const expected = [...new Set(expectedParentOids)].sort();
+    if (commit.oid !== commitOid || canonicalAssetJson(observed) !== canonicalAssetJson(expected))
+      throw new Error("immutable media record has changed parent authority");
+  }
+
+  private async resolveReadyAssetSet(snapshot: ApplicationSnapshot, digest: string) {
+    if (!this.context.assetStore) throw new Error("media asset storage is not configured");
+    const events = this.allEvents(snapshot);
+    const readyEvents = events.filter(
+      (event) =>
+        event.kind === "media" &&
+        event.event === "AssetSetReady" &&
+        event.assetSetDigest === digest,
+    ) as MediaEvent[];
+    if (readyEvents.length !== 1)
+      throw new Error("asset set requires exactly one authenticated ready event");
+    const ready = readyEvents[0]!;
+    const starts = events.filter(
+      (event) =>
+        event.kind === "run" && event.event === "FactoryRunStarted" && event.runId === ready.runId,
+    );
+    if (starts.length !== 1) throw new Error("asset set run authority is ambiguous");
+    const start = starts[0]!;
+    if (start.kind !== "run" || start.event !== "FactoryRunStarted")
+      throw new Error("asset set run authority is invalid");
+    const reservations = events.filter(
+      (event) =>
+        event.kind === "attempt" &&
+        event.event === "AttemptReserved" &&
+        event.runId === ready.runId &&
+        event.workItem === ready.workItem &&
+        event.attempt === ready.attempt &&
+        event.mediaInvocation?.digest === ready.invocationDigest,
+    ) as AttemptEvent[];
+    if (reservations.length !== 1)
+      throw new Error("asset set producer reservation is missing or ambiguous");
+    const reservation = reservations[0]!;
+    const ref = attemptRef(snapshot.number, ready.workItem, ready.attempt);
+    if ((await this.context.assetStore.readRef(ref)) !== ready.reservationOid)
+      throw new Error("asset set ready event differs from the immutable producer reservation");
+    const reservationCommit = await this.context.assetStore.readCommit(ready.reservationOid);
+    const committedReservation = decodeEventTrailer(reservationCommit.message);
+    if (
+      reservationCommit.oid !== ready.reservationOid ||
+      reservationCommit.parentOids.length !== 1 ||
+      reservationCommit.parentOids[0] !== reservation.baseSha ||
+      committedReservation?.kind !== "attempt" ||
+      committedReservation.event !== "AttemptReserved" ||
+      canonicalAssetJson(committedReservation) !== canonicalAssetJson(reservation) ||
+      committedReservation.objective !== snapshot.number ||
+      committedReservation.runId !== ready.runId ||
+      committedReservation.workItem !== ready.workItem ||
+      committedReservation.attempt !== ready.attempt ||
+      committedReservation.mediaInvocation?.digest !== ready.invocationDigest ||
+      start.repository.toLowerCase() !==
+        `${this.context.owner}/${this.context.repo}`.toLowerCase() ||
+      committedReservation.mediaInvocation?.authorityBaseSha !== start.baseSha ||
+      start.policyDigest !== reservation.policyDigest
+    )
+      throw new Error("asset set producer reservation commit differs from authenticated evidence");
+    const authority = {
+      repository: `${this.context.owner}/${this.context.repo}`,
+      objective: snapshot.number,
+      baseSha: committedReservation.mediaInvocation.authorityBaseSha,
+    };
+    const stored = await readAssetSet({
+      store: this.context.assetStore,
+      authority,
+      runId: ready.runId,
+      digest,
+    });
+    if (!stored) throw new Error("authenticated asset set record is unavailable");
+    const assetSet = stored.record;
+    if (
+      stored.commit !== ready.assetSetCommitOid ||
+      canonicalAssetJson(assetSet.authority) !== canonicalAssetJson(authority) ||
+      assetSet.runId !== ready.runId ||
+      assetSet.workItem !== ready.workItem ||
+      assetSet.attempt !== ready.attempt ||
+      assetSet.invocationDigest !== ready.invocationDigest ||
+      reservation.mediaInvocation?.digest !== assetSet.invocationDigest ||
+      reservation.mediaInvocation.intentDigest !== assetSet.intentDigest
+    )
+      throw new Error("asset set differs from its authenticated ready evidence");
+    await this.assertCommitParents(
+      stored.commit,
+      assetSet.variants.map(({ storage }) => storage.readyCommit),
+    );
+    return { ready, reservation, start, authority, stored, assetSet };
   }
 
   doctor(objective: number, checkout?: string) {

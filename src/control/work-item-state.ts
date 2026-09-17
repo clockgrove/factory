@@ -2,7 +2,10 @@ import type { FactoryEvent } from "../protocol/events.js";
 import { COPILOT_ASSIGNEE_LOGIN, type WorkItemSnapshot, type WorkItemState } from "../types.js";
 
 export const RESERVATION_STALE_MS = 5 * 60_000;
-type WorkScopedEvent = Extract<FactoryEvent, { kind: "attempt" | "validation" | "budget" }>;
+type WorkScopedEvent = Extract<
+  FactoryEvent,
+  { kind: "attempt" | "validation" | "budget" | "media" }
+>;
 
 const assignedToCopilot = (workItem: WorkItemSnapshot) =>
   workItem.assignees.includes(COPILOT_ASSIGNEE_LOGIN);
@@ -12,7 +15,10 @@ const hasHumanAssignee = (workItem: WorkItemSnapshot) =>
 function eventsForCurrentAttempt(workItem: WorkItemSnapshot): WorkScopedEvent[] {
   const events = (workItem.factoryEvents ?? []).filter(
     (event): event is WorkScopedEvent =>
-      (event.kind === "attempt" || event.kind === "validation" || event.kind === "budget") &&
+      (event.kind === "attempt" ||
+        event.kind === "validation" ||
+        event.kind === "budget" ||
+        event.kind === "media") &&
       "workItem" in event &&
       event.workItem === workItem.number,
   );
@@ -39,7 +45,7 @@ function inconsistentAttempt(events: WorkScopedEvent[]): boolean {
   );
 }
 
-export function deriveV2State(
+export function deriveWorkItemState(
   workItem: WorkItemSnapshot,
   now: Date,
   reservationStaleMs = RESERVATION_STALE_MS,
@@ -61,6 +67,33 @@ export function deriveV2State(
 
   if (inconsistentAttempt(events)) return "inconsistent";
   if (assignedToCopilot(workItem)) return "inconsistent";
+  const mediaEvents = events.filter((event) => event.kind === "media");
+  if (mediaEvents.length) {
+    if (merged) return "inconsistent";
+    const cleanup = [...mediaEvents]
+      .reverse()
+      .find((event) => ["MediaCleanupFailed", "MediaCleanupCompleted"].includes(event.event));
+    if (cleanup?.event === "MediaCleanupFailed") return "in_flight";
+    const attemptEvents = events.filter((event) => event.kind === "attempt");
+    const terminalAttempt = [...attemptEvents]
+      .reverse()
+      .find((event) =>
+        ["AttemptFailed", "AttemptTimedOut", "AttemptCancelled"].includes(event.event),
+      );
+    if (terminalAttempt) return "failed";
+    const activation = mediaEvents.find((event) => event.event === "AssetActivated");
+    if (activation) return workItem.closed ? "done" : "for_review";
+    if (workItem.closed) return "inconsistent";
+    const decision = [...mediaEvents]
+      .reverse()
+      .find((event) => event.event === "AssetDecisionRecorded");
+    if (decision?.event === "AssetDecisionRecorded") {
+      if (decision.decisionKind === "approved") return "for_review";
+      return decision.decisionKind === "revision-requested" ? "failed" : "escalated";
+    }
+    if (mediaEvents.some((event) => event.event === "AssetSetReady")) return "for_review";
+    if (mediaEvents.some((event) => event.event === "MediaDispatchRecorded")) return "in_flight";
+  }
   if (workItem.closed && merged) return "done";
   const integrated = events.some(
     (event) => event.kind === "attempt" && event.event === "AttemptIntegrated",

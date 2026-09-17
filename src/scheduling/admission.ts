@@ -59,6 +59,7 @@ export interface PreviousQueueObservation {
 }
 
 export interface AdmissionWorkItem {
+  executionKind?: "repository" | "media";
   priority: RankedWorkItem;
   requirements: ExecutionRequirements;
   backends: readonly BackendCandidate[];
@@ -377,8 +378,9 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
       continue;
     }
 
-    const candidates = item.backends.filter((candidate) =>
-      input.policy.backendOrder.includes(candidate.id),
+    const candidates = item.backends.filter(
+      (candidate) =>
+        item.executionKind === "media" || input.policy.backendOrder.includes(candidate.id),
     );
     const configuredLocal = candidates.filter((candidate) => candidate.costClass === "local");
     const locallyCompatible = candidates.filter(
@@ -455,7 +457,7 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
     };
 
     let validation: NonNullable<AdmissionProposal["validation"]> | undefined;
-    if (item.requirements.trust !== "trusted_local") {
+    if (item.executionKind !== "media" && item.requirements.trust !== "trusted_local") {
       const selectedValidation = selectValidation();
       if (selectedValidation.rejection) {
         queued.push(selectedValidation.rejection);

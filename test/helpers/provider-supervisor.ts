@@ -29,6 +29,7 @@ import {
   type RunPolicy,
 } from "../../src/protocol/policy.js";
 import { parseFactoryEvent } from "../../src/protocol/events.js";
+import type { FactoryEvent } from "../../src/protocol/events.js";
 import {
   isCompiledRepositoryWorkItem,
   renderWorkPacket,
@@ -58,6 +59,7 @@ import { PlatformUnavailableError } from "../../src/platform.js";
 import { TOOLCHAIN_AUTHORITY_ADAPTERS } from "../../src/toolchains/authority.js";
 import * as artifactTransfers from "../../src/control/artifact-transfers.js";
 import { pnpmBootstrapLock } from "./pnpm-bootstrap.js";
+import type { MediaAdapterRegistry } from "../../src/media/adapter.js";
 
 export const LOCAL = "codex-sdk/local-worktree";
 export const DAYTONA = "codex-cli/daytona";
@@ -135,6 +137,9 @@ export interface ProviderFaults {
   workflowLiveBaseUnsafe?: boolean | "create" | "push";
   afterWorkflowCandidatePreparedSnapshot?: () => Promise<void>;
   compilerNpmAuthority?: boolean;
+  graphFactory?: (baseSha: string) => CompiledObjective;
+  mediaAdapterRegistry?: MediaAdapterRegistry;
+  afterComment?: (events: readonly FactoryEvent[]) => void;
 }
 
 export async function providerSupervisorFixture(
@@ -803,8 +808,9 @@ wheels = [
         }
       : {}),
   };
-  const graph: CompiledObjective =
-    faults.greenfieldBootstrap || faults.greenfieldLifecycle
+  const graph: CompiledObjective = faults.graphFactory
+    ? faults.graphFactory(baseSha)
+    : faults.greenfieldBootstrap || faults.greenfieldLifecycle
       ? {
           title: "Greenfield bootstrap qualification",
           deferredCapabilityAdapters: faults.greenfieldLifecycle ? ["node-pnpm"] : [],
@@ -1125,6 +1131,7 @@ wheels = [
       );
       target.factoryEvents!.push(...recordedReceipt);
       publishedComments.push({ commentId: String(nextCommentId++), node, body });
+      faults.afterComment?.(recordedReceipt);
       if (
         receipt.some(
           (event) =>
@@ -1822,6 +1829,9 @@ jobs:
         policy,
         managementBackend: management,
         backendRegistry: registry,
+        ...(faults.mediaAdapterRegistry
+          ? { mediaAdapterRegistry: faults.mediaAdapterRegistry }
+          : {}),
         repositoryResources: shared,
         ...(faults.repositoryFence ? { repositoryFence: faults.repositoryFence } : {}),
         ...(pollIntervalMs === null ? {} : { pollIntervalMs }),
@@ -1869,6 +1879,9 @@ jobs:
         policy,
         managementBackend: management,
         backendRegistry: registry,
+        ...(faults.mediaAdapterRegistry
+          ? { mediaAdapterRegistry: faults.mediaAdapterRegistry }
+          : {}),
         repositoryResources: shared,
         ...(faults.repositoryFence ? { repositoryFence: faults.repositoryFence } : {}),
         pollIntervalMs: 20,

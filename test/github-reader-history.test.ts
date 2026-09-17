@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { encodeEventComment } from "../src/control/receipts.js";
-import { deriveV2State } from "../src/control/v2-state.js";
+import { deriveWorkItemState } from "../src/control/work-item-state.js";
 import { GitHubReader } from "../src/github.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
@@ -248,7 +248,7 @@ describe("GitHubReader Work Item history", () => {
     const [workItem] = snapshot.workItems;
 
     expect(workItem?.factoryEvents?.map((event) => event.runId)).toEqual([priorRun, priorRun]);
-    expect(deriveV2State(workItem!, snapshot.readAt)).toBe("done");
+    expect(deriveWorkItemState(workItem!, snapshot.readAt)).toBe("done");
     expect(snapshot.copilotBotId).toBe("BOT_copilot");
     expect(snapshot.managedAgentActors).toEqual([
       { id: "BOT_copilot", login: "copilot-swe-agent", type: "Bot" },

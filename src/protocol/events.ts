@@ -5,6 +5,11 @@ import { LocalScopeBatchSchema } from "./local-scope.js";
 import { ReportedModelUsageSchema } from "./model-usage.js";
 import { ManagedRuntimeActivationSchema } from "./worker-packet.js";
 import {
+  AssetActivationBundleSchema,
+  MediaInvocationSchema,
+  MediaUsageSchema,
+} from "../media/contracts.js";
+import {
   FindingClassificationSchema,
   FindingDispositionSchema,
   FindingEvidenceReferenceSchema,
@@ -291,6 +296,15 @@ const RunControlAcknowledged = Common.extend({
   commandRequestId: safeId,
 });
 
+export const MediaRevisionRetryBindingSchema = z
+  .object({
+    decisionRequestId: safeId,
+    assetSetDigest: sha256Digest,
+    decisionDigest: sha256Digest,
+    feedbackDigest: sha256Digest,
+  })
+  .strict();
+
 const WorkItemRetryRequested = Common.extend({
   kind: z.literal("run"),
   event: z.literal("WorkItemRetryRequested"),
@@ -298,6 +312,13 @@ const WorkItemRetryRequested = Common.extend({
   requestId: safeId,
   workItem: z.number().int().positive(),
   reason: boundedText(8_000).optional(),
+  mediaRevision: MediaRevisionRetryBindingSchema.optional(),
+}).superRefine((value, context) => {
+  if (value.mediaRevision && !value.reason)
+    context.addIssue({
+      code: "custom",
+      message: "media revision retry requires its bounded feedback",
+    });
 });
 
 const WorkItemPriorityChanged = Common.extend({
@@ -383,6 +404,8 @@ const Attempt = Common.extend({
   localScopeBatch: LocalScopeBatchSchema.optional(),
   artifactConsumer: ArtifactConsumerBindingSchema.optional(),
   managedRuntimeActivation: ManagedRuntimeActivationSchema.optional(),
+  mediaInvocation: MediaInvocationSchema.optional(),
+  assetActivationBundle: AssetActivationBundleSchema.optional(),
   artifactDigest: sha256Digest.optional(),
   headSha: gitSha.optional(),
   sessionId: boundedText(500).optional(),
@@ -422,6 +445,26 @@ const Attempt = Common.extend({
       path: ["managedRuntimeActivation"],
       message: "managed runtime activation belongs only to an attempt reservation",
     });
+  if ((event.mediaInvocation || event.assetActivationBundle) && event.event !== "AttemptReserved")
+    context.addIssue({
+      code: "custom",
+      message: "media invocation and activation bundle belong only to an attempt reservation",
+    });
+  if (event.mediaInvocation && event.assetActivationBundle)
+    context.addIssue({
+      code: "custom",
+      message: "a producer invocation cannot also be a consumer activation reservation",
+    });
+  if (
+    event.mediaInvocation &&
+    (event.mediaInvocation.objective !== event.objective ||
+      event.mediaInvocation.runId !== event.runId ||
+      event.mediaInvocation.workItem !== event.workItem ||
+      event.mediaInvocation.attempt !== event.attempt ||
+      event.mediaInvocation.adapterId !== event.backend ||
+      event.mediaInvocation.policyDigest !== event.policyDigest)
+  )
+    context.addIssue({ code: "custom", message: "media invocation differs from its reservation" });
   if (
     event.artifactConsumer &&
     (event.event !== "AttemptReserved" ||
@@ -912,6 +955,77 @@ const Finding = Common.extend({
     });
 });
 
+const Media = Common.extend({
+  kind: z.literal("media"),
+  event: z.enum([
+    "MediaDispatchRecorded",
+    "AssetSetReady",
+    "AssetDecisionRecorded",
+    "AssetActivated",
+    "MediaUsageSettled",
+    "MediaCleanupCompleted",
+    "MediaCleanupFailed",
+  ]),
+  workItem: z.number().int().positive(),
+  attempt: z.number().int().positive(),
+  reservationOid: gitSha,
+  invocationDigest: sha256Digest,
+  dispatchReceiptDigest: sha256Digest.optional(),
+  dispatchCommitOid: gitSha.optional(),
+  assetSetDigest: sha256Digest.optional(),
+  assetSetCommitOid: gitSha.optional(),
+  decisionDigest: sha256Digest.optional(),
+  decisionKind: z.enum(["approved", "rejected", "revision-requested"]).optional(),
+  requestId: safeId.optional(),
+  requestedBy: boundedText(160).optional(),
+  activationDigest: sha256Digest.optional(),
+  activationCommitOid: gitSha.optional(),
+  accounting: z
+    .object({
+      providerRequests: z.number().int().min(0).max(64).nullable(),
+      variants: z.number().int().nonnegative().max(32).nullable(),
+      generatedBytes: z
+        .number()
+        .int()
+        .nonnegative()
+        .max(512 * 1024 * 1024)
+        .nullable(),
+      storageBytes: z
+        .number()
+        .int()
+        .nonnegative()
+        .max(512 * 1024 * 1024)
+        .nullable(),
+      native: z.array(MediaUsageSchema).max(32),
+    })
+    .strict()
+    .optional(),
+  reason: boundedText(8_000).optional(),
+}).superRefine((value, context) => {
+  const required = (...fields: Array<keyof typeof value>) => {
+    if (fields.some((field) => value[field] === undefined))
+      context.addIssue({ code: "custom", message: `${value.event} is incomplete` });
+  };
+  if (value.event === "MediaDispatchRecorded")
+    required("dispatchReceiptDigest", "dispatchCommitOid");
+  if (value.event === "AssetSetReady") required("assetSetDigest", "assetSetCommitOid");
+  if (value.event === "AssetDecisionRecorded")
+    required("assetSetDigest", "decisionDigest", "decisionKind", "requestId", "requestedBy");
+  if (
+    value.event === "AssetDecisionRecorded" &&
+    ((value.decisionKind === "approved" && value.reason !== undefined) ||
+      (value.decisionKind !== "approved" && value.reason === undefined))
+  )
+    context.addIssue({
+      code: "custom",
+      message: "media decision reason must be present exactly for rejection or revision",
+    });
+  if (value.event === "AssetActivated")
+    required("assetSetDigest", "decisionDigest", "activationDigest", "activationCommitOid");
+  if (value.event === "MediaUsageSettled") required("accounting");
+  if (value.event === "MediaCleanupFailed") required("reason");
+});
+
 export const FactoryEventSchema = z.union([
   RunStarted,
   RunTerminal,
@@ -941,6 +1055,7 @@ export const FactoryEventSchema = z.union([
   Budget,
   ProviderQuotaBlocked,
   Finding,
+  Media,
 ]);
 
 export type FactoryEvent = z.infer<typeof FactoryEventSchema>;
@@ -950,6 +1065,7 @@ export type DeliveryEvent = z.infer<typeof Delivery>;
 export type PublicationEvent = z.infer<typeof Publication>;
 export type ProviderQuotaEvent = z.infer<typeof ProviderQuotaBlocked>;
 export type FindingEvent = z.infer<typeof Finding>;
+export type MediaEvent = z.infer<typeof Media>;
 
 export function parseFactoryEvent(input: unknown): FactoryEvent {
   const record = FactoryEventSchema.parse(input);

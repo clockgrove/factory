@@ -20,6 +20,7 @@ import { listAttemptReservationRefs } from "./attempt-readers.js";
 export { listAttemptReservationRefs, readAttemptReservationRef } from "./attempt-readers.js";
 import type { LocalScopeBatch } from "../protocol/local-scope.js";
 import type { ManagedRuntimeActivation } from "../protocol/worker-packet.js";
+import type { AssetActivationBundle, MediaInvocation } from "../media/contracts.js";
 import { recoveryEventDigest } from "../recovery/identity.js";
 
 export interface AttemptStore {
@@ -62,6 +63,8 @@ export interface AttemptReservation {
   localScopeBatch?: LocalScopeBatch;
   artifactConsumer?: ArtifactConsumerBinding;
   managedRuntimeActivation?: ManagedRuntimeActivation;
+  mediaInvocation?: MediaInvocation;
+  assetActivationBundle?: AssetActivationBundle;
 }
 
 export interface AttemptAdmissionReceipt {
@@ -194,6 +197,8 @@ function parseReservation(ref: string, commit: GitCommitContent): AttemptReserva
     ...(event.managedRuntimeActivation
       ? { managedRuntimeActivation: event.managedRuntimeActivation }
       : {}),
+    ...(event.mediaInvocation ? { mediaInvocation: event.mediaInvocation } : {}),
+    ...(event.assetActivationBundle ? { assetActivationBundle: event.assetActivationBundle } : {}),
   };
 }
 
@@ -206,6 +211,8 @@ export interface AttemptAdmissionBinding {
   resourceIdentity: string;
   artifactConsumer?: ArtifactConsumerBinding;
   managedRuntimeActivation?: ManagedRuntimeActivation;
+  mediaInvocation?: MediaInvocation;
+  assetActivationBundle?: AssetActivationBundle;
 }
 
 export interface AttemptManagerOptions {
@@ -291,6 +298,10 @@ export class AttemptManager {
       ...(binding.managedRuntimeActivation
         ? { managedRuntimeActivation: binding.managedRuntimeActivation }
         : {}),
+      ...(binding.mediaInvocation ? { mediaInvocation: binding.mediaInvocation } : {}),
+      ...(binding.assetActivationBundle
+        ? { assetActivationBundle: binding.assetActivationBundle }
+        : {}),
     };
     parseFactoryEvent(event);
     const oid = await this.#store.createCommit({
@@ -345,6 +356,10 @@ export class AttemptManager {
       ...(binding.artifactConsumer ? { artifactConsumer: binding.artifactConsumer } : {}),
       ...(binding.managedRuntimeActivation
         ? { managedRuntimeActivation: binding.managedRuntimeActivation }
+        : {}),
+      ...(binding.mediaInvocation ? { mediaInvocation: binding.mediaInvocation } : {}),
+      ...(binding.assetActivationBundle
+        ? { assetActivationBundle: binding.assetActivationBundle }
         : {}),
     };
   }
@@ -455,6 +470,8 @@ export class AttemptManager {
         admission.managedRuntimeActivation,
         reservation.managedRuntimeActivation,
       ) ||
+      !isDeepStrictEqual(admission.mediaInvocation, reservation.mediaInvocation) ||
+      !isDeepStrictEqual(admission.assetActivationBundle, reservation.assetActivationBundle) ||
       admission.directorEpoch !== reservation.directorEpoch ||
       admission.writerEpoch > lease.epoch ||
       (admission.writerEpoch === lease.epoch && admission.currentWriterHolder !== lease.holder)

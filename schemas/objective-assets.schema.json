@@ -56,11 +56,12 @@
           "storage": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["protocol", "authority", "descriptorDigest", "payload", "transferRef", "transferRequestId", "intentCommit", "readyCommit", "digest"],
+            "required": ["protocol", "authority", "descriptorDigest", "transferDomain", "payload", "transferRef", "transferRequestId", "intentCommit", "readyCommit", "digest"],
             "properties": {
               "protocol": { "const": "clockgrove.factory/asset-storage-receipt" },
               "authority": { "$ref": "#/properties/authority" },
               "descriptorDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "transferDomain": { "enum": ["objective-asset", "produced-asset"] },
               "payload": { "$ref": "artifact.schema.json#/properties/payload" },
               "transferRef": { "type": "string", "minLength": 1, "maxLength": 500 },
               "transferRequestId": { "type": "string", "minLength": 1, "maxLength": 160 },

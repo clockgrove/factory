@@ -745,22 +745,7 @@ const jsonCompilerWorkItemProposal = (
   });
 const jsonMediaIntent = strictObject({
   id: jsonId,
-  kind: {
-    type: "string",
-    enum: [
-      "concept-reference",
-      "layout-reference",
-      "state-diagram",
-      "spatial-map",
-      "style-reference",
-      "sprite-sheet",
-      "reference-board",
-      "sound-reference",
-      "motion-reference",
-      "model-reference",
-      "acceptance-capture",
-    ],
-  },
+  role: jsonId,
   purpose: {
     type: "string",
     enum: ["decision-input", "implementation-reference", "product-asset", "acceptance-evidence"],
@@ -769,7 +754,26 @@ const jsonMediaIntent = strictObject({
   obligationIds: { ...stringArray(128, jsonEvalId), minItems: 1 },
   rationale: { type: "string", minLength: 1, maxLength: 2_000 },
   brief: jsonText,
-  importedAssetIds: { ...stringArray(32, jsonId), uniqueItems: true },
+  fulfillment: {
+    anyOf: [
+      strictObject({
+        kind: { type: "string", const: "imported" },
+        assetIds: { ...stringArray(32, jsonId), minItems: 1, uniqueItems: true },
+      }),
+      strictObject({
+        kind: { type: "string", const: "produced" },
+        inputRoleBindings: {
+          type: "array",
+          maxItems: 8,
+          items: strictObject({
+            roleId: jsonId,
+            importedAssetIds: { ...stringArray(32, jsonId), uniqueItems: true },
+            inputIntentIds: { ...stringArray(32, jsonId), uniqueItems: true },
+          }),
+        },
+      }),
+    ],
+  },
   output: strictObject({
     mediaTypes: {
       type: "array",
@@ -810,7 +814,6 @@ const jsonMediaIntent = strictObject({
   },
   bindings: {
     type: "array",
-    minItems: 1,
     maxItems: 64,
     items: strictObject({
       workItemId: jsonId,
@@ -866,17 +869,26 @@ const jsonCompilerMediaFacts = strictObject({
     maxItems: 16,
     items: strictObject({
       id: jsonId,
-      kinds: {
+      capabilityDigest: jsonDigest,
+      roles: {
         type: "array",
         minItems: 1,
         maxItems: 8,
-        items: jsonMediaIntent.properties.kind,
+        items: jsonId,
       },
       purposes: {
         type: "array",
         minItems: 1,
         maxItems: 4,
-        items: jsonMediaIntent.properties.purpose,
+        items: {
+          type: "string",
+          enum: [
+            "decision-input",
+            "implementation-reference",
+            "product-asset",
+            "acceptance-evidence",
+          ],
+        },
       },
       mediaTypes: {
         type: "array",
@@ -889,6 +901,33 @@ const jsonCompilerMediaFacts = strictObject({
           pattern:
             "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$",
         },
+      },
+      outputVisibility: { type: "string", enum: ["public", "private"] },
+      outputRightsBasis: {
+        type: "string",
+        enum: ["user-owned", "licensed", "permission-granted", "unknown"],
+      },
+      inputRoles: {
+        type: "array",
+        maxItems: 8,
+        items: strictObject({
+          id: jsonId,
+          mediaTypes: {
+            type: "array",
+            minItems: 1,
+            maxItems: 16,
+            items: {
+              type: "string",
+              minLength: 1,
+              maxLength: 160,
+              pattern:
+                "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$",
+            },
+          },
+          minimumCount: { type: "integer", minimum: 0, maximum: 32 },
+          maximumCount: { type: "integer", minimum: 0, maximum: 32 },
+          semantics: jsonId,
+        }),
       },
       maximumCount: { type: "integer", minimum: 1, maximum: 16 },
       raster: {
@@ -910,6 +949,59 @@ const jsonCompilerMediaFacts = strictObject({
     items: strictObject({
       id: jsonId,
       kind: { type: "string", const: "deterministic-preauthorized" },
+      producerCapabilityIds: { ...stringArray(16, jsonId), minItems: 1 },
+      roles: { ...stringArray(16, jsonId), minItems: 1 },
+      purposes: {
+        type: "array",
+        minItems: 1,
+        maxItems: 4,
+        items: {
+          type: "string",
+          enum: [
+            "decision-input",
+            "implementation-reference",
+            "product-asset",
+            "acceptance-evidence",
+          ],
+        },
+      },
+      mediaTypes: {
+        type: "array",
+        minItems: 1,
+        maxItems: 32,
+        items: {
+          type: "string",
+          minLength: 1,
+          maxLength: 160,
+          pattern:
+            "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$",
+        },
+      },
+      profiles: {
+        type: "array",
+        minItems: 1,
+        maxItems: 2,
+        items: { type: "string", enum: ["binary", "raster"] },
+      },
+      outputVisibilities: {
+        type: "array",
+        minItems: 1,
+        maxItems: 2,
+        items: { type: "string", enum: ["public", "private"] },
+      },
+      rightsBases: {
+        type: "array",
+        minItems: 1,
+        maxItems: 4,
+        items: {
+          type: "string",
+          enum: ["user-owned", "licensed", "permission-granted", "unknown"],
+        },
+      },
+      selectionStrategy: {
+        type: "string",
+        const: "activation-minimum-canonical",
+      },
     }),
   },
 });

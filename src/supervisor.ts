@@ -20157,14 +20157,16 @@ export class FactorySupervisor {
   }
 
   async #hasUnsettledMediaTerminalLiability(item: DerivedWorkItem): Promise<boolean> {
-    const packet = parseWorkerPacketFromIssue(item.body ?? "");
-    if (packet.deliverable.kind !== "asset-production") return false;
     const reservation = (await this.#attempts.list(this.#run.objective, item.number))
       .filter((candidate) => candidate.runId === this.#run.runId)
       .sort((left, right) => right.attempt - left.attempt)[0];
-    if (!reservation) return false;
-    if (!reservation.mediaInvocation)
-      throw new Error("asset-production reservation lacks its immutable media invocation");
+    // The immutable reservation is the media authority. Historical repository
+    // Work Items may not have a current Worker Packet envelope at all, so do
+    // not parse their issue bodies merely to prove that they are non-media.
+    if (!reservation?.mediaInvocation) return false;
+    const packet = parseWorkerPacketFromIssue(item.body ?? "");
+    if (packet.deliverable.kind !== "asset-production")
+      throw new Error("media reservation belongs to a non-media Worker Packet");
     const admission = (await this.#attempts.ledger.read(item.number))?.history.find(
       (entry) => entry.reservation.oid === reservation.oid,
     );

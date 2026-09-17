@@ -43,16 +43,23 @@ export interface LfsOutputTransport {
     repository: string,
     expectedRepository?: string,
     allowedNetworkDestinations?: string[],
-  ): Promise<{ toolVersion: string; remoteDigest: string; remoteHost: string }>;
+  ): Promise<{
+    toolVersion: string;
+    remoteDigest: string;
+    remoteHost: string;
+    endpoint: string;
+  }>;
   upload(args: {
     repository: string;
     object: PendingLfsObject;
+    endpoint: string;
   }): Promise<"uploaded" | "already-present">;
   read(args: {
     repository: string;
     object: Pick<PendingLfsObject, "path" | "oid" | "size">;
     resultTreeSha: string;
     baseSha: string;
+    endpoint: string;
   }): Promise<Buffer>;
 }
 
@@ -190,7 +197,14 @@ export async function finalizeLfsArtifact(args: {
   if (!pending?.length) return verifyArtifact(args.artifact);
   const transport = args.transport ?? new GitLfsOutputTransport();
   const receipts: LfsObjectReceipt[] = [];
-  let preflight: { toolVersion: string; remoteDigest: string; remoteHost: string } | undefined;
+  let preflight:
+    | {
+        toolVersion: string;
+        remoteDigest: string;
+        remoteHost: string;
+        endpoint: string;
+      }
+    | undefined;
   for (const object of [...pending].sort((left, right) => left.path.localeCompare(right.path))) {
     const identity = transferIdentity({
       authority: args.authority,
@@ -241,13 +255,18 @@ export async function finalizeLfsArtifact(args: {
         assertCurrent: args.assertCurrent,
       });
       await args.assertCurrent();
-      const uploadOutcome = await transport.upload({ repository: args.repositoryPath, object });
+      const uploadOutcome = await transport.upload({
+        repository: args.repositoryPath,
+        object,
+        endpoint: remote.endpoint,
+      });
       await args.assertCurrent();
       const downloaded = await transport.read({
         repository: args.repositoryPath,
         object,
         resultTreeSha: args.artifact.fileManifest!.resultTreeSha,
         baseSha: args.artifact.baseSha,
+        endpoint: remote.endpoint,
       });
       if (downloaded.length !== object.size || sha256(downloaded) !== object.oid)
         throw new Error("independently downloaded LFS object differs from uploaded raw bytes");
@@ -316,6 +335,22 @@ export async function restoreLfsArtifactContent(args: {
   artifact: NormalizedArtifact;
 }): Promise<void> {
   for (const receipt of args.artifact.lfsObjects ?? []) {
+    const observedReceipt = await readReceipt({
+      store: args.store,
+      ref: receipt.receiptRef,
+      expected: {
+        path: receipt.path,
+        oid: receipt.oid,
+        assignmentDigest: receipt.assignmentDigest,
+        baseSha: args.artifact.baseSha,
+      },
+    });
+    if (
+      !observedReceipt ||
+      observedReceipt.digest !== receipt.digest ||
+      JSON.stringify(observedReceipt) !== JSON.stringify(receipt)
+    )
+      throw new Error("durable LFS upload receipt differs from its artifact binding");
     const transfer = await recoverContentTransfer({
       store: args.store,
       identity: receipt.rawTransfer.identity,
@@ -376,7 +411,7 @@ export async function verifyMaterializedLfsContent(
   }
 }
 
-function lfsEnvironment(storage?: string): NodeJS.ProcessEnv {
+function lfsEnvironment(storage?: string, endpoint?: string): NodeJS.ProcessEnv {
   const environment = { ...process.env };
   for (const name of Object.keys(environment)) {
     if (
@@ -394,10 +429,15 @@ function lfsEnvironment(storage?: string): NodeJS.ProcessEnv {
   environment.GIT_TERMINAL_PROMPT = "0";
   environment.GCM_INTERACTIVE = "Never";
   environment.GIT_LFS_SKIP_SMUDGE = "1";
-  if (storage) {
-    environment.GIT_CONFIG_COUNT = "1";
-    environment.GIT_CONFIG_KEY_0 = "lfs.storage";
-    environment.GIT_CONFIG_VALUE_0 = storage;
+  delete environment.GIT_LFS_SKIP_PUSH;
+  const overrides = [
+    ...(storage ? [["lfs.storage", storage] as const] : []),
+    ...(endpoint ? [["lfs.url", endpoint] as const, ["lfs.pushurl", endpoint] as const] : []),
+  ];
+  if (overrides.length) environment.GIT_CONFIG_COUNT = String(overrides.length);
+  for (const [index, [key, value]] of overrides.entries()) {
+    environment[`GIT_CONFIG_KEY_${index}`] = key;
+    environment[`GIT_CONFIG_VALUE_${index}`] = value;
   }
   return environment;
 }
@@ -407,18 +447,68 @@ async function runLfs(args: {
   executable: string;
   command: string[];
   storage?: string;
+  endpoint?: string;
 }): Promise<string> {
   const result = await runContainedProcess({
     command: args.executable,
     args: args.command,
     cwd: resolve(args.repository),
-    env: lfsEnvironment(args.storage),
+    env: lfsEnvironment(args.storage, args.endpoint),
     timeoutMs: 120_000,
     maxOutputBytes: 64 * 1024,
   });
   if (result.exitCode !== 0 || result.timedOut)
     throw new Error("authenticated Git LFS operation failed; verify remote access and credentials");
   return result.stdout;
+}
+
+/** Resolve the effective origin endpoint reported by Git LFS, including .lfsconfig. */
+export function resolvedGitLfsEndpoint(args: {
+  environment: string;
+  expectedHost: string;
+  expectedRepository: string;
+}): string {
+  const endpointLines = [
+    ...args.environment.matchAll(/^Endpoint(?: \(origin\))?=(\S+)(?: \([^\n]*\))?$/gm),
+  ];
+  const endpoint =
+    endpointLines.find((match) => match[0].startsWith("Endpoint (origin)="))?.[1] ??
+    endpointLines.find((match) => match[0].startsWith("Endpoint="))?.[1];
+  if (!endpoint) throw new Error("Git LFS origin endpoint is unavailable");
+  let parsed: URL;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    throw new Error("Git LFS origin endpoint is invalid");
+  }
+  const host = args.expectedHost.toLowerCase();
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    (parsed.port && parsed.port !== "443") ||
+    parsed.hostname.toLowerCase() !== host
+  )
+    throw new Error("Git LFS origin endpoint is outside the authenticated repository authority");
+  const escapedRepository = args.expectedRepository.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!new RegExp(`^/${escapedRepository}(?:\\.git)?/info/lfs/?$`, "i").test(parsed.pathname))
+    throw new Error("Git LFS origin endpoint does not match the authenticated repository");
+  return endpoint;
+}
+
+export function assertLfsReceiptRemoteIdentity(
+  artifact: NormalizedArtifact,
+  remote: { toolVersion: string; remoteDigest: string },
+): void {
+  if (
+    (artifact.lfsObjects ?? []).some(
+      (receipt) =>
+        receipt.toolVersion !== remote.toolVersion || receipt.remoteDigest !== remote.remoteDigest,
+    )
+  )
+    throw new Error("Git LFS remote identity changed after artifact verification");
 }
 
 /** Direct Git LFS CLI adapter. It never invokes clean/smudge filters or hooks. */
@@ -470,13 +560,15 @@ export class GitLfsOutputTransport implements LfsOutputTransport {
         "--no-optional-locks",
         "config",
         "--get-regexp",
-        "^(lfs\\.url|remote\\.origin\\.lfsurl|lfs\\.customtransfer\\.)",
+        "^(lfs\\.(url|pushurl|storage|standalonetransferagent)|remote\\.origin\\.lfs(push)?url|lfs\\.customtransfer\\.)",
       ],
       cwd: resolve(repository),
       env: lfsEnvironment(),
       timeoutMs: 10_000,
       maxOutputBytes: 16 * 1024,
     });
+    if (custom.timedOut || (custom.exitCode !== 0 && custom.exitCode !== 1))
+      throw new Error("Git LFS configuration inspection failed");
     if (custom.exitCode === 0 && custom.stdout.trim())
       throw new Error(
         "custom Git LFS endpoints or transfer agents are outside the output capability",
@@ -498,15 +590,26 @@ export class GitLfsOutputTransport implements LfsOutputTransport {
     });
     if (readable.exitCode !== 0 || readable.timedOut)
       throw new Error("authenticated Git LFS origin read preflight failed");
-    await runLfs({ repository, executable: this.#tool.path, command: ["env"] });
+    const environment = await runLfs({
+      repository,
+      executable: this.#tool.path,
+      command: ["env"],
+    });
+    const repositoryName = remoteMatch[1]!;
+    const endpoint = resolvedGitLfsEndpoint({
+      environment,
+      expectedHost: host,
+      expectedRepository: repositoryName,
+    });
     return {
       toolVersion: this.#tool.version,
-      remoteDigest: digest({ remote: url, tool: this.#tool.version }),
+      remoteDigest: digest({ remote: url, endpoint, tool: this.#tool.version }),
       remoteHost: host,
+      endpoint,
     };
   }
 
-  async upload(args: { repository: string; object: PendingLfsObject }) {
+  async upload(args: { repository: string; object: PendingLfsObject; endpoint: string }) {
     this.#tool ??= await resolveGitLfsTool();
     const root = await mkdtemp(join(tmpdir(), "factory-lfs-upload-"));
     try {
@@ -527,6 +630,7 @@ export class GitLfsOutputTransport implements LfsOutputTransport {
         executable: this.#tool.path,
         command: ["push", "--object-id", "origin", args.object.oid],
         storage,
+        endpoint: args.endpoint,
       });
       return "uploaded" as const;
     } finally {
@@ -539,6 +643,7 @@ export class GitLfsOutputTransport implements LfsOutputTransport {
     object: Pick<PendingLfsObject, "path" | "oid" | "size">;
     resultTreeSha: string;
     baseSha: string;
+    endpoint: string;
   }) {
     this.#tool ??= await resolveGitLfsTool();
     const root = await mkdtemp(join(tmpdir(), "factory-lfs-read-"));
@@ -577,6 +682,7 @@ export class GitLfsOutputTransport implements LfsOutputTransport {
         executable: this.#tool.path,
         command: ["fetch", `--include=${args.object.path}`, "--exclude=", "origin", commit],
         storage,
+        endpoint: args.endpoint,
       });
       const path = join(
         storage,

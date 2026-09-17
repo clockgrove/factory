@@ -7,6 +7,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GitCommitObject } from "../src/control/lease.js";
+import {
+  artifactRecoveryCopyAvailable,
+  persistArtifactTransfer,
+} from "../src/control/artifact-transfers.js";
 import { releaseAllArtifactContent, sha256 } from "../src/execution/artifact-content.js";
 import {
   canonicalLfsPointer,
@@ -15,7 +19,9 @@ import {
 } from "../src/execution/artifacts.js";
 import {
   finalizeLfsArtifact,
+  resolvedGitLfsEndpoint,
   restoreLfsArtifactContent,
+  assertLfsReceiptRemoteIdentity,
   type LfsObjectStore,
   type LfsOutputTransport,
 } from "../src/publication/git-lfs-output.js";
@@ -31,7 +37,11 @@ afterEach(async () => {
 const gitOid = (bytes: Buffer) =>
   createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
 
-function memoryStore(): LfsObjectStore {
+interface TestLfsObjectStore extends LfsObjectStore {
+  deleteRefForTest(ref: string): boolean;
+}
+
+function memoryStore(): TestLfsObjectStore {
   const blobs = new Map<string, Buffer>();
   const trees = new Map<string, Map<string, string>>();
   const commits = new Map<string, GitCommitObject>();
@@ -56,7 +66,15 @@ function memoryStore(): LfsObjectStore {
     },
     createTree: async ({ entries }) => {
       const oid = createHash("sha1").update(JSON.stringify(entries)).digest("hex");
-      trees.set(oid, new Map(entries.map((entry) => [entry.path, entry.sha])));
+      const resolved = entries.map((entry) => {
+        const withContent = entry as typeof entry & { content?: string };
+        if (withContent.content === undefined) return [entry.path, entry.sha] as const;
+        const bytes = Buffer.from(withContent.content);
+        const blobOid = gitOid(bytes);
+        blobs.set(blobOid, bytes);
+        return [entry.path, blobOid] as const;
+      });
+      trees.set(oid, new Map(resolved));
       return oid;
     },
     createCommit: async ({ treeOid, parentOids, message }) => {
@@ -71,6 +89,7 @@ function memoryStore(): LfsObjectStore {
       refs.set(ref, oid);
       return true;
     },
+    deleteRefForTest: (ref: string) => refs.delete(ref),
   };
 }
 
@@ -155,6 +174,7 @@ function transport(
         toolVersion: "git-lfs/3.7.0",
         remoteDigest: "9".repeat(64),
         remoteHost: "github.com",
+        endpoint: "https://github.com/fixture/project.git/info/lfs",
       };
     }),
     upload,
@@ -210,6 +230,24 @@ describe("preconfigured Git LFS output normalization", () => {
     expect(receipt.rawTransfer.identity.domain).toBe("worker-artifact");
     expect(fake.upload).toHaveBeenCalledTimes(1);
     expect(fake.read).toHaveBeenCalledTimes(1);
+    expect(fake.upload).toHaveBeenCalledWith(
+      expect.objectContaining({ endpoint: "https://github.com/fixture/project.git/info/lfs" }),
+    );
+    expect(fake.read).toHaveBeenCalledWith(
+      expect.objectContaining({ endpoint: "https://github.com/fixture/project.git/info/lfs" }),
+    );
+    expect(() =>
+      assertLfsReceiptRemoteIdentity(finalized, {
+        toolVersion: receipt.toolVersion,
+        remoteDigest: receipt.remoteDigest,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertLfsReceiptRemoteIdentity(finalized, {
+        toolVersion: receipt.toolVersion,
+        remoteDigest: "7".repeat(64),
+      }),
+    ).toThrow(/remote identity changed/);
     const pointer = canonicalLfsPointer(receipt.oid, receipt.size);
     expect(finalized.fileManifest!.files[0]).toMatchObject({
       path: "asset.bin",
@@ -219,6 +257,32 @@ describe("preconfigured Git LFS output normalization", () => {
     expect(value.git("show", `${finalized.fileManifest!.resultTreeSha}:asset.bin`)).toBe(
       pointer.toString("utf8").trim(),
     );
+  });
+
+  it("accepts only the effective LFS endpoint for the authenticated repository", () => {
+    expect(
+      resolvedGitLfsEndpoint({
+        environment:
+          "Endpoint=https://github.com/fixture/project.git/info/lfs (auth=basic)\n" +
+          "Endpoint (origin)=https://github.com/fixture/project.git/info/lfs (auth=basic)\n",
+        expectedHost: "github.com",
+        expectedRepository: "fixture/project",
+      }),
+    ).toBe("https://github.com/fixture/project.git/info/lfs");
+    for (const endpoint of [
+      "https://objects.example.test/fixture/project.git/info/lfs",
+      "https://github.com/fixture/other.git/info/lfs",
+      "https://token@github.com/fixture/project.git/info/lfs",
+      "http://github.com/fixture/project.git/info/lfs",
+      "https://github.com/fixture/project.git/info/lfs?redirect=objects.example.test",
+    ])
+      expect(() =>
+        resolvedGitLfsEndpoint({
+          environment: `Endpoint (origin)=${endpoint} (auth=basic)\n`,
+          expectedHost: "github.com",
+          expectedRepository: "fixture/project",
+        }),
+      ).toThrow(/endpoint/);
   });
 
   it("fails missing config/auth and missing or corrupt independent reads before a receipt exists", async () => {
@@ -325,6 +389,58 @@ describe("preconfigured Git LFS output normalization", () => {
     expect(fake.upload).toHaveBeenCalledTimes(1);
     expect(fake.read).toHaveBeenCalledTimes(1);
     await expect(restoreLfsArtifactContent({ store, artifact: second })).resolves.toBeUndefined();
+    store.deleteRefForTest(second.lfsObjects![0]!.receiptRef);
+    await expect(restoreLfsArtifactContent({ store, artifact: second })).rejects.toThrow(
+      /durable LFS upload receipt/,
+    );
+  });
+
+  it("keeps the source until every raw LFS content transfer is independently recoverable", async () => {
+    const value = await fixture();
+    const bytes = Buffer.from("raw recovery boundary");
+    const collected = await collectRaw(value, "asset.bin", bytes);
+    const store = memoryStore();
+    const finalized = await finalizeLfsArtifact({
+      store,
+      artifact: collected,
+      authority,
+      repositoryPath: value.repository,
+      allowedNetworkDestinations: ["github.com"],
+      assertCurrent: async () => {},
+      transport: transport(bytes).value,
+    });
+    const identity = {
+      repository: authority.repository,
+      objective: authority.objective,
+      workItem: authority.workItem,
+      attempt: authority.attempt,
+      runId: authority.runId,
+      directorEpoch: authority.directorEpoch,
+      policyDigest: authority.policyDigest,
+      baseSha: finalized.baseSha,
+    };
+    await persistArtifactTransfer({
+      store,
+      identity,
+      artifact: finalized,
+      allowedPaths: finalized.changedPaths,
+      assertCurrent: async () => {},
+    });
+    await expect(
+      artifactRecoveryCopyAvailable({
+        store,
+        identity,
+        artifactDigest: finalized.digest,
+      }),
+    ).resolves.toBe(true);
+    store.deleteRefForTest(`${finalized.lfsObjects![0]!.rawTransfer.ref}/ready`);
+    await expect(
+      artifactRecoveryCopyAvailable({
+        store,
+        identity,
+        artifactDigest: finalized.digest,
+      }),
+    ).resolves.toBe(false);
   });
 
   it("recomputes pinned assignment and raw transfer identity bindings", async () => {

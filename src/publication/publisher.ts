@@ -30,6 +30,7 @@ import {
 } from "./merge-candidate.js";
 import {
   GitLfsOutputTransport,
+  assertLfsReceiptRemoteIdentity,
   verifyMaterializedLfsContent,
   type LfsOutputTransport,
 } from "./git-lfs-output.js";
@@ -371,12 +372,14 @@ export async function publishValidated(args: {
                 )
               )
                 throw new Error("Git LFS publication endpoint is outside run-policy egress");
+              assertLfsReceiptRemoteIdentity(args.artifact, remote);
               for (const receipt of args.artifact.lfsObjects) {
                 const bytes = await transport.read({
                   repository: args.repositoryPath,
                   object: receipt,
                   resultTreeSha: args.validation.evidence.outputTreeSha,
                   baseSha: args.artifact.baseSha,
+                  endpoint: remote.endpoint,
                 });
                 if (bytes.length !== receipt.size || sha256(bytes) !== receipt.oid)
                   throw new Error("remote LFS object changed before pointer publication");

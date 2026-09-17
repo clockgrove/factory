@@ -131,9 +131,11 @@ patch. The artifact digest binds sorted object receipts, pinned-assignment proof
 intent/ready commits, remote/tool identity, upload outcome and independent read verification. Replay
 observes those receipts and restores raw validation bytes from their bound content transfers; the
 Git index and validated result tree remain canonical pointers. Immediately before creating the
-feature ref, Factory reads each remote object again. Missing config or credentials, missing or
-corrupt objects, and changed assignment proofs therefore fail before pointer publication. Ordinary
-Git artifacts with no LFS receipts retain their existing artifact bytes and digest behavior.
+feature ref, Factory requires Git LFS's effective endpoint to remain the exact authenticated
+repository endpoint and tool identity bound in every receipt, pins both read and push operations to
+that endpoint, and reads each remote object again. Missing config or credentials, missing or corrupt
+objects, and changed assignment proofs therefore fail before pointer publication. Ordinary Git
+artifacts with no LFS receipts retain their existing artifact bytes and digest behavior.
 The current raw-payload hydration seam is host-local. Daytona and Vercel validators fail before
 provider creation when an artifact has LFS receipts; they do not validate pointer bytes as product
 bytes. Supporting them requires a generic bound content-chunk input in those validator contracts.

@@ -622,6 +622,7 @@ function validateCliResponse(response: Record<string, unknown>, durableUsage: un
         exitCode: processEvidence.exitCode,
         signal: processEvidence.signal,
         timedOut: processEvidence.timedOut,
+        durationMs: processEvidence.durationMs,
         stdout: stdout.content,
       });
     } catch {
@@ -916,14 +917,30 @@ function validateTranscript(
     !response ||
     expectation.transport !== "codex-cli-jsonl" ||
     !durableTerminal ||
-    !exactKeys(durableTerminal, ["state", "usage"])
+    !exactKeys(
+      durableTerminal,
+      durableTerminal.process === undefined ? ["state", "usage"] : ["state", "usage", "process"],
+    )
   )
     return null;
   const validatedResponse = validateCliResponse(response, result.payload.usage);
+  const durableProcess =
+    durableTerminal.process === undefined ? undefined : object(durableTerminal.process);
   if (
     !validatedResponse ||
     durableTerminal.state !== validatedResponse.state ||
     !sameValue(durableTerminal.usage, result.payload.usage) ||
+    (validatedResponse.process.timedOut &&
+      (!durableProcess ||
+        !sameFlatRecord(durableProcess, {
+          timedOut: true,
+          durationMs: validatedResponse.process.durationMs,
+        }))) ||
+    (durableProcess !== undefined &&
+      !sameFlatRecord(durableProcess, {
+        timedOut: validatedResponse.process.timedOut,
+        durationMs: validatedResponse.process.durationMs,
+      })) ||
     (validatedResponse.state === "succeeded"
       ? !providerOutputMatchesDurableResult(
           validatedResponse.parsedResponse,

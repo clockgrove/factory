@@ -32,7 +32,7 @@ import {
 } from "../control/compiler-drafts.js";
 import type { LeaseState } from "../control/lease.js";
 import { ProviderQuotaError } from "../providers/quota.js";
-import { managementFailureProvenance } from "../management/backend.js";
+import { managementFailureProvenance, managementTerminalOutcome } from "../management/backend.js";
 import {
   ObligationInventorySchema,
   repairableCompilerJudgeVerdict,
@@ -71,6 +71,14 @@ function safeValidationReport(error: unknown): CompilerValidationReport | null {
   return CompilerValidationReportSchema.safeParse(error.validationReport).data ?? null;
 }
 const TimestampSchema = z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const DraftStageSchema = z.enum(["inventory", "compile", "repair", "judge"]);
+export type DraftStage = z.infer<typeof DraftStageSchema>;
+const CompilerDiagnosticStageSchema = z.enum(["inventory", "proposal", "repair", "judge"]);
+export type CompilerDiagnosticStage = z.infer<typeof CompilerDiagnosticStageSchema>;
+
+export function compilerTimeoutDiagnosticStage(stage: DraftStage): CompilerDiagnosticStage {
+  return stage === "compile" ? "proposal" : stage;
+}
 
 const UsageSchema = z
   .object({
@@ -87,11 +95,33 @@ const DraftTerminalOutcomeSchema = z
   .object({
     state: z.enum(["succeeded", "provider-failed", "invalid-response"]),
     usage: UsageSchema.nullable(),
+    process: z
+      .object({
+        timedOut: z.literal(true),
+        durationMs: TimestampSchema,
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .refine((value) => value.state !== "succeeded" || value.usage !== null, {
     message: "successful provider terminal outcome requires exact usage",
   });
+const CompilerTimeoutDiagnosticSchema = z
+  .object({
+    kind: z.literal("compiler-timeout"),
+    stage: CompilerDiagnosticStageSchema,
+    evaluationTimeoutMs: z.number().int().positive().max(86_400_000),
+    observedDurationMs: TimestampSchema,
+    invocationId: safeId,
+    usage: z.enum(["exact", "unknown"]),
+  })
+  .strict();
+export type CompilerTimeoutDiagnostic = z.infer<typeof CompilerTimeoutDiagnosticSchema>;
+
+function compilerTimeoutDiagnosticMessage(diagnostic: CompilerTimeoutDiagnostic): string {
+  return `compiler timeout: stage=${diagnostic.stage}; evaluation timeout=${diagnostic.evaluationTimeoutMs}ms; observed duration=${diagnostic.observedDurationMs}ms; invocation=${diagnostic.invocationId}; usage: ${diagnostic.usage}`;
+}
 const CompilerInvocationProvenanceSchema = z
   .object({
     promptDigest: z.string().regex(/^[0-9a-f]{64}$/),
@@ -139,16 +169,29 @@ export class CompilerDraftAdmissionError extends Error {
 class CompilerDraftAccountingError extends Error {}
 export class CompilerDraftTerminalOutcomeError extends Error {
   readonly terminalOutcome: DraftTerminalOutcome;
+  readonly timeoutDiagnostic?: CompilerTimeoutDiagnostic;
 
   constructor(
     cause: unknown,
     terminalOutcome: DraftTerminalOutcome,
     provenance?: z.infer<typeof CompilerInvocationProvenanceSchema> | null,
+    timeoutDiagnostic?: CompilerTimeoutDiagnostic,
   ) {
-    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    const parsedDiagnostic = timeoutDiagnostic
+      ? CompilerTimeoutDiagnosticSchema.parse(timeoutDiagnostic)
+      : undefined;
+    super(
+      parsedDiagnostic
+        ? compilerTimeoutDiagnosticMessage(parsedDiagnostic)
+        : cause instanceof Error
+          ? cause.message
+          : String(cause),
+      { cause },
+    );
     this.name = "CompilerDraftTerminalOutcomeError";
     if (typeof cause === "object" && cause !== null) Object.assign(this, cause);
     this.terminalOutcome = DraftTerminalOutcomeSchema.parse(terminalOutcome);
+    if (parsedDiagnostic) this.timeoutDiagnostic = parsedDiagnostic;
     if (provenance) Object.assign(this, { provenance });
   }
 }
@@ -184,7 +227,6 @@ function retainedRepairableInvalidClaims(
   return parsed.data;
 }
 
-export type DraftStage = "inventory" | "compile" | "repair" | "judge";
 export interface ValidatedCompilerDraft {
   proposal: CompilerJudgeCandidate;
   objective: CompiledObjective;
@@ -270,7 +312,6 @@ const LimitsSchema = z
   })
   .strict();
 
-const DraftStageSchema = z.enum(["inventory", "compile", "repair", "judge"]);
 const DraftAdapterModeSchema = z.enum(["local", "provider"]);
 
 /** Pure grammar check for the whole immutable chain. It must run before replay causes effects. */
@@ -583,6 +624,10 @@ export function validateCompilerDraftJournal(
         record.payload.terminalOutcome === undefined
           ? undefined
           : DraftTerminalOutcomeSchema.parse(record.payload.terminalOutcome);
+      const timeoutDiagnostic =
+        record.payload.timeoutDiagnostic === undefined
+          ? undefined
+          : CompilerTimeoutDiagnosticSchema.parse(record.payload.timeoutDiagnostic);
       const cleanupDiagnostic =
         record.payload.cleanupDiagnostic === undefined
           ? undefined
@@ -596,6 +641,7 @@ export function validateCompilerDraftJournal(
           record.payload.providerQuota !== undefined ||
           record.payload.provenance !== undefined ||
           terminalOutcome !== undefined ||
+          timeoutDiagnostic !== undefined ||
           cleanupDiagnostic !== undefined
         )
           throw new Error("compiler pre-provider terminal payload is invalid");
@@ -619,11 +665,31 @@ export function validateCompilerDraftJournal(
           if (
             !terminalOutcome ||
             draftDigest(terminalOutcome.usage) !== draftDigest(usage) ||
-            (!hasError && terminalOutcome.state !== "succeeded")
+            (!hasError && terminalOutcome.state !== "succeeded") ||
+            (hasError && terminalOutcome.state === "succeeded")
           )
             throw new Error("compiler provider terminal outcome differs");
         } else if (terminalOutcome !== undefined) {
           throw new Error("local compiler result claims a provider terminal outcome");
+        }
+        if (terminalOutcome?.process?.timedOut === true) {
+          const expectedDiagnostic = {
+            kind: "compiler-timeout" as const,
+            stage: compilerTimeoutDiagnosticStage(DraftStageSchema.parse(intent.payload.stage)),
+            evaluationTimeoutMs: expected.limits.deadlineMs,
+            observedDurationMs: terminalOutcome.process.durationMs,
+            invocationId,
+            usage: usage === null ? ("unknown" as const) : ("exact" as const),
+          };
+          if (
+            !hasError ||
+            terminalOutcome.state !== "provider-failed" ||
+            !timeoutDiagnostic ||
+            draftDigest(timeoutDiagnostic) !== draftDigest(expectedDiagnostic)
+          )
+            throw new Error("compiler timeout diagnostic differs from terminal evidence");
+        } else if (timeoutDiagnostic !== undefined) {
+          throw new Error("compiler timeout diagnostic lacks timed-out process evidence");
         }
         if (cleanupDiagnostic !== undefined && (expected.adapterMode !== "provider" || !hasError))
           throw new Error("compiler cleanup diagnostic lacks a provider failure binding");
@@ -1056,12 +1122,20 @@ export async function runCompilerDraftLoop(args: {
       typeof providerQuotaResult.payload.cleanupDiagnostic === "string"
         ? boundedText(4_000).parse(providerQuotaResult.payload.cleanupDiagnostic)
         : undefined;
+    const timeoutDiagnostic =
+      providerQuotaResult.payload.timeoutDiagnostic === undefined
+        ? undefined
+        : CompilerTimeoutDiagnosticSchema.parse(providerQuotaResult.payload.timeoutDiagnostic);
     const recovered = new ProviderQuotaError(gate, {
       invocationId,
       ...(usage ? { usage } : {}),
       ...(cleanupDiagnostic ? { cause: new Error(cleanupDiagnostic) } : {}),
     });
     if (cleanupDiagnostic) Object.assign(recovered, { cleanupDiagnostic });
+    if (timeoutDiagnostic) {
+      recovered.message = compilerTimeoutDiagnosticMessage(timeoutDiagnostic);
+      Object.assign(recovered, { timeoutDiagnostic });
+    }
     throw recovered;
   }
   const conflicts = records.filter((item) => item.kind === "terminal-conflict");
@@ -1221,7 +1295,16 @@ export async function runCompilerDraftLoop(args: {
         completed.payload.preProviderTerminal === true
       )
         throw new Stop(completed.payload.stopReason);
-      if (completed.payload.usage === null) throw new Stop("accounting-unavailable");
+      if (completed.payload.usage === null) {
+        const timeoutDiagnostic = CompilerTimeoutDiagnosticSchema.safeParse(
+          completed.payload.timeoutDiagnostic,
+        );
+        throw new Stop(
+          timeoutDiagnostic.success
+            ? compilerTimeoutDiagnosticMessage(timeoutDiagnostic.data)
+            : "accounting-unavailable",
+        );
+      }
       if (typeof completed.payload.stopReason === "string")
         throw new Stop(completed.payload.stopReason);
       if (completed.payload.error)
@@ -1399,6 +1482,32 @@ export async function runCompilerDraftLoop(args: {
       error.bindInvocation(invocationId);
       const gate = ProviderQuotaCheckpointSchema.parse(error.gate);
       const usage = error.usage ? UsageSchema.parse(error.usage) : null;
+      const boundTerminalOutcome = managementTerminalOutcome(error);
+      const terminalOutcome = callbacks.reserveAtDispatch
+        ? DraftTerminalOutcomeSchema.parse(
+            boundTerminalOutcome ?? { state: "provider-failed" as const, usage },
+          )
+        : undefined;
+      if (
+        terminalOutcome &&
+        (terminalOutcome.state !== "provider-failed" ||
+          draftDigest(terminalOutcome.usage) !== draftDigest(usage))
+      )
+        throw new Error("compiler provider refusal terminal outcome differs");
+      const timeoutDiagnostic = terminalOutcome?.process?.timedOut
+        ? CompilerTimeoutDiagnosticSchema.parse({
+            kind: "compiler-timeout",
+            stage: compilerTimeoutDiagnosticStage(stage),
+            evaluationTimeoutMs: limits.deadlineMs,
+            observedDurationMs: terminalOutcome.process.durationMs,
+            invocationId,
+            usage: usage === null ? "unknown" : "exact",
+          })
+        : undefined;
+      if (timeoutDiagnostic) {
+        error.message = compilerTimeoutDiagnosticMessage(timeoutDiagnostic);
+        Object.assign(error, { timeoutDiagnostic });
+      }
       const cleanupDiagnostic =
         "cleanupDiagnostic" in error && typeof error.cleanupDiagnostic === "string"
           ? diagnostic(error.cleanupDiagnostic)
@@ -1413,7 +1522,14 @@ export async function runCompilerDraftLoop(args: {
               typeof savedProviderQuota.cleanupDiagnostic === "string"
                 ? diagnostic(savedProviderQuota.cleanupDiagnostic)
                 : null,
-          }) !== draftDigest({ gate, usage, cleanupDiagnostic: cleanupDiagnostic ?? null })
+            terminalOutcome: managementTerminalOutcome(savedProviderQuota),
+          }) !==
+          draftDigest({
+            gate,
+            usage,
+            cleanupDiagnostic: cleanupDiagnostic ?? null,
+            terminalOutcome: terminalOutcome ?? null,
+          })
         )
           throw new Error("conflicting compiler provider refusal checkpoint");
         return;
@@ -1425,12 +1541,13 @@ export async function runCompilerDraftLoop(args: {
         value: null,
         usage,
         ...timing(),
-        error: diagnostic(error),
+        error: timeoutDiagnostic
+          ? compilerTimeoutDiagnosticMessage(timeoutDiagnostic)
+          : diagnostic(error),
         providerQuota: gate,
         ...(cleanupDiagnostic ? { cleanupDiagnostic } : {}),
-        ...(callbacks.reserveAtDispatch
-          ? { terminalOutcome: { state: "provider-failed" as const, usage } }
-          : {}),
+        ...(terminalOutcome ? { terminalOutcome } : {}),
+        ...(timeoutDiagnostic ? { timeoutDiagnostic } : {}),
         ...(reservedExpectedProvenance
           ? { provenance: CompilerInvocationProvenanceSchema.parse(reservedExpectedProvenance) }
           : {}),
@@ -1493,6 +1610,10 @@ export async function runCompilerDraftLoop(args: {
             : error instanceof ProviderQuotaError && callbacks.reserveAtDispatch
               ? ({ state: "provider-failed", usage } as const)
               : undefined;
+        const timeoutDiagnostic =
+          error instanceof CompilerDraftTerminalOutcomeError && error.timeoutDiagnostic
+            ? CompilerTimeoutDiagnosticSchema.parse(error.timeoutDiagnostic)
+            : undefined;
         const stopCause = nestedCompilerDraftStop(error);
         const preProviderTerminal =
           stopCause !== null &&
@@ -1552,6 +1673,7 @@ export async function runCompilerDraftLoop(args: {
           ...retainedRepairability,
           ...(!preProviderTerminal && provenance ? { provenance } : {}),
           ...(!preProviderTerminal && terminalOutcome ? { terminalOutcome } : {}),
+          ...(!preProviderTerminal && timeoutDiagnostic ? { timeoutDiagnostic } : {}),
           ...(cleanupDiagnostic ? { cleanupDiagnostic } : {}),
           error: diagnostic(error),
           ...(providerQuota ? { providerQuota } : {}),
@@ -1568,7 +1690,12 @@ export async function runCompilerDraftLoop(args: {
           // before provider admission. Its explicit stop reason proves no model
           // accounting is expected for this invocation.
           throw stopCause;
-        } else if (!(error instanceof ProviderQuotaError)) throw new Stop("accounting-unavailable");
+        } else if (!(error instanceof ProviderQuotaError))
+          throw new Stop(
+            timeoutDiagnostic
+              ? compilerTimeoutDiagnosticMessage(timeoutDiagnostic)
+              : "accounting-unavailable",
+          );
         if (error instanceof ProviderQuotaError) throw error;
         if (stopCause) throw stopCause;
         throw error;

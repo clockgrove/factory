@@ -65,6 +65,10 @@ export interface ManagementUsage {
 export interface ManagementTerminalOutcome {
   state: "succeeded" | "provider-failed" | "invalid-response";
   usage: ManagementUsage | null;
+  process?: {
+    timedOut: true;
+    durationMs: number;
+  };
 }
 
 const managementFailureAuthorities = new WeakMap<

@@ -605,6 +605,7 @@ export interface ManagementCliProcessTerminal {
   exitCode: number | null;
   signal: string | null;
   timedOut: boolean;
+  durationMs?: number;
   stdout: string;
 }
 
@@ -612,6 +613,7 @@ export interface ManagementCliProcessFailure {
   error: Error;
   usage: ManagementUsage | null;
   providerQuota: ProviderQuotaError | null;
+  process?: { timedOut: true; durationMs: number };
 }
 
 /** Pure authority for CLI process-terminal classification and its exact diagnostic. */
@@ -623,7 +625,12 @@ export function classifyManagementCliProcessFailure(
     (process.exitCode !== null &&
       (!Number.isSafeInteger(process.exitCode) || process.exitCode < 0)) ||
     (process.signal !== null && !process.signal) ||
-    typeof process.timedOut !== "boolean"
+    typeof process.timedOut !== "boolean" ||
+    (process.durationMs !== undefined &&
+      (!Number.isFinite(process.durationMs) ||
+        process.durationMs < 0 ||
+        process.durationMs > Number.MAX_SAFE_INTEGER)) ||
+    (process.timedOut && process.durationMs === undefined)
   )
     throw new Error("management backend returned an invalid process terminal tuple");
   if (process.exitCode === 0 && process.signal !== null)
@@ -639,7 +646,14 @@ export function classifyManagementCliProcessFailure(
       ...(usage ? { usage } : {}),
       ...(invocationId ? { invocationId } : {}),
     });
-    return { error: providerQuota, usage, providerQuota };
+    return {
+      error: providerQuota,
+      usage,
+      providerQuota,
+      ...(process.timedOut && process.durationMs !== undefined
+        ? { process: { timedOut: true as const, durationMs: process.durationMs } }
+        : {}),
+    };
   }
   if (process.exitCode === 0 && process.signal === null && !process.timedOut) return null;
   const error = new Error(
@@ -649,6 +663,9 @@ export function classifyManagementCliProcessFailure(
     error: usage ? new ManagementOutputError(error, usage) : error,
     usage,
     providerQuota: null,
+    ...(process.timedOut && process.durationMs !== undefined
+      ? { process: { timedOut: true as const, durationMs: process.durationMs } }
+      : {}),
   };
 }
 
@@ -1519,16 +1536,17 @@ export class CodexCliManagementBackend implements ManagementBackend {
           exitCode: result.exitCode,
           signal: result.signal ?? null,
           timedOut: result.timedOut ?? false,
+          durationMs: result.durationMs,
           stdout: result.stdout,
         },
         invocationId,
       );
       if (processFailure) {
         const terminalError = processFailure.error;
-        bindManagementTerminalOutcome(
-          terminalError,
-          failedManagementOutcome("provider-failed", terminalError),
-        );
+        bindManagementTerminalOutcome(terminalError, {
+          ...failedManagementOutcome("provider-failed", terminalError),
+          ...(processFailure.process ? { process: processFailure.process } : {}),
+        });
         if (expectedProvenance) bindManagementFailureProvenance(terminalError, expectedProvenance);
         this.#finishTranscript(transcript, {
           state: "provider-failed",

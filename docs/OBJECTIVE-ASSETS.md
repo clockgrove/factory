@@ -51,37 +51,45 @@ adapter advertises the exact media type. The Codex CLI adapter currently maps su
 types to its image-input channel. Local paths and media bytes are never embedded in the prompt or
 GitHub issue.
 
-The model may return semantic `mediaIntents` for any supported media type. Concept and layout
-references, diagrams, sprites, sounds, motion, models, and acceptance captures are representative
-kinds. Each intent cites Objective obligations and directed Work Item bindings, declares required
-or helpful necessity, sets bounded media type and count constraints, optionally adds a typed raster
-profile, and requests human review or a policy-authorized deterministic rule. It cannot select
-providers, models, credentials, stores, URLs, network access, or execution authority.
+The model may return semantic `mediaIntents` for supported media types and producer roles advertised
+in the compiler request. Each intent cites Objective obligations and directed Work Item bindings,
+declares required or helpful necessity, sets bounded media type and count constraints, optionally
+adds a typed raster profile, and requests human review or a policy-authorized deterministic rule.
+The model selects imported manifest asset IDs and prior intent IDs under the capability-advertised
+roles in `inputRoleBindings`; Factory resolves those IDs and derives the exact descriptor digests.
+The model cannot select providers, models, credentials, stores, URLs, network access, descriptor
+digests, or execution authority.
 
 Factory first matches an intent against the selected imported manifest. A matching implementation
 reference becomes an exact `assetInputs` binding on the repository Work Item. Otherwise Factory may
-derive an `asset-production` Work Item only from an advertised producer capability. That Work Item
-has a `clockgrove.factory/asset-set` deliverable, no repository scope, no validation command, and a
-directed dependency according to whether it is an input or acceptance evidence. Required intents
-without an import or producer fail compilation deterministically; helpful intents may be omitted
-with an explicit projection-trace disposition.
+derive an `asset-production` Work Item only from an advertised producer capability whose output and
+input roles are fully satisfied. That Work Item has a `clockgrove.factory/asset-set` deliverable, no
+repository scope, and no validation command. The current produced-media path supplies reviewed
+inputs to downstream implementation or decisions. Repository-result acceptance evidence remains in
+the ordinary repository validation flow; producing new media after implementation as acceptance
+evidence is outside this path. A required unsupported intent fails compilation deterministically;
+a helpful intent may be omitted with an explicit projection-trace disposition.
 
 ## Produced asset lifecycle
 
 Asset production uses its own adapter contract and never enters the repository artifact, validation,
-or pull-request pipeline. The supported route is `sharp/local-raster-v1`, a deterministic local PNG
-producer with no network or paid provider call. Producer capabilities bind exact input and output
-MIME types, typed profiles, request and byte limits, egress, observation, cancellation, result
-collection, and native usage units. The compiler receives only the intersection of those registered
-capabilities with the immutable run policy. A compiled producer binds both the capability ID and
-digest, so a later adapter change cannot silently execute an older graph.
+or pull-request pipeline. The installed route is `sharp/local-raster-derivative-v1`, a deterministic
+local PNG derivative producer with no network or paid provider call. Its capability advertises the
+`raster-derivative` intent role, a required `source` input role, and private output with unknown
+rights. Producer capabilities bind exact input and output MIME types, typed profiles, request and
+byte limits, egress, observation, cancellation, result collection, and native usage units. The
+compiler receives only the intersection of those registered capabilities with the immutable run
+policy. A compiled producer binds both the capability ID and digest, so a later adapter change cannot
+silently execute an older graph.
 
 Before dispatch, `AttemptReserved` and the issue admission ledger bind the complete media invocation:
 the run, Work Item, attempt, intent and Worker Packet digests, adapter capability, exact inputs,
 model, quality, typed profile, deadline, policy, egress, and all limits. The admission transition to
 `dispatching` is the single launch marker. A refusal before it proves zero requests. After it, Factory
 never launches the invocation again. Recovery observes and collects the same invocation through its
-durable receipt or the local route's invocation identity. If exact observation is unavailable,
+durable receipt or the local route's invocation identity. Deterministic local recovery may compute
+only missing bytes in that same invocation's checkpoint, while preserving and verifying each
+completed variant; it never starts a new provider dispatch. If exact observation is unavailable,
 consumption stays unknown and replacement remains blocked.
 
 A successful adapter response is intermediate. Factory validates every variant against its MIME,
@@ -146,6 +154,8 @@ descriptor can therefore serve several semantic uses without duplicating its byt
 that exact activated packet from the reservation and refuses a changed descriptor, receipt,
 activation, producer, or consumer identity.
 
-The local route currently publishes produced descriptors as private with unknown rights. A later
-product-delivery stage must obtain policy-grounded public visibility and rights before public-repository
-delivery; it must not reinterpret these descriptors as publishable.
+The local route publishes immutable produced descriptors as private with unknown rights and does not
+advertise the `product-asset` purpose. Those descriptors cannot later acquire different visibility or
+rights. A future product producer must advertise lawful output authority, and policy must authorize
+that authority before dispatch; public delivery must not reinterpret this route's descriptors as
+publishable.

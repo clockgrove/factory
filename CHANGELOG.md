@@ -25,6 +25,10 @@ and artifacts, and record the commit SHA when installing from source.
 
 ### Documentation
 
+- Align the Initial Beta publication contract with its WSL2 local and GitHub Copilot scope, replace
+  the deferred Daytona/extra-host release rows with installed application qualification, and retain
+  those routes as separately tracked later qualification targets. ([#88](https://github.com/clockgrove/factory/issues/88))
+
 - Replace historical run ledgers with release procedures and supported-behavior guidance;
   keep raw qualification output outside Git and retain sanitized summaries with releases.
 

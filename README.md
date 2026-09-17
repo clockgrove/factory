@@ -23,9 +23,11 @@ GitHub Actions workflow, hosted service, or database is required.
 
 <a id="tldr"></a>
 
-Start in **Linux, Windows WSL2, or a Linux guest on macOS** with Node.js 20+, Git, GitHub CLI, and
-Codex CLI. The installation procedure is verified with Codex CLI 0.153.0; newer clients must expose
-the same plugin commands. Keep your target checkout and credentials inside the Linux environment.
+The Initial Beta target is **Windows WSL2**, with Node.js 20+, Git, GitHub CLI, and Codex CLI
+installed inside the Linux environment. Keep the target checkout, Factory state, and credentials on
+the Linux filesystem. Native Linux and a Linux guest hosted by macOS are implemented development
+targets whose live release qualification remains separately tracked. The installation procedure is
+verified with Codex CLI 0.153.0; newer clients must expose the same plugin commands.
 
 For the portable prompt layer, install Factory's three public skills directly from this repository:
 

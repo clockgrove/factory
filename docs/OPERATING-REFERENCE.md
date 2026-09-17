@@ -7,11 +7,16 @@ Start with the quick start before configuring an unattended run.
 
 ## Scope
 
-Factory executes on Linux. The supported host configurations are native Linux, a Linux distribution
+Factory executes on Linux. Its implemented host configurations are native Linux, a Linux distribution
 under Windows WSL2, and a Linux guest hosted by macOS. The repository, controller, worktrees, locks,
 and credentials stay inside the Linux filesystem. Native Win32 and native Darwin execution or
 service lifecycle are not targets; on macOS, Factory runs inside a Linux VM or equivalent Linux
 guest rather than as a `launchd` service.
+
+The current Initial Beta claim covers Windows WSL2 local execution and qualified GitHub Copilot
+managed execution. WSL2 is the only supported host configuration for that beta. Native Linux, a
+Linux guest hosted by macOS, and Daytona below are implemented targets with later live qualification;
+their presence in the package is not a support claim.
 
 Factory's target capabilities are:
 

@@ -17,12 +17,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { providerPolicy } from "../scripts/verify-provider-objective.mjs";
 
 const gates = [
-  "Linux environment matrix",
+  "WSL2 environment matrix",
   "Live adaptive scheduling matrix",
   "Live native-stack matrix",
-  "Real Daytona Objective",
-  "Managed-provider capability boundaries",
   "Objective-level adversarial E2E",
+  "Managed-provider capability boundaries",
+  "Installed application qualification",
 ];
 const subjects = [
   "dist/factory.js",
@@ -607,6 +607,14 @@ describe("release evidence and publication boundary", () => {
       index.gates.push({ gate: "invented", path: "0.json", sha256: "0".repeat(64) });
     write(path, JSON.stringify(index));
     expect(verify().status).not.toBe(0);
+  });
+
+  it("rejects a deferred provider gate in place of installed application qualification", () => {
+    const path = "release/evidence/index.json";
+    const index = JSON.parse(readFileSync(join(root, path), "utf8"));
+    index.gates[5].gate = "Real Daytona Objective";
+    write(path, JSON.stringify(index));
+    expect(verify().stderr).toContain("invalid release evidence index");
   });
 
   it.each(["escape", "absolute", "symlink", "directory"])("rejects %s evidence paths", (fault) => {

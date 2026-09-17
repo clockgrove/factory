@@ -2,6 +2,8 @@
 
 Date: 2026-09-04
 
+Amended: 2026-09-17 for the Initial Beta support boundary
+
 Status: accepted
 
 ## Context
@@ -10,21 +12,23 @@ Factory targets indie developers and small teams using one local computer, with 
 capacity. The scope prioritizes reliable local execution, bounded spending, and GitHub-native
 delivery over a broad catalog of integrations.
 
-Factory also needs a precise platform statement. Windows WSL2 and a Linux guest on macOS are Linux
-execution environments; supporting those does not imply native Win32 or Darwin lifecycle support.
+Factory also needs a precise first-public-release statement. Implementing a host or provider route
+does not make it part of the Initial Beta support claim before its live qualification passes.
 
 ## Decision
 
-The scope includes:
+The Initial Beta scope includes:
 
 - the Agent Plugin and `@clockgrove/factory` npm CLI/controller;
-- Linux execution on native Linux, Windows WSL2, or a Linux guest hosted by macOS;
+- Linux execution under Windows WSL2, with Factory state and repositories in the Linux filesystem;
 - Codex SDK local workers, Codex CLI fallback, and adaptive single-host admission;
 - fair same-host multi-Objective sharing and durable explicit Codex App Server sessions;
-- GitHub Copilot and OpenAI Codex managed agents;
-- Daytona as the supported third-party sandbox;
+- qualified GitHub Copilot managed execution, with its documented operator boundary;
+- explicit refusal of OpenAI Codex managed execution until an authoritative provider identity and
+  lifecycle interface are implemented and qualified;
 - concurrent regular and native stacked GitHub pull requests;
-- local LFS detection/tooling, binary/media manifests, and bounded large-file transport; and
+- local LFS detection/tooling, binary/media manifests, and bounded large-file transport;
+- installed application qualification through the Clockgrove pilot; and
 - GitHub-only durable orchestration with no required workflow, UI, or hosted Factory service.
 
 Every claimed supported capability passes the applicable deterministic, security, recovery, package,
@@ -35,16 +39,19 @@ Session/resource caps are not guaranteed dollar caps, unknown costs remain unava
 billing settlement finality is not required. Exact active-compute and cleanup evidence remains required
 before releasing resource obligations or admitting unsafe replacements.
 
-Vercel Sandbox and additional provider/harness adapters are Labs. Native Win32
-and Darwin lifecycle/execution and multi-machine local clusters are out of scope.
+Native Linux, a Linux guest hosted by macOS, and Daytona retain implemented routes and deterministic
+coverage but remain later qualification targets. Vercel Sandbox and additional provider/harness
+adapters are Labs. Native Win32 and Darwin lifecycle/execution and multi-machine local clusters are
+out of scope.
 
 ## Consequences
 
 - `CONFORMANCE.md` records verification results and remaining gaps.
-- Daytona retains its live release gate. **Managed-provider capability boundaries** requires exact
-  evidence for each provider's claimed behavior and explicit limits for unavailable features; it does
-  not require every managed provider to offer the same API. Vercel remains Labs; explicit App Server
-  session recovery retains its supported-route qualification and documented provider limitations.
+- **Managed-provider capability boundaries** requires exact evidence for each provider's claimed
+  Initial Beta behavior and explicit limits for unavailable features; it does not require every
+  managed provider to offer the same API. Daytona moves to its separately tracked later-provider
+  qualification. Vercel remains Labs; explicit App Server session recovery retains its
+  supported-route qualification and documented provider limitations.
 - Copilot has limited automation, including an operator boundary when exact-session termination cannot
   be automated. Codex managed execution remains unavailable until an authoritative identity and real
   provider-specific lifecycle interface are implemented and qualified; a display name is not identity.
@@ -52,6 +59,7 @@ and Darwin lifecycle/execution and multi-machine local clusters are out of scope
 - Application dogfood retains the complete scenario coverage in implementation-plan Wave 8.
   The rich-media appendix supplies generic acceptance inputs, not an exclusion from that gate;
   a bounded first pilot cannot discharge the remaining application scenarios.
-- The `systemd` lifecycle runs inside Linux even when Windows or macOS hosts that environment.
+- The Initial Beta `systemd` lifecycle runs inside WSL2 Linux. Later host qualification exercises
+  the same Linux service contract without implying native Win32 or Darwin lifecycle support.
 - Plugin and npm artifacts are versioned and verified together; neither installation starts the
   controller or mutates a repository.

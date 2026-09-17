@@ -8,14 +8,18 @@ A plugin cannot start a stopped process or wake a powered-off host. Operators wh
 login or reboot can explicitly configure their operating system to restart the same command. Factory
 does not install or enable a daemon during plugin installation.
 
-## Supported environment boundary
+## Runtime environment boundary
 
-Factory's runtime target is Linux. The same `systemd` lifecycle applies in three supported host
+Factory's runtime target is Linux. The same `systemd` lifecycle is implemented for three host
 configurations:
 
 - native Linux;
 - a Linux distribution under Windows WSL2; and
 - a Linux VM or equivalent Linux guest hosted by macOS.
+
+The Initial Beta supports the WSL2 configuration. Native Linux and a Linux guest hosted by macOS
+remain implemented targets pending their later live qualification; package availability alone does
+not make them supported Initial Beta hosts.
 
 In every case, run the controller, Git, Node.js, Codex SDK/CLI runtime, and validation tools inside
 Linux. Keep the repository, worktrees, Factory state, sockets, and locks on the Linux filesystem. On WSL2 this

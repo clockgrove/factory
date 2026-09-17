@@ -2,8 +2,8 @@
 
 Factory's [design contract](DESIGN.md#definition-of-done) defines the intended behavior.
 Implementation tests and installed release qualification establish different things: a passing
-component test does not prove a complete host matrix, recovery scenario, or live provider route.
-Full release qualification remains unfinished. The [Factory Project](https://github.com/orgs/clockgrove/projects/1)
+component test does not prove the selected host, recovery scenario, or live provider route.
+Initial Beta qualification remains unfinished. The [Factory Project](https://github.com/orgs/clockgrove/projects/1)
 and [qualification issues](https://github.com/clockgrove/factory/issues?q=is%3Aissue+is%3Aopen+qualification)
 own current work; this document defines requirements, not a candidate status ledger.
 
@@ -12,8 +12,8 @@ own current work; this document defines requirements, not a candidate status led
 Release qualification must cover installation without lifecycle scripts or required repository
 configuration; explicit durable activation through chat or CLI; fair, bounded scheduling of
 independent pipelines; repository-grounded compilation of scope, dependencies, resources,
-validation, and topology; isolated, attributable and recoverable local sessions; optional,
-local-first, atomically budgeted cloud burst; correct linear-stack and sibling/join delivery;
+validation, and topology; isolated, attributable and recoverable local sessions; bounded
+GitHub Copilot execution under explicit provider authority; correct linear-stack and sibling/join delivery;
 independent validation of every published SHA; explainable scheduling, accounting and delivery
 decisions; and reconstruction of meaningful state from GitHub without a private database or queue.
 The installed [application qualification](APPLICATION-QUALIFICATION.md) is part of this acceptance.
@@ -48,8 +48,8 @@ exception for later evidence-only commits. If the candidate or artifact changes,
 candidate; do not relabel an earlier observation. Repeated readiness checks preserve the tested
 artifacts. The release tag stays on its original commit.
 
-The integrated release suite requires Linux, systemd 254 or newer, and a reachable user manager,
-including on WSL2. Diagnose the user bus with
+The integrated Initial Beta release suite requires Windows WSL2, systemd 254 or newer, and a
+reachable Linux user manager. Diagnose the user bus with
 `systemctl --user show --property=Version --value --no-pager`; passing that preflight does not
 replace real transient-scope containment tests. Package checks install an isolated staged plugin
 and npm tarball and exercise their executable surfaces without the development worktree's
@@ -72,12 +72,12 @@ content hashes alone do not prove behavior.
 
 | Gate | Required acceptance |
 | --- | --- |
-| Linux environment matrix | Exercise SDK execution and CLI fallback, adaptive scheduling and pressure, cancellation, restart, service install/uninstall, and clean validation on native Linux, Windows WSL2, and a Linux guest hosted by macOS. Native Win32 and Darwin are outside this gate. Include the explicit App Server route's installed [session acceptance](CODEX-APP-SERVER-SESSIONS.md#qualification-still-required); component tests do not establish same-attempt terminal recovery. |
-| Live adaptive scheduling matrix | Qualify independent Objective concurrency, ready-task ordering, CPU/memory pressure, organization field edits, phase-kill recovery, inner Director races, authorized paid burst, and the host matrix. Separate ordinary throughput from service election and same-Objective contention fault cases. See [adaptive scheduling](ADAPTIVE-SCHEDULING.md). |
+| WSL2 environment matrix | On Windows WSL2 with repositories and Factory state in the Linux filesystem, exercise SDK execution and CLI fallback, adaptive scheduling and pressure, cancellation, restart, service install/uninstall, and clean validation. Include the explicit App Server route's installed [session acceptance](CODEX-APP-SERVER-SESSIONS.md#qualification-still-required); component tests do not establish same-attempt terminal recovery. Native Linux and a Linux guest hosted by macOS remain later portability qualification rather than Initial Beta claims. |
+| Live adaptive scheduling matrix | On the qualified WSL2 host, exercise independent Objective concurrency, ready-task ordering, CPU/memory pressure, phase-kill recovery, inner Director races, and exact explain/replay observations. Separate ordinary throughput from service election and same-Objective contention fault cases. Organization-field mutation and paid burst remain separately tracked capabilities. See [adaptive scheduling](ADAPTIVE-SCHEDULING.md). |
 | Live native-stack matrix | Exercise installed Supervisor create/extend, response-loss replay, cascading exact-head validation/review, branch-rule enforcement, partial merge, rebase/tree preservation, restart, cancellation, cleanup, and regular-PR fallback. Optional merge-queue integration is tracked in [#223](https://github.com/clockgrove/factory/issues/223); required queues must never be bypassed. |
-| Real Daytona Objective | Qualify real paid creation, local/cloud sibling overlap, independent validation and integration, cancellation, restart/accounting reconciliation, TTL, restricted egress, named-secret brokerage, and leak cleanup. Credential-free simulations do not satisfy this gate. See [provider qualification](PROVIDER-QUALIFICATION.md). |
-| Managed-provider capability boundaries | Record provider-specific installed evidence: Copilot requires exact task/head identity, independent validation, native admission and terminal-session proof; operator-assisted stop limitations stay explicit. Managed Codex is unavailable and must deny launch while preserving local startup. Missing credentials do not prove an unsupported interface. Qualify every advertised execution capability; invoice settlement is not required, but unknown execution/resource obligations remain fenced. See [provider qualification](PROVIDER-QUALIFICATION.md). |
 | Objective-level adversarial E2E | Run a disposable multi-wave Objective through compilation, parallel local execution, independent validation, integration, restart recovery, cancellation, failed checks, conflict, budget exhaustion, and final closure. Independently verify accounting and resource cleanup. Keep destructive failure injection in disposable repositories. |
+| Managed-provider capability boundaries | Record provider-specific installed evidence: Copilot requires exact task/head identity, independent validation, native admission and terminal-session proof; operator-assisted stop limitations stay explicit. Managed Codex is unavailable and must deny launch while preserving local startup. Missing credentials do not prove an unsupported interface. Qualify every Initial Beta execution capability; invoice settlement is not required, but unknown execution/resource obligations remain fenced. See [provider qualification](PROVIDER-QUALIFICATION.md). |
+| Installed application qualification | Run Factory through the exact installed plugin on real Clockgrove application work. Cover the retained dependency, concurrency, artifact, constrained-resource, delivery/recovery, human-decision, and economic-decomposition scenarios, including the media-agnostic composition tracked by [#414](https://github.com/clockgrove/factory/issues/414). Bind the evidence to one exact candidate and keep private application inputs and operational records out of public release evidence. See [application qualification](APPLICATION-QUALIFICATION.md). |
 
 ### Recording evidence
 
@@ -90,7 +90,7 @@ The verifier reads `release/evidence/index.json`, not this Markdown document. Th
   "releaseManifestSha256": "SHA256_OF_RELEASE_MANIFEST",
   "gates": [
     {
-      "gate": "Linux environment matrix",
+      "gate": "WSL2 environment matrix",
       "path": "linux.json",
       "sha256": "SHA256_OF_GATE_RECORD"
     }
@@ -104,7 +104,7 @@ entry for every gate above. Each entry references a schema-2 gate record:
 ```json
 {
   "schema": 2,
-  "gate": "Linux environment matrix",
+  "gate": "WSL2 environment matrix",
   "status": "passed",
   "commit": "FULL_TESTED_COMMIT_SHA",
   "releaseManifestSha256": "SHA256_OF_RELEASE_MANIFEST",
@@ -170,12 +170,15 @@ release attachment bound to the unchanged version tag, source commit, and publis
 digests. If it fails, document the failure and prepare a new version; never overwrite the release.
 See [release delivery](DELIVERY-PLAN.md#recording-evidence-and-publishing) for retention guidance.
 
-## Supported and experimental routes
+## Initial Beta scope and later routes
 
 The explicit Codex App Server route is supported local implementation with installed session
 qualification still required. Unsupported cold repair turns remain a provider boundary.
-Vercel Sandbox and harness-native child workers are Labs integrations: retain deterministic tests,
-but missing live evidence does not block the initial release scope.
+The Initial Beta support claim is Windows WSL2 local execution plus qualified GitHub Copilot
+managed execution. Native Linux, a Linux guest hosted by macOS, and Daytona retain their
+implementation and deterministic coverage but require their separately tracked live qualification
+before a later release claims those routes. Vercel Sandbox and harness-native child workers remain
+Labs integrations. Missing evidence for those later or Labs routes does not block Initial Beta.
 
 No procedure here authorizes publication or paid execution. A real paid-provider run requires
 explicit authority naming the provider, target, maximum billable units, and cleanup boundary.

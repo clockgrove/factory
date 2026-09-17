@@ -57,6 +57,11 @@ Windows and macOS may host or access the Linux environment, but native Win32 and
 process management, worktrees, credential handling, and service lifecycle are not supported targets.
 Coordinating a pool of multiple local computers is also out of scope.
 
+The Initial Beta support claim is narrower than this implementation target: Windows WSL2 local
+execution plus qualified GitHub Copilot managed execution. Native Linux, a Linux guest hosted by
+macOS, and Daytona require their separately tracked live qualification before a later release may
+claim them. [`CONFORMANCE.md`](CONFORMANCE.md) is the canonical current release gate.
+
 The product scope includes both the Agent Plugins package and the `@clockgrove/factory` npm
 CLI/controller, Codex SDK local execution with Codex CLI fallback, Daytona sandbox burst, GitHub
 Copilot and OpenAI Codex managed-agent integration targets, and regular or native stacked
@@ -1703,13 +1708,17 @@ different activation or successor inherits it. Once a run is already active when
 is observed, the existing actor-authenticated run cancellation protocol applies. Terminal history
 does not become a new pending activation.
 
-The target environment is Linux: native Linux, Windows WSL2, or a Linux guest hosted by macOS.
+The implementation target is Linux: native Linux, Windows WSL2, or a Linux guest hosted by macOS.
 Codex SDK is the preferred local route and Codex CLI is its supported portable fallback. Daytona and
 available managed-provider capabilities extend local execution under explicit paid-backend policies.
 Qualify a provider before claiming execution support; document unsupported capabilities instead of
 requiring unavailable APIs to pass a global release gate. The managed-provider capability-boundary
 gate still requires evidence that declarations, admission refusal and supported claims agree.
 Recovery preserves the original recorded policy.
+
+Initial Beta qualifies the WSL2 and GitHub Copilot subset described in
+[`CONFORMANCE.md`](CONFORMANCE.md). Implemented later host and provider routes remain unclaimed until
+their own live gates pass.
 
 Release evidence and open gates are listed in
 [`CONFORMANCE.md`](CONFORMANCE.md). Optional host restart configuration is documented in

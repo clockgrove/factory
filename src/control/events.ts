@@ -692,6 +692,22 @@ export class LifecycleRecorder {
   }): Promise<FactoryEvent> {
     await this.leases.assertMutationAuthorized(args.lease);
     assertReservationLease(args.reservation, args.lease);
+    assertValidationInvocationAuthority(args.reservation, args.invocation);
+    const scope = args.localScopeBatch.identity;
+    if (
+      args.backend !== args.invocation.toolEnvironment.backendId ||
+      scope.repository !== args.invocation.repository.toLowerCase() ||
+      scope.objective !== args.reservation.objective ||
+      scope.runId !== args.reservation.runId ||
+      scope.workItem !== args.reservation.workItem ||
+      scope.attempt !== args.reservation.attempt ||
+      scope.policyDigest !== args.reservation.policyDigest ||
+      scope.directorEpoch !== args.lease.epoch ||
+      scope.phase !== "validation" ||
+      scope.commandIndex !== 0 ||
+      scope.invocationDigest !== args.invocation.artifactDigest
+    )
+      throw new Error("validation scope rebound differs from its exact invocation authority");
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,

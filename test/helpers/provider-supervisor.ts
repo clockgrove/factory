@@ -14,8 +14,14 @@ import {
 } from "../../src/supervisor.js";
 import { GitHubReader } from "../../src/github.js";
 import { GitHubControlStore } from "../../src/control/github-store.js";
+import { objectiveAuthorityObservation } from "../../src/control/authority.js";
 import { CompiledGraphManager, type CompiledGraphStore } from "../../src/control/graphs.js";
-import { LeaseManager, type GitCommitObject, type LeaseState } from "../../src/control/lease.js";
+import {
+  LeaseLostError,
+  LeaseManager,
+  type GitCommitObject,
+  type LeaseState,
+} from "../../src/control/lease.js";
 import { IssueAdmissionLedger } from "../../src/control/issue-admission.js";
 import { decodeEventComments } from "../../src/control/receipts.js";
 import {
@@ -87,6 +93,8 @@ export interface ProviderFaults {
   repositoryFence?: () => Promise<void>;
   configureLocalBackend?: (backend: ExecutionBackend) => ExecutionBackend;
   controllerActivation?: boolean;
+  includeObjectiveAuthority?: boolean;
+  enforceCurrentLease?: boolean;
   afterControllerObservation?: () => void;
   afterIntegration?: () => void;
   waitForSiblingCompletionBeforeIntegration?: boolean;
@@ -139,7 +147,7 @@ export interface ProviderFaults {
   compilerNpmAuthority?: boolean;
   graphFactory?: (baseSha: string) => CompiledObjective;
   mediaAdapterRegistry?: MediaAdapterRegistry;
-  afterComment?: (events: readonly FactoryEvent[]) => void;
+  afterComment?: (events: readonly FactoryEvent[]) => void | Promise<void>;
 }
 
 export async function providerSupervisorFixture(
@@ -378,7 +386,7 @@ wheels = [
         .slice(treeEnd + 1, parentsEnd)
         .split(" ")
         .filter(Boolean),
-      message: output.slice(parentsEnd + 1),
+      message: output.slice(parentsEnd + 1).replace(/\n$/, ""),
       serverTime: new Date(),
     };
   };
@@ -461,28 +469,30 @@ wheels = [
       return rawGit(["hash-object", "-w", "--stdin"], bytes).trim();
     },
     createTree: async ({ baseTreeOid, entries }) => {
-      const index = join(repository, "fixture-tree-index");
+      const index = join(repository, `fixture-tree-index-${randomUUID()}`);
       const indexed = (args: string[]) =>
         execFileSync("git", args, {
           cwd: repository,
           env: { ...process.env, GIT_INDEX_FILE: index },
           encoding: "utf8",
         }).trim();
-      indexed(baseTreeOid ? ["read-tree", baseTreeOid] : ["read-tree", "--empty"]);
-      for (const entry of entries) {
-        const sha =
-          entry.content !== undefined
-            ? rawGit(["hash-object", "-w", "--stdin"], Buffer.from(entry.content, "utf8")).trim()
-            : entry.sha;
-        indexed(
-          sha
-            ? ["update-index", "--add", "--cacheinfo", `${entry.mode},${sha},${entry.path}`]
-            : ["update-index", "--force-remove", entry.path],
-        );
+      try {
+        indexed(baseTreeOid ? ["read-tree", baseTreeOid] : ["read-tree", "--empty"]);
+        for (const entry of entries) {
+          const sha =
+            entry.content !== undefined
+              ? rawGit(["hash-object", "-w", "--stdin"], Buffer.from(entry.content, "utf8")).trim()
+              : entry.sha;
+          indexed(
+            sha
+              ? ["update-index", "--add", "--cacheinfo", `${entry.mode},${sha},${entry.path}`]
+              : ["update-index", "--force-remove", entry.path],
+          );
+        }
+        return indexed(["write-tree"]);
+      } finally {
+        await rm(index, { force: true });
       }
-      const oid = indexed(["write-tree"]);
-      await rm(index, { force: true });
-      return oid;
     },
     createCommit: async (input) => {
       if (input.message.includes("Factory-Artifact:")) publicationCandidatePrepared = true;
@@ -1131,7 +1141,7 @@ wheels = [
       );
       target.factoryEvents!.push(...recordedReceipt);
       publishedComments.push({ commentId: String(nextCommentId++), node, body });
-      faults.afterComment?.(recordedReceipt);
+      await faults.afterComment?.(recordedReceipt);
       if (
         receipt.some(
           (event) =>
@@ -1200,6 +1210,7 @@ wheels = [
   });
   vi.spyOn(GitHubControlStore.prototype, "assignIssue").mockResolvedValue(undefined);
   let reads = 0;
+  let latestLease: LeaseState | undefined;
   const notifications: string[] = [];
   vi.spyOn(GitHubReader.prototype, "readObjective").mockImplementation(async () => {
     if (++reads > 500)
@@ -1207,6 +1218,8 @@ wheels = [
         `bounded fixture snapshot budget exhausted: ${notifications.slice(-4).join("; ")}`,
       );
     snapshot.readAt = new Date();
+    if (faults.includeObjectiveAuthority && latestLease)
+      snapshot.objectiveAuthority = objectiveAuthorityObservation(latestLease, snapshot.readAt);
     if (workflowCandidatePrepared) await faults.afterWorkflowCandidatePreparedSnapshot?.();
     return structuredClone(snapshot);
   });
@@ -1218,14 +1231,26 @@ wheels = [
   vi.spyOn(GitHubReader.prototype, "readRunCancellationRequest").mockResolvedValue(null);
   vi.spyOn(LeaseManager.prototype, "read").mockResolvedValue(null);
   let leaseGeneration = 0;
-  vi.spyOn(LeaseManager.prototype, "acquire").mockImplementation(async (identity) => ({
-    ...lease,
-    ...identity,
-    // Every acquisition gets a new holder, including foreground restart. Model
-    // the real lease's increasing epoch instead of lending epoch 1 to new owners.
-    epoch: ++leaseGeneration,
-  }));
-  vi.spyOn(LeaseManager.prototype, "assertCurrent").mockResolvedValue(undefined);
+  vi.spyOn(LeaseManager.prototype, "acquire").mockImplementation(async (identity) => {
+    latestLease = {
+      ...lease,
+      ...identity,
+      // Every acquisition gets a new holder, including foreground restart. Model
+      // the real lease's increasing epoch instead of lending epoch 1 to new owners.
+      epoch: ++leaseGeneration,
+    };
+    return latestLease;
+  });
+  vi.spyOn(LeaseManager.prototype, "assertCurrent").mockImplementation(async (candidate) => {
+    if (
+      faults.enforceCurrentLease &&
+      (!latestLease ||
+        candidate.epoch !== latestLease.epoch ||
+        candidate.holder !== latestLease.holder ||
+        candidate.runId !== latestLease.runId)
+    )
+      throw new LeaseLostError("fixture rejected a stale controller generation");
+  });
   // This fixture replaces transport writes, so model the dispatch-time authority
   // check that the real GitHub transport performs after queueing.
   vi.spyOn(LeaseManager.prototype, "assertMutationAuthorized").mockImplementation(function (

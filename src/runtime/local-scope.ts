@@ -205,6 +205,9 @@ export interface LocalScopeProcessPort extends LocalScopeReadPort {
 
 export interface ScopedLocalProcessOptions extends StartProcessOptions {
   launchDeadline?: Date;
+  /** Exact active producer generation under which a previously persisted
+   * rebound resumes after its recorded producer generation retired. */
+  successorProducerInvocationId?: string;
 }
 
 export const linuxLocalScopeProcessPort: LocalScopeProcessPort = {
@@ -232,20 +235,32 @@ export async function assertLocalScopeLaunch(
   input: LocalScopeIdentity,
   deadline?: Date,
   port: LocalScopeReadPort = linuxLocalScopeReadPort,
+  successorProducerInvocationId?: string,
 ): Promise<void> {
   const identity = parseLocalScopeIdentity(input);
   const before = await observeLocalScope(identity, port);
   if (before.status !== "absent") throw new Error("owned local scope is not available for launch");
+  if (successorProducerInvocationId && !identity.producerUnit)
+    throw new Error("local scope successor producer requires recorded producer authority");
+  if (successorProducerInvocationId && !/^[a-f0-9]{32}$/.test(successorProducerInvocationId))
+    throw new Error("local scope successor producer generation is invalid");
   if (identity.producerUnit) {
     const producer = parseProperties(await port.show(identity.producerUnit), identity.producerUnit);
+    const expectedInvocationId = successorProducerInvocationId ?? identity.producerInvocationId;
     if (
       producer.LoadState !== "loaded" ||
       producer.ActiveState !== "active" ||
       producer.KillMode !== "control-group" ||
-      producer.InvocationID !== identity.producerInvocationId ||
+      producer.InvocationID !== expectedInvocationId ||
+      (successorProducerInvocationId !== undefined &&
+        successorProducerInvocationId === identity.producerInvocationId) ||
       !["", "0", "0 /"].includes(producer.Job!)
     ) {
-      throw new Error("local scope producer generation is no longer active");
+      throw new Error(
+        successorProducerInvocationId
+          ? "local scope successor producer generation is unavailable"
+          : "local scope producer generation is no longer active",
+      );
     }
   }
   if (deadline) {
@@ -299,20 +314,30 @@ export async function startScopedLocalProcess(
   port: LocalScopeProcessPort = linuxLocalScopeProcessPort,
 ): Promise<ContainedProcess> {
   const identity = parseLocalScopeIdentity(input);
-  await assertLocalScopeLaunch(identity, options.launchDeadline, port);
-  if (options.launchDeadline)
-    options = {
-      ...options,
-      timeoutMs: Math.min(options.timeoutMs, options.launchDeadline.getTime() - Date.now()),
+  const { successorProducerInvocationId, ...processOptions } = options;
+  await assertLocalScopeLaunch(
+    identity,
+    processOptions.launchDeadline,
+    port,
+    successorProducerInvocationId,
+  );
+  let boundedOptions = processOptions;
+  if (processOptions.launchDeadline)
+    boundedOptions = {
+      ...processOptions,
+      timeoutMs: Math.min(
+        processOptions.timeoutMs,
+        processOptions.launchDeadline.getTime() - Date.now(),
+      ),
     };
   const command = scopedLocalCommand(
     identity,
-    options.command,
-    options.args ?? [],
-    options.timeoutMs,
+    boundedOptions.command,
+    boundedOptions.args ?? [],
+    boundedOptions.timeoutMs,
   );
   const stopOwned = () => stopLocalScope(identity, port);
-  const child = port.start({ ...options, ...command, terminateDescendants: stopOwned });
+  const child = port.start({ ...boundedOptions, ...command, terminateDescendants: stopOwned });
   const completed = child.completed.then(async (result) => {
     // A worker/test can daemonize out of its original process group. Stop only
     // this content-bound scope, then require an independently observed empty tree.

@@ -39,6 +39,7 @@ import {
 import {
   runContainedProcess,
   sanitizedWorkerEnvironment,
+  type ProcessResult,
   type StartProcessOptions,
 } from "../runtime/process-group.js";
 import {
@@ -145,6 +146,7 @@ export interface CleanValidationInput {
   localScope?: {
     identity: Omit<LocalScopeIdentity, "commandIndex">;
     deadline: string;
+    successorProducerInvocationId?: string;
     beforeLaunch(identity: LocalScopeIdentity): Promise<void>;
     afterStop(identity: LocalScopeIdentity): Promise<void>;
     observe(identity: LocalScopeIdentity): Promise<"absent" | "active" | "unknown">;
@@ -159,13 +161,44 @@ export interface CleanValidationInput {
       outputTreeSha: string;
       validationCommands: string[];
     }): ValidationInvocation | Promise<ValidationInvocation>;
+    executeLocalValidationCommand?(input: {
+      invocation: ValidationInvocation;
+      commandIndex: number;
+      plannedCommand: string;
+      execution: { executable: string; args: string[]; cwd: string; timeoutMs: number };
+      cwd: string;
+      environment: NodeJS.ProcessEnv;
+      runCommand(input: {
+        executable: string;
+        args: string[];
+        plannedCommand: string;
+        cwd: string;
+        env: NodeJS.ProcessEnv;
+      }): Promise<{
+        exitCode: number;
+        durationMs: number;
+        stdout: string;
+        stderr: string;
+      }>;
+      observeCommand(input: { plannedCommand: string }): Promise<"absent" | "active" | "unknown">;
+      commandDeadline: string;
+    }): Promise<{
+      command: string;
+      exitCode: number;
+      durationMs: number;
+      stdout: string;
+      stderr: string;
+      startedAt: string;
+      completedAt: string;
+    }>;
     execute(input: {
       invocation: ValidationInvocation;
       resultRoot: string;
       assertOutputTree(): Promise<void>;
       ordinaryValidationCommands: string[];
       runCaptureCommand(input: {
-        command: string;
+        executable: string;
+        args: string[];
         plannedCommand: string;
         env: NodeJS.ProcessEnv;
       }): Promise<{
@@ -1301,12 +1334,11 @@ export async function validateArtifactClean(
     throw new Error("local validation scope must bind this exact trusted-local artifact");
   }
 
-  let commandIndex = 0;
-  const runLocalCommand = async (options: StartProcessOptions) => {
+  const runLocalCommand = async (commandIndex: number, options: StartProcessOptions) => {
     if (!input.localScope) return runContainedProcess(options);
     const identity = parseLocalScopeIdentity({
       ...input.localScope.identity,
-      commandIndex: commandIndex++,
+      commandIndex,
     });
     await input.localScope.beforeLaunch(identity);
     const remaining = Date.parse(input.localScope.deadline) - Date.now();
@@ -1316,6 +1348,9 @@ export async function validateArtifactClean(
       ...options,
       timeoutMs: Math.min(options.timeoutMs, remaining),
       launchDeadline: new Date(input.localScope.deadline),
+      ...(input.localScope.successorProducerInvocationId
+        ? { successorProducerInvocationId: input.localScope.successorProducerInvocationId }
+        : {}),
     });
     await input.localScope.afterStop(identity);
     return result;
@@ -1462,8 +1497,67 @@ export async function validateArtifactClean(
           JSON.stringify(plannedValidationCommands))
     )
       throw new Error("repository capture runtime created a mismatched validation invocation");
+    const runPlannedLocalCommand = async (args: {
+      commandIndex: number;
+      plannedCommand: string;
+      executable: string;
+      executableArgs: string[];
+      cwd: string;
+      cwdIdentity: string;
+      environment: NodeJS.ProcessEnv;
+    }): Promise<ProcessResult & { startedAt?: string; completedAt?: string }> => {
+      if (!validationInvocation || !input.localScope)
+        return runLocalCommand(args.commandIndex, {
+          command: args.executable,
+          args: args.executableArgs,
+          cwd: args.cwd,
+          env: args.environment,
+          timeoutMs: plan.timeoutMsPerCommand,
+        });
+      if (!input.repositoryCaptureRuntime?.executeLocalValidationCommand)
+        throw new Error("local repository validation lacks its durable command journal");
+      const journaled = await input.repositoryCaptureRuntime.executeLocalValidationCommand({
+        invocation: validationInvocation,
+        commandIndex: args.commandIndex,
+        plannedCommand: args.plannedCommand,
+        execution: {
+          executable: args.executable,
+          args: args.executableArgs,
+          cwd: args.cwdIdentity,
+          timeoutMs: plan.timeoutMsPerCommand,
+        },
+        cwd: args.cwd,
+        environment: args.environment,
+        runCommand: async (command) => {
+          const result = await runLocalCommand(args.commandIndex, {
+            command: command.executable,
+            args: command.args,
+            cwd: command.cwd,
+            env: command.env,
+            timeoutMs: plan.timeoutMsPerCommand,
+          });
+          return {
+            exitCode: result.exitCode ?? (result.timedOut ? 124 : 1),
+            durationMs: result.durationMs,
+            stdout: result.stdout,
+            stderr: result.stderr,
+          };
+        },
+        observeCommand: async () =>
+          input.localScope!.observe(
+            parseLocalScopeIdentity({
+              ...input.localScope!.identity,
+              commandIndex: args.commandIndex,
+            }),
+          ),
+        commandDeadline: input.localScope.deadline,
+      });
+      return { ...journaled, signal: null, timedOut: false };
+    };
     let evidenceStartedAt = startedAt.toISOString();
     let evidenceCompletedAt = evidenceStartedAt;
+    let journalStartedAt: string | undefined;
+    let journalCompletedAt: string | undefined;
     let environmentIdentity: string | undefined;
     const launchValidation = async (
       capture?: Parameters<NonNullable<CleanValidationInput["isolatedValidator"]>>[0],
@@ -1496,14 +1590,20 @@ export async function validateArtifactClean(
             args: ["ci", "--no-audit", "--no-fund"],
             expectedStdout: undefined as string | undefined,
           }));
-        for (const setup of localCommands) {
-          const result = await runLocalCommand({
-            command: setup.executable,
-            args: setup.args,
+        for (const [commandIndex, setup] of localCommands.entries()) {
+          const result = await runPlannedLocalCommand({
+            commandIndex,
+            plannedCommand: setup.command,
+            executable: setup.executable,
+            executableArgs: setup.args,
             cwd: worktree.path,
-            env: bootstrapEnvironment ?? sanitizedWorkerEnvironment(process.env),
-            timeoutMs: plan.timeoutMsPerCommand,
+            cwdIdentity: ".",
+            environment: bootstrapEnvironment ?? sanitizedWorkerEnvironment(process.env),
           });
+          if (result.startedAt && result.completedAt) {
+            journalStartedAt ??= result.startedAt;
+            journalCompletedAt = result.completedAt;
+          }
           const versionMismatch =
             setup.expectedStdout !== undefined &&
             result.exitCode === 0 &&
@@ -1526,23 +1626,36 @@ export async function validateArtifactClean(
           executable: string;
           args: string[];
           cwd?: string;
+          commandIndex: number;
         }> = managedExecution
-          ? managedExecution.validation.filter(({ command }) => !captureCommands.has(command))
+          ? managedExecution.validation
+              .map((command, index) => ({
+                ...command,
+                commandIndex: setupCommands.length + index,
+              }))
+              .filter(({ command }) => !captureCommands.has(command))
           : plan.commands
-              .filter((command) => !captureCommands.has(command))
-              .map((command) => ({
+              .map((command, index) => ({
                 command,
                 executable: "/bin/sh",
                 args: ["-c", command],
-              }));
+                commandIndex: setupCommands.length + index,
+              }))
+              .filter(({ command }) => !captureCommands.has(command));
         for (const command of failureReason ? [] : validationCommands) {
-          const result = await runLocalCommand({
-            command: command.executable,
-            args: command.args,
+          const result = await runPlannedLocalCommand({
+            commandIndex: command.commandIndex,
+            plannedCommand: command.command,
+            executable: command.executable,
+            executableArgs: command.args,
             cwd: command.cwd ? join(worktree.path, command.cwd) : worktree.path,
-            env: bootstrapEnvironment ?? sanitizedWorkerEnvironment(process.env),
-            timeoutMs: plan.timeoutMsPerCommand,
+            cwdIdentity: command.cwd ?? ".",
+            environment: bootstrapEnvironment ?? sanitizedWorkerEnvironment(process.env),
           });
+          if (result.startedAt && result.completedAt) {
+            journalStartedAt ??= result.startedAt;
+            journalCompletedAt = result.completedAt;
+          }
           commands.push({
             command: command.command,
             exitCode: result.exitCode ?? (result.timedOut ? 124 : 1),
@@ -1554,7 +1667,8 @@ export async function validateArtifactClean(
           }
         }
         passed = failureReason === undefined;
-        evidenceCompletedAt = new Date().toISOString();
+        evidenceStartedAt = journalStartedAt ?? evidenceStartedAt;
+        evidenceCompletedAt = journalCompletedAt ?? new Date().toISOString();
         environmentIdentity = validationInvocation?.toolEnvironment.environmentIdentity;
       }
       return {
@@ -1583,10 +1697,10 @@ export async function validateArtifactClean(
           resultRoot: worktree.path,
           assertOutputTree,
           ordinaryValidationCommands: ordinaryPlannedValidationCommands,
-          runCaptureCommand: async ({ command, plannedCommand, env }) => {
+          runCaptureCommand: async ({ executable, args, plannedCommand, env }) => {
             const options = {
-              command: "/bin/sh",
-              args: ["-c", command],
+              command: executable,
+              args,
               cwd: worktree.path,
               env,
               timeoutMs: plan.timeoutMsPerCommand,
@@ -1611,6 +1725,11 @@ export async function validateArtifactClean(
                 ...options,
                 timeoutMs: Math.min(options.timeoutMs, remaining),
                 launchDeadline: new Date(input.localScope.deadline),
+                ...(input.localScope.successorProducerInvocationId
+                  ? {
+                      successorProducerInvocationId: input.localScope.successorProducerInvocationId,
+                    }
+                  : {}),
               });
               await input.localScope.afterStop(identity);
             } else {

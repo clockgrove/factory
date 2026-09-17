@@ -13,6 +13,7 @@ import {
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { policyDigest, DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import { localScopeBatchDigest } from "../src/protocol/local-scope.js";
+import { writerAuthority } from "../src/control/authority.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const DIGEST = policyDigest(DEFAULT_RUN_POLICY);
@@ -623,6 +624,21 @@ describe("repository-wide capacity ledger", () => {
       protocol: "clockgrove.factory/v2",
       kind: "validation-invocation",
       event: "ValidationInvocationScopeRebound",
+      ...writerAuthority(
+        {
+          objective: 1,
+          runId: "run-1",
+          holder: "director-b",
+          epoch: 2,
+          policyDigest: DIGEST,
+          ref: "refs/clockgrove-factory/leases/objective-1",
+          oid: SHA,
+          treeOid: SHA,
+          sequence: 1,
+          expiresAt: new Date("2026-09-04T01:00:00.000Z"),
+        },
+        2,
+      ),
       objective: 1,
       runId: "run-1",
       sequence: 2,

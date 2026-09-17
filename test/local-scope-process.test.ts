@@ -159,6 +159,40 @@ describe("owned local scope process runner", () => {
     expect(f.stop.mock.calls).toEqual([[f.unit]]);
   });
 
+  it("resumes an exact rebound scope under the authenticated successor producer generation", async () => {
+    const f = producerFixture();
+    const successorProducerInvocationId = "e".repeat(32);
+    f.producer.InvocationID = successorProducerInvocationId;
+    const child = await startScopedLocalProcess(
+      f.bound,
+      { ...options, successorProducerInvocationId },
+      f.port,
+    );
+    expect(f.start.mock.calls[0]![0]).not.toHaveProperty("successorProducerInvocationId");
+    expect(f.start.mock.calls[0]![0].args).toContain(
+      `--property=Requisite=${f.bound.producerUnit}`,
+    );
+    await f.finish();
+    expect(await child.completed).toBe(result);
+  });
+
+  it.each([
+    { expected: "d".repeat(32), observed: "d".repeat(32) },
+    { expected: "e".repeat(32), observed: "f".repeat(32) },
+    { expected: "not-an-invocation", observed: "not-an-invocation" },
+  ])("refuses an unproven successor producer generation %j", async ({ expected, observed }) => {
+    const f = producerFixture();
+    f.producer.InvocationID = observed;
+    await expect(
+      startScopedLocalProcess(
+        f.bound,
+        { ...options, successorProducerInvocationId: expected },
+        f.port,
+      ),
+    ).rejects.toThrow(/successor producer/);
+    expect(f.start).not.toHaveBeenCalled();
+  });
+
   it.each([
     { InvocationID: "e".repeat(32) },
     { ActiveState: "inactive" },

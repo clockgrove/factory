@@ -17,7 +17,13 @@ import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
 import { inspectContentFile } from "../execution/artifact-content.js";
-import { MAX_PRODUCT_FILE_BYTES, boundedText, safeId, sha256Digest } from "../protocol/limits.js";
+import {
+  MAX_PRODUCT_FILE_BYTES,
+  boundedText,
+  isoDate,
+  safeId,
+  sha256Digest,
+} from "../protocol/limits.js";
 import type { IsolatedValidationResult } from "../execution/backend.js";
 import {
   RepositoryCaptureCollectionManifestSchema,
@@ -120,20 +126,52 @@ const LocalCommandTerminalSchema = z
   .object({
     protocol: z.literal("clockgrove.factory/local-capture-command-terminal"),
     commandDigest: sha256Digest,
+    requestDigest: sha256Digest,
     exitCode: z.number().int().min(0).max(255),
     durationMs: z
       .number()
       .int()
       .nonnegative()
       .max(24 * 60 * 60 * 1_000),
+    startedAt: isoDate,
+    completedAt: isoDate,
+    stdout: z.string().max(128 * 1024),
+    stderr: z.string().max(128 * 1024),
   })
-  .strict();
+  .strict()
+  .refine(
+    (receipt) =>
+      Date.parse(receipt.completedAt) >= Date.parse(receipt.startedAt) &&
+      Date.parse(receipt.completedAt) - Date.parse(receipt.startedAt) === receipt.durationMs,
+    "local command terminal timestamps differ from duration",
+  );
 
 const LocalCommandStartedSchema = z
   .object({
     protocol: z.literal("clockgrove.factory/local-capture-command-started"),
     commandDigest: sha256Digest,
     requestDigest: sha256Digest,
+  })
+  .strict();
+
+const LocalValidationCommandRequestSchema = z
+  .object({
+    protocol: z.literal("clockgrove.factory/local-validation-command-request"),
+    validationInvocationDigest: sha256Digest,
+    commandIndex: z.number().int().nonnegative().max(256),
+    plannedCommand: boundedText(1_000),
+    execution: z
+      .object({
+        executable: boundedText(1_000),
+        args: z.array(boundedText(4_000)).max(128),
+        cwd: boundedText(500),
+        timeoutMs: z
+          .number()
+          .int()
+          .positive()
+          .max(24 * 60 * 60 * 1_000),
+      })
+      .strict(),
   })
   .strict();
 
@@ -148,6 +186,32 @@ export class LocalRepositoryCaptureCommandFailure extends Error {
     this.name = "LocalRepositoryCaptureCommandFailure";
     this.commandResults = commandResults;
   }
+}
+
+export type LocalRepositoryCaptureScopeRecoveryAction =
+  | "observe-only"
+  | "adopt-only"
+  | "wait"
+  | "persist-rebound"
+  | "resume-rebound";
+
+/** Decide whether exact local absence needs its one durable rebound or may
+ * resume the exact replacement already authorized by that event. */
+export function localRepositoryCaptureScopeRecoveryAction(args: {
+  scopeStatus: "absent" | "active" | "unknown";
+  dispatchState: "rebound-safe" | "ambiguous" | "complete";
+  reboundPersisted: boolean;
+  validationDeadline: string;
+  now: Date;
+}): LocalRepositoryCaptureScopeRecoveryAction {
+  if (args.dispatchState === "ambiguous") return "observe-only";
+  if (args.dispatchState === "complete") return "adopt-only";
+  if (args.scopeStatus === "unknown")
+    throw new Error("prepared local repository capture scope cannot be observed exactly");
+  if (args.scopeStatus === "active") return "wait";
+  if (args.now.getTime() >= Date.parse(args.validationDeadline))
+    throw new Error("repository capture recovery deadline is exhausted");
+  return args.reboundPersisted ? "resume-rebound" : "persist-rebound";
 }
 
 class LocalRepositoryCaptureAmbiguousDispatch extends Error {
@@ -170,14 +234,21 @@ const startedPath = process.argv[4];
 const commandDigest = process.argv[5];
 const requestDigest = process.argv[6];
 const request = JSON.parse(readFileSync(requestPath, "utf8"));
-const command = request.command.command;
+const command = request.plannedCommand ?? request.command.command;
+const executable = request.execution?.executable ?? "/bin/sh";
+const commandArgs = request.execution?.args ?? ["-c", command];
 const startedReceipt = JSON.stringify({ protocol: "clockgrove.factory/local-capture-command-started", commandDigest, requestDigest });
 const startedFd = openSync(startedPath, "wx", 0o600);
 try { writeFileSync(startedFd, startedReceipt); fsyncSync(startedFd); } finally { closeSync(startedFd); }
 const startedDirectory = openSync(dirname(startedPath), constants.O_RDONLY);
 try { fsyncSync(startedDirectory); } finally { closeSync(startedDirectory); }
 const began = Date.now();
-const result = spawnSync("/bin/sh", ["-c", command], { cwd: process.cwd(), env: process.env, stdio: "inherit" });
+const startedAt = new Date(began).toISOString();
+const result = spawnSync(executable, commandArgs, { cwd: process.cwd(), env: process.env, encoding: "utf8", maxBuffer: 256 * 1024 });
+const stdout = String(result.stdout ?? "");
+const stderr = String(result.stderr ?? result.error?.message ?? "");
+process.stdout.write(stdout);
+process.stderr.write(stderr);
 const exitCode = Number.isInteger(result.status) ? result.status : 1;
 if (exitCode === 0) {
   const outputs = request.recipes
@@ -195,7 +266,9 @@ if (exitCode === 0) {
     try { fsyncSync(directory); } finally { closeSync(directory); }
   }
 }
-const receipt = JSON.stringify({ protocol: "clockgrove.factory/local-capture-command-terminal", commandDigest: createHash("sha256").update(command).digest("hex"), exitCode, durationMs: Date.now() - began });
+const completed = Date.now();
+const bounded = (value) => Buffer.from(value).subarray(0, 128 * 1024).toString("utf8");
+const receipt = JSON.stringify({ protocol: "clockgrove.factory/local-capture-command-terminal", commandDigest: createHash("sha256").update(command).digest("hex"), requestDigest, exitCode, durationMs: completed - began, startedAt, completedAt: new Date(completed).toISOString(), stdout: bounded(stdout), stderr: bounded(stderr) });
 const temporary = receiptPath + ".pending-" + process.pid;
 const fd = openSync(temporary, "wx", 0o600);
 try { writeFileSync(fd, receipt); fsyncSync(fd); } finally { closeSync(fd); }
@@ -333,10 +406,6 @@ async function atomicJson(path: string, value: unknown) {
   await syncDirectory(dirname(path));
 }
 
-function shellQuote(value: string) {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
 async function durableCommand(args: {
   ownedRoot: string;
   key: string;
@@ -345,27 +414,36 @@ async function durableCommand(args: {
   cwd: string;
   env: NodeJS.ProcessEnv;
   runCommand(input: {
-    command: string;
+    executable: string;
+    args: string[];
     plannedCommand: string;
     cwd: string;
     env: NodeJS.ProcessEnv;
   }): Promise<LocalCaptureCommandResult>;
   observeCommand(input: { plannedCommand: string }): Promise<"absent" | "active" | "unknown">;
   commandDeadline: string | null;
+  allowLaunch: boolean;
 }) {
   const wrapperPath = join(args.ownedRoot, "command-wrapper.mjs");
   const receiptPath = join(args.ownedRoot, `terminal-${args.key}.json`);
   const startedPath = join(args.ownedRoot, `started-${args.key}.json`);
-  const existing = await readJson(receiptPath);
-  if (existing) {
-    const terminal = LocalCommandTerminalSchema.parse(existing);
-    if (terminal.commandDigest !== digestText(args.command))
-      throw new Error("local capture terminal receipt belongs to another command");
-    return { command: args.command, terminal, stdout: "", stderr: "" };
-  }
   const requestDigest = createHash("sha256")
     .update(await readFile(args.requestPath))
     .digest("hex");
+  const parseTerminal = (value: unknown) => {
+    const terminal = LocalCommandTerminalSchema.parse(value);
+    if (
+      terminal.commandDigest !== digestText(args.command) ||
+      terminal.requestDigest !== requestDigest
+    )
+      throw new Error("local capture terminal receipt belongs to another command request");
+    return terminal;
+  };
+  const existing = await readJson(receiptPath);
+  if (existing) {
+    const terminal = parseTerminal(existing);
+    return { command: args.command, terminal, stdout: terminal.stdout, stderr: terminal.stderr };
+  }
   const existingStarted = await readJson(startedPath);
   if (existingStarted) {
     const started = LocalCommandStartedSchema.parse(existingStarted);
@@ -378,10 +456,13 @@ async function durableCommand(args: {
       const scope = await args.observeCommand({ plannedCommand: args.command });
       const terminalValue = await readJson(receiptPath);
       if (terminalValue) {
-        const terminal = LocalCommandTerminalSchema.parse(terminalValue);
-        if (terminal.commandDigest !== digestText(args.command))
-          throw new Error("local capture terminal receipt belongs to another command");
-        return { command: args.command, terminal, stdout: "", stderr: "" };
+        const terminal = parseTerminal(terminalValue);
+        return {
+          command: args.command,
+          terminal,
+          stdout: terminal.stdout,
+          stderr: terminal.stderr,
+        };
       }
       if (scope !== "active") throw new LocalRepositoryCaptureAmbiguousDispatch();
       if (args.commandDeadline && Date.now() >= Date.parse(args.commandDeadline))
@@ -393,10 +474,13 @@ async function durableCommand(args: {
   while (scope === "active") {
     const terminalValue = await readJson(receiptPath);
     if (terminalValue) {
-      const terminal = LocalCommandTerminalSchema.parse(terminalValue);
-      if (terminal.commandDigest !== digestText(args.command))
-        throw new Error("local capture terminal receipt belongs to another command");
-      return { command: args.command, terminal, stdout: "", stderr: "" };
+      const terminal = parseTerminal(terminalValue);
+      return {
+        command: args.command,
+        terminal,
+        stdout: terminal.stdout,
+        stderr: terminal.stderr,
+      };
     }
     const startedValue = await readJson(startedPath);
     if (startedValue) {
@@ -415,6 +499,10 @@ async function durableCommand(args: {
   if (scope === "unknown")
     throw new Error("local capture scope observation is unavailable before dispatch");
   if (await readJson(startedPath)) throw new LocalRepositoryCaptureAmbiguousDispatch();
+  if (!args.allowLaunch)
+    throw new Error("local command launch is forbidden during observation-only recovery");
+  if (args.commandDeadline && Date.now() >= Date.parse(args.commandDeadline))
+    throw new Error("local validation command deadline is exhausted before dispatch");
   try {
     await lstat(wrapperPath);
   } catch (error) {
@@ -423,7 +511,15 @@ async function durableCommand(args: {
     await chmod(wrapperPath, 0o500);
   }
   const result = await args.runCommand({
-    command: `${shellQuote(process.execPath)} ${shellQuote(wrapperPath)} ${shellQuote(args.requestPath)} ${shellQuote(receiptPath)} ${shellQuote(startedPath)} ${shellQuote(digestText(args.command))} ${shellQuote(requestDigest)}`,
+    executable: process.execPath,
+    args: [
+      wrapperPath,
+      args.requestPath,
+      receiptPath,
+      startedPath,
+      digestText(args.command),
+      requestDigest,
+    ],
     plannedCommand: args.command,
     cwd: args.cwd,
     env: { ...args.env, FACTORY_CAPTURE_TERMINAL_RECEIPT: receiptPath },
@@ -431,10 +527,10 @@ async function durableCommand(args: {
   const observed = await readJson(receiptPath);
   if (!observed)
     throw new Error("local capture command returned without its durable terminal receipt");
-  const terminal = LocalCommandTerminalSchema.parse(observed);
-  if (terminal.commandDigest !== digestText(args.command) || terminal.exitCode !== result.exitCode)
+  const terminal = parseTerminal(observed);
+  if (terminal.exitCode !== result.exitCode)
     throw new Error("local capture terminal receipt differs from process observation");
-  return { command: args.command, terminal, stdout: result.stdout, stderr: result.stderr };
+  return { command: args.command, terminal, stdout: terminal.stdout, stderr: terminal.stderr };
 }
 
 async function readJson(path: string): Promise<unknown | null> {
@@ -451,6 +547,84 @@ async function readJson(path: string): Promise<unknown | null> {
 
 function invocationRoot(stagingRoot: string, invocationDigest: string) {
   return join(resolve(stagingRoot), invocationDigest);
+}
+
+/** Execute or adopt one ordinary command from the immutable validation plan.
+ * The wrapper fsyncs its start before dispatch and its terminal result before
+ * returning, so a successor may launch only an exactly absent command. */
+export async function executeLocalValidationCommand(args: {
+  stagingRoot: string;
+  invocation: ValidationInvocation;
+  commandIndex: number;
+  plannedCommand: string;
+  execution: { executable: string; args: string[]; cwd: string; timeoutMs: number };
+  cwd: string;
+  environment: NodeJS.ProcessEnv;
+  runCommand(input: {
+    executable: string;
+    args: string[];
+    plannedCommand: string;
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+  }): Promise<LocalCaptureCommandResult>;
+  observeCommand(input: { plannedCommand: string }): Promise<"absent" | "active" | "unknown">;
+  commandDeadline: string;
+  allowLaunch: boolean;
+}): Promise<{
+  command: string;
+  exitCode: number;
+  durationMs: number;
+  stdout: string;
+  stderr: string;
+  startedAt: string;
+  completedAt: string;
+}> {
+  const invocation = ValidationInvocationSchema.parse(args.invocation);
+  if (
+    invocation.validationDeadline !== args.commandDeadline ||
+    invocation.validationCommands[args.commandIndex] !== args.plannedCommand ||
+    invocation.repositoryCaptureRecipes.some(
+      (recipe) => recipe.captureCommand.command === args.plannedCommand,
+    )
+  )
+    throw new Error("local validation command differs from its immutable invocation plan");
+  const root = resolve(args.stagingRoot);
+  await privateDirectory(root);
+  const ownedRoot = invocationRoot(root, invocation.digest);
+  await privateDirectory(ownedRoot);
+  const request = LocalValidationCommandRequestSchema.parse({
+    protocol: "clockgrove.factory/local-validation-command-request",
+    validationInvocationDigest: invocation.digest,
+    commandIndex: args.commandIndex,
+    plannedCommand: args.plannedCommand,
+    execution: args.execution,
+  });
+  const requestPath = join(ownedRoot, `validation-command-${args.commandIndex}.json`);
+  const existingRequest = await readJson(requestPath);
+  if (existingRequest && canonical(existingRequest) !== canonical(request))
+    throw new Error("local validation command request conflicts with retained staging");
+  if (!existingRequest) await atomicJson(requestPath, request);
+  const observed = await durableCommand({
+    ownedRoot,
+    key: `validation-${args.commandIndex}-${digestText(args.plannedCommand)}`,
+    command: args.plannedCommand,
+    requestPath,
+    cwd: args.cwd,
+    env: args.environment,
+    runCommand: args.runCommand,
+    observeCommand: args.observeCommand,
+    commandDeadline: args.commandDeadline,
+    allowLaunch: args.allowLaunch,
+  });
+  return {
+    command: args.plannedCommand,
+    exitCode: observed.terminal.exitCode,
+    durationMs: observed.terminal.durationMs,
+    stdout: observed.stdout,
+    stderr: observed.stderr,
+    startedAt: observed.terminal.startedAt,
+    completedAt: observed.terminal.completedAt,
+  };
 }
 
 /** Inspect only Factory-owned dispatch receipts for one exact invocation. This
@@ -481,26 +655,45 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "rebound-safe";
     throw error;
   }
-  const actionByCommand = new Map<
-    string,
-    {
-      command: string;
-      key: string;
-      checkpoints: Array<{
-        name: string;
-        parse(value: unknown): { recipeId: string; recipeDigest: string; command: unknown };
-        recipeId: string;
-        recipeDigest: string;
-        identity: unknown;
-      }>;
-    }
-  >();
+  const validationValue = await readJson(join(root, "validation.json"));
+  if (validationValue) {
+    const checkpoint = LocalValidationCheckpointSchema.parse(validationValue);
+    if (checkpoint.validationInvocationDigest !== invocation.digest)
+      throw new Error("local validation checkpoint belongs to another invocation");
+    assertValidationResult(invocation, checkpoint.validation as IsolatedValidationResult);
+  }
+  type CaptureAction = {
+    kind: "capture";
+    command: string;
+    key: string;
+    requestName: string;
+    captureIdentity: unknown;
+    checkpoints: Array<{
+      name: string;
+      parse(value: unknown): { recipeId: string; recipeDigest: string; command: unknown };
+      recipeId: string;
+      recipeDigest: string;
+      identity: unknown;
+    }>;
+  };
+  type ValidationAction = {
+    kind: "validation";
+    command: string;
+    key: string;
+    requestName: string;
+    commandIndex: number;
+    checkpoints: never[];
+  };
+  const captureByCommand = new Map<string, CaptureAction>();
   for (const recipe of invocation.repositoryCaptureRecipes) {
     const captureIdentity = recipe.captureCommand;
     const captureKey = `capture-${digestText(canonical(captureIdentity))}`;
-    const capture = actionByCommand.get(captureIdentity.command) ?? {
+    const capture: CaptureAction = captureByCommand.get(captureIdentity.command) ?? {
+      kind: "capture",
       command: captureIdentity.command,
       key: captureKey,
+      requestName: `${captureKey}.json`,
+      captureIdentity,
       checkpoints: [],
     };
     if (capture.key !== captureKey)
@@ -512,27 +705,44 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
       recipeDigest: recipe.digest,
       identity: captureIdentity,
     });
-    actionByCommand.set(captureIdentity.command, capture);
+    captureByCommand.set(captureIdentity.command, capture);
   }
-  const actions = invocation.validationCommands.flatMap((command) => {
-    const action = actionByCommand.get(command);
-    return action ? [action] : [];
-  });
-  if (actions.length !== actionByCommand.size)
+  const actions: Array<CaptureAction | ValidationAction> = invocation.validationCommands.map(
+    (command, index) => {
+      const capture = captureByCommand.get(command);
+      return (
+        capture ?? {
+          kind: "validation" as const,
+          command,
+          key: `validation-${index}-${digestText(command)}`,
+          requestName: `validation-command-${index}.json`,
+          commandIndex: index,
+          checkpoints: [],
+        }
+      );
+    },
+  );
+  if (actions.filter((action) => "captureIdentity" in action).length !== captureByCommand.size)
     throw new Error("local capture dispatch actions differ from validation order");
   const allowed = new Set(
     actions.flatMap((action) => [
+      action.requestName,
       `started-${action.key}.json`,
       `terminal-${action.key}.json`,
       ...action.checkpoints.map(({ name }) => name),
     ]),
   );
   const unexpected = names.filter(
-    (name) => /^(?:started|terminal|recipe)-.*\.json$/.test(name) && !allowed.has(name),
+    (name) =>
+      /^(?:started|terminal|recipe|validation-command|capture)-.*\.json$/.test(name) &&
+      !allowed.has(name),
   );
   if (unexpected.length)
     throw new Error("local capture dispatch journal contains an unexpected action identity");
   for (const [index, action] of actions.entries()) {
+    if (validationValue && action.kind === "validation") continue;
+    const requestPath = join(root, action.requestName);
+    const requestValue = await readJson(requestPath);
     const startedValue = await readJson(join(root, `started-${action.key}.json`));
     const terminalValue = await readJson(join(root, `terminal-${action.key}.json`));
     const checkpoints = await Promise.all(
@@ -551,16 +761,48 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
     );
     if (checkpoints.some(Boolean) && !checkpoints.every(Boolean))
       throw new Error("shared local capture action has a partial recipe checkpoint");
+    if ((startedValue || terminalValue || checkpoints.some(Boolean)) && !requestValue)
+      throw new Error("local capture action evidence lacks its immutable request");
+    if (requestValue) {
+      if ("captureIdentity" in action) {
+        const request = requestValue as Record<string, unknown>;
+        if (
+          request["protocol"] !== "clockgrove.factory/repository-capture-command-request" ||
+          request["validationInvocationDigest"] !== invocation.digest ||
+          canonical(request["command"]) !== canonical(action.captureIdentity)
+        )
+          throw new Error("local capture action request differs from its invocation");
+      } else {
+        const request = LocalValidationCommandRequestSchema.parse(requestValue);
+        if (
+          request.validationInvocationDigest !== invocation.digest ||
+          request.commandIndex !== action.commandIndex ||
+          request.plannedCommand !== action.command
+        )
+          throw new Error("local validation command request differs from its invocation");
+      }
+    }
+    const requestDigest = requestValue
+      ? createHash("sha256")
+          .update(await readFile(requestPath))
+          .digest("hex")
+      : null;
     if (terminalValue && !startedValue)
       throw new Error("local capture terminal receipt lacks its dispatch receipt");
     if (startedValue) {
       const started = LocalCommandStartedSchema.parse(startedValue);
-      if (started.commandDigest !== digestText(action.command))
+      if (
+        started.commandDigest !== digestText(action.command) ||
+        started.requestDigest !== requestDigest
+      )
         throw new Error("local capture dispatch receipt differs from its action");
     }
     if (terminalValue) {
       const terminal = LocalCommandTerminalSchema.parse(terminalValue);
-      if (terminal.commandDigest !== digestText(action.command))
+      if (
+        terminal.commandDigest !== digestText(action.command) ||
+        terminal.requestDigest !== requestDigest
+      )
         throw new Error("local capture terminal receipt differs from its action");
     }
     if (checkpoints.some(Boolean) && !terminalValue)
@@ -568,7 +810,9 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
     if (startedValue && !terminalValue) return "ambiguous";
     if (!startedValue) {
       for (const later of actions.slice(index + 1)) {
+        if (validationValue && later.kind === "validation") continue;
         if (
+          (await readJson(join(root, later.requestName))) ||
           (await readJson(join(root, `started-${later.key}.json`))) ||
           (await readJson(join(root, `terminal-${later.key}.json`))) ||
           (await Promise.all(later.checkpoints.map(({ name }) => readJson(join(root, name))))).some(
@@ -705,13 +949,15 @@ export async function executeLocalRepositoryCaptures(args: {
   resultTreeRoot: string;
   environment: NodeJS.ProcessEnv;
   runCommand(input: {
-    command: string;
+    executable: string;
+    args: string[];
     plannedCommand: string;
     cwd: string;
     env: NodeJS.ProcessEnv;
   }): Promise<LocalCaptureCommandResult>;
   observeCommand(input: { plannedCommand: string }): Promise<"absent" | "active" | "unknown">;
   commandDeadline: string | null;
+  allowLaunch: boolean;
   assertOutputTree(): Promise<void>;
 }): Promise<{
   collection: RepositoryCaptureCollectionManifest;
@@ -829,6 +1075,7 @@ export async function executeLocalRepositoryCaptures(args: {
         runCommand: args.runCommand,
         observeCommand: args.observeCommand,
         commandDeadline: args.commandDeadline,
+        allowLaunch: args.allowLaunch,
       });
       const commandResult = LocalCaptureCommandResultSchema.parse({
         command,

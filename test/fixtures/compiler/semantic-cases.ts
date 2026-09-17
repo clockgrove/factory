@@ -616,6 +616,30 @@ export const SEMANTIC_COMPILER_CASES: ReadonlyArray<SemanticCompilerCase> = [
     ["compiler-contracts.test.ts::returns exact terminal codes for $name"],
   ),
   row(
+    "unsupported Cargo proposal",
+    {
+      repository: {
+        paths: ["Cargo.toml", "src/lib.rs"],
+        scripts: {},
+        allowedNetworkDestinations: onlineToolchains,
+      },
+      graph: { shape: "linear", count: 1 },
+      criterion: { risk: "ordinary", tier: "mechanical" },
+      canonicalization: "stable-under-reordering",
+    },
+    {
+      repositoryState: ["unsupported"],
+      toolchain: ["cargo"],
+      objectiveSize: ["one"],
+      graphShape: ["linear"],
+      capability: [],
+      criteria: ["ordinary"],
+      outcome: ["repairable"],
+      canonicalization: ["stable-under-reordering"],
+    },
+    ["compiler-contracts.test.ts::keeps %s outside bootstrap authority"],
+  ),
+  row(
     "unsupported Go proposal",
     {
       repository: {

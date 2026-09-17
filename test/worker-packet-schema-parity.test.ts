@@ -195,6 +195,105 @@ describe("repository capability JSON Schema parity", () => {
     expect(validate(withRecipe), JSON.stringify(validate.errors)).toBe(true);
     expect(acceptedByZod(withRecipe)).toBe(true);
     expect(withRecipe.repositoryCaptureRecipes[0]!.comparison).not.toHaveProperty("command");
+
+    expect(
+      acceptedByZod({
+        ...withRecipe,
+        validationCommands: ["npm run capture", ...packet.validationCommands],
+      }),
+    ).toBe(false);
+
+    const conflictingCore = {
+      ...recipeCore,
+      id: "capture-result-again",
+      captureCommand: {
+        ...recipeCore.captureCommand,
+        recipeId: "recipe-capture-again",
+      },
+    };
+    expect(
+      acceptedByZod({
+        ...withRecipe,
+        repositoryCaptureRecipes: [
+          ...withRecipe.repositoryCaptureRecipes,
+          { ...conflictingCore, digest: compilerEvalDigest(conflictingCore) },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts raster capture acceptance constraints in JSON and Zod schemas", () => {
+    const descriptorDigest = "1".repeat(64);
+    const contentDigest = "3".repeat(64);
+    const recipeCore = {
+      id: "capture-raster",
+      mediaUse: { intentId: "raster-evidence", direction: "evidence-for" as const },
+      criterionIds: ["validated"],
+      scenario: { id: "desktop", fixture: null, seed: "fixed" },
+      captureCommand: {
+        recipeId: "recipe-raster",
+        recipeDigest: "5".repeat(64),
+        command: "npm run capture",
+      },
+      outputs: [{ roleId: "capture", mediaType: "image/png" }],
+      profile: {
+        kind: "raster" as const,
+        viewport: { width: 1280, height: 720 },
+        output: { width: 800, height: 600 },
+        captureRoleId: "capture",
+        diffRoleId: null,
+        previewRoleId: null,
+        constraints: {
+          kind: "raster" as const,
+          minimumWidth: 640,
+          maximumWidth: 1024,
+          minimumHeight: 480,
+          maximumHeight: 768,
+          alpha: "allowed" as const,
+          animation: "forbidden" as const,
+        },
+      },
+      comparison: {
+        kind: "exact" as const,
+        outputRoleId: "capture",
+        expectedDescriptorDigest: descriptorDigest,
+        policy: { kind: "exact-bytes" as const },
+      },
+      gate: { kind: "human-required" as const },
+    };
+    const withRecipe = {
+      ...structuredClone(packet),
+      validationCommands: [...packet.validationCommands, "npm run capture"],
+      assetInputs: [
+        {
+          manifestDigest: "2".repeat(64),
+          descriptorDigest,
+          contentDigest,
+          storageReceiptDigest: "4".repeat(64),
+          path: `assets/${contentDigest}/result.png`,
+        },
+      ],
+      mediaUses: [
+        {
+          source: "imported" as const,
+          intentId: "raster-evidence",
+          role: "acceptance-capture",
+          inputRoleId: null,
+          brief: "Capture one raster repository result.",
+          purpose: "acceptance-evidence" as const,
+          necessity: "required" as const,
+          obligationIds: ["validated"],
+          rationale: "The criterion requires raster evidence.",
+          direction: "evidence-for" as const,
+          criterionIds: ["validated"],
+          descriptorDigests: [descriptorDigest],
+          manifestDigest: "2".repeat(64),
+        },
+      ],
+      repositoryCaptureRecipes: [{ ...recipeCore, digest: compilerEvalDigest(recipeCore) }],
+    };
+    expect(validate(withRecipe), JSON.stringify(validate.errors)).toBe(true);
+    expect(acceptedByZod(withRecipe)).toBe(true);
   });
 
   it("accepts the strict asset-production shape and rejects repository and retired fields", () => {

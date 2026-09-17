@@ -394,6 +394,38 @@ export function validateCompilerRequest(requestInput: unknown): CompilerValidati
       ),
     );
   const recipes = request.repository.validationRecipes;
+  const commandIdentities = new Map<string, Set<string>>();
+  const recipeIdentities = new Map<string, Set<string>>();
+  for (const recipe of recipes) {
+    const phase = recipe.capture?.kind ?? "ordinary";
+    const identity = compilerEvalDigest(recipe);
+    const byCommand = commandIdentities.get(recipe.command) ?? new Set<string>();
+    byCommand.add(`${phase}\0${recipe.id}\0${identity}`);
+    commandIdentities.set(recipe.command, byCommand);
+    const byId = recipeIdentities.get(recipe.id) ?? new Set<string>();
+    byId.add(identity);
+    recipeIdentities.set(recipe.id, byId);
+  }
+  for (const [command, identities] of commandIdentities)
+    if (identities.size > 1)
+      violations.push(
+        violation(
+          "schema-invalid",
+          "/repository/validationRecipes",
+          "one phase and recipe identity per command text",
+          command,
+        ),
+      );
+  for (const [id, identities] of recipeIdentities)
+    if (identities.size > 1)
+      violations.push(
+        violation(
+          "schema-invalid",
+          "/repository/validationRecipes",
+          "one recipe value per identity",
+          id,
+        ),
+      );
   const eligible = request.repository.toolchains.filter(
     (toolchain) => toolchain.state === "eligible-deferred",
   );
@@ -575,6 +607,7 @@ function resolvedExecutionRequirements(
   const captureRecipeIds = proposal.mediaIntents.flatMap((intent) => {
     if (!intent.repositoryCapture) return [];
     if (!intent.bindings.some((binding) => binding.workItemId === item.id)) return [];
+    if (repositoryCaptureUnavailableReasons(request, proposal, intent).length > 0) return [];
     return [
       intent.repositoryCapture.captureRecipeId,
       ...(intent.repositoryCapture.comparison.kind === "threshold"
@@ -772,21 +805,45 @@ function importedAssetsSatisfyMediaIntent(request: CompilerRequest, intent: Medi
   const permittedMediaTypes = new Set<string>(intent.output.mediaTypes);
   return assets.every((asset) => {
     if (!asset || !permittedMediaTypes.has(asset.mediaType)) return false;
-    const raster = intent.output.profile;
-    if (raster === null) return true;
-    if (asset.inspection.kind !== "raster") return false;
-    if (raster.minimumWidth !== null && asset.inspection.width < raster.minimumWidth) return false;
-    if (raster.maximumWidth !== null && asset.inspection.width > raster.maximumWidth) return false;
-    if (raster.minimumHeight !== null && asset.inspection.height < raster.minimumHeight)
-      return false;
-    if (raster.maximumHeight !== null && asset.inspection.height > raster.maximumHeight)
-      return false;
-    if (raster.alpha === "required" && asset.inspection.alpha !== true) return false;
-    if (raster.alpha === "forbidden" && asset.inspection.alpha !== false) return false;
-    if (raster.animation === "required" && asset.inspection.frames <= 1) return false;
-    if (raster.animation === "forbidden" && asset.inspection.frames !== 1) return false;
-    return true;
+    return rasterInspectionSatisfies(asset.inspection, intent.output.profile);
   });
+}
+
+function rasterInspectionSatisfies(
+  inspection:
+    | { kind: "raster"; width: number; height: number; frames: number; alpha: boolean }
+    | {
+        kind: "opaque";
+      },
+  constraints: MediaIntent["output"]["profile"],
+): boolean {
+  if (constraints === null) return true;
+  if (inspection.kind !== "raster") return false;
+  if (constraints.minimumWidth !== null && inspection.width < constraints.minimumWidth)
+    return false;
+  if (constraints.maximumWidth !== null && inspection.width > constraints.maximumWidth)
+    return false;
+  if (constraints.minimumHeight !== null && inspection.height < constraints.minimumHeight)
+    return false;
+  if (constraints.maximumHeight !== null && inspection.height > constraints.maximumHeight)
+    return false;
+  if (constraints.alpha === "required" && inspection.alpha !== true) return false;
+  if (constraints.alpha === "forbidden" && inspection.alpha !== false) return false;
+  if (constraints.animation === "required" && inspection.frames <= 1) return false;
+  if (constraints.animation === "forbidden" && inspection.frames !== 1) return false;
+  return true;
+}
+
+function dimensionsSatisfy(
+  dimensions: { width: number; height: number },
+  constraints: NonNullable<MediaIntent["output"]["profile"]>,
+): boolean {
+  return (
+    (constraints.minimumWidth === null || dimensions.width >= constraints.minimumWidth) &&
+    (constraints.maximumWidth === null || dimensions.width <= constraints.maximumWidth) &&
+    (constraints.minimumHeight === null || dimensions.height >= constraints.minimumHeight) &&
+    (constraints.maximumHeight === null || dimensions.height <= constraints.maximumHeight)
+  );
 }
 
 function canonicalMediaIntent(intent: MediaIntent): MediaIntent {
@@ -821,6 +878,7 @@ function canonicalMediaIntent(intent: MediaIntent): MediaIntent {
 
 function repositoryCaptureUnavailableReasons(
   request: CompilerRequest,
+  proposal: CompilerProposal,
   intent: MediaIntent,
 ): string[] {
   if (!intent.repositoryCapture) return [];
@@ -829,6 +887,8 @@ function repositoryCaptureUnavailableReasons(
   const expected = request.media.assetManifest?.assets.find(
     ({ id }) => id === captureRequest.expectedAssetId,
   );
+  if (intent.output.minimumCount > 1)
+    reasons.push("repository capture supports exactly one required comparison subject");
   if (!expected) reasons.push(`expected asset ${captureRequest.expectedAssetId} is unavailable`);
   else if (!intent.output.mediaTypes.includes(expected.mediaType))
     reasons.push(`expected asset MIME ${expected.mediaType} is outside the capture contract`);
@@ -838,12 +898,37 @@ function repositoryCaptureUnavailableReasons(
   if (captureRecipe?.capture?.kind !== "capture")
     reasons.push(`capture recipe ${captureRequest.captureRecipeId} is unavailable`);
   else {
-    const outputs = new Set(captureRecipe.capture.outputs.map(({ mediaType }) => mediaType));
-    if (intent.output.mediaTypes.some((mediaType) => !outputs.has(mediaType)))
-      reasons.push("capture recipe does not declare every required output MIME");
-    if ((intent.output.profile?.kind ?? null) !== (captureRecipe.capture.profile?.kind ?? null))
+    const capture = captureRecipe.capture;
+    const subject = capture.outputs.find(({ roleId }) => roleId === capture.comparisonOutputRoleId);
+    if (!subject) reasons.push("capture comparison subject role is not a declared output");
+    else {
+      if (!intent.output.mediaTypes.includes(subject.mediaType))
+        reasons.push(
+          `comparison subject MIME ${subject.mediaType} is outside the capture contract`,
+        );
+      if (expected && subject.mediaType !== expected.mediaType)
+        reasons.push(
+          `comparison subject MIME ${subject.mediaType} differs from expected asset MIME ${expected.mediaType}`,
+        );
+    }
+    if ((intent.output.profile?.kind ?? null) !== (capture.profile?.kind ?? null))
       reasons.push("capture recipe does not support the requested typed profile");
-    if (!captureRecipe.capture.gates.includes(intent.review.kind))
+    const constraints = intent.output.profile;
+    const profile = capture.profile;
+    if (constraints && profile?.kind === "raster") {
+      if (profile.output && !dimensionsSatisfy(profile.output, constraints))
+        reasons.push("capture recipe exact output dimensions are outside the capture contract");
+      if (expected && !rasterInspectionSatisfies(expected.inspection, constraints))
+        reasons.push("expected asset inspection is outside the raster capture contract");
+      if (
+        expected?.inspection.kind === "raster" &&
+        profile.output &&
+        (expected.inspection.width !== profile.output.width ||
+          expected.inspection.height !== profile.output.height)
+      )
+        reasons.push("expected asset dimensions differ from the capture recipe exact output");
+    }
+    if (!capture.gates.includes(intent.review.kind))
       reasons.push(`capture recipe does not support gate ${intent.review.kind}`);
   }
   if (captureRequest.comparison.kind === "threshold") {
@@ -867,6 +952,40 @@ function repositoryCaptureUnavailableReasons(
     )
       reasons.push(`review rule ${reviewRuleId} does not support the exact capture contract`);
   }
+  const boundItems = new Set(intent.bindings.map(({ workItemId }) => workItemId));
+  const registrations = new Map<string, Set<string>>();
+  const register = (command: string, phase: string, identity: string) => {
+    const identities = registrations.get(command) ?? new Set<string>();
+    identities.add(`${phase}\0${identity}`);
+    registrations.set(command, identities);
+  };
+  for (const item of proposal.workItems.filter(({ id }) => boundItems.has(id)))
+    for (const criterion of item.criteria)
+      for (const validation of criterion.validation)
+        for (const reference of validation.evidence) {
+          const command = validationCommand(request, reference);
+          if (command) register(command, "ordinary", compilerEvalDigest(reference));
+        }
+  for (const candidate of proposal.mediaIntents) {
+    const candidateCapture = candidate.repositoryCapture;
+    if (!candidateCapture) continue;
+    if (!candidate.bindings.some(({ workItemId }) => boundItems.has(workItemId))) continue;
+    const selectedCapture = request.repository.validationRecipes.find(
+      ({ id }) => id === candidateCapture.captureRecipeId,
+    );
+    if (selectedCapture) register(selectedCapture.command, "capture", selectedCapture.id);
+    if (candidateCapture.comparison.kind === "threshold") {
+      const comparisonRecipeId = candidateCapture.comparison.recipeId;
+      const selectedComparison = request.repository.validationRecipes.find(
+        ({ id }) => id === comparisonRecipeId,
+      );
+      if (selectedComparison)
+        register(selectedComparison.command, "threshold-comparison", selectedComparison.id);
+    }
+  }
+  for (const [command, identities] of registrations)
+    if (identities.size > 1)
+      reasons.push(`validation command ${command} has conflicting phase or recipe identity`);
   return reasons;
 }
 
@@ -1142,7 +1261,7 @@ function mediaIntentViolations(
         ),
       );
     if (intent.repositoryCapture) {
-      const unavailable = repositoryCaptureUnavailableReasons(request, intent);
+      const unavailable = repositoryCaptureUnavailableReasons(request, proposal, intent);
       if (intent.necessity === "required" && unavailable.length)
         violations.push(
           violation(
@@ -2135,34 +2254,40 @@ function uniqueCommands(
   proposal: CompilerProposal,
   item: CompilerProposal["workItems"][number],
 ): string[] {
-  const commands: string[] = [];
+  const ordinaryCommands: string[] = [];
   for (const criterion of item.criteria)
     for (const validation of criterion.validation)
       for (const reference of validation.evidence) {
         const command = validationCommand(request, reference);
-        if (command && !commands.includes(command)) commands.push(command);
+        if (command && !ordinaryCommands.includes(command)) ordinaryCommands.push(command);
       }
+  const captureCommands: string[] = [];
+  const comparisonCommands: string[] = [];
   for (const intent of proposal.mediaIntents) {
-    if (!intent.repositoryCapture) continue;
+    const capture = intent.repositoryCapture;
+    if (!capture) continue;
     if (!intent.bindings.some((binding) => binding.workItemId === item.id)) continue;
-    const recipeIds = [
-      intent.repositoryCapture.captureRecipeId,
-      ...(intent.repositoryCapture.comparison.kind === "threshold"
-        ? [intent.repositoryCapture.comparison.recipeId]
-        : []),
-    ];
-    for (const recipeId of recipeIds) {
-      const command = request.repository.validationRecipes.find(
-        ({ id }) => id === recipeId,
+    if (repositoryCaptureUnavailableReasons(request, proposal, intent).length > 0) continue;
+    const captureCommand = request.repository.validationRecipes.find(
+      ({ id }) => id === capture.captureRecipeId,
+    )?.command;
+    if (captureCommand && !captureCommands.includes(captureCommand))
+      captureCommands.push(captureCommand);
+    if (capture.comparison.kind === "threshold") {
+      const comparisonRecipeId = capture.comparison.recipeId;
+      const comparisonCommand = request.repository.validationRecipes.find(
+        ({ id }) => id === comparisonRecipeId,
       )?.command;
-      if (command && !commands.includes(command)) commands.push(command);
+      if (comparisonCommand && !comparisonCommands.includes(comparisonCommand))
+        comparisonCommands.push(comparisonCommand);
     }
   }
-  return commands;
+  return [...ordinaryCommands, ...captureCommands, ...comparisonCommands];
 }
 
 function validationDesign(
   request: CompilerRequest,
+  proposal: CompilerProposal,
   item: CompilerProposal["workItems"][number],
 ): NonNullable<CompilerWorkItemInput["validation"]> {
   const tiers = new Map<
@@ -2179,10 +2304,26 @@ function validationDesign(
       }
       tiers.set(validation.tier, current);
     }
+  const humanCaptureRequired = proposal.mediaIntents.some(
+    (intent) =>
+      intent.repositoryCapture !== null &&
+      intent.review.kind === "human-required" &&
+      intent.bindings.some(({ workItemId }) => workItemId === item.id) &&
+      repositoryCaptureUnavailableReasons(request, proposal, intent).length === 0,
+  );
+  if (humanCaptureRequired) {
+    const semantic = tiers.get("semantic") ?? { criteria: [], commands: [] };
+    for (const criterion of item.criteria)
+      if (!semantic.criteria.includes(criterion.text)) semantic.criteria.push(criterion.text);
+    tiers.set("semantic", semantic);
+  }
   return [...tiers].map(([tier, value]) => ({
     tier,
     criteria: value.criteria,
-    rationale: `Criterion IDs select ${tier} evidence through the pinned compiler request.`,
+    rationale:
+      tier === "semantic" && humanCaptureRequired
+        ? "A human-required repository capture gate retains semantic review for the complete acceptance set."
+        : `Criterion IDs select ${tier} evidence through the pinned compiler request.`,
     evidenceCommands: value.commands,
   }));
 }
@@ -2211,7 +2352,7 @@ function semanticWorkItem(
     dependsOn: [...item.dependsOn],
     baseSha: request.baseSha,
     validationCommands: uniqueCommands(request, proposal, item),
-    validation: validationDesign(request, item),
+    validation: validationDesign(request, proposal, item),
     criterionRisks: item.criteria.map((criterion) => ({
       criterion: criterion.text,
       risk: risk(criterion),
@@ -2332,7 +2473,13 @@ function projectedRepositoryCaptureRecipe(
     scenario: structuredClone(captureRequest.scenario),
     captureCommand: commandIdentity(captureRecipe),
     outputs: structuredClone(captureRecipe.capture.outputs),
-    profile: structuredClone(captureRecipe.capture.profile),
+    profile:
+      captureRecipe.capture.profile && intent.output.profile
+        ? {
+            ...structuredClone(captureRecipe.capture.profile),
+            constraints: structuredClone(intent.output.profile),
+          }
+        : null,
     comparison,
     gate: structuredClone(intent.review),
   };
@@ -2372,7 +2519,7 @@ function projectMediaIntents(
   }
   for (const intent of proposal.mediaIntents) {
     if (intent.repositoryCapture) {
-      const unavailable = repositoryCaptureUnavailableReasons(request, intent);
+      const unavailable = repositoryCaptureUnavailableReasons(request, proposal, intent);
       if (unavailable.length) {
         if (intent.necessity === "required")
           throw new Error(`required media intent ${intent.id} lacks capture authority`);

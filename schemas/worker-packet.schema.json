@@ -885,14 +885,28 @@
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["kind", "viewport", "output", "captureRoleId", "diffRoleId", "previewRoleId"],
+              "required": ["kind", "viewport", "output", "captureRoleId", "diffRoleId", "previewRoleId", "constraints"],
               "properties": {
                 "kind": { "const": "raster" },
                 "viewport": { "$ref": "#/definitions/repositoryCaptureDimensions" },
                 "output": { "$ref": "#/definitions/repositoryCaptureDimensions" },
                 "captureRoleId": { "$ref": "#/definitions/safeId" },
                 "diffRoleId": { "anyOf": [{ "$ref": "#/definitions/safeId" }, { "type": "null" }] },
-                "previewRoleId": { "anyOf": [{ "$ref": "#/definitions/safeId" }, { "type": "null" }] }
+                "previewRoleId": { "anyOf": [{ "$ref": "#/definitions/safeId" }, { "type": "null" }] },
+                "constraints": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["kind", "minimumWidth", "maximumWidth", "minimumHeight", "maximumHeight", "alpha", "animation"],
+                  "properties": {
+                    "kind": { "const": "raster" },
+                    "minimumWidth": { "anyOf": [{ "type": "integer", "minimum": 1, "maximum": 16384 }, { "type": "null" }] },
+                    "maximumWidth": { "anyOf": [{ "type": "integer", "minimum": 1, "maximum": 16384 }, { "type": "null" }] },
+                    "minimumHeight": { "anyOf": [{ "type": "integer", "minimum": 1, "maximum": 16384 }, { "type": "null" }] },
+                    "maximumHeight": { "anyOf": [{ "type": "integer", "minimum": 1, "maximum": 16384 }, { "type": "null" }] },
+                    "alpha": { "enum": ["allowed", "required", "forbidden"] },
+                    "animation": { "enum": ["allowed", "required", "forbidden"] }
+                  }
+                }
               }
             }
           ]

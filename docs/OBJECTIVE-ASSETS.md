@@ -74,10 +74,15 @@ against commands observed from the pinned checkout and emits a digest-bound
 `repositoryCaptureRecipes` entry with the exact intent and criterion references, scenario input,
 declared output roles and MIME types, optional typed raster profile, exact-byte or bounded-threshold
 comparison with one explicit subject output role, and review gate. Exact-byte comparison has no
-comparison command. The expected bytes
-reuse one exact `assetInputs` descriptor rather than repeating transport identity in the recipe.
-Required unsupported evidence fails compilation with a structured violation; helpful evidence may
-be omitted with an explicit trace disposition while its Work Item criteria and obligations remain.
+comparison command. The subject role names one declared output whose MIME exactly matches the
+expected asset and is permitted by the intent. Raster profiles preserve catalog viewport, exact
+output dimensions, and role identities and add the intent's width, height, alpha, and animation
+acceptance constraints. Catalog exact dimensions and expected asset inspection must satisfy them.
+Auxiliary capture, diff, and preview outputs do not count as additional comparison subjects. The
+expected bytes reuse one exact `assetInputs` descriptor rather than repeating transport identity in
+the recipe. Required unsupported evidence fails compilation with a structured violation; helpful
+evidence may be omitted with an explicit trace disposition while its Work Item criteria and
+obligations remain.
 
 The committed catalog contains `captures` and `thresholdComparisons`; it has no protocol-version
 field or aliases. Every command must already be a repository-observed validation recipe. Its JSON
@@ -85,6 +90,10 @@ shape is [`schemas/validation-captures.schema.json`](../schemas/validation-captu
 Capture recipes are format-neutral: outputs may be structured JSON, opaque binary, raster, or any
 other bounded MIME identity. Runtime trees, artifacts, environments, captured bytes, receipts, and
 decisions are execution results and never recipe fields.
+Worker validation commands are unique and ordered by phase: ordinary validation first, then all
+capture commands, then all threshold comparisons. Reusing command text across phases or recipe
+identities is rejected. A human-required capture gate forces semantic review across the bound Work
+Item's complete acceptance set.
 
 ## Produced asset lifecycle
 

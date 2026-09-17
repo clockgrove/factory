@@ -6,6 +6,7 @@ import {
   AssetProductionDeliverableSchema,
   GeneratedAssetRequirementSchema,
   MediaTypeSchema,
+  RasterMediaConstraintsSchema,
   RepositoryChangeDeliverableSchema,
 } from "../assets/media-intent.js";
 
@@ -201,6 +202,7 @@ export const RepositoryCaptureProfileSchema = z.discriminatedUnion("kind", [
       captureRoleId: safeId,
       diffRoleId: safeId.nullable(),
       previewRoleId: safeId.nullable(),
+      constraints: RasterMediaConstraintsSchema,
     })
     .strict(),
 ]);
@@ -578,6 +580,25 @@ export const RepositoryChangeWorkerPacketSchema = WorkerPacketCommon.extend({
     const inputs = new Set(packet.assetInputs.map(({ descriptorDigest }) => descriptorDigest));
     const uses = new Map(packet.mediaUses.map((use) => [`${use.intentId}\0${use.direction}`, use]));
     const recipeIds = new Set<string>();
+    const commandIdentities = new Map<string, string>();
+    const captureCommands: string[] = [];
+    const comparisonCommands: string[] = [];
+    const registerCommand = (
+      command: string,
+      phase: "capture" | "threshold-comparison",
+      identity: { recipeId: string; recipeDigest: string },
+      path: Array<string | number>,
+    ) => {
+      const commandIdentity = `${phase}\0${identity.recipeId}\0${identity.recipeDigest}`;
+      const existing = commandIdentities.get(command);
+      if (existing !== undefined && existing !== commandIdentity)
+        context.addIssue({
+          code: "custom",
+          path,
+          message: "validation command text has conflicting phase or recipe identity",
+        });
+      else commandIdentities.set(command, commandIdentity);
+    };
     for (const [index, recipe] of packet.repositoryCaptureRecipes.entries()) {
       if (recipeIds.has(recipe.id))
         context.addIssue({
@@ -620,7 +641,48 @@ export const RepositoryChangeWorkerPacketSchema = WorkerPacketCommon.extend({
             path: ["repositoryCaptureRecipes", index],
             message: "capture recipe references an ungrounded validation command",
           });
+      registerCommand(recipe.captureCommand.command, "capture", recipe.captureCommand, [
+        "repositoryCaptureRecipes",
+        index,
+        "captureCommand",
+      ]);
+      if (!captureCommands.includes(recipe.captureCommand.command))
+        captureCommands.push(recipe.captureCommand.command);
+      if (recipe.comparison.kind === "threshold") {
+        registerCommand(
+          recipe.comparison.command.command,
+          "threshold-comparison",
+          recipe.comparison.command,
+          ["repositoryCaptureRecipes", index, "comparison", "command"],
+        );
+        if (!comparisonCommands.includes(recipe.comparison.command.command))
+          comparisonCommands.push(recipe.comparison.command.command);
+      }
     }
+    const reservedCommands = new Set([...captureCommands, ...comparisonCommands]);
+    for (const [validationIndex, validation] of (packet.validation ?? []).entries())
+      for (const command of validation.evidenceCommands ?? [])
+        if (reservedCommands.has(command))
+          context.addIssue({
+            code: "custom",
+            path: ["validation", validationIndex, "evidenceCommands"],
+            message: "ordinary validation command conflicts with a capture command phase",
+          });
+    const captureCommandSet = new Set(captureCommands);
+    const comparisonCommandSet = new Set(comparisonCommands);
+    const commandPhases = packet.validationCommands.map((command) =>
+      comparisonCommandSet.has(command) ? 2 : captureCommandSet.has(command) ? 1 : 0,
+    );
+    if (
+      new Set(packet.validationCommands).size !== packet.validationCommands.length ||
+      commandPhases.some((phase, index) => index > 0 && phase < commandPhases[index - 1]!)
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["validationCommands"],
+        message:
+          "validation commands must be unique and ordered ordinary, capture, then threshold comparison",
+      });
   });
 
 export const AssetProductionWorkerPacketSchema = WorkerPacketCommon.extend({

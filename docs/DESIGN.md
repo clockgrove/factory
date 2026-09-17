@@ -727,11 +727,16 @@ binds a pinned `.factory/validation-captures.json` entry to the target `reposito
 Item's `repositoryCaptureRecipes`. The recipe contains exact intent and criterion references,
 repository-observed command identities, bounded scenario inputs, declared output roles and MIME
 identities, an optional typed raster profile, exact-byte or grounded threshold comparison naming
-one subject output role, and the required gate. It references the expected immutable `assetInputs`
-descriptor and contains no runtime result fields. A required unsupported evidence intent fails
-before graph publication; a helpful omission preserves the Work Item's obligations. Code-native
-SVG, Mermaid, HTML/CSS/canvas
-and similar repository artifacts stay on the repository-change path.
+one subject output role, and the required gate. The comparison subject's declared MIME must equal
+the expected asset MIME and be allowed by the intent. Raster projection keeps catalog-owned
+viewport, exact output dimensions, and role identities while adding intent-owned width, height,
+alpha, and animation acceptance constraints. The expected asset inspection and any catalog exact
+output dimensions must satisfy those constraints. It references the expected immutable `assetInputs`
+descriptor and contains no runtime result fields. Repository capture has one comparison subject;
+auxiliary capture, diff, or preview outputs do not change its cardinality. A required unsupported
+evidence intent fails before graph publication; a helpful omission preserves the Work Item's
+obligations. Code-native SVG, Mermaid, HTML/CSS/canvas and similar repository artifacts stay on the
+repository-change path.
 
 An optional Objective asset manifest is part of activation and run identity. The Supervisor reads
 that exact manifest from immutable Git refs, reconstructs verified media in private temporary
@@ -743,6 +748,10 @@ deterministic review rules. It grants no producer, provider, network, storage, c
 execution authority. Compilation fails deterministically for a required implementation input
 without a matching import or producer capability, and for required repository evidence without
 grounded capture authority. Helpful omissions remain visible in the projection trace.
+Validation commands have one canonical phase order: ordinary commands, capture commands, then
+threshold-comparison commands, with stable first-occurrence deduplication inside each phase. A
+command string cannot carry conflicting phase or recipe identity. A human-required capture gate
+retains semantic review for every acceptance criterion on its repository Work Item.
 The Supervisor routes `asset-production` through its own capability, admission, execution,
 accounting, storage, review, activation, and recovery lifecycle before ordinary repository backend
 selection. A later repository consumer reserves the exact activation bundle and activated packet.

@@ -105,6 +105,10 @@ The equivalent MCP tools are `factory_asset_status`, `factory_asset_approve`,
 reservation, invocation, and base authority from the authenticated `AssetSetReady` event; callers do
 not supply them. The same request ID and exact decision returns the original record. Reusing a
 request ID with changed selection or text, or deciding the same Asset Set twice, fails closed.
+Approval requires one or more unique descriptor digests and accepts no reason. Rejection and
+revision require bounded human text and accept no descriptor selection. `asset-status` reauthenticates
+the immutable Asset Set, decision, and activation chain and reports their exact refs and commits;
+publication-pending states identify a durable record whose authenticated event still needs repair.
 Approval first persists an immutable decision and activation, then publishes their authenticated
 events. Rejection is terminal review evidence. Revision binds the prior Asset Set and feedback and
 permits a separately admitted bounded producer attempt; it never mutates or reuses the prior

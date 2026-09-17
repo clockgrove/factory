@@ -70,7 +70,7 @@ const USAGE = [
   "  factory assets-import OWNER/REPO#NUMBER --request-id ID --input FILE",
   "  factory assets-inspect OWNER/REPO#NUMBER --base-sha SHA --manifest-digest DIGEST",
   "  factory asset-status OWNER/REPO#NUMBER --asset-set-digest DIGEST",
-  "  factory asset-approve OWNER/REPO#NUMBER --request-id ID --asset-set-digest DIGEST --descriptor DIGEST [--descriptor DIGEST...]",
+  "  factory asset-approve OWNER/REPO#NUMBER --request-id ID --asset-set-digest DIGEST --descriptor-digest DIGEST [--descriptor-digest DIGEST...]",
   "  factory asset-reject|asset-revise OWNER/REPO#NUMBER --request-id ID --asset-set-digest DIGEST --reason TEXT",
   "  factory plan OWNER/REPO#NUMBER [--compile] [--repo DIR] [--base-sha SHA] [--asset-manifest-digest DIGEST] [--policy FILE]",
   "  factory compiler-eval OWNER/REPO#NUMBER [--markdown] [--annotations FILE]  (read-only draft history and post-mortem)",
@@ -315,26 +315,43 @@ async function applicationCommand(command: string, args: string[]): Promise<void
   if (["asset-approve", "asset-reject", "asset-revise"].includes(command)) {
     const requestId = option(args, "--request-id");
     const assetSetDigest = option(args, "--asset-set-digest");
-    const selectedDescriptorDigests = options(args, "--descriptor");
+    if (args.includes("--descriptor"))
+      fail("--descriptor is not supported; use --descriptor-digest DIGEST");
+    const selectedDescriptorDigests = options(args, "--descriptor-digest");
     const reason = option(args, "--reason");
     if (!requestId || !assetSetDigest)
       fail(`${command} requires --request-id ID and --asset-set-digest DIGEST`);
     if (command === "asset-approve" && selectedDescriptorDigests.length === 0)
-      fail("asset-approve requires at least one --descriptor DIGEST");
+      fail("asset-approve requires at least one --descriptor-digest DIGEST");
+    if (command === "asset-approve" && reason !== undefined)
+      fail("asset-approve does not accept --reason");
+    if (command !== "asset-approve" && selectedDescriptorDigests.length)
+      fail(`${command} does not accept --descriptor-digest`);
     if (command !== "asset-approve" && !reason) fail(`${command} requires --reason TEXT`);
-    const result = await service.assetDecision({
-      objective: target.objective,
-      requestId,
-      assetSetDigest,
-      kind:
-        command === "asset-approve"
-          ? "approved"
-          : command === "asset-reject"
-            ? "rejected"
-            : "revision-requested",
-      ...(selectedDescriptorDigests.length ? { selectedDescriptorDigests } : {}),
-      ...(reason ? { reason } : {}),
-    });
+    const result =
+      command === "asset-approve"
+        ? await service.assetDecision({
+            objective: target.objective,
+            requestId,
+            assetSetDigest,
+            kind: "approved",
+            selectedDescriptorDigests,
+          })
+        : command === "asset-reject"
+          ? await service.assetDecision({
+              objective: target.objective,
+              requestId,
+              assetSetDigest,
+              kind: "rejected",
+              reason: reason!,
+            })
+          : await service.assetDecision({
+              objective: target.objective,
+              requestId,
+              assetSetDigest,
+              kind: "revision-requested",
+              reason: reason!,
+            });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }

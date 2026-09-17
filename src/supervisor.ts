@@ -126,6 +126,7 @@ import {
   type ArtifactTransferIntentCheckpoint,
 } from "./control/artifact-transfers.js";
 import {
+  assertRemoteLfsObjectsCurrent,
   finalizeLfsArtifact,
   reconstructNativeLfsArtifact,
   restoreLfsArtifactContent,
@@ -14768,6 +14769,24 @@ export class FactorySupervisor {
                 target.pull.commitSha,
               );
             }
+            const mutationArtifacts: NormalizedArtifact[] = [];
+            for (const member of integratingMembers) {
+              const item = ordered.find(
+                (candidate) => candidate.number === member.receipt.workItem,
+              );
+              if (!item) throw new Error("native integration member is outside its delivery unit");
+              const artifact = await this.#siblingArtifact(
+                item,
+                member,
+                member.pull.exactHeadValidation.baseSha,
+              );
+              if (
+                artifact.fileManifest?.resultTreeSha !==
+                member.pull.exactHeadValidation.outputTreeSha
+              )
+                throw new Error("native integration artifact differs from its validated tree");
+              mutationArtifacts.push(artifact);
+            }
             const assertNativeMergeCurrent = async () => {
               if (
                 (await this.#store.getBranchHeadOid(this.#baseBranch)) !==
@@ -14807,16 +14826,36 @@ export class FactorySupervisor {
             };
             await assertNativeMergeCurrent();
             await admission.markDispatched("native");
-            const result = await this.#store.withPublicationSafetyFence(
-              assertNativeMergeCurrent,
-              () =>
-                this.#stacks.requestMerge({
-                  pullRequest: target.pull.number,
-                  expectedHeadSha: target.pull.commitSha,
-                  title: target.receipt.itemId,
-                  action: "default",
-                }),
-            );
+            let mutationStarted = false;
+            let result: Awaited<ReturnType<GitHubStacks["requestMerge"]>>;
+            try {
+              result = await this.#store.withPublicationSafetyFence(
+                async () => {
+                  await assertNativeMergeCurrent();
+                  await assertRemoteLfsObjectsCurrent({
+                    artifacts: mutationArtifacts,
+                    repositoryPath: this.#options.repository,
+                    allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                  });
+                },
+                () => {
+                  mutationStarted = true;
+                  return this.#stacks.requestMerge({
+                    pullRequest: target.pull.number,
+                    expectedHeadSha: target.pull.commitSha,
+                    title: target.receipt.itemId,
+                    action: "default",
+                  });
+                },
+              );
+            } catch (error) {
+              if (!mutationStarted)
+                await admission.authoritativeNonExecution({
+                  kind: "native-request-rejection",
+                  reason: "native pre-dispatch safety check refused the exact merge request",
+                });
+              throw error;
+            }
             if (result.state === "pending") await admission.bindAsynchronousMerge(result.uuid);
             return result;
           });
@@ -15988,6 +16027,7 @@ export class FactorySupervisor {
     assertAdmission();
     const identity = await this.#siblingRefreshIdentity(item, member, targetBaseSha);
     let record = await this.#siblingRefreshes.load(identity);
+    let refreshArtifact: NormalizedArtifact | undefined;
     const observed = await this.#store.readPullRequest(member.pull.number);
     const previous = await this.#observedSiblingRefresh(item, member, observed.headSha);
     if (previous?.identity.targetBaseSha === targetBaseSha) {
@@ -16018,6 +16058,7 @@ export class FactorySupervisor {
       if (budget.modelTokens !== null && budget.modelTokens <= 0)
         throw new Error("model-token budget exhausted before sibling refresh");
       const artifact = await this.#siblingArtifact(item, member, targetBaseSha);
+      refreshArtifact = artifact;
       const packet = this.#packetBoundToReservation(item, member.reservation, targetBaseSha);
       const outputTreeSha = await prepareSiblingRefreshTree({
         repository: this.#options.repository,
@@ -16085,11 +16126,20 @@ export class FactorySupervisor {
         };
         const branchHead = await assertRefreshCurrent();
         if (branchHead === pinned.expectedOldHeadSha) {
+          refreshArtifact ??= await this.#siblingArtifact(item, member, targetBaseSha);
+          if (refreshArtifact.fileManifest?.resultTreeSha !== pinned.outputTreeSha)
+            throw new Error("sibling refresh artifact differs from its pinned result tree");
+          const mutationArtifact = refreshArtifact;
           await this.#lease.use(async () => {
             if (
               !(await this.#store.withPublicationSafetyFence(
                 async () => {
                   await assertRefreshCurrent();
+                  await assertRemoteLfsObjectsCurrent({
+                    artifacts: [mutationArtifact],
+                    repositoryPath: this.#options.repository,
+                    allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                  });
                 },
                 () =>
                   this.#store.compareAndSwapRef({
@@ -21332,6 +21382,11 @@ export class FactorySupervisor {
               } catch (cause) {
                 throw new PrepublicationApprovalRequiredError(cause);
               }
+              await assertRemoteLfsObjectsCurrent({
+                artifacts: [artifact],
+                repositoryPath: this.#options.repository,
+                allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+              });
             },
             mutate: () => this.#store.createRef(`refs/heads/${branch}`, plannedHead),
           });

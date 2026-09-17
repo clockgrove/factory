@@ -29,12 +29,10 @@ import {
   type MergeCandidateValidationEvidence,
 } from "./merge-candidate.js";
 import {
-  GitLfsOutputTransport,
-  assertLfsReceiptRemoteIdentity,
+  assertRemoteLfsObjectsCurrent,
   verifyMaterializedLfsContent,
   type LfsOutputTransport,
 } from "./git-lfs-output.js";
-import { destinationAllowedByPolicy } from "../protocol/policy.js";
 
 export interface PublicationStore {
   listRefs?(prefix: string): Promise<Array<{ ref: string; oid: string }>>;
@@ -356,35 +354,14 @@ export async function publishValidated(args: {
         ...{
           assertSafety: async () => {
             await args.beforeRefMutation?.();
-            if (args.artifact.lfsObjects?.length) {
-              if (!args.repositoryPath)
-                throw new Error("LFS publication requires the authenticated repository path");
-              const transport = args.lfsTransport ?? new GitLfsOutputTransport();
-              const remote = await transport.preflight(
-                args.repositoryPath,
-                args.artifact.lfsObjects[0]!.rawTransfer.identity.repository,
-                args.allowedNetworkDestinations ?? [],
-              );
-              if (
-                !destinationAllowedByPolicy(
-                  remote.remoteHost,
-                  args.allowedNetworkDestinations ?? [],
-                )
-              )
-                throw new Error("Git LFS publication endpoint is outside run-policy egress");
-              assertLfsReceiptRemoteIdentity(args.artifact, remote);
-              for (const receipt of args.artifact.lfsObjects) {
-                const bytes = await transport.read({
-                  repository: args.repositoryPath,
-                  object: receipt,
-                  resultTreeSha: args.validation.evidence.outputTreeSha,
-                  baseSha: args.artifact.baseSha,
-                  endpoint: remote.endpoint,
-                });
-                if (bytes.length !== receipt.size || sha256(bytes) !== receipt.oid)
-                  throw new Error("remote LFS object changed before pointer publication");
-              }
-            }
+            if (args.artifact.lfsObjects?.length && !args.repositoryPath)
+              throw new Error("LFS publication requires the authenticated repository path");
+            await assertRemoteLfsObjectsCurrent({
+              artifacts: [args.artifact],
+              repositoryPath: args.repositoryPath ?? "",
+              allowedNetworkDestinations: args.allowedNetworkDestinations ?? [],
+              ...(args.lfsTransport ? { transport: args.lfsTransport } : {}),
+            });
           },
         },
         mutate: () => args.store.createRef(`refs/heads/${branch}`, preparedCommitSha),

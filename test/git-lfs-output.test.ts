@@ -18,6 +18,7 @@ import {
   normalizeArtifact,
 } from "../src/execution/artifacts.js";
 import {
+  assertRemoteLfsObjectsCurrent,
   finalizeLfsArtifact,
   reconstructNativeLfsArtifact,
   resolvedGitLfsEndpoint,
@@ -259,6 +260,112 @@ describe("preconfigured Git LFS output normalization", () => {
       pointer.toString("utf8").trim(),
     );
   });
+
+  it("rechecks each bound remote object once and skips ordinary Git artifacts", async () => {
+    const value = await fixture();
+    const bytes = Buffer.from("publication-bound remote object");
+    const fake = transport(bytes);
+    const store = memoryStore();
+    const collected = await collectRaw(value, "asset.bin", bytes);
+    const finalized = await finalizeLfsArtifact({
+      store,
+      artifact: collected,
+      authority,
+      repositoryPath: value.repository,
+      allowedNetworkDestinations: ["github.com"],
+      assertCurrent: async () => {},
+      transport: fake.value,
+    });
+    const rebound = await finalizeLfsArtifact({
+      store,
+      artifact: collected,
+      authority: { ...authority, attempt: 2 },
+      repositoryPath: value.repository,
+      allowedNetworkDestinations: ["github.com"],
+      assertCurrent: async () => {},
+      transport: fake.value,
+    });
+    expect(rebound.lfsObjects![0]!.digest).not.toBe(finalized.lfsObjects![0]!.digest);
+    fake.read.mockClear();
+    vi.mocked(fake.value.preflight).mockClear();
+
+    await expect(
+      assertRemoteLfsObjectsCurrent({
+        artifacts: [finalized, rebound],
+        repositoryPath: value.repository,
+        allowedNetworkDestinations: ["github.com"],
+        transport: fake.value,
+      }),
+    ).resolves.toBeUndefined();
+    expect(fake.value.preflight).toHaveBeenCalledTimes(1);
+    expect(fake.value.preflight).toHaveBeenCalledWith(value.repository, authority.repository, [
+      "github.com",
+    ]);
+    expect(fake.read).toHaveBeenCalledTimes(1);
+
+    const ordinaryTransport = transport(bytes);
+    await expect(
+      assertRemoteLfsObjectsCurrent({
+        artifacts: [
+          normalizeArtifact({
+            baseSha: value.baseSha,
+            patch: "",
+            changedPaths: [],
+            outcome: "succeeded",
+          }),
+        ],
+        repositoryPath: value.repository,
+        allowedNetworkDestinations: [],
+        transport: ordinaryTransport.value,
+      }),
+    ).resolves.toBeUndefined();
+    expect(ordinaryTransport.value.preflight).not.toHaveBeenCalled();
+    expect(ordinaryTransport.read).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "corrupt", "misrouted"] as const)(
+    "refuses a %s remote object after its durable receipt",
+    async (failure) => {
+      const value = await fixture();
+      const bytes = Buffer.from(`post-receipt-${failure}`);
+      const finalized = await finalizeLfsArtifact({
+        store: memoryStore(),
+        artifact: await collectRaw(value, "asset.bin", bytes),
+        authority,
+        repositoryPath: value.repository,
+        allowedNetworkDestinations: ["github.com"],
+        assertCurrent: async () => {},
+        transport: transport(bytes).value,
+      });
+      const changed = transport(bytes, {
+        missingRead: failure === "missing",
+        corruptRead: failure === "corrupt",
+      });
+      if (failure === "misrouted")
+        vi.mocked(changed.value.preflight).mockResolvedValue({
+          toolVersion: finalized.lfsObjects![0]!.toolVersion,
+          remoteDigest: "7".repeat(64),
+          remoteHost: "github.com",
+          endpoint: "https://github.com/fixture/other.git/info/lfs",
+        });
+
+      await expect(
+        assertRemoteLfsObjectsCurrent({
+          artifacts: [finalized],
+          repositoryPath: value.repository,
+          allowedNetworkDestinations: ["github.com"],
+          transport: changed.value,
+        }),
+      ).rejects.toThrow(
+        failure === "missing"
+          ? /missing/
+          : failure === "corrupt"
+            ? /changed before pointer publication/
+            : /remote identity changed/,
+      );
+      if (failure === "misrouted") expect(changed.read).not.toHaveBeenCalled();
+    },
+  );
 
   it("reconstructs a native Git range from authenticated raw bytes and issues target-base receipts", async () => {
     const value = await fixture();

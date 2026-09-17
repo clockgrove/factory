@@ -47,6 +47,24 @@ function writerOperationId(identity: WriterIdentity, sequence: number): string {
     .digest("hex");
 }
 
+function hasRecomputableWriterAuthority(event: FactoryEvent): boolean {
+  const writer = completeWriterAuthority(event);
+  return Boolean(
+    writer &&
+      writer.writerOperationId ===
+        writerOperationId(
+          {
+            objective: event.objective,
+            runId: event.runId,
+            holder: writer.writerHolder,
+            epoch: writer.writerEpoch,
+            policyDigest: writer.writerPolicyDigest,
+          },
+          event.sequence,
+        ),
+  );
+}
+
 export function writerAuthority(lease: LeaseState, sequence: number): WriterAuthority {
   if (!Number.isSafeInteger(sequence) || sequence < 0) {
     throw new Error("writer operation sequence must be a non-negative safe integer");
@@ -74,6 +92,25 @@ export function hasExactWriterAuthority(
       writer.writerEpoch === authority.epoch &&
       writer.writerPolicyDigest === authority.policyDigest &&
       writer.writerOperationId === writerOperationId(authority, event.sequence),
+  );
+}
+
+/** Authenticate a durable receipt written by the current Objective writer or
+ * any earlier writer generation. A historical generation keeps its own holder;
+ * the currently observed epoch must use the current holder exactly. */
+export function hasHistoricalWriterAuthority(
+  event: FactoryEvent,
+  authority: ObjectiveAuthorityObservation,
+): boolean {
+  const writer = completeWriterAuthority(event);
+  return Boolean(
+    writer &&
+      event.objective === authority.objective &&
+      event.runId === authority.runId &&
+      writer.writerPolicyDigest === authority.policyDigest &&
+      writer.writerEpoch <= authority.epoch &&
+      (writer.writerEpoch < authority.epoch || writer.writerHolder === authority.holder) &&
+      hasRecomputableWriterAuthority(event),
   );
 }
 

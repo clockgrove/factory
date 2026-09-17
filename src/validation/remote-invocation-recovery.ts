@@ -142,6 +142,26 @@ export function inspectRemoteValidationEventChain(args: {
       settled.sequence <= (rebound?.sequence ?? dispatch.sequence))
   )
     throw new Error("remote validation settlement has an invalid cleanup chain");
+  const writerChain = [args.capacity, prepared, dispatch, rebound, settled].filter(
+    (event) => event !== undefined,
+  );
+  for (let index = 1; index < writerChain.length; index += 1) {
+    const previous = writerChain[index - 1]!;
+    const current = writerChain[index]!;
+    if (
+      current.sequence <= previous.sequence ||
+      current.writerEpoch! < previous.writerEpoch! ||
+      (current.writerEpoch === previous.writerEpoch &&
+        current.writerHolder !== previous.writerHolder)
+    )
+      throw new Error("remote validation writer generation chain regressed or changed holder");
+  }
+  if (
+    prepared.writerEpoch !== args.capacity.writerEpoch ||
+    prepared.writerHolder !== args.capacity.writerHolder ||
+    prepared.writerPolicyDigest !== args.capacity.writerPolicyDigest
+  )
+    throw new Error("remote validation preparation differs from its capacity writer");
   return {
     prepared,
     ...(dispatch ? { dispatch } : {}),

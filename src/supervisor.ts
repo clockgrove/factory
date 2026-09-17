@@ -288,7 +288,7 @@ import {
 import { assertIsolatedCandidateFailureProof } from "./recovery/isolated-candidate.js";
 import { assertNoSecretMaterial, PROTOCOL_V2 } from "./protocol/limits.js";
 import { RESULT_RECORD_PROTOCOL } from "./control/result-receipts.js";
-import { hasExactWriterAuthority, writerAuthority } from "./control/authority.js";
+import { hasHistoricalWriterAuthority, writerAuthority } from "./control/authority.js";
 import {
   assertRequirementsWithinPolicy,
   isManagedAgentBackendId,
@@ -11577,10 +11577,9 @@ export class FactorySupervisor {
       if (
         matches[0] &&
         (!observed.objectiveAuthority ||
-          !hasCurrentWriterAuthority(matches[0], events, observed.objectiveAuthority) ||
-          !hasExactWriterAuthority(matches[0], observed.objectiveAuthority))
+          !hasHistoricalWriterAuthority(matches[0], observed.objectiveAuthority))
       )
-        throw new Error("validation invocation prepared event lacks current writer authority");
+        throw new Error("validation invocation prepared event lacks valid writer authority");
       return matches[0] ?? null;
     };
     const observeIntent = async (invocation: ValidationInvocation) => {
@@ -11977,8 +11976,7 @@ export class FactorySupervisor {
             capacity,
             resourceIdentity: remoteIdentity!,
             isWriterAuthorized: (event) =>
-              hasCurrentWriterAuthority(event, events, observed.objectiveAuthority) &&
-              hasExactWriterAuthority(event, observed.objectiveAuthority!),
+              hasHistoricalWriterAuthority(event, observed.objectiveAuthority!),
           });
           return { capacity, ...chain };
         };
@@ -12236,15 +12234,19 @@ export class FactorySupervisor {
         const snapshot = await this.#reader.readObjective(this.#run.objective);
         this.#fenceSnapshot(snapshot);
         const events = snapshotEvents(snapshot);
-        const exactLeaseWriter = (event: FactoryEvent) => {
-          const expected = writerAuthority(lease, event.sequence);
-          return (
-            event.writerEpoch === expected.writerEpoch &&
-            event.writerHolder === expected.writerHolder &&
-            event.writerPolicyDigest === expected.writerPolicyDigest &&
-            event.writerOperationId === expected.writerOperationId
-          );
-        };
+        if (!snapshot.objectiveAuthority)
+          throw new Error("remote validation result lacks current Objective authority");
+        const historicalWriter = (event: FactoryEvent) =>
+          hasHistoricalWriterAuthority(event, snapshot.objectiveAuthority!);
+        const capacities = unreconciledCapacityReservations(events).filter(
+          (event) =>
+            event.event === "CapacityReserved" &&
+            event.runId === reservation.runId &&
+            event.workItem === reservation.workItem &&
+            event.attempt === reservation.attempt &&
+            event.phase === "validation" &&
+            event.backend === intent.invocation.toolEnvironment.backendId,
+        );
         const dispatches = events.filter(
           (
             event,
@@ -12261,33 +12263,23 @@ export class FactorySupervisor {
             event.invocationDigest === intent.invocation.digest &&
             event.artifactDigest === artifactDigest &&
             event.backend === intent.invocation.toolEnvironment.backendId &&
-            event.validationDeadline === intent.invocation.validationDeadline &&
-            exactLeaseWriter(event),
+            event.validationDeadline === intent.invocation.validationDeadline,
         );
-        const settlements = events.filter(
-          (event): event is Extract<FactoryEvent, { event: "ValidationInvocationRemoteSettled" }> =>
-            event.kind === "validation-invocation" &&
-            event.event === "ValidationInvocationRemoteSettled" &&
-            event.runId === reservation.runId &&
-            event.workItem === reservation.workItem &&
-            event.attempt === reservation.attempt &&
-            event.reservationOid === reservation.oid &&
-            event.invocationDigest === intent.invocation.digest &&
-            event.artifactDigest === artifactDigest &&
-            event.backend === intent.invocation.toolEnvironment.backendId &&
-            event.validationDeadline === intent.invocation.validationDeadline &&
-            exactLeaseWriter(event),
-        );
-        if (
-          dispatches.length !== 1 ||
-          settlements.length !== 1 ||
-          settlements[0]!.originalDispatchSequence !== dispatches[0]!.sequence ||
-          settlements[0]!.resourceName !== dispatches[0]!.resourceName ||
-          settlements[0]!.requestIdentityDigest !== dispatches[0]!.requestIdentityDigest
-        )
-          throw new Error(
-            "remote validation result lacks its exact current-writer resource settlement",
-          );
+        if (capacities.length !== 1 || dispatches.length === 0)
+          throw new Error("remote validation result lacks its exact capacity or dispatch");
+        const chain = inspectRemoteValidationEventChain({
+          events,
+          reservation,
+          invocation: intent.invocation,
+          capacity: capacities[0]!,
+          resourceIdentity: {
+            resourceName: dispatches[0]!.resourceName,
+            requestIdentityDigest: dispatches[0]!.requestIdentityDigest,
+          },
+          isWriterAuthorized: historicalWriter,
+        });
+        if (!chain.dispatch || !chain.settled)
+          throw new Error("remote validation result lacks its exact resource settlement");
       }
     } else if (evidence.repositoryCapture) {
       throw new Error("repository capture evidence lacks a durable validation invocation");
@@ -19952,8 +19944,21 @@ export class FactorySupervisor {
         if (!refreshed.objectiveAuthority)
           throw new Error("recovered remote validation lacks current Objective authority");
         const writerAuthorized = (event: FactoryEvent) =>
-          hasCurrentWriterAuthority(event, refreshedEvents, refreshed.objectiveAuthority) &&
-          hasExactWriterAuthority(event, refreshed.objectiveAuthority!);
+          hasHistoricalWriterAuthority(event, refreshed.objectiveAuthority!);
+        const stored = await readValidationInvocation({
+          store: this.#store,
+          digest: prepared.invocationDigest,
+        });
+        const capacities = unreconciledCapacityReservations(refreshedEvents).filter(
+          (event) =>
+            event.event === "CapacityReserved" &&
+            event.runId === reservation.runId &&
+            event.workItem === reservation.workItem &&
+            event.attempt === reservation.attempt &&
+            event.phase === "validation" &&
+            event.backend === capacity.backend &&
+            event.sequence === capacity.sequence,
+        );
         const dispatches = refreshedEvents.filter(
           (
             event,
@@ -19969,33 +19974,28 @@ export class FactorySupervisor {
             event.reservationOid === reservation.oid &&
             event.invocationDigest === prepared.invocationDigest &&
             event.backend === capacity.backend &&
-            event.capacityReservationSequence === capacity.sequence &&
-            writerAuthorized(event),
+            event.capacityReservationSequence === capacity.sequence,
         );
-        const settlements = refreshedEvents.filter(
-          (event): event is Extract<FactoryEvent, { event: "ValidationInvocationRemoteSettled" }> =>
-            event.kind === "validation-invocation" &&
-            event.event === "ValidationInvocationRemoteSettled" &&
-            event.runId === reservation.runId &&
-            event.workItem === reservation.workItem &&
-            event.attempt === reservation.attempt &&
-            event.reservationOid === reservation.oid &&
-            event.invocationDigest === prepared.invocationDigest &&
-            event.backend === capacity.backend &&
-            event.capacityReservationSequence === capacity.sequence &&
-            writerAuthorized(event),
-        );
-        if (
-          dispatches.length !== 1 ||
-          settlements.length !== 1 ||
-          settlements[0]!.originalDispatchSequence !== dispatches[0]!.sequence ||
-          settlements[0]!.resourceName !== dispatches[0]!.resourceName ||
-          settlements[0]!.requestIdentityDigest !== dispatches[0]!.requestIdentityDigest
-        )
+        if (!stored || capacities.length !== 1 || dispatches.length === 0)
+          throw new Error(
+            "recovered remote validation lacks its exact invocation, capacity, or dispatch",
+          );
+        const chain = inspectRemoteValidationEventChain({
+          events: refreshedEvents,
+          reservation,
+          invocation: stored.invocation,
+          capacity: capacities[0]!,
+          resourceIdentity: {
+            resourceName: dispatches[0]!.resourceName,
+            requestIdentityDigest: dispatches[0]!.requestIdentityDigest,
+          },
+          isWriterAuthorized: writerAuthorized,
+        });
+        if (!chain.dispatch || !chain.settled)
           throw new Error(
             "recovered remote validation lacks one exact authenticated dispatch settlement",
           );
-        recoveredRemoteResourceName = dispatches[0]!.resourceName;
+        recoveredRemoteResourceName = chain.dispatch.resourceName;
       }
       if (capacity.backend !== "factory/local-validation") {
         const backend = this.#registry.get(capacity.backend);

@@ -7,7 +7,11 @@ import {
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import { createValidationInvocation } from "../src/validation/repository-capture.js";
 import { DEFAULT_REPOSITORY_CAPTURE_EGRESS_POLICY } from "../src/protocol/policy.js";
-import { hasExactWriterAuthority, writerAuthority } from "../src/control/authority.js";
+import {
+  hasExactWriterAuthority,
+  hasHistoricalWriterAuthority,
+  writerAuthority,
+} from "../src/control/authority.js";
 
 const providers = ["codex-cli/daytona", "codex-cli/vercel-sandbox"] as const;
 const deadline = "2026-09-17T00:10:00.000Z";
@@ -317,12 +321,32 @@ function authenticatedChainFixture() {
     noHandleReplacementNotBefore: fence,
     capacityReservationSequence: capacity.sequence,
   });
+  const rebound = parseFactoryEvent({
+    ...dispatch,
+    event: "ValidationInvocationRemoteRebound",
+    sequence: 13,
+    ...writerAuthority(writer, 13),
+    at: fence,
+    originalDispatchSequence: dispatch.sequence,
+  });
+  const settled = parseFactoryEvent({
+    ...dispatch,
+    event: "ValidationInvocationRemoteSettled",
+    sequence: 14,
+    ...writerAuthority(writer, 14),
+    at: fence,
+    originalDispatchSequence: dispatch.sequence,
+    reboundSequence: rebound.sequence,
+    settlementEvidence: "provider-cleanup",
+  });
   return {
     reservation,
     invocation,
     capacity,
     prepared,
     dispatch,
+    rebound,
+    settled,
     resourceIdentity: {
       resourceName: "factory-candidate-exact",
       requestIdentityDigest: "a".repeat(64),
@@ -363,6 +387,88 @@ it("authenticates the remote chain against exact current writer and immutable au
   expect(() => inspect([fixture.capacity, fixture.prepared, forgedRequest])).toThrow(
     /differs from immutable authority/,
   );
+});
+
+it("accepts monotonic Director takeover chains and refuses forged or regressing generations", () => {
+  const fixture = authenticatedChainFixture();
+  const directorB = { ...writer, holder: "director-b", epoch: 2 };
+  const directorC = { ...writer, holder: "director-c", epoch: 3 };
+  const observation = (lease: typeof writer) => ({
+    ...authority,
+    holder: lease.holder,
+    epoch: lease.epoch,
+  });
+  const authored = (event: ReturnType<typeof parseFactoryEvent>, lease: typeof writer) =>
+    parseFactoryEvent({ ...event, ...writerAuthority(lease, event.sequence) });
+  const inspect = (events: ReturnType<typeof parseFactoryEvent>[], current: typeof writer) =>
+    inspectRemoteValidationEventChain({
+      ...fixture,
+      events,
+      isWriterAuthorized: (event) => hasHistoricalWriterAuthority(event, observation(current)),
+    });
+
+  const reboundB = authored(fixture.rebound, directorB);
+  const settledB = authored(fixture.settled, directorB);
+  expect(
+    inspect([fixture.capacity, fixture.prepared, fixture.dispatch, reboundB, settledB], directorB)
+      .settled?.writerHolder,
+  ).toBe("director-b");
+
+  const dispatchB = authored(fixture.dispatch, directorB);
+  const reboundC = authored(fixture.rebound, directorC);
+  const settledC = authored(fixture.settled, directorC);
+  expect(
+    inspect([fixture.capacity, fixture.prepared, dispatchB, reboundC, settledC], directorC).settled
+      ?.writerHolder,
+  ).toBe("director-c");
+
+  const future = authored(fixture.dispatch, { ...writer, holder: "director-d", epoch: 4 });
+  expect(() => inspect([fixture.capacity, fixture.prepared, future], directorC)).toThrow(
+    /unauthenticated writer authority/,
+  );
+  const wrongPolicy = authored(fixture.dispatch, {
+    ...directorB,
+    policyDigest: "e".repeat(64),
+  });
+  expect(() => inspect([fixture.capacity, fixture.prepared, wrongPolicy], directorC)).toThrow(
+    /unauthenticated writer authority/,
+  );
+  const wrongCurrentHolder = authored(fixture.dispatch, {
+    ...directorC,
+    holder: "not-director-c",
+  });
+  expect(() =>
+    inspect([fixture.capacity, fixture.prepared, wrongCurrentHolder], directorC),
+  ).toThrow(/unauthenticated writer authority/);
+  const forgedOperation = parseFactoryEvent({
+    ...dispatchB,
+    writerOperationId: "f".repeat(64),
+  });
+  expect(() => inspect([fixture.capacity, fixture.prepared, forgedOperation], directorC)).toThrow(
+    /unauthenticated writer authority/,
+  );
+  const regressingRebound = authored(fixture.rebound, writer);
+  expect(() =>
+    inspect([fixture.capacity, fixture.prepared, dispatchB, regressingRebound], directorC),
+  ).toThrow(/writer generation chain regressed/);
+  const regressingSettlement = authored(
+    parseFactoryEvent({ ...fixture.settled, reboundSequence: null }),
+    writer,
+  );
+  expect(() =>
+    inspect([fixture.capacity, fixture.prepared, dispatchB, regressingSettlement], directorC),
+  ).toThrow(/writer generation chain regressed/);
+  const preparedB = authored(fixture.prepared, directorB);
+  expect(() => inspect([fixture.capacity, preparedB, dispatchB], directorC)).toThrow(
+    /preparation differs from its capacity writer/,
+  );
+  const changedHistoricalHolder = authored(fixture.dispatch, {
+    ...writer,
+    holder: "other-director-a",
+  });
+  expect(() =>
+    inspect([fixture.capacity, fixture.prepared, changedHistoricalHolder], directorC),
+  ).toThrow(/changed holder/);
 });
 
 describe.each(providers)("%s remote validation recovery", (provider) => {

@@ -703,6 +703,301 @@ describe("compiler dispatch admission", () => {
     expect(mocks.run).toHaveBeenCalledOnce();
     expect(admit).toHaveBeenCalledOnce();
   });
+  it("surfaces and replays a bounded durable timeout diagnostic when usage is unknown", async () => {
+    const f = await fixture();
+    const privateProgress = "private provider progress must stay out of durable diagnostics";
+    const backend = new CodexCliManagementBackend({
+      createCodexHome: home,
+      authFile: join(f.directory, "no-auth"),
+    });
+    mocks.run.mockResolvedValue({
+      exitCode: null,
+      signal: null,
+      timedOut: true,
+      durationMs: 590_901,
+      stdout: [
+        JSON.stringify({ type: "turn.started" }),
+        JSON.stringify({ type: "diagnostic", message: privateProgress }),
+      ].join("\n"),
+      stderr: "private stderr",
+    });
+    const recordUsage = vi.fn(async () => {});
+    const args = {
+      ...f,
+      backend,
+      lease: {} as LeaseState,
+      deadlineAt: Date.now() + 600_000,
+      assertInputs: async () => {},
+      admit: vi.fn(async () => {}),
+      recordUsage,
+      validate: async () => {},
+    };
+
+    const first = await compileEvaluatedDraft(args);
+    const invocationId = String(
+      f.records.find((record) => record.kind === "invocation")?.payload.invocationId,
+    );
+    const message = `compiler timeout: stage=inventory; evaluation timeout=600000ms; observed duration=590901ms; invocation=${invocationId}; usage: unknown`;
+    expect(message.length).toBeLessThan(400);
+    expect(first).toMatchObject({ status: "stopped", reason: message });
+    expect(f.records.find((record) => record.kind === "result")?.payload).toMatchObject({
+      invocationId,
+      stage: "inventory",
+      usage: null,
+      error: message,
+      terminalOutcome: {
+        state: "provider-failed",
+        usage: null,
+        process: { timedOut: true, durationMs: 590_901 },
+      },
+      timeoutDiagnostic: {
+        kind: "compiler-timeout",
+        stage: "inventory",
+        evaluationTimeoutMs: 600_000,
+        observedDurationMs: 590_901,
+        invocationId,
+        usage: "unknown",
+      },
+    });
+    expect(JSON.stringify(f.records)).not.toContain(privateProgress);
+    expect(JSON.stringify(f.records)).not.toContain("private stderr");
+    expect(recordUsage).not.toHaveBeenCalled();
+
+    await expect(compileEvaluatedDraft(args)).resolves.toMatchObject({
+      status: "stopped",
+      reason: message,
+    });
+    expect(mocks.run).toHaveBeenCalledOnce();
+    expect(args.admit).toHaveBeenCalledOnce();
+    expect(recordUsage).not.toHaveBeenCalled();
+  });
+  it("maps the internal compile stage to proposal in the public timeout diagnostic", async () => {
+    const f = await fixture();
+    const backend = new CodexCliManagementBackend({
+      createCodexHome: home,
+      authFile: join(f.directory, "no-auth"),
+    });
+    mocks.run.mockImplementation(async () => {
+      if (mocks.run.mock.calls.length === 1) {
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          durationMs: 100,
+          stdout: [
+            JSON.stringify({
+              type: "item.completed",
+              item: {
+                type: "agent_message",
+                text: JSON.stringify({
+                  version: f.inventory.version,
+                  obligations: f.inventory.obligations,
+                }),
+              },
+            }),
+            JSON.stringify({
+              type: "turn.completed",
+              usage: { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens },
+            }),
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      return {
+        exitCode: null,
+        signal: null,
+        timedOut: true,
+        durationMs: 580_000,
+        stdout: JSON.stringify({ type: "turn.started" }),
+        stderr: "",
+      };
+    });
+    const args = {
+      ...f,
+      backend,
+      lease: {} as LeaseState,
+      deadlineAt: Date.now() + 600_000,
+      assertInputs: async () => {},
+      admit: vi.fn(async () => {}),
+      recordUsage: vi.fn(async () => {}),
+      validate: async () => {},
+    };
+
+    const result = await compileEvaluatedDraft(args);
+    const timedOut = f.records.find(
+      (record) => record.kind === "result" && record.payload.stage === "compile",
+    )!;
+    const invocationId = String(timedOut.payload.invocationId);
+    const message = `compiler timeout: stage=proposal; evaluation timeout=600000ms; observed duration=580000ms; invocation=${invocationId}; usage: unknown`;
+    expect(result).toMatchObject({ status: "stopped", reason: message });
+    expect(timedOut.payload).toMatchObject({
+      stage: "compile",
+      error: message,
+      timeoutDiagnostic: {
+        kind: "compiler-timeout",
+        stage: "proposal",
+        evaluationTimeoutMs: 600_000,
+        observedDurationMs: 580_000,
+        invocationId,
+        usage: "unknown",
+      },
+    });
+    expect(mocks.run).toHaveBeenCalledTimes(2);
+    expect(args.admit).toHaveBeenCalledTimes(2);
+  });
+  it("retains timeout diagnostics when the timed-out stream also reports provider quota", async () => {
+    const f = await fixture();
+    const backend = new CodexCliManagementBackend({
+      createCodexHome: home,
+      authFile: join(f.directory, "no-auth"),
+    });
+    mocks.run.mockResolvedValue({
+      exitCode: null,
+      signal: null,
+      timedOut: true,
+      durationMs: 575_000,
+      stdout: JSON.stringify({
+        type: "error",
+        message: "You've reached your additional usage limit for your plan.",
+      }),
+      stderr: "",
+    });
+    const recordUsage = vi.fn(async () => {});
+    const args = {
+      ...f,
+      backend,
+      lease: {} as LeaseState,
+      deadlineAt: Date.now() + 600_000,
+      assertInputs: async () => {},
+      admit: vi.fn(async () => {}),
+      recordUsage,
+      validate: async () => {},
+    };
+
+    const first = await compileEvaluatedDraft(args).catch((error) => error);
+    const result = f.records.find((record) => record.kind === "result")!;
+    const invocationId = String(result.payload.invocationId);
+    const message = `compiler timeout: stage=inventory; evaluation timeout=600000ms; observed duration=575000ms; invocation=${invocationId}; usage: unknown`;
+    expect(first).toBeInstanceOf(ProviderQuotaError);
+    expect(first.message).toBe(message);
+    expect(result.payload).toMatchObject({
+      error: message,
+      usage: null,
+      providerQuota: {
+        reasonCode: "provider-quota-exhausted",
+        provider: "github-copilot",
+      },
+      terminalOutcome: {
+        state: "provider-failed",
+        usage: null,
+        process: { timedOut: true, durationMs: 575_000 },
+      },
+      timeoutDiagnostic: {
+        kind: "compiler-timeout",
+        stage: "inventory",
+        evaluationTimeoutMs: 600_000,
+        observedDurationMs: 575_000,
+        invocationId,
+        usage: "unknown",
+      },
+    });
+    expect(recordUsage).not.toHaveBeenCalled();
+
+    const replay = await compileEvaluatedDraft(args).catch((error) => error);
+    expect(replay).toBeInstanceOf(ProviderQuotaError);
+    expect(replay.message).toBe(message);
+    expect(mocks.run).toHaveBeenCalledOnce();
+    expect(args.admit).toHaveBeenCalledOnce();
+    expect(recordUsage).not.toHaveBeenCalled();
+  });
+  it("reconciles one exact completion receipt from a timed-out compiler invocation once", async () => {
+    const f = await fixture();
+    const exactUsage = { inputTokens: 41, outputTokens: 5, cachedInputTokens: 20 };
+    const backend = new CodexCliManagementBackend({
+      createCodexHome: home,
+      authFile: join(f.directory, "no-auth"),
+    });
+    mocks.run.mockResolvedValue({
+      exitCode: null,
+      signal: null,
+      timedOut: true,
+      durationMs: 599_000,
+      stdout: [
+        JSON.stringify({ type: "turn.started" }),
+        JSON.stringify({
+          type: "turn.completed",
+          usage: {
+            input_tokens: exactUsage.inputTokens,
+            output_tokens: exactUsage.outputTokens,
+            cached_input_tokens: exactUsage.cachedInputTokens,
+          },
+        }),
+      ].join("\n"),
+      stderr: "",
+    });
+    const reconciled = new Map<string, unknown>();
+    let accountingWrites = 0;
+    const recordUsage = vi.fn(async (invocationId: string, _stage: string, observed: unknown) => {
+      const prior = reconciled.get(invocationId);
+      if (prior) expect(prior).toEqual(observed);
+      else {
+        reconciled.set(invocationId, observed);
+        accountingWrites += 1;
+      }
+    });
+    const args = {
+      ...f,
+      backend,
+      lease: {} as LeaseState,
+      deadlineAt: Date.now() + 600_000,
+      assertInputs: async () => {},
+      admit: vi.fn(async () => {}),
+      recordUsage,
+      validate: async () => {},
+    };
+
+    const first = await compileEvaluatedDraft(args);
+    const result = f.records.find((record) => record.kind === "result")!;
+    const invocationId = String(result.payload.invocationId);
+    const message = `compiler timeout: stage=inventory; evaluation timeout=600000ms; observed duration=599000ms; invocation=${invocationId}; usage: exact`;
+    expect(first).toMatchObject({ status: "stopped", reason: `invalid-inventory: ${message}` });
+    expect(result.payload).toMatchObject({
+      usage: exactUsage,
+      error: message,
+      terminalOutcome: {
+        state: "provider-failed",
+        usage: exactUsage,
+        process: { timedOut: true, durationMs: 599_000 },
+      },
+      timeoutDiagnostic: {
+        kind: "compiler-timeout",
+        stage: "inventory",
+        evaluationTimeoutMs: 600_000,
+        observedDurationMs: 599_000,
+        invocationId,
+        usage: "exact",
+      },
+    });
+    expect(recordUsage).toHaveBeenCalledExactlyOnceWith(invocationId, "inventory", exactUsage);
+    expect(accountingWrites).toBe(1);
+
+    await expect(compileEvaluatedDraft(args)).resolves.toMatchObject({
+      status: "stopped",
+      reason: `invalid-inventory: ${message}`,
+    });
+    expect(mocks.run).toHaveBeenCalledOnce();
+    expect(args.admit).toHaveBeenCalledOnce();
+    expect(recordUsage).toHaveBeenCalledTimes(2);
+    expect(reconciled).toEqual(new Map([[invocationId, exactUsage]]));
+    expect(accountingWrites).toBe(1);
+
+    (result.payload.terminalOutcome as { state: string }).state = "succeeded";
+    await expect(compileEvaluatedDraft(args)).rejects.toThrow(
+      "compiler provider terminal outcome differs",
+    );
+    expect(mocks.run).toHaveBeenCalledOnce();
+    expect(recordUsage).toHaveBeenCalledTimes(2);
+  });
   it.each([
     ["string", "primitive process rejection"],
     ["null", null],

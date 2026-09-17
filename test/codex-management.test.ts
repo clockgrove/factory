@@ -38,6 +38,7 @@ describe("Codex management backend", () => {
         exitCode: 2,
         signal: null,
         timedOut: false,
+        durationMs: 20,
         stdout: JSON.stringify({ type: "turn.started" }),
       },
       message:
@@ -50,6 +51,7 @@ describe("Codex management backend", () => {
         exitCode: 0,
         signal: null,
         timedOut: false,
+        durationMs: 21,
         stdout: JSON.stringify({
           type: "error",
           message: "You've reached your additional usage limit for your plan.",
@@ -64,6 +66,7 @@ describe("Codex management backend", () => {
         exitCode: null,
         signal: "SIGTERM",
         timedOut: false,
+        durationMs: 22,
         stdout: "",
       },
       message:
@@ -72,7 +75,7 @@ describe("Codex management backend", () => {
     },
     {
       name: "timeout",
-      process: { exitCode: null, signal: null, timedOut: true, stdout: "" },
+      process: { exitCode: null, signal: null, timedOut: true, durationMs: 23, stdout: "" },
       message:
         "management backend failed: Codex CLI exited with status unknown after timeout; inspect the local management transcript when enabled",
       quota: false,
@@ -84,9 +87,10 @@ describe("Codex management backend", () => {
   });
 
   it.each([
-    { exitCode: null, signal: null, timedOut: false, stdout: "" },
-    { exitCode: 0, signal: "SIGTERM", timedOut: false, stdout: "" },
-    { exitCode: -1, signal: null, timedOut: false, stdout: "" },
+    { exitCode: null, signal: null, timedOut: false, durationMs: 1, stdout: "" },
+    { exitCode: 0, signal: "SIGTERM", timedOut: false, durationMs: 1, stdout: "" },
+    { exitCode: -1, signal: null, timedOut: false, durationMs: 1, stdout: "" },
+    { exitCode: 1, signal: null, timedOut: false, durationMs: -1, stdout: "" },
   ])("rejects impossible process terminal tuple %#", (process) => {
     expect(() => classifyManagementCliProcessFailure(process)).toThrow(/process terminal|tuple/);
   });

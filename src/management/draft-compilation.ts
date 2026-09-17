@@ -16,6 +16,7 @@ import {
   CompilerDraftStopError,
   CompilerDraftAdmissionError,
   CompilerDraftTerminalOutcomeError,
+  compilerTimeoutDiagnosticStage,
   type CompilerDraftOutcome,
   type DraftStage,
   type ValidatedCompilerDraft,
@@ -750,7 +751,21 @@ export async function compileEvaluatedDraft(args: {
           }
           const terminalOutcome = managementTerminalOutcome(error);
           if (terminalOutcome)
-            throw new CompilerDraftTerminalOutcomeError(error, terminalOutcome, provenance);
+            throw new CompilerDraftTerminalOutcomeError(
+              error,
+              terminalOutcome,
+              provenance,
+              terminalOutcome.process?.timedOut
+                ? {
+                    kind: "compiler-timeout",
+                    stage: compilerTimeoutDiagnosticStage(request.stage),
+                    evaluationTimeoutMs: (policy.timeoutSeconds ?? 600) * 1000,
+                    observedDurationMs: terminalOutcome.process.durationMs,
+                    invocationId: request.invocationId,
+                    usage: terminalOutcome.usage === null ? "unknown" : "exact",
+                  }
+                : undefined,
+            );
           throw error;
         }
       },

@@ -537,12 +537,13 @@ function failedDurablePair(
   state: FailedTranscriptState,
   usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | null,
   error = `${state} fixture`,
+  process?: { timedOut: boolean; durationMs: number },
 ) {
   const records = durablePair(invocationId, 0, usage);
   const result = records[1]!;
   result.payload.value = null;
   result.payload.error = error;
-  result.payload.terminalOutcome = { state, usage };
+  result.payload.terminalOutcome = { state, usage, ...(process ? { process } : {}) };
   return records;
 }
 
@@ -1143,7 +1144,15 @@ describe("issue #404 live compiler authority", () => {
             : { cachedInputTokens: testCase.usage.cachedInputTokens }),
         }
       : null;
-    const durable = failedDurablePair(invocationId, testCase.state, durableUsage, testCase.error);
+    const durable = failedDurablePair(
+      invocationId,
+      testCase.state,
+      durableUsage,
+      testCase.error,
+      testCase.process.timedOut
+        ? { timedOut: true, durationMs: testCase.process.durationMs }
+        : undefined,
+    );
     expect(
       issue404TerminalTranscriptEvidence(
         [transcript],

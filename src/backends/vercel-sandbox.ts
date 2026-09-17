@@ -558,6 +558,10 @@ export class VercelSandboxBackend implements ExecutionBackend {
       "validation deadline exhausted before Vercel sandbox launch",
       this.#now,
     );
+    if (context.artifact?.lfsObjects?.length)
+      throw new Error(
+        "Vercel validation cannot hydrate bound raw LFS payloads; use a local validator with the generic artifact-content cache",
+      );
     if (context.artifact.payload)
       throw new Error(
         "Labs Vercel validation does not support the content-addressed large-artifact channel; select Daytona or local validation",

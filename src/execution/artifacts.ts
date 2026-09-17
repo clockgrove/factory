@@ -18,6 +18,7 @@ import {
   byteLength,
   gitSha,
   isoDate,
+  safeId,
   sha256Digest,
 } from "../protocol/limits.js";
 import {
@@ -48,6 +49,76 @@ export const CommandResultSchema = z
   })
   .passthrough();
 
+const LfsTransferIdentitySchema = z
+  .object({
+    domain: z.literal("worker-artifact"),
+    repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+    objective: z.number().int().positive(),
+    baseSha: gitSha,
+    requestId: safeId,
+    subjectDigest: sha256Digest,
+  })
+  .strict();
+
+export const LfsObjectReceiptSchema = z
+  .object({
+    protocol: z.literal("clockgrove.factory/lfs-object-receipt"),
+    path: relativePath,
+    mode: z.enum(["100644", "100755"]),
+    oid: sha256Digest,
+    size: z
+      .number()
+      .int()
+      .positive()
+      .max(100 * 1024 * 1024),
+    assignmentDigest: sha256Digest,
+    payload: ArtifactPayloadSchema,
+    rawTransfer: z
+      .object({
+        identity: LfsTransferIdentitySchema,
+        ref: z.string().min(1).max(500),
+        intentCommit: gitSha,
+        readyCommit: gitSha,
+      })
+      .strict(),
+    toolVersion: z.string().min(1).max(200),
+    remoteDigest: sha256Digest,
+    uploadOutcome: z.enum(["uploaded", "already-present"]),
+    readVerified: z.literal(true),
+    receiptRef: z.string().min(1).max(500),
+    digest: sha256Digest,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const { digest, ...core } = value;
+    const expected = createHash("sha256").update(JSON.stringify(core)).digest("hex");
+    if (
+      digest !== expected ||
+      value.payload.digest !== value.oid ||
+      value.payload.bytes !== value.size ||
+      value.rawTransfer.identity.subjectDigest !== value.oid ||
+      value.rawTransfer.identity.baseSha.length !== 40
+    )
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "LFS object receipt binding differs",
+      });
+  });
+export type LfsObjectReceipt = z.infer<typeof LfsObjectReceiptSchema>;
+
+export const canonicalLfsPointer = (oid: string, size: number): Buffer => {
+  sha256Digest.parse(oid);
+  if (!Number.isSafeInteger(size) || size <= 0 || size > 100 * 1024 * 1024)
+    throw new Error("invalid LFS object size");
+  return Buffer.from(
+    `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${size}\n`,
+  );
+};
+
+export function lfsObjectReceiptDigest(input: Omit<LfsObjectReceipt, "digest">): string {
+  return createHash("sha256").update(JSON.stringify(input)).digest("hex");
+}
+
 export const NormalizedArtifactSchema = z
   .object({
     protocol: z.literal("clockgrove.factory/artifact"),
@@ -56,6 +127,7 @@ export const NormalizedArtifactSchema = z
     patch: z.string().max(MAX_ARTIFACT_PATCH_BYTES),
     payload: ArtifactPayloadSchema.optional(),
     fileManifest: ArtifactFileManifestSchema.optional(),
+    lfsObjects: z.array(LfsObjectReceiptSchema).max(256).optional(),
     changedPaths: z.array(relativePath).max(10_000),
     commands: z.array(CommandResultSchema).max(128),
     logs: z.string().max(MAX_LOG_BYTES),
@@ -73,6 +145,7 @@ export interface ArtifactInput {
   patch: string;
   payload?: ArtifactPayload | undefined;
   fileManifest?: ArtifactFileManifest | undefined;
+  lfsObjects?: LfsObjectReceipt[] | undefined;
   changedPaths: string[];
   commands?: Array<{ command: string; exitCode: number; durationMs: number }>;
   logs?: string;
@@ -88,6 +161,7 @@ export function artifactDigest(input: {
   changedPaths: string[];
   payload?: ArtifactPayload | undefined;
   fileManifest?: ArtifactFileManifest | undefined;
+  lfsObjects?: LfsObjectReceipt[] | undefined;
   findings?: FindingCandidate[] | undefined;
 }): string {
   const hash = createHash("sha256")
@@ -97,12 +171,15 @@ export function artifactDigest(input: {
     .update("\0")
     .update(input.patch);
   // The canonical artifact binds external content into the same digest.
-  if (input.payload || input.fileManifest)
+  if (input.payload || input.fileManifest || input.lfsObjects?.length)
     hash.update("\0content\0").update(
       JSON.stringify({
         ...(input.payload ? { payload: ArtifactPayloadSchema.parse(input.payload) } : {}),
         ...(input.fileManifest
           ? { fileManifest: ArtifactFileManifestSchema.parse(input.fileManifest) }
+          : {}),
+        ...(input.lfsObjects?.length
+          ? { lfsObjects: input.lfsObjects.map((receipt) => LfsObjectReceiptSchema.parse(receipt)) }
           : {}),
       }),
     );
@@ -152,6 +229,13 @@ export function normalizeArtifact(input: ArtifactInput): NormalizedArtifact {
     patch: input.patch,
     ...(input.payload ? { payload: input.payload } : {}),
     ...(input.fileManifest ? { fileManifest: input.fileManifest } : {}),
+    ...(input.lfsObjects?.length
+      ? {
+          lfsObjects: [...input.lfsObjects]
+            .map((receipt) => LfsObjectReceiptSchema.parse(receipt))
+            .sort((left, right) => left.path.localeCompare(right.path)),
+        }
+      : {}),
     changedPaths: [...new Set(input.changedPaths)].sort(),
     commands: input.commands ?? [],
     logs: boundWorkerLogs(rawLogs),
@@ -193,8 +277,52 @@ function assertArtifactContentBinding(artifact: NormalizedArtifact): void {
       JSON.stringify([...artifact.changedPaths].sort())
   )
     throw new Error("artifact file manifest differs from changed paths");
+  if (artifact.lfsObjects?.length) {
+    if (
+      artifact.lfsObjects.some(
+        (receipt, index) =>
+          !artifact.changedPaths.includes(receipt.path) ||
+          (index > 0 && artifact.lfsObjects![index - 1]!.path.localeCompare(receipt.path) >= 0),
+      ) ||
+      artifact.lfsObjects.reduce((sum, receipt) => sum + receipt.size, 0) > 256 * 1024 * 1024 ||
+      artifact.changedPaths.some((path) => path.split("/").at(-1) === ".gitattributes")
+    )
+      throw new Error("LFS object receipts differ from the canonical artifact paths or bounds");
+    for (const receipt of artifact.lfsObjects) {
+      const file = artifact.fileManifest?.files.find(({ path }) => path === receipt.path);
+      const pointer = canonicalLfsPointer(receipt.oid, receipt.size);
+      const assignmentDigest = createHash("sha256")
+        .update(JSON.stringify({ baseSha: artifact.baseSha, path: receipt.path, filter: "lfs" }))
+        .digest("hex");
+      const transferIdentity = {
+        ...receipt.rawTransfer.identity,
+        repository: receipt.rawTransfer.identity.repository.toLowerCase(),
+      };
+      const expectedTransferRef = `refs/clockgrove-factory/content-transfers/${createHash("sha256")
+        .update(JSON.stringify(transferIdentity))
+        .digest("hex")}`;
+      if (
+        !file ||
+        file.action !== "write" ||
+        file.mode !== receipt.mode ||
+        file.bytes !== pointer.length ||
+        file.digest !== createHash("sha256").update(pointer).digest("hex") ||
+        receipt.assignmentDigest !== assignmentDigest ||
+        receipt.rawTransfer.identity.baseSha !== artifact.baseSha ||
+        receipt.rawTransfer.identity.subjectDigest !== receipt.oid ||
+        receipt.rawTransfer.ref !== expectedTransferRef ||
+        receipt.payload.digest !== receipt.oid ||
+        receipt.payload.bytes !== receipt.size
+      )
+        throw new Error("LFS receipt does not bind its canonical pointer manifest entry");
+    }
+  }
   assertNoSecretMaterial(
-    { payload: artifact.payload, fileManifest: artifact.fileManifest },
+    {
+      payload: artifact.payload,
+      fileManifest: artifact.fileManifest,
+      lfsObjects: artifact.lfsObjects,
+    },
     "artifact content descriptor",
   );
 }

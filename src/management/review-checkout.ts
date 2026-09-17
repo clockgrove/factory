@@ -14,7 +14,11 @@ import {
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import { inspectPatchManifest } from "../runtime/artifact-patch.js";
 import { materializePinnedCompilationTree } from "../execution/pinned-compilation-tree.js";
-import { materializeLocalLfsAssets } from "../repository-profiles/git-lfs.js";
+import {
+  materializeLocalLfsAssets,
+  restorePinnedLfsPointers,
+} from "../repository-profiles/git-lfs.js";
+import { materializeLfsArtifactContent } from "../publication/git-lfs-output.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
 import { verifyValidationEvidence } from "../validation/evidence.js";
 import {
@@ -112,11 +116,19 @@ export async function withVerifiedReviewCheckout<T>(
     await materializeLocalLfsAssets(input.repository, worktree.path, artifact.baseSha);
     const patchPath = join(worktree.root, "semantic-review.patch");
     await materializeArtifactPatch(artifact, patchPath);
+    if (artifact.lfsObjects?.length)
+      await restorePinnedLfsPointers(
+        input.repository,
+        worktree.path,
+        artifact.baseSha,
+        artifact.changedPaths,
+      );
     const manifest = await inspectPatchManifest(
       worktree.path,
       artifact.baseSha,
       patchPath,
       artifact.changedPaths,
+      ...(artifact.lfsObjects ? [{ lfsObjects: artifact.lfsObjects }] : [{}]),
     );
     if (artifact.fileManifest && JSON.stringify(artifact.fileManifest) !== JSON.stringify(manifest))
       throw new Error("semantic review manifest differs from actual artifact content");
@@ -136,6 +148,7 @@ export async function withVerifiedReviewCheckout<T>(
     )
       throw new Error("semantic review materialized tree differs from validated output tree");
     await verifyMaterializedFiles(worktree.path, manifest);
+    if (artifact.lfsObjects?.length) await materializeLfsArtifactContent(worktree.path, artifact);
     const pnpmValidation = basePackageJsonPresent
       ? await assertEstablishedPnpmValidation(
           worktree,

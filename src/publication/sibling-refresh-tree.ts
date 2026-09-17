@@ -150,7 +150,10 @@ export async function prepareSiblingRefreshTree(input: {
       baseSha,
       patchPath,
       artifact.changedPaths,
-      { allowSymlinkBlobs: true },
+      {
+        allowSymlinkBlobs: true,
+        ...(artifact.lfsObjects ? { lfsObjects: artifact.lfsObjects } : {}),
+      },
     );
     if (
       artifact.fileManifest &&

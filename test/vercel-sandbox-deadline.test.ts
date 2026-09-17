@@ -306,6 +306,19 @@ it.each([
   },
 );
 
+it("fails closed before provider validation when bound LFS raw content cannot be hydrated", async () => {
+  vi.spyOn(Date, "now").mockReturnValue(1_000);
+  const inspect = vi.spyOn(lfs, "inspectPinnedLfs");
+  const archive = vi.spyOn(sandboxCommon, "repositoryArchive");
+  const backend = new VercelSandboxBackend({ repository: "/tmp/factory-vercel-deadline" });
+  const context = deadlineContext() as unknown as IsolatedValidationContext;
+  Object.assign(context.artifact, { lfsObjects: [{ path: "asset.bin" }] });
+  await expect(backend.validate(context)).rejects.toThrow(/cannot hydrate bound raw LFS payloads/);
+  expect(inspect).not.toHaveBeenCalled();
+  expect(archive).not.toHaveBeenCalled();
+  expect(provider.create).not.toHaveBeenCalled();
+});
+
 it.each([
   [
     "execution",

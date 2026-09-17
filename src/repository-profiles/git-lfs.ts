@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat, open, realpath, rename, unlink } from "node:fs/promises";
+import { access, lstat, mkdtemp, open, realpath, rename, rm, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
 
@@ -297,14 +298,14 @@ export async function inspectPinnedLfs(
   });
 }
 
-async function requireTool(): Promise<void> {
+async function findGitLfsTool(): Promise<string> {
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     if (!isAbsolute(directory)) continue;
     const candidate = join(directory, "git-lfs");
     try {
       await access(candidate, constants.X_OK);
       const resolved = await realpath(candidate);
-      if ((await lstat(resolved)).isFile()) return;
+      if ((await lstat(resolved)).isFile()) return resolved;
     } catch {
       /* Keep looking; never execute an untrusted repository alias. */
     }
@@ -314,12 +315,137 @@ async function requireTool(): Promise<void> {
   );
 }
 
+export async function resolveGitLfsTool(): Promise<{ path: string; version: string }> {
+  const path = await findGitLfsTool();
+  const result = await runContainedProcess({
+    command: path,
+    args: ["version"],
+    cwd: resolve(tmpdir()),
+    env: objectEnvironment(),
+    timeoutMs: 5_000,
+    maxOutputBytes: 4 * 1024,
+  });
+  const version = result.stdout.trim();
+  if (result.exitCode !== 0 || !/^git-lfs\/[0-9]+\.[0-9]+\.[0-9]+/.test(version))
+    throw new Error("installed git-lfs did not report a supported exact version");
+  return { path, version };
+}
+
+async function requireTool(): Promise<void> {
+  await findGitLfsTool();
+}
+
 async function commonDirectory(repository: string): Promise<string> {
   const path = (
     await git(repository, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
   ).trim();
   if (!isAbsolute(path)) throw new Error("LFS common Git directory is not absolute");
   return realpath(path);
+}
+
+export interface PinnedLfsAssignment {
+  path: string;
+  assignmentDigest: string;
+}
+
+/** Ask Git's attribute engine against only the pinned commit object database.
+ * A fresh bare metadata directory excludes working-tree, info and global
+ * attributes, while Git itself retains the complete nested attribute grammar. */
+export async function inspectPinnedLfsAssignments(
+  repository: string,
+  baseSha: string,
+  paths: string[],
+): Promise<PinnedLfsAssignment[]> {
+  if (!/^[0-9a-f]{40}$/.test(baseSha)) throw new Error("invalid LFS assignment base SHA");
+  const exactPaths = [...new Set(paths)].sort();
+  if (exactPaths.length > 5_000 || exactPaths.some((path) => !safePath(path)))
+    throw new Error("invalid or excessive LFS assignment paths");
+  if (!exactPaths.length) return [];
+  const common = await commonDirectory(repository);
+  const root = await mkdtemp(join(tmpdir(), "factory-lfs-attributes-"));
+  try {
+    const initialized = await runContainedProcess({
+      command: "git",
+      args: ["init", "--bare", "--quiet", root],
+      cwd: resolve(repository),
+      env: objectEnvironment(),
+      timeoutMs: 10_000,
+      maxOutputBytes: 4 * 1024,
+    });
+    if (initialized.exitCode !== 0) throw new Error("private LFS attribute repository failed");
+    const result = await runContainedProcess({
+      command: "git",
+      args: [
+        `--git-dir=${root}`,
+        "-c",
+        "core.attributesFile=/dev/null",
+        "check-attr",
+        `--source=${baseSha}`,
+        "-z",
+        "--stdin",
+        "filter",
+      ],
+      cwd: resolve(repository),
+      env: { ...objectEnvironment(), GIT_OBJECT_DIRECTORY: join(common, "objects") },
+      stdin: { text: `${exactPaths.join("\0")}\0`, maxBytes: 3 * 1024 * 1024 },
+      timeoutMs: 30_000,
+      maxOutputBytes: 3 * 1024 * 1024,
+    });
+    if (result.exitCode !== 0 || result.timedOut)
+      throw new Error("pinned LFS attribute evaluation failed");
+    const fields = result.stdout.split("\0");
+    if (fields.pop() !== "" || fields.length !== exactPaths.length * 3)
+      throw new Error("pinned LFS attribute output is incomplete");
+    const assignments: PinnedLfsAssignment[] = [];
+    for (const [index, path] of exactPaths.entries()) {
+      const observedPath = fields[index * 3],
+        name = fields[index * 3 + 1],
+        value = fields[index * 3 + 2];
+      if (observedPath !== path || name !== "filter")
+        throw new Error("pinned LFS attribute output changed path identity");
+      if (value === "lfs")
+        assignments.push({
+          path,
+          assignmentDigest: createHash("sha256")
+            .update(JSON.stringify({ baseSha, path, filter: "lfs" }))
+            .digest("hex"),
+        });
+    }
+    return assignments;
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+/** Put only changed pinned LFS paths back into their committed pointer form so
+ * `git apply --index` evaluates the canonical pointer patch. No filter runs. */
+export async function restorePinnedLfsPointers(
+  repository: string,
+  destination: string,
+  baseSha: string,
+  changedPaths: string[],
+): Promise<void> {
+  const changed = new Set(changedPaths);
+  if (!changed.size) return;
+  const facts = await inspectPinnedLfs(repository, baseSha);
+  const selected = facts.assets.filter((asset) => changed.has(asset.path));
+  if (!selected.length) return;
+  for (const asset of selected) {
+    const target = await regularPath(destination, asset.path);
+    const bytes = Buffer.from(await git(repository, ["show", `${baseSha}:${asset.path}`]), "utf8");
+    if (
+      createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex") !==
+        asset.pointerBlobOid ||
+      !parseLfsPointer(bytes)
+    )
+      throw new Error("pinned LFS pointer restoration failed");
+    const file = await open(target, constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_TRUNC);
+    try {
+      await file.writeFile(bytes);
+    } finally {
+      await file.close();
+    }
+  }
 }
 
 async function regularPath(root: string, path: string): Promise<string> {

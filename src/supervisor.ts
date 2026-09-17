@@ -119,6 +119,7 @@ import {
   type ArtifactTransferIdentity,
   type ArtifactTransferIntentCheckpoint,
 } from "./control/artifact-transfers.js";
+import { finalizeLfsArtifact, restoreLfsArtifactContent } from "./publication/git-lfs-output.js";
 import {
   activationCancellation,
   activationRejection,
@@ -1603,7 +1604,9 @@ class RetryArtifactCache {
   async set(workItem: number, artifact: NormalizedArtifact): Promise<void> {
     await this.delete(workItem);
     const bytes = Buffer.byteLength(JSON.stringify(artifact));
-    const payloadBytes = artifact.payload?.bytes ?? 0;
+    const payloadBytes =
+      (artifact.payload?.bytes ?? 0) +
+      (artifact.lfsObjects ?? []).reduce((sum, receipt) => sum + receipt.payload.bytes, 0);
     if (bytes > MAX_RETRY_CHECKPOINT_CACHE_BYTES || payloadBytes > MAX_RETRY_PAYLOAD_CACHE_BYTES)
       return;
     while (
@@ -1615,7 +1618,14 @@ class RetryArtifactCache {
       await this.delete(oldest);
     }
     this.#entries.set(workItem, artifact);
-    if (artifact.payload) this.#releases.set(workItem, retainArtifactContent(artifact.payload));
+    const releases = [
+      ...(artifact.payload ? [retainArtifactContent(artifact.payload)] : []),
+      ...(artifact.lfsObjects ?? []).map((receipt) => retainArtifactContent(receipt.payload)),
+    ];
+    if (releases.length)
+      this.#releases.set(workItem, async () => {
+        for (const release of releases) await release();
+      });
     this.#bytes += bytes;
     this.#payloadBytes += payloadBytes;
   }
@@ -1624,7 +1634,9 @@ class RetryArtifactCache {
     const artifact = this.#entries.get(workItem);
     if (!artifact) return;
     this.#bytes -= Buffer.byteLength(JSON.stringify(artifact));
-    this.#payloadBytes -= artifact.payload?.bytes ?? 0;
+    this.#payloadBytes -=
+      (artifact.payload?.bytes ?? 0) +
+      (artifact.lfsObjects ?? []).reduce((sum, receipt) => sum + receipt.payload.bytes, 0);
     this.#entries.delete(workItem);
     const release = this.#releases.get(workItem);
     this.#releases.delete(workItem);
@@ -9211,8 +9223,9 @@ export class FactorySupervisor {
         throw new Error(artifact.reason ?? `worker ${artifact.outcome}`);
       }
       try {
-        await this.#persistCollectedArtifact(
+        artifact = await this.#persistCollectedArtifact(
           reservation,
+          item.id,
           packet,
           artifact,
           objectiveDeadline,
@@ -9802,6 +9815,8 @@ export class FactorySupervisor {
           attempt: reservation.attempt,
           title: item.title,
           baseBranch: publicationBaseBranch,
+          repositoryPath: this.#options.repository,
+          allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
           beforeRefMutation: assertPublicationSafety,
           beforePullRequestMutation: assertPublicationSafety,
         });
@@ -10836,11 +10851,17 @@ export class FactorySupervisor {
             }),
           );
         });
-      const artifact = await backend.collect(handle);
+      let artifact = await backend.collect(handle);
       // The same durable artifact boundary as fresh execution. Never remove the
       // original materialization on persistence failure, and never generate again.
       try {
-        await this.#persistCollectedArtifact(reservation, prepared.packet, artifact, deadline);
+        artifact = await this.#persistCollectedArtifact(
+          reservation,
+          item.id,
+          prepared.packet,
+          artifact,
+          deadline,
+        );
       } catch (error) {
         throw new ArtifactCollectionCheckpointError(error);
       }
@@ -10998,6 +11019,7 @@ export class FactorySupervisor {
       throw new ArtifactCollectionCheckpointError(cause);
     }
     if (!artifact) return false;
+    await restoreLfsArtifactContent({ store: this.#store, artifact });
     this.#retainArtifactContent(artifact);
     const recoverablePostSuccessCancellation = this.#isRecoverablePostSuccessCancellation(events);
     if (
@@ -11144,6 +11166,7 @@ export class FactorySupervisor {
 
   async #persistCollectedArtifact(
     reservation: AttemptReservation,
+    workItemNodeId: string,
     packet: WorkerPacket,
     artifact: NormalizedArtifact,
     objectiveDeadline: number,
@@ -11153,7 +11176,27 @@ export class FactorySupervisor {
       turnId: string | undefined;
       signal: AbortSignal | undefined;
     },
-  ): Promise<void> {
+  ): Promise<NormalizedArtifact> {
+    artifact = await finalizeLfsArtifact({
+      store: this.#store,
+      artifact,
+      authority: {
+        repository: `${this.#options.owner}/${this.#options.repo}`,
+        objective: reservation.objective,
+        workItem: reservation.workItem,
+        attempt: reservation.attempt,
+        runId: reservation.runId,
+        directorEpoch: reservation.directorEpoch,
+        policyDigest: reservation.policyDigest,
+      },
+      repositoryPath: this.#options.repository,
+      allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+      assertCurrent: () =>
+        this.#lease.use(async (lease) => {
+          await this.#attempts.assertReservation(lease, reservation, workItemNodeId);
+        }),
+    });
+    this.#retainArtifactContent(artifact);
     await persistArtifactTransfer({
       store: this.#store,
       identity: this.#artifactTransferIdentity(reservation),
@@ -11222,6 +11265,7 @@ export class FactorySupervisor {
           }
         : {}),
     });
+    return artifact;
   }
 
   #reviewUsageId(record: ReviewCheckpointRecord): string {
@@ -12150,6 +12194,7 @@ export class FactorySupervisor {
       ) {
         throw new Error("validated recovery differs from its exact retained artifact");
       }
+      await restoreLfsArtifactContent({ store: this.#store, artifact });
       this.#retainArtifactContent(artifact);
       const invocationId = `review-${reviewIdentityDigest(reviewIdentity)}`;
       this.#assertManagementInvocationNotFailed(invocationId);
@@ -20023,6 +20068,7 @@ export class FactorySupervisor {
     });
     if (!artifact || artifact.digest !== source.artifactDigest)
       throw new ArtifactCompletionUnavailableError();
+    await restoreLfsArtifactContent({ store: this.#store, artifact });
     this.#retainArtifactContent(artifact);
     const base = await this.#store.readCommit(sourceReservation.baseSha);
     let reservation = reservations
@@ -20790,6 +20836,7 @@ export class FactorySupervisor {
           throw new Error(
             "validated publication recovery differs from the original retained artifact",
           );
+        await restoreLfsArtifactContent({ store: this.#store, artifact });
         this.#retainArtifactContent(artifact);
         // The raw-object helper refuses an unavailable base; recovery must not
         // run checkout-configured fetch, credential helpers, hooks, or filters.

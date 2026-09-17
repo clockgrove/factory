@@ -215,7 +215,7 @@ describe("bounded content-addressed artifacts", () => {
     );
   });
 
-  it("refuses new LFS pointer uploads and retains legacy inline digest compatibility", async () => {
+  it("refuses pointer-only output without a verified raw receipt and retains legacy inline digest compatibility", async () => {
     const f = await fixture();
     await writeFile(
       join(f.repository, "new.dat"),
@@ -232,7 +232,7 @@ describe("bounded content-addressed artifacts", () => {
         changedPaths: ["new.dat"],
         outcome: "succeeded",
       }),
-    ).rejects.toThrow("new LFS pointer");
+    ).rejects.toThrow("pointer-only LFS output");
     const legacy = normalizeArtifact({
       baseSha: f.base,
       patch: "",
@@ -328,9 +328,11 @@ describe("bounded content-addressed artifacts", () => {
           await cleanupLocalWorktree(clean);
         }
         await writeFile(join(worker.path, "asset.dat"), "changed binary asset");
-        await expect(
-          collectLocalArtifact(worker, "", ["original.txt", "asset.dat"]),
-        ).rejects.toThrow("changed LFS asset");
+        const ordinary = await collectLocalArtifact(worker, "", ["original.txt", "asset.dat"]);
+        expect(ordinary.pendingLfsObjects).toBeUndefined();
+        expect(
+          ordinary.fileManifest!.files.find((file) => file.path === "asset.dat"),
+        ).toMatchObject({ bytes: Buffer.byteLength("changed binary asset") });
       } finally {
         await cleanupLocalWorktree(worker);
       }

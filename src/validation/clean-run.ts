@@ -14,6 +14,8 @@ import {
   verifyMaterializedFiles,
 } from "../execution/artifact-content.js";
 import { inspectPatchManifest } from "../runtime/artifact-patch.js";
+import { restorePinnedLfsPointers } from "../repository-profiles/git-lfs.js";
+import { materializeLfsArtifactContent } from "../publication/git-lfs-output.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import { FINDING_PROTOCOL, type FindingCandidate } from "../protocol/findings.js";
 import {
@@ -1344,11 +1346,19 @@ export async function validateArtifactClean(
   try {
     const patchPath = join(worktree.root, "artifact.patch");
     await materializeArtifactPatch(artifact, patchPath);
+    if (artifact.lfsObjects?.length)
+      await restorePinnedLfsPointers(
+        input.repository,
+        worktree.path,
+        artifact.baseSha,
+        artifact.changedPaths,
+      );
     const trustedManifest = await inspectPatchManifest(
       input.repository,
       artifact.baseSha,
       patchPath,
       artifact.changedPaths,
+      ...(artifact.lfsObjects ? [{ lfsObjects: artifact.lfsObjects }] : [{}]),
     );
     if (
       artifact.fileManifest &&
@@ -1390,6 +1400,7 @@ export async function validateArtifactClean(
       )
         throw new Error("applied artifact tree differs from trusted collection manifest");
       await verifyMaterializedFiles(worktree.path, trustedManifest);
+      if (artifact.lfsObjects?.length) await materializeLfsArtifactContent(worktree.path, artifact);
     }
     const pnpmValidation = basePackageJsonPresent
       ? await assertEstablishedPnpmValidation(

@@ -116,7 +116,11 @@ export async function probeHostToolchain(checkout?: string): Promise<{
   const facts = await readRepositoryFacts(local.root, local.files);
   const validationCommands = discoverValidationCommands(facts);
   const runners = [
-    ...new Set(["git", ...validationCommands.map((command) => command.split(" ")[0]!)]),
+    ...new Set([
+      "git",
+      ...(facts.lfs?.requiredTools ?? []),
+      ...validationCommands.map((command) => command.split(" ")[0]!),
+    ]),
   ];
   const commands = await Promise.all(
     runners.map(async (command) => {

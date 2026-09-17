@@ -119,13 +119,24 @@ local objects before a paid management/worker call. Bounds are 256 assets, 100 M
 cache beforehand. No fetch, smudge/clean hook, config edit, attribute rewrite or migration occurs.
 
 Hydration preserves the exact pointer index. Unchanged hydrated assets are omitted from collection
-only after hashing bytes and checking size. Changed pinned LFS paths and new pointer outputs are
-refused without a supported authenticated upload lifecycle. Clean validation uses `git apply --index`
-and `write-tree`, not `git add -A`; publication uses that exact index tree. Thus unrelated hydrated
-assets cannot become committed binary replacements. Git's working-tree dirty view still reports
-hydrated LFS assets without a clean filter; validations relying on a clean `git diff` must account for
-that documented limitation. Remote fetch/upload is a provider-specific missing capability, not a
-reason to remove generic non-LFS large-file support.
+only after hashing bytes and checking size. For a changed path, Factory asks Git's attribute engine
+against the pinned base in isolated metadata. Output is eligible only when that exact path already
+has `filter=lfs`; `.gitattributes` changes, pointer-only worker output, custom transfer agents and
+automatic tracking remain refused.
+
+Eligible raw bytes use the same durable `worker-artifact` content transfer as other artifact content.
+Factory uploads the SHA-256 object with the installed authenticated Git LFS CLI, reads it back into
+fresh isolated storage, and verifies exact size and SHA-256 before constructing the canonical pointer
+patch. The artifact digest binds sorted object receipts, pinned-assignment proofs, content-transfer
+intent/ready commits, remote/tool identity, upload outcome and independent read verification. Replay
+observes those receipts and restores raw validation bytes from their bound content transfers; the
+Git index and validated result tree remain canonical pointers. Immediately before creating the
+feature ref, Factory reads each remote object again. Missing config or credentials, missing or
+corrupt objects, and changed assignment proofs therefore fail before pointer publication. Ordinary
+Git artifacts with no LFS receipts retain their existing artifact bytes and digest behavior.
+The current raw-payload hydration seam is host-local. Daytona and Vercel validators fail before
+provider creation when an artifact has LFS receipts; they do not validate pointer bytes as product
+bytes. Supporting them requires a generic bound content-chunk input in those validator contracts.
 
 ## Primary API contracts and regression entry points
 

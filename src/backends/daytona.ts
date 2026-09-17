@@ -827,6 +827,10 @@ export class DaytonaBackend implements ExecutionBackend {
       throw new Error("isolated capture environment differs from the pinned Daytona image");
     const deadlineFailure = "Daytona validation deadline elapsed before sandbox creation";
     remainingBeforeAttemptDeadline(context.deadline, deadlineFailure, this.#now);
+    if (context.artifact?.lfsObjects?.length)
+      throw new Error(
+        "Daytona validation cannot hydrate bound raw LFS payloads; use a local validator with the generic artifact-content cache",
+      );
     const domains = explicitDaytonaDomains(
       context.packet.requirements.networkDestinations,
       context.policyNetworkDestinations ?? [],

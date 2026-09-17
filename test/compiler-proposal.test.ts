@@ -123,6 +123,7 @@ function capturePinnedFacts(input: {
       {
         command: "npm run capture",
         outputs: input.outputs,
+        comparisonOutputRoleId: input.profile?.captureRoleId ?? input.outputs[0]!.roleId,
         profile: input.profile,
         gates: ["human-required"],
       },
@@ -1035,6 +1036,7 @@ describe("media intent compilation", () => {
           profile: null,
           comparison: {
             kind: "exact",
+            outputRoleId: "capture",
             expectedDescriptorDigest: expected.input.descriptorDigest,
             policy: { kind: "exact-bytes" },
           },
@@ -1123,6 +1125,7 @@ describe("media intent compilation", () => {
         ],
         comparison: expect.objectContaining({
           kind: "threshold",
+          outputRoleId: "capture",
           command: expect.objectContaining({ command: "npm run compare" }),
           policy: {
             kind: "bounded-difference",

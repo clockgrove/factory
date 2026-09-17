@@ -726,10 +726,11 @@ capabilities. An `evidence-for` intent never derives an asset producer. Trusted 
 binds a pinned `.factory/validation-captures.json` entry to the target `repository-change` Work
 Item's `repositoryCaptureRecipes`. The recipe contains exact intent and criterion references,
 repository-observed command identities, bounded scenario inputs, declared output roles and MIME
-identities, an optional typed raster profile, exact-byte or grounded threshold comparison, and the
-required gate. It references the expected immutable `assetInputs` descriptor and contains no
-runtime result fields. A required unsupported evidence intent fails before graph publication; a
-helpful omission preserves the Work Item's obligations. Code-native SVG, Mermaid, HTML/CSS/canvas
+identities, an optional typed raster profile, exact-byte or grounded threshold comparison naming
+one subject output role, and the required gate. It references the expected immutable `assetInputs`
+descriptor and contains no runtime result fields. A required unsupported evidence intent fails
+before graph publication; a helpful omission preserves the Work Item's obligations. Code-native
+SVG, Mermaid, HTML/CSS/canvas
 and similar repository artifacts stay on the repository-change path.
 
 An optional Objective asset manifest is part of activation and run identity. The Supervisor reads

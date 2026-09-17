@@ -73,7 +73,8 @@ bound `repository-change` Work Item. Trusted projection resolves `.factory/valid
 against commands observed from the pinned checkout and emits a digest-bound
 `repositoryCaptureRecipes` entry with the exact intent and criterion references, scenario input,
 declared output roles and MIME types, optional typed raster profile, exact-byte or bounded-threshold
-comparison, and review gate. Exact-byte comparison has no comparison command. The expected bytes
+comparison with one explicit subject output role, and review gate. Exact-byte comparison has no
+comparison command. The expected bytes
 reuse one exact `assetInputs` descriptor rather than repeating transport identity in the recipe.
 Required unsupported evidence fails compilation with a structured violation; helpful evidence may
 be omitted with an explicit trace disposition while its Work Item criteria and obligations remain.

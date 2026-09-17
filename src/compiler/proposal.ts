@@ -2303,6 +2303,7 @@ function projectedRepositoryCaptureRecipe(
     captureRequest.comparison.kind === "exact"
       ? {
           kind: "exact" as const,
+          outputRoleId: captureRecipe.capture.comparisonOutputRoleId,
           expectedDescriptorDigest: expected.descriptorDigest,
           policy: { kind: "exact-bytes" as const },
         }
@@ -2314,6 +2315,7 @@ function projectedRepositoryCaptureRecipe(
             throw new Error(`media intent ${intent.id} lacks grounded comparison authority`);
           return {
             kind: "threshold" as const,
+            outputRoleId: captureRecipe.capture.comparisonOutputRoleId,
             command: commandIdentity(recipe),
             expectedDescriptorDigest: expected.descriptorDigest,
             policy: {

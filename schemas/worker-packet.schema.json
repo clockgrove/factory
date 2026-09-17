@@ -902,9 +902,10 @@
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["kind", "expectedDescriptorDigest", "policy"],
+              "required": ["kind", "outputRoleId", "expectedDescriptorDigest", "policy"],
               "properties": {
                 "kind": { "const": "exact" },
+                "outputRoleId": { "$ref": "#/definitions/safeId" },
                 "expectedDescriptorDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
                 "policy": {
                   "type": "object",
@@ -917,9 +918,10 @@
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["kind", "command", "expectedDescriptorDigest", "policy"],
+              "required": ["kind", "outputRoleId", "command", "expectedDescriptorDigest", "policy"],
               "properties": {
                 "kind": { "const": "threshold" },
+                "outputRoleId": { "$ref": "#/definitions/safeId" },
                 "command": { "$ref": "#/definitions/repositoryCommandIdentity" },
                 "expectedDescriptorDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
                 "policy": {

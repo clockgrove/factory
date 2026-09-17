@@ -13,7 +13,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["command", "outputs", "profile", "gates"],
+        "required": ["command", "outputs", "comparisonOutputRoleId", "profile", "gates"],
         "properties": {
           "command": { "type": "string", "minLength": 1, "maxLength": 1000 },
           "outputs": {
@@ -30,6 +30,7 @@
               }
             }
           },
+          "comparisonOutputRoleId": { "$ref": "#/definitions/id" },
           "profile": {
             "oneOf": [
               { "type": "null" },

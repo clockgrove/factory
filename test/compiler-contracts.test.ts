@@ -55,6 +55,7 @@ describe("adapter-owned compiler capabilities", () => {
         {
           command: "npm run capture",
           outputs: [{ roleId: "capture", mediaType: "application/json" }],
+          comparisonOutputRoleId: "capture",
           profile: null,
           gates: ["human-required"],
         },
@@ -70,6 +71,53 @@ describe("adapter-owned compiler capabilities", () => {
       },
     });
     expect(() => compilerCapabilitiesForRepository(pinned, [])).toThrow();
+  });
+
+  it.each([
+    {
+      name: "undeclared comparison subject",
+      comparisonOutputRoleId: "missing",
+      profile: null,
+      message: /comparison output role is undeclared/,
+    },
+    {
+      name: "raster subject differing from capture role",
+      comparisonOutputRoleId: "diff",
+      profile: {
+        kind: "raster" as const,
+        viewport: null,
+        output: null,
+        captureRoleId: "capture",
+        diffRoleId: "diff",
+        previewRoleId: null,
+      },
+      message: /raster capture and comparison output roles differ/,
+    },
+  ])("rejects $name in the validation capture catalog", (invalid) => {
+    const scripts = { test: "vitest run", capture: "node capture.mjs" };
+    const pinned = semanticPinnedFacts({
+      paths: ["package.json", "package-lock.json", ".factory/validation-captures.json"],
+      scripts,
+      documents: {
+        "package.json": JSON.stringify({ scripts }),
+        ".factory/validation-captures.json": JSON.stringify({
+          captures: [
+            {
+              command: "npm run capture",
+              outputs: [
+                { roleId: "capture", mediaType: "image/png" },
+                { roleId: "diff", mediaType: "image/png" },
+              ],
+              comparisonOutputRoleId: invalid.comparisonOutputRoleId,
+              profile: invalid.profile,
+              gates: ["human-required"],
+            },
+          ],
+          thresholdComparisons: [],
+        }),
+      },
+    });
+    expect(() => compilerCapabilitiesForRepository(pinned, [])).toThrow(invalid.message);
   });
 
   it("retains an unrelated observed generic recipe beside unsupported provider evidence", () => {

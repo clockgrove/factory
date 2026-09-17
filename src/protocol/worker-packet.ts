@@ -180,7 +180,7 @@ const RepositoryCaptureOutputSchema = z
   })
   .strict();
 
-const RepositoryCaptureProfileSchema = z.discriminatedUnion("kind", [
+export const RepositoryCaptureProfileSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("raster"),
@@ -209,6 +209,7 @@ const RepositoryCaptureComparisonSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("exact"),
+      outputRoleId: safeId,
       expectedDescriptorDigest: sha256Digest,
       policy: z.object({ kind: z.literal("exact-bytes") }).strict(),
     })
@@ -216,6 +217,7 @@ const RepositoryCaptureComparisonSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("threshold"),
+      outputRoleId: safeId,
       command: RepositoryCommandIdentitySchema,
       expectedDescriptorDigest: sha256Digest,
       policy: z
@@ -297,6 +299,18 @@ export const RepositoryCaptureRecipeSchema = RepositoryCaptureRecipeCoreSchema.e
             path: ["profile"],
             message: "raster profile references an undeclared output role",
           });
+    if (!roles.includes(value.comparison.outputRoleId))
+      context.addIssue({
+        code: "custom",
+        path: ["comparison", "outputRoleId"],
+        message: "capture comparison references an undeclared output role",
+      });
+    if (value.profile && value.profile.captureRoleId !== value.comparison.outputRoleId)
+      context.addIssue({
+        code: "custom",
+        path: ["comparison", "outputRoleId"],
+        message: "raster capture and comparison output roles differ",
+      });
   });
 
 export const CriterionRiskAssessmentSchema = z
@@ -664,6 +678,7 @@ export type RepositoryChangeWorkerPacket =
 export type AssetProductionWorkerPacket = OptionalPacketDefaults<ParsedAssetProductionWorkerPacket>;
 export type WorkerPacket = RepositoryChangeWorkerPacket | AssetProductionWorkerPacket;
 export type RepositoryCaptureRecipe = z.infer<typeof RepositoryCaptureRecipeSchema>;
+export type RepositoryCaptureProfile = z.infer<typeof RepositoryCaptureProfileSchema>;
 export function isRepositoryChangeWorkerPacket(
   packet: WorkerPacket,
 ): packet is RepositoryChangeWorkerPacket {

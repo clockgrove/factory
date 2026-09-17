@@ -155,6 +155,7 @@ describe("repository capability JSON Schema parity", () => {
       profile: null,
       comparison: {
         kind: "exact" as const,
+        outputRoleId: "capture",
         expectedDescriptorDigest: descriptorDigest,
         policy: { kind: "exact-bytes" as const },
       },

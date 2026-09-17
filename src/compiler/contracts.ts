@@ -484,6 +484,7 @@ const CompilerCaptureRecipeSchema = z
       .array(z.object({ roleId: Id, mediaType: MediaTypeSchema }).strict())
       .min(1)
       .max(16),
+    comparisonOutputRoleId: Id,
     profile: z
       .discriminatedUnion("kind", [
         z
@@ -571,6 +572,12 @@ export const RepositoryCaptureCatalogSchema = z
           path: ["captures", index, "gates"],
           message: "capture gates are duplicated",
         });
+      if (!roles.includes(capture.comparisonOutputRoleId))
+        context.addIssue({
+          code: "custom",
+          path: ["captures", index, "comparisonOutputRoleId"],
+          message: "capture comparison output role is undeclared",
+        });
       if (capture.profile)
         for (const roleId of [
           capture.profile.captureRoleId,
@@ -583,6 +590,12 @@ export const RepositoryCaptureCatalogSchema = z
               path: ["captures", index, "profile"],
               message: "capture profile references an undeclared output role",
             });
+      if (capture.profile && capture.profile.captureRoleId !== capture.comparisonOutputRoleId)
+        context.addIssue({
+          code: "custom",
+          path: ["captures", index, "comparisonOutputRoleId"],
+          message: "raster capture and comparison output roles differ",
+        });
     }
   });
 
@@ -1434,6 +1447,7 @@ const jsonRecipe = strictObject({
             },
           }),
         },
+        comparisonOutputRoleId: jsonId,
         profile: {
           anyOf: [
             { type: "null" },

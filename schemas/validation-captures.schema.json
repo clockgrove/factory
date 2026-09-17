@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/clockgrove/factory/schemas/validation-captures.schema.json",
   "title": "Repository validation capture catalog",
-  "description": "Optional committed authority for repository-observed capture and threshold-comparison commands.",
+  "description": "Optional committed authority for repository-observed capture commands and Factory-installed threshold comparator policies.",
   "type": "object",
   "additionalProperties": false,
   "required": ["captures", "thresholdComparisons"],
@@ -64,9 +64,8 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["command", "policy"],
+        "required": ["policy"],
         "properties": {
-          "command": { "type": "string", "minLength": 1, "maxLength": 1000 },
           "policy": {
             "type": "object",
             "additionalProperties": false,

@@ -205,10 +205,7 @@ export interface CleanValidationResult {
 function repositoryCaptureCommandSet(packet: WorkerPacket): Set<string> {
   if (packet.deliverable.kind !== "repository-change") return new Set();
   return new Set(
-    (packet.repositoryCaptureRecipes ?? []).flatMap((recipe) => [
-      recipe.captureCommand.command,
-      ...(recipe.comparison.kind === "threshold" ? [recipe.comparison.command.command] : []),
-    ]),
+    (packet.repositoryCaptureRecipes ?? []).map((recipe) => recipe.captureCommand.command),
   );
 }
 

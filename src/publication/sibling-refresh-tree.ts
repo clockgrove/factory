@@ -10,7 +10,7 @@ import {
   materializeArtifactPatch,
   type NormalizedArtifact,
 } from "../execution/artifacts.js";
-import { assertNoSecretMaterial, gitSha } from "../protocol/limits.js";
+import { MAX_PRODUCT_FILE_BYTES, assertNoSecretMaterial, gitSha } from "../protocol/limits.js";
 import type { WorkerPacket } from "../protocol/worker-packet.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
 import { inspectPatchManifest } from "../runtime/artifact-patch.js";
@@ -18,7 +18,7 @@ import { assertPublicationMutationAuthorized, type PublicationStore } from "./pu
 
 // GitHub's ordinary Git-blob read contract is bounded at 100 MB. Large assets
 // outside that contract require their repository's separate asset/LFS policy.
-export const MAX_SIBLING_REFRESH_BLOB_BYTES = 100 * 1024 * 1024;
+export const MAX_SIBLING_REFRESH_BLOB_BYTES = MAX_PRODUCT_FILE_BYTES;
 const PREPARATION_TIMEOUT_MS = 120_000;
 const gitOptions = [
   "--no-optional-locks",

@@ -289,7 +289,6 @@ function fakeProvider() {
                   protocol: "clockgrove.factory/repository-capture-manifest",
                   validationInvocationDigest: captureRequest.validationInvocationDigest,
                   files: captureFiles,
-                  comparisons: [],
                 };
                 files.set(
                   "factory/capture-manifest.json",
@@ -499,14 +498,6 @@ describe("Daytona supported provider contract", () => {
         validationInvocationDigest,
         validationDeadline: source.context.deadline.toISOString(),
         environmentIdentity: DAYTONA_DEFAULT_IMAGE,
-        expectedInputs: [
-          {
-            descriptorDigest: expectedDescriptorDigest,
-            contentDigest: expectedPayload.digest,
-            storageReceiptDigest: "a".repeat(64),
-            payload: expectedPayload,
-          },
-        ],
         recipes: [
           {
             id: "opaque-result",
@@ -542,7 +533,6 @@ describe("Daytona supported provider contract", () => {
           resourceId: "sandbox-1",
           manifestPath: "factory/capture-manifest.json",
         },
-        comparisons: [],
         files: [
           {
             recipeId: "opaque-result",

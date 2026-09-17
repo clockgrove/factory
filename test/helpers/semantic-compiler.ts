@@ -127,7 +127,7 @@ export function semanticRequest(
 }
 
 export function semanticProposal(request: CompilerRequest, count = 1): CompilerProposal {
-  const recipe = request.repository.validationRecipes[0];
+  const recipe = request.repository.validationRecipes.find(({ capture }) => capture === null);
   if (!recipe) throw new Error("semantic fixture requires an observed validation recipe");
   return {
     protocol: "clockgrove.factory/compiler-proposal",

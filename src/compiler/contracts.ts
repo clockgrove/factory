@@ -12,6 +12,7 @@ import {
   type ObligationInventory,
 } from "../evaluation/compiler-eval.js";
 import { NetworkDestinationSchema, RepositoryScopePathSchema } from "../protocol/worker-packet.js";
+import { MAX_PRODUCT_FILE_BYTES } from "../protocol/limits.js";
 import {
   CompilerMediaFactsSchema,
   MediaIntentSchema,
@@ -544,20 +545,21 @@ export const RepositoryCaptureCatalogSchema = z
       )
       .max(32),
     thresholdComparisons: z
-      .array(
-        CompilerThresholdComparisonRecipeSchema.omit({ kind: true })
-          .extend({ command: z.string().min(1).max(1_000) })
-          .strict(),
-      )
+      .array(CompilerThresholdComparisonRecipeSchema.omit({ kind: true }).strict())
       .max(32),
   })
   .strict()
   .superRefine((catalog, context) => {
-    const commands = [...catalog.captures, ...catalog.thresholdComparisons].map(
-      ({ command }) => command,
-    );
+    const commands = catalog.captures.map(({ command }) => command);
     if (new Set(commands).size !== commands.length)
       context.addIssue({ code: "custom", message: "capture catalog commands are duplicated" });
+    const comparatorIds = catalog.thresholdComparisons.map(({ policy }) => policy.id);
+    if (new Set(comparatorIds).size !== comparatorIds.length)
+      context.addIssue({
+        code: "custom",
+        path: ["thresholdComparisons"],
+        message: "threshold comparison policy identities are duplicated",
+      });
     for (const [index, capture] of catalog.captures.entries()) {
       const roles = capture.outputs.map(({ roleId }) => roleId);
       if (new Set(roles).size !== roles.length)
@@ -993,7 +995,7 @@ const jsonCompilerMediaFacts = strictObject({
               pattern:
                 "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$",
             },
-            bytes: { type: "integer", minimum: 1, maximum: 100 * 1024 * 1024 },
+            bytes: { type: "integer", minimum: 1, maximum: MAX_PRODUCT_FILE_BYTES },
             inspection: {
               anyOf: [
                 strictObject({ kind: { type: "string", const: "opaque" } }),

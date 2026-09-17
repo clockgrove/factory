@@ -38,7 +38,6 @@ import { validationInvocationOwnership } from "./validation-invocation.js";
 import {
   ISOLATED_CAPTURE_MANIFEST_PATH,
   MAX_ISOLATED_CAPTURE_MANIFEST_BYTES,
-  materializeIsolatedValidationCaptureInputs,
   parseIsolatedValidationCaptureManifest,
   parseIsolatedValidationCaptureRequest,
   parseSandboxPaths,
@@ -942,7 +941,6 @@ export class DaytonaBackend implements ExecutionBackend {
     let captureRecoveryFailure: unknown;
     let checkpointFailure: unknown;
     let patchRoot: string | undefined;
-    let captureInputRoot: string | undefined;
     try {
       remainingBeforeAttemptDeadline(
         context.deadline,
@@ -952,11 +950,6 @@ export class DaytonaBackend implements ExecutionBackend {
       patchRoot = await mkdtemp(join(tmpdir(), "factory-daytona-validation-content-"));
       const patchPath = join(patchRoot, "artifact.patch");
       await materializeArtifactPatch(context.artifact, patchPath);
-      captureInputRoot = await mkdtemp(join(tmpdir(), "factory-daytona-capture-inputs-"));
-      const captureInputs = await materializeIsolatedValidationCaptureInputs(
-        captureRequest,
-        captureInputRoot,
-      );
       await this.#withinDeadline(
         context.deadline,
         "Daytona validation deadline elapsed during sandbox folder setup",
@@ -972,7 +965,6 @@ export class DaytonaBackend implements ExecutionBackend {
               archive,
             ),
             { source: patchPath, destination: "factory/artifact.patch" },
-            ...captureInputs,
           ]),
       );
       const workdir = await this.#withinDeadline(
@@ -1036,7 +1028,6 @@ export class DaytonaBackend implements ExecutionBackend {
     } finally {
       await archive.dispose();
       if (patchRoot) await rm(patchRoot, { recursive: true, force: true });
-      if (captureInputRoot) await rm(captureInputRoot, { recursive: true, force: true });
     }
 
     if (checkpointFailure) {

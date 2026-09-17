@@ -141,28 +141,20 @@ async function runIsolatedCaptureValidation(threshold = false) {
     cwd: source,
     encoding: "utf8",
   });
+  const expectedContent = Buffer.from("expected fixture");
   const captureScript = [
     'const fs=require("node:fs"),p=require("node:path")',
     "const request=JSON.parse(fs.readFileSync(process.env.FACTORY_CAPTURE_REQUEST,'utf8'))",
+    `for(const name of fs.readdirSync(p.dirname(process.env.FACTORY_CAPTURE_REQUEST)))if(fs.statSync(p.join(p.dirname(process.env.FACTORY_CAPTURE_REQUEST),name)).isFile()&&fs.readFileSync(p.join(p.dirname(process.env.FACTORY_CAPTURE_REQUEST),name)).includes(Buffer.from('${expectedContent.toString("base64")}','base64')))process.exit(88)`,
     "const count=p.join(p.dirname(process.env.FACTORY_CAPTURE_REQUEST),'capture-count')",
     "fs.writeFileSync(count,String(Number(fs.existsSync(count)?fs.readFileSync(count,'utf8'):0)+1))",
     "for(const recipe of request.recipes)for(const output of recipe.outputs)fs.writeFileSync(output.outputPath,recipe.id+':'+output.roleId)",
   ].join(";");
   const captureCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(captureScript)}`;
-  const comparisonScript = [
-    'const fs=require("node:fs")',
-    "const request=JSON.parse(fs.readFileSync(process.env.FACTORY_CAPTURE_REQUEST,'utf8'))",
-    "for(const recipe of request.recipes)fs.writeFileSync(recipe.comparison.comparisonResultPath,JSON.stringify({observedDifference:0.25}))",
-  ].join(";");
-  const comparisonCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(comparisonScript)}`;
   const base = context();
   base.packet.baseSha = baseSha;
   base.packet.allowedPaths = ["tracked.txt"];
-  base.packet.validationCommands = [
-    "true",
-    captureCommand,
-    ...(threshold ? [comparisonCommand] : []),
-  ];
+  base.packet.validationCommands = ["true", captureCommand];
   const artifact = normalizeArtifact({
     baseSha,
     patch,
@@ -170,8 +162,6 @@ async function runIsolatedCaptureValidation(threshold = false) {
     outcome: "succeeded",
   });
   const validationInvocationDigest = "c".repeat(64);
-  const expectedContent = Buffer.from("expected fixture");
-  const expectedContentDigest = createHash("sha256").update(expectedContent).digest("hex");
   const expectedDescriptorDigest = "e".repeat(64);
   const validation: IsolatedValidationContext = {
     ...base,
@@ -187,21 +177,6 @@ async function runIsolatedCaptureValidation(threshold = false) {
       validationInvocationDigest,
       validationDeadline: base.deadline.toISOString(),
       environmentIdentity: "fixture/image@sha256:" + "1".repeat(64),
-      expectedInputs: threshold
-        ? [
-            {
-              descriptorDigest: expectedDescriptorDigest,
-              contentDigest: expectedContentDigest,
-              storageReceiptDigest: "f".repeat(64),
-              payload: {
-                kind: "content-chunks" as const,
-                digest: expectedContentDigest,
-                bytes: expectedContent.byteLength,
-                chunks: [{ digest: expectedContentDigest, bytes: expectedContent.byteLength }],
-              },
-            },
-          ]
-        : [],
       recipes: ["primary", "secondary"].map((id) => ({
         id,
         digest: createHash("sha256").update(id).digest("hex"),
@@ -215,10 +190,9 @@ async function runIsolatedCaptureValidation(threshold = false) {
         comparison: threshold
           ? {
               kind: "threshold" as const,
-              command: comparisonCommand,
               outputRoleId: "result",
               expectedDescriptorDigest,
-              metric: "difference",
+              metric: "byte-difference",
               maximumDifference: id === "primary" ? 0.2 : 0.3,
             }
           : {
@@ -237,15 +211,6 @@ async function runIsolatedCaptureValidation(threshold = false) {
     await writeFile(path, file.content);
     if (file.mode !== undefined) await chmod(path, file.mode);
   }
-  const expectedPath = join(
-    root,
-    "factory",
-    "capture-inputs",
-    validationInvocationDigest,
-    expectedDescriptorDigest,
-  );
-  await mkdir(dirname(expectedPath), { recursive: true });
-  await writeFile(expectedPath, expectedContent);
   execFileSync(process.execPath, [join(root, "factory", "validate.mjs")], { cwd: root });
   const result = parseIsolatedValidationResult(
     await readFile(join(root, "factory", "validation-result.json")),
@@ -254,7 +219,6 @@ async function runIsolatedCaptureValidation(threshold = false) {
   return {
     root,
     captureCommand,
-    comparisonCommand,
     validation,
     result,
     manifestBytes,
@@ -440,7 +404,6 @@ describe("sandbox bootstrap contracts", () => {
         protocol: string;
         validationInvocationDigest: string;
         files: Array<Record<string, unknown>>;
-        comparisons: Array<Record<string, unknown>>;
         manifestDigest: string;
       };
       const encode = (value: typeof manifest) => {
@@ -448,7 +411,6 @@ describe("sandbox bootstrap contracts", () => {
           protocol: value.protocol,
           validationInvocationDigest: value.validationInvocationDigest,
           files: value.files,
-          comparisons: value.comparisons,
         };
         return Buffer.from(
           JSON.stringify({
@@ -498,30 +460,15 @@ describe("sandbox bootstrap contracts", () => {
     }
   });
 
-  it("runs grounded threshold comparison after capture and records one observation per recipe", async () => {
+  it("keeps isolated expected bytes from repository commands and returns captures for host comparison", async () => {
     const run = await runIsolatedCaptureValidation(true);
     try {
       expect(run.result.commands.map(({ command }) => command)).toEqual([
         "true",
         run.captureCommand,
-        run.comparisonCommand,
       ]);
-      expect(run.manifest.comparisons).toEqual([
-        {
-          recipeId: "primary",
-          metric: "difference",
-          maximumDifference: 0.2,
-          observedDifference: 0.25,
-          passed: false,
-        },
-        {
-          recipeId: "secondary",
-          metric: "difference",
-          maximumDifference: 0.3,
-          observedDifference: 0.25,
-          passed: true,
-        },
-      ]);
+      expect(run.manifest).not.toHaveProperty("comparisons");
+      expect(run.manifest.files).toHaveLength(2);
       expect(run.result.passed).toBe(true);
     } finally {
       await run.dispose();

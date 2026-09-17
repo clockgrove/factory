@@ -17,11 +17,16 @@ import { dirname, join, resolve, sep } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
-import { assertNoSecretMaterial, gitSha, sha256Digest } from "../protocol/limits.js";
+import {
+  MAX_PRODUCT_FILE_BYTES,
+  assertNoSecretMaterial,
+  gitSha,
+  sha256Digest,
+} from "../protocol/limits.js";
 
 export const CONTENT_CHUNK_BYTES = 4 * 1024 * 1024;
 export const MAX_CONTENT_BYTES = 256 * 1024 * 1024;
-export const MAX_CONTENT_FILE_BYTES = 100 * 1000 * 1000;
+export const MAX_CONTENT_FILE_BYTES = MAX_PRODUCT_FILE_BYTES;
 export const MAX_CONTENT_FILES = 5000;
 export const ArtifactPathSchema = z
   .string()

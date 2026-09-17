@@ -14,7 +14,7 @@ import {
 import { reconcileAdmissionForSuccessor } from "./control/admission-reassignment.js";
 import { observeLocalScopeBatch } from "./recovery/scope-resources.js";
 import { dirname, join, resolve } from "node:path";
-import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { arch, homedir, platform, tmpdir } from "node:os";
 import { readObjectiveAssetManifest, recoverObjectiveAsset } from "./assets/storage.js";
 import { materializeObjectiveAssets, materializeWorkerAssetInputs } from "./assets/materialize.js";
@@ -11484,18 +11484,6 @@ export class FactorySupervisor {
       authorityBaseSha: this.#run.baseSha ?? args.packet.baseSha,
       packet: args.packet,
     });
-    const retainedExpectedInputs = new Map(
-      await Promise.all(
-        [...captureAssets.entries()].map(async ([descriptorDigest, expected]) => {
-          const recovered = await recoverObjectiveAsset({
-            store: this.#store,
-            manifest: expected.manifest,
-            descriptorDigest,
-          });
-          return [descriptorDigest, recovered.payload] as const;
-        }),
-      ),
-    );
     const backendId = args.validator?.capabilities.id ?? "factory/local-validation";
     const toolReceiptDigests = [
       ...new Set(
@@ -11779,31 +11767,35 @@ export class FactorySupervisor {
         });
       },
       execute: async (input) => {
-        const thresholdExpected = new Set(
-          input.invocation.repositoryCaptureRecipes.flatMap((recipe) =>
-            recipe.comparison.kind === "threshold"
-              ? [recipe.comparison.expectedDescriptorDigest]
-              : [],
-          ),
-        );
+        const downloadExpected = async (
+          expectedInput: ValidationInvocation["mediaInputs"][number],
+        ) => {
+          const expected = captureAssets.get(expectedInput.descriptorDigest);
+          if (
+            !expected ||
+            expected.binding.contentDigest !== expectedInput.contentDigest ||
+            expected.binding.storageReceiptDigest !== expectedInput.storageReceiptDigest
+          )
+            throw new Error("comparator expected bytes differ from validation invocation");
+          const recovered = await recoverObjectiveAsset({
+            store: this.#store,
+            manifest: expected.manifest,
+            descriptorDigest: expectedInput.descriptorDigest,
+          });
+          const temporary = await mkdtemp(join(tmpdir(), "factory-comparator-expected-"));
+          try {
+            const path = join(temporary, "content");
+            await materializePayload(recovered.payload, path);
+            return await readFile(path);
+          } finally {
+            await rm(temporary, { recursive: true, force: true });
+          }
+        };
         const isolatedCaptureRequest: IsolatedValidationCaptureRequest = {
           protocol: "clockgrove.factory/repository-capture-request",
           validationInvocationDigest: input.invocation.digest,
           validationDeadline: input.invocation.validationDeadline,
           environmentIdentity: input.invocation.toolEnvironment.environmentIdentity,
-          expectedInputs: input.invocation.mediaInputs
-            .filter(({ descriptorDigest }) => thresholdExpected.has(descriptorDigest))
-            .map((expected) => {
-              const payload = retainedExpectedInputs.get(expected.descriptorDigest);
-              if (!payload || payload.digest !== expected.contentDigest || payload.bytes <= 0)
-                throw new Error("isolated expected input differs from validation invocation");
-              return {
-                descriptorDigest: expected.descriptorDigest,
-                contentDigest: expected.contentDigest,
-                storageReceiptDigest: expected.storageReceiptDigest,
-                payload,
-              };
-            }),
           recipes: input.invocation.repositoryCaptureRecipes.map((recipe) => ({
             id: recipe.id,
             digest: recipe.digest,
@@ -11823,7 +11815,6 @@ export class FactorySupervisor {
                   }
                 : {
                     kind: "threshold" as const,
-                    command: recipe.comparison.command.command,
                     outputRoleId: recipe.comparison.outputRoleId,
                     expectedDescriptorDigest: recipe.comparison.expectedDescriptorDigest,
                     metric: recipe.comparison.policy.metric,
@@ -11843,18 +11834,9 @@ export class FactorySupervisor {
           const captures = validation.captures;
           if (!captures)
             throw new Error("isolated capture checkpoint omitted retained output payloads");
-          const comparisons = new Map(
-            captures.comparisons.map((comparison) => [comparison.recipeId, comparison]),
-          );
           const collection = createRepositoryCaptureCollection({
             invocation: input.invocation,
             files: captures.files.map((file) => {
-              const recipe = input.invocation.repositoryCaptureRecipes.find(
-                ({ id }) => id === file.recipeId,
-              );
-              const comparison = comparisons.get(file.recipeId);
-              const comparisonCommand =
-                recipe?.comparison.kind === "threshold" ? recipe.comparison.command.command : null;
               return {
                 recipeId: file.recipeId,
                 roleId: file.roleId,
@@ -11862,18 +11844,6 @@ export class FactorySupervisor {
                 mediaType: file.mediaType,
                 bytes: file.bytes,
                 digest: file.digest,
-                ...(recipe?.comparison.kind === "threshold" &&
-                recipe.comparison.outputRoleId === file.roleId &&
-                comparison
-                  ? {
-                      threshold: {
-                        observedDifference: comparison.observedDifference,
-                        exitCode:
-                          validation.commands.find(({ command }) => command === comparisonCommand)
-                            ?.exitCode ?? 1,
-                      },
-                    }
-                  : {}),
               };
             }),
           });
@@ -11882,6 +11852,7 @@ export class FactorySupervisor {
             store: this.#store,
             invocation: input.invocation,
             collection,
+            downloadExpected,
             downloadCapture: async (file) => {
               const retained = captures.files.find(
                 (candidate) =>
@@ -12067,28 +12038,6 @@ export class FactorySupervisor {
               runCommand: input.runCaptureCommand,
               observeCommand: input.observeCaptureCommand,
               commandDeadline: input.captureObservationDeadline,
-              materializeExpected: async ({
-                descriptorDigest,
-                contentDigest,
-                storageReceiptDigest,
-                destination,
-              }) => {
-                const expected = captureAssets.get(descriptorDigest);
-                if (
-                  !expected ||
-                  expected.binding.contentDigest !== contentDigest ||
-                  expected.binding.storageReceiptDigest !== storageReceiptDigest
-                )
-                  throw new Error("threshold expected-byte request differs from invocation");
-                const recovered = await recoverObjectiveAsset({
-                  store: this.#store,
-                  manifest: expected.manifest,
-                  descriptorDigest,
-                });
-                await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-                await materializePayload(recovered.payload, destination);
-                await chmod(destination, 0o400);
-              },
               assertOutputTree: input.assertOutputTree,
             });
           } catch (error) {
@@ -12109,6 +12058,7 @@ export class FactorySupervisor {
             store: this.#store,
             invocation: input.invocation,
             collection: captured.collection,
+            downloadExpected,
             downloadCapture: captured.downloadCapture,
             assertCurrent: () => this.#lease.assert(),
             assertOutputTree: async (outputTreeSha) => {

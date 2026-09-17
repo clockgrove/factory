@@ -15,12 +15,10 @@ import type {
   ValidationResourceIdentity,
 } from "../execution/backend.js";
 import {
-  ArtifactPayloadSchema,
   cachePayload,
   inspectContentFile,
   MAX_CONTENT_BYTES,
   MAX_CONTENT_FILE_BYTES,
-  materializePayload,
   releasePayload,
 } from "../execution/artifact-content.js";
 import { streamGitFile } from "../runtime/artifact-patch.js";
@@ -59,18 +57,6 @@ export const IsolatedValidationCaptureRequestSchema = z
     validationInvocationDigest: digest,
     validationDeadline: z.string().datetime({ offset: true }),
     environmentIdentity: z.string().min(1).max(500),
-    expectedInputs: z
-      .array(
-        z
-          .object({
-            descriptorDigest: digest,
-            contentDigest: digest,
-            storageReceiptDigest: digest,
-            payload: ArtifactPayloadSchema,
-          })
-          .strict(),
-      )
-      .max(MAX_ISOLATED_CAPTURE_FILES),
     recipes: z
       .array(
         z
@@ -111,7 +97,6 @@ export const IsolatedValidationCaptureRequestSchema = z
               z
                 .object({
                   kind: z.literal("threshold"),
-                  command: z.string().min(1).max(1_000),
                   outputRoleId: captureId,
                   expectedDescriptorDigest: digest,
                   metric: captureId,
@@ -138,42 +123,12 @@ export const IsolatedValidationCaptureRequestSchema = z
       context.addIssue({ code: z.ZodIssueCode.custom, message: "duplicate capture output role" });
     if (outputIds.length > MAX_ISOLATED_CAPTURE_FILES)
       context.addIssue({ code: z.ZodIssueCode.custom, message: "too many capture outputs" });
-    const captureCommands = new Set(value.recipes.map((recipe) => recipe.command));
-    const expectedInputs = new Map(
-      value.expectedInputs.map((input) => [input.descriptorDigest, input]),
-    );
-    if (expectedInputs.size !== value.expectedInputs.length)
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "duplicate expected capture input",
-      });
-    if (
-      value.expectedInputs.reduce((total, input) => total + input.payload.bytes, 0) >
-      MAX_CONTENT_BYTES
-    )
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["expectedInputs"],
-        message: "expected capture inputs exceed the aggregate byte limit",
-      });
-    for (const [index, input] of value.expectedInputs.entries())
-      if (input.contentDigest !== input.payload.digest)
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["expectedInputs", index, "contentDigest"],
-          message: "expected capture input content digest differs from its payload",
-        });
     for (const [index, recipe] of value.recipes.entries())
-      if (
-        !recipe.outputs.some((output) => output.roleId === recipe.comparison.outputRoleId) ||
-        (recipe.comparison.kind === "threshold" &&
-          (!expectedInputs.has(recipe.comparison.expectedDescriptorDigest) ||
-            captureCommands.has(recipe.comparison.command)))
-      )
+      if (!recipe.outputs.some((output) => output.roleId === recipe.comparison.outputRoleId))
         context.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["recipes", index, "comparison"],
-          message: "comparison must name a declared output role and distinct threshold command",
+          message: "comparison must name a declared output role",
         });
   });
 
@@ -191,21 +146,11 @@ const CaptureManifestFileSchema = z
     digest,
   })
   .strict();
-const CaptureManifestComparisonSchema = z
-  .object({
-    recipeId: captureId,
-    metric: captureId,
-    maximumDifference: z.number().finite().nonnegative(),
-    observedDifference: z.number().finite().nonnegative(),
-    passed: z.boolean(),
-  })
-  .strict();
 const CaptureManifestSchema = z
   .object({
     protocol: z.literal("clockgrove.factory/repository-capture-manifest"),
     validationInvocationDigest: digest,
     files: z.array(CaptureManifestFileSchema).min(1).max(MAX_ISOLATED_CAPTURE_FILES),
-    comparisons: z.array(CaptureManifestComparisonSchema).max(MAX_ISOLATED_CAPTURE_FILES),
     manifestDigest: digest,
   })
   .strict();
@@ -213,10 +158,6 @@ type CaptureManifest = z.infer<typeof CaptureManifestSchema>;
 
 function captureSourcePath(invocation: string, recipeId: string, roleId: string): string {
   return `factory/captures/${invocation}/${recipeId}/${roleId}`;
-}
-
-function captureInputPath(invocation: string, descriptorDigest: string): string {
-  return `factory/capture-inputs/${invocation}/${descriptorDigest}`;
 }
 
 function captureManifestIdentity(manifest: Omit<CaptureManifest, "manifestDigest">): string {
@@ -235,57 +176,19 @@ export function parseIsolatedValidationCaptureRequest(
   )
     throw new Error("capture request differs from its validation invocation or deadline");
   const captureCommands = new Set(request.recipes.map((recipe) => recipe.command));
-  const comparisonCommands = new Set(
-    request.recipes.flatMap((recipe) =>
-      recipe.comparison.kind === "threshold" ? [recipe.comparison.command] : [],
-    ),
-  );
-  const specialCommands = new Set([...captureCommands, ...comparisonCommands]);
+  const specialCommands = captureCommands;
   const planned = [...context.packet.validationCommands] as string[];
   for (const command of specialCommands)
     if (planned.filter((candidate) => candidate === command).length !== 1)
-      throw new Error("capture or comparison command must identify one planned validation command");
+      throw new Error("capture command must identify one planned validation command");
   const firstCapture = planned.findIndex((command) => specialCommands.has(command));
   if (
     firstCapture < 0 ||
     planned.slice(firstCapture).some((command) => !specialCommands.has(command))
   )
     throw new Error("capture commands must follow ordinary validation commands");
-  for (const recipe of request.recipes)
-    if (
-      recipe.comparison.kind === "threshold" &&
-      planned.indexOf(recipe.command) > planned.indexOf(recipe.comparison.command)
-    )
-      throw new Error("threshold comparison command must follow its capture command");
-  const captureIndexes = [...captureCommands].map((command) => planned.indexOf(command));
-  const comparisonIndexes = [...comparisonCommands].map((command) => planned.indexOf(command));
-  if (comparisonIndexes.length > 0 && Math.max(...captureIndexes) > Math.min(...comparisonIndexes))
-    throw new Error("all capture commands must precede threshold comparison commands");
   assertNoSecretMaterial(request, "isolated capture request");
   return request;
-}
-
-export async function materializeIsolatedValidationCaptureInputs(
-  request: IsolatedValidationCaptureRequest | undefined,
-  root: string,
-): Promise<Array<{ source: string; destination: string; bytes: number }>> {
-  if (!request) return [];
-  await mkdir(root, { recursive: true });
-  const files: Array<{ source: string; destination: string; bytes: number }> = [];
-  for (let index = 0; index < request.expectedInputs.length; index += 1) {
-    const input = request.expectedInputs[index]!;
-    const source = join(root, String(index));
-    await materializePayload(input.payload, source);
-    const inspected = await inspectContentFile(source, MAX_CONTENT_FILE_BYTES);
-    if (inspected.digest !== input.contentDigest || inspected.bytes !== input.payload.bytes)
-      throw new Error("materialized expected capture input differs from its bound content");
-    files.push({
-      source,
-      destination: captureInputPath(request.validationInvocationDigest, input.descriptorDigest),
-      bytes: inspected.bytes,
-    });
-  }
-  return files;
 }
 
 export function parseIsolatedValidationCaptureManifest(
@@ -312,23 +215,10 @@ export function parseIsolatedValidationCaptureManifest(
       maxBytes: output.maxBytes,
     })),
   );
-  const expectedComparisons = request.recipes.flatMap((recipe) =>
-    recipe.comparison.kind === "threshold"
-      ? [
-          {
-            recipeId: recipe.id,
-            metric: recipe.comparison.metric,
-            maximumDifference: recipe.comparison.maximumDifference,
-          },
-        ]
-      : [],
-  );
   if (manifest.validationInvocationDigest !== request.validationInvocationDigest)
     throw new Error("isolated capture manifest invocation mismatch");
   if (manifest.files.length !== expected.length)
     throw new Error("isolated capture manifest output count mismatch");
-  if (manifest.comparisons.length !== expectedComparisons.length)
-    throw new Error("isolated capture manifest comparison count mismatch");
   let total = 0;
   for (let index = 0; index < expected.length; index += 1) {
     const actual = manifest.files[index]!;
@@ -346,17 +236,6 @@ export function parseIsolatedValidationCaptureManifest(
   }
   if (total > request.maximumTotalBytes)
     throw new Error("isolated capture files exceed their aggregate byte limit");
-  for (let index = 0; index < expectedComparisons.length; index += 1) {
-    const actual = manifest.comparisons[index]!;
-    const planned = expectedComparisons[index]!;
-    if (
-      actual.recipeId !== planned.recipeId ||
-      actual.metric !== planned.metric ||
-      actual.maximumDifference !== planned.maximumDifference ||
-      actual.passed !== actual.observedDifference <= actual.maximumDifference
-    )
-      throw new Error("isolated capture comparison differs from its request or observed value");
-  }
   assertNoSecretMaterial(manifest, "isolated capture manifest");
   return manifest;
 }
@@ -385,7 +264,6 @@ export async function retainIsolatedValidationCaptures(
       manifestDigest: manifest.manifestDigest,
       locator,
       files: retained,
-      comparisons: manifest.comparisons,
     };
   } catch (error) {
     await Promise.all(retained.map((file) => releasePayload(file.payload)));
@@ -1015,12 +893,7 @@ export function sandboxValidationFiles(
     );
   const captureRequest = parseIsolatedValidationCaptureRequest(context);
   const captureCommands = new Set(captureRequest?.recipes.map((recipe) => recipe.command) ?? []);
-  const comparisonCommands = new Set(
-    captureRequest?.recipes.flatMap((recipe) =>
-      recipe.comparison.kind === "threshold" ? [recipe.comparison.command] : [],
-    ) ?? [],
-  );
-  const capturePlanCommands = new Set([...captureCommands, ...comparisonCommands]);
+  const capturePlanCommands = captureCommands;
   const ordinaryValidationCommands = context.packet.validationCommands.filter(
     (command) => !capturePlanCommands.has(command),
   );
@@ -1029,31 +902,20 @@ export function sandboxValidationFiles(
     packetRuntimeRequirements(context.packet),
   );
   const sandboxCaptureRequest = captureRequest
-    ? (() => {
-        const { expectedInputs, ...request } = captureRequest;
-        return {
-          ...request,
-          expectedInputs: expectedInputs.map(({ payload, ...input }) => ({
-            ...input,
-            bytes: payload.bytes,
-            sourcePath: captureInputPath(
+    ? {
+        ...captureRequest,
+        recipes: captureRequest.recipes.map((recipe) => ({
+          ...recipe,
+          outputs: recipe.outputs.map((output) => ({
+            ...output,
+            sourcePath: captureSourcePath(
               captureRequest.validationInvocationDigest,
-              input.descriptorDigest,
+              recipe.id,
+              output.roleId,
             ),
           })),
-          recipes: captureRequest.recipes.map((recipe) => ({
-            ...recipe,
-            outputs: recipe.outputs.map((output) => ({
-              ...output,
-              sourcePath: captureSourcePath(
-                captureRequest.validationInvocationDigest,
-                recipe.id,
-                output.roleId,
-              ),
-            })),
-          })),
-        };
-      })()
+        })),
+      }
     : undefined;
   const captureRequestBytes = sandboxCaptureRequest
     ? Buffer.from(JSON.stringify(sandboxCaptureRequest), "utf8")
@@ -1182,63 +1044,6 @@ function inspectCapture(output) {
   }
 }
 
-function inspectComparison(recipe) {
-  const path = recipe.comparison.resultPath;
-  const info = lstatSync(path);
-  if (!info.isFile() || info.isSymbolicLink() || info.size <= 0 || info.size > 1024) {
-    throw new Error("threshold comparison result is missing, non-regular, empty, or oversized");
-  }
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const bytes = readFileSync(fd);
-    const after = statSync(path);
-    if (after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs) {
-      throw new Error("threshold comparison result changed while reading");
-    }
-    const parsed = JSON.parse(bytes.toString("utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.keys(parsed).length !== 1 || typeof parsed.observedDifference !== "number" || !Number.isFinite(parsed.observedDifference) || parsed.observedDifference < 0) {
-      throw new Error("threshold comparison result must contain one finite non-negative observedDifference");
-    }
-    return {
-      recipeId: recipe.id,
-      metric: recipe.comparison.metric,
-      maximumDifference: recipe.comparison.maximumDifference,
-      observedDifference: parsed.observedDifference,
-      passed: parsed.observedDifference <= recipe.comparison.maximumDifference,
-    };
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function inspectExpectedInput(input) {
-  const path = resolve(root, input.sourcePath.slice("factory/".length));
-  const info = lstatSync(path);
-  if (!info.isFile() || info.isSymbolicLink() || info.size !== input.bytes) {
-    throw new Error("expected comparison input is missing, non-regular, or changed size");
-  }
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  const hash = createHash("sha256");
-  const chunk = Buffer.alloc(64 * 1024);
-  let bytes = 0;
-  try {
-    for (;;) {
-      const count = readSync(fd, chunk, 0, chunk.length, null);
-      if (!count) break;
-      bytes += count;
-      if (bytes > input.bytes) throw new Error("expected comparison input grew while hashing");
-      hash.update(chunk.subarray(0, count));
-    }
-    const after = statSync(path);
-    if (bytes !== input.bytes || after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs || hash.digest("hex") !== input.contentDigest) {
-      throw new Error("expected comparison input differs from its bound content");
-    }
-    return path;
-  } finally {
-    closeSync(fd);
-  }
-}
-
 function captureFiles(recipes) {
   let totalBytes = 0;
   return recipes.flatMap(recipe => recipe.outputs.map(output => {
@@ -1253,7 +1058,6 @@ function assertOwnedCaptureTree(recipes) {
   const captureRoot = resolve(root, "captures", captureRequest.validationInvocationDigest);
   const expected = new Set(recipes.flatMap(recipe => [
     ...recipe.outputs.map(output => output.outputPath),
-    ...(recipe.comparison.kind === "threshold" ? [recipe.comparison.resultPath] : []),
   ]));
   const observed = [];
   const visit = directory => {
@@ -1291,57 +1095,18 @@ function runCaptures(outputTreeSha) {
       if (existsSync(outputPath)) throw new Error("capture output existed before dispatch");
       return { ...output, outputPath };
     }),
-    comparison: (() => {
-      if (recipe.comparison.kind === "exact") return recipe.comparison;
-      const expected = captureRequest.expectedInputs.find(input => input.descriptorDigest === recipe.comparison.expectedDescriptorDigest);
-      if (!expected) throw new Error("threshold capture comparison lacks its expected input");
-      return {
-        ...recipe.comparison,
-        expected,
-        expectedPath: resolve(root, expected.sourcePath.slice("factory/".length)),
-        resultPath: resolve(root, "captures", captureRequest.validationInvocationDigest, recipe.id, ".comparison-result.json"),
-      };
-    })(),
   }));
   const commandOrder = config.captureCommands;
-  let capturedBeforeComparison = null;
   for (let index = 0; index < commandOrder.length; index += 1) {
     const command = commandOrder[index];
     const captureRecipes = recipes.filter(recipe => recipe.command === command);
-    const comparisonRecipes = recipes.filter(recipe => recipe.comparison.kind === "threshold" && recipe.comparison.command === command);
-    if ((captureRecipes.length === 0) === (comparisonRecipes.length === 0)) {
-      throw new Error("capture plan command has ambiguous phase ownership");
-    }
-    for (const recipe of comparisonRecipes) {
-      if (!capturedBeforeComparison) capturedBeforeComparison = captureFiles(recipes);
-      const subject = recipe.outputs.find(output => output.roleId === recipe.comparison.outputRoleId);
-      if (!subject || !lstatSync(subject.outputPath).isFile()) throw new Error("threshold comparison subject is unavailable");
-      const expectedPath = inspectExpectedInput(recipe.comparison.expected);
-      if (expectedPath !== recipe.comparison.expectedPath) throw new Error("threshold comparison expected path changed");
-      if (existsSync(recipe.comparison.resultPath)) throw new Error("threshold comparison result existed before dispatch");
-    }
-    const assignedRecipes = captureRecipes.length
-      ? captureRecipes.map(({ comparison: _comparison, command: _command, ...recipe }) => recipe)
-      : comparisonRecipes.map(recipe => {
-          const subject = recipe.outputs.find(output => output.roleId === recipe.comparison.outputRoleId);
-          return {
-            id: recipe.id,
-            digest: recipe.digest,
-            scenario: recipe.scenario,
-            output: subject,
-            comparison: {
-              metric: recipe.comparison.metric,
-              maximumDifference: recipe.comparison.maximumDifference,
-              expectedPath: recipe.comparison.expectedPath,
-              comparisonResultPath: recipe.comparison.resultPath,
-            },
-          };
-        });
+    if (captureRecipes.length === 0) throw new Error("capture plan command has no recipe owner");
+    const assignedRecipes = captureRecipes.map(({ comparison: _comparison, command: _command, ...recipe }) => recipe);
     const commandRequestPath = new URL("capture-command-request-" + index + ".json", import.meta.url).pathname;
     const commandRequest = JSON.stringify({
       protocol: captureRequest.protocol,
       validationInvocationDigest: captureRequest.validationInvocationDigest,
-      phase: captureRecipes.length ? "capture" : "comparison",
+      phase: "capture",
       recipes: assignedRecipes,
     });
     if (Buffer.byteLength(commandRequest, "utf8") > ${MAX_ISOLATED_CAPTURE_MANIFEST_BYTES}) {
@@ -1369,15 +1134,10 @@ function runCaptures(outputTreeSha) {
   }
   assertOwnedCaptureTree(recipes);
   const files = captureFiles(recipes);
-  if (capturedBeforeComparison && JSON.stringify(files) !== JSON.stringify(capturedBeforeComparison)) {
-    throw new Error("threshold comparison changed immutable capture output bytes");
-  }
-  const comparisons = recipes.flatMap(recipe => recipe.comparison.kind === "threshold" ? [inspectComparison(recipe)] : []);
   const identity = {
     protocol: "clockgrove.factory/repository-capture-manifest",
     validationInvocationDigest: captureRequest.validationInvocationDigest,
     files,
-    comparisons,
   };
   const manifestDigest = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
   writeFileSync(new URL("capture-manifest.json", import.meta.url), JSON.stringify({ ...identity, manifestDigest }), { mode: 0o400, flag: "wx" });

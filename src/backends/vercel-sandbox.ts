@@ -1,8 +1,4 @@
 import { Sandbox, type Command, type CommandFinished, type NetworkPolicy } from "@vercel/sandbox";
-import { mkdtemp, open, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
 import type {
   AttemptContext,
   BackendHandle,
@@ -25,7 +21,6 @@ import {
   ISOLATED_CAPTURE_MANIFEST_PATH,
   MAX_ISOLATED_CAPTURE_MANIFEST_BYTES,
   MAX_ISOLATED_VALIDATION_RESULT_BYTES,
-  materializeIsolatedValidationCaptureInputs,
   parseIsolatedValidationCaptureManifest,
   parseIsolatedValidationCaptureRequest,
   parseSandboxPaths,
@@ -648,38 +643,21 @@ export class VercelSandboxBackend implements ExecutionBackend {
     let checkpointFailure: unknown;
     let retainedResult: IsolatedValidationResult | undefined;
     try {
-      const captureInputRoot = await mkdtemp(join(tmpdir(), "factory-vercel-capture-inputs-"));
-      try {
-        const captureInputs = await materializeIsolatedValidationCaptureInputs(
-          captureRequest,
-          captureInputRoot,
-        );
-        const captureUploads = await Promise.all(
-          captureInputs.map(async (file) => ({
-            path: file.destination,
-            content: await readFile(file.source),
-            mode: 0o400,
-          })),
-        );
-        await this.#withinDeadline(
-          context.deadline,
-          "validation deadline exhausted during Vercel source upload",
-          (signal) =>
-            sandbox.writeFiles(
-              [
-                ...sandboxValidationFiles(context, archive).map((file) => ({
-                  path: file.path,
-                  content: file.content,
-                  ...(file.mode ? { mode: file.mode } : {}),
-                })),
-                ...captureUploads,
-              ],
-              { signal },
-            ),
-        );
-      } finally {
-        await rm(captureInputRoot, { recursive: true, force: true });
-      }
+      await this.#withinDeadline(
+        context.deadline,
+        "validation deadline exhausted during Vercel source upload",
+        (signal) =>
+          sandbox.writeFiles(
+            [
+              ...sandboxValidationFiles(context, archive).map((file) => ({
+                path: file.path,
+                content: file.content,
+                ...(file.mode ? { mode: file.mode } : {}),
+              })),
+            ],
+            { signal },
+          ),
+      );
       remainingBeforeAttemptDeadline(
         context.deadline,
         "validation deadline exhausted before Vercel command dispatch",

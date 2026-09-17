@@ -1,5 +1,5 @@
 import { access, chmod, copyFile, mkdir, readFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { executionAffectingReason } from "../approval.js";
 import {
   assertArtifactScope,
@@ -183,11 +183,8 @@ export async function withVerifiedReviewCheckout<T>(
       const root = join(worktree.path, ".factory-review-evidence");
       await mkdir(root, { recursive: true, mode: 0o700 });
       const files = [];
-      for (const [index, file] of input.repositoryCaptureBundle.files.entries()) {
-        const name = basename(file.sourceName)
-          .replace(/[^A-Za-z0-9._-]+/g, "-")
-          .slice(0, 120);
-        const destination = join(root, `${index}-${name || "capture.bin"}`);
+      for (const file of input.repositoryCaptureBundle.files) {
+        const destination = join(root, file.payloadIdentity);
         await copyFile(file.path, destination);
         const observed = await inspectContentFile(destination, file.bytes);
         if (observed.digest !== file.digest || observed.bytes !== file.bytes)

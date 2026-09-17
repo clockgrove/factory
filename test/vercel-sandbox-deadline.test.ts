@@ -133,7 +133,6 @@ it("downloads retained capture bytes through the bounded Vercel stream channel",
           protocol: "clockgrove.factory/repository-capture-manifest",
           validationInvocationDigest: request.validationInvocationDigest,
           files,
-          comparisons: [],
         };
         remote.set(
           "factory/capture-manifest.json",
@@ -193,14 +192,6 @@ it("downloads retained capture bytes through the bounded Vercel stream channel",
     validationInvocationDigest: context.validationInvocation.identityDigest,
     validationDeadline: context.deadline.toISOString(),
     environmentIdentity: captureImage,
-    expectedInputs: [
-      {
-        descriptorDigest: expectedDescriptorDigest,
-        contentDigest: expectedPayload.digest,
-        storageReceiptDigest: "a".repeat(64),
-        payload: expectedPayload,
-      },
-    ],
     recipes: [
       {
         id: "opaque",
@@ -248,7 +239,6 @@ it("downloads retained capture bytes through the bounded Vercel stream channel",
         backendId: "codex-cli/vercel-sandbox",
         resourceId: resourceName,
       },
-      comparisons: [],
       files: [{ recipeId: "opaque", roleId: "result" }],
     });
     expect(result.captures?.files[0]?.payload.digest).toBe(result.captures?.files[0]?.digest);

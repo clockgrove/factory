@@ -191,15 +191,15 @@ rules must be named explicitly. Select the exact manifest on `factory_activate` 
 checked again on resume. See [Objective input assets](OBJECTIVE-ASSETS.md#compiler-media-intents).
 
 Repository-result capture has separate validation and review egress phases, both denied by default.
-Local capture and local comparison do not disclose bytes and need no egress grant. An isolated exact
-comparison also receives no expected bytes: the trusted host compares the returned content digest.
-An isolated threshold comparison receives only the expected inputs used by its grounded comparison
-recipes. Set `validation.mode` to `public-assets` or `private-assets` with a sufficient `maxAssets`
-only when the selected validator must receive those inputs. The ordinary backend and network policy
-must still authorize the provider destination.
+Local and isolated capture commands receive no expected bytes. Exact comparison uses the returned
+content digest, while threshold comparison runs afterward in Factory through the installed trusted
+comparator. Repository commands cannot provide the certified scalar. The ordinary backend and
+network policy must still authorize any provider destination used for isolated validation.
 
 Semantic review uses the independent `review` gate. Name the selected management adapter's exact
-reviewer capability ID and bound the complete deduplicated expected-plus-observed bundle. The
+reviewer capability ID and bound the complete unique-payload expected-plus-observed bundle. Recipe,
+role, source-path and expected/observed associations remain as bounded uses when one payload serves
+several comparisons. The
 installed Codex CLI adapter advertises `codex-cli-repository-capture`, at most 64 assets, and semantic
 handlers for JSON, inert UTF-8 text/Markdown, and supported raster files. Its capability also declares
 allowed MIME types, optional typed profiles, visibility classes, rights bases and the `api.openai.com`
@@ -277,7 +277,8 @@ node dist/factory.js backends probe
 
 An `evidence-for` recipe validates the repository artifact already produced by its Work Item. It
 does not create an asset-production Work Item or another product. Factory runs ordinary validation,
-then repository capture commands, then grounded threshold commands. The recipe declares bounded
+then repository capture commands, and finally performs grounded thresholds inside its installed
+comparator boundary. The recipe declares bounded
 output roles and MIME identities; installed handlers supply any semantic parsing. Shared capture,
 storage, policy and recovery contracts remain format-neutral. Raster is one optional typed profile,
 and visual application fixtures exercise the same path as structured data or other bounded passive

@@ -4,9 +4,10 @@ import { lstat, mkdtemp, mkdir, readFile, readdir, writeFile, rm } from "node:fs
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { sanitizedWorkerEnvironment, terminateProcessGroup } from "../runtime/process-group.js";
+import { MAX_PRODUCT_FILE_BYTES } from "../protocol/limits.js";
 
 const MAX_FILES = 5000;
-const MAX_BLOB_BYTES = 100 * 1024 * 1024;
+const MAX_BLOB_BYTES = MAX_PRODUCT_FILE_BYTES;
 const MAX_TREE_BYTES = 256 * 1024 * 1024;
 const options = [
   "--no-optional-locks",

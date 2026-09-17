@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { boundedText, safeId, sha256Digest } from "../protocol/limits.js";
+import { MAX_PRODUCT_FILE_BYTES, boundedText, safeId, sha256Digest } from "../protocol/limits.js";
 
 const referenceIds = (maximum: number, minimum = 0) =>
   z
@@ -199,11 +199,7 @@ export const CompilerMediaAssetFactSchema = z
   .object({
     id: safeId,
     mediaType: MediaTypeSchema,
-    bytes: z
-      .number()
-      .int()
-      .positive()
-      .max(100 * 1024 * 1024),
+    bytes: z.number().int().positive().max(MAX_PRODUCT_FILE_BYTES),
     inspection: z.discriminatedUnion("kind", [
       z
         .object({

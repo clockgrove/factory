@@ -4,6 +4,8 @@ export const PROTOCOL_V2 = "clockgrove.factory/v2" as const;
 export const MAX_PERSISTED_EVENT_BYTES = 64 * 1024;
 export const MAX_WORKER_PACKET_BYTES = 128 * 1024;
 export const MAX_LOG_BYTES = 64 * 1024;
+/** Canonical per-file byte ceiling for repository products and validation media. */
+export const MAX_PRODUCT_FILE_BYTES = 100 * 1024 * 1024;
 /** Conservative raw UTF-8 bound shared by GitHub issue/comment text surfaces. */
 export const MAX_GITHUB_TEXT_BYTES = 60_000;
 

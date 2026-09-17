@@ -12,6 +12,7 @@ import {
 
 import {
   MAX_LOG_BYTES,
+  MAX_PRODUCT_FILE_BYTES,
   assertNoSecretMaterial,
   assertWithinBytes,
   boundedText,
@@ -66,11 +67,7 @@ export const LfsObjectReceiptSchema = z
     path: relativePath,
     mode: z.enum(["100644", "100755"]),
     oid: sha256Digest,
-    size: z
-      .number()
-      .int()
-      .positive()
-      .max(100 * 1024 * 1024),
+    size: z.number().int().positive().max(MAX_PRODUCT_FILE_BYTES),
     assignmentDigest: sha256Digest,
     payload: ArtifactPayloadSchema,
     rawTransfer: z
@@ -108,7 +105,7 @@ export type LfsObjectReceipt = z.infer<typeof LfsObjectReceiptSchema>;
 
 export const canonicalLfsPointer = (oid: string, size: number): Buffer => {
   sha256Digest.parse(oid);
-  if (!Number.isSafeInteger(size) || size <= 0 || size > 100 * 1024 * 1024)
+  if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_PRODUCT_FILE_BYTES)
     throw new Error("invalid LFS object size");
   return Buffer.from(
     `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${size}\n`,

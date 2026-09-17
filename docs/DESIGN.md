@@ -748,8 +748,9 @@ deterministic review rules. It grants no producer, provider, network, storage, c
 execution authority. Compilation fails deterministically for a required implementation input
 without a matching import or producer capability, and for required repository evidence without
 grounded capture authority. Helpful omissions remain visible in the projection trace.
-Validation commands have one canonical phase order: ordinary commands, capture commands, then
-threshold-comparison commands, with stable first-occurrence deduplication inside each phase. A
+Validation commands have one canonical phase order: ordinary commands, then capture commands, with
+stable first-occurrence deduplication inside each phase. Threshold policies select Factory-installed
+comparators and never add repository commands. A
 command string cannot carry conflicting phase or recipe identity. A human-required capture gate
 retains semantic review for every acceptance criterion on its repository Work Item.
 The Supervisor routes `asset-production` through its own capability, admission, execution,
@@ -865,21 +866,21 @@ example. Visual game fixtures such as Raccoon World exercise the abstraction but
 
 Before any capture command runs, the Supervisor persists one immutable validation invocation. It
 binds repository, Objective, run, Work Item and attempt; artifact, base and output tree; the ordered
-ordinary/capture/comparison plan; recipe and output authority; exact expected descriptors, content
+ordinary/capture plan; recipe and output authority; exact expected descriptors, content
 and storage receipts; selected environment and tool receipts; and the complete repository-capture
 egress policy. The immutable result commit is a child of that exact intent. Validation evidence binds
-the invocation digest; each capture descriptor additionally binds its recipe, output role, artifact,
-base, result tree, declared content identity, visibility and rights. Content storage uses the existing
+the invocation digest. Each unique capture descriptor binds artifact, base, result tree, declared
+content identity, visibility and rights. Bounded uses separately retain every recipe, output role,
+source path, typed profile, criterion and scenario association. Content storage uses the existing
 immutable transfer substrate under the validation-evidence domain. Host verification checks the
 result tree before and after persistence and refuses undeclared, missing, changed or duplicated
 outputs.
 
 Exact comparison requires no expected-byte disclosure to the execution adapter. The host compares
-the captured SHA-256 with the invocation's expected content digest. A threshold comparison executes
-the repository-observed comparison recipe and needs private expected-byte materialization. Local
-validation keeps those bytes in owned staging. Isolated validation receives only the expected inputs
-referenced by threshold recipes and only within the validation egress mode, visibility and count
-limits. All isolated outputs return under bounded manifests and are rehashed and inspected by the
+the captured SHA-256 with the invocation's expected content digest. For thresholds, Factory
+materializes expected bytes only in controller-owned storage after repository commands exit and
+recomputes the scalar with the installed comparator contract. Neither local nor isolated repository
+code receives expected bytes or supplies the certified scalar. All isolated outputs return under bounded manifests and are rehashed and inspected by the
 host before they become evidence. An unprofiled passive output may remain opaque and establish exact
 byte equality; that result does not assert semantic validity.
 
@@ -889,13 +890,14 @@ accepted from a command's assertion. When criteria still require judgment, the r
 private read-only bundle containing the exact expected and observed bytes. Materialization begins
 only after the immutable review policy and selected management adapter capability admit every MIME
 type, optional typed profile, semantic handler, visibility, rights basis, network destination and
-deduplicated byte count. The reviewer treats the repository and bundle as untrusted inputs. Its
+unique payload count. Identical expected and observed payloads with the same security identity have
+one materialized file and multiple bounded uses. The reviewer treats the repository and bundle as untrusted inputs. Its
 durable receipt remains separate from validation evidence and binds the same evidence digest and
 result tree, so semantic acceptance cannot migrate to another artifact or invocation.
 
 `repositoryCaptureEgress` has independent validation and review grants. Both default to `denied`, and
-compiler input egress grants neither. The validation asset count covers threshold expected inputs
-sent to a third-party validator. The review count covers all deduplicated expected and observed files
+compiler input egress grants neither. Validation capture never sends expected bytes to a validator.
+The review count covers all unique expected and observed payloads
 and also requires an explicit reviewer capability ID. `public-assets` permits only public content;
 `private-assets` still requires the adapter's matching visibility, rights, handler and MIME
 capabilities plus ordinary network-destination authority. Capability mismatch fails before content

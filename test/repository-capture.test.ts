@@ -200,13 +200,7 @@ function invocationFor(args: {
     artifactDigest: sha("artifact"),
     baseSha: "a".repeat(40),
     outputTreeSha: "b".repeat(40),
-    validationCommands: [
-      "npm test",
-      args.recipe.captureCommand.command,
-      ...(args.recipe.comparison.kind === "threshold"
-        ? [args.recipe.comparison.command.command]
-        : []),
-    ],
+    validationCommands: ["npm test", args.recipe.captureCommand.command],
     repositoryCaptureRecipes: [args.recipe],
     captureOutputAuthorities: args.recipe.outputs.map(({ roleId }) => ({
       recipeId: args.recipe.id,
@@ -276,6 +270,7 @@ function persistCaptureBytes(args: {
   store: ContentTransferStore;
   invocation: ValidationInvocation;
   captures: CollectedRepositoryCapture[];
+  expectedBytes?: Buffer;
   assertCurrent(): Promise<void>;
   assertOutputTree(outputTreeSha: string): Promise<void>;
 }) {
@@ -293,12 +288,67 @@ function persistCaptureBytes(args: {
       if (!capture) throw new Error("test capture download is missing");
       return capture.bytes;
     },
+    downloadExpected: async () => args.expectedBytes ?? Buffer.from("expected\n"),
     assertCurrent: args.assertCurrent,
     assertOutputTree: args.assertOutputTree,
   });
 }
 
 describe("repository result capture evidence", () => {
+  it("stores identical cross-recipe payloads once while retaining every use", async () => {
+    const bytes = Buffer.from("shared capture\n");
+    const first = exactRecipe({
+      id: "first-capture",
+      command: "npm run capture:first",
+      expectedDescriptorDigest: sha("shared-reference"),
+    });
+    const second = exactRecipe({
+      id: "second-capture",
+      command: "npm run capture:second",
+      expectedDescriptorDigest: sha("shared-reference"),
+    });
+    const template = invocationFor({ recipe: first, expectedBytes: bytes });
+    const { digest: _templateDigest, ...templateCore } = template;
+    const invocation = createValidationInvocation({
+      ...templateCore,
+      validationCommands: ["npm test", first.captureCommand.command, second.captureCommand.command],
+      repositoryCaptureRecipes: [first, second],
+      captureOutputAuthorities: [first, second].flatMap((recipe) =>
+        recipe.outputs.map(({ roleId }) => ({
+          recipeId: recipe.id,
+          roleId,
+          visibility: "private" as const,
+          rights: { basis: "unknown" as const },
+        })),
+      ),
+      comparisonAuthorities: [first, second].map((recipe) => ({
+        recipeId: recipe.id,
+        expectedDescriptorDigest: recipe.comparison.expectedDescriptorDigest,
+        expectedContentDigest: sha(bytes),
+        expectedStorageReceiptDigest: sha("expected-storage"),
+      })),
+    });
+    const memory = memoryStore();
+    const evidence = await persistCaptureBytes({
+      store: memory.store,
+      invocation,
+      captures: [
+        { recipeId: first.id, roleId: "result", path: "first/result.txt", bytes },
+        { recipeId: second.id, roleId: "result", path: "second/result.txt", bytes },
+      ],
+      assertCurrent: async () => undefined,
+      assertOutputTree: async () => undefined,
+    });
+    expect(evidence.manifest.entries).toHaveLength(1);
+    expect(evidence.manifest.totalBytes).toBe(bytes.length);
+    expect(evidence.uses).toHaveLength(2);
+    expect(evidence.uses.map(({ sourcePath }) => sourcePath)).toEqual([
+      "first/result.txt",
+      "second/result.txt",
+    ]);
+    expect(new Set(evidence.uses.map(({ descriptorDigest }) => descriptorDigest)).size).toBe(1);
+  });
+
   it("rejects media inspection and profile metadata that differs from recipe authority", () => {
     const recipe = exactRecipe({ expectedDescriptorDigest: sha("bound-reference") });
     const valid = invocationFor({ recipe, expectedBytes: Buffer.from("expected\n") });
@@ -551,7 +601,10 @@ describe("repository result capture evidence", () => {
     });
     expect(
       await readFile(
-        join(materialized.root, evidence.manifest.entries[0]!.descriptor.materializationPath),
+        join(
+          materialized.root,
+          `captures/${evidence.manifest.entries[0]!.descriptor.digest}/payload`,
+        ),
       ),
     ).toEqual(bytes);
   });
@@ -662,10 +715,10 @@ describe("repository result capture evidence", () => {
       downloadExpected,
     });
     expect(downloadExpected).toHaveBeenCalledTimes(1);
-    expect(bundle.files).toHaveLength(2);
-    expect(bundle.files.map(({ recipeIds }) => recipeIds)).toEqual([
-      [humanRecipe.id],
-      [humanRecipe.id],
+    expect(bundle.files).toHaveLength(1);
+    expect(bundle.files[0]!.uses.map(({ recipeId }) => recipeId)).toEqual([
+      humanRecipe.id,
+      humanRecipe.id,
     ]);
     expect(bundle.files.every(({ handlerContract }) => handlerContract === 1)).toBe(true);
 
@@ -881,6 +934,7 @@ describe("repository result capture evidence", () => {
                 invocation: prepared,
                 collection: retained.collection,
                 downloadCapture: retained.downloadCapture,
+                downloadExpected: async () => bytes,
                 assertCurrent: async () => undefined,
                 assertOutputTree: async () => assertOutputTree(),
               });
@@ -1053,6 +1107,7 @@ describe("repository result capture evidence", () => {
               invocation,
               collection: retained.collection,
               downloadCapture: retained.downloadCapture,
+              downloadExpected: async () => raw,
               assertCurrent: async () => undefined,
               assertOutputTree: async () => assertOutputTree(),
             });
@@ -1121,7 +1176,8 @@ describe("repository result capture evidence", () => {
             encoding: "utf8",
           }).trim(),
         ).toBe(artifact.fileManifest!.resultTreeSha);
-        expect(materializedBundle?.files).toHaveLength(2);
+        expect(materializedBundle?.files).toHaveLength(1);
+        expect(materializedBundle?.files[0]?.uses).toHaveLength(2);
         expect(
           materializedBundle?.files.every(
             ({ path }) =>
@@ -1129,9 +1185,7 @@ describe("repository result capture evidence", () => {
               path !== join(reviewRepository, "asset.bin"),
           ),
         ).toBe(true);
-        expect(
-          await Promise.all(materializedBundle!.files.map(({ path }) => readFile(path))),
-        ).toEqual([raw, raw]);
+        expect(await readFile(materializedBundle!.files[0]!.path)).toEqual(raw);
       },
     );
     await discardValidationResult(result);
@@ -1255,17 +1309,11 @@ describe("validation invocation no-replay transaction", () => {
         digest: sha(bytes),
       })),
     });
-    const entries = captures.map(({ recipeId, roleId, path, bytes }, index) => {
-      const recipe = recipes.find(({ id }) => id === recipeId)!;
+    const entries = captures.map(({ bytes }, index) => {
       const contentDigest = sha(bytes);
       const descriptorCore = {
         protocol: "clockgrove.factory/evidence-capture-descriptor" as const,
         validationInvocationDigest: invocation.digest,
-        recipeId,
-        recipeDigest: recipe.digest,
-        outputRole: roleId,
-        sourcePath: path,
-        profile: null,
         artifactDigest: invocation.artifactDigest,
         baseSha: invocation.baseSha,
         outputTreeSha: invocation.outputTreeSha,
@@ -1287,7 +1335,6 @@ describe("validation invocation no-replay transaction", () => {
         },
         visibility: "private" as const,
         rights: { basis: "unknown" as const },
-        materializationPath: `captures/${contentDigest}/${roleId}.bin`,
       };
       const descriptor = { ...descriptorCore, digest: sha(canonical(descriptorCore)) };
       const identity = {
@@ -1339,12 +1386,25 @@ describe("validation invocation no-replay transaction", () => {
       manifest,
       uses: recipes.flatMap((recipe) =>
         recipe.outputs.map((output) => ({
+          descriptorDigest: entries.find(
+            ({ descriptor }) =>
+              descriptor.content.digest ===
+              sha(
+                captures.find(
+                  (capture) => capture.recipeId === recipe.id && capture.roleId === output.roleId,
+                )!.bytes,
+              ),
+          )!.descriptor.digest,
           recipeId: recipe.id,
           recipeDigest: recipe.digest,
           mediaUse: recipe.mediaUse,
           criterionIds: recipe.criterionIds,
           scenarioId: recipe.scenario.id,
           outputRole: output.roleId,
+          sourcePath: captures.find(
+            (capture) => capture.recipeId === recipe.id && capture.roleId === output.roleId,
+          )!.path,
+          profile: recipe.profile,
         })),
       ),
     };
@@ -1643,8 +1703,9 @@ describe("local validation and capture staging", () => {
     expect(command).toHaveBeenCalledTimes(1);
   });
 
-  it("allows rebound after an adoptable capture terminal and before the next threshold dispatch", async () => {
-    const bytes = Buffer.from("captured-before-threshold\n");
+  it("keeps expected bytes outside the local repository command and recomputes the threshold", async () => {
+    const expectedBytes = Buffer.from("controller-only-expected\n");
+    const observedBytes = Buffer.from("repository-controlled-observed\n");
     const exact = exactRecipe({
       id: "threshold-capture",
       command: "npm run capture:threshold",
@@ -1656,49 +1717,57 @@ describe("local validation and capture staging", () => {
       comparison: {
         kind: "threshold" as const,
         outputRoleId: "result",
-        command: {
-          recipeId: "catalog-threshold-comparison",
-          recipeDigest: sha("threshold-command"),
-          command: "npm run compare:threshold",
-        },
         expectedDescriptorDigest: sha("descriptor"),
         policy: {
           kind: "bounded-difference" as const,
-          metric: "fixture-distance",
+          metric: "byte-difference",
           maximumDifference: 0,
         },
+        comparator: { id: "byte-difference", contract: 1 },
       },
     };
     const recipe = {
       ...thresholdCore,
       digest: sha(canonical(thresholdCore)),
     } as RepositoryCaptureRecipe;
-    const invocation = invocationFor({ recipe, expectedBytes: bytes });
+    const invocation = invocationFor({ recipe, expectedBytes });
     const root = await mkdtemp(join(tmpdir(), "factory-local-between-actions-"));
     roots.push(root);
     const command = vi.fn(async ({ env }: { env: NodeJS.ProcessEnv }) => {
-      const request = JSON.parse(await readFile(env["FACTORY_CAPTURE_REQUEST"]!, "utf8"));
-      await writeFile(request.recipes[0].outputs[0].path, bytes);
+      const requestBytes = await readFile(env["FACTORY_CAPTURE_REQUEST"]!);
+      expect(requestBytes.includes(expectedBytes)).toBe(false);
+      expect(Object.keys(env).some((name) => name.includes("EXPECTED"))).toBe(false);
+      const request = JSON.parse(requestBytes.toString("utf8"));
+      await writeFile(request.recipes[0].outputs[0].path, observedBytes);
       await checkpointMockCommand(env, recipe.captureCommand.command);
-      throw new Error("controller restarted before capture checkpoint");
+      return { exitCode: 0, durationMs: 1, stdout: "0", stderr: "" };
     });
-    await expect(
-      executeLocalRepositoryCaptures({
-        stagingRoot: root,
-        invocation,
-        resultTreeRoot: root,
-        environment: {},
-        runCommand: command,
-        observeCommand: async () => "absent",
-        commandDeadline: null,
-        materializeExpected: async () => {
-          throw new Error("threshold materialization must not begin");
-        },
-        assertOutputTree: async () => undefined,
+    const retained = await executeLocalRepositoryCaptures({
+      stagingRoot: root,
+      invocation,
+      resultTreeRoot: root,
+      environment: {},
+      runCommand: command,
+      observeCommand: async () => "absent",
+      commandDeadline: null,
+      assertOutputTree: async () => undefined,
+    });
+    const evidence = await persistRepositoryCaptures({
+      store: memoryStore().store,
+      invocation,
+      collection: retained.collection,
+      downloadCapture: retained.downloadCapture,
+      downloadExpected: async () => expectedBytes,
+      assertCurrent: async () => undefined,
+      assertOutputTree: async () => undefined,
+    });
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(evidence.manifest.mechanicalResults).toEqual([
+      expect.objectContaining({
+        kind: "threshold",
+        observedDifference: expect.any(Number),
+        passed: false,
       }),
-    ).rejects.toThrow(/before capture checkpoint/);
-    await expect(
-      inspectLocalRepositoryCaptureDispatchState({ stagingRoot: root, invocation }),
-    ).resolves.toBe("rebound-safe");
+    ]);
   });
 });

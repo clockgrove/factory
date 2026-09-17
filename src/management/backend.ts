@@ -31,18 +31,21 @@ import type { FindingCandidate } from "../protocol/findings.js";
 import type { RepositoryCaptureReviewerCapability } from "../validation/repository-capture.js";
 
 export interface RepositoryCaptureReviewFile {
-  kind: "expected" | "observed";
-  descriptorDigest: string;
+  payloadIdentity: string;
   digest: string;
   bytes: number;
   mediaType: string;
-  sourceName: string;
   handlerId: string;
   handlerContract: number;
-  profileIds: string[];
   path: string;
-  recipeIds: string[];
-  outputRole: string | null;
+  uses: Array<{
+    kind: "expected" | "observed";
+    descriptorDigest: string;
+    recipeId: string;
+    sourceName: string;
+    profileId: string | null;
+    outputRole: string | null;
+  }>;
 }
 
 export interface RepositoryCaptureReviewBundle {

@@ -15,6 +15,7 @@ import {
 } from "../repository-profiles/index.js";
 import { scopeOwnsPath, type CapabilityOperation } from "../repository-capabilities/model.js";
 import { destinationAllowedByPolicy } from "../protocol/policy.js";
+import { repositoryComparatorContracts } from "../validation/repository-comparators.js";
 import {
   TOOLCHAIN_AUTHORITY_ADAPTERS,
   toolchainAdapterById,
@@ -237,10 +238,22 @@ function bindRepositoryCaptureRecipes(
     captureByCommand.set(command, { kind: "capture", ...capture });
   }
   for (const entry of catalog.thresholdComparisons) {
-    if (captureByCommand.has(entry.command))
-      throw new Error("capture catalog configures one command more than once");
-    const { command, ...comparison } = entry;
-    captureByCommand.set(command, { kind: "threshold-comparison", ...comparison });
+    const comparator = repositoryComparatorContracts.find(({ id }) => id === entry.policy.metric);
+    if (!comparator)
+      throw new Error(`capture catalog requests unavailable comparator ${entry.policy.metric}`);
+    const command = `factory:compare:${entry.policy.id}`;
+    if (recipes.some((recipe) => recipe.command === command))
+      throw new Error("capture catalog comparator identity conflicts with an observed command");
+    recipes.push(
+      CompilerValidationRecipeSchema.parse({
+        id: entry.policy.id,
+        command,
+        adapterId: "factory-repository-comparator",
+        requiredTools: [],
+        networkDestinations: [],
+        capture: { kind: "threshold-comparison", policy: entry.policy },
+      }),
+    );
   }
   const observed = new Set(recipes.map(({ command }) => command));
   const unknown = [...captureByCommand.keys()].filter((command) => !observed.has(command));
@@ -249,7 +262,7 @@ function bindRepositoryCaptureRecipes(
   return recipes.map((recipe) =>
     CompilerValidationRecipeSchema.parse({
       ...recipe,
-      capture: captureByCommand.get(recipe.command) ?? null,
+      capture: captureByCommand.get(recipe.command) ?? recipe.capture,
     }),
   );
 }

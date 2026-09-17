@@ -4,6 +4,7 @@ import { access, lstat, mkdtemp, open, realpath, rename, rm, unlink } from "node
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
+import { MAX_PRODUCT_FILE_BYTES } from "../protocol/limits.js";
 
 export interface PinnedLfsAsset {
   path: string;
@@ -19,7 +20,7 @@ export interface PinnedLfsFacts {
   attributes: boolean;
 }
 
-export const MAX_LOCAL_LFS_FILE_BYTES = 100 * 1024 * 1024;
+export const MAX_LOCAL_LFS_FILE_BYTES = MAX_PRODUCT_FILE_BYTES;
 export const MAX_LOCAL_LFS_TOTAL_BYTES = 256 * 1024 * 1024;
 const MAX_LFS_ASSETS = 256;
 const versions = new Set([

@@ -117,7 +117,6 @@ function capturePinnedFacts(input: {
   const scripts = {
     test: "vitest run",
     capture: "node scripts/capture.mjs",
-    compare: "node scripts/compare.mjs",
   };
   const catalog = {
     captures: [
@@ -129,9 +128,7 @@ function capturePinnedFacts(input: {
         gates: ["human-required"],
       },
     ],
-    thresholdComparisons: input.threshold
-      ? [{ command: "npm run compare", policy: input.threshold }]
-      : [],
+    thresholdComparisons: input.threshold ? [{ policy: input.threshold }] : [],
   };
   return semanticPinnedFacts({
     paths: [
@@ -139,7 +136,6 @@ function capturePinnedFacts(input: {
       "package-lock.json",
       ".factory/validation-captures.json",
       "scripts/capture.mjs",
-      "scripts/compare.mjs",
       "src/item-1.ts",
     ],
     scripts,
@@ -1067,7 +1063,7 @@ describe("media intent compilation", () => {
     },
   );
 
-  it("projects a grounded raster capture and threshold comparison command", () => {
+  it("projects a grounded raster capture and an installed host comparator", () => {
     const profile = {
       kind: "raster" as const,
       viewport: { width: 1280, height: 720 },
@@ -1124,9 +1120,8 @@ describe("media intent compilation", () => {
       },
     });
     const item = result.objective.workItems[0]!;
-    expect(item.validationCommands).toEqual(
-      expect.arrayContaining(["npm run capture", "npm run compare"]),
-    );
+    expect(item.validationCommands).toContain("npm run capture");
+    expect(item.validationCommands).not.toContain("npm run compare");
     expect(item.requirements.tools).toEqual(expect.arrayContaining(["npm"]));
     expect(item.repositoryCaptureRecipes).toEqual([
       expect.objectContaining({
@@ -1150,7 +1145,7 @@ describe("media intent compilation", () => {
         comparison: expect.objectContaining({
           kind: "threshold",
           outputRoleId: "capture",
-          command: expect.objectContaining({ command: "npm run compare" }),
+          comparator: { id: "pixel-difference", contract: 1 },
           policy: {
             kind: "bounded-difference",
             metric: "pixel-difference",
@@ -1377,12 +1372,11 @@ describe("media intent compilation", () => {
     );
   });
 
-  it("orders ordinary, capture, and threshold commands by phase across intents", () => {
+  it("orders ordinary and capture commands while keeping thresholds in Factory", () => {
     const scripts = {
       test: "vitest run",
       "capture-a": "node scripts/capture-a.mjs",
       "capture-b": "node scripts/capture-b.mjs",
-      compare: "node scripts/compare.mjs",
     };
     const catalog = {
       captures: [
@@ -1403,7 +1397,6 @@ describe("media intent compilation", () => {
       ],
       thresholdComparisons: [
         {
-          command: "npm run compare",
           policy: { id: "json-threshold", metric: "byte-difference", maximumDifference: 0 },
         },
       ],
@@ -1415,7 +1408,6 @@ describe("media intent compilation", () => {
         ".factory/validation-captures.json",
         "scripts/capture-a.mjs",
         "scripts/capture-b.mjs",
-        "scripts/compare.mjs",
         "src/item-1.ts",
       ],
       scripts,
@@ -1432,7 +1424,7 @@ describe("media intent compilation", () => {
       ({ command }) => command === "npm run capture-b",
     )!;
     const comparison = request.repository.validationRecipes.find(
-      ({ command }) => command === "npm run compare",
+      ({ capture }) => capture?.kind === "threshold-comparison",
     )!;
     const first = expectedAssetBinding("application/json");
     const second = {
@@ -1513,7 +1505,6 @@ describe("media intent compilation", () => {
       "npm run test",
       "npm run capture-a",
       "npm run capture-b",
-      "npm run compare",
     ]);
     expect(() => workerPacketFromCompiled(result.objective.workItems[0]!)).not.toThrow();
   });

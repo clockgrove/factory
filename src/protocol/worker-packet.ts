@@ -220,7 +220,9 @@ const RepositoryCaptureComparisonSchema = z.discriminatedUnion("kind", [
     .object({
       kind: z.literal("threshold"),
       outputRoleId: safeId,
-      command: RepositoryCommandIdentitySchema,
+      comparator: z
+        .object({ id: safeId, contract: z.number().int().positive().max(1_000) })
+        .strict(),
       expectedDescriptorDigest: sha256Digest,
       policy: z
         .object({
@@ -312,6 +314,15 @@ export const RepositoryCaptureRecipeSchema = RepositoryCaptureRecipeCoreSchema.e
         code: "custom",
         path: ["comparison", "outputRoleId"],
         message: "raster capture and comparison output roles differ",
+      });
+    if (
+      value.comparison.kind === "threshold" &&
+      value.comparison.comparator.id !== value.comparison.policy.metric
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["comparison", "comparator"],
+        message: "threshold metric differs from its installed comparator identity",
       });
   });
 
@@ -582,10 +593,9 @@ export const RepositoryChangeWorkerPacketSchema = WorkerPacketCommon.extend({
     const recipeIds = new Set<string>();
     const commandIdentities = new Map<string, string>();
     const captureCommands: string[] = [];
-    const comparisonCommands: string[] = [];
     const registerCommand = (
       command: string,
-      phase: "capture" | "threshold-comparison",
+      phase: "capture",
       identity: { recipeId: string; recipeDigest: string },
       path: Array<string | number>,
     ) => {
@@ -630,10 +640,7 @@ export const RepositoryChangeWorkerPacketSchema = WorkerPacketCommon.extend({
           path: ["repositoryCaptureRecipes", index, "comparison", "expectedDescriptorDigest"],
           message: "capture comparison expected descriptor differs from its evidence media use",
         });
-      const commands = [
-        recipe.captureCommand.command,
-        ...(recipe.comparison.kind === "threshold" ? [recipe.comparison.command.command] : []),
-      ];
+      const commands = [recipe.captureCommand.command];
       for (const command of commands)
         if (!packet.validationCommands.includes(command))
           context.addIssue({
@@ -648,18 +655,8 @@ export const RepositoryChangeWorkerPacketSchema = WorkerPacketCommon.extend({
       ]);
       if (!captureCommands.includes(recipe.captureCommand.command))
         captureCommands.push(recipe.captureCommand.command);
-      if (recipe.comparison.kind === "threshold") {
-        registerCommand(
-          recipe.comparison.command.command,
-          "threshold-comparison",
-          recipe.comparison.command,
-          ["repositoryCaptureRecipes", index, "comparison", "command"],
-        );
-        if (!comparisonCommands.includes(recipe.comparison.command.command))
-          comparisonCommands.push(recipe.comparison.command.command);
-      }
     }
-    const reservedCommands = new Set([...captureCommands, ...comparisonCommands]);
+    const reservedCommands = new Set(captureCommands);
     for (const [validationIndex, validation] of (packet.validation ?? []).entries())
       for (const command of validation.evidenceCommands ?? [])
         if (reservedCommands.has(command))
@@ -669,9 +666,8 @@ export const RepositoryChangeWorkerPacketSchema = WorkerPacketCommon.extend({
             message: "ordinary validation command conflicts with a capture command phase",
           });
     const captureCommandSet = new Set(captureCommands);
-    const comparisonCommandSet = new Set(comparisonCommands);
     const commandPhases = packet.validationCommands.map((command) =>
-      comparisonCommandSet.has(command) ? 2 : captureCommandSet.has(command) ? 1 : 0,
+      captureCommandSet.has(command) ? 1 : 0,
     );
     if (
       new Set(packet.validationCommands).size !== packet.validationCommands.length ||
@@ -680,8 +676,7 @@ export const RepositoryChangeWorkerPacketSchema = WorkerPacketCommon.extend({
       context.addIssue({
         code: "custom",
         path: ["validationCommands"],
-        message:
-          "validation commands must be unique and ordered ordinary, capture, then threshold comparison",
+        message: "validation commands must be unique and ordered ordinary, then capture",
       });
   });
 

@@ -25,7 +25,13 @@ import {
   materializePayload,
 } from "../execution/artifact-content.js";
 import { withArtifactContentScope } from "../execution/artifact-content-scope.js";
-import { boundedText, gitSha, safeId, sha256Digest } from "../protocol/limits.js";
+import {
+  MAX_PRODUCT_FILE_BYTES,
+  boundedText,
+  gitSha,
+  safeId,
+  sha256Digest,
+} from "../protocol/limits.js";
 import { RepositoryCaptureEgressPolicySchema } from "../protocol/policy.js";
 import {
   RepositoryCaptureProfileSchema,
@@ -33,6 +39,7 @@ import {
   type RepositoryCaptureProfile,
   type RepositoryCaptureRecipe,
 } from "../protocol/worker-packet.js";
+import { compareRepositoryCaptureBytes } from "./repository-comparators.js";
 
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -61,17 +68,16 @@ const unique = <T extends z.ZodTypeAny>(schema: T, maximum: number, minimum = 0)
  * Byte transport remains separate, so one descriptor can support many uses. */
 export const RepositoryCaptureUseSchema = z
   .object({
+    descriptorDigest: sha256Digest,
     recipeId: safeId,
     recipeDigest: sha256Digest,
     mediaUse: z.object({ intentId: safeId, direction: z.literal("evidence-for") }).strict(),
     criterionIds: unique(safeId, 64, 1),
     scenarioId: safeId,
     outputRole: safeId,
+    sourcePath: ArtifactPathSchema,
+    profile: RepositoryCaptureProfileSchema.nullable(),
   })
-  .strict();
-
-const CaptureCommandSchema = z
-  .object({ recipeId: safeId, recipeDigest: sha256Digest, command: boundedText(1_000) })
   .strict();
 
 const CaptureOutputAuthoritySchema = z
@@ -152,36 +158,8 @@ function validateCaptureOutputAuthorities(
   invocation: z.infer<typeof ValidationInvocationCoreObject>,
   context: z.RefinementCtx,
 ) {
-  const captureCommands = new Set(
-    invocation.repositoryCaptureRecipes.map((recipe) => recipe.captureCommand.command),
-  );
-  const comparisonCommands = new Set(
-    invocation.repositoryCaptureRecipes.flatMap((recipe) =>
-      recipe.comparison.kind === "threshold" ? [recipe.comparison.command.command] : [],
-    ),
-  );
-  const lastCapture = Math.max(
-    -1,
-    ...[...captureCommands].map((command) => invocation.validationCommands.indexOf(command)),
-  );
-  const firstComparison = Math.min(
-    Number.POSITIVE_INFINITY,
-    ...[...comparisonCommands].map((command) => invocation.validationCommands.indexOf(command)),
-  );
-  if (
-    [...captureCommands].some((command) => comparisonCommands.has(command)) ||
-    lastCapture > firstComparison
-  )
-    context.addIssue({
-      code: "custom",
-      path: ["validationCommands"],
-      message: "capture commands must precede distinct comparison commands",
-    });
   for (const recipe of invocation.repositoryCaptureRecipes) {
-    const recipeCommands = [
-      recipe.captureCommand.command,
-      ...(recipe.comparison.kind === "threshold" ? [recipe.comparison.command.command] : []),
-    ];
+    const recipeCommands = [recipe.captureCommand.command];
     for (const command of recipeCommands)
       if (invocation.validationCommands.filter((candidate) => candidate === command).length !== 1)
         context.addIssue({
@@ -263,37 +241,6 @@ function validateCaptureOutputAuthorities(
         message: "validation media input profiles differ from its recipe bindings",
       });
   });
-  if (invocation.toolEnvironment.egress === "third-party") {
-    const thresholdExpected = new Set(
-      invocation.repositoryCaptureRecipes.flatMap((recipe) =>
-        recipe.comparison.kind === "threshold" ? [recipe.comparison.expectedDescriptorDigest] : [],
-      ),
-    );
-    const validationEgressInputs = invocation.mediaInputs.filter(({ descriptorDigest }) =>
-      thresholdExpected.has(descriptorDigest),
-    );
-    if (validationEgressInputs.length > 0 && invocation.egressPolicy.validation.mode === "denied")
-      context.addIssue({
-        code: "custom",
-        path: ["egressPolicy", "validation"],
-        message: "validation-only assets may not leave the controller",
-      });
-    if (validationEgressInputs.length > invocation.egressPolicy.validation.maxAssets)
-      context.addIssue({
-        code: "custom",
-        path: ["mediaInputs"],
-        message: "validation-only input count exceeds immutable egress authority",
-      });
-    if (
-      invocation.egressPolicy.validation.mode === "public-assets" &&
-      validationEgressInputs.some(({ visibility }) => visibility !== "public")
-    )
-      context.addIssue({
-        code: "custom",
-        path: ["mediaInputs"],
-        message: "private validation-only input is not authorized for this backend",
-      });
-  }
 }
 
 const ValidationInvocationCoreSchema = ValidationInvocationCoreObject.superRefine(
@@ -351,14 +298,15 @@ const CaptureMechanicalResultSchema = z.discriminatedUnion("kind", [
       kind: z.literal("threshold"),
       recipeId: safeId,
       outputRoleId: safeId,
-      command: CaptureCommandSchema,
+      comparator: z
+        .object({ id: safeId, contract: z.number().int().positive().max(1_000) })
+        .strict(),
       expectedDescriptorDigest: sha256Digest,
       expectedContentDigest: sha256Digest,
       expectedStorageReceiptDigest: sha256Digest,
       metric: safeId,
       maximumDifference: z.number().finite().nonnegative(),
       observedDifference: z.number().finite().nonnegative(),
-      exitCode: z.number().int(),
       passed: z.boolean(),
     })
     .strict(),
@@ -368,11 +316,7 @@ const CaptureContentSchema = z
   .object({
     protocol: z.literal("clockgrove.factory/evidence-capture-content"),
     digest: sha256Digest,
-    bytes: z
-      .number()
-      .int()
-      .positive()
-      .max(100 * 1024 * 1024),
+    bytes: z.number().int().positive().max(MAX_PRODUCT_FILE_BYTES),
     declaredMediaType: MediaTypeSchema,
     inspection: AssetInspectionSchema,
   })
@@ -382,20 +326,12 @@ const CaptureDescriptorCoreSchema = z
   .object({
     protocol: z.literal("clockgrove.factory/evidence-capture-descriptor"),
     validationInvocationDigest: sha256Digest,
-    recipeId: safeId,
-    recipeDigest: sha256Digest,
-    outputRole: safeId,
-    sourcePath: ArtifactPathSchema,
-    profile: RepositoryCaptureProfileSchema.nullable(),
     artifactDigest: sha256Digest,
     baseSha: gitSha,
     outputTreeSha: gitSha,
     content: CaptureContentSchema,
     visibility: AssetVisibilitySchema,
     rights: AssetRightsSchema,
-    materializationPath: z
-      .string()
-      .regex(/^captures\/[a-f0-9]{64}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
   })
   .strict();
 
@@ -419,11 +355,7 @@ const CaptureStorageReceiptCoreSchema = z
     descriptorDigest: sha256Digest,
     identity: ContentTransferIdentitySchema,
     payloadDigest: sha256Digest,
-    payloadBytes: z
-      .number()
-      .int()
-      .positive()
-      .max(100 * 1024 * 1024),
+    payloadBytes: z.number().int().positive().max(MAX_PRODUCT_FILE_BYTES),
     transferRef: boundedText(500),
     intentCommit: gitSha,
     readyCommit: gitSha,
@@ -553,11 +485,11 @@ export const RepositoryCaptureEvidenceSchema = RepositoryCaptureEvidenceCoreSche
         path: ["collection"],
         message: "capture collection invocation differs",
       });
-    const recipeIds = new Set(
-      evidence.manifest.entries.map(({ descriptor }) => descriptor.recipeId),
+    const descriptorDigests = new Set(
+      evidence.manifest.entries.map(({ descriptor }) => descriptor.digest),
     );
     for (const use of evidence.uses)
-      if (!recipeIds.has(use.recipeId))
+      if (!descriptorDigests.has(use.descriptorDigest))
         context.addIssue({
           code: "custom",
           path: ["uses"],
@@ -575,23 +507,6 @@ export function verifyRepositoryCaptureEvidenceBinding(
   const invocation = ValidationInvocationSchema.parse(invocationInput);
   if (evidence.validationInvocationDigest !== invocation.digest)
     throw new Error("repository capture binds a different validation invocation");
-  if (
-    canonicalJson(evidence.uses) !==
-    canonicalJson(
-      invocation.repositoryCaptureRecipes.flatMap((recipe) =>
-        recipe.outputs.map((output) => ({
-          recipeId: recipe.id,
-          recipeDigest: recipe.digest,
-          mediaUse: recipe.mediaUse,
-          criterionIds: recipe.criterionIds,
-          scenarioId: recipe.scenario.id,
-          outputRole: output.roleId,
-        })),
-      ),
-    )
-  )
-    throw new Error("capture uses differ from the validation invocation");
-  const recipes = new Map(invocation.repositoryCaptureRecipes.map((recipe) => [recipe.id, recipe]));
   const authorities = new Map(
     invocation.captureOutputAuthorities.map((authority) => [
       `${authority.recipeId}\0${authority.roleId}`,
@@ -601,31 +516,43 @@ export function verifyRepositoryCaptureEvidenceBinding(
   const collected = new Map(
     evidence.collection.files.map((file) => [captureKey(file.recipeId, file.roleId), file]),
   );
-  if (collected.size !== evidence.manifest.entries.length)
-    throw new Error("capture collection and evidence manifest cardinality differ");
-  for (const entry of evidence.manifest.entries) {
-    const { descriptor } = entry;
-    const recipe = recipes.get(descriptor.recipeId);
-    const output = recipe?.outputs.find(({ roleId }) => roleId === descriptor.outputRole);
-    const authority = authorities.get(`${descriptor.recipeId}\0${descriptor.outputRole}`);
-    const collectedFile = collected.get(captureKey(descriptor.recipeId, descriptor.outputRole));
-    const comparisonAuthority = invocation.comparisonAuthorities.find(
-      ({ recipeId }) => recipeId === descriptor.recipeId,
+  const entries = new Map(
+    evidence.manifest.entries.map((entry) => [entry.descriptor.digest, entry]),
+  );
+  const expectedUses = invocation.repositoryCaptureRecipes.flatMap((recipe) =>
+    recipe.outputs.map((output) => ({ recipe, output })),
+  );
+  if (evidence.uses.length !== expectedUses.length || collected.size !== expectedUses.length)
+    throw new Error("capture collection and evidence uses cardinality differ");
+  if (
+    new Set(evidence.uses.map(({ descriptorDigest }) => descriptorDigest)).size !== entries.size ||
+    evidence.uses.some(({ descriptorDigest }) => !entries.has(descriptorDigest))
+  )
+    throw new Error("capture evidence contains an unreferenced or missing payload descriptor");
+  for (const { recipe, output } of expectedUses) {
+    const use = evidence.uses.find(
+      (candidate) => candidate.recipeId === recipe.id && candidate.outputRole === output.roleId,
     );
+    const authority = authorities.get(`${recipe.id}\0${output.roleId}`);
+    const collectedFile = collected.get(captureKey(recipe.id, output.roleId));
+    const entry = use ? entries.get(use.descriptorDigest) : undefined;
+    const descriptor = entry?.descriptor;
     if (
-      !recipe ||
-      !output ||
+      !use ||
       !authority ||
       !collectedFile ||
-      !comparisonAuthority ||
+      !descriptor ||
+      use.recipeDigest !== recipe.digest ||
+      canonicalJson(use.mediaUse) !== canonicalJson(recipe.mediaUse) ||
+      canonicalJson(use.criterionIds) !== canonicalJson(recipe.criterionIds) ||
+      use.scenarioId !== recipe.scenario.id ||
+      use.sourcePath !== collectedFile.path ||
+      canonicalJson(use.profile) !== canonicalJson(recipe.profile) ||
       descriptor.validationInvocationDigest !== invocation.digest ||
-      descriptor.recipeDigest !== recipe.digest ||
-      descriptor.sourcePath !== collectedFile.path ||
       descriptor.content.digest !== collectedFile.digest ||
       descriptor.content.bytes !== collectedFile.bytes ||
       descriptor.content.declaredMediaType !== output.mediaType ||
       descriptor.content.declaredMediaType !== collectedFile.mediaType ||
-      canonicalJson(descriptor.profile) !== canonicalJson(recipe.profile) ||
       descriptor.artifactDigest !== invocation.artifactDigest ||
       descriptor.baseSha !== invocation.baseSha ||
       descriptor.outputTreeSha !== invocation.outputTreeSha ||
@@ -644,10 +571,13 @@ export function verifyRepositoryCaptureEvidenceBinding(
     const comparisonAuthority = invocation.comparisonAuthorities.find(
       ({ recipeId }) => recipeId === recipe.id,
     );
-    const subject = evidence.manifest.entries.find(
-      ({ descriptor }) =>
-        descriptor.recipeId === recipe.id &&
-        descriptor.outputRole === recipe.comparison.outputRoleId,
+    const subject = evidence.manifest.entries.find(({ descriptor }) =>
+      evidence.uses.some(
+        (use) =>
+          use.descriptorDigest === descriptor.digest &&
+          use.recipeId === recipe.id &&
+          use.outputRole === recipe.comparison.outputRoleId,
+      ),
     );
     if (
       !mechanical ||
@@ -666,16 +596,14 @@ export function verifyRepositoryCaptureEvidenceBinding(
             (mechanical.observedContentDigest === mechanical.expectedContentDigest))) ||
       (mechanical.kind === "threshold" &&
         recipe.comparison.kind === "threshold" &&
-        (canonicalJson(mechanical.command) !== canonicalJson(recipe.comparison.command) ||
+        (canonicalJson(mechanical.comparator) !== canonicalJson(recipe.comparison.comparator) ||
           mechanical.expectedDescriptorDigest !== comparisonAuthority.expectedDescriptorDigest ||
           mechanical.expectedContentDigest !== comparisonAuthority.expectedContentDigest ||
           mechanical.expectedStorageReceiptDigest !==
             comparisonAuthority.expectedStorageReceiptDigest ||
           mechanical.metric !== recipe.comparison.policy.metric ||
           mechanical.maximumDifference !== recipe.comparison.policy.maximumDifference ||
-          mechanical.passed !==
-            (mechanical.exitCode === 0 &&
-              mechanical.observedDifference <= mechanical.maximumDifference)))
+          mechanical.passed !== mechanical.observedDifference <= mechanical.maximumDifference))
     )
       throw new Error("capture result differs from its invocation comparison");
   }
@@ -686,25 +614,16 @@ export interface CollectedRepositoryCapture {
   roleId: string;
   path: string;
   bytes: Buffer;
-  threshold?: { observedDifference: number; exitCode: number };
 }
 
-const RepositoryCaptureCollectedFileSchema = z
+export const RepositoryCaptureCollectedFileSchema = z
   .object({
     recipeId: safeId,
     roleId: safeId,
     path: ArtifactPathSchema,
     mediaType: MediaTypeSchema,
-    bytes: z
-      .number()
-      .int()
-      .positive()
-      .max(100 * 1024 * 1024),
+    bytes: z.number().int().positive().max(MAX_PRODUCT_FILE_BYTES),
     digest: sha256Digest,
-    threshold: z
-      .object({ observedDifference: z.number().finite().nonnegative(), exitCode: z.number().int() })
-      .strict()
-      .optional(),
   })
   .strict();
 
@@ -777,7 +696,6 @@ export function describeRepositoryCaptureBytes(args: {
         mediaType: output.mediaType,
         bytes: capture.bytes.length,
         digest: createHash("sha256").update(capture.bytes).digest("hex"),
-        ...(capture.threshold ? { threshold: capture.threshold } : {}),
       };
     }),
   });
@@ -795,11 +713,12 @@ function safeDisplayName(path: string, opaque: boolean): string {
   return /^[A-Za-z0-9]/.test(name) ? name : "capture.bin";
 }
 
-function mechanicalResult(
+async function mechanicalResult(
   recipe: RepositoryCaptureRecipe,
   authority: z.infer<typeof CaptureComparisonAuthoritySchema>,
   observedContentDigest: string,
-  threshold: CollectedRepositoryCapture["threshold"],
+  observedBytes: Buffer,
+  expectedBytes: Buffer | undefined,
 ) {
   if (recipe.comparison.kind === "exact")
     return CaptureMechanicalResultSchema.parse({
@@ -812,22 +731,32 @@ function mechanicalResult(
       observedContentDigest,
       passed: observedContentDigest === authority.expectedContentDigest,
     });
-  if (!threshold) throw new Error("threshold capture omitted its repository-grounded result");
-  const passed =
-    threshold.exitCode === 0 &&
-    threshold.observedDifference <= recipe.comparison.policy.maximumDifference;
+  if (!expectedBytes)
+    throw new Error("threshold capture omitted its controller-owned expected bytes");
+  if (createHash("sha256").update(expectedBytes).digest("hex") !== authority.expectedContentDigest)
+    throw new Error("threshold expected bytes differ from invocation authority");
+  const output = recipe.outputs.find(({ roleId }) => roleId === recipe.comparison.outputRoleId);
+  if (!output) throw new Error("threshold comparison subject role is unavailable");
+  const observedDifference = await compareRepositoryCaptureBytes({
+    comparator: recipe.comparison.comparator,
+    metric: recipe.comparison.policy.metric,
+    mediaType: output.mediaType,
+    profile: recipe.profile,
+    expected: expectedBytes,
+    observed: observedBytes,
+  });
+  const passed = observedDifference <= recipe.comparison.policy.maximumDifference;
   return CaptureMechanicalResultSchema.parse({
     kind: "threshold",
     recipeId: recipe.id,
     outputRoleId: recipe.comparison.outputRoleId,
-    command: recipe.comparison.command,
+    comparator: recipe.comparison.comparator,
     expectedDescriptorDigest: authority.expectedDescriptorDigest,
     expectedContentDigest: authority.expectedContentDigest,
     expectedStorageReceiptDigest: authority.expectedStorageReceiptDigest,
     metric: recipe.comparison.policy.metric,
     maximumDifference: recipe.comparison.policy.maximumDifference,
-    observedDifference: threshold.observedDifference,
-    exitCode: threshold.exitCode,
+    observedDifference,
     passed,
   });
 }
@@ -868,6 +797,7 @@ export async function persistRepositoryCaptures(args: {
   invocation: ValidationInvocation;
   collection: RepositoryCaptureCollectionManifest;
   downloadCapture(file: RepositoryCaptureCollectionManifest["files"][number]): Promise<Buffer>;
+  downloadExpected(input: ValidationInvocation["mediaInputs"][number]): Promise<Buffer>;
   assertCurrent(): Promise<void>;
   assertOutputTree(outputTreeSha: string): Promise<void>;
 }): Promise<RepositoryCaptureEvidence> {
@@ -898,7 +828,8 @@ export async function persistRepositoryCaptures(args: {
     const comparisonAuthorities = new Map(
       invocation.comparisonAuthorities.map((authority) => [authority.recipeId, authority]),
     );
-    const entries: Array<z.infer<typeof EvidenceCaptureEntrySchema>> = [];
+    const entriesByDescriptor = new Map<string, z.infer<typeof EvidenceCaptureEntrySchema>>();
+    const uses: Array<z.infer<typeof RepositoryCaptureUseSchema>> = [];
     const mechanicalResults: Array<z.infer<typeof CaptureMechanicalResultSchema>> = [];
     for (const recipe of invocation.repositoryCaptureRecipes) {
       for (const output of recipe.outputs) {
@@ -925,15 +856,9 @@ export async function persistRepositoryCaptures(args: {
         });
         assertProfile(recipe.profile, output.mediaType, inspection);
         const contentDigest = createHash("sha256").update(bytes).digest("hex");
-        const displayName = safeDisplayName(capture.path, inspection.status === "opaque");
         const descriptorCore = CaptureDescriptorCoreSchema.parse({
           protocol: "clockgrove.factory/evidence-capture-descriptor",
           validationInvocationDigest: invocation.digest,
-          recipeId: recipe.id,
-          recipeDigest: recipe.digest,
-          outputRole: output.roleId,
-          sourcePath: capture.path,
-          profile: recipe.profile,
           artifactDigest: invocation.artifactDigest,
           baseSha: invocation.baseSha,
           outputTreeSha: invocation.outputTreeSha,
@@ -946,52 +871,88 @@ export async function persistRepositoryCaptures(args: {
           },
           visibility: authority.visibility,
           rights: authority.rights,
-          materializationPath: `captures/${contentDigest}/${displayName}`,
         });
         const descriptor = EvidenceCaptureDescriptorSchema.parse({
           ...descriptorCore,
           digest: digestOf(descriptorCore),
         });
-        const payload = await cachePayloadBytes(bytes);
-        const identity = ContentTransferIdentitySchema.parse({
-          domain: "validation-evidence",
-          repository: invocation.repository,
-          objective: invocation.objective,
-          baseSha: invocation.baseSha,
-          requestId: `capture-${digestOf([invocation.digest, recipe.id, output.roleId]).slice(0, 40)}`,
-          subjectDigest: contentDigest,
-        });
-        const transfer = await persistContentTransfer({
-          store: args.store,
-          identity,
-          payload,
-          assertCurrent: args.assertCurrent,
-        });
-        const storageCore = CaptureStorageReceiptCoreSchema.parse({
-          protocol: "clockgrove.factory/evidence-capture-storage-receipt",
-          descriptorDigest: descriptor.digest,
-          identity,
-          payloadDigest: transfer.payload.digest,
-          payloadBytes: transfer.payload.bytes,
-          transferRef: transfer.transferRef,
-          intentCommit: transfer.intentCommit,
-          readyCommit: transfer.readyCommit,
-        });
-        entries.push(
-          EvidenceCaptureEntrySchema.parse({
-            descriptor,
-            storage: { ...storageCore, digest: digestOf(storageCore) },
+        uses.push(
+          RepositoryCaptureUseSchema.parse({
+            descriptorDigest: descriptor.digest,
+            recipeId: recipe.id,
+            recipeDigest: recipe.digest,
+            mediaUse: recipe.mediaUse,
+            criterionIds: recipe.criterionIds,
+            scenarioId: recipe.scenario.id,
+            outputRole: output.roleId,
+            sourcePath: capture.path,
+            profile: recipe.profile,
           }),
         );
-        if (output.roleId === recipe.comparison.outputRoleId)
-          mechanicalResults.push(
-            mechanicalResult(recipe, comparisonAuthority, contentDigest, capture.threshold),
+        if (!entriesByDescriptor.has(descriptor.digest)) {
+          const payload = await cachePayloadBytes(bytes);
+          const identity = ContentTransferIdentitySchema.parse({
+            domain: "validation-evidence",
+            repository: invocation.repository,
+            objective: invocation.objective,
+            baseSha: invocation.baseSha,
+            requestId: `capture-${descriptor.digest.slice(0, 40)}`,
+            subjectDigest: contentDigest,
+          });
+          const transfer = await persistContentTransfer({
+            store: args.store,
+            identity,
+            payload,
+            assertCurrent: args.assertCurrent,
+          });
+          const storageCore = CaptureStorageReceiptCoreSchema.parse({
+            protocol: "clockgrove.factory/evidence-capture-storage-receipt",
+            descriptorDigest: descriptor.digest,
+            identity,
+            payloadDigest: transfer.payload.digest,
+            payloadBytes: transfer.payload.bytes,
+            transferRef: transfer.transferRef,
+            intentCommit: transfer.intentCommit,
+            readyCommit: transfer.readyCommit,
+          });
+          entriesByDescriptor.set(
+            descriptor.digest,
+            EvidenceCaptureEntrySchema.parse({
+              descriptor,
+              storage: { ...storageCore, digest: digestOf(storageCore) },
+            }),
           );
+        }
+        if (output.roleId === recipe.comparison.outputRoleId) {
+          const expectedInput = invocation.mediaInputs.find(
+            ({ descriptorDigest }) =>
+              descriptorDigest === comparisonAuthority.expectedDescriptorDigest,
+          );
+          if (!expectedInput)
+            throw new Error("repository capture comparison lacks its expected input");
+          mechanicalResults.push(
+            await mechanicalResult(
+              recipe,
+              comparisonAuthority,
+              contentDigest,
+              bytes,
+              recipe.comparison.kind === "threshold"
+                ? await args.downloadExpected(expectedInput)
+                : undefined,
+            ),
+          );
+        }
       }
     }
-    if (entries.length !== collected.size)
+    if (uses.length !== collected.size)
       throw new Error("repository capture returned an undeclared output");
+    const entries = [...entriesByDescriptor.values()];
     entries.sort((left, right) => left.descriptor.digest.localeCompare(right.descriptor.digest));
+    uses.sort((left, right) =>
+      `${left.recipeId}\0${left.outputRole}`.localeCompare(
+        `${right.recipeId}\0${right.outputRole}`,
+      ),
+    );
     const manifestCore = CaptureManifestCoreSchema.parse({
       protocol: "clockgrove.factory/evidence-capture-manifest",
       validationInvocationDigest: invocation.digest,
@@ -1008,16 +969,7 @@ export async function persistRepositoryCaptures(args: {
       validationInvocationDigest: invocation.digest,
       collection,
       manifest,
-      uses: invocation.repositoryCaptureRecipes.flatMap((recipe) =>
-        recipe.outputs.map((output) => ({
-          recipeId: recipe.id,
-          recipeDigest: recipe.digest,
-          mediaUse: recipe.mediaUse,
-          criterionIds: recipe.criterionIds,
-          scenarioId: recipe.scenario.id,
-          outputRole: output.roleId,
-        })),
-      ),
+      uses,
     });
     await args.assertOutputTree(invocation.outputTreeSha);
     const evidence = RepositoryCaptureEvidenceSchema.parse({ ...core, digest: digestOf(core) });
@@ -1058,6 +1010,20 @@ function reviewerSupportsInspection(
   );
 }
 
+function selectedCaptureUses(evidence: RepositoryCaptureEvidence, recipeIds?: ReadonlySet<string>) {
+  return recipeIds ? evidence.uses.filter((use) => recipeIds.has(use.recipeId)) : evidence.uses;
+}
+
+function selectedCaptureEntries(
+  evidence: RepositoryCaptureEvidence,
+  recipeIds?: ReadonlySet<string>,
+) {
+  const digests = new Set(
+    selectedCaptureUses(evidence, recipeIds).map(({ descriptorDigest }) => descriptorDigest),
+  );
+  return evidence.manifest.entries.filter(({ descriptor }) => digests.has(descriptor.digest));
+}
+
 export function authorizeRepositoryCaptureReview(args: {
   evidence: RepositoryCaptureEvidence;
   capability: z.infer<typeof RepositoryCaptureReviewerCapabilitySchema>;
@@ -1079,18 +1045,14 @@ export function authorizeRepositoryCaptureReview(args: {
     )
   )
     throw new Error("repository capture reviewer destination is denied by immutable policy");
-  const entries = args.recipeIds
-    ? evidence.manifest.entries.filter(({ descriptor }) => args.recipeIds!.has(descriptor.recipeId))
-    : evidence.manifest.entries;
+  const uses = selectedCaptureUses(evidence, args.recipeIds);
+  const entries = selectedCaptureEntries(evidence, args.recipeIds);
   if (entries.length > capability.maximumAssets || entries.length > args.policy.maxAssets)
     throw new Error("repository capture count exceeds reviewer capability");
   for (const { descriptor } of entries) {
     const inspection = descriptor.content.inspection;
     if (
       !capability.mediaTypes.includes(descriptor.content.declaredMediaType) ||
-      (descriptor.profile
-        ? !capability.profiles.includes(descriptor.profile.kind)
-        : !capability.allowUnprofiled) ||
       !capability.visibilities.includes(descriptor.visibility) ||
       !capability.rightsBases.includes(descriptor.rights.basis) ||
       (args.policy.mode === "public-assets" && descriptor.visibility === "private")
@@ -1103,6 +1065,9 @@ export function authorizeRepositoryCaptureReview(args: {
     )
       throw new Error("repository capture lacks an exact semantic handler for this reviewer");
   }
+  for (const use of uses)
+    if (use.profile ? !capability.profiles.includes(use.profile.kind) : !capability.allowUnprofiled)
+      throw new Error("repository capture profile is outside reviewer capability");
 }
 
 async function privateRoot(path: string) {
@@ -1139,11 +1104,7 @@ export async function materializeRepositoryCapturesForReview(args: {
     await privateRoot(base);
     const root = await mkdtemp(join(base, `review-${evidence.digest.slice(0, 12)}-`));
     try {
-      const entries = args.recipeIds
-        ? evidence.manifest.entries.filter(({ descriptor }) =>
-            args.recipeIds!.has(descriptor.recipeId),
-          )
-        : evidence.manifest.entries;
+      const entries = selectedCaptureEntries(evidence, args.recipeIds);
       for (const entry of entries) {
         const recovered = await recoverContentTransfer({
           store: args.store,
@@ -1158,7 +1119,7 @@ export async function materializeRepositoryCapturesForReview(args: {
           recovered.payload.bytes !== entry.storage.payloadBytes
         )
           throw new Error("repository capture transfer differs from its validation receipt");
-        const destination = join(root, entry.descriptor.materializationPath);
+        const destination = join(root, `captures/${entry.descriptor.digest}/payload`);
         if (!resolve(destination).startsWith(`${resolve(root)}${sep}`))
           throw new Error("repository capture materialization escaped its root");
         await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
@@ -1215,23 +1176,16 @@ export async function materializeRepositoryCaptureReviewBundle(args: {
   const humanExpectedDescriptors = new Set(
     humanRecipes.map(({ comparison }) => comparison.expectedDescriptorDigest),
   );
-  const expectedAssociations = new Map<
-    string,
-    { recipeIds: Set<string>; profileIds: Set<string> }
-  >();
+  const expectedAssociations = new Map<string, typeof humanRecipes>();
   for (const recipe of humanRecipes) {
     const descriptorDigest = recipe.comparison.expectedDescriptorDigest;
-    const association = expectedAssociations.get(descriptorDigest) ?? {
-      recipeIds: new Set<string>(),
-      profileIds: new Set<string>(),
-    };
-    association.recipeIds.add(recipe.id);
-    if (recipe.profile) association.profileIds.add(recipe.profile.kind);
-    expectedAssociations.set(descriptorDigest, association);
+    expectedAssociations.set(descriptorDigest, [
+      ...(expectedAssociations.get(descriptorDigest) ?? []),
+      recipe,
+    ]);
   }
-  const observedEntries = evidence.manifest.entries.filter(({ descriptor }) =>
-    humanRecipeIds.has(descriptor.recipeId),
-  );
+  const observedUses = selectedCaptureUses(evidence, humanRecipeIds);
+  const observedEntries = selectedCaptureEntries(evidence, humanRecipeIds);
   const expectedInputs = invocation.mediaInputs.filter(({ descriptorDigest }) =>
     humanExpectedDescriptors.has(descriptorDigest),
   );
@@ -1241,20 +1195,49 @@ export async function materializeRepositoryCaptureReviewBundle(args: {
     policy: args.policy,
     recipeIds: humanRecipeIds,
   });
-  const total = observedEntries.length + expectedInputs.length;
+  const payloadIdentity = (value: {
+    digest: string;
+    mediaType: string;
+    inspection: z.infer<typeof AssetInspectionSchema>;
+    visibility: z.infer<typeof AssetVisibilitySchema>;
+    rights: z.infer<typeof AssetRightsSchema>;
+  }) => digestOf(value);
+  const expectedIdentities = new Map(
+    expectedInputs.map((input) => [
+      input.descriptorDigest,
+      payloadIdentity({
+        digest: input.contentDigest,
+        mediaType: input.declaredMediaType,
+        inspection: input.inspection,
+        visibility: input.visibility,
+        rights: input.rights,
+      }),
+    ]),
+  );
+  const observedIdentities = new Map(
+    observedEntries.map(({ descriptor }) => [
+      descriptor.digest,
+      payloadIdentity({
+        digest: descriptor.content.digest,
+        mediaType: descriptor.content.declaredMediaType,
+        inspection: descriptor.content.inspection,
+        visibility: descriptor.visibility,
+        rights: descriptor.rights,
+      }),
+    ]),
+  );
+  const total = new Set([...expectedIdentities.values(), ...observedIdentities.values()]).size;
   if (total > args.policy.maxAssets || total > capability.maximumAssets)
-    throw new Error("repository capture review bundle exceeds its immutable count authority");
+    throw new Error("repository capture review bundle exceeds its unique-payload count authority");
   for (const input of expectedInputs) {
+    const associations = expectedAssociations.get(input.descriptorDigest) ?? [];
     if (
       !capability.mediaTypes.includes(input.declaredMediaType) ||
       input.inspection.status !== "semantic-valid" ||
       input.inspection.mediaType !== input.declaredMediaType ||
       !reviewerSupportsInspection(capability, input.inspection) ||
-      [...(expectedAssociations.get(input.descriptorDigest)?.profileIds ?? [])].some(
-        (profileId) => !capability.profiles.includes(profileId),
-      ) ||
-      ((expectedAssociations.get(input.descriptorDigest)?.profileIds.size ?? 0) === 0 &&
-        !capability.allowUnprofiled) ||
+      associations.some(({ profile }) => profile && !capability.profiles.includes(profile.kind)) ||
+      (associations.some(({ profile }) => profile === null) && !capability.allowUnprofiled) ||
       !capability.visibilities.includes(input.visibility) ||
       !capability.rightsBases.includes(input.rights.basis) ||
       (args.policy.mode === "public-assets" && input.visibility === "private")
@@ -1270,7 +1253,53 @@ export async function materializeRepositoryCaptureReviewBundle(args: {
     recipeIds: humanRecipeIds,
   });
   try {
-    const expectedFiles = [];
+    const files = new Map<
+      string,
+      {
+        payloadIdentity: string;
+        digest: string;
+        bytes: number;
+        mediaType: string;
+        handlerId: string;
+        handlerContract: number;
+        path: string;
+        uses: Array<{
+          kind: "expected" | "observed";
+          descriptorDigest: string;
+          recipeId: string;
+          sourceName: string;
+          profileId: string | null;
+          outputRole: string | null;
+        }>;
+      }
+    >();
+    const entryByDigest = new Map(observedEntries.map((entry) => [entry.descriptor.digest, entry]));
+    for (const use of observedUses) {
+      const entry = entryByDigest.get(use.descriptorDigest);
+      if (!entry) throw new Error("observed review use has no captured payload");
+      const identity = observedIdentities.get(entry.descriptor.digest)!;
+      const existing = files.get(identity);
+      const association = {
+        kind: "observed" as const,
+        descriptorDigest: entry.descriptor.digest,
+        recipeId: use.recipeId,
+        sourceName: basename(use.sourcePath),
+        profileId: use.profile?.kind ?? null,
+        outputRole: use.outputRole,
+      };
+      if (existing) existing.uses.push(association);
+      else
+        files.set(identity, {
+          payloadIdentity: identity,
+          digest: entry.descriptor.content.digest,
+          bytes: entry.descriptor.content.bytes,
+          mediaType: entry.descriptor.content.declaredMediaType,
+          handlerId: entry.descriptor.content.inspection.handlerId,
+          handlerContract: entry.descriptor.content.inspection.handlerContract,
+          path: join(observed.root, `captures/${entry.descriptor.digest}/payload`),
+          uses: [association],
+        });
+    }
     for (const input of expectedInputs) {
       const bytes = await args.downloadExpected(input);
       if (
@@ -1288,58 +1317,51 @@ export async function materializeRepositoryCaptureReviewBundle(args: {
         canonicalJson(inspection) !== canonicalJson(input.inspection)
       )
         throw new Error("expected review input lacks an authorized semantic handler");
-      const relative = `expected/${input.descriptorDigest}/reference`;
-      const destination = join(observed.root, relative);
-      await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-      const handle = await open(
-        destination,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-        0o400,
-      );
-      try {
-        await handle.writeFile(bytes);
-        await handle.sync();
-      } finally {
-        await handle.close();
+      const identity = expectedIdentities.get(input.descriptorDigest)!;
+      let file = files.get(identity);
+      if (!file) {
+        const destination = join(observed.root, `payloads/${identity}`);
+        await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+        const handle = await open(
+          destination,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+          0o400,
+        );
+        try {
+          await handle.writeFile(bytes);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        file = {
+          payloadIdentity: identity,
+          digest: input.contentDigest,
+          bytes: bytes.length,
+          mediaType: input.declaredMediaType,
+          handlerId: inspection.handlerId,
+          handlerContract: inspection.handlerContract,
+          path: destination,
+          uses: [],
+        };
+        files.set(identity, file);
       }
-      expectedFiles.push({
-        kind: "expected" as const,
-        descriptorDigest: input.descriptorDigest,
-        digest: input.contentDigest,
-        bytes: bytes.length,
-        mediaType: input.declaredMediaType,
-        sourceName: input.displayName,
-        handlerId: inspection.handlerId,
-        handlerContract: inspection.handlerContract,
-        profileIds: [
-          ...(expectedAssociations.get(input.descriptorDigest)?.profileIds ?? []),
-        ].sort(),
-        path: destination,
-        recipeIds: [...(expectedAssociations.get(input.descriptorDigest)?.recipeIds ?? [])].sort(),
-        outputRole: null,
-      });
+      for (const recipe of expectedAssociations.get(input.descriptorDigest) ?? [])
+        file.uses.push({
+          kind: "expected",
+          descriptorDigest: input.descriptorDigest,
+          recipeId: recipe.id,
+          sourceName: input.displayName,
+          profileId: recipe.profile?.kind ?? null,
+          outputRole: null,
+        });
     }
     return {
       validationInvocationDigest: invocation.digest,
       evidenceDigest: evidence.digest,
       root: observed.root,
-      files: [
-        ...expectedFiles,
-        ...observedEntries.map(({ descriptor }) => ({
-          kind: "observed" as const,
-          descriptorDigest: descriptor.digest,
-          digest: descriptor.content.digest,
-          bytes: descriptor.content.bytes,
-          mediaType: descriptor.content.declaredMediaType,
-          sourceName: basename(descriptor.sourcePath),
-          handlerId: descriptor.content.inspection.handlerId,
-          handlerContract: descriptor.content.inspection.handlerContract,
-          profileIds: descriptor.profile ? [descriptor.profile.kind] : [],
-          path: join(observed.root, descriptor.materializationPath),
-          recipeIds: [descriptor.recipeId],
-          outputRole: descriptor.outputRole,
-        })),
-      ],
+      files: [...files.values()].sort((left, right) =>
+        left.payloadIdentity.localeCompare(right.payloadIdentity),
+      ),
     };
   } catch (error) {
     await rm(observed.root, { recursive: true, force: true });

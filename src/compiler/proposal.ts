@@ -33,6 +33,7 @@ import {
   formatCompilerOperation,
 } from "../toolchains/compiler-capabilities.js";
 import { toolchainAdapterById } from "../toolchains/authority.js";
+import { repositoryComparatorIdentity } from "../validation/repository-comparators.js";
 import {
   compilerEvalDigest,
   deriveCompilerInferenceChallenges,
@@ -974,14 +975,6 @@ function repositoryCaptureUnavailableReasons(
       ({ id }) => id === candidateCapture.captureRecipeId,
     );
     if (selectedCapture) register(selectedCapture.command, "capture", selectedCapture.id);
-    if (candidateCapture.comparison.kind === "threshold") {
-      const comparisonRecipeId = candidateCapture.comparison.recipeId;
-      const selectedComparison = request.repository.validationRecipes.find(
-        ({ id }) => id === comparisonRecipeId,
-      );
-      if (selectedComparison)
-        register(selectedComparison.command, "threshold-comparison", selectedComparison.id);
-    }
   }
   for (const [command, identities] of registrations)
     if (identities.size > 1)
@@ -1893,24 +1886,30 @@ export function parseAndValidateCompilerProposal(
           );
         for (const reference of validation.evidence) {
           itemEvidenceCount += 1;
-          if (reference.kind === "observed" && !recipes.has(reference.recipeId))
-            violations.push(
-              violation(
-                "unknown-validation-recipe",
-                pointer(
-                  "workItems",
-                  itemIndex,
-                  "criteria",
-                  criterionIndex,
-                  "validation",
-                  validationIndex,
-                  "evidence",
+          if (reference.kind === "observed") {
+            const recipe = recipes.get(reference.recipeId);
+            if (!recipe || recipe.capture !== null)
+              violations.push(
+                violation(
+                  "unknown-validation-recipe",
+                  pointer(
+                    "workItems",
+                    itemIndex,
+                    "criteria",
+                    criterionIndex,
+                    "validation",
+                    validationIndex,
+                    "evidence",
+                  ),
+                  [...recipes.values()]
+                    .filter(({ capture }) => capture === null)
+                    .map(({ id }) => id)
+                    .sort(),
+                  reference.recipeId,
+                  item.id,
                 ),
-                [...recipes.keys()].sort(),
-                reference.recipeId,
-                item.id,
-              ),
-            );
+              );
+          }
           if (reference.kind === "scoped-node-test") {
             const observedBare = [...recipes.values()].some(
               (recipe) => recipe.command === "node --test",
@@ -2262,7 +2261,6 @@ function uniqueCommands(
         if (command && !ordinaryCommands.includes(command)) ordinaryCommands.push(command);
       }
   const captureCommands: string[] = [];
-  const comparisonCommands: string[] = [];
   for (const intent of proposal.mediaIntents) {
     const capture = intent.repositoryCapture;
     if (!capture) continue;
@@ -2273,16 +2271,8 @@ function uniqueCommands(
     )?.command;
     if (captureCommand && !captureCommands.includes(captureCommand))
       captureCommands.push(captureCommand);
-    if (capture.comparison.kind === "threshold") {
-      const comparisonRecipeId = capture.comparison.recipeId;
-      const comparisonCommand = request.repository.validationRecipes.find(
-        ({ id }) => id === comparisonRecipeId,
-      )?.command;
-      if (comparisonCommand && !comparisonCommands.includes(comparisonCommand))
-        comparisonCommands.push(comparisonCommand);
-    }
   }
-  return [...ordinaryCommands, ...captureCommands, ...comparisonCommands];
+  return [...ordinaryCommands, ...captureCommands];
 }
 
 function validationDesign(
@@ -2440,6 +2430,7 @@ function projectedRepositoryCaptureRecipe(
   );
   if (captureRecipe?.capture?.kind !== "capture")
     throw new Error(`media intent ${intent.id} lacks grounded capture authority`);
+  const captureCapability = captureRecipe.capture;
   const commandIdentity = (recipe: (typeof request.repository.validationRecipes)[number]) => ({
     recipeId: recipe.id,
     recipeDigest: compilerEvalDigest(recipe),
@@ -2449,7 +2440,7 @@ function projectedRepositoryCaptureRecipe(
     captureRequest.comparison.kind === "exact"
       ? {
           kind: "exact" as const,
-          outputRoleId: captureRecipe.capture.comparisonOutputRoleId,
+          outputRoleId: captureCapability.comparisonOutputRoleId,
           expectedDescriptorDigest: expected.descriptorDigest,
           policy: { kind: "exact-bytes" as const },
         }
@@ -2461,8 +2452,20 @@ function projectedRepositoryCaptureRecipe(
             throw new Error(`media intent ${intent.id} lacks grounded comparison authority`);
           return {
             kind: "threshold" as const,
-            outputRoleId: captureRecipe.capture.comparisonOutputRoleId,
-            command: commandIdentity(recipe),
+            outputRoleId: captureCapability.comparisonOutputRoleId,
+            comparator: repositoryComparatorIdentity({
+              metric: recipe.capture.policy.metric,
+              mediaType: captureCapability.outputs.find(
+                ({ roleId }) => roleId === captureCapability.comparisonOutputRoleId,
+              )!.mediaType,
+              profile:
+                captureCapability.profile && intent.output.profile
+                  ? {
+                      ...captureCapability.profile,
+                      constraints: intent.output.profile,
+                    }
+                  : null,
+            }),
             expectedDescriptorDigest: expected.descriptorDigest,
             policy: {
               kind: "bounded-difference" as const,
@@ -2477,11 +2480,11 @@ function projectedRepositoryCaptureRecipe(
     criterionIds: [...binding.criterionIds].sort(),
     scenario: structuredClone(captureRequest.scenario),
     captureCommand: commandIdentity(captureRecipe),
-    outputs: structuredClone(captureRecipe.capture.outputs),
+    outputs: structuredClone(captureCapability.outputs),
     profile:
-      captureRecipe.capture.profile && intent.output.profile
+      captureCapability.profile && intent.output.profile
         ? {
-            ...structuredClone(captureRecipe.capture.profile),
+            ...structuredClone(captureCapability.profile),
             constraints: structuredClone(intent.output.profile),
           }
         : null,

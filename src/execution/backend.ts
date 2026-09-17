@@ -191,12 +191,6 @@ export interface IsolatedValidationCaptureRequest {
   validationInvocationDigest: string;
   validationDeadline: string;
   environmentIdentity: string;
-  expectedInputs: Array<{
-    descriptorDigest: string;
-    contentDigest: string;
-    storageReceiptDigest: string;
-    payload: ArtifactPayload;
-  }>;
   recipes: Array<{
     id: string;
     digest: string;
@@ -215,7 +209,6 @@ export interface IsolatedValidationCaptureRequest {
       | { kind: "exact"; outputRoleId: string; expectedDescriptorDigest: string }
       | {
           kind: "threshold";
-          command: string;
           outputRoleId: string;
           expectedDescriptorDigest: string;
           metric: string;
@@ -242,13 +235,6 @@ export interface IsolatedValidationCaptures {
     bytes: number;
     digest: string;
     payload: ArtifactPayload;
-  }>;
-  comparisons: Array<{
-    recipeId: string;
-    metric: string;
-    maximumDifference: number;
-    observedDifference: number;
-    passed: boolean;
   }>;
 }
 

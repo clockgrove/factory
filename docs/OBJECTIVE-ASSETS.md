@@ -73,8 +73,8 @@ bound `repository-change` Work Item. Trusted projection resolves `.factory/valid
 against commands observed from the pinned checkout and emits a digest-bound
 `repositoryCaptureRecipes` entry with the exact intent and criterion references, scenario input,
 declared output roles and MIME types, optional typed raster profile, exact-byte or bounded-threshold
-comparison with one explicit subject output role, and review gate. Exact-byte comparison has no
-comparison command. The subject role names one declared output whose MIME exactly matches the
+comparison with one explicit subject output role, and review gate. Comparisons name an installed
+Factory comparator contract; repository code never implements the comparison. The subject role names one declared output whose MIME exactly matches the
 expected asset and is permitted by the intent. Raster profiles preserve catalog viewport, exact
 output dimensions, and role identities and add the intent's width, height, alpha, and animation
 acceptance constraints. Catalog exact dimensions and expected asset inspection must satisfy them.
@@ -85,14 +85,14 @@ evidence may be omitted with an explicit trace disposition while its Work Item c
 obligations remain.
 
 The committed catalog contains `captures` and `thresholdComparisons`; it has no protocol-version
-field or aliases. Every command must already be a repository-observed validation recipe. Its JSON
+field or aliases. Every capture command must already be a repository-observed validation recipe,
+while each threshold policy selects an installed Factory comparator. Its JSON
 shape is [`schemas/validation-captures.schema.json`](../schemas/validation-captures.schema.json).
 Capture recipes are format-neutral: outputs may be structured JSON, opaque binary, raster, or any
 other bounded MIME identity. Runtime trees, artifacts, environments, captured bytes, receipts, and
 decisions are execution results and never recipe fields.
 Worker validation commands are unique and ordered by phase: ordinary validation first, then all
-capture commands, then all threshold comparisons. Reusing command text across phases or recipe
-identities is rejected. A human-required capture gate forces semantic review across the bound Work
+capture commands. A human-required capture gate forces semantic review across the bound Work
 Item's complete acceptance set.
 
 ## Repository-result capture
@@ -107,18 +107,18 @@ World is a qualification fixture for this composition, not an architecture bound
 
 Before capture execution, Factory persists one immutable validation invocation. It binds repository,
 Objective, run, Work Item and attempt identity; artifact, base and result-tree identity; ordered
-ordinary, capture and comparison commands; recipes and output authorities; expected descriptor,
+ordinary and capture commands; recipes and output authorities; expected descriptor,
 content and storage-receipt digests; the selected validation environment; and the complete
 `repositoryCaptureEgress` policy. A result is an immutable child of that intent. Capture descriptors,
 storage receipts, mechanical comparison results and validation evidence all repeat the invocation
 digest and artifact/base/result-tree identities. Factory checks the result tree before and after
 persisting captured bytes, so a valid capture cannot be paired with a different repository result.
 
-Exact and threshold comparisons use different byte flows. For an exact comparison, the trusted host
-compares the captured SHA-256 with the expected content digest; the validator never needs the
-expected bytes. A threshold recipe runs its repository-observed comparison command and therefore
-receives the expected bytes in private staging. An isolated validator receives only the expected
-inputs used by threshold recipes, subject to the validation egress mode, visibility and count bound.
+For an exact comparison, the trusted host compares the captured SHA-256 with the expected content
+digest. For a threshold comparison, Factory downloads expected bytes into controller-owned storage
+only after every repository command exits, then invokes the installed comparator over expected and
+observed bytes. Local and isolated validators never receive expected bytes and never provide the
+certified difference scalar.
 All captured outputs return to the host, are checked against their declared MIME and optional typed
 profile, and are retained through immutable `validation-evidence` content transfers. An opaque
 unprofiled output may establish an exact byte match, but it carries no semantic-validity claim.
@@ -128,7 +128,9 @@ declared content identity and a typed handler check can produce mechanical evide
 acceptance criterion still requires judgment, Factory may materialize the expected and observed
 bytes for the independent reviewer only after the immutable review policy and the selected
 management adapter's reviewer capability both allow every MIME type, typed profile, semantic handler,
-visibility, rights basis, network destination and deduplicated asset count. The files are rehashed,
+visibility, rights basis, network destination and unique payload count. Expected and observed
+associations are bounded uses of immutable payloads, so identical bytes with the same security
+identity are stored and materialized once without losing recipe, role, path, criterion, or authorization context. The files are rehashed,
 placed in private read-only staging and supplied separately from the textual prompt. Repository files
 and every evidence byte remain untrusted reviewer input. The durable review receipt stays separate
 from validation evidence and binds its exact evidence digest and result tree.

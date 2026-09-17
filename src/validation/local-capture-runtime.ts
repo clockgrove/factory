@@ -17,7 +17,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
 import { inspectContentFile } from "../execution/artifact-content.js";
-import { boundedText, safeId, sha256Digest } from "../protocol/limits.js";
+import { MAX_PRODUCT_FILE_BYTES, boundedText, safeId, sha256Digest } from "../protocol/limits.js";
 import type { IsolatedValidationResult } from "../execution/backend.js";
 import {
   RepositoryCaptureCollectionManifestSchema,
@@ -27,7 +27,7 @@ import {
   type ValidationInvocation,
 } from "./repository-capture.js";
 
-const MAX_CAPTURE_FILE_BYTES = 100_000_000;
+const MAX_CAPTURE_FILE_BYTES = MAX_PRODUCT_FILE_BYTES;
 const MAX_CAPTURE_TOTAL_BYTES = 256 * 1024 * 1024;
 
 const RuntimeOutputSchema = z
@@ -96,41 +96,11 @@ const LocalRecipeCheckpointSchema = z
             mediaType: boundedText(160),
             bytes: z.number().int().positive().max(MAX_CAPTURE_FILE_BYTES),
             digest: sha256Digest,
-            threshold: z
-              .object({
-                observedDifference: z.number().finite().nonnegative(),
-                exitCode: z.number().int(),
-              })
-              .strict()
-              .optional(),
           })
           .strict(),
       )
       .min(1)
       .max(16),
-  })
-  .strict();
-
-const LocalComparisonCheckpointSchema = z
-  .object({
-    recipeId: safeId,
-    recipeDigest: sha256Digest,
-    command: z
-      .object({ recipeId: safeId, recipeDigest: sha256Digest, command: boundedText(1_000) })
-      .strict(),
-    commandResult: z
-      .object({
-        command: boundedText(1_000),
-        exitCode: z.number().int().min(0).max(255),
-        durationMs: z
-          .number()
-          .int()
-          .nonnegative()
-          .max(24 * 60 * 60 * 1_000),
-      })
-      .strict(),
-    outputRoleId: safeId,
-    observedDifference: z.number().finite().nonnegative(),
   })
   .strict();
 
@@ -212,7 +182,7 @@ const exitCode = Number.isInteger(result.status) ? result.status : 1;
 if (exitCode === 0) {
   const outputs = request.recipes
     ? request.recipes.flatMap((recipe) => recipe.outputs.map((output) => output.path))
-    : request.comparisons.map((comparison) => comparison.comparisonResultPath);
+    : [];
   for (const output of outputs) {
     const fd = openSync(output, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
@@ -543,25 +513,6 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
       identity: captureIdentity,
     });
     actionByCommand.set(captureIdentity.command, capture);
-    if (recipe.comparison.kind === "threshold") {
-      const comparisonIdentity = recipe.comparison.command;
-      const comparisonKey = `comparison-${digestText(canonical(comparisonIdentity))}`;
-      const comparison = actionByCommand.get(comparisonIdentity.command) ?? {
-        command: comparisonIdentity.command,
-        key: comparisonKey,
-        checkpoints: [],
-      };
-      if (comparison.key !== comparisonKey)
-        throw new Error("shared local comparison command has conflicting identity");
-      comparison.checkpoints.push({
-        name: `comparison-${Buffer.from(recipe.id).toString("hex")}.json`,
-        parse: (value) => LocalComparisonCheckpointSchema.parse(value),
-        recipeId: recipe.id,
-        recipeDigest: recipe.digest,
-        identity: comparisonIdentity,
-      });
-      actionByCommand.set(comparisonIdentity.command, comparison);
-    }
   }
   const actions = invocation.validationCommands.flatMap((command) => {
     const action = actionByCommand.get(command);
@@ -577,7 +528,7 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
     ]),
   );
   const unexpected = names.filter(
-    (name) => /^(?:started|terminal|recipe|comparison)-.*\.json$/.test(name) && !allowed.has(name),
+    (name) => /^(?:started|terminal|recipe)-.*\.json$/.test(name) && !allowed.has(name),
   );
   if (unexpected.length)
     throw new Error("local capture dispatch journal contains an unexpected action identity");
@@ -638,10 +589,7 @@ function assertValidationResult(
 ): IsolatedValidationResult {
   const result = LocalValidationResultSchema.parse(input);
   const captureCommands = new Set(
-    invocation.repositoryCaptureRecipes.flatMap((recipe) => [
-      recipe.captureCommand.command,
-      ...(recipe.comparison.kind === "threshold" ? [recipe.comparison.command.command] : []),
-    ]),
+    invocation.repositoryCaptureRecipes.map((recipe) => recipe.captureCommand.command),
   );
   const ordinaryCommands = invocation.validationCommands.filter(
     (command) => !captureCommands.has(command),
@@ -764,13 +712,6 @@ export async function executeLocalRepositoryCaptures(args: {
   }): Promise<LocalCaptureCommandResult>;
   observeCommand(input: { plannedCommand: string }): Promise<"absent" | "active" | "unknown">;
   commandDeadline: string | null;
-  materializeExpected?(input: {
-    recipeId: string;
-    descriptorDigest: string;
-    contentDigest: string;
-    storageReceiptDigest: string;
-    destination: string;
-  }): Promise<void>;
   assertOutputTree(): Promise<void>;
 }): Promise<{
   collection: RepositoryCaptureCollectionManifest;
@@ -802,46 +743,19 @@ export async function executeLocalRepositoryCaptures(args: {
   }
   await args.assertOutputTree();
   const captureGroups = new Map<string, RuntimeRequest["recipes"]>();
-  const comparisonGroups = new Map<
-    string,
-    Array<{
-      recipe: RuntimeRequest["recipes"][number];
-      invocationRecipe: ValidationInvocation["repositoryCaptureRecipes"][number];
-    }>
-  >();
   const actionByCommand = new Map<
     string,
-    | {
-        kind: "capture";
-        identity: RuntimeRequest["recipes"][number]["command"];
-        recipes: RuntimeRequest["recipes"];
-      }
-    | {
-        kind: "comparison";
-        identity: Extract<
-          ValidationInvocation["repositoryCaptureRecipes"][number]["comparison"],
-          { kind: "threshold" }
-        >["command"];
-        recipes: Array<{
-          recipe: RuntimeRequest["recipes"][number];
-          invocationRecipe: ValidationInvocation["repositoryCaptureRecipes"][number];
-        }>;
-      }
+    {
+      kind: "capture";
+      identity: RuntimeRequest["recipes"][number]["command"];
+      recipes: RuntimeRequest["recipes"];
+    }
   >();
   for (const recipe of request.recipes) {
     const captureKey = canonical(recipe.command);
     const captureGroup = captureGroups.get(captureKey) ?? [];
     captureGroup.push(recipe);
     captureGroups.set(captureKey, captureGroup);
-    const invocationRecipe = invocation.repositoryCaptureRecipes.find(
-      ({ id }) => id === recipe.id,
-    )!;
-    if (invocationRecipe.comparison.kind === "threshold") {
-      const comparisonKey = canonical(invocationRecipe.comparison.command);
-      const comparisonGroup = comparisonGroups.get(comparisonKey) ?? [];
-      comparisonGroup.push({ recipe, invocationRecipe });
-      comparisonGroups.set(comparisonKey, comparisonGroup);
-    }
   }
   for (const recipes of captureGroups.values()) {
     const identity = recipes[0]!.command;
@@ -850,21 +764,10 @@ export async function executeLocalRepositoryCaptures(args: {
       throw new Error("repository capture command text has conflicting immutable identities");
     actionByCommand.set(identity.command, { kind: "capture", identity, recipes });
   }
-  for (const recipes of comparisonGroups.values()) {
-    const comparison = recipes[0]!.invocationRecipe.comparison;
-    if (comparison.kind !== "threshold") throw new Error("threshold command grouping failed");
-    const identity = comparison.command;
-    const prior = actionByCommand.get(identity.command);
-    if (prior && (prior.kind !== "comparison" || canonical(prior.identity) !== canonical(identity)))
-      throw new Error("repository comparison command text has conflicting immutable identities");
-    actionByCommand.set(identity.command, { kind: "comparison", identity, recipes });
-  }
   for (const command of actionByCommand.keys())
     if (invocation.validationCommands.filter((candidate) => candidate === command).length !== 1)
       throw new Error("repository capture command must occur exactly once in validation order");
   const commandResults: Array<{ command: string; exitCode: number; durationMs: number }> = [];
-  const materializedExpected = new Set<string>();
-  const comparisonCheckpoints = new Map<string, z.infer<typeof LocalComparisonCheckpointSchema>>();
   for (const command of invocation.validationCommands) {
     const action = actionByCommand.get(command);
     if (!action) continue;
@@ -963,145 +866,6 @@ export async function executeLocalRepositoryCaptures(args: {
           checkpoint,
         );
       }
-      continue;
-    }
-    if (!args.materializeExpected)
-      throw new Error("threshold capture comparison lacks private expected-byte materialization");
-    const existing = await Promise.all(
-      action.recipes.map(async ({ recipe }) => {
-        const marker = await readJson(
-          join(ownedRoot, `comparison-${Buffer.from(recipe.id).toString("hex")}.json`),
-        );
-        return marker ? LocalComparisonCheckpointSchema.parse(marker) : null;
-      }),
-    );
-    if (existing.every(Boolean)) {
-      commandResults.push(existing[0]!.commandResult);
-      for (const checkpoint of existing)
-        comparisonCheckpoints.set(checkpoint!.recipeId, checkpoint!);
-      continue;
-    }
-    if (existing.some(Boolean))
-      throw new Error("shared local comparison command has a partial terminal checkpoint");
-    const comparisons = [];
-    for (const { recipe, invocationRecipe } of action.recipes) {
-      if (invocationRecipe.comparison.kind !== "threshold")
-        throw new Error("comparison action differs from invocation");
-      const authority = invocation.comparisonAuthorities.find(
-        ({ recipeId }) => recipeId === recipe.id,
-      )!;
-      const expectedPath = join(ownedRoot, "expected", authority.expectedDescriptorDigest);
-      const resultPath = join(ownedRoot, "comparisons", Buffer.from(recipe.id).toString("hex"));
-      await mkdir(dirname(expectedPath), { recursive: true, mode: 0o700 });
-      await mkdir(dirname(resultPath), { recursive: true, mode: 0o700 });
-      if (!materializedExpected.has(authority.expectedDescriptorDigest)) {
-        let retained = false;
-        try {
-          const observed = await inspectContentFile(expectedPath, MAX_CAPTURE_FILE_BYTES);
-          if (observed.digest !== authority.expectedContentDigest)
-            throw new Error("retained threshold expected bytes changed");
-          retained = true;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        }
-        if (!retained)
-          await args.materializeExpected({
-            recipeId: recipe.id,
-            descriptorDigest: authority.expectedDescriptorDigest,
-            contentDigest: authority.expectedContentDigest,
-            storageReceiptDigest: authority.expectedStorageReceiptDigest,
-            destination: expectedPath,
-          });
-        materializedExpected.add(authority.expectedDescriptorDigest);
-      }
-      const expected = await inspectContentFile(expectedPath, MAX_CAPTURE_FILE_BYTES);
-      if (expected.digest !== authority.expectedContentDigest)
-        throw new Error("threshold expected bytes differ from invocation authority");
-      const actual = recipe.outputs.find(
-        ({ roleId }) => roleId === invocationRecipe.comparison.outputRoleId,
-      );
-      if (!actual) throw new Error("threshold comparison subject output is unavailable");
-      comparisons.push({
-        recipeId: recipe.id,
-        recipeDigest: recipe.digest,
-        outputRoleId: actual.roleId,
-        actualPath: actual.path,
-        expectedPath,
-        comparisonResultPath: resultPath,
-        metric: invocationRecipe.comparison.policy.metric,
-        maximumDifference: invocationRecipe.comparison.policy.maximumDifference,
-      });
-    }
-    const comparisonRequestPath = join(
-      ownedRoot,
-      `comparison-${digestText(canonical(action.identity))}.json`,
-    );
-    await atomicJson(comparisonRequestPath, {
-      protocol: "clockgrove.factory/repository-capture-comparison-request",
-      validationInvocationDigest: invocation.digest,
-      command: action.identity,
-      comparisons,
-    });
-    const comparisonTerminalKey = `comparison-${digestText(canonical(action.identity))}`;
-    if (
-      (
-        await Promise.all(
-          comparisons.map(async ({ comparisonResultPath }) => {
-            try {
-              return (await lstat(comparisonResultPath)).isFile();
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-              throw error;
-            }
-          }),
-        )
-      ).some(Boolean) &&
-      !(await readJson(join(ownedRoot, `terminal-${comparisonTerminalKey}.json`)))
-    ) {
-      if (!(await readJson(join(ownedRoot, `started-${comparisonTerminalKey}.json`))))
-        throw new Error("partial local comparison output lacks a terminal command receipt");
-    }
-    const observed = await durableCommand({
-      ownedRoot,
-      key: comparisonTerminalKey,
-      command,
-      requestPath: comparisonRequestPath,
-      cwd: args.resultTreeRoot,
-      env: { ...args.environment, FACTORY_CAPTURE_REQUEST: comparisonRequestPath },
-      runCommand: args.runCommand,
-      observeCommand: args.observeCommand,
-      commandDeadline: args.commandDeadline,
-    });
-    const commandResult = LocalCaptureCommandResultSchema.parse({
-      command,
-      exitCode: observed.terminal.exitCode,
-      durationMs: observed.terminal.durationMs,
-    });
-    commandResults.push(commandResult);
-    if (observed.terminal.exitCode !== 0)
-      throw new LocalRepositoryCaptureCommandFailure(
-        `repository comparison command failed with exit code ${observed.terminal.exitCode}`,
-        [...commandResults],
-      );
-    for (const comparison of comparisons) {
-      const observedDifference = Number(
-        (await readFile(comparison.comparisonResultPath, "utf8")).trim(),
-      );
-      if (!Number.isFinite(observedDifference) || observedDifference < 0)
-        throw new Error("repository capture comparison did not write a nonnegative number");
-      const checkpoint = LocalComparisonCheckpointSchema.parse({
-        recipeId: comparison.recipeId,
-        recipeDigest: comparison.recipeDigest,
-        command: action.identity,
-        commandResult,
-        outputRoleId: comparison.outputRoleId,
-        observedDifference,
-      });
-      await atomicJson(
-        join(ownedRoot, `comparison-${Buffer.from(comparison.recipeId).toString("hex")}.json`),
-        checkpoint,
-      );
-      comparisonCheckpoints.set(comparison.recipeId, checkpoint);
     }
   }
   const files: RepositoryCaptureCollectionManifest["files"] = [];
@@ -1110,22 +874,8 @@ export async function executeLocalRepositoryCaptures(args: {
     const checkpoint = LocalRecipeCheckpointSchema.parse(
       await readJson(join(ownedRoot, `recipe-${Buffer.from(recipe.id).toString("hex")}.json`)),
     );
-    const comparison = comparisonCheckpoints.get(recipe.id);
-    const invocationRecipe = invocation.repositoryCaptureRecipes.find(
-      ({ id }) => id === recipe.id,
-    )!;
     for (const file of checkpoint.files) {
-      const withComparison =
-        comparison && file.roleId === invocationRecipe.comparison.outputRoleId
-          ? {
-              ...file,
-              threshold: {
-                observedDifference: comparison.observedDifference,
-                exitCode: comparison.commandResult.exitCode,
-              },
-            }
-          : file;
-      files.push(withComparison);
+      files.push(file);
       totalBytes += file.bytes;
     }
     if (totalBytes > request.maximumTotalBytes)

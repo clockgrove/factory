@@ -932,11 +932,19 @@
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["kind", "outputRoleId", "command", "expectedDescriptorDigest", "policy"],
+              "required": ["kind", "outputRoleId", "comparator", "expectedDescriptorDigest", "policy"],
               "properties": {
                 "kind": { "const": "threshold" },
                 "outputRoleId": { "$ref": "#/definitions/safeId" },
-                "command": { "$ref": "#/definitions/repositoryCommandIdentity" },
+                "comparator": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["id", "contract"],
+                  "properties": {
+                    "id": { "$ref": "#/definitions/safeId" },
+                    "contract": { "type": "integer", "minimum": 1, "maximum": 1000 }
+                  }
+                },
                 "expectedDescriptorDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
                 "policy": {
                   "type": "object",

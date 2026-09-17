@@ -10,11 +10,12 @@ import type {
 import type { LeaseState } from "../src/control/lease.js";
 import { compileEvaluatedDraft } from "../src/management/draft-compilation.js";
 import { compilerObligationEvidence } from "../src/management/codex-cli.js";
-import type {
-  CompilationContext,
-  CompilerModelAdmission,
-  ManagementBackend,
-  PlanJudgeContext,
+import {
+  EMPTY_REPOSITORY_CAPTURE_PLANNING,
+  type CompilationContext,
+  type CompilerModelAdmission,
+  type ManagementBackend,
+  type PlanJudgeContext,
 } from "../src/management/backend.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { parsePersistedCompiledObjective, type CompiledObjective } from "../src/graph.js";
@@ -116,6 +117,7 @@ async function fixture() {
       allowedNetworkDestinations: [],
       compilerEvaluation: { mode: "auto-repair" },
     },
+    repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
   };
   context.repositoryEvidence = compilerObligationEvidence(context);
   const graph = parsePersistedCompiledObjective({

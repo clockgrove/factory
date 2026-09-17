@@ -93,7 +93,7 @@ export const MediaInputRoleBindingSchema = z
   })
   .strict();
 
-const RepositoryCaptureScenarioSchema = z
+export const RepositoryCaptureScenarioSchema = z
   .object({
     id: safeId,
     fixture: boundedText(500).nullable(),
@@ -113,7 +113,7 @@ const RepositoryCaptureComparisonSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("threshold"),
-      recipeId: safeId,
+      policyId: safeId,
     })
     .strict(),
 ]);
@@ -124,6 +124,15 @@ export const RepositoryCaptureRequestSchema = z
     scenario: RepositoryCaptureScenarioSchema,
     captureRecipeId: safeId,
     comparison: RepositoryCaptureComparisonSchema,
+    gate: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("human-required") }).strict(),
+      z
+        .object({
+          kind: z.literal("deterministic-preauthorized"),
+          authorityId: safeId,
+        })
+        .strict(),
+    ]),
   })
   .strict();
 
@@ -154,7 +163,7 @@ export const MediaIntentSchema = z
     brief: boundedText(4_000),
     fulfillment: MediaIntentFulfillmentSchema,
     output: MediaOutputConstraintsSchema,
-    review: MediaReviewRequestSchema,
+    review: MediaReviewRequestSchema.nullable(),
     repositoryCapture: RepositoryCaptureRequestSchema.nullable(),
     bindings: z.array(MediaIntentBindingSchema).max(64),
   })
@@ -174,6 +183,12 @@ export const MediaIntentSchema = z
         code: "custom",
         path: ["bindings"],
         message: "repository capture intents may contain only evidence-for bindings",
+      });
+    if ((intent.repositoryCapture !== null) === (intent.review !== null))
+      context.addIssue({
+        code: "custom",
+        path: ["review"],
+        message: "producer review and repository capture gate are mutually exclusive",
       });
     if (
       intent.repositoryCapture &&
@@ -212,7 +227,12 @@ export const CompilerMediaAssetFactSchema = z
         .strict(),
       z.object({ kind: z.literal("opaque") }).strict(),
     ]),
+    descriptorClass: z.enum(["opaque", "semantic"]),
+    inspectionHandler: z
+      .object({ id: safeId, contract: z.number().int().positive().max(1_000) })
+      .strict(),
     visibility: z.enum(["public", "private"]),
+    rightsBasis: z.enum(["user-owned", "licensed", "permission-granted", "unknown"]),
   })
   .strict();
 
@@ -340,7 +360,9 @@ export const AssetProductionDeliverableSchema = z
   .object({
     kind: z.literal("asset-production"),
     contract: z.literal("clockgrove.factory/asset-set"),
-    intent: MediaIntentSchema,
+    intent: MediaIntentSchema.and(
+      z.object({ review: MediaReviewRequestSchema, repositoryCapture: z.null() }),
+    ),
     producerCapabilityId: safeId,
     producerCapabilityDigest: sha256Digest,
     activationSelection: MediaActivationSelectionSchema,

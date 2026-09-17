@@ -7,6 +7,7 @@ import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
 import {
   managementFailureProvenance,
   managementTerminalOutcome,
+  EMPTY_REPOSITORY_CAPTURE_PLANNING,
   ManagementFailureCleanupError,
   ManagementOutputError,
   type ManagementBackend,
@@ -54,6 +55,7 @@ describe("single semantic management route", () => {
       repositoryFiles: [],
       allowedNetworkDestinations: [],
       runPolicy: DEFAULT_RUN_POLICY,
+      repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
     };
     const legacyAdmission = vi.fn();
     const accounting = vi.fn();
@@ -154,6 +156,7 @@ describe("single semantic management route", () => {
         repositoryFiles: [],
         allowedNetworkDestinations: [],
         runPolicy: { ...semanticProjectionContext().runPolicy },
+        repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
         legacyGraphConstraints: legacy,
       }),
     ).rejects.toThrow(`compiler prompt is ${targetBytes} bytes; maximum is 1048576`);

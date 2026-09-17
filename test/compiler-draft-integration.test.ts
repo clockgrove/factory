@@ -14,7 +14,10 @@ import {
   CodexCliManagementBackend,
   compilerObligationEvidence,
 } from "../src/management/codex-cli.js";
-import type { CompilationContext } from "../src/management/backend.js";
+import {
+  EMPTY_REPOSITORY_CAPTURE_PLANNING,
+  type CompilationContext,
+} from "../src/management/backend.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import {
   COMPILER_JUDGE_DIMENSIONS,
@@ -224,6 +227,7 @@ async function setup(
       allowedNetworkDestinations: [],
       compilerEvaluation: { mode: options.reportOnly ? "report-only" : "auto-repair" },
     },
+    repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
   };
   context.repositoryEvidence = compilerObligationEvidence(context);
   const inventory: ObligationInventory = {

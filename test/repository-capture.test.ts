@@ -144,11 +144,11 @@ function exactRecipe(args: {
   expectedDescriptorDigest: string;
   profile?: RepositoryCaptureRecipe["profile"];
   command?: string;
-  gate?: RepositoryCaptureRecipe["gate"];
+  deterministicGateId?: string;
 }): RepositoryCaptureRecipe {
   const id = args.id ?? "capture-report";
   const commandDigest = sha(`capture-command:${id}`);
-  const core = {
+  const recipeCore = {
     id,
     mediaUse: { intentId: "intent-result-evidence", direction: "evidence-for" },
     criterionIds: ["criterion-result"],
@@ -166,8 +166,45 @@ function exactRecipe(args: {
       expectedDescriptorDigest: args.expectedDescriptorDigest,
       policy: { kind: "exact-bytes" },
     },
-    gate: args.gate ?? { kind: "human-required" },
   };
+  const gate = args.deterministicGateId
+    ? (() => {
+        const egressPolicy = {
+          deterministicGateIds: [args.deterministicGateId],
+          review: {
+            mode: "denied" as const,
+            maxAssets: 0,
+            reviewerCapabilityIds: [] as string[],
+          },
+        };
+        const authorityCore = {
+          protocol: "clockgrove.factory/repository-capture-gate-authority" as const,
+          authorityId: args.deterministicGateId,
+          captureCommand: recipeCore.captureCommand,
+          comparison: { kind: "exact" as const },
+          expectedDescriptorDigest: args.expectedDescriptorDigest,
+          expectedMediaType: args.mediaType ?? "text/plain",
+          expectedDescriptorClass:
+            (args.mediaType ?? "text/plain") === "text/plain"
+              ? ("semantic" as const)
+              : ("opaque" as const),
+          expectedVisibility: "private" as const,
+          expectedRightsBasis: "unknown" as const,
+          observedVisibility: "private" as const,
+          observedRightsBasis: "unknown" as const,
+          profileId: recipeCore.profile?.kind ?? null,
+          scenario: recipeCore.scenario,
+          criterionIds: recipeCore.criterionIds,
+          maximumCriteria: 64,
+          policyDigest: sha(canonical(egressPolicy)),
+        };
+        return {
+          kind: "deterministic-preauthorized" as const,
+          authority: { ...authorityCore, digest: sha(canonical(authorityCore)) },
+        };
+      })()
+    : ({ kind: "human-required" } as const);
+  const core = { ...recipeCore, gate };
   return { ...core, digest: sha(canonical(core)) } as RepositoryCaptureRecipe;
 }
 
@@ -253,7 +290,10 @@ function invocationFor(args: {
       },
     ],
     egressPolicy: {
-      validation: { mode: "denied", maxAssets: 0 },
+      deterministicGateIds:
+        args.recipe.gate.kind === "deterministic-preauthorized"
+          ? [args.recipe.gate.authority.authorityId]
+          : [],
       review: { mode: "denied", maxAssets: 0, reviewerCapabilityIds: [] },
     },
     toolEnvironment: {
@@ -618,7 +658,7 @@ describe("repository result capture evidence", () => {
       expectedDescriptorDigest: sha("opaque-reference"),
       mediaType: "application/octet-stream",
       roleId: "opaque-result",
-      gate: { kind: "deterministic-preauthorized", ruleId: "exact-bytes" },
+      deterministicGateId: "exact-bytes",
     });
     const humanRecipe = exactRecipe({
       id: "human-text",
@@ -656,7 +696,7 @@ describe("repository result capture evidence", () => {
         ...humanInvocation.comparisonAuthorities,
       ],
       mediaInputs: [...opaqueInvocation.mediaInputs, ...humanInvocation.mediaInputs],
-      egressPolicy: humanInvocation.egressPolicy,
+      egressPolicy: opaqueInvocation.egressPolicy,
       toolEnvironment: humanInvocation.toolEnvironment,
     });
     const memory = memoryStore();
@@ -1281,7 +1321,7 @@ describe("validation invocation no-replay transaction", () => {
         rights: { basis: "unknown" as const },
       })),
       egressPolicy: {
-        validation: { mode: "denied", maxAssets: 0 },
+        deterministicGateIds: [],
         review: { mode: "denied", maxAssets: 0, reviewerCapabilityIds: [] },
       },
       toolEnvironment: {

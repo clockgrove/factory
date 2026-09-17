@@ -110,6 +110,15 @@ const jsonHandler: AssetHandler = {
 };
 const handlers = [rasterHandler, textHandler, jsonHandler] as const;
 export const assetHandlerContracts = handlers.map(({ id, contract }) => ({ id, contract }));
+export function declaredAssetHandlerContract(mediaType: string) {
+  assertPassiveAssetMediaType(mediaType);
+  const selected = handlers.filter((handler) => handler.supports(mediaType));
+  if (selected.length > 1) throw new Error(`ambiguous Objective asset handlers for ${mediaType}`);
+  const handler = selected[0];
+  return handler
+    ? { descriptorClass: "semantic" as const, id: handler.id, contract: handler.contract }
+    : { descriptorClass: "opaque" as const, id: "opaque-passive", contract: 1 };
+}
 export async function probeAssetHandlers() {
   const sharp = (await import("sharp")).default;
   return {

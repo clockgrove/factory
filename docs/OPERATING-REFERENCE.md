@@ -133,10 +133,7 @@ model invocation. Each use is additionally capped by the remaining authenticated
     "deterministicReviewRuleIds": []
   },
   "repositoryCaptureEgress": {
-    "validation": {
-      "mode": "denied",
-      "maxAssets": 0
-    },
+    "deterministicGateIds": [],
     "review": {
       "mode": "denied",
       "maxAssets": 0,
@@ -190,11 +187,12 @@ rules must be named explicitly. Select the exact manifest on `factory_activate` 
 `assetManifestDigest` (CLI `--asset-manifest-digest`). That digest is immutable run identity and is
 checked again on resume. See [Objective input assets](OBJECTIVE-ASSETS.md#compiler-media-intents).
 
-Repository-result capture has separate validation and review egress phases, both denied by default.
-Local and isolated capture commands receive no expected bytes. Exact comparison uses the returned
-content digest, while threshold comparison runs afterward in Factory through the installed trusted
-comparator. Repository commands cannot provide the certified scalar. The ordinary backend and
-network policy must still authorize any provider destination used for isolated validation.
+Repository-result capture has an explicit deterministic-gate allowlist and an independent semantic
+review egress grant, which is denied by default. Local and isolated capture commands receive no
+expected bytes. Exact comparison uses the returned content digest, while threshold comparison runs
+afterward in Factory through the installed trusted comparator. Repository commands cannot provide
+the certified scalar. The ordinary backend and network policy must still authorize any provider
+destination used for isolated validation.
 
 Semantic review uses the independent `review` gate. Name the selected management adapter's exact
 reviewer capability ID and bound the complete unique-payload expected-plus-observed bundle. Recipe,

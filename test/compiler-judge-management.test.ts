@@ -13,7 +13,11 @@ import {
   CODEX_CASE_LABEL_SCHEMA,
 } from "../src/management/codex-cli.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
-import type { CompilationContext, PlanJudgeContext } from "../src/management/backend.js";
+import {
+  EMPTY_REPOSITORY_CAPTURE_PLANNING,
+  type CompilationContext,
+  type PlanJudgeContext,
+} from "../src/management/backend.js";
 import {
   COMPILER_JUDGE_DIMENSIONS,
   CompilerCaseLabelSchema,
@@ -134,6 +138,7 @@ async function fixture() {
     repositoryFiles: ["package.json"],
     allowedNetworkDestinations: [],
     runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
+    repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
   };
   context.repositoryEvidence = compilerObligationEvidence(context);
   const inventory: ObligationInventory = {

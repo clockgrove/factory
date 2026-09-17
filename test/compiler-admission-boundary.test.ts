@@ -18,6 +18,7 @@ import {
   managementTerminalOutcome,
   ManagementCleanupError,
   ManagementFailureCleanupError,
+  EMPTY_REPOSITORY_CAPTURE_PLANNING,
   type CompilationContext,
 } from "../src/management/backend.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
@@ -101,6 +102,7 @@ async function fixture() {
       allowedNetworkDestinations: [],
       compilerEvaluation: { mode: "report-only" },
     },
+    repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
   };
   context.repositoryEvidence = compilerObligationEvidence(context);
   const graph = parsePersistedCompiledObjective({
@@ -259,6 +261,9 @@ describe("compiler dispatch admission", () => {
             alpha: false,
           },
           visibility: "private",
+          descriptorClass: "semantic",
+          inspectionHandler: { id: "sharp-raster", contract: 1 },
+          rightsBasis: "unknown",
         },
       ],
     };
@@ -381,6 +386,9 @@ describe("compiler dispatch admission", () => {
             bytes: 22,
             inspection: { kind: "raster", width: 16, height: 16, frames: 1, alpha: false },
             visibility: "private",
+            descriptorClass: "semantic",
+            inspectionHandler: { id: "sharp-raster", contract: 1 },
+            rightsBasis: "unknown",
           },
         ],
       },

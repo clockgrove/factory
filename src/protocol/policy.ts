@@ -281,7 +281,7 @@ export const DEFAULT_COMPILER_MEDIA_EGRESS_POLICY = Object.freeze({
   deterministicReviewRuleIds: [],
 });
 
-const repositoryCaptureEgressPhase = <T extends z.ZodRawShape>(extra: T) =>
+const repositoryCaptureReviewEgress = <T extends z.ZodRawShape>(extra: T) =>
   z
     .object({
       mode: z.enum(["denied", "public-assets", "private-assets"]),
@@ -298,15 +298,15 @@ const repositoryCaptureEgressPhase = <T extends z.ZodRawShape>(extra: T) =>
         });
     });
 
-const RepositoryCaptureEgressPhaseSchema = repositoryCaptureEgressPhase({});
-
-/** Independent authority for exposing validation-only repository captures.
- * Validation covers an isolated execution backend; review covers a semantic
- * reviewer. Neither permission is inherited from compiler input egress. */
+/** Independent authority for deterministic capture gates and semantic-review
+ * disclosure. Repository validators never receive expected payloads. */
 export const RepositoryCaptureEgressPolicySchema = z
   .object({
-    validation: RepositoryCaptureEgressPhaseSchema,
-    review: repositoryCaptureEgressPhase({
+    deterministicGateIds: z
+      .array(safeId)
+      .max(32)
+      .refine((ids) => new Set(ids).size === ids.length, "capture gate IDs must be unique"),
+    review: repositoryCaptureReviewEgress({
       reviewerCapabilityIds: z
         .array(safeId)
         .max(32)
@@ -319,7 +319,7 @@ export const RepositoryCaptureEgressPolicySchema = z
   .strict();
 
 export const DEFAULT_REPOSITORY_CAPTURE_EGRESS_POLICY = Object.freeze({
-  validation: { mode: "denied" as const, maxAssets: 0 },
+  deterministicGateIds: [],
   review: { mode: "denied" as const, maxAssets: 0, reviewerCapabilityIds: [] },
 });
 

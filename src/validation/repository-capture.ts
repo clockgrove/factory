@@ -241,6 +241,36 @@ function validateCaptureOutputAuthorities(
         message: "validation media input profiles differ from its recipe bindings",
       });
   });
+  for (const [index, recipe] of invocation.repositoryCaptureRecipes.entries()) {
+    if (recipe.gate.kind !== "deterministic-preauthorized") continue;
+    const authority = recipe.gate.authority;
+    const expected = invocation.mediaInputs.find(
+      ({ descriptorDigest }) => descriptorDigest === authority.expectedDescriptorDigest,
+    );
+    const outputs = invocation.captureOutputAuthorities.filter(
+      ({ recipeId }) => recipeId === recipe.id,
+    );
+    if (
+      authority.policyDigest !== digestOf(invocation.egressPolicy) ||
+      !invocation.egressPolicy.deterministicGateIds.includes(authority.authorityId) ||
+      !expected ||
+      expected.declaredMediaType !== authority.expectedMediaType ||
+      (expected.inspection.status === "semantic-valid" ? "semantic" : "opaque") !==
+        authority.expectedDescriptorClass ||
+      expected.visibility !== authority.expectedVisibility ||
+      expected.rights.basis !== authority.expectedRightsBasis ||
+      outputs.some(
+        ({ visibility, rights }) =>
+          visibility !== authority.observedVisibility ||
+          rights.basis !== authority.observedRightsBasis,
+      )
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["repositoryCaptureRecipes", index, "gate", "authority"],
+        message: "deterministic gate authority differs from runtime policy or expected descriptor",
+      });
+  }
 }
 
 const ValidationInvocationCoreSchema = ValidationInvocationCoreObject.superRefine(
@@ -1147,8 +1177,8 @@ export async function materializeRepositoryCapturesForReview(args: {
 }
 
 /** Build the complete private semantic-review bundle. Authorization covers
- * both validation-only expected inputs and observed result captures before
- * either content channel is touched. */
+ * expected inputs and observed result captures before either review content
+ * channel is touched. */
 export async function materializeRepositoryCaptureReviewBundle(args: {
   store: ContentTransferStore;
   invocation: ValidationInvocation;

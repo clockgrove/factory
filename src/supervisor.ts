@@ -60,6 +60,7 @@ import {
   type RepositoryCaptureEvidence,
   type ValidationInvocation,
 } from "./validation/repository-capture.js";
+import { repositoryCapturePlanningCapabilities } from "./validation/repository-capture-capabilities.js";
 import {
   executeLocalRepositoryCaptures,
   inspectLocalRepositoryCaptureDispatchState,
@@ -5670,6 +5671,11 @@ export class FactorySupervisor {
                     producerCapabilities: policyMediaCompilerCapabilities(this.#policy),
                     reviewRules: policyMediaReviewRules(this.#policy, this.#mediaReviewRegistry),
                   },
+                  repositoryCapturePlanning: repositoryCapturePlanningCapabilities({
+                    registry: this.#registry,
+                    policy: this.#policy,
+                    management: this.#management,
+                  }),
                   invocationTimeoutMs: Math.min(
                     deadline - Date.now(),
                     this.#policy.workItemTimeoutMinutes * 60_000,

@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { compileObjective, type CompilerWorkItemInput } from "../src/compiler/index.js";
 import { CodexCliManagementBackend } from "../src/management/codex-cli.js";
+import { EMPTY_REPOSITORY_CAPTURE_PLANNING } from "../src/management/backend.js";
 import { DEFAULT_RUN_POLICY, type RunPolicy } from "../src/protocol/policy.js";
 import {
   assessCompilerCorpusResult,
@@ -248,6 +249,7 @@ describe("representative executable corpus integrity, not compiler/model quality
         defaultBranch: "main",
         allowedNetworkDestinations: corpusRunPolicy.allowedNetworkDestinations,
         runPolicy: corpusRunPolicy,
+        repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
       },
       backend,
       async () => {
@@ -273,6 +275,7 @@ describe("representative executable corpus integrity, not compiler/model quality
           defaultBranch: "main",
           allowedNetworkDestinations: corpusRunPolicy.allowedNetworkDestinations,
           runPolicy: corpusRunPolicy,
+          repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
         },
         backend,
         async () => {},

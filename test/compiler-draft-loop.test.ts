@@ -235,6 +235,20 @@ function validatedObjective(graph: CompiledObjective): ValidatedCompilerDraft {
         },
         pathCount: 1,
       },
+      repositoryCapture: {
+        execution: { commands: [] },
+        egress: {
+          policyDigest: compilerEvalDigest({
+            deterministicGateIds: [],
+            review: { mode: "denied", maxAssets: 0, reviewerCapabilityIds: [] },
+          }),
+          deterministicGateIds: [],
+          review: { mode: "denied", maxAssets: 0, reviewerCapabilityIds: [] },
+        },
+        reviewer: null,
+        comparators: [],
+        deterministicGates: [],
+      },
       media: {
         assetManifest: null,
         assetEgress: {

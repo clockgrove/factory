@@ -727,14 +727,17 @@ binds a pinned `.factory/validation-captures.json` entry to the target `reposito
 Item's `repositoryCaptureRecipes`. The recipe contains exact intent and criterion references,
 repository-observed command identities, bounded scenario inputs, declared output roles and MIME
 identities, an optional typed raster profile, exact-byte or grounded threshold comparison naming
-one subject output role, and the required gate. The comparison subject's declared MIME must equal
+one subject output role, and a capture-specific gate selected from explicit repository policy. The comparison subject's declared MIME must equal
 the expected asset MIME and be allowed by the intent. Raster projection keeps catalog-owned
 viewport, exact output dimensions, and role identities while adding intent-owned width, height,
 alpha, and animation acceptance constraints. The expected asset inspection and any catalog exact
 output dimensions must satisfy those constraints. It references the expected immutable `assetInputs`
 descriptor and contains no runtime result fields. Repository capture has one comparison subject;
 auxiliary capture, diff, or preview outputs do not change its cardinality. A required unsupported
-evidence intent fails before graph publication; a helpful omission preserves the Work Item's
+evidence intent fails before model dispatch when machine-derived execution, egress, reviewer, or
+gate capabilities prove no plan can work, or before graph publication when a selected plan loses
+authority. A bad model selection is repairable only when another advertised selection satisfies the
+same semantic result contract; a helpful omission preserves the Work Item's
 obligations. Code-native SVG, Mermaid, HTML/CSS/canvas and similar repository artifacts stay on the
 repository-change path.
 
@@ -752,7 +755,16 @@ Validation commands have one canonical phase order: ordinary commands, then capt
 stable first-occurrence deduplication inside each phase. Threshold policies select Factory-installed
 comparators and never add repository commands. A
 command string cannot carry conflicting phase or recipe identity. A human-required capture gate
-retains semantic review for every acceptance criterion on its repository Work Item.
+retains semantic review only for the exact criterion IDs on that capture binding.
+
+Capture gate authority never comes from the compiler model or a producer review rule. Repository
+configuration defines each deterministic rule's comparison kind and metric, MIME/profile,
+visibility and rights, scenario, expected descriptor class, and criterion bound. Immutable run
+policy admits specific rule IDs. Trusted projection binds the selected rule to the expected
+descriptor, capture and installed comparator identities, scenario, criterion IDs, and policy digest;
+validation recomputes that binding before accepting evidence. An opaque passive output may use an
+exact deterministic rule without acquiring semantic meaning. Human capture review instead requires
+one exact management-reviewer capability covering all deduplicated expected and observed assets.
 The Supervisor routes `asset-production` through its own capability, admission, execution,
 accounting, storage, review, activation, and recovery lifecycle before ordinary repository backend
 selection. A later repository consumer reserves the exact activation bundle and activated packet.
@@ -895,9 +907,9 @@ one materialized file and multiple bounded uses. The reviewer treats the reposit
 durable receipt remains separate from validation evidence and binds the same evidence digest and
 result tree, so semantic acceptance cannot migrate to another artifact or invocation.
 
-`repositoryCaptureEgress` has independent validation and review grants. Both default to `denied`, and
-compiler input egress grants neither. Validation capture never sends expected bytes to a validator.
-The review count covers all unique expected and observed payloads
+`repositoryCaptureEgress` contains the deterministic capture-gate allowlist and the independent
+semantic-review grant. Review defaults to `denied`, and compiler input egress does not grant review
+authority. Capture validation never sends expected bytes to a validator. The review count covers all unique expected and observed payloads
 and also requires an explicit reviewer capability ID. `public-assets` permits only public content;
 `private-assets` still requires the adapter's matching visibility, rights, handler and MIME
 capabilities plus ordinary network-destination authority. Capability mismatch fails before content

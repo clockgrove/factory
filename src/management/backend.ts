@@ -236,7 +236,10 @@ export interface CompilationContext {
     producerCapabilities: CompilerMediaProducerCapability[];
     reviewRules: CompilerRequest["media"]["reviewRules"];
   };
-  /** Authenticated pre-v2 issue core. The compiler may enrich, never decompose or rewrite it. */
+  /** Explicit machine authority for repository-result capture. It comes from
+   * validation execution and review adapters, never from the management model. */
+  repositoryCapturePlanning: RepositoryCapturePlanningAuthority;
+  /** Authenticated existing issue core. The compiler may enrich, never decompose or rewrite it. */
   legacyGraphConstraints?: LegacyGraphConstraints;
   /** Authenticated predecessor terminal diagnostic for a graphless compilation recovery.
    * The predecessor proposal is deliberately unavailable and grants no graph authority. */
@@ -247,6 +250,19 @@ export interface CompilationContext {
   /** Read-only trusted observations after grounding; omitted callers retain explicit unknowns. */
   economicEvidence?: (items: readonly CompilerWorkItem[]) => Promise<DecompositionEvidence>;
 }
+
+export interface RepositoryCapturePlanningAuthority {
+  execution: {
+    localManagedRuntimeAdapterIds: string[];
+    isolatedBackendIds: string[];
+  };
+  reviewerCapability: RepositoryCaptureReviewerCapability | null;
+}
+
+export const EMPTY_REPOSITORY_CAPTURE_PLANNING: RepositoryCapturePlanningAuthority = {
+  execution: { localManagedRuntimeAdapterIds: [], isolatedBackendIds: [] },
+  reviewerCapability: null,
+};
 
 /** A compiler request and its projection policy must derive network authority from one source. */
 export function assertCompilationContextPolicyAuthority(context: CompilationContext): void {

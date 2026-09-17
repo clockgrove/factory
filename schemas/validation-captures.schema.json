@@ -1,11 +1,11 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/clockgrove/factory/schemas/validation-captures.schema.json",
-  "title": "Repository validation capture catalog",
-  "description": "Optional committed authority for repository-observed capture commands and Factory-installed threshold comparator policies.",
+  "title": "Repository-result capture catalog",
+  "description": "Committed format-neutral capture recipes, Factory-installed threshold comparator policies, and explicitly authored deterministic gate policy. Run `factory validate-captures` for canonical semantic validation after this structural check.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["captures", "thresholdComparisons"],
+  "required": ["captures"],
   "properties": {
     "captures": {
       "type": "array",
@@ -13,67 +13,57 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["command", "outputs", "comparisonOutputRoleId", "profile", "gates"],
+        "required": ["command", "comparisonOutput", "auxiliaryOutputs", "profile", "humanReview", "exactDeterministicGates", "thresholdComparisons"],
         "properties": {
-          "command": { "type": "string", "minLength": 1, "maxLength": 1000 },
-          "outputs": {
+          "command": { "$ref": "#/definitions/command" },
+          "comparisonOutput": { "$ref": "#/definitions/output" },
+          "auxiliaryOutputs": {
             "type": "array",
-            "minItems": 1,
-            "maxItems": 16,
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["roleId", "mediaType"],
-              "properties": {
-                "roleId": { "$ref": "#/definitions/id" },
-                "mediaType": { "$ref": "#/definitions/mediaType" }
-              }
-            }
+            "maxItems": 13,
+            "uniqueItems": true,
+            "items": { "$ref": "#/definitions/output" }
           },
-          "comparisonOutputRoleId": { "$ref": "#/definitions/id" },
           "profile": {
             "oneOf": [
               { "type": "null" },
               {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["kind", "viewport", "output", "captureRoleId", "diffRoleId", "previewRoleId"],
+                "required": ["kind", "viewport", "output", "diffOutput", "previewOutput"],
                 "properties": {
                   "kind": { "const": "raster" },
-                  "viewport": { "$ref": "#/definitions/dimensions" },
-                  "output": { "$ref": "#/definitions/dimensions" },
-                  "captureRoleId": { "$ref": "#/definitions/id" },
-                  "diffRoleId": { "anyOf": [{ "$ref": "#/definitions/id" }, { "type": "null" }] },
-                  "previewRoleId": { "anyOf": [{ "$ref": "#/definitions/id" }, { "type": "null" }] }
+                  "viewport": { "$ref": "#/definitions/nullableDimensions" },
+                  "output": { "$ref": "#/definitions/nullableDimensions" },
+                  "diffOutput": { "oneOf": [{ "$ref": "#/definitions/output" }, { "type": "null" }] },
+                  "previewOutput": { "oneOf": [{ "$ref": "#/definitions/output" }, { "type": "null" }] }
                 }
               }
             ]
           },
-          "gates": {
+          "humanReview": { "type": "boolean" },
+          "exactDeterministicGates": {
             "type": "array",
-            "minItems": 1,
-            "maxItems": 2,
-            "items": { "enum": ["human-required", "deterministic-preauthorized"] }
-          }
-        }
-      }
-    },
-    "thresholdComparisons": {
-      "type": "array",
-      "maxItems": 32,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["policy"],
-        "properties": {
-          "policy": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["id", "metric", "maximumDifference"],
-            "properties": {
-              "id": { "$ref": "#/definitions/id" },
-              "metric": { "$ref": "#/definitions/id" },
-              "maximumDifference": { "type": "number", "minimum": 0 }
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": { "$ref": "#/definitions/deterministicGate" }
+          },
+          "thresholdComparisons": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["policy", "deterministicGates"],
+              "properties": {
+                "policy": { "$ref": "#/definitions/thresholdPolicy" },
+                "deterministicGates": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "uniqueItems": true,
+                  "items": { "$ref": "#/definitions/deterministicGate" }
+                }
+              }
             }
           }
         }
@@ -81,31 +71,72 @@
     }
   },
   "definitions": {
-    "id": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 160,
-      "pattern": "^[A-Za-z0-9._:/+\\-]+$"
-    },
+    "runtimeId": { "type": "string", "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "command": { "type": "string", "minLength": 1, "maxLength": 1000 },
     "mediaType": {
       "type": "string",
       "minLength": 1,
       "maxLength": 160,
       "pattern": "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$"
     },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["roleId", "mediaType"],
+      "properties": {
+        "roleId": { "$ref": "#/definitions/runtimeId" },
+        "mediaType": { "$ref": "#/definitions/mediaType" }
+      }
+    },
     "dimensions": {
-      "oneOf": [
-        { "type": "null" },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["width", "height"],
-          "properties": {
-            "width": { "type": "integer", "minimum": 1, "maximum": 16384 },
-            "height": { "type": "integer", "minimum": 1, "maximum": 16384 }
-          }
-        }
-      ]
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 16384 }
+      }
+    },
+    "nullableDimensions": { "oneOf": [{ "$ref": "#/definitions/dimensions" }, { "type": "null" }] },
+    "thresholdPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "metric", "maximumDifference"],
+      "properties": {
+        "id": { "$ref": "#/definitions/runtimeId" },
+        "metric": { "$ref": "#/definitions/runtimeId" },
+        "maximumDifference": { "type": "number", "minimum": 0 }
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "fixture", "seed"],
+      "properties": {
+        "id": { "$ref": "#/definitions/runtimeId" },
+        "fixture": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 500 }, { "type": "null" }] },
+        "seed": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 500 }, { "type": "null" }] }
+      },
+      "not": {
+        "properties": { "fixture": { "type": "string" }, "seed": { "type": "string" } },
+        "required": ["fixture", "seed"]
+      }
+    },
+    "deterministicGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "mediaTypes", "profiles", "visibilities", "rightsBases", "expectedDescriptorClasses", "scenarios", "maximumCriteria"],
+      "properties": {
+        "id": { "$ref": "#/definitions/runtimeId" },
+        "mediaTypes": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/definitions/mediaType" } },
+        "profiles": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["unprofiled", "raster"] } },
+        "visibilities": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["public", "private"] } },
+        "rightsBases": { "type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": { "enum": ["user-owned", "licensed", "permission-granted", "unknown"] } },
+        "expectedDescriptorClasses": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["opaque", "semantic"] } },
+        "scenarios": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/definitions/scenario" } },
+        "maximumCriteria": { "type": "integer", "minimum": 1, "maximum": 64 }
+      }
     }
-  }
+  },
+  "x-factory-executable-validation": "factory validate-captures [FILE]"
 }

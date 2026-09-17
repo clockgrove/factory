@@ -163,6 +163,17 @@ const proposalRequest = CompilerRequestSchema.parse({
     producerCapabilities: [],
     reviewRules: [],
   },
+  repositoryCapture: {
+    execution: { commands: [] },
+    egress: {
+      policyDigest: compilerEvalDigest(DEFAULT_RUN_POLICY.repositoryCaptureEgress),
+      deterministicGateIds: [...DEFAULT_RUN_POLICY.repositoryCaptureEgress.deterministicGateIds],
+      review: structuredClone(DEFAULT_RUN_POLICY.repositoryCaptureEgress.review),
+    },
+    reviewer: null,
+    comparators: [],
+    deterministicGates: [],
+  },
   constraints: {
     maxWorkItems: 100,
     planningWorkItemThreshold: 100,

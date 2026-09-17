@@ -25,7 +25,11 @@ import {
   type ManagementTranscriptRecorder,
 } from "../src/management/transcripts.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
-import type { CompilationContext, CompilerProposalCheckpoint } from "../src/management/backend.js";
+import {
+  EMPTY_REPOSITORY_CAPTURE_PLANNING,
+  type CompilationContext,
+  type CompilerProposalCheckpoint,
+} from "../src/management/backend.js";
 import {
   materializePinnedCompilationTree,
   sealPinnedCompilationTreeProof,
@@ -84,6 +88,7 @@ async function proposeWithTranscript(
     ...(pinned ? { pinnedCompilationTree: pinned.proof } : {}),
     allowedNetworkDestinations: [],
     runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
+    repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
   };
   try {
     return await backend.proposePlan(

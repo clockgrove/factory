@@ -54,14 +54,14 @@ GitHub issue.
 The model may return semantic `mediaIntents` for supported media types and producer roles advertised
 in the compiler request. Each intent cites Objective obligations and directed Work Item bindings,
 declares required or helpful necessity, sets bounded media type and count constraints, optionally
-adds a typed raster profile, and requests human review or a policy-authorized deterministic rule.
+adds a typed raster profile, and selects a preexisting human or deterministic capture gate.
 The model selects one strict fulfillment: exact imported manifest asset IDs, or produced media whose
 imported and prior-intent inputs are assigned to capability-advertised roles in
 `inputRoleBindings`. Factory resolves those IDs and derives the exact descriptor digests.
 For an `evidence-for` binding, the model also selects an expected imported asset, a bounded scenario,
 and grounded capture and optional comparison recipe IDs. It cannot author command text, output
 roles, MIME authority, comparison policy, providers, models, credentials, stores, URLs, network
-access, descriptor digests, or execution authority.
+access, descriptor digests, execution routes, reviewer capability, or gate authority.
 
 Factory first matches an intent against the selected imported manifest. A matching implementation
 reference becomes an exact `assetInputs` binding on the repository Work Item. Otherwise Factory may
@@ -73,8 +73,8 @@ bound `repository-change` Work Item. Trusted projection resolves `.factory/valid
 against commands observed from the pinned checkout and emits a digest-bound
 `repositoryCaptureRecipes` entry with the exact intent and criterion references, scenario input,
 declared output roles and MIME types, optional typed raster profile, exact-byte or bounded-threshold
-comparison with one explicit subject output role, and review gate. Comparisons name an installed
-Factory comparator contract; repository code never implements the comparison. The subject role names one declared output whose MIME exactly matches the
+comparison with one explicit subject output role, and capture-specific gate. Comparisons have no
+repository command. The subject role names one declared output whose MIME exactly matches the
 expected asset and is permitted by the intent. Raster profiles preserve catalog viewport, exact
 output dimensions, and role identities and add the intent's width, height, alpha, and animation
 acceptance constraints. Catalog exact dimensions and expected asset inspection must satisfy them.
@@ -84,16 +84,25 @@ the recipe. Required unsupported evidence fails compilation with a structured vi
 evidence may be omitted with an explicit trace disposition while its Work Item criteria and
 obligations remain.
 
-The committed catalog contains `captures` and `thresholdComparisons`; it has no protocol-version
-field or aliases. Every capture command must already be a repository-observed validation recipe,
-while each threshold policy selects an installed Factory comparator. Its JSON
-shape is [`schemas/validation-captures.schema.json`](../schemas/validation-captures.schema.json).
+The committed catalog contains `captures`; each capture owns its exact deterministic gates and its
+threshold policies, and each threshold policy owns its deterministic gates. Gate authority therefore
+cannot point at a different capture command or comparator policy. A capture names its comparison
+output directly, declares auxiliary outputs separately, and declares typed profile diff and preview
+outputs inline. It has no protocol-version field, aliases, or role-ID pointers whose meaning must be
+reconstructed from another field. Every capture command must already be a repository-observed
+validation recipe; threshold policies name installed Factory comparators and contain no command. Its
+structural JSON shape is
+[`schemas/validation-captures.schema.json`](../schemas/validation-captures.schema.json). Draft-07
+cannot express global uniqueness by identity; run
+`factory validate-captures` from the repository root for the canonical structural and semantic
+check before committing the file.
 Capture recipes are format-neutral: outputs may be structured JSON, opaque binary, raster, or any
 other bounded MIME identity. Runtime trees, artifacts, environments, captured bytes, receipts, and
 decisions are execution results and never recipe fields.
 Worker validation commands are unique and ordered by phase: ordinary validation first, then all
-capture commands. A human-required capture gate forces semantic review across the bound Work
-Item's complete acceptance set.
+capture commands. Reusing command text across recipe identities is rejected. A human-required
+capture gate forces semantic review for the exact criteria
+named by each capture binding.
 
 ## Repository-result capture
 
@@ -107,41 +116,50 @@ World is a qualification fixture for this composition, not an architecture bound
 
 Before capture execution, Factory persists one immutable validation invocation. It binds repository,
 Objective, run, Work Item and attempt identity; artifact, base and result-tree identity; ordered
-ordinary and capture commands; recipes and output authorities; expected descriptor,
+ordinary and capture commands; recipes, installed comparator contracts and output authorities; expected descriptor,
 content and storage-receipt digests; the selected validation environment; and the complete
 `repositoryCaptureEgress` policy. A result is an immutable child of that intent. Capture descriptors,
 storage receipts, mechanical comparison results and validation evidence all repeat the invocation
 digest and artifact/base/result-tree identities. Factory checks the result tree before and after
 persisting captured bytes, so a valid capture cannot be paired with a different repository result.
 
-For an exact comparison, the trusted host compares the captured SHA-256 with the expected content
-digest. For a threshold comparison, Factory downloads expected bytes into controller-owned storage
-only after every repository command exits, then invokes the installed comparator over expected and
-observed bytes. Local and isolated validators never receive expected bytes and never provide the
-certified difference scalar.
-All captured outputs return to the host, are checked against their declared MIME and optional typed
+Exact and threshold comparisons share the same trust boundary. The validator receives no expected
+bytes. After capture commands exit, the trusted Factory host compares either the captured SHA-256
+or the immutable expected and observed payloads with the installed comparator named by the policy.
+Repository code never supplies the comparison scalar. All captured outputs return to the host, are checked against their declared MIME and optional typed
 profile, and are retained through immutable `validation-evidence` content transfers. An opaque
 unprofiled output may establish an exact byte match, but it carries no semantic-validity claim.
 
-Mechanical validation and semantic review are separate gates. Exact equality, a grounded threshold,
-declared content identity and a typed handler check can produce mechanical evidence. When an
+Mechanical validation and semantic review are separate gates. Exact equality, a grounded threshold
+executed by its installed comparator contract, declared content identity, and a typed handler check
+can produce mechanical evidence. A repository-authored scalar or model claim does not create
+deterministic gate authority. When an
 acceptance criterion still requires judgment, Factory may materialize the expected and observed
 bytes for the independent reviewer only after the immutable review policy and the selected
 management adapter's reviewer capability both allow every MIME type, typed profile, semantic handler,
-visibility, rights basis, network destination and unique payload count. Expected and observed
-associations are bounded uses of immutable payloads, so identical bytes with the same security
-identity are stored and materialized once without losing recipe, role, path, criterion, or authorization context. The files are rehashed,
+visibility, rights basis, network destination and deduplicated asset count. The files are rehashed,
 placed in private read-only staging and supplied separately from the textual prompt. Repository files
 and every evidence byte remain untrusted reviewer input. The durable review receipt stays separate
 from validation evidence and binds its exact evidence digest and result tree.
 
-`repositoryCaptureEgress.validation` and `repositoryCaptureEgress.review` are independent and deny
-external disclosure by default. Compiler input egress does not grant either permission. The
-validation count covers only threshold expected inputs sent to a third-party validator. The review
-count covers the complete deduplicated expected-plus-observed bundle and additionally requires an
+`repositoryCaptureEgress.review` denies reviewer disclosure by default. Compiler input egress does
+not grant review permission. The review count covers the complete deduplicated
+expected-plus-observed bundle and additionally requires an
 explicit reviewer capability ID. `public-assets` excludes private bytes; `private-assets` permits
 both visibility classes but still requires compatible rights, handlers, adapter capabilities and
 ordinary network-destination policy.
+
+The compiler request exposes only machine-derived repository-result capture facts. Each capture
+recipe names its authorized local managed-runtime route and isolated validation routes; each
+threshold policy names only its installed Factory comparator contract;
+the request also binds the exact capture-policy digest, reviewer ID, MIME types,
+profiles, semantic handlers, visibility and rights sets, destinations, and deduplicated asset bound.
+Deterministic rules are explicit repository configuration allowed by immutable run policy. Factory
+binds a selected rule to the exact expected descriptor, scenario, command/comparator identities,
+criteria, and policy digest in the Worker Packet, then recomputes those bindings during validation.
+The model cannot create or broaden that authority. Exact comparison of an opaque passive output
+remains valid when such a rule authorizes its MIME and opaque descriptor class; it makes no semantic
+claim.
 
 Recovery observes the exact invocation before considering another launch. Local commands have
 durable dispatch and terminal records, and ambiguous dispatch without a terminal record fails closed.

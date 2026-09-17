@@ -1,12 +1,16 @@
 import { createHash } from "node:crypto";
 
 import {
+  CompilerRepositoryCaptureGateRuleSchema,
   CompilerToolchainCapabilitySchema,
   CompilerValidationRecipeSchema,
   RepositoryCaptureCatalogSchema,
   type CompilerToolchainCapability,
   type CompilerValidationRecipe,
+  type CompilerRepositoryCaptureGateRule,
+  type CompilerRepositoryComparator,
 } from "../compiler/contracts.js";
+import { compilerEvalDigest } from "../evaluation/compiler-eval.js";
 import {
   discoverValidationCommands,
   normalizeRepositoryFacts,
@@ -25,6 +29,8 @@ import {
 export interface CompilerRepositoryCapabilities {
   validationRecipes: CompilerValidationRecipe[];
   toolchains: CompilerToolchainCapability[];
+  repositoryComparators: CompilerRepositoryComparator[];
+  deterministicCaptureGates: CompilerRepositoryCaptureGateRule[];
 }
 
 const uniqueSorted = (values: readonly string[]) => [...new Set(values)].sort();
@@ -220,9 +226,14 @@ function genericRecipes(pinned: PinnedRepositoryFacts): CompilerValidationRecipe
 function bindRepositoryCaptureRecipes(
   recipes: CompilerValidationRecipe[],
   pinned: PinnedRepositoryFacts,
-): CompilerValidationRecipe[] {
+): {
+  validationRecipes: CompilerValidationRecipe[];
+  repositoryComparators: CompilerRepositoryComparator[];
+  deterministicCaptureGates: CompilerRepositoryCaptureGateRule[];
+} {
   const document = pinned.repository.documents?.[".factory/validation-captures.json"];
-  if (document === undefined) return recipes;
+  if (document === undefined)
+    return { validationRecipes: recipes, repositoryComparators: [], deterministicCaptureGates: [] };
   let decoded: unknown;
   try {
     decoded = JSON.parse(document);
@@ -231,40 +242,123 @@ function bindRepositoryCaptureRecipes(
   }
   const catalog = RepositoryCaptureCatalogSchema.parse(decoded);
   const captureByCommand = new Map<string, CompilerValidationRecipe["capture"]>();
+  const configuredGates: Array<{
+    captureCommand: string;
+    comparison:
+      | { kind: "exact" }
+      | {
+          kind: "threshold";
+          policy: (typeof catalog.captures)[number]["thresholdComparisons"][number]["policy"];
+        };
+    rule: (typeof catalog.captures)[number]["exactDeterministicGates"][number];
+  }> = [];
   for (const entry of catalog.captures) {
     if (captureByCommand.has(entry.command))
       throw new Error("capture catalog configures one command more than once");
-    const { command, ...capture } = entry;
-    captureByCommand.set(command, { kind: "capture", ...capture });
-  }
-  for (const entry of catalog.thresholdComparisons) {
-    const comparator = repositoryComparatorContracts.find(({ id }) => id === entry.policy.metric);
-    if (!comparator)
-      throw new Error(`capture catalog requests unavailable comparator ${entry.policy.metric}`);
-    const command = `factory:compare:${entry.policy.id}`;
-    if (recipes.some((recipe) => recipe.command === command))
-      throw new Error("capture catalog comparator identity conflicts with an observed command");
-    recipes.push(
-      CompilerValidationRecipeSchema.parse({
-        id: entry.policy.id,
-        command,
-        adapterId: "factory-repository-comparator",
-        requiredTools: [],
-        networkDestinations: [],
-        capture: { kind: "threshold-comparison", policy: entry.policy },
-      }),
+    const {
+      command,
+      comparisonOutput,
+      auxiliaryOutputs,
+      profile,
+      exactDeterministicGates,
+      thresholdComparisons,
+    } = entry;
+    const outputs = [
+      comparisonOutput,
+      ...auxiliaryOutputs,
+      ...(profile?.diffOutput ? [profile.diffOutput] : []),
+      ...(profile?.previewOutput ? [profile.previewOutput] : []),
+    ];
+    captureByCommand.set(command, {
+      kind: "capture",
+      outputs,
+      comparisonOutputRoleId: comparisonOutput.roleId,
+      profile: profile
+        ? {
+            kind: "raster",
+            viewport: profile.viewport,
+            output: profile.output,
+            captureRoleId: comparisonOutput.roleId,
+            diffRoleId: profile.diffOutput?.roleId ?? null,
+            previewRoleId: profile.previewOutput?.roleId ?? null,
+          }
+        : null,
+      humanReview: entry.humanReview,
+    });
+    configuredGates.push(
+      ...exactDeterministicGates.map((rule) => ({
+        captureCommand: command,
+        comparison: { kind: "exact" as const },
+        rule,
+      })),
+      ...thresholdComparisons.flatMap(({ policy, deterministicGates }) =>
+        deterministicGates.map((rule) => ({
+          captureCommand: command,
+          comparison: { kind: "threshold" as const, policy },
+          rule,
+        })),
+      ),
     );
   }
   const observed = new Set(recipes.map(({ command }) => command));
   const unknown = [...captureByCommand.keys()].filter((command) => !observed.has(command));
   if (unknown.length)
     throw new Error(`capture catalog references unobserved command: ${unknown.sort().join(", ")}`);
-  return recipes.map((recipe) =>
+  const validationRecipes = recipes.map((recipe) =>
     CompilerValidationRecipeSchema.parse({
       ...recipe,
       capture: captureByCommand.get(recipe.command) ?? recipe.capture,
     }),
   );
+  const recipeByCommand = new Map(validationRecipes.map((recipe) => [recipe.command, recipe]));
+  const repositoryComparators: CompilerRepositoryComparator[] = catalog.captures.flatMap(
+    ({ command, thresholdComparisons }) => {
+      const capture = recipeByCommand.get(command);
+      if (capture?.capture?.kind !== "capture")
+        throw new Error(`capture catalog command ${command} lacks its authoritative recipe`);
+      return thresholdComparisons.map(({ policy }) => {
+        const comparator = repositoryComparatorContracts.find(({ id }) => id === policy.metric);
+        if (!comparator)
+          throw new Error(`capture catalog requests unavailable comparator ${policy.metric}`);
+        return {
+          captureRecipeId: capture.id,
+          captureRecipeDigest: compilerEvalDigest(capture),
+          policy,
+          comparator,
+        };
+      });
+    },
+  );
+  const comparatorByPolicyId = new Map(
+    repositoryComparators.map((comparator) => [comparator.policy.id, comparator]),
+  );
+  const deterministicCaptureGates = configuredGates.map(({ captureCommand, comparison, rule }) => {
+    const capture = recipeByCommand.get(captureCommand);
+    if (capture?.capture?.kind !== "capture")
+      throw new Error(`capture gate ${rule.id} lacks its authoritative capture recipe`);
+    const boundComparison =
+      comparison.kind === "exact"
+        ? { kind: "exact" as const }
+        : ((selected) => {
+            if (!selected)
+              throw new Error(`capture gate ${rule.id} lacks its authoritative comparator`);
+            return {
+              kind: "threshold" as const,
+              policyId: selected.policy.id,
+              policyDigest: compilerEvalDigest(selected.policy),
+              comparator: selected.comparator,
+              metric: selected.policy.metric,
+              maximumDifference: selected.policy.maximumDifference,
+            };
+          })(comparatorByPolicyId.get(comparison.policy.id));
+    return CompilerRepositoryCaptureGateRuleSchema.parse({
+      ...rule,
+      captureRecipeId: capture.id,
+      captureRecipeDigest: compilerEvalDigest(capture),
+      comparison: boundComparison,
+    });
+  });
+  return { validationRecipes, repositoryComparators, deterministicCaptureGates };
 }
 
 /** Pure prompt-safe capability selection over immutable facts and accepted policy. */
@@ -290,18 +384,24 @@ export function compilerCapabilitiesForRepository(
   const observedAdapters = TOOLCHAIN_AUTHORITY_ADAPTERS.filter(
     (adapter) => states.get(adapter.id) === "observed",
   );
-  const validationRecipes = bindRepositoryCaptureRecipes(
+  const bound = bindRepositoryCaptureRecipes(
     [
       ...observedAdapters.flatMap((adapter) => adapterRecipes(adapter, pinned)),
       ...genericRecipes(pinned),
     ],
     pinned,
-  )
+  );
+  const validationRecipes = bound.validationRecipes
     .sort((left, right) => left.id.localeCompare(right.id))
     .filter(
       (recipe, index, all) => all.findIndex((candidate) => candidate.id === recipe.id) === index,
     );
-  return { validationRecipes, toolchains };
+  return {
+    validationRecipes,
+    toolchains,
+    repositoryComparators: bound.repositoryComparators,
+    deterministicCaptureGates: bound.deterministicCaptureGates,
+  };
 }
 
 export function formatCompilerOperation(

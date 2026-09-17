@@ -235,9 +235,84 @@ const RepositoryCaptureComparisonSchema = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 
+const RepositoryCaptureDeterministicGateAuthorityCoreSchema = z
+  .object({
+    protocol: z.literal("clockgrove.factory/repository-capture-gate-authority"),
+    authorityId: safeId,
+    captureCommand: RepositoryCommandIdentitySchema,
+    comparison: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("exact") }).strict(),
+      z
+        .object({
+          kind: z.literal("threshold"),
+          comparator: z
+            .object({ id: safeId, contract: z.number().int().positive().max(1_000) })
+            .strict(),
+          metric: safeId,
+          maximumDifference: z.number().finite().min(0),
+        })
+        .strict(),
+    ]),
+    expectedDescriptorDigest: sha256Digest,
+    expectedMediaType: MediaTypeSchema,
+    expectedDescriptorClass: z.enum(["opaque", "semantic"]),
+    expectedVisibility: z.enum(["public", "private"]),
+    expectedRightsBasis: z.enum(["user-owned", "licensed", "permission-granted", "unknown"]),
+    observedVisibility: z.literal("private"),
+    observedRightsBasis: z.literal("unknown"),
+    profileId: safeId.nullable(),
+    scenario: z
+      .object({
+        id: safeId,
+        fixture: boundedText(500).nullable(),
+        seed: boundedText(500).nullable(),
+      })
+      .strict(),
+    criterionIds: shortList(safeId, 64).min(1),
+    maximumCriteria: z.number().int().min(1).max(64),
+    policyDigest: sha256Digest,
+  })
+  .strict();
+
+export const RepositoryCaptureDeterministicGateAuthoritySchema =
+  RepositoryCaptureDeterministicGateAuthorityCoreSchema.extend({ digest: sha256Digest })
+    .strict()
+    .superRefine((authority, context) => {
+      const { digest, ...core } = authority;
+      if (digest !== createHash("sha256").update(canonicalJson(core)).digest("hex"))
+        context.addIssue({
+          code: "custom",
+          path: ["digest"],
+          message: "gate authority digest mismatch",
+        });
+      if (new Set(authority.criterionIds).size !== authority.criterionIds.length)
+        context.addIssue({
+          code: "custom",
+          path: ["criterionIds"],
+          message: "gate criteria are duplicated",
+        });
+      if (authority.criterionIds.length > authority.maximumCriteria)
+        context.addIssue({
+          code: "custom",
+          path: ["criterionIds"],
+          message: "gate criteria exceed authority",
+        });
+      if (authority.scenario.fixture !== null && authority.scenario.seed !== null)
+        context.addIssue({
+          code: "custom",
+          path: ["scenario"],
+          message: "gate scenario is ambiguous",
+        });
+    });
+
 const RepositoryCaptureGateSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("human-required") }).strict(),
-  z.object({ kind: z.literal("deterministic-preauthorized"), ruleId: safeId }).strict(),
+  z
+    .object({
+      kind: z.literal("deterministic-preauthorized"),
+      authority: RepositoryCaptureDeterministicGateAuthoritySchema,
+    })
+    .strict(),
 ]);
 
 const RepositoryCaptureRecipeCoreSchema = z
@@ -324,6 +399,31 @@ export const RepositoryCaptureRecipeSchema = RepositoryCaptureRecipeCoreSchema.e
         path: ["comparison", "comparator"],
         message: "threshold metric differs from its installed comparator identity",
       });
+    if (value.gate.kind === "deterministic-preauthorized") {
+      const authority = value.gate.authority;
+      const comparisonMatches =
+        (value.comparison.kind === "exact" && authority.comparison.kind === "exact") ||
+        (value.comparison.kind === "threshold" &&
+          authority.comparison.kind === "threshold" &&
+          canonicalJson(value.comparison.comparator) ===
+            canonicalJson(authority.comparison.comparator) &&
+          value.comparison.policy.metric === authority.comparison.metric &&
+          value.comparison.policy.maximumDifference === authority.comparison.maximumDifference);
+      if (
+        canonicalJson(value.captureCommand) !== canonicalJson(authority.captureCommand) ||
+        value.comparison.expectedDescriptorDigest !== authority.expectedDescriptorDigest ||
+        canonicalJson(value.scenario) !== canonicalJson(authority.scenario) ||
+        canonicalJson([...value.criterionIds].sort()) !==
+          canonicalJson([...authority.criterionIds].sort()) ||
+        (value.profile?.kind ?? null) !== authority.profileId ||
+        !comparisonMatches
+      )
+        context.addIssue({
+          code: "custom",
+          path: ["gate", "authority"],
+          message: "deterministic gate authority differs from its capture recipe",
+        });
+    }
   });
 
 export const CriterionRiskAssessmentSchema = z

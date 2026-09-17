@@ -223,9 +223,13 @@ function entry(
   return { descriptor, storage };
 }
 
-async function fixture() {
+async function fixture(options: { maxAttemptsPerItem?: number } = {}) {
   const memory = memoryStore();
   const authority = { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) };
+  const runPolicy = {
+    ...DEFAULT_RUN_POLICY,
+    maxAttemptsPerItem: options.maxAttemptsPerItem ?? DEFAULT_RUN_POLICY.maxAttemptsPerItem,
+  };
   const exactPacket = packet();
   const invocation = createMediaInvocation({
     repository: authority.repository,
@@ -238,7 +242,7 @@ async function fixture() {
     inputEntries: [],
     authorityBaseSha: authority.baseSha,
     deadline: "2099-01-01T00:00:00.000Z",
-    policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+    policyDigest: policyDigest(runPolicy),
     outputVisibility: "private",
     outputRights: { basis: "unknown" },
   });
@@ -256,8 +260,8 @@ async function fixture() {
     fork: false,
     baseBranch: "main",
     baseSha: authority.baseSha,
-    policy: DEFAULT_RUN_POLICY,
-    policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+    policy: runPolicy,
+    policyDigest: policyDigest(runPolicy),
   });
   const reserved = parseFactoryEvent({
     protocol: "clockgrove.factory/v2",
@@ -272,7 +276,7 @@ async function fixture() {
     backend: capability.id,
     baseSha: authority.baseSha,
     directorEpoch: 1,
-    policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+    policyDigest: policyDigest(runPolicy),
     mediaInvocation: invocation,
   });
   const emptyTree = await memory.store.createTree({ entries: [] });
@@ -352,28 +356,36 @@ async function fixture() {
   };
   let login = "reviewer";
   let failNextComment = false;
+  let failCommentEvent: FactoryEvent["event"] | null = null;
   const comments: FactoryEvent[] = [];
-  const service = new FactoryApplicationService({
-    owner: "fixture",
-    repo: "project",
-    reader: { readObjective: async () => structuredClone(current) },
-    assetStore: memory.store,
-    store: {
-      getAuthenticatedLogin: async () => login,
-      serverTime: async () => new Date("2026-01-01T00:03:00.000Z"),
-      addIssueComment: async (_issue, body) => {
-        if (failNextComment) {
-          failNextComment = false;
-          throw new Error("simulated publication interruption");
-        }
-        const decoded = decodeEventComments(body);
-        comments.push(...decoded);
-        current.factoryEvents!.push(...decoded);
+  const serviceForRestart = () =>
+    new FactoryApplicationService({
+      owner: "fixture",
+      repo: "project",
+      reader: { readObjective: async () => structuredClone(current) },
+      assetStore: memory.store,
+      store: {
+        getAuthenticatedLogin: async () => login,
+        serverTime: async () => new Date("2026-01-01T00:03:00.000Z"),
+        addIssueComment: async (_issue, body) => {
+          const decoded = decodeEventComments(body);
+          if (
+            failNextComment ||
+            (failCommentEvent !== null && decoded.some(({ event }) => event === failCommentEvent))
+          ) {
+            failNextComment = false;
+            failCommentEvent = null;
+            throw new Error("simulated publication interruption");
+          }
+          comments.push(...decoded);
+          current.factoryEvents!.push(...decoded);
+        },
       },
-    },
-  });
+    });
+  const service = serviceForRestart();
   return {
     service,
+    serviceForRestart,
     current,
     assetSet,
     comments,
@@ -383,6 +395,9 @@ async function fixture() {
     },
     failNextComment: () => {
       failNextComment = true;
+    },
+    failCommentEvent: (event: FactoryEvent["event"]) => {
+      failCommentEvent = event;
     },
   };
 }
@@ -404,6 +419,7 @@ describe("media application commands", () => {
     expect(first).toMatchObject({
       operation: "asset-approve",
       decision: { kind: "approved", selectedDescriptorDigests },
+      requestJournal: { digest: expect.stringMatching(/^[a-f0-9]{64}$/) },
       activation: { selectedDescriptorDigests },
     });
     expect(test.comments.map(({ event }) => event)).toEqual([
@@ -422,7 +438,7 @@ describe("media application commands", () => {
         at: "2026-01-01T00:04:00.000Z",
       }),
     );
-    expect(await test.service.assetDecision(input)).toEqual(first);
+    expect(await test.serviceForRestart().assetDecision(input)).toEqual(first);
     expect(test.refWrites()).toBe(writes);
     expect(test.comments).toHaveLength(2);
     expect(first.activation).toBeDefined();
@@ -470,13 +486,54 @@ describe("media application commands", () => {
     await expect(test.service.assetDecision(input)).rejects.toThrow(/publication interruption/);
     const writes = test.refWrites();
     expect(test.comments).toHaveLength(0);
-    const repaired = await test.service.assetDecision(input);
+    const repaired = await test.serviceForRestart().assetDecision(input);
     expect(repaired.operation).toBe("asset-approve");
     expect(test.refWrites()).toBe(writes);
     expect(test.comments.map(({ event }) => event)).toEqual([
       "AssetDecisionRecorded",
       "AssetActivated",
     ]);
+  });
+
+  it("repairs the canonical revision retry after a restart without another user command", async () => {
+    const test = await fixture();
+    const input = {
+      objective: 7,
+      requestId: "repair-revision",
+      assetSetDigest: test.assetSet.digest,
+      kind: "revision-requested" as const,
+      reason: "Retain the layout and increase foreground contrast.",
+    };
+    test.failCommentEvent("WorkItemRetryRequested");
+    await expect(test.service.assetDecision(input)).rejects.toThrow(/publication interruption/);
+    expect(test.comments.map(({ event }) => event)).toEqual(["AssetDecisionRecorded"]);
+    const writes = test.refWrites();
+    const repaired = await test.serviceForRestart().assetDecision(input);
+    expect(repaired).toMatchObject({
+      operation: "asset-revise",
+      retry: { workItem: 17, priorDecisionDigest: repaired.decision.digest },
+    });
+    expect(test.refWrites()).toBe(writes);
+    expect(test.comments.map(({ event }) => event)).toEqual([
+      "AssetDecisionRecorded",
+      "WorkItemRetryRequested",
+    ]);
+  });
+
+  it("refuses to journal a revision after the bounded attempt allowance is exhausted", async () => {
+    const test = await fixture({ maxAttemptsPerItem: 1 });
+    const writes = test.refWrites();
+    await expect(
+      test.service.assetDecision({
+        objective: 7,
+        requestId: "exhausted-revision",
+        assetSetDigest: test.assetSet.digest,
+        kind: "revision-requested",
+        reason: "Generate one more bounded variant.",
+      }),
+    ).rejects.toThrow(/maximum attempts/);
+    expect(test.refWrites()).toBe(writes);
+    expect(test.comments).toHaveLength(0);
   });
 
   it("validates authority and the complete decision shape before durable writes", async () => {
@@ -530,14 +587,30 @@ describe("media application commands", () => {
       });
       expect(result).toMatchObject({ operation, decision: { kind, reason } });
       expect(result).not.toHaveProperty("activation");
-      expect(
-        (
-          await test.service.assetStatus({
-            objective: 7,
-            assetSetDigest: test.assetSet.digest,
-          })
-        ).review,
-      ).toMatchObject({ state: kind, decision: { kind, reason }, activation: null });
+      if (kind === "revision-requested") {
+        expect(result).toMatchObject({
+          retry: {
+            workItem: 17,
+            priorAssetSetDigest: test.assetSet.digest,
+            priorDecisionDigest: result.decision.digest,
+          },
+        });
+        expect(test.comments.map(({ event }) => event)).toEqual([
+          "AssetDecisionRecorded",
+          "WorkItemRetryRequested",
+        ]);
+      }
+      const status = await test.service.assetStatus({
+        objective: 7,
+        assetSetDigest: test.assetSet.digest,
+      });
+      expect(status.review).toMatchObject({
+        state: kind,
+        decision: { kind, reason },
+        activation: null,
+      });
+      if (kind === "revision-requested")
+        expect(status.review.decision).toMatchObject({ retry: { published: true, workItem: 17 } });
     },
   );
 });

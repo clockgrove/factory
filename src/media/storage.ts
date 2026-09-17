@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { z } from "zod";
 
 import {
   ObjectiveAssetAuthoritySchema,
@@ -7,6 +8,7 @@ import {
 } from "../assets/contracts.js";
 import { persistProducedAssetManifest } from "../assets/storage.js";
 import type { ContentTransferStore } from "../control/content-transfers.js";
+import { boundedText, safeId, sha256Digest } from "../protocol/limits.js";
 import {
   AssetActivationSchema,
   AssetDecisionSchema,
@@ -30,7 +32,7 @@ const scopeKey = (authority: unknown, runId: string) => assetDigest({ authority,
 const recordRef = (
   authority: unknown,
   runId: string,
-  collection: "dispatches" | "asset-sets" | "decisions" | "activations",
+  collection: "dispatches" | "asset-sets" | "decision-requests" | "decisions" | "activations",
   digest: string,
 ) => `refs/clockgrove-factory/media/${scopeKey(authority, runId)}/${collection}/${digest}`;
 export const mediaAssetSetDecisionRef = (
@@ -39,6 +41,11 @@ export const mediaAssetSetDecisionRef = (
   assetSetDigest: string,
 ) =>
   `refs/clockgrove-factory/media/${scopeKey(authority, runId)}/asset-set-decisions/${assetSetDigest}`;
+export const mediaDecisionRequestRef = (repository: string, objective: number, requestId: string) =>
+  `refs/clockgrove-factory/media/${assetDigest({
+    repository: repository.toLowerCase(),
+    objective,
+  })}/decision-requests/${assetDigest(requestId)}`;
 export const mediaInvocationDispatchRef = (
   authority: unknown,
   runId: string,
@@ -46,11 +53,116 @@ export const mediaInvocationDispatchRef = (
 ) =>
   `refs/clockgrove-factory/media/${scopeKey(authority, runId)}/invocation-dispatches/${invocationDigest}`;
 
+const MediaRevisionRetrySchema = z
+  .object({
+    requestId: safeId,
+    workItem: z.number().int().positive(),
+    priorAssetSetDigest: sha256Digest,
+    priorDecisionDigest: sha256Digest,
+    feedback: boundedText(8_000),
+    feedbackDigest: sha256Digest,
+  })
+  .strict();
+
+const MediaDecisionRequestCoreSchema = z
+  .object({
+    protocol: z.literal("clockgrove.factory/media-decision-request"),
+    authority: ObjectiveAssetAuthoritySchema,
+    decision: AssetDecisionSchema,
+    reason: boundedText(8_000).nullable(),
+    retry: MediaRevisionRetrySchema.nullable(),
+  })
+  .strict();
+
+export const MediaDecisionRequestSchema = MediaDecisionRequestCoreSchema.extend({
+  digest: sha256Digest,
+})
+  .strict()
+  .superRefine((value, context) => {
+    const { digest, ...core } = value;
+    if (digest !== assetDigest(core))
+      context.addIssue({ code: "custom", message: "media decision request digest mismatch" });
+    const reasonDigest = value.reason
+      ? createHash("sha256").update(value.reason).digest("hex")
+      : null;
+    if (
+      (value.decision.kind === "approved" && (value.reason !== null || value.retry !== null)) ||
+      (value.decision.kind === "rejected" &&
+        (reasonDigest !== value.decision.reasonDigest || value.retry !== null)) ||
+      (value.decision.kind === "revision-requested" &&
+        (reasonDigest !== value.decision.feedbackDigest || value.retry === null))
+    )
+      context.addIssue({
+        code: "custom",
+        message: "media decision request differs from its decision semantics",
+      });
+    if (
+      value.retry &&
+      (value.retry.workItem !== value.decision.producerWorkItem ||
+        value.retry.priorAssetSetDigest !== value.decision.assetSetDigest ||
+        value.retry.priorDecisionDigest !== value.decision.digest ||
+        value.retry.feedback !== value.reason ||
+        value.retry.feedbackDigest !== value.decision.feedbackDigest ||
+        value.retry.requestId !== mediaRevisionRetryRequestId(value.authority, value.decision))
+    )
+      context.addIssue({
+        code: "custom",
+        message: "media revision retry differs from its immutable decision request",
+      });
+  });
+
+export type MediaDecisionRequest = z.infer<typeof MediaDecisionRequestSchema>;
+
+export function mediaRevisionRetryRequestId(
+  authorityInput: unknown,
+  decisionInput: AssetDecision,
+): string {
+  const authority = ObjectiveAssetAuthoritySchema.parse(authorityInput);
+  const decision = AssetDecisionSchema.parse(decisionInput);
+  return `media-revision:${assetDigest([
+    authority.repository,
+    authority.objective,
+    decision.runId,
+    decision.requestId,
+    decision.digest,
+  ]).slice(0, 48)}`;
+}
+
+export function createMediaDecisionRequest(args: {
+  authority: unknown;
+  decision: AssetDecision;
+  reason?: string;
+}): MediaDecisionRequest {
+  const authority = ObjectiveAssetAuthoritySchema.parse(args.authority);
+  const decision = AssetDecisionSchema.parse(args.decision);
+  const reason = args.reason ?? null;
+  const retry =
+    decision.kind === "revision-requested" && reason
+      ? {
+          requestId: mediaRevisionRetryRequestId(authority, decision),
+          workItem: decision.producerWorkItem,
+          priorAssetSetDigest: decision.assetSetDigest,
+          priorDecisionDigest: decision.digest,
+          feedback: reason,
+          feedbackDigest: decision.feedbackDigest!,
+        }
+      : null;
+  return MediaDecisionRequestSchema.parse(
+    withMediaDigest({
+      protocol: "clockgrove.factory/media-decision-request" as const,
+      authority,
+      decision,
+      reason,
+      retry,
+    }),
+  );
+}
+
 async function publishRecord(args: {
   store: MediaStore;
   authority: unknown;
   runId: string;
-  collection: "dispatches" | "asset-sets" | "decisions" | "activations";
+  collection: "dispatches" | "asset-sets" | "decision-requests" | "decisions" | "activations";
   digest: string;
   filename: string;
   record: unknown;
@@ -126,7 +238,7 @@ async function readRecord<T>(args: {
   store: MediaStore;
   authority: unknown;
   runId: string;
-  collection: "dispatches" | "asset-sets" | "decisions" | "activations";
+  collection: "dispatches" | "asset-sets" | "decision-requests" | "decisions" | "activations";
   digest: string;
   filename: string;
   parse(value: unknown): T;
@@ -220,6 +332,66 @@ export function readAssetDecisionByAssetSet(args: {
     ...args,
     ref: mediaAssetSetDecisionRef(args.authority, args.runId, args.assetSetDigest),
   });
+}
+
+export async function persistMediaDecisionRequest(args: {
+  store: MediaStore;
+  request: MediaDecisionRequest;
+  parentOids: string[];
+  assertCurrent(): Promise<void>;
+}) {
+  const request = MediaDecisionRequestSchema.parse(args.request);
+  const primaryRef = mediaDecisionRequestRef(
+    request.authority.repository,
+    request.authority.objective,
+    request.decision.requestId,
+  );
+  return {
+    request,
+    ...(await publishRecord({
+      store: args.store,
+      authority: request.authority,
+      runId: request.decision.runId,
+      collection: "decision-requests",
+      digest: request.digest,
+      filename: "media-decision-request.json",
+      record: request,
+      parentOids: args.parentOids,
+      primaryRef,
+      publishDigestRef: false,
+      assertCurrent: args.assertCurrent,
+    })),
+  };
+}
+
+export async function readMediaDecisionRequest(args: {
+  store: MediaStore;
+  repository: string;
+  objective: number;
+  requestId: string;
+}) {
+  const ref = mediaDecisionRequestRef(args.repository, args.objective, args.requestId);
+  const oid = await args.store.readRef(ref);
+  if (!oid) return null;
+  const commit = await args.store.readCommit(oid);
+  const blob = await args.store.readTreeEntry(commit.treeOid, "media-decision-request.json");
+  if (!blob) throw new Error("immutable media decision request blob is missing");
+  const bytes = await args.store.readBlob(blob);
+  if (gitOid(bytes) !== blob)
+    throw new Error("immutable media decision request Git identity mismatch");
+  const request = MediaDecisionRequestSchema.parse(JSON.parse(bytes.toString("utf8")));
+  if (
+    commit.message.trim() !==
+    `Factory immutable media decision-requests\n\nFactory-Media-Digest: ${request.digest}`
+  )
+    throw new Error("immutable media decision request commit identity mismatch");
+  if (
+    request.authority.repository !== args.repository.toLowerCase() ||
+    request.authority.objective !== args.objective ||
+    request.decision.requestId !== args.requestId
+  )
+    throw new Error("media decision request differs from its request authority");
+  return { request, ref, commit: oid };
 }
 
 export async function readMediaDispatchReceiptByInvocation(args: {

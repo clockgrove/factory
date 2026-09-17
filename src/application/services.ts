@@ -62,11 +62,15 @@ import { createAssetDecision } from "../media/lifecycle.js";
 import type { AssetActivation, AssetDecision, AssetSet } from "../media/contracts.js";
 import {
   createAssetActivation,
+  createMediaDecisionRequest,
   persistAssetActivation,
   persistAssetDecision,
+  persistMediaDecisionRequest,
   readAssetActivation,
   readAssetDecisionByAssetSet,
   readAssetSet,
+  readMediaDecisionRequest,
+  type MediaDecisionRequest,
 } from "../media/storage.js";
 
 const uniqueDigests = z
@@ -492,11 +496,40 @@ export class FactoryApplicationService {
     const decisionEvent = decisionEvents[0];
     if (decisionEvent && !storedDecision)
       throw new Error("authenticated media decision has no durable record");
+    let storedRequest: Awaited<ReturnType<typeof readMediaDecisionRequest>> = null;
     if (storedDecision) {
       this.assertDecisionBinding(storedDecision.decision, resolved);
-      await this.assertCommitParents(storedDecision.commit, [resolved.stored.commit]);
+      if (storedDecision.decision.ruleId === null) {
+        storedRequest = await readMediaDecisionRequest({
+          store: this.context.assetStore,
+          repository: resolved.authority.repository,
+          objective: command.objective,
+          requestId: storedDecision.decision.requestId,
+        });
+        if (!storedRequest)
+          throw new Error("human media decision has no immutable request journal");
+        this.assertDecisionRequest(storedRequest.request, storedDecision.decision, resolved);
+        await this.assertCommitParents(storedRequest.commit, [resolved.stored.commit]);
+      }
+      await this.assertCommitParents(storedDecision.commit, [
+        resolved.stored.commit,
+        ...(storedRequest ? [storedRequest.commit] : []),
+      ]);
       if (decisionEvent) this.assertDecisionEvent(decisionEvent, storedDecision.decision, resolved);
     }
+    const retryEvents = storedRequest?.request.retry
+      ? (events.filter(
+          (event) =>
+            event.kind === "run" &&
+            event.event === "WorkItemRetryRequested" &&
+            event.requestId === storedRequest!.request.retry!.requestId,
+        ) as FactoryEvent[])
+      : [];
+    if (retryEvents.length > 1)
+      throw new Error("media revision has multiple authenticated retry commands");
+    const retryEvent = retryEvents[0];
+    if (storedRequest?.request.retry && retryEvent)
+      this.assertRevisionRetryEvent(retryEvent, storedRequest.request);
     const activationEvents = events.filter(
       (event) =>
         event.kind === "media" &&
@@ -545,11 +578,13 @@ export class FactoryApplicationService {
       ? "for-review"
       : !decisionEvent
         ? "decision-publication-pending"
-        : storedDecision.decision.kind !== "approved"
-          ? storedDecision.decision.kind
-          : !activation || !activationEvents[0]
-            ? "activation-publication-pending"
-            : "approved";
+        : storedRequest?.request.retry && !retryEvent
+          ? "retry-publication-pending"
+          : storedDecision.decision.kind !== "approved"
+            ? storedDecision.decision.kind
+            : !activation || !activationEvents[0]
+              ? "activation-publication-pending"
+              : "approved";
     return {
       operation: "asset-status" as const,
       repository: resolved.authority.repository,
@@ -583,7 +618,32 @@ export class FactoryApplicationService {
               requestId: storedDecision.decision.requestId,
               requestedBy: storedDecision.decision.requestedBy,
               selectedDescriptorDigests: storedDecision.decision.selectedDescriptorDigests,
-              ...(decisionEvent?.reason ? { reason: decisionEvent.reason } : {}),
+              ...(storedRequest?.request.reason
+                ? { reason: storedRequest.request.reason }
+                : decisionEvent?.reason
+                  ? { reason: decisionEvent.reason }
+                  : {}),
+              ...(storedRequest
+                ? {
+                    requestJournal: {
+                      digest: storedRequest.request.digest,
+                      ref: storedRequest.ref,
+                      commit: storedRequest.commit,
+                    },
+                  }
+                : {}),
+              ...(storedRequest?.request.retry
+                ? {
+                    retry: {
+                      requestId: storedRequest.request.retry.requestId,
+                      workItem: storedRequest.request.retry.workItem,
+                      priorAssetSetDigest: storedRequest.request.retry.priorAssetSetDigest,
+                      priorDecisionDigest: storedRequest.request.retry.priorDecisionDigest,
+                      feedbackDigest: storedRequest.request.retry.feedbackDigest,
+                      published: Boolean(retryEvent),
+                    },
+                  }
+                : {}),
             }
           : null,
         activation: activation
@@ -632,6 +692,27 @@ export class FactoryApplicationService {
           ? { feedbackDigest: reasonDigest }
           : {}),
       });
+      const request = createMediaDecisionRequest({
+        authority,
+        decision,
+        ...(reason ? { reason } : {}),
+      });
+      const priorRequest = await readMediaDecisionRequest({
+        store: this.context.assetStore!,
+        repository: authority.repository,
+        objective: command.objective,
+        requestId: command.requestId,
+      });
+      if (priorRequest && canonicalAssetJson(priorRequest.request) !== canonicalAssetJson(request))
+        throw new Error(
+          `idempotency key ${command.requestId} was already used for a different request`,
+        );
+      if (
+        !priorRequest &&
+        decision.kind === "revision-requested" &&
+        assetSet.attempt >= resolved.start.policy.maxAttemptsPerItem
+      )
+        throw new Error("media revision cannot exceed the run's maximum attempts per Work Item");
       const requestEvents = events.filter(
         (event) =>
           event.kind === "media" &&
@@ -651,6 +732,8 @@ export class FactoryApplicationService {
       if (setEvents.some((event) => !this.isExactDecisionEvent(event, decision, resolved)))
         throw new Error("this asset set already has an immutable review decision");
       const existingEvent = setEvents[0];
+      if ((requestEvents.length || existingEvent) && !priorRequest)
+        throw new Error("authenticated human media decision has no immutable request journal");
       const priorBySet = await readAssetDecisionByAssetSet({
         store: this.context.assetStore!,
         authority,
@@ -661,13 +744,29 @@ export class FactoryApplicationService {
         throw new Error("this asset set already has an immutable review decision");
       if (priorBySet) {
         this.assertDecisionBinding(priorBySet.decision, resolved);
-        await this.assertCommitParents(priorBySet.commit, [storedSet.commit]);
+        if (!priorRequest)
+          throw new Error("durable human media decision has no immutable request journal");
+        await this.assertCommitParents(priorRequest.commit, [storedSet.commit]);
+        await this.assertCommitParents(priorBySet.commit, [storedSet.commit, priorRequest.commit]);
       }
-      const exactReplay = Boolean(existingEvent || priorBySet);
-      const assertCurrent = async () => {
+      const exactReplay = Boolean(priorRequest);
+      const assertCurrent = async (requireActive: boolean) => {
         const current = await this.context.reader.readObjective(command.objective);
         const currentEvents = this.allEvents(current);
-        if (!exactReplay) {
+        const currentRequest = await readMediaDecisionRequest({
+          store: this.context.assetStore!,
+          repository: authority.repository,
+          objective: command.objective,
+          requestId: command.requestId,
+        });
+        if (
+          currentRequest &&
+          canonicalAssetJson(currentRequest.request) !== canonicalAssetJson(request)
+        )
+          throw new Error(
+            `idempotency key ${command.requestId} was already used for a different request`,
+          );
+        if (requireActive && !currentRequest) {
           const active = latestSupportedRun(
             current.factoryEvents ?? [],
             current.objectiveAuthority,
@@ -698,7 +797,13 @@ export class FactoryApplicationService {
           throw new Error("this asset set already has another durable review decision");
         if (durableDecision) {
           this.assertDecisionBinding(durableDecision.decision, currentResolved);
-          await this.assertCommitParents(durableDecision.commit, [currentResolved.stored.commit]);
+          if (!currentRequest)
+            throw new Error("durable human media decision has no immutable request journal");
+          await this.assertCommitParents(currentRequest.commit, [currentResolved.stored.commit]);
+          await this.assertCommitParents(durableDecision.commit, [
+            currentResolved.stored.commit,
+            currentRequest.commit,
+          ]);
         }
       };
       if (!exactReplay) {
@@ -711,12 +816,37 @@ export class FactoryApplicationService {
             `Objective #${snapshot.number} has no active Factory run for this asset set`,
           );
       }
+      let storedRequest: Awaited<ReturnType<typeof persistMediaDecisionRequest>>;
+      try {
+        storedRequest = await persistMediaDecisionRequest({
+          store: this.context.assetStore!,
+          request,
+          parentOids: [storedSet.commit],
+          assertCurrent: () => assertCurrent(true),
+        });
+      } catch (error) {
+        const winner = await readMediaDecisionRequest({
+          store: this.context.assetStore!,
+          repository: authority.repository,
+          objective: command.objective,
+          requestId: command.requestId,
+        });
+        if (!winner) throw error;
+        if (canonicalAssetJson(winner.request) !== canonicalAssetJson(request))
+          throw new Error(
+            `idempotency key ${command.requestId} was already used for a different request`,
+            { cause: error },
+          );
+        storedRequest = { request: winner.request, ref: winner.ref, commit: winner.commit };
+      }
+      this.assertDecisionRequest(storedRequest.request, decision, resolved);
+      await this.assertCommitParents(storedRequest.commit, [storedSet.commit]);
       const storedDecision = await persistAssetDecision({
         store: this.context.assetStore!,
         authority,
         decision,
-        parentOids: [storedSet.commit],
-        assertCurrent,
+        parentOids: [storedSet.commit, storedRequest.commit],
+        assertCurrent: () => assertCurrent(false),
       });
       let activationRecord: AssetActivation | undefined;
       let activationResult:
@@ -754,7 +884,7 @@ export class FactoryApplicationService {
               storedDecision.commit,
               ...activation.selected.map(({ storage }) => storage.readyCommit),
             ],
-            assertCurrent,
+            assertCurrent: () => assertCurrent(false),
           }));
         activationRecord = activation;
         activationResult = {
@@ -787,7 +917,7 @@ export class FactoryApplicationService {
           ...(reason ? { reason } : {}),
         });
       if (!existingEvent) {
-        await assertCurrent();
+        await assertCurrent(false);
         await this.context.store!.addIssueComment(
           workItem.id,
           encodeEventComment(`Factory recorded media decision \`${decision.kind}\`.`, event),
@@ -812,7 +942,7 @@ export class FactoryApplicationService {
             resolved,
           );
         if (!priorActivation) {
-          await assertCurrent();
+          await assertCurrent(false);
           const fresh = await this.context.reader.readObjective(command.objective);
           const activationEvent = parseFactoryEvent({
             protocol: PROTOCOL_V2,
@@ -840,6 +970,71 @@ export class FactoryApplicationService {
           );
         }
       }
+      let retryResult:
+        | {
+            requestId: string;
+            workItem: number;
+            priorAssetSetDigest: string;
+            priorDecisionDigest: string;
+            feedbackDigest: string;
+          }
+        | undefined;
+      if (storedRequest.request.retry) {
+        const retry = storedRequest.request.retry;
+        let retrySnapshot = await this.context.reader.readObjective(command.objective);
+        let retryEvents = this.allEvents(retrySnapshot).filter(
+          (candidate) => "requestId" in candidate && candidate.requestId === retry.requestId,
+        );
+        for (const candidate of retryEvents)
+          this.assertRevisionRetryEvent(candidate, storedRequest.request);
+        let retryEvent = retryEvents[0];
+        if (!retryEvent) {
+          await assertCurrent(false);
+          retrySnapshot = await this.context.reader.readObjective(command.objective);
+          retryEvents = this.allEvents(retrySnapshot).filter(
+            (candidate) => "requestId" in candidate && candidate.requestId === retry.requestId,
+          );
+          for (const candidate of retryEvents)
+            this.assertRevisionRetryEvent(candidate, storedRequest.request);
+          retryEvent = retryEvents[0];
+          if (!retryEvent) {
+            retryEvent = parseFactoryEvent({
+              protocol: PROTOCOL_V2,
+              kind: "run",
+              event: "WorkItemRetryRequested",
+              objective: command.objective,
+              runId,
+              sequence: nextEventSequence(this.allEvents(retrySnapshot)),
+              at: now.toISOString(),
+              requestedBy: actor,
+              requestId: retry.requestId,
+              workItem: retry.workItem,
+              reason: retry.feedback,
+              mediaRevision: {
+                decisionRequestId: decision.requestId,
+                assetSetDigest: retry.priorAssetSetDigest,
+                decisionDigest: retry.priorDecisionDigest,
+                feedbackDigest: retry.feedbackDigest,
+              },
+            });
+            await this.context.store!.addIssueComment(
+              retrySnapshot.id,
+              encodeEventComment(
+                "Factory authorized the bounded retry for this media revision.",
+                retryEvent,
+              ),
+            );
+          }
+        }
+        await this.notifyRequest(retryEvent);
+        retryResult = {
+          requestId: retry.requestId,
+          workItem: retry.workItem,
+          priorAssetSetDigest: retry.priorAssetSetDigest,
+          priorDecisionDigest: retry.priorDecisionDigest,
+          feedbackDigest: retry.feedbackDigest,
+        };
+      }
       await this.notifyRequest(event);
       return {
         operation: this.assetDecisionOperation(decision.kind),
@@ -862,7 +1057,13 @@ export class FactoryApplicationService {
           selectedDescriptorDigests: decision.selectedDescriptorDigests,
           ...(reason ? { reason } : {}),
         },
+        requestJournal: {
+          digest: storedRequest.request.digest,
+          ref: storedRequest.ref,
+          commit: storedRequest.commit,
+        },
         ...(activationResult ? { activation: activationResult } : {}),
+        ...(retryResult ? { retry: retryResult } : {}),
       };
     });
   }
@@ -871,6 +1072,43 @@ export class FactoryApplicationService {
     if (kind === "approved") return "asset-approve" as const;
     if (kind === "rejected") return "asset-reject" as const;
     return "asset-revise" as const;
+  }
+
+  private assertDecisionRequest(
+    request: MediaDecisionRequest,
+    decision: AssetDecision,
+    resolved: { assetSet: AssetSet },
+  ) {
+    const expected = createMediaDecisionRequest({
+      authority: resolved.assetSet.authority,
+      decision,
+      ...(request.reason ? { reason: request.reason } : {}),
+    });
+    if (canonicalAssetJson(request) !== canonicalAssetJson(expected))
+      throw new Error("immutable media decision request differs from its Asset Set and decision");
+  }
+
+  private assertRevisionRetryEvent(event: FactoryEvent, request: MediaDecisionRequest) {
+    const retry = request.retry;
+    if (
+      !retry ||
+      event.kind !== "run" ||
+      event.event !== "WorkItemRetryRequested" ||
+      event.objective !== request.authority.objective ||
+      event.runId !== request.decision.runId ||
+      event.requestId !== retry.requestId ||
+      event.requestedBy.toLowerCase() !== request.decision.requestedBy.toLowerCase() ||
+      event.workItem !== retry.workItem ||
+      event.reason !== retry.feedback ||
+      canonicalAssetJson(event.mediaRevision) !==
+        canonicalAssetJson({
+          decisionRequestId: request.decision.requestId,
+          assetSetDigest: retry.priorAssetSetDigest,
+          decisionDigest: retry.priorDecisionDigest,
+          feedbackDigest: retry.feedbackDigest,
+        })
+    )
+      throw new Error("media revision retry differs from its immutable decision request");
   }
 
   private assertDecisionBinding(
@@ -982,6 +1220,8 @@ export class FactoryApplicationService {
     );
     if (starts.length !== 1) throw new Error("asset set run authority is ambiguous");
     const start = starts[0]!;
+    if (start.kind !== "run" || start.event !== "FactoryRunStarted")
+      throw new Error("asset set run authority is invalid");
     const reservations = events.filter(
       (event) =>
         event.kind === "attempt" &&
@@ -1010,7 +1250,11 @@ export class FactoryApplicationService {
       committedReservation.runId !== ready.runId ||
       committedReservation.workItem !== ready.workItem ||
       committedReservation.attempt !== ready.attempt ||
-      committedReservation.mediaInvocation?.digest !== ready.invocationDigest
+      committedReservation.mediaInvocation?.digest !== ready.invocationDigest ||
+      start.repository.toLowerCase() !==
+        `${this.context.owner}/${this.context.repo}`.toLowerCase() ||
+      start.baseSha !== reservation.baseSha ||
+      start.policyDigest !== reservation.policyDigest
     )
       throw new Error("asset set producer reservation commit differs from authenticated evidence");
     const authority = {
@@ -1041,8 +1285,6 @@ export class FactoryApplicationService {
       stored.commit,
       assetSet.variants.map(({ storage }) => storage.readyCommit),
     );
-    if (start.kind !== "run" || start.event !== "FactoryRunStarted")
-      throw new Error("asset set run authority is invalid");
     return { ready, reservation, start, authority, stored, assetSet };
   }
 

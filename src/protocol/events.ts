@@ -296,6 +296,15 @@ const RunControlAcknowledged = Common.extend({
   commandRequestId: safeId,
 });
 
+export const MediaRevisionRetryBindingSchema = z
+  .object({
+    decisionRequestId: safeId,
+    assetSetDigest: sha256Digest,
+    decisionDigest: sha256Digest,
+    feedbackDigest: sha256Digest,
+  })
+  .strict();
+
 const WorkItemRetryRequested = Common.extend({
   kind: z.literal("run"),
   event: z.literal("WorkItemRetryRequested"),
@@ -303,6 +312,13 @@ const WorkItemRetryRequested = Common.extend({
   requestId: safeId,
   workItem: z.number().int().positive(),
   reason: boundedText(8_000).optional(),
+  mediaRevision: MediaRevisionRetryBindingSchema.optional(),
+}).superRefine((value, context) => {
+  if (value.mediaRevision && !value.reason)
+    context.addIssue({
+      code: "custom",
+      message: "media revision retry requires its bounded feedback",
+    });
 });
 
 const WorkItemPriorityChanged = Common.extend({

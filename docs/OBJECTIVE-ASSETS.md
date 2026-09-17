@@ -105,14 +105,19 @@ The equivalent MCP tools are `factory_asset_status`, `factory_asset_approve`,
 reservation, invocation, and base authority from the authenticated `AssetSetReady` event; callers do
 not supply them. The same request ID and exact decision returns the original record. Reusing a
 request ID with changed selection or text, or deciding the same Asset Set twice, fails closed.
+Before publishing a decision, Factory claims a request-ID-scoped immutable journal that binds the
+repository, Objective, run, Asset Set, and complete decision. Concurrent processes repair the same
+Asset Set index and authenticated events from that journal; a changed request loses the Git CAS and
+cannot reuse the request ID.
 Approval requires one or more unique descriptor digests and accepts no reason. Rejection and
 revision require bounded human text and accept no descriptor selection. `asset-status` reauthenticates
 the immutable Asset Set, decision, and activation chain and reports their exact refs and commits;
 publication-pending states identify a durable record whose authenticated event still needs repair.
 Approval first persists an immutable decision and activation, then publishes their authenticated
 events. Rejection is terminal review evidence. Revision binds the prior Asset Set and feedback and
-permits a separately admitted bounded producer attempt; it never mutates or reuses the prior
-invocation.
+publishes its canonical one-shot retry command as part of the same journaled transaction. The
+ordinary maximum-attempt policy still gates the new admission; the user does not issue a second
+retry command. It never mutates or reuses the prior invocation.
 
 The registered deterministic rule `factory/local-private-reference-v1` may be named in
 `compilerMediaEgress.deterministicReviewRuleIds`. It approves all verified private PNG variants from

@@ -10,6 +10,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ContentTransferStore } from "../src/control/content-transfers.js";
 import type { GitCommitObject } from "../src/control/lease.js";
 import { releaseAllArtifactContent } from "../src/execution/artifact-content.js";
+import { withVerifiedReviewCheckout } from "../src/management/review-checkout.js";
+import {
+  finalizeLfsArtifact,
+  restoreLfsArtifactContent,
+  type LfsOutputTransport,
+} from "../src/publication/git-lfs-output.js";
 import {
   collectLocalArtifact,
   cleanupLocalWorktree,
@@ -894,6 +900,233 @@ describe("repository result capture evidence", () => {
     ]);
     expect(() => verifyValidationEvidence(result.evidence)).not.toThrow();
     await discardValidationResult(result);
+  });
+
+  it("captures hydrated LFS bytes while preserving the pointer tree and rejects raw mutation", async () => {
+    const repository = await mkdtemp(join(tmpdir(), "factory-repository-capture-lfs-"));
+    roots.push(repository);
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repository });
+    execFileSync("git", ["config", "user.name", "Factory Test"], { cwd: repository });
+    execFileSync("git", ["config", "user.email", "factory@example.invalid"], {
+      cwd: repository,
+    });
+    await writeFile(join(repository, ".gitattributes"), "*.bin filter=lfs diff=lfs -text\n");
+    execFileSync("git", ["add", ".gitattributes"], { cwd: repository });
+    execFileSync("git", ["commit", "-q", "-m", "base"], { cwd: repository });
+    const baseSha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repository,
+      encoding: "utf8",
+    }).trim();
+    const raw = Buffer.from("exact raw LFS result bytes\n");
+    const worker = await createLocalWorktree(repository, baseSha);
+    await writeFile(join(worker.path, "asset.bin"), raw);
+    const collected = await collectLocalArtifact(worker);
+    await cleanupLocalWorktree(worker);
+    expect(collected.pendingLfsObjects).toHaveLength(1);
+    const memory = memoryStore();
+    const transport: LfsOutputTransport = {
+      preflight: async () => ({
+        toolVersion: "git-lfs/3.7.0",
+        remoteDigest: sha("fixture-lfs-remote"),
+        remoteHost: "github.com",
+        endpoint: "https://github.com/fixture/repository.git/info/lfs",
+      }),
+      upload: async () => "uploaded",
+      read: async () => raw,
+    };
+    const artifact = await finalizeLfsArtifact({
+      store: memory.store,
+      artifact: collected,
+      authority: {
+        repository: "fixture/repository",
+        objective: 418,
+        workItem: 7,
+        attempt: 1,
+        runId: "run-lfs-capture",
+        directorEpoch: 1,
+        policyDigest: sha("policy"),
+      },
+      repositoryPath: repository,
+      allowedNetworkDestinations: ["github.com"],
+      assertCurrent: async () => undefined,
+      transport,
+    });
+    const recipe = exactRecipe({
+      id: "capture-lfs-result",
+      command: "npm run capture:lfs",
+      expectedDescriptorDigest: sha("lfs-reference"),
+    });
+    const packet: RepositoryChangeWorkerPacket = {
+      protocol: "clockgrove.factory/worker-packet",
+      goal: "Validate and capture the exact large-file result.",
+      acceptanceCriteria: ["The exact result bytes match the expected result."],
+      allowedPaths: ["asset.bin"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      baseSha,
+      validationCommands: [
+        "grep -qx 'exact raw LFS result bytes' asset.bin",
+        recipe.captureCommand.command,
+      ],
+      requirements: {
+        os: ["linux"],
+        architecture: [],
+        tools: ["grep", "npm"],
+        services: [],
+        networkDestinations: [],
+        permittedSecretNames: [],
+        trust: "trusted_local",
+      },
+      deliverable: {
+        kind: "repository-change",
+        contract: "clockgrove.factory/artifact",
+      },
+      repositoryCaptureRecipes: [recipe],
+    };
+    let preparedInvocation: ValidationInvocation | undefined;
+    const validate = (mutateRaw: boolean) => {
+      const stagingRoot = join(repository, `.factory-capture-${mutateRaw ? "mutated" : "exact"}`);
+      return validateArtifactClean({
+        repository,
+        artifact,
+        packet,
+        repositoryCaptureRuntime: {
+          createInvocation: (identity) => {
+            const template = invocationFor({ recipe, expectedBytes: raw });
+            const { digest: _templateDigest, ...templateCore } = template;
+            preparedInvocation = createValidationInvocation({
+              ...templateCore,
+              artifactDigest: identity.artifactDigest,
+              baseSha: identity.baseSha,
+              outputTreeSha: identity.outputTreeSha,
+              validationCommands: identity.validationCommands,
+              egressPolicy: {
+                ...templateCore.egressPolicy,
+                review: {
+                  mode: "private-assets",
+                  maxAssets: 2,
+                  reviewerCapabilityIds: ["text-reviewer"],
+                },
+              },
+            });
+            return preparedInvocation;
+          },
+          execute: async ({
+            invocation,
+            resultRoot,
+            assertOutputTree,
+            ordinaryValidationCommands: _ordinaryValidationCommands,
+            launchValidation,
+          }) => {
+            const validation = await launchValidation();
+            const retained = await executeLocalRepositoryCaptures({
+              stagingRoot,
+              invocation,
+              resultTreeRoot: resultRoot,
+              environment: {},
+              runCommand: async ({ env }) => {
+                const observed = await readFile(join(resultRoot, "asset.bin"));
+                expect(observed).toEqual(raw);
+                const request = JSON.parse(await readFile(env["FACTORY_CAPTURE_REQUEST"]!, "utf8"));
+                await writeFile(request.recipes[0].outputs[0].path, observed);
+                if (mutateRaw) await writeFile(join(resultRoot, "asset.bin"), "corrupt\n");
+                await checkpointMockCommand(env, recipe.captureCommand.command);
+                return { exitCode: 0, durationMs: 1, stdout: "", stderr: "" };
+              },
+              observeCommand: async () => "absent",
+              commandDeadline: null,
+              assertOutputTree,
+            });
+            const repositoryCapture = await persistRepositoryCaptures({
+              store: memory.store,
+              invocation,
+              collection: retained.collection,
+              downloadCapture: retained.downloadCapture,
+              assertCurrent: async () => undefined,
+              assertOutputTree: async () => assertOutputTree(),
+            });
+            const byCommand = new Map([
+              ...validation.commands.map((result) => [result.command, result] as const),
+              ...retained.commandResults.map((result) => [result.command, result] as const),
+            ]);
+            return {
+              validation: {
+                ...validation,
+                commands: invocation.validationCommands.map((command) => byCommand.get(command)!),
+              },
+              repositoryCapture,
+            };
+          },
+        },
+      });
+    };
+    const result = await validate(false);
+    expect(result.evidence.outputTreeSha).toBe(artifact.fileManifest!.resultTreeSha);
+    expect(result.evidence.repositoryCapture?.manifest.entries[0]?.descriptor.content.digest).toBe(
+      sha(raw),
+    );
+    const reviewBundleRoot = await mkdtemp(join(tmpdir(), "factory-lfs-review-bundle-"));
+    roots.push(reviewBundleRoot);
+    const reviewBundle = await materializeRepositoryCaptureReviewBundle({
+      store: memory.store,
+      invocation: preparedInvocation!,
+      evidence: result.evidence.repositoryCapture!,
+      capability: {
+        id: "text-reviewer",
+        mediaTypes: ["text/plain"],
+        profiles: [],
+        allowUnprofiled: true,
+        visibilities: ["private"],
+        rightsBases: ["unknown"],
+        semanticHandlers: [{ id: "utf8-text", contract: 1 }],
+        networkDestinations: [],
+        maximumAssets: 2,
+      },
+      policy: {
+        mode: "private-assets",
+        maxAssets: 2,
+        reviewerCapabilityIds: ["text-reviewer"],
+        allowedNetworkDestinations: [],
+      },
+      supervisorRoot: reviewBundleRoot,
+      downloadExpected: async () => raw,
+    });
+    await withVerifiedReviewCheckout(
+      {
+        repository,
+        objectiveNumber: 418,
+        workItemNumber: 7,
+        packet,
+        artifact,
+        evidence: result.evidence,
+        repositoryCaptureBundle: reviewBundle,
+        requiresIsolation: false,
+      },
+      async (reviewRepository, materializedBundle) => {
+        expect(await readFile(join(reviewRepository, "asset.bin"))).toEqual(raw);
+        expect(
+          execFileSync("git", ["write-tree"], {
+            cwd: reviewRepository,
+            encoding: "utf8",
+          }).trim(),
+        ).toBe(artifact.fileManifest!.resultTreeSha);
+        expect(materializedBundle?.files).toHaveLength(2);
+        expect(
+          materializedBundle?.files.every(
+            ({ path }) =>
+              path.startsWith(join(reviewRepository, ".factory-review-evidence")) &&
+              path !== join(reviewRepository, "asset.bin"),
+          ),
+        ).toBe(true);
+        expect(
+          await Promise.all(materializedBundle!.files.map(({ path }) => readFile(path))),
+        ).toEqual([raw, raw]);
+      },
+    );
+    await discardValidationResult(result);
+    await restoreLfsArtifactContent({ store: memory.store, artifact });
+    await expect(validate(true)).rejects.toThrow(/materialized LFS object (?:size|digest) differs/);
   });
 });
 

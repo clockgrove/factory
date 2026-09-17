@@ -799,8 +799,6 @@ export interface RepositoryCapabilityBindings {
 /** Packets without explicit validation design conservatively retain semantic review. */
 export function semanticReviewCriteria(packet: WorkerPacket): string[] {
   if (packet.deliverable.kind === "asset-production") return [...packet.acceptanceCriteria];
-  if ((packet.repositoryCaptureRecipes ?? []).some(({ gate }) => gate.kind === "human-required"))
-    return [...packet.acceptanceCriteria];
   if (!packet.validation) return [...packet.acceptanceCriteria];
   const accepted = new Set(packet.acceptanceCriteria);
   const seenTiers = new Set<string>();

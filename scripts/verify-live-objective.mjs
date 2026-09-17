@@ -374,6 +374,10 @@ export function boundedPolicy(delivery = "stacked-prs", maxModelTokens = maximum
       maxAssets: 0,
       deterministicReviewRuleIds: [],
     },
+    repositoryCaptureEgress: {
+      validation: { mode: "denied", maxAssets: 0 },
+      review: { mode: "denied", maxAssets: 0, reviewerCapabilityIds: [] },
+    },
     economics: {
       maxModelTokens,
       modelTokenBudgetMode: "observed-stop",

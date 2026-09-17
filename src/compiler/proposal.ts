@@ -2304,25 +2304,30 @@ function validationDesign(
       }
       tiers.set(validation.tier, current);
     }
-  const humanCaptureRequired = proposal.mediaIntents.some(
-    (intent) =>
+  const humanCaptureCriterionIds = new Set(
+    proposal.mediaIntents.flatMap((intent) =>
       intent.repositoryCapture !== null &&
       intent.review.kind === "human-required" &&
-      intent.bindings.some(({ workItemId }) => workItemId === item.id) &&
-      repositoryCaptureUnavailableReasons(request, proposal, intent).length === 0,
+      repositoryCaptureUnavailableReasons(request, proposal, intent).length === 0
+        ? intent.bindings
+            .filter(({ workItemId }) => workItemId === item.id)
+            .flatMap(({ criterionIds }) => criterionIds)
+        : [],
+    ),
   );
-  if (humanCaptureRequired) {
+  if (humanCaptureCriterionIds.size > 0) {
     const semantic = tiers.get("semantic") ?? { criteria: [], commands: [] };
     for (const criterion of item.criteria)
-      if (!semantic.criteria.includes(criterion.text)) semantic.criteria.push(criterion.text);
+      if (humanCaptureCriterionIds.has(criterion.id) && !semantic.criteria.includes(criterion.text))
+        semantic.criteria.push(criterion.text);
     tiers.set("semantic", semantic);
   }
   return [...tiers].map(([tier, value]) => ({
     tier,
     criteria: value.criteria,
     rationale:
-      tier === "semantic" && humanCaptureRequired
-        ? "A human-required repository capture gate retains semantic review for the complete acceptance set."
+      tier === "semantic" && humanCaptureCriterionIds.size > 0
+        ? "Human-required repository capture gates retain semantic review for their exact bound criteria."
         : `Criterion IDs select ${tier} evidence through the pinned compiler request.`,
     evidenceCommands: value.commands,
   }));

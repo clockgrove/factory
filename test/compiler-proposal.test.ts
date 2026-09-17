@@ -14,6 +14,7 @@ import {
   MAX_COMPILER_JUDGE_SOURCE_BYTES,
 } from "../src/compiler/judge-context.js";
 import { workerPacketFromCompiled } from "../src/graph.js";
+import { semanticReviewCriteria } from "../src/protocol/worker-packet.js";
 import type { PinnedRepositoryFacts } from "../src/repository-profiles/read.js";
 import {
   parseAndValidateCompilerProposal,
@@ -966,6 +967,12 @@ describe("media intent compilation", () => {
         assets: [expected.asset],
       };
       const proposal = semanticProposal(request);
+      proposal.workItems[0]!.criteria.push({
+        id: "mechanical-only",
+        text: "The ordinary source contract remains mechanically valid.",
+        risk: "ordinary",
+        validation: structuredClone(proposal.workItems[0]!.criteria[0]!.validation),
+      });
       proposal.mediaIntents = [
         mediaIntent({
           role: "acceptance-capture",
@@ -1013,9 +1020,12 @@ describe("media intent compilation", () => {
         ),
       ).toBe(false);
       expect(item.validation?.map(({ tier }) => tier)).toEqual(["mechanical", "semantic"]);
-      expect(item.validation?.find(({ tier }) => tier === "semantic")?.criteria).toEqual(
-        item.acceptance,
-      );
+      expect(item.validation?.find(({ tier }) => tier === "semantic")?.criteria).toEqual([
+        proposal.workItems[0]!.criteria[0]!.text,
+      ]);
+      expect(semanticReviewCriteria(workerPacketFromCompiled(item))).toEqual([
+        proposal.workItems[0]!.criteria[0]!.text,
+      ]);
       expect(item.dependsOn).toEqual([]);
       expect(item.generatedAssetRequirements ?? []).toEqual([]);
       expect(item.economicReview).not.toMatchObject({

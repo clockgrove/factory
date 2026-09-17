@@ -18,7 +18,10 @@ import {
   materializeLocalLfsAssets,
   restorePinnedLfsPointers,
 } from "../repository-profiles/git-lfs.js";
-import { materializeLfsArtifactContent } from "../publication/git-lfs-output.js";
+import {
+  materializeLfsArtifactContent,
+  verifyMaterializedLfsContent,
+} from "../publication/git-lfs-output.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
 import { verifyValidationEvidence } from "../validation/evidence.js";
 import {
@@ -148,7 +151,10 @@ export async function withVerifiedReviewCheckout<T>(
     )
       throw new Error("semantic review materialized tree differs from validated output tree");
     await verifyMaterializedFiles(worktree.path, manifest);
-    if (artifact.lfsObjects?.length) await materializeLfsArtifactContent(worktree.path, artifact);
+    if (artifact.lfsObjects?.length) {
+      await materializeLfsArtifactContent(worktree.path, artifact);
+      await verifyMaterializedLfsContent(worktree.path, artifact);
+    }
     const pnpmValidation = basePackageJsonPresent
       ? await assertEstablishedPnpmValidation(
           worktree,

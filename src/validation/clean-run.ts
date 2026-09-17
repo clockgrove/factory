@@ -15,7 +15,10 @@ import {
 } from "../execution/artifact-content.js";
 import { inspectPatchManifest } from "../runtime/artifact-patch.js";
 import { restorePinnedLfsPointers } from "../repository-profiles/git-lfs.js";
-import { materializeLfsArtifactContent } from "../publication/git-lfs-output.js";
+import {
+  materializeLfsArtifactContent,
+  verifyMaterializedLfsContent,
+} from "../publication/git-lfs-output.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import { FINDING_PROTOCOL, type FindingCandidate } from "../protocol/findings.js";
 import {
@@ -1386,12 +1389,6 @@ export async function validateArtifactClean(
     }
 
     const outputTreeSha = await git(worktree, ["write-tree"]);
-    const outputStatus = await git(worktree, [
-      "status",
-      "--porcelain=v1",
-      "-z",
-      "--untracked-files=all",
-    ]);
     if (trustedManifest) {
       if (
         trustedManifest.resultTreeSha !== outputTreeSha ||
@@ -1400,8 +1397,17 @@ export async function validateArtifactClean(
       )
         throw new Error("applied artifact tree differs from trusted collection manifest");
       await verifyMaterializedFiles(worktree.path, trustedManifest);
-      if (artifact.lfsObjects?.length) await materializeLfsArtifactContent(worktree.path, artifact);
+      if (artifact.lfsObjects?.length) {
+        await materializeLfsArtifactContent(worktree.path, artifact);
+        await verifyMaterializedLfsContent(worktree.path, artifact);
+      }
     }
+    const outputStatus = await git(worktree, [
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--untracked-files=all",
+    ]);
     const pnpmValidation = basePackageJsonPresent
       ? await assertEstablishedPnpmValidation(
           worktree,
@@ -1565,6 +1571,7 @@ export async function validateArtifactClean(
       };
     };
     const assertOutputTree = async () => {
+      if (artifact.lfsObjects?.length) await verifyMaterializedLfsContent(worktree.path, artifact);
       if ((await git(worktree, ["write-tree"])) !== outputTreeSha)
         throw new Error("repository capture result tree differs from validation invocation");
       if (
@@ -1669,6 +1676,7 @@ export async function validateArtifactClean(
       passed = false;
       failureReason = "repository capture mechanical comparison failed";
     }
+    if (artifact.lfsObjects?.length) await verifyMaterializedLfsContent(worktree.path, artifact);
     const findingPhase = input.findingPhase === false ? null : (input.findingPhase ?? "validation");
     const findings: FindingCandidate[] =
       passed || findingPhase === null

@@ -9238,6 +9238,7 @@ export class FactorySupervisor {
               }
             : undefined,
         );
+        retryableArtifact = artifact;
       } catch (cause) {
         // Keep the original workspace only when no complete independent copy can
         // be verified. Complete local pending bytes or a ready ref survive cleanup.
@@ -19744,6 +19745,7 @@ export class FactorySupervisor {
       artifact.baseSha !== stored.invocation.baseSha
     )
       throw new Error("prepared repository capture lacks its exact retained artifact");
+    await restoreLfsArtifactContent({ store: this.#store, artifact });
     this.#retainArtifactContent(artifact);
     const original = this.#packetFor(args.item.number);
     const packet = this.#packetBoundToReservation(

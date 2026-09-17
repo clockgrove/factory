@@ -1,4 +1,4 @@
-export const LARGE_FILE_RECIPE_VERSION: "factory-large-files-fixture-v2";
+export const LARGE_FILE_RECIPE_VERSION: "factory-large-files-fixture";
 export const LARGE_FILE_VALIDATION_SCRIPT: "test:large-file-fixture";
 export const LARGE_FILE_VALIDATION_COMMAND: "npm run test:large-file-fixture";
 export const LARGE_FILE_AUDIO_BYTES: number;
@@ -14,8 +14,8 @@ export interface LargeFilePaths {
   attributes: string;
   recipe: string;
   test: string;
-  canonical: string;
-  legacy: string;
+  primary: string;
+  secondary: string;
   payload: string;
   executable: string;
   metadata: string;

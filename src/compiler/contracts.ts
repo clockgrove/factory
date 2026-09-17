@@ -12,7 +12,12 @@ import {
   type ObligationInventory,
 } from "../evaluation/compiler-eval.js";
 import { NetworkDestinationSchema, RepositoryScopePathSchema } from "../protocol/worker-packet.js";
-import { CompilerMediaFactsSchema, MediaIntentSchema } from "../assets/media-intent.js";
+import { MAX_PRODUCT_FILE_BYTES } from "../protocol/limits.js";
+import {
+  CompilerMediaFactsSchema,
+  MediaIntentSchema,
+  MediaTypeSchema,
+} from "../assets/media-intent.js";
 
 export type JsonSchema = Readonly<Record<string, unknown>>;
 
@@ -90,6 +95,8 @@ export const COMPILER_VIOLATION_CODES = [
   "unauthorized-media-review",
   "inconsistent-media-necessity",
   "media-producer-unavailable",
+  "invalid-media-validation-selection",
+  "media-validation-unavailable",
   "media-dependency-cycle",
   "objective-count",
   "duplicate-objective-id",
@@ -134,6 +141,7 @@ export const COMPILER_TERMINAL_VIOLATION_PHASES: Readonly<
   "judge-context-limit": ["request"],
   "denied-network-destination": ["request"],
   "media-producer-unavailable": ["proposal"],
+  "media-validation-unavailable": ["proposal"],
 };
 
 export const CompilerViolationSchema = z
@@ -218,7 +226,7 @@ export const CompilerCriterionSchema = z
       .array(
         z
           .object({
-            tier: z.enum(["mechanical", "semantic", "visual", "deterministic-simulation"]),
+            tier: z.enum(["mechanical", "semantic", "deterministic-simulation"]),
             evidence: z.array(ValidationIntentRefSchema).max(32),
           })
           .strict(),
@@ -471,6 +479,289 @@ export function normalizeCompilerProposalProviderOutput(value: unknown): unknown
   return value;
 }
 
+const CompilerCaptureRecipeSchema = z
+  .object({
+    kind: z.literal("capture"),
+    outputs: z
+      .array(z.object({ roleId: Id, mediaType: MediaTypeSchema }).strict())
+      .min(1)
+      .max(16),
+    comparisonOutputRoleId: Id,
+    profile: z
+      .discriminatedUnion("kind", [
+        z
+          .object({
+            kind: z.literal("raster"),
+            viewport: z
+              .object({
+                width: z.number().int().min(1).max(16_384),
+                height: z.number().int().min(1).max(16_384),
+              })
+              .strict()
+              .nullable(),
+            output: z
+              .object({
+                width: z.number().int().min(1).max(16_384),
+                height: z.number().int().min(1).max(16_384),
+              })
+              .strict()
+              .nullable(),
+            captureRoleId: Id,
+            diffRoleId: Id.nullable(),
+            previewRoleId: Id.nullable(),
+          })
+          .strict(),
+      ])
+      .nullable(),
+    humanReview: z.boolean(),
+  })
+  .strict();
+const RepositoryThresholdPolicySchema = z
+  .object({
+    id: Id,
+    metric: Id,
+    maximumDifference: z.number().finite().min(0),
+  })
+  .strict();
+const RepositoryCaptureCapabilitySchema = CompilerCaptureRecipeSchema;
+
+const RepositoryComparatorIdentitySchema = z
+  .object({ id: Id, contract: z.number().int().positive().max(1_000) })
+  .strict();
+
+export const CompilerRepositoryComparatorSchema = z
+  .object({
+    captureRecipeId: Id,
+    captureRecipeDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    policy: RepositoryThresholdPolicySchema,
+    comparator: RepositoryComparatorIdentitySchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.policy.metric !== value.comparator.id)
+      context.addIssue({
+        code: "custom",
+        path: ["comparator"],
+        message: "threshold metric differs from installed comparator identity",
+      });
+  });
+export type CompilerRepositoryComparator = z.infer<typeof CompilerRepositoryComparatorSchema>;
+
+const CompilerCaptureScenarioSchema = z
+  .object({
+    id: Id,
+    fixture: z.string().min(1).max(500).nullable(),
+    seed: z.string().min(1).max(500).nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.fixture !== null && value.seed !== null)
+      context.addIssue({ code: "custom", message: "capture scenario may bind a fixture or seed" });
+  });
+
+const RepositoryCaptureCatalogOutputSchema = z
+  .object({ roleId: Id, mediaType: MediaTypeSchema })
+  .strict();
+
+const RepositoryCaptureCatalogProfileSchema = z
+  .object({
+    kind: z.literal("raster"),
+    viewport: z
+      .object({
+        width: z.number().int().min(1).max(16_384),
+        height: z.number().int().min(1).max(16_384),
+      })
+      .strict()
+      .nullable(),
+    output: z
+      .object({
+        width: z.number().int().min(1).max(16_384),
+        height: z.number().int().min(1).max(16_384),
+      })
+      .strict()
+      .nullable(),
+    diffOutput: RepositoryCaptureCatalogOutputSchema.nullable(),
+    previewOutput: RepositoryCaptureCatalogOutputSchema.nullable(),
+  })
+  .strict();
+
+const RepositoryCaptureDeterministicGateCatalogRuleBaseSchema = z
+  .object({
+    id: Id,
+    mediaTypes: z.array(MediaTypeSchema).min(1).max(32),
+    profiles: z
+      .array(z.enum(["unprofiled", "raster"]))
+      .min(1)
+      .max(2),
+    visibilities: z
+      .array(z.enum(["public", "private"]))
+      .min(1)
+      .max(2),
+    rightsBases: z
+      .array(z.enum(["user-owned", "licensed", "permission-granted", "unknown"]))
+      .min(1)
+      .max(4),
+    expectedDescriptorClasses: z
+      .array(z.enum(["opaque", "semantic"]))
+      .min(1)
+      .max(2),
+    scenarios: z.array(CompilerCaptureScenarioSchema).min(1).max(32),
+    maximumCriteria: z.number().int().min(1).max(64),
+  })
+  .strict();
+
+function validateRepositoryCaptureDeterministicGateCatalogRule(
+  rule: z.infer<typeof RepositoryCaptureDeterministicGateCatalogRuleBaseSchema>,
+  context: z.RefinementCtx,
+): void {
+  for (const [field, values] of [
+    ["mediaTypes", rule.mediaTypes],
+    ["profiles", rule.profiles],
+    ["visibilities", rule.visibilities],
+    ["rightsBases", rule.rightsBases],
+    ["expectedDescriptorClasses", rule.expectedDescriptorClasses],
+  ] as const)
+    if (new Set(values).size !== values.length)
+      context.addIssue({ code: "custom", path: [field], message: `${field} are duplicated` });
+  const scenarios = rule.scenarios.map((scenario) => JSON.stringify(scenario));
+  if (new Set(scenarios).size !== scenarios.length)
+    context.addIssue({ code: "custom", path: ["scenarios"], message: "scenarios are duplicated" });
+}
+
+export const RepositoryCaptureDeterministicGateCatalogRuleSchema =
+  RepositoryCaptureDeterministicGateCatalogRuleBaseSchema.superRefine((rule, context) => {
+    validateRepositoryCaptureDeterministicGateCatalogRule(rule, context);
+  });
+
+export const CompilerRepositoryCaptureGateRuleSchema =
+  RepositoryCaptureDeterministicGateCatalogRuleBaseSchema.extend({
+    captureRecipeId: Id,
+    captureRecipeDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    comparison: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("exact") }).strict(),
+      z
+        .object({
+          kind: z.literal("threshold"),
+          policyId: Id,
+          policyDigest: z.string().regex(/^[a-f0-9]{64}$/),
+          comparator: RepositoryComparatorIdentitySchema,
+          metric: Id,
+          maximumDifference: z.number().finite().min(0),
+        })
+        .strict(),
+    ]),
+  })
+    .strict()
+    .superRefine((rule, context) => {
+      if (
+        rule.comparison.kind === "threshold" &&
+        rule.comparison.comparator.id !== rule.comparison.metric
+      )
+        context.addIssue({
+          code: "custom",
+          path: ["comparison", "comparator"],
+          message: "threshold metric differs from installed comparator identity",
+        });
+      validateRepositoryCaptureDeterministicGateCatalogRule(rule, context);
+    });
+export type CompilerRepositoryCaptureGateRule = z.infer<
+  typeof CompilerRepositoryCaptureGateRuleSchema
+>;
+
+export const RepositoryCaptureCatalogSchema = z
+  .object({
+    captures: z
+      .array(
+        z
+          .object({
+            command: z.string().min(1).max(1_000),
+            comparisonOutput: RepositoryCaptureCatalogOutputSchema,
+            auxiliaryOutputs: z.array(RepositoryCaptureCatalogOutputSchema).max(13),
+            profile: RepositoryCaptureCatalogProfileSchema.nullable(),
+            humanReview: z.boolean(),
+            exactDeterministicGates: z
+              .array(RepositoryCaptureDeterministicGateCatalogRuleSchema)
+              .max(32),
+            thresholdComparisons: z
+              .array(
+                z
+                  .object({
+                    policy: RepositoryThresholdPolicySchema,
+                    deterministicGates: z
+                      .array(RepositoryCaptureDeterministicGateCatalogRuleSchema)
+                      .max(32),
+                  })
+                  .strict(),
+              )
+              .max(32),
+          })
+          .strict(),
+      )
+      .max(32),
+  })
+  .strict()
+  .superRefine((catalog, context) => {
+    const commands = catalog.captures.map(({ command }) => command);
+    if (new Set(commands).size !== commands.length)
+      context.addIssue({ code: "custom", message: "capture catalog commands are duplicated" });
+    const thresholdComparisons = catalog.captures.flatMap(
+      ({ thresholdComparisons }) => thresholdComparisons,
+    );
+    const comparatorIds = thresholdComparisons.map(({ policy }) => policy.id);
+    if (new Set(comparatorIds).size !== comparatorIds.length)
+      context.addIssue({
+        code: "custom",
+        path: ["captures"],
+        message: "threshold comparison policy identities are duplicated",
+      });
+    const gates = catalog.captures.flatMap(({ exactDeterministicGates, thresholdComparisons }) => [
+      ...exactDeterministicGates,
+      ...thresholdComparisons.flatMap(({ deterministicGates }) => deterministicGates),
+    ]);
+    if (new Set(gates.map(({ id }) => id)).size !== gates.length)
+      context.addIssue({
+        code: "custom",
+        path: ["captures"],
+        message: "deterministic capture gate IDs are duplicated",
+      });
+    for (const [index, capture] of catalog.captures.entries()) {
+      const outputs = [
+        capture.comparisonOutput,
+        ...capture.auxiliaryOutputs,
+        ...(capture.profile?.diffOutput ? [capture.profile.diffOutput] : []),
+        ...(capture.profile?.previewOutput ? [capture.profile.previewOutput] : []),
+      ];
+      const roles = outputs.map(({ roleId }) => roleId);
+      if (new Set(roles).size !== roles.length)
+        context.addIssue({
+          code: "custom",
+          path: ["captures", index],
+          message: "capture output roles are duplicated",
+        });
+      if (outputs.length > 16)
+        context.addIssue({
+          code: "custom",
+          path: ["captures", index],
+          message: "capture declares more than 16 outputs",
+        });
+      const captureGates = [
+        ...capture.exactDeterministicGates,
+        ...capture.thresholdComparisons.flatMap(({ deterministicGates }) => deterministicGates),
+      ];
+      for (const rule of captureGates) {
+        if (
+          !rule.mediaTypes.includes(capture.comparisonOutput.mediaType) ||
+          !rule.profiles.includes(capture.profile ? capture.profile.kind : "unprofiled")
+        )
+          context.addIssue({
+            code: "custom",
+            path: ["captures", index],
+            message: "deterministic capture gate excludes its capture result contract",
+          });
+      }
+    }
+  });
+
 export const CompilerValidationRecipeSchema = z
   .object({
     id: Id,
@@ -478,6 +769,7 @@ export const CompilerValidationRecipeSchema = z
     adapterId: Id.nullable(),
     requiredTools: z.array(Id).max(16),
     networkDestinations: z.array(z.string().min(1).max(253)).max(16),
+    capture: RepositoryCaptureCapabilitySchema.nullable(),
   })
   .strict();
 export type CompilerValidationRecipe = z.infer<typeof CompilerValidationRecipeSchema>;
@@ -529,6 +821,128 @@ export const CompilerToolchainCapabilitySchema = z
   .strict();
 export type CompilerToolchainCapability = z.infer<typeof CompilerToolchainCapabilitySchema>;
 
+const CompilerRepositoryCaptureExecutionSchema = z
+  .object({
+    commands: z
+      .array(
+        z
+          .object({
+            recipeId: Id,
+            local: z
+              .object({ managedRuntimeReceiptRequired: z.literal(true) })
+              .strict()
+              .nullable(),
+            isolatedBackendIds: z.array(Id).max(16),
+          })
+          .strict()
+          .superRefine((command, context) => {
+            if (new Set(command.isolatedBackendIds).size !== command.isolatedBackendIds.length)
+              context.addIssue({
+                code: "custom",
+                path: ["isolatedBackendIds"],
+                message: "isolated backend IDs are duplicated",
+              });
+          }),
+      )
+      .max(64),
+  })
+  .strict()
+  .superRefine((execution, context) => {
+    if (
+      new Set(execution.commands.map(({ recipeId }) => recipeId)).size !== execution.commands.length
+    )
+      context.addIssue({ code: "custom", message: "capture command authorities are duplicated" });
+  });
+
+const CompilerRepositoryCaptureReviewerSchema = z
+  .object({
+    id: Id,
+    mediaTypes: z.array(MediaTypeSchema).min(1).max(32),
+    profiles: z.array(Id).max(32),
+    allowUnprofiled: z.boolean(),
+    visibilities: z
+      .array(z.enum(["public", "private"]))
+      .min(1)
+      .max(2),
+    rightsBases: z
+      .array(z.enum(["user-owned", "licensed", "permission-granted", "unknown"]))
+      .min(1)
+      .max(4),
+    semanticHandlers: z
+      .array(z.object({ id: Id, contract: z.number().int().positive().max(1_000) }).strict())
+      .max(32),
+    networkDestinations: z.array(z.string().min(1).max(253)).max(32),
+    maximumAssets: z.number().int().positive().max(544),
+  })
+  .strict()
+  .superRefine((reviewer, context) => {
+    for (const [field, values] of [
+      ["mediaTypes", reviewer.mediaTypes],
+      ["profiles", reviewer.profiles],
+      ["visibilities", reviewer.visibilities],
+      ["rightsBases", reviewer.rightsBases],
+      ["networkDestinations", reviewer.networkDestinations],
+    ] as const)
+      if (new Set(values).size !== values.length)
+        context.addIssue({ code: "custom", path: [field], message: `${field} are duplicated` });
+    if (
+      new Set(reviewer.semanticHandlers.map(({ id }) => id)).size !==
+      reviewer.semanticHandlers.length
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["semanticHandlers"],
+        message: "semantic handler IDs are duplicated",
+      });
+  });
+
+export const CompilerRepositoryCaptureFactsSchema = z
+  .object({
+    execution: CompilerRepositoryCaptureExecutionSchema,
+    egress: z
+      .object({
+        policyDigest: z.string().regex(/^[a-f0-9]{64}$/),
+        deterministicGateIds: z.array(Id).max(32),
+        review: z
+          .object({
+            mode: z.enum(["denied", "public-assets", "private-assets"]),
+            maxAssets: z.number().int().min(0).max(544),
+            reviewerCapabilityIds: z.array(Id).max(32),
+          })
+          .strict(),
+      })
+      .strict(),
+    reviewer: CompilerRepositoryCaptureReviewerSchema.nullable(),
+    comparators: z.array(CompilerRepositoryComparatorSchema).max(32),
+    deterministicGates: z.array(CompilerRepositoryCaptureGateRuleSchema).max(32),
+  })
+  .strict()
+  .superRefine((facts, context) => {
+    if (
+      new Set(facts.egress.deterministicGateIds).size !== facts.egress.deterministicGateIds.length
+    )
+      context.addIssue({ code: "custom", message: "allowed capture gate IDs are duplicated" });
+    if (
+      new Set(facts.egress.review.reviewerCapabilityIds).size !==
+      facts.egress.review.reviewerCapabilityIds.length
+    )
+      context.addIssue({ code: "custom", message: "reviewer capability IDs are duplicated" });
+    if (
+      new Set(facts.deterministicGates.map(({ id }) => id)).size !== facts.deterministicGates.length
+    )
+      context.addIssue({ code: "custom", message: "capture gate authorities are duplicated" });
+    if (new Set(facts.comparators.map(({ policy }) => policy.id)).size !== facts.comparators.length)
+      context.addIssue({ code: "custom", message: "comparator policy identities are duplicated" });
+    if (facts.deterministicGates.some(({ id }) => !facts.egress.deterministicGateIds.includes(id)))
+      context.addIssue({ code: "custom", message: "capture gate lacks run-policy authorization" });
+    if (facts.reviewer && !facts.egress.review.reviewerCapabilityIds.includes(facts.reviewer.id))
+      context.addIssue({
+        code: "custom",
+        message: "capture reviewer lacks run-policy authorization",
+      });
+  });
+export type CompilerRepositoryCaptureFacts = z.infer<typeof CompilerRepositoryCaptureFactsSchema>;
+
 const CompilerValidationSurfaceSchema = z
   .object({
     count: z.number().int().min(0).max(10_000),
@@ -572,7 +986,6 @@ export const CompilerRequestSchema = z
         validationSurfaces: z
           .object({
             deterministicSimulation: CompilerValidationSurfaceSchema,
-            visual: CompilerValidationSurfaceSchema,
             python: CompilerValidationSurfaceSchema,
             rust: CompilerValidationSurfaceSchema,
             go: CompilerValidationSurfaceSchema,
@@ -582,6 +995,7 @@ export const CompilerRequestSchema = z
       })
       .strict(),
     media: CompilerMediaFactsSchema,
+    repositoryCapture: CompilerRepositoryCaptureFactsSchema,
     constraints: z
       .object({
         maxWorkItems: z.number().int().min(1).max(100),
@@ -713,7 +1127,7 @@ const jsonCompilerWorkItemProposal = (
           items: strictObject({
             tier: {
               type: "string",
-              enum: ["mechanical", "semantic", "visual", "deterministic-simulation"],
+              enum: ["mechanical", "semantic", "deterministic-simulation"],
             },
             evidence: stringArray(32, intentSchema(scopePath)),
           }),
@@ -789,10 +1203,11 @@ const jsonMediaIntent = strictObject({
     },
     minimumCount: { type: "integer", minimum: 1, maximum: 16 },
     maximumCount: { type: "integer", minimum: 1, maximum: 16 },
-    raster: {
+    profile: {
       anyOf: [
         { type: "null" },
         strictObject({
+          kind: { type: "string", const: "raster" },
           minimumWidth: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
           maximumWidth: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
           minimumHeight: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
@@ -805,10 +1220,43 @@ const jsonMediaIntent = strictObject({
   }),
   review: {
     anyOf: [
+      { type: "null" },
       strictObject({ kind: { type: "string", const: "human-required" } }),
       strictObject({
         kind: { type: "string", const: "deterministic-preauthorized" },
         ruleId: jsonId,
+      }),
+    ],
+  },
+  repositoryCapture: {
+    anyOf: [
+      { type: "null" },
+      strictObject({
+        expectedAssetId: jsonId,
+        scenario: strictObject({
+          id: jsonId,
+          fixture: { type: ["string", "null"], minLength: 1, maxLength: 500 },
+          seed: { type: ["string", "null"], minLength: 1, maxLength: 500 },
+        }),
+        captureRecipeId: jsonId,
+        comparison: {
+          anyOf: [
+            strictObject({ kind: { type: "string", const: "exact" } }),
+            strictObject({
+              kind: { type: "string", const: "threshold" },
+              policyId: jsonId,
+            }),
+          ],
+        },
+        gate: {
+          anyOf: [
+            strictObject({ kind: { type: "string", const: "human-required" } }),
+            strictObject({
+              kind: { type: "string", const: "deterministic-preauthorized" },
+              authorityId: jsonId,
+            }),
+          ],
+        },
       }),
     ],
   },
@@ -841,7 +1289,7 @@ const jsonCompilerMediaFacts = strictObject({
               pattern:
                 "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$",
             },
-            bytes: { type: "integer", minimum: 1, maximum: 100 * 1024 * 1024 },
+            bytes: { type: "integer", minimum: 1, maximum: MAX_PRODUCT_FILE_BYTES },
             inspection: {
               anyOf: [
                 strictObject({ kind: { type: "string", const: "opaque" } }),
@@ -854,7 +1302,15 @@ const jsonCompilerMediaFacts = strictObject({
                 }),
               ],
             },
+            descriptorClass: { enum: ["opaque", "semantic"] },
+            inspectionHandler: strictObject({
+              id: jsonId,
+              contract: { type: "integer", minimum: 1, maximum: 1_000 },
+            }),
             visibility: { type: "string", enum: ["public", "private"] },
+            rightsBasis: {
+              enum: ["user-owned", "licensed", "permission-granted", "unknown"],
+            },
           }),
         },
       }),
@@ -1003,6 +1459,183 @@ const jsonCompilerMediaFacts = strictObject({
         const: "activation-minimum-canonical",
       },
     }),
+  },
+});
+const jsonMediaType = {
+  type: "string",
+  minLength: 1,
+  maxLength: 160,
+  pattern: "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$",
+};
+const jsonCaptureScenario = strictObject({
+  id: jsonId,
+  fixture: { type: ["string", "null"], minLength: 1, maxLength: 500 },
+  seed: { type: ["string", "null"], minLength: 1, maxLength: 500 },
+});
+const jsonCompilerCaptureGate = strictObject({
+  id: jsonId,
+  captureRecipeId: jsonId,
+  captureRecipeDigest: jsonDigest,
+  comparison: {
+    anyOf: [
+      strictObject({ kind: { const: "exact" } }),
+      strictObject({
+        kind: { const: "threshold" },
+        policyId: jsonId,
+        policyDigest: jsonDigest,
+        comparator: strictObject({
+          id: jsonId,
+          contract: { type: "integer", minimum: 1, maximum: 1_000 },
+        }),
+        metric: jsonId,
+        maximumDifference: { type: "number", minimum: 0 },
+      }),
+    ],
+  },
+  mediaTypes: {
+    type: "array",
+    minItems: 1,
+    maxItems: 32,
+    uniqueItems: true,
+    items: jsonMediaType,
+  },
+  profiles: {
+    type: "array",
+    minItems: 1,
+    maxItems: 2,
+    uniqueItems: true,
+    items: { enum: ["unprofiled", "raster"] },
+  },
+  visibilities: {
+    type: "array",
+    minItems: 1,
+    maxItems: 2,
+    uniqueItems: true,
+    items: { enum: ["public", "private"] },
+  },
+  rightsBases: {
+    type: "array",
+    minItems: 1,
+    maxItems: 4,
+    uniqueItems: true,
+    items: { enum: ["user-owned", "licensed", "permission-granted", "unknown"] },
+  },
+  expectedDescriptorClasses: {
+    type: "array",
+    minItems: 1,
+    maxItems: 2,
+    uniqueItems: true,
+    items: { enum: ["opaque", "semantic"] },
+  },
+  scenarios: {
+    type: "array",
+    minItems: 1,
+    maxItems: 32,
+    uniqueItems: true,
+    items: jsonCaptureScenario,
+  },
+  maximumCriteria: { type: "integer", minimum: 1, maximum: 64 },
+});
+const jsonCompilerRepositoryCaptureFacts = strictObject({
+  execution: strictObject({
+    commands: {
+      type: "array",
+      maxItems: 64,
+      items: strictObject({
+        recipeId: jsonId,
+        local: {
+          anyOf: [
+            { type: "null" },
+            strictObject({ managedRuntimeReceiptRequired: { const: true } }),
+          ],
+        },
+        isolatedBackendIds: {
+          ...stringArray(16, jsonId),
+          uniqueItems: true,
+        },
+      }),
+    },
+  }),
+  egress: strictObject({
+    policyDigest: jsonDigest,
+    deterministicGateIds: {
+      ...stringArray(32, jsonId),
+      uniqueItems: true,
+    },
+    review: strictObject({
+      mode: { enum: ["denied", "public-assets", "private-assets"] },
+      maxAssets: { type: "integer", minimum: 0, maximum: 544 },
+      reviewerCapabilityIds: {
+        ...stringArray(32, jsonId),
+        uniqueItems: true,
+      },
+    }),
+  }),
+  reviewer: {
+    anyOf: [
+      { type: "null" },
+      strictObject({
+        id: jsonId,
+        mediaTypes: {
+          type: "array",
+          minItems: 1,
+          maxItems: 32,
+          uniqueItems: true,
+          items: jsonMediaType,
+        },
+        profiles: { ...stringArray(32, jsonId), uniqueItems: true },
+        allowUnprofiled: { type: "boolean" },
+        visibilities: {
+          type: "array",
+          minItems: 1,
+          maxItems: 2,
+          uniqueItems: true,
+          items: { enum: ["public", "private"] },
+        },
+        rightsBases: {
+          type: "array",
+          minItems: 1,
+          maxItems: 4,
+          uniqueItems: true,
+          items: { enum: ["user-owned", "licensed", "permission-granted", "unknown"] },
+        },
+        semanticHandlers: {
+          type: "array",
+          maxItems: 32,
+          items: strictObject({
+            id: jsonId,
+            contract: { type: "integer", minimum: 1, maximum: 1_000 },
+          }),
+        },
+        networkDestinations: {
+          ...stringArray(32, { type: "string", minLength: 1, maxLength: 253 }),
+          uniqueItems: true,
+        },
+        maximumAssets: { type: "integer", minimum: 1, maximum: 544 },
+      }),
+    ],
+  },
+  comparators: {
+    type: "array",
+    maxItems: 32,
+    items: strictObject({
+      captureRecipeId: jsonId,
+      captureRecipeDigest: jsonDigest,
+      policy: strictObject({
+        id: jsonId,
+        metric: jsonId,
+        maximumDifference: { type: "number", minimum: 0 },
+      }),
+      comparator: strictObject({
+        id: jsonId,
+        contract: { type: "integer", minimum: 1, maximum: 1_000 },
+      }),
+    }),
+  },
+  deterministicGates: {
+    type: "array",
+    maxItems: 32,
+    items: jsonCompilerCaptureGate,
   },
 });
 const jsonPlanningTrigger = strictObject({
@@ -1275,6 +1908,60 @@ const jsonRecipe = strictObject({
   adapterId: { oneOf: [jsonId, { type: "null" }] },
   requiredTools: stringArray(16, jsonId),
   networkDestinations: stringArray(16, { type: "string", minLength: 1, maxLength: 253 }),
+  capture: {
+    anyOf: [
+      { type: "null" },
+      strictObject({
+        kind: { const: "capture" },
+        outputs: {
+          type: "array",
+          minItems: 1,
+          maxItems: 16,
+          items: strictObject({
+            roleId: jsonId,
+            mediaType: {
+              type: "string",
+              minLength: 1,
+              maxLength: 160,
+              pattern:
+                "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$",
+            },
+          }),
+        },
+        comparisonOutputRoleId: jsonId,
+        profile: {
+          anyOf: [
+            { type: "null" },
+            strictObject({
+              kind: { const: "raster" },
+              viewport: {
+                anyOf: [
+                  { type: "null" },
+                  strictObject({
+                    width: { type: "integer", minimum: 1, maximum: 16_384 },
+                    height: { type: "integer", minimum: 1, maximum: 16_384 },
+                  }),
+                ],
+              },
+              output: {
+                anyOf: [
+                  { type: "null" },
+                  strictObject({
+                    width: { type: "integer", minimum: 1, maximum: 16_384 },
+                    height: { type: "integer", minimum: 1, maximum: 16_384 },
+                  }),
+                ],
+              },
+              captureRoleId: jsonId,
+              diffRoleId: { anyOf: [jsonId, { type: "null" }] },
+              previewRoleId: { anyOf: [jsonId, { type: "null" }] },
+            }),
+          ],
+        },
+        humanReview: { type: "boolean" },
+      }),
+    ],
+  },
 });
 const jsonToolchain = strictObject({
   adapterId: jsonId,
@@ -1396,7 +2083,6 @@ export const COMPILER_REQUEST_JSON_SCHEMA = {
       toolchains: { type: "array", maxItems: 32, items: jsonToolchain },
       validationSurfaces: strictObject({
         deterministicSimulation: jsonValidationSurface,
-        visual: jsonValidationSurface,
         python: jsonValidationSurface,
         rust: jsonValidationSurface,
         go: jsonValidationSurface,
@@ -1404,6 +2090,7 @@ export const COMPILER_REQUEST_JSON_SCHEMA = {
       pathCount: { type: "integer", minimum: 0, maximum: 10_000 },
     }),
     media: jsonCompilerMediaFacts,
+    repositoryCapture: jsonCompilerRepositoryCaptureFacts,
     constraints: strictObject({
       maxWorkItems: { type: "integer", minimum: 1, maximum: 100 },
       planningWorkItemThreshold: { type: "integer", minimum: 1, maximum: 100 },

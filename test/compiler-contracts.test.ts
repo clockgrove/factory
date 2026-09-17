@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
+import Ajv from "ajv";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -11,6 +12,7 @@ import {
   CompilerProposalSchema,
   CompilerRequestSchema,
   CompilerValidationReportSchema,
+  RepositoryCaptureCatalogSchema,
   type CompilerObjectivesProposal,
   type CompilerWorkItemsProposal,
   type CompilerViolation,
@@ -47,6 +49,198 @@ const workItemsProposal = (count = 1): CompilerWorkItemsProposal => {
 };
 
 describe("adapter-owned compiler capabilities", () => {
+  it("keeps the public repository-result capture schema bidirectionally aligned", async () => {
+    const publicSchema = JSON.parse(
+      await readFile(
+        new URL("../schemas/validation-captures.schema.json", import.meta.url),
+        "utf8",
+      ),
+    );
+    const validatePublic = new Ajv({ strict: false }).compile(publicSchema);
+    const valid = {
+      captures: [
+        {
+          command: "npm run capture",
+          comparisonOutput: { roleId: "opaque", mediaType: "application/octet-stream" },
+          auxiliaryOutputs: [
+            { roleId: "json", mediaType: "application/json" },
+            { roleId: "text", mediaType: "text/plain" },
+            { roleId: "audio", mediaType: "audio/wav" },
+            { roleId: "archive", mediaType: "application/zip" },
+            { roleId: "model", mediaType: "model/gltf-binary" },
+          ],
+          profile: null,
+          humanReview: true,
+          exactDeterministicGates: [
+            {
+              id: "exact-opaque",
+              mediaTypes: [
+                "application/json",
+                "text/plain",
+                "audio/wav",
+                "application/zip",
+                "model/gltf-binary",
+                "application/octet-stream",
+              ],
+              profiles: ["unprofiled"],
+              visibilities: ["private"],
+              rightsBases: ["unknown"],
+              expectedDescriptorClasses: ["opaque", "semantic"],
+              scenarios: [{ id: "fixture", fixture: "fixtures/result.bin", seed: null }],
+              maximumCriteria: 8,
+            },
+          ],
+          thresholdComparisons: [],
+        },
+      ],
+    };
+    const fixtures = [
+      { value: valid, accepted: true },
+      {
+        value: {
+          ...valid,
+          captures: [
+            {
+              ...valid.captures[0],
+              exactDeterministicGates: [
+                {
+                  ...valid.captures[0]!.exactDeterministicGates[0],
+                  mediaTypes: ["application/json", "application/json"],
+                },
+              ],
+            },
+          ],
+        },
+        accepted: false,
+      },
+      {
+        value: {
+          ...valid,
+          captures: [
+            {
+              ...valid.captures[0],
+              exactDeterministicGates: [
+                {
+                  ...valid.captures[0]!.exactDeterministicGates[0],
+                  scenarios: [{ id: "fixture", fixture: "result.bin", seed: "seed" }],
+                },
+              ],
+            },
+          ],
+        },
+        accepted: false,
+      },
+      {
+        value: {
+          ...valid,
+          captures: [
+            {
+              ...valid.captures[0],
+              exactDeterministicGates: [
+                { ...valid.captures[0]!.exactDeterministicGates[0], id: "Uppercase" },
+              ],
+            },
+          ],
+        },
+        accepted: false,
+      },
+    ];
+    for (const fixture of fixtures) {
+      expect(validatePublic(fixture.value)).toBe(fixture.accepted);
+      expect(RepositoryCaptureCatalogSchema.safeParse(fixture.value).success).toBe(
+        fixture.accepted,
+      );
+    }
+    expect(publicSchema["x-factory-executable-validation"]).toBe(
+      "factory validate-captures [FILE]",
+    );
+  });
+
+  it("rejects a protocol-version field in the validation capture catalog", () => {
+    const scripts = { test: "vitest run", capture: "node capture.mjs" };
+    const catalog = {
+      version: 1,
+      captures: [
+        {
+          command: "npm run capture",
+          comparisonOutput: { roleId: "capture", mediaType: "application/json" },
+          auxiliaryOutputs: [],
+          profile: null,
+          humanReview: true,
+          exactDeterministicGates: [],
+          thresholdComparisons: [],
+        },
+      ],
+    };
+    const pinned = semanticPinnedFacts({
+      paths: ["package.json", "package-lock.json", ".factory/validation-captures.json"],
+      scripts,
+      documents: {
+        "package.json": JSON.stringify({ scripts }),
+        ".factory/validation-captures.json": JSON.stringify(catalog),
+      },
+    });
+    expect(() => compilerCapabilitiesForRepository(pinned, [])).toThrow();
+  });
+
+  it("rejects the removed role-pointer catalog shape structurally", async () => {
+    const scripts = { test: "vitest run", capture: "node capture.mjs" };
+    const legacy = {
+      captures: [
+        {
+          command: "npm run capture",
+          outputs: [{ roleId: "capture", mediaType: "image/png" }],
+          comparisonOutputRoleId: "capture",
+          profile: null,
+          humanReview: true,
+        },
+      ],
+      thresholdComparisons: [],
+      deterministicGates: [],
+    };
+    const publicSchema = JSON.parse(
+      await readFile(
+        new URL("../schemas/validation-captures.schema.json", import.meta.url),
+        "utf8",
+      ),
+    );
+    expect(new Ajv({ strict: false }).compile(publicSchema)(legacy)).toBe(false);
+    expect(RepositoryCaptureCatalogSchema.safeParse(legacy).success).toBe(false);
+    const pinned = semanticPinnedFacts({
+      paths: ["package.json", "package-lock.json", ".factory/validation-captures.json"],
+      scripts,
+      documents: {
+        "package.json": JSON.stringify({ scripts }),
+        ".factory/validation-captures.json": JSON.stringify(legacy),
+      },
+    });
+    expect(() => compilerCapabilitiesForRepository(pinned, [])).toThrow();
+  });
+
+  it("documents and enforces semantic catalog constraints beyond draft-07", async () => {
+    const duplicateRole = {
+      captures: [
+        {
+          command: "npm run capture",
+          comparisonOutput: { roleId: "capture", mediaType: "image/png" },
+          auxiliaryOutputs: [{ roleId: "capture", mediaType: "image/png" }],
+          profile: null,
+          humanReview: true,
+          exactDeterministicGates: [],
+          thresholdComparisons: [],
+        },
+      ],
+    };
+    const publicSchema = JSON.parse(
+      await readFile(
+        new URL("../schemas/validation-captures.schema.json", import.meta.url),
+        "utf8",
+      ),
+    );
+    expect(new Ajv({ strict: false }).compile(publicSchema)(duplicateRole)).toBe(true);
+    expect(RepositoryCaptureCatalogSchema.safeParse(duplicateRole).success).toBe(false);
+  });
+
   it("retains an unrelated observed generic recipe beside unsupported provider evidence", () => {
     const fixture = (paths: string[]) =>
       semanticPinnedFacts({
@@ -216,6 +410,19 @@ describe("adapter-owned compiler capabilities", () => {
       /runtime[- ]pin/i,
     ])
       expect(prompt).not.toMatch(literal);
+  });
+
+  it("gives repository-result capture one concise format-neutral instruction", () => {
+    const prompt = compilerProposalPrompt(semanticRequest());
+    const instruction = prompt
+      .split("\n")
+      .find((line) => line.includes("repository-result evidence"));
+    expect(instruction).toContain("evidence-for");
+    expect(instruction).toContain("exact repository-change result");
+    expect(instruction).toContain("never creates a producer Work Item");
+    expect(instruction).toContain("Factory derives commands, routes, egress, reviewer capability");
+    expect(instruction).not.toMatch(/image|raster|audio|video|archive|model|json/i);
+    expect(instruction!.length).toBeLessThan(500);
   });
 });
 
@@ -545,14 +752,14 @@ describe("strict semantic compiler contracts", () => {
     withReport("repairable", "proposal", [violation("report-truncated")], true);
 
     const invalidSurface = structuredClone(request);
-    invalidSurface.repository.validationSurfaces.visual = {
+    invalidSurface.repository.validationSurfaces.deterministicSimulation = {
       count: 0,
       digest: "a".repeat(64),
       sample: ["src/visible.ts"],
     };
     cases.push({ value: invalidSurface, accepted: false });
     const boundedSurface = structuredClone(request);
-    boundedSurface.repository.validationSurfaces.visual = {
+    boundedSurface.repository.validationSurfaces.deterministicSimulation = {
       count: 1,
       digest: "a".repeat(64),
       sample: ["src/visible.ts"],

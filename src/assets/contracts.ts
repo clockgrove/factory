@@ -2,10 +2,16 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import { ArtifactPayloadSchema } from "../execution/artifact-content.js";
-import { boundedText, gitSha, safeId, sha256Digest } from "../protocol/limits.js";
+import {
+  MAX_PRODUCT_FILE_BYTES,
+  boundedText,
+  gitSha,
+  safeId,
+  sha256Digest,
+} from "../protocol/limits.js";
 
 export const MAX_OBJECTIVE_ASSETS = 32;
-export const MAX_OBJECTIVE_ASSET_BYTES = 100 * 1024 * 1024;
+export const MAX_OBJECTIVE_ASSET_BYTES = MAX_PRODUCT_FILE_BYTES;
 export const MAX_OBJECTIVE_ASSET_TOTAL_BYTES = 256 * 1024 * 1024;
 export const MAX_OBJECTIVE_ASSET_PIXELS = 40_000_000;
 export const MAX_OBJECTIVE_ASSET_FRAMES = 16;
@@ -42,6 +48,13 @@ const TextMetadataSchema = z
     lines: z.number().int().positive().max(1_000_000),
   })
   .strict();
+const JsonMetadataSchema = z
+  .object({
+    kind: z.literal("json"),
+    encoding: z.literal("utf-8"),
+    root: z.enum(["array", "object", "scalar"]),
+  })
+  .strict();
 const RasterMetadataSchema = z
   .object({
     kind: z.literal("raster"),
@@ -59,6 +72,7 @@ const OpaqueMetadataSchema = z
   .strict();
 export const AssetValidationMetadataSchema = z.discriminatedUnion("kind", [
   TextMetadataSchema,
+  JsonMetadataSchema,
   RasterMetadataSchema,
   OpaqueMetadataSchema,
 ]);

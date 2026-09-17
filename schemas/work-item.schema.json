@@ -188,6 +188,10 @@
       "$ref": "worker-packet.schema.json#/properties/mediaUses",
       "default": []
     },
+    "repositoryCaptureRecipes": {
+      "$ref": "worker-packet.schema.json#/properties/repositoryCaptureRecipes",
+      "default": []
+    },
     "context": { "$ref": "worker-packet.schema.json#/properties/context" },
     "changeSurface": { "$ref": "worker-packet.schema.json#/properties/changeSurface" },
     "delivery": { "$ref": "worker-packet.schema.json#/properties/delivery" },
@@ -204,7 +208,7 @@
         "additionalProperties": false,
         "required": ["tier", "criteria"],
         "properties": {
-          "tier": { "enum": ["mechanical", "semantic", "visual", "deterministic-simulation"] },
+          "tier": { "enum": ["mechanical", "semantic", "deterministic-simulation"] },
           "criteria": {
             "type": "array",
             "minItems": 1,
@@ -260,7 +264,8 @@
           { "required": ["repositoryCapabilities"] },
           { "required": ["managedRuntimes"] },
           { "required": ["generatedAssetRequirements"] },
-          { "required": ["mediaUses"] }
+          { "required": ["mediaUses"] },
+          { "required": ["repositoryCaptureRecipes"] }
         ]
       }
     }

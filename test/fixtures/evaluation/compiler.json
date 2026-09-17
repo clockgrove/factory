@@ -146,7 +146,7 @@
     },
     {
       "id": "visual-status",
-      "kind": "visual",
+      "kind": "capture",
       "title": "Make paused status visible without color alone",
       "objective": "The status card is a deterministic SVG produced by a small renderer. [paused] Add paused state with visible text Paused and a double-bar icon, keeping ready state Ready with its checkmark. [snapshot] Refresh visual/status.svg for paused state and extend offline renderer assertions for text, shape, and width 160 height 48. Preserve the viewBox and accessible title. A reviewer must inspect the actual SVG at its intended size for unclipped readable text and the distinct icon; string checks alone do not establish visual quality. Keep deterministic offline SVG output, no browser automation framework or remote assets.",
       "baseline": {
@@ -167,7 +167,7 @@
           "text": "The rendered paused SVG remains accessible, readable and unclipped at 160 by 48.",
           "paths": ["visual/status.svg", "check.mjs"],
           "commands": ["npm test"],
-          "tiers": ["mechanical", "semantic", "visual"],
+          "tiers": ["mechanical", "semantic"],
           "after": ["paused"]
         }
       ],

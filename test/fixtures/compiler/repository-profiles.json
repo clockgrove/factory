@@ -26,10 +26,5 @@
     "name": "deterministic-simulation",
     "facts": { "files": [{ "path": "test/seed-replay.ts" }] },
     "expected": { "deterministicSimulation": true }
-  },
-  {
-    "name": "visual-validation",
-    "facts": { "files": [{ "path": "test/visual-snapshot.ts" }] },
-    "expected": { "visualValidation": true }
   }
 ]

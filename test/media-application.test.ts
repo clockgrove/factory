@@ -151,7 +151,8 @@ function packet(): AssetProductionWorkerPacket {
           mediaTypes: ["image/png"],
           minimumCount: 2,
           maximumCount: 2,
-          raster: {
+          profile: {
+            kind: "raster",
             minimumWidth: 32,
             maximumWidth: 32,
             minimumHeight: 32,
@@ -161,6 +162,7 @@ function packet(): AssetProductionWorkerPacket {
           },
         },
         review: { kind: "human-required" },
+        repositoryCapture: null,
         bindings: [
           {
             workItemId: "consumer",

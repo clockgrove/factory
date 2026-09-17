@@ -17,11 +17,16 @@ import { dirname, join, resolve, sep } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
-import { assertNoSecretMaterial, gitSha, sha256Digest } from "../protocol/limits.js";
+import {
+  MAX_PRODUCT_FILE_BYTES,
+  assertNoSecretMaterial,
+  gitSha,
+  sha256Digest,
+} from "../protocol/limits.js";
 
 export const CONTENT_CHUNK_BYTES = 4 * 1024 * 1024;
 export const MAX_CONTENT_BYTES = 256 * 1024 * 1024;
-export const MAX_CONTENT_FILE_BYTES = 100 * 1000 * 1000;
+export const MAX_CONTENT_FILE_BYTES = MAX_PRODUCT_FILE_BYTES;
 export const MAX_CONTENT_FILES = 5000;
 export const ArtifactPathSchema = z
   .string()
@@ -66,18 +71,11 @@ export const ArtifactPayloadSchema = z
       });
   });
 export type ArtifactPayload = z.infer<typeof ArtifactPayloadSchema>;
-const MediaSchema = z.enum([
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "application/pdf",
-  "application/wasm",
-  "application/zip",
-  "audio/wav",
-  "video/mp4",
-  "unknown",
-]);
+const MediaSchema = z
+  .string()
+  .min(3)
+  .max(160)
+  .regex(/^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/i);
 export const ArtifactFileSchema = z
   .object({
     path: ArtifactPathSchema,
@@ -90,7 +88,7 @@ export const ArtifactFileSchema = z
   })
   .strict()
   .superRefine((value, context) => {
-    if (value.mode === "120000" && value.mediaType !== "unknown")
+    if (value.mode === "120000" && value.mediaType !== "application/octet-stream")
       context.addIssue({
         code: z.ZodIssueCode.custom,
         message: "symlink target bytes must not claim regular-file media",
@@ -99,7 +97,7 @@ export const ArtifactFileSchema = z
       value.action === "delete" &&
       (value.bytes !== 0 ||
         value.digest !== sha256(Buffer.alloc(0)) ||
-        value.mediaType !== "unknown")
+        value.mediaType !== "application/octet-stream")
     )
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -151,7 +149,7 @@ export function knownMediaType(prefix: Buffer): z.infer<typeof MediaSchema> {
     return "application/wasm";
   if (prefix.subarray(0, 4).equals(Buffer.from([80, 75, 3, 4]))) return "application/zip";
   if (prefix.subarray(4, 8).toString("ascii") === "ftyp") return "video/mp4";
-  return "unknown";
+  return "application/octet-stream";
 }
 
 /** No follow of any path component; caller roots must be trusted owned materializations. */

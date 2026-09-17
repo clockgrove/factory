@@ -10,6 +10,56 @@ import {
   type CompilerProjectionContext,
 } from "../../src/compiler/proposal.js";
 import { compilerCapabilitiesForRepository } from "../../src/toolchains/compiler-capabilities.js";
+import { EMPTY_REPOSITORY_CAPTURE_PLANNING } from "../../src/management/backend.js";
+import type { RepositoryCapturePlanningAuthority } from "../../src/management/backend.js";
+import type { RepositoryCaptureReviewerCapability } from "../../src/validation/repository-capture.js";
+
+const semanticCaptureReviewer: RepositoryCaptureReviewerCapability = {
+  id: "semantic-fixture-reviewer",
+  mediaTypes: [
+    "application/json",
+    "application/octet-stream",
+    "application/zip",
+    "audio/wav",
+    "image/jpeg",
+    "image/png",
+    "model/gltf-binary",
+    "text/plain",
+  ],
+  profiles: ["raster"],
+  allowUnprofiled: true,
+  visibilities: ["public", "private"],
+  rightsBases: ["user-owned", "licensed", "permission-granted", "unknown"],
+  semanticHandlers: [
+    { id: "sharp-raster", contract: 1 },
+    { id: "json", contract: 1 },
+    { id: "utf8-text", contract: 1 },
+  ],
+  networkDestinations: [],
+  maximumAssets: 64,
+};
+
+export function semanticRepositoryCapturePlanning(
+  pinned = semanticPinnedFacts(),
+): RepositoryCapturePlanningAuthority {
+  const capabilities = compilerCapabilitiesForRepository(pinned, []);
+  const localManagedRuntimeAdapterIds = [
+    ...new Set(
+      capabilities.validationRecipes.flatMap(({ capture, adapterId }) =>
+        capture !== null && adapterId !== null ? [adapterId] : [],
+      ),
+    ),
+  ].sort();
+  return capabilities.validationRecipes.some(({ capture }) => capture !== null)
+    ? {
+        execution: {
+          localManagedRuntimeAdapterIds,
+          isolatedBackendIds: ["fixture-validation"],
+        },
+        reviewerCapability: structuredClone(semanticCaptureReviewer),
+      }
+    : EMPTY_REPOSITORY_CAPTURE_PLANNING;
+}
 
 export const semanticBaseSha = "a".repeat(40);
 
@@ -55,7 +105,11 @@ export function semanticProjectionContext(
     allowedNetworkDestinations: [],
   },
 ): CompilerProjectionContext {
-  return { pinnedFacts, runPolicy };
+  return {
+    pinnedFacts,
+    runPolicy,
+    repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
+  };
 }
 
 export function semanticRequest(
@@ -65,6 +119,18 @@ export function semanticRequest(
   const objective = { number: 404, title: "Semantic compiler", body: "Implement the contract." };
   const objectiveDigest = compilerEvalDigest(objective);
   const capabilities = compilerCapabilitiesForRepository(pinned, allowedNetworkDestinations);
+  const captureEnabled = capabilities.validationRecipes.some(({ capture }) => capture !== null);
+  const repositoryCaptureEgress = captureEnabled
+    ? {
+        deterministicGateIds: capabilities.deterministicCaptureGates.map(({ id }) => id),
+        review: {
+          mode: "private-assets" as const,
+          maxAssets: 64,
+          reviewerCapabilityIds: [semanticCaptureReviewer.id],
+        },
+      }
+    : DEFAULT_RUN_POLICY.repositoryCaptureEgress;
+  const planning = semanticRepositoryCapturePlanning(pinned);
   return {
     protocol: "clockgrove.factory/compiler-request",
     revision: 0,
@@ -101,6 +167,29 @@ export function semanticRequest(
       validationSurfaces: summarizeCompilerValidationSurfaces(pinned.relevantPaths),
       pathCount: pinned.relevantPaths.length,
     },
+    repositoryCapture: {
+      execution: {
+        commands: capabilities.validationRecipes
+          .filter(({ capture }) => capture !== null)
+          .map(({ id, adapterId }) => ({
+            recipeId: id,
+            local:
+              adapterId !== null &&
+              planning.execution.localManagedRuntimeAdapterIds.includes(adapterId)
+                ? { managedRuntimeReceiptRequired: true as const }
+                : null,
+            isolatedBackendIds: [...planning.execution.isolatedBackendIds],
+          })),
+      },
+      egress: {
+        policyDigest: compilerEvalDigest(repositoryCaptureEgress),
+        deterministicGateIds: [...repositoryCaptureEgress.deterministicGateIds],
+        review: structuredClone(repositoryCaptureEgress.review),
+      },
+      reviewer: planning.reviewerCapability,
+      comparators: capabilities.repositoryComparators,
+      deterministicGates: capabilities.deterministicCaptureGates,
+    },
     media: {
       assetManifest: null,
       assetEgress: {
@@ -127,7 +216,7 @@ export function semanticRequest(
 }
 
 export function semanticProposal(request: CompilerRequest, count = 1): CompilerProposal {
-  const recipe = request.repository.validationRecipes[0];
+  const recipe = request.repository.validationRecipes.find(({ capture }) => capture === null);
   if (!recipe) throw new Error("semantic fixture requires an observed validation recipe");
   return {
     protocol: "clockgrove.factory/compiler-proposal",

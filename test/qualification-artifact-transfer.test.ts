@@ -210,7 +210,7 @@ function fixture() {
           mode: "100644",
           bytes: 100,
           digest: hash(Buffer.alloc(100)),
-          mediaType: "unknown",
+          mediaType: "application/octet-stream",
           generated: false,
         },
       ],

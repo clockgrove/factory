@@ -16,8 +16,10 @@ import {
   assertLocalLfsAvailable,
   inspectPinnedLfs,
   materializeLocalLfsAssets,
+  restorePinnedLfsPointers,
   MAX_LOCAL_LFS_FILE_BYTES,
 } from "../repository-profiles/git-lfs.js";
+import { materializeLfsArtifactContent } from "../publication/git-lfs-output.js";
 import {
   assertFilesystemArtifactManifest,
   inspectContentFile,
@@ -111,15 +113,17 @@ export async function collectLocalArtifact(
   for (const asset of lfs.assets) {
     const index = changedPaths.indexOf(asset.path);
     if (index < 0) continue;
-    const actual = await inspectContentFile(
-      await regularContentPath(worktree.path, asset.path),
-      MAX_LOCAL_LFS_FILE_BYTES,
-    );
-    if (actual.digest !== asset.oid || actual.bytes !== asset.size || actual.mode !== asset.mode)
-      throw new Error(
-        `changed LFS asset ${asset.path} requires unsupported authenticated LFS upload; restore the original asset or publish it explicitly outside Factory`,
+    try {
+      const actual = await inspectContentFile(
+        await regularContentPath(worktree.path, asset.path),
+        MAX_LOCAL_LFS_FILE_BYTES,
       );
-    changedPaths.splice(index, 1);
+      if (actual.digest === asset.oid && actual.bytes === asset.size && actual.mode === asset.mode)
+        changedPaths.splice(index, 1);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // A deletion remains a changed path but carries no new LFS object.
+    }
   }
   if (allowedPaths) assertChangedPathScope(changedPaths, allowedPaths);
   if (!changedPaths.length)
@@ -152,6 +156,7 @@ export async function collectLocalArtifact(
       baseSha: worktree.baseSha,
       patchPath,
       changedPaths,
+      outputRoot: worktree.path,
       logs,
       outcome: "succeeded",
     });
@@ -176,14 +181,23 @@ export async function seedLocalWorktree(
   const patchPath = join(worktree.root, "retry-checkpoint.patch");
   await materializeArtifactPatch(verified, patchPath);
   try {
+    if (verified.lfsObjects?.length)
+      await restorePinnedLfsPointers(
+        worktree.repository,
+        worktree.path,
+        verified.baseSha,
+        verified.changedPaths,
+      );
     const manifest = await inspectPatchManifest(
       worktree.repository,
       verified.baseSha,
       patchPath,
       verified.changedPaths,
+      ...(verified.lfsObjects ? [{ lfsObjects: verified.lfsObjects }] : [{}]),
     );
     assertFilesystemArtifactManifest(manifest);
     await git(worktree.path, ["apply", "--binary", "--whitespace=error-all", patchPath]);
+    if (verified.lfsObjects?.length) await materializeLfsArtifactContent(worktree.path, verified);
   } finally {
     await rm(patchPath, { force: true });
   }

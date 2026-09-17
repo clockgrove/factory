@@ -1,4 +1,5 @@
-import { open, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,10 +7,20 @@ import { z } from "zod";
 
 import type {
   AttemptContext,
+  IsolatedValidationCaptureRequest,
+  IsolatedValidationCaptures,
   IsolatedValidationContext,
   IsolatedValidationResult,
   StaleAttemptIdentity,
+  ValidationResourceIdentity,
 } from "../execution/backend.js";
+import {
+  cachePayload,
+  inspectContentFile,
+  MAX_CONTENT_BYTES,
+  MAX_CONTENT_FILE_BYTES,
+  releasePayload,
+} from "../execution/artifact-content.js";
 import { streamGitFile } from "../runtime/artifact-patch.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import { NPM_VALIDATION_SETUP_COMMAND } from "../validation/plan.js";
@@ -24,7 +35,250 @@ import { validationInvocationOwnership } from "./validation-invocation.js";
 
 const MAX_SOURCE_ARCHIVE_BYTES = 64 * 1024 * 1024;
 export const MAX_ISOLATED_VALIDATION_RESULT_BYTES = 64 * 1024;
+export const MAX_ISOLATED_CAPTURE_MANIFEST_BYTES = 1024 * 1024;
+export const MAX_ISOLATED_CAPTURE_FILES = 512;
+export const ISOLATED_CAPTURE_MANIFEST_PATH = "factory/capture-manifest.json";
 export const SANDBOX_CODEX_PACKAGE = "@openai/codex@0.153.0";
+
+const digest = z.string().regex(/^[0-9a-f]{64}$/);
+const captureId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
+const mediaType = z.string().min(1).max(200);
+const scenarioDescriptor = z
+  .string()
+  .min(1)
+  .max(500)
+  .refine(
+    (value) => !Array.from(value).some((character) => character.charCodeAt(0) < 32),
+    "capture scenario descriptor contains control characters",
+  );
+export const IsolatedValidationCaptureRequestSchema = z
+  .object({
+    protocol: z.literal("clockgrove.factory/repository-capture-request"),
+    validationInvocationDigest: digest,
+    validationDeadline: z.string().datetime({ offset: true }),
+    environmentIdentity: z.string().min(1).max(500),
+    recipes: z
+      .array(
+        z
+          .object({
+            id: captureId,
+            digest,
+            command: z.string().min(1).max(1_000),
+            scenario: z
+              .object({
+                id: captureId,
+                fixture: scenarioDescriptor.nullable(),
+                seed: scenarioDescriptor.nullable(),
+              })
+              .strict()
+              .refine((value) => value.fixture === null || value.seed === null, {
+                message: "capture fixture and seed are mutually exclusive",
+              }),
+            outputs: z
+              .array(
+                z
+                  .object({
+                    roleId: captureId,
+                    mediaType,
+                    maxBytes: z.number().int().positive().max(MAX_CONTENT_FILE_BYTES),
+                  })
+                  .strict(),
+              )
+              .min(1)
+              .max(MAX_ISOLATED_CAPTURE_FILES),
+            comparison: z.discriminatedUnion("kind", [
+              z
+                .object({
+                  kind: z.literal("exact"),
+                  outputRoleId: captureId,
+                  expectedDescriptorDigest: digest,
+                })
+                .strict(),
+              z
+                .object({
+                  kind: z.literal("threshold"),
+                  outputRoleId: captureId,
+                  expectedDescriptorDigest: digest,
+                  metric: captureId,
+                  maximumDifference: z.number().finite().nonnegative(),
+                })
+                .strict(),
+            ]),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(MAX_ISOLATED_CAPTURE_FILES),
+    maximumTotalBytes: z.number().int().positive().max(MAX_CONTENT_BYTES),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const recipeIds = value.recipes.map((recipe) => recipe.id);
+    const outputIds = value.recipes.flatMap((recipe) =>
+      recipe.outputs.map((output) => `${recipe.id}\0${output.roleId}`),
+    );
+    if (new Set(recipeIds).size !== recipeIds.length)
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "duplicate capture recipe id" });
+    if (new Set(outputIds).size !== outputIds.length)
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "duplicate capture output role" });
+    if (outputIds.length > MAX_ISOLATED_CAPTURE_FILES)
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "too many capture outputs" });
+    for (const [index, recipe] of value.recipes.entries())
+      if (!recipe.outputs.some((output) => output.roleId === recipe.comparison.outputRoleId))
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["recipes", index, "comparison"],
+          message: "comparison must name a declared output role",
+        });
+  });
+
+const CaptureManifestFileSchema = z
+  .object({
+    recipeId: captureId,
+    roleId: captureId,
+    sourcePath: z
+      .string()
+      .regex(
+        /^factory\/captures\/[0-9a-f]{64}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/,
+      ),
+    mediaType,
+    bytes: z.number().int().positive().max(MAX_CONTENT_FILE_BYTES),
+    digest,
+  })
+  .strict();
+const CaptureManifestSchema = z
+  .object({
+    protocol: z.literal("clockgrove.factory/repository-capture-manifest"),
+    validationInvocationDigest: digest,
+    files: z.array(CaptureManifestFileSchema).min(1).max(MAX_ISOLATED_CAPTURE_FILES),
+    manifestDigest: digest,
+  })
+  .strict();
+type CaptureManifest = z.infer<typeof CaptureManifestSchema>;
+
+function captureSourcePath(invocation: string, recipeId: string, roleId: string): string {
+  return `factory/captures/${invocation}/${recipeId}/${roleId}`;
+}
+
+function captureManifestIdentity(manifest: Omit<CaptureManifest, "manifestDigest">): string {
+  return createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
+}
+
+export function parseIsolatedValidationCaptureRequest(
+  context: IsolatedValidationContext,
+): IsolatedValidationCaptureRequest | undefined {
+  if (!context.captureRequest) return undefined;
+  const request = IsolatedValidationCaptureRequestSchema.parse(context.captureRequest);
+  if (
+    !context.validationInvocation ||
+    request.validationInvocationDigest !== context.validationInvocation.identityDigest ||
+    request.validationDeadline !== context.deadline.toISOString()
+  )
+    throw new Error("capture request differs from its validation invocation or deadline");
+  const captureCommands = new Set(request.recipes.map((recipe) => recipe.command));
+  const specialCommands = captureCommands;
+  const planned = [...context.packet.validationCommands] as string[];
+  for (const command of specialCommands)
+    if (planned.filter((candidate) => candidate === command).length !== 1)
+      throw new Error("capture command must identify one planned validation command");
+  const firstCapture = planned.findIndex((command) => specialCommands.has(command));
+  if (
+    firstCapture < 0 ||
+    planned.slice(firstCapture).some((command) => !specialCommands.has(command))
+  )
+    throw new Error("capture commands must follow ordinary validation commands");
+  assertNoSecretMaterial(request, "isolated capture request");
+  return request;
+}
+
+export function parseIsolatedValidationCaptureManifest(
+  buffer: Buffer,
+  request: IsolatedValidationCaptureRequest,
+): CaptureManifest {
+  if (buffer.byteLength > MAX_ISOLATED_CAPTURE_MANIFEST_BYTES)
+    throw new Error("isolated capture manifest exceeds the maximum size");
+  let manifest: CaptureManifest;
+  try {
+    manifest = CaptureManifestSchema.parse(JSON.parse(buffer.toString("utf8")) as unknown);
+  } catch {
+    throw new Error("isolated validator returned a malformed capture manifest");
+  }
+  const { manifestDigest, ...identity } = manifest;
+  if (captureManifestIdentity(identity) !== manifestDigest)
+    throw new Error("isolated capture manifest digest mismatch");
+  const expected = request.recipes.flatMap((recipe) =>
+    recipe.outputs.map((output) => ({
+      recipeId: recipe.id,
+      roleId: output.roleId,
+      sourcePath: captureSourcePath(request.validationInvocationDigest, recipe.id, output.roleId),
+      mediaType: output.mediaType,
+      maxBytes: output.maxBytes,
+    })),
+  );
+  if (manifest.validationInvocationDigest !== request.validationInvocationDigest)
+    throw new Error("isolated capture manifest invocation mismatch");
+  if (manifest.files.length !== expected.length)
+    throw new Error("isolated capture manifest output count mismatch");
+  let total = 0;
+  for (let index = 0; index < expected.length; index += 1) {
+    const actual = manifest.files[index]!;
+    const planned = expected[index]!;
+    if (
+      actual.recipeId !== planned.recipeId ||
+      actual.roleId !== planned.roleId ||
+      actual.sourcePath !== planned.sourcePath ||
+      actual.mediaType !== planned.mediaType
+    )
+      throw new Error("isolated capture manifest differs from its request");
+    if (actual.bytes > planned.maxBytes)
+      throw new Error("isolated capture file exceeds its requested byte limit");
+    total += actual.bytes;
+  }
+  if (total > request.maximumTotalBytes)
+    throw new Error("isolated capture files exceed their aggregate byte limit");
+  assertNoSecretMaterial(manifest, "isolated capture manifest");
+  return manifest;
+}
+
+export async function retainIsolatedValidationCaptures(
+  manifest: CaptureManifest,
+  locator: IsolatedValidationCaptures["locator"],
+  download: (file: CaptureManifest["files"][number], destination: string) => Promise<void>,
+): Promise<IsolatedValidationCaptures> {
+  const root = await mkdtemp(join(tmpdir(), "factory-isolated-captures-"));
+  const retained: IsolatedValidationCaptures["files"] = [];
+  try {
+    await mkdir(root, { recursive: true });
+    for (let index = 0; index < manifest.files.length; index += 1) {
+      const file = manifest.files[index]!;
+      const destination = join(root, String(index));
+      await download(file, destination);
+      const inspected = await inspectContentFile(destination, file.bytes);
+      if (inspected.bytes !== file.bytes || inspected.digest !== file.digest)
+        throw new Error("downloaded isolated capture identity mismatch");
+      const payload = await cachePayload(destination);
+      retained.push({ ...file, payload });
+    }
+    return {
+      validationInvocationDigest: manifest.validationInvocationDigest,
+      manifestDigest: manifest.manifestDigest,
+      locator,
+      files: retained,
+    };
+  } catch (error) {
+    await Promise.all(retained.map((file) => releasePayload(file.payload)));
+    throw error;
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+export async function releaseIsolatedValidationCaptures(
+  captures: IsolatedValidationCaptures | undefined,
+): Promise<void> {
+  if (!captures) return;
+  await Promise.all(captures.files.map((file) => releasePayload(file.payload)));
+}
 
 const IsolatedValidationResultSchema = z
   .object({
@@ -383,6 +637,54 @@ export function sandboxResourceName(
   return phase === "validation" ? `${identity.slice(0, 54)}-validate` : identity;
 }
 
+function canonicalResourceIdentityJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalResourceIdentityJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalResourceIdentityJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** Exact deterministic remote validation request identity. Host filesystem paths and
+ * provider cleanup clocks are deliberately excluded from provider-create authority. */
+export function sandboxValidationResourceIdentity(
+  context: IsolatedValidationContext,
+  backendId: string,
+): ValidationResourceIdentity {
+  const resourceName = sandboxResourceName(context, "validation");
+  const request = {
+    backendId,
+    resourceName,
+    repository: context.repository.toLowerCase(),
+    objective: context.objective,
+    workItem: context.workItem,
+    attempt: context.attempt,
+    runId: context.runId,
+    directorEpoch: context.directorEpoch,
+    policyDigest: context.policyDigest,
+    validationDeadline: context.deadline.toISOString(),
+    validationInvocation: context.validationInvocation,
+    artifactDigest: context.artifact.digest,
+    artifactBaseSha: context.artifact.baseSha,
+    packetDigest: createHash("sha256")
+      .update(canonicalResourceIdentityJson(context.packet))
+      .digest("hex"),
+    policyNetworkDestinations: [...(context.policyNetworkDestinations ?? [])].sort(),
+    captureRequest: context.captureRequest,
+  };
+  return {
+    resourceName,
+    requestIdentityDigest: createHash("sha256")
+      .update(canonicalResourceIdentityJson(request))
+      .digest("hex"),
+  };
+}
+
 export async function repositoryArchive(
   repository: string,
   baseSha: string,
@@ -589,13 +891,47 @@ export function sandboxValidationFiles(
     throw new Error(
       "externalized artifact requires a verified file upload; a payload marker is not a patch",
     );
+  const captureRequest = parseIsolatedValidationCaptureRequest(context);
+  const captureCommands = new Set(captureRequest?.recipes.map((recipe) => recipe.command) ?? []);
+  const capturePlanCommands = captureCommands;
+  const ordinaryValidationCommands = context.packet.validationCommands.filter(
+    (command) => !capturePlanCommands.has(command),
+  );
   const managedToolchain = isolatedManagedToolchainPlan(
-    context.packet.validationCommands,
+    ordinaryValidationCommands,
     packetRuntimeRequirements(context.packet),
   );
+  const sandboxCaptureRequest = captureRequest
+    ? {
+        ...captureRequest,
+        recipes: captureRequest.recipes.map((recipe) => ({
+          ...recipe,
+          outputs: recipe.outputs.map((output) => ({
+            ...output,
+            sourcePath: captureSourcePath(
+              captureRequest.validationInvocationDigest,
+              recipe.id,
+              output.roleId,
+            ),
+          })),
+        })),
+      }
+    : undefined;
+  const captureRequestBytes = sandboxCaptureRequest
+    ? Buffer.from(JSON.stringify(sandboxCaptureRequest), "utf8")
+    : undefined;
+  if (captureRequestBytes && captureRequestBytes.byteLength > MAX_ISOLATED_CAPTURE_MANIFEST_BYTES)
+    throw new Error("isolated capture request exceeds the maximum size");
   const configuration = {
     expectedPaths: [...context.artifact.changedPaths].sort(),
-    commands: context.packet.validationCommands,
+    commands: ordinaryValidationCommands,
+    ...(captureRequest
+      ? {
+          captureCommands: context.packet.validationCommands.filter((command) =>
+            capturePlanCommands.has(command),
+          ),
+        }
+      : {}),
     managedToolchain: managedToolchain ? managedConfiguration(managedToolchain.plan) : null,
     timeoutMsPerCommand: Math.min(
       (context.packet.requirements.timeoutMinutes ?? 30) * 60_000,
@@ -603,12 +939,17 @@ export function sandboxValidationFiles(
     ),
   };
   const validator = String.raw`import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 const root = new URL(".", import.meta.url).pathname;
 const workspace = new URL("../workspace/", import.meta.url).pathname;
 const config = JSON.parse(readFileSync(new URL("config.json", import.meta.url), "utf8"));
+const captureRequestUrl = new URL("capture-request.json", import.meta.url);
+const captureRequest = existsSync(captureRequestUrl)
+  ? JSON.parse(readFileSync(captureRequestUrl, "utf8"))
+  : null;
 if (config.managedToolchain) execFileSync(process.execPath, [
   new URL("materialize-toolchain.mjs", import.meta.url).pathname,
   new URL("managed-toolchain.json", import.meta.url).pathname,
@@ -668,6 +1009,140 @@ function executeManagedStep(step, setup) {
     : (setup ? "validation setup failed (" : "validation failed (") + exitCode + "): " + step.display;
 }
 
+function inspectCapture(output) {
+  const path = resolve(root, output.sourcePath.slice("factory/".length));
+  const info = lstatSync(path);
+  if (!info.isFile() || info.isSymbolicLink() || info.size <= 0 || info.size > output.maxBytes) {
+    throw new Error("capture output is missing, non-regular, empty, or oversized: " + output.sourcePath);
+  }
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const hash = createHash("sha256");
+  const chunk = Buffer.alloc(64 * 1024);
+  let bytes = 0;
+  try {
+    for (;;) {
+      const count = readSync(fd, chunk, 0, chunk.length, null);
+      if (!count) break;
+      bytes += count;
+      if (bytes > output.maxBytes) throw new Error("capture output grew beyond its byte limit");
+      hash.update(chunk.subarray(0, count));
+    }
+    const after = statSync(path);
+    if (bytes !== info.size || after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs) {
+      throw new Error("capture output changed while hashing: " + output.sourcePath);
+    }
+    return {
+      recipeId: output.recipeId,
+      roleId: output.roleId,
+      sourcePath: output.sourcePath,
+      mediaType: output.mediaType,
+      bytes,
+      digest: hash.digest("hex"),
+    };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function captureFiles(recipes) {
+  let totalBytes = 0;
+  return recipes.flatMap(recipe => recipe.outputs.map(output => {
+    const file = inspectCapture({ ...output, recipeId: recipe.id });
+    totalBytes += file.bytes;
+    if (totalBytes > captureRequest.maximumTotalBytes) throw new Error("capture outputs exceed their aggregate byte limit");
+    return file;
+  }));
+}
+
+function assertOwnedCaptureTree(recipes) {
+  const captureRoot = resolve(root, "captures", captureRequest.validationInvocationDigest);
+  const expected = new Set(recipes.flatMap(recipe => [
+    ...recipe.outputs.map(output => output.outputPath),
+  ]));
+  const observed = [];
+  const visit = directory => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = resolve(directory, entry.name);
+      const info = lstatSync(path);
+      if (info.isSymbolicLink()) throw new Error("capture output tree contains a symbolic link");
+      if (info.isDirectory()) visit(path);
+      else if (info.isFile()) observed.push(path);
+      else throw new Error("capture output tree contains an unsupported file kind");
+    }
+  };
+  visit(captureRoot);
+  if (observed.length !== expected.size || observed.some(path => !expected.has(path))) {
+    throw new Error("capture output tree differs from its assigned file set");
+  }
+}
+
+function runCaptures(outputTreeSha) {
+  if (!captureRequest) return;
+  const beforeStatus = git(["status", "--porcelain=v1", "--untracked-files=all"]);
+  if (git(["write-tree"]).trim() !== outputTreeSha) throw new Error("capture input tree changed before dispatch");
+  const recipes = captureRequest.recipes.map(recipe => ({
+    ...recipe,
+    outputs: recipe.outputs.map(output => {
+      const sourcePath = output.sourcePath;
+      if (!sourcePath.startsWith("factory/captures/" + captureRequest.validationInvocationDigest + "/")) {
+        throw new Error("capture output escaped its invocation namespace");
+      }
+      const outputPath = resolve(root, sourcePath.slice("factory/".length));
+      if (!outputPath.startsWith(resolve(root, "captures", captureRequest.validationInvocationDigest) + "/")) {
+        throw new Error("capture output escaped its owned root");
+      }
+      mkdirSync(dirname(outputPath), { recursive: true });
+      if (existsSync(outputPath)) throw new Error("capture output existed before dispatch");
+      return { ...output, outputPath };
+    }),
+  }));
+  const commandOrder = config.captureCommands;
+  for (let index = 0; index < commandOrder.length; index += 1) {
+    const command = commandOrder[index];
+    const captureRecipes = recipes.filter(recipe => recipe.command === command);
+    if (captureRecipes.length === 0) throw new Error("capture plan command has no recipe owner");
+    const assignedRecipes = captureRecipes.map(({ comparison: _comparison, command: _command, ...recipe }) => recipe);
+    const commandRequestPath = new URL("capture-command-request-" + index + ".json", import.meta.url).pathname;
+    const commandRequest = JSON.stringify({
+      protocol: captureRequest.protocol,
+      validationInvocationDigest: captureRequest.validationInvocationDigest,
+      phase: "capture",
+      recipes: assignedRecipes,
+    });
+    if (Buffer.byteLength(commandRequest, "utf8") > ${MAX_ISOLATED_CAPTURE_MANIFEST_BYTES}) {
+      throw new Error("capture command request exceeds the maximum size");
+    }
+    writeFileSync(commandRequestPath, commandRequest, { mode: 0o400, flag: "wx" });
+    const began = Date.now();
+    const execution = spawnSync("/bin/sh", ["-c", command], {
+      cwd: workspace,
+      timeout: config.timeoutMsPerCommand,
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      env: { ...childEnv, FACTORY_CAPTURE_REQUEST: commandRequestPath },
+    });
+    const exitCode = execution.status ?? (execution.error?.code === "ETIMEDOUT" ? 124 : 1);
+    commands.push({ command, exitCode, durationMs: Date.now() - began });
+    if (exitCode !== 0) {
+      return exitCode === 124
+        ? "capture command timed out: " + command
+        : "capture command failed (" + exitCode + "): " + command;
+    }
+  }
+  if (git(["write-tree"]).trim() !== outputTreeSha || git(["status", "--porcelain=v1", "--untracked-files=all"]) !== beforeStatus) {
+    throw new Error("capture command changed the exact repository result tree");
+  }
+  assertOwnedCaptureTree(recipes);
+  const files = captureFiles(recipes);
+  const identity = {
+    protocol: "clockgrove.factory/repository-capture-manifest",
+    validationInvocationDigest: captureRequest.validationInvocationDigest,
+    files,
+  };
+  const manifestDigest = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+  writeFileSync(new URL("capture-manifest.json", import.meta.url), JSON.stringify({ ...identity, manifestDigest }), { mode: 0o400, flag: "wx" });
+}
+
 try {
   mkdirSync(workspace, { recursive: true });
   mkdirSync("/tmp/factory-home", { recursive: true });
@@ -721,8 +1196,10 @@ try {
       break;
     }
   }
+  const outputTreeSha = git(["write-tree"]).trim();
+  if (failureReason === undefined) failureReason = runCaptures(outputTreeSha);
   const result = {
-    outputTreeSha: git(["write-tree"]).trim(), commands,
+    outputTreeSha, commands,
     passed: failureReason === undefined, ...(failureReason ? { failureReason } : {}),
     startedAt, completedAt: new Date().toISOString(),
   };
@@ -741,6 +1218,9 @@ try {
       path: "factory/config.json",
       content: Buffer.from(JSON.stringify(configuration), "utf8"),
     },
+    ...(captureRequestBytes
+      ? [{ path: "factory/capture-request.json", content: captureRequestBytes }]
+      : []),
     ...(managedToolchain ? sandboxManagedToolchainFiles(managedToolchain.plan) : []),
     { path: "factory/validate.mjs", content: Buffer.from(validator, "utf8"), mode: 0o700 },
   ];

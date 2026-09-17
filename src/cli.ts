@@ -52,6 +52,7 @@ import {
 import type { ManagedToolchain } from "./runtime/toolchain-bundle.js";
 import { RuntimeBundleReceiptSchema } from "./protocol/worker-packet.js";
 import type { ObjectiveAssetImport, ObjectiveAssetImportMetadata } from "./assets/import.js";
+import { RepositoryCaptureCatalogSchema } from "./compiler/contracts.js";
 
 const controllerLifecycle = new SystemdControllerLifecycle(
   new SystemdUserService({
@@ -86,6 +87,7 @@ const USAGE = [
   "  factory priority-fields OWNER/REPO",
   "  factory backends probe",
   "  factory management probe",
+  "  factory validate-captures [FILE]  (canonical .factory/validation-captures.json validation)",
   "  factory toolchains provision npm|pnpm|bun|uv|all",
   "  factory toolchains restore RECEIPT.json",
   "  factory toolchains status",
@@ -215,6 +217,7 @@ function applicationFor(
     },
     planning: {
       management,
+      backendRegistry: registry,
       assetStore: store,
       repositoryPath: checkout,
       validateCheckout: validatePlanningCheckout,
@@ -739,6 +742,15 @@ async function probeManagement(): Promise<void> {
   );
 }
 
+async function validateCaptureCatalog(args: string[]): Promise<void> {
+  if (args.length > 1) fail("usage: factory validate-captures [FILE]");
+  const path = resolve(args[0] ?? ".factory/validation-captures.json");
+  const catalog = RepositoryCaptureCatalogSchema.parse(JSON.parse(await readFile(path, "utf8")));
+  process.stdout.write(
+    `${JSON.stringify({ valid: true, path, captures: catalog.captures.length }, null, 2)}\n`,
+  );
+}
+
 async function inspectPriorityFields(args: string[]): Promise<void> {
   if (!args[0]) fail("usage: factory priority-fields OWNER/REPO");
   const repository = parseRepository(args[0]);
@@ -808,6 +820,10 @@ export async function main(argv: string[]): Promise<void> {
   }
   if (command === "management" && rest[0] === "probe") {
     await probeManagement();
+    return;
+  }
+  if (command === "validate-captures") {
+    await validateCaptureCatalog(rest);
     return;
   }
   if (command === "toolchains") {

@@ -47,7 +47,16 @@ export function compilerAssetManifestView(manifestInput: ObjectiveAssetManifest)
                 alpha: raster.hasAlpha,
               }
             : { kind: "opaque" as const },
+          descriptorClass:
+            descriptor.content.inspection.status === "semantic-valid"
+              ? ("semantic" as const)
+              : ("opaque" as const),
+          inspectionHandler: {
+            id: descriptor.content.inspection.handlerId,
+            contract: descriptor.content.inspection.handlerContract,
+          },
           visibility: descriptor.visibility,
+          rightsBasis: descriptor.rights.basis,
         };
       }),
     },

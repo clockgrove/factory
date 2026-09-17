@@ -19,6 +19,7 @@ import {
 } from "../execution/artifact-content.js";
 import { assertNoSecretMaterial, gitSha, sha256Digest } from "../protocol/limits.js";
 import type { GitCommitContent, GitCommitObject } from "./lease.js";
+import { contentTransferRef, recoverContentTransfer } from "./content-transfers.js";
 
 const IdentitySchema = z
   .object({
@@ -339,6 +340,30 @@ export class ArtifactTransferIncompleteError extends Error {
   }
 }
 
+async function lfsRawRecoveryCopiesAvailable(
+  store: ArtifactTransferStore,
+  artifact: NormalizedArtifact,
+): Promise<boolean> {
+  for (const receipt of artifact.lfsObjects ?? []) {
+    const transfer = await recoverContentTransfer({
+      store,
+      identity: receipt.rawTransfer.identity,
+    });
+    if (
+      !transfer ||
+      transfer.transferRef !== contentTransferRef(receipt.rawTransfer.identity) ||
+      transfer.transferRef !== receipt.rawTransfer.ref ||
+      transfer.intentCommit !== receipt.rawTransfer.intentCommit ||
+      transfer.readyCommit !== receipt.rawTransfer.readyCommit ||
+      transfer.payload.digest !== receipt.oid ||
+      transfer.payload.bytes !== receipt.size ||
+      JSON.stringify(transfer.payload) !== JSON.stringify(receipt.payload)
+    )
+      return false;
+  }
+  return true;
+}
+
 /** Read-only proof used while the original owned workspace is still available.
  * False means keep that source; a failed copy or unavailable transport never licenses deletion. */
 export async function artifactRecoveryCopyAvailable(args: {
@@ -351,10 +376,13 @@ export async function artifactRecoveryCopyAvailable(args: {
     if (local) {
       if (local.artifact.digest !== args.artifactDigest) return false;
       if (local.artifact.payload) await verifyPayload(local.artifact.payload);
-      return true;
+      return lfsRawRecoveryCopiesAvailable(args.store, local.artifact);
     }
     const recovered = await recoverArtifactTransfer(args);
-    return recovered?.digest === args.artifactDigest;
+    return (
+      recovered?.digest === args.artifactDigest &&
+      (await lfsRawRecoveryCopiesAvailable(args.store, recovered))
+    );
   } catch {
     return false;
   }

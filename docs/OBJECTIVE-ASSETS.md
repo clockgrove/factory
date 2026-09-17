@@ -54,22 +54,128 @@ GitHub issue.
 The model may return semantic `mediaIntents` for supported media types and producer roles advertised
 in the compiler request. Each intent cites Objective obligations and directed Work Item bindings,
 declares required or helpful necessity, sets bounded media type and count constraints, optionally
-adds a typed raster profile, and requests human review or a policy-authorized deterministic rule.
+adds a typed raster profile, and selects a preexisting human or deterministic capture gate.
 The model selects one strict fulfillment: exact imported manifest asset IDs, or produced media whose
 imported and prior-intent inputs are assigned to capability-advertised roles in
 `inputRoleBindings`. Factory resolves those IDs and derives the exact descriptor digests.
-The model cannot select providers, models, credentials, stores, URLs, network access, descriptor
-digests, or execution authority.
+For an `evidence-for` binding, the model also selects an expected imported asset, a bounded scenario,
+and grounded capture and optional comparison recipe IDs. It cannot author command text, output
+roles, MIME authority, comparison policy, providers, models, credentials, stores, URLs, network
+access, descriptor digests, execution routes, reviewer capability, or gate authority.
 
 Factory first matches an intent against the selected imported manifest. A matching implementation
 reference becomes an exact `assetInputs` binding on the repository Work Item. Otherwise Factory may
 derive an `asset-production` Work Item only from an advertised producer capability whose output and
 input roles are fully satisfied. That Work Item has a `clockgrove.factory/asset-set` deliverable, no
 repository scope, and no validation command. The current produced-media path supplies reviewed
-inputs to downstream implementation or decisions. Repository-result acceptance evidence remains in
-the ordinary repository validation flow; producing new media after implementation as acceptance
-evidence is outside this path. A required unsupported intent fails compilation deterministically;
-a helpful intent may be omitted with an explicit projection-trace disposition.
+inputs to downstream implementation or decisions. An `evidence-for` intent always remains on its
+bound `repository-change` Work Item. Trusted projection resolves `.factory/validation-captures.json`
+against commands observed from the pinned checkout and emits a digest-bound
+`repositoryCaptureRecipes` entry with the exact intent and criterion references, scenario input,
+declared output roles and MIME types, optional typed raster profile, exact-byte or bounded-threshold
+comparison with one explicit subject output role, and capture-specific gate. Comparisons have no
+repository command. The subject role names one declared output whose MIME exactly matches the
+expected asset and is permitted by the intent. Raster profiles preserve catalog viewport, exact
+output dimensions, and role identities and add the intent's width, height, alpha, and animation
+acceptance constraints. Catalog exact dimensions and expected asset inspection must satisfy them.
+Auxiliary capture, diff, and preview outputs do not count as additional comparison subjects. The
+expected bytes reuse one exact `assetInputs` descriptor rather than repeating transport identity in
+the recipe. Required unsupported evidence fails compilation with a structured violation; helpful
+evidence may be omitted with an explicit trace disposition while its Work Item criteria and
+obligations remain.
+
+The committed catalog contains `captures`; each capture owns its exact deterministic gates and its
+threshold policies, and each threshold policy owns its deterministic gates. Gate authority therefore
+cannot point at a different capture command or comparator policy. A capture names its comparison
+output directly, declares auxiliary outputs separately, and declares typed profile diff and preview
+outputs inline. It has no protocol-version field, aliases, or role-ID pointers whose meaning must be
+reconstructed from another field. Every capture command must already be a repository-observed
+validation recipe; threshold policies name installed Factory comparators and contain no command. Its
+structural JSON shape is
+[`schemas/validation-captures.schema.json`](../schemas/validation-captures.schema.json). Draft-07
+cannot express global uniqueness by identity; run
+`factory validate-captures` from the repository root for the canonical structural and semantic
+check before committing the file.
+Capture recipes are format-neutral: outputs may be structured JSON, opaque binary, raster, or any
+other bounded MIME identity. Runtime trees, artifacts, environments, captured bytes, receipts, and
+decisions are execution results and never recipe fields.
+Worker validation commands are unique and ordered by phase: ordinary validation first, then all
+capture commands. Reusing command text across recipe identities is rejected. A human-required
+capture gate forces semantic review for the exact criteria
+named by each capture binding.
+
+## Repository-result capture
+
+Repository-result capture is part of independent validation, not a third deliverable type. A
+repository Work Item still produces one `clockgrove.factory/artifact`; `evidence-for` recipes observe
+that artifact's exact independently validated result tree. Captured files may be JSON, text, audio,
+documents, raster output, or other bounded passive bytes. Output roles are recipe-defined semantics,
+not a format whitelist. Raster dimensions and alpha/animation constraints are one optional typed
+profile implemented by an installed handler. A game or visual-application scenario such as Raccoon
+World is a qualification fixture for this composition, not an architecture boundary.
+
+Before capture execution, Factory persists one immutable validation invocation. It binds repository,
+Objective, run, Work Item and attempt identity; artifact, base and result-tree identity; ordered
+ordinary and capture commands; recipes, installed comparator contracts and output authorities; expected descriptor,
+content and storage-receipt digests; the selected validation environment; and the complete
+`repositoryCaptureEgress` policy. A result is an immutable child of that intent. Capture descriptors,
+storage receipts, mechanical comparison results and validation evidence all repeat the invocation
+digest and artifact/base/result-tree identities. Factory checks the result tree before and after
+persisting captured bytes, so a valid capture cannot be paired with a different repository result.
+
+Exact and threshold comparisons share the same trust boundary. The validator receives no expected
+bytes. After capture commands exit, the trusted Factory host compares either the captured SHA-256
+or the immutable expected and observed payloads with the installed comparator named by the policy.
+Repository code never supplies the comparison scalar. All captured outputs return to the host, are checked against their declared MIME and optional typed
+profile, and are retained through immutable `validation-evidence` content transfers. An opaque
+unprofiled output may establish an exact byte match, but it carries no semantic-validity claim.
+
+Mechanical validation and semantic review are separate gates. Exact equality, a grounded threshold
+executed by its installed comparator contract, declared content identity, and a typed handler check
+can produce mechanical evidence. A repository-authored scalar or model claim does not create
+deterministic gate authority. When an
+acceptance criterion still requires judgment, Factory may materialize the expected and observed
+bytes for the independent reviewer only after the immutable review policy and the selected
+management adapter's reviewer capability both allow every MIME type, typed profile, semantic handler,
+visibility, rights basis, network destination and deduplicated asset count. The files are rehashed,
+placed in private read-only staging and supplied separately from the textual prompt. Repository files
+and every evidence byte remain untrusted reviewer input. The durable review receipt stays separate
+from validation evidence and binds its exact evidence digest and result tree.
+
+`repositoryCaptureEgress.review` denies reviewer disclosure by default. Compiler input egress does
+not grant review permission. The review count covers the complete deduplicated
+expected-plus-observed bundle and additionally requires an
+explicit reviewer capability ID. `public-assets` excludes private bytes; `private-assets` permits
+both visibility classes but still requires compatible rights, handlers, adapter capabilities and
+ordinary network-destination policy.
+
+The compiler request exposes only machine-derived repository-result capture facts. Each capture
+recipe names its authorized local managed-runtime route and isolated validation routes; each
+threshold policy names only its installed Factory comparator contract;
+the request also binds the exact capture-policy digest, reviewer ID, MIME types,
+profiles, semantic handlers, visibility and rights sets, destinations, and deduplicated asset bound.
+Deterministic rules are explicit repository configuration allowed by immutable run policy. Factory
+binds a selected rule to the exact expected descriptor, scenario, command/comparator identities,
+criteria, and policy digest in the Worker Packet, then recomputes those bindings during validation.
+The model cannot create or broaden that authority. Exact comparison of an opaque passive output
+remains valid when such a rule authorizes its MIME and opaque descriptor class; it makes no semantic
+claim.
+
+Recovery observes the exact invocation before considering another launch. Local commands have
+durable dispatch and terminal records, and ambiguous dispatch without a terminal record fails closed.
+For isolated validation, Factory first recovers retained outputs, downloads and verifies them, and
+persists the invocation result and capture evidence. Only then may it delete the provider resource or
+reconcile validation capacity. A provider adapter must refuse stale-resource cleanup while it knows
+of uncheckpointed captured bytes. Recovery never regenerates evidence or substitutes a new result
+tree.
+
+Repository delivery remains independent of capture format. Ordinary bounded outputs are committed as
+ordinary Git blobs. In a repository whose pinned base already assigns a changed path to Git LFS,
+Factory may use the existing authenticated LFS endpoint as an artifact transport adapter: it retains
+the raw bytes in the ordinary content-transfer substrate, uploads and independently reads back the
+exact object, then commits the canonical pointer. The artifact binds the assignment, tool, endpoint,
+transfer and verification receipts. Factory does not turn an output MIME type or capture profile into
+LFS policy, add tracking rules, or route validation evidence through product delivery.
 
 ## Produced asset lifecycle
 

@@ -497,11 +497,7 @@ function verifyBaseline({ authority, evidence, command }) {
     );
     if (Number(size) >= 1024) continue;
     const content = command("git", ["cat-file", "blob", oid], authority.checkout);
-    if (
-      /^version https:\/\/(?:git-lfs\.github\.com\/spec\/v1|hawser\.github\.com\/spec\/v1)(?:\r?\n|$)/.test(
-        content,
-      )
-    )
+    if (/^version https:\/\/git-lfs\.github\.com\/spec\/v1(?:\r?\n|$)/.test(content))
       pointers.push(path);
   }
   assert.deepEqual(

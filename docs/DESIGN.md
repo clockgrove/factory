@@ -722,9 +722,24 @@ media intent, capability-advertised semantic role, named input-role bindings, an
 implementation consumers. Its strict fulfillment selects either exact imported manifest asset IDs,
 or produced media with imported and upstream-intent inputs assigned to named roles; trusted
 projection resolves exact descriptor digests and derives an asset producer from advertised
-capabilities. Repository-result evidence remains part of ordinary repository validation, and a
-required unsupported evidence intent fails before graph publication. Code-native SVG, Mermaid,
-HTML/CSS/canvas and similar repository artifacts stay on the repository-change path.
+capabilities. An `evidence-for` intent never derives an asset producer. Trusted projection instead
+binds a pinned `.factory/validation-captures.json` entry to the target `repository-change` Work
+Item's `repositoryCaptureRecipes`. The recipe contains exact intent and criterion references,
+repository-observed command identities, bounded scenario inputs, declared output roles and MIME
+identities, an optional typed raster profile, exact-byte or grounded threshold comparison naming
+one subject output role, and a capture-specific gate selected from explicit repository policy. The comparison subject's declared MIME must equal
+the expected asset MIME and be allowed by the intent. Raster projection keeps catalog-owned
+viewport, exact output dimensions, and role identities while adding intent-owned width, height,
+alpha, and animation acceptance constraints. The expected asset inspection and any catalog exact
+output dimensions must satisfy those constraints. It references the expected immutable `assetInputs`
+descriptor and contains no runtime result fields. Repository capture has one comparison subject;
+auxiliary capture, diff, or preview outputs do not change its cardinality. A required unsupported
+evidence intent fails before model dispatch when machine-derived execution, egress, reviewer, or
+gate capabilities prove no plan can work, or before graph publication when a selected plan loses
+authority. A bad model selection is repairable only when another advertised selection satisfies the
+same semantic result contract; a helpful omission preserves the Work Item's
+obligations. Code-native SVG, Mermaid, HTML/CSS/canvas and similar repository artifacts stay on the
+repository-change path.
 
 An optional Objective asset manifest is part of activation and run identity. The Supervisor reads
 that exact manifest from immutable Git refs, reconstructs verified media in private temporary
@@ -733,8 +748,23 @@ only to a compiler adapter that advertises each exact media type. Raster dimensi
 animation are one nested media profile rather than fields on the canonical contract. The
 independent `compilerMediaEgress` policy controls public or private compiler input and authorized
 deterministic review rules. It grants no producer, provider, network, storage, credential, or
-execution authority. Compilation fails deterministically for a required media intent without a
-matching import or producer capability. Helpful omissions remain visible in the projection trace.
+execution authority. Compilation fails deterministically for a required implementation input
+without a matching import or producer capability, and for required repository evidence without
+grounded capture authority. Helpful omissions remain visible in the projection trace.
+Validation commands have one canonical phase order: ordinary commands, then capture commands, with
+stable first-occurrence deduplication inside each phase. Threshold policies select Factory-installed
+comparators and never add repository commands. A
+command string cannot carry conflicting phase or recipe identity. A human-required capture gate
+retains semantic review only for the exact criterion IDs on that capture binding.
+
+Capture gate authority never comes from the compiler model or a producer review rule. Repository
+configuration defines each deterministic rule's comparison kind and metric, MIME/profile,
+visibility and rights, scenario, expected descriptor class, and criterion bound. Immutable run
+policy admits specific rule IDs. Trusted projection binds the selected rule to the expected
+descriptor, capture and installed comparator identities, scenario, criterion IDs, and policy digest;
+validation recomputes that binding before accepting evidence. An opaque passive output may use an
+exact deterministic rule without acquiring semantic meaning. Human capture review instead requires
+one exact management-reviewer capability covering all deduplicated expected and observed assets.
 The Supervisor routes `asset-production` through its own capability, admission, execution,
 accounting, storage, review, activation, and recovery lifecycle before ordinary repository backend
 selection. A later repository consumer reserves the exact activation bundle and activated packet.
@@ -837,6 +867,79 @@ Worker self-report is never authoritative. The trusted host applies the artifact
 at the recorded base, rechecks scope and sensitive surfaces, runs the declared validation plan in the
 required trust boundary, records evidence bound to exact input and output SHAs, and only then creates
 the publication commit and pull request.
+
+Repository-result capture extends that validation plan without adding a deliverable kind. An
+`evidence-for` recipe observes the exact result tree of a `repository-change` artifact after ordinary
+validation. Recipes declare bounded scenarios, output roles, MIME identities and comparisons; those
+roles carry repository semantics and are not an adapter whitelist. The shared invocation, execution,
+transport, evidence, review and recovery contracts are format-neutral. Installed semantic handlers
+may add typed profiles; raster geometry and alpha/animation constraints are the currently installed
+example. Visual game fixtures such as Raccoon World exercise the abstraction but do not define it.
+
+Before any capture command runs, the Supervisor persists one immutable validation invocation. It
+binds repository, Objective, run, Work Item and attempt; artifact, base and output tree; the ordered
+ordinary/capture plan; recipe and output authority; exact expected descriptors, content
+and storage receipts; selected environment and tool receipts; and the complete repository-capture
+egress policy. The immutable result commit is a child of that exact intent. Validation evidence binds
+the invocation digest. Each unique capture descriptor binds artifact, base, result tree, declared
+content identity, visibility and rights. Bounded uses separately retain every recipe, output role,
+source path, typed profile, criterion and scenario association. Content storage uses the existing
+immutable transfer substrate under the validation-evidence domain. Host verification checks the
+result tree before and after persistence and refuses undeclared, missing, changed or duplicated
+outputs.
+
+Exact comparison requires no expected-byte disclosure to the execution adapter. The host compares
+the captured SHA-256 with the invocation's expected content digest. For thresholds, Factory
+materializes expected bytes only in controller-owned storage after repository commands exit and
+recomputes the scalar with the installed comparator contract. Neither local nor isolated repository
+code receives expected bytes or supplies the certified scalar. All isolated outputs return under bounded manifests and are rehashed and inspected by the
+host before they become evidence. An unprofiled passive output may remain opaque and establish exact
+byte equality; that result does not assert semantic validity.
+
+Mechanical evidence and semantic review remain distinct authorities. Deterministic equality,
+threshold and typed-handler results are recomputed from the invocation and observed bytes rather than
+accepted from a command's assertion. When criteria still require judgment, the reviewer receives a
+private read-only bundle containing the exact expected and observed bytes. Materialization begins
+only after the immutable review policy and selected management adapter capability admit every MIME
+type, optional typed profile, semantic handler, visibility, rights basis, network destination and
+unique payload count. Identical expected and observed payloads with the same security identity have
+one materialized file and multiple bounded uses. The reviewer treats the repository and bundle as untrusted inputs. Its
+durable receipt remains separate from validation evidence and binds the same evidence digest and
+result tree, so semantic acceptance cannot migrate to another artifact or invocation.
+
+`repositoryCaptureEgress` contains the deterministic capture-gate allowlist and the independent
+semantic-review grant. Review defaults to `denied`, and compiler input egress does not grant review
+authority. Capture validation never sends expected bytes to a validator. The review count covers all unique expected and observed payloads
+and also requires an explicit reviewer capability ID. `public-assets` permits only public content;
+`private-assets` still requires the adapter's matching visibility, rights, handler and MIME
+capabilities plus ordinary network-destination authority. Capability mismatch fails before content
+materialization or provider dispatch.
+
+Capture recovery follows observe-before-replay. Local command dispatch and terminal observations are
+durable; a started command without a terminal observation is ambiguous and cannot be relaunched.
+For an isolated validator, restart first recovers the exact invocation-owned resource, downloads and
+verifies retained capture outputs, and checkpoints the invocation result and validation evidence.
+Only after that checkpoint may adapter cleanup and validation-capacity reconciliation proceed.
+Adapters refuse cleanup while retained outputs are known but not checkpointed. A recovered result
+retains its original commands, timestamps, environment and result tree.
+
+Repository product transport is orthogonal to repository capture. Bounded ordinary outputs use Git
+blobs and the normal artifact path regardless of MIME. When the pinned base already assigns a changed
+path to Git LFS, the existing-repository LFS adapter can retain the raw output through the same
+immutable worker-artifact transfer, upload it through the exact authenticated effective endpoint,
+read and verify the object independently, and publish the canonical pointer tree. The artifact binds
+the pinned path assignment, LFS tool and endpoint, raw transfer, upload outcome and read-back receipt.
+MIME and capture profiles never select LFS. New tracking rules, changed attributes, pointer-only
+worker output and custom transfer agents are refused. Validation capture bytes remain separate
+validation evidence. The current raw LFS hydration seam is host-local; isolated validators fail
+before provider creation for artifacts carrying LFS output receipts.
+
+Native publication reconstruction is a separate authenticated pointer consumer. It recovers the
+source artifact's durable receipt and raw transfer under the exact attempt reservation, validates
+the committed canonical pointer against those bytes, and finalizes a new receipt whose transfer and
+assignment identities name the target base and current run. An adopted predecessor is read-only
+source authority; its accepted recovery plan and current successor lease authorize the new receipt.
+A pointer, source receipt, or cached payload by itself cannot certify the rewritten artifact.
 
 Validation commands normally must already be observed at the frozen base. A provider-neutral
 repository-capability model handles the narrower case where an immutable graph must refer to an

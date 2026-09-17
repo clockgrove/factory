@@ -8,10 +8,13 @@ import { pipeline } from "node:stream/promises";
 import {
   MAX_ARTIFACT_PATCH_BYTES,
   assertArtifactScope,
+  canonicalLfsPointer,
+  LfsObjectReceiptSchema,
   normalizeArtifact,
   payloadPatchMarker,
   verifyArtifact,
   type ArtifactInput,
+  type LfsObjectReceipt,
   type NormalizedArtifact,
 } from "../execution/artifacts.js";
 import {
@@ -21,12 +24,16 @@ import {
   MAX_CONTENT_FILES,
   MAX_CONTENT_FILE_BYTES,
   cachePayload,
+  copyBoundedContent,
   inspectContentFile,
+  materializePayload,
+  regularContentPath,
   sha256,
+  verifyPayload,
   type ArtifactFileManifest,
 } from "../execution/artifact-content.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "./process-group.js";
-import { inspectPinnedLfs, parseLfsPointer } from "../repository-profiles/git-lfs.js";
+import { inspectPinnedLfsAssignments, parseLfsPointer } from "../repository-profiles/git-lfs.js";
 import { pinnedGitEnvironment } from "./pinned-git-environment.js";
 
 const safeGit = [
@@ -61,7 +68,12 @@ export async function streamGitFile(
   args: string[],
   destination: string,
   limit = MAX_CONTENT_BYTES,
-  options: { deadline?: Date; signal?: AbortSignal; now?: () => number } = {},
+  options: {
+    deadline?: Date;
+    signal?: AbortSignal;
+    now?: () => number;
+    environment?: NodeJS.ProcessEnv;
+  } = {},
 ): Promise<void> {
   return streamCommandFile("git", [...safeGit, ...args], repository, destination, limit, options);
 }
@@ -71,7 +83,12 @@ export async function streamCommandFile(
   repository: string,
   destination: string,
   limit = MAX_CONTENT_BYTES,
-  options: { deadline?: Date; signal?: AbortSignal; now?: () => number } = {},
+  options: {
+    deadline?: Date;
+    signal?: AbortSignal;
+    now?: () => number;
+    environment?: NodeJS.ProcessEnv;
+  } = {},
 ): Promise<void> {
   const now = options.now ?? Date.now;
   const timeoutMs = Math.min(
@@ -84,7 +101,7 @@ export async function streamCommandFile(
   options.signal?.throwIfAborted();
   const child = spawn(command, args, {
     cwd: repository,
-    env: gitEnvironment(),
+    env: options.environment ?? gitEnvironment(),
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -155,23 +172,164 @@ async function indexGit(repository: string, index: string, args: string[]): Prom
   return result.stdout.trimEnd();
 }
 
+export interface PendingLfsObject {
+  path: string;
+  mode: "100644" | "100755";
+  oid: string;
+  size: number;
+  assignmentDigest: string;
+  payload: Awaited<ReturnType<typeof cachePayload>>;
+}
+
+export type CollectedArtifact = NormalizedArtifact & {
+  pendingLfsObjects?: PendingLfsObject[];
+};
+
+async function normalizeLfsPatch(args: {
+  repository: string;
+  baseSha: string;
+  patchPath: string;
+  changedPaths: string[];
+  outputRoot?: string;
+  resolveSourceLfsObjects?: () => Promise<LfsObjectReceipt[]>;
+  root: string;
+}): Promise<{ patchPath: string; objects: PendingLfsObject[] }> {
+  const assignments = await inspectPinnedLfsAssignments(
+    args.repository,
+    args.baseSha,
+    args.changedPaths,
+  );
+  if (!assignments.length) return { patchPath: args.patchPath, objects: [] };
+  if (args.changedPaths.some((path) => path.split("/").at(-1) === ".gitattributes"))
+    throw new Error("an LFS output cannot modify .gitattributes or its pinned assignment");
+  const index = join(args.root, "lfs-index");
+  await indexGit(args.repository, index, ["read-tree", args.baseSha]);
+  await indexGit(args.repository, index, [
+    "apply",
+    "--cached",
+    "--binary",
+    "--whitespace=error-all",
+    args.patchPath,
+  ]);
+  const objects: PendingLfsObject[] = [];
+  let sourceObjects: Promise<LfsObjectReceipt[]> | undefined;
+  for (const assignment of assignments) {
+    const entry = await indexGit(args.repository, index, [
+      "ls-files",
+      "--stage",
+      "-z",
+      "--",
+      assignment.path,
+    ]);
+    if (!entry) continue;
+    const match = /^(100644|100755) ([0-9a-f]{40}) 0\t([^\0]+)\0$/.exec(entry);
+    if (!match || match[3] !== assignment.path)
+      throw new Error("LFS output must be a regular or executable Git file");
+    const content = join(args.root, `lfs-raw-${objects.length}`);
+    if (args.outputRoot) {
+      await copyBoundedContent(
+        await regularContentPath(args.outputRoot, assignment.path),
+        content,
+        MAX_CONTENT_FILE_BYTES,
+      );
+    } else {
+      await streamGitFile(
+        args.repository,
+        ["cat-file", "blob", match[2]!],
+        content,
+        MAX_CONTENT_FILE_BYTES,
+      );
+    }
+    await chmod(content, match[1] === "100755" ? 0o700 : 0o600);
+    const raw = await readFile(content);
+    const pointer = raw.length < 1024 ? parseLfsPointer(raw) : null;
+    let payload: Awaited<ReturnType<typeof cachePayload>>;
+    if (pointer) {
+      if (!args.resolveSourceLfsObjects)
+        throw new Error(
+          "pointer-only LFS output is refused without its authenticated source receipt",
+        );
+      sourceObjects ??= args.resolveSourceLfsObjects();
+      const receipts = await sourceObjects;
+      const matches = receipts.filter((candidate) => candidate.path === assignment.path);
+      if (matches.length !== 1)
+        throw new Error("LFS source pointer has no unique authenticated raw object receipt");
+      const receipt = LfsObjectReceiptSchema.parse(matches[0]);
+      if (
+        receipt.mode !== match[1] ||
+        receipt.oid !== pointer.oid ||
+        receipt.size !== pointer.size ||
+        !raw.equals(canonicalLfsPointer(receipt.oid, receipt.size))
+      )
+        throw new Error("LFS source pointer differs from its authenticated raw object receipt");
+      await verifyPayload(receipt.payload);
+      await rm(content);
+      await materializePayload(receipt.payload, content);
+      payload = receipt.payload;
+    } else {
+      payload = await cachePayload(content);
+    }
+    await chmod(content, match[1] === "100755" ? 0o700 : 0o600);
+    const observed = await inspectContentFile(content, MAX_CONTENT_FILE_BYTES);
+    if (observed.mode !== match[1]) throw new Error("LFS output mode changed during collection");
+    if (observed.digest !== payload.digest || observed.bytes !== payload.bytes)
+      throw new Error("LFS raw content differs from its authenticated payload");
+    const canonicalPointer = canonicalLfsPointer(observed.digest, observed.bytes);
+    const hashed = await runContainedProcess({
+      command: "git",
+      args: [...safeGit, "hash-object", "-w", "--stdin"],
+      cwd: args.repository,
+      env: { ...gitEnvironment(), GIT_INDEX_FILE: index },
+      stdin: { text: canonicalPointer.toString("utf8"), maxBytes: 1024 },
+      timeoutMs: 30_000,
+      maxOutputBytes: 1024,
+    });
+    const pointerOid = hashed.stdout.trim();
+    if (hashed.exitCode !== 0 || !/^[0-9a-f]{40}$/.test(pointerOid))
+      throw new Error("canonical LFS pointer object construction failed");
+    await indexGit(args.repository, index, [
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      match[1]!,
+      pointerOid,
+      assignment.path,
+    ]);
+    objects.push({
+      path: assignment.path,
+      mode: match[1] as "100644" | "100755",
+      oid: observed.digest,
+      size: observed.bytes,
+      assignmentDigest: assignment.assignmentDigest,
+      payload,
+    });
+  }
+  const normalized = join(args.root, "pointer.patch");
+  await streamGitFile(
+    args.repository,
+    ["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", args.baseSha],
+    normalized,
+    MAX_CONTENT_BYTES,
+    { environment: { ...gitEnvironment(), GIT_INDEX_FILE: index } },
+  );
+  return { patchPath: normalized, objects: objects.sort((a, b) => a.path.localeCompare(b.path)) };
+}
+
 /** Applies in a private index only; hashes actual Git blobs before any upload or executable validation. */
 export async function inspectPatchManifest(
   repository: string,
   baseSha: string,
   patchPath: string,
   changedPaths: string[],
-  options: { allowSymlinkBlobs?: boolean } = {},
+  options: {
+    allowSymlinkBlobs?: boolean;
+    lfsObjects?: Array<Pick<PendingLfsObject, "path" | "oid" | "size" | "mode">>;
+  } = {},
 ): Promise<ArtifactFileManifest> {
   if (!/^[a-f0-9]{40}$/i.test(baseSha)) throw new Error("invalid artifact base SHA");
   if (changedPaths.length > MAX_CONTENT_FILES || new Set(changedPaths).size !== changedPaths.length)
     throw new Error("artifact path count/identity exceeds bound");
   changedPaths.forEach((path) => ArtifactPathSchema.parse(path));
-  const lfs = await inspectPinnedLfs(repository, baseSha);
-  if (lfs.assets.some((asset) => changedPaths.includes(asset.path)))
-    throw new Error(
-      "changed LFS assets require an explicitly supported authenticated LFS upload capability",
-    );
   const root = await mkdtemp(join(tmpdir(), "factory-artifact-index-"));
   const index = join(root, "index");
   try {
@@ -234,7 +392,7 @@ export async function inspectPatchManifest(
           bytes: 0,
           digest: sha256(Buffer.alloc(0)),
           mode: "100644",
-          mediaType: "unknown",
+          mediaType: "application/octet-stream",
           generated: /(^|\/)(generated|dist|build)\//.test(path),
         });
         continue;
@@ -248,14 +406,19 @@ export async function inspectPatchManifest(
       );
       await chmod(content, object.mode === "100755" ? 0o700 : 0o600);
       const observed = await inspectContentFile(content);
-      if (
-        object.mode !== "120000" &&
-        observed.bytes < 1024 &&
-        parseLfsPointer(await readFile(content))
-      )
-        throw new Error(
-          "new LFS pointer assets require an explicitly supported authenticated LFS upload capability",
-        );
+      if (object.mode !== "120000" && observed.bytes < 1024) {
+        const pointer = parseLfsPointer(await readFile(content));
+        if (pointer) {
+          const expected = options.lfsObjects?.find((candidate) => candidate.path === path);
+          if (
+            !expected ||
+            expected.oid !== pointer.oid ||
+            expected.size !== pointer.size ||
+            expected.mode !== object.mode
+          )
+            throw new Error("pointer-only LFS output lacks its exact verified raw object receipt");
+        }
+      }
       if (observed.bytes !== object.bytes)
         throw new Error("artifact blob size changed during collection");
       files.push({
@@ -263,7 +426,7 @@ export async function inspectPatchManifest(
         action: "write",
         ...observed,
         mode: object.mode,
-        mediaType: object.mode === "120000" ? "unknown" : observed.mediaType,
+        mediaType: object.mode === "120000" ? "application/octet-stream" : observed.mediaType,
         generated: /(^|\/)(generated|dist|build)\//.test(path),
       });
       await rm(content);
@@ -279,30 +442,55 @@ export async function artifactFromPatchFile(
   args: Omit<ArtifactInput, "patch" | "payload" | "fileManifest"> & {
     repository: string;
     patchPath: string;
+    outputRoot?: string;
+    resolveSourceLfsObjects?: () => Promise<LfsObjectReceipt[]>;
   },
-): Promise<NormalizedArtifact> {
-  const patchIdentity = await inspectContentFile(args.patchPath, MAX_CONTENT_BYTES);
-  const fileManifest = await inspectPatchManifest(
-    args.repository,
-    args.baseSha,
-    args.patchPath,
-    args.changedPaths,
-  );
-  const payload =
-    patchIdentity.bytes > MAX_ARTIFACT_PATCH_BYTES ? await cachePayload(args.patchPath) : undefined;
-  const patch = payload ? payloadPatchMarker(payload) : await readFile(args.patchPath, "utf8");
-  return normalizeArtifact({
-    baseSha: args.baseSha,
-    changedPaths: args.changedPaths,
-    patch,
-    payload,
-    fileManifest,
-    ...(args.commands ? { commands: args.commands } : {}),
-    ...(args.logs === undefined ? {} : { logs: args.logs }),
-    outcome: args.outcome,
-    ...(args.reason ? { reason: args.reason } : {}),
-    ...(args.createdAt ? { createdAt: args.createdAt } : {}),
-  });
+): Promise<CollectedArtifact> {
+  const root = await mkdtemp(join(tmpdir(), "factory-lfs-normalization-"));
+  try {
+    const normalized = await normalizeLfsPatch({
+      repository: args.repository,
+      baseSha: args.baseSha,
+      patchPath: args.patchPath,
+      changedPaths: args.changedPaths,
+      ...(args.outputRoot ? { outputRoot: args.outputRoot } : {}),
+      ...(args.resolveSourceLfsObjects
+        ? { resolveSourceLfsObjects: args.resolveSourceLfsObjects }
+        : {}),
+      root,
+    });
+    const patchIdentity = await inspectContentFile(normalized.patchPath, MAX_CONTENT_BYTES);
+    const fileManifest = await inspectPatchManifest(
+      args.repository,
+      args.baseSha,
+      normalized.patchPath,
+      args.changedPaths,
+      { lfsObjects: normalized.objects },
+    );
+    const payload =
+      patchIdentity.bytes > MAX_ARTIFACT_PATCH_BYTES
+        ? await cachePayload(normalized.patchPath)
+        : undefined;
+    const patch = payload
+      ? payloadPatchMarker(payload)
+      : await readFile(normalized.patchPath, "utf8");
+    const artifact: CollectedArtifact = normalizeArtifact({
+      baseSha: args.baseSha,
+      changedPaths: args.changedPaths,
+      patch,
+      payload,
+      fileManifest,
+      ...(args.commands ? { commands: args.commands } : {}),
+      ...(args.logs === undefined ? {} : { logs: args.logs }),
+      outcome: args.outcome,
+      ...(args.reason ? { reason: args.reason } : {}),
+      ...(args.createdAt ? { createdAt: args.createdAt } : {}),
+    });
+    if (normalized.objects.length) artifact.pendingLfsObjects = normalized.objects;
+    return artifact;
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 export async function artifactFromGitRange(args: {
@@ -312,8 +500,8 @@ export async function artifactFromGitRange(args: {
   baseSha: string;
   changedPaths: string[];
   emptyReason?: string;
-  authenticatedLegacyDigest?: string | undefined;
-}): Promise<NormalizedArtifact> {
+  resolveSourceLfsObjects?: () => Promise<LfsObjectReceipt[]>;
+}): Promise<CollectedArtifact> {
   if (
     ![args.sourceBaseSha, args.headSha, args.baseSha].every((value) =>
       /^[a-f0-9]{40}$/i.test(value),
@@ -342,16 +530,10 @@ export async function artifactFromGitRange(args: {
       patchPath,
       changedPaths: args.changedPaths,
       outcome: "succeeded",
+      ...(args.resolveSourceLfsObjects
+        ? { resolveSourceLfsObjects: args.resolveSourceLfsObjects }
+        : {}),
     });
-    if (args.authenticatedLegacyDigest && !artifact.payload) {
-      const legacy = normalizeArtifact({
-        baseSha: artifact.baseSha,
-        patch: artifact.patch,
-        changedPaths: artifact.changedPaths,
-        outcome: artifact.outcome,
-      });
-      if (legacy.digest === args.authenticatedLegacyDigest) return legacy;
-    }
     return artifact;
   } finally {
     await rm(root, { recursive: true, force: true });

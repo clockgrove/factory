@@ -149,6 +149,7 @@ export async function compilePlan(
         proposal: proposalResult.proposal,
         pinnedFacts: prepared.pinnedFacts,
         runPolicy: context.runPolicy,
+        repositoryCapturePlanning: context.repositoryCapturePlanning,
         ...(context.mediaPlanning
           ? {
               mediaPlanning: {
@@ -177,6 +178,7 @@ export async function compilePlan(
     {
       pinnedFacts: prepared.pinnedFacts,
       runPolicy: context.runPolicy,
+      repositoryCapturePlanning: context.repositoryCapturePlanning,
       ...(context.mediaPlanning
         ? {
             mediaPlanning: {

@@ -223,17 +223,31 @@ function validatedObjective(graph: CompiledObjective): ValidatedCompilerDraft {
             adapterId: "npm",
             requiredTools: ["node", "npm"],
             networkDestinations: [],
+            capture: null,
           },
         ],
         toolchains: [],
         validationSurfaces: {
           deterministicSimulation: { count: 0, digest: compilerEvalDigest([]), sample: [] },
-          visual: { count: 0, digest: compilerEvalDigest([]), sample: [] },
           python: { count: 0, digest: compilerEvalDigest([]), sample: [] },
           rust: { count: 0, digest: compilerEvalDigest([]), sample: [] },
           go: { count: 0, digest: compilerEvalDigest([]), sample: [] },
         },
         pathCount: 1,
+      },
+      repositoryCapture: {
+        execution: { commands: [] },
+        egress: {
+          policyDigest: compilerEvalDigest({
+            deterministicGateIds: [],
+            review: { mode: "denied", maxAssets: 0, reviewerCapabilityIds: [] },
+          }),
+          deterministicGateIds: [],
+          review: { mode: "denied", maxAssets: 0, reviewerCapabilityIds: [] },
+        },
+        reviewer: null,
+        comparators: [],
+        deterministicGates: [],
       },
       media: {
         assetManifest: null,

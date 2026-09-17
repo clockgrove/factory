@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { lstat, open, readlink } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { NormalizedArtifact } from "../execution/artifacts.js";
+import { canonicalLfsPointer, type NormalizedArtifact } from "../execution/artifacts.js";
 import {
   MAX_CONTENT_FILE_BYTES,
   regularContentPath,
@@ -28,6 +28,13 @@ import {
   verifyMergeCandidateValidation,
   type MergeCandidateValidationEvidence,
 } from "./merge-candidate.js";
+import {
+  GitLfsOutputTransport,
+  assertLfsReceiptRemoteIdentity,
+  verifyMaterializedLfsContent,
+  type LfsOutputTransport,
+} from "./git-lfs-output.js";
+import { destinationAllowedByPolicy } from "../protocol/policy.js";
 
 export interface PublicationStore {
   listRefs?(prefix: string): Promise<Array<{ ref: string; oid: string }>>;
@@ -252,6 +259,9 @@ export async function publishValidated(args: {
   attempt: number;
   title: string;
   baseBranch: string;
+  repositoryPath?: string;
+  allowedNetworkDestinations?: string[];
+  lfsTransport?: LfsOutputTransport;
   /** Deterministic content-policy checks replayed at the actual remote effects. */
   beforeRefMutation?: () => Promise<void>;
   beforePullRequestMutation?: () => Promise<void>;
@@ -270,7 +280,12 @@ export async function publishValidated(args: {
       args.artifact.fileManifest.resultTreeSha !== args.validation.evidence.outputTreeSha
     )
       throw new Error("publication content manifest does not match exact validated trees");
-    await verifyMaterializedFiles(args.validation.worktree.path, args.artifact.fileManifest);
+    const lfsPaths = new Set((args.artifact.lfsObjects ?? []).map((receipt) => receipt.path));
+    await verifyMaterializedFiles(args.validation.worktree.path, {
+      ...args.artifact.fileManifest,
+      files: args.artifact.fileManifest.files.filter((file) => !lfsPaths.has(file.path)),
+    });
+    await verifyMaterializedLfsContent(args.validation.worktree.path, args.artifact);
   }
   const branch = publicationBranch(args.objective, args.workItem, args.attempt);
   const expectedMessage = `${args.title}\n\nCloses #${args.workItem}\nFactory-Artifact: ${args.artifact.digest}\nFactory-Validation: ${args.validation.evidence.digest}`;
@@ -301,7 +316,10 @@ export async function publishValidated(args: {
         entries.push({ path, mode: "100644", type: "blob", sha: null });
         continue;
       }
-      const content = await blobContent(args.validation.worktree.path, path, mode);
+      const lfs = args.artifact.lfsObjects?.find((receipt) => receipt.path === path);
+      const content = lfs
+        ? canonicalLfsPointer(lfs.oid, lfs.size)
+        : await blobContent(args.validation.worktree.path, path, mode);
       const manifest = args.artifact.fileManifest?.files.find((file) => file.path === path);
       if (
         manifest &&
@@ -335,7 +353,40 @@ export async function publishValidated(args: {
       branchCreated = await dispatchPublicationMutation({
         store: args.store,
         assertCurrent: args.assertLease,
-        ...(args.beforeRefMutation ? { assertSafety: args.beforeRefMutation } : {}),
+        ...{
+          assertSafety: async () => {
+            await args.beforeRefMutation?.();
+            if (args.artifact.lfsObjects?.length) {
+              if (!args.repositoryPath)
+                throw new Error("LFS publication requires the authenticated repository path");
+              const transport = args.lfsTransport ?? new GitLfsOutputTransport();
+              const remote = await transport.preflight(
+                args.repositoryPath,
+                args.artifact.lfsObjects[0]!.rawTransfer.identity.repository,
+                args.allowedNetworkDestinations ?? [],
+              );
+              if (
+                !destinationAllowedByPolicy(
+                  remote.remoteHost,
+                  args.allowedNetworkDestinations ?? [],
+                )
+              )
+                throw new Error("Git LFS publication endpoint is outside run-policy egress");
+              assertLfsReceiptRemoteIdentity(args.artifact, remote);
+              for (const receipt of args.artifact.lfsObjects) {
+                const bytes = await transport.read({
+                  repository: args.repositoryPath,
+                  object: receipt,
+                  resultTreeSha: args.validation.evidence.outputTreeSha,
+                  baseSha: args.artifact.baseSha,
+                  endpoint: remote.endpoint,
+                });
+                if (bytes.length !== receipt.size || sha256(bytes) !== receipt.oid)
+                  throw new Error("remote LFS object changed before pointer publication");
+              }
+            }
+          },
+        },
         mutate: () => args.store.createRef(`refs/heads/${branch}`, preparedCommitSha),
       });
     } catch (error) {

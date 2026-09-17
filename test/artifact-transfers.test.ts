@@ -146,7 +146,7 @@ async function artifact(baseSha: string, bytes = "safe retained transfer bytes")
           mode: "100644",
           bytes: 1,
           digest: sha256("x"),
-          mediaType: "unknown",
+          mediaType: "application/octet-stream",
           generated: false,
         },
       ],

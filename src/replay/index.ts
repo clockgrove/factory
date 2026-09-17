@@ -172,6 +172,7 @@ function pinnedPolicy(value: RunPolicy): RunPolicy {
     ...(policy.modelProfile ? { modelProfile: policy.modelProfile } : {}),
     allowedNetworkDestinations: [...policy.allowedNetworkDestinations],
     compilerMediaEgress: structuredClone(policy.compilerMediaEgress),
+    repositoryCaptureEgress: structuredClone(policy.repositoryCaptureEgress),
     ...(policy.priority ? { priority: structuredClone(policy.priority) } : {}),
     ...(policy.capacity ? { capacity: structuredClone(policy.capacity) } : {}),
     ...(policy.burst ? { burst: structuredClone(policy.burst) } : {}),

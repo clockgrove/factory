@@ -35,6 +35,10 @@ const POLICY = {
     maxAssets: 0,
     deterministicReviewRuleIds: [],
   },
+  repositoryCaptureEgress: {
+    deterministicGateIds: [],
+    review: { mode: "denied", maxAssets: 0, reviewerCapabilityIds: [] },
+  },
   priority: {
     source: "subissue-order",
     unsetRank: 100,

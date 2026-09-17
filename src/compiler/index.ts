@@ -2,6 +2,7 @@ import {
   ExecutionRequirementsSchema,
   RepositoryScopePathSchema,
   type ExecutionRequirements,
+  type RepositoryCaptureRecipe,
 } from "../protocol/worker-packet.js";
 import { addScopeSerializationEdges } from "../graph.js";
 import {
@@ -71,6 +72,7 @@ export type CompilerWorkItem = {
     contract: "clockgrove.factory/artifact";
   };
   assetInputs?: WorkerAssetInput[];
+  repositoryCaptureRecipes?: RepositoryCaptureRecipe[];
   repositoryCapabilities?: import("../protocol/worker-packet.js").RepositoryCapabilityBindings;
   managedRuntimes?: import("../runtime/toolchain-bundle.js").RuntimeBundleRequirement[];
   context: {
@@ -216,6 +218,13 @@ export function canonicalizeObjective(input: CompilerObjective): CompilerObjecti
       ? {
           criterionRisks: [...w.criterionRisks].sort((a, b) =>
             a.criterion.localeCompare(b.criterion),
+          ),
+        }
+      : {}),
+    ...(w.repositoryCaptureRecipes
+      ? {
+          repositoryCaptureRecipes: [...w.repositoryCaptureRecipes].sort((a, b) =>
+            a.id.localeCompare(b.id),
           ),
         }
       : {}),
@@ -377,7 +386,6 @@ export function validateCompiledObjective(
           validation: w.validation!,
           criterionRisks: w.criterionRisks!,
           deterministicSimulation: validationProfile?.deterministicSimulation ?? true,
-          visualValidation: validationProfile?.visualValidation ?? true,
         }),
       );
     if (w.changeSurface) {

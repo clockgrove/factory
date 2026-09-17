@@ -230,6 +230,7 @@ function applicationFor(
     },
     planning: {
       management,
+      backendRegistry: registry,
       assetStore: store,
       repositoryPath: checkout,
       validateCheckout: validatePlanningCheckout,

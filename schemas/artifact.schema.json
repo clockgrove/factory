@@ -99,24 +99,67 @@
               "bytes": { "type": "integer", "minimum": 0, "maximum": 100000000 },
               "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
               "mediaType": {
-                "enum": [
-                  "image/png",
-                  "image/jpeg",
-                  "image/gif",
-                  "image/webp",
-                  "application/pdf",
-                  "application/wasm",
-                  "application/zip",
-                  "audio/wav",
-                  "video/mp4",
-                  "unknown"
-                ]
+                "type": "string",
+                "minLength": 3,
+                "maxLength": 160,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$"
               },
               "generated": { "type": "boolean" }
             },
-            "if": { "properties": { "mode": { "const": "120000" } } },
-            "then": { "properties": { "mediaType": { "const": "unknown" } } }
+            "allOf": [
+              {
+                "if": { "properties": { "mode": { "const": "120000" } }, "required": ["mode"] },
+                "then": {
+                  "properties": { "mediaType": { "const": "application/octet-stream" } }
+                }
+              },
+              {
+                "if": { "properties": { "action": { "const": "delete" } }, "required": ["action"] },
+                "then": {
+                  "properties": {
+                    "bytes": { "const": 0 },
+                    "digest": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+                    "mediaType": { "const": "application/octet-stream" }
+                  }
+                }
+              }
+            ]
           }
+        }
+      }
+    },
+    "lfsObjects": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["protocol", "path", "mode", "oid", "size", "assignmentDigest", "payload", "rawTransfer", "toolVersion", "remoteDigest", "uploadOutcome", "readVerified", "receiptRef", "digest"],
+        "properties": {
+          "protocol": { "const": "clockgrove.factory/lfs-object-receipt" },
+          "path": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "mode": { "enum": ["100644", "100755"] },
+          "oid": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "size": { "type": "integer", "minimum": 1, "maximum": 104857600 },
+          "assignmentDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "payload": { "type": "object" },
+          "rawTransfer": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["identity", "ref", "intentCommit", "readyCommit"],
+            "properties": {
+              "identity": { "type": "object" },
+              "ref": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "intentCommit": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" },
+              "readyCommit": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" }
+            }
+          },
+          "toolVersion": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "remoteDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "uploadOutcome": { "enum": ["uploaded", "already-present"] },
+          "readVerified": { "const": true },
+          "receiptRef": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
         }
       }
     },

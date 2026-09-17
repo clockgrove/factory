@@ -201,7 +201,8 @@ function packet(capabilityDigest = assetDigest(SHARP_RASTER_MEDIA_CAPABILITY)) {
           mediaTypes: ["image/png" as const],
           minimumCount: 1,
           maximumCount: 1,
-          raster: {
+          profile: {
+            kind: "raster",
             minimumWidth: 2,
             maximumWidth: 2,
             minimumHeight: 2,
@@ -211,6 +212,7 @@ function packet(capabilityDigest = assetDigest(SHARP_RASTER_MEDIA_CAPABILITY)) {
           },
         },
         review: { kind: "human-required" as const },
+        repositoryCapture: null,
         bindings: [
           {
             workItemId: "consumer",
@@ -472,8 +474,8 @@ describe("media production execution", () => {
 
   it("honors a raster profile that forbids alpha", async () => {
     const forbidden = structuredClone(packet()) as AssetProductionWorkerPacket;
-    if (!forbidden.deliverable.intent.output.raster) throw new Error("expected raster intent");
-    forbidden.deliverable.intent.output.raster.alpha = "forbidden";
+    if (!forbidden.deliverable.intent.output.profile) throw new Error("expected raster intent");
+    forbidden.deliverable.intent.output.profile.alpha = "forbidden";
     const exact = invocation(forbidden);
     const result = await new MediaProductionExecutor({
       store: memoryStore().store,
@@ -711,7 +713,7 @@ describe("media production execution", () => {
       mediaTypes: ["audio/wav"],
       minimumCount: 1,
       maximumCount: 1,
-      raster: null,
+      profile: null,
     };
     const exact = createMediaInvocation({
       repository: "fixture/project",
@@ -747,7 +749,7 @@ describe("media production execution", () => {
       mediaTypes: ["image/svg+xml"],
       minimumCount: 1,
       maximumCount: 1,
-      raster: null,
+      profile: null,
     };
     expect(
       createMediaInvocation({
@@ -768,7 +770,8 @@ describe("media production execution", () => {
 
   it("chooses an exact raster profile inside a compiler-valid open interval", () => {
     const compiledPacket = structuredClone(packet()) as AssetProductionWorkerPacket;
-    compiledPacket.deliverable.intent.output.raster = {
+    compiledPacket.deliverable.intent.output.profile = {
+      kind: "raster",
       minimumWidth: 2_048,
       maximumWidth: null,
       minimumHeight: 2_048,

@@ -89,6 +89,14 @@ export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule
     "media-producer-unavailable",
     "A required media intent has no imported result or permitted producer.",
   ),
+  "invalid-media-validation-selection": rule(
+    "invalid-media-validation-selection",
+    "The selected repository-result capture does not match available machine authority.",
+  ),
+  "media-validation-unavailable": rule(
+    "media-validation-unavailable",
+    "A required repository capture has no grounded recipe supporting its exact contract.",
+  ),
   "media-dependency-cycle": rule(
     "media-dependency-cycle",
     "Derived media producer ordering would create a dependency cycle.",

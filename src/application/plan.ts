@@ -41,6 +41,8 @@ import {
 } from "../assets/compiler-input.js";
 import { policyMediaCompilerCapabilities } from "../media/adapter.js";
 import { policyMediaReviewRules } from "../media/review.js";
+import type { BackendRegistry } from "../execution/registry.js";
+import { repositoryCapturePlanningCapabilities } from "../validation/repository-capture-capabilities.js";
 
 export interface PlanInput {
   objective: number;
@@ -75,6 +77,7 @@ export interface PlanReport {
 
 export interface PlanningContext {
   management?: ManagementBackend;
+  backendRegistry?: BackendRegistry;
   /** Local checkout used only for repository-grounded compiler reads. */
   repositoryPath?: string;
   assetStore?: ObjectiveAssetStore;
@@ -321,6 +324,8 @@ export async function buildPlanReport(input: {
       });
     const management = input.planning?.management;
     if (!management) throw new Error("management compiler is not configured");
+    if (!input.planning?.backendRegistry)
+      throw new Error("plan compilation requires explicit validation backend capabilities");
     if (!input.planning?.readRepositoryLayout)
       throw new Error("repository layout reader is not configured");
     const requestedBaseSha =
@@ -423,6 +428,11 @@ export async function buildPlanReport(input: {
         allowedNetworkDestinations: policy.allowedNetworkDestinations,
         runPolicy: policy,
         mediaPlanning,
+        repositoryCapturePlanning: repositoryCapturePlanningCapabilities({
+          registry: input.planning.backendRegistry,
+          policy,
+          management,
+        }),
         ...(modelSelection ? { modelSelection } : {}),
       };
       let checkpointed = false;

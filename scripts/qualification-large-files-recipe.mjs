@@ -9,7 +9,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const namespace = "__FACTORY_LARGE_FILE_NAMESPACE__";
-const recipeVersion = "factory-large-files-fixture-v2";
+const recipeVersion = "factory-large-files-fixture";
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 function assertNamespace(namespace) {
@@ -36,8 +36,8 @@ function largeFilePaths(namespace) {
     attributes: `${prefix}/.gitattributes`,
     recipe: `${prefix}/large-files-recipe.mjs`,
     test: `${prefix}/large-files.test.mjs`,
-    canonical: `${prefix}/lfs/canonical.bin`,
-    legacy: `${prefix}/lfs/legacy.bin`,
+    primary: `${prefix}/lfs/primary.bin`,
+    secondary: `${prefix}/lfs/secondary.bin`,
     payload: `${prefix}/generated/qualification-audio.wav`,
     executable: `${prefix}/tools/qualification-check.mjs`,
     metadata: `${prefix}/generated/qualification-metadata.json`,
@@ -98,7 +98,7 @@ function outputFiles(namespace) {
       phase: "metadata",
       bytes: executable,
       mode: "100755",
-      mediaType: "unknown",
+      mediaType: "application/octet-stream",
       generated: false,
     },
     {
@@ -106,7 +106,7 @@ function outputFiles(namespace) {
       phase: "metadata",
       bytes: metadata,
       mode: "100644",
-      mediaType: "unknown",
+      mediaType: "application/octet-stream",
       generated: true,
     },
     {
@@ -114,7 +114,7 @@ function outputFiles(namespace) {
       phase: "join",
       bytes: result,
       mode: "100644",
-      mediaType: "unknown",
+      mediaType: "application/octet-stream",
       generated: true,
     },
   ];
@@ -207,7 +207,7 @@ function recipeOutput(root, namespace, scenario, phase) {
     exclusiveFile(root, paths.payload, bytes);
   } else if (scenario === "symlink") {
     safeDirectory(root, dirname(paths.payload));
-    fs.symlinkSync("../lfs/canonical.bin", join(root, paths.payload));
+    fs.symlinkSync("../lfs/primary.bin", join(root, paths.payload));
   } else {
     assert.fail("unknown output scenario");
   }

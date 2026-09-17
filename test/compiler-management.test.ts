@@ -7,6 +7,7 @@ import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
 import {
   managementFailureProvenance,
   managementTerminalOutcome,
+  EMPTY_REPOSITORY_CAPTURE_PLANNING,
   ManagementFailureCleanupError,
   ManagementOutputError,
   type ManagementBackend,
@@ -54,6 +55,7 @@ describe("single semantic management route", () => {
       repositoryFiles: [],
       allowedNetworkDestinations: [],
       runPolicy: DEFAULT_RUN_POLICY,
+      repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
     };
     const legacyAdmission = vi.fn();
     const accounting = vi.fn();
@@ -154,6 +156,7 @@ describe("single semantic management route", () => {
         repositoryFiles: [],
         allowedNetworkDestinations: [],
         runPolicy: { ...semanticProjectionContext().runPolicy },
+        repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
         legacyGraphConstraints: legacy,
       }),
     ).rejects.toThrow(`compiler prompt is ${targetBytes} bytes; maximum is 1048576`);
@@ -296,7 +299,7 @@ describe("single semantic management route", () => {
     expect(Buffer.byteLength(JSON.stringify(persistedResult))).toBeLessThanOrEqual(2 * 1024 * 1024);
   });
 
-  it("summarizes 257 overlapping visual and simulation paths without a request overflow", () => {
+  it("summarizes 257 simulation paths without a request overflow", () => {
     const paths = Array.from(
       { length: 257 },
       (_, index) => `test/simulation-snapshot-${String(index).padStart(3, "0")}.png`,
@@ -307,9 +310,7 @@ describe("single semantic management route", () => {
     expect(request.repository.validationSurfaces.deterministicSimulation).toMatchObject({
       count: 257,
     });
-    expect(request.repository.validationSurfaces.visual).toMatchObject({ count: 257 });
     expect(request.repository.validationSurfaces.deterministicSimulation.sample).toHaveLength(32);
-    expect(request.repository.validationSurfaces.visual.sample).toHaveLength(32);
     expect(() => compilerProposalPrompt(request)).not.toThrow();
   });
 

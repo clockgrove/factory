@@ -138,12 +138,12 @@ const proposalRequest = CompilerRequestSchema.parse({
         adapterId: "node-npm",
         requiredTools: ["node", "npm"],
         networkDestinations: [],
+        capture: null,
       },
     ],
     toolchains: [],
     validationSurfaces: {
       deterministicSimulation: { count: 0, digest: compilerEvalDigest([]), sample: [] },
-      visual: { count: 0, digest: compilerEvalDigest([]), sample: [] },
       python: { count: 0, digest: compilerEvalDigest([]), sample: [] },
       rust: { count: 0, digest: compilerEvalDigest([]), sample: [] },
       go: { count: 0, digest: compilerEvalDigest([]), sample: [] },
@@ -162,6 +162,17 @@ const proposalRequest = CompilerRequestSchema.parse({
     },
     producerCapabilities: [],
     reviewRules: [],
+  },
+  repositoryCapture: {
+    execution: { commands: [] },
+    egress: {
+      policyDigest: compilerEvalDigest(DEFAULT_RUN_POLICY.repositoryCaptureEgress),
+      deterministicGateIds: [...DEFAULT_RUN_POLICY.repositoryCaptureEgress.deterministicGateIds],
+      review: structuredClone(DEFAULT_RUN_POLICY.repositoryCaptureEgress.review),
+    },
+    reviewer: null,
+    comparators: [],
+    deterministicGates: [],
   },
   constraints: {
     maxWorkItems: 100,

@@ -28,6 +28,7 @@ import { managedRuntimeRequirements } from "../src/toolchains/authority.js";
 import type { ManagementBackend } from "../src/management/backend.js";
 import type { CompilationContext } from "../src/management/backend.js";
 import { adaptFixtureCompiler } from "./helpers/compiler-proposal.js";
+import { BackendRegistry } from "../src/execution/registry.js";
 
 const exec = promisify(execFile);
 const roots: string[] = [];
@@ -235,6 +236,7 @@ describe("read-only checkout preflight", () => {
         snapshot,
         planning: {
           repositoryPath: f.root,
+          backendRegistry: new BackendRegistry(),
           management: {
             id: "test",
             proposePlan: adaptFixtureCompiler(compile),
@@ -286,6 +288,7 @@ describe("read-only checkout preflight", () => {
         snapshot,
         planning: {
           repositoryPath: f.root,
+          backendRegistry: new BackendRegistry(),
           management: { id: "test", compile } as unknown as ManagementBackend,
           validateCheckout: validatePlanningCheckout,
           readRepositoryLayout: (max, base) => readPlanningRepositoryLayout(f.root, max, base),

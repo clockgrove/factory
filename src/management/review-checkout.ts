@@ -1,4 +1,4 @@
-import { access, readFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { executionAffectingReason } from "../approval.js";
 import {
@@ -8,12 +8,20 @@ import {
 } from "../execution/artifacts.js";
 import {
   assertFilesystemArtifactManifest,
+  inspectContentFile,
   verifyMaterializedFiles,
 } from "../execution/artifact-content.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import { inspectPatchManifest } from "../runtime/artifact-patch.js";
 import { materializePinnedCompilationTree } from "../execution/pinned-compilation-tree.js";
-import { materializeLocalLfsAssets } from "../repository-profiles/git-lfs.js";
+import {
+  materializeLocalLfsAssets,
+  restorePinnedLfsPointers,
+} from "../repository-profiles/git-lfs.js";
+import {
+  materializeLfsArtifactContent,
+  verifyMaterializedLfsContent,
+} from "../publication/git-lfs-output.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
 import { verifyValidationEvidence } from "../validation/evidence.js";
 import {
@@ -44,7 +52,10 @@ export function reviewCheckoutCleanupFailure(
  * stale validation directory is review evidence. */
 export async function withVerifiedReviewCheckout<T>(
   input: ReviewContext & { requiresIsolation: boolean },
-  review: (repository: string) => Promise<T>,
+  review: (
+    repository: string,
+    captureBundle?: ReviewContext["repositoryCaptureBundle"],
+  ) => Promise<T>,
 ): Promise<T> {
   if (input.requiresIsolation || input.packet.requirements.trust !== "trusted_local")
     throw new Error(
@@ -108,11 +119,19 @@ export async function withVerifiedReviewCheckout<T>(
     await materializeLocalLfsAssets(input.repository, worktree.path, artifact.baseSha);
     const patchPath = join(worktree.root, "semantic-review.patch");
     await materializeArtifactPatch(artifact, patchPath);
+    if (artifact.lfsObjects?.length)
+      await restorePinnedLfsPointers(
+        input.repository,
+        worktree.path,
+        artifact.baseSha,
+        artifact.changedPaths,
+      );
     const manifest = await inspectPatchManifest(
       worktree.path,
       artifact.baseSha,
       patchPath,
       artifact.changedPaths,
+      ...(artifact.lfsObjects ? [{ lfsObjects: artifact.lfsObjects }] : [{}]),
     );
     if (artifact.fileManifest && JSON.stringify(artifact.fileManifest) !== JSON.stringify(manifest))
       throw new Error("semantic review manifest differs from actual artifact content");
@@ -132,6 +151,10 @@ export async function withVerifiedReviewCheckout<T>(
     )
       throw new Error("semantic review materialized tree differs from validated output tree");
     await verifyMaterializedFiles(worktree.path, manifest);
+    if (artifact.lfsObjects?.length) {
+      await materializeLfsArtifactContent(worktree.path, artifact);
+      await verifyMaterializedLfsContent(worktree.path, artifact);
+    }
     const pnpmValidation = basePackageJsonPresent
       ? await assertEstablishedPnpmValidation(
           worktree,
@@ -149,7 +172,29 @@ export async function withVerifiedReviewCheckout<T>(
     const packageValidation = pnpmValidation;
     if (sensitive.length > 0 && !isPermittedSensitiveArtifactSurface(sensitive, packageValidation))
       throw new Error("semantic review artifact touches a sensitive surface");
-    return await review(worktree.path);
+    let captureBundle: ReviewContext["repositoryCaptureBundle"];
+    if (input.repositoryCaptureBundle) {
+      if (
+        input.repositoryCaptureBundle.evidenceDigest !== input.evidence.repositoryCapture?.digest ||
+        input.repositoryCaptureBundle.validationInvocationDigest !==
+          input.evidence.validationInvocationDigest
+      )
+        throw new Error("semantic review capture bundle differs from validation evidence");
+      const root = join(worktree.path, ".factory-review-evidence");
+      await mkdir(root, { recursive: true, mode: 0o700 });
+      const files = [];
+      for (const file of input.repositoryCaptureBundle.files) {
+        const destination = join(root, file.payloadIdentity);
+        await copyFile(file.path, destination);
+        const observed = await inspectContentFile(destination, file.bytes);
+        if (observed.digest !== file.digest || observed.bytes !== file.bytes)
+          throw new Error("semantic review capture bundle changed during checkout materialization");
+        await chmod(destination, 0o400);
+        files.push({ ...file, path: destination });
+      }
+      captureBundle = { ...input.repositoryCaptureBundle, root, files };
+    }
+    return await review(worktree.path, captureBundle);
   } catch (error) {
     reviewFailure = error;
     throw error;

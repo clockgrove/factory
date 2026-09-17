@@ -316,7 +316,7 @@ function fixture(scenario = "scope") {
     status: { run: { runId: common.runId, state: "escalated" } },
   });
   const transferRef = `refs/clockgrove-factory/artifact-transfers/${hash(JSON.stringify(identity))}`;
-  const retainedSymlink = (target = "../lfs/canonical.bin") => {
+  const retainedSymlink = (target = "../lfs/primary.bin") => {
     const raw = Buffer.from(target),
       blob = oid("blob", raw);
     let resultTree = blob;
@@ -341,7 +341,7 @@ function fixture(scenario = "scope") {
           mode: "120000",
           bytes: raw.length,
           digest: hash(raw),
-          mediaType: "unknown",
+          mediaType: "application/octet-stream",
           generated: true,
         },
       ],
@@ -582,9 +582,9 @@ describe("installed large-file refusal ports (scripted Git/MCP contracts, no liv
       boundary: "filesystem-materialization",
       uploadCount: null,
       transfer: {
-        rawTarget: "../lfs/canonical.bin",
+        rawTarget: "../lfs/primary.bin",
         mode: "120000",
-        mediaType: "unknown",
+        mediaType: "application/octet-stream",
         materialized: false,
       },
     });

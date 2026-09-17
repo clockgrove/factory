@@ -9,6 +9,8 @@ import { encodeEventBatchComment, encodeEventComment } from "./receipts.js";
 import type { AttemptReservation } from "./attempts.js";
 import type { LeaseManager, LeaseState } from "./lease.js";
 import type { ValidationEvidence } from "../validation/evidence.js";
+import type { ValidationInvocation } from "../validation/repository-capture.js";
+import type { LocalScopeBatch } from "../protocol/local-scope.js";
 import type { DeliverySelection } from "../publication/delivery.js";
 import type { PublicationReceipt } from "../publication/stack-manager.js";
 import { writerAuthority } from "./authority.js";
@@ -79,6 +81,25 @@ function assertReservationLease(reservation: AttemptReservation, lease: LeaseSta
   ) {
     throw new Error("validation or budget reservation is fenced from the current lease epoch");
   }
+}
+
+function assertValidationInvocationAuthority(
+  reservation: AttemptReservation,
+  invocation: ValidationInvocation,
+): void {
+  const authority = invocation.attemptAuthority;
+  if (
+    invocation.objective !== reservation.objective ||
+    invocation.runId !== reservation.runId ||
+    invocation.workItem !== reservation.workItem ||
+    invocation.attempt !== reservation.attempt ||
+    authority.reservationRef !== reservation.ref ||
+    authority.reservationOid !== reservation.oid ||
+    authority.reservationReceiptDigest !== reservation.receiptDigest ||
+    authority.directorEpoch !== reservation.directorEpoch ||
+    authority.policyDigest !== reservation.policyDigest
+  )
+    throw new Error("validation invocation differs from its exact attempt reservation");
 }
 
 export class LifecycleRecorder {
@@ -421,6 +442,279 @@ export class LifecycleRecorder {
         args.evidence.passed
           ? `Factory independently validated attempt ${args.reservation.attempt}.`
           : `Factory validation failed for attempt ${args.reservation.attempt}: ${args.evidence.failureReason ?? "validation failed"}`,
+        event,
+      ),
+    );
+    return event;
+  }
+
+  async validationInvocationRemoteDispatch(args: {
+    lease: LeaseState;
+    workItemNodeId: string;
+    reservation: AttemptReservation;
+    invocation: ValidationInvocation;
+    backend: string;
+    resourceName: string;
+    requestIdentityDigest: string;
+    capacityReservationSequence: number;
+    sequence: number;
+  }): Promise<FactoryEvent> {
+    await this.leases.assertMutationAuthorized(args.lease);
+    assertReservationLease(args.reservation, args.lease);
+    assertValidationInvocationAuthority(args.reservation, args.invocation);
+    if (
+      args.backend !== args.invocation.toolEnvironment.backendId ||
+      args.capacityReservationSequence >= args.sequence
+    )
+      throw new Error("remote validation dispatch differs from its backend or capacity chain");
+    const now = await this.store.serverTime();
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "validation-invocation",
+      ...writerAuthority(args.lease, args.sequence),
+      event: "ValidationInvocationRemoteDispatchStarted",
+      objective: args.reservation.objective,
+      runId: args.reservation.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      workItem: args.reservation.workItem,
+      attempt: args.reservation.attempt,
+      reservationOid: args.reservation.oid,
+      artifactDigest: args.invocation.artifactDigest,
+      invocationDigest: args.invocation.digest,
+      backend: args.backend,
+      resourceName: args.resourceName,
+      requestIdentityDigest: args.requestIdentityDigest,
+      validationDeadline: args.invocation.validationDeadline,
+      noHandleReplacementNotBefore: new Date(now.getTime() + 60_000).toISOString(),
+      capacityReservationSequence: args.capacityReservationSequence,
+    });
+    await this.store.addIssueComment(
+      args.workItemNodeId,
+      encodeEventComment(
+        `Factory started remote dispatch for validation invocation ${args.invocation.digest.slice(0, 12)}.`,
+        event,
+      ),
+    );
+    return event;
+  }
+
+  async validationInvocationRemoteRebound(args: {
+    lease: LeaseState;
+    workItemNodeId: string;
+    reservation: AttemptReservation;
+    invocation: ValidationInvocation;
+    dispatch: Extract<FactoryEvent, { event: "ValidationInvocationRemoteDispatchStarted" }>;
+    sequence: number;
+  }): Promise<FactoryEvent> {
+    await this.leases.assertMutationAuthorized(args.lease);
+    assertReservationLease(args.reservation, args.lease);
+    assertValidationInvocationAuthority(args.reservation, args.invocation);
+    if (
+      args.dispatch.reservationOid !== args.reservation.oid ||
+      args.dispatch.invocationDigest !== args.invocation.digest ||
+      args.dispatch.artifactDigest !== args.invocation.artifactDigest ||
+      args.dispatch.backend !== args.invocation.toolEnvironment.backendId ||
+      args.dispatch.validationDeadline !== args.invocation.validationDeadline ||
+      args.dispatch.capacityReservationSequence >= args.dispatch.sequence ||
+      args.dispatch.sequence >= args.sequence
+    )
+      throw new Error("remote validation rebound differs from its original dispatch chain");
+    const now = await this.store.serverTime();
+    if (now.getTime() < Date.parse(args.dispatch.noHandleReplacementNotBefore))
+      throw new Error("remote validation rebound preceded its durable visibility fence");
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "validation-invocation",
+      ...writerAuthority(args.lease, args.sequence),
+      event: "ValidationInvocationRemoteRebound",
+      objective: args.reservation.objective,
+      runId: args.reservation.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      workItem: args.reservation.workItem,
+      attempt: args.reservation.attempt,
+      reservationOid: args.reservation.oid,
+      artifactDigest: args.invocation.artifactDigest,
+      invocationDigest: args.invocation.digest,
+      backend: args.dispatch.backend,
+      resourceName: args.dispatch.resourceName,
+      requestIdentityDigest: args.dispatch.requestIdentityDigest,
+      validationDeadline: args.invocation.validationDeadline,
+      noHandleReplacementNotBefore: args.dispatch.noHandleReplacementNotBefore,
+      originalDispatchSequence: args.dispatch.sequence,
+      capacityReservationSequence: args.dispatch.capacityReservationSequence,
+    });
+    await this.store.addIssueComment(
+      args.workItemNodeId,
+      encodeEventComment(
+        `Factory rebound remote validation invocation ${args.invocation.digest.slice(0, 12)} after exact resource absence.`,
+        event,
+      ),
+    );
+    return event;
+  }
+
+  async validationInvocationRemoteSettled(args: {
+    lease: LeaseState;
+    workItemNodeId: string;
+    reservation: AttemptReservation;
+    invocation: ValidationInvocation;
+    dispatch: Extract<FactoryEvent, { event: "ValidationInvocationRemoteDispatchStarted" }>;
+    rebound?: Extract<FactoryEvent, { event: "ValidationInvocationRemoteRebound" }>;
+    settlementEvidence: "provider-cleanup" | "post-fence-exact-absence";
+    sequence: number;
+  }): Promise<FactoryEvent> {
+    await this.leases.assertMutationAuthorized(args.lease);
+    assertReservationLease(args.reservation, args.lease);
+    assertValidationInvocationAuthority(args.reservation, args.invocation);
+    if (
+      args.dispatch.reservationOid !== args.reservation.oid ||
+      args.dispatch.invocationDigest !== args.invocation.digest ||
+      args.dispatch.artifactDigest !== args.invocation.artifactDigest ||
+      args.dispatch.backend !== args.invocation.toolEnvironment.backendId ||
+      args.dispatch.validationDeadline !== args.invocation.validationDeadline ||
+      args.dispatch.capacityReservationSequence >= args.dispatch.sequence ||
+      args.dispatch.sequence >= args.sequence ||
+      (args.rebound !== undefined &&
+        (args.rebound.originalDispatchSequence !== args.dispatch.sequence ||
+          args.rebound.reservationOid !== args.dispatch.reservationOid ||
+          args.rebound.invocationDigest !== args.dispatch.invocationDigest ||
+          args.rebound.resourceName !== args.dispatch.resourceName ||
+          args.rebound.requestIdentityDigest !== args.dispatch.requestIdentityDigest ||
+          args.rebound.sequence <= args.dispatch.sequence ||
+          args.rebound.sequence >= args.sequence))
+    )
+      throw new Error("remote validation settlement differs from its dispatch chain");
+    const now = await this.store.serverTime("cleanup");
+    if (
+      args.settlementEvidence === "post-fence-exact-absence" &&
+      now.getTime() < Date.parse(args.dispatch.noHandleReplacementNotBefore)
+    )
+      throw new Error("remote validation absence settlement preceded its visibility fence");
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "validation-invocation",
+      ...writerAuthority(args.lease, args.sequence),
+      event: "ValidationInvocationRemoteSettled",
+      objective: args.reservation.objective,
+      runId: args.reservation.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      workItem: args.reservation.workItem,
+      attempt: args.reservation.attempt,
+      reservationOid: args.reservation.oid,
+      artifactDigest: args.invocation.artifactDigest,
+      invocationDigest: args.invocation.digest,
+      backend: args.dispatch.backend,
+      resourceName: args.dispatch.resourceName,
+      requestIdentityDigest: args.dispatch.requestIdentityDigest,
+      validationDeadline: args.invocation.validationDeadline,
+      noHandleReplacementNotBefore: args.dispatch.noHandleReplacementNotBefore,
+      originalDispatchSequence: args.dispatch.sequence,
+      reboundSequence: args.rebound?.sequence ?? null,
+      capacityReservationSequence: args.dispatch.capacityReservationSequence,
+      settlementEvidence: args.settlementEvidence,
+    });
+    await this.store.addIssueComment(
+      args.workItemNodeId,
+      encodeEventComment(
+        `Factory settled remote validation invocation ${args.invocation.digest.slice(0, 12)} after exact provider cleanup evidence.`,
+        event,
+      ),
+      "cleanup",
+    );
+    return event;
+  }
+
+  async validationInvocation(args: {
+    lease: LeaseState;
+    workItemNodeId: string;
+    reservation: AttemptReservation;
+    invocation: ValidationInvocation;
+    invocationRef: string;
+    invocationCommitOid: string;
+    capacityReservationSequence: number;
+    sequence: number;
+  }): Promise<FactoryEvent> {
+    await this.leases.assertMutationAuthorized(args.lease);
+    assertReservationLease(args.reservation, args.lease);
+    assertValidationInvocationAuthority(args.reservation, args.invocation);
+    if (args.capacityReservationSequence >= args.sequence)
+      throw new Error("validation invocation preparation preceded its capacity reservation");
+    const now = await this.store.serverTime();
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "validation-invocation",
+      ...writerAuthority(args.lease, args.sequence),
+      event: "ValidationInvocationPrepared",
+      objective: args.reservation.objective,
+      runId: args.reservation.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      workItem: args.reservation.workItem,
+      attempt: args.reservation.attempt,
+      reservationRef: args.invocation.attemptAuthority.reservationRef,
+      reservationOid: args.invocation.attemptAuthority.reservationOid,
+      reservationReceiptDigest: args.invocation.attemptAuthority.reservationReceiptDigest,
+      attemptDirectorEpoch: args.invocation.attemptAuthority.directorEpoch,
+      attemptPolicyDigest: args.invocation.attemptAuthority.policyDigest,
+      validationDeadline: args.invocation.validationDeadline,
+      capacityReservationSequence: args.capacityReservationSequence,
+      artifactDigest: args.invocation.artifactDigest,
+      baseSha: args.invocation.baseSha,
+      outputTreeSha: args.invocation.outputTreeSha,
+      invocationDigest: args.invocation.digest,
+      invocationRef: args.invocationRef,
+      invocationCommitOid: args.invocationCommitOid,
+      backend: args.invocation.toolEnvironment.backendId,
+      backendLocator: args.invocation.toolEnvironment.backendLocator,
+    });
+    await this.store.addIssueComment(
+      args.workItemNodeId,
+      encodeEventComment(
+        `Factory prepared validation invocation ${args.invocation.digest.slice(0, 12)}.`,
+        event,
+      ),
+    );
+    return event;
+  }
+
+  async validationInvocationScopeRebound(args: {
+    lease: LeaseState;
+    workItemNodeId: string;
+    reservation: AttemptReservation;
+    invocation: ValidationInvocation;
+    backend: string;
+    previousScopeBatchDigest: string;
+    localScopeBatch: LocalScopeBatch;
+    sequence: number;
+  }): Promise<FactoryEvent> {
+    await this.leases.assertMutationAuthorized(args.lease);
+    assertReservationLease(args.reservation, args.lease);
+    const now = await this.store.serverTime();
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "validation-invocation",
+      ...writerAuthority(args.lease, args.sequence),
+      event: "ValidationInvocationScopeRebound",
+      objective: args.reservation.objective,
+      runId: args.reservation.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      workItem: args.reservation.workItem,
+      attempt: args.reservation.attempt,
+      artifactDigest: args.invocation.artifactDigest,
+      invocationDigest: args.invocation.digest,
+      reservationOid: args.reservation.oid,
+      backend: args.backend,
+      previousScopeBatchDigest: args.previousScopeBatchDigest,
+      localScopeBatch: args.localScopeBatch,
+    });
+    await this.store.addIssueComment(
+      args.workItemNodeId,
+      encodeEventComment(
+        `Factory rebound validation invocation ${args.invocation.digest.slice(0, 12)} to its recovery scope.`,
         event,
       ),
     );

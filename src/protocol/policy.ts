@@ -281,6 +281,48 @@ export const DEFAULT_COMPILER_MEDIA_EGRESS_POLICY = Object.freeze({
   deterministicReviewRuleIds: [],
 });
 
+const repositoryCaptureReviewEgress = <T extends z.ZodRawShape>(extra: T) =>
+  z
+    .object({
+      mode: z.enum(["denied", "public-assets", "private-assets"]),
+      maxAssets: z.number().int().min(0).max(544),
+      ...extra,
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if ((value.mode === "denied") !== (value.maxAssets === 0))
+        context.addIssue({
+          code: "custom",
+          path: ["maxAssets"],
+          message: "denied repository capture egress requires zero assets",
+        });
+    });
+
+/** Independent authority for deterministic capture gates and semantic-review
+ * disclosure. Repository validators never receive expected payloads. */
+export const RepositoryCaptureEgressPolicySchema = z
+  .object({
+    deterministicGateIds: z
+      .array(safeId)
+      .max(32)
+      .refine((ids) => new Set(ids).size === ids.length, "capture gate IDs must be unique"),
+    review: repositoryCaptureReviewEgress({
+      reviewerCapabilityIds: z
+        .array(safeId)
+        .max(32)
+        .refine(
+          (ids) => new Set(ids).size === ids.length,
+          "reviewer capability IDs must be unique",
+        ),
+    }),
+  })
+  .strict();
+
+export const DEFAULT_REPOSITORY_CAPTURE_EGRESS_POLICY = Object.freeze({
+  deterministicGateIds: [],
+  review: { mode: "denied" as const, maxAssets: 0, reviewerCapabilityIds: [] },
+});
+
 export const RunPolicySchema = z
   .object({
     backendOrder: z.array(safeId).min(1).max(16),
@@ -316,6 +358,7 @@ export const RunPolicySchema = z
     compilerEvaluation: CompilerEvaluationPolicySchema.optional(),
     objectivePlanning: ObjectivePlanningPolicySchema.optional(),
     compilerMediaEgress: CompilerMediaEgressPolicySchema,
+    repositoryCaptureEgress: RepositoryCaptureEgressPolicySchema,
     /** Explicit authority for bounded defect publication; absence denies automatic writes. */
     findingReporting: FindingReportingPolicySchema.optional(),
   })
@@ -348,6 +391,7 @@ export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
   compilerEvaluation: DEFAULT_COMPILER_EVALUATION_POLICY,
   objectivePlanning: DEFAULT_OBJECTIVE_PLANNING_POLICY,
   compilerMediaEgress: DEFAULT_COMPILER_MEDIA_EGRESS_POLICY,
+  repositoryCaptureEgress: DEFAULT_REPOSITORY_CAPTURE_EGRESS_POLICY,
   allowedNetworkDestinations: ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"],
   priority: {
     source: "subissue-order" as const,

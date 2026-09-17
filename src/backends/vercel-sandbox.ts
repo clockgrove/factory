@@ -1,5 +1,5 @@
 import { Sandbox, type Command, type CommandFinished, type NetworkPolicy } from "@vercel/sandbox";
-
+import { open } from "node:fs/promises";
 import type {
   AttemptContext,
   BackendHandle,
@@ -7,6 +7,7 @@ import type {
   BackendProbe,
   ExecutionBackend,
   ExecutionBackendCapabilities,
+  IsolatedValidationCaptures,
   IsolatedValidationContext,
   IsolatedValidationResult,
   StaleAttemptIdentity,
@@ -18,11 +19,19 @@ import {
 import { normalizeArtifact, type NormalizedArtifact } from "../execution/artifacts.js";
 import { inspectPinnedLfs } from "../repository-profiles/git-lfs.js";
 import {
+  ISOLATED_CAPTURE_MANIFEST_PATH,
+  MAX_ISOLATED_CAPTURE_MANIFEST_BYTES,
+  MAX_ISOLATED_VALIDATION_RESULT_BYTES,
+  parseIsolatedValidationCaptureManifest,
+  parseIsolatedValidationCaptureRequest,
   parseSandboxPaths,
   parseIsolatedValidationResult,
+  releaseIsolatedValidationCaptures,
+  retainIsolatedValidationCaptures,
   repositoryArchive,
   sandboxBootstrapFiles,
   sandboxResourceName,
+  sandboxValidationResourceIdentity,
   sandboxValidationFiles,
 } from "./sandbox-common.js";
 
@@ -37,6 +46,8 @@ interface RunningVercel {
 
 export interface VercelSandboxBackendOptions {
   repository: string;
+  /** Required and digest-pinned for authoritative repository capture validation. */
+  image?: string;
   modelCredentialName?: string;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -103,6 +114,7 @@ export class VercelSandboxBackend implements ExecutionBackend {
   };
 
   readonly #repository: string;
+  readonly #image: string | undefined;
   readonly #modelCredential: string;
   readonly #now: () => number;
   readonly #sleep: (milliseconds: number) => Promise<void>;
@@ -111,9 +123,11 @@ export class VercelSandboxBackend implements ExecutionBackend {
   readonly #cleanupTimeoutMs: number;
   readonly #deadlineSignal: NonNullable<VercelSandboxBackendOptions["deadlineSignal"]>;
   readonly #running = new Map<string, RunningVercel>();
+  readonly #uncheckpointedCaptures = new Map<string, IsolatedValidationCaptures>();
 
   constructor(options: VercelSandboxBackendOptions) {
     this.#repository = options.repository;
+    this.#image = options.image;
     this.#modelCredential = options.modelCredentialName ?? "OPENAI_API_KEY";
     this.#now = options.now ?? Date.now;
     this.#sleep =
@@ -173,6 +187,123 @@ export class VercelSandboxBackend implements ExecutionBackend {
     }
   }
 
+  async #readValidationFile(
+    sandbox: Sandbox,
+    path: string,
+    maxBytes: number,
+    deadline: Date,
+  ): Promise<Buffer> {
+    return this.#withinDeadline(
+      deadline,
+      `validation deadline exhausted while downloading ${path}`,
+      async (signal) => {
+        const stream = await sandbox.readFile({ path }, { signal });
+        if (!stream) throw new Error(`isolated validator did not produce ${path}`);
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        for await (const chunk of stream) {
+          const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string | Uint8Array);
+          bytes += data.byteLength;
+          if (bytes > maxBytes) {
+            if ("destroy" in stream && typeof stream.destroy === "function") stream.destroy();
+            throw new Error(`${path} exceeds its ${maxBytes} byte limit`);
+          }
+          chunks.push(data);
+        }
+        return Buffer.concat(chunks, bytes);
+      },
+    );
+  }
+
+  async #downloadValidationFile(
+    sandbox: Sandbox,
+    path: string,
+    expectedBytes: number,
+    destination: string,
+    deadline: Date,
+  ): Promise<void> {
+    await this.#withinDeadline(
+      deadline,
+      `validation deadline exhausted while downloading ${path}`,
+      async (signal) => {
+        const stream = await sandbox.readFile({ path }, { signal });
+        if (!stream) throw new Error(`isolated validator did not produce ${path}`);
+        const output = await open(destination, "wx", 0o600);
+        let bytes = 0;
+        try {
+          for await (const chunk of stream) {
+            const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string | Uint8Array);
+            bytes += data.byteLength;
+            if (bytes > expectedBytes) {
+              if ("destroy" in stream && typeof stream.destroy === "function") stream.destroy();
+              throw new Error(`${path} exceeds its manifest byte count`);
+            }
+            let offset = 0;
+            while (offset < data.length) offset += (await output.write(data, offset)).bytesWritten;
+          }
+          if (bytes !== expectedBytes)
+            throw new Error(`${path} was truncated or changed after manifest collection`);
+        } finally {
+          await output.close();
+        }
+      },
+    );
+  }
+
+  async #collectValidationResult(
+    sandbox: Sandbox,
+    context: IsolatedValidationContext,
+    captureRequest: ReturnType<typeof parseIsolatedValidationCaptureRequest>,
+  ): Promise<IsolatedValidationResult> {
+    let result = parseIsolatedValidationResult(
+      await this.#readValidationFile(
+        sandbox,
+        "factory/validation-result.json",
+        MAX_ISOLATED_VALIDATION_RESULT_BYTES,
+        context.deadline,
+      ),
+    );
+    if (captureRequest && result.passed) {
+      try {
+        const manifest = parseIsolatedValidationCaptureManifest(
+          await this.#readValidationFile(
+            sandbox,
+            ISOLATED_CAPTURE_MANIFEST_PATH,
+            MAX_ISOLATED_CAPTURE_MANIFEST_BYTES,
+            context.deadline,
+          ),
+          captureRequest,
+        );
+        const captures = await retainIsolatedValidationCaptures(
+          manifest,
+          {
+            backendId: this.capabilities.id,
+            resourceId: sandbox.name,
+            manifestPath: ISOLATED_CAPTURE_MANIFEST_PATH,
+          },
+          (file, destination) =>
+            this.#downloadValidationFile(
+              sandbox,
+              file.sourcePath,
+              file.bytes,
+              destination,
+              context.deadline,
+            ),
+        );
+        result = { ...result, captures, environmentIdentity: this.#image! };
+      } catch (error) {
+        throw new Error(
+          `isolated capture collection failed at ${this.capabilities.id}/${sandbox.name}/${ISOLATED_CAPTURE_MANIFEST_PATH}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
+    }
+    return {
+      ...result,
+      ...(captureRequest ? { environmentIdentity: this.#image! } : {}),
+    };
+  }
+
   async probe(): Promise<BackendProbe> {
     const provider = Boolean(process.env.VERCEL_OIDC_TOKEN);
     const model = Boolean(process.env[this.#modelCredential]);
@@ -196,6 +327,10 @@ export class VercelSandboxBackend implements ExecutionBackend {
       ...(!available ? { reason: "VERCEL_OIDC_TOKEN is not available" } : {}),
       measuredAt: new Date().toISOString(),
     };
+  }
+
+  validationEnvironmentIdentity(): string | null {
+    return this.#image ?? null;
   }
 
   async launch(context: AttemptContext): Promise<BackendHandle> {
@@ -405,11 +540,25 @@ export class VercelSandboxBackend implements ExecutionBackend {
   }
 
   async validate(context: IsolatedValidationContext): Promise<IsolatedValidationResult> {
+    const captureRequest = parseIsolatedValidationCaptureRequest(context);
+    if (captureRequest && !context.checkpointCaptureResult)
+      throw new Error("isolated capture validation requires a durable checkpoint callback");
+    if (
+      captureRequest &&
+      (!this.#image ||
+        !/@sha256:[0-9a-f]{64}$/.test(this.#image) ||
+        captureRequest.environmentIdentity !== this.#image)
+    )
+      throw new Error("Vercel capture validation requires its exact digest-pinned image");
     remainingBeforeAttemptDeadline(
       context.deadline,
       "validation deadline exhausted before Vercel sandbox launch",
       this.#now,
     );
+    if (context.artifact?.lfsObjects?.length)
+      throw new Error(
+        "Vercel validation cannot hydrate bound raw LFS payloads; use a local validator with the generic artifact-content cache",
+      );
     if (context.artifact.payload)
       throw new Error(
         "Labs Vercel validation does not support the content-addressed large-artifact channel; select Daytona or local validation",
@@ -471,6 +620,7 @@ export class VercelSandboxBackend implements ExecutionBackend {
               attempt: String(context.attempt),
               run: context.runId.slice(0, 48),
             },
+            ...(captureRequest ? { image: this.#image! } : {}),
             ...(context.packet.requirements.cpu
               ? { resources: { vcpus: Math.ceil(context.packet.requirements.cpu) } }
               : {}),
@@ -483,18 +633,29 @@ export class VercelSandboxBackend implements ExecutionBackend {
         cause: error,
       });
     }
+    if (sandbox.name !== resourceName)
+      throw new VercelResourceCleanupError({
+        resourceName,
+        operation: "created validation ownership mismatch",
+        cause: `provider returned ${sandbox.name}`,
+      });
     let validationFailure: unknown;
+    let captureRecoveryFailure: unknown;
+    let checkpointFailure: unknown;
+    let retainedResult: IsolatedValidationResult | undefined;
     try {
       await this.#withinDeadline(
         context.deadline,
         "validation deadline exhausted during Vercel source upload",
         (signal) =>
           sandbox.writeFiles(
-            sandboxValidationFiles(context, archive).map((file) => ({
-              path: file.path,
-              content: file.content,
-              ...(file.mode ? { mode: file.mode } : {}),
-            })),
+            [
+              ...sandboxValidationFiles(context, archive).map((file) => ({
+                path: file.path,
+                content: file.content,
+                ...(file.mode ? { mode: file.mode } : {}),
+              })),
+            ],
             { signal },
           ),
       );
@@ -538,20 +699,163 @@ export class VercelSandboxBackend implements ExecutionBackend {
             ).slice(0, 8_000);
         throw new Error(diagnostic || stderr || `isolated validator exited ${finished.exitCode}`);
       }
-      const result = await this.#withinDeadline(
-        context.deadline,
-        "validation deadline exhausted during Vercel result collection",
-        (signal) =>
-          sandbox.readFileToBuffer({ path: "factory/validation-result.json" }, { signal }),
-      );
-      if (!result) throw new Error("isolated validator produced no result");
-      return parseIsolatedValidationResult(result);
+      let parsed: IsolatedValidationResult;
+      try {
+        parsed = await this.#collectValidationResult(sandbox, context, captureRequest);
+      } catch (error) {
+        if (captureRequest) captureRecoveryFailure = error;
+        throw error;
+      }
+      retainedResult = parsed;
+      if (parsed.captures) {
+        try {
+          await context.checkpointCaptureResult!(parsed);
+        } catch (error) {
+          checkpointFailure = error;
+          this.#uncheckpointedCaptures.set(sandbox.name, parsed.captures);
+          throw error;
+        }
+      }
     } catch (error) {
       validationFailure = error;
-      throw error;
-    } finally {
-      await this.#stopSandbox(sandbox, "validation cleanup", validationFailure);
     }
+    if (checkpointFailure)
+      throw new VercelResourceCleanupError({
+        resourceName: sandbox.name,
+        operation: "durable capture checkpoint",
+        cause: checkpointFailure,
+      });
+    if (captureRecoveryFailure)
+      throw new VercelResourceCleanupError({
+        resourceName: sandbox.name,
+        operation: "capture result before durable checkpoint",
+        cause: captureRecoveryFailure,
+      });
+    try {
+      await this.#stopSandbox(sandbox, "validation cleanup", validationFailure);
+    } catch (error) {
+      await releaseIsolatedValidationCaptures(retainedResult?.captures);
+      throw error;
+    }
+    if (validationFailure) {
+      await releaseIsolatedValidationCaptures(retainedResult?.captures);
+      throw validationFailure;
+    }
+    if (!retainedResult) throw new Error("isolated Vercel validator produced no result");
+    return retainedResult;
+  }
+
+  validationResourceIdentity(context: IsolatedValidationContext) {
+    return sandboxValidationResourceIdentity(context, this.capabilities.id);
+  }
+
+  async recoverValidation(
+    context: IsolatedValidationContext,
+  ): Promise<IsolatedValidationResult | null> {
+    const captureRequest = parseIsolatedValidationCaptureRequest(context);
+    if (!captureRequest) return null;
+    if (!context.checkpointCaptureResult)
+      throw new Error("isolated capture recovery requires a durable checkpoint callback");
+    if (
+      !this.#image ||
+      !/@sha256:[0-9a-f]{64}$/.test(this.#image) ||
+      captureRequest.environmentIdentity !== this.#image
+    )
+      throw new Error("Vercel capture recovery requires its exact digest-pinned image");
+    const resourceName = sandboxResourceName(context, "validation");
+    let sandbox: Sandbox | undefined;
+    for (let attempt = 0; attempt < this.#createVisibilityAttempts; attempt += 1) {
+      try {
+        sandbox = await this.#withinDeadline(
+          new Date(this.#now() + this.#cleanupTimeoutMs),
+          `Vercel capture recovery lookup exceeded its ${this.#cleanupTimeoutMs} ms observation bound`,
+          () => Sandbox.get({ name: resourceName }),
+        );
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/\b(?:404|not[ -]?found)\b/i.test(message))
+          throw new VercelResourceCleanupError({
+            resourceName,
+            operation: "capture recovery lookup",
+            cause: error,
+          });
+        if (attempt + 1 < this.#createVisibilityAttempts)
+          await this.#sleep(this.#createVisibilityDelayMs);
+      }
+    }
+    if (!sandbox) return null;
+    if (sandbox.name !== resourceName)
+      throw new VercelResourceCleanupError({
+        resourceName,
+        operation: "capture recovery ownership",
+        cause: "retained validation resource differs from its exact invocation",
+      });
+    let result: IsolatedValidationResult | undefined;
+    try {
+      result = await this.#collectValidationResult(sandbox, context, captureRequest);
+      if (result.captures) await context.checkpointCaptureResult(result);
+    } catch (error) {
+      if (result?.captures) this.#uncheckpointedCaptures.set(resourceName, result.captures);
+      throw new VercelResourceCleanupError({
+        resourceName,
+        operation: "capture recovery before durable checkpoint",
+        cause: error,
+      });
+    }
+    if (!result) throw new Error("retained Vercel capture produced no validation result");
+    await this.#stopSandbox(sandbox, "recovered validation cleanup");
+    const priorCapture = this.#uncheckpointedCaptures.get(resourceName);
+    this.#uncheckpointedCaptures.delete(resourceName);
+    await releaseIsolatedValidationCaptures(priorCapture);
+    return result;
+  }
+
+  async cleanupValidationResource(
+    context: IsolatedValidationContext,
+  ): Promise<"cleaned" | "absent"> {
+    const captureRequest = parseIsolatedValidationCaptureRequest(context);
+    if (
+      !captureRequest ||
+      !this.#image ||
+      !/@sha256:[0-9a-f]{64}$/.test(this.#image) ||
+      captureRequest.environmentIdentity !== this.#image
+    )
+      throw new Error("validation cleanup requires its exact digest-pinned Vercel invocation");
+    const resourceName = sandboxResourceName(context, "validation");
+    let sandbox: Sandbox | undefined;
+    for (let attempt = 0; attempt < this.#createVisibilityAttempts; attempt += 1) {
+      try {
+        sandbox = await this.#withinDeadline(
+          new Date(this.#now() + this.#cleanupTimeoutMs),
+          `Vercel bound validation cleanup lookup exceeded its ${this.#cleanupTimeoutMs} ms operation bound`,
+          () => Sandbox.get({ name: resourceName }),
+        );
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/\b(?:404|not[ -]?found)\b/i.test(message))
+          throw new VercelResourceCleanupError({
+            resourceName,
+            operation: "bound validation cleanup lookup",
+            cause: error,
+          });
+        if (attempt + 1 < this.#createVisibilityAttempts)
+          await this.#sleep(this.#createVisibilityDelayMs);
+      }
+    }
+    if (!sandbox) return "absent";
+    if (sandbox.name !== resourceName)
+      throw new VercelResourceCleanupError({
+        resourceName,
+        operation: "bound validation cleanup ownership",
+        cause: "refusing cleanup of a resource outside the exact validation invocation",
+      });
+    await this.#stopSandbox(sandbox, "bound validation cleanup");
+    const priorCapture = this.#uncheckpointedCaptures.get(resourceName);
+    this.#uncheckpointedCaptures.delete(resourceName);
+    await releaseIsolatedValidationCaptures(priorCapture);
+    return "cleaned";
   }
 
   async reconcileStale(identity: StaleAttemptIdentity): Promise<void> {
@@ -588,6 +892,12 @@ export class VercelSandboxBackend implements ExecutionBackend {
         cause: `bounded visibility checks still report absence; replacement is unsafe until ${new Date(replacementNotBefore).toISOString()} and a subsequent absence check`,
       });
     }
+    if (this.#uncheckpointedCaptures.has(resourceName))
+      throw new VercelResourceCleanupError({
+        resourceName,
+        operation: "stale-resource reconciliation before durable capture recovery",
+        cause: "retained capture must be recovered and checkpointed before provider cleanup",
+      });
     await this.#stopSandbox(sandbox, "stale-resource reconciliation");
   }
 

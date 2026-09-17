@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { boundedText, safeId, sha256Digest } from "../protocol/limits.js";
+import { MAX_PRODUCT_FILE_BYTES, boundedText, safeId, sha256Digest } from "../protocol/limits.js";
 
 const referenceIds = (maximum: number, minimum = 0) =>
   z
@@ -41,6 +41,7 @@ export const MediaTypeSchema = boundedText(160).regex(
 
 export const RasterMediaConstraintsSchema = z
   .object({
+    kind: z.literal("raster"),
     minimumWidth: z.number().int().min(1).max(16_384).nullable(),
     maximumWidth: z.number().int().min(1).max(16_384).nullable(),
     minimumHeight: z.number().int().min(1).max(16_384).nullable(),
@@ -67,7 +68,7 @@ export const MediaOutputConstraintsSchema = z
     mediaTypes: z.array(MediaTypeSchema).min(1).max(16),
     minimumCount: z.number().int().min(1).max(16),
     maximumCount: z.number().int().min(1).max(16),
-    raster: RasterMediaConstraintsSchema.nullable(),
+    profile: RasterMediaConstraintsSchema.nullable(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -89,6 +90,49 @@ export const MediaInputRoleBindingSchema = z
     roleId: safeId,
     importedAssetIds: referenceIds(32),
     inputIntentIds: referenceIds(32),
+  })
+  .strict();
+
+export const RepositoryCaptureScenarioSchema = z
+  .object({
+    id: safeId,
+    fixture: boundedText(500).nullable(),
+    seed: boundedText(500).nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.fixture !== null && value.seed !== null)
+      context.addIssue({
+        code: "custom",
+        message: "capture scenario may bind a fixture or seed, not both",
+      });
+  });
+
+const RepositoryCaptureComparisonSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("exact") }).strict(),
+  z
+    .object({
+      kind: z.literal("threshold"),
+      policyId: safeId,
+    })
+    .strict(),
+]);
+
+export const RepositoryCaptureRequestSchema = z
+  .object({
+    expectedAssetId: safeId,
+    scenario: RepositoryCaptureScenarioSchema,
+    captureRecipeId: safeId,
+    comparison: RepositoryCaptureComparisonSchema,
+    gate: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("human-required") }).strict(),
+      z
+        .object({
+          kind: z.literal("deterministic-preauthorized"),
+          authorityId: safeId,
+        })
+        .strict(),
+    ]),
   })
   .strict();
 
@@ -119,15 +163,49 @@ export const MediaIntentSchema = z
     brief: boundedText(4_000),
     fulfillment: MediaIntentFulfillmentSchema,
     output: MediaOutputConstraintsSchema,
-    review: MediaReviewRequestSchema,
+    review: MediaReviewRequestSchema.nullable(),
+    repositoryCapture: RepositoryCaptureRequestSchema.nullable(),
     bindings: z.array(MediaIntentBindingSchema).max(64),
   })
   .strict()
   .superRefine((intent, context) => {
-    if (intent.fulfillment.kind !== "produced") return;
+    const evidenceBindings = intent.bindings.filter(
+      ({ direction }) => direction === "evidence-for",
+    );
+    if ((intent.repositoryCapture !== null) !== evidenceBindings.length > 0)
+      context.addIssue({
+        code: "custom",
+        path: ["repositoryCapture"],
+        message: "repository capture request is required exactly for evidence-for intents",
+      });
+    if (intent.repositoryCapture && evidenceBindings.length !== intent.bindings.length)
+      context.addIssue({
+        code: "custom",
+        path: ["bindings"],
+        message: "repository capture intents may contain only evidence-for bindings",
+      });
+    if ((intent.repositoryCapture !== null) === (intent.review !== null))
+      context.addIssue({
+        code: "custom",
+        path: ["review"],
+        message: "producer review and repository capture gate are mutually exclusive",
+      });
     if (
+      intent.repositoryCapture &&
+      (intent.purpose !== "acceptance-evidence" ||
+        intent.fulfillment.kind !== "imported" ||
+        intent.fulfillment.assetIds.length !== 1 ||
+        intent.fulfillment.assetIds[0] !== intent.repositoryCapture.expectedAssetId)
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["fulfillment"],
+        message: "repository capture must use its one expected imported acceptance asset",
+      });
+    if (
+      intent.fulfillment.kind === "produced" &&
       new Set(intent.fulfillment.inputRoleBindings.map(({ roleId }) => roleId)).size !==
-      intent.fulfillment.inputRoleBindings.length
+        intent.fulfillment.inputRoleBindings.length
     )
       context.addIssue({ code: "custom", message: "media input role is duplicated" });
   });
@@ -136,11 +214,7 @@ export const CompilerMediaAssetFactSchema = z
   .object({
     id: safeId,
     mediaType: MediaTypeSchema,
-    bytes: z
-      .number()
-      .int()
-      .positive()
-      .max(100 * 1024 * 1024),
+    bytes: z.number().int().positive().max(MAX_PRODUCT_FILE_BYTES),
     inspection: z.discriminatedUnion("kind", [
       z
         .object({
@@ -153,7 +227,12 @@ export const CompilerMediaAssetFactSchema = z
         .strict(),
       z.object({ kind: z.literal("opaque") }).strict(),
     ]),
+    descriptorClass: z.enum(["opaque", "semantic"]),
+    inspectionHandler: z
+      .object({ id: safeId, contract: z.number().int().positive().max(1_000) })
+      .strict(),
     visibility: z.enum(["public", "private"]),
+    rightsBasis: z.enum(["user-owned", "licensed", "permission-granted", "unknown"]),
   })
   .strict();
 
@@ -281,7 +360,9 @@ export const AssetProductionDeliverableSchema = z
   .object({
     kind: z.literal("asset-production"),
     contract: z.literal("clockgrove.factory/asset-set"),
-    intent: MediaIntentSchema,
+    intent: MediaIntentSchema.and(
+      z.object({ review: MediaReviewRequestSchema, repositoryCapture: z.null() }),
+    ),
     producerCapabilityId: safeId,
     producerCapabilityDigest: sha256Digest,
     activationSelection: MediaActivationSelectionSchema,

@@ -13,6 +13,7 @@ import type {
   ExecutionBackend,
   ExecutionBackendCapabilities,
   IsolatedValidationContext,
+  IsolatedValidationCaptures,
   IsolatedValidationResult,
   StaleAttemptIdentity,
 } from "../execution/backend.js";
@@ -35,10 +36,17 @@ import type { ManagedToolchain } from "../runtime/toolchain-bundle.js";
 import { toolchainStatus } from "../runtime/toolchain-store.js";
 import { validationInvocationOwnership } from "./validation-invocation.js";
 import {
+  ISOLATED_CAPTURE_MANIFEST_PATH,
+  MAX_ISOLATED_CAPTURE_MANIFEST_BYTES,
+  parseIsolatedValidationCaptureManifest,
+  parseIsolatedValidationCaptureRequest,
   parseSandboxPaths,
   parseIsolatedValidationResult,
+  releaseIsolatedValidationCaptures,
+  retainIsolatedValidationCaptures,
   sandboxBootstrapFiles,
   sandboxResourceName,
+  sandboxValidationResourceIdentity,
   sandboxValidationFiles,
 } from "./sandbox-common.js";
 
@@ -231,6 +239,12 @@ const REMOTE_VALIDATION_ERROR = {
   maxBytes: MAX_LOG_BYTES,
 } as const satisfies RemoteArtifactFile;
 
+const REMOTE_CAPTURE_MANIFEST = {
+  path: ISOLATED_CAPTURE_MANIFEST_PATH,
+  label: "Daytona capture manifest",
+  maxBytes: MAX_ISOLATED_CAPTURE_MANIFEST_BYTES,
+} as const satisfies RemoteArtifactFile;
+
 function explicitDaytonaDomains(
   destinations: readonly string[],
   policyDestinations: readonly string[],
@@ -323,6 +337,7 @@ export class DaytonaBackend implements ExecutionBackend {
   readonly #deadlineSignal: NonNullable<DaytonaBackendOptions["deadlineSignal"]>;
   readonly #running = new Map<string, RunningDaytona>();
   readonly #resources = new Map<string, TrackedDaytona>();
+  readonly #uncheckpointedCaptures = new Map<string, IsolatedValidationCaptures>();
   readonly #ambiguousCreates = new Map<string, AmbiguousDaytonaCreate>();
   readonly #deletedHandles = new Set<string>();
   readonly #deletions = new Map<string, Promise<void>>();
@@ -454,6 +469,10 @@ export class DaytonaBackend implements ExecutionBackend {
       ...(!available ? { reason: "Daytona authentication is not available" } : {}),
       measuredAt: new Date().toISOString(),
     };
+  }
+
+  validationEnvironmentIdentity(): string {
+    return this.#image;
   }
 
   async #refreshManagedTools(): Promise<void> {
@@ -743,10 +762,75 @@ export class DaytonaBackend implements ExecutionBackend {
     await this.#deleteHandle(handle, "final cleanup");
   }
 
+  async #collectValidationResult(
+    sandbox: Sandbox,
+    context: IsolatedValidationContext,
+    captureRequest: ReturnType<typeof parseIsolatedValidationCaptureRequest>,
+  ): Promise<IsolatedValidationResult> {
+    let result = parseIsolatedValidationResult(
+      await this.#downloadBoundedRemoteFile(sandbox, REMOTE_VALIDATION_RESULT, context.deadline),
+    );
+    if (captureRequest && result.passed) {
+      try {
+        const manifest = parseIsolatedValidationCaptureManifest(
+          await this.#downloadBoundedRemoteFile(sandbox, REMOTE_CAPTURE_MANIFEST, context.deadline),
+          captureRequest,
+        );
+        const captures = await retainIsolatedValidationCaptures(
+          manifest,
+          {
+            backendId: this.capabilities.id,
+            resourceId: sandbox.id,
+            manifestPath: ISOLATED_CAPTURE_MANIFEST_PATH,
+          },
+          async (file, destination) => {
+            const remote = {
+              path: file.sourcePath,
+              label: `Daytona capture ${file.recipeId}/${file.roleId}`,
+              maxBytes: file.bytes,
+            } satisfies RemoteArtifactFile;
+            await this.#withinDeadline(
+              context.deadline,
+              `Daytona ${remote.label} download exceeded the validation deadline`,
+              async (signal) => {
+                const metadata = await sandbox.fs.getFileDetails(remote.path);
+                if (metadata.isDir || metadata.size !== file.bytes)
+                  throw new Error(`${remote.label} size or file kind differs from its manifest`);
+                await this.#downloadRemoteFileToPath(
+                  sandbox,
+                  remote,
+                  file.bytes,
+                  destination,
+                  signal,
+                );
+              },
+            );
+          },
+        );
+        result = { ...result, captures, environmentIdentity: this.#image };
+      } catch (error) {
+        throw new Error(
+          `isolated capture collection failed at ${this.capabilities.id}/${sandbox.id}/${ISOLATED_CAPTURE_MANIFEST_PATH}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
+    }
+    return captureRequest ? { ...result, environmentIdentity: this.#image } : result;
+  }
+
   async validate(context: IsolatedValidationContext): Promise<IsolatedValidationResult> {
     const invocationOwner = validationInvocationOwnership(context);
+    const captureRequest = parseIsolatedValidationCaptureRequest(context);
+    if (captureRequest && !context.checkpointCaptureResult)
+      throw new Error("isolated capture validation requires a durable checkpoint callback");
+    if (captureRequest && captureRequest.environmentIdentity !== this.#image)
+      throw new Error("isolated capture environment differs from the pinned Daytona image");
     const deadlineFailure = "Daytona validation deadline elapsed before sandbox creation";
     remainingBeforeAttemptDeadline(context.deadline, deadlineFailure, this.#now);
+    if (context.artifact?.lfsObjects?.length)
+      throw new Error(
+        "Daytona validation cannot hydrate bound raw LFS payloads; use a local validator with the generic artifact-content cache",
+      );
     const domains = explicitDaytonaDomains(
       context.packet.requirements.networkDestinations,
       context.policyNetworkDestinations ?? [],
@@ -854,6 +938,8 @@ export class DaytonaBackend implements ExecutionBackend {
     let result: IsolatedValidationResult | undefined;
     let validationFailure: unknown;
     let validationFailed = false;
+    let captureRecoveryFailure: unknown;
+    let checkpointFailure: unknown;
     let patchRoot: string | undefined;
     try {
       remainingBeforeAttemptDeadline(
@@ -921,9 +1007,21 @@ export class DaytonaBackend implements ExecutionBackend {
               : `isolated validator exited ${command.exitCode}`,
         );
       }
-      result = parseIsolatedValidationResult(
-        await this.#downloadBoundedRemoteFile(sandbox, REMOTE_VALIDATION_RESULT, context.deadline),
-      );
+      try {
+        result = await this.#collectValidationResult(sandbox, context, captureRequest);
+      } catch (error) {
+        if (captureRequest) captureRecoveryFailure = error;
+        throw error;
+      }
+      if (result.captures) {
+        try {
+          await context.checkpointCaptureResult!(result);
+        } catch (error) {
+          checkpointFailure = error;
+          this.#uncheckpointedCaptures.set(sandbox.id, result.captures);
+          throw error;
+        }
+      }
     } catch (error) {
       validationFailed = true;
       validationFailure = error;
@@ -932,16 +1030,145 @@ export class DaytonaBackend implements ExecutionBackend {
       if (patchRoot) await rm(patchRoot, { recursive: true, force: true });
     }
 
-    await this.#deleteTracked(
-      tracked,
-      "validation cleanup",
-      validationFailed ? validationFailure : undefined,
-    );
+    if (checkpointFailure) {
+      throw new DaytonaResourceCleanupError({
+        resourceId: sandbox.id,
+        resourceName,
+        ttlMinutes,
+        operation: "durable capture checkpoint",
+        cause: checkpointFailure,
+      });
+    }
+    if (captureRecoveryFailure) {
+      throw new DaytonaResourceCleanupError({
+        resourceId: sandbox.id,
+        resourceName,
+        ttlMinutes,
+        operation: "capture result before durable checkpoint",
+        cause: captureRecoveryFailure,
+      });
+    }
+
+    try {
+      await this.#deleteTracked(
+        tracked,
+        "validation cleanup",
+        validationFailed ? validationFailure : undefined,
+      );
+    } catch (error) {
+      await releaseIsolatedValidationCaptures(result?.captures);
+      throw error;
+    }
     if (validationFailed) {
+      await releaseIsolatedValidationCaptures(result?.captures);
       throw safeFailure(validationFailure, "Daytona validation failure");
     }
     if (!result) throw new Error("isolated Daytona validator produced no result");
-    return { ...result, environmentIdentity: this.#image };
+    return result;
+  }
+
+  validationResourceIdentity(context: IsolatedValidationContext) {
+    return sandboxValidationResourceIdentity(context, this.capabilities.id);
+  }
+
+  async recoverValidation(
+    context: IsolatedValidationContext,
+  ): Promise<IsolatedValidationResult | null> {
+    const captureRequest = parseIsolatedValidationCaptureRequest(context);
+    if (!captureRequest) return null;
+    if (!context.checkpointCaptureResult)
+      throw new Error("isolated capture recovery requires a durable checkpoint callback");
+    if (captureRequest.environmentIdentity !== this.#image)
+      throw new Error("isolated capture environment differs from the pinned Daytona image");
+    const resourceName = sandboxResourceName(context, "validation");
+    const invocationOwner = validationInvocationOwnership(context)!;
+    const daytona = this.#createClient();
+    let sandbox: Sandbox | null;
+    try {
+      sandbox = await this.#findWithBoundedVisibility(daytona, resourceName);
+    } catch (error) {
+      throw new DaytonaResourceCleanupError({
+        resourceId: resourceName,
+        resourceName,
+        operation: "capture recovery lookup",
+        cause: error,
+      });
+    }
+    if (!sandbox) return null;
+    if (sandbox.name !== resourceName || sandbox.labels?.invocationOwner !== invocationOwner)
+      throw new DaytonaResourceCleanupError({
+        resourceId: sandbox.id,
+        resourceName,
+        operation: "capture recovery ownership",
+        cause: "retained validation resource differs from its exact invocation",
+      });
+    const tracked: TrackedDaytona = { sandbox, resourceName, phase: "validation" };
+    this.#track(tracked);
+    let result: IsolatedValidationResult | undefined;
+    try {
+      result = await this.#collectValidationResult(sandbox, context, captureRequest);
+      if (result.captures) await context.checkpointCaptureResult(result);
+    } catch (error) {
+      if (result?.captures) this.#uncheckpointedCaptures.set(sandbox.id, result.captures);
+      throw new DaytonaResourceCleanupError({
+        resourceId: sandbox.id,
+        resourceName,
+        operation: "capture recovery before durable checkpoint",
+        cause: error,
+      });
+    }
+    if (!result) throw new Error("retained Daytona capture produced no validation result");
+    await this.#deleteTracked(tracked, "recovered validation cleanup");
+    const priorCapture = this.#uncheckpointedCaptures.get(sandbox.id);
+    this.#uncheckpointedCaptures.delete(sandbox.id);
+    await releaseIsolatedValidationCaptures(priorCapture);
+    return result;
+  }
+
+  async cleanupValidationResource(
+    context: IsolatedValidationContext,
+  ): Promise<"cleaned" | "absent"> {
+    const captureRequest = parseIsolatedValidationCaptureRequest(context);
+    if (!captureRequest || captureRequest.environmentIdentity !== this.#image)
+      throw new Error("validation cleanup requires its exact Daytona capture invocation");
+    const resourceName = sandboxResourceName(context, "validation");
+    const invocationOwner = validationInvocationOwnership(context)!;
+    let tracked = [...this.#resources.values()].find(
+      (resource) => resource.resourceName === resourceName,
+    );
+    if (!tracked) {
+      const daytona = this.#createClient();
+      let sandbox: Sandbox | null;
+      try {
+        sandbox = await this.#findWithBoundedVisibility(daytona, resourceName);
+      } catch (error) {
+        throw new DaytonaResourceCleanupError({
+          resourceId: resourceName,
+          resourceName,
+          operation: "bound validation cleanup lookup",
+          cause: error,
+        });
+      }
+      if (!sandbox) return "absent";
+      tracked = { sandbox, resourceName, phase: "validation" };
+      this.#track(tracked);
+    }
+    if (
+      tracked.phase !== "validation" ||
+      tracked.sandbox.name !== resourceName ||
+      tracked.sandbox.labels?.invocationOwner !== invocationOwner
+    )
+      throw new DaytonaResourceCleanupError({
+        resourceId: tracked.sandbox.id,
+        resourceName,
+        operation: "bound validation cleanup ownership",
+        cause: "refusing cleanup of a resource outside the exact validation invocation",
+      });
+    await this.#deleteTracked(tracked, "bound validation cleanup");
+    const priorCapture = this.#uncheckpointedCaptures.get(tracked.sandbox.id);
+    this.#uncheckpointedCaptures.delete(tracked.sandbox.id);
+    await releaseIsolatedValidationCaptures(priorCapture);
+    return "cleaned";
   }
 
   async reconcileStale(identity: StaleAttemptIdentity): Promise<void> {
@@ -965,6 +1192,13 @@ export class DaytonaBackend implements ExecutionBackend {
           resourceName,
           operation: "tracked validation ownership mismatch",
           cause: "refusing cleanup of unowned resource",
+        });
+      if (this.#uncheckpointedCaptures.has(tracked.sandbox.id))
+        throw new DaytonaResourceCleanupError({
+          resourceId: tracked.sandbox.id,
+          resourceName,
+          operation: "stale-attempt reconciliation before durable capture recovery",
+          cause: "retained capture must be recovered and checkpointed before provider cleanup",
         });
       await this.#deleteTracked(tracked, "stale-attempt reconciliation");
       return;

@@ -127,17 +127,21 @@ earlier planning thresholds of 24 Work Items, 75% of the Objective timeout for c
 path, and 150% for configured aggregate work; `objectivePlanning` can set all three ratios/counts.
 These are admission signals, not completion forecasts. Missing duration estimates remain unavailable.
 
-For media work, a `work-items` proposal always includes `mediaIntents` (empty when the Objective
-needs none). The model selects a capability-advertised semantic role, purpose, cited obligations,
-media constraints, and a strict fulfillment: exact imported manifest asset IDs, or produced media
-with named `inputRoleBindings`. Factory resolves those IDs and derives the exact descriptor digests.
+For repository-result capture or produced asset work, a `work-items` proposal always includes
+`mediaIntents` (empty when the Objective needs none). The model selects a capability-advertised
+semantic role, purpose, cited obligations, format-neutral output constraints, and a strict
+fulfillment: exact imported manifest asset IDs, or produced assets with named `inputRoleBindings`.
+Factory resolves those IDs and derives the exact descriptor digests.
 Factory keeps provider, model, storage, credentials,
 network authority, exact imported digests, and graph edges on the trusted side. An activation can
 bind one imported Objective asset manifest; safe metadata enters the structured request and verified
 files reach only an adapter that advertises their exact media types. The Codex CLI maps its supported
 raster types to image inputs. The current producer path creates reviewed inputs for implementation or
-decisions. Repository-result evidence stays in ordinary repository validation, and a required media
-intent fails deterministically when no import or permitted producer can satisfy it. See
+decisions. An `evidence-for` intent remains on its repository Work Item and selects only a
+preexisting capture recipe and capture-specific gate. Factory derives the command route, egress,
+reviewer, descriptor, comparator, and policy authority. A bad selection is repairable when another
+advertised selection satisfies the same result contract; compilation stops before model dispatch or
+graph publication when machine-derived capabilities prove that no required plan can work. See
 [Objective input assets](docs/OBJECTIVE-ASSETS.md#compiler-media-intents).
 
 `factory_plan` returns proposed Objective specifications with an identity digest, complete parent-

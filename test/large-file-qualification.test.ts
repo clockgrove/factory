@@ -130,7 +130,7 @@ describe("installed large-file qualifier fixture and proof contracts", () => {
     );
   });
 
-  it("prepares canonical/legacy pointer Git blobs and verified local-only LFS objects", () => {
+  it("prepares canonical pointer Git blobs and verified local-only LFS objects", () => {
     const prepared = fixture();
     expect(prepared.lfs).toHaveLength(2);
     expect(git(prepared.repository, ["remote"]).toString()).toBe("");
@@ -142,11 +142,11 @@ describe("installed large-file qualifier fixture and proof contracts", () => {
       expect(sha256(pointer)).toBe(asset.pointerDigest);
       expect(pointer.toString()).toContain(`oid sha256:${asset.oid}\nsize ${asset.size}\n`);
     }
-    expect(readFileSync(join(prepared.repository, prepared.paths.canonical), "utf8")).toContain(
+    expect(readFileSync(join(prepared.repository, prepared.paths.primary), "utf8")).toContain(
       "https://git-lfs.github.com/spec/v1",
     );
-    expect(readFileSync(join(prepared.repository, prepared.paths.legacy), "utf8")).toContain(
-      "https://hawser.github.com/spec/v1",
+    expect(readFileSync(join(prepared.repository, prepared.paths.secondary), "utf8")).toContain(
+      "https://git-lfs.github.com/spec/v1",
     );
     const observed = observeLargeFileTree({
       repository: prepared.repository,
@@ -176,8 +176,8 @@ describe("installed large-file qualifier fixture and proof contracts", () => {
     expect(commit).toContain(`parent ${source.baseSha}\n`);
     expect(prepared.sourceTreeSha).toBe(source.baseTreeSha);
     expect(existsSync(hook)).toBe(false);
-    expect(readFileSync(join(prepared.repository, source.paths.canonical))).toEqual(
-      readFileSync(join(source.repository, source.paths.canonical)),
+    expect(readFileSync(join(prepared.repository, source.paths.primary))).toEqual(
+      readFileSync(join(source.repository, source.paths.primary)),
     );
   });
 
@@ -275,7 +275,7 @@ describe("installed large-file qualifier fixture and proof contracts", () => {
         const mutations = [
           { ...artifact, digest: "0".repeat(64) },
           { ...artifact, patch: artifact.patch + "text" },
-          { ...artifact, changedPaths: [prepared.paths.canonical] },
+          { ...artifact, changedPaths: [prepared.paths.primary] },
           {
             ...artifact,
             payload: { ...artifact.payload!, chunks: [...artifact.payload!.chunks].reverse() },
@@ -333,7 +333,7 @@ describe("installed large-file qualifier fixture and proof contracts", () => {
       "100755",
     );
     const changed = structuredClone(observation);
-    changed.files.find((file) => file.path === prepared.paths.canonical)!.digest = "0".repeat(64);
+    changed.files.find((file) => file.path === prepared.paths.primary)!.digest = "0".repeat(64);
     expect(() => assertLargeFileFinalTree({ fixture: prepared, observation: changed })).toThrow();
   }, 90_000);
 
@@ -441,9 +441,9 @@ describe("installed large-file qualifier fixture and proof contracts", () => {
         path: prepared.paths.payload,
         action: "write",
         mode: "120000",
-        bytes: Buffer.byteLength("../lfs/canonical.bin"),
-        digest: sha256("../lfs/canonical.bin"),
-        mediaType: "unknown",
+        bytes: Buffer.byteLength("../lfs/primary.bin"),
+        digest: sha256("../lfs/primary.bin"),
+        mediaType: "application/octet-stream",
         generated: true,
       },
     ]);

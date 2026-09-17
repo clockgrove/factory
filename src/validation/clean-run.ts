@@ -14,6 +14,11 @@ import {
   verifyMaterializedFiles,
 } from "../execution/artifact-content.js";
 import { inspectPatchManifest } from "../runtime/artifact-patch.js";
+import { restorePinnedLfsPointers } from "../repository-profiles/git-lfs.js";
+import {
+  materializeLfsArtifactContent,
+  verifyMaterializedLfsContent,
+} from "../publication/git-lfs-output.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import { FINDING_PROTOCOL, type FindingCandidate } from "../protocol/findings.js";
 import {
@@ -21,7 +26,10 @@ import {
   type RepositoryCapabilityOperation,
   type WorkerPacket,
 } from "../protocol/worker-packet.js";
-import type { IsolatedValidationResult } from "../execution/backend.js";
+import type {
+  IsolatedValidationCaptureRequest,
+  IsolatedValidationResult,
+} from "../execution/backend.js";
 import { isReviewOnlyWorkflowSurface } from "../publication/workflow-safety.js";
 import {
   cleanupLocalWorktree,
@@ -88,6 +96,12 @@ import {
   NPM_VALIDATION_SETUP_COMMAND,
   validationPlanFromPacket,
 } from "./plan.js";
+import {
+  RepositoryCaptureEvidenceSchema,
+  ValidationInvocationSchema,
+  type RepositoryCaptureEvidence,
+  type ValidationInvocation,
+} from "./repository-capture.js";
 
 function pnpmPackageScriptValidationCommand(command: string) {
   const parsed = packageScriptValidationCommand(command);
@@ -115,7 +129,14 @@ export interface CleanValidationInput {
   packet: WorkerPacket;
   /** Protected branch whose update is the human-authorized integration event. */
   publicationBaseBranch?: string;
-  isolatedValidator?: () => Promise<IsolatedValidationResult>;
+  isolatedValidator?: (capture?: {
+    captureRequest: IsolatedValidationCaptureRequest;
+    checkpointCaptureResult(result: IsolatedValidationResult): Promise<void>;
+  }) => Promise<IsolatedValidationResult>;
+  isolatedValidationRecovery?: (capture: {
+    captureRequest: IsolatedValidationCaptureRequest;
+    checkpointCaptureResult(result: IsolatedValidationResult): Promise<void>;
+  }) => Promise<IsolatedValidationResult | null>;
   /** Integration candidates use a distinct trusted phase. Recovery replay may suppress a new
    * candidate when its pre-existing evidence digest is already the durable authority. */
   findingPhase?: "validation" | "integration" | false;
@@ -126,6 +147,49 @@ export interface CleanValidationInput {
     deadline: string;
     beforeLaunch(identity: LocalScopeIdentity): Promise<void>;
     afterStop(identity: LocalScopeIdentity): Promise<void>;
+    observe(identity: LocalScopeIdentity): Promise<"absent" | "active" | "unknown">;
+  };
+  /** Optional repository-result capture runtime. It creates and journals one
+   * exact validation invocation before any validation command is dispatched.
+   * Review decisions remain outside canonical ValidationEvidence. */
+  repositoryCaptureRuntime?: {
+    createInvocation(input: {
+      artifactDigest: string;
+      baseSha: string;
+      outputTreeSha: string;
+      validationCommands: string[];
+    }): ValidationInvocation | Promise<ValidationInvocation>;
+    execute(input: {
+      invocation: ValidationInvocation;
+      resultRoot: string;
+      assertOutputTree(): Promise<void>;
+      ordinaryValidationCommands: string[];
+      runCaptureCommand(input: {
+        command: string;
+        plannedCommand: string;
+        env: NodeJS.ProcessEnv;
+      }): Promise<{
+        exitCode: number;
+        durationMs: number;
+        stdout: string;
+        stderr: string;
+      }>;
+      observeCaptureCommand(input: {
+        plannedCommand: string;
+      }): Promise<"absent" | "active" | "unknown">;
+      captureObservationDeadline: string | null;
+      launchValidation(capture?: {
+        captureRequest: IsolatedValidationCaptureRequest;
+        checkpointCaptureResult(result: IsolatedValidationResult): Promise<void>;
+      }): Promise<IsolatedValidationResult>;
+      recoverValidation?(capture: {
+        captureRequest: IsolatedValidationCaptureRequest;
+        checkpointCaptureResult(result: IsolatedValidationResult): Promise<void>;
+      }): Promise<IsolatedValidationResult | null>;
+    }): Promise<{
+      validation: IsolatedValidationResult;
+      repositoryCapture?: RepositoryCaptureEvidence;
+    }>;
   };
 }
 
@@ -136,6 +200,13 @@ export interface CleanValidationResult {
     sensitivePaths: string[];
     changedPackageScripts: string[];
   };
+}
+
+function repositoryCaptureCommandSet(packet: WorkerPacket): Set<string> {
+  if (packet.deliverable.kind !== "repository-change") return new Set();
+  return new Set(
+    (packet.repositoryCaptureRecipes ?? []).map((recipe) => recipe.captureCommand.command),
+  );
 }
 
 async function hasNpmLockfile(worktree: LocalWorktree): Promise<boolean> {
@@ -1198,6 +1269,9 @@ export async function validateArtifactClean(
   assertNoSecretMaterial({ patch: artifact.patch, logs: artifact.logs }, "artifact");
 
   const plan = validationPlanFromPacket(input.packet);
+  const captureCommands = repositoryCaptureCommandSet(input.packet);
+  if (captureCommands.size > 0 && !input.repositoryCaptureRuntime)
+    throw new Error("repository capture recipes require the supervised capture runtime");
   const potentialBootstrapManagers = new Set<"npm" | "pnpm" | "bun" | "uv">(
     plan.commands.flatMap((command) => {
       const parsed = pnpmPackageScriptValidationCommand(command);
@@ -1272,11 +1346,19 @@ export async function validateArtifactClean(
   try {
     const patchPath = join(worktree.root, "artifact.patch");
     await materializeArtifactPatch(artifact, patchPath);
+    if (artifact.lfsObjects?.length)
+      await restorePinnedLfsPointers(
+        input.repository,
+        worktree.path,
+        artifact.baseSha,
+        artifact.changedPaths,
+      );
     const trustedManifest = await inspectPatchManifest(
       input.repository,
       artifact.baseSha,
       patchPath,
       artifact.changedPaths,
+      ...(artifact.lfsObjects ? [{ lfsObjects: artifact.lfsObjects }] : [{}]),
     );
     if (
       artifact.fileManifest &&
@@ -1312,7 +1394,17 @@ export async function validateArtifactClean(
       )
         throw new Error("applied artifact tree differs from trusted collection manifest");
       await verifyMaterializedFiles(worktree.path, trustedManifest);
+      if (artifact.lfsObjects?.length) {
+        await materializeLfsArtifactContent(worktree.path, artifact);
+        await verifyMaterializedLfsContent(worktree.path, artifact);
+      }
     }
+    const outputStatus = await git(worktree, [
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--untracked-files=all",
+    ]);
     const pnpmValidation = basePackageJsonPresent
       ? await assertEstablishedPnpmValidation(
           worktree,
@@ -1342,96 +1434,246 @@ export async function validateArtifactClean(
         ? [NPM_VALIDATION_SETUP_COMMAND]
         : [];
     const bootstrapEnvironment = managedExecution?.environment ?? null;
+    const plannedValidationCommands = [
+      ...setupCommands,
+      ...(managedExecution
+        ? managedExecution.validation.map((step) => step.command)
+        : plan.commands),
+    ];
+    const ordinaryPlannedValidationCommands = plannedValidationCommands.filter(
+      (command) => !captureCommands.has(command),
+    );
+    const validationInvocation = input.repositoryCaptureRuntime
+      ? ValidationInvocationSchema.parse(
+          await input.repositoryCaptureRuntime.createInvocation({
+            artifactDigest: artifact.digest,
+            baseSha: artifact.baseSha,
+            outputTreeSha,
+            validationCommands: plannedValidationCommands,
+          }),
+        )
+      : undefined;
+    if (
+      validationInvocation &&
+      (validationInvocation.artifactDigest !== artifact.digest ||
+        validationInvocation.baseSha !== artifact.baseSha ||
+        validationInvocation.outputTreeSha !== outputTreeSha ||
+        JSON.stringify(validationInvocation.validationCommands) !==
+          JSON.stringify(plannedValidationCommands))
+    )
+      throw new Error("repository capture runtime created a mismatched validation invocation");
     let evidenceStartedAt = startedAt.toISOString();
-    let evidenceCompletedAt: string;
+    let evidenceCompletedAt = evidenceStartedAt;
     let environmentIdentity: string | undefined;
-    if (plan.isolation === "isolated" || input.isolatedValidator) {
-      const isolated = await input.isolatedValidator!();
-      if (isolated.outputTreeSha !== outputTreeSha) {
-        throw new Error(
-          `isolated validator tree ${isolated.outputTreeSha} does not match host tree ${outputTreeSha}`,
-        );
-      }
-      const expectedCommands = [
-        ...setupCommands,
-        ...(managedExecution
-          ? managedExecution.validation.map((step) => step.command)
-          : plan.commands),
-      ];
-      assertIsolatedValidationMatchesPlan(isolated, expectedCommands);
-      commands.push(...isolated.commands);
-      passed = isolated.passed;
-      failureReason = isolated.failureReason;
-      evidenceStartedAt = isolated.startedAt;
-      evidenceCompletedAt = isolated.completedAt;
-      environmentIdentity = isolated.environmentIdentity;
-    } else {
-      const localCommands =
-        managedExecution?.setup ??
-        setupCommands.map((command) => ({
-          command,
-          executable: "npm",
-          args: ["ci", "--no-audit", "--no-fund"],
-          expectedStdout: undefined as string | undefined,
-        }));
-      for (const setup of localCommands) {
-        const result = await runLocalCommand({
-          command: setup.executable,
-          args: setup.args,
-          cwd: worktree.path,
-          env: bootstrapEnvironment ?? sanitizedWorkerEnvironment(process.env),
-          timeoutMs: plan.timeoutMsPerCommand,
-        });
-        const versionMismatch =
-          setup.expectedStdout !== undefined &&
-          result.exitCode === 0 &&
-          result.stdout.trim() !== setup.expectedStdout;
-        const exitCode = versionMismatch ? 1 : (result.exitCode ?? (result.timedOut ? 124 : 1));
-        commands.push({
-          command: setup.command,
-          exitCode,
-          durationMs: result.durationMs,
-        });
-        if (exitCode !== 0) {
-          failureReason = versionMismatch
-            ? `validation setup used ${JSON.stringify(result.stdout.trim().slice(0, 100))}, expected ${setup.expectedStdout}`
-            : validationFailureReason("validation setup", setup.command, result);
-          break;
+    const launchValidation = async (
+      capture?: Parameters<NonNullable<CleanValidationInput["isolatedValidator"]>>[0],
+    ): Promise<IsolatedValidationResult> => {
+      if (plan.isolation === "isolated" || input.isolatedValidator) {
+        const isolated = await input.isolatedValidator!(capture);
+        if (isolated.outputTreeSha !== outputTreeSha) {
+          throw new Error(
+            `isolated validator tree ${isolated.outputTreeSha} does not match host tree ${outputTreeSha}`,
+          );
         }
-      }
-      const validationCommands: Array<{
-        command: string;
-        executable: string;
-        args: string[];
-        cwd?: string;
-      }> = managedExecution
-        ? managedExecution.validation
-        : plan.commands.map((command) => ({
+        assertIsolatedValidationMatchesPlan(isolated, plannedValidationCommands);
+        commands.push(...isolated.commands);
+        passed = isolated.passed;
+        failureReason = isolated.failureReason;
+        evidenceStartedAt = isolated.startedAt;
+        evidenceCompletedAt = isolated.completedAt;
+        environmentIdentity = isolated.environmentIdentity;
+        if (
+          validationInvocation &&
+          validationInvocation.toolEnvironment.environmentIdentity !== environmentIdentity
+        )
+          throw new Error("isolated validator environment differs from validation invocation");
+      } else {
+        const localCommands =
+          managedExecution?.setup ??
+          setupCommands.map((command) => ({
             command,
-            executable: "/bin/sh",
-            args: ["-c", command],
+            executable: "npm",
+            args: ["ci", "--no-audit", "--no-fund"],
+            expectedStdout: undefined as string | undefined,
           }));
-      for (const command of failureReason ? [] : validationCommands) {
-        const result = await runLocalCommand({
-          command: command.executable,
-          args: command.args,
-          cwd: command.cwd ? join(worktree.path, command.cwd) : worktree.path,
-          env: bootstrapEnvironment ?? sanitizedWorkerEnvironment(process.env),
-          timeoutMs: plan.timeoutMsPerCommand,
-        });
-        commands.push({
-          command: command.command,
-          exitCode: result.exitCode ?? (result.timedOut ? 124 : 1),
-          durationMs: result.durationMs,
-        });
-        if (result.exitCode !== 0) {
-          failureReason = validationFailureReason("validation", command.command, result);
-          break;
+        for (const setup of localCommands) {
+          const result = await runLocalCommand({
+            command: setup.executable,
+            args: setup.args,
+            cwd: worktree.path,
+            env: bootstrapEnvironment ?? sanitizedWorkerEnvironment(process.env),
+            timeoutMs: plan.timeoutMsPerCommand,
+          });
+          const versionMismatch =
+            setup.expectedStdout !== undefined &&
+            result.exitCode === 0 &&
+            result.stdout.trim() !== setup.expectedStdout;
+          const exitCode = versionMismatch ? 1 : (result.exitCode ?? (result.timedOut ? 124 : 1));
+          commands.push({
+            command: setup.command,
+            exitCode,
+            durationMs: result.durationMs,
+          });
+          if (exitCode !== 0) {
+            failureReason = versionMismatch
+              ? `validation setup used ${JSON.stringify(result.stdout.trim().slice(0, 100))}, expected ${setup.expectedStdout}`
+              : validationFailureReason("validation setup", setup.command, result);
+            break;
+          }
         }
+        const validationCommands: Array<{
+          command: string;
+          executable: string;
+          args: string[];
+          cwd?: string;
+        }> = managedExecution
+          ? managedExecution.validation.filter(({ command }) => !captureCommands.has(command))
+          : plan.commands
+              .filter((command) => !captureCommands.has(command))
+              .map((command) => ({
+                command,
+                executable: "/bin/sh",
+                args: ["-c", command],
+              }));
+        for (const command of failureReason ? [] : validationCommands) {
+          const result = await runLocalCommand({
+            command: command.executable,
+            args: command.args,
+            cwd: command.cwd ? join(worktree.path, command.cwd) : worktree.path,
+            env: bootstrapEnvironment ?? sanitizedWorkerEnvironment(process.env),
+            timeoutMs: plan.timeoutMsPerCommand,
+          });
+          commands.push({
+            command: command.command,
+            exitCode: result.exitCode ?? (result.timedOut ? 124 : 1),
+            durationMs: result.durationMs,
+          });
+          if (result.exitCode !== 0) {
+            failureReason = validationFailureReason("validation", command.command, result);
+            break;
+          }
+        }
+        passed = failureReason === undefined;
+        evidenceCompletedAt = new Date().toISOString();
+        environmentIdentity = validationInvocation?.toolEnvironment.environmentIdentity;
       }
-      passed = failureReason === undefined;
-      evidenceCompletedAt = new Date().toISOString();
+      return {
+        outputTreeSha,
+        commands: [...commands],
+        passed,
+        ...(failureReason ? { failureReason } : {}),
+        startedAt: evidenceStartedAt,
+        completedAt: evidenceCompletedAt,
+        ...(environmentIdentity ? { environmentIdentity } : {}),
+      };
+    };
+    const assertOutputTree = async () => {
+      if (artifact.lfsObjects?.length) await verifyMaterializedLfsContent(worktree.path, artifact);
+      if ((await git(worktree, ["write-tree"])) !== outputTreeSha)
+        throw new Error("repository capture result tree differs from validation invocation");
+      if (
+        (await git(worktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) !==
+        outputStatus
+      )
+        throw new Error("repository capture command changed the exact result checkout");
+    };
+    const runtimeExecution = input.repositoryCaptureRuntime
+      ? await input.repositoryCaptureRuntime.execute({
+          invocation: validationInvocation!,
+          resultRoot: worktree.path,
+          assertOutputTree,
+          ordinaryValidationCommands: ordinaryPlannedValidationCommands,
+          runCaptureCommand: async ({ command, plannedCommand, env }) => {
+            const options = {
+              command: "/bin/sh",
+              args: ["-c", command],
+              cwd: worktree.path,
+              env,
+              timeoutMs: plan.timeoutMsPerCommand,
+            };
+            let result;
+            if (input.localScope) {
+              const commandIndex = plannedValidationCommands.indexOf(plannedCommand);
+              if (
+                commandIndex < 0 ||
+                plannedValidationCommands.lastIndexOf(plannedCommand) !== commandIndex
+              )
+                throw new Error("capture command lacks one deterministic validation-plan index");
+              const identity = parseLocalScopeIdentity({
+                ...input.localScope.identity,
+                commandIndex,
+              });
+              await input.localScope.beforeLaunch(identity);
+              const remaining = Date.parse(input.localScope.deadline) - Date.now();
+              if (!Number.isFinite(remaining) || remaining <= 0)
+                throw new Error("local capture launch deadline expired");
+              result = await runScopedLocalProcess(identity, {
+                ...options,
+                timeoutMs: Math.min(options.timeoutMs, remaining),
+                launchDeadline: new Date(input.localScope.deadline),
+              });
+              await input.localScope.afterStop(identity);
+            } else {
+              result = await runContainedProcess(options);
+            }
+            return {
+              exitCode: result.exitCode ?? (result.timedOut ? 124 : 1),
+              durationMs: result.durationMs,
+              stdout: result.stdout,
+              stderr: result.stderr,
+            };
+          },
+          observeCaptureCommand: async ({ plannedCommand }) => {
+            if (!input.localScope) return "unknown";
+            const commandIndex = plannedValidationCommands.indexOf(plannedCommand);
+            if (
+              commandIndex < 0 ||
+              plannedValidationCommands.lastIndexOf(plannedCommand) !== commandIndex
+            )
+              throw new Error("capture command lacks one deterministic validation-plan index");
+            return input.localScope.observe(
+              parseLocalScopeIdentity({ ...input.localScope.identity, commandIndex }),
+            );
+          },
+          captureObservationDeadline: input.localScope?.deadline ?? null,
+          launchValidation,
+          ...(input.isolatedValidationRecovery
+            ? { recoverValidation: input.isolatedValidationRecovery }
+            : {}),
+        })
+      : { validation: await launchValidation() };
+    const observedValidation = runtimeExecution.validation;
+    if (observedValidation.outputTreeSha !== outputTreeSha)
+      throw new Error("validation runtime returned evidence for another output tree");
+    assertIsolatedValidationMatchesPlan(observedValidation, plannedValidationCommands);
+    commands.splice(0, commands.length, ...observedValidation.commands);
+    passed = observedValidation.passed;
+    failureReason = observedValidation.failureReason;
+    evidenceStartedAt = observedValidation.startedAt;
+    evidenceCompletedAt = observedValidation.completedAt;
+    environmentIdentity = observedValidation.environmentIdentity;
+    const repositoryCapture = runtimeExecution.repositoryCapture
+      ? RepositoryCaptureEvidenceSchema.parse(runtimeExecution.repositoryCapture)
+      : undefined;
+    if (repositoryCapture && !observedValidation.passed)
+      throw new Error("repository capture cannot precede passing repository validation");
+    if (
+      observedValidation.passed &&
+      validationInvocation &&
+      validationInvocation.repositoryCaptureRecipes.length > 0 &&
+      !repositoryCapture
+    )
+      throw new Error("passing repository validation omitted required capture evidence");
+    if (
+      repositoryCapture &&
+      repositoryCapture.validationInvocationDigest !== validationInvocation?.digest
+    )
+      throw new Error("repository capture runtime returned evidence for another invocation");
+    if (repositoryCapture?.manifest.mechanicalResults.some(({ passed }) => !passed)) {
+      passed = false;
+      failureReason = "repository capture mechanical comparison failed";
     }
+    if (artifact.lfsObjects?.length) await verifyMaterializedLfsContent(worktree.path, artifact);
     const findingPhase = input.findingPhase === false ? null : (input.findingPhase ?? "validation");
     const findings: FindingCandidate[] =
       passed || findingPhase === null
@@ -1475,6 +1717,8 @@ export async function validateArtifactClean(
       completedAt: evidenceCompletedAt,
       ...(environmentIdentity ? { environmentIdentity } : {}),
       ...(findings.length > 0 ? { findings } : {}),
+      ...(validationInvocation ? { validationInvocationDigest: validationInvocation.digest } : {}),
+      ...(repositoryCapture ? { repositoryCapture } : {}),
     });
     return {
       evidence,

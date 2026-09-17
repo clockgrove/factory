@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 
 import { DEFAULT_RUN_POLICY } from "../protocol/policy.js";
+import { MAX_PRODUCT_FILE_BYTES } from "../protocol/limits.js";
 import { branchRuleBlockers, requiredChecks } from "../publication/branch-policy.js";
 import type { ApplicationSnapshot, ControllerLifecycle } from "./services.js";
 import { discoverValidationCommands, readRepositoryFacts } from "../repository-profiles/index.js";
@@ -116,7 +117,11 @@ export async function probeHostToolchain(checkout?: string): Promise<{
   const facts = await readRepositoryFacts(local.root, local.files);
   const validationCommands = discoverValidationCommands(facts);
   const runners = [
-    ...new Set(["git", ...validationCommands.map((command) => command.split(" ")[0]!)]),
+    ...new Set([
+      "git",
+      ...(facts.lfs?.requiredTools ?? []),
+      ...validationCommands.map((command) => command.split(" ")[0]!),
+    ]),
   ];
   const commands = await Promise.all(
     runners.map(async (command) => {
@@ -439,7 +444,7 @@ export async function buildDoctorReport(input: {
       details: {
         ...handlerProbe,
         limits: {
-          perAssetBytes: 100 * 1024 * 1024,
+          perAssetBytes: MAX_PRODUCT_FILE_BYTES,
           aggregateBytes: 256 * 1024 * 1024,
           rasterPixels: 40_000_000,
           rasterFrames: 16,

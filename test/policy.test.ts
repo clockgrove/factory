@@ -41,7 +41,7 @@ describe("extended run policy", () => {
     const parsed = parseRunPolicy(minimalPolicy);
     expect(parsed).toEqual(minimalPolicy);
     expect(policyDigest(parsed)).toBe(
-      "e5156f5761d68dd384cff9e4f512b768099401d3f19ba8c23df02dd7d7a337bc",
+      "cd1d9c8833af70d37a97c5b4614e722a5ceb2dcfecc07d1a86837ea4e258ed08",
     );
   });
 

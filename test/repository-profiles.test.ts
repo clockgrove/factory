@@ -79,7 +79,6 @@ describe("repository profiles", () => {
       { files: [{ path: "test/deterministic-simulation.ts" }] },
       { deterministicSimulation: true },
     ],
-    ["visual", { files: [{ path: "test/visual-snapshot.ts" }] }, { visualValidation: true }],
   ];
   for (const [name, facts, expected] of cases)
     it(`normalizes bounded ${name} evidence`, () => {
@@ -110,7 +109,6 @@ describe("repository profiles", () => {
       "generated-output",
       "binary",
       "deterministic-simulation",
-      "visual-validation",
     ]);
     for (const fixture of fixtures) {
       expect(profileRepository(fixture.facts)).toMatchObject(fixture.expected);

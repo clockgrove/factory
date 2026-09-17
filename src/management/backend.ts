@@ -28,6 +28,32 @@ import type { PinnedLfsFacts } from "../repository-profiles/git-lfs.js";
 import type { PinnedCompilationTreeProof } from "../execution/pinned-compilation-tree.js";
 import type { ProviderQuotaCheckpoint } from "../providers/quota.js";
 import type { FindingCandidate } from "../protocol/findings.js";
+import type { RepositoryCaptureReviewerCapability } from "../validation/repository-capture.js";
+
+export interface RepositoryCaptureReviewFile {
+  payloadIdentity: string;
+  digest: string;
+  bytes: number;
+  mediaType: string;
+  handlerId: string;
+  handlerContract: number;
+  path: string;
+  uses: Array<{
+    kind: "expected" | "observed";
+    descriptorDigest: string;
+    recipeId: string;
+    sourceName: string;
+    profileId: string | null;
+    outputRole: string | null;
+  }>;
+}
+
+export interface RepositoryCaptureReviewBundle {
+  validationInvocationDigest: string;
+  evidenceDigest: string;
+  root: string;
+  files: RepositoryCaptureReviewFile[];
+}
 
 export interface ManagementUsage {
   inputTokens: number;
@@ -210,7 +236,10 @@ export interface CompilationContext {
     producerCapabilities: CompilerMediaProducerCapability[];
     reviewRules: CompilerRequest["media"]["reviewRules"];
   };
-  /** Authenticated pre-v2 issue core. The compiler may enrich, never decompose or rewrite it. */
+  /** Explicit machine authority for repository-result capture. It comes from
+   * validation execution and review adapters, never from the management model. */
+  repositoryCapturePlanning: RepositoryCapturePlanningAuthority;
+  /** Authenticated existing issue core. The compiler may enrich, never decompose or rewrite it. */
   legacyGraphConstraints?: LegacyGraphConstraints;
   /** Authenticated predecessor terminal diagnostic for a graphless compilation recovery.
    * The predecessor proposal is deliberately unavailable and grants no graph authority. */
@@ -221,6 +250,19 @@ export interface CompilationContext {
   /** Read-only trusted observations after grounding; omitted callers retain explicit unknowns. */
   economicEvidence?: (items: readonly CompilerWorkItem[]) => Promise<DecompositionEvidence>;
 }
+
+export interface RepositoryCapturePlanningAuthority {
+  execution: {
+    localManagedRuntimeAdapterIds: string[];
+    isolatedBackendIds: string[];
+  };
+  reviewerCapability: RepositoryCaptureReviewerCapability | null;
+}
+
+export const EMPTY_REPOSITORY_CAPTURE_PLANNING: RepositoryCapturePlanningAuthority = {
+  execution: { localManagedRuntimeAdapterIds: [], isolatedBackendIds: [] },
+  reviewerCapability: null,
+};
 
 /** A compiler request and its projection policy must derive network authority from one source. */
 export function assertCompilationContextPolicyAuthority(context: CompilationContext): void {
@@ -360,6 +402,7 @@ export interface ReviewContext {
   packet: WorkerPacket;
   artifact: NormalizedArtifact;
   evidence: ValidationEvidence;
+  repositoryCaptureBundle?: RepositoryCaptureReviewBundle;
   publicationBaseBranch?: string;
   modelSelection?: ModelSelection;
   /** Remaining per-invocation operation-stall bound for legacy review adapters.
@@ -398,6 +441,7 @@ export interface ManagementBackend {
   readonly supportsCompilerAdmission?: true;
   /** Exact media types the adapter can carry separately from the textual compiler request. */
   readonly compilerInputMediaTypes?: readonly string[];
+  readonly repositoryCaptureReviewerCapability?: RepositoryCaptureReviewerCapability | undefined;
   readonly id: string;
   probe(): Promise<{ available: boolean; authenticated: boolean; reason?: string }>;
   proposePlan(

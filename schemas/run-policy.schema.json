@@ -17,7 +17,8 @@
     "trust",
     "managementBackend",
     "allowedNetworkDestinations",
-    "compilerMediaEgress"
+    "compilerMediaEgress",
+    "repositoryCaptureEgress"
   ],
   "properties": {
     "compilerMediaEgress": {
@@ -46,6 +47,51 @@
           "else": { "properties": { "maxAssets": { "minimum": 1 } } }
         }
       ]
+    },
+    "repositoryCaptureEgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deterministicGateIds", "review"],
+      "properties": {
+        "deterministicGateIds": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^[A-Za-z0-9._:/+\\-]+$"
+          }
+        },
+        "review": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "maxAssets", "reviewerCapabilityIds"],
+          "properties": {
+            "mode": { "enum": ["denied", "public-assets", "private-assets"] },
+            "maxAssets": { "type": "integer", "minimum": 0, "maximum": 544 },
+            "reviewerCapabilityIds": {
+              "type": "array",
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160,
+                "pattern": "^[A-Za-z0-9._:/+\\-]+$"
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "mode": { "const": "denied" } } },
+              "then": { "properties": { "maxAssets": { "const": 0 } } },
+              "else": { "properties": { "maxAssets": { "minimum": 1 } } }
+            }
+          ]
+        }
+      }
     },
     "objectivePlanning": {
       "type": "object",

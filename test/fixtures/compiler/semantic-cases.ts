@@ -44,7 +44,6 @@ export const COMPILER_DIMENSIONS = {
     "destructive-action",
     "accounting",
     "recovery",
-    "visual",
     "deterministic-simulation",
   ],
   outcome: ["valid", "repairable", "unsatisfiable"],
@@ -64,8 +63,8 @@ type RepositoryInput = {
 };
 type GraphShape = DimensionValue<"graphShape">;
 type Capability = DimensionValue<"capability">;
-type CriterionRisk = Exclude<DimensionValue<"criteria">, "visual" | "deterministic-simulation">;
-type ValidationTier = "mechanical" | "semantic" | "visual" | "deterministic-simulation";
+type CriterionRisk = Exclude<DimensionValue<"criteria">, "deterministic-simulation">;
+type ValidationTier = "mechanical" | "semantic" | "deterministic-simulation";
 type Canonicalization = DimensionValue<"canonicalization">;
 
 export interface SemanticCompilerCaseInput {
@@ -416,8 +415,7 @@ export function observeSemanticCompilerCase(input: SemanticCompilerCaseInput): C
     for (const criterion of item.criteria) {
       criteria.add(criterion.risk);
       for (const design of criterion.validation)
-        if (design.tier === "visual" || design.tier === "deterministic-simulation")
-          criteria.add(design.tier);
+        if (design.tier === "deterministic-simulation") criteria.add(design.tier);
     }
   const count = proposal.workItems.length;
   return {
@@ -618,15 +616,15 @@ export const SEMANTIC_COMPILER_CASES: ReadonlyArray<SemanticCompilerCase> = [
     ["compiler-contracts.test.ts::returns exact terminal codes for $name"],
   ),
   row(
-    "unsupported Cargo visual proposal",
+    "unsupported Rust proposal",
     {
       repository: {
-        paths: ["Cargo.toml", "src/lib.rs", "test/snapshot.png"],
+        paths: ["Cargo.toml", "Cargo.lock", "src/lib.rs"],
         scripts: {},
         allowedNetworkDestinations: onlineToolchains,
       },
       graph: { shape: "multiple-roots", count: 2 },
-      criterion: { risk: "recovery", tier: "visual" },
+      criterion: { risk: "ordinary", tier: "mechanical" },
       canonicalization: "duplicate-violations-collapsed",
     },
     {
@@ -635,7 +633,7 @@ export const SEMANTIC_COMPILER_CASES: ReadonlyArray<SemanticCompilerCase> = [
       objectiveSize: ["small"],
       graphShape: ["multiple-roots"],
       capability: [],
-      criteria: ["recovery", "visual"],
+      criteria: ["ordinary"],
       outcome: ["repairable"],
       canonicalization: ["duplicate-violations-collapsed"],
     },

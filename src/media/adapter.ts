@@ -15,6 +15,7 @@ import {
   workerPacketDigest,
   type AssetProductionWorkerPacket,
 } from "../protocol/worker-packet.js";
+import { MAX_PRODUCT_FILE_BYTES } from "../protocol/limits.js";
 import {
   MediaInvocationSchema,
   MediaProducerCapabilitySchema,
@@ -243,8 +244,8 @@ export const SHARP_RASTER_MEDIA_CAPABILITY = MediaProducerCapabilitySchema.parse
   limits: {
     providerRequests: 0,
     variants: 16,
-    generatedBytes: 100 * 1024 * 1024,
-    storageBytes: 100 * 1024 * 1024,
+    generatedBytes: MAX_PRODUCT_FILE_BYTES,
+    storageBytes: MAX_PRODUCT_FILE_BYTES,
   },
   network: { destinations: [], thirdPartyEgress: "denied" },
   recovery: {

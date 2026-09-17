@@ -326,6 +326,7 @@ export async function compileEvaluatedDraft(args: {
   const projectionContext: CompilerProjectionContext = {
     pinnedFacts,
     runPolicy: frozenContext.runPolicy,
+    repositoryCapturePlanning: frozenContext.repositoryCapturePlanning,
     ...(frozenContext.mediaPlanning
       ? {
           mediaPlanning: {

@@ -18,6 +18,7 @@ import type {
 } from "../src/management/backend.js";
 import { adaptFixtureCompiler } from "./helpers/compiler-proposal.js";
 import { validatePlanningCheckout, readPlanningRepositoryLayout } from "../src/application/plan.js";
+import { BackendRegistry } from "../src/execution/registry.js";
 
 const snapshot = (): ApplicationSnapshot => ({
   id: "objective-node",
@@ -410,6 +411,7 @@ describe("FactoryApplicationService", () => {
         },
         planning: {
           management: backend,
+          backendRegistry: new BackendRegistry(),
           repositoryPath: checkout,
           validateCheckout: validatePlanningCheckout,
           readRepositoryLayout: (max, base) => readPlanningRepositoryLayout(checkout, max, base),
@@ -451,6 +453,7 @@ describe("FactoryApplicationService", () => {
       reader: { readObjective: async () => snapshot() },
       planning: {
         management: backend,
+        backendRegistry: new BackendRegistry(),
         repositoryPath: "/repo",
         readRepositoryLayout: async () => ({
           // Checkout/base are independently supplied so this case reaches inventory validation.

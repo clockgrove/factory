@@ -392,25 +392,18 @@ function descriptor(proof, ref, parents, identity, phase, externalRequired = tru
       integer(file.bytes, 0, 100000000);
       digest(file.digest);
       assert.ok(
-        [
-          "image/png",
-          "image/jpeg",
-          "image/gif",
-          "image/webp",
-          "application/pdf",
-          "application/wasm",
-          "application/zip",
-          "audio/wav",
-          "video/mp4",
-          "unknown",
-        ].includes(file.mediaType),
+        typeof file.mediaType === "string" &&
+          file.mediaType.length <= 160 &&
+          /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/i.test(
+            file.mediaType,
+          ),
       );
       assert.equal(typeof file.generated, "boolean");
-      if (file.mode === "120000") assert.equal(file.mediaType, "unknown");
+      if (file.mode === "120000") assert.equal(file.mediaType, "application/octet-stream");
       if (file.action === "delete") {
         assert.equal(file.bytes, 0);
         assert.equal(file.digest, hash(Buffer.alloc(0)));
-        assert.equal(file.mediaType, "unknown");
+        assert.equal(file.mediaType, "application/octet-stream");
       }
       resultBytes += file.bytes;
       return {

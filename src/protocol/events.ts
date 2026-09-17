@@ -42,6 +42,13 @@ const Common = z
   })
   .passthrough();
 
+const AuthenticatedCommon = Common.extend({
+  writerEpoch: z.number().int().positive(),
+  writerOperationId: safeId,
+  writerHolder: safeId,
+  writerPolicyDigest: sha256Digest,
+});
+
 const RunStarted = Common.extend({
   kind: z.literal("run"),
   event: z.literal("FactoryRunStarted"),
@@ -743,6 +750,148 @@ const Validation = Common.extend({
   evidenceDigest: sha256Digest,
 });
 
+const ValidationInvocationPrepared = AuthenticatedCommon.extend({
+  kind: z.literal("validation-invocation"),
+  event: z.literal("ValidationInvocationPrepared"),
+  workItem: z.number().int().positive(),
+  attempt: z.number().int().positive(),
+  reservationRef: boundedText(500),
+  reservationOid: gitSha,
+  reservationReceiptDigest: sha256Digest,
+  attemptDirectorEpoch: z.number().int().positive(),
+  attemptPolicyDigest: sha256Digest,
+  validationDeadline: isoDate,
+  capacityReservationSequence: z.number().int().nonnegative(),
+  artifactDigest: sha256Digest,
+  baseSha: gitSha,
+  outputTreeSha: gitSha,
+  invocationDigest: sha256Digest,
+  invocationRef: boundedText(500),
+  invocationCommitOid: gitSha,
+  backend: safeId,
+  backendLocator: boundedText(500).nullable(),
+}).superRefine((event, context) => {
+  if (event.capacityReservationSequence >= event.sequence)
+    context.addIssue({
+      code: "custom",
+      message: "validation invocation preparation must follow its capacity reservation",
+    });
+});
+
+const ValidationInvocationRemoteDispatchStarted = AuthenticatedCommon.extend({
+  kind: z.literal("validation-invocation"),
+  event: z.literal("ValidationInvocationRemoteDispatchStarted"),
+  workItem: z.number().int().positive(),
+  attempt: z.number().int().positive(),
+  reservationOid: gitSha,
+  artifactDigest: sha256Digest,
+  invocationDigest: sha256Digest,
+  backend: safeId,
+  resourceName: boundedText(500),
+  requestIdentityDigest: sha256Digest,
+  validationDeadline: isoDate,
+  noHandleReplacementNotBefore: isoDate,
+  capacityReservationSequence: z.number().int().nonnegative(),
+}).superRefine((event, context) => {
+  if (
+    event.capacityReservationSequence >= event.sequence ||
+    Date.parse(event.noHandleReplacementNotBefore) !== Date.parse(event.at) + 60_000
+  )
+    context.addIssue({
+      code: "custom",
+      message: "remote validation dispatch has an invalid capacity or visibility fence",
+    });
+});
+
+const ValidationInvocationRemoteRebound = AuthenticatedCommon.extend({
+  kind: z.literal("validation-invocation"),
+  event: z.literal("ValidationInvocationRemoteRebound"),
+  workItem: z.number().int().positive(),
+  attempt: z.number().int().positive(),
+  reservationOid: gitSha,
+  artifactDigest: sha256Digest,
+  invocationDigest: sha256Digest,
+  backend: safeId,
+  resourceName: boundedText(500),
+  requestIdentityDigest: sha256Digest,
+  validationDeadline: isoDate,
+  noHandleReplacementNotBefore: isoDate,
+  originalDispatchSequence: z.number().int().nonnegative(),
+  capacityReservationSequence: z.number().int().nonnegative(),
+}).superRefine((event, context) => {
+  if (
+    event.capacityReservationSequence >= event.originalDispatchSequence ||
+    event.originalDispatchSequence >= event.sequence ||
+    Date.parse(event.at) < Date.parse(event.noHandleReplacementNotBefore)
+  )
+    context.addIssue({
+      code: "custom",
+      message: "remote validation rebound has an invalid dispatch chain or visibility fence",
+    });
+});
+
+const ValidationInvocationRemoteSettled = AuthenticatedCommon.extend({
+  kind: z.literal("validation-invocation"),
+  event: z.literal("ValidationInvocationRemoteSettled"),
+  workItem: z.number().int().positive(),
+  attempt: z.number().int().positive(),
+  reservationOid: gitSha,
+  artifactDigest: sha256Digest,
+  invocationDigest: sha256Digest,
+  backend: safeId,
+  resourceName: boundedText(500),
+  requestIdentityDigest: sha256Digest,
+  validationDeadline: isoDate,
+  noHandleReplacementNotBefore: isoDate,
+  originalDispatchSequence: z.number().int().nonnegative(),
+  reboundSequence: z.number().int().nonnegative().nullable(),
+  capacityReservationSequence: z.number().int().nonnegative(),
+  settlementEvidence: z.enum(["provider-cleanup", "post-fence-exact-absence"]),
+}).superRefine((event, context) => {
+  if (
+    event.capacityReservationSequence >= event.originalDispatchSequence ||
+    event.originalDispatchSequence >= event.sequence ||
+    (event.reboundSequence !== null &&
+      (event.reboundSequence <= event.originalDispatchSequence ||
+        event.reboundSequence >= event.sequence)) ||
+    (event.settlementEvidence === "post-fence-exact-absence" &&
+      Date.parse(event.at) < Date.parse(event.noHandleReplacementNotBefore))
+  )
+    context.addIssue({
+      code: "custom",
+      message: "remote validation settlement has an invalid dispatch or cleanup chain",
+    });
+});
+
+const ValidationInvocationScopeRebound = Common.extend({
+  kind: z.literal("validation-invocation"),
+  event: z.literal("ValidationInvocationScopeRebound"),
+  workItem: z.number().int().positive(),
+  attempt: z.number().int().positive(),
+  artifactDigest: sha256Digest,
+  invocationDigest: sha256Digest,
+  reservationOid: gitSha,
+  backend: safeId,
+  previousScopeBatchDigest: sha256Digest,
+  localScopeBatch: LocalScopeBatchSchema,
+}).superRefine((event, context) => {
+  const scope = event.localScopeBatch.identity;
+  if (
+    scope.phase !== "validation" ||
+    scope.objective !== event.objective ||
+    scope.runId !== event.runId ||
+    scope.workItem !== event.workItem ||
+    scope.attempt !== event.attempt ||
+    scope.policyDigest !== event.policyDigest ||
+    scope.directorEpoch !== event.directorEpoch ||
+    scope.invocationDigest !== event.artifactDigest
+  )
+    context.addIssue({
+      code: "custom",
+      message: "validation invocation scope rebound differs from its writer and attempt authority",
+    });
+});
+
 const GraphCompiled = Common.extend({
   kind: z.literal("graph"),
   event: z.literal("GraphCompiled"),
@@ -1050,6 +1199,11 @@ export const FactoryEventSchema = z.union([
   Delivery,
   Publication,
   Validation,
+  ValidationInvocationPrepared,
+  ValidationInvocationRemoteDispatchStarted,
+  ValidationInvocationRemoteRebound,
+  ValidationInvocationRemoteSettled,
+  ValidationInvocationScopeRebound,
   GraphCompiled,
   GraphProjected,
   Budget,

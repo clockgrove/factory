@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CompilerProposalSchema,
+  CompilerRequestSchema,
   type CompilerProposal,
   type CompilerRequest,
 } from "../src/compiler/contracts.js";
@@ -14,6 +15,7 @@ import {
   MAX_COMPILER_JUDGE_SOURCE_BYTES,
 } from "../src/compiler/judge-context.js";
 import { workerPacketFromCompiled } from "../src/graph.js";
+import { semanticReviewCriteria } from "../src/protocol/worker-packet.js";
 import type { PinnedRepositoryFacts } from "../src/repository-profiles/read.js";
 import {
   parseAndValidateCompilerProposal,
@@ -26,9 +28,11 @@ import {
 } from "../src/graph-analysis.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import { parseCompilerOperation } from "../src/toolchains/compiler-capabilities.js";
+import { declaredAssetHandlerContract } from "../src/assets/handlers.js";
 import {
   semanticPinnedFacts,
   semanticProposal,
+  semanticRepositoryCapturePlanning,
   semanticRequest,
 } from "./helpers/semantic-compiler.js";
 
@@ -36,7 +40,13 @@ function codes(request: CompilerRequest, proposal: unknown, pinned?: PinnedRepos
   return parseAndValidateCompilerProposal(
     request,
     proposal,
-    pinned ? { pinnedFacts: pinned, runPolicy: projectionPolicy(request) } : undefined,
+    pinned
+      ? {
+          pinnedFacts: pinned,
+          runPolicy: projectionPolicy(request),
+          repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
+        }
+      : undefined,
   ).report.violations.map((entry) => ({
     code: entry.code,
     itemId: entry.itemId,
@@ -60,6 +70,10 @@ function projectionPolicy(request: CompilerRequest) {
     workItemTimeoutMinutes: request.constraints.workItemTimeoutMinutes,
     allowedNetworkDestinations: [...request.constraints.allowedNetworkDestinations],
     compilerMediaEgress,
+    repositoryCaptureEgress: {
+      deterministicGateIds: [...request.repositoryCapture.egress.deterministicGateIds],
+      review: structuredClone(request.repositoryCapture.egress.review),
+    },
   };
 }
 
@@ -79,7 +93,8 @@ function mediaIntent(
       mediaTypes: ["image/png"],
       minimumCount: 1,
       maximumCount: 1,
-      raster: {
+      profile: {
+        kind: "raster",
         minimumWidth: 640,
         maximumWidth: 1024,
         minimumHeight: 480,
@@ -89,6 +104,7 @@ function mediaIntent(
       },
     },
     review: { kind: "human-required" },
+    repositoryCapture: null,
     bindings: [{ workItemId: "item-1", direction: "input-to", criterionIds: [] }],
     ...overrides,
   };
@@ -99,6 +115,122 @@ const privateUnknownOutput = {
   outputRightsBasis: "unknown" as const,
 };
 
+function capturePinnedFacts(input: {
+  outputs: Array<{ roleId: string; mediaType: string }>;
+  profile: {
+    kind: "raster";
+    viewport: { width: number; height: number } | null;
+    output: { width: number; height: number } | null;
+    captureRoleId: string;
+    diffRoleId: string | null;
+    previewRoleId: string | null;
+  } | null;
+  threshold?: { id: string; metric: string; maximumDifference: number };
+  deterministic?: boolean;
+}) {
+  const scripts = {
+    test: "vitest run",
+    capture: "node scripts/capture.mjs",
+  };
+  const comparisonRoleId = input.profile?.captureRoleId ?? input.outputs[0]!.roleId;
+  const comparisonOutput = input.outputs.find(({ roleId }) => roleId === comparisonRoleId)!;
+  const diffOutput = input.profile?.diffRoleId
+    ? (input.outputs.find(({ roleId }) => roleId === input.profile?.diffRoleId) ?? null)
+    : null;
+  const previewOutput = input.profile?.previewRoleId
+    ? (input.outputs.find(({ roleId }) => roleId === input.profile?.previewRoleId) ?? null)
+    : null;
+  const profileOutputRoles = new Set(
+    [comparisonRoleId, input.profile?.diffRoleId, input.profile?.previewRoleId].filter(Boolean),
+  );
+  const catalog = {
+    captures: [
+      {
+        command: "npm run capture",
+        comparisonOutput,
+        auxiliaryOutputs: input.outputs.filter(({ roleId }) => !profileOutputRoles.has(roleId)),
+        profile: input.profile
+          ? {
+              kind: "raster" as const,
+              viewport: input.profile.viewport,
+              output: input.profile.output,
+              diffOutput,
+              previewOutput,
+            }
+          : null,
+        humanReview: true,
+        exactDeterministicGates: input.deterministic
+          ? [
+              {
+                id: "exact-result",
+                mediaTypes: [...new Set(input.outputs.map(({ mediaType }) => mediaType))],
+                profiles: [input.profile ? "raster" : "unprofiled"],
+                visibilities: ["private"],
+                rightsBases: ["unknown"],
+                expectedDescriptorClasses: ["opaque", "semantic"],
+                scenarios: [
+                  { id: "default", fixture: null, seed: null },
+                  { id: "default", fixture: "fixtures/result.json", seed: null },
+                  { id: "desktop", fixture: null, seed: "fixed-seed" },
+                  { id: "fanout", fixture: "fixtures/fanout.json", seed: null },
+                ],
+                maximumCriteria: 64,
+              },
+            ]
+          : [],
+        thresholdComparisons: input.threshold
+          ? [{ policy: input.threshold, deterministicGates: [] }]
+          : [],
+      },
+    ],
+  };
+  return semanticPinnedFacts({
+    paths: [
+      "package.json",
+      "package-lock.json",
+      ".factory/validation-captures.json",
+      "scripts/capture.mjs",
+      "src/item-1.ts",
+    ],
+    scripts,
+    documents: {
+      "package.json": JSON.stringify({ scripts }),
+      ".factory/validation-captures.json": JSON.stringify(catalog),
+    },
+  });
+}
+
+function expectedAssetBinding(mediaType: string) {
+  const manifestDigest = "b".repeat(64);
+  const descriptorDigest = "c".repeat(64);
+  const contentDigest = "d".repeat(64);
+  const handler = declaredAssetHandlerContract(mediaType);
+  return {
+    manifestDigest,
+    asset: {
+      id: "expected-result",
+      mediaType,
+      bytes: 128,
+      inspection:
+        mediaType === "image/png"
+          ? ({ kind: "raster", width: 800, height: 600, frames: 1, alpha: false } as const)
+          : ({ kind: "opaque" } as const),
+      visibility: "private" as const,
+      descriptorClass: handler.descriptorClass,
+      inspectionHandler: { id: handler.id, contract: handler.contract },
+      rightsBasis: "unknown" as const,
+    },
+    input: {
+      manifestDigest,
+      descriptorDigest,
+      contentDigest,
+      storageReceiptDigest: "e".repeat(64),
+      path: `assets/${contentDigest}/expected.bin`,
+      purpose: "Expected repository validation result.",
+    },
+  };
+}
+
 it("rejects duplicate imported asset identities before media projection", () => {
   const proposal = semanticProposal(semanticRequest());
   proposal.mediaIntents = [
@@ -108,7 +240,7 @@ it("rejects duplicate imported asset identities before media projection", () => 
         mediaTypes: ["image/png"],
         minimumCount: 2,
         maximumCount: 2,
-        raster: null,
+        profile: null,
       },
     }),
   ];
@@ -245,17 +377,6 @@ describe("semantic proposal validation", () => {
         code: "protected-risk-validation",
         itemId: "item-1",
         field: "/workItems/0/criteria/0/validation",
-      },
-    },
-    {
-      name: "ungrounded visual tier",
-      mutate(_request: CompilerRequest, proposal: CompilerProposal) {
-        proposal.workItems[0]!.criteria[0]!.validation[0]!.tier = "visual";
-      },
-      expected: {
-        code: "ungrounded-validation-tier",
-        itemId: "item-1",
-        field: "/workItems/0/criteria/0/validation/0/tier",
       },
     },
     {
@@ -411,6 +532,7 @@ describe("semantic proposal validation", () => {
         request,
         proposal: boundary,
         pinnedFacts: pinned,
+        repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
         runPolicy: projectionPolicy(request),
       }).objective.workItems[0]!.requirements!.tools,
     ).toHaveLength(64);
@@ -566,6 +688,7 @@ describe("semantic proposal validation", () => {
     expect(
       parseAndValidateCompilerProposal(request, boundary, {
         pinnedFacts: pinned,
+        repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
         runPolicy: projectionPolicy(request),
       }).report.status,
     ).toBe("valid");
@@ -574,6 +697,7 @@ describe("semantic proposal validation", () => {
         request,
         proposal: boundary,
         pinnedFacts: pinned,
+        repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
         runPolicy: projectionPolicy(request),
       }).objective.workItems.reduce((total, item) => total + item.dependsOn.length, 0),
     ).toBe(1_029);
@@ -634,6 +758,7 @@ describe("semantic proposal validation", () => {
 
     const report = parseAndValidateCompilerProposal(request, proposal, {
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
     }).report;
     expect(report.violations).toEqual(
@@ -646,7 +771,7 @@ describe("semantic proposal validation", () => {
         expect.objectContaining({
           code: "issue-body-limit",
           itemId: proposal.workItems[0]!.id,
-          observed: 73_756,
+          observed: 73_796,
         }),
       ]),
     );
@@ -697,6 +822,7 @@ describe("semantic proposal validation", () => {
     expect(
       parseAndValidateCompilerProposal(request, proposal, {
         pinnedFacts: pinned,
+        repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
         runPolicy: projectionPolicy(request),
       }).report.status,
     ).toBe("valid");
@@ -704,6 +830,7 @@ describe("semantic proposal validation", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
     }).objective.workItems[0]!;
     expect(() => workerPacketFromCompiled(projected)).not.toThrow();
@@ -761,6 +888,7 @@ describe("semantic proposal validation", () => {
     const proposal = semanticProposal(request);
     const result = parseAndValidateCompilerProposal(request, proposal, {
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: {
         ...DEFAULT_RUN_POLICY,
         workItemTimeoutMinutes: 7,
@@ -865,6 +993,7 @@ describe("media intent compilation", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
     });
     expect(result.objective.workItems).toHaveLength(proposal.workItems.length);
@@ -874,6 +1003,868 @@ describe("media intent compilation", () => {
       ),
     ).toBe(true);
     expect(result.trace.mediaIntents).toEqual([]);
+  });
+
+  it.each([
+    { name: "structured JSON", mediaType: "application/json" },
+    { name: "opaque binary", mediaType: "application/octet-stream" },
+  ])(
+    "projects an exact-byte repository capture for $name without semantic claims",
+    ({ mediaType }) => {
+      const pinned = capturePinnedFacts({
+        outputs: [{ roleId: "capture", mediaType }],
+        profile: null,
+        deterministic: true,
+      });
+      const request = semanticRequest(pinned);
+      for (const command of request.repositoryCapture.execution.commands) command.local = null;
+      request.repositoryCapture.egress.deterministicGateIds = ["exact-result"];
+      request.repositoryCapture.egress.policyDigest = compilerEvalDigest({
+        deterministicGateIds: request.repositoryCapture.egress.deterministicGateIds,
+        review: request.repositoryCapture.egress.review,
+      });
+      request.constraints.maxWorkItems = 1;
+      request.constraints.planningWorkItemThreshold = 1;
+      request.constraints.planningCriticalPathMinutes = 15;
+      request.constraints.planningAggregateWorkMinutes = 15;
+      const captureRecipe = request.repository.validationRecipes.find(
+        ({ capture }) => capture?.kind === "capture",
+      )!;
+      const expected = expectedAssetBinding(mediaType);
+      request.media.assetManifest = {
+        digest: expected.manifestDigest,
+        assets: [expected.asset],
+      };
+      const proposal = semanticProposal(request);
+      proposal.workItems[0]!.criteria.push({
+        id: "mechanical-only",
+        text: "The ordinary source contract remains mechanically valid.",
+        risk: "ordinary",
+        validation: structuredClone(proposal.workItems[0]!.criteria[0]!.validation),
+      });
+      proposal.mediaIntents = [
+        mediaIntent({
+          role: "acceptance-capture",
+          purpose: "acceptance-evidence",
+          fulfillment: { kind: "imported", assetIds: [expected.asset.id] },
+          output: { mediaTypes: [mediaType], minimumCount: 1, maximumCount: 1, profile: null },
+          review: null,
+
+          repositoryCapture: {
+            gate: { kind: "deterministic-preauthorized", authorityId: "exact-result" },
+            expectedAssetId: expected.asset.id,
+            scenario: { id: "default", fixture: "fixtures/result.json", seed: null },
+            captureRecipeId: captureRecipe.id,
+            comparison: { kind: "exact" },
+          },
+          bindings: [
+            { workItemId: "item-1", direction: "evidence-for", criterionIds: ["implemented"] },
+          ],
+        }),
+      ];
+
+      const projectionContext = {
+        pinnedFacts: pinned,
+        repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
+        runPolicy: projectionPolicy(request),
+        mediaPlanning: {
+          assetBindings: [{ assetId: expected.asset.id, input: expected.input }],
+          producerCapabilities: [],
+          reviewRules: [],
+        },
+      };
+      expect(
+        parseAndValidateCompilerProposal(request, proposal, projectionContext).report,
+      ).toMatchObject({
+        status: "valid",
+        violations: [],
+      });
+
+      const result = projectCompilerProposal({
+        request,
+        proposal,
+        ...projectionContext,
+      });
+      const item = result.objective.workItems[0]!;
+      expect(result.objective.workItems).toHaveLength(1);
+      expect(
+        result.objective.workItems.some(
+          ({ deliverable }) => deliverable.kind === "asset-production",
+        ),
+      ).toBe(false);
+      expect(item.validation?.map(({ tier }) => tier)).toEqual(["mechanical"]);
+      expect(semanticReviewCriteria(workerPacketFromCompiled(item))).toEqual([]);
+      expect(item.dependsOn).toEqual([]);
+      expect(item.generatedAssetRequirements ?? []).toEqual([]);
+      expect(item.economicReview).not.toMatchObject({
+        rationale: "Provider economics remain unresolved until supervised asset execution.",
+      });
+      expect(item.assetInputs).toEqual([expected.input]);
+      expect(item.mediaUses).toEqual([
+        expect.objectContaining({
+          intentId: "primary-media",
+          direction: "evidence-for",
+          criterionIds: ["implemented"],
+          descriptorDigests: [expected.input.descriptorDigest],
+        }),
+      ]);
+      expect(item.repositoryCaptureRecipes).toEqual([
+        expect.objectContaining({
+          mediaUse: { intentId: "primary-media", direction: "evidence-for" },
+          criterionIds: ["implemented"],
+          captureCommand: expect.objectContaining({ command: "npm run capture" }),
+          outputs: [{ roleId: "capture", mediaType }],
+          profile: null,
+          comparison: {
+            kind: "exact",
+            outputRoleId: "capture",
+            expectedDescriptorDigest: expected.input.descriptorDigest,
+            policy: { kind: "exact-bytes" },
+          },
+          gate: expect.objectContaining({
+            kind: "deterministic-preauthorized",
+            authority: expect.objectContaining({ authorityId: "exact-result" }),
+          }),
+        }),
+      ]);
+      expect(item.repositoryCaptureRecipes![0]!.comparison).not.toHaveProperty("command");
+      expect(result.trace.mediaIntents).toEqual([
+        {
+          intentId: "primary-media",
+          disposition: "repository-capture",
+          producerWorkItemId: null,
+        },
+      ]);
+    },
+  );
+
+  it("projects a grounded raster capture with an installed threshold comparator", () => {
+    const profile = {
+      kind: "raster" as const,
+      viewport: { width: 1280, height: 720 },
+      output: { width: 800, height: 600 },
+      captureRoleId: "capture",
+      diffRoleId: "diff",
+      previewRoleId: "preview",
+    };
+    const pinned = capturePinnedFacts({
+      outputs: [
+        { roleId: "capture", mediaType: "image/png" },
+        { roleId: "diff", mediaType: "image/png" },
+        { roleId: "preview", mediaType: "image/png" },
+      ],
+      profile,
+      threshold: { id: "pixel-threshold", metric: "pixel-difference", maximumDifference: 0.01 },
+    });
+    const request = semanticRequest(pinned);
+    for (const command of request.repositoryCapture.execution.commands) command.local = null;
+    request.repositoryCapture.egress.deterministicGateIds = [];
+    request.repositoryCapture.egress.policyDigest = compilerEvalDigest({
+      deterministicGateIds: request.repositoryCapture.egress.deterministicGateIds,
+      review: request.repositoryCapture.egress.review,
+    });
+    const captureRecipe = request.repository.validationRecipes.find(
+      ({ capture }) => capture?.kind === "capture",
+    )!;
+    const comparator = request.repositoryCapture.comparators[0]!;
+    const expected = expectedAssetBinding("image/png");
+    request.media.assetManifest = { digest: expected.manifestDigest, assets: [expected.asset] };
+    const proposal = semanticProposal(request);
+    proposal.mediaIntents = [
+      mediaIntent({
+        role: "acceptance-capture",
+        purpose: "acceptance-evidence",
+        fulfillment: { kind: "imported", assetIds: [expected.asset.id] },
+        review: null,
+
+        repositoryCapture: {
+          gate: { kind: "human-required" },
+          expectedAssetId: expected.asset.id,
+          scenario: { id: "desktop", fixture: null, seed: "fixed-seed" },
+          captureRecipeId: captureRecipe.id,
+          comparison: { kind: "threshold", policyId: comparator.policy.id },
+        },
+        bindings: [
+          { workItemId: "item-1", direction: "evidence-for", criterionIds: ["implemented"] },
+        ],
+      }),
+    ];
+
+    const result = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
+      runPolicy: projectionPolicy(request),
+      mediaPlanning: {
+        assetBindings: [{ assetId: expected.asset.id, input: expected.input }],
+        producerCapabilities: [],
+        reviewRules: [],
+      },
+    });
+    const item = result.objective.workItems[0]!;
+    expect(item.validationCommands).toEqual(expect.arrayContaining(["npm run capture"]));
+    expect(item.validationCommands).not.toContain("npm run compare");
+    expect(item.requirements.tools).toEqual(expect.arrayContaining(["npm"]));
+    expect(item.repositoryCaptureRecipes).toEqual([
+      expect.objectContaining({
+        profile: {
+          ...profile,
+          constraints: {
+            kind: "raster",
+            minimumWidth: 640,
+            maximumWidth: 1024,
+            minimumHeight: 480,
+            maximumHeight: 768,
+            alpha: "allowed",
+            animation: "forbidden",
+          },
+        },
+        outputs: [
+          { roleId: "capture", mediaType: "image/png" },
+          { roleId: "diff", mediaType: "image/png" },
+          { roleId: "preview", mediaType: "image/png" },
+        ],
+        comparison: expect.objectContaining({
+          kind: "threshold",
+          outputRoleId: "capture",
+          comparator: { id: "pixel-difference", contract: 1 },
+          policy: {
+            kind: "bounded-difference",
+            metric: "pixel-difference",
+            maximumDifference: 0.01,
+          },
+        }),
+      }),
+    ]);
+    expect(() => workerPacketFromCompiled(item)).not.toThrow();
+  });
+
+  it("converges in one repair when the model selects a bad capture recipe", () => {
+    const pinned = capturePinnedFacts({
+      outputs: [{ roleId: "result", mediaType: "application/json" }],
+      profile: null,
+    });
+    const request = semanticRequest(pinned);
+    const recipe = request.repository.validationRecipes.find(
+      ({ capture }) => capture?.kind === "capture",
+    )!;
+    const expected = expectedAssetBinding("application/json");
+    request.media.assetManifest = { digest: expected.manifestDigest, assets: [expected.asset] };
+    const proposal = semanticProposal(request);
+    proposal.mediaIntents = [
+      mediaIntent({
+        role: "result-evidence",
+        purpose: "acceptance-evidence",
+        fulfillment: { kind: "imported", assetIds: [expected.asset.id] },
+        output: {
+          mediaTypes: ["application/json"],
+          minimumCount: 1,
+          maximumCount: 1,
+          profile: null,
+        },
+        review: null,
+        repositoryCapture: {
+          gate: { kind: "human-required" },
+          expectedAssetId: expected.asset.id,
+          scenario: { id: "default", fixture: null, seed: null },
+          captureRecipeId: "bad-model-selection",
+          comparison: { kind: "exact" },
+        },
+        bindings: [
+          { workItemId: "item-1", direction: "evidence-for", criterionIds: ["implemented"] },
+        ],
+      }),
+    ];
+    const context = {
+      pinnedFacts: pinned,
+      runPolicy: projectionPolicy(request),
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
+      mediaPlanning: {
+        assetBindings: [{ assetId: expected.asset.id, input: expected.input }],
+        producerCapabilities: [],
+        reviewRules: [],
+      },
+    };
+    const first = parseAndValidateCompilerProposal(request, proposal, context).report;
+    expect(first.status).toBe("repairable");
+    expect(first.violations).toContainEqual(
+      expect.objectContaining({ code: "invalid-media-validation-selection" }),
+    );
+    const repairRequest = CompilerRequestSchema.parse({
+      ...request,
+      revision: 1,
+      previousProposal: structuredClone(proposal),
+      validationReport: first,
+    });
+    expect(
+      repairRequest.validationReport.violations.find(
+        ({ code }) => code === "invalid-media-validation-selection",
+      ),
+    ).toMatchObject({
+      code: "invalid-media-validation-selection",
+      field: "/mediaIntents/0/repositoryCapture",
+    });
+
+    proposal.mediaIntents[0]!.repositoryCapture!.captureRecipeId = recipe.id;
+    expect(parseAndValidateCompilerProposal(repairRequest, proposal, context).report).toMatchObject(
+      {
+        status: "valid",
+        violations: [],
+      },
+    );
+  });
+
+  it("classifies an over-counted redundant human capture as a repairable selection", () => {
+    const pinned = capturePinnedFacts({
+      outputs: [{ roleId: "result", mediaType: "application/json" }],
+      profile: null,
+    });
+    const request = semanticRequest(pinned);
+    const recipe = request.repository.validationRecipes.find(
+      ({ capture }) => capture?.kind === "capture",
+    )!;
+    request.repositoryCapture.egress.review.maxAssets = 2;
+    request.repositoryCapture.egress.policyDigest = compilerEvalDigest({
+      deterministicGateIds: request.repositoryCapture.egress.deterministicGateIds,
+      review: request.repositoryCapture.egress.review,
+    });
+    const first = expectedAssetBinding("application/json");
+    const second = {
+      ...expectedAssetBinding("application/json"),
+      asset: { ...expectedAssetBinding("application/json").asset, id: "expected-second" },
+    };
+    request.media.assetManifest = {
+      digest: first.manifestDigest,
+      assets: [first.asset, second.asset],
+    };
+    const proposal = semanticProposal(request);
+    const captureIntent = (id: string, expectedAssetId: string) =>
+      mediaIntent({
+        id,
+        role: "result-evidence",
+        purpose: "acceptance-evidence",
+        fulfillment: { kind: "imported", assetIds: [expectedAssetId] },
+        output: {
+          mediaTypes: ["application/json"],
+          minimumCount: 1,
+          maximumCount: 1,
+          profile: null,
+        },
+        review: null,
+        repositoryCapture: {
+          gate: { kind: "human-required" },
+          expectedAssetId,
+          scenario: { id: "default", fixture: null, seed: null },
+          captureRecipeId: recipe.id,
+          comparison: { kind: "exact" },
+        },
+        bindings: [
+          { workItemId: "item-1", direction: "evidence-for", criterionIds: ["implemented"] },
+        ],
+      });
+    proposal.mediaIntents = [
+      captureIntent("canonical-result", first.asset.id),
+      captureIntent("redundant-result", second.asset.id),
+    ];
+
+    const report = parseAndValidateCompilerProposal(request, proposal, {
+      pinnedFacts: pinned,
+      runPolicy: projectionPolicy(request),
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
+    }).report;
+    expect(report.status).toBe("repairable");
+    expect(report.violations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "invalid-media-validation-selection",
+          itemId: "canonical-result",
+        }),
+        expect.objectContaining({
+          code: "invalid-media-validation-selection",
+          itemId: "redundant-result",
+        }),
+      ]),
+    );
+    expect(report.violations).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "media-validation-unavailable" })]),
+    );
+  });
+
+  it("rejects a comparison subject whose declared MIME differs from the expected asset", () => {
+    const pinned = capturePinnedFacts({
+      outputs: [{ roleId: "capture", mediaType: "image/jpeg" }],
+      profile: null,
+    });
+    const request = semanticRequest(pinned);
+    const captureRecipe = request.repository.validationRecipes.find(
+      ({ capture }) => capture?.kind === "capture",
+    )!;
+    const expected = expectedAssetBinding("image/png");
+    request.media.assetManifest = { digest: expected.manifestDigest, assets: [expected.asset] };
+    const proposal = semanticProposal(request);
+    proposal.mediaIntents = [
+      mediaIntent({
+        role: "acceptance-capture",
+        purpose: "acceptance-evidence",
+        fulfillment: { kind: "imported", assetIds: [expected.asset.id] },
+        output: {
+          mediaTypes: ["image/png", "image/jpeg"],
+          minimumCount: 1,
+          maximumCount: 1,
+          profile: null,
+        },
+        review: null,
+
+        repositoryCapture: {
+          gate: { kind: "human-required" },
+          expectedAssetId: expected.asset.id,
+          scenario: { id: "default", fixture: null, seed: null },
+          captureRecipeId: captureRecipe.id,
+          comparison: { kind: "exact" },
+        },
+        bindings: [
+          { workItemId: "item-1", direction: "evidence-for", criterionIds: ["implemented"] },
+        ],
+      }),
+    ];
+
+    expect(codes(request, proposal, pinned)).toContainEqual(
+      expect.objectContaining({
+        code: "media-validation-unavailable",
+        itemId: "primary-media",
+      }),
+    );
+  });
+
+  it.each([
+    {
+      name: "catalog output dimensions",
+      configure: (input: {
+        request: CompilerRequest;
+        proposal: CompilerProposal;
+        expected: ReturnType<typeof expectedAssetBinding>;
+      }) => {
+        const recipe = input.request.repository.validationRecipes.find(
+          ({ capture }) => capture?.kind === "capture",
+        )!;
+        if (recipe.capture?.kind === "capture" && recipe.capture.profile?.kind === "raster")
+          recipe.capture.profile.output = { width: 1200, height: 600 };
+      },
+    },
+    {
+      name: "expected dimensions",
+      configure: (input: {
+        request: CompilerRequest;
+        proposal: CompilerProposal;
+        expected: ReturnType<typeof expectedAssetBinding>;
+      }) => {
+        if (input.expected.asset.inspection.kind === "raster")
+          Object.assign(input.expected.asset.inspection, { width: 1200 });
+      },
+    },
+    {
+      name: "expected alpha",
+      configure: (input: {
+        request: CompilerRequest;
+        proposal: CompilerProposal;
+        expected: ReturnType<typeof expectedAssetBinding>;
+      }) => {
+        const profile = input.proposal.mediaIntents[0]!.output.profile;
+        if (profile) profile.alpha = "required";
+      },
+    },
+    {
+      name: "expected animation",
+      configure: (input: {
+        request: CompilerRequest;
+        proposal: CompilerProposal;
+        expected: ReturnType<typeof expectedAssetBinding>;
+      }) => {
+        const profile = input.proposal.mediaIntents[0]!.output.profile;
+        if (profile) profile.animation = "required";
+      },
+    },
+  ])("rejects repository capture with out-of-range $name", ({ configure }) => {
+    const profile = {
+      kind: "raster" as const,
+      viewport: { width: 1280, height: 720 },
+      output: { width: 800, height: 600 },
+      captureRoleId: "capture",
+      diffRoleId: null,
+      previewRoleId: null,
+    };
+    const pinned = capturePinnedFacts({
+      outputs: [{ roleId: "capture", mediaType: "image/png" }],
+      profile,
+    });
+    const request = semanticRequest(pinned);
+    const captureRecipe = request.repository.validationRecipes.find(
+      ({ capture }) => capture?.kind === "capture",
+    )!;
+    const expected = expectedAssetBinding("image/png");
+    request.media.assetManifest = { digest: expected.manifestDigest, assets: [expected.asset] };
+    const proposal = semanticProposal(request);
+    proposal.mediaIntents = [
+      mediaIntent({
+        role: "acceptance-capture",
+        purpose: "acceptance-evidence",
+        fulfillment: { kind: "imported", assetIds: [expected.asset.id] },
+        review: null,
+
+        repositoryCapture: {
+          gate: { kind: "human-required" },
+          expectedAssetId: expected.asset.id,
+          scenario: { id: "default", fixture: null, seed: null },
+          captureRecipeId: captureRecipe.id,
+          comparison: { kind: "exact" },
+        },
+        bindings: [
+          { workItemId: "item-1", direction: "evidence-for", criterionIds: ["implemented"] },
+        ],
+      }),
+    ];
+    configure({ request, proposal, expected });
+    request.media.assetManifest = { digest: expected.manifestDigest, assets: [expected.asset] };
+
+    expect(codes(request, proposal, pinned)).toContainEqual(
+      expect.objectContaining({
+        code: "media-validation-unavailable",
+        itemId: "primary-media",
+      }),
+    );
+  });
+
+  it("requires one comparison subject for repository capture", () => {
+    const pinned = capturePinnedFacts({
+      outputs: [{ roleId: "capture", mediaType: "application/json" }],
+      profile: null,
+    });
+    const request = semanticRequest(pinned);
+    const captureRecipe = request.repository.validationRecipes.find(
+      ({ capture }) => capture?.kind === "capture",
+    )!;
+    const expected = expectedAssetBinding("application/json");
+    request.media.assetManifest = { digest: expected.manifestDigest, assets: [expected.asset] };
+    const proposal = semanticProposal(request);
+    proposal.mediaIntents = [
+      mediaIntent({
+        role: "acceptance-capture",
+        purpose: "acceptance-evidence",
+        fulfillment: { kind: "imported", assetIds: [expected.asset.id] },
+        output: {
+          mediaTypes: ["application/json"],
+          minimumCount: 2,
+          maximumCount: 2,
+          profile: null,
+        },
+        review: null,
+
+        repositoryCapture: {
+          gate: { kind: "human-required" },
+          expectedAssetId: expected.asset.id,
+          scenario: { id: "default", fixture: null, seed: null },
+          captureRecipeId: captureRecipe.id,
+          comparison: { kind: "exact" },
+        },
+        bindings: [
+          { workItemId: "item-1", direction: "evidence-for", criterionIds: ["implemented"] },
+        ],
+      }),
+    ];
+
+    expect(codes(request, proposal, pinned)).toContainEqual(
+      expect.objectContaining({
+        code: "invalid-media-validation-selection",
+        itemId: "primary-media",
+      }),
+    );
+  });
+
+  it("rejects one command text shared between ordinary and capture phases", () => {
+    const pinned = capturePinnedFacts({
+      outputs: [{ roleId: "capture", mediaType: "application/json" }],
+      profile: null,
+    });
+    const request = semanticRequest(pinned);
+    const captureRecipe = request.repository.validationRecipes.find(
+      ({ capture }) => capture?.kind === "capture",
+    )!;
+    const expected = expectedAssetBinding("application/json");
+    request.media.assetManifest = { digest: expected.manifestDigest, assets: [expected.asset] };
+    const proposal = semanticProposal(request);
+    proposal.workItems[0]!.criteria[0]!.validation = [
+      { tier: "mechanical", evidence: [{ kind: "observed", recipeId: captureRecipe.id }] },
+    ];
+    proposal.mediaIntents = [
+      mediaIntent({
+        role: "acceptance-capture",
+        purpose: "acceptance-evidence",
+        fulfillment: { kind: "imported", assetIds: [expected.asset.id] },
+        output: {
+          mediaTypes: ["application/json"],
+          minimumCount: 1,
+          maximumCount: 1,
+          profile: null,
+        },
+        review: null,
+
+        repositoryCapture: {
+          gate: { kind: "human-required" },
+          expectedAssetId: expected.asset.id,
+          scenario: { id: "default", fixture: null, seed: null },
+          captureRecipeId: captureRecipe.id,
+          comparison: { kind: "exact" },
+        },
+        bindings: [
+          { workItemId: "item-1", direction: "evidence-for", criterionIds: ["implemented"] },
+        ],
+      }),
+    ];
+
+    expect(codes(request, proposal, pinned)).toContainEqual(
+      expect.objectContaining({
+        code: "invalid-media-validation-selection",
+        itemId: "primary-media",
+      }),
+    );
+  });
+
+  it("orders ordinary and capture commands while keeping threshold comparison inside Factory", () => {
+    const scripts = {
+      test: "vitest run",
+      "capture-a": "node scripts/capture-a.mjs",
+      "capture-b": "node scripts/capture-b.mjs",
+    };
+    const catalog = {
+      captures: [
+        {
+          command: "npm run capture-a",
+          comparisonOutput: { roleId: "capture", mediaType: "application/json" },
+          auxiliaryOutputs: [],
+          profile: null,
+          humanReview: true,
+          exactDeterministicGates: [],
+          thresholdComparisons: [
+            {
+              policy: {
+                id: "json-threshold-a",
+                metric: "byte-difference",
+                maximumDifference: 0,
+              },
+              deterministicGates: [],
+            },
+          ],
+        },
+        {
+          command: "npm run capture-b",
+          comparisonOutput: { roleId: "capture", mediaType: "application/json" },
+          auxiliaryOutputs: [],
+          profile: null,
+          humanReview: true,
+          exactDeterministicGates: [],
+          thresholdComparisons: [
+            {
+              policy: {
+                id: "json-threshold-b",
+                metric: "byte-difference",
+                maximumDifference: 0,
+              },
+              deterministicGates: [],
+            },
+          ],
+        },
+      ],
+    };
+    const pinned = semanticPinnedFacts({
+      paths: [
+        "package.json",
+        "package-lock.json",
+        ".factory/validation-captures.json",
+        "scripts/capture-a.mjs",
+        "scripts/capture-b.mjs",
+        "src/item-1.ts",
+      ],
+      scripts,
+      documents: {
+        "package.json": JSON.stringify({ scripts }),
+        ".factory/validation-captures.json": JSON.stringify(catalog),
+      },
+    });
+    const request = semanticRequest(pinned);
+    const captureA = request.repository.validationRecipes.find(
+      ({ command }) => command === "npm run capture-a",
+    )!;
+    const captureB = request.repository.validationRecipes.find(
+      ({ command }) => command === "npm run capture-b",
+    )!;
+    const comparison = request.repositoryCapture.comparators.find(
+      ({ policy }) => policy.id === "json-threshold-a",
+    )!;
+    const first = expectedAssetBinding("application/json");
+    const second = {
+      manifestDigest: first.manifestDigest,
+      asset: { ...expectedAssetBinding("application/json").asset, id: "expected-second" },
+      input: {
+        ...expectedAssetBinding("application/json").input,
+        manifestDigest: first.manifestDigest,
+        descriptorDigest: "f".repeat(64),
+        contentDigest: "1".repeat(64),
+        storageReceiptDigest: "2".repeat(64),
+        path: `assets/${"1".repeat(64)}/expected.bin`,
+      },
+    };
+    request.media.assetManifest = {
+      digest: first.manifestDigest,
+      assets: [first.asset, second.asset],
+    };
+    const proposal = semanticProposal(request);
+    const intent = (
+      id: string,
+      expected: typeof first,
+      captureRecipeId: string,
+      threshold: boolean,
+    ) =>
+      mediaIntent({
+        id,
+        role: "acceptance-capture",
+        purpose: "acceptance-evidence",
+        fulfillment: { kind: "imported", assetIds: [expected.asset.id] },
+        output: {
+          mediaTypes: ["application/json"],
+          minimumCount: 1,
+          maximumCount: 1,
+          profile: null,
+        },
+        review: null,
+
+        repositoryCapture: {
+          gate: { kind: "human-required" },
+          expectedAssetId: expected.asset.id,
+          scenario: { id, fixture: null, seed: null },
+          captureRecipeId,
+          comparison: threshold
+            ? { kind: "threshold", policyId: comparison.policy.id }
+            : { kind: "exact" },
+        },
+        bindings: [
+          { workItemId: "item-1", direction: "evidence-for", criterionIds: ["implemented"] },
+        ],
+      });
+    proposal.mediaIntents = [
+      intent("a-threshold", first, captureA.id, true),
+      intent("z-exact", second, captureB.id, false),
+    ];
+    const mediaPlanning = {
+      assetBindings: [
+        { assetId: first.asset.id, input: first.input },
+        { assetId: second.asset.id, input: second.input },
+      ],
+      producerCapabilities: [],
+      reviewRules: [],
+    };
+
+    expect(
+      parseAndValidateCompilerProposal(request, proposal, {
+        pinnedFacts: pinned,
+        repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
+        runPolicy: projectionPolicy(request),
+        mediaPlanning,
+      }).report,
+    ).toMatchObject({ status: "valid", violations: [] });
+
+    const result = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
+      runPolicy: projectionPolicy(request),
+      mediaPlanning,
+    });
+    expect(result.objective.workItems[0]!.validationCommands).toEqual([
+      "npm run test",
+      "npm run capture-a",
+      "npm run capture-b",
+    ]);
+    expect(() => workerPacketFromCompiled(result.objective.workItems[0]!)).not.toThrow();
+  });
+
+  it("binds one capture intent across a fan-out and preserves the authored join", () => {
+    const pinned = capturePinnedFacts({
+      outputs: [{ roleId: "capture", mediaType: "application/json" }],
+      profile: null,
+    });
+    const request = semanticRequest(pinned);
+    const captureRecipe = request.repository.validationRecipes.find(
+      ({ capture }) => capture?.kind === "capture",
+    )!;
+    const expected = expectedAssetBinding("application/json");
+    request.media.assetManifest = { digest: expected.manifestDigest, assets: [expected.asset] };
+    const proposal = semanticProposal(request, 4);
+    proposal.workItems[1]!.dependsOn = ["item-1"];
+    proposal.workItems[2]!.dependsOn = ["item-1"];
+    proposal.workItems[3]!.dependsOn = ["item-2", "item-3"];
+    proposal.workItems[1]!.obligationIds = ["explicit-contract"];
+    proposal.workItems[2]!.obligationIds = ["explicit-contract"];
+    proposal.mediaIntents = [
+      mediaIntent({
+        role: "acceptance-capture",
+        purpose: "acceptance-evidence",
+        fulfillment: { kind: "imported", assetIds: [expected.asset.id] },
+        output: {
+          mediaTypes: ["application/json"],
+          minimumCount: 1,
+          maximumCount: 1,
+          profile: null,
+        },
+        review: null,
+
+        repositoryCapture: {
+          gate: { kind: "human-required" },
+          expectedAssetId: expected.asset.id,
+          scenario: { id: "fanout", fixture: "fixtures/fanout.json", seed: null },
+          captureRecipeId: captureRecipe.id,
+          comparison: { kind: "exact" },
+        },
+        bindings: [
+          { workItemId: "item-2", direction: "evidence-for", criterionIds: ["implemented"] },
+          { workItemId: "item-3", direction: "evidence-for", criterionIds: ["implemented"] },
+        ],
+      }),
+    ];
+
+    const result = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
+      runPolicy: projectionPolicy(request),
+      mediaPlanning: {
+        assetBindings: [{ assetId: expected.asset.id, input: expected.input }],
+        producerCapabilities: [],
+        reviewRules: [],
+      },
+    });
+    expect(result.objective.workItems).toHaveLength(4);
+    expect(result.objective.workItems.map(({ id, dependsOn }) => ({ id, dependsOn }))).toEqual([
+      { id: "item-1", dependsOn: [] },
+      { id: "item-2", dependsOn: ["item-1"] },
+      { id: "item-3", dependsOn: ["item-1"] },
+      { id: "item-4", dependsOn: ["item-2", "item-3"] },
+    ]);
+    expect(
+      result.objective.workItems.filter(
+        ({ repositoryCaptureRecipes }) => repositoryCaptureRecipes?.length,
+      ),
+    ).toHaveLength(2);
+    expect(result.trace.addedEdges).toEqual([]);
+    expect(result.trace.mediaIntents).toEqual([
+      {
+        intentId: "primary-media",
+        disposition: "repository-capture",
+        producerWorkItemId: null,
+      },
+    ]);
   });
 
   it("returns structured limits for 101 projected items without running out-of-range economics", () => {
@@ -912,6 +1903,7 @@ describe("media intent compilation", () => {
     );
     const result = parseAndValidateCompilerProposal(request, proposal, {
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
       mediaPlanning: {
         assetBindings: [],
@@ -955,7 +1947,7 @@ describe("media intent compilation", () => {
           mediaTypes: ["application/octet-stream"],
           minimumCount: 4,
           maximumCount: 4,
-          raster: null,
+          profile: null,
         },
       }),
     );
@@ -963,6 +1955,7 @@ describe("media intent compilation", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
       mediaPlanning: {
         assetBindings: [],
@@ -1012,6 +2005,7 @@ describe("media intent compilation", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
     });
     expect(result.objective.workItems).toHaveLength(1);
@@ -1052,6 +2046,9 @@ describe("media intent compilation", () => {
               alpha: false,
             },
             visibility: "private",
+            descriptorClass: "semantic",
+            inspectionHandler: { id: "sharp-raster", contract: 1 },
+            rightsBasis: "unknown",
           },
         ],
       },
@@ -1080,6 +2077,7 @@ describe("media intent compilation", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: policy,
       mediaPlanning: {
         assetBindings: [{ assetId: "asset-1", input }],
@@ -1147,6 +2145,9 @@ describe("media intent compilation", () => {
               alpha: false,
             },
             visibility: "private",
+            descriptorClass: "semantic",
+            inspectionHandler: { id: "sharp-raster", contract: 1 },
+            rightsBasis: "unknown",
           },
         ],
       },
@@ -1180,6 +2181,7 @@ describe("media intent compilation", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: policy,
       mediaPlanning: {
         assetBindings: [{ assetId: "asset-1", input }],
@@ -1222,6 +2224,9 @@ describe("media intent compilation", () => {
             bytes: 4096,
             inspection: { kind: "opaque" },
             visibility: "private",
+            descriptorClass: "opaque",
+            inspectionHandler: { id: "opaque-passive", contract: 1 },
+            rightsBasis: "unknown",
           },
         ],
       },
@@ -1250,7 +2255,7 @@ describe("media intent compilation", () => {
           mediaTypes: ["audio/wav"],
           minimumCount: 1,
           maximumCount: 16,
-          raster: null,
+          profile: null,
         },
       }),
     ];
@@ -1258,6 +2263,7 @@ describe("media intent compilation", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: policy,
       mediaPlanning: {
         assetBindings: [{ assetId: "sound-1", input }],
@@ -1308,6 +2314,7 @@ describe("media intent compilation", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
       mediaPlanning: {
         assetBindings: [],
@@ -1336,17 +2343,19 @@ describe("media intent compilation", () => {
     });
   });
 
-  it("refuses required repository-result media evidence before graph projection", () => {
+  it("never projects a producer for required repository evidence with unsupported capture authority", () => {
     const pinned = semanticPinnedFacts();
     const request = semanticRequest(pinned);
+    const expected = expectedAssetBinding("image/png");
+    request.media.assetManifest = { digest: expected.manifestDigest, assets: [expected.asset] };
     request.media.producerCapabilities = [
       {
         id: "input-only-raster-producer",
         capabilityDigest: "1".repeat(64),
         ...privateUnknownOutput,
         inputRoles: [],
-        roles: ["layout-reference"],
-        purposes: ["implementation-reference"],
+        roles: ["acceptance-capture"],
+        purposes: ["acceptance-evidence"],
         mediaTypes: ["image/png"],
         maximumCount: 4,
         raster: {
@@ -1360,6 +2369,18 @@ describe("media intent compilation", () => {
     const proposal = semanticProposal(request);
     proposal.mediaIntents = [
       mediaIntent({
+        role: "acceptance-capture",
+        purpose: "acceptance-evidence",
+        fulfillment: { kind: "imported", assetIds: [expected.asset.id] },
+        review: null,
+
+        repositoryCapture: {
+          gate: { kind: "human-required" },
+          expectedAssetId: expected.asset.id,
+          scenario: { id: "default", fixture: null, seed: null },
+          captureRecipeId: "unsupported-capture",
+          comparison: { kind: "exact" },
+        },
         bindings: [
           { workItemId: "item-1", direction: "evidence-for", criterionIds: ["implemented"] },
         ],
@@ -1367,11 +2388,74 @@ describe("media intent compilation", () => {
     ];
     const parsed = parseAndValidateCompilerProposal(request, proposal, {
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
     });
     expect(parsed.report.violations).toContainEqual(
-      expect.objectContaining({ code: "incompatible-media-output", itemId: "primary-media" }),
+      expect.objectContaining({ code: "media-validation-unavailable", itemId: "primary-media" }),
     );
+    expect(parsed.report.violations).not.toContainEqual(
+      expect.objectContaining({ code: "media-producer-unavailable" }),
+    );
+  });
+
+  it("omits helpful unsupported repository capture while preserving criterion coverage", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const expected = expectedAssetBinding("application/octet-stream");
+    request.media.assetManifest = { digest: expected.manifestDigest, assets: [expected.asset] };
+    const proposal = semanticProposal(request);
+    proposal.mediaIntents = [
+      mediaIntent({
+        role: "acceptance-capture",
+        purpose: "acceptance-evidence",
+        necessity: "helpful",
+        fulfillment: { kind: "imported", assetIds: [expected.asset.id] },
+        output: {
+          mediaTypes: ["application/octet-stream"],
+          minimumCount: 1,
+          maximumCount: 1,
+          profile: null,
+        },
+        review: null,
+
+        repositoryCapture: {
+          gate: { kind: "human-required" },
+          expectedAssetId: expected.asset.id,
+          scenario: { id: "default", fixture: null, seed: null },
+          captureRecipeId: "unsupported-capture",
+          comparison: { kind: "exact" },
+        },
+        bindings: [
+          { workItemId: "item-1", direction: "evidence-for", criterionIds: ["implemented"] },
+        ],
+      }),
+    ];
+
+    const result = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
+      runPolicy: projectionPolicy(request),
+      mediaPlanning: {
+        assetBindings: [{ assetId: expected.asset.id, input: expected.input }],
+        producerCapabilities: [],
+        reviewRules: [],
+      },
+    });
+    expect(result.objective.workItems).toHaveLength(1);
+    expect(result.objective.workItems[0]!.acceptance).toEqual([
+      "Item 1 is implemented and tested.",
+    ]);
+    expect(result.objective.workItems[0]!.repositoryCaptureRecipes ?? []).toEqual([]);
+    expect(result.trace.mediaIntents).toEqual([
+      {
+        intentId: "primary-media",
+        disposition: "omitted-helpful",
+        producerWorkItemId: null,
+      },
+    ]);
   });
 
   it("projects non-raster media without inventing image constraints", () => {
@@ -1399,7 +2483,7 @@ describe("media intent compilation", () => {
           mediaTypes: ["audio/wav"],
           minimumCount: 1,
           maximumCount: 1,
-          raster: null,
+          profile: null,
         },
       }),
     ];
@@ -1408,6 +2492,7 @@ describe("media intent compilation", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
       mediaPlanning: {
         assetBindings: [],
@@ -1424,7 +2509,7 @@ describe("media intent compilation", () => {
       producerCapabilityId: "audio-producer",
       intent: {
         id: "interaction-sound",
-        output: { mediaTypes: ["audio/wav"], raster: null },
+        output: { mediaTypes: ["audio/wav"], profile: null },
       },
     });
     expect(result.trace.mediaIntents).toEqual([
@@ -1481,7 +2566,7 @@ describe("media intent compilation", () => {
           mediaTypes: ["audio/wav"],
           minimumCount: 1,
           maximumCount: 1,
-          raster: null,
+          profile: null,
         },
       }),
       mediaIntent({
@@ -1502,7 +2587,7 @@ describe("media intent compilation", () => {
           mediaTypes: ["application/octet-stream"],
           minimumCount: 1,
           maximumCount: 1,
-          raster: null,
+          profile: null,
         },
       }),
     ];
@@ -1510,6 +2595,7 @@ describe("media intent compilation", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
       mediaPlanning: {
         assetBindings: [],
@@ -1582,7 +2668,7 @@ describe("media intent compilation", () => {
           mediaTypes: ["application/octet-stream"],
           minimumCount: 1,
           maximumCount: 4,
-          raster: null,
+          profile: null,
         },
       }),
       mediaIntent({
@@ -1598,7 +2684,7 @@ describe("media intent compilation", () => {
           mediaTypes: ["application/octet-stream"],
           minimumCount: 1,
           maximumCount: 1,
-          raster: null,
+          profile: null,
         },
       }),
     ];
@@ -1606,6 +2692,7 @@ describe("media intent compilation", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
       mediaPlanning: {
         assetBindings: [],
@@ -1673,7 +2760,7 @@ describe("media intent compilation", () => {
           mediaTypes: ["application/octet-stream"],
           minimumCount: 1,
           maximumCount: 1,
-          raster: null,
+          profile: null,
         },
       });
     const proposal = semanticProposal(request);
@@ -1686,7 +2773,7 @@ describe("media intent compilation", () => {
           mediaTypes: ["application/octet-stream"],
           minimumCount: 1,
           maximumCount: 4,
-          raster: null,
+          profile: null,
         },
       }),
       producedFrom("consumer-one", "one-consumer"),
@@ -1727,7 +2814,7 @@ describe("media intent compilation", () => {
       mediaIntent({
         output: {
           ...intent.output,
-          raster: { ...intent.output.raster!, minimumWidth: 2048, maximumWidth: null },
+          profile: { ...intent.output.profile!, minimumWidth: 2048, maximumWidth: null },
         },
       }),
     ];
@@ -1796,6 +2883,7 @@ describe("media intent compilation", () => {
     expect(
       parseAndValidateCompilerProposal(request, proposal, {
         pinnedFacts: pinned,
+        repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
         runPolicy: projectionPolicy(request),
         mediaPlanning: {
           assetBindings: [],
@@ -1997,6 +3085,7 @@ describe("deferred capability provider validation", () => {
         request,
         proposal: boundary,
         pinnedFacts: pinned,
+        repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
         runPolicy: projectionPolicy(request),
       }),
     ).not.toThrow();
@@ -2072,6 +3161,7 @@ describe("deterministic semantic projection", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
     });
     expect(projected.objective.workItems[0]!.requirements).toMatchObject({
@@ -2098,6 +3188,7 @@ describe("deterministic semantic projection", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
     });
     expect(projected.objective.workItems[0]).toMatchObject({
@@ -2150,6 +3241,7 @@ describe("deterministic semantic projection", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
     });
     expect(trace.addedEdges).toEqual([
@@ -2175,6 +3267,7 @@ describe("deterministic semantic projection", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
     });
     expect(projected.trace.addedEdges.length).toBeGreaterThan(600);
@@ -2199,6 +3292,7 @@ describe("deterministic semantic projection", () => {
       request,
       proposal,
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
     });
     expect(projected.trace.addedEdges.length).toBeGreaterThan(700);
@@ -2210,6 +3304,7 @@ describe("deterministic semantic projection", () => {
           proposal,
           report: parseAndValidateCompilerProposal(request, proposal, {
             pinnedFacts: pinned,
+            repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
             runPolicy: projectionPolicy(request),
           }).report,
           projectionTrace: projected.trace,
@@ -2241,6 +3336,7 @@ describe("deterministic semantic projection", () => {
     expect(Buffer.byteLength(JSON.stringify(proposal))).toBeLessThan(512 * 1024);
     const report = parseAndValidateCompilerProposal(request, proposal, {
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
     }).report;
     expect(report.violations).toContainEqual(
@@ -2288,6 +3384,7 @@ describe("deterministic semantic projection", () => {
     expect(Buffer.byteLength(JSON.stringify(proposal))).toBeLessThan(512 * 1024);
     const report = parseAndValidateCompilerProposal(request, proposal, {
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
     }).report;
     expect(report.violations).toContainEqual(
@@ -2380,6 +3477,7 @@ describe("deterministic semantic projection", () => {
     expect(
       parseAndValidateCompilerProposal(request, proposal, {
         pinnedFacts: pinned,
+        repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
         runPolicy: projectionPolicy(request),
       }).report.violations,
     ).toContainEqual(expect.objectContaining({ code: "judge-context-limit" }));
@@ -2415,6 +3513,7 @@ describe("deterministic semantic projection", () => {
 
     const report = parseAndValidateCompilerProposal(request, proposal, {
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
     }).report;
     expect(report.violations.map((entry) => entry.code)).toEqual(
@@ -2437,6 +3536,7 @@ describe("deterministic semantic projection", () => {
 
     const first = parseAndValidateCompilerProposal(request, proposal, {
       pinnedFacts: pinned,
+      repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
     }).report;
     expect(first.violations.map((entry) => entry.code)).toEqual(
@@ -2449,6 +3549,7 @@ describe("deterministic semantic projection", () => {
     expect(
       parseAndValidateCompilerProposal(request, proposal, {
         pinnedFacts: pinned,
+        repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
         runPolicy: projectionPolicy(request),
       }).report.status,
     ).toBe("valid");

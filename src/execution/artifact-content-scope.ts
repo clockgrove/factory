@@ -7,10 +7,14 @@ import type { NormalizedArtifact } from "./artifacts.js";
 /** Runtime cache ownership is local optimization only. Durable pending transfer
  * content is separate and is never deleted by an operation's cache cleanup. */
 export function retainScopedArtifact(artifact: NormalizedArtifact): NormalizedArtifact {
-  if (!artifact.payload) return artifact;
+  const payloads = [
+    ...(artifact.payload ? [artifact.payload] : []),
+    ...(artifact.lfsObjects ?? []).map((receipt) => receipt.payload),
+  ];
+  if (!payloads.length) return artifact;
   const scope = owners.getStore();
   if (!scope) throw new Error("artifact payload consumer has no operation ownership scope");
-  retainCurrentArtifactPayload(artifact.payload);
+  for (const payload of payloads) retainCurrentArtifactPayload(payload);
   return artifact;
 }
 

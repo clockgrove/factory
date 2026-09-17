@@ -103,10 +103,12 @@ export function createMediaInvocation(args: {
     .sort()
     .find((mediaType) => capability.outputMediaTypes.includes(mediaType));
   if (!outputMediaType) throw new Error("producer capability has no exact output MIME match");
-  const raster = intent.output.raster ? exactRasterProfile(intent.output.raster, capability) : null;
-  if (intent.output.raster && !raster)
+  const raster = intent.output.profile
+    ? exactRasterProfile(intent.output.profile, capability)
+    : null;
+  if (intent.output.profile && !raster)
     throw new Error("raster output requires a matching typed producer profile");
-  if (!intent.output.raster && !capability.profiles.some(({ kind }) => kind === "binary"))
+  if (!intent.output.profile && !capability.profiles.some(({ kind }) => kind === "binary"))
     throw new Error("non-raster output requires the media-agnostic binary profile");
   const inputEntries = args.inputEntries.map((value) => AssetManifestEntrySchema.parse(value));
   const associations = new Map<string, { roleId: string; descriptorDigest: string }>();

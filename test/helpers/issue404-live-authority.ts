@@ -4,6 +4,7 @@ import { lstat, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   bindManagementTerminalOutcome,
+  EMPTY_REPOSITORY_CAPTURE_PLANNING,
   type CompilationContext,
   type ManagementUsage,
 } from "../../src/management/backend.js";
@@ -65,6 +66,7 @@ export function issue404QualificationCompilationContext(
       reasoning: "xhigh",
     },
     invocationTimeoutMs: 5 * 60_000,
+    repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
   };
 }
 

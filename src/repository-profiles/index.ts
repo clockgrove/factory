@@ -27,7 +27,6 @@ export type ExecutionProfile = {
   generatedOutput: boolean;
   binaryAssets: boolean;
   deterministicSimulation: boolean;
-  visualValidation: boolean;
   validationCommands: string[];
 };
 export type RepositoryFacts = {
@@ -302,15 +301,11 @@ export function profileRepository(factsInput: RepositoryFacts): ExecutionProfile
     (f) => f.binary === true || /\.(?:png|jpe?g|gif|webp|pdf|zip|wasm|mp[34]|mov)$/i.test(f.path),
   );
   const deterministicSimulation = paths.some((p) => /(?:simulation|simulator|replay|seed)/.test(p));
-  const visualValidation = paths.some(
-    (p) => /(?:screenshot|snapshot|visual|storybook)/.test(p) || /\.(?:png|jpe?g|webp)$/.test(p),
-  );
   return {
     languages: uniqueSorted(languages),
     generatedOutput,
     binaryAssets,
     deterministicSimulation,
-    visualValidation,
     validationCommands: discoverValidationCommands(facts),
   };
 }

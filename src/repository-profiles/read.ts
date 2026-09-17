@@ -17,7 +17,7 @@ export interface PinnedRepositoryFacts {
 }
 
 const compilerDocument = (path: string) =>
-  /^(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|bun\.lock|bun\.lockb|bunfig\.toml|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|uv\.lock|\.python-version|pytest\.ini|setup\.cfg|GNUmakefile|makefile|Makefile|\.factory\/execution-requirements\.json)$/.test(
+  /^(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|bun\.lock|bun\.lockb|bunfig\.toml|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|uv\.lock|\.python-version|pytest\.ini|setup\.cfg|GNUmakefile|makefile|Makefile|\.factory\/(?:execution-requirements|validation-captures)\.json)$/.test(
     path,
   ) || /^(?:README|CONTRIBUTING|AGENTS)(?:\.md)?$/i.test(path);
 
@@ -138,7 +138,7 @@ export async function readRepositoryFacts(
   const root = await realpath(checkout);
   const candidates = facts.files.filter(
     ({ path }) =>
-      /^(?:package\.json|Cargo\.toml|go\.mod|pyproject\.toml|pytest\.ini|setup\.cfg|GNUmakefile|makefile|Makefile|\.factory\/execution-requirements\.json)$/.test(
+      /^(?:package\.json|Cargo\.toml|go\.mod|pyproject\.toml|pytest\.ini|setup\.cfg|GNUmakefile|makefile|Makefile|\.factory\/(?:execution-requirements|validation-captures)\.json)$/.test(
         path,
       ) || /^(?:README|CONTRIBUTING|AGENTS)(?:\.md)?$/i.test(path),
   );

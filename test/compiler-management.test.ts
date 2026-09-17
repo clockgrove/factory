@@ -296,7 +296,7 @@ describe("single semantic management route", () => {
     expect(Buffer.byteLength(JSON.stringify(persistedResult))).toBeLessThanOrEqual(2 * 1024 * 1024);
   });
 
-  it("summarizes 257 overlapping visual and simulation paths without a request overflow", () => {
+  it("summarizes 257 simulation paths without a request overflow", () => {
     const paths = Array.from(
       { length: 257 },
       (_, index) => `test/simulation-snapshot-${String(index).padStart(3, "0")}.png`,
@@ -307,9 +307,7 @@ describe("single semantic management route", () => {
     expect(request.repository.validationSurfaces.deterministicSimulation).toMatchObject({
       count: 257,
     });
-    expect(request.repository.validationSurfaces.visual).toMatchObject({ count: 257 });
     expect(request.repository.validationSurfaces.deterministicSimulation.sample).toHaveLength(32);
-    expect(request.repository.validationSurfaces.visual.sample).toHaveLength(32);
     expect(() => compilerProposalPrompt(request)).not.toThrow();
   });
 

@@ -79,14 +79,18 @@ imported-asset IDs, output media types and count, any applicable typed profile c
 requirement, and directed bindings to Work Items and criteria. Raster dimensions, alpha, and
 animation belong in the optional raster profile; do not infer that profile for other media. An
 `input-to` binding means the repository Work
-Item consumes the asset; an `evidence-for` binding means the asset is produced after the repository
-change as acceptance evidence. Acceptance evidence is always required and cites criterion IDs.
+Item consumes the asset. An `evidence-for` binding means the bound repository Work Item captures
+its result under a grounded repository validation recipe. It cites criterion IDs, an exact expected
+asset, a bounded scenario, and capture plus optional comparison recipe IDs supplied in the compiler
+request. It never creates an asset-production Work Item.
 
 Never choose a media provider, model, credential, storage location, URL, network destination, or
 execution backend. Factory matches imported assets and advertised producer capabilities
 mechanically. It derives exact asset bindings, any `asset-production` Work Item, its
-`clockgrove.factory/asset-set` deliverable, and dependency edges. A required intent with no matching
-import or permitted producer is a terminal compilation result. A helpful intent may be omitted only
+`clockgrove.factory/asset-set` deliverable, dependency edges, and repository capture recipes from
+the pinned catalog. Do not invent capture or comparison commands, output roles, MIME declarations,
+profiles, policies, or gates. A required intent with no matching import, permitted producer, or
+grounded capture authority is a terminal compilation result. A helpful intent may be omitted only
 when its bound obligations remain covered, and Factory records that disposition. Diagrams that are
 source-controlled SVG, Mermaid, HTML, CSS, canvas, or other code remain ordinary repository-change
 work; use a media intent for immutable reference, product, or evidence assets outside the repository

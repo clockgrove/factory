@@ -62,7 +62,7 @@ function item(
   baseSha = sha,
 ): CompilerWorkItemInput {
   const criteria = value.entry.criteria;
-  const tiers = ["mechanical", "semantic", "visual", "deterministic-simulation"] as const;
+  const tiers = ["mechanical", "semantic", "deterministic-simulation"] as const;
   return {
     id,
     title: `Implement ${id}`,
@@ -177,7 +177,6 @@ describe("representative executable corpus integrity, not compiler/model quality
       }
       if (id === "generated-catalog") expect(value.profile.generatedOutput).toBe(true);
       if (id === "seeded-simulation") expect(value.profile.deterministicSimulation).toBe(true);
-      if (id === "visual-status") expect(value.profile.visualValidation).toBe(true);
     },
     30_000,
   );

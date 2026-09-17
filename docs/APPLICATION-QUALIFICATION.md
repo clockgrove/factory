@@ -98,10 +98,11 @@ installed or paid-provider qualification.
 - A worker may update an expected golden result only when the Work Item explicitly owns the semantic
   change and validation explains the before/after difference.
 
-### Visual and experiential validation
+### Captured and experiential validation
 
-- A visual validation plan pins scenario, data/seed, viewport or output dimensions, environment,
-  tool version, and capture command.
+- A repository capture recipe pins the scenario, required fixture or seed, optional typed profile,
+  declared output MIME roles, and repository-observed capture command. Environment observations and
+  tool receipts remain runtime evidence rather than recipe fields.
 - Factory records capture digests and bounded diffs with the exact validated commit.
 - Mechanical comparison may accept unchanged or threshold-bounded output. A deliberate change in
   media intent remains a legitimate human review boundary unless the Objective pre-authorized an

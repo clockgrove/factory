@@ -20,6 +20,7 @@ import {
   type RunPolicy,
 } from "../protocol/policy.js";
 import { RepositoryScopePathSchema } from "../protocol/worker-packet.js";
+import type { RepositoryCaptureRecipe } from "../protocol/worker-packet.js";
 import { MAX_GITHUB_TEXT_BYTES, MAX_WORKER_PACKET_BYTES } from "../protocol/limits.js";
 import {
   readPinnedCompilerFacts,
@@ -87,7 +88,7 @@ export interface CompilerProjectionTrace {
   addedEdges: Array<{
     itemId: string;
     dependsOn: string;
-    reason: "scope-overlap" | "exclusive-resource" | "media-input" | "media-evidence";
+    reason: "scope-overlap" | "exclusive-resource" | "media-input";
   }>;
   adapterBindings: Array<{
     itemId: string;
@@ -97,7 +98,7 @@ export interface CompilerProjectionTrace {
   }>;
   mediaIntents: Array<{
     intentId: string;
-    disposition: "imported" | "producer" | "omitted-helpful";
+    disposition: "imported" | "producer" | "repository-capture" | "omitted-helpful";
     producerWorkItemId: string | null;
   }>;
   riskElevations: {
@@ -129,7 +130,6 @@ export interface CompilerProjectionContext {
 
 type CompilerValidationSurfacePaths = {
   deterministicSimulation: string[];
-  visual: string[];
   python: string[];
   rust: string[];
   go: string[];
@@ -142,11 +142,6 @@ function compilerValidationSurfacePaths(
   return {
     deterministicSimulation: paths.filter((path) =>
       /(?:simulation|simulator|replay|seed)/.test(path.toLowerCase()),
-    ),
-    visual: paths.filter(
-      (path) =>
-        /(?:screenshot|snapshot|visual|storybook)/.test(path.toLowerCase()) ||
-        /\.(?:png|jpe?g|webp)$/i.test(path),
     ),
     python: paths.filter((path) => path === "pyproject.toml" || path.endsWith(".py")),
     rust: paths.filter((path) => path === "Cargo.toml" || path.endsWith(".rs")),
@@ -571,18 +566,36 @@ function validationCommand(
 
 function resolvedExecutionRequirements(
   request: CompilerRequest,
+  proposal: CompilerProposal,
   item: CompilerProposal["workItems"][number],
 ) {
   const references = item.criteria.flatMap((criterion) =>
     criterion.validation.flatMap((validation) => validation.evidence),
   );
-  const recipes = references.flatMap((reference) =>
-    reference.kind === "observed"
-      ? request.repository.validationRecipes.filter((recipe) => recipe.id === reference.recipeId)
-      : reference.kind === "scoped-node-test"
-        ? request.repository.validationRecipes.filter((recipe) => recipe.command === "node --test")
-        : [],
-  );
+  const captureRecipeIds = proposal.mediaIntents.flatMap((intent) => {
+    if (!intent.repositoryCapture) return [];
+    if (!intent.bindings.some((binding) => binding.workItemId === item.id)) return [];
+    return [
+      intent.repositoryCapture.captureRecipeId,
+      ...(intent.repositoryCapture.comparison.kind === "threshold"
+        ? [intent.repositoryCapture.comparison.recipeId]
+        : []),
+    ];
+  });
+  const recipes = [
+    ...references.flatMap((reference) =>
+      reference.kind === "observed"
+        ? request.repository.validationRecipes.filter((recipe) => recipe.id === reference.recipeId)
+        : reference.kind === "scoped-node-test"
+          ? request.repository.validationRecipes.filter(
+              (recipe) => recipe.command === "node --test",
+            )
+          : [],
+    ),
+    ...request.repository.validationRecipes.filter((recipe) =>
+      captureRecipeIds.includes(recipe.id),
+    ),
+  ];
   const deferred = references.flatMap((reference) =>
     reference.kind === "deferred"
       ? request.repository.toolchains.filter(
@@ -662,7 +675,7 @@ function mediaCapabilitySupports(
   intent: MediaIntent,
 ): boolean {
   const output = intent.output;
-  const raster = output.raster;
+  const raster = output.profile;
   const capabilityRaster = capability.raster;
   const intentById = new Map(proposal.mediaIntents.map((entry) => [entry.id, entry]));
   const importedById = new Map(
@@ -759,7 +772,7 @@ function importedAssetsSatisfyMediaIntent(request: CompilerRequest, intent: Medi
   const permittedMediaTypes = new Set<string>(intent.output.mediaTypes);
   return assets.every((asset) => {
     if (!asset || !permittedMediaTypes.has(asset.mediaType)) return false;
-    const raster = intent.output.raster;
+    const raster = intent.output.profile;
     if (raster === null) return true;
     if (asset.inspection.kind !== "raster") return false;
     if (raster.minimumWidth !== null && asset.inspection.width < raster.minimumWidth) return false;
@@ -777,22 +790,23 @@ function importedAssetsSatisfyMediaIntent(request: CompilerRequest, intent: Medi
 }
 
 function canonicalMediaIntent(intent: MediaIntent): MediaIntent {
+  const fulfillment =
+    intent.fulfillment.kind === "imported"
+      ? { kind: "imported" as const, assetIds: [...intent.fulfillment.assetIds].sort() }
+      : {
+          kind: "produced" as const,
+          inputRoleBindings: intent.fulfillment.inputRoleBindings
+            .map((binding) => ({
+              ...binding,
+              importedAssetIds: [...binding.importedAssetIds].sort(),
+              inputIntentIds: [...binding.inputIntentIds].sort(),
+            }))
+            .sort((left, right) => left.roleId.localeCompare(right.roleId)),
+        };
   return {
     ...intent,
     obligationIds: [...intent.obligationIds].sort(),
-    fulfillment:
-      intent.fulfillment.kind === "imported"
-        ? { kind: "imported", assetIds: [...intent.fulfillment.assetIds].sort() }
-        : {
-            kind: "produced",
-            inputRoleBindings: intent.fulfillment.inputRoleBindings
-              .map((binding) => ({
-                ...binding,
-                importedAssetIds: [...binding.importedAssetIds].sort(),
-                inputIntentIds: [...binding.inputIntentIds].sort(),
-              }))
-              .sort((left, right) => left.roleId.localeCompare(right.roleId)),
-          },
+    fulfillment,
     output: { ...intent.output, mediaTypes: [...intent.output.mediaTypes].sort() },
     bindings: intent.bindings
       .map((binding) => ({ ...binding, criterionIds: [...binding.criterionIds].sort() }))
@@ -805,9 +819,61 @@ function canonicalMediaIntent(intent: MediaIntent): MediaIntent {
   };
 }
 
+function repositoryCaptureUnavailableReasons(
+  request: CompilerRequest,
+  intent: MediaIntent,
+): string[] {
+  if (!intent.repositoryCapture) return [];
+  const captureRequest = intent.repositoryCapture;
+  const reasons: string[] = [];
+  const expected = request.media.assetManifest?.assets.find(
+    ({ id }) => id === captureRequest.expectedAssetId,
+  );
+  if (!expected) reasons.push(`expected asset ${captureRequest.expectedAssetId} is unavailable`);
+  else if (!intent.output.mediaTypes.includes(expected.mediaType))
+    reasons.push(`expected asset MIME ${expected.mediaType} is outside the capture contract`);
+  const captureRecipe = request.repository.validationRecipes.find(
+    ({ id }) => id === captureRequest.captureRecipeId,
+  );
+  if (captureRecipe?.capture?.kind !== "capture")
+    reasons.push(`capture recipe ${captureRequest.captureRecipeId} is unavailable`);
+  else {
+    const outputs = new Set(captureRecipe.capture.outputs.map(({ mediaType }) => mediaType));
+    if (intent.output.mediaTypes.some((mediaType) => !outputs.has(mediaType)))
+      reasons.push("capture recipe does not declare every required output MIME");
+    if ((intent.output.profile?.kind ?? null) !== (captureRecipe.capture.profile?.kind ?? null))
+      reasons.push("capture recipe does not support the requested typed profile");
+    if (!captureRecipe.capture.gates.includes(intent.review.kind))
+      reasons.push(`capture recipe does not support gate ${intent.review.kind}`);
+  }
+  if (captureRequest.comparison.kind === "threshold") {
+    const comparisonRecipeId = captureRequest.comparison.recipeId;
+    const comparisonRecipe = request.repository.validationRecipes.find(
+      ({ id }) => id === comparisonRecipeId,
+    );
+    if (comparisonRecipe?.capture?.kind !== "threshold-comparison")
+      reasons.push(`comparison recipe ${comparisonRecipeId} is unavailable`);
+  }
+  if (intent.review.kind === "deterministic-preauthorized") {
+    const reviewRuleId = intent.review.ruleId;
+    const rule = request.media.reviewRules.find(({ id }) => id === reviewRuleId);
+    const profile = intent.output.profile?.kind ?? "binary";
+    if (
+      !rule ||
+      !rule.roles.includes(intent.role) ||
+      !rule.purposes.includes(intent.purpose) ||
+      !rule.profiles.includes(profile) ||
+      !intent.output.mediaTypes.every((mediaType) => rule.mediaTypes.includes(mediaType))
+    )
+      reasons.push(`review rule ${reviewRuleId} does not support the exact capture contract`);
+  }
+  return reasons;
+}
+
 function projectedMediaProducerCount(request: CompilerRequest, proposal: CompilerProposal): number {
   return proposal.mediaIntents.filter(
     (intent) =>
+      !intent.repositoryCapture &&
       !importedAssetsSatisfyMediaIntent(request, intent) &&
       request.media.producerCapabilities.some((capability) =>
         mediaCapabilitySupports(request, proposal, capability, intent),
@@ -831,6 +897,7 @@ function projectedWorkItemsForEconomics(
   const producerIds = new Map<string, string>();
   for (const intent of proposal.mediaIntents) {
     if (
+      !intent.repositoryCapture &&
       !importedAssetsSatisfyMediaIntent(request, intent) &&
       request.media.producerCapabilities.some((capability) =>
         mediaCapabilitySupports(request, proposal, capability, intent),
@@ -858,9 +925,6 @@ function projectedWorkItemsForEconomics(
         conventions: [],
         dependsOn: [
           ...new Set([
-            ...intent.bindings
-              .filter(({ direction }) => direction === "evidence-for")
-              .map(({ workItemId }) => workItemId),
             ...intentInputIntentIds(intent)
               .map((inputId) => producerIds.get(inputId))
               .filter((inputId): inputId is string => Boolean(inputId)),
@@ -916,6 +980,7 @@ function mediaIntentViolations(
   const producerIdByIntent = new Map<string, string>();
   for (const intent of proposal.mediaIntents) {
     if (
+      !intent.repositoryCapture &&
       !importedAssetsSatisfyMediaIntent(request, intent) &&
       request.media.producerCapabilities.some((capability) =>
         mediaCapabilitySupports(request, proposal, capability, intent),
@@ -1076,6 +1141,20 @@ function mediaIntentViolations(
           intent.id,
         ),
       );
+    if (intent.repositoryCapture) {
+      const unavailable = repositoryCaptureUnavailableReasons(request, intent);
+      if (intent.necessity === "required" && unavailable.length)
+        violations.push(
+          violation(
+            "media-validation-unavailable",
+            `${base}/repositoryCapture`,
+            "a repository-grounded capture recipe supporting the exact MIME, profile, comparison, and gate",
+            unavailable,
+            intent.id,
+          ),
+        );
+      continue;
+    }
     if (
       intent.review.kind === "deterministic-preauthorized" &&
       !reviewRules.has(intent.review.ruleId)
@@ -1096,7 +1175,7 @@ function mediaIntentViolations(
           mediaCapabilitySupports(request, proposal, capability, intent) &&
           rule?.producerCapabilityIds.includes(capability.id),
       );
-      const profile = intent.output.raster ? "raster" : "binary";
+      const profile = intent.output.profile ? "raster" : "binary";
       if (
         rule &&
         (!compatibleCapability ||
@@ -1117,19 +1196,6 @@ function mediaIntentViolations(
           ),
         );
     }
-    const criterionRequired =
-      intent.purpose === "acceptance-evidence" ||
-      intent.bindings.some((binding) => binding.direction === "evidence-for");
-    if (intent.necessity === "helpful" && criterionRequired)
-      violations.push(
-        violation(
-          "inconsistent-media-necessity",
-          `${base}/necessity`,
-          "required when used as acceptance evidence",
-          intent.necessity,
-          intent.id,
-        ),
-      );
     if (
       intent.purpose === "acceptance-evidence" &&
       intent.bindings.some((binding) => binding.direction !== "evidence-for")
@@ -1493,7 +1559,6 @@ export function parseAndValidateCompilerProposal(
     : {
         deterministicSimulation:
           request.repository.validationSurfaces.deterministicSimulation.sample,
-        visual: request.repository.validationSurfaces.visual.sample,
         python: request.repository.validationSurfaces.python.sample,
         rust: request.repository.validationSurfaces.rust.sample,
         go: request.repository.validationSurfaces.go.sample,
@@ -1671,9 +1736,7 @@ export function parseAndValidateCompilerProposal(
             ? validationSurfacePaths.deterministicSimulation.some((path) =>
                 scopeOwnsPath(item.scope, path),
               )
-            : validation.tier === "visual"
-              ? validationSurfacePaths.visual.some((path) => scopeOwnsPath(item.scope, path))
-              : true;
+            : true;
         if (!groundedTier)
           violations.push(
             violation(
@@ -1808,7 +1871,7 @@ export function parseAndValidateCompilerProposal(
           item.id,
         ),
       );
-    const validationCommands = uniqueCommands(request, item);
+    const validationCommands = uniqueCommands(request, proposal, item);
     if (validationCommands.length > 32)
       violations.push(
         violation(
@@ -1819,7 +1882,7 @@ export function parseAndValidateCompilerProposal(
           item.id,
         ),
       );
-    const executionRequirements = resolvedExecutionRequirements(request, item);
+    const executionRequirements = resolvedExecutionRequirements(request, proposal, item);
     for (const [field, values] of [
       ["additionalTools", executionRequirements.tools],
       ["additionalNetworkDestinations", executionRequirements.networkDestinations],
@@ -1977,7 +2040,7 @@ export function parseAndValidateCompilerProposal(
     }
     for (const providerId of [...providers].sort()) {
       const provider = proposal.workItems.find((item) => item.id === providerId)!;
-      const count = uniqueCommands(request, provider).length;
+      const count = uniqueCommands(request, proposal, provider).length;
       const expected = contract.operation?.providerCommandCount;
       if (expected && (count < expected.min || count > expected.max))
         violations.push(
@@ -1993,7 +2056,7 @@ export function parseAndValidateCompilerProposal(
   }
   const economicContracts = new Map<string, string>();
   for (const item of proposal.workItems) {
-    const execution = resolvedExecutionRequirements(request, item);
+    const execution = resolvedExecutionRequirements(request, proposal, item);
     const digest = compilerEvalDigest({
       goal: item.goal.trim(),
       acceptance: [...new Set(item.criteria.map((criterion) => criterion.text))].sort(),
@@ -2001,7 +2064,7 @@ export function parseAndValidateCompilerProposal(
       preconditions: [...new Set(item.preconditions)].sort(),
       outOfScope: [...new Set(item.outOfScope)].sort(),
       conventions: [...new Set(item.conventions)].sort(),
-      validationCommands: uniqueCommands(request, item),
+      validationCommands: uniqueCommands(request, proposal, item),
       executionIntent: {
         estimatedDurationMinutes: item.executionIntent.estimatedDurationMinutes,
         tools: execution.tools,
@@ -2069,6 +2132,7 @@ export function parseAndValidateCompilerProposal(
 
 function uniqueCommands(
   request: CompilerRequest,
+  proposal: CompilerProposal,
   item: CompilerProposal["workItems"][number],
 ): string[] {
   const commands: string[] = [];
@@ -2078,6 +2142,22 @@ function uniqueCommands(
         const command = validationCommand(request, reference);
         if (command && !commands.includes(command)) commands.push(command);
       }
+  for (const intent of proposal.mediaIntents) {
+    if (!intent.repositoryCapture) continue;
+    if (!intent.bindings.some((binding) => binding.workItemId === item.id)) continue;
+    const recipeIds = [
+      intent.repositoryCapture.captureRecipeId,
+      ...(intent.repositoryCapture.comparison.kind === "threshold"
+        ? [intent.repositoryCapture.comparison.recipeId]
+        : []),
+    ];
+    for (const recipeId of recipeIds) {
+      const command = request.repository.validationRecipes.find(
+        ({ id }) => id === recipeId,
+      )?.command;
+      if (command && !commands.includes(command)) commands.push(command);
+    }
+  }
   return commands;
 }
 
@@ -2109,11 +2189,12 @@ function validationDesign(
 
 function semanticWorkItem(
   request: CompilerRequest,
+  proposal: CompilerProposal,
   item: CompilerProposal["workItems"][number],
   runPolicy: RunPolicy,
 ): CompilerWorkItemInput {
   const scheduling = normalizeSchedulingPolicy(runPolicy);
-  const executionRequirements = resolvedExecutionRequirements(request, item);
+  const executionRequirements = resolvedExecutionRequirements(request, proposal, item);
   const risk = (criterion: (typeof item.criteria)[number]): CriterionRisk => {
     const inferred = inferCriterionRisk(criterion.text);
     return criterion.risk === "ordinary" ? inferred : criterion.risk;
@@ -2129,7 +2210,7 @@ function semanticWorkItem(
     conventions: [...item.conventions],
     dependsOn: [...item.dependsOn],
     baseSha: request.baseSha,
-    validationCommands: uniqueCommands(request, item),
+    validationCommands: uniqueCommands(request, proposal, item),
     validation: validationDesign(request, item),
     criterionRisks: item.criteria.map((criterion) => ({
       criterion: criterion.text,
@@ -2164,7 +2245,7 @@ function semanticCompilerWorkItems(
   proposal: CompilerProposal,
   runPolicy: RunPolicy,
 ): CompilerWorkItemInput[] {
-  return proposal.workItems.map((item) => semanticWorkItem(request, item, runPolicy));
+  return proposal.workItems.map((item) => semanticWorkItem(request, proposal, item, runPolicy));
 }
 
 function restoreAuthoredWorkItemFields(
@@ -2200,6 +2281,62 @@ function derivedMediaProducerId(intentId: string, existing: ReadonlySet<string>)
   throw new Error(`media intent ${intentId} has no collision-free derived producer identity`);
 }
 
+function projectedRepositoryCaptureRecipe(
+  request: CompilerRequest,
+  intent: MediaIntent,
+  binding: MediaIntent["bindings"][number],
+  expected: WorkerAssetInput,
+): RepositoryCaptureRecipe {
+  const captureRequest = intent.repositoryCapture;
+  if (!captureRequest) throw new Error(`media intent ${intent.id} lacks capture semantics`);
+  const captureRecipe = request.repository.validationRecipes.find(
+    ({ id }) => id === captureRequest.captureRecipeId,
+  );
+  if (captureRecipe?.capture?.kind !== "capture")
+    throw new Error(`media intent ${intent.id} lacks grounded capture authority`);
+  const commandIdentity = (recipe: (typeof request.repository.validationRecipes)[number]) => ({
+    recipeId: recipe.id,
+    recipeDigest: compilerEvalDigest(recipe),
+    command: recipe.command,
+  });
+  const comparison =
+    captureRequest.comparison.kind === "exact"
+      ? {
+          kind: "exact" as const,
+          expectedDescriptorDigest: expected.descriptorDigest,
+          policy: { kind: "exact-bytes" as const },
+        }
+      : ((comparisonRecipeId: string) => {
+          const recipe = request.repository.validationRecipes.find(
+            ({ id }) => id === comparisonRecipeId,
+          );
+          if (recipe?.capture?.kind !== "threshold-comparison")
+            throw new Error(`media intent ${intent.id} lacks grounded comparison authority`);
+          return {
+            kind: "threshold" as const,
+            command: commandIdentity(recipe),
+            expectedDescriptorDigest: expected.descriptorDigest,
+            policy: {
+              kind: "bounded-difference" as const,
+              metric: recipe.capture.policy.metric,
+              maximumDifference: recipe.capture.policy.maximumDifference,
+            },
+          };
+        })(captureRequest.comparison.recipeId);
+  const core = {
+    id: `capture-${compilerEvalDigest({ intentId: intent.id, workItemId: binding.workItemId }).slice(0, 16)}`,
+    mediaUse: { intentId: intent.id, direction: "evidence-for" as const },
+    criterionIds: [...binding.criterionIds].sort(),
+    scenario: structuredClone(captureRequest.scenario),
+    captureCommand: commandIdentity(captureRecipe),
+    outputs: structuredClone(captureRecipe.capture.outputs),
+    profile: structuredClone(captureRecipe.capture.profile),
+    comparison,
+    gate: structuredClone(intent.review),
+  };
+  return { ...core, digest: compilerEvalDigest(core) };
+}
+
 function projectMediaIntents(
   request: CompilerRequest,
   proposal: CompilerProposal,
@@ -2220,6 +2357,7 @@ function projectMediaIntents(
   const producerIdByIntent = new Map<string, string>();
   for (const intent of proposal.mediaIntents) {
     if (
+      !intent.repositoryCapture &&
       !importedAssetsSatisfyMediaIntent(request, intent) &&
       request.media.producerCapabilities.some((candidate) =>
         mediaCapabilitySupports(request, proposal, candidate, intent),
@@ -2231,6 +2369,61 @@ function projectMediaIntents(
     }
   }
   for (const intent of proposal.mediaIntents) {
+    if (intent.repositoryCapture) {
+      const unavailable = repositoryCaptureUnavailableReasons(request, intent);
+      if (unavailable.length) {
+        if (intent.necessity === "required")
+          throw new Error(`required media intent ${intent.id} lacks capture authority`);
+        disposition.push({
+          intentId: intent.id,
+          disposition: "omitted-helpful",
+          producerWorkItemId: null,
+        });
+        continue;
+      }
+      const expected = assetBindings.get(intent.repositoryCapture.expectedAssetId);
+      if (!expected) throw new Error(`media intent ${intent.id} lacks expected asset authority`);
+      for (const binding of intent.bindings) {
+        const consumer = byId.get(binding.workItemId);
+        if (!consumer || consumer.deliverable.kind !== "repository-change")
+          throw new Error(`media intent ${intent.id} has no repository consumer`);
+        const knownInputs = new Set(
+          (consumer.assetInputs ?? []).map(({ descriptorDigest }) => descriptorDigest),
+        );
+        consumer.assetInputs = [
+          ...(consumer.assetInputs ?? []),
+          ...(!knownInputs.has(expected.descriptorDigest) ? [structuredClone(expected)] : []),
+        ].sort((left, right) => left.descriptorDigest.localeCompare(right.descriptorDigest));
+        consumer.mediaUses = [
+          ...(consumer.mediaUses ?? []),
+          {
+            source: "imported" as const,
+            intentId: intent.id,
+            role: intent.role,
+            inputRoleId: null,
+            brief: intent.brief,
+            purpose: intent.purpose,
+            necessity: intent.necessity,
+            obligationIds: [...intent.obligationIds],
+            rationale: intent.rationale,
+            direction: "evidence-for" as const,
+            criterionIds: [...binding.criterionIds],
+            descriptorDigests: [expected.descriptorDigest],
+            manifestDigest: expected.manifestDigest,
+          },
+        ];
+        consumer.repositoryCaptureRecipes = [
+          ...(consumer.repositoryCaptureRecipes ?? []),
+          projectedRepositoryCaptureRecipe(request, intent, binding, expected),
+        ].sort((left, right) => left.id.localeCompare(right.id));
+      }
+      disposition.push({
+        intentId: intent.id,
+        disposition: "repository-capture",
+        producerWorkItemId: null,
+      });
+      continue;
+    }
     const imported = importedAssetsSatisfyMediaIntent(request, intent);
     const selectedAssetIds = imported
       ? intentFulfillmentAssetIds(intent)
@@ -2344,10 +2537,6 @@ function projectMediaIntents(
         };
       }),
     );
-    const evidenceDependencies = intent.bindings
-      .filter((binding) => binding.direction === "evidence-for")
-      .map((binding) => binding.workItemId)
-      .sort();
     const producer: CompiledAssetProductionWorkItem = {
       id: producerId,
       title: `Produce ${intent.role.replaceAll("-", " ")}: ${intent.id}`.slice(0, 256),
@@ -2364,10 +2553,7 @@ function projectMediaIntents(
         "Preserve exact imported asset identities and return only bounded immutable variant descriptors.",
       ],
       dependsOn: [
-        ...new Set([
-          ...evidenceDependencies,
-          ...inputRequirements.map(({ producerWorkItemId }) => producerWorkItemId),
-        ]),
+        ...new Set([...inputRequirements.map(({ producerWorkItemId }) => producerWorkItemId)]),
       ].sort(),
       baseSha: request.baseSha,
       scope: [],
@@ -2477,7 +2663,7 @@ function compilerProjectionTrace(
         addedEdges.push({
           itemId: item.id,
           dependsOn: dependency,
-          reason: "media-evidence",
+          reason: "media-input",
         });
       continue;
     }

@@ -7,6 +7,7 @@ import { parsePersistedCompiledObjective } from "../src/graph.js";
 import { parseWorkerPacket, type WorkerPacket } from "../src/protocol/worker-packet.js";
 import { DEFERRED_CAPABILITY_ADAPTERS } from "../src/toolchains/authority.js";
 import { projectCompilerProposal } from "../src/compiler/proposal.js";
+import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
 import {
   semanticPinnedFacts,
   semanticProposal,
@@ -137,6 +138,64 @@ describe("repository capability JSON Schema parity", () => {
     if (parsed.deliverable.kind === "repository-change") expect(parsed.mediaUses).toHaveLength(2);
   });
 
+  it("accepts the same format-neutral repository capture recipe", () => {
+    const descriptorDigest = "1".repeat(64);
+    const contentDigest = "3".repeat(64);
+    const recipeCore = {
+      id: "capture-result",
+      mediaUse: { intentId: "result-evidence", direction: "evidence-for" as const },
+      criterionIds: ["validated"],
+      scenario: { id: "fixture", fixture: "fixtures/result.bin", seed: null },
+      captureCommand: {
+        recipeId: "recipe-capture",
+        recipeDigest: "5".repeat(64),
+        command: "npm run capture",
+      },
+      outputs: [{ roleId: "capture", mediaType: "application/octet-stream" }],
+      profile: null,
+      comparison: {
+        kind: "exact" as const,
+        expectedDescriptorDigest: descriptorDigest,
+        policy: { kind: "exact-bytes" as const },
+      },
+      gate: { kind: "human-required" as const },
+    };
+    const withRecipe = {
+      ...structuredClone(packet),
+      validationCommands: [...packet.validationCommands, "npm run capture"],
+      assetInputs: [
+        {
+          manifestDigest: "2".repeat(64),
+          descriptorDigest,
+          contentDigest,
+          storageReceiptDigest: "4".repeat(64),
+          path: `assets/${contentDigest}/result.bin`,
+        },
+      ],
+      mediaUses: [
+        {
+          source: "imported" as const,
+          intentId: "result-evidence",
+          role: "acceptance-capture",
+          inputRoleId: null,
+          brief: "Capture one exact repository result.",
+          purpose: "acceptance-evidence" as const,
+          necessity: "required" as const,
+          obligationIds: ["validated"],
+          rationale: "The criterion requires exact bytes.",
+          direction: "evidence-for" as const,
+          criterionIds: ["validated"],
+          descriptorDigests: [descriptorDigest],
+          manifestDigest: "2".repeat(64),
+        },
+      ],
+      repositoryCaptureRecipes: [{ ...recipeCore, digest: compilerEvalDigest(recipeCore) }],
+    };
+    expect(validate(withRecipe), JSON.stringify(validate.errors)).toBe(true);
+    expect(acceptedByZod(withRecipe)).toBe(true);
+    expect(withRecipe.repositoryCaptureRecipes[0]!.comparison).not.toHaveProperty("command");
+  });
+
   it("accepts the strict asset-production shape and rejects repository and retired fields", () => {
     const intent = {
       id: "primary-media",
@@ -151,7 +210,8 @@ describe("repository capability JSON Schema parity", () => {
         mediaTypes: ["image/png" as const],
         minimumCount: 1,
         maximumCount: 1,
-        raster: {
+        profile: {
+          kind: "raster" as const,
           minimumWidth: 640,
           maximumWidth: 1024,
           minimumHeight: 480,
@@ -161,6 +221,7 @@ describe("repository capability JSON Schema parity", () => {
         },
       },
       review: { kind: "human-required" as const },
+      repositoryCapture: null,
       bindings: [{ workItemId: "consumer", direction: "input-to" as const, criterionIds: [] }],
     };
     const assetPacket: WorkerPacket = {

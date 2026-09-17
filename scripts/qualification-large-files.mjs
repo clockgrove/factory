@@ -105,7 +105,7 @@ function outputFiles(namespace) {
       phase: "metadata",
       bytes: executable,
       mode: "100755",
-      mediaType: "unknown",
+      mediaType: "application/octet-stream",
       generated: false,
     },
     {
@@ -113,7 +113,7 @@ function outputFiles(namespace) {
       phase: "metadata",
       bytes: metadata,
       mode: "100644",
-      mediaType: "unknown",
+      mediaType: "application/octet-stream",
       generated: true,
     },
     {
@@ -121,7 +121,7 @@ function outputFiles(namespace) {
       phase: "join",
       bytes: result,
       mode: "100644",
-      mediaType: "unknown",
+      mediaType: "application/octet-stream",
       generated: true,
     },
   ];
@@ -732,7 +732,7 @@ export function observeLargeFileTree({
       gitBlobOid: entry.oid,
       bytes: bytes.length,
       digest: hash(bytes),
-      mediaType: spec.mediaType ?? "unknown",
+      mediaType: spec.mediaType ?? "application/octet-stream",
       generated: spec.generated ?? false,
     };
   });

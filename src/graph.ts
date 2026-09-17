@@ -50,12 +50,14 @@ import {
   DeliveryHintSchema,
   ExecutionRequirementsSchema,
   RepositoryCapabilityBindingsSchema,
+  RepositoryCaptureRecipeSchema,
   RepositoryScopePathSchema,
   RuntimeBundleRequirementSchema,
   ValidationDesignSchema,
   parseWorkerPacket,
   type ExecutionRequirements,
   type RepositoryCapabilityBindings,
+  type RepositoryCaptureRecipe,
   type WorkerPacket,
 } from "./protocol/worker-packet.js";
 import { WorkerAssetInputSchema, type WorkerAssetInput } from "./assets/contracts.js";
@@ -123,6 +125,7 @@ export interface CompiledRepositoryWorkItem extends CompiledWorkItemCommon {
   validationCommands: string[];
   generatedAssetRequirements?: GeneratedAssetRequirement[] | undefined;
   mediaUses?: WorkerMediaIntentUse[] | undefined;
+  repositoryCaptureRecipes?: RepositoryCaptureRecipe[] | undefined;
   context?: z.infer<typeof ContextManifestSchema> | undefined;
   changeSurface?: z.infer<typeof ChangeSurfaceSchema> | undefined;
   criterionRisks?:
@@ -133,7 +136,7 @@ export interface CompiledRepositoryWorkItem extends CompiledWorkItemCommon {
     | undefined;
   validation?:
     | Array<{
-        tier: "mechanical" | "semantic" | "visual" | "deterministic-simulation";
+        tier: "mechanical" | "semantic" | "deterministic-simulation";
         criteria: string[];
         rationale?: string | undefined;
         evidenceCommands?: string[] | undefined;
@@ -150,6 +153,7 @@ export interface CompiledAssetProductionWorkItem extends CompiledWorkItemCommon 
   validationCommands: [];
   generatedAssetRequirements?: GeneratedAssetRequirement[] | undefined;
   mediaUses?: WorkerMediaIntentUse[] | undefined;
+  repositoryCaptureRecipes?: never;
   context?: never;
   changeSurface?: never;
   criterionRisks?: never;
@@ -517,6 +521,7 @@ const PersistedCompiledRepositoryWorkItemSchema = PersistedCompiledWorkItemCommo
   validationCommands: z.array(z.string().min(1).max(1_000)).min(1).max(32),
   generatedAssetRequirements: z.array(GeneratedAssetRequirementSchema).max(32).optional(),
   mediaUses: z.array(WorkerMediaIntentUseSchema).max(64).optional(),
+  repositoryCaptureRecipes: z.array(RepositoryCaptureRecipeSchema).max(32).optional(),
   context: ContextManifestSchema.optional(),
   changeSurface: ChangeSurfaceSchema.optional(),
   criterionRisks: CriterionRiskAssessmentSchema.optional(),
@@ -793,6 +798,7 @@ export function workerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
     validationCommands: wi.validationCommands,
     generatedAssetRequirements: wi.generatedAssetRequirements ?? [],
     mediaUses: wi.mediaUses ?? [],
+    repositoryCaptureRecipes: wi.repositoryCaptureRecipes ?? [],
     ...(wi.context ? { context: wi.context } : {}),
     ...(wi.changeSurface ? { changeSurface: wi.changeSurface } : {}),
     ...(wi.criterionRisks ? { criterionRisks: wi.criterionRisks } : {}),

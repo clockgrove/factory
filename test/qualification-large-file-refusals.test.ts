@@ -341,7 +341,7 @@ function fixture(scenario = "scope") {
           mode: "120000",
           bytes: raw.length,
           digest: hash(raw),
-          mediaType: "unknown",
+          mediaType: "application/octet-stream",
           generated: true,
         },
       ],
@@ -584,7 +584,7 @@ describe("installed large-file refusal ports (scripted Git/MCP contracts, no liv
       transfer: {
         rawTarget: "../lfs/canonical.bin",
         mode: "120000",
-        mediaType: "unknown",
+        mediaType: "application/octet-stream",
         materialized: false,
       },
     });

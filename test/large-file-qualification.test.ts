@@ -443,7 +443,7 @@ describe("installed large-file qualifier fixture and proof contracts", () => {
         mode: "120000",
         bytes: Buffer.byteLength("../lfs/canonical.bin"),
         digest: sha256("../lfs/canonical.bin"),
-        mediaType: "unknown",
+        mediaType: "application/octet-stream",
         generated: true,
       },
     ]);

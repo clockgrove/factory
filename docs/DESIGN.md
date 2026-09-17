@@ -722,9 +722,15 @@ media intent, capability-advertised semantic role, named input-role bindings, an
 implementation consumers. Its strict fulfillment selects either exact imported manifest asset IDs,
 or produced media with imported and upstream-intent inputs assigned to named roles; trusted
 projection resolves exact descriptor digests and derives an asset producer from advertised
-capabilities. Repository-result evidence remains part of ordinary repository validation, and a
-required unsupported evidence intent fails before graph publication. Code-native SVG, Mermaid,
-HTML/CSS/canvas and similar repository artifacts stay on the repository-change path.
+capabilities. An `evidence-for` intent never derives an asset producer. Trusted projection instead
+binds a pinned `.factory/validation-captures.json` entry to the target `repository-change` Work
+Item's `repositoryCaptureRecipes`. The recipe contains exact intent and criterion references,
+repository-observed command identities, bounded scenario inputs, declared output roles and MIME
+identities, an optional typed raster profile, exact-byte or grounded threshold comparison, and the
+required gate. It references the expected immutable `assetInputs` descriptor and contains no
+runtime result fields. A required unsupported evidence intent fails before graph publication; a
+helpful omission preserves the Work Item's obligations. Code-native SVG, Mermaid, HTML/CSS/canvas
+and similar repository artifacts stay on the repository-change path.
 
 An optional Objective asset manifest is part of activation and run identity. The Supervisor reads
 that exact manifest from immutable Git refs, reconstructs verified media in private temporary
@@ -733,8 +739,9 @@ only to a compiler adapter that advertises each exact media type. Raster dimensi
 animation are one nested media profile rather than fields on the canonical contract. The
 independent `compilerMediaEgress` policy controls public or private compiler input and authorized
 deterministic review rules. It grants no producer, provider, network, storage, credential, or
-execution authority. Compilation fails deterministically for a required media intent without a
-matching import or producer capability. Helpful omissions remain visible in the projection trace.
+execution authority. Compilation fails deterministically for a required implementation input
+without a matching import or producer capability, and for required repository evidence without
+grounded capture authority. Helpful omissions remain visible in the projection trace.
 The Supervisor routes `asset-production` through its own capability, admission, execution,
 accounting, storage, review, activation, and recovery lifecycle before ordinary repository backend
 selection. A later repository consumer reserves the exact activation bundle and activated packet.

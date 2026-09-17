@@ -7,7 +7,7 @@
   "humanLabeled": false,
   "heldOut": false,
   "candidateVerdictsRead": false,
-  "manifestSha256": "e080c200a7033689805f28e9c5ea7eb9b973bf30eb9d594e04d6db4836300df1",
+  "manifestSha256": "286fec03ba0726d4df7598ac190ea3866a39fbeecdb75fb6b3ff67e7859b9ec6",
   "limitation": "Automated original-source annotations supplied independently before candidate verdict inspection. Not human gold, held-out validation, measured model usage, or evidence of economic savings. Static path bindings are not behavioral proof; retained baseline properties do not mandate source edits.",
   "cases": [
     {

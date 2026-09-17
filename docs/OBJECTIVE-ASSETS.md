@@ -58,18 +58,32 @@ adds a typed raster profile, and requests human review or a policy-authorized de
 The model selects one strict fulfillment: exact imported manifest asset IDs, or produced media whose
 imported and prior-intent inputs are assigned to capability-advertised roles in
 `inputRoleBindings`. Factory resolves those IDs and derives the exact descriptor digests.
-The model cannot select providers, models, credentials, stores, URLs, network access, descriptor
-digests, or execution authority.
+For an `evidence-for` binding, the model also selects an expected imported asset, a bounded scenario,
+and grounded capture and optional comparison recipe IDs. It cannot author command text, output
+roles, MIME authority, comparison policy, providers, models, credentials, stores, URLs, network
+access, descriptor digests, or execution authority.
 
 Factory first matches an intent against the selected imported manifest. A matching implementation
 reference becomes an exact `assetInputs` binding on the repository Work Item. Otherwise Factory may
 derive an `asset-production` Work Item only from an advertised producer capability whose output and
 input roles are fully satisfied. That Work Item has a `clockgrove.factory/asset-set` deliverable, no
 repository scope, and no validation command. The current produced-media path supplies reviewed
-inputs to downstream implementation or decisions. Repository-result acceptance evidence remains in
-the ordinary repository validation flow; producing new media after implementation as acceptance
-evidence is outside this path. A required unsupported intent fails compilation deterministically;
-a helpful intent may be omitted with an explicit projection-trace disposition.
+inputs to downstream implementation or decisions. An `evidence-for` intent always remains on its
+bound `repository-change` Work Item. Trusted projection resolves `.factory/validation-captures.json`
+against commands observed from the pinned checkout and emits a digest-bound
+`repositoryCaptureRecipes` entry with the exact intent and criterion references, scenario input,
+declared output roles and MIME types, optional typed raster profile, exact-byte or bounded-threshold
+comparison, and review gate. Exact-byte comparison has no comparison command. The expected bytes
+reuse one exact `assetInputs` descriptor rather than repeating transport identity in the recipe.
+Required unsupported evidence fails compilation with a structured violation; helpful evidence may
+be omitted with an explicit trace disposition while its Work Item criteria and obligations remain.
+
+The committed catalog contains `captures` and `thresholdComparisons`; it has no protocol-version
+field or aliases. Every command must already be a repository-observed validation recipe. Its JSON
+shape is [`schemas/validation-captures.schema.json`](../schemas/validation-captures.schema.json).
+Capture recipes are format-neutral: outputs may be structured JSON, opaque binary, raster, or any
+other bounded MIME identity. Runtime trees, artifacts, environments, captured bytes, receipts, and
+decisions are execution results and never recipe fields.
 
 ## Produced asset lifecycle
 

@@ -234,7 +234,7 @@ export async function inspectPatchManifest(
           bytes: 0,
           digest: sha256(Buffer.alloc(0)),
           mode: "100644",
-          mediaType: "unknown",
+          mediaType: "application/octet-stream",
           generated: /(^|\/)(generated|dist|build)\//.test(path),
         });
         continue;
@@ -263,7 +263,7 @@ export async function inspectPatchManifest(
         action: "write",
         ...observed,
         mode: object.mode,
-        mediaType: object.mode === "120000" ? "unknown" : observed.mediaType,
+        mediaType: object.mode === "120000" ? "application/octet-stream" : observed.mediaType,
         generated: /(^|\/)(generated|dist|build)\//.test(path),
       });
       await rm(content);

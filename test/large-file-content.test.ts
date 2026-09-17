@@ -98,7 +98,7 @@ describe("bounded content-addressed artifacts", () => {
       bytes: bytes.length,
       digest: sha256(bytes),
       generated: true,
-      mediaType: "unknown",
+      mediaType: "application/octet-stream",
     });
     const reassembled = join(f.repository, "reassembled.patch");
     await materializeArtifactPatch(artifact, reassembled);

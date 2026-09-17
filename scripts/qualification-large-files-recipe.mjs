@@ -98,7 +98,7 @@ function outputFiles(namespace) {
       phase: "metadata",
       bytes: executable,
       mode: "100755",
-      mediaType: "unknown",
+      mediaType: "application/octet-stream",
       generated: false,
     },
     {
@@ -106,7 +106,7 @@ function outputFiles(namespace) {
       phase: "metadata",
       bytes: metadata,
       mode: "100644",
-      mediaType: "unknown",
+      mediaType: "application/octet-stream",
       generated: true,
     },
     {
@@ -114,7 +114,7 @@ function outputFiles(namespace) {
       phase: "join",
       bytes: result,
       mode: "100644",
-      mediaType: "unknown",
+      mediaType: "application/octet-stream",
       generated: true,
     },
   ];

@@ -47,6 +47,31 @@ const workItemsProposal = (count = 1): CompilerWorkItemsProposal => {
 };
 
 describe("adapter-owned compiler capabilities", () => {
+  it("rejects a protocol-version field in the validation capture catalog", () => {
+    const scripts = { test: "vitest run", capture: "node capture.mjs" };
+    const catalog = {
+      version: 1,
+      captures: [
+        {
+          command: "npm run capture",
+          outputs: [{ roleId: "capture", mediaType: "application/json" }],
+          profile: null,
+          gates: ["human-required"],
+        },
+      ],
+      thresholdComparisons: [],
+    };
+    const pinned = semanticPinnedFacts({
+      paths: ["package.json", "package-lock.json", ".factory/validation-captures.json"],
+      scripts,
+      documents: {
+        "package.json": JSON.stringify({ scripts }),
+        ".factory/validation-captures.json": JSON.stringify(catalog),
+      },
+    });
+    expect(() => compilerCapabilitiesForRepository(pinned, [])).toThrow();
+  });
+
   it("retains an unrelated observed generic recipe beside unsupported provider evidence", () => {
     const fixture = (paths: string[]) =>
       semanticPinnedFacts({
@@ -545,14 +570,14 @@ describe("strict semantic compiler contracts", () => {
     withReport("repairable", "proposal", [violation("report-truncated")], true);
 
     const invalidSurface = structuredClone(request);
-    invalidSurface.repository.validationSurfaces.visual = {
+    invalidSurface.repository.validationSurfaces.deterministicSimulation = {
       count: 0,
       digest: "a".repeat(64),
       sample: ["src/visible.ts"],
     };
     cases.push({ value: invalidSurface, accepted: false });
     const boundedSurface = structuredClone(request);
-    boundedSurface.repository.validationSurfaces.visual = {
+    boundedSurface.repository.validationSurfaces.deterministicSimulation = {
       count: 1,
       digest: "a".repeat(64),
       sample: ["src/visible.ts"],

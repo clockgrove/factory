@@ -55,14 +55,47 @@ async function fixture(target = "%PDF-1.7/../../../outside") {
 }
 
 describe("Git-object-only symlink artifact boundary", () => {
-  it("hashes target bytes with mode120000 and unknown media, without following or creating a link", async () => {
+  it("accepts a bounded non-raster MIME identity for a regular artifact file", async () => {
+    const fileManifest = ArtifactFileManifestSchema.parse({
+      baseTreeSha: "a".repeat(40),
+      resultTreeSha: "b".repeat(40),
+      files: [
+        {
+          path: "model.bin",
+          action: "write",
+          mode: "100644",
+          bytes: 4,
+          digest: sha256("safe"),
+          mediaType: "model/gltf-binary",
+          generated: false,
+        },
+      ],
+    });
+    const artifact = normalizeArtifact({
+      baseSha: "c".repeat(40),
+      patch: "inline",
+      changedPaths: ["model.bin"],
+      outcome: "succeeded",
+      fileManifest,
+    });
+    const ajv = new Ajv({ strict: false });
+    addFormats(ajv);
+    const validate = ajv.compile(
+      JSON.parse(
+        await readFile(new URL("../schemas/artifact.schema.json", import.meta.url), "utf8"),
+      ),
+    );
+    expect(validate(artifact), JSON.stringify(validate.errors)).toBe(true);
+  });
+
+  it("hashes target bytes with mode120000 and canonical opaque media, without following or creating a link", async () => {
     const f = await fixture();
     const manifest = await f.manifest();
     expect(manifest.files).toMatchObject([
       {
         path: "link",
         mode: "120000",
-        mediaType: "unknown",
+        mediaType: "application/octet-stream",
         bytes: Buffer.byteLength(f.target),
         digest: sha256(f.target),
       },

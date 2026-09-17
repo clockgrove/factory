@@ -1,8 +1,4 @@
-export type CriterionValidationTier =
-  | "mechanical"
-  | "semantic"
-  | "visual"
-  | "deterministic-simulation";
+export type CriterionValidationTier = "mechanical" | "semantic" | "deterministic-simulation";
 
 export type CriterionValidationDesign = {
   tier: CriterionValidationTier;
@@ -57,7 +53,6 @@ export function validateCriterionValidationDesign(args: {
   validation: readonly CriterionValidationDesign[];
   criterionRisks: readonly CriterionRiskAssessment[];
   deterministicSimulation: boolean;
-  visualValidation: boolean;
 }): void {
   const { itemId, acceptance, validationCommands, validation, criterionRisks } = args;
   if (validation.length < 1 || validation.length > 4)
@@ -87,8 +82,6 @@ export function validateCriterionValidationDesign(args: {
       throw new Error(`deterministic validation lacks command evidence in ${itemId}`);
     if (entry.tier === "deterministic-simulation" && !args.deterministicSimulation)
       throw new Error(`deterministic simulation is not repository-grounded in ${itemId}`);
-    if (entry.tier === "visual" && !args.visualValidation)
-      throw new Error(`visual validation is not repository-grounded in ${itemId}`);
     entry.criteria.forEach((criterion) => associated.add(criterion));
   }
   if (acceptance.some((criterion) => !associated.has(criterion)))

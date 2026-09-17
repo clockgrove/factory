@@ -21,7 +21,7 @@ const PathSchema = z
   .regex(/^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*$/)
   .refine((path) => !path.split("/").some((part) => part === "." || part === ".."));
 const IdSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
-const TierSchema = z.enum(["mechanical", "semantic", "visual", "deterministic-simulation"]);
+const TierSchema = z.enum(["mechanical", "semantic", "deterministic-simulation"]);
 const CriterionSchema = z
   .object({
     id: IdSchema,
@@ -35,7 +35,7 @@ const CriterionSchema = z
 const CaseSchema = z
   .object({
     id: IdSchema,
-    kind: z.enum(["typescript", "generated", "binary", "simulation", "visual"]),
+    kind: z.enum(["typescript", "generated", "binary", "simulation", "capture"]),
     title: z.string().min(1).max(256),
     objective: z.string().min(40).max(8000),
     baseline: z

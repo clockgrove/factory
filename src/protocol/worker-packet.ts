@@ -5,6 +5,7 @@ import { WorkerMediaIntentUseSchema } from "../media/contracts.js";
 import {
   AssetProductionDeliverableSchema,
   GeneratedAssetRequirementSchema,
+  MediaTypeSchema,
   RepositoryChangeDeliverableSchema,
 } from "../assets/media-intent.js";
 
@@ -154,7 +155,7 @@ export const ValidationDesignSchema = z
   .array(
     z
       .object({
-        tier: z.enum(["mechanical", "semantic", "visual", "deterministic-simulation"]),
+        tier: z.enum(["mechanical", "semantic", "deterministic-simulation"]),
         criteria: shortList(boundedText(2_000)).min(1),
         rationale: boundedText(2_000).optional(),
         evidenceCommands: shortList(boundedText(1_000), 32).optional(),
@@ -163,6 +164,140 @@ export const ValidationDesignSchema = z
   )
   .min(1)
   .max(4);
+
+const RepositoryCommandIdentitySchema = z
+  .object({
+    recipeId: safeId,
+    recipeDigest: sha256Digest,
+    command: boundedText(1_000),
+  })
+  .strict();
+
+const RepositoryCaptureOutputSchema = z
+  .object({
+    roleId: safeId,
+    mediaType: MediaTypeSchema,
+  })
+  .strict();
+
+const RepositoryCaptureProfileSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("raster"),
+      viewport: z
+        .object({
+          width: z.number().int().min(1).max(16_384),
+          height: z.number().int().min(1).max(16_384),
+        })
+        .strict()
+        .nullable(),
+      output: z
+        .object({
+          width: z.number().int().min(1).max(16_384),
+          height: z.number().int().min(1).max(16_384),
+        })
+        .strict()
+        .nullable(),
+      captureRoleId: safeId,
+      diffRoleId: safeId.nullable(),
+      previewRoleId: safeId.nullable(),
+    })
+    .strict(),
+]);
+
+const RepositoryCaptureComparisonSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("exact"),
+      expectedDescriptorDigest: sha256Digest,
+      policy: z.object({ kind: z.literal("exact-bytes") }).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("threshold"),
+      command: RepositoryCommandIdentitySchema,
+      expectedDescriptorDigest: sha256Digest,
+      policy: z
+        .object({
+          kind: z.literal("bounded-difference"),
+          metric: safeId,
+          maximumDifference: z.number().finite().min(0),
+        })
+        .strict(),
+    })
+    .strict(),
+]);
+
+const RepositoryCaptureGateSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("human-required") }).strict(),
+  z.object({ kind: z.literal("deterministic-preauthorized"), ruleId: safeId }).strict(),
+]);
+
+const RepositoryCaptureRecipeCoreSchema = z
+  .object({
+    id: safeId,
+    mediaUse: z.object({ intentId: safeId, direction: z.literal("evidence-for") }).strict(),
+    criterionIds: shortList(safeId, 64).min(1),
+    scenario: z
+      .object({
+        id: safeId,
+        fixture: boundedText(500).nullable(),
+        seed: boundedText(500).nullable(),
+      })
+      .strict(),
+    captureCommand: RepositoryCommandIdentitySchema,
+    outputs: shortList(RepositoryCaptureOutputSchema, 16).min(1),
+    profile: RepositoryCaptureProfileSchema.nullable(),
+    comparison: RepositoryCaptureComparisonSchema,
+    gate: RepositoryCaptureGateSchema,
+  })
+  .strict();
+
+export const RepositoryCaptureRecipeSchema = RepositoryCaptureRecipeCoreSchema.extend({
+  digest: sha256Digest,
+})
+  .strict()
+  .superRefine((value, context) => {
+    const { digest, ...core } = value;
+    if (digest !== createHash("sha256").update(canonicalJson(core)).digest("hex"))
+      context.addIssue({
+        code: "custom",
+        path: ["digest"],
+        message: "capture recipe digest mismatch",
+      });
+    if (value.scenario.fixture !== null && value.scenario.seed !== null)
+      context.addIssue({
+        code: "custom",
+        path: ["scenario"],
+        message: "scenario may bind a fixture or seed, not both",
+      });
+    if (new Set(value.criterionIds).size !== value.criterionIds.length)
+      context.addIssue({
+        code: "custom",
+        path: ["criterionIds"],
+        message: "capture criteria are duplicated",
+      });
+    const roles = value.outputs.map(({ roleId }) => roleId);
+    if (new Set(roles).size !== roles.length)
+      context.addIssue({
+        code: "custom",
+        path: ["outputs"],
+        message: "capture output roles are duplicated",
+      });
+    if (value.profile)
+      for (const roleId of [
+        value.profile.captureRoleId,
+        value.profile.diffRoleId,
+        value.profile.previewRoleId,
+      ])
+        if (roleId !== null && !roles.includes(roleId))
+          context.addIssue({
+            code: "custom",
+            path: ["profile"],
+            message: "raster profile references an undeclared output role",
+          });
+  });
 
 export const CriterionRiskAssessmentSchema = z
   .array(
@@ -412,6 +547,7 @@ export const RepositoryChangeWorkerPacketSchema = WorkerPacketCommon.extend({
   managedRuntimes: shortList(RuntimeBundleRequirementSchema, 8).optional(),
   generatedAssetRequirements: shortList(GeneratedAssetRequirementSchema, 32).default([]),
   mediaUses: shortList(WorkerMediaIntentUseSchema, 64).default([]),
+  repositoryCaptureRecipes: shortList(RepositoryCaptureRecipeSchema, 32).default([]),
   validationCommands: shortList(boundedText(1_000), 32).min(1),
 })
   .strict()
@@ -424,6 +560,52 @@ export const RepositoryChangeWorkerPacketSchema = WorkerPacketCommon.extend({
           path: ["mediaUses", index, "descriptorDigests"],
           message: "media use references a descriptor absent from immutable asset inputs",
         });
+    }
+    const inputs = new Set(packet.assetInputs.map(({ descriptorDigest }) => descriptorDigest));
+    const uses = new Map(packet.mediaUses.map((use) => [`${use.intentId}\0${use.direction}`, use]));
+    const recipeIds = new Set<string>();
+    for (const [index, recipe] of packet.repositoryCaptureRecipes.entries()) {
+      if (recipeIds.has(recipe.id))
+        context.addIssue({
+          code: "custom",
+          path: ["repositoryCaptureRecipes", index, "id"],
+          message: "capture recipe identity is duplicated",
+        });
+      recipeIds.add(recipe.id);
+      const use = uses.get(`${recipe.mediaUse.intentId}\0evidence-for`);
+      if (
+        !use ||
+        JSON.stringify([...use.criterionIds].sort()) !==
+          JSON.stringify([...recipe.criterionIds].sort())
+      )
+        context.addIssue({
+          code: "custom",
+          path: ["repositoryCaptureRecipes", index, "mediaUse"],
+          message: "capture recipe does not bind its exact evidence media use",
+        });
+      if (!inputs.has(recipe.comparison.expectedDescriptorDigest))
+        context.addIssue({
+          code: "custom",
+          path: ["repositoryCaptureRecipes", index, "comparison", "expectedDescriptorDigest"],
+          message: "capture comparison expected descriptor is absent from immutable asset inputs",
+        });
+      if (use && !use.descriptorDigests.includes(recipe.comparison.expectedDescriptorDigest))
+        context.addIssue({
+          code: "custom",
+          path: ["repositoryCaptureRecipes", index, "comparison", "expectedDescriptorDigest"],
+          message: "capture comparison expected descriptor differs from its evidence media use",
+        });
+      const commands = [
+        recipe.captureCommand.command,
+        ...(recipe.comparison.kind === "threshold" ? [recipe.comparison.command.command] : []),
+      ];
+      for (const command of commands)
+        if (!packet.validationCommands.includes(command))
+          context.addIssue({
+            code: "custom",
+            path: ["repositoryCaptureRecipes", index],
+            message: "capture recipe references an ungrounded validation command",
+          });
     }
   });
 
@@ -440,6 +622,7 @@ export const AssetProductionWorkerPacketSchema = WorkerPacketCommon.extend({
   managedRuntimes: z.never().optional(),
   generatedAssetRequirements: shortList(GeneratedAssetRequirementSchema, 32).default([]),
   mediaUses: shortList(WorkerMediaIntentUseSchema, 64).default([]),
+  repositoryCaptureRecipes: z.never().optional(),
 })
   .strict()
   .superRefine((packet, context) => {
@@ -464,19 +647,23 @@ type ParsedRepositoryChangeWorkerPacket = z.output<typeof RepositoryChangeWorker
 type ParsedAssetProductionWorkerPacket = z.output<typeof AssetProductionWorkerPacketSchema>;
 type OptionalPacketDefaults<T extends { assetInputs: unknown }> = Omit<
   T,
-  "assetInputs" | "generatedAssetRequirements" | "mediaUses"
+  "assetInputs" | "generatedAssetRequirements" | "mediaUses" | "repositoryCaptureRecipes"
 > & {
   assetInputs?: T["assetInputs"];
 } & ("generatedAssetRequirements" extends keyof T
     ? {
         generatedAssetRequirements?: T["generatedAssetRequirements"];
         mediaUses?: "mediaUses" extends keyof T ? T["mediaUses"] : never;
+        repositoryCaptureRecipes?: "repositoryCaptureRecipes" extends keyof T
+          ? T["repositoryCaptureRecipes"]
+          : never;
       }
     : object);
 export type RepositoryChangeWorkerPacket =
   OptionalPacketDefaults<ParsedRepositoryChangeWorkerPacket>;
 export type AssetProductionWorkerPacket = OptionalPacketDefaults<ParsedAssetProductionWorkerPacket>;
 export type WorkerPacket = RepositoryChangeWorkerPacket | AssetProductionWorkerPacket;
+export type RepositoryCaptureRecipe = z.infer<typeof RepositoryCaptureRecipeSchema>;
 export function isRepositoryChangeWorkerPacket(
   packet: WorkerPacket,
 ): packet is RepositoryChangeWorkerPacket {
@@ -538,7 +725,7 @@ export function semanticReviewCriteria(packet: WorkerPacket): string[] {
   return packet.acceptanceCriteria.filter((criterion) => {
     const routes = mapped.get(criterion);
     if (!routes?.length) return true;
-    if (routes.some((entry) => entry.tier === "semantic" || entry.tier === "visual")) return true;
+    if (routes.some((entry) => entry.tier === "semantic")) return true;
     return !routes.some(
       (entry) =>
         (entry.tier === "mechanical" || entry.tier === "deterministic-simulation") &&

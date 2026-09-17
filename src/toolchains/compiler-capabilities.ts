@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   CompilerToolchainCapabilitySchema,
   CompilerValidationRecipeSchema,
+  RepositoryCaptureCatalogSchema,
   type CompilerToolchainCapability,
   type CompilerValidationRecipe,
 } from "../compiler/contracts.js";
@@ -179,6 +180,7 @@ function adapterRecipes(
         adapterId: adapter.id,
         requiredTools: [...adapter.compiler!.requiredTools],
         networkDestinations: [],
+        capture: null,
       }),
     ];
   });
@@ -209,8 +211,47 @@ function genericRecipes(pinned: PinnedRepositoryFacts): CompilerValidationRecipe
         adapterId: null,
         requiredTools: [command.split(/\s+/)[0]!],
         networkDestinations: [],
+        capture: null,
       }),
     );
+}
+
+function bindRepositoryCaptureRecipes(
+  recipes: CompilerValidationRecipe[],
+  pinned: PinnedRepositoryFacts,
+): CompilerValidationRecipe[] {
+  const document = pinned.repository.documents?.[".factory/validation-captures.json"];
+  if (document === undefined) return recipes;
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(document);
+  } catch {
+    throw new Error("pinned .factory/validation-captures.json is invalid JSON");
+  }
+  const catalog = RepositoryCaptureCatalogSchema.parse(decoded);
+  const captureByCommand = new Map<string, CompilerValidationRecipe["capture"]>();
+  for (const entry of catalog.captures) {
+    if (captureByCommand.has(entry.command))
+      throw new Error("capture catalog configures one command more than once");
+    const { command, ...capture } = entry;
+    captureByCommand.set(command, { kind: "capture", ...capture });
+  }
+  for (const entry of catalog.thresholdComparisons) {
+    if (captureByCommand.has(entry.command))
+      throw new Error("capture catalog configures one command more than once");
+    const { command, ...comparison } = entry;
+    captureByCommand.set(command, { kind: "threshold-comparison", ...comparison });
+  }
+  const observed = new Set(recipes.map(({ command }) => command));
+  const unknown = [...captureByCommand.keys()].filter((command) => !observed.has(command));
+  if (unknown.length)
+    throw new Error(`capture catalog references unobserved command: ${unknown.sort().join(", ")}`);
+  return recipes.map((recipe) =>
+    CompilerValidationRecipeSchema.parse({
+      ...recipe,
+      capture: captureByCommand.get(recipe.command) ?? null,
+    }),
+  );
 }
 
 /** Pure prompt-safe capability selection over immutable facts and accepted policy. */
@@ -236,10 +277,13 @@ export function compilerCapabilitiesForRepository(
   const observedAdapters = TOOLCHAIN_AUTHORITY_ADAPTERS.filter(
     (adapter) => states.get(adapter.id) === "observed",
   );
-  const validationRecipes = [
-    ...observedAdapters.flatMap((adapter) => adapterRecipes(adapter, pinned)),
-    ...genericRecipes(pinned),
-  ]
+  const validationRecipes = bindRepositoryCaptureRecipes(
+    [
+      ...observedAdapters.flatMap((adapter) => adapterRecipes(adapter, pinned)),
+      ...genericRecipes(pinned),
+    ],
+    pinned,
+  )
     .sort((left, right) => left.id.localeCompare(right.id))
     .filter(
       (recipe, index, all) => all.findIndex((candidate) => candidate.id === recipe.id) === index,

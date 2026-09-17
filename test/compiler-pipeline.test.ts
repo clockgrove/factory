@@ -169,7 +169,7 @@ describe("bounded objective compiler", () => {
         risk: "ordinary" | "safety" | "security" | "destructive-action" | "accounting" | "recovery";
       }>;
       validation: Array<{
-        tier: "mechanical" | "semantic" | "visual" | "deterministic-simulation";
+        tier: "mechanical" | "semantic" | "deterministic-simulation";
         criteria: string[];
         rationale: string;
         evidenceCommands: string[];
@@ -206,7 +206,7 @@ describe("bounded objective compiler", () => {
       expect(packet.validation).toEqual(compiled.validation);
       expect(semanticReviewCriteria(packet)).toEqual(
         expected.validation
-          .filter((entry) => entry.tier === "semantic" || entry.tier === "visual")
+          .filter((entry) => entry.tier === "semantic")
           .flatMap((entry) => entry.criteria)
           .sort(),
       );

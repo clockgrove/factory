@@ -99,23 +99,31 @@
               "bytes": { "type": "integer", "minimum": 0, "maximum": 100000000 },
               "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
               "mediaType": {
-                "enum": [
-                  "image/png",
-                  "image/jpeg",
-                  "image/gif",
-                  "image/webp",
-                  "application/pdf",
-                  "application/wasm",
-                  "application/zip",
-                  "audio/wav",
-                  "video/mp4",
-                  "unknown"
-                ]
+                "type": "string",
+                "minLength": 3,
+                "maxLength": 160,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$"
               },
               "generated": { "type": "boolean" }
             },
-            "if": { "properties": { "mode": { "const": "120000" } } },
-            "then": { "properties": { "mediaType": { "const": "unknown" } } }
+            "allOf": [
+              {
+                "if": { "properties": { "mode": { "const": "120000" } }, "required": ["mode"] },
+                "then": {
+                  "properties": { "mediaType": { "const": "application/octet-stream" } }
+                }
+              },
+              {
+                "if": { "properties": { "action": { "const": "delete" } }, "required": ["action"] },
+                "then": {
+                  "properties": {
+                    "bytes": { "const": 0 },
+                    "digest": { "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+                    "mediaType": { "const": "application/octet-stream" }
+                  }
+                }
+              }
+            ]
           }
         }
       }

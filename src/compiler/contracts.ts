@@ -12,7 +12,11 @@ import {
   type ObligationInventory,
 } from "../evaluation/compiler-eval.js";
 import { NetworkDestinationSchema, RepositoryScopePathSchema } from "../protocol/worker-packet.js";
-import { CompilerMediaFactsSchema, MediaIntentSchema } from "../assets/media-intent.js";
+import {
+  CompilerMediaFactsSchema,
+  MediaIntentSchema,
+  MediaTypeSchema,
+} from "../assets/media-intent.js";
 
 export type JsonSchema = Readonly<Record<string, unknown>>;
 
@@ -90,6 +94,7 @@ export const COMPILER_VIOLATION_CODES = [
   "unauthorized-media-review",
   "inconsistent-media-necessity",
   "media-producer-unavailable",
+  "media-validation-unavailable",
   "media-dependency-cycle",
   "objective-count",
   "duplicate-objective-id",
@@ -134,6 +139,7 @@ export const COMPILER_TERMINAL_VIOLATION_PHASES: Readonly<
   "judge-context-limit": ["request"],
   "denied-network-destination": ["request"],
   "media-producer-unavailable": ["proposal"],
+  "media-validation-unavailable": ["proposal"],
 };
 
 export const CompilerViolationSchema = z
@@ -218,7 +224,7 @@ export const CompilerCriterionSchema = z
       .array(
         z
           .object({
-            tier: z.enum(["mechanical", "semantic", "visual", "deterministic-simulation"]),
+            tier: z.enum(["mechanical", "semantic", "deterministic-simulation"]),
             evidence: z.array(ValidationIntentRefSchema).max(32),
           })
           .strict(),
@@ -471,6 +477,115 @@ export function normalizeCompilerProposalProviderOutput(value: unknown): unknown
   return value;
 }
 
+const CompilerCaptureRecipeSchema = z
+  .object({
+    kind: z.literal("capture"),
+    outputs: z
+      .array(z.object({ roleId: Id, mediaType: MediaTypeSchema }).strict())
+      .min(1)
+      .max(16),
+    profile: z
+      .discriminatedUnion("kind", [
+        z
+          .object({
+            kind: z.literal("raster"),
+            viewport: z
+              .object({
+                width: z.number().int().min(1).max(16_384),
+                height: z.number().int().min(1).max(16_384),
+              })
+              .strict()
+              .nullable(),
+            output: z
+              .object({
+                width: z.number().int().min(1).max(16_384),
+                height: z.number().int().min(1).max(16_384),
+              })
+              .strict()
+              .nullable(),
+            captureRoleId: Id,
+            diffRoleId: Id.nullable(),
+            previewRoleId: Id.nullable(),
+          })
+          .strict(),
+      ])
+      .nullable(),
+    gates: z
+      .array(z.enum(["human-required", "deterministic-preauthorized"]))
+      .min(1)
+      .max(2),
+  })
+  .strict();
+const CompilerThresholdComparisonRecipeSchema = z
+  .object({
+    kind: z.literal("threshold-comparison"),
+    policy: z
+      .object({
+        id: Id,
+        metric: Id,
+        maximumDifference: z.number().finite().min(0),
+      })
+      .strict(),
+  })
+  .strict();
+const RepositoryCaptureCapabilitySchema = z.discriminatedUnion("kind", [
+  CompilerCaptureRecipeSchema,
+  CompilerThresholdComparisonRecipeSchema,
+]);
+
+export const RepositoryCaptureCatalogSchema = z
+  .object({
+    captures: z
+      .array(
+        CompilerCaptureRecipeSchema.omit({ kind: true })
+          .extend({ command: z.string().min(1).max(1_000) })
+          .strict(),
+      )
+      .max(32),
+    thresholdComparisons: z
+      .array(
+        CompilerThresholdComparisonRecipeSchema.omit({ kind: true })
+          .extend({ command: z.string().min(1).max(1_000) })
+          .strict(),
+      )
+      .max(32),
+  })
+  .strict()
+  .superRefine((catalog, context) => {
+    const commands = [...catalog.captures, ...catalog.thresholdComparisons].map(
+      ({ command }) => command,
+    );
+    if (new Set(commands).size !== commands.length)
+      context.addIssue({ code: "custom", message: "capture catalog commands are duplicated" });
+    for (const [index, capture] of catalog.captures.entries()) {
+      const roles = capture.outputs.map(({ roleId }) => roleId);
+      if (new Set(roles).size !== roles.length)
+        context.addIssue({
+          code: "custom",
+          path: ["captures", index, "outputs"],
+          message: "capture output roles are duplicated",
+        });
+      if (new Set(capture.gates).size !== capture.gates.length)
+        context.addIssue({
+          code: "custom",
+          path: ["captures", index, "gates"],
+          message: "capture gates are duplicated",
+        });
+      if (capture.profile)
+        for (const roleId of [
+          capture.profile.captureRoleId,
+          capture.profile.diffRoleId,
+          capture.profile.previewRoleId,
+        ])
+          if (roleId !== null && !roles.includes(roleId))
+            context.addIssue({
+              code: "custom",
+              path: ["captures", index, "profile"],
+              message: "capture profile references an undeclared output role",
+            });
+    }
+  });
+
 export const CompilerValidationRecipeSchema = z
   .object({
     id: Id,
@@ -478,6 +593,7 @@ export const CompilerValidationRecipeSchema = z
     adapterId: Id.nullable(),
     requiredTools: z.array(Id).max(16),
     networkDestinations: z.array(z.string().min(1).max(253)).max(16),
+    capture: RepositoryCaptureCapabilitySchema.nullable(),
   })
   .strict();
 export type CompilerValidationRecipe = z.infer<typeof CompilerValidationRecipeSchema>;
@@ -572,7 +688,6 @@ export const CompilerRequestSchema = z
         validationSurfaces: z
           .object({
             deterministicSimulation: CompilerValidationSurfaceSchema,
-            visual: CompilerValidationSurfaceSchema,
             python: CompilerValidationSurfaceSchema,
             rust: CompilerValidationSurfaceSchema,
             go: CompilerValidationSurfaceSchema,
@@ -713,7 +828,7 @@ const jsonCompilerWorkItemProposal = (
           items: strictObject({
             tier: {
               type: "string",
-              enum: ["mechanical", "semantic", "visual", "deterministic-simulation"],
+              enum: ["mechanical", "semantic", "deterministic-simulation"],
             },
             evidence: stringArray(32, intentSchema(scopePath)),
           }),
@@ -789,10 +904,11 @@ const jsonMediaIntent = strictObject({
     },
     minimumCount: { type: "integer", minimum: 1, maximum: 16 },
     maximumCount: { type: "integer", minimum: 1, maximum: 16 },
-    raster: {
+    profile: {
       anyOf: [
         { type: "null" },
         strictObject({
+          kind: { type: "string", const: "raster" },
           minimumWidth: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
           maximumWidth: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
           minimumHeight: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
@@ -809,6 +925,29 @@ const jsonMediaIntent = strictObject({
       strictObject({
         kind: { type: "string", const: "deterministic-preauthorized" },
         ruleId: jsonId,
+      }),
+    ],
+  },
+  repositoryCapture: {
+    anyOf: [
+      { type: "null" },
+      strictObject({
+        expectedAssetId: jsonId,
+        scenario: strictObject({
+          id: jsonId,
+          fixture: { type: ["string", "null"], minLength: 1, maxLength: 500 },
+          seed: { type: ["string", "null"], minLength: 1, maxLength: 500 },
+        }),
+        captureRecipeId: jsonId,
+        comparison: {
+          anyOf: [
+            strictObject({ kind: { type: "string", const: "exact" } }),
+            strictObject({
+              kind: { type: "string", const: "threshold" },
+              recipeId: jsonId,
+            }),
+          ],
+        },
       }),
     ],
   },
@@ -1275,6 +1414,72 @@ const jsonRecipe = strictObject({
   adapterId: { oneOf: [jsonId, { type: "null" }] },
   requiredTools: stringArray(16, jsonId),
   networkDestinations: stringArray(16, { type: "string", minLength: 1, maxLength: 253 }),
+  capture: {
+    anyOf: [
+      { type: "null" },
+      strictObject({
+        kind: { const: "capture" },
+        outputs: {
+          type: "array",
+          minItems: 1,
+          maxItems: 16,
+          items: strictObject({
+            roleId: jsonId,
+            mediaType: {
+              type: "string",
+              minLength: 1,
+              maxLength: 160,
+              pattern:
+                "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$",
+            },
+          }),
+        },
+        profile: {
+          anyOf: [
+            { type: "null" },
+            strictObject({
+              kind: { const: "raster" },
+              viewport: {
+                anyOf: [
+                  { type: "null" },
+                  strictObject({
+                    width: { type: "integer", minimum: 1, maximum: 16_384 },
+                    height: { type: "integer", minimum: 1, maximum: 16_384 },
+                  }),
+                ],
+              },
+              output: {
+                anyOf: [
+                  { type: "null" },
+                  strictObject({
+                    width: { type: "integer", minimum: 1, maximum: 16_384 },
+                    height: { type: "integer", minimum: 1, maximum: 16_384 },
+                  }),
+                ],
+              },
+              captureRoleId: jsonId,
+              diffRoleId: { anyOf: [jsonId, { type: "null" }] },
+              previewRoleId: { anyOf: [jsonId, { type: "null" }] },
+            }),
+          ],
+        },
+        gates: {
+          type: "array",
+          minItems: 1,
+          maxItems: 2,
+          items: { enum: ["human-required", "deterministic-preauthorized"] },
+        },
+      }),
+      strictObject({
+        kind: { const: "threshold-comparison" },
+        policy: strictObject({
+          id: jsonId,
+          metric: jsonId,
+          maximumDifference: { type: "number", minimum: 0 },
+        }),
+      }),
+    ],
+  },
 });
 const jsonToolchain = strictObject({
   adapterId: jsonId,
@@ -1396,7 +1601,6 @@ export const COMPILER_REQUEST_JSON_SCHEMA = {
       toolchains: { type: "array", maxItems: 32, items: jsonToolchain },
       validationSurfaces: strictObject({
         deterministicSimulation: jsonValidationSurface,
-        visual: jsonValidationSurface,
         python: jsonValidationSurface,
         rust: jsonValidationSurface,
         go: jsonValidationSurface,

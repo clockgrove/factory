@@ -846,6 +846,7 @@ export const RepositoryCaptureCatalogSchema = z
       }
     }
   });
+export type RepositoryCaptureCatalog = z.infer<typeof RepositoryCaptureCatalogSchema>;
 
 export const CompilerValidationRecipeSchema = z
   .object({

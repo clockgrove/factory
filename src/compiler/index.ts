@@ -1,10 +1,16 @@
 import {
   ExecutionRequirementsSchema,
+  RepositoryCaptureRecipeSchema,
   RepositoryScopePathSchema,
   type ExecutionRequirements,
   type RepositoryCaptureRecipe,
 } from "../protocol/worker-packet.js";
-import { addScopeSerializationEdges } from "../graph.js";
+import {
+  addScopeSerializationEdges,
+  type CompiledObjective as PersistedCompiledObjective,
+  type CompiledRepositoryWorkItem,
+  type CompiledWorkItem,
+} from "../graph.js";
 import {
   analyzeDependencies,
   exclusiveResourcePairs,
@@ -123,6 +129,7 @@ export type CompilerWorkItemInput = Omit<
   | "economicReview"
   | "repositoryCapabilities"
   | "managedRuntimes"
+  | "repositoryCaptureRecipes"
 > & {
   exclusiveResources?: string[] | undefined;
   validation?: CriterionValidationDesign[] | undefined;
@@ -261,7 +268,7 @@ function canonicalRequirements(value: unknown): ExecutionRequirements {
 }
 
 export function validateCompiledObjective(
-  objective: CompilerObjective,
+  objective: CompilerObjective | PersistedCompiledObjective,
   commandEvidence?: string[] | RepositoryFacts,
 ): void {
   if (objective.workItems.length < 1 || objective.workItems.length > 100)
@@ -286,7 +293,11 @@ export function validateCompiledObjective(
         .join("\n")}`,
     );
   };
-  const byId = new Map<string, CompilerWorkItem>();
+  type RepositoryValidationItem = CompilerWorkItem | CompiledRepositoryWorkItem;
+  const isRepositoryValidationItem = (
+    item: CompilerWorkItem | CompiledWorkItem,
+  ): item is RepositoryValidationItem => item.deliverable.kind === "repository-change";
+  const byId = new Map<string, CompilerWorkItem | CompiledWorkItem>();
   const observed = commandEvidence
     ? Array.isArray(commandEvidence)
       ? commandEvidence
@@ -300,7 +311,7 @@ export function validateCompiledObjective(
     const parsed = futureToolchainCommand(command);
     return Boolean(parsed && repositoryLacksFutureToolchainAuthority(parsed.adapter, basePaths));
   };
-  const ungrounded: Array<{ item: CompilerWorkItem; command: string }> = [];
+  const ungrounded: Array<{ item: RepositoryValidationItem; command: string }> = [];
   for (const w of objective.workItems) {
     if (byId.has(w.id)) reject(`duplicate Work Item id ${w.id}`);
     byId.set(w.id, w);
@@ -313,6 +324,20 @@ export function validateCompiledObjective(
         reject(
           `invalid acceptance criterion ${index + 1} in ${w.id}: ${problem}; state a concrete expected behavior or result and associate it with validation evidence`,
         );
+    }
+    if (!isRepositoryValidationItem(w)) continue;
+    const validCaptureRecipes: RepositoryCaptureRecipe[] = [];
+    for (const recipe of w.repositoryCaptureRecipes ?? []) {
+      const parsed = RepositoryCaptureRecipeSchema.safeParse(recipe);
+      if (!parsed.success) {
+        reject(`invalid repository capture recipe in ${w.id}`);
+        continue;
+      }
+      validCaptureRecipes.push(parsed.data);
+      if (!w.validationCommands.includes(parsed.data.captureCommand.command))
+        reject(`repository capture recipe references ungrounded command in ${w.id}`);
+      if (parsed.data.criteria.some((criterion) => !w.acceptance.includes(criterion)))
+        reject(`repository capture recipe references unknown acceptance criterion in ${w.id}`);
     }
     if (w.validationCommands.length < 1) reject(`missing validation command in ${w.id}`);
     if (commandEvidence) {
@@ -383,9 +408,14 @@ export function validateCompiledObjective(
           itemId: w.id,
           acceptance: w.acceptance,
           validationCommands: w.validationCommands,
-          validation: w.validation!,
+          validation: w.validation!.map((entry) => ({
+            ...entry,
+            rationale: entry.rationale ?? "",
+            evidenceCommands: entry.evidenceCommands ?? [],
+          })),
           criterionRisks: w.criterionRisks!,
           deterministicSimulation: validationProfile?.deterministicSimulation ?? true,
+          repositoryCaptureRecipes: validCaptureRecipes,
         }),
       );
     if (w.changeSurface) {
@@ -413,9 +443,10 @@ export function validateCompiledObjective(
   for (const entry of dependencyAnalysis.unknownDependencies)
     reject(`unknown dependency ${entry.dependencyId}`);
   const path = dependencyAnalysis.hasPath;
-  const futureProviders = new Map<string, CompilerWorkItem[]>();
+  const futureProviders = new Map<string, RepositoryValidationItem[]>();
   if (facts)
     for (const item of byId.values()) {
+      if (!isRepositoryValidationItem(item)) continue;
       const parsed =
         item.validationCommands.length === 1
           ? futureToolchainCommand(item.validationCommands[0]!)
@@ -464,38 +495,48 @@ export function validateCompiledObjective(
     }
   }
   const items = [...byId.values()];
-  for (const [left, right] of overlappingScopePairs(items))
+  const repositoryItems = items.filter(isRepositoryValidationItem);
+  for (const [left, right] of overlappingScopePairs(repositoryItems))
     if (!path(left, right) && !path(right, left))
       reject(`overlapping unordered scopes: ${left}, ${right}`);
   for (const pair of exclusiveResourcePairs(
-    items.map((item) => ({
+    repositoryItems.map((item) => ({
       id: item.id,
       exclusiveResources: item.changeSurface?.exclusiveResources ?? [],
     })),
   ))
     if (!path(pair.left, pair.right) && !path(pair.right, pair.left))
       reject(`conflicting unordered exclusive resource: ${pair.left}, ${pair.right}`);
-  for (const w of items) {
+  for (const w of repositoryItems) {
     const d = w.delivery;
     if (!d) continue;
+    const repositoryDependencies = w.dependsOn.filter(
+      (id) => byId.get(id)?.deliverable.kind === "repository-change",
+    );
     if (
       d.relationship === "root" &&
-      (d.parentWorkItem || w.dependsOn.length !== 0 || d.group !== w.id)
+      (d.parentWorkItem || repositoryDependencies.length !== 0 || d.group !== w.id)
     )
       reject(`impossible root topology for ${w.id}`);
     if (
       d.relationship === "continue-stack" &&
       (!d.parentWorkItem ||
-        w.dependsOn.length !== 1 ||
-        w.dependsOn[0] !== d.parentWorkItem ||
+        repositoryDependencies.length !== 1 ||
+        repositoryDependencies[0] !== d.parentWorkItem ||
+        byId.get(d.parentWorkItem)?.deliverable.kind !== "repository-change" ||
         byId.get(d.parentWorkItem)?.delivery?.group !== d.group)
     )
       reject(`impossible stack topology for ${w.id}`);
     if (d.relationship === "join-after-merge") {
-      const groups = w.dependsOn.map((id) => byId.get(id)?.delivery?.group);
+      const groups = repositoryDependencies.map((id) => {
+        const dependency = byId.get(id);
+        return dependency?.deliverable.kind === "repository-change"
+          ? dependency.delivery?.group
+          : dependency?.id;
+      });
       if (
         d.parentWorkItem ||
-        w.dependsOn.length < 2 ||
+        repositoryDependencies.length < 2 ||
         groups.some((g) => !g) ||
         new Set(groups).size !== groups.length ||
         groups.includes(d.group)
@@ -505,8 +546,9 @@ export function validateCompiledObjective(
     if (
       d.relationship === "sibling" &&
       (d.parentWorkItem ||
-        w.dependsOn.length !== 1 ||
-        byId.get(w.dependsOn[0]!)?.delivery?.group === d.group ||
+        repositoryDependencies.length !== 1 ||
+        (byId.get(repositoryDependencies[0]!)?.deliverable.kind === "repository-change" &&
+          byId.get(repositoryDependencies[0]!)?.delivery?.group === d.group) ||
         d.group !== w.id)
     )
       reject(`impossible sibling topology for ${w.id}`);
@@ -526,8 +568,13 @@ export function compileObjective(input: CompileInput): CompilerObjective {
       exclusiveResources: _claims,
       validation: authoredValidation,
       criterionRisks: authoredCriterionRisks,
+      repositoryCaptureRecipes: _repositoryCaptureRecipes,
+      deterministicCaptureCriteria: _deterministicCaptureCriteria,
       ...source
-    } = w;
+    } = w as CompilerWorkItemInput & {
+      repositoryCaptureRecipes?: unknown;
+      deterministicCaptureCriteria?: unknown;
+    };
     const scope = w.scope.map((p) => RepositoryScopePathSchema.parse(p));
     const manifest = buildContextManifest(facts, scope);
     const scopedFacts = facts.files.filter((f) =>

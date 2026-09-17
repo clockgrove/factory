@@ -145,6 +145,7 @@ describe("repository capability JSON Schema parity", () => {
       id: "capture-result",
       mediaUse: { intentId: "result-evidence", direction: "evidence-for" as const },
       criterionIds: ["validated"],
+      criteria: [packet.acceptanceCriteria[0]!],
       scenario: { id: "fixture", fixture: "fixtures/result.bin", seed: null },
       captureCommand: {
         recipeId: "recipe-capture",
@@ -229,6 +230,7 @@ describe("repository capability JSON Schema parity", () => {
       id: "capture-raster",
       mediaUse: { intentId: "raster-evidence", direction: "evidence-for" as const },
       criterionIds: ["validated"],
+      criteria: [packet.acceptanceCriteria[0]!],
       scenario: { id: "desktop", fixture: null, seed: "fixed" },
       captureCommand: {
         recipeId: "recipe-raster",

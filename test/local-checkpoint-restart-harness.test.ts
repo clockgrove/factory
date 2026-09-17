@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
+import { SystemdUserService } from "../src/service/systemd-user-service.js";
 import { boundedPolicy } from "../scripts/verify-live-objective.mjs";
 import {
   assertControllerUnit,
@@ -1476,28 +1480,97 @@ describe("strict repository takeover receipt", () => {
 });
 
 describe("preinstalled configuration identity", () => {
-  const expected = {
-    repository,
-    checkout,
-    node: "/usr/bin/node",
-    bundle: "/home/example/.codex/plugins/cache/personal/factory/2.0.26/dist/factory.js",
-    identity: "d".repeat(64),
+  let root: string;
+  let body: string;
+  let expected: {
+    repository: string;
+    checkout: string;
+    node: string;
+    bundle: string;
+    identity: string;
   };
-  const body = `# Managed by Clockgrove Factory v2\n[Unit]\nDescription=Clockgrove Factory repository controller for ${repository}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${checkout}\nEnvironment="PATH=/usr/bin:/bin"\n# FactoryExecutableIdentity=sha256:${expected.identity}\nExecStart="${expected.node}" "${expected.bundle}" controller run "${repository}" --repo "${checkout}" --executable-identity "sha256:${expected.identity}"\nRestart=on-failure\nRestartPreventExitStatus=2 65 70 72 78 130 203\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
-  it("accepts only the exact generated nonsecret unit", () =>
-    expect(assertControllerUnit(body, expected)).toMatch(/^[a-f0-9]{64}$/));
-  it.each([
-    body.replace("KillMode=control-group", "KillMode=process"),
-    body.replace("controller run", "run"),
-    body.replace(expected.bundle, "/tmp/other.js"),
-    body.replace(expected.identity, "e".repeat(64)),
-    body.replace("[Service]", "[Service]\nExecStartPre=/tmp/other"),
-    body.replace('Environment="PATH=/usr/bin:/bin"', 'Environment="GITHUB_TOKEN=private"'),
-    body.replace(
-      'Environment="PATH=/usr/bin:/bin"',
-      'Environment="PATH=/usr/bin:/bin"\nEnvironment="PATH=/tmp"',
-    ),
-  ])("rejects changed executable, mutation hooks or secrets", (changed) =>
-    expect(() => assertControllerUnit(changed, expected)).toThrow(),
-  );
+
+  beforeAll(async () => {
+    root = await mkdtemp(join(tmpdir(), "factory-checkpoint-controller-unit-"));
+    const bundle = join(root, "factory bundle", "factory.js");
+    const codex = join(root, "codex tools", "pinned codex");
+    await mkdir(dirname(bundle), { recursive: true });
+    await mkdir(dirname(codex), { recursive: true });
+    await writeFile(bundle, "process.exit(0);\n");
+    await writeFile(codex, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    const input = { repository, checkout: root };
+    let enabled = false;
+    let loaded = false;
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: join(root, "units"),
+      commandEnvironment: () => ({
+        PATH: dirname(codex),
+        FACTORY_CODEX_PATH: codex,
+        FACTORY_MANAGEMENT_TRANSCRIPT_DIR: join(root, "diagnostic transcripts"),
+      }),
+      currentUserManager: async () => ({
+        uid: process.getuid?.() ?? 1000,
+        runtimeDirectory: `/run/user/${process.getuid?.() ?? 1000}`,
+        environment: {},
+      }),
+      run: async (args) => {
+        if (args[0] === "show" && args[1] === "--property=Version") {
+          return { stdout: "259\n" };
+        }
+        if (args[0] === "daemon-reload") loaded = true;
+        if (args[0] === "enable") enabled = true;
+        if (args[0] === "show") {
+          return {
+            stdout: `Id=${args[1]}\nLoadState=${loaded ? "loaded" : "not-found"}\nUnitFileState=${enabled ? "enabled" : "disabled"}\nActiveState=inactive\nResult=success\nExecMainStatus=0\nNRestarts=0\n`,
+          };
+        }
+        return {};
+      },
+    });
+    const installed = await service.install(input);
+    if (!installed.executableIdentity?.startsWith("sha256:")) {
+      throw new Error("production fixture lacks its executable identity");
+    }
+    body = await readFile(service.unitPath(input), "utf8");
+    expected = {
+      ...input,
+      node: process.execPath,
+      bundle,
+      identity: installed.executableIdentity.slice("sha256:".length),
+    };
+  });
+
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("accepts the production-generated unit with every supported environment", () => {
+    expect(body).toContain('Environment="FACTORY_CODEX_PATH=');
+    expect(body).toContain('Environment="FACTORY_MANAGEMENT_TRANSCRIPT_DIR=');
+    expect(assertControllerUnit(body, expected)).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("rejects changed identities, guards, lifecycle fields, hooks and environments", () => {
+    const nodeGuard = `ExecCondition=:/usr/bin/test -x "${expected.node}"\n`;
+    const bundleGuard = `ExecCondition=:/usr/bin/test -r "${expected.bundle}"\n`;
+    const changes = [
+      body.replace(nodeGuard, ""),
+      body.replace(bundleGuard, bundleGuard.replace(expected.bundle, "/tmp/other.js")),
+      body.replace("KillMode=control-group", "KillMode=process"),
+      body.replace("controller run", "run"),
+      body.replace(`"${expected.bundle}" controller`, '"/tmp/other.js" controller'),
+      body.replace(`# FactoryExecutableIdentity=sha256:${expected.identity}\n`, ""),
+      body.replace(
+        `--executable-identity "sha256:${expected.identity}"`,
+        `--executable-identity "sha256:${"e".repeat(64)}"`,
+      ),
+      body.replace("[Service]", "[Service]\nExecStartPre=/tmp/other"),
+      body.replace('Environment="PATH=', 'Environment="GITHUB_TOKEN='),
+      body.replace('Environment="PATH=', 'Environment="PATH=/tmp"\nEnvironment="PATH='),
+    ];
+    for (const changed of changes) {
+      expect(() => assertControllerUnit(changed, expected)).toThrow();
+    }
+  });
 });

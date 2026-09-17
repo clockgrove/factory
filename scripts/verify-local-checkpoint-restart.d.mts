@@ -174,7 +174,13 @@ export function checkpointCompletionReady(
 export function checkpointLease(commit: unknown, oid: string): Record<string, unknown>;
 export function assertControllerUnit(
   body: string,
-  expected: { repository: string; checkout: string; node: string; bundle: string },
+  expected: {
+    repository: string;
+    checkout: string;
+    node: string;
+    bundle: string;
+    identity: string;
+  },
 ): string;
 export interface CheckpointPort {
   pauseRequestId: string;

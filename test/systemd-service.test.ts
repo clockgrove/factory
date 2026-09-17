@@ -1329,7 +1329,7 @@ describe("systemd user service lifecycle", () => {
       /controller-lifecycle-outcome-unknown: uninstall failed.*rollback could not be verified.*fixture rollback reload failure/,
     );
     expect(await readFile(service.unitPath(input), "utf8")).toContain(
-      "# Managed by Clockgrove Factory v2",
+      "# Managed by Clockgrove Factory",
     );
     expect(enabled).toBe(true);
     expect(failedReloads).toBe(2);
@@ -1421,7 +1421,7 @@ describe("systemd user service lifecycle", () => {
       /controller-lifecycle-outcome-unknown:.*original controller process.*repair was verified/,
     );
     expect(await readFile(service.unitPath(input), "utf8")).toContain(
-      "# Managed by Clockgrove Factory v2",
+      "# Managed by Clockgrove Factory",
     );
     expect(enabled).toBe(true);
     expect(active).toBe(true);
@@ -1582,7 +1582,7 @@ describe("systemd user service lifecycle", () => {
     expect(unit).toContain(
       `ExecStart="${process.execPath}" "${bundle}" controller run "Owner/Repo" --repo "/work/repo"`,
     );
-    expect(unit).toMatch(/^# Managed by Clockgrove Factory v2/);
+    expect(unit).toMatch(/^# Managed by Clockgrove Factory/);
     expect(unit).toMatch(/^# FactoryExecutableIdentity=sha256:[a-f0-9]{64}$/m);
     expect(unit).toContain("RestartPreventExitStatus=2 65 70 72 78 130 203");
     expect(await service.start(input)).toMatchObject({ active: true });
@@ -1639,7 +1639,7 @@ describe("systemd user service lifecycle", () => {
     const input = { repository: "Owner/Repo", checkout: "/work/repo" };
     await writeFile(
       service.unitPath(input),
-      '# Managed by Clockgrove Factory v2\n[Service]\nExecStart="/usr/bin/node" "/missing/old-cache/factory.js" controller run "Owner/Repo" --repo "/work/repo"\n',
+      '# Managed by Clockgrove Factory\n[Service]\nExecStart="/usr/bin/node" "/missing/old-cache/factory.js" controller run "Owner/Repo" --repo "/work/repo"\n',
     );
 
     expect(await service.status(input)).toMatchObject({

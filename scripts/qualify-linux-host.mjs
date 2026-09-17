@@ -254,7 +254,7 @@ async function controllerInstallCycle(cli, temporary, expectedVersion) {
     assert.equal(installed.unit, unit);
     assert.ok(installed.installed && installed.enabled && !installed.active);
     const body = await readFile(path, "utf8");
-    assert.ok(body.startsWith("# Managed by Clockgrove Factory v2\n"));
+    assert.ok(body.startsWith("# Managed by Clockgrove Factory\n"));
     assert.ok(body.includes(cli) && body.includes("KillMode=control-group\n"));
     await command("systemd-analyze", ["--user", "verify", path]);
     assert.equal(await command(process.execPath, [cli, "--version"]), expectedVersion);

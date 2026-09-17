@@ -1175,20 +1175,106 @@ function hostIdentity() {
 
 export function assertControllerUnit(body, expected) {
   assert.ok(Buffer.byteLength(body) <= 16384);
-  const environments = body.split("\n").filter((line) => line.startsWith("Environment="));
-  assert.ok(environments.length >= 1 && environments.length <= 2);
-  assert.ok(environments[0].startsWith('Environment="PATH='));
-  if (environments.length === 2)
-    assert.ok(environments[1].startsWith('Environment="FACTORY_CODEX_PATH='));
-  for (const line of environments)
-    assert.match(
-      line,
-      /^Environment="(?:PATH=\/[A-Za-z0-9_./:-]+|FACTORY_CODEX_PATH=\/[A-Za-z0-9_./-]+)"$/,
-    );
   assert.match(expected.identity, /^[a-f0-9]{64}$/);
-  const rendered = `# Managed by Clockgrove Factory v2\n[Unit]\nDescription=Clockgrove Factory repository controller for ${expected.repository}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${expected.checkout}\n${environments.map((line) => `${line}\n`).join("")}# FactoryExecutableIdentity=sha256:${expected.identity}\nExecStart="${expected.node}" "${expected.bundle}" controller run "${expected.repository}" --repo "${expected.checkout}" --executable-identity "sha256:${expected.identity}"\nRestart=on-failure\nRestartPreventExitStatus=2 65 70 72 78 130 203\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
-  assert.equal(body, rendered, "controller config differs from exact installed identity");
+  assert.ok(expected.node.startsWith("/") && expected.bundle.startsWith("/"));
+  const lines = body.split("\n");
+  const environments = lines.filter((line) => line.startsWith("Environment="));
+  const assignments = environments.map((line) => {
+    let assignment;
+    try {
+      assignment = JSON.parse(line.slice("Environment=".length)).replaceAll("%%", "%");
+    } catch {
+      assert.fail("invalid controller environment assignment");
+    }
+    assert.equal(line, `Environment=${systemdQuote(assignment)}`);
+    const separator = assignment.indexOf("=");
+    assert.ok(separator > 0, "invalid controller environment assignment");
+    return [assignment.slice(0, separator), assignment.slice(separator + 1)];
+  });
+  assert.deepEqual(
+    assignments.map(([name]) => name),
+    [
+      "PATH",
+      ...(assignments.some(([name]) => name === "FACTORY_CODEX_PATH")
+        ? ["FACTORY_CODEX_PATH"]
+        : []),
+      ...(assignments.some(([name]) => name === "FACTORY_MANAGEMENT_TRANSCRIPT_DIR")
+        ? ["FACTORY_MANAGEMENT_TRANSCRIPT_DIR"]
+        : []),
+    ],
+    "unsupported or duplicate controller environment assignment",
+  );
+  const unsafeEnvironmentValue = (value) => /[\p{Cc}\p{Zl}\p{Zp}]/u.test(value);
+  for (const [name, value] of assignments) {
+    assert.ok(!unsafeEnvironmentValue(value), `unsafe ${name} value`);
+    if (name === "PATH") {
+      const directories = value.split(":");
+      assert.ok(
+        directories.length > 0 &&
+          directories.every(
+            (directory) => directory.startsWith("/") && resolve(directory) === directory,
+          ),
+        "controller PATH must contain only absolute directories",
+      );
+    } else {
+      assert.ok(
+        value.startsWith("/") && resolve(value) === value,
+        `${name} must be an absolute path`,
+      );
+    }
+  }
+  const guards = [
+    `ExecCondition=:/usr/bin/test -f ${systemdQuote(expected.node)}`,
+    `ExecCondition=:/usr/bin/test -x ${systemdQuote(expected.node)}`,
+    `ExecCondition=:/usr/bin/test -f ${systemdQuote(expected.bundle)}`,
+    `ExecCondition=:/usr/bin/test -r ${systemdQuote(expected.bundle)}`,
+  ];
+  const checkout = resolve(expected.checkout);
+  const identity = `sha256:${expected.identity}`;
+  const start = `ExecStart=${systemdQuote(expected.node)} ${systemdQuote(expected.bundle)} controller run ${systemdQuote(expected.repository)} --repo ${systemdQuote(checkout)} --executable-identity ${systemdQuote(identity)}`;
+  assert.deepEqual(
+    lines,
+    [
+      "# Managed by Clockgrove Factory",
+      "[Unit]",
+      `Description=Clockgrove Factory repository controller for ${expected.repository}`,
+      "After=network-online.target",
+      "Wants=network-online.target",
+      "",
+      "[Service]",
+      "Type=simple",
+      `WorkingDirectory=${systemdDirectivePath(checkout)}`,
+      ...environments,
+      `# FactoryExecutableIdentity=${identity}`,
+      ...guards,
+      start,
+      "Restart=on-failure",
+      "RestartPreventExitStatus=2 65 70 72 78 130 203",
+      "RestartSec=30",
+      "TimeoutStopSec=90",
+      "KillMode=control-group",
+      "",
+      "[Install]",
+      "WantedBy=default.target",
+      "",
+    ],
+    "controller config differs from the supported installed contract",
+  );
   return hash(body);
+}
+
+function systemdQuote(value) {
+  return `"${value.replaceAll("%", "%%").replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
+function systemdDirectivePath(value) {
+  return value
+    .replaceAll("%", "%%")
+    .replaceAll("\\", "\\x5c")
+    .replace(
+      /[\s"]/g,
+      (character) => `\\x${character.charCodeAt(0).toString(16).padStart(2, "0")}`,
+    );
 }
 
 // The supplied original start is immutable authority, not a fresh phase start.

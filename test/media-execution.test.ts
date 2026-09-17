@@ -766,6 +766,26 @@ describe("media production execution", () => {
     ).toMatchObject({ profile: { kind: "binary" }, outputMediaType: "image/svg+xml" });
   });
 
+  it("chooses an exact raster profile inside a compiler-valid open interval", () => {
+    const compiledPacket = structuredClone(packet()) as AssetProductionWorkerPacket;
+    compiledPacket.deliverable.intent.output.raster = {
+      minimumWidth: 2_048,
+      maximumWidth: null,
+      minimumHeight: 2_048,
+      maximumHeight: null,
+      alpha: "allowed",
+      animation: "forbidden",
+    };
+
+    expect(invocation(compiledPacket).profile).toEqual({
+      kind: "raster",
+      width: 2_048,
+      height: 2_048,
+      alpha: false,
+      animation: false,
+    });
+  });
+
   it("refuses product production without authenticated output rights", () => {
     const productPacket = structuredClone(packet()) as AssetProductionWorkerPacket;
     productPacket.deliverable.intent.purpose = "product-asset";
@@ -793,11 +813,15 @@ describe("media production execution", () => {
         profiles: LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY.profiles,
         outputVisibilities: LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY.outputVisibilities,
         rightsBases: LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY.rightsBases,
+        selectionStrategy: LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY.selectionStrategy,
       },
     ]);
     const memory = memoryStore();
     const recorded = hooks();
-    const exact = invocation();
+    const reviewPacket = structuredClone(packet()) as AssetProductionWorkerPacket;
+    reviewPacket.deliverable.intent.output.minimumCount = 4;
+    reviewPacket.deliverable.intent.output.maximumCount = 4;
+    const exact = invocation(reviewPacket);
     const result = await new MediaProductionExecutor({
       store: memory.store,
       retentionRoot: await retentionRoot(),
@@ -806,7 +830,7 @@ describe("media production execution", () => {
       assertCurrent: async () => {},
     }).runPrepared({
       authority: { repository: "fixture/project", objective: 7, baseSha: "b".repeat(40) },
-      request: await requestFor(exact),
+      request: await requestFor(exact, reviewPacket),
       reservationOid: "a".repeat(40),
     });
     expect(result.state).toBe("for-review");
@@ -826,10 +850,10 @@ describe("media production execution", () => {
       kind: "approved",
       ruleId: reviewer.capability.id,
       ruleDigest: assetDigest(reviewer.capability),
-      selectedDescriptorDigests: result.assetSet.variants.map(
-        ({ descriptor }) => descriptor.digest,
-      ),
+      selectedDescriptorDigests: [result.assetSet.variants[0]!.descriptor.digest],
     });
+    expect(result.assetSet.variants).toHaveLength(4);
+    expect(result.assetSet.activationSelection).toEqual({ minimumCount: 1, maximumCount: 1 });
   });
 
   it("indexes one immutable decision per request and Asset Set before activation", async () => {

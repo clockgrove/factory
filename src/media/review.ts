@@ -30,13 +30,15 @@ export const LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY = MediaReviewCapabilitySchema
   outputVisibilities: ["private"],
   rightsBases: ["unknown"],
   decisionKinds: ["deterministic-preauthorized"],
+  selectionStrategy: "activation-minimum-canonical",
   maximumVariants: 16,
   network: { destinations: [], thirdPartyEgress: "denied" },
 });
 
-/** A deliberately narrow preauthorization rule. It approves every verified
- * private PNG produced by the local raster route for internal consumption. It
- * does not grant public visibility or a rights basis. */
+/** A deliberately narrow preauthorization rule. It approves the smallest
+ * canonical subset allowed by the compiled activation interval from verified
+ * private PNGs produced by the local raster route for internal consumption.
+ * It does not grant public visibility or a rights basis. */
 export class LocalPrivateMediaReviewer implements DeterministicMediaReviewer {
   readonly capability = LOCAL_PRIVATE_MEDIA_REVIEW_CAPABILITY;
 
@@ -73,7 +75,8 @@ export class LocalPrivateMediaReviewer implements DeterministicMediaReviewer {
       kind: "approved",
       selectedDescriptorDigests: assetSet.variants
         .map(({ descriptor }) => descriptor.digest)
-        .sort(),
+        .sort()
+        .slice(0, assetSet.activationSelection.minimumCount),
       reason: null,
     };
   }
@@ -107,6 +110,7 @@ export class MediaReviewRegistry {
         profiles: capability.profiles,
         outputVisibilities: capability.outputVisibilities,
         rightsBases: capability.rightsBases,
+        selectionStrategy: capability.selectionStrategy,
       }))
       .sort((left, right) => left.id.localeCompare(right.id));
   }

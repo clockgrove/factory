@@ -998,6 +998,10 @@ const jsonCompilerMediaFacts = strictObject({
           enum: ["user-owned", "licensed", "permission-granted", "unknown"],
         },
       },
+      selectionStrategy: {
+        type: "string",
+        const: "activation-minimum-canonical",
+      },
     }),
   },
 });

@@ -36,10 +36,22 @@ function exactRasterProfile(rasterInput: unknown, capabilityInput: MediaProducer
   const supported = capability.profiles.find((profile) => profile.kind === "raster");
   if (!supported) return null;
   const raster = rasterInput ? RasterMediaConstraintsSchema.parse(rasterInput) : null;
-  const width = Math.min(raster?.maximumWidth ?? 1_024, supported.maximumWidth);
-  const height = Math.min(raster?.maximumHeight ?? 1_024, supported.maximumHeight);
-  if ((raster?.minimumWidth ?? 1) > width || (raster?.minimumHeight ?? 1) > height)
-    throw new Error("media raster dimensions exceed producer capability");
+  const chooseDimension = (minimum: number, maximum: number | null, supportedMaximum: number) => {
+    const availableMaximum = Math.min(maximum ?? supportedMaximum, supportedMaximum);
+    if (minimum > availableMaximum)
+      throw new Error("media raster dimensions exceed producer capability");
+    return Math.max(minimum, Math.min(1_024, availableMaximum));
+  };
+  const width = chooseDimension(
+    raster?.minimumWidth ?? 1,
+    raster?.maximumWidth ?? null,
+    supported.maximumWidth,
+  );
+  const height = chooseDimension(
+    raster?.minimumHeight ?? 1,
+    raster?.maximumHeight ?? null,
+    supported.maximumHeight,
+  );
   if (raster?.alpha === "required" && !supported.supportsAlpha)
     throw new Error("media intent requires unsupported alpha output");
   if (raster?.animation === "required" && !supported.supportsAnimation)

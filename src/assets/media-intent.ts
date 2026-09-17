@@ -225,6 +225,7 @@ export const CompilerMediaReviewRuleSchema = z
       .array(z.enum(["user-owned", "licensed", "permission-granted", "unknown"]))
       .min(1)
       .max(4),
+    selectionStrategy: z.literal("activation-minimum-canonical"),
   })
   .strict();
 

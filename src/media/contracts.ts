@@ -146,6 +146,7 @@ export const MediaReviewCapabilitySchema = z
     outputVisibilities: unique(AssetVisibilitySchema, 2, 1),
     rightsBases: unique(z.enum(["user-owned", "licensed", "permission-granted", "unknown"]), 4, 1),
     decisionKinds: unique(z.enum(["human", "deterministic-preauthorized"]), 2, 1),
+    selectionStrategy: z.literal("activation-minimum-canonical"),
     maximumVariants: z.number().int().min(1).max(32),
     network: z
       .object({

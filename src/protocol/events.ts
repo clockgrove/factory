@@ -42,6 +42,13 @@ const Common = z
   })
   .passthrough();
 
+const AuthenticatedCommon = Common.extend({
+  writerEpoch: z.number().int().positive(),
+  writerOperationId: safeId,
+  writerHolder: safeId,
+  writerPolicyDigest: sha256Digest,
+});
+
 const RunStarted = Common.extend({
   kind: z.literal("run"),
   event: z.literal("FactoryRunStarted"),
@@ -743,7 +750,7 @@ const Validation = Common.extend({
   evidenceDigest: sha256Digest,
 });
 
-const ValidationInvocationPrepared = Common.extend({
+const ValidationInvocationPrepared = AuthenticatedCommon.extend({
   kind: z.literal("validation-invocation"),
   event: z.literal("ValidationInvocationPrepared"),
   workItem: z.number().int().positive(),
@@ -771,7 +778,7 @@ const ValidationInvocationPrepared = Common.extend({
     });
 });
 
-const ValidationInvocationRemoteDispatchStarted = Common.extend({
+const ValidationInvocationRemoteDispatchStarted = AuthenticatedCommon.extend({
   kind: z.literal("validation-invocation"),
   event: z.literal("ValidationInvocationRemoteDispatchStarted"),
   workItem: z.number().int().positive(),
@@ -796,7 +803,7 @@ const ValidationInvocationRemoteDispatchStarted = Common.extend({
     });
 });
 
-const ValidationInvocationRemoteRebound = Common.extend({
+const ValidationInvocationRemoteRebound = AuthenticatedCommon.extend({
   kind: z.literal("validation-invocation"),
   event: z.literal("ValidationInvocationRemoteRebound"),
   workItem: z.number().int().positive(),
@@ -820,6 +827,39 @@ const ValidationInvocationRemoteRebound = Common.extend({
     context.addIssue({
       code: "custom",
       message: "remote validation rebound has an invalid dispatch chain or visibility fence",
+    });
+});
+
+const ValidationInvocationRemoteSettled = AuthenticatedCommon.extend({
+  kind: z.literal("validation-invocation"),
+  event: z.literal("ValidationInvocationRemoteSettled"),
+  workItem: z.number().int().positive(),
+  attempt: z.number().int().positive(),
+  reservationOid: gitSha,
+  artifactDigest: sha256Digest,
+  invocationDigest: sha256Digest,
+  backend: safeId,
+  resourceName: boundedText(500),
+  requestIdentityDigest: sha256Digest,
+  validationDeadline: isoDate,
+  noHandleReplacementNotBefore: isoDate,
+  originalDispatchSequence: z.number().int().nonnegative(),
+  reboundSequence: z.number().int().nonnegative().nullable(),
+  capacityReservationSequence: z.number().int().nonnegative(),
+  settlementEvidence: z.enum(["provider-cleanup", "post-fence-exact-absence"]),
+}).superRefine((event, context) => {
+  if (
+    event.capacityReservationSequence >= event.originalDispatchSequence ||
+    event.originalDispatchSequence >= event.sequence ||
+    (event.reboundSequence !== null &&
+      (event.reboundSequence <= event.originalDispatchSequence ||
+        event.reboundSequence >= event.sequence)) ||
+    (event.settlementEvidence === "post-fence-exact-absence" &&
+      Date.parse(event.at) < Date.parse(event.noHandleReplacementNotBefore))
+  )
+    context.addIssue({
+      code: "custom",
+      message: "remote validation settlement has an invalid dispatch or cleanup chain",
     });
 });
 
@@ -1162,6 +1202,7 @@ export const FactoryEventSchema = z.union([
   ValidationInvocationPrepared,
   ValidationInvocationRemoteDispatchStarted,
   ValidationInvocationRemoteRebound,
+  ValidationInvocationRemoteSettled,
   ValidationInvocationScopeRebound,
   GraphCompiled,
   GraphProjected,

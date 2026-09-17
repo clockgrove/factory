@@ -555,6 +555,78 @@ export class LifecycleRecorder {
     return event;
   }
 
+  async validationInvocationRemoteSettled(args: {
+    lease: LeaseState;
+    workItemNodeId: string;
+    reservation: AttemptReservation;
+    invocation: ValidationInvocation;
+    dispatch: Extract<FactoryEvent, { event: "ValidationInvocationRemoteDispatchStarted" }>;
+    rebound?: Extract<FactoryEvent, { event: "ValidationInvocationRemoteRebound" }>;
+    settlementEvidence: "provider-cleanup" | "post-fence-exact-absence";
+    sequence: number;
+  }): Promise<FactoryEvent> {
+    await this.leases.assertMutationAuthorized(args.lease);
+    assertReservationLease(args.reservation, args.lease);
+    assertValidationInvocationAuthority(args.reservation, args.invocation);
+    if (
+      args.dispatch.reservationOid !== args.reservation.oid ||
+      args.dispatch.invocationDigest !== args.invocation.digest ||
+      args.dispatch.artifactDigest !== args.invocation.artifactDigest ||
+      args.dispatch.backend !== args.invocation.toolEnvironment.backendId ||
+      args.dispatch.validationDeadline !== args.invocation.validationDeadline ||
+      args.dispatch.capacityReservationSequence >= args.dispatch.sequence ||
+      args.dispatch.sequence >= args.sequence ||
+      (args.rebound !== undefined &&
+        (args.rebound.originalDispatchSequence !== args.dispatch.sequence ||
+          args.rebound.reservationOid !== args.dispatch.reservationOid ||
+          args.rebound.invocationDigest !== args.dispatch.invocationDigest ||
+          args.rebound.resourceName !== args.dispatch.resourceName ||
+          args.rebound.requestIdentityDigest !== args.dispatch.requestIdentityDigest ||
+          args.rebound.sequence <= args.dispatch.sequence ||
+          args.rebound.sequence >= args.sequence))
+    )
+      throw new Error("remote validation settlement differs from its dispatch chain");
+    const now = await this.store.serverTime("cleanup");
+    if (
+      args.settlementEvidence === "post-fence-exact-absence" &&
+      now.getTime() < Date.parse(args.dispatch.noHandleReplacementNotBefore)
+    )
+      throw new Error("remote validation absence settlement preceded its visibility fence");
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "validation-invocation",
+      ...writerAuthority(args.lease, args.sequence),
+      event: "ValidationInvocationRemoteSettled",
+      objective: args.reservation.objective,
+      runId: args.reservation.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      workItem: args.reservation.workItem,
+      attempt: args.reservation.attempt,
+      reservationOid: args.reservation.oid,
+      artifactDigest: args.invocation.artifactDigest,
+      invocationDigest: args.invocation.digest,
+      backend: args.dispatch.backend,
+      resourceName: args.dispatch.resourceName,
+      requestIdentityDigest: args.dispatch.requestIdentityDigest,
+      validationDeadline: args.invocation.validationDeadline,
+      noHandleReplacementNotBefore: args.dispatch.noHandleReplacementNotBefore,
+      originalDispatchSequence: args.dispatch.sequence,
+      reboundSequence: args.rebound?.sequence ?? null,
+      capacityReservationSequence: args.dispatch.capacityReservationSequence,
+      settlementEvidence: args.settlementEvidence,
+    });
+    await this.store.addIssueComment(
+      args.workItemNodeId,
+      encodeEventComment(
+        `Factory settled remote validation invocation ${args.invocation.digest.slice(0, 12)} after exact provider cleanup evidence.`,
+        event,
+      ),
+      "cleanup",
+    );
+    return event;
+  }
+
   async validationInvocation(args: {
     lease: LeaseState;
     workItemNodeId: string;

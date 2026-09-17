@@ -128,6 +128,7 @@ function captureGraph(baseSha: string, payload: Awaited<ReturnType<typeof cacheP
     id: "capture-result",
     mediaUse: { intentId: "result-evidence", direction: "evidence-for" as const },
     criterionIds: ["validated"],
+    criteria: ["capture.txt has the expected text"],
     scenario: { id: "fixture", fixture: "capture.txt", seed: null },
     captureCommand: {
       recipeId: "recipe-capture",

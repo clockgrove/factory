@@ -24,15 +24,22 @@ const hash = (value) =>
   createHash("sha256")
     .update(typeof value === "string" || Buffer.isBuffer(value) ? value : JSON.stringify(value))
     .digest("hex");
-const canonical = (value) =>
-  Array.isArray(value)
-    ? `[${value.map(canonical).join(",")}]`
-    : value !== null && typeof value === "object"
-      ? `{${Object.keys(value)
-          .sort()
-          .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
-          .join(",")}}`
-      : JSON.stringify(value);
+const canonical = (value) => {
+  if (value === null || typeof value === "string" || typeof value === "boolean")
+    return JSON.stringify(value);
+  if (typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object")
+    return `{${Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
+      .join(",")}}`;
+  throw new Error("recovery identity requires JSON data");
+};
+// Authenticated qualification receipts are JSON.parse results, so this is the
+// exact canonical envelope contract used by recoveryEventDigest in the runtime.
+const recoveryReceiptDigest = (event) => hash(canonical(event));
 const unique = (rows, message) => {
   assert.equal(rows.length, 1, message);
   return rows[0];
@@ -309,10 +316,20 @@ export function assertGraphProjectionHold(observation, authority, armRecord, con
     assert.equal(receipt.graphSize, witness.proof.graphSize);
   }
   if (compiled) {
+    assert.equal(
+      recoveryReceiptDigest(compiled),
+      witness.proof.graphReceiptDigest,
+      "compiled graph receipt digest differs",
+    );
     assert.equal(compiled.graphRef, witness.proof.graphRef);
     assert.equal(compiled.graphBlobSha, witness.proof.graphBlobSha);
   }
   if (projected) {
+    assert.equal(
+      recoveryReceiptDigest(projected),
+      witness.proof.projectionReceiptDigest,
+      "projected graph receipt digest differs",
+    );
     assert.equal(projected.projectionRef, witness.proof.projectionRef);
     assert.equal(projected.projectionBlobSha, witness.proof.projectionBlobSha);
   }

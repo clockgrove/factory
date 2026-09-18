@@ -19,17 +19,22 @@ import {
 } from "../scripts/verify-compiler-qualification-checkpoints.mjs";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
-const canonical = (value: unknown): string =>
-  Array.isArray(value)
-    ? `[${value.map(canonical).join(",")}]`
-    : value !== null && typeof value === "object"
-      ? `{${Object.keys(value)
-          .sort()
-          .map(
-            (key) => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`,
-          )
-          .join(",")}}`
-      : JSON.stringify(value);
+const canonical = (value: unknown): string => {
+  if (value === null || typeof value === "string" || typeof value === "boolean")
+    return JSON.stringify(value);
+  if (typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`)
+      .join(",")}}`;
+  }
+  throw new Error("recovery identity requires JSON data");
+};
+const recoveryReceiptDigest = (event: unknown) => hash(canonical(event));
 function pnpmRuntimeStatus(
   overrides: Record<string, unknown> = {},
 ): Array<Record<string, unknown>> {
@@ -229,9 +234,46 @@ function selectionWitness() {
   };
 }
 
+const graphRef = "refs/clockgrove-factory/graphs/objective-47/run-fixture";
+const graphBlobSha = "8".repeat(40);
+const projectionRef = "refs/clockgrove-factory/graph-projections/objective-47/run-fixture";
+const projectionBlobSha = "b".repeat(40);
+function graphEvents(workItemNumbers = [48, 49, 50, 51]) {
+  return [
+    {
+      protocol: "clockgrove.factory/v2",
+      kind: "graph",
+      event: "GraphCompiled",
+      sequence: 10,
+      at: fixtureStartedAt,
+      objective,
+      runId: actualRunId,
+      graphDigest: "6".repeat(64),
+      graphSize: workItemNumbers.length,
+      baseSha,
+      graphRef,
+      graphBlobSha,
+    },
+    {
+      protocol: "clockgrove.factory/v2",
+      kind: "graph",
+      event: "GraphProjected",
+      sequence: 11,
+      at: fixtureStartedAt,
+      objective,
+      runId: actualRunId,
+      graphDigest: "6".repeat(64),
+      graphSize: workItemNumbers.length,
+      projectionRef,
+      projectionBlobSha,
+    },
+  ];
+}
+
 function projectionWitness(workItemNumbers = [48, 49, 50, 51]) {
   const projected = arm("graph-projection");
   const reachedAt = new Date(Date.now() - 30_000);
+  const [compiledReceipt, projectedReceipt] = graphEvents(workItemNumbers);
   return {
     ...projected,
     protocol: "clockgrove.factory/compiler-qualification-checkpoint-reached",
@@ -245,14 +287,14 @@ function projectionWitness(workItemNumbers = [48, 49, 50, 51]) {
       checkpoint: "graph-projection",
       graphDigest: "6".repeat(64),
       graphSize: workItemNumbers.length,
-      graphRef: "refs/clockgrove-factory/graphs/objective-47/run-fixture",
+      graphRef,
       graphCommitOid: "7".repeat(40),
-      graphBlobSha: "8".repeat(40),
-      graphReceiptDigest: "9".repeat(64),
-      projectionRef: "refs/clockgrove-factory/graph-projections/objective-47/run-fixture",
+      graphBlobSha,
+      graphReceiptDigest: recoveryReceiptDigest(compiledReceipt),
+      projectionRef,
       projectionCommitOid: "a".repeat(40),
-      projectionBlobSha: "b".repeat(40),
-      projectionReceiptDigest: "c".repeat(64),
+      projectionBlobSha,
+      projectionReceiptDigest: recoveryReceiptDigest(projectedReceipt),
       bindingsDigest: "d".repeat(64),
       workItemNumbers,
       attemptReservations: 0,
@@ -282,30 +324,7 @@ function projectedObservation(
   acknowledged = false,
   workItemNumbers = [48, 49, 50, 51],
 ) {
-  const graph = [
-    {
-      kind: "graph",
-      event: "GraphCompiled",
-      sequence: 10,
-      objective,
-      runId: actualRunId,
-      graphDigest: "6".repeat(64),
-      graphSize: workItemNumbers.length,
-      graphRef: projectionWitness(workItemNumbers).proof.graphRef,
-      graphBlobSha: projectionWitness(workItemNumbers).proof.graphBlobSha,
-    },
-    {
-      kind: "graph",
-      event: "GraphProjected",
-      sequence: 11,
-      objective,
-      runId: actualRunId,
-      graphDigest: "6".repeat(64),
-      graphSize: workItemNumbers.length,
-      projectionRef: projectionWitness(workItemNumbers).proof.projectionRef,
-      projectionBlobSha: projectionWitness(workItemNumbers).proof.projectionBlobSha,
-    },
-  ];
+  const graph = graphEvents(workItemNumbers);
   const commands = paused
     ? [
         {
@@ -625,6 +644,31 @@ describe("installed compiler checkpoint qualifier", () => {
       runId: "1ca6b1cf-8368-4c8a-9326-32ad468b6bf7",
     });
     expect(() => assertHold(changedRun)).toThrow();
+
+    for (const mutation of [{ baseSha: "f".repeat(40) }, { kind: "run" }, { sequence: 12 }]) {
+      const changedCompiledEnvelope = withoutProjectedReceipt();
+      Object.assign(
+        changedCompiledEnvelope.receipts.find(({ event }) => event.event === "GraphCompiled")!
+          .event,
+        mutation,
+      );
+      expect(() => assertHold(changedCompiledEnvelope)).toThrow(
+        "compiled graph receipt digest differs",
+      );
+    }
+
+    const changedProjectedEnvelope = projectedObservation();
+    changedProjectedEnvelope.receipts = changedProjectedEnvelope.receipts.filter(
+      ({ event }) => event.event !== "GraphCompiled",
+    );
+    Object.assign(
+      changedProjectedEnvelope.receipts.find(({ event }) => event.event === "GraphProjected")!
+        .event,
+      { at: new Date(Date.parse(fixtureStartedAt) + 1).toISOString() },
+    );
+    expect(() => assertHold(changedProjectedEnvelope)).toThrow(
+      "projected graph receipt digest differs",
+    );
 
     const foreignChild = withoutProjectedReceipt();
     foreignChild.children[0]!.number = 999;

@@ -32,14 +32,18 @@ import {
 import { compiledGraphDigest, type CompiledObjective } from "../graph.js";
 import { analyzeDependencies } from "../graph-analysis.js";
 import {
-  ObligationInventorySchema,
+  CompilerEvidenceSchema,
+  type ObligationInventorySchema,
+  compilerEvalDigest,
   createCompilerEvalReport,
+  parseObligationInventory,
   renderCompilerEvalMarkdown,
   validateCompilerInferenceChallenges,
   type CompilerEvalUsage,
   type CompilerEvidence,
 } from "../evaluation/compiler-eval.js";
 import { validatePersistedCompilerDraftJournal } from "../evaluation/compiler-draft-loop.js";
+import { ModelReasoningEffortSchema } from "../protocol/policy.js";
 import type { ApplicationSnapshot } from "./services.js";
 
 export const MAX_COMPILER_ANNOTATION_BYTES = 256 * 1024;
@@ -239,6 +243,26 @@ const InvocationProvenance = z
   })
   .passthrough();
 const ResponseSizeSource = z.enum(["provider-final-response", "canonical-structured-value"]);
+const CompilerSourceEvidence = z
+  .object({
+    objective: z
+      .object({
+        number: z.number().int().positive(),
+        title: z.string(),
+        body: z.string(),
+      })
+      .strict(),
+    evidence: z.array(CompilerEvidenceSchema).min(1).max(128),
+    modelSelection: z
+      .object({
+        profile: z.string().min(1).max(160),
+        model: z.string().min(1).max(160),
+        reasoning: ModelReasoningEffortSchema,
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
 
 type CalibrationAvailability = "observed" | "missing" | "conflicting";
 
@@ -857,6 +881,23 @@ export async function inspectCompilerEvaluation(args: {
   )
     throw new Error("compiler draft disagrees with authenticated run identity");
   const journalAuthority = validatePersistedCompilerDraftJournal(records);
+  if (binding && journalAuthority?.sourceEvidence == null)
+    throw new Error("compiler draft requires current durable source evidence");
+  const sourceEvidence = binding
+    ? CompilerSourceEvidence.parse(journalAuthority?.sourceEvidence)
+    : null;
+  if (
+    binding &&
+    sourceEvidence &&
+    (sourceEvidence.objective.number !== binding.objective ||
+      binding.inputDigest !==
+        compilerEvalDigest({
+          objective: sourceEvidence.objective,
+          assetManifestDigest: run.start.assetManifestDigest ?? null,
+          compilerMediaEgress: run.start.policy.compilerMediaEgress,
+        }))
+  )
+    throw new Error("compiler draft input envelope identity mismatch");
   const hasFixedGraphRecord = records.some((record) => record.kind === "fixed-graph");
   const fixedGraph = journalAuthority?.fixedGraph;
   if (hasFixedGraphRecord && !fixedGraph)
@@ -899,14 +940,12 @@ export async function inspectCompilerEvaluation(args: {
   );
   if (inventoryResults.length > 1) throw new Error("multiple obligation inventories");
   const inventory = inventoryResults[0]
-    ? ObligationInventorySchema.parse(inventoryResults[0].payload.value)
+    ? parseObligationInventory(inventoryResults[0].payload.value, {
+        objectiveDigest: compilerEvalDigest(sourceEvidence!.objective),
+        baseSha: binding!.baseSha,
+        evidence: sourceEvidence!.evidence,
+      })
     : null;
-  if (
-    inventory &&
-    binding &&
-    (inventory.baseSha !== binding.baseSha || inventory.objectiveDigest !== binding.inputDigest)
-  )
-    throw new Error("inventory repository identity mismatch");
   const invocations = records
     .filter((record) => record.kind === "invocation")
     .map((record) => ({ record, invocation: Invocation.parse(record.payload) }));

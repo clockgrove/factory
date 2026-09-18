@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { checkpointAuthority } from "../scripts/verify-local-checkpoint-restart.mjs";
 import {
   assertCompilerSelectionHold,
   assertGraphProjectionHold,
   assertCompilerQualificationDefaults,
+  assertCompilerQualificationPnpmRuntime,
   compilerCheckpointArm,
   compilerCheckpointExtension,
   compilerCheckpointPath,
@@ -14,6 +15,38 @@ import {
 } from "../scripts/verify-compiler-qualification-checkpoints.mjs";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const canonical = (value: unknown): string =>
+  Array.isArray(value)
+    ? `[${value.map(canonical).join(",")}]`
+    : value !== null && typeof value === "object"
+      ? `{${Object.keys(value)
+          .sort()
+          .map(
+            (key) => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`,
+          )
+          .join(",")}}`
+      : JSON.stringify(value);
+function pnpmRuntimeStatus(
+  overrides: Record<string, unknown> = {},
+): Array<Record<string, unknown>> {
+  const receipt = {
+    protocol: "clockgrove.factory/toolchain-runtime-bundle-v1",
+    tool: "pnpm",
+    adapter: "node-pnpm",
+    adapterContract: 1,
+    platform: { os: "linux", architecture: "x64", libc: "glibc" },
+    components: [
+      { id: "node", version: "22.14.0" },
+      { id: "pnpm", version: "10.34.5" },
+    ],
+    resolvedAt: "2026-09-18T01:02:03.000Z",
+    ...overrides,
+  };
+  const { resolvedAt: _resolvedAt, ...identity } = receipt;
+  return [
+    { tool: "pnpm", state: "ready", receipt: { ...receipt, digest: hash(canonical(identity)) } },
+  ];
+}
 const repository = "example/compiler-checkpoint-fixture";
 const checkout = "/home/example/compiler-checkpoint-fixture";
 const unit = `clockgrove-factory-${hash(`${repository}\0${resolve(checkout)}`).slice(0, 16)}.service`;
@@ -354,6 +387,57 @@ describe("installed compiler checkpoint qualifier", () => {
     expect(() => assertCompilerQualificationDefaults(incomplete, 500_000)).toThrow(
       "installed compiler defaults differ from the documented authorized envelope",
     );
+  });
+
+  it("requires the exact ready pnpm adapter before compiler qualification", () => {
+    expect(assertCompilerQualificationPnpmRuntime(pnpmRuntimeStatus())).toEqual({
+      tool: "pnpm",
+      adapter: "node-pnpm",
+      adapterContract: 1,
+      platform: { os: "linux", architecture: "x64", libc: "glibc" },
+      digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      components: [
+        { id: "node", version: "22.14.0" },
+        { id: "pnpm", version: "10.34.5" },
+      ],
+    });
+    for (const state of ["missing", "corrupt"]) {
+      expect(() => assertCompilerQualificationPnpmRuntime([{ tool: "pnpm", state }])).toThrow(
+        "compiler qualification requires a ready integrity-verified pnpm managed runtime",
+      );
+    }
+    expect(() =>
+      assertCompilerQualificationPnpmRuntime(pnpmRuntimeStatus({ adapter: "javascript-pnpm" })),
+    ).toThrow();
+    expect(() =>
+      assertCompilerQualificationPnpmRuntime(
+        pnpmRuntimeStatus({ platform: { os: "linux", architecture: "arm64", libc: "glibc" } }),
+      ),
+    ).toThrow();
+  });
+
+  it("checks installed pnpm before the compiler fixture can create an Objective", () => {
+    const evidence: Record<string, unknown> = {};
+    const save = vi.fn();
+    const command = vi.fn(() => JSON.stringify(pnpmRuntimeStatus()));
+    compilerCheckpointExtension(authority).preflight?.({
+      authority,
+      evidence,
+      command,
+      installedFactoryCli: "/installed/factory.js",
+      save,
+    });
+    expect(command).toHaveBeenCalledWith(
+      process.execPath,
+      ["/installed/factory.js", "toolchains", "status"],
+      checkout,
+    );
+    expect(evidence.compilerRuntime).toMatchObject({
+      tool: "pnpm",
+      adapter: "node-pnpm",
+      adapterContract: 1,
+    });
+    expect(save).toHaveBeenCalledOnce();
   });
 
   it("raises only the compiler fixture's shared observation bound to four", () => {

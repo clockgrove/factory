@@ -32,6 +32,22 @@ unavailable observations fail preflight. No service installation or configuratio
 authorized. Read-only repository checks reject other active Objectives, open pull requests and
 an existing qualification namespace.
 
+The evaluated-compiler fixture additionally requires the candidate's managed pnpm runtime before
+preflight. Inspect and, when explicitly authorized, provision it with the exact retained installed
+CLI before invoking the qualifier:
+
+```sh
+/home/example/Codex/factory-initial-beta/2.0.27-beta.0-COMMIT/npm/bin/factory toolchains status
+/home/example/Codex/factory-initial-beta/2.0.27-beta.0-COMMIT/npm/bin/factory toolchains provision pnpm
+```
+
+Provisioning is a separate operator action that uses network access and writes the managed-runtime
+store. The qualifier never downloads a runtime or falls back to ambient `node` or `pnpm`. With
+`FACTORY_CHECKPOINT_BACKEND=compiler`, preflight uses the receipt-authenticated installed CLI to
+require a ready, integrity-verified `node-pnpm` adapter for Linux x64 glibc and retains only its
+adapter contract, platform, digest, and component identities. Failure occurs before controller
+start, Objective creation, or model spend.
+
 Create a private evidence directory (owner-only mode `0700`) before invoking the harness. Each
 invocation requires a new output filename; the script exclusively creates it with mode `0600`.
 Evidence contains private repository and resource identities and must not be committed or

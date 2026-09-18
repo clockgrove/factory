@@ -58,6 +58,7 @@ const selectionProof: CompilerQualificationProof = {
     invocationId: `compiler-${stage}`,
     stage: stage as "inventory" | "compile" | "judge",
     revision: stage === "inventory" ? 0 : 1,
+    state: "completed" as const,
     amount: 10 + index,
     reservationSequence: index * 2 + 1,
     reconciliationSequence: index * 2 + 2,

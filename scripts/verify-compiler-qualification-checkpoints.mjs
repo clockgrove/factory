@@ -271,7 +271,7 @@ export function assertCompilerSelectionHold(observation, authority, armRecord, c
       invocationId: item.invocationId,
       stage: item.stage,
       revision: item.revision,
-      state: "completed",
+      state: item.state,
       observedTokens: item.amount,
     })),
     "compiler status differs from the accepted fully-accounted selection",

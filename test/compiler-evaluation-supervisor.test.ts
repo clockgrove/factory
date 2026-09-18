@@ -938,7 +938,11 @@ describe("Supervisor compiler evaluation activation boundary", () => {
         checkpoint: "compiler-selection",
         graphDigest: persisted!.graphDigest,
         graphAbsent: true,
-        usage: expect.arrayContaining([expect.objectContaining({ stage: "repair", amount: 30 })]),
+        usage: expect.arrayContaining([
+          expect.objectContaining({ stage: "compile", state: "failed", amount: 30 }),
+          expect.objectContaining({ stage: "repair", state: "completed", amount: 30 }),
+          expect.objectContaining({ stage: "judge", state: "completed", amount: 30 }),
+        ]),
       });
       expect(proof.usage).toHaveLength(4);
       const trailingRecord = structuredClone(records.at(-1)!);

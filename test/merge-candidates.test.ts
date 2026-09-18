@@ -32,6 +32,9 @@ class Store implements CompiledGraphStore {
   loseAfter: string | null = null;
   loseLeaseAfter: string | null = null;
   competingOid: string | null = null;
+  hideCreatedRefReads = 0;
+  hiddenCreatedRefReads = 0;
+  readRefCalls = 0;
   private counter = 0;
   async assertCurrent() {
     if (!this.validLease) throw new Error("lease lost");
@@ -56,6 +59,11 @@ class Store implements CompiledGraphStore {
     }
   }
   async readRef(ref: string) {
+    this.readRefCalls += 1;
+    if (this.hiddenCreatedRefReads > 0) {
+      this.hiddenCreatedRefReads -= 1;
+      return null;
+    }
     return this.refs.get(ref) ?? null;
   }
   async readCommit(oid: string) {
@@ -97,6 +105,7 @@ class Store implements CompiledGraphStore {
     if (this.competingOid) this.refs.set(ref, this.competingOid);
     const created = !this.refs.has(ref);
     if (created) this.refs.set(ref, oid);
+    this.hiddenCreatedRefReads = this.hideCreatedRefReads;
     this.after("ref");
     return created;
   }
@@ -285,6 +294,30 @@ describe("immutable merge-candidate validation checkpoints", () => {
     expect(next.digest).not.toBe(record.validation.digest);
     expect(await f.manager.persist({ ...f.args, validation: next })).toEqual(record);
     expect(f.store.writes).toHaveLength(4);
+  });
+
+  it("trusts successful ref creation without requiring immediate read visibility", async () => {
+    const f = fixture();
+    f.store.hideCreatedRefReads = 1;
+    const record = await f.manager.persist(f.args);
+    expect(record).toMatchObject({
+      ref: mergeCandidateCheckpointRef(f.args.identity),
+      identity: f.args.identity,
+      validation: f.args.validation,
+    });
+    expect(f.store.readRefCalls).toBe(1);
+    expect(await f.manager.load(f.args.identity)).toBeNull();
+    expect(await f.manager.load(f.args.identity)).toEqual(record);
+  });
+
+  it("preserves response-loss ambiguity while the created ref remains hidden", async () => {
+    const f = fixture();
+    f.store.hideCreatedRefReads = 1;
+    f.store.loseAfter = "ref";
+    await expect(f.manager.persist(f.args)).rejects.toThrow("response lost");
+    const record = await f.manager.persist(f.args);
+    expect(await f.manager.load(f.args.identity)).toEqual(record);
+    expect(f.store.writes).toEqual(["blob", "tree", "commit", "ref"]);
   });
 
   it.each([

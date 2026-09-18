@@ -1209,7 +1209,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
           new ManagementOutputError(
             new CompilerDraftStopError(reason),
             usage,
-            value,
+            undefined,
             responseBytes,
             responseBytesSource,
           ),

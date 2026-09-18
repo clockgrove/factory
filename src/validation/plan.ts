@@ -8,21 +8,54 @@ import {
 } from "../toolchains/authority.js";
 import type { ValidationEvidence } from "./evidence.js";
 import { runtimeBundleByDigestSync } from "../runtime/toolchain-store.js";
+import { assertPnpmManifestRuntimePins, pnpmRuntimeVersions } from "../toolchains/pnpm.js";
 
-function managedPnpmVersion(packet?: WorkerPacket): string {
-  const digests = new Set(
-    (packet?.managedRuntimes ?? []).flatMap((runtime) =>
-      runtime?.tool === "pnpm" && runtime.bundleDigest ? [runtime.bundleDigest] : [],
-    ),
-  );
-  if (digests.size !== 1)
+export type ActivatedPnpmRuntimePins = {
+  node: string;
+  pnpm: string;
+  packageManager: string;
+  runtime: { name: "node"; version: string; onFail: "error" };
+};
+
+function activatedPnpmRuntime(packet: WorkerPacket) {
+  const requirements = (packet.managedRuntimes ?? []).filter(({ tool }) => tool === "pnpm");
+  if (requirements.length === 0) return null;
+  if (requirements.length !== 1 || !requirements[0]?.bundleDigest)
     throw new Error(
-      `pnpm validation lacks one exact activated runtime; observed ${JSON.stringify(packet?.managedRuntimes ?? [])}`,
+      `pnpm packet lacks one exact activated runtime; observed ${JSON.stringify(packet.managedRuntimes ?? [])}`,
     );
-  const receipt = runtimeBundleByDigestSync("pnpm", [...digests][0]!);
-  const component = receipt.components.find(({ id }) => id === "pnpm");
-  if (!component) throw new Error("pnpm runtime bundle lacks its executable component");
-  return component.version;
+  const receipt = runtimeBundleByDigestSync("pnpm", requirements[0].bundleDigest);
+  const versions = pnpmRuntimeVersions(receipt);
+  return {
+    receipt,
+    pins: {
+      ...versions,
+      packageManager: `pnpm@${versions.pnpm}`,
+      runtime: { name: "node" as const, version: versions.node, onFail: "error" as const },
+    },
+  };
+}
+
+export function activatedPnpmRuntimePins(packet: WorkerPacket): ActivatedPnpmRuntimePins | null {
+  return activatedPnpmRuntime(packet)?.pins ?? null;
+}
+
+export function assertActivatedPnpmPinsGroundedOnManifest(
+  packet: WorkerPacket,
+  manifestText: string,
+): ActivatedPnpmRuntimePins | null {
+  const runtime = activatedPnpmRuntime(packet);
+  if (!runtime) return null;
+  if (Buffer.byteLength(manifestText) > 256 * 1024)
+    throw new Error("pnpm execution-base package.json exceeds the inspection bound");
+  let value: unknown;
+  try {
+    value = JSON.parse(manifestText);
+  } catch {
+    throw new Error("pnpm execution-base package.json is invalid JSON");
+  }
+  assertPnpmManifestRuntimePins(value, runtime.receipt);
+  return runtime.pins;
 }
 
 export interface ValidationPlan {
@@ -34,7 +67,7 @@ export interface ValidationPlan {
 export { NPM_VALIDATION_SETUP_COMMAND } from "../toolchains/authority.js";
 
 /** Upper bound reserved for trusted-local validation scopes. npm may consume
- * one setup command; pnpm always proves the bundled version and installs once. */
+ * one setup command; pnpm proves exact Node and pnpm, then installs once. */
 export function validationLocalCommandCount(packet: WorkerPacket): number {
   return (
     packet.validationCommands.length +
@@ -61,8 +94,7 @@ export function assertPnpmCommandsGroundedOnManifest(
     throw new Error("pnpm validation is missing its declared tool requirement");
   if (!packet.requirements.networkDestinations.includes(PACKAGE_SETUP_REGISTRY))
     throw new Error("pnpm validation is missing registry.npmjs.org setup authority");
-  if (Buffer.byteLength(manifestText) > 256 * 1024)
-    throw new Error("pnpm execution-base package.json exceeds the inspection bound");
+  assertActivatedPnpmPinsGroundedOnManifest(packet, manifestText);
   let value: unknown;
   try {
     value = JSON.parse(manifestText);
@@ -71,10 +103,7 @@ export function assertPnpmCommandsGroundedOnManifest(
   }
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("pnpm execution-base package.json is invalid");
-  const manifest = value as { packageManager?: unknown; scripts?: unknown };
-  const version = managedPnpmVersion(packet);
-  if (manifest.packageManager !== `pnpm@${version}`)
-    throw new Error(`pnpm execution base must pin packageManager to pnpm@${version}`);
+  const manifest = value as { scripts?: unknown };
   if (!manifest.scripts || typeof manifest.scripts !== "object" || Array.isArray(manifest.scripts))
     throw new Error("pnpm execution base has no valid script map");
   const scripts = manifest.scripts as Record<string, unknown>;

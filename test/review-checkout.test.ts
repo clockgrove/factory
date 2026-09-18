@@ -118,6 +118,9 @@ async function greenfieldFixture(unsafeLifecycle = false) {
       name: "greenfield",
       private: true,
       packageManager: "pnpm@10.34.5",
+      devEngines: {
+        runtime: { name: "node", version: "24.15.0", onFail: "error" },
+      },
       scripts: {
         check: "turbo run check",
         ...(unsafeLifecycle ? { precheck: "node --test escape.test.js" } : {}),
@@ -178,6 +181,7 @@ async function greenfieldFixture(unsafeLifecycle = false) {
     baseSha,
     outputTreeSha: artifact.fileManifest!.resultTreeSha,
     commands: [
+      { command: "node --version", exitCode: 0, durationMs: 1 },
       { command: "pnpm --version", exitCode: 0, durationMs: 1 },
       {
         command:

@@ -517,6 +517,7 @@ describe("sandbox bootstrap contracts", () => {
       ]),
     );
     expect(config.managedToolchain.assets[0]?.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(rendered).toContain("node --version");
     expect(rendered).toContain("pnpm --version");
     expect(rendered).toContain(
       "pnpm install --frozen-lockfile --ignore-scripts --registry=https://registry.npmjs.org/",

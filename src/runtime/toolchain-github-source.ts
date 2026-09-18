@@ -116,9 +116,9 @@ export class OctokitToolchainReleaseSource implements ToolchainReleaseSource {
     throw new Error("GitHub release asset response was not binary data");
   }
 
-  async resolveLatestNodeDistribution(requirement?: {
-    embeddedNpm: true;
-  }): Promise<NodeDistributionIdentity> {
+  async resolveLatestNodeDistribution(
+    requirement?: { embeddedNpm: true } | { nodePnpm: true },
+  ): Promise<NodeDistributionIdentity> {
     const indexResponse = await fetch("https://nodejs.org/dist/index.json", {
       headers: { accept: "application/json" },
     });
@@ -139,18 +139,22 @@ export class OctokitToolchainReleaseSource implements ToolchainReleaseSource {
       const match = typeof version === "string" ? /^v(\d+)\.(\d+)\.(\d+)$/.exec(version) : null;
       const npmMatch = typeof npm === "string" ? /^(\d+)\.(\d+)\.(\d+)$/.exec(npm) : null;
       const supportedNpm =
-        !requirement ||
+        !(requirement && "embeddedNpm" in requirement) ||
         (typeof lts === "string" &&
           lts.length > 0 &&
           npmMatch !== null &&
           ((match?.[1] === "22" && npmMatch[1] === "10") ||
             (match?.[1] === "24" && npmMatch[1] === "11")));
+      const supportedPnpmNode =
+        !(requirement && "nodePnpm" in requirement) ||
+        (match?.[1] === "24" && typeof lts === "string" && lts.length > 0);
       return match &&
         typeof date === "string" &&
         /^\d{4}-\d{2}-\d{2}$/.test(date) &&
         Array.isArray(files) &&
         files.includes("linux-x64") &&
-        supportedNpm
+        supportedNpm &&
+        supportedPnpmNode
         ? [{ ...candidate, version, date, npm, lts, semver: match.slice(1).map(Number) }]
         : [];
     });
@@ -164,9 +168,11 @@ export class OctokitToolchainReleaseSource implements ToolchainReleaseSource {
     const release = releases[0];
     if (!release || typeof release.version !== "string" || typeof release.date !== "string")
       throw new Error(
-        requirement
+        requirement && "embeddedNpm" in requirement
           ? "official Node release index has no supported Node 22/npm 10 or Node 24/npm 11 Linux x64 LTS"
-          : "official Node release index has no Linux x64 GA",
+          : requirement && "nodePnpm" in requirement
+            ? "official Node release index has no Node 24 Linux x64 LTS"
+            : "official Node release index has no Linux x64 GA",
       );
     const name = `node-${release.version}-linux-x64.tar.xz`;
     const shasumsUrl = `https://nodejs.org/dist/${release.version}/SHASUMS256.txt`;
@@ -189,7 +195,11 @@ export class OctokitToolchainReleaseSource implements ToolchainReleaseSource {
       sha256: matches[0]!,
       archive: "tar.xz",
       executablePath: `node-${release.version}-linux-x64/bin/node`,
-      ...(requirement ? { npmVersion: release.npm as string, lts: release.lts as string } : {}),
+      ...(requirement && "embeddedNpm" in requirement
+        ? { npmVersion: release.npm as string, lts: release.lts as string }
+        : requirement && "nodePnpm" in requirement
+          ? { lts: release.lts as string }
+          : {}),
     };
   }
 

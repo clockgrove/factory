@@ -30,7 +30,7 @@ const pnpmArchivePath = join(pnpmAssetRoot, "pnpm-linux-x64.tar.gz");
 execFileSync("tar", ["-czf", pnpmArchivePath, "-C", pnpmAssetRoot, "pnpm"]);
 const pnpmArchive = readFileSync(pnpmArchivePath);
 const nodeWrapper = Buffer.from(
-  `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
+  `#!/bin/sh\nif [ "$1" = "--version" ]; then printf 'v24.15.0\\n'; exit 0; fi\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
   "utf8",
 );
 await provisionToolchain("pnpm", {
@@ -59,16 +59,17 @@ await provisionToolchain("pnpm", {
     ],
     downloadAsset: async () => pnpmArchive,
     resolveLatestNodeDistribution: async () => ({
-      version: process.version.slice(1),
-      tag: process.version,
+      version: "24.15.0",
+      tag: "v24.15.0",
       publishedAt: "2026-09-10T00:00:00.000Z",
-      name: `node-${process.version}-linux-x64-test`,
-      url: `https://nodejs.org/dist/${process.version}/node-${process.version}-linux-x64-test`,
+      name: "node-v24.15.0-linux-x64-test",
+      url: "https://nodejs.org/dist/v24.15.0/node-v24.15.0-linux-x64-test",
       sha256: await crypto.subtle
         .digest("SHA-256", nodeWrapper)
         .then((value) => Buffer.from(value).toString("hex")),
       archive: "raw",
       executablePath: "node",
+      lts: "Krypton",
     }),
     downloadNodeDistribution: async () => nodeWrapper,
   },

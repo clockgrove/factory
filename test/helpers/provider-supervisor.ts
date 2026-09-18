@@ -131,6 +131,8 @@ export interface ProviderFaults {
   greenfieldLifecycle?: boolean;
   greenfieldDescendants?: number;
   pnpmUnavailable?: boolean;
+  ordinaryPnpmPins?: "valid" | "missing" | "mismatched";
+  pnpmPinMismatchAfterReservation?: boolean;
   capabilityAdmission?: "valid" | "unsafe";
   capabilityAdapter?: "npm" | "bun" | "uv";
   capabilityProviderLineageMismatch?: boolean;
@@ -245,7 +247,19 @@ wheels = [
                   packageManager: { name: "npm", version: "11.6.0", onFail: "error" },
                 },
               }
-            : {}),
+            : faults.capabilityAdapter === "bun"
+              ? {}
+              : faults.ordinaryPnpmPins === "missing"
+                ? {}
+                : {
+                    devEngines: {
+                      runtime: {
+                        name: "node",
+                        version: faults.ordinaryPnpmPins === "mismatched" ? "24.14.0" : "24.15.0",
+                        onFail: "error",
+                      },
+                    },
+                  }),
           scripts:
             faults.capabilityAdapter === "bun"
               ? { test: "bun test", check: "bun test" }
@@ -299,6 +313,9 @@ wheels = [
   git("add", ".");
   git("commit", "-qm", "base");
   const baseSha = git("rev-parse", "HEAD");
+  const pnpmPackageBlob = faults.ordinaryPnpmPins
+    ? git("rev-parse", `${baseSha}:package.json`)
+    : null;
   const managed = scenario !== "daytona-burst";
   const provider =
     scenario === "copilot-objective" ? COPILOT : scenario === "codex-objective" ? CODEX : DAYTONA;
@@ -367,6 +384,7 @@ wheels = [
   let workflowLiveBaseMutated = false;
   let capabilityProviderIntegrated = false;
   let capabilityConsumerReserved = false;
+  let pnpmPinDispatchFenceActive = false;
   let capabilitySourceRefReads = 0;
   let releaseSiblingCompletion!: () => void;
   const siblingCompletion = new Promise<void>((resolve) => {
@@ -446,7 +464,25 @@ wheels = [
       return current;
     },
     readCommit,
-    readBlob: async (oid) => Buffer.from(rawGit(["cat-file", "blob", oid])),
+    readBlob: async (oid) => {
+      const bytes = Buffer.from(rawGit(["cat-file", "blob", oid]));
+      if (
+        pnpmPinDispatchFenceActive &&
+        pnpmPackageBlob === oid &&
+        faults.pnpmPinMismatchAfterReservation
+      ) {
+        const manifest = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+        return Buffer.from(
+          JSON.stringify({
+            ...manifest,
+            devEngines: {
+              runtime: { name: "node", version: "24.14.0", onFail: "error" },
+            },
+          }),
+        );
+      }
+      return bytes;
+    },
     readTreeEntry: async (oid, path) => git("ls-tree", oid, "--", path).split(/\s+/)[2] ?? null,
     createBlob: async (bytes) => {
       if (bytes.toString("utf8").startsWith("name: CI\non:\n")) {
@@ -748,6 +784,24 @@ wheels = [
       },
     ],
   };
+  const ordinaryPnpmItem = structuredClone(repositoryWorkItem(capabilityGraph.workItems[0]!));
+  delete ordinaryPnpmItem.repositoryCapabilities;
+  const ordinaryPnpmGraph: CompiledObjective = {
+    title: "Observed pnpm admission qualification",
+    deferredCapabilityAdapters: [],
+    workItems: [
+      {
+        ...ordinaryPnpmItem,
+        id: "observed-pnpm",
+        title: "Use observed pnpm authority",
+        goal: "Create observed-pnpm.txt containing observed-pnpm",
+        acceptance: ["observed-pnpm.txt has the expected text"],
+        scope: ["observed-pnpm.txt"],
+        dependsOn: [],
+        delivery: { group: "observed-pnpm", relationship: "root" },
+      },
+    ],
+  };
   const workflowGraph: CompiledObjective = {
     ...ordinaryGraph,
     title: "Workflow publication-boundary qualification",
@@ -818,9 +872,8 @@ wheels = [
         }
       : {}),
   };
-  const graph: CompiledObjective = faults.graphFactory
-    ? faults.graphFactory(baseSha)
-    : faults.greenfieldBootstrap || faults.greenfieldLifecycle
+  const defaultGraph: CompiledObjective =
+    faults.greenfieldBootstrap || faults.greenfieldLifecycle
       ? {
           title: "Greenfield bootstrap qualification",
           deferredCapabilityAdapters: faults.greenfieldLifecycle ? ["node-pnpm"] : [],
@@ -876,6 +929,11 @@ wheels = [
         : faults.workflowArtifact
           ? workflowGraph
           : ordinaryGraph;
+  const graph: CompiledObjective = faults.graphFactory
+    ? faults.graphFactory(baseSha)
+    : faults.ordinaryPnpmPins
+      ? ordinaryPnpmGraph
+      : defaultGraph;
   const leases = {
     assertCurrent: async () => undefined,
     assertMutationAuthorized: async () => undefined,
@@ -1158,6 +1216,7 @@ wheels = [
           event.runId !== lease.runId
         )
           continue;
+        if (faults.pnpmPinMismatchAfterReservation) pnpmPinDispatchFenceActive = true;
         const digest = artifactTransfers
           .artifactTransferRef({
             repository: "fixture/provider-qualification",
@@ -1560,6 +1619,9 @@ wheels = [
               name: "greenfield",
               private: true,
               packageManager: "pnpm@10.34.5",
+              devEngines: {
+                runtime: { name: "node", version: "24.15.0", onFail: "error" },
+              },
               scripts: { check: "turbo run check" },
               devDependencies: { turbo: "2.5.6", typescript: "5.9.2" },
             }),

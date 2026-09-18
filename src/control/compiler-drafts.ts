@@ -11,6 +11,9 @@ const MAX_BYTES = 2 * 1024 * 1024;
 // A graph that passes the authoritative graph serializer must remain representable
 // after the immutable journal binding and record envelope are attached.
 const MAX_FIXED_GRAPH_RECORD_BYTES = MAX_COMPILED_GRAPH_BYTES + 256 * 1024;
+// A successful validation adds the bounded graph to a record whose proposal
+// trace and immutable bindings were already permitted by MAX_BYTES.
+const MAX_VALIDATION_RECORD_BYTES = MAX_COMPILED_GRAPH_BYTES + MAX_BYTES;
 const BindingSchema = z
   .object({
     repository: z.string().min(1).max(300),
@@ -45,7 +48,9 @@ const RecordSchema = z
   .strict();
 export type CompilerDraftRecord = z.infer<typeof RecordSchema>;
 function maximumRecordBytes(kind: CompilerDraftRecord["kind"]): number {
-  return kind === "fixed-graph" ? MAX_FIXED_GRAPH_RECORD_BYTES : MAX_BYTES;
+  if (kind === "fixed-graph") return MAX_FIXED_GRAPH_RECORD_BYTES;
+  if (kind === "validation") return MAX_VALIDATION_RECORD_BYTES;
+  return MAX_BYTES;
 }
 export function draftDigest(value: unknown): string {
   return createHash("sha256").update(canonicalDraftJson(value)).digest("hex");
@@ -172,7 +177,7 @@ async function loadBoundCompilerDrafts(
     if (!blob) throw new Error("compiler draft evidence missing");
     const bytes = await store.readBlob(blob);
     if (
-      bytes.length > MAX_FIXED_GRAPH_RECORD_BYTES ||
+      bytes.length > MAX_VALIDATION_RECORD_BYTES ||
       createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex") !== blob
     )
       throw new Error("compiler draft blob invalid");

@@ -75,6 +75,34 @@ this opt-in qualifier so parent REST observations and the preinstalled service u
 default Linux authentication. Clearing these variables is per process, not a global settings
 change. Never place tokens in arguments, unit properties or evidence.
 
+### Evaluated compiler selection and projection restart
+
+Compiler checkpoint preflight and exercise must use
+`scripts/verify-compiler-qualification-checkpoints.mjs` with
+`FACTORY_CHECKPOINT_BACKEND=compiler`. The shared
+`scripts/verify-local-checkpoint-restart.mjs` entrypoint rejects compiler mode before it creates
+evidence or performs controller, GitHub, or model operations because only the compiler-specific
+entrypoint installs the two checkpoint arms and validates their witnesses.
+
+Use the same preflight variables shown above, add `FACTORY_CHECKPOINT_BACKEND=compiler`, and invoke:
+
+```sh
+node scripts/verify-compiler-qualification-checkpoints.mjs
+```
+
+After reviewing preflight and obtaining permission for the bounded live run, repeat through that
+same compiler-specific script with a new evidence filename, `FACTORY_CHECKPOINT_PHASE=exercise`,
+and this exact acknowledgement:
+
+```text
+FACTORY_CHECKPOINT_ACK=<repository>:<exact-unit>:start,arm-compiler-selection,arm-graph-projection,restart,pause,restart,stop
+```
+
+The compiler exercise restarts once after the accepted selection and again after graph projection.
+It requires the original run, exact compiler accounting, retained graph and projection identities,
+and zero worker or capacity admission at the projection pause. The generic lifecycle exercise does
+not establish these compiler-specific boundaries.
+
 ## Explicit exercise
 
 ### App Server same-attempt artifact continuation

@@ -55,7 +55,7 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
   const calls: string[] = [];
   Object.assign(f.management, { supportsCompilerAdmission: true });
   f.management.extractObligations = async (context, checkpoint, beforeModelInvocation) => {
-    await beforeModelInvocation?.();
+    await beforeModelInvocation?.(invocationProvenance(context.baseSha));
     calls.push("inventory");
     const inventory: ObligationInventory = {
       version: 1,
@@ -89,7 +89,16 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
     beforeModelInvocation,
     execution,
   ) => {
-    await beforeModelInvocation?.();
+    await beforeModelInvocation?.({
+      promptDigest: compilerEvalDigest(request),
+      schemaDigest: "a".repeat(64),
+      promptBytes: Buffer.byteLength(JSON.stringify(request), "utf8"),
+      schemaBytes: 1,
+      sizeSource: "provider-dispatch",
+      baseSha: request.baseSha,
+      model: null,
+      reasoning: null,
+    });
     calls.push("compile");
     if (!execution) throw new Error("fixture requires compilation context");
     const criterion = "answer.txt contains the required answer";
@@ -145,7 +154,7 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
     return result;
   };
   f.management.judgePlan = async (context, checkpoint, beforeModelInvocation) => {
-    await beforeModelInvocation?.();
+    await beforeModelInvocation?.(invocationProvenance(context.compilation.baseSha));
     calls.push("judge");
     const verdict: CompilerJudgeVerdict = {
       version: 1,
@@ -1063,6 +1072,76 @@ describe("Supervisor compiler evaluation activation boundary", () => {
       expect(calls).toEqual(["inventory", "compile", "judge"]);
       assertNoProjection(f);
       expect(vi.mocked(GitHubControlStore.prototype.closeIssue)).not.toHaveBeenCalled();
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
+  it("reuses the accepted projection after restart without resampling compiler economics", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      compilerEvaluation: { mode: "auto-repair" },
+    });
+    try {
+      freshObjective(f);
+      const calls = configureCompiler(f);
+      const samples = ["2026-09-18T00:00:01.000Z", "2026-09-18T00:00:02.000Z"];
+      let sample = samples[0]!;
+      f.repositoryResources.resourceSampler.sample = vi.fn(async () => ({
+        measuredAt: sample,
+        logicalCpu: 8,
+        effectiveCpu: 8,
+        loadRatio: 0,
+        totalMemoryMb: 32_768,
+        availableMemoryMb: 30_000,
+        memoryUsageRatio: 0.1,
+        source: "host" as const,
+      }));
+      const persist = CompiledGraphManager.prototype.persist;
+      let interrupted = false;
+      vi.spyOn(CompiledGraphManager.prototype, "persist").mockImplementation(async function (
+        this: CompiledGraphManager,
+        ...args
+      ) {
+        if (!interrupted) {
+          interrupted = true;
+          throw new PlatformUnavailableError(
+            { kind: "server_error", retryAfterMs: 1 },
+            new Error("fixture pauses after accepted compiler selection"),
+          );
+        }
+        return persist.apply(this, args);
+      });
+
+      await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+      expect(interrupted).toBe(true);
+      expect(calls).toEqual(["inventory", "compile", "judge"]);
+      assertNoProjection(f);
+      const before = await loadCompilerDrafts(f.storage, 7, f.runId);
+      const validation = before.find(
+        (record) => record.kind === "validation" && record.payload.valid === true,
+      );
+      expect(validation?.payload.graph).toBeDefined();
+      const managementCharges = () =>
+        f
+          .events()
+          .filter(
+            (event) =>
+              event.kind === "budget" &&
+              event.event === "BudgetReconciled" &&
+              event.phase === "management" &&
+              event.unit === "model_tokens",
+          );
+      expect(managementCharges()).toHaveLength(3);
+
+      sample = samples[1]!;
+      const result = await f.run();
+      expect(calls).toEqual(["inventory", "compile", "judge"]);
+      expect(managementCharges()).toHaveLength(3);
+      const graph = await new CompiledGraphManager(f.storage, f.leases).load(7, f.runId);
+      expect(graph, JSON.stringify({ result, refs: [...f.refs.keys()] })).not.toBeNull();
+      expect(graph?.objective.workItems[0]?.economicReview?.rationale).toContain(samples[0]);
+      expect(graph?.objective.workItems[0]?.economicReview?.rationale).not.toContain(samples[1]);
     } finally {
       await f.dispose();
     }

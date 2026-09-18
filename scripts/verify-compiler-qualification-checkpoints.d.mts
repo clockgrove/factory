@@ -1,4 +1,9 @@
-import type { CheckpointExtension } from "./verify-local-checkpoint-restart.mjs";
+import type {
+  CheckpointExtension,
+  CompilerCheckpointBootstrapAuthority,
+} from "./verify-local-checkpoint-restart.mjs";
+
+export type { CompilerCheckpointBootstrapAuthority } from "./verify-local-checkpoint-restart.mjs";
 
 export type CompilerCheckpointKind = "compiler-selection" | "graph-projection";
 export interface CompilerCheckpointPolicy extends Record<string, unknown> {
@@ -45,7 +50,17 @@ export interface CompilerCheckpointArm extends Record<string, unknown> {
   holdDurationMs: number;
 }
 export function compilerCheckpointPath(binding: Record<string, unknown>, uid?: number): string;
+export function compilerCheckpointAuthority(
+  env: Record<string, string | undefined>,
+): CompilerCheckpointBootstrapAuthority | null;
 export function compilerQualificationObjectiveBody(authority: { namespace: string }): string;
+export type CompilerCheckpointExtension = Omit<
+  CheckpointExtension,
+  "authority" | "objectiveBody"
+> & {
+  authority: CompilerCheckpointBootstrapAuthority | CompilerCheckpointAuthority | null;
+  objectiveBody: typeof compilerQualificationObjectiveBody;
+};
 export function assertCompilerQualificationDefaults(
   effectiveDefaults: unknown,
   maxObservedTokens: number,
@@ -82,5 +97,7 @@ export function runCompilerCheckpointScenario(
   port: unknown,
   authority: CompilerCheckpointAuthority,
 ): Promise<Record<string, unknown>>;
-export function compilerCheckpointExtension(authority: unknown): CheckpointExtension;
+export function compilerCheckpointExtension(
+  authority: CompilerCheckpointBootstrapAuthority | CompilerCheckpointAuthority | null,
+): CompilerCheckpointExtension;
 export function main(env?: NodeJS.ProcessEnv): Promise<void>;

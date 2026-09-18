@@ -14,7 +14,10 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkpointAuthority, main as checkpointMain } from "./verify-local-checkpoint-restart.mjs";
+import {
+  compilerQualificationCheckpointAuthority,
+  main as checkpointMain,
+} from "./verify-local-checkpoint-restart.mjs";
 import { qualificationNamespaceMarker } from "./verify-live-objective.mjs";
 
 const hash = (value) =>
@@ -41,6 +44,10 @@ const documentedCompilerEvaluationDefaults = Object.freeze({
   maxInvocations: 7,
   timeoutSeconds: 600,
 });
+
+export function compilerCheckpointAuthority(env) {
+  return compilerQualificationCheckpointAuthority(env);
+}
 
 export function assertCompilerQualificationDefaults(effectiveDefaults, maxObservedTokens) {
   assert.ok(
@@ -578,7 +585,7 @@ export function compilerCheckpointExtension(authority) {
 }
 
 export async function main(env = process.env) {
-  const authority = checkpointAuthority(env);
+  const authority = compilerCheckpointAuthority(env);
   if (authority) assert.equal(authority.compilerRecovery, true);
   return checkpointMain(env, runCompilerCheckpointScenario, compilerCheckpointExtension(authority));
 }

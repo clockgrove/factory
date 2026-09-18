@@ -89,7 +89,12 @@ export function qualificationRuntimeCodexHome(env, linuxHome = realpathSync(home
   return codexHome;
 }
 
-export function checkpointAuthority(env) {
+function parseCheckpointAuthority(env, compilerQualificationEntrypoint) {
+  const compilerRecovery = env.FACTORY_CHECKPOINT_BACKEND === "compiler";
+  assert.ok(
+    !compilerRecovery || compilerQualificationEntrypoint,
+    "compiler checkpoint mode requires scripts/verify-compiler-qualification-checkpoints.mjs",
+  );
   if (env.FACTORY_LOCAL_CHECKPOINT_RESTART !== "1") return null;
   for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"])
     assert.equal(env[key], undefined, "default Linux-home authentication required");
@@ -102,7 +107,6 @@ export function checkpointAuthority(env) {
   assert.equal(env.FACTORY_CHECKPOINT_CONTROLLER_UNIT, unit, "exact installed controller required");
   const phase = env.FACTORY_CHECKPOINT_PHASE;
   const sessionRecovery = env.FACTORY_CHECKPOINT_BACKEND === "app-server";
-  const compilerRecovery = env.FACTORY_CHECKPOINT_BACKEND === "compiler";
   assert.ok(
     env.FACTORY_CHECKPOINT_BACKEND === undefined || sessionRecovery || compilerRecovery,
     "unsupported checkpoint backend",
@@ -153,6 +157,15 @@ export function checkpointAuthority(env) {
     ...(sessionRecovery ? { sessionRecovery: true } : {}),
     ...(compilerRecovery ? { compilerRecovery: true } : {}),
   };
+}
+
+export function checkpointAuthority(env) {
+  return parseCheckpointAuthority(env, false);
+}
+
+/** Internal adapter for the committed compiler-specific entrypoint. */
+export function compilerQualificationCheckpointAuthority(env) {
+  return parseCheckpointAuthority(env, true);
 }
 
 class CheckpointPending extends Error {}

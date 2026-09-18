@@ -1525,8 +1525,14 @@ Draft records use the replacement `clockgrove.factory/compiler-draft` protocol i
 Git objects under per-Objective/run sequence refs. There is no compatibility alias or parallel reader
 for the retired draft format. Records retain frozen source evidence, invocation intents, semantic
 proposals, closed validation reports, deterministic projection traces, usage, failed validation,
-every verdict, and the exact final selection. Lease-fenced create-if-absent publication admits one invocation
-winner. Missing terminal evidence is unknown accounting and forbids replay; completed results
+every verdict, and the exact final selection. Each successful validation record also retains the
+complete bounded projected graph before judge dispatch. Restart parses and mechanically revalidates
+that exact graph together with the frozen Objective, base, policy, input, proposal, trace, judgment,
+and accounting bindings; it never recollects advisory economics to reconstruct an accepted
+projection. A validation record alone grants no `GraphCompiled`, Work Item, or scheduling authority.
+Missing, malformed, foreign, or contradictory retained graph data fails closed. Lease-fenced
+create-if-absent publication admits one invocation winner. Missing terminal evidence is unknown
+accounting and forbids replay; completed results
 repair their own idempotent accounting before another call. Contradictory terminal responses,
 changed inputs, cycling drafts, repeated blockers, exhausted bounds, and material ambiguity
 fail closed. Malformed repair output consumes its attempt. Revisions never emit `GraphCompiled`;

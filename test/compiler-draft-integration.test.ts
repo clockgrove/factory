@@ -28,6 +28,7 @@ import {
 import type { CompilerRequest } from "../src/compiler/contracts.js";
 import { CompilerInvariantError } from "../src/compiler/invariant-error.js";
 import { validatePersistedCompilerDraftJournal } from "../src/evaluation/compiler-draft-loop.js";
+import { compiledGraphDigest, type CompiledObjective } from "../src/graph.js";
 import { pinFixtureRepository } from "./helpers/compiler-proposal.js";
 const BASE_SHA = "a".repeat(40);
 const BASE_TREE = "b".repeat(40);
@@ -565,6 +566,62 @@ describe("production compiler draft adapter", () => {
       "reserved request binding",
     );
   });
+
+  it.each(["validation", "judge", "selection"] as const)(
+    "restarts after durable %s with the retained projection and no mutable-economics replay",
+    async (boundary) => {
+      const f = await setup({ acceptFirst: true });
+      const samples = ["2026-09-18T00:00:01.000Z", "2026-09-18T00:00:02.000Z"];
+      const economicEvidence = vi.fn(async () => ({
+        objective: 42,
+        policy: f.args.context.runPolicy,
+        resource: {
+          measuredAt: samples[Math.min(economicEvidence.mock.calls.length - 1, 1)],
+        },
+      }));
+      f.args.context.economicEvidence = economicEvidence as never;
+      const append = f.args.manager.append.bind(f.args.manager);
+      let interrupted = false;
+      const fault = vi.spyOn(f.args.manager, "append").mockImplementation(async (...args) => {
+        if (args[3] === "stopped") throw new Error("process unavailable before stopped record");
+        const saved = await append(...args);
+        const reached =
+          args[3] === boundary ||
+          (boundary === "judge" && args[3] === "result" && args[4].stage === "judge");
+        if (!interrupted && reached) {
+          interrupted = true;
+          throw new Error(`crash after durable ${boundary}`);
+        }
+        return saved;
+      });
+
+      await expect(compileEvaluatedDraft(f.args)).rejects.toThrow();
+      fault.mockRestore();
+      expect(interrupted).toBe(true);
+      const before = await f.args.manager.load(f.args.binding);
+      const validation = before.find(
+        (record) => record.kind === "validation" && record.payload.valid === true,
+      );
+      expect(validation?.payload.graph).toBeDefined();
+      expect(validation?.payload.graphDigest).toBe(
+        compiledGraphDigest(validation!.payload.graph as CompiledObjective),
+      );
+      const result = await compileEvaluatedDraft({
+        ...f.args,
+        context: { ...f.args.context },
+      });
+      if (result.status !== "accepted") throw new Error("accepted graph required");
+
+      expect(result.graph.workItems[0]?.economicReview?.rationale).toContain(samples[0]);
+      expect(result.graph.workItems[0]?.economicReview?.rationale).not.toContain(samples[1]);
+      expect(economicEvidence).toHaveBeenCalledOnce();
+      expect(f.stages).toEqual(["inventory", "compile", "judge"]);
+      expect(f.runStructured).toHaveBeenCalledTimes(3);
+      expect(f.args.admit).toHaveBeenCalledTimes(3);
+      expect(f.accounting.size).toBe(3);
+      expect(result.records.filter((record) => record.kind === "selection")).toHaveLength(1);
+    },
+  );
 
   it("repairs a schema-valid accept verdict with an unknown dimension and replays without spend", async () => {
     const f = await setup({ invalidAcceptUnknownFirst: true });

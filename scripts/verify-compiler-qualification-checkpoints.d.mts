@@ -54,6 +54,13 @@ export function compilerCheckpointAuthority(
   env: Record<string, string | undefined>,
 ): CompilerCheckpointBootstrapAuthority | null;
 export function compilerQualificationObjectiveBody(authority: { namespace: string }): string;
+export type CompilerCheckpointExtension = Omit<
+  CheckpointExtension,
+  "authority" | "objectiveBody"
+> & {
+  authority: CompilerCheckpointBootstrapAuthority | CompilerCheckpointAuthority | null;
+  objectiveBody: typeof compilerQualificationObjectiveBody;
+};
 export function assertCompilerQualificationDefaults(
   effectiveDefaults: unknown,
   maxObservedTokens: number,
@@ -92,5 +99,5 @@ export function runCompilerCheckpointScenario(
 ): Promise<Record<string, unknown>>;
 export function compilerCheckpointExtension(
   authority: CompilerCheckpointBootstrapAuthority | CompilerCheckpointAuthority | null,
-): CheckpointExtension;
+): CompilerCheckpointExtension;
 export function main(env?: NodeJS.ProcessEnv): Promise<void>;

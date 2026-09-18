@@ -314,6 +314,9 @@ describe("independent compiler management boundaries", () => {
     expect(result.provenance).toEqual({
       promptDigest: createHash("sha256").update(observedPrompt).digest("hex"),
       schemaDigest: createHash("sha256").update(JSON.stringify(observedSchema)).digest("hex"),
+      promptBytes: Buffer.byteLength(observedPrompt, "utf8"),
+      schemaBytes: Buffer.byteLength(JSON.stringify(observedSchema), "utf8"),
+      sizeSource: "provider-dispatch",
       baseSha: context.baseSha,
       model: null,
       reasoning: null,
@@ -445,6 +448,8 @@ describe("independent compiler management boundaries", () => {
       name: "ManagementOutputError",
       usage,
       proposal: undefined,
+      responseBytes: Buffer.byteLength(JSON.stringify(oversized), "utf8"),
+      responseBytesSource: "canonical-structured-value",
     });
     expect(observed).not.toHaveProperty("repairableInvalidClaims");
 
@@ -522,6 +527,9 @@ describe("independent compiler management boundaries", () => {
     expect(judged.provenance).toEqual({
       promptDigest: createHash("sha256").update(observedPrompt).digest("hex"),
       schemaDigest: createHash("sha256").update(JSON.stringify(observedSchema)).digest("hex"),
+      promptBytes: Buffer.byteLength(observedPrompt, "utf8"),
+      schemaBytes: Buffer.byteLength(JSON.stringify(observedSchema), "utf8"),
+      sizeSource: "provider-dispatch",
       baseSha: context.baseSha,
       model: null,
       reasoning: null,

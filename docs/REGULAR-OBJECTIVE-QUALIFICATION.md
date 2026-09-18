@@ -50,6 +50,11 @@ mutation or model use, and raw transcripts remain local debug evidence.
 Preflight performs bounded reads and writes only local evidence. Execution requires
 both the shared execution opt-in and acknowledgment of the exact disposable repository:
 
+Because this qualifier requires durable local-scope ownership in its merge proof, preflight also
+uses the installed Factory CLI's production capability discovery to require Linux systemd 254+ and
+a reachable user systemd manager. Execution rechecks that capability before Objective creation or
+model dispatch. Ordinary Factory runs still retain their portable process-group fallback.
+
 ```bash
 export FACTORY_LIVE_OBJECTIVE=1
 export FACTORY_LIVE_OBJECTIVE_MUTATION_ACK=OWNER/DISPOSABLE_REPO

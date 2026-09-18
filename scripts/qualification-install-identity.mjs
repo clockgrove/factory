@@ -95,6 +95,49 @@ export function installedCompilerPreflight(
   return report;
 }
 
+/** Invoke the exact retained CLI's production local-scope discovery. The
+ * qualifier calls this before any mutation and again at live entry. */
+export function installedLocalScopePreflight(
+  { factoryCli, checkout, environment = process.env },
+  execute = spawnSync,
+) {
+  assert.ok(isAbsolute(factoryCli), "installed Factory CLI path must be absolute");
+  assert.ok(isAbsolute(checkout), "local-scope preflight checkout must be absolute");
+  const result = execute(factoryCli, ["local-scope-preflight"], {
+    cwd: checkout,
+    env: environment,
+    encoding: "utf8",
+    timeout: 30_000,
+    maxBuffer: 64 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.equal(result.signal, null, "installed local-scope preflight was interrupted");
+  assert.equal(result.error, undefined, "installed local-scope preflight could not execute");
+  assert.ok([0, 2].includes(result.status), "installed local-scope preflight failed unexpectedly");
+  assert.ok(
+    typeof result.stdout === "string" && Buffer.byteLength(result.stdout) <= 64 * 1024,
+    "installed local-scope preflight output is unavailable or unbounded",
+  );
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.protocol, "clockgrove.factory/local-scope-preflight-v1");
+  assert.equal(report.capability, "durable-local-scopes");
+  assert.ok(["passed", "blocked"].includes(report.result), "local-scope result is invalid");
+  assert.equal(report.result === "passed", result.status === 0);
+  if (report.result === "passed") {
+    assert.equal(report.reason, undefined);
+    assert.equal(report.blocker, undefined);
+  } else {
+    assert.equal(report.blocker, "durable-local-scopes-unavailable");
+    assert.ok(
+      typeof report.reason === "string" &&
+        report.reason.includes("systemd") &&
+        Buffer.byteLength(report.reason) <= 1_024,
+      "local-scope preflight diagnostic is unavailable or unbounded",
+    );
+  }
+  return report;
+}
+
 function required(env, name) {
   const value = env[name]?.trim();
   assert.ok(value, `${name} is required`);

@@ -7,6 +7,7 @@ import {
   assertCompletion,
   assessCompletion,
   assessQualificationPreflight,
+  applyQualificationScenarioPreflight,
   assertRetryableObjective,
   assertQualificationCompletion,
   assertRecordedQualificationPolicy,
@@ -28,6 +29,8 @@ import { assertSchedulingCompletion } from "../scripts/verify-local-scheduling.m
 import {
   assertRegularCompletion,
   assessRegularCompletion,
+  enterRegularQualification,
+  observeRegularLocalScopeCapability,
   regularQualification,
   main as regularMain,
   observeRegularCommits,
@@ -632,6 +635,82 @@ describe("shared versioned REST merge evidence", () => {
 });
 
 describe("explicit installed regular qualification", () => {
+  const localScopeInput = {
+    factoryCli: "/installed/factory.js",
+    checkout: "/home/example/repository",
+    environment: { PATH: "/usr/bin:/bin" },
+  };
+  const localScopeReport = (result: "passed" | "blocked") => ({
+    protocol: "clockgrove.factory/local-scope-preflight-v1",
+    result,
+    capability: "durable-local-scopes",
+    ...(result === "blocked"
+      ? {
+          blocker: "durable-local-scopes-unavailable",
+          reason:
+            "durable local-scope qualification requires systemd and a reachable user systemd manager",
+        }
+      : {}),
+  });
+
+  it("observes durable local-scope capability before qualification mutation", async () => {
+    const observe = vi.fn(() => localScopeReport("passed"));
+
+    await expect(
+      observeRegularLocalScopeCapability(localScopeInput, observe),
+    ).resolves.toMatchObject({ result: "passed" });
+    expect(observe).toHaveBeenCalledExactlyOnceWith(localScopeInput);
+  });
+
+  it("retains the precise local-scope blocker and diagnostic in preflight evidence", () => {
+    const preflight = { result: "passed" as const, blockers: [] as string[] };
+    const scenario = localScopeReport("blocked");
+
+    applyQualificationScenarioPreflight(preflight, scenario);
+
+    expect(preflight).toEqual({
+      result: "blocked",
+      blockers: ["durable-local-scopes-unavailable"],
+      scenario,
+    });
+  });
+
+  it("rechecks capability at live entry and fails before mutation when it changed", async () => {
+    const evidence: Record<string, unknown> = {
+      preflight: { scenario: localScopeReport("passed"), defaultBranch: "main" },
+    };
+    const save = vi.fn();
+    const observe = vi.fn(() => localScopeReport("blocked"));
+
+    await expect(
+      enterRegularQualification(
+        { ...localScopeInput, evidence, save, profile: "local-default" },
+        observe,
+      ),
+    ).rejects.toThrow(/user systemd manager/);
+    expect(observe).toHaveBeenCalledExactlyOnceWith(localScopeInput);
+    expect(save).toHaveBeenCalledOnce();
+    expect(evidence).not.toHaveProperty("regularBackendProfile");
+    expect(evidence.liveLocalScopeCapability).toMatchObject({ result: "blocked" });
+  });
+
+  it("keeps the existing live path after both local-scope checks pass", async () => {
+    const evidence: Record<string, unknown> = {
+      preflight: { scenario: localScopeReport("passed"), defaultBranch: "main" },
+    };
+    const save = vi.fn();
+
+    await enterRegularQualification(
+      { ...localScopeInput, evidence, save, profile: "codex-cli" },
+      vi.fn(() => localScopeReport("passed")),
+    );
+
+    expect(save).toHaveBeenCalledOnce();
+    expect(evidence.regularBackendProfile).toBe("codex-cli");
+    expect(evidence.nativeDefaultBranch).toBe("main");
+    expect(evidence.liveLocalScopeCapability).toMatchObject({ result: "passed" });
+  });
+
   it("selects only explicit CLI without changing default authority or model settings", async () => {
     const env = {
       FACTORY_LIVE_REGULAR_OBJECTIVE: "1",
@@ -649,11 +728,7 @@ describe("explicit installed regular qualification", () => {
       expect(() => regularQualification({ ...env, FACTORY_LIVE_REGULAR_BACKEND: profile })).toThrow(
         /route/,
       );
-    const captured: Record<string, unknown> = {};
-    await (selected.beforeRun as (input: { evidence: Record<string, unknown> }) => Promise<void>)({
-      evidence: captured,
-    });
-    expect(captured.regularBackendProfile).toBe("codex-cli");
+    expect(selected.observePreflight).toBe(observeRegularLocalScopeCapability);
   });
   it("requires CLI for every attempt under explicit CLI policy", async () => {
     const value = await regularEvidence("codex-cli");

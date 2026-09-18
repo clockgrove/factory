@@ -1243,119 +1243,126 @@ const jsonCompilerWorkItemProposal = (
       trust: { type: "string", enum: ["trusted_local", "isolated", "managed"] },
     }),
   });
-const jsonMediaIntent = strictObject({
-  id: jsonId,
-  role: jsonId,
-  purpose: {
-    type: "string",
-    enum: ["decision-input", "implementation-reference", "product-asset", "acceptance-evidence"],
-  },
-  necessity: { type: "string", enum: ["required", "helpful"] },
-  obligationIds: { ...stringArray(128, jsonEvalId), minItems: 1 },
-  rationale: { type: "string", minLength: 1, maxLength: 2_000 },
-  brief: jsonText,
-  fulfillment: {
-    anyOf: [
-      strictObject({
-        kind: { type: "string", const: "imported" },
-        assetIds: { ...stringArray(32, jsonId), minItems: 1, uniqueItems: true },
-      }),
-      strictObject({
-        kind: { type: "string", const: "produced" },
-        inputRoleBindings: {
-          type: "array",
-          maxItems: 8,
-          items: strictObject({
-            roleId: jsonId,
-            importedAssetIds: { ...stringArray(32, jsonId), uniqueItems: true },
-            inputIntentIds: { ...stringArray(32, jsonId), uniqueItems: true },
-          }),
-        },
-      }),
-    ],
-  },
-  output: strictObject({
-    mediaTypes: {
-      type: "array",
-      minItems: 1,
-      maxItems: 16,
-      items: {
-        type: "string",
-        minLength: 1,
-        maxLength: 160,
-        pattern:
-          "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$",
-      },
+const jsonMediaIntent = (includeUniqueItems: boolean) => {
+  const referenceArray = (maximum: number, item: Record<string, unknown>, minimum?: number) => ({
+    ...stringArray(maximum, item),
+    ...(minimum === undefined ? {} : { minItems: minimum }),
+    ...(includeUniqueItems ? { uniqueItems: true } : {}),
+  });
+  return strictObject({
+    id: jsonId,
+    role: jsonId,
+    purpose: {
+      type: "string",
+      enum: ["decision-input", "implementation-reference", "product-asset", "acceptance-evidence"],
     },
-    minimumCount: { type: "integer", minimum: 1, maximum: 16 },
-    maximumCount: { type: "integer", minimum: 1, maximum: 16 },
-    profile: {
+    necessity: { type: "string", enum: ["required", "helpful"] },
+    obligationIds: { ...stringArray(128, jsonEvalId), minItems: 1 },
+    rationale: { type: "string", minLength: 1, maxLength: 2_000 },
+    brief: jsonText,
+    fulfillment: {
       anyOf: [
-        { type: "null" },
         strictObject({
-          kind: { type: "string", const: "raster" },
-          minimumWidth: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
-          maximumWidth: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
-          minimumHeight: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
-          maximumHeight: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
-          alpha: { type: "string", enum: ["allowed", "required", "forbidden"] },
-          animation: { type: "string", enum: ["allowed", "required", "forbidden"] },
+          kind: { type: "string", const: "imported" },
+          assetIds: referenceArray(32, jsonId, 1),
+        }),
+        strictObject({
+          kind: { type: "string", const: "produced" },
+          inputRoleBindings: {
+            type: "array",
+            maxItems: 8,
+            items: strictObject({
+              roleId: jsonId,
+              importedAssetIds: referenceArray(32, jsonId),
+              inputIntentIds: referenceArray(32, jsonId),
+            }),
+          },
         }),
       ],
     },
-  }),
-  review: {
-    anyOf: [
-      { type: "null" },
-      strictObject({ kind: { type: "string", const: "human-required" } }),
-      strictObject({
-        kind: { type: "string", const: "deterministic-preauthorized" },
-        ruleId: jsonId,
-      }),
-    ],
-  },
-  repositoryCapture: {
-    anyOf: [
-      { type: "null" },
-      strictObject({
-        expectedAssetId: jsonId,
-        scenario: strictObject({
-          id: jsonId,
-          fixture: { type: ["string", "null"], minLength: 1, maxLength: 500 },
-          seed: { type: ["string", "null"], minLength: 1, maxLength: 500 },
-        }),
-        captureRecipeId: jsonId,
-        comparison: {
-          anyOf: [
-            strictObject({ kind: { type: "string", const: "exact" } }),
-            strictObject({
-              kind: { type: "string", const: "threshold" },
-              policyId: jsonId,
-            }),
-          ],
+    output: strictObject({
+      mediaTypes: {
+        type: "array",
+        minItems: 1,
+        maxItems: 16,
+        items: {
+          type: "string",
+          minLength: 1,
+          maxLength: 160,
+          pattern:
+            "^[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}/[a-zA-Z0-9][a-zA-Z0-9!#$&^_.+\\-]{0,126}$",
         },
-        gate: {
-          anyOf: [
-            strictObject({ kind: { type: "string", const: "human-required" } }),
-            strictObject({
-              kind: { type: "string", const: "deterministic-preauthorized" },
-              authorityId: jsonId,
-            }),
-          ],
-        },
-      }),
-    ],
-  },
-  bindings: {
-    type: "array",
-    maxItems: 64,
-    items: strictObject({
-      workItemId: jsonId,
-      direction: { type: "string", enum: ["input-to", "evidence-for"] },
-      criterionIds: { ...stringArray(64, jsonId), uniqueItems: true },
+      },
+      minimumCount: { type: "integer", minimum: 1, maximum: 16 },
+      maximumCount: { type: "integer", minimum: 1, maximum: 16 },
+      profile: {
+        anyOf: [
+          { type: "null" },
+          strictObject({
+            kind: { type: "string", const: "raster" },
+            minimumWidth: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
+            maximumWidth: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
+            minimumHeight: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
+            maximumHeight: { type: ["integer", "null"], minimum: 1, maximum: 16_384 },
+            alpha: { type: "string", enum: ["allowed", "required", "forbidden"] },
+            animation: { type: "string", enum: ["allowed", "required", "forbidden"] },
+          }),
+        ],
+      },
     }),
-  },
-});
+    review: {
+      anyOf: [
+        { type: "null" },
+        strictObject({ kind: { type: "string", const: "human-required" } }),
+        strictObject({
+          kind: { type: "string", const: "deterministic-preauthorized" },
+          ruleId: jsonId,
+        }),
+      ],
+    },
+    repositoryCapture: {
+      anyOf: [
+        { type: "null" },
+        strictObject({
+          expectedAssetId: jsonId,
+          scenario: strictObject({
+            id: jsonId,
+            fixture: { type: ["string", "null"], minLength: 1, maxLength: 500 },
+            seed: { type: ["string", "null"], minLength: 1, maxLength: 500 },
+          }),
+          captureRecipeId: jsonId,
+          comparison: {
+            anyOf: [
+              strictObject({ kind: { type: "string", const: "exact" } }),
+              strictObject({
+                kind: { type: "string", const: "threshold" },
+                policyId: jsonId,
+              }),
+            ],
+          },
+          gate: {
+            anyOf: [
+              strictObject({ kind: { type: "string", const: "human-required" } }),
+              strictObject({
+                kind: { type: "string", const: "deterministic-preauthorized" },
+                authorityId: jsonId,
+              }),
+            ],
+          },
+        }),
+      ],
+    },
+    bindings: {
+      type: "array",
+      maxItems: 64,
+      items: strictObject({
+        workItemId: jsonId,
+        direction: { type: "string", enum: ["input-to", "evidence-for"] },
+        criterionIds: referenceArray(64, jsonId),
+      }),
+    },
+  });
+};
 const jsonCompilerMediaFacts = strictObject({
   assetManifest: {
     anyOf: [
@@ -1827,6 +1834,7 @@ const compilerProposalSchemas = (
   scopePath: Record<string, unknown>,
   networkDestination: Record<string, unknown>,
   exclusiveResourcePattern: string,
+  mediaIntent: Record<string, unknown>,
 ) => {
   const workItem = jsonCompilerWorkItemProposal(
     scopePath,
@@ -1851,7 +1859,7 @@ const compilerProposalSchemas = (
       protocol: { type: "string", const: "clockgrove.factory/compiler-proposal" },
       kind: { type: "string", const: "work-items" },
       workItems: { type: "array", minItems: 1, maxItems: 100, items: workItem },
-      mediaIntents: { type: "array", maxItems: 32, items: jsonMediaIntent },
+      mediaIntents: { type: "array", maxItems: 32, items: mediaIntent },
     }),
     strictObject({
       protocol: { type: "string", const: "clockgrove.factory/compiler-proposal" },
@@ -1876,7 +1884,7 @@ const compilerProposalSchemas = (
     protocol: { type: "string", const: "clockgrove.factory/compiler-proposal" },
     kind: { type: "string", enum: ["work-items", "objectives", "clarification"] },
     workItems: { type: "array", maxItems: 100, items: workItem },
-    mediaIntents: { type: "array", maxItems: 32, items: jsonMediaIntent },
+    mediaIntents: { type: "array", maxItems: 32, items: mediaIntent },
     objectives: { type: "array", maxItems: 32, items: proposedObjective },
     coverage: { type: "array", maxItems: 128, items: jsonRequirementDisposition },
     triggers: { type: "array", maxItems: 32, items: jsonPlanningTrigger },
@@ -1889,11 +1897,13 @@ const providerCompilerProposalObjectSchema = compilerProposalSchemas(
   providerJsonScopePath,
   providerJsonNetworkDestination,
   "^[a-z0-9][a-z0-9:._/-]*$",
+  jsonMediaIntent(false),
 ).provider;
 const durableCompilerProposalObjectSchema = compilerProposalSchemas(
   jsonScopePath,
   jsonNetworkDestination,
   "^(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*//)(?!.*\\/$)[a-z0-9][a-z0-9:._/-]*$",
+  jsonMediaIntent(true),
 ).durable;
 
 export const COMPILER_PROPOSAL_JSON_SCHEMA = {

@@ -28,6 +28,19 @@ describe("provider structured-output schema subset", () => {
     ["worker output", CODEX_WORKER_OUTPUT_SCHEMA],
   ])("accepts the production %s schema", (_name, schema) => {
     expect(() => assertProviderStructuredOutputSchema(schema)).not.toThrow();
+    expect(JSON.stringify(schema)).not.toContain('"uniqueItems"');
+  });
+
+  it("rejects nested uniqueItems with its exact schema path", () => {
+    expect(() =>
+      assertProviderStructuredOutputSchema(
+        objectSchema({
+          type: "array",
+          uniqueItems: true,
+          items: { type: "string" },
+        }),
+      ),
+    ).toThrow("provider schema uses unsupported uniqueItems at $/properties/value/uniqueItems");
   });
 
   it.each(["oneOf", "allOf", "not", "dependentRequired", "dependentSchemas", "if", "then", "else"])(

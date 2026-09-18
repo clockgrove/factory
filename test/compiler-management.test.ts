@@ -18,6 +18,10 @@ import {
   compilerProposalPrompt,
   renderCompilerProposalPrompt,
 } from "../src/management/codex-cli.js";
+import type {
+  ManagementTranscriptRecorder,
+  ManagementTranscriptStart,
+} from "../src/management/transcripts.js";
 import {
   compilePlan,
   compilePlanWithLegacyAdmission,
@@ -320,12 +324,19 @@ describe("single semantic management route", () => {
     const proposal = semanticProposal(initial);
     const schemas: unknown[] = [];
     const prompts: string[] = [];
+    const transcriptStarts: ManagementTranscriptStart[] = [];
+    const transcriptRecorder: ManagementTranscriptRecorder = {
+      begin: vi.fn(async (input) => {
+        transcriptStarts.push(input);
+        return { finish: async () => {} };
+      }),
+    };
     const runStructured = vi.fn(async (_cwd, schema, prompt) => {
       schemas.push(schema);
       prompts.push(prompt);
       return { value: proposal, usage: { inputTokens: 12, outputTokens: 3, cachedInputTokens: 4 } };
     });
-    const backend = new CodexCliManagementBackend({ runStructured });
+    const backend = new CodexCliManagementBackend({ runStructured, transcriptRecorder });
     const firstCheckpoint = vi.fn(async () => {});
     const first = await backend.proposePlan(initial, firstCheckpoint, semanticProjectionContext());
     const repair = structuredClone(initial);
@@ -361,6 +372,15 @@ describe("single semantic management route", () => {
     ];
     const second = await backend.proposePlan(repair, async () => {}, semanticProjectionContext());
     expect(schemas).toEqual([COMPILER_PROPOSAL_JSON_SCHEMA, COMPILER_PROPOSAL_JSON_SCHEMA]);
+    const dispatchedSchema = JSON.stringify(COMPILER_PROPOSAL_JSON_SCHEMA);
+    expect(schemas.map((schema) => JSON.stringify(schema))).toEqual([
+      dispatchedSchema,
+      dispatchedSchema,
+    ]);
+    expect(transcriptStarts.map(({ schema }) => JSON.stringify(schema))).toEqual([
+      dispatchedSchema,
+      dispatchedSchema,
+    ]);
     expect(prompts[0]).toContain(JSON.stringify(initial.inventory));
     expect(prompts[0]).toContain("complete independent obligation inventory");
     const repairEnvelope = JSON.parse(prompts[1]!.split("\n\n").at(-1)!);
@@ -373,8 +393,11 @@ describe("single semantic management route", () => {
       createHash("sha256").update(prompts[0]!).digest("hex"),
     );
     expect(first.provenance.schemaDigest).toBe(
-      createHash("sha256").update(JSON.stringify(COMPILER_PROPOSAL_JSON_SCHEMA)).digest("hex"),
+      createHash("sha256").update(dispatchedSchema).digest("hex"),
     );
+    expect(first.provenance.schemaBytes).toBe(Buffer.byteLength(dispatchedSchema, "utf8"));
+    expect(second.provenance.schemaDigest).toBe(first.provenance.schemaDigest);
+    expect(second.provenance.schemaBytes).toBe(first.provenance.schemaBytes);
   });
 
   it("fails closed before dispatch when projection authority is absent", async () => {

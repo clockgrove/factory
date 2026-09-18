@@ -20,7 +20,6 @@ const TYPED_CONSTRAINTS = [
   "multipleOf",
   "minItems",
   "maxItems",
-  "uniqueItems",
 ] as const;
 const MAX_SCHEMA_NESTING = 10;
 const MAX_SCHEMA_PROPERTIES = 5_000;
@@ -95,6 +94,8 @@ export function assertProviderStructuredOutputSchema(schema: unknown): void {
     for (const keyword of FORBIDDEN_KEYWORDS)
       if (Object.hasOwn(node, keyword))
         throw new Error(`provider schema uses unsupported ${keyword} at ${path}`);
+    if (Object.hasOwn(node, "uniqueItems"))
+      throw new Error(`provider schema uses unsupported uniqueItems at ${path}/uniqueItems`);
     if (path === "$" && Object.hasOwn(node, "anyOf"))
       throw new Error("provider schema root must not use anyOf");
     if (

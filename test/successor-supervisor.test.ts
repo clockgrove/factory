@@ -3160,6 +3160,64 @@ describe("Supervisor adopted isolated candidate validation", () => {
 });
 
 describe("Supervisor authenticated successor execution", () => {
+  it("restarts through merge-candidate ref visibility lag without replaying local work", async () => {
+    const f = await successorFixture({ noJoin: true });
+    const readRef = vi.mocked(GitHubControlStore.prototype.readRef).getMockImplementation()!;
+    let candidateVisible = false;
+    let hiddenReads = 0;
+    vi.mocked(GitHubControlStore.prototype.readRef).mockImplementation(async (ref) => {
+      if (!candidateVisible && ref.includes("/merge-candidates/") && f.refs.has(ref)) {
+        hiddenReads += 1;
+        if (hiddenReads === 1) return null;
+        throw new PlatformUnavailableError(
+          { kind: "server_error", retryAfterMs: 1 },
+          new Error("fixture lost transport while the created ref remained hidden"),
+        );
+      }
+      return readRef(ref);
+    });
+
+    await expect(f.run()).rejects.toThrow(PlatformUnavailableError);
+    expect(f.validate).toHaveBeenCalledOnce();
+    expect(f.review).not.toHaveBeenCalled();
+    expect(
+      f.snapshot.workItems[1]!.factoryEvents!.filter(
+        (event) => event.kind === "capacity" && event.runId === "successor",
+      ).map((event) => event.event),
+    ).toEqual(["CapacityReserved"]);
+
+    candidateVisible = true;
+    expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({ status: "completed" });
+    expect(f.validate).toHaveBeenCalledOnce();
+    expect(f.review).toHaveBeenCalledOnce();
+    expect(f.launch).not.toHaveBeenCalled();
+    const events = f.snapshot.workItems[1]!.factoryEvents!;
+    expect(
+      events
+        .filter((event) => event.kind === "capacity" && event.runId === "successor")
+        .map((event) => event.event),
+    ).toEqual(["CapacityReserved", "CapacityReconciled"]);
+    expect(
+      events.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.runId === "successor" &&
+          event.unit === "validation_milliseconds" &&
+          event.usageId?.startsWith("integration-validation-"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      events.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.runId === "successor" &&
+          event.unit === "model_tokens" &&
+          event.usageId?.startsWith("integration-review-"),
+      ),
+    ).toHaveLength(1);
+    expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 45 } });
+  }, 30_000);
+
   it("refreshes a retained ordinary foreground PR without relabelling its paid old-head candidate", async () => {
     const f = await successorFixture({
       foregroundPredecessor: true,

@@ -134,9 +134,13 @@ function parseCheckpoint(input: unknown): Checkpoint {
   assertNoSecretMaterial(JSON.stringify(value), "merge-candidate checkpoint");
   return value;
 }
-function sameCandidate(record: MergeCandidateCheckpointRecord, value: Checkpoint): boolean {
+function sameCandidate(
+  record: MergeCandidateCheckpointRecord,
+  value: Pick<Checkpoint, "identity" | "source" | "evidence" | "isolatedResource">,
+): boolean {
   return (
-    mergeCandidateIdentityDigest(record.identity) === value.identityDigest &&
+    mergeCandidateIdentityDigest(record.identity) ===
+      mergeCandidateIdentityDigest(value.identity) &&
     JSON.stringify(record.source) === JSON.stringify(value.source) &&
     record.evidence.candidateOutputTreeSha === value.evidence.candidateOutputTreeSha &&
     record.isolatedResource?.invocationOwnershipDigest ===
@@ -197,6 +201,21 @@ export class MergeCandidateCheckpointStore {
   load(identity: MergeCandidateIdentity): Promise<MergeCandidateCheckpointRecord | null> {
     return loadMergeCandidateCheckpoint(this.store, identity);
   }
+  /** Authenticate a locally known successful publication before downstream durable effects. */
+  async observePublished(
+    record: MergeCandidateCheckpointRecord,
+  ): Promise<MergeCandidateCheckpointRecord | null> {
+    const observed = await this.load(record.identity);
+    if (!observed) return null;
+    requireCheckpoint(
+      observed.ref === record.ref &&
+        observed.commitOid === record.commitOid &&
+        observed.blobOid === record.blobOid,
+      "published checkpoint differs from acknowledged record",
+    );
+    requireCheckpoint(sameCandidate(observed, record), "conflicting immutable candidate");
+    return observed;
+  }
   async persist(args: {
     lease: LeaseState;
     identity: MergeCandidateIdentity;
@@ -219,10 +238,21 @@ export class MergeCandidateCheckpointStore {
       evidence: bindMergeCandidateValidation({ source: args.source, validation: args.validation }),
       ...(args.isolatedResource ? { isolatedResource: args.isolatedResource } : {}),
     });
+    const record = (ref: string, commitOid: string, blobOid: string) => ({
+      ref,
+      commitOid,
+      blobOid,
+      identity: value.identity,
+      source: value.source,
+      validation: value.validation,
+      evidence: value.evidence,
+      ...(value.isolatedResource ? { isolatedResource: value.isolatedResource } : {}),
+    });
     const winner = (
       record: MergeCandidateCheckpointRecord | null,
     ): MergeCandidateCheckpointRecord => {
-      requireCheckpoint(record && sameCandidate(record, value), "conflicting immutable candidate");
+      requireCheckpoint(record, "checkpoint publication is unresolved");
+      requireCheckpoint(sameCandidate(record, value), "conflicting immutable candidate");
       return record;
     };
     const existing = await this.load(identity);
@@ -243,13 +273,21 @@ export class MergeCandidateCheckpointStore {
       message: `Factory merge candidate for Work Item #${identity.workItem}\n\nFactory-Merge-Candidate: ${value.identityDigest}`,
     });
     await this.leases.assertMutationAuthorized(args.lease);
+    const ref = mergeCandidateCheckpointRef(identity);
+    let created: boolean;
     try {
-      await this.store.createRef(mergeCandidateCheckpointRef(identity), commitOid);
+      created = await this.store.createRef(ref, commitOid);
     } catch (error) {
-      const observed = await this.load(identity);
+      let observed: MergeCandidateCheckpointRecord | null;
+      try {
+        observed = await this.load(identity);
+      } catch {
+        throw error;
+      }
       if (observed) return winner(observed);
       throw error;
     }
+    if (created) return record(ref, commitOid, blobOid);
     return winner(await this.load(identity));
   }
 }

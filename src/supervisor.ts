@@ -17044,11 +17044,7 @@ export class FactorySupervisor {
     );
     // A checkpoint is written only after the clean validator has returned. Without it, a
     // crashed validator may still be alive: do not manufacture absence or duplicate its work.
-    if (!record && priorCapacity.length > 0) {
-      throw new Error(
-        "interrupted merge-candidate validation has no completion evidence; resource reconciliation required",
-      );
-    }
+    if (!record && priorCapacity.length > 0) return null;
     const reconcileCapacity = async (cpu: number, memoryMb: number) =>
       this.#lease.use((lease) =>
         this.#attempts.recordCapacity({
@@ -17158,6 +17154,7 @@ export class FactorySupervisor {
       let providerCompleted: Date | undefined;
       let capacityRecorded = false;
       let validationLaunched = false;
+      let publicationPending = false;
       try {
         artifact = await reconstructArtifact();
         const scopedValidation = isolated
@@ -17356,7 +17353,7 @@ export class FactorySupervisor {
             throw new Error("refreshed head differs from the full newly validated tree");
           }
         }
-        record = await this.#lease.use((lease) =>
+        const published = await this.#lease.use((lease) =>
           this.#mergeCandidates.persist({
             lease,
             identity,
@@ -17375,13 +17372,18 @@ export class FactorySupervisor {
               : {}),
           }),
         );
+        record = await this.#mergeCandidates.observePublished(published);
+        if (!record) {
+          publicationPending = true;
+          return null;
+        }
       } finally {
         try {
           if (validation) await discardValidationResult(validation);
           if (capacityRecorded && (record || !validationLaunched))
             await reconcileCapacity(capacity.cpu, capacity.memoryMb);
         } finally {
-          if (!capacityRecorded || record || !validationLaunched)
+          if (!capacityRecorded || record || !validationLaunched || publicationPending)
             await this.#releaseCapacity(capacity.key);
         }
       }
@@ -18807,8 +18809,7 @@ export class FactorySupervisor {
           "interrupted adopted isolated validation reconciled resources but lacks immutable completion",
         );
       }
-      if (!candidate && outstanding.length)
-        throw new Error("interrupted adopted validation requires exact scope reconciliation");
+      if (!candidate && outstanding.length) return false;
       if (candidate)
         for (const entry of outstanding)
           await recordCapacity(
@@ -18882,6 +18883,7 @@ export class FactorySupervisor {
         let recorded = false;
         let validationLaunched = false;
         let failureRecorded = false;
+        let publicationPending = false;
         let providerStarted: Date | undefined;
         let providerCompleted: Date | undefined;
         let providerResult:
@@ -19191,7 +19193,7 @@ export class FactorySupervisor {
             );
             throw new Error("adopted refreshed head differs from its newly validated tree");
           }
-          candidate = await this.#lease.use((lease) =>
+          const published = await this.#lease.use((lease) =>
             this.#mergeCandidates.persist({
               lease,
               identity,
@@ -19212,6 +19214,11 @@ export class FactorySupervisor {
                 : {}),
             }),
           );
+          candidate = (await this.#mergeCandidates.observePublished(published)) ?? undefined;
+          if (!candidate) {
+            publicationPending = true;
+            return false;
+          }
         } finally {
           try {
             if (validation) await discardValidationResult(validation);
@@ -19231,7 +19238,13 @@ export class FactorySupervisor {
                 isolated ? remoteReservation : undefined,
               );
           } finally {
-            if (!recorded || candidate || failureRecorded || !validationLaunched)
+            if (
+              !recorded ||
+              candidate ||
+              failureRecorded ||
+              !validationLaunched ||
+              publicationPending
+            )
               await this.#releaseCapacity(capacity.key);
           }
         }

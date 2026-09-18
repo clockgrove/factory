@@ -14,9 +14,15 @@ not evidence that this installed flow has passed live.
 
 Use an explicitly authorized private disposable repository, a clean Linux-home checkout of its
 current default branch, and existing default Linux `gh` authentication. The production Factory
-repository is rejected. The candidate checkout containing this script must be committed,
-including the script itself; its bundle inventory must match the installed plugin. Evidence
-records that source commit, the script SHA-256, and installed artifact identity separately.
+repository is rejected. The candidate checkout containing this script must be committed, including
+the script and every qualification helper. Supply the exact owner-private `install-identities.txt`
+retained during the fresh npm and Agent Plugin installation. The shared validator binds that receipt
+to the clean source commit, release tarball, npm CLI, plugin archive and snapshot, isolated
+marketplace listing, installed plugin cache, inventory, and both bundles before evidence, GitHub,
+MCP, provider, or systemd activity. Only its read-only `codex plugin list --json` check uses the
+isolated candidate `CODEX_HOME`; the MCP server, installed clients, and active controller use the
+normal Linux home and default `~/.codex` provider authentication. Evidence records the source,
+committed harness, receipt, and installed artifact identities separately.
 
 The exact preinstalled user-service name must equal the normal controller identity derived from
 the repository and absolute checkout path. The harness checks its complete generated unit
@@ -34,8 +40,8 @@ published unsanitized.
 For example, substitute the explicitly approved fixture values:
 
 ```sh
-env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME \
-  CODEX_HOME=/home/example/.codex \
+env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME -u CODEX_HOME \
+  FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/example/Codex/factory-initial-beta/2.0.27-beta.0-COMMIT/install-identities.txt \
   FACTORY_LOCAL_CHECKPOINT_RESTART=1 \
   FACTORY_CHECKPOINT_PHASE=preflight \
   FACTORY_CHECKPOINT_REPOSITORY=example/disposable-conformance \

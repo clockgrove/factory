@@ -85,6 +85,10 @@ export function assertCheckpointExecutable(
   expectedNode: string,
   readLink?: (path: string) => string,
 ): void;
+export function assertControllerRuntimeEnvironment(
+  text: string,
+  linuxHome: string,
+): { home: string; codexHome: "absent" | "default-linux-home" };
 export function checkpointStartupObservation(
   observe: (capture: (identity: unknown) => void, remainingMs: () => number) => unknown,
   options: {

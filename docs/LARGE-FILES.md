@@ -207,6 +207,7 @@ Set these explicit variables, then run `node scripts/verify-local-large-files.mj
 | Variable | Required value |
 | --- | --- |
 | `FACTORY_LOCAL_LARGE_FILES` | `1` |
+| `FACTORY_QUALIFICATION_INSTALL_RECEIPT` | Exact owner-private retained-candidate receipt from the [fresh installation procedure](setup/local.md#detailed-installation-and-activation) |
 | `FACTORY_LARGE_FILE_CASE` | `transfer-restart`, `lfs-missing-tool`, `lfs-missing-object`, `scope`, `secret` or `symlink` |
 | `FACTORY_LARGE_FILE_PHASE` | `preflight` first; `exercise` only with accepted scenario authority |
 | `FACTORY_LARGE_FILE_REPOSITORY` / `FACTORY_LARGE_FILE_CHECKOUT` | Exact private `owner/repo` and canonical Linux-home checkout |
@@ -223,8 +224,10 @@ Acknowledgements are `owner/repo:controller-unit:case:actions`, with these exact
 - Either `lfs-` case: `create,compile-refusal`
 - `scope`, `secret`, `symlink`: `start,create,activate,stop`
 
-Use the normal Linux-home plugin/authentication, with `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`,
-`GH_CONFIG_DIR` and `XDG_CONFIG_HOME` unset. Source and installed bundle identities must match;
+Use the retained receipt's isolated plugin install for artifact selection and normal Linux-home
+GitHub and Codex authentication, with `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`, `GH_CONFIG_DIR` and
+`XDG_CONFIG_HOME` unset. The normal-home plugin cache is not candidate authority. Source and installed
+bundle identities must match;
 build/install only at the coordinated candidate boundary. Preflight and exercise need different
 evidence files. A successful preflight proves prerequisites, not model execution or recovery.
 

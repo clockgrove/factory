@@ -3,8 +3,9 @@
 `scripts/verify-local-failure-conflict.mjs` advances the remaining negative scenarios in
 [#75](https://github.com/clockgrove/factory/issues/75), implemented by
 [#141](https://github.com/clockgrove/factory/issues/141). Source regressions are not live evidence.
-The runner uses the matching installed plugin and an explicitly installed, inactive controller in
-an authorized private disposable repository. It never selects paid backends or changes branch rules.
+The runner selects the exact retained candidate plugin through the shared install receipt and uses
+an explicitly installed, inactive controller in an authorized private disposable repository. It
+never selects paid backends or changes branch rules.
 
 Prepare one new namespace per case. With `FACTORY_FAILURE_NAMESPACE` and
 `FACTORY_FAILURE_CASE` set (`failed-validation` or `real-conflict`), print the exact fixture:
@@ -25,14 +26,17 @@ Set these names privately; no credential values belong in evidence or commands:
 - `FACTORY_FAILURE_CASE`, `FACTORY_FAILURE_NAMESPACE`
 - `FACTORY_FAILURE_REPOSITORY`, `FACTORY_FAILURE_CHECKOUT`, `FACTORY_FAILURE_CONTROLLER_UNIT`
 - `FACTORY_FAILURE_BASE_SHA`, `FACTORY_FAILURE_FIXTURE_SHA256`
+- `FACTORY_QUALIFICATION_INSTALL_RECEIPT`: the exact owner-private retained-candidate receipt from
+  the [shared checkpoint preflight](LOCAL-CHECKPOINT-RESTART-QUALIFICATION.md#authority-and-preflight)
 - `FACTORY_FAILURE_MAX_MODEL_TOKENS`: a newly authorized observed-stop threshold, not a hard cap
 - `FACTORY_FAILURE_PHASE`: `preflight` or `exercise`
 - `FACTORY_FAILURE_EVIDENCE`: a new exclusive file in an owned private directory (0700)
 - `FACTORY_FAILURE_ACK`: required only for exercise, as specified below
 
-Default Linux-home GitHub authentication and the exact installed controller are required. The
-shared runner rejects alternate credential environment variables, a mutable source harness, a
-mismatched installed bundle, another runnable Objective, open PRs, a dirty checkout, or changed base.
+Default Linux-home GitHub and Codex authentication and the exact installed controller are required.
+Artifact selection comes only from the retained receipt's isolated plugin install, not the normal-home
+plugin cache. The shared runner rejects alternate credential environment variables, a mutable source
+harness, a mismatched installed bundle, another runnable Objective, open PRs, a dirty checkout, or changed base.
 Preflight and exercise must use different fresh evidence files. Both use:
 
 ```sh

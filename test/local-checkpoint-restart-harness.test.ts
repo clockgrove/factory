@@ -22,6 +22,7 @@ import {
   checkpointOperatorFailure,
   checkpointStatusSnapshotRetry,
   assertCheckpointExecutable,
+  assertControllerRuntimeEnvironment,
   checkpointStartupObservation,
   checkpointReady,
   checkpointCompletionReady,
@@ -35,6 +36,34 @@ import {
 } from "../scripts/verify-local-checkpoint-restart.mjs";
 
 const repository = "example/disposable";
+describe("controller runtime home authority", () => {
+  const home = "/home/example";
+
+  it("accepts an absent or exact default CODEX_HOME without retaining the full environment", () => {
+    expect(
+      assertControllerRuntimeEnvironment(`PATH=/usr/bin\0HOME=${home}\0SECRET=value\0`, home),
+    ).toEqual({ home, codexHome: "absent" });
+    expect(
+      assertControllerRuntimeEnvironment(
+        `HOME=${home}\0CODEX_HOME=${home}/.codex\0TOKEN=private\0`,
+        home,
+      ),
+    ).toEqual({ home, codexHome: "default-linux-home" });
+  });
+
+  it("rejects manager-injected candidate or duplicate home authority", () => {
+    expect(() =>
+      assertControllerRuntimeEnvironment(
+        `HOME=${home}\0CODEX_HOME=/home/example/retained/codex-home\0`,
+        home,
+      ),
+    ).toThrow("default Linux Codex home");
+    expect(() => assertControllerRuntimeEnvironment(`HOME=${home}\0HOME=${home}\0`, home)).toThrow(
+      "duplicate controller HOME",
+    );
+  });
+});
+
 describe("opt-in original-start observation window", () => {
   const startedAt = "2026-01-01T00:00:00.000Z";
   const start = Date.parse(startedAt);

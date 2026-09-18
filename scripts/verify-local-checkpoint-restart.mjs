@@ -25,8 +25,6 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import {
   boundedPolicy,
   installedBundleIdentity,
-  installedIdentity,
-  installedPluginPath,
   modelTokenLimit,
   objectiveBodyFor,
   qualificationNamespace,
@@ -56,6 +54,10 @@ import {
   observeAppServerCheckpoints,
 } from "./qualification-app-server-checkpoint.mjs";
 import { boundedQualificationEvidenceText } from "./qualification-evidence-boundary.mjs";
+import {
+  installedQualificationAuthority,
+  qualificationRuntimeEnvironment,
+} from "./qualification-install-identity.mjs";
 
 const hash = (value) =>
   createHash("sha256")
@@ -71,6 +73,21 @@ const unique = (items, message) => {
   assert.equal(items.length, 1, message);
   return items[0];
 };
+
+export function qualificationRuntimeCodexHome(env, linuxHome = realpathSync(homedir())) {
+  assert.ok(!linuxHome.startsWith("/mnt/"), "Linux-native home required");
+  const codexHome = realpathSync(join(linuxHome, ".codex"));
+  const facts = statSync(codexHome);
+  assert.ok(facts.isDirectory(), "default Linux Codex home is unavailable");
+  assert.equal(facts.uid, process.getuid(), "default Linux Codex home owner differs");
+  if (env.CODEX_HOME !== undefined)
+    assert.equal(
+      realpathSync(env.CODEX_HOME),
+      codexHome,
+      "runtime CODEX_HOME must be unset or the default Linux Codex home",
+    );
+  return codexHome;
+}
 
 export function checkpointAuthority(env) {
   if (env.FACTORY_LOCAL_CHECKPOINT_RESTART !== "1") return null;
@@ -177,6 +194,7 @@ export function checkpointFailure(error, boundary) {
     "controller-process-executable",
     "controller-process-cwd",
     "controller-process-command",
+    "controller-process-environment",
     "controller-process-birth",
     "controller-process-cgroup",
     "controller-generation",
@@ -383,6 +401,32 @@ export function createCheckpointList(request, { now = Date.now } = {}) {
 export function assertCheckpointExecutable(pid, expectedNode, readLink = readlinkSync) {
   assert.ok(Number.isSafeInteger(pid) && pid > 1);
   assert.equal(readLink(`/proc/${pid}/exe`), expectedNode);
+}
+
+export function assertControllerRuntimeEnvironment(text, linuxHome) {
+  assert.ok(Buffer.byteLength(text) <= 65_536, "controller environment exceeds its bound");
+  assert.ok(!/^\/mnt(?:\/|$)/.test(linuxHome), "Linux-native home required");
+  const selected = new Map();
+  for (const entry of text.split("\0").filter(Boolean)) {
+    const separator = entry.indexOf("=");
+    assert.ok(separator > 0, "malformed controller environment entry");
+    const name = entry.slice(0, separator);
+    if (!["HOME", "CODEX_HOME"].includes(name)) continue;
+    assert.ok(!selected.has(name), `duplicate controller ${name}`);
+    selected.set(name, entry.slice(separator + 1));
+  }
+  assert.equal(selected.get("HOME"), linuxHome, "controller HOME differs from Linux home");
+  const codexHome = join(linuxHome, ".codex");
+  if (selected.has("CODEX_HOME"))
+    assert.equal(
+      selected.get("CODEX_HOME"),
+      codexHome,
+      "controller CODEX_HOME must be absent or the default Linux Codex home",
+    );
+  return {
+    home: linuxHome,
+    codexHome: selected.has("CODEX_HOME") ? "default-linux-home" : "absent",
+  };
 }
 
 export async function checkpointStartupObservation(
@@ -1448,46 +1492,20 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
   );
   assert.equal(process.platform, "linux");
   const home = realpathSync(homedir());
-  assert.ok(!home.startsWith("/mnt/"));
-  if (env.CODEX_HOME) assert.equal(realpathSync(env.CODEX_HOME), join(home, ".codex"));
+  const runtimeEnvironment = qualificationRuntimeEnvironment(env, { linuxHome: home });
+  const runtimeCodexHome = runtimeEnvironment.CODEX_HOME;
+  assert.equal(runtimeCodexHome, qualificationRuntimeCodexHome(env, home));
   assert.equal(realpathSync(authority.checkout), authority.checkout);
   const parent = statSync(dirname(authority.evidence));
   assert.equal(parent.uid, process.getuid());
   assert.equal(parent.mode & 0o077, 0);
-  const listed = JSON.parse(command("codex", ["plugin", "list", "--json"], authority.checkout));
-  const pluginRoot = installedPluginPath({ listed, codexHome: join(home, ".codex") });
-  const manifest = JSON.parse(readBounded(join(pluginRoot, ".codex-plugin/plugin.json")));
-  installedIdentity({
-    listed,
-    codexHome: join(home, ".codex"),
-    pluginRoot,
-    manifest,
-    portable: JSON.parse(readBounded(join(pluginRoot, "plugin.json"))),
-    packageManifest: JSON.parse(readBounded(join(pluginRoot, "package.json"))),
-  });
-  const artifact = installedBundleIdentity(pluginRoot);
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  assert.equal(
-    hash(readFileSync(join(root, "dist/bundle-inventory.json"), "utf8")),
-    artifact.inventorySha256,
-  );
-  assert.equal(
-    command("git", ["status", "--porcelain", "--untracked-files=no"], root),
-    "",
-    "harness must be committed",
-  );
-  const sourceCommit = command("git", ["rev-parse", "HEAD"], root);
-  assert.match(sourceCommit, /^[a-f0-9]{40}$/);
   const harnessPath = "scripts/verify-local-checkpoint-restart.mjs";
-  assert.equal(command("git", ["ls-files", "--error-unmatch", harnessPath], root), harnessPath);
-  assert.equal(
-    command("git", ["show", `HEAD:${harnessPath}`], root),
-    readBounded(fileURLToPath(import.meta.url), 262144).trim(),
-  );
-  const harnessFiles = [
+  const committedPaths = [
     ...new Set([
       harnessPath,
       "scripts/qualification-model-accounting.mjs",
+      "scripts/qualification-install-identity.mjs",
       "scripts/qualification-receipts.mjs",
       "scripts/qualification-sibling-refresh-proof.mjs",
       "scripts/qualification-reservation-authority.mjs",
@@ -1496,16 +1514,16 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       ...(authority.sessionRecovery ? ["scripts/qualification-app-server-checkpoint.mjs"] : []),
       ...(extension.harnessPaths ?? []),
     ]),
-  ].map((path) => {
-    assert.match(path, /^scripts\/[A-Za-z0-9_.-]+\.mjs$/);
-    const bytes = readBounded(join(root, path), 262144);
-    assert.equal(
-      command("git", ["show", `HEAD:${path}`], root),
-      bytes.trim(),
-      "qualification dependency differs from committed source",
-    );
-    return { path, sha256: hash(bytes) };
+  ];
+  const candidate = installedQualificationAuthority(env, {
+    sourceRoot: root,
+    committedPaths,
   });
+  const pluginRoot = candidate.installedPluginRoot;
+  const manifest = JSON.parse(readBounded(join(pluginRoot, ".codex-plugin/plugin.json")));
+  const artifact = candidate.pluginArtifact;
+  const sourceCommit = candidate.candidateSourceCommit;
+  const harnessFiles = candidate.committedQualificationFiles;
   const token = command("gh", ["auth", "token"], authority.checkout);
   const [owner, repo] = authority.repository.split("/");
   const octokit = new Octokit({
@@ -1533,6 +1551,13 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     authority,
     artifact,
     sourceCommit,
+    installedCandidate: {
+      version: candidate.candidateVersion,
+      installReceiptIdentity: candidate.installReceiptIdentity,
+      inventoryIdentity: candidate.inventoryIdentity,
+      factoryArtifactIdentity: candidate.artifactIdentity,
+      mcpArtifactIdentity: candidate.mcpArtifactIdentity,
+    },
     harnessSha256: hash(readFileSync(fileURLToPath(import.meta.url), "utf8")),
     harnessFiles,
     actions: [],
@@ -1563,7 +1588,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     command: mcp.command,
     args: mcp.args.map((arg) => arg.replaceAll("${PLUGIN_ROOT}", pluginRoot)),
     cwd: authority.checkout,
-    env: { ...env, CODEX_HOME: join(home, ".codex"), GITHUB_TOKEN: token },
+    env: { ...runtimeEnvironment, GITHUB_TOKEN: token },
     stderr: "pipe",
   });
   const expected = {
@@ -1648,27 +1673,6 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
         assert.ok(
           readBounded(`/proc/${pid}/cgroup`).split("\n").includes(`0::${fields.ControlGroup}`),
         );
-        const result = {
-          unit: authority.unit,
-          state,
-          pid,
-          startTicks,
-          invocationId: fields.InvocationID,
-          hostIdentity: host,
-          configDigest,
-        };
-        controllerBoundary = "controller-generation";
-        if (prior)
-          for (const key of [
-            "unit",
-            "pid",
-            "startTicks",
-            "invocationId",
-            "hostIdentity",
-            "configDigest",
-          ])
-            assert.equal(result[key], prior[key], "controller generation changed");
-        capture(result);
         controllerBoundary = "controller-process-executable";
         assertCheckpointExecutable(pid, expected.node);
         controllerBoundary = "controller-process-cwd";
@@ -1683,6 +1687,46 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
           "--repo",
           authority.checkout,
         ]);
+        controllerBoundary = "controller-process-environment";
+        const runtime = assertControllerRuntimeEnvironment(
+          readBounded(`/proc/${pid}/environ`),
+          home,
+        );
+        controllerBoundary = "controller-process-birth";
+        const rebound = readBounded(`/proc/${pid}/stat`);
+        const reboundStartTicks = rebound
+          .slice(rebound.lastIndexOf(")") + 2)
+          .trim()
+          .split(/\s+/)[19];
+        assert.equal(reboundStartTicks, startTicks, "controller process generation changed");
+        controllerBoundary = "controller-process-cgroup";
+        assert.ok(
+          readBounded(`/proc/${pid}/cgroup`).split("\n").includes(`0::${fields.ControlGroup}`),
+          "controller process cgroup changed",
+        );
+        const result = {
+          unit: authority.unit,
+          state,
+          pid,
+          startTicks,
+          invocationId: fields.InvocationID,
+          hostIdentity: host,
+          configDigest,
+          runtime,
+        };
+        controllerBoundary = "controller-generation";
+        if (prior)
+          for (const key of [
+            "unit",
+            "pid",
+            "startTicks",
+            "invocationId",
+            "hostIdentity",
+            "configDigest",
+          ])
+            assert.equal(result[key], prior[key], "controller generation changed");
+        if (prior) assert.deepEqual(result.runtime, prior.runtime, "controller runtime changed");
+        capture(result);
         controllerBoundary = undefined;
         return result;
       },

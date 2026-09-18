@@ -20,9 +20,13 @@ import {
   writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
+import {
+  installedQualificationAuthority,
+  qualificationRuntimeEnvironment,
+} from "./qualification-install-identity.mjs";
 
 const ARM_ENV = "FACTORY_LIFECYCLE_QUALIFICATION_ARM";
 const MAX_OUTPUT = 64 * 1024;
@@ -30,25 +34,6 @@ const CALL_TIMEOUT_MS = 45_000;
 const REACHED_TIMEOUT_MS = 15_000;
 const WAITING_TIMEOUT_MS = 10_000;
 const unitPattern = /^clockgrove-factory-[a-f0-9]{16}\.service$/;
-const installReceiptFields = [
-  "sourceCommit",
-  "version",
-  "tarballFile",
-  "tarballSha256",
-  "npmPrefix",
-  "factoryCli",
-  "codexHome",
-  "codexCli",
-  "pluginArchive",
-  "pluginArchiveSha256",
-  "installedPluginRoot",
-  "listedPluginSource",
-  "bundleInventorySha256",
-  "factoryBundleSha256",
-  "mcpServerBundleSha256",
-  "controllerLauncherIdentity",
-].sort();
-
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 
 function required(env, name) {
@@ -57,47 +42,20 @@ function required(env, name) {
   return value;
 }
 
-export function parseInstalledCandidateReceipt(text) {
-  assert.ok(text.endsWith("\n"), "install receipt must end with one newline");
-  const values = new Map();
-  for (const line of text.slice(0, -1).split("\n")) {
-    assert.ok(line, "install receipt contains an empty line");
-    const separator = line.indexOf("=");
-    assert.ok(separator > 0 && separator < line.length - 1, "malformed install receipt line");
-    const key = line.slice(0, separator);
-    assert.ok(!values.has(key), `duplicate install receipt field ${key}`);
-    values.set(key, line.slice(separator + 1));
-  }
-  assert.deepEqual(
-    [...values.keys()].sort(),
-    installReceiptFields,
-    "install receipt fields differ",
-  );
-  return Object.fromEntries(values);
-}
-
 function boundedAppend(current, chunk) {
   const next = `${current}${chunk}`;
   return next.length <= MAX_OUTPUT ? next : next.slice(-MAX_OUTPUT);
 }
 
-function command(file, args, cwd, timeout = 15_000) {
+function command(file, args, cwd, timeout = 15_000, env) {
   return execFileSync(file, args, {
     cwd,
+    env,
     encoding: "utf8",
     timeout,
     maxBuffer: MAX_OUTPUT,
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
-}
-
-function commandBytes(file, args, cwd, timeout = 15_000) {
-  return execFileSync(file, args, {
-    cwd,
-    timeout,
-    maxBuffer: MAX_OUTPUT,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
 }
 
 function processStartTicks(pid) {
@@ -375,72 +333,6 @@ function managerState(unit, uid) {
   );
 }
 
-export function installedCandidateAuthority(env, uid) {
-  const installReceiptInput = required(env, "FACTORY_LIFECYCLE_INSTALL_RECEIPT");
-  assert.ok(isAbsolute(installReceiptInput), "installed candidate receipt path must be absolute");
-  const installReceiptPath = resolve(installReceiptInput);
-  const installReceiptBytes = readPrivate(installReceiptPath, uid, 16 * 1024);
-  assert.equal(realpathSync(installReceiptPath), installReceiptPath);
-  const qualificationRoot = realpathSync(dirname(installReceiptPath));
-  assert.equal(installReceiptPath, join(qualificationRoot, "install-identities.txt"));
-  const qualificationRootFacts = statSync(qualificationRoot);
-  assert.ok(qualificationRootFacts.isDirectory());
-  assert.equal(qualificationRootFacts.uid, uid);
-  assert.equal(qualificationRootFacts.mode & 0o077, 0);
-  const installReceipt = parseInstalledCandidateReceipt(installReceiptBytes);
-  assert.match(installReceipt.sourceCommit, /^[a-f0-9]{40}$/);
-  assert.match(installReceipt.version, /^[A-Za-z0-9._-]+$/);
-  assert.ok(isAbsolute(installReceipt.npmPrefix));
-  const npmPrefix = realpathSync(installReceipt.npmPrefix);
-  assert.equal(npmPrefix, join(qualificationRoot, "npm"));
-  const installedFactoryRoot = join(npmPrefix, "lib/node_modules/@clockgrove/factory");
-  const installedFactoryRootFacts = lstatSync(installedFactoryRoot);
-  assert.ok(installedFactoryRootFacts.isDirectory());
-  assert.ok(!installedFactoryRootFacts.isSymbolicLink());
-  assert.equal(realpathSync(installedFactoryRoot), installedFactoryRoot);
-  assert.equal(statOptional(join(installedFactoryRoot, ".git")), false);
-  assert.ok(isAbsolute(installReceipt.factoryCli));
-  assert.equal(resolve(installReceipt.factoryCli), join(npmPrefix, "bin/factory"));
-  const factoryCli = realpathSync(required(env, "FACTORY_LIFECYCLE_FACTORY_CLI"));
-  assert.equal(factoryCli, realpathSync(installReceipt.factoryCli));
-  assert.equal(
-    factoryCli,
-    join(installedFactoryRoot, "dist/factory.js"),
-    "retained npm-installed Factory bundle required",
-  );
-  const artifactIdentity = `sha256:${hash(readFileSync(factoryCli))}`;
-  assert.equal(
-    required(env, "FACTORY_LIFECYCLE_ARTIFACT_IDENTITY"),
-    artifactIdentity,
-    "installed Factory bundle differs from the selected candidate identity",
-  );
-  const inventoryPath = join(dirname(factoryCli), "bundle-inventory.json");
-  const inventoryIdentity = `sha256:${hash(readFileSync(inventoryPath))}`;
-  assert.equal(installReceipt.factoryBundleSha256, artifactIdentity.slice("sha256:".length));
-  assert.equal(installReceipt.controllerLauncherIdentity, artifactIdentity);
-  assert.equal(installReceipt.bundleInventorySha256, inventoryIdentity.slice("sha256:".length));
-  const installedManifest = JSON.parse(
-    readFileSync(join(installedFactoryRoot, "package.json"), "utf8"),
-  );
-  assert.equal(installedManifest.name, "@clockgrove/factory");
-  assert.equal(installedManifest.version, installReceipt.version);
-  const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
-  const inventoryFactory = inventory.bundles?.find((record) => record.file === "factory.js");
-  assert.equal(inventoryFactory?.sha256, artifactIdentity.slice("sha256:".length));
-  assert.equal(inventoryFactory?.bytes, statSync(factoryCli).size);
-  return {
-    factoryCli,
-    installedFactoryRoot,
-    qualificationRoot,
-    installReceiptPath,
-    installReceiptIdentity: `sha256:${hash(installReceiptBytes)}`,
-    candidateSourceCommit: installReceipt.sourceCommit,
-    candidateVersion: installReceipt.version,
-    artifactIdentity,
-    inventoryIdentity,
-  };
-}
-
 function lifecycleAuthority(env) {
   if (env.FACTORY_LIFECYCLE_QUALIFICATION !== "1") return null;
   assert.equal(process.platform, "linux", "Linux qualification host required");
@@ -453,7 +345,13 @@ function lifecycleAuthority(env) {
     checkout.startsWith(`${realpathSync(homedir())}/`),
     "checkout must be Linux-home native",
   );
-  const candidate = installedCandidateAuthority(env, uid);
+  const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const runtimeEnvironment = qualificationRuntimeEnvironment(env);
+  const candidate = installedQualificationAuthority(env, {
+    uid,
+    sourceRoot,
+    committedPaths: ["scripts/verify-installed-controller-lifecycle.mjs"],
+  });
   const unit = unitName(repository, checkout);
   assert.match(unit, unitPattern);
   const acknowledgement = `${repository}:${unit}:install-start,install-uninstall,busy,killed-owner,cleanup`;
@@ -482,6 +380,7 @@ function lifecycleAuthority(env) {
     unitPath: join(configHome, "systemd/user", unit),
     acknowledgement,
     evidence,
+    runtimeEnvironment,
   };
 }
 
@@ -516,7 +415,13 @@ export async function main(env = process.env) {
     return;
   }
   assert.equal(
-    command(process.execPath, [authority.factoryCli, "--version"], authority.checkout).length > 0,
+    command(
+      process.execPath,
+      [authority.factoryCli, "--version"],
+      authority.checkout,
+      15_000,
+      authority.runtimeEnvironment,
+    ).length > 0,
     true,
   );
   assert.equal(realpathSync("/usr/bin/flock"), "/usr/bin/flock");
@@ -529,25 +434,11 @@ export async function main(env = process.env) {
   const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   assert.equal(command("git", ["status", "--porcelain", "--untracked-files=all"], sourceRoot), "");
   const sourceCommit = command("git", ["rev-parse", "HEAD"], sourceRoot);
-  assert.equal(
-    authority.candidateSourceCommit,
-    sourceCommit,
-    "installed candidate receipt differs from harness source commit",
-  );
+  assert.equal(authority.candidateSourceCommit, sourceCommit);
   assert.notEqual(
     authority.installedFactoryRoot,
     sourceRoot,
     "source or development checkout is not an installed candidate",
-  );
-  const sourceInventoryBytes = commandBytes(
-    "git",
-    ["show", `${sourceCommit}:dist/bundle-inventory.json`],
-    sourceRoot,
-  );
-  assert.equal(
-    `sha256:${hash(sourceInventoryBytes)}`,
-    authority.inventoryIdentity,
-    "installed bundle inventory differs from recorded source commit",
   );
   assert.equal(
     command("git", ["rev-parse", "--show-toplevel"], authority.checkout),
@@ -605,8 +496,6 @@ export async function main(env = process.env) {
   const metadata = new Set();
   const qualifications = new Map();
   const factory = (operation, requestId, extraEnvironment = {}) => {
-    const childEnvironment = { ...env };
-    delete childEnvironment[ARM_ENV];
     const handle = spawnCaptured(
       process.execPath,
       [
@@ -619,7 +508,7 @@ export async function main(env = process.env) {
         "--request-id",
         requestId,
       ],
-      { cwd: authority.checkout, env: { ...childEnvironment, ...extraEnvironment } },
+      { cwd: authority.checkout, env: { ...authority.runtimeEnvironment, ...extraEnvironment } },
     );
     spawned.add(handle);
     return handle;
@@ -786,7 +675,10 @@ export async function main(env = process.env) {
         "/usr/bin/sleep",
         "300",
       ];
-      const owner = spawnCaptured("/usr/bin/flock", ownerCommand, { cwd: authority.checkout, env });
+      const owner = spawnCaptured("/usr/bin/flock", ownerCommand, {
+        cwd: authority.checkout,
+        env: authority.runtimeEnvironment,
+      });
       spawned.add(owner);
       const deadline = Date.now() + WAITING_TIMEOUT_MS;
       while (
@@ -854,7 +746,7 @@ export async function main(env = process.env) {
       const probe = spawnCaptured(
         "/usr/bin/flock",
         ["--exclusive", "--nonblock", authority.lockPath, "/usr/bin/true"],
-        { cwd: authority.checkout, env },
+        { cwd: authority.checkout, env: authority.runtimeEnvironment },
       );
       spawned.add(probe);
       const unlocked = await within(probe.settled, 5_000, "unlocked lock probe");

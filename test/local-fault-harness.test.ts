@@ -82,7 +82,25 @@ describe("bounded local-fault progress diagnostics", () => {
 
 describe("local fault controller authority", () => {
   const artifactIdentity = `sha256:${"a".repeat(64)}`;
-  const expected = {
+  type ExpectedAuthority = {
+    artifactIdentity: string;
+    launcher: string;
+    bundle: string;
+    repository: string;
+    checkout: string;
+    runningArgv: string[];
+  };
+  type ControllerStatus = {
+    installed: boolean;
+    enabled: boolean;
+    active: boolean;
+    healthy: boolean;
+    launcherCurrent: boolean;
+    executableIdentity: string;
+    currentExecutableIdentity: string;
+    reasonCode: string | null;
+  };
+  const expected: ExpectedAuthority = {
     artifactIdentity,
     launcher: "/usr/bin/node",
     bundle: "/retained/plugin/dist/factory.js",
@@ -100,7 +118,7 @@ describe("local fault controller authority", () => {
       artifactIdentity,
     ],
   };
-  const status = {
+  const status: ControllerStatus = {
     installed: true,
     enabled: true,
     active: true,
@@ -110,12 +128,11 @@ describe("local fault controller authority", () => {
     currentExecutableIdentity: artifactIdentity,
     reasonCode: null,
   };
-
-  it("accepts only the active healthy controller executing the exact retained candidate", () => {
-    expect(() => assertFaultControllerAuthority(status, expected)).not.toThrow();
-  });
-
-  it.each([
+  type AuthorityDrift = {
+    controller?: Partial<typeof status>;
+    authority?: Partial<typeof expected>;
+  };
+  const authorityDrifts: Array<[string, AuthorityDrift]> = [
     ["not installed", { controller: { installed: false } }],
     ["not enabled", { controller: { enabled: false } }],
     ["not active", { controller: { active: false } }],
@@ -134,15 +151,17 @@ describe("local fault controller authority", () => {
       "bundle path drift",
       {
         authority: {
-          runningArgv: [
-            expected.runningArgv[0],
-            "/other/factory.js",
-            ...expected.runningArgv.slice(2),
-          ],
+          runningArgv: [expected.launcher, "/other/factory.js", ...expected.runningArgv.slice(2)],
         },
       },
     ],
-  ])("rejects %s before any Objective mutation", (_name, drift) => {
+  ];
+
+  it("accepts only the active healthy controller executing the exact retained candidate", () => {
+    expect(() => assertFaultControllerAuthority(status, expected)).not.toThrow();
+  });
+
+  it.each(authorityDrifts)("rejects %s before any Objective mutation", (_name, drift) => {
     const mutateObjective = vi.fn();
     expect(() => {
       assertFaultControllerAuthority(

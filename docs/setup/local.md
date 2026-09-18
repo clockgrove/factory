@@ -89,20 +89,89 @@ set -euo pipefail
 candidate_root=/absolute/path/to/factory-candidate
 release_manifest="$candidate_root/release/release-manifest.json"
 source_commit="$(node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(m.provenance.sourceCommit)' "$release_manifest")"
+candidate_version="$(node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(m.version)' "$release_manifest")"
 tarball_file="$(node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(m.tarball.file)' "$release_manifest")"
 tarball_sha256="$(node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(m.tarball.sha256)' "$release_manifest")"
+bundle_inventory_sha256="$(node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(m.bundleInventory.sha256)' "$release_manifest")"
 cd "$candidate_root"
 test "$(git rev-parse HEAD)" = "$source_commit"
 test -z "$(git status --porcelain --untracked-files=all)"
 observed_tarball_sha256="$(sha256sum -- "$candidate_root/release/$tarball_file")"
 observed_tarball_sha256="${observed_tarball_sha256%% *}"
 test "$observed_tarball_sha256" = "$tarball_sha256"
-npm install --global "$candidate_root/release/$tarball_file"
-plugin_snapshot="$(mktemp -d)"
-git archive --format=tar "$source_commit" | tar -xf - -C "$plugin_snapshot"
-codex plugin marketplace add "$plugin_snapshot"
-codex plugin add factory@clockgrove-factory
-codex plugin list --json
+case "$candidate_version" in (''|*[!A-Za-z0-9._-]*) exit 1;; esac
+qualification_parent="${FACTORY_QUALIFICATION_PARENT:-/home/kirk/Codex/factory-initial-beta}"
+case "$qualification_parent" in (/*) ;; (*) exit 1;; esac
+qualification_root="$qualification_parent/$candidate_version-${source_commit:0:12}"
+test ! -e "$qualification_root"
+umask 077
+mkdir -p "$qualification_parent"
+mkdir "$qualification_root"
+qualification_root="$(realpath -- "$qualification_root")"
+npm_prefix="$qualification_root/npm"
+npm_cache="$qualification_root/npm-cache"
+codex_home="$qualification_root/codex-home"
+plugin_archive="$qualification_root/factory-plugin-$source_commit.tar"
+plugin_snapshot="$qualification_root/plugin-marketplace"
+mkdir "$npm_prefix" "$codex_home" "$plugin_snapshot"
+npm_config_cache="$npm_cache" npm install --global --prefix "$npm_prefix" --ignore-scripts=false --no-audit --no-fund "$candidate_root/release/$tarball_file"
+factory_cli="$npm_prefix/bin/factory"
+installed_factory_root="$npm_prefix/lib/node_modules/@clockgrove/factory"
+test -x "$factory_cli"
+test "$(readlink -f -- "$factory_cli")" = "$installed_factory_root/dist/factory.js"
+qualification_path="$npm_prefix/bin:$PATH"
+test "$(PATH="$qualification_path" command -v factory)" = "$factory_cli"
+test "$(PATH="$qualification_path" "$factory_cli" --version)" = "$candidate_version"
+test "$(sha256sum -- "$installed_factory_root/dist/bundle-inventory.json" | cut -d' ' -f1)" = "$bundle_inventory_sha256"
+expected_factory_bundle_sha256="$(node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const b=m.bundles.find((x)=>x.file==="factory.js");if(!b)process.exit(1);process.stdout.write(b.sha256)' "$installed_factory_root/dist/bundle-inventory.json")"
+expected_mcp_bundle_sha256="$(node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const b=m.bundles.find((x)=>x.file==="mcp-server.js");if(!b)process.exit(1);process.stdout.write(b.sha256)' "$installed_factory_root/dist/bundle-inventory.json")"
+observed_factory_bundle_sha256="$(sha256sum -- "$installed_factory_root/dist/factory.js" | cut -d' ' -f1)"
+test "$observed_factory_bundle_sha256" = "$expected_factory_bundle_sha256"
+test "$(sha256sum -- "$installed_factory_root/dist/mcp-server.js" | cut -d' ' -f1)" = "$expected_mcp_bundle_sha256"
+controller_launcher_identity="sha256:$observed_factory_bundle_sha256"
+git archive --format=tar --output="$plugin_archive" "$source_commit"
+plugin_archive_sha256="$(sha256sum -- "$plugin_archive" | cut -d' ' -f1)"
+tar -xf "$plugin_archive" -C "$plugin_snapshot"
+test "$(node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(m.version)' "$plugin_snapshot/.codex-plugin/plugin.json")" = "$candidate_version"
+test "$(sha256sum -- "$plugin_snapshot/dist/bundle-inventory.json" | cut -d' ' -f1)" = "$bundle_inventory_sha256"
+test "$(sha256sum -- "$plugin_snapshot/dist/factory.js" | cut -d' ' -f1)" = "$expected_factory_bundle_sha256"
+test "$(sha256sum -- "$plugin_snapshot/dist/mcp-server.js" | cut -d' ' -f1)" = "$expected_mcp_bundle_sha256"
+codex_cli="$(command -v codex)"
+test -n "$codex_cli"
+test -x "$codex_cli"
+CODEX_HOME="$codex_home" "$codex_cli" plugin marketplace add "$plugin_snapshot" --json > "$qualification_root/codex-marketplace-add.json"
+CODEX_HOME="$codex_home" "$codex_cli" plugin add factory@clockgrove-factory --json > "$qualification_root/codex-plugin-add.json"
+CODEX_HOME="$codex_home" "$codex_cli" plugin list --json > "$qualification_root/codex-plugin-list.json"
+installed_plugin_root="$(node -e 'const fs=require("node:fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(p.pluginId!=="factory@clockgrove-factory"||p.name!=="factory"||p.marketplaceName!=="clockgrove-factory"||p.version!==process.argv[2]||p.authPolicy!=="ON_INSTALL"||typeof p.installedPath!=="string")process.exit(1);process.stdout.write(p.installedPath)' "$qualification_root/codex-plugin-add.json" "$candidate_version")"
+installed_plugin_root="$(realpath -- "$installed_plugin_root")"
+case "$installed_plugin_root/" in ("$codex_home/plugins/cache/clockgrove-factory/factory/"*) ;; (*) exit 1;; esac
+listed_plugin_source="$(node -e 'const fs=require("node:fs");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const p=j.installed?.filter((x)=>x.pluginId==="factory@clockgrove-factory"&&x.name==="factory"&&x.marketplaceName==="clockgrove-factory"&&x.version===process.argv[2]&&x.installed===true&&x.enabled===true);if(p?.length!==1||p[0].source?.source!=="local"||typeof p[0].source.path!=="string")process.exit(1);process.stdout.write(p[0].source.path)' "$qualification_root/codex-plugin-list.json" "$candidate_version")"
+listed_plugin_source="$(realpath -- "$listed_plugin_source")"
+test "$listed_plugin_source" = "$(realpath -- "$plugin_snapshot")"
+test "$(sha256sum -- "$installed_plugin_root/dist/bundle-inventory.json" | cut -d' ' -f1)" = "$bundle_inventory_sha256"
+test "$(sha256sum -- "$installed_plugin_root/dist/factory.js" | cut -d' ' -f1)" = "$expected_factory_bundle_sha256"
+test "$(sha256sum -- "$installed_plugin_root/dist/mcp-server.js" | cut -d' ' -f1)" = "$expected_mcp_bundle_sha256"
+install_identity_receipt="$qualification_root/install-identities.txt"
+{
+  printf 'sourceCommit=%s\n' "$source_commit"
+  printf 'version=%s\n' "$candidate_version"
+  printf 'tarballFile=%s\n' "$tarball_file"
+  printf 'tarballSha256=%s\n' "$tarball_sha256"
+  printf 'npmPrefix=%s\n' "$npm_prefix"
+  printf 'factoryCli=%s\n' "$factory_cli"
+  printf 'codexHome=%s\n' "$codex_home"
+  printf 'codexCli=%s\n' "$codex_cli"
+  printf 'pluginArchive=%s\n' "$plugin_archive"
+  printf 'pluginArchiveSha256=%s\n' "$plugin_archive_sha256"
+  printf 'installedPluginRoot=%s\n' "$installed_plugin_root"
+  printf 'listedPluginSource=%s\n' "$listed_plugin_source"
+  printf 'bundleInventorySha256=%s\n' "$bundle_inventory_sha256"
+  printf 'factoryBundleSha256=%s\n' "$expected_factory_bundle_sha256"
+  printf 'mcpServerBundleSha256=%s\n' "$expected_mcp_bundle_sha256"
+  printf 'controllerLauncherIdentity=%s\n' "$controller_launcher_identity"
+} > "$install_identity_receipt"
+chmod 600 "$install_identity_receipt"
+printf 'Factory candidate root: %s\nFactory install identity receipt: %s\n' "$qualification_root" "$install_identity_receipt"
 ```
 
 This path is for the authorized qualification sequence in
@@ -115,8 +184,13 @@ override for the installed plugin cache path. The clean-tree check includes ever
 path; the ignored `release/` directory remains excluded. The npm install occurs only after the exact
 tarball bytes match `tarball.sha256` from the release manifest. The local plugin marketplace comes
 from a fresh tracked-file archive of `provenance.sourceCommit`, so ignored `release/`, `node_modules/`,
-and other working-checkout content cannot enter its snapshot. Retain that temporary marketplace for
-the duration of qualification, then remove it with the rest of the qualification environment.
+and other working-checkout content cannot enter its snapshot. The explicit npm prefix and fresh
+`CODEX_HOME` keep the candidate under the retained Linux-native qualification root. They do not
+change the default Codex home, its installed plugins or caches, or an active repository controller's
+pinned launcher. Retain this root and its local receipts for the whole qualification run. Before
+removing it, prove that no candidate controller unit or process references its paths. Moving an
+existing controller to this candidate is a separate drain, settlement, stop, install, and explicit
+restart operation; never evict its current cache generation as part of candidate installation.
 
 ### Postpublication installation
 

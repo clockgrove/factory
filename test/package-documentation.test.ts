@@ -55,27 +55,103 @@ describe("distributed operator documentation", () => {
 
   it("fails closed before installing a prepublication candidate", () => {
     const guide = readFileSync(new URL("docs/setup/local.md", root), "utf8");
+    const procedure = guide.match(
+      /### Prepublication candidate qualification \(maintainers\)[\s\S]*?```bash\n([\s\S]*?)\n```/,
+    )?.[1];
+    expect(procedure).toBeDefined();
+    const commands = procedure!;
     const cleanTree = 'test -z "$(git status --porcelain --untracked-files=all)"';
     const tarballDigest = 'test "$observed_tarball_sha256" = "$tarball_sha256"';
-    const install = 'npm install --global "$candidate_root/release/$tarball_file"';
-    const archive = 'git archive --format=tar "$source_commit" | tar -xf - -C "$plugin_snapshot"';
-    const marketplace = 'codex plugin marketplace add "$plugin_snapshot"';
+    const freshRoot = 'test ! -e "$qualification_root"';
+    const install =
+      'npm_config_cache="$npm_cache" npm install --global --prefix "$npm_prefix" --ignore-scripts=false --no-audit --no-fund "$candidate_root/release/$tarball_file"';
+    const archive = 'git archive --format=tar --output="$plugin_archive" "$source_commit"';
+    const marketplace =
+      'CODEX_HOME="$codex_home" "$codex_cli" plugin marketplace add "$plugin_snapshot" --json';
 
-    expect(guide).toContain("set -euo pipefail");
-    expect(guide).toContain("m.tarball.sha256");
-    expect(guide).toContain(
+    expect(commands).toContain("set -euo pipefail");
+    expect(commands).toContain("m.tarball.sha256");
+    expect(commands).toContain(
       'observed_tarball_sha256="$(sha256sum -- "$candidate_root/release/$tarball_file")"',
     );
-    expect(guide).toContain(cleanTree);
-    expect(guide).not.toContain("git status --porcelain --untracked-files=no");
-    expect(guide).toContain(tarballDigest);
-    expect(guide.indexOf(cleanTree)).toBeLessThan(guide.indexOf(install));
-    expect(guide.indexOf(tarballDigest)).toBeLessThan(guide.indexOf(install));
-    expect(guide).toContain('plugin_snapshot="$(mktemp -d)"');
-    expect(guide).toContain(archive);
-    expect(guide).toContain(marketplace);
-    expect(guide).not.toContain('codex plugin marketplace add "$candidate_root"');
-    expect(guide.indexOf(archive)).toBeLessThan(guide.indexOf(marketplace));
+    expect(commands).toContain(cleanTree);
+    expect(commands).not.toContain("git status --porcelain --untracked-files=no");
+    expect(commands).toContain(tarballDigest);
+    expect(commands).toContain(
+      'qualification_parent="${FACTORY_QUALIFICATION_PARENT:-/home/kirk/Codex/factory-initial-beta}"',
+    );
+    expect(commands).toContain(freshRoot);
+    expect(commands).toContain('npm_prefix="$qualification_root/npm"');
+    expect(commands).toContain('codex_home="$qualification_root/codex-home"');
+    expect(commands).toContain(install);
+    expect(commands).not.toContain('npm install --global "$candidate_root/release/$tarball_file"');
+    expect(commands.indexOf(cleanTree)).toBeLessThan(commands.indexOf(freshRoot));
+    expect(commands.indexOf(tarballDigest)).toBeLessThan(commands.indexOf(freshRoot));
+    expect(commands.indexOf(freshRoot)).toBeLessThan(commands.indexOf(install));
+    expect(commands).toContain('mkdir "$qualification_root"');
+    expect(commands).not.toContain('mkdir -p "$qualification_root"');
+    expect(commands).not.toContain('plugin_snapshot="$(mktemp -d)"');
+    expect(commands).toContain(
+      'plugin_archive="$qualification_root/factory-plugin-$source_commit.tar"',
+    );
+    expect(commands).toContain('plugin_snapshot="$qualification_root/plugin-marketplace"');
+    expect(commands).toContain(archive);
+    expect(commands).toContain(marketplace);
+    expect(commands).not.toContain('codex plugin marketplace add "$candidate_root"');
+    expect(commands.indexOf(archive)).toBeLessThan(commands.indexOf(marketplace));
+
+    const codexCommands = commands
+      .split("\n")
+      .filter((line) => /"\$codex_cli" plugin (?:marketplace add|add|list) /.test(line));
+    expect(codexCommands).toHaveLength(3);
+    expect(
+      codexCommands.every((line) => line.startsWith('CODEX_HOME="$codex_home" "$codex_cli"')),
+    ).toBe(true);
+    expect(commands).toContain(
+      'test "$(PATH="$qualification_path" command -v factory)" = "$factory_cli"',
+    );
+    expect(commands).toContain(
+      'controller_launcher_identity="sha256:$observed_factory_bundle_sha256"',
+    );
+    expect(commands).toContain(
+      'plugin_archive_sha256="$(sha256sum -- "$plugin_archive" | cut -d\' \' -f1)"',
+    );
+    expect(commands).toContain(
+      'test "$(sha256sum -- "$installed_plugin_root/dist/mcp-server.js" | cut -d\' \' -f1)" = "$expected_mcp_bundle_sha256"',
+    );
+    expect(commands).toContain(
+      'case "$installed_plugin_root/" in ("$codex_home/plugins/cache/clockgrove-factory/factory/"*) ;; (*) exit 1;; esac',
+    );
+    const addReceiptAuthority = commands
+      .split("\n")
+      .find((line) => line.startsWith('installed_plugin_root="$(node -e'));
+    expect(addReceiptAuthority).toContain("p.installedPath");
+    expect(addReceiptAuthority).toContain("codex-plugin-add.json");
+    expect(addReceiptAuthority).not.toContain("codex-plugin-list.json");
+    expect(commands.indexOf('codex-plugin-add.json"')).toBeLessThan(
+      commands.indexOf('installed_plugin_root="$(node -e'),
+    );
+    const listReceiptAuthority = commands
+      .split("\n")
+      .find((line) => line.startsWith('listed_plugin_source="$(node -e'));
+    expect(listReceiptAuthority).toContain("p[0].source.path");
+    expect(listReceiptAuthority).toContain("codex-plugin-list.json");
+    expect(listReceiptAuthority).not.toContain("p.installedPath");
+    expect(commands.indexOf('codex-plugin-list.json"')).toBeLessThan(
+      commands.indexOf('listed_plugin_source="$(node -e'),
+    );
+    expect(commands).toContain(
+      'test "$listed_plugin_source" = "$(realpath -- "$plugin_snapshot")"',
+    );
+    expect(commands).toContain(
+      'install_identity_receipt="$qualification_root/install-identities.txt"',
+    );
+    expect(commands).toContain(
+      "printf 'controllerLauncherIdentity=%s\\n' \"$controller_launcher_identity\"",
+    );
+    expect(guide).toContain(
+      "They do not\nchange the default Codex home, its installed plugins or caches, or an active repository controller's\npinned launcher.",
+    );
   });
 
   it.each([

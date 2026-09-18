@@ -199,6 +199,12 @@ export function observeNativeScopes(
 export function assertNativeScopes(evidence) {
   const observations = evidence.nativeScopeObservations;
   const expected = nativeOwnedScopes(evidence, observations.hostIdentity);
+  const terminalAt =
+    evidence.status.run.finishedAt ??
+    nativeQualificationEvents(evidence).find((event) =>
+      ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event),
+    )?.at;
+  assert.ok(Number.isFinite(Date.parse(terminalAt)), "terminal scope observation boundary missing");
   assert.deepEqual(
     observations.units.map((value) => value.unit),
     expected,
@@ -214,16 +220,6 @@ export function assertNativeScopes(evidence) {
       controlGroupDigest: value.controlGroupDigest,
     });
     assert.equal(parsed.status, "absent");
-    assert.ok(
-      Date.parse(value.at) >=
-        Date.parse(
-          evidence.status.run.completedAt ??
-            evidence.events.find(
-              (event) =>
-                event.event === "FactoryRunCompleted" && event.runId === evidence.runResult.runId,
-            )?.at,
-        ),
-      "scope read predates terminal completion",
-    );
+    assert.ok(Date.parse(value.at) >= Date.parse(terminalAt), "scope read predates terminal state");
   }
 }

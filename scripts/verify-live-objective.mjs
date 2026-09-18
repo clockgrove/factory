@@ -1256,8 +1256,9 @@ export async function main(
       identity.version,
       "installed server version mismatch",
     );
-    assertMcpSurface((await client.listTools()).tools);
-    const hooks = { call, request, octokit, evidence, checkout, owner, repo, save };
+    const tools = (await client.listTools()).tools;
+    assertMcpSurface(tools);
+    const hooks = { call, request, octokit, evidence, checkout, owner, repo, save, tools };
     if (qualification.beforeRun) await qualification.beforeRun(hooks);
     evidence.objective = (
       await request("POST /repos/{owner}/{repo}/issues", {
@@ -1270,7 +1271,7 @@ export async function main(
     console.log(
       `Created disposable Objective ${evidence.objective.html_url} for ${namespace}; installed Factory is running.`,
     );
-    evidence.runRequest = {
+    const foregroundRequest = {
       tool: "factory_run",
       arguments: {
         owner,
@@ -1281,12 +1282,34 @@ export async function main(
         policy: evidence.policy,
       },
     };
+    evidence.runRequest = qualification.createRunRequest
+      ? await qualification.createRunRequest({ ...hooks, foregroundRequest })
+      : foregroundRequest;
+    assert.ok(
+      evidence.runRequest && ["factory_run", "factory_activate"].includes(evidence.runRequest.tool),
+      "qualification run request escaped its repository, Objective, or policy",
+    );
+    assert.equal(evidence.runRequest.arguments?.owner, owner);
+    assert.equal(evidence.runRequest.arguments?.repo, repo);
+    assert.equal(evidence.runRequest.arguments?.objectiveNumber, evidence.objective.number);
+    assert.equal(evidence.runRequest.arguments?.repository, checkout);
+    assert.deepEqual(evidence.runRequest.arguments?.policy, evidence.policy);
+    if (evidence.runRequest.tool === "factory_activate") {
+      assert.equal(evidence.runRequest.arguments.baseSha, evidence.base);
+      assert.match(evidence.runRequest.arguments.requestId ?? "", /^[A-Za-z0-9._:/+-]{1,160}$/);
+    }
     save();
-    evidence.runResult = await runQualificationCall({
-      invoke: () => call(evidence.runRequest.tool, evidence.runRequest.arguments, 48 * 60_000),
-      duringRun: qualification.duringRun,
-      hooks,
-    });
+    evidence.runResult = qualification.executeRun
+      ? await qualification.executeRun({ ...hooks, runRequest: evidence.runRequest })
+      : await runQualificationCall({
+          invoke: () => call(evidence.runRequest.tool, evidence.runRequest.arguments, 48 * 60_000),
+          duringRun: qualification.duringRun,
+          hooks,
+        });
+    assert.ok(
+      evidence.runResult && typeof evidence.runResult === "object",
+      "qualification execution returned no run result",
+    );
     evidence.status = await call("factory_status", {
       owner,
       repo,

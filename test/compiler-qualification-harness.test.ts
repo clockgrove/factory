@@ -539,8 +539,123 @@ describe("installed compiler checkpoint qualifier", () => {
     ).toThrow("compiler qualification graph must contain four items");
   });
 
+  it("keeps incomplete exact graph projection evidence pending", () => {
+    const withoutProjectedReceipt = projectedObservation();
+    withoutProjectedReceipt.receipts = withoutProjectedReceipt.receipts.filter(
+      ({ event }) => event.event !== "GraphProjected",
+    );
+    expect(
+      assertGraphProjectionHold(
+        withoutProjectedReceipt,
+        authority,
+        { arm: arm("graph-projection") },
+        projectionController,
+      ),
+    ).toBe(false);
+
+    const withoutAllChildren = projectedObservation();
+    withoutAllChildren.children.pop();
+    expect(
+      assertGraphProjectionHold(
+        withoutAllChildren,
+        authority,
+        { arm: arm("graph-projection") },
+        projectionController,
+      ),
+    ).toBe(false);
+
+    expect(
+      assertGraphProjectionHold(
+        projectedObservation(),
+        authority,
+        { arm: arm("graph-projection") },
+        projectionController,
+      ),
+    ).toBe(true);
+  });
+
+  it("fails closed on contradictory graph projection evidence while receipts are incomplete", () => {
+    const withoutProjectedReceipt = () => {
+      const observation = projectedObservation();
+      observation.receipts = observation.receipts.filter(
+        ({ event }) => event.event !== "GraphProjected",
+      );
+      return observation;
+    };
+    const assertHold = (observation: ReturnType<typeof projectedObservation>) =>
+      assertGraphProjectionHold(
+        observation,
+        authority,
+        { arm: arm("graph-projection") },
+        projectionController,
+      );
+
+    const duplicateCompiled = withoutProjectedReceipt();
+    duplicateCompiled.receipts.push(
+      structuredClone(
+        duplicateCompiled.receipts.find(({ event }) => event.event === "GraphCompiled")!,
+      ),
+    );
+    expect(() => assertHold(duplicateCompiled)).toThrow(
+      "one exact compiled graph receipt required",
+    );
+
+    const duplicateProjected = projectedObservation();
+    duplicateProjected.receipts = duplicateProjected.receipts.filter(
+      ({ event }) => event.event !== "GraphCompiled",
+    );
+    duplicateProjected.receipts.push(
+      structuredClone(
+        duplicateProjected.receipts.find(({ event }) => event.event === "GraphProjected")!,
+      ),
+    );
+    expect(() => assertHold(duplicateProjected)).toThrow(
+      "one exact projected graph receipt required",
+    );
+
+    const changedDigest = withoutProjectedReceipt();
+    Object.assign(
+      changedDigest.receipts.find(({ event }) => event.event === "GraphCompiled")!.event,
+      { graphDigest: "f".repeat(64) },
+    );
+    expect(() => assertHold(changedDigest)).toThrow();
+
+    const changedRun = withoutProjectedReceipt();
+    Object.assign(changedRun.receipts.find(({ event }) => event.event === "GraphCompiled")!.event, {
+      runId: "1ca6b1cf-8368-4c8a-9326-32ad468b6bf7",
+    });
+    expect(() => assertHold(changedRun)).toThrow();
+
+    const foreignChild = withoutProjectedReceipt();
+    foreignChild.children[0]!.number = 999;
+    expect(() => assertHold(foreignChild)).toThrow(
+      "compiler projection contains a foreign Work Item",
+    );
+
+    const extraChild = withoutProjectedReceipt();
+    extraChild.children.push({ number: 999, state: "open" });
+    expect(() => assertHold(extraChild)).toThrow("compiler projection contains extra Work Items");
+
+    const scheduled = withoutProjectedReceipt();
+    scheduled.receipts.push({
+      event: {
+        kind: "attempt",
+        event: "AttemptReserved",
+        sequence: 12,
+        objective,
+        runId: actualRunId,
+      },
+    } as unknown as (typeof scheduled.receipts)[number]);
+    expect(() => assertHold(scheduled)).toThrow();
+
+    const reservedWitness = withoutProjectedReceipt();
+    reservedWitness.compilerCheckpoints["graph-projection"].proof.attemptReservations = 1;
+    expect(() => assertHold(reservedWitness)).toThrow();
+  });
+
   it("orchestrates restart adoption, durable pause, zero admission, and final stop", async () => {
     const actions: string[] = [];
+    let graphProjectionObservations = 0;
     const controllers = [original, projectionController, pausedController];
     const observations = {
       "compiler-selection-hold": selectionObservation(),
@@ -566,6 +681,16 @@ describe("installed compiler checkpoint qualifier", () => {
       assertDefaultPolicyActivation: async () => {},
       poll: async (phase: keyof typeof observations, accept: (value: unknown) => boolean) => {
         const observation = observations[phase];
+        if (phase === "graph-projection-hold") {
+          const incomplete = structuredClone(observation);
+          incomplete.receipts = incomplete.receipts.filter(
+            ({ event }) => event.event !== "GraphProjected",
+          );
+          graphProjectionObservations += 1;
+          expect(accept(incomplete)).toBe(false);
+          expect(actions).not.toContain("pause");
+        }
+        graphProjectionObservations += phase === "graph-projection-hold" ? 1 : 0;
         expect(accept(observation)).toBe(true);
         return observation;
       },
@@ -584,6 +709,7 @@ describe("installed compiler checkpoint qualifier", () => {
       "restart-projection",
       "stop",
     ]);
+    expect(graphProjectionObservations).toBe(2);
   });
 
   it("rejects an extra compiler invocation and accounting pair after restart", async () => {

@@ -101,17 +101,28 @@ export function assertInnerDirectorCollision(input) {
   assert.equal(terminalLease.event.event, "LeaseReleased", "terminal lease is not released");
   for (const [index, current] of input.leaseChain.entries()) {
     assert.match(current.oid, /^[a-f0-9]{40}$/);
+    assert.equal(current.event.protocol, "clockgrove.factory/v2");
     assert.equal(current.event.kind, "lease");
     assert.equal(current.event.objective, input.objective);
     assert.equal(current.event.runId, input.runId);
     assert.equal(current.event.policyDigest, input.policyDigest);
     assert.equal(current.event.holder, winner.observedHolder);
+    assert.ok(
+      Number.isSafeInteger(current.event.epoch) && current.event.epoch > 0,
+      "lease epoch is not a positive integer",
+    );
+    assert.equal(current.event.epoch, 1, "absent-ref lease must start at epoch one");
+    assert.ok(
+      Number.isSafeInteger(current.event.sequence) && current.event.sequence > 0,
+      "lease sequence is not a positive integer",
+    );
     assert.equal(current.parents.length, 1, "lease commit must have one parent");
     const previous = input.leaseChain[index + 1];
     if (previous) {
-      assert.ok(
-        ["LeaseReleased", "LeaseRenewed"].includes(current.event.event),
-        "noninitial lease event is not a renewal or release",
+      assert.equal(
+        current.event.event,
+        index === 0 ? "LeaseReleased" : "LeaseRenewed",
+        "lease chain contains an invalid transition",
       );
       assert.equal(current.event.previousOid, previous.oid, "lease previousOid differs from chain");
       assert.deepEqual(current.parents, [previous.oid]);

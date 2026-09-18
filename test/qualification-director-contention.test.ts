@@ -94,6 +94,7 @@ function collision() {
         oid: "e".repeat(40),
         parents: ["d".repeat(40)],
         event: {
+          protocol: "clockgrove.factory/v2",
           kind: "lease",
           event: "LeaseReleased",
           objective: 7,
@@ -109,6 +110,7 @@ function collision() {
         oid: "d".repeat(40),
         parents: ["c".repeat(40)],
         event: {
+          protocol: "clockgrove.factory/v2",
           kind: "lease",
           event: "LeaseAcquired",
           objective: 7,
@@ -371,6 +373,7 @@ describe("inner Director qualification assertions", () => {
       oid: "f".repeat(40),
       parents: ["d".repeat(40)],
       event: {
+        protocol: "clockgrove.factory/v2",
         kind: "lease",
         event: "LeaseRenewed",
         objective: 7,
@@ -388,6 +391,53 @@ describe("inner Director qualification assertions", () => {
     });
     renewed.leaseChain.shift();
     expect(() => assertInnerDirectorCollision(renewed)).toThrow(/terminal lease is not released/);
+  });
+
+  it.each([
+    [
+      "interior release",
+      (value: ReturnType<typeof collision>) => (value.leaseChain[1]!.event.event = "LeaseReleased"),
+    ],
+    [
+      "missing epoch",
+      (value: ReturnType<typeof collision>) =>
+        (value.leaseChain[0]!.event.epoch = undefined as never),
+    ],
+    [
+      "changed epoch",
+      (value: ReturnType<typeof collision>) => (value.leaseChain[0]!.event.epoch = 2),
+    ],
+    [
+      "noninteger sequence",
+      (value: ReturnType<typeof collision>) => (value.leaseChain[0]!.event.sequence = "2" as never),
+    ],
+    [
+      "malformed protocol",
+      (value: ReturnType<typeof collision>) => (value.leaseChain[0]!.event.protocol = "other"),
+    ],
+  ])("rejects %s in the authenticated lease chain", (_name, mutate) => {
+    const invalid = collision();
+    invalid.leaseChain[0]!.event.previousOid = "f".repeat(40);
+    invalid.leaseChain[0]!.parents = ["f".repeat(40)];
+    invalid.leaseChain[0]!.event.sequence = 3;
+    invalid.leaseChain.splice(1, 0, {
+      oid: "f".repeat(40),
+      parents: ["d".repeat(40)],
+      event: {
+        protocol: "clockgrove.factory/v2",
+        kind: "lease",
+        event: "LeaseRenewed",
+        objective: 7,
+        runId: "run-7",
+        policyDigest,
+        holder: "winner-holder",
+        epoch: 1,
+        sequence: 2,
+        previousOid: "d".repeat(40),
+      },
+    });
+    mutate(invalid);
+    expect(() => assertInnerDirectorCollision(invalid)).toThrow();
   });
 });
 

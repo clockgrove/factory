@@ -96,8 +96,10 @@ unexplained head change. The variant also retains the existing dependent-join, c
 resources, installed-artifact and fresh-clone behavior assertions.
 
 A passing branch-update component probe is insufficient: this exercise must observe the installed
-Factory implementation complete the actual Objective. It still does not qualify native linear-stack
-rebases, every recovery/cancellation fault, or other host/provider environments.
+Factory implementation complete the actual Objective. The separate
+[native linear-stack qualifier](NATIVE-STACK-QUALIFICATION.md) covers a root → middle → top cascade,
+exact changed-head proofs, partial completion, response-loss restart adoption and active
+cancellation. Neither qualifier alone covers every recovery fault or host/provider environment.
 
 ## Evidence and failure handling
 

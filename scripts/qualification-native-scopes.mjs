@@ -220,9 +220,6 @@ export function assertNativeScopes(evidence) {
       controlGroupDigest: value.controlGroupDigest,
     });
     assert.equal(parsed.status, "absent");
-    assert.ok(
-      Date.parse(value.at) >= Date.parse(terminalAt),
-      "scope read predates terminal state",
-    );
+    assert.ok(Date.parse(value.at) >= Date.parse(terminalAt), "scope read predates terminal state");
   }
 }

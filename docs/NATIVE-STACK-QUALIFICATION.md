@@ -27,6 +27,14 @@ protection, no open Factory pull request, and the exact candidate installed in t
 Codex home. The two controller cases additionally require an active healthy repository controller
 running that installed candidate.
 
+Install the retained npm and Agent Plugin candidate first. Set
+`FACTORY_QUALIFICATION_INSTALL_RECEIPT` to the owner-private `install-identities.txt` created for
+that candidate. The shared [installed Objective harness](LIVE-OBJECTIVE-HARNESS.md#setup-and-authority)
+authenticates the retained receipt, source commit, archives, installs, bundle inventory and launcher
+before any repository write or model call. The receipt selects artifact bytes only; normal Linux
+`~/.codex` remains the provider-authentication home. The runner declares every imported harness path,
+so an uncommitted, omitted or plugin-cache-only qualifier cannot become evidence.
+
 Run preflight before each case:
 
 ```bash
@@ -36,7 +44,7 @@ export FACTORY_LIVE_NATIVE_LINEAR_CASE=cascade
 export FACTORY_LIVE_OBJECTIVE_NAMESPACE=native-cascade-unique
 export FACTORY_LIVE_OBJECTIVE_REPOSITORY=OWNER/DISPOSABLE_REPO
 export FACTORY_LIVE_OBJECTIVE_CHECKOUT=/home/USER/Codex/disposable-repo
-export FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT=/home/USER/.codex/plugins/cache/MARKETPLACE/factory/VERSION
+export FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/USER/Codex/factory-initial-beta/CANDIDATE/install-identities.txt
 export FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=500000
 export FACTORY_LIVE_OBJECTIVE_EVIDENCE=/home/USER/Codex/factory-private-evidence/native-cascade
 node scripts/verify-native-linear-objective.mjs
@@ -57,10 +65,18 @@ for each case. Refresh the checkout to the current default branch between comple
 rerun an uncertain case with the same namespace or relabel a failed/cancelled case as another case.
 
 Evidence stays private. It binds the installed bundle inventory, candidate harness hashes, Objective,
-run, controller activation, Work Item/PR/head/base/tree identities, invalidation causes, validation and
-review checkpoints, accounting, GraphQL merge commits, terminal state and exact owned-scope absence.
+run, controller activation, every initial and rewritten Work Item head/base/tree identity, invalidation
+causes, validation and review checkpoints, accounting, GraphQL merge commits, terminal state and exact
+owned-scope absence. Completed cases also bind the final default-branch tree to the validated top
+output tree. Cancellation proves an exact accepted root with unresolved descendants, authenticated
+root merge, no later delivery and survival of an unrelated exact systemd service generation before
+stopping that sentinel. Restart proves a different repository-controller identity, a higher epoch and
+the same policy before resumed delivery.
 The runner performs no provider fallback, paid-provider selection, completed-run revival, package
 publication or mutation of the Factory product repository.
+
+These cases contribute to the [live native-stack conformance gate](CONFORMANCE.md#verification-required-before-publication).
+Native capability unavailability remains exclusively in the separate fallback qualifier.
 
 Focused credential-free checks:
 

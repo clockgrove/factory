@@ -1,20 +1,57 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
+  assertNativeControllerTakeover,
+  assertNativeCancellationBoundary,
+  assertNativeLinearFinalTree,
   assertNativeLinearHistory,
+  assertNativeLinearPublicationProofs,
+  assertNativeLinearReview,
+  assertNativeLinearSentinelAlive,
+  assertNativeLinearTerminal,
+  assertNoOpenLiabilities,
   executeNativeLinearControllerCase,
   nativeLinearObjectiveBody,
   nativeLinearQualification,
+  observeNativeLinearProofs,
+  startNativeLinearSentinel,
+  stopNativeLinearSentinel,
 } from "../scripts/verify-native-linear-objective.mjs";
 import { qualificationPaths } from "../scripts/verify-live-objective.mjs";
 
 const head = (character: string) => character.repeat(40);
 const digest = (character: string) => character.repeat(64);
+const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const canonical = (value: unknown): string =>
+  value && typeof value === "object"
+    ? Array.isArray(value)
+      ? `[${value.map(canonical).join(",")}]`
+      : `{${Object.keys(value)
+          .sort()
+          .map(
+            (key) => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`,
+          )
+          .join(",")}}`
+    : JSON.stringify(value);
 
 type QualificationEvent = {
   event: string;
   workItem?: number;
   sequence?: number;
   headSha?: string;
+  baseSha?: string;
+  outputTreeSha?: string;
+  validationDigest?: string;
+  evidenceDigest?: string;
+  artifactDigest?: string;
+  exactHeadValidationDigest?: string;
+  pullRequest?: number;
+  attempt?: number;
+  objective?: number;
+  runId?: string;
+  epoch?: number;
+  controllerPolicyDigest?: string;
+  observationScope?: string;
   invalidatedByItem?: string;
   usageId?: string;
   [key: string]: unknown;
@@ -62,7 +99,15 @@ function history(): QualificationEvent[] {
       operationId: "linear-stack-operation",
       sequence: 19,
     },
-    { event: "AttemptIntegrated", workItem: 2, sequence: 20 },
+    {
+      event: "AttemptIntegrated",
+      runId: "run",
+      objective: 1,
+      workItem: 2,
+      attempt: 1,
+      headSha: head("a"),
+      sequence: 20,
+    },
     {
       ...middle,
       event: "ValidationInvalidated",
@@ -80,18 +125,24 @@ function history(): QualificationEvent[] {
     {
       event: "ValidationRecorded",
       workItem: 3,
+      attempt: 1,
       sequence: 23,
       evidenceDigest: digest("d"),
       baseSha: head("1"),
+      outputTreeSha: head("4"),
+      passed: true,
     },
     { event: "AttemptPublished", workItem: 3, sequence: 24, headSha: head("d") },
     middleRebased,
     {
       event: "ValidationRecorded",
       workItem: 4,
+      attempt: 1,
       sequence: 26,
       evidenceDigest: digest("e"),
       baseSha: head("d"),
+      outputTreeSha: head("5"),
+      passed: true,
     },
     { event: "AttemptPublished", workItem: 4, sequence: 27, headSha: head("e") },
     topFirstRebase,
@@ -101,7 +152,15 @@ function history(): QualificationEvent[] {
       operationId: "linear-stack-operation",
       sequence: 29,
     },
-    { event: "AttemptIntegrated", workItem: 3, sequence: 30 },
+    {
+      event: "AttemptIntegrated",
+      runId: "run",
+      objective: 1,
+      workItem: 3,
+      attempt: 1,
+      headSha: head("d"),
+      sequence: 30,
+    },
     {
       ...topFirstRebase,
       event: "ValidationInvalidated",
@@ -112,9 +171,12 @@ function history(): QualificationEvent[] {
     {
       event: "ValidationRecorded",
       workItem: 4,
+      attempt: 1,
       sequence: 32,
       evidenceDigest: digest("f"),
       baseSha: head("2"),
+      outputTreeSha: head("6"),
+      passed: true,
     },
     { event: "AttemptPublished", workItem: 4, sequence: 33, headSha: head("f") },
     topFinal,
@@ -124,7 +186,15 @@ function history(): QualificationEvent[] {
       operationId: "linear-stack-operation",
       sequence: 39,
     },
-    { event: "AttemptIntegrated", workItem: 4, sequence: 40 },
+    {
+      event: "AttemptIntegrated",
+      runId: "run",
+      objective: 1,
+      workItem: 4,
+      attempt: 1,
+      headSha: head("f"),
+      sequence: 40,
+    },
     ...["one", "two", "three"].flatMap((suffix, index) => [
       {
         event: "BudgetReconciled",
@@ -134,6 +204,57 @@ function history(): QualificationEvent[] {
       { event: "BudgetReconciled", usageId: `rebase-review-${suffix}`, amount: index + 1 },
     ]),
   ];
+}
+
+function exactBinding(publication: QualificationEvent, validation: QualificationEvent) {
+  return hash(
+    JSON.stringify({
+      protocol: "clockgrove.factory/exact-head-validation-v1",
+      validationDigest: validation.evidenceDigest,
+      baseSha: validation.baseSha,
+      outputTreeSha: validation.outputTreeSha,
+      publishedHeadSha: publication.headSha,
+    }),
+  );
+}
+
+function proofEvents(): QualificationEvent[] {
+  const events = history().map((event) => ({
+    ...event,
+    ...(event.workItem ? { runId: "run", objective: 1, attempt: 1 } : {}),
+  }));
+  const initial = events.filter((event) => event.event === "PublicationRecorded").slice(0, 3);
+  events.push(
+    ...initial.map((event, index) => ({
+      event: "ValidationRecorded",
+      runId: "run",
+      objective: 1,
+      workItem: event.workItem!,
+      attempt: 1,
+      sequence: index + 1,
+      evidenceDigest: event.validationDigest!,
+      baseSha: event.baseSha!,
+      outputTreeSha: head(String(index + 7)),
+      passed: true,
+    })),
+  );
+  for (const event of events.filter((entry) => entry.event === "AttemptPublished")) {
+    event.runId = "run";
+    event.objective = 1;
+    event.attempt = 1;
+    event.artifactDigest = digest("9");
+  }
+  for (const publication of events.filter((event) => event.event === "PublicationRecorded")) {
+    publication.pullRequest = publication.workItem!;
+    const validation = events.find(
+      (event) =>
+        event.event === "ValidationRecorded" &&
+        event.workItem === publication.workItem &&
+        event.evidenceDigest === publication.validationDigest,
+    )!;
+    publication.exactHeadValidationDigest = exactBinding(publication, validation);
+  }
+  return events;
 }
 
 function controllerInput(caseName: "response-loss-restart" | "active-cancellation") {
@@ -157,6 +278,52 @@ function controllerInput(caseName: "response-loss-restart" | "active-cancellatio
       policy: {},
     },
   };
+  const validation = {
+    event: "ValidationRecorded",
+    runId: "run",
+    objective: 7,
+    workItem: 3,
+    attempt: 1,
+    sequence: 23,
+    evidenceDigest: digest("b"),
+    baseSha: head("1"),
+    outputTreeSha: head("2"),
+    passed: true,
+  };
+  const published = {
+    event: "AttemptPublished",
+    runId: "run",
+    objective: 7,
+    workItem: 3,
+    attempt: 1,
+    sequence: 25,
+    headSha: head("b"),
+    artifactDigest: digest("c"),
+  };
+  const publication = {
+    event: "PublicationRecorded",
+    runId: "run",
+    objective: 7,
+    workItem: 3,
+    attempt: 1,
+    sequence: 26,
+    headSha: head("b"),
+    baseSha: head("1"),
+    validationDigest: digest("b"),
+  };
+  const reviewIdentity = {
+    kind: "rebase",
+    runId: "run",
+    objective: 7,
+    workItem: 3,
+    attempt: 1,
+    artifactDigest: digest("c"),
+    baseSha: head("1"),
+    outputTreeSha: head("2"),
+    evidenceDigest: digest("b"),
+    headSha: head("b"),
+  };
+  const reviewIdentityDigest = hash(canonical(reviewIdentity));
   const progressEvents = [
     {
       event: "FactoryRunStarted",
@@ -173,21 +340,50 @@ function controllerInput(caseName: "response-loss-restart" | "active-cancellatio
       operationId: "linear-stack-operation",
     },
     {
-      event: "ValidationInvalidated",
+      event: "AttemptIntegrated",
       runId: "run",
-      workItem: 3,
+      objective: 7,
+      workItem: 2,
       attempt: 1,
       sequence: 20,
-      headSha: head("a"),
+      headSha: head("0"),
     },
     {
-      event: "PublicationRecorded",
+      event: "ValidationInvalidated",
       runId: "run",
+      objective: 7,
       workItem: 3,
       attempt: 1,
-      sequence: 21,
-      headSha: head("b"),
+      sequence: 22,
+      headSha: head("a"),
+      invalidatedByItem: "root",
+      invalidatedByHeadSha: head("0"),
     },
+    {
+      event: "ControllerObserved",
+      runId: "run",
+      objective: 7,
+      sequence: 21,
+      observationScope: "repository-controller",
+      controllerId: "controller-one",
+      epoch: 4,
+      controllerPolicyDigest: digest("d"),
+    },
+    validation,
+    {
+      event: "BudgetReconciled",
+      runId: "run",
+      objective: 7,
+      workItem: 3,
+      attempt: 1,
+      sequence: 24,
+      phase: "management",
+      unit: "model_tokens",
+      usageId: `rebase-review-${reviewIdentityDigest}`,
+      amount: 2,
+    },
+    published,
+    publication,
   ];
   const observations = [
     { events: progressEvents, status: { run: { availability: "observed", state: "running" } } },
@@ -239,6 +435,11 @@ describe("native linear-stack installed matrix", () => {
       scope: "installed-local-native-linear-stack-cascade",
       namespace,
       privateEvidence: true,
+      harnessPaths: expect.arrayContaining([
+        "scripts/verify-native-linear-objective.mjs",
+        "scripts/verify-live-objective.mjs",
+        "scripts/verify-local-faults.mjs",
+      ]),
     });
   });
 
@@ -341,6 +542,489 @@ describe("native linear-stack installed matrix", () => {
     const events = history();
     mutate(events);
     expect(() => assertNativeLinearHistory(events)).toThrow();
+  });
+
+  it("binds the merged default-branch tree to the final validated top tree", () => {
+    expect(assertNativeLinearFinalTree(history(), head("6"))).toMatchObject({
+      validation: { outputTreeSha: head("6") },
+    });
+    expect(() => assertNativeLinearFinalTree(history(), head("7"))).toThrow(
+      /validated top output tree/,
+    );
+  });
+
+  it("observes every initial and rewritten publication, including the top intermediate rebase", async () => {
+    const events = proofEvents();
+    const rawEvents = events
+      .filter((event) => event.runId === "run")
+      .map((event, index) => ({
+        ...event,
+        author: "operator",
+        authorId: 9,
+        receiptUrl: `https://github.com/example/fixture/issues/${event.workItem ?? 1}#issuecomment-${index + 1}`,
+      }));
+    const evidence: {
+      nativeLinearProofs?: Array<Record<string, unknown>>;
+      mergeProofs?: Array<Record<string, unknown>>;
+      [key: string]: unknown;
+    } = {
+      repository: "example/fixture",
+      actor: { id: 9, login: "operator" },
+      objective: { number: 1 },
+      children: [{ number: 2 }, { number: 3 }, { number: 4 }],
+      events: rawEvents,
+      runResult: { runId: "run" },
+      runRequest: { tool: "factory_run", arguments: {} },
+      pulls: [2, 3, 4].map((number) => ({
+        number,
+        node_id: `pull-${number}`,
+        base: { repo: { node_id: "repo-node" } },
+      })),
+    };
+    const validationByHead = new Map(
+      events
+        .filter((event) => event.event === "PublicationRecorded")
+        .map((publication) => [
+          publication.headSha,
+          events.find(
+            (event) =>
+              event.event === "ValidationRecorded" &&
+              event.workItem === publication.workItem &&
+              event.evidenceDigest === publication.validationDigest,
+          )!,
+        ]),
+    );
+    const read = vi.fn(async (demand: Record<string, unknown>) => {
+      if (demand.kind === "checkpoint") return { demand };
+      const validation = validationByHead.get(String(demand.oid))!;
+      return {
+        oid: demand.oid,
+        treeOid: validation.outputTreeSha,
+        parentOids: [validation.baseSha],
+        message: "qualification fixture",
+      };
+    });
+    await observeNativeLinearProofs(
+      { evidence, request: vi.fn() },
+      read,
+      async (expected) => expected,
+    );
+    expect(evidence.nativeLinearProofs).toHaveLength(6);
+    expect(evidence.nativeLinearProofs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ position: 2, publicationIndex: 1 })]),
+    );
+    expect(evidence.nativeLinearProofs!.filter((proof) => proof.reviewDemand)).toHaveLength(3);
+
+    const missing = structuredClone(evidence);
+    missing.nativeLinearProofs!.splice(4, 1);
+    expect(() => assertNativeLinearPublicationProofs(missing, events)).toThrow(/coverage/);
+
+    const changedCommit = structuredClone(evidence);
+    (changedCommit.nativeLinearProofs![0]!.commitRead as Record<string, unknown>).parentOids = [
+      head("9"),
+    ];
+    expect(() => assertNativeLinearPublicationProofs(changedCommit, events)).toThrow();
+
+    const changedDigest = structuredClone(evidence);
+    const changedDigestEvents = structuredClone(events);
+    const changedPublication = changedDigest.nativeLinearProofs![0]!
+      .publication as QualificationEvent;
+    changedPublication.exactHeadValidationDigest = digest("0");
+    changedDigestEvents.find(
+      (event) =>
+        event.event === "PublicationRecorded" &&
+        event.workItem === changedPublication.workItem &&
+        event.headSha === changedPublication.headSha,
+    )!.exactHeadValidationDigest = digest("0");
+    expect(() => assertNativeLinearPublicationProofs(changedDigest, changedDigestEvents)).toThrow(
+      /exact-head validation binding/,
+    );
+  });
+
+  it("binds every rewritten-head review decision and accounting to its exact identity", () => {
+    const events = proofEvents();
+    const publication = events.find(
+      (event) =>
+        event.event === "PublicationRecorded" &&
+        event.workItem === 3 &&
+        event.headSha === head("d"),
+    )!;
+    const validation = events.find(
+      (event) =>
+        event.event === "ValidationRecorded" &&
+        event.workItem === publication.workItem &&
+        event.evidenceDigest === publication.validationDigest,
+    )!;
+    const published = events.find(
+      (event) =>
+        event.event === "AttemptPublished" &&
+        event.workItem === publication.workItem &&
+        event.headSha === publication.headSha,
+    )!;
+    const identity = {
+      kind: "rebase",
+      runId: publication.runId,
+      objective: publication.objective,
+      workItem: publication.workItem,
+      attempt: publication.attempt,
+      artifactDigest: published.artifactDigest,
+      baseSha: validation.baseSha,
+      outputTreeSha: validation.outputTreeSha,
+      evidenceDigest: validation.evidenceDigest,
+      headSha: publication.headSha,
+    };
+    const identityDigest = hash(canonical(identity));
+    const review = {
+      protocol: "clockgrove.factory/review-checkpoint-v1",
+      identityDigest,
+      identity,
+      review: { accepted: true, unmetCriteria: [] },
+      usage: { inputTokens: 5, outputTokens: 3 },
+    };
+    const reviewEvents = [
+      ...events.filter(
+        (event) =>
+          !(
+            event.event === "BudgetReconciled" &&
+            typeof event.usageId === "string" &&
+            event.usageId.startsWith("rebase-review-")
+          ),
+      ),
+      {
+        event: "BudgetReconciled",
+        workItem: publication.workItem,
+        attempt: publication.attempt,
+        phase: "management",
+        unit: "model_tokens",
+        usageId: `rebase-review-${identityDigest}`,
+        amount: 8,
+        sequence: publication.sequence! - 1,
+      },
+    ];
+    expect(assertNativeLinearReview(review, publication, validation, published, reviewEvents)).toBe(
+      identityDigest,
+    );
+    expect(() =>
+      assertNativeLinearReview(
+        { ...review, review: { accepted: false, unmetCriteria: ["missing"] } },
+        publication,
+        validation,
+        published,
+        reviewEvents,
+      ),
+    ).toThrow();
+    expect(() =>
+      assertNativeLinearReview(
+        { ...review, identityDigest: digest("0") },
+        publication,
+        validation,
+        published,
+        reviewEvents,
+      ),
+    ).toThrow();
+    reviewEvents.at(-1)!.usageId = `rebase-review-${digest("f")}`;
+    expect(() =>
+      assertNativeLinearReview(review, publication, validation, published, reviewEvents),
+    ).toThrow(/accounting/);
+  });
+
+  it("uses standard marker-to-actual model accounting and rejects open or duplicate usage", () => {
+    const marker = {
+      kind: "budget",
+      event: "BudgetReserved",
+      objective: 1,
+      runId: "run",
+      workItem: 2,
+      attempt: 1,
+      phase: "execution",
+      modelInvocationId: "worker-1",
+      policyDigest: digest("a"),
+      directorEpoch: 1,
+      unit: "model_tokens",
+      amount: 0,
+      usageId: "invocation-worker-1",
+      sequence: 1,
+    };
+    const actual = {
+      ...marker,
+      event: "BudgetReconciled",
+      amount: 8,
+      usageId: "worker-actual-1",
+      sequence: 2,
+      usageEvidence: "as-recorded",
+      reportedModelUsage: { inputTokens: 5, outputTokens: 3, cachedInputTokens: 2 },
+    };
+    expect(assertNoOpenLiabilities([marker, actual])).toMatchObject({ total: 8, unresolved: [] });
+    expect(() => assertNoOpenLiabilities([marker])).toThrow(/unresolved/);
+    expect(() => assertNoOpenLiabilities([actual])).toThrow(/dispatch marker/);
+    expect(() => assertNoOpenLiabilities([marker, actual, { ...actual, sequence: 3 }])).toThrow(
+      /repeated|multiple actual/,
+    );
+  });
+
+  it("rejects conflicting terminal receipts", () => {
+    expect(() =>
+      assertNativeLinearTerminal(
+        [{ event: "FactoryRunCompleted" }, { event: "FactoryRunCancelled" }],
+        "completed",
+      ),
+    ).toThrow(/conflicting/);
+  });
+
+  it("authenticates takeover by scope, monotonic generation and pre-advancement observation", () => {
+    const trigger = { event: "PublicationRecorded", sequence: 2 };
+    const events: QualificationEvent[] = [
+      {
+        event: "ControllerObserved",
+        sequence: 1,
+        observationScope: "repository-controller",
+        controllerId: "old",
+        epoch: 4,
+        controllerPolicyDigest: digest("a"),
+      },
+      trigger,
+      {
+        event: "ControllerObserved",
+        sequence: 3,
+        observationScope: "repository-controller",
+        controllerId: "new",
+        epoch: 5,
+        controllerPolicyDigest: digest("a"),
+      },
+      { event: "AttemptPublished", sequence: 4 },
+    ];
+    const expected = {
+      controllerId: "old",
+      epoch: 4,
+      controllerPolicyDigest: digest("a"),
+    };
+    expect(assertNativeControllerTakeover(events, trigger, expected)).toMatchObject({
+      after: { controllerId: "new", epoch: 5 },
+    });
+    for (const mutate of [
+      (copy: typeof events) => {
+        copy[2]!.epoch = 4;
+      },
+      (copy: typeof events) => {
+        copy[2]!.controllerPolicyDigest = digest("b");
+      },
+      (copy: typeof events) => {
+        copy[2]!.observationScope = "worker";
+      },
+      (copy: typeof events) => {
+        copy[2]!.sequence = 5;
+      },
+    ]) {
+      const copy = structuredClone(events);
+      mutate(copy);
+      expect(() => assertNativeControllerTakeover(copy, trigger, expected)).toThrow();
+    }
+  });
+
+  it("keeps an unrelated exact systemd sentinel generation alive, then stops it", () => {
+    let state: "absent" | "active" = "absent";
+    let invocation = "1".repeat(32);
+    const port = {
+      unit: () => "clockgrove-qualification-sentinel-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.service",
+      now: () => "2026-09-18T00:00:00.000Z",
+      run: (file: string, args: string[]) => {
+        if (file === "systemd-run") {
+          state = "active";
+          return "";
+        }
+        if (args.includes("stop")) {
+          state = "absent";
+          return "";
+        }
+        return [
+          `Id=${port.unit()}`,
+          `LoadState=${state === "active" ? "loaded" : "not-found"}`,
+          `ActiveState=${state === "active" ? "active" : "inactive"}`,
+          `SubState=${state === "active" ? "running" : "dead"}`,
+          `ControlGroup=${state === "active" ? `/user.slice/${port.unit()}` : ""}`,
+          "Job=",
+          `InvocationID=${state === "active" ? invocation : ""}`,
+          "KillMode=control-group",
+        ].join("\n");
+      },
+    };
+    const started = startNativeLinearSentinel(port);
+    expect(assertNativeLinearSentinelAlive(started, port)).toMatchObject({ status: "active" });
+    invocation = "2".repeat(32);
+    expect(() => assertNativeLinearSentinelAlive(started, port)).toThrow(/replaced/);
+    invocation = String(started.invocationId);
+    expect(stopNativeLinearSentinel(started, port)).toMatchObject({ status: "absent" });
+  });
+
+  it("accepts only a root-only cancellation boundary with bound proof and sentinel survival", () => {
+    const events = proofEvents()
+      .filter(
+        (event) =>
+          event.sequence === undefined ||
+          event.sequence <= 25 ||
+          (event.event === "ValidationInvalidated" && event.workItem === 4),
+      )
+      .filter(
+        (event) =>
+          !(
+            event.event === "BudgetReconciled" &&
+            typeof event.usageId === "string" &&
+            (event.usageId.startsWith("rebase-review-") ||
+              event.usageId.startsWith("integration-validation-"))
+          ),
+      );
+    const validation = events.find(
+      (event) => event.event === "ValidationRecorded" && event.workItem === 3,
+    )!;
+    const published = events.find(
+      (event) => event.event === "AttemptPublished" && event.workItem === 3,
+    )!;
+    const publication = events.find(
+      (event) =>
+        event.event === "PublicationRecorded" &&
+        event.workItem === 3 &&
+        event.headSha === head("d"),
+    )!;
+    published.sequence = 25;
+    publication.sequence = 26;
+    const identity = {
+      kind: "rebase",
+      runId: "run",
+      objective: 1,
+      workItem: 3,
+      attempt: 1,
+      artifactDigest: published.artifactDigest,
+      baseSha: validation.baseSha,
+      outputTreeSha: validation.outputTreeSha,
+      evidenceDigest: validation.evidenceDigest,
+      headSha: publication.headSha,
+    };
+    const identityDigest = hash(canonical(identity));
+    events.push(
+      {
+        event: "BudgetReconciled",
+        runId: "run",
+        objective: 1,
+        workItem: 3,
+        attempt: 1,
+        phase: "management",
+        unit: "model_tokens",
+        usageId: `rebase-review-${identityDigest}`,
+        amount: 2,
+        sequence: 24,
+      },
+      {
+        event: "FactoryRunCancellationRequested",
+        runId: "run",
+        objective: 1,
+        requestId: "cancel-once",
+        sequence: 30,
+      },
+    );
+    const pull = {
+      number: 2,
+      node_id: "pull-2",
+      merged: true,
+      state: "closed",
+      merged_at: "2026-09-18T00:00:00Z",
+      head: { sha: head("a") },
+      base: { repo: { full_name: "example/fixture", node_id: "repo-node" } },
+    };
+    const evidence = {
+      repository: "example/fixture",
+      pulls: [pull],
+      mergeProofs: [
+        {
+          runId: "run",
+          objective: 1,
+          workItem: 2,
+          attempt: 1,
+          pullRequestNodeId: "pull-2",
+          pullRequest: 2,
+          repository: "example/fixture",
+          repositoryNodeId: "repo-node",
+          headSha: head("a"),
+          mergeSha: head("a"),
+        },
+      ],
+      nativeLinearIntervention: {
+        case: "active-cancellation",
+        requestId: "cancel-once",
+        progress: {
+          workItem: 3,
+          attempt: 1,
+          invalidationSequence: 21,
+          invalidatedHeadSha: head("b"),
+          invalidatedByItem: "root",
+          invalidatedByHeadSha: head("1"),
+          durableHeadSha: head("d"),
+          validationSequence: 23,
+          validationDigest: digest("d"),
+          outputTreeSha: head("4"),
+          reviewIdentityDigest: identityDigest,
+          reviewUsageId: `rebase-review-${identityDigest}`,
+          reviewUsageSequence: 24,
+          attemptPublicationSequence: 25,
+          artifactDigest: digest("9"),
+          publicationSequence: 26,
+          operationId: "linear-stack-operation",
+          integratedWorkItem: 2,
+          integrationHeadSha: head("a"),
+          integrationCompletedSequence: 19,
+          attemptIntegratedSequence: 20,
+        },
+      },
+      nativeLinearUnrelatedSentinel: {
+        started: {
+          status: "active",
+          unit: "clockgrove-qualification-sentinel-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.service",
+          invocationId: "1".repeat(32),
+          controlGroupDigest: digest("a"),
+        },
+        survived: {
+          status: "active",
+          unit: "clockgrove-qualification-sentinel-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.service",
+          invocationId: "1".repeat(32),
+          controlGroupDigest: digest("a"),
+        },
+        stopped: { status: "absent" },
+      },
+    };
+    expect(() => assertNativeCancellationBoundary(evidence, events)).not.toThrow();
+
+    const completedDescendant = structuredClone(events);
+    completedDescendant.push({
+      event: "AttemptIntegrated",
+      runId: "run",
+      objective: 1,
+      workItem: 3,
+      attempt: 1,
+      headSha: head("d"),
+      sequence: 29,
+    });
+    expect(() => assertNativeCancellationBoundary(evidence, completedDescendant)).toThrow(
+      /exactly the integrated root/,
+    );
+
+    const transplanted = structuredClone(evidence);
+    transplanted.nativeLinearIntervention.progress.validationSequence = 999;
+    expect(() => assertNativeCancellationBoundary(transplanted, events)).toThrow(
+      /revalidation trigger/,
+    );
+
+    const missingMerge = structuredClone(evidence);
+    missingMerge.mergeProofs = [];
+    expect(() => assertNativeCancellationBoundary(missingMerge, events)).toThrow(/merge-proof/);
+
+    const advanced = structuredClone(events);
+    advanced.push({ event: "IntegrationCompleted", sequence: 31 });
+    expect(() => assertNativeCancellationBoundary(evidence, advanced)).toThrow(
+      /advanced after durable cancellation/,
+    );
+
+    const replacedSentinel = structuredClone(evidence);
+    replacedSentinel.nativeLinearUnrelatedSentinel.survived.invocationId = "2".repeat(32);
+    expect(() => assertNativeCancellationBoundary(replacedSentinel, events)).toThrow(/sentinel/);
   });
 
   it("adopts one durable revalidated operation after a deliberately lost restart response", async () => {

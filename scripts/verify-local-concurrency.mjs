@@ -96,10 +96,46 @@ function reservationWindows(events) {
   });
 }
 
+function concurrencyRunIdentity(observation, authority, { activated = true } = {}) {
+  const events = eventsOf(observation),
+    start = one(
+      events.filter((event) => event.event === "FactoryRunStarted"),
+      "one exact run required",
+    ),
+    activations = events.filter((event) => event.event === "ActivationRequested");
+  let activation;
+  if (activated) activation = one(activations, "one exact activation required");
+  else assert.equal(activations.length, 0, "foreground collision gained activation authority");
+  if (activation) {
+    assert.equal(activation.requestId, `${authority.namespace}-activate`);
+    assert.equal(start.activationRequestId, activation.requestId);
+  } else assert.equal(start.activationRequestId, undefined);
+  for (const event of activation ? [activation, start] : [start]) {
+    assert.equal(event.repository, authority.repository);
+    assert.deepEqual(event.policy, authority.policy);
+    assert.equal(event.policyDigest, start.policyDigest);
+    assert.equal(event.objective, observation.status.objective.number);
+  }
+  if (activation) assert.equal(activation.requestedBy.toLowerCase(), start.actor.toLowerCase());
+  assert.equal(observation.status.run.availability, "observed");
+  assert.equal(observation.status.run.runId, start.runId);
+  assert.equal(observation.status.summary.runId, start.runId);
+  assert.equal(observation.status.run.policyDigest, start.policyDigest);
+  assert.ok(
+    events.every((event) => event === activation || event.runId === start.runId),
+    "foreign run history",
+  );
+  return { events, start, run: events.filter((event) => event.runId === start.runId) };
+}
+
 function sourceRefreshWindow(window) {
   const deferred = window.events.filter((event) => event.event === "AttemptDeferred");
   if (deferred.length === 0) return false;
   const terminal = one(deferred, "source refresh was deferred more than once");
+  assert.ok(
+    sameAttempt(window.reservation, terminal),
+    "source refresh deferral differs from its reservation",
+  );
   assert.ok(sourceRefreshReasons.has(terminal.reason), "deferred attempt is not a source refresh");
   assert.equal(
     terminal.reportedModelTokens,
@@ -133,6 +169,7 @@ function sourceRefreshWindow(window) {
     (event) =>
       event.kind === "budget" &&
       event.event === "BudgetReserved" &&
+      sameAttempt(event, window.reservation) &&
       event.phase === "execution" &&
       event.unit !== "model_tokens",
   );
@@ -147,6 +184,7 @@ function sourceRefreshWindow(window) {
       (event) =>
         event.kind === "budget" &&
         event.event === "BudgetReconciled" &&
+        sameAttempt(event, window.reservation) &&
         event.phase === native.phase &&
         event.unit === native.unit &&
         event.sequence > native.sequence,
@@ -595,7 +633,9 @@ export function qualifyConcurrencyAttempts(run, backendOrder) {
       ({ reservation, events }) =>
         reservation.workItem === window.reservation.workItem &&
         reservation.sequence > window.reservation.sequence &&
-        events.some((event) => event.event === "AttemptIntegrated"),
+        events.some(
+          (event) => event.event === "AttemptIntegrated" && sameAttempt(event, reservation),
+        ),
     );
     assert.equal(later.length, 1, "source refresh lacks exactly one later integrated execution");
   }
@@ -633,7 +673,6 @@ export function assessConcurrencyObservedStop(pair, authority) {
   if (adverse.length === 0) return null;
   assert.equal(adverse.length, 1, "multiple adverse Objective outcomes are ambiguous");
   const stopped = adverse[0];
-  assert.equal(stopped.status.run.availability, "observed");
   assert.equal(stopped.status.run.state, "escalated", "terminal outcome is not observed-stop");
   assert.ok(
     pair.every(
@@ -642,17 +681,23 @@ export function assessConcurrencyObservedStop(pair, authority) {
     "peer Objective is not terminal",
   );
 
-  const rows = pair.map((observation) => {
-    const events = eventsOf(observation),
-      start = one(
-        events.filter((event) => event.event === "FactoryRunStarted"),
-        "one exact run required",
+  const rows = pair.map((observation, index) => {
+    const selectedAuthority = policyFor(authority, index),
+      { start, run } = concurrencyRunIdentity(observation, selectedAuthority),
+      terminal = one(
+        run.filter((event) =>
+          ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
+            event.event,
+          ),
+        ),
+        "one exact terminal run receipt required",
       ),
-      run = events.filter((event) => event.runId === start.runId),
-      accounting = qualificationModelAccounting(run, { requireMarkers: true }),
-      configured = start.policy?.economics?.maxModelTokens;
-    assert.equal(start.policy?.economics?.modelTokenBudgetMode, "observed-stop");
-    assert.equal(configured, authority.policy.economics.maxModelTokens);
+      expectedTerminal = observation === stopped ? "FactoryRunEscalated" : "FactoryRunCompleted";
+    assert.equal(terminal.event, expectedTerminal, "terminal receipt differs from observed status");
+    if (observation !== stopped) assertConcurrencySettlement(observation, selectedAuthority);
+
+    const accounting = qualificationModelAccounting(run, { requireMarkers: true }),
+      configured = start.policy.economics.maxModelTokens;
     assert.equal(accounting.unresolved.length, 0, "unknown model invocation remains");
     const economics = observation.status.summary.economics;
     assert.equal(economics.modelTokenBudgetIntent?.mode, "observed-stop");
@@ -663,13 +708,40 @@ export function assessConcurrencyObservedStop(pair, authority) {
     assert.equal(economics.usage.model_tokens.value, accounting.total);
     assert.equal(economics.budgets.modelTokens?.value?.configured, configured);
     assert.equal(economics.budgets.modelTokens.value.committed, accounting.total);
+    const components = {
+      reconciledCalls: accounting.usage.length,
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+    };
+    for (const usage of accounting.usage)
+      for (const field of ["inputTokens", "outputTokens", "cachedInputTokens"]) {
+        assert.ok(
+          Number.isSafeInteger(usage.reportedModelUsage?.[field]) &&
+            usage.reportedModelUsage[field] >= 0,
+          `observed-stop ${field} evidence missing`,
+        );
+        components[field] += usage.reportedModelUsage[field];
+        assert.ok(Number.isSafeInteger(components[field]), `${field} total overflow`);
+      }
+    const breakdown = economics.modelTokenBreakdown;
+    assert.equal(breakdown?.source, "model-token-reconciliations");
+    assert.equal(breakdown.reconciledCalls, components.reconciledCalls);
+    for (const field of ["inputTokens", "outputTokens", "cachedInputTokens"]) {
+      assert.equal(breakdown[field]?.receiptsWithValue, components.reconciledCalls);
+      assert.equal(breakdown[field]?.receiptsWithoutValue, 0);
+      assert.equal(breakdown[field]?.tokens?.availability, "observed");
+      assert.equal(breakdown[field]?.tokens?.value, components[field]);
+    }
     return {
       observation,
       events: run,
       objective: observation.status.objective.number,
+      state: observation.status.run.state,
       configured,
       reconciled: accounting.total,
       overshoot: Math.max(0, accounting.total - configured),
+      ...components,
     };
   });
   const stoppedRow = one(
@@ -693,10 +765,7 @@ export function assessConcurrencyObservedStop(pair, authority) {
     collected.sequence < failure.sequence,
     "semantic review failed before execution completed",
   );
-  const terminal = one(
-    stoppedRow.events.filter((event) => event.event === "FactoryRunEscalated"),
-    "terminal escalation missing or repeated",
-  );
+  const terminal = one(stoppedRow.events.filter((event) => event.event === "FactoryRunEscalated"));
   assert.equal(terminal.reason, `Work Item #${failure.workItem}: attempt budget exhausted (1)`);
   assert.ok(failure.sequence < terminal.sequence);
   assert.equal(stopped.status.summary.attempts.active, 0);
@@ -705,6 +774,13 @@ export function assessConcurrencyObservedStop(pair, authority) {
   assert.ok(Number.isSafeInteger(aggregateReconciled));
   const aggregateConfigured = rows.reduce((total, row) => total + row.configured, 0);
   assert.equal(aggregateConfigured, authority.aggregateObservedThreshold);
+  const aggregateComponents = Object.fromEntries(
+    ["reconciledCalls", "inputTokens", "outputTokens", "cachedInputTokens"].map((field) => {
+      const total = rows.reduce((sum, row) => sum + row[field], 0);
+      assert.ok(Number.isSafeInteger(total), `${field} aggregate overflow`);
+      return [field, total];
+    }),
+  );
   return {
     kind: "observed-stop",
     state: "terminal-incomplete",
@@ -714,10 +790,29 @@ export function assessConcurrencyObservedStop(pair, authority) {
       reconciled: stoppedRow.reconciled,
       overshoot: stoppedRow.overshoot,
     },
+    objectives: rows.map(
+      ({
+        objective,
+        state,
+        configured,
+        reconciled,
+        overshoot,
+        reconciledCalls,
+        inputTokens,
+        outputTokens,
+        cachedInputTokens,
+      }) => ({
+        objective,
+        state,
+        budget: { configured, reconciled, overshoot },
+        tokens: { reconciledCalls, inputTokens, outputTokens, cachedInputTokens },
+      }),
+    ),
     aggregate: {
       configured: aggregateConfigured,
       reconciled: aggregateReconciled,
       overshoot: Math.max(0, aggregateReconciled - aggregateConfigured),
+      ...aggregateComponents,
     },
     automaticActions: { retry: false, restart: false },
   };
@@ -728,34 +823,7 @@ export function assertConcurrencySettlement(
   authority,
   { paused = false, activated = true } = {},
 ) {
-  const events = eventsOf(observation),
-    start = one(
-      events.filter((event) => event.event === "FactoryRunStarted"),
-      "one exact run required",
-    );
-  const activations = events.filter((event) => event.event === "ActivationRequested");
-  let activation;
-  if (activated) activation = one(activations, "one exact activation required");
-  else assert.equal(activations.length, 0, "foreground collision gained activation authority");
-  if (activation) {
-    assert.equal(activation.requestId, `${authority.namespace}-activate`);
-    assert.equal(start.activationRequestId, activation.requestId);
-  } else assert.equal(start.activationRequestId, undefined);
-  for (const event of activation ? [activation, start] : [start]) {
-    assert.equal(event.repository, authority.repository);
-    assert.deepEqual(event.policy, authority.policy);
-    assert.equal(event.policyDigest, start.policyDigest);
-    assert.equal(event.objective, observation.status.objective.number);
-  }
-  if (activation) assert.equal(activation.requestedBy.toLowerCase(), start.actor.toLowerCase());
-  assert.equal(observation.status.run.runId, start.runId);
-  assert.equal(observation.status.summary.runId, start.runId);
-  assert.equal(observation.status.run.policyDigest, start.policyDigest);
-  assert.ok(
-    events.every((event) => event === activation || event.runId === start.runId),
-    "foreign run history",
-  );
-  const run = events.filter((event) => event.runId === start.runId);
+  const { start, run } = concurrencyRunIdentity(observation, authority, { activated });
   assertScopeCoverage(run);
   assert.ok(
     !run.some((event) =>
@@ -1057,6 +1125,7 @@ export async function runConcurrencyScenario(port, authority) {
     );
   } catch (error) {
     if (!(error instanceof ConcurrencyObservedStopError)) throw error;
+    process.exitCode = 2;
     return {
       result: "incomplete",
       scope: "installed-two-objective-useful-throughput-refill",

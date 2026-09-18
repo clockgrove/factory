@@ -3,7 +3,7 @@ import type {
   CheckpointExtension,
 } from "./verify-local-checkpoint-restart.mjs";
 export interface ConcurrencyAuthority extends CheckpointAuthority {
-  scenario: "throughput" | "lease-fault";
+  scenario: "throughput" | "lease-fault" | "director-contention";
   namespaces: string[];
   aggregateObservedThreshold: number;
   controllerLocalCeiling: number;
@@ -13,6 +13,12 @@ export function concurrencyAuthority(
   env: Record<string, string | undefined>,
 ): ConcurrencyAuthority | null;
 export function concurrencyObjectiveBody(namespace: string, index: number): string;
+export function directorContentionObjectiveBody(
+  namespace: string,
+  index: number,
+  sharedPath: string,
+  sharedResource: string,
+): string;
 export function concurrencyRefill(pair: unknown[]): Record<string, unknown> | null;
 export function concurrencyReceiptProgress(phase: string, pair: unknown[]): boolean;
 export function concurrencyModelConfiguration(
@@ -26,7 +32,7 @@ export function concurrencyMeasurements(
 export function assertConcurrencySettlement(
   observation: unknown,
   authority: CheckpointAuthority,
-  options?: { paused?: boolean },
+  options?: { paused?: boolean; activated?: boolean },
 ): { runId: string; modelTokens: number; reservations: number };
 export function observeSettledConcurrencyMergeProofs(input: {
   entry: unknown;
@@ -48,11 +54,18 @@ export interface ConcurrencyPort {
   contend(pair: unknown[]): Promise<unknown>;
   pollPair(phase: string, accept: (pair: unknown[]) => boolean): Promise<unknown[]>;
   scoped(action: string): Promise<unknown>;
-  settled(observation: unknown, paused: boolean, index?: number): boolean;
+  settled(observation: unknown, paused: boolean, index?: number, activated?: boolean): boolean;
+  pollPeer(phase: string): Promise<unknown>;
+  innerCasCollision(controller: unknown): Promise<unknown>;
   captureCheckpoint(pair: unknown[], original: unknown): Promise<unknown>;
   innerContend(original: unknown): Promise<unknown>;
   takeover(checkpoint: unknown): Promise<unknown>;
   finishThroughput(pair: unknown[], controller: unknown, refill: unknown): Promise<unknown>;
+  finishDirectorContention(
+    pair: unknown[],
+    controller: unknown,
+    collision: unknown,
+  ): Promise<unknown>;
   finish(
     pair: unknown[],
     original: unknown,
@@ -65,6 +78,10 @@ export function runConcurrencyScenario(
   authority: ConcurrencyAuthority,
 ): Promise<Record<string, unknown>>;
 export function runConcurrencyLeaseFaultScenario(
+  port: ConcurrencyPort,
+  authority: ConcurrencyAuthority,
+): Promise<Record<string, unknown>>;
+export function runDirectorContentionScenario(
   port: ConcurrencyPort,
   authority: ConcurrencyAuthority,
 ): Promise<Record<string, unknown>>;

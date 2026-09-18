@@ -75,7 +75,7 @@ export function failureAuthority(env) {
     FACTORY_CHECKPOINT_EVIDENCE: env.FACTORY_FAILURE_EVIDENCE,
     // Exact scenario authority is checked above; the shared parser supplies path,
     // host/authentication, installed-unit and policy checks, not extra permission.
-    FACTORY_CHECKPOINT_ACK: `${repository}:${unit}:start,arm-terminal-artifact-hold,pause,restart,resume,stop`,
+    FACTORY_CHECKPOINT_ACK: `${repository}:${unit}:start,arm-terminal-artifact-hold,pause,phase-kill-restart,resume,stop`,
   });
   authority.policy.maxAttemptsPerItem = 1;
   authority.policy.maxParallel = 1;

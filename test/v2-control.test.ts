@@ -318,6 +318,38 @@ describe("Director lease", () => {
     expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
   });
 
+  it("allows exactly one create-ref winner when two Directors observe an absent lease", async () => {
+    const store = new MemoryStore();
+    const manager = new LeaseManager({ store, durationMs: 60_000 });
+    const base = await store.readCommit(BASE_SHA);
+    const results = await Promise.allSettled([
+      manager.acquire({ ...identity, runId: "run-a", holder: "host-a" }, base),
+      manager.acquire({ ...identity, runId: "run-b", holder: "host-b" }, base),
+    ]);
+    const winner = results.find((result) => result.status === "fulfilled");
+    const loser = results.find((result) => result.status === "rejected");
+    expect(winner).toMatchObject({ status: "fulfilled" });
+    expect(loser).toMatchObject({
+      status: "rejected",
+      reason: expect.objectContaining({
+        name: "LeaseLostError",
+        message: "another Director won lease acquisition",
+      }),
+    });
+    const lease = winner?.status === "fulfilled" ? winner.value : undefined;
+    expect(store.refs).toEqual(
+      new Map([["refs/clockgrove-factory/leases/objective-42", lease?.oid]]),
+    );
+    const commit = lease ? await store.readCommit(lease.oid) : undefined;
+    expect(commit?.parentOids).toEqual([BASE_SHA]);
+    const event = decodeEventTrailer(commit?.message ?? "");
+    expect(event).toMatchObject({
+      event: "LeaseAcquired",
+      objective: 42,
+    });
+    expect(event).not.toHaveProperty("previousOid");
+  });
+
   it("records a fenced release that permits immediate takeover", async () => {
     const store = new MemoryStore();
     const manager = new LeaseManager({ store, durationMs: 60_000 });

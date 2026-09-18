@@ -5,10 +5,12 @@ qualification. It exercises the installed MCP commands and an **already installe
 repository controller. It does not install a controller, change its configuration, or launch a
 cloud provider. Importing the script or running without its opt-in performs no qualification.
 
-This is an orderly restart at a fully accounted checkpoint, not an abrupt worker interruption
-test. A passing record does not close interrupted-turn usage, other host, cloud, managed-agent,
-or complete release qualification gates. The implementation and deterministic tests alone are
-not evidence that this installed flow has passed live.
+The default SDK/CLI path is an orderly restart at a fully accounted checkpoint. The App Server
+path instead kills the exact controller main process at the retained-terminal-artifact boundary and
+requires systemd's configured on-failure restart to recover that same attempt. Neither path claims
+an interrupted provider turn. A passing record does not close other-host, cloud, managed-agent, or
+complete release qualification gates. Implementation and deterministic tests alone are not live
+qualification evidence.
 
 ## Authority and preflight
 
@@ -118,7 +120,7 @@ seam; it does not substitute a source-worktree MCP server.
 The exercise acknowledgement is deliberately different:
 
 ```text
-FACTORY_CHECKPOINT_ACK=<repository>:<exact-unit>:start,arm-terminal-artifact-hold,pause,restart,resume,stop
+FACTORY_CHECKPOINT_ACK=<repository>:<exact-unit>:start,arm-terminal-artifact-hold,pause,phase-kill-restart,resume,stop
 ```
 
 Before activation, the runner exclusively writes a bounded owner-only qualification arm keyed
@@ -142,15 +144,20 @@ artifact permits normal exact-owned workspace cleanup; provider session history 
 The runner independently reloads reservation ancestry, prepared/turn/terminal stage refs and
 intent/ready artifact refs, validating exact tree-path/blob identity and complete raw response
 usage. It checks the reached witness against those GitHub facts, proves the reserved worker scope
-absent, and restarts only the exact captured controller once. The earlier Pause request prevents
-new workers while the replacement consumes the original artifact and performs its first actual
+absent, records the mutation request, and sends exactly one `systemctl --user kill
+--kill-whom=main --signal=KILL` to the captured unit. The service must recover through
+`Restart=on-failure` with a new PID and InvocationID, the same host and config digests, and proved
+absence of the original process incarnation. The earlier Pause request prevents new workers while
+the replacement consumes the original artifact and performs its first actual
 validation/review/integration. Validator scopes belong to the replacement generation; the original
 worker scope does not. All are independently checked, including unused optional setup slots.
 
 At the fully accounted pause, the same run/attempt/thread/turn/terminal usage and artifact OIDs
 must be unchanged. Resume then completes the original three-item fixture. The final proof requires
 three unique App Server executions, three publications/integrations, complete known accounting,
-unchanged installed/source identity, all exact scopes absent and the exact controller stopped.
+unchanged installed/source identity, no duplicate admission/provider/publication/validation/
+integration boundary for the pre-kill attempt, all exact scopes absent, and the exact controller
+stopped.
 Written negative contracts reject changed binding, missing raw usage, early validation, repeated
 dispatch, live/unknown resources and an Objective deadline reached before the seam; they are not
 separate live negative outcomes. The v2 reached witness records the authenticated run start,

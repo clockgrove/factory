@@ -1,6 +1,6 @@
 {
   "name": "factory",
-  "version": "2.0.26",
+  "version": "2.0.27-beta.0",
   "description": "Coordinate local coding agents to turn GitHub issues into tested pull requests, with dependency-aware scheduling, validation, and restart recovery.",
   "author": {
     "name": "Clockgrove",

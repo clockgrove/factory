@@ -53,6 +53,31 @@ describe("distributed operator documentation", () => {
     expect(() => assertPackageDocumentation(paths, documents)).not.toThrow();
   });
 
+  it("fails closed before installing a prepublication candidate", () => {
+    const guide = readFileSync(new URL("docs/setup/local.md", root), "utf8");
+    const cleanTree = 'test -z "$(git status --porcelain --untracked-files=all)"';
+    const tarballDigest = 'test "$observed_tarball_sha256" = "$tarball_sha256"';
+    const install = 'npm install --global "$candidate_root/release/$tarball_file"';
+    const archive = 'git archive --format=tar "$source_commit" | tar -xf - -C "$plugin_snapshot"';
+    const marketplace = 'codex plugin marketplace add "$plugin_snapshot"';
+
+    expect(guide).toContain("set -euo pipefail");
+    expect(guide).toContain("m.tarball.sha256");
+    expect(guide).toContain(
+      'observed_tarball_sha256="$(sha256sum -- "$candidate_root/release/$tarball_file")"',
+    );
+    expect(guide).toContain(cleanTree);
+    expect(guide).not.toContain("git status --porcelain --untracked-files=no");
+    expect(guide).toContain(tarballDigest);
+    expect(guide.indexOf(cleanTree)).toBeLessThan(guide.indexOf(install));
+    expect(guide.indexOf(tarballDigest)).toBeLessThan(guide.indexOf(install));
+    expect(guide).toContain('plugin_snapshot="$(mktemp -d)"');
+    expect(guide).toContain(archive);
+    expect(guide).toContain(marketplace);
+    expect(guide).not.toContain('codex plugin marketplace add "$candidate_root"');
+    expect(guide.indexOf(archive)).toBeLessThan(guide.indexOf(marketplace));
+  });
+
   it.each([
     "docs/release-evidence/private-observation.json",
     "docs/IMPLEMENTATION-HANDOFF.md",

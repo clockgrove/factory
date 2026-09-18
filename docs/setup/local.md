@@ -8,28 +8,34 @@
    and Codex CLI 0.153.0 (the client version verified for this procedure). A later Codex version must
    still expose the `plugin marketplace add`, `plugin add`, and `plugin list` commands shown below.
    Factory's source checks use npm 11.19.0, but npm is not needed to run the plugin.
-2. For a portable skill-only introduction in any target repository, run
+2. For a mutable development-only, skill-only introduction in any target repository, run
    `npx skills add clockgrove/factory`. It discovers Factory's three public skills and asks which
-   agents and scope to use. This standard third-party install does not register the repository or
-   provide the MCP execution tools. For Codex execution, install the full plugin instead of keeping
-   a duplicate Skills CLI copy, then fully restart Codex:
+   agents and scope to use. The unpinned repository command is outside the exact Initial Beta
+   artifact and cannot satisfy release qualification. It does not register the repository or
+   provide the MCP execution tools.
+3. Before publication, only maintainers qualifying the release candidate should install it, using
+   the exact local artifacts and source identity in
+   [the prepublication procedure](#prepublication-candidate-qualification-maintainers). Ordinary
+   users should wait until the
+   [`v2.0.27-beta.0` GitHub Release](https://github.com/clockgrove/factory/releases/tag/v2.0.27-beta.0)
+   exists. After publication, install the full plugin and fully restart Codex:
 
    ```bash
-   codex plugin marketplace add clockgrove/factory --ref main
+   codex plugin marketplace add clockgrove/factory --ref v2.0.27-beta.0
    codex plugin add factory@clockgrove-factory
    codex plugin list
    ```
 
-   The marketplace is currently sourced from reviewed repository snapshots rather than a published
-   release tag, so record the installed commit/version and check
+   These postpublication commands install the immutable Initial Beta plugin tag. Record the
+   installed version and check
    [verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md)
    before authorizing work. The plugin includes Factory's runtime; npm/npx is not required.
-3. In that same Linux user/process environment, run `codex login` and `gh auth login`. The GitHub
+4. In that same Linux user/process environment, run `codex login` and `gh auth login`. The GitHub
    identity needs access to the target repository's issues, pull requests, contents, and custom Git
    refs, including writes before execution can be authorized.
-4. Open your checkout and ask the agent: “Use Factory to inspect this repository for existing
+5. Open your checkout and ask the agent: “Use Factory to inspect this repository for existing
    Objectives and prerequisites. Do not start work.”
-5. Review the reported gates, then ask in ordinary language to build or continue the repository.
+6. Review the reported gates, then ask in ordinary language to build or continue the repository.
    Factory reuses one unambiguous existing Objective and maps that request to its internal activation
    and compilation operations. Start local-only; no sandbox account, cloud key, Factory workflow, or
    paid-cloud policy is needed.
@@ -69,19 +75,61 @@ accepted graph.
 Factory has two distribution artifacts built from the same source: the Agent Plugins package from
 `clockgrove/factory` for chat/MCP use, and `@clockgrove/factory` on npm for the `factory` CLI and
 repository controller. Installing either artifact runs no lifecycle scripts, changes no repository,
-and starts no daemon. Until the npm artifact has passed the published-artifact gate in
-[verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md),
-use the plugin installation supported by your client or
-the source-checkout command below rather than assuming the npm package is available.
+and starts no daemon.
 
-Once the npm package is published, the controller installation path will be:
+### Prepublication candidate qualification (maintainers)
+
+The release procedure generates `release/release-manifest.json` and one exact local npm tarball.
+Use the manifest's `provenance.sourceCommit` to pin the clean plugin snapshot and its `tarball.file`
+to select the npm artifact; do not infer either identity from a branch or filename. From the clean
+candidate checkout, read and verify those fields before installing:
 
 ```bash
-npm install --global @clockgrove/factory
+set -euo pipefail
+candidate_root=/absolute/path/to/factory-candidate
+release_manifest="$candidate_root/release/release-manifest.json"
+source_commit="$(node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(m.provenance.sourceCommit)' "$release_manifest")"
+tarball_file="$(node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(m.tarball.file)' "$release_manifest")"
+tarball_sha256="$(node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(m.tarball.sha256)' "$release_manifest")"
+cd "$candidate_root"
+test "$(git rev-parse HEAD)" = "$source_commit"
+test -z "$(git status --porcelain --untracked-files=all)"
+observed_tarball_sha256="$(sha256sum -- "$candidate_root/release/$tarball_file")"
+observed_tarball_sha256="${observed_tarball_sha256%% *}"
+test "$observed_tarball_sha256" = "$tarball_sha256"
+npm install --global "$candidate_root/release/$tarball_file"
+plugin_snapshot="$(mktemp -d)"
+git archive --format=tar "$source_commit" | tar -xf - -C "$plugin_snapshot"
+codex plugin marketplace add "$plugin_snapshot"
+codex plugin add factory@clockgrove-factory
+codex plugin list --json
+```
+
+This path is for the authorized qualification sequence in
+[release verification](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md#release-verification-procedure).
+The release manifest,
+tarball, and plugin source snapshot are local candidate inputs; they are not evidence of a published
+package or GitHub Release. Run qualification in the required fresh installation environments, keep
+its evidence private under ignored `release/evidence/`, and do not substitute a mutable worktree MCP
+override for the installed plugin cache path. The clean-tree check includes every visible untracked
+path; the ignored `release/` directory remains excluded. The npm install occurs only after the exact
+tarball bytes match `tarball.sha256` from the release manifest. The local plugin marketplace comes
+from a fresh tracked-file archive of `provenance.sourceCommit`, so ignored `release/`, `node_modules/`,
+and other working-checkout content cannot enter its snapshot. Retain that temporary marketplace for
+the duration of qualification, then remove it with the rest of the qualification environment.
+
+### Postpublication installation
+
+Only after the `v2.0.27-beta.0` GitHub Release and npm package exist, install the Initial Beta
+CLI/controller from its exact prerelease version rather than a moving npm distribution tag:
+
+```bash
+npm install --global @clockgrove/factory@2.0.27-beta.0
 factory --help
 ```
 
-The commands above select Codex as the supported first-run client and exercise its packaged
+The postpublication plugin commands in the TL;DR and npm commands above select Codex as the supported
+first-run client and exercise its packaged
 marketplace, manifest, skills, and MCP launcher. `codex plugin list` should show `factory` installed
 from `clockgrove-factory`. Fully restart Codex so its skills and bundled MCP server are reloaded.
 Opening another chat is not a process restart. Provider SDK code required by shipped adapters is

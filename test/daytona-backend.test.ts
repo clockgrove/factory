@@ -28,6 +28,7 @@ import { MAX_LOG_BYTES } from "../src/protocol/limits.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
 import type { RepositoryChangeWorkerPacket } from "../src/protocol/worker-packet.js";
 import { managedRuntimeRequirements } from "../src/toolchains/authority.js";
+import { pnpmRuntimeVersions } from "../src/toolchains/pnpm.js";
 import { activeRuntimeBundleSync } from "../src/runtime/toolchain-store.js";
 
 const temporaryPaths = new Set<string>();
@@ -1398,6 +1399,7 @@ describe("Daytona supported provider contract", () => {
     source.context.packet.requirements.tools = ["git", "node", "pnpm", "npx"];
     source.context.packet.requirements.networkDestinations = ["registry.npmjs.org"];
     const runtime = activeRuntimeBundleSync("pnpm");
+    const expectedRuntime = pnpmRuntimeVersions(runtime);
     source.context.packet.managedRuntimes = managedRuntimeRequirements(
       source.context.packet.validationCommands,
     ).map((requirement) => ({ ...requirement, bundleDigest: runtime.digest }));
@@ -1480,14 +1482,14 @@ describe("Daytona supported provider contract", () => {
           [...paths.executables.pnpm!.argsPrefix, "--version"],
           { cwd: materialization, encoding: "utf8", env: { ...process.env, PATH: hostile } },
         ).trim(),
-      ).toBe("10.34.5");
+      ).toBe(expectedRuntime.pnpm);
       expect(
         execFileSync(
           paths.executables.node!.path,
           [...paths.executables.node!.argsPrefix, "--version"],
           { cwd: materialization, encoding: "utf8", env: { ...process.env, PATH: hostile } },
         ).trim(),
-      ).toBe(process.version);
+      ).toBe(`v${expectedRuntime.node}`);
     } finally {
       await rm("/tmp/factory-toolchain", { recursive: true, force: true });
     }

@@ -348,7 +348,12 @@ describe("Supervisor activation withdrawal races", () => {
       .mockImplementation(async (identity) => ({
         exitCode: 0,
         signal: null,
-        stdout: identity.commandIndex === 0 ? "10.34.5\n" : "",
+        stdout:
+          identity.commandIndex === 0
+            ? "v24.15.0\n"
+            : identity.commandIndex === 1
+              ? "10.34.5\n"
+              : "",
         stderr: "",
         durationMs: 1,
         timedOut: false,
@@ -370,7 +375,7 @@ describe("Supervisor activation withdrawal races", () => {
       backend: "codex-sdk/local-worktree",
       workItem: 8,
     });
-    expect(scoped).toHaveBeenCalledTimes(3);
+    expect(scoped).toHaveBeenCalledTimes(4);
     expect(f.mergePull).not.toHaveBeenCalled();
     expect(f.snapshot.workItems[0]?.linkedPullRequests).toContainEqual(
       expect.objectContaining({ number: 108, state: "OPEN", mergedAt: null }),
@@ -385,7 +390,7 @@ describe("Supervisor activation withdrawal races", () => {
       reason: expect.stringContaining("explicit evidence-preserving successor-run recovery"),
     });
     expect(f.compile).toHaveBeenCalledOnce();
-    expect(scoped).toHaveBeenCalledTimes(3);
+    expect(scoped).toHaveBeenCalledTimes(4);
     expect(
       f.events().filter((event) => event.kind === "attempt" && event.event === "AttemptStarted"),
     ).toHaveLength(1);
@@ -520,7 +525,12 @@ describe("Supervisor activation withdrawal races", () => {
       .mockImplementation(async (identity) => ({
         exitCode: 0,
         signal: null,
-        stdout: identity.commandIndex === 0 ? "10.34.5\n" : "",
+        stdout:
+          identity.commandIndex === 0
+            ? "v24.15.0\n"
+            : identity.commandIndex === 1
+              ? "10.34.5\n"
+              : "",
         stderr: "",
         durationMs: 1,
         timedOut: false,
@@ -668,7 +678,7 @@ describe("Supervisor activation withdrawal races", () => {
       throw new Error("greenfield successor did not retain its authenticated graph");
     expect(sourceGraph?.graphDigest).toBe(planRecord.plan.graph.digest);
     expect(sourceGraph?.objective.workItems[1]?.repositoryCapabilities?.requires).toHaveLength(1);
-    expect(scoped).toHaveBeenCalledTimes(6);
+    expect(scoped).toHaveBeenCalledTimes(8);
   }, 60_000);
 
   it("refuses adoption writes when a legacy Work Item changes during compilation", async () => {

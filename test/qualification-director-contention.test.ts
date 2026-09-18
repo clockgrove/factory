@@ -89,18 +89,37 @@ function collision() {
     policyDigest,
     baseSha: "c".repeat(40),
     beforeLease: null,
-    afterLease: {
-      oid: "d".repeat(40),
-      parents: ["c".repeat(40)],
-      event: {
-        kind: "lease",
-        event: "LeaseAcquired",
-        objective: 7,
-        runId: "run-7",
-        policyDigest,
-        holder: "winner-holder",
+    leaseChain: [
+      {
+        oid: "e".repeat(40),
+        parents: ["d".repeat(40)],
+        event: {
+          kind: "lease",
+          event: "LeaseReleased",
+          objective: 7,
+          runId: "run-7",
+          policyDigest,
+          holder: "winner-holder",
+          epoch: 1,
+          sequence: 2,
+          previousOid: "d".repeat(40),
+        },
       },
-    },
+      {
+        oid: "d".repeat(40),
+        parents: ["c".repeat(40)],
+        event: {
+          kind: "lease",
+          event: "LeaseAcquired",
+          objective: 7,
+          runId: "run-7",
+          policyDigest,
+          holder: "winner-holder",
+          epoch: 1,
+          sequence: 1,
+        },
+      },
+    ],
     contenders: [
       {
         clientInvocationId: "client-a",
@@ -341,6 +360,34 @@ describe("inner Director qualification assertions", () => {
     const duplicateAccounting = collision();
     duplicateAccounting.events.push({ ...duplicateAccounting.events[3]!, sequence: 10 });
     expect(() => assertInnerDirectorCollision(duplicateAccounting)).toThrow(/usage repeated/);
+  });
+
+  it("accepts renewal history only beneath a released terminal lease", () => {
+    const renewed = collision();
+    renewed.leaseChain[0]!.event.previousOid = "f".repeat(40);
+    renewed.leaseChain[0]!.parents = ["f".repeat(40)];
+    renewed.leaseChain[0]!.event.sequence = 3;
+    renewed.leaseChain.splice(1, 0, {
+      oid: "f".repeat(40),
+      parents: ["d".repeat(40)],
+      event: {
+        kind: "lease",
+        event: "LeaseRenewed",
+        objective: 7,
+        runId: "run-7",
+        policyDigest,
+        holder: "winner-holder",
+        epoch: 1,
+        sequence: 2,
+        previousOid: "d".repeat(40),
+      },
+    });
+    expect(assertInnerDirectorCollision(renewed)).toMatchObject({
+      leaseTransitions: 3,
+      terminalLeaseOid: "e".repeat(40),
+    });
+    renewed.leaseChain.shift();
+    expect(() => assertInnerDirectorCollision(renewed)).toThrow(/terminal lease is not released/);
   });
 });
 

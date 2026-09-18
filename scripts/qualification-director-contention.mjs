@@ -88,14 +88,38 @@ export function assertInnerDirectorCollision(input) {
   assert.equal(winner.automaticRetry, false);
   assert.equal(loser.automaticRetry, false);
   assert.equal(loser.errorCode, "inner-lease-cas-lost");
-  const lease = input.afterLease;
-  assert.match(lease.oid, /^[a-f0-9]{40}$/);
-  assert.equal(lease.event.kind, "lease");
+  assert.ok(
+    input.leaseChain.length >= 2 && input.leaseChain.length <= 256,
+    "bounded acquired-to-released lease chain required",
+  );
+  assertDistinct(
+    input.leaseChain.map((lease) => lease.oid),
+    "lease chain repeats a commit",
+  );
+  const terminalLease = input.leaseChain[0],
+    lease = input.leaseChain.at(-1);
+  assert.equal(terminalLease.event.event, "LeaseReleased", "terminal lease is not released");
+  for (const [index, current] of input.leaseChain.entries()) {
+    assert.match(current.oid, /^[a-f0-9]{40}$/);
+    assert.equal(current.event.kind, "lease");
+    assert.equal(current.event.objective, input.objective);
+    assert.equal(current.event.runId, input.runId);
+    assert.equal(current.event.policyDigest, input.policyDigest);
+    assert.equal(current.event.holder, winner.observedHolder);
+    assert.equal(current.parents.length, 1, "lease commit must have one parent");
+    const previous = input.leaseChain[index + 1];
+    if (previous) {
+      assert.ok(
+        ["LeaseReleased", "LeaseRenewed"].includes(current.event.event),
+        "noninitial lease event is not a renewal or release",
+      );
+      assert.equal(current.event.previousOid, previous.oid, "lease previousOid differs from chain");
+      assert.deepEqual(current.parents, [previous.oid]);
+      assert.equal(current.event.epoch, previous.event.epoch);
+      assert.equal(current.event.sequence, previous.event.sequence + 1);
+    }
+  }
   assert.equal(lease.event.event, "LeaseAcquired");
-  assert.equal(lease.event.objective, input.objective);
-  assert.equal(lease.event.runId, input.runId);
-  assert.equal(lease.event.policyDigest, input.policyDigest);
-  assert.equal(lease.event.holder, winner.observedHolder);
   assert.equal(loser.observedHolder, "unavailable-before-winning-CAS");
   assert.equal(
     lease.event.previousOid,
@@ -131,6 +155,8 @@ export function assertInnerDirectorCollision(input) {
     objective: input.objective,
     runId: input.runId,
     leaseOid: lease.oid,
+    terminalLeaseOid: terminalLease.oid,
+    leaseTransitions: input.leaseChain.length,
     winner: winner.clientInvocationId,
     loser: loser.clientInvocationId,
     loserOutcome: loser.outcome,

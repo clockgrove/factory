@@ -1315,6 +1315,21 @@ export async function main(env = process.env, run = checkpointMain) {
             parents: commit.parents.map((parent) => parent.sha),
           };
         };
+        const readLeaseChain = async (objective) => {
+          const chain = [];
+          let current = await readLease(objective);
+          for (let count = 0; count < 256; count++) {
+            chain.push(current);
+            if (current.event.previousOid === undefined) return chain;
+            assert.equal(
+              current.parents[0],
+              current.event.previousOid,
+              "inner lease parent differs from previousOid",
+            );
+            current = await readLease(objective, current.event.previousOid);
+          }
+          throw Error("inner lease chain exceeds the bounded observation limit");
+        };
         const settled = (observation, paused, index = paused ? 1 : 0, activated = true) => {
           if (observation.status.run.state !== (paused ? "paused" : "completed")) return false;
           const events = eventsOf(observation),
@@ -1685,7 +1700,7 @@ export async function main(env = process.env, run = checkpointMain) {
                 },
                 "losing Director did not report the exact create-ref CAS loss",
               );
-              const afterLease = await readLease(objective),
+              const leaseChain = await readLeaseChain(objective),
                 final = await observeOne(record),
                 start = one(
                   eventsOf(final).filter((event) => event.event === "FactoryRunStarted"),
@@ -1713,7 +1728,7 @@ export async function main(env = process.env, run = checkpointMain) {
                 policyDigest: start.policyDigest,
                 baseSha: evidence.base,
                 beforeLease: null,
-                afterLease,
+                leaseChain,
                 contenders: contenders.map((entry, index) => ({
                   clientInvocationId: entry.clientInvocationId,
                   pid: entry.pid,
@@ -1721,7 +1736,7 @@ export async function main(env = process.env, run = checkpointMain) {
                   barrierDigest,
                   automaticRetry: false,
                   ...(index === winnerIndex
-                    ? { outcome: "won", observedHolder: afterLease.event.holder }
+                    ? { outcome: "won", observedHolder: leaseChain.at(-1).event.holder }
                     : {
                         outcome: "lease-cas-lost",
                         errorCode: "inner-lease-cas-lost",

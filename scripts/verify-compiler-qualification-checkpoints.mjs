@@ -124,7 +124,7 @@ export function compilerCheckpointPath(binding, uid = process.geteuid()) {
     tmpdir(),
     `factory-compiler-qualification-checkpoints-${uid}`,
     `${hash(
-      `${binding.repository}\0${binding.objective}\0${binding.runId}\0${binding.checkpoint}`,
+      `${binding.repository}\0${binding.objective}\0${binding.activationRequestId}\0${binding.checkpoint}`,
     )}.json`,
   );
 }
@@ -151,7 +151,6 @@ export function compilerCheckpointArm(
     repository: authority.repository,
     objective,
     activationRequestId: `${authority.namespace}-activate`,
-    runId: `${authority.namespace}-activate`,
     policyDigest: hash(canonical(authority.policy)),
     baseSha,
     checkpoint,
@@ -169,7 +168,6 @@ function assertWitnessBinding(witness, arm, controller) {
     "repository",
     "objective",
     "activationRequestId",
-    "runId",
     "policyDigest",
     "baseSha",
     "checkpoint",
@@ -207,6 +205,7 @@ export function assertCompilerSelectionHold(observation, authority, armRecord, c
   assert.equal(start.baseSha, witness.baseSha);
   assert.equal(start.at, witness.startedAt);
   assert.deepEqual(start.policy, authority.policy);
+  assert.equal(observation.status.run.runId, witness.runId);
   assert.equal(witness.proof.checkpoint, "compiler-selection");
   assert.equal(witness.proof.graphAbsent, true);
   assert.match(witness.proof.journalDigest, /^[a-f0-9]{64}$/);
@@ -281,6 +280,7 @@ export function assertGraphProjectionHold(observation, authority, armRecord, con
   assert.equal(start.baseSha, witness.baseSha);
   assert.equal(start.at, witness.startedAt);
   assert.deepEqual(start.policy, authority.policy);
+  assert.equal(observation.status.run.runId, witness.runId);
   const compiled = unique(
     events.filter((event) => event.event === "GraphCompiled"),
     "one exact compiled graph receipt required",
@@ -338,6 +338,7 @@ export async function runCompilerCheckpointScenario(port, authority) {
   );
   const selectionAccounting = stableCompilerAccounting(selection);
   const selectionInvocations = stableCompilerInvocations(selection);
+  const runId = selection.compilerCheckpoints["compiler-selection"].runId;
 
   await port.restart("selection");
   const projectionController = await port.controller("active");
@@ -362,6 +363,11 @@ export async function runCompilerCheckpointScenario(port, authority) {
     "compiler invocation inventory changed after restart",
   );
   const projectedGraph = stableGraphEvidence(projected);
+  assert.equal(
+    projected.compilerCheckpoints["graph-projection"].runId,
+    runId,
+    "graph projection checkpoint belongs to another run",
+  );
   await port.action("pause");
   const pausedAtProjection = await port.poll("graph-projection-pause", (observation) => {
     if (
@@ -386,6 +392,7 @@ export async function runCompilerCheckpointScenario(port, authority) {
   const paused = await port.poll("projected-paused-restart", (observation) => {
     const events = observation.receipts.map(({ event }) => event);
     return (
+      observation.status.run.runId === runId &&
       observation.status.run.state === "paused" &&
       events.filter(
         (event) =>
@@ -406,7 +413,7 @@ export async function runCompilerCheckpointScenario(port, authority) {
   return {
     result: "passed",
     scope: "installed-compiler-qualification-checkpoints",
-    runId: paused.status.run.runId,
+    runId,
     original,
     projectionController,
     pausedController,
@@ -485,7 +492,7 @@ export function compilerCheckpointExtension(authority) {
         const firstPath = compilerCheckpointPath({
           repository: authority.repository,
           objective: evidence.objective.number,
-          runId: `${authority.namespace}-activate`,
+          activationRequestId: `${authority.namespace}-activate`,
           checkpoint: "compiler-selection",
         });
         try {

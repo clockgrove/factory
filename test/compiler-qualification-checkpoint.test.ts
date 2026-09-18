@@ -25,7 +25,7 @@ const binding = {
   repository: "example/compiler-fixture",
   objective: 47,
   activationRequestId: "compiler-checkpoint-activate",
-  runId: "compiler-checkpoint-activate",
+  runId: "2f71de37-e17c-4c69-a337-087d429e4f65",
   policyDigest: "a".repeat(64),
   baseSha: "b".repeat(40),
 } as const;
@@ -71,7 +71,11 @@ function fixture(
     bundleIdentity: controller.bundleIdentity,
     effectiveUid: process.geteuid!(),
     controllerUnit: controller.producerUnit,
-    ...binding,
+    repository: binding.repository,
+    objective: binding.objective,
+    activationRequestId: binding.activationRequestId,
+    policyDigest: binding.policyDigest,
+    baseSha: binding.baseSha,
     checkpoint,
     eligibilityDurationMs: objectiveDeadline.getTime() - objectiveStartedAt.getTime(),
     holdDurationMs,
@@ -227,6 +231,7 @@ describe.sequential("compiler qualification checkpoint", () => {
       );
       const witness = JSON.parse(await readFile(`${f.path}.reached`, "utf8"));
       expect(f.order).toEqual(["controller", "lease", "proof", "lease"]);
+      expect(f.arm).not.toHaveProperty("runId");
       expect(witness).toMatchObject({
         protocol: "clockgrove.factory/compiler-qualification-checkpoint-reached",
         armDigest: hash(JSON.stringify(f.arm)),
@@ -238,6 +243,8 @@ describe.sequential("compiler qualification checkpoint", () => {
         checkpoint,
         proof: f.args.proveBoundary === undefined ? undefined : expect.any(Object),
       });
+      expect(witness.runId).toBe(binding.runId);
+      expect(witness.runId).not.toBe(binding.activationRequestId);
       expect((await stat(f.path)).mode & 0o777).toBe(0o600);
       expect((await stat(`${f.path}.reached`)).mode & 0o777).toBe(0o600);
     },
@@ -297,7 +304,7 @@ describe.sequential("compiler qualification checkpoint", () => {
       "repository",
       "objective",
       "activation",
-      "run",
+      "legacy-run",
       "policy",
       "base",
       "kind",
@@ -310,7 +317,8 @@ describe.sequential("compiler qualification checkpoint", () => {
       if (mutation === "repository") f.arm.repository = "example/other";
       if (mutation === "objective") f.arm.objective += 1;
       if (mutation === "activation") f.arm.activationRequestId = "other-activation";
-      if (mutation === "run") f.arm.runId = "other-run";
+      if (mutation === "legacy-run")
+        (f.arm as unknown as Record<string, unknown>).runId = "obsolete-run-binding";
       if (mutation === "policy") f.arm.policyDigest = "0".repeat(64);
       if (mutation === "base") f.arm.baseSha = "0".repeat(40);
       if (mutation === "kind") f.arm.checkpoint = "graph-projection";

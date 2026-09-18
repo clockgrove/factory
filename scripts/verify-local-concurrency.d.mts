@@ -21,6 +21,18 @@ export function directorContentionObjectiveBody(
 ): string;
 export function concurrencyRefill(pair: unknown[]): Record<string, unknown> | null;
 export function concurrencyReceiptProgress(phase: string, pair: unknown[]): boolean;
+export function qualifyConcurrencyAttempts(
+  events: unknown[],
+  backendOrder: string[],
+): Record<string, unknown>;
+export class ConcurrencyObservedStopError extends Error {
+  outcome: Record<string, unknown>;
+  constructor(outcome: Record<string, unknown>);
+}
+export function assessConcurrencyObservedStop(
+  pair: unknown[],
+  authority: ConcurrencyAuthority,
+): Record<string, unknown> | null;
 export function concurrencyModelConfiguration(
   observation: unknown,
   authority: CheckpointAuthority,
@@ -33,7 +45,12 @@ export function assertConcurrencySettlement(
   observation: unknown,
   authority: CheckpointAuthority,
   options?: { paused?: boolean; activated?: boolean },
-): { runId: string; modelTokens: number; reservations: number };
+): {
+  runId: string;
+  modelTokens: number;
+  reservations: number;
+  deferredSourceRefreshes: number;
+};
 export function observeSettledConcurrencyMergeProofs(input: {
   entry: unknown;
   request: (route: string, parameters: Record<string, unknown>) => Promise<unknown>;

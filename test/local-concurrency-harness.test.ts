@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { parseRunPolicy } from "../src/protocol/policy.js";
 import {
+  ConcurrencyObservedStopError,
+  assessConcurrencyObservedStop,
   concurrencyAuthority,
   concurrencyMeasurements,
   concurrencyModelConfiguration,
@@ -10,6 +12,7 @@ import {
   concurrencyRefill,
   concurrencyReceiptProgress,
   observeSettledConcurrencyMergeProofs,
+  qualifyConcurrencyAttempts,
   assertInnerTakeover,
   assertObjectiveContention,
   assertRetiredController,
@@ -1014,6 +1017,148 @@ function pair(closed = true) {
   ];
 }
 
+function sourceRefreshAttemptEvents(): Array<Record<string, unknown>> {
+  const attempt = (name: string, sequence: number, attemptNumber: number, extra = {}) => ({
+    objective: 1,
+    runId: "run-1",
+    kind: "attempt",
+    event: name,
+    sequence,
+    at: at(sequence),
+    workItem: 10,
+    attempt: attemptNumber,
+    backend: "codex-sdk/local-worktree",
+    baseSha: (attemptNumber === 1 ? "a" : "b").repeat(40),
+    ...extra,
+  });
+  return [
+    attempt("AttemptReserved", 1, 1),
+    {
+      ...attempt("BudgetReserved", 2, 1),
+      kind: "budget",
+      phase: "execution",
+      unit: "local_milliseconds",
+      amount: 600000,
+    },
+    {
+      ...attempt("BudgetReconciled", 3, 1),
+      kind: "budget",
+      phase: "execution",
+      unit: "local_milliseconds",
+      amount: 0,
+    },
+    attempt("AttemptDeferred", 4, 1, {
+      reason: "execution source ref changed after attempt reservation",
+    }),
+    attempt("AttemptReserved", 5, 2),
+    attempt("AttemptStarted", 6, 2),
+    attempt("AttemptSucceeded", 7, 2),
+    attempt("AttemptCollected", 8, 2),
+    attempt("AttemptIntegrated", 9, 2),
+  ];
+}
+
+function observedStopPair() {
+  const digest = "d".repeat(64);
+  const make = (objective: number, reconciled: number, stopped: boolean) => {
+    const runId = `run-${objective}`;
+    const modelInvocationId = `compile-${objective}`;
+    const common = { objective, runId, at: at(1) };
+    const events: Record<string, unknown>[] = [
+      {
+        ...common,
+        kind: "run",
+        event: "FactoryRunStarted",
+        sequence: 1,
+        policy: authority.policy,
+      },
+      {
+        ...common,
+        kind: "budget",
+        event: "BudgetReserved",
+        sequence: 2,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: `invocation-${modelInvocationId}`,
+        modelInvocationId,
+        policyDigest: digest,
+        directorEpoch: 1,
+      },
+      {
+        ...common,
+        kind: "budget",
+        event: "BudgetReconciled",
+        sequence: 3,
+        phase: "management",
+        unit: "model_tokens",
+        amount: reconciled,
+        usageId: `compile-${"e".repeat(64)}`,
+        modelInvocationId,
+        policyDigest: digest,
+        directorEpoch: 1,
+        reportedModelUsage: { inputTokens: reconciled - 10, outputTokens: 10 },
+      },
+    ];
+    if (stopped) {
+      const attempt = {
+        ...common,
+        kind: "attempt",
+        workItem: 11,
+        attempt: 1,
+        backend: "codex-sdk/local-worktree",
+        baseSha: "a".repeat(40),
+      };
+      events.push(
+        { ...attempt, event: "AttemptStarted", sequence: 4 },
+        { ...attempt, event: "AttemptSucceeded", sequence: 5 },
+        { ...attempt, event: "AttemptCollected", sequence: 6 },
+        {
+          ...attempt,
+          event: "AttemptFailed",
+          sequence: 7,
+          reason: "model-token budget is exhausted; refusing semantic review",
+        },
+        {
+          ...common,
+          kind: "run",
+          event: "FactoryRunEscalated",
+          sequence: 8,
+          reason: "Work Item #11: attempt budget exhausted (1)",
+        },
+      );
+    } else {
+      events.push({ ...common, kind: "run", event: "FactoryRunCompleted", sequence: 4 });
+    }
+    const configured = (authority.policy.economics as { maxModelTokens: number }).maxModelTokens;
+    return {
+      receipts: events.map((event) => ({ event })),
+      status: {
+        objective: { number: objective },
+        run: { availability: "observed", state: stopped ? "escalated" : "completed" },
+        summary: {
+          attempts: { active: 0 },
+          economics: {
+            modelTokenBudgetIntent: {
+              mode: "observed-stop",
+              limit: configured,
+              hardCapEnforced: false,
+            },
+            unresolvedModelInvocations: 0,
+            usage: { model_tokens: { availability: "observed", value: reconciled } },
+            budgets: {
+              modelTokens: { value: { configured, committed: reconciled, remaining: 0 } },
+            },
+          },
+        },
+        capacity: { activeReservations: [] },
+      },
+    };
+  };
+  const configured = (authority.policy.economics as { maxModelTokens: number }).maxModelTokens;
+  return [make(1, configured + 10, true), make(2, 100, false)];
+}
+
 describe("installed two-Objective qualification authority", () => {
   it("preserves controller8 and derives scenario2 from two explicit one-worker policies", () => {
     expect(authority).toMatchObject({
@@ -1111,7 +1256,10 @@ describe("installed two-Objective qualification authority", () => {
   it("keeps useful asymmetric work in disjoint original fixture namespaces, never sleep/pressure injection", () => {
     const a = concurrencyObjectiveBody(authority.namespaces[0]!, 0);
     const b = concurrencyObjectiveBody(authority.namespaces[1]!, 1);
-    expect(a).toContain("24 individually named edge-case assertions");
+    expect(a).toContain(
+      "exactly five named edge-case assertions: +Infinity, -Infinity, negative zero, negative fractional, and inverted fractional",
+    );
+    expect(a).not.toMatch(/at least 24/i);
     expect(a).toContain("Do not introduce artificial delays");
     expect(b).toContain("Keep both roots minimal");
     expect(a).not.toContain(authority.namespaces[1]!);
@@ -1165,15 +1313,102 @@ describe("independent authenticated timing assertions", () => {
     invalid[1]!.receipts[2]!.event.sequence = 5;
     expect(() => concurrencyRefill(invalid)).toThrow(/one-worker ceiling/);
   });
-  it("rejects conflicting terminal events instead of guessing the shorter lifetime", () => {
-    const invalid = pair();
-    invalid[1]!.receipts.push({ event: event(2, 7, "AttemptFailed", 5) });
-    expect(() => concurrencyRefill(invalid)).toThrow(/conflicting worker terminals/);
+  it("uses the first execution terminal when a later semantic-review failure shares the attempt", () => {
+    const reviewed = pair();
+    reviewed[1]!.receipts.push({ event: event(2, 7, "AttemptFailed", 5) });
+    expect(concurrencyRefill(reviewed)).toMatchObject({
+      released: { event: "AttemptSucceeded", sequence: 3 },
+      refill: { event: "AttemptStarted", sequence: 4 },
+    });
   });
   it("rejects a refill lifetime with missing attempt identity", () => {
     const invalid = pair();
     delete invalid[1]!.receipts[1]!.event.attempt;
     expect(() => concurrencyRefill(invalid)).toThrow(/identity missing/);
+  });
+});
+
+describe("bounded source refresh and observed-stop outcomes", () => {
+  it("excludes one reconciled zero-model source refresh from useful work and retry counts", () => {
+    const result = qualifyConcurrencyAttempts(sourceRefreshAttemptEvents(), [
+      "codex-sdk/local-worktree",
+    ]) as {
+      windows: unknown[];
+      deferred: unknown[];
+      useful: unknown[];
+      reservations: Array<{ attempt: number }>;
+    };
+    expect(result).toMatchObject({
+      windows: expect.any(Array),
+      deferred: [expect.any(Object)],
+      useful: [expect.any(Object)],
+      reservations: [{ attempt: 2 }],
+    });
+    expect(result.windows).toHaveLength(2);
+  });
+
+  it("refuses a source refresh with model use, unreconciled capacity, or no later integration", () => {
+    const withModel = sourceRefreshAttemptEvents();
+    withModel.splice(3, 0, {
+      ...withModel[1],
+      event: "BudgetReserved",
+      unit: "model_tokens",
+      amount: 0,
+      usageId: "invocation-worker-10-1",
+      modelInvocationId: "worker-10-1",
+    });
+    expect(() => qualifyConcurrencyAttempts(withModel, ["codex-sdk/local-worktree"])).toThrow(
+      /consumed model tokens/,
+    );
+
+    const unreconciled = sourceRefreshAttemptEvents().filter(
+      (entry) => entry.event !== "BudgetReconciled",
+    );
+    expect(() => qualifyConcurrencyAttempts(unreconciled, ["codex-sdk/local-worktree"])).toThrow(
+      /capacity was not reconciled/,
+    );
+
+    const notIntegrated = sourceRefreshAttemptEvents().filter(
+      (entry) => entry.event !== "AttemptIntegrated",
+    );
+    expect(() => qualifyConcurrencyAttempts(notIntegrated, ["codex-sdk/local-worktree"])).toThrow(
+      /later integrated execution/,
+    );
+  });
+
+  it("reports exact per-Objective and aggregate observed-stop totals", () => {
+    const result = assessConcurrencyObservedStop(observedStopPair(), authority);
+    expect(result).toMatchObject({
+      kind: "observed-stop",
+      state: "terminal-incomplete",
+      objective: 1,
+      budget: {
+        configured: 250000,
+        reconciled: 250010,
+        overshoot: 10,
+      },
+      aggregate: {
+        configured: 500000,
+        reconciled: 250110,
+        overshoot: 0,
+      },
+      automaticActions: { retry: false, restart: false },
+    });
+  });
+
+  it("keeps unknown and ambiguous adverse outcomes fail-closed", () => {
+    const unknown = observedStopPair();
+    const failure = unknown[0]!.receipts.find(
+      ({ event }) => event.event === "AttemptFailed",
+    )!.event;
+    failure.reason = "unrelated delivery failure";
+    expect(() => assessConcurrencyObservedStop(unknown, authority)).toThrow(
+      /observed-stop receipt missing/,
+    );
+
+    const cancelled = observedStopPair();
+    cancelled[0]!.status.run.state = "cancelled";
+    expect(() => assessConcurrencyObservedStop(cancelled, authority)).toThrow(/not observed-stop/);
   });
 });
 
@@ -1352,6 +1587,32 @@ describe("bounded existing installed-controller composition", () => {
       "controller:inactive",
       "throughput-final-proofs",
     ]);
+  });
+  it("returns an authenticated policy stop without retry, restart, stop, or final proofs", async () => {
+    const f = scenarioPort();
+    const outcome = assessConcurrencyObservedStop(observedStopPair(), authority)!;
+    f.port.pollPair = async (phase) => {
+      f.actions.push(phase);
+      throw new ConcurrencyObservedStopError(outcome);
+    };
+    await expect(runConcurrencyScenario(f.port, authority)).resolves.toMatchObject({
+      result: "incomplete",
+      outcome: {
+        kind: "observed-stop",
+        state: "terminal-incomplete",
+        automaticActions: { retry: false, restart: false },
+      },
+    });
+    expect(f.actions).toEqual([
+      "preflight",
+      "prepare:create",
+      "start",
+      "controller:active",
+      "prepare:activate",
+      "both-started",
+    ]);
+    for (const action of ["restart", "stop", "throughput-final-proofs"])
+      expect(f.actions).not.toContain(action);
   });
   it("keeps expiry, same-Objective contention and restart in an explicit fault scenario", async () => {
     const f = scenarioPort();

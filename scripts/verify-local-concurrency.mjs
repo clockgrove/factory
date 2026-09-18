@@ -67,7 +67,107 @@ const endNames = new Set([
   "AttemptTimedOut",
   "AttemptCancelled",
   "AttemptDeferred",
+  "AttemptCollected",
 ]);
+const sourceRefreshReasons = new Set([
+  "execution source ref changed after attempt reservation",
+  "execution source ref changed during final dispatch validation",
+]);
+const semanticReviewBudgetReason = "model-token budget is exhausted; refusing semantic review";
+
+function reservationWindows(events) {
+  const reservations = events
+    .filter((event) => event.event === "AttemptReserved")
+    .sort((a, b) => a.sequence - b.sequence);
+  return reservations.map((reservation) => {
+    const next = reservations.find(
+      (candidate) =>
+        candidate.workItem === reservation.workItem && candidate.sequence > reservation.sequence,
+    );
+    return {
+      reservation,
+      events: events.filter(
+        (event) =>
+          event.workItem === reservation.workItem &&
+          event.sequence >= reservation.sequence &&
+          (!next || event.sequence < next.sequence),
+      ),
+    };
+  });
+}
+
+function sourceRefreshWindow(window) {
+  const deferred = window.events.filter((event) => event.event === "AttemptDeferred");
+  if (deferred.length === 0) return false;
+  const terminal = one(deferred, "source refresh was deferred more than once");
+  assert.ok(sourceRefreshReasons.has(terminal.reason), "deferred attempt is not a source refresh");
+  assert.equal(
+    terminal.reportedModelTokens,
+    undefined,
+    "pre-dispatch refresh reported model usage",
+  );
+  assert.ok(
+    !window.events.some(
+      (event) =>
+        event.kind === "attempt" &&
+        [
+          "AttemptStarted",
+          "AttemptProgressed",
+          "AttemptSucceeded",
+          "AttemptCollected",
+          "AttemptPublished",
+          "AttemptValidated",
+          "AttemptIntegrated",
+          "AttemptFailed",
+          "AttemptTimedOut",
+          "AttemptCancelled",
+        ].includes(event.event),
+    ),
+    "source refresh reached execution",
+  );
+  assert.ok(
+    !window.events.some((event) => event.kind === "budget" && event.unit === "model_tokens"),
+    "source refresh consumed model tokens",
+  );
+  const nativeReservations = window.events.filter(
+    (event) =>
+      event.kind === "budget" &&
+      event.event === "BudgetReserved" &&
+      event.phase === "execution" &&
+      event.unit !== "model_tokens",
+  );
+  assert.equal(
+    nativeReservations.length,
+    1,
+    "source refresh capacity reservation missing or repeated",
+  );
+  const native = nativeReservations[0];
+  const reconciled = one(
+    window.events.filter(
+      (event) =>
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.phase === native.phase &&
+        event.unit === native.unit &&
+        event.sequence > native.sequence,
+    ),
+    "source refresh capacity was not reconciled exactly once",
+  );
+  assert.equal(reconciled.amount, 0, "pre-dispatch refresh consumed native capacity");
+  assert.ok(
+    reconciled.sequence < terminal.sequence,
+    "source refresh closed before capacity reconciliation",
+  );
+  return true;
+}
+
+export class ConcurrencyObservedStopError extends Error {
+  constructor(outcome) {
+    super("authenticated observed-stop ended the throughput exercise");
+    this.name = "ConcurrencyObservedStopError";
+    this.outcome = outcome;
+  }
+}
 
 function workerPacketScope(issue) {
   assert.equal(typeof issue.body, "string", "Work Item body unavailable");
@@ -398,7 +498,7 @@ export function concurrencyAuthority(env) {
 export function concurrencyObjectiveBody(namespace, index) {
   return `${objectiveBodyFor(namespace)}\n\nThis is one of exactly two explicitly activated, disjoint qualification Objectives. Keep exactly three Work Items and two independent roots, then the dependent join. Do not edit the other namespace. ${
     index === 0
-      ? "Make clamp the first root in native sub-issue order. Its implementation must also handle infinities and negative zero consistently with Math.min(Math.max(value,min),max). Add at least 24 individually named edge-case assertions covering negative/fractional inputs, both infinities, negative zero, equal bounds and inverted bounds. Do not introduce artificial delays, sleeps, services, network calls or resource pressure."
+      ? "Make clamp the first root in native sub-issue order. Its implementation must also handle infinities and negative zero consistently with Math.min(Math.max(value,min),max). Add exactly five named edge-case assertions: +Infinity, -Infinity, negative zero, negative fractional, and inverted fractional. Do not introduce artificial delays, sleeps, services, network calls or resource pressure."
       : "Keep both roots minimal: only the specified deterministic implementation and acceptance cases. Make clamp first and slugify second in native sub-issue order."
   }\nKeep all six new files ordinary non-executable Git mode 100644. Do not combine the roots or add Work Items. This requests useful asymmetric work, not a guarantee about model speed. The observer records an incomplete result if actual overlap/refill does not occur.`;
 }
@@ -434,11 +534,9 @@ export function concurrencyRefill(pair) {
             start.sequence > 0,
           "worker lifetime identity missing",
         );
-        const ends = events.filter(
-          (event) => endNames.has(event.event) && sameAttempt(start, event),
-        );
-        assert.ok(ends.length <= 1, "conflicting worker terminals");
-        const end = ends[0];
+        const end = events
+          .filter((event) => endNames.has(event.event) && sameAttempt(start, event))
+          .sort((a, b) => a.sequence - b.sequence)[0];
         if (end) {
           assert.ok(Number.isSafeInteger(end.sequence) && end.sequence > start.sequence);
           assert.ok(time(end) >= time(start));
@@ -487,6 +585,144 @@ export function concurrencyRefill(pair) {
   return null;
 }
 
+export function qualifyConcurrencyAttempts(run, backendOrder) {
+  const windows = reservationWindows(run),
+    deferred = windows.filter(sourceRefreshWindow),
+    useful = windows.filter((window) => !deferred.includes(window));
+  assert.ok(deferred.length <= 1, "multiple source refresh deferrals are outside this scenario");
+  for (const window of deferred) {
+    const later = useful.filter(
+      ({ reservation, events }) =>
+        reservation.workItem === window.reservation.workItem &&
+        reservation.sequence > window.reservation.sequence &&
+        events.some((event) => event.event === "AttemptIntegrated"),
+    );
+    assert.equal(later.length, 1, "source refresh lacks exactly one later integrated execution");
+  }
+  const reservations = useful.map(({ reservation }) => reservation);
+  assert.equal(
+    new Set(reservations.map((event) => event.workItem)).size,
+    reservations.length,
+    "duplicate useful implementation attempt",
+  );
+  for (const [index, reserved] of reservations.entries()) {
+    const priorRefreshes = deferred.filter(
+      ({ reservation }) =>
+        reservation.workItem === reserved.workItem && reservation.sequence < reserved.sequence,
+    ).length;
+    assert.equal(reserved.attempt, priorRefreshes + 1);
+    assert.ok(backendOrder.includes(reserved.backend));
+    for (const name of ["AttemptStarted", "AttemptSucceeded", "AttemptIntegrated"])
+      one(
+        useful[index].events.filter(
+          (event) => event.event === name && sameAttempt(event, reserved),
+        ),
+        "admitted attempt not settled exactly once",
+      );
+  }
+  return { windows, deferred, useful, reservations };
+}
+
+/** Recognize only the authenticated policy stop exercised by this qualifier. Any other
+ * cancellation/escalation remains an error so an ambiguous failure cannot become a result. */
+export function assessConcurrencyObservedStop(pair, authority) {
+  assert.equal(pair.length, 2);
+  const adverse = pair.filter((observation) =>
+    ["cancelled", "escalated"].includes(observation.status.run.state),
+  );
+  if (adverse.length === 0) return null;
+  assert.equal(adverse.length, 1, "multiple adverse Objective outcomes are ambiguous");
+  const stopped = adverse[0];
+  assert.equal(stopped.status.run.availability, "observed");
+  assert.equal(stopped.status.run.state, "escalated", "terminal outcome is not observed-stop");
+  assert.ok(
+    pair.every(
+      (observation) => observation === stopped || observation.status.run.state === "completed",
+    ),
+    "peer Objective is not terminal",
+  );
+
+  const rows = pair.map((observation) => {
+    const events = eventsOf(observation),
+      start = one(
+        events.filter((event) => event.event === "FactoryRunStarted"),
+        "one exact run required",
+      ),
+      run = events.filter((event) => event.runId === start.runId),
+      accounting = qualificationModelAccounting(run, { requireMarkers: true }),
+      configured = start.policy?.economics?.maxModelTokens;
+    assert.equal(start.policy?.economics?.modelTokenBudgetMode, "observed-stop");
+    assert.equal(configured, authority.policy.economics.maxModelTokens);
+    assert.equal(accounting.unresolved.length, 0, "unknown model invocation remains");
+    const economics = observation.status.summary.economics;
+    assert.equal(economics.modelTokenBudgetIntent?.mode, "observed-stop");
+    assert.equal(economics.modelTokenBudgetIntent?.limit, configured);
+    assert.equal(economics.unresolvedModelInvocations, 0);
+    assert.deepEqual(observation.status.capacity.activeReservations, []);
+    assert.equal(economics.usage.model_tokens?.availability, "observed");
+    assert.equal(economics.usage.model_tokens.value, accounting.total);
+    assert.equal(economics.budgets.modelTokens?.value?.configured, configured);
+    assert.equal(economics.budgets.modelTokens.value.committed, accounting.total);
+    return {
+      observation,
+      events: run,
+      objective: observation.status.objective.number,
+      configured,
+      reconciled: accounting.total,
+      overshoot: Math.max(0, accounting.total - configured),
+    };
+  });
+  const stoppedRow = one(
+    rows.filter(({ observation }) => observation === stopped),
+    "stopped Objective accounting missing",
+  );
+  assert.ok(stoppedRow.reconciled >= stoppedRow.configured, "observed threshold was not exhausted");
+  const failure = one(
+    stoppedRow.events.filter(
+      (event) => event.event === "AttemptFailed" && event.reason === semanticReviewBudgetReason,
+    ),
+    "semantic-review observed-stop receipt missing or repeated",
+  );
+  const collected = one(
+    stoppedRow.events.filter(
+      (event) => event.event === "AttemptCollected" && sameAttempt(event, failure),
+    ),
+    "observed-stop lacks one completed execution",
+  );
+  assert.ok(
+    collected.sequence < failure.sequence,
+    "semantic review failed before execution completed",
+  );
+  const terminal = one(
+    stoppedRow.events.filter((event) => event.event === "FactoryRunEscalated"),
+    "terminal escalation missing or repeated",
+  );
+  assert.equal(terminal.reason, `Work Item #${failure.workItem}: attempt budget exhausted (1)`);
+  assert.ok(failure.sequence < terminal.sequence);
+  assert.equal(stopped.status.summary.attempts.active, 0);
+
+  const aggregateReconciled = rows.reduce((total, row) => total + row.reconciled, 0);
+  assert.ok(Number.isSafeInteger(aggregateReconciled));
+  const aggregateConfigured = rows.reduce((total, row) => total + row.configured, 0);
+  assert.equal(aggregateConfigured, authority.aggregateObservedThreshold);
+  return {
+    kind: "observed-stop",
+    state: "terminal-incomplete",
+    objective: stoppedRow.objective,
+    budget: {
+      configured: stoppedRow.configured,
+      reconciled: stoppedRow.reconciled,
+      overshoot: stoppedRow.overshoot,
+    },
+    aggregate: {
+      configured: aggregateConfigured,
+      reconciled: aggregateReconciled,
+      overshoot: Math.max(0, aggregateReconciled - aggregateConfigured),
+    },
+    automaticActions: { retry: false, restart: false },
+  };
+}
+
 export function assertConcurrencySettlement(
   observation,
   authority,
@@ -523,27 +759,11 @@ export function assertConcurrencySettlement(
   assertScopeCoverage(run);
   assert.ok(
     !run.some((event) =>
-      ["AttemptFailed", "AttemptDeferred", "AttemptCancelled", "AttemptTimedOut"].includes(
-        event.event,
-      ),
+      ["AttemptFailed", "AttemptCancelled", "AttemptTimedOut"].includes(event.event),
     ),
     "replacement or failed work is not this scenario",
   );
-  const reservations = run.filter((event) => event.event === "AttemptReserved");
-  assert.equal(
-    new Set(reservations.map((event) => event.workItem)).size,
-    reservations.length,
-    "duplicate implementation attempt",
-  );
-  for (const reserved of reservations) {
-    assert.equal(reserved.attempt, 1);
-    assert.ok(authority.policy.backendOrder.includes(reserved.backend));
-    for (const name of ["AttemptStarted", "AttemptSucceeded", "AttemptIntegrated"])
-      one(
-        run.filter((event) => event.event === name && sameAttempt(event, reserved)),
-        "admitted attempt not settled exactly once",
-      );
-  }
+  const { deferred, reservations } = qualifyConcurrencyAttempts(run, authority.policy.backendOrder);
   const accounting = qualificationModelAccounting(run, { requireMarkers: true });
   assert.equal(accounting.unresolved.length, 0, "unknown model invocation remains");
   one(
@@ -627,7 +847,12 @@ export function assertConcurrencySettlement(
     assert.equal(reservations.length, 3);
     assert.ok(observation.children.every((child) => child.state === "closed"));
   }
-  return { runId: start.runId, modelTokens: accounting.total, reservations: reservations.length };
+  return {
+    runId: start.runId,
+    modelTokens: accounting.total,
+    reservations: reservations.length,
+    deferredSourceRefreshes: deferred.length,
+  };
 }
 
 /** Terminal Factory cleanup retires disposable review refs; merged PRs and receipts stay durable. */
@@ -818,16 +1043,32 @@ export async function runConcurrencyScenario(port, authority) {
   await port.action("start");
   const controller = await port.controller("active");
   await port.prepare("activate");
-  await port.pollPair("both-started", (pair) =>
-    pair.every((observation) =>
-      eventsOf(observation).some((event) => event.event === "ControllerObserved"),
-    ),
-  );
-  const overlap = await port.pollPair("refill", (pair) => concurrencyRefill(pair) !== null);
-  const refill = concurrencyRefill(overlap);
-  const final = await port.pollPair("completed", (pair) =>
-    pair.every((observation, index) => port.settled(observation, false, index)),
-  );
+  let final, refill;
+  try {
+    await port.pollPair("both-started", (pair) =>
+      pair.every((observation) =>
+        eventsOf(observation).some((event) => event.event === "ControllerObserved"),
+      ),
+    );
+    const overlap = await port.pollPair("refill", (pair) => concurrencyRefill(pair) !== null);
+    refill = concurrencyRefill(overlap);
+    final = await port.pollPair("completed", (pair) =>
+      pair.every((observation, index) => port.settled(observation, false, index)),
+    );
+  } catch (error) {
+    if (!(error instanceof ConcurrencyObservedStopError)) throw error;
+    return {
+      result: "incomplete",
+      scope: "installed-two-objective-useful-throughput-refill",
+      controllerLocalCeiling: 8,
+      authorizedScenarioWorkerMaximum: 2,
+      aggregateObservedThreshold: authority.aggregateObservedThreshold,
+      artificialDelayMs: 0,
+      injectedFaults: 0,
+      comparativeSavings: "not-measured",
+      outcome: error.outcome,
+    };
+  }
   await port.action("stop");
   await port.controller("inactive");
   const proofs = await port.finishThroughput(final, controller, refill);
@@ -1333,7 +1574,10 @@ export async function main(env = process.env, run = checkpointMain) {
         const settled = (observation, paused, index = paused ? 1 : 0, activated = true) => {
           if (observation.status.run.state !== (paused ? "paused" : "completed")) return false;
           const events = eventsOf(observation),
-            reservations = events.filter((event) => event.event === "AttemptReserved");
+            windows = reservationWindows(events),
+            reservations = windows
+              .filter((window) => !window.events.some((event) => event.event === "AttemptDeferred"))
+              .map(({ reservation }) => reservation);
           if (
             !events.some(
               (event) => event.event === (paused ? "RunPauseAcknowledged" : "FactoryRunCompleted"),
@@ -1341,12 +1585,12 @@ export async function main(env = process.env, run = checkpointMain) {
           )
             return false;
           if (
-            reservations.some(
-              (reserved) =>
-                !events.some(
-                  (event) => event.event === "AttemptIntegrated" && sameAttempt(event, reserved),
-                ),
-            )
+            reservations.some((reserved) => {
+              const window = windows.find((candidate) => candidate.reservation === reserved);
+              return !window.events.some(
+                (event) => event.event === "AttemptIntegrated" && sameAttempt(event, reserved),
+              );
+            })
           )
             return false;
           const start = events.find((event) => event.event === "FactoryRunStarted");
@@ -1784,13 +2028,8 @@ export async function main(env = process.env, run = checkpointMain) {
               evidence.latestPair = pair;
               evidence.observationPhase = phase;
               save();
-              assert.ok(
-                pair.every(
-                  (observation) =>
-                    !["cancelled", "escalated"].includes(observation.status.run.state),
-                ),
-                "owned run ended before scenario completion",
-              );
+              const observedStop = assessConcurrencyObservedStop(pair, authority);
+              if (observedStop) throw new ConcurrencyObservedStopError(observedStop);
               checkpointTimeout(deadline(), 1);
               const accepted = accept(pair);
               checkpointTimeout(deadline(), 1);

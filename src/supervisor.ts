@@ -21689,31 +21689,9 @@ export class FactorySupervisor {
               reason: "recovered interrupted validated publication",
             }),
           );
-          if (native) return;
         }
-        await this.#integrate(
-          item,
-          reservation,
-          {
-            branch,
-            commitSha: headSha,
-            number: pull.number,
-            htmlUrl: pull.htmlUrl,
-            exactHeadValidation: bindValidationToPublishedHead({
-              validation: {
-                passed: validation.passed,
-                digest: validation.evidenceDigest,
-                baseSha: validation.baseSha,
-                outputTreeSha: validation.outputTreeSha,
-              },
-              publishedHeadSha: headSha,
-              publishedTreeSha: commit.treeOid,
-              publishedBaseSha: validation.baseSha,
-            }),
-          },
-          deadline,
-          true,
-        );
+        // Publication is the durable handoff. The next scheduler snapshot
+        // integrates from the newly recorded AttemptPublished authority.
         return;
       }
     }

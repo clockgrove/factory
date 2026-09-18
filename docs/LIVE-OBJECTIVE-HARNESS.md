@@ -29,16 +29,13 @@ no active repository rulesets, no open prior Factory PRs, and at least 1,000 rem
 and 1,000 GraphQL points. Use an appropriate disposable repository; do not weaken a production
 repository to run this exercise. Preserve GitHub event comments and partial results as evidence.
 
-Install Factory through Codex's plugin installation flow first. The harness checks the enabled
-plugin version in `codex plugin list --json`, reads its installed manifest, and starts that manifest's
-MCP command from the exact marketplace/version cache path in that receipt. The portable plugin and
-package versions must agree; only the documented `+codex.YYYYMMDDHHMMSS` suffix is permitted on the
-Codex-specific manifest. The MCP handshake must report the canonical package version. A
-development-worktree MCP override is rejected. Both installed bundles must match their inventory,
-and that inventory must match the committed, clean qualification source checkout. It needs the
-existing Codex local authentication and GitHub write authentication (`GITHUB_TOKEN`, `GH_TOKEN`, or
-`gh auth token`). On WSL, use the Linux Codex home; if Desktop injected a Windows `CODEX_HOME`, remove
-that variable for the invocation so Codex uses the normal `/home/.../.codex` directory.
+Install the retained npm and Agent Plugin candidate first and set
+`FACTORY_QUALIFICATION_INSTALL_RECEIPT` to its owner-private `install-identities.txt`. Before any
+GitHub write or model call, the harness independently verifies the receipt, source commit, release
+tarball, plugin archive, npm install, isolated plugin listing, inventory, Factory/MCP bundles and MCP
+launcher. The receipt's isolated Codex home selects artifact bytes only. Runtime provider
+authentication remains in the normal Linux `/home/.../.codex`; a mutable Desktop plugin cannot
+become artifact authority. The MCP handshake must report the canonical package version.
 
 The operator must authorize Objective/sub-issue creation, local model usage, PR creation and merging
 into the named disposable repository. The exact repository acknowledgement below is a guard against
@@ -58,7 +55,7 @@ env -u CODEX_HOME -u FACTORY_LIVE_OBJECTIVE_PREFLIGHT \
   FACTORY_LIVE_OBJECTIVE_REPOSITORY=OWNER/DISPOSABLE-REPO \
   FACTORY_LIVE_OBJECTIVE_MUTATION_ACK=OWNER/DISPOSABLE-REPO \
   FACTORY_LIVE_OBJECTIVE_CHECKOUT=/home/you/conformance-fixture \
-  FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT=/home/you/.codex/plugins/cache/MARKETPLACE/factory/VERSION \
+  FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/you/Codex/factory-initial-beta/CANDIDATE/install-identities.txt \
   FACTORY_LIVE_OBJECTIVE_NAMESPACE=qualification-example-001 \
   FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=250000 \
   FACTORY_LIVE_OBJECTIVE_EVIDENCE=/tmp/factory-objective-evidence-UNIQUE \
@@ -66,8 +63,9 @@ env -u CODEX_HOME -u FACTORY_LIVE_OBJECTIVE_PREFLIGHT \
   node scripts/verify-live-objective.mjs
 ```
 
-Replace the example namespace and evidence path with unused values. The plugin-root override is
-optional; when present, it must match the installed receipt exactly.
+Replace the example namespace and evidence directory with unused values. The harness creates
+evidence files exclusively and requires the directory to be owned by the current user with no group
+or other permissions.
 
 `stacked-prs` is both the default and the required delivery mode for this CLI harness. If native
 delivery is unavailable, the policy escalates; it does not fall back to ordinary PRs.

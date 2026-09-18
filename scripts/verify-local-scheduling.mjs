@@ -667,6 +667,12 @@ export function createSchedulingQualification(authority, env = process.env, port
     };
   return {
     scope: "installed-local-explicit-regular-objective",
+    harnessPaths: [
+      "scripts/verify-local-scheduling.mjs",
+      "scripts/verify-local-faults.mjs",
+      "scripts/verify-regular-objective.mjs",
+      "scripts/qualification-sibling-refresh-proof.mjs",
+    ],
     policy: authority.policy,
     privateEvidence: true,
     namespace: authority.namespace,

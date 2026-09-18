@@ -5,9 +5,9 @@ credential-free release suite. Its unit tests exercise evidence assessment and
 guards; they do **not** qualify an installed controller. No live qualification is
 implied by the presence of this script.
 
-The two independently namespaced scenarios use the actual enabled Codex plugin's
-MCP server and an already-installed repository controller executing that exact
-plugin bundle. They require Linux (including a Linux environment on a Mac or
+The two independently namespaced scenarios use the exact retained candidate's MCP server and an
+already-installed repository controller executing that exact plugin bundle. They require Linux
+(including a Linux environment on a Mac or
 Windows host), user systemd, a Linux-filesystem checkout, working local Codex and
 GitHub authentication, and a private disposable repository with no competing
 Objective or open PR. Do not run beside another qualification in the same repo.
@@ -59,12 +59,15 @@ export FACTORY_LOCAL_FAULT_REPOSITORY=OWNER/DISPOSABLE_REPO
 export FACTORY_LOCAL_FAULT_CHECKOUT=/home/USER/Codex/disposable-repo
 export FACTORY_LOCAL_FAULT_NAMESPACE=unique-fault-20260905
 export FACTORY_LOCAL_FAULT_MAX_MODEL_TOKENS=500000
-export FACTORY_LOCAL_FAULT_EVIDENCE=/tmp/factory-private-restart-evidence.json
+export FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/USER/Codex/factory-initial-beta/CANDIDATE/install-identities.txt
+install -d -m 700 /tmp/factory-private-restart-UNIQUE
+export FACTORY_LOCAL_FAULT_EVIDENCE=/tmp/factory-private-restart-UNIQUE/evidence.json
 ```
 
-Repository owner/name must be lowercase. The script refuses the Factory product
-repository, public repositories, redirected Codex homes, `/mnt` checkouts,
-different installed bytes, and an uncommitted candidate.
+Repository owner/name must be lowercase. The script refuses the Factory product repository, public
+repositories, non-private evidence directories, redirected provider Codex homes, `/mnt` checkouts,
+different retained install bytes, and an uncommitted candidate. The receipt's isolated Codex home
+selects the artifact; the actual provider runtime still uses the normal Linux Codex home.
 
 The opt-in runner also rejects `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`, `GH_CONFIG_DIR` and
 `XDG_CONFIG_HOME` overrides so its REST observations and installed controller use the same default

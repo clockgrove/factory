@@ -76,6 +76,7 @@ export function nativeRefreshQualification(env) {
   );
   return {
     scope,
+    harnessPaths: files.map((file) => `scripts/${file}`),
     privateEvidence: true,
     policy: boundedPolicy(
       "stacked-prs",

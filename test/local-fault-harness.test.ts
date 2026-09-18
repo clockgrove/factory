@@ -16,6 +16,7 @@ import {
   isQuiescentFaultObjective,
   parseUnitObservation,
   privateEvidenceFile,
+  reservePrivateEvidenceFile,
   scopeUnit,
 } from "../scripts/verify-local-faults.mjs";
 import { parseRunPolicy } from "../src/protocol/policy.js";
@@ -498,6 +499,17 @@ describe("installed local fault qualification harness", () => {
       symlinkSync(path, `${directory}/linked.json`);
       expect(() => privateEvidenceFile(`${directory}/linked.json`, { wrong: true })).toThrow();
       expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ ok: true });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  it("reserves a fresh evidence file exactly once before remote mutation", () => {
+    const directory = mkdtempSync("/tmp/factory-fault-harness-test-");
+    try {
+      const path = `${directory}/evidence.json`;
+      reservePrivateEvidenceFile(path);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(() => reservePrivateEvidenceFile(path)).toThrow("never overwrite");
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

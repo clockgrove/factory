@@ -14,9 +14,9 @@ import {
   readFileSync,
   realpathSync,
   readlinkSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Octokit } from "@octokit/core";
@@ -25,12 +25,14 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import {
   boundedPolicy,
   installedBundleIdentity,
-  installedIdentity,
-  installedPluginPath,
   modelTokenLimit,
   qualificationNamespace,
   qualificationNamespaceMarker,
 } from "./verify-live-objective.mjs";
+import {
+  installedQualificationAuthority,
+  qualificationRuntimeEnvironment,
+} from "./qualification-install-identity.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const hash = (value) =>
@@ -173,6 +175,13 @@ export function privateEvidenceFile(path, value) {
     resolve(path).startsWith("/tmp/") && (parent === "/tmp" || parent.startsWith("/tmp/")),
     "private evidence must stay in /tmp",
   );
+  const parentFacts = statSync(parent);
+  assert.ok(
+    parentFacts.isDirectory() &&
+      parentFacts.uid === process.getuid() &&
+      (parentFacts.mode & 0o077) === 0,
+    "private evidence directory must be owner-only",
+  );
   const flags =
     constants.O_NOFOLLOW |
     (value === undefined ? constants.O_RDONLY : constants.O_WRONLY | constants.O_CREAT);
@@ -196,6 +205,16 @@ export function privateEvidenceFile(path, value) {
   } finally {
     closeSync(fd);
   }
+}
+
+export function reservePrivateEvidenceFile(path) {
+  assert.ok(!existsSync(path), "never overwrite prior qualification evidence");
+  const fd = openSync(
+    path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o600,
+  );
+  closeSync(fd);
 }
 
 function assertScopeReceipt(reservation, start, repository, objective) {
@@ -807,31 +826,45 @@ async function runQualification(progress) {
   const policy = faultPolicy(maxModelTokens, scenario);
   const evidencePath = resolve(required("EVIDENCE"));
   assert.ok(evidencePath.startsWith("/tmp/"), "private evidence must be in /tmp");
-  const codexHome = realpathSync(join(homedir(), ".codex"));
   progress.stage("installed-identity");
-  if (process.env.CODEX_HOME) assert.equal(realpathSync(process.env.CODEX_HOME), codexHome);
-  const listed = JSON.parse(command("codex", ["plugin", "list", "--json"], checkout));
-  const pluginRoot = installedPluginPath({ listed, codexHome });
-  const manifest = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"));
-  installedIdentity({
-    manifest,
-    listed,
-    pluginRoot,
-    codexHome,
-    portable: JSON.parse(readFileSync(join(pluginRoot, "plugin.json"), "utf8")),
-    packageManifest: JSON.parse(readFileSync(join(pluginRoot, "package.json"), "utf8")),
+  const candidate = installedQualificationAuthority(process.env, {
+    sourceRoot: root,
+    committedPaths: [
+      "scripts/verify-local-faults.mjs",
+      "scripts/qualification-model-accounting.mjs",
+      "scripts/qualification-receipts.mjs",
+      "scripts/qualification-install-identity.mjs",
+    ],
   });
-  const artifact = installedBundleIdentity(pluginRoot);
-  assert.equal(
-    artifact.inventorySha256,
-    createHash("sha256")
-      .update(readFileSync(join(root, "dist/bundle-inventory.json")))
-      .digest("hex"),
-  );
-  assert.equal(
-    command("git", ["status", "--porcelain", "--untracked-files=no"], root),
-    "",
-    "harness must be committed",
+  const runtimeEnvironment = qualificationRuntimeEnvironment(process.env);
+  const pluginRoot = candidate.installedPluginRoot;
+  const manifest = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"));
+  const artifact = candidate.pluginArtifact;
+  const installedCandidate = {
+    sourceCommit: candidate.candidateSourceCommit,
+    version: candidate.candidateVersion,
+    installReceiptIdentity: candidate.installReceiptIdentity,
+    inventoryIdentity: candidate.inventoryIdentity,
+    factoryArtifactIdentity: candidate.artifactIdentity,
+    mcpArtifactIdentity: candidate.mcpArtifactIdentity,
+    artifactAuthority: {
+      qualificationRoot: candidate.qualificationRoot,
+      pluginRoot,
+      codexHome: candidate.codexHome,
+    },
+    providerRuntime: {
+      home: runtimeEnvironment.HOME,
+      codexHome: runtimeEnvironment.CODEX_HOME,
+    },
+  };
+  const evidenceDirectory = realpathSync(dirname(evidencePath));
+  const evidenceDirectoryFacts = statSync(evidenceDirectory);
+  assert.ok(
+    evidenceDirectory.startsWith("/tmp/") &&
+      evidenceDirectoryFacts.isDirectory() &&
+      evidenceDirectoryFacts.uid === process.getuid() &&
+      (evidenceDirectoryFacts.mode & 0o077) === 0,
+    "private evidence directory must be a fresh owner-only /tmp directory",
   );
   progress.stage("repository-preflight");
   const token = command("gh", ["auth", "token"], checkout);
@@ -869,7 +902,7 @@ async function runQualification(progress) {
     command: mcp.command,
     args: mcp.args.map((arg) => arg.replaceAll("${PLUGIN_ROOT}", pluginRoot)),
     cwd: checkout,
-    env: { ...process.env, GITHUB_TOKEN: token },
+    env: { ...runtimeEnvironment, GITHUB_TOKEN: token },
     stderr: "pipe",
   });
   let evidence;
@@ -937,6 +970,8 @@ async function runQualification(progress) {
           result: "passed",
           phase,
           scenario,
+          installedCandidate,
+          harnessFiles: candidate.committedQualificationFiles,
           installedArtifact: artifact,
           controllerUnit: controller.unit,
           modelTokenLimit: maxModelTokens,
@@ -946,7 +981,6 @@ async function runQualification(progress) {
     }
     if (phase === "prepare") {
       progress.stage("repository-quiescence");
-      assert.ok(!existsSync(evidencePath), "never overwrite prior qualification evidence");
       assert.equal(command("git", ["status", "--porcelain"], checkout), "");
       const issues = await list("GET /repos/{owner}/{repo}/issues", { state: "all" });
       assert.ok(
@@ -969,6 +1003,7 @@ async function runQualification(progress) {
         "disposable repository must have no open PRs",
       );
       const body = faultObjective(namespace);
+      reservePrivateEvidenceFile(evidencePath);
       progress.stage("objective-create");
       const objective = (
         await request("POST /repos/{owner}/{repo}/issues", {
@@ -987,6 +1022,8 @@ async function runQualification(progress) {
         maxModelTokens,
         policy,
         installedArtifact: artifact,
+        installedCandidate,
+        harnessFiles: candidate.committedQualificationFiles,
         activationRequestId: `${namespace}-activate`,
         faultRequestId: `${namespace}-${scenario}`,
         pauseRequestId: `${namespace}-pause`,
@@ -1010,6 +1047,8 @@ async function runQualification(progress) {
     }))
       assert.deepEqual(evidence[key], expected);
     assert.deepEqual(evidence.installedArtifact, artifact);
+    assert.deepEqual(evidence.installedCandidate, installedCandidate);
+    assert.deepEqual(evidence.harnessFiles, candidate.committedQualificationFiles);
     assert.deepEqual(evidence.actor, { id: actor.id, login: actor.login });
     const observe = async () => {
       const objective = (

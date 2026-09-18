@@ -426,7 +426,7 @@ export function installedQualificationAuthority(
   assert.ok(listedEntry, "exact installed Factory plugin receipt unavailable");
   assert.equal(listedEntry.source?.source, "local");
   assert.equal(realpathSync(listedEntry.source.path), listedPluginSource);
-  installedIdentity({
+  const pluginIdentity = installedIdentity({
     listed,
     codexHome,
     pluginRoot: installedPluginRoot,
@@ -452,6 +452,7 @@ export function installedQualificationAuthority(
     mcpArtifactIdentity: `sha256:${receipt.mcpServerBundleSha256}`,
     inventoryIdentity: `sha256:${receipt.bundleInventorySha256}`,
     pluginArtifact,
+    pluginIdentity,
     committedQualificationFiles,
     installReceipt: receipt,
   };

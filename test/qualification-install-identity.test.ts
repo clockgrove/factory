@@ -171,6 +171,7 @@ function fixture() {
     installedPluginRoot,
     listedPluginSource,
     pluginArchive,
+    tarball,
     codexHome,
     codexCli,
     version,
@@ -219,6 +220,24 @@ describe("retained qualification install authority", () => {
       "installed plugin substitution",
       (value: ReturnType<typeof fixture>) => {
         write(join(value.installedPluginRoot, "dist/mcp-server.js"), "substituted\n", 0o700);
+      },
+    ],
+    [
+      "retained npm tarball drift",
+      (value: ReturnType<typeof fixture>) => {
+        writeFileSync(value.tarball, "substituted tarball\n");
+      },
+    ],
+    [
+      "installed bundle inventory drift",
+      (value: ReturnType<typeof fixture>) => {
+        write(join(value.installedFactoryRoot, "dist/bundle-inventory.json"), "{}\n");
+      },
+    ],
+    [
+      "installed Factory bundle drift",
+      (value: ReturnType<typeof fixture>) => {
+        write(join(value.installedFactoryRoot, "dist/factory.js"), "substituted\n", 0o700);
       },
     ],
     [
@@ -287,6 +306,21 @@ describe("retained qualification install authority", () => {
       },
     ],
     [
+      "candidate CODEX_HOME substitution",
+      (value: ReturnType<typeof fixture>) => {
+        const other = join(value.root, "other-codex-home");
+        mkdirSync(other, { mode: 0o700 });
+        writeFileSync(
+          value.installReceipt,
+          readFileSync(value.installReceipt, "utf8").replace(
+            /^codexHome=.*$/m,
+            `codexHome=${other}`,
+          ),
+          { mode: 0o600 },
+        );
+      },
+    ],
+    [
       "uncommitted harness",
       (value: ReturnType<typeof fixture>) => {
         write(join(value.source, "scripts/harness.mjs"), "export const harness = false;\n");
@@ -303,6 +337,23 @@ describe("retained qualification install authority", () => {
       ),
     ).toThrow();
     expect(listPlugins).not.toHaveBeenCalled();
+  });
+
+  it("rejects a changed isolated plugin listing before qualifier mutation", () => {
+    const value = fixture();
+    const listPlugins = vi.fn(() => ({
+      installed: value.listed.installed.map((entry) => ({
+        ...entry,
+        version: "2.0.26",
+      })),
+    }));
+    expect(() =>
+      installedQualificationAuthority(
+        { FACTORY_QUALIFICATION_INSTALL_RECEIPT: value.installReceipt },
+        { sourceRoot: value.source, committedPaths: ["scripts/harness.mjs"], listPlugins },
+      ),
+    ).toThrow();
+    expect(listPlugins).toHaveBeenCalledOnce();
   });
 
   it("rejects foreign ownership authority before querying plugins", () => {

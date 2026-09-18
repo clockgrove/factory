@@ -22,7 +22,6 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -31,6 +30,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const sharedHarnessPaths = [
+  "scripts/verify-live-objective.mjs",
+  "scripts/qualification-model-accounting.mjs",
+  "scripts/qualification-receipts.mjs",
+  "scripts/qualification-merge-proof.mjs",
+];
 const localBackends = ["codex-sdk/local-worktree", "codex-cli/local-worktree"];
 const minimumGitHubQuota = 1_000;
 const minimumModelTokens = 250_000;
@@ -957,6 +962,40 @@ export async function main(qualification = {}) {
     return;
   }
   assert.equal(process.platform, "linux", "live Objective harness requires Linux");
+  const { installedQualificationAuthority, qualificationRuntimeEnvironment } = await import(
+    "./qualification-install-identity.mjs"
+  );
+  assert.equal(
+    process.env.FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT,
+    undefined,
+    "plugin-root selection was replaced by retained install receipt authority",
+  );
+  const candidate = installedQualificationAuthority(process.env, {
+    sourceRoot,
+    committedPaths: [...sharedHarnessPaths, ...(qualification.harnessPaths ?? [])],
+  });
+  const runtimeEnvironment = qualificationRuntimeEnvironment(process.env);
+  const pluginRoot = candidate.installedPluginRoot;
+  const manifest = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"));
+  const identity = candidate.pluginIdentity;
+  const artifact = candidate.pluginArtifact;
+  const installedCandidate = {
+    sourceCommit: candidate.candidateSourceCommit,
+    version: candidate.candidateVersion,
+    installReceiptIdentity: candidate.installReceiptIdentity,
+    inventoryIdentity: candidate.inventoryIdentity,
+    factoryArtifactIdentity: candidate.artifactIdentity,
+    mcpArtifactIdentity: candidate.mcpArtifactIdentity,
+    artifactAuthority: {
+      qualificationRoot: candidate.qualificationRoot,
+      pluginRoot,
+      codexHome: candidate.codexHome,
+    },
+    providerRuntime: {
+      home: runtimeEnvironment.HOME,
+      codexHome: runtimeEnvironment.CODEX_HOME,
+    },
+  };
   assert.equal(
     process.env.FACTORY_LIVE_OBJECTIVE_NUMBER,
     undefined,
@@ -996,48 +1035,11 @@ export async function main(qualification = {}) {
     origin === `https://github.com/${repository}` || origin === `git@github.com:${repository}`,
     "checkout origin differs from approved repository",
   );
-  const codexHome = realpathSync(join(homedir(), ".codex"));
-  if (process.env.CODEX_HOME)
-    assert.equal(
-      realpathSync(process.env.CODEX_HOME),
-      codexHome,
-      "unset non-Linux-home CODEX_HOME for installed qualification",
-    );
-  const listed = JSON.parse(run("codex", ["plugin", "list", "--json"], checkout));
-  const pluginRoot = realpathSync(
-    installedPluginPath({
-      listed,
-      codexHome,
-      requestedRoot: process.env.FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT?.trim(),
-    }),
-  );
-  assert.ok(
-    pluginRoot.startsWith(`${join(codexHome, "plugins", "cache")}${sep}`),
-    "use the plugin installed in this Codex home's cache",
-  );
-  assert.ok(
-    pluginRoot !== sourceRoot && !pluginRoot.startsWith(`${sourceRoot}${sep}`),
-    "development worktree is not an installation",
-  );
-  const manifest = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"));
-  const identity = installedIdentity({
-    manifest,
-    listed,
-    pluginRoot,
-    codexHome,
-    portable: JSON.parse(readFileSync(join(pluginRoot, "plugin.json"), "utf8")),
-    packageManifest: JSON.parse(readFileSync(join(pluginRoot, "package.json"), "utf8")),
-  });
-  const artifact = installedBundleIdentity(pluginRoot);
-  assert.equal(artifact.version, identity.version, "installed inventory version differs");
-  const candidateInventorySha256 = createHash("sha256")
-    .update(readFileSync(join(sourceRoot, "dist", "bundle-inventory.json")))
-    .digest("hex");
   const harness = {
-    sourceCommit: run("git", ["rev-parse", "HEAD"], sourceRoot),
-    sourceTreeClean:
-      run("git", ["status", "--porcelain", "--untracked-files=no"], sourceRoot) === "",
-    candidateInventorySha256,
+    sourceCommit: candidate.candidateSourceCommit,
+    sourceTreeClean: true,
+    candidateInventorySha256: candidate.installReceipt.bundleInventorySha256,
+    files: candidate.committedQualificationFiles,
   };
   const modelTokenCeiling =
     qualification.policy?.economics?.maxModelTokens ??
@@ -1120,6 +1122,7 @@ export async function main(qualification = {}) {
       fixturePathsAbsent,
     },
     installedArtifact: artifact,
+    installedCandidate,
     harness,
     pluginId: identity.pluginId,
     codexManifestVersion: identity.codexManifestVersion,
@@ -1153,16 +1156,12 @@ export async function main(qualification = {}) {
     }
   }
   const output = resolve(required("FACTORY_LIVE_OBJECTIVE_EVIDENCE"));
-  mkdirSync(output, { recursive: true, ...(qualification.privateEvidence ? { mode: 0o700 } : {}) });
-  if (qualification.privateEvidence) {
-    const directory = statSync(output);
-    assert.ok(
-      directory.isDirectory() &&
-        directory.uid === process.getuid() &&
-        (directory.mode & 0o077) === 0,
-      "regular qualification evidence directory must be owner-only",
-    );
-  }
+  mkdirSync(output, { recursive: true, mode: 0o700 });
+  const directory = statSync(output);
+  assert.ok(
+    directory.isDirectory() && directory.uid === process.getuid() && (directory.mode & 0o077) === 0,
+    "qualification evidence directory must be owner-only",
+  );
   const evidencePath = join(
     output,
     preflightOnly ? "qualification-preflight.json" : "objective-evidence.json",
@@ -1197,6 +1196,8 @@ export async function main(qualification = {}) {
     codexManifestVersion: identity.codexManifestVersion,
     pluginId: identity.pluginId,
     installedArtifact: artifact,
+    installedCandidate,
+    harnessFiles: candidate.committedQualificationFiles,
     preflight,
     policy,
     actor: { id: actor.id, login: actor.login },
@@ -1218,7 +1219,7 @@ export async function main(qualification = {}) {
     command: mcp.command,
     args: mcp.args.map((arg) => arg.replaceAll("${PLUGIN_ROOT}", pluginRoot)),
     cwd: checkout,
-    env: { ...process.env, GITHUB_TOKEN: token },
+    env: { ...runtimeEnvironment, GITHUB_TOKEN: token },
     stderr: "pipe",
   };
   const transport = new StdioClientTransport(

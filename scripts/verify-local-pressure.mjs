@@ -305,6 +305,14 @@ export function createPressureQualification(authority, env = process.env, port =
   };
   return {
     scope: "installed-local-explicit-regular-objective",
+    harnessPaths: [
+      "scripts/verify-local-pressure.mjs",
+      "scripts/local-pressure-resource.mjs",
+      "scripts/verify-local-scheduling.mjs",
+      "scripts/verify-local-faults.mjs",
+      "scripts/verify-regular-objective.mjs",
+      "scripts/qualification-sibling-refresh-proof.mjs",
+    ],
     policy: authority.policy,
     namespace: authority.namespace,
     privateEvidence: true,

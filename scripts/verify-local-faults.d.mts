@@ -23,6 +23,7 @@ export function isQuiescentFaultObjective(
   objective: number,
 ): boolean;
 export function privateEvidenceFile(path: string, value?: unknown): unknown;
+export function reservePrivateEvidenceFile(path: string): void;
 export function scopeUnit(identity: unknown): string;
 export function parseUnitObservation(
   unit: string,

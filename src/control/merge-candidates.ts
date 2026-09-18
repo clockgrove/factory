@@ -207,6 +207,12 @@ export class MergeCandidateCheckpointStore {
   ): Promise<MergeCandidateCheckpointRecord | null> {
     const observed = await this.load(record.identity);
     if (!observed) return null;
+    requireCheckpoint(
+      observed.ref === record.ref &&
+        observed.commitOid === record.commitOid &&
+        observed.blobOid === record.blobOid,
+      "published checkpoint differs from acknowledged record",
+    );
     requireCheckpoint(sameCandidate(observed, record), "conflicting immutable candidate");
     return observed;
   }

@@ -318,6 +318,32 @@ describe("immutable merge-candidate validation checkpoints", () => {
     await expect(f.manager.observePublished(record)).resolves.toEqual(record);
   });
 
+  it("rejects a different valid checkpoint observed after acknowledged publication", async () => {
+    const f = fixture();
+    const acknowledged = await f.manager.persist(f.args);
+    f.store.refs.delete(acknowledged.ref);
+    const replacement = await f.manager.persist({
+      ...f.args,
+      validation: rerun(f.args.validation, {
+        commands: [{ command: "npm test", exitCode: 0, durationMs: 6 }],
+      }),
+    });
+    expect(replacement.commitOid).not.toBe(acknowledged.commitOid);
+    expect(replacement.validation.digest).not.toBe(acknowledged.validation.digest);
+    expect(replacement.evidence.candidateArtifactDigest).toBe(
+      acknowledged.evidence.candidateArtifactDigest,
+    );
+    expect(replacement.evidence.candidateOutputTreeSha).toBe(
+      acknowledged.evidence.candidateOutputTreeSha,
+    );
+    expect(replacement.evidence.candidateValidationDigest).not.toBe(
+      acknowledged.evidence.candidateValidationDigest,
+    );
+    await expect(f.manager.observePublished(acknowledged)).rejects.toThrow(
+      /differs from acknowledged record/,
+    );
+  });
+
   it("preserves response-loss ambiguity while the created ref remains hidden", async () => {
     const f = fixture();
     f.store.hideCreatedRefReads = 1;

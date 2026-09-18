@@ -310,6 +310,14 @@ describe("immutable merge-candidate validation checkpoints", () => {
     expect(await f.manager.load(f.args.identity)).toEqual(record);
   });
 
+  it("requires an authenticated observation before downstream durable effects", async () => {
+    const f = fixture();
+    f.store.hideCreatedRefReads = 1;
+    const record = await f.manager.persist(f.args);
+    await expect(f.manager.observePublished(record)).resolves.toBeNull();
+    await expect(f.manager.observePublished(record)).resolves.toEqual(record);
+  });
+
   it("preserves response-loss ambiguity while the created ref remains hidden", async () => {
     const f = fixture();
     f.store.hideCreatedRefReads = 1;

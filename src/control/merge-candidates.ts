@@ -134,9 +134,13 @@ function parseCheckpoint(input: unknown): Checkpoint {
   assertNoSecretMaterial(JSON.stringify(value), "merge-candidate checkpoint");
   return value;
 }
-function sameCandidate(record: MergeCandidateCheckpointRecord, value: Checkpoint): boolean {
+function sameCandidate(
+  record: MergeCandidateCheckpointRecord,
+  value: Pick<Checkpoint, "identity" | "source" | "evidence" | "isolatedResource">,
+): boolean {
   return (
-    mergeCandidateIdentityDigest(record.identity) === value.identityDigest &&
+    mergeCandidateIdentityDigest(record.identity) ===
+      mergeCandidateIdentityDigest(value.identity) &&
     JSON.stringify(record.source) === JSON.stringify(value.source) &&
     record.evidence.candidateOutputTreeSha === value.evidence.candidateOutputTreeSha &&
     record.isolatedResource?.invocationOwnershipDigest ===
@@ -196,6 +200,15 @@ export class MergeCandidateCheckpointStore {
   ) {}
   load(identity: MergeCandidateIdentity): Promise<MergeCandidateCheckpointRecord | null> {
     return loadMergeCandidateCheckpoint(this.store, identity);
+  }
+  /** Authenticate a locally known successful publication before downstream durable effects. */
+  async observePublished(
+    record: MergeCandidateCheckpointRecord,
+  ): Promise<MergeCandidateCheckpointRecord | null> {
+    const observed = await this.load(record.identity);
+    if (!observed) return null;
+    requireCheckpoint(sameCandidate(observed, record), "conflicting immutable candidate");
+    return observed;
   }
   async persist(args: {
     lease: LeaseState;

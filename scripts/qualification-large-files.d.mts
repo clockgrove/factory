@@ -31,6 +31,7 @@ export interface LargeFileFixture {
   version: typeof LARGE_FILE_RECIPE_VERSION;
   id: string;
   namespace: string;
+  producedLfs: boolean;
   root: string;
   repository: string;
   baseSha: string;
@@ -77,11 +78,13 @@ export function largeFilePaths(namespace: string): LargeFilePaths;
 export function largeFileValidationRecipe(namespace: string): string;
 export function renderLargeFileRecipe(template: string, namespace: string): string;
 export function largeFileObjectiveBody(namespace: string): string;
+export function producedLfsObjectiveBody(namespace: string): string;
 export function createLargeFileFixture(input: {
   parent: string;
   namespace: string;
   sourceRepository?: string;
   baseSha?: string;
+  producedLfs?: boolean;
 }): LargeFileFixture;
 /** Offline fixture generation only: never a replacement for an installed worker. */
 export function writeLargeFileOutput(input: {
@@ -117,6 +120,12 @@ export function observeLargeFileTree(input: {
   fixture: LargeFileFixture;
   baseSha?: string;
   patch?: Uint8Array;
+}): LargeFileTreeObservation;
+export function observeLargeFilePatch(input: {
+  repository: string;
+  fixture: LargeFileFixture;
+  artifact: unknown;
+  patch: Uint8Array;
 }): LargeFileTreeObservation;
 export function assertLargeFileFinalTree(input: {
   fixture: LargeFileFixture;

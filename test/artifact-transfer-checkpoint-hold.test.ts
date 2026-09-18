@@ -15,7 +15,7 @@ vi.mock("../src/runtime/local-scope.js", () => ({
 }));
 import {
   artifactTransferRef,
-  type ArtifactTransferIntentCheckpoint,
+  type ArtifactTransferQualificationCheckpoint,
 } from "../src/control/artifact-transfers.js";
 import {
   ArtifactTransferQualificationHeldError,
@@ -79,14 +79,13 @@ async function fixture() {
     retained = 0,
     proved = 0;
   const controller = new AbortController();
-  const checkpoint: ArtifactTransferIntentCheckpoint = {
+  const checkpoint: ArtifactTransferQualificationCheckpoint = {
     identity,
     artifactDigest: "c".repeat(64),
-    payloadDigest: "d".repeat(64),
-    payloadBytes: 5 * 1024 * 1024 + 1,
-    payloadChunks: 2,
-    intentRef: `${artifactTransferRef(identity)}/intent`,
-    intentCommitSha: "e".repeat(40),
+    phase: "intent",
+    content: [{ digest: "d".repeat(64), bytes: 5 * 1024 * 1024 + 1, chunks: 2 }],
+    ref: `${artifactTransferRef(identity)}/intent`,
+    commitSha: "e".repeat(40),
     descriptorDigest: "f".repeat(64),
     proveRetained: async () => {
       retained++;
@@ -188,7 +187,8 @@ async function fixture() {
     hostIdentity: digest,
     producerPid: process.pid,
     producerStartTicks: "123",
-    minPayloadBytes: 5 * 1024 * 1024 + 1,
+    phase: "intent",
+    minContentBytes: 5 * 1024 * 1024 + 1,
     eligibilityDurationMs: 120_000,
     holdDurationMs: args.holdDurationMs,
   };
@@ -209,11 +209,14 @@ describe("one-shot oversized transfer checkpoint", () => {
   it("does nothing without opt-in, for inline output, or below the armed threshold", async () => {
     const f = await fixture();
     await holdArtifactTransferQualificationCheckpoint(f.args);
-    await f.armNow({ ...f.arm, minPayloadBytes: f.arm.minPayloadBytes + 1 });
+    await f.armNow({ ...f.arm, minContentBytes: f.arm.minContentBytes + 1 });
     await holdArtifactTransferQualificationCheckpoint(f.args);
     await holdArtifactTransferQualificationCheckpoint({
       ...f.args,
-      checkpoint: { ...f.args.checkpoint, payloadBytes: 10 },
+      checkpoint: {
+        ...f.args.checkpoint,
+        content: [{ ...f.args.checkpoint.content[0]!, bytes: 10 }],
+      },
     });
     expect(f.counts()).toEqual({ fenced: 0, retained: 0, proved: 0 });
     expect(state.observations).toBe(0);
@@ -230,10 +233,10 @@ describe("one-shot oversized transfer checkpoint", () => {
       protocol: "clockgrove.factory/artifact-transfer-checkpoint-reached",
       ...f.args.checkpoint.identity,
       artifactDigest: f.args.checkpoint.artifactDigest,
-      intentCommitSha: f.args.checkpoint.intentCommitSha,
+      commitSha: f.args.checkpoint.commitSha,
       descriptorDigest: f.args.checkpoint.descriptorDigest,
-      payloadBytes: f.args.checkpoint.payloadBytes,
-      payloadDigest: f.args.checkpoint.payloadDigest,
+      contentBytes: f.args.checkpoint.content[0]!.bytes,
+      content: f.args.checkpoint.content,
       terminal: {
         modelTokens: 1234,
         usageId: "worker-8-1",
@@ -251,6 +254,26 @@ describe("one-shot oversized transfer checkpoint", () => {
       ArtifactTransferQualificationHeldError,
     );
     expect(await readFile(`${f.path}.reached`, "utf8")).toBe(raw);
+  });
+  it("latches a produced-content ready checkpoint after its retained artifact is durable", async () => {
+    const f = await fixture();
+    f.args.checkpoint = {
+      ...f.args.checkpoint,
+      phase: "ready",
+      ref: `${artifactTransferRef(f.args.checkpoint.identity)}/ready`,
+    };
+    await f.armNow({ ...f.arm, phase: "ready" });
+    await expect(holdArtifactTransferQualificationCheckpoint(f.args)).rejects.toBeInstanceOf(
+      ArtifactTransferQualificationHeldError,
+    );
+    const witness = JSON.parse(await readFile(`${f.path}.reached`, "utf8"));
+    expect(witness).toMatchObject({
+      phase: "ready",
+      ref: f.args.checkpoint.ref,
+      commitSha: f.args.checkpoint.commitSha,
+      content: f.args.checkpoint.content,
+    });
+    expect(f.counts()).toEqual({ fenced: 2, retained: 1, proved: 1 });
   });
   it("samples the reach clock once so a later tick cannot cross eligibility", async () => {
     const f = await fixture();

@@ -5,11 +5,20 @@ import type {
 } from "./verify-local-checkpoint-restart.mjs";
 export type LargeFileCase =
   | "transfer-restart"
+  | "produced-lfs-restart"
   | "lfs-missing-tool"
   | "lfs-missing-object"
   | "scope"
   | "secret"
   | "symlink";
+export function assertProducedLfsPointerBytes(
+  receipt: { oid: string; size: number },
+  observed: Buffer,
+): { bytes: number; sha256: string };
+export function assertProducedLfsRemoteBytes(
+  receipt: { oid: string; size: number },
+  observed: Buffer,
+): { bytes: number; sha256: string };
 export interface LargeFileAuthority extends CheckpointAuthority {
   largeFile: { scenario: LargeFileCase; fixture: string; fixtureDigest: string };
 }
@@ -19,7 +28,7 @@ export interface LargeFilePort extends CheckpointPort {
   armTransfer(original: unknown): Promise<unknown>;
   transferProof(
     observation: unknown,
-    phase: "intent" | "ready",
+    phase: "intent" | "ready" | "direct",
     witness: unknown,
   ): Promise<unknown>;
 }

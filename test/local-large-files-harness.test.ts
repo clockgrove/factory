@@ -48,7 +48,7 @@ const env = {
   FACTORY_LARGE_FILE_EVIDENCE: "/tmp/private/result.json",
   FACTORY_LARGE_FILE_FIXTURE: "/tmp/private/fixture.json",
   FACTORY_LARGE_FILE_FIXTURE_SHA256: "a".repeat(64),
-  FACTORY_LARGE_FILE_ACK: `${repository}:${unit}:transfer-restart:start,create,arm-transfer-intent,activate,pause,restart,resume,stop`,
+  FACTORY_LARGE_FILE_ACK: `${repository}:${unit}:transfer-restart:start,create,arm-transfer-checkpoint,activate,pause,restart,resume,stop`,
 };
 const authority = largeFileAuthority(env)!;
 const original = {
@@ -188,7 +188,9 @@ function scenario() {
       armDigest: "f".repeat(64),
       workItem: 8,
       attempt: 1,
-      payloadBytes: 6 * 1024 * 1024,
+      phase: "intent",
+      content: [{ digest: "1".repeat(64), bytes: 6 * 1024 * 1024, chunks: 2 }],
+      contentBytes: 6 * 1024 * 1024,
       startedAt: common.at,
       eligibleUntil: new Date(
         Date.parse(common.at) + runPolicy.objectiveTimeoutMinutes * 60_000,
@@ -411,6 +413,43 @@ describe("installed large-file lifecycle authority", () => {
       rmSync(parent, { recursive: true, force: true });
     }
   });
+  it("grounds the produced LFS scenario in a fresh exact repository rule", () => {
+    const parent = mkdtempSync(join(tmpdir(), "factory-produced-lfs-objective-test-"));
+    try {
+      const prepared = createLargeFileFixture({
+        parent,
+        namespace: authority.namespace,
+        sourceRepository,
+        baseSha: sourceBaseSha,
+        producedLfs: true,
+      });
+      const descriptor = join(prepared.root, "fixture.json");
+      const producedAuthority = {
+        ...authority,
+        largeFile: {
+          scenario: "produced-lfs-restart" as const,
+          fixture: descriptor,
+          fixtureDigest: hash(readFileSync(descriptor)),
+        },
+      };
+      const extension = largeFileExtension(producedAuthority);
+      expect(extension.objectiveBody!(producedAuthority)).toContain("authenticated Git LFS upload");
+      const attributes = execFileSync(
+        "/usr/bin/git",
+        ["cat-file", "blob", `${prepared.baseSha}:${prepared.paths.attributes}`],
+        { cwd: prepared.repository, encoding: "utf8" },
+      );
+      expect(attributes).toContain(
+        "generated/qualification-audio.wav filter=lfs diff=lfs merge=lfs -text",
+      );
+      expect(largeFileTransferArm(producedAuthority, original, 7, prepared.baseSha)).toMatchObject({
+        phase: "ready",
+        minContentBytes: 5242881,
+      });
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  }, 30_000);
   it("does nothing without its own opt-in", async () => {
     expect(largeFileAuthority({ ...env, FACTORY_LOCAL_LARGE_FILES: undefined })).toBeNull();
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -438,6 +477,7 @@ describe("installed large-file lifecycle authority", () => {
   });
   it.each([
     "transfer-restart",
+    "produced-lfs-restart",
     "lfs-missing-tool",
     "lfs-missing-object",
     "scope",
@@ -472,7 +512,8 @@ describe("installed large-file lifecycle authority", () => {
       unit,
       activationRequestId: `${authority.namespace}-activate`,
       invocationId: original.invocationId,
-      minPayloadBytes: 5242881,
+      phase: "intent",
+      minContentBytes: 5242881,
       eligibilityDurationMs: 45 * 60_000,
       holdDurationMs: 600_000,
     });
@@ -531,6 +572,37 @@ describe("installed large-file lifecycle authority", () => {
     expect(f.port.armTransfer).toHaveBeenCalledOnce();
     expect(f.port.transferProof).toHaveBeenCalledTimes(2);
     expect(f.port.finalProof).toHaveBeenCalledOnce();
+  });
+  it("restarts from one produced LFS ready artifact without another attempt", async () => {
+    const f = scenario();
+    f.held.transferCheckpoint.phase = "ready";
+    expect(
+      await runLargeFileScenario(f.port as never, {
+        ...authority,
+        largeFile: { ...authority.largeFile, scenario: "produced-lfs-restart" },
+      }),
+    ).toMatchObject({ result: "passed", final: { integrated: 3 } });
+    expect(f.actions).toEqual([
+      "start",
+      "create",
+      "activate",
+      "pause",
+      "restart",
+      "resume",
+      "stop",
+    ]);
+    expect(f.port.transferProof).toHaveBeenNthCalledWith(
+      1,
+      f.held,
+      "direct",
+      f.held.transferCheckpoint,
+    );
+    expect(f.port.transferProof).toHaveBeenNthCalledWith(
+      2,
+      f.paused,
+      "direct",
+      f.held.transferCheckpoint,
+    );
   });
   it.each(["checkpoint", "takeover", "finalProof", "absence"] as const)(
     "never automatically retries or cleans up after uncertain %s",

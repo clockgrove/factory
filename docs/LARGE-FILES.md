@@ -169,15 +169,14 @@ local contracts only; they do not substitute for installed/provider execution ev
 of the local checkpoint qualifier. No opt-in means no actions. This is contributor qualification,
 not a user-facing runtime API or a claim that these scenarios have passed.
 
-The current runner requires a freshly generated version-2 fixture. Its committed test imports
-Vitest and every generated Objective names the repository-observed `npm test` validation command;
-older version-1 fixtures remain bound to their original evidence and are not reusable with this
-runner.
+The current runner requires a freshly generated fixture. Its committed test imports Vitest and
+every generated Objective names the repository-observed `npm test` validation command. Regenerate
+the fixture from the exact candidate for each case.
 
 Prepare each case in a fresh disposable private repository/namespace. The offline
 `createLargeFileFixture` export in `scripts/qualification-large-files.mjs` accepts an owned `parent`
 directory and `namespace`. Its standalone mode supports fixture unit tests, but an installed
-version-2 scenario also requires a local `sourceRepository` and its exact current default-branch
+scenario also requires a local `sourceRepository` and its exact current default-branch
 `baseSha`. The runner verifies that source parent and its committed Vitest npm recipe before creating
 an Objective. The generator creates a private `root/fixture.json`, a fresh `repository`, an exact
 child baseline commit, and two verified synthetic objects in that repository's standard LFS cache.
@@ -208,7 +207,7 @@ Set these explicit variables, then run `node scripts/verify-local-large-files.mj
 | --- | --- |
 | `FACTORY_LOCAL_LARGE_FILES` | `1` |
 | `FACTORY_QUALIFICATION_INSTALL_RECEIPT` | Exact owner-private retained-candidate receipt from the [fresh installation procedure](setup/local.md#detailed-installation-and-activation) |
-| `FACTORY_LARGE_FILE_CASE` | `transfer-restart`, `lfs-missing-tool`, `lfs-missing-object`, `scope`, `secret` or `symlink` |
+| `FACTORY_LARGE_FILE_CASE` | `transfer-restart`, `produced-lfs-restart`, `lfs-missing-tool`, `lfs-missing-object`, `scope`, `secret` or `symlink` |
 | `FACTORY_LARGE_FILE_PHASE` | `preflight` first; `exercise` only with accepted scenario authority |
 | `FACTORY_LARGE_FILE_REPOSITORY` / `FACTORY_LARGE_FILE_CHECKOUT` | Exact private `owner/repo` and canonical Linux-home checkout |
 | `FACTORY_LARGE_FILE_CONTROLLER_UNIT` | Exact installed controller for that repository/checkout |
@@ -220,7 +219,8 @@ Set these explicit variables, then run `node scripts/verify-local-large-files.mj
 
 Acknowledgements are `owner/repo:controller-unit:case:actions`, with these exact action suffixes:
 
-- `transfer-restart`: `start,create,arm-transfer-intent,activate,pause,restart,resume,stop`
+- `transfer-restart`: `start,create,arm-transfer-checkpoint,activate,pause,restart,resume,stop`
+- `produced-lfs-restart`: `start,create,arm-transfer-checkpoint,activate,pause,restart,resume,stop`
 - Either `lfs-` case: `create,compile-refusal`
 - `scope`, `secret`, `symlink`: `start,create,activate,stop`
 
@@ -244,6 +244,17 @@ permission to upload or rerun. The runner independently verifies intent→ready 
 reachable chunk bytes, original session/accounting, exact owned resource absence, all merged patch
 trees, binary manifests, unchanged Git LFS pointers and final behavior in a credential-free,
 network-isolated read-only fixture. Conservative native accounting remains labelled as such.
+
+The produced-LFS case uses a separate fresh fixture whose committed `.gitattributes` selects the
+generated payload. It holds the controller after authenticated upload, remote read verification,
+the immutable LFS receipt, raw content transfer, and direct artifact-ready checkpoint are durable,
+but before the supervisor receives success. Restart must adopt that exact ready artifact without a
+second worker, upload, accounting entry, or publication. After integration, the runner reads the Git
+pointer and authenticated remote object independently and rechecks their exact size and digest.
+While the controller is held and before restart, the runner independently applies the pointer patch,
+checks the exact worker scope, regular-file mode, generated classification and credential scan, then
+performs its own authenticated remote LFS fetch and compares those bytes with the retained worker
+content. The later postpublication pointer/object read is a separate proof.
 
 Negative cases use independent fresh fixtures. Missing-tool preparation uses a controlled process
 PATH without `git-lfs`; missing-object preparation leaves a named synthetic cache object absent in

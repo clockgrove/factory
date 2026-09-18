@@ -33,7 +33,9 @@ import {
   LARGE_FILE_VALIDATION_COMMAND,
   LARGE_FILE_VALIDATION_SCRIPT,
   largeFileObjectiveBody,
+  producedLfsObjectiveBody,
   largeFileValidationRecipe,
+  observeLargeFilePatch,
   observeLargeFileTree,
   largeFilePaths,
   assertLargeFileFinalTree,
@@ -54,6 +56,7 @@ const canonical = (value) =>
       : JSON.stringify(value);
 const cases = new Set([
   "transfer-restart",
+  "produced-lfs-restart",
   "lfs-missing-tool",
   "lfs-missing-object",
   "scope",
@@ -76,12 +79,11 @@ export function largeFileAuthority(env) {
   const scenario = env.FACTORY_LARGE_FILE_CASE;
   assert.ok(cases.has(scenario), "an explicit supported large-file case is required");
   assert.ok(env.FACTORY_LARGE_FILE_MAX_MODEL_TOKENS, "explicit scenario allowance required");
-  const actions =
-    scenario === "transfer-restart"
-      ? "start,create,arm-transfer-intent,activate,pause,restart,resume,stop"
-      : scenario.startsWith("lfs-")
-        ? "create,compile-refusal"
-        : "start,create,activate,stop";
+  const actions = ["transfer-restart", "produced-lfs-restart"].includes(scenario)
+    ? "start,create,arm-transfer-checkpoint,activate,pause,restart,resume,stop"
+    : scenario.startsWith("lfs-")
+      ? "create,compile-refusal"
+      : "start,create,activate,stop";
   if (env.FACTORY_LARGE_FILE_PHASE === "exercise")
     assert.equal(
       env.FACTORY_LARGE_FILE_ACK,
@@ -153,7 +155,7 @@ export function transferArmPath(unit, invocationId, uid = process.getuid()) {
 }
 
 export function largeFileTransferArm(authority, producer, objective, baseSha) {
-  assert.equal(authority.largeFile.scenario, "transfer-restart");
+  assert.ok(["transfer-restart", "produced-lfs-restart"].includes(authority.largeFile.scenario));
   const objectiveTimeoutMinutes = authority.policy.objectiveTimeoutMinutes,
     workItemTimeoutMinutes = authority.policy.workItemTimeoutMinutes;
   assert.ok(Number.isInteger(objectiveTimeoutMinutes) && objectiveTimeoutMinutes >= 1);
@@ -170,7 +172,8 @@ export function largeFileTransferArm(authority, producer, objective, baseSha) {
     hostIdentity: producer.hostIdentity,
     producerPid: producer.pid,
     producerStartTicks: producer.startTicks,
-    minPayloadBytes: 5 * 1024 * 1024 + 1,
+    phase: authority.largeFile.scenario === "produced-lfs-restart" ? "ready" : "intent",
+    minContentBytes: 5 * 1024 * 1024 + 1,
     eligibilityDurationMs: objectiveTimeoutMinutes * 60_000,
     holdDurationMs: workItemTimeoutMinutes * 60_000,
   };
@@ -204,7 +207,11 @@ export function transferHoldReady(observation, authority, arm) {
   ])
     assert.equal(witness[key], reserved[key]);
   assert.deepEqual(witness.batch, reserved.localScopeBatch);
-  assert.ok(witness.payloadBytes > 5 * 1024 * 1024);
+  assert.equal(
+    witness.phase,
+    authority.largeFile.scenario === "produced-lfs-restart" ? "ready" : "intent",
+  );
+  assert.ok(witness.contentBytes > 5 * 1024 * 1024);
   const started = one(events.filter((event) => event.event === "AttemptStarted"));
   assert.equal(started.workItem, reserved.workItem);
   assert.equal(started.attempt, 1);
@@ -258,7 +265,7 @@ export async function runLargeFileScenario(port, authority) {
   await port.action("start");
   const original = await port.controller("active");
   await port.action("create");
-  if (scenario !== "transfer-restart") {
+  if (!["transfer-restart", "produced-lfs-restart"].includes(scenario)) {
     await port.action("activate");
     const stoppedRun = await port.poll("expected-artifact-refusal", (value) =>
       value.receipts.some(({ event }) => terminal.has(event.event)),
@@ -279,7 +286,8 @@ export async function runLargeFileScenario(port, authority) {
   const held = await port.poll("transfer-intent-hold", (value) =>
     transferHoldReady(value, authority, arm),
   );
-  const intent = await port.transferProof(held, "intent", held.transferCheckpoint);
+  const checkpointPhase = scenario === "produced-lfs-restart" ? "direct" : "intent";
+  const intent = await port.transferProof(held, checkpointPhase, held.transferCheckpoint);
   const stable = held.receipts
     .map(({ event }) => event)
     .filter((event) => ["attempt", "budget", "graph"].includes(event.kind));
@@ -305,7 +313,11 @@ export async function runLargeFileScenario(port, authority) {
       facts.stable.some((candidate) => canonical(candidate) === canonical(event)),
       "original receipt changed during transfer recovery",
     );
-  const ready = await port.transferProof(paused, "ready", held.transferCheckpoint);
+  const ready = await port.transferProof(
+    paused,
+    scenario === "produced-lfs-restart" ? "direct" : "ready",
+    held.transferCheckpoint,
+  );
   assert.equal(ready.artifactDigest, intent.artifactDigest);
   assert.equal(ready.intentOid, intent.intentOid);
   const scopes = await port.absence(paused, [original, replacement]);
@@ -358,6 +370,11 @@ function checkedFixture(authority) {
   const fixture = document.value;
   assert.equal(fixture.version, LARGE_FILE_RECIPE_VERSION);
   assert.equal(fixture.namespace, authority.namespace);
+  assert.equal(
+    fixture.producedLfs,
+    authority.largeFile.scenario === "produced-lfs-restart",
+    "fixture LFS output rule does not match the selected scenario",
+  );
   assert.deepEqual(fixture.paths, largeFilePaths(authority.namespace));
   assert.match(fixture.baseSha, /^[a-f0-9]{40}$/);
   assert.match(fixture.baseTreeSha, /^[a-f0-9]{40}$/);
@@ -385,7 +402,10 @@ function checkedFixture(authority) {
 function objectiveBody(authority) {
   const fixture = checkedFixture(authority);
   const scenario = authority.largeFile.scenario;
-  let body = largeFileObjectiveBody(authority.namespace);
+  let body =
+    scenario === "produced-lfs-restart"
+      ? producedLfsObjectiveBody(authority.namespace)
+      : largeFileObjectiveBody(authority.namespace);
   if (["scope", "secret", "symlink"].includes(scenario)) {
     body =
       `Exercise the committed bounded negative-artifact fixture for ${scenario}. ` +
@@ -455,7 +475,7 @@ function verifyBaseline({ authority, evidence, command }) {
   assert.equal(
     sourcePackageJson.scripts?.test,
     "vitest run",
-    "version-2 large-file fixture requires the committed Vitest npm test recipe",
+    "large-file fixture requires the committed Vitest npm test recipe",
   );
   assert.equal(sourcePackageJson.scripts[LARGE_FILE_VALIDATION_SCRIPT], undefined);
   const expectedPackageJson = structuredClone(sourcePackageJson);
@@ -597,6 +617,7 @@ function readOnlyMirror(context, shas) {
   };
   for (const args of [
     ["init", "--quiet"],
+    ["remote", "add", "origin", `https://github.com/${authority.repository}.git`],
     [
       "-c",
       "core.hooksPath=/dev/null",
@@ -623,7 +644,157 @@ function readOnlyMirror(context, shas) {
   return root;
 }
 
-function verifyFinalBehavior(context, fixture, repository, commitSha) {
+export function assertProducedLfsPointerBytes(receipt, observed) {
+  assert.ok(Buffer.isBuffer(observed));
+  const pointer = Buffer.from(
+    `version https://git-lfs.github.com/spec/v1\noid sha256:${receipt.oid}\nsize ${receipt.size}\n`,
+  );
+  assert.ok(observed.equals(pointer), "published LFS pointer identity differs");
+  return { bytes: pointer.length, sha256: hash(pointer) };
+}
+
+export function assertProducedLfsRemoteBytes(receipt, observed) {
+  assert.ok(Buffer.isBuffer(observed));
+  assert.equal(observed.length, receipt.size, "authenticated LFS byte count differs");
+  assert.equal(hash(observed), receipt.oid, "authenticated LFS digest differs");
+  return { bytes: observed.length, sha256: hash(observed) };
+}
+
+function fetchProducedLfsObject(context, repository, receipt, stage) {
+  assert.equal(context.authority.largeFile.scenario, "produced-lfs-restart");
+  assert.match(receipt.oid, /^[a-f0-9]{64}$/);
+  assert.ok(Number.isSafeInteger(receipt.size) && receipt.size > 5 * 1024 * 1024);
+  assert.ok(["prepublication", "postpublication"].includes(stage));
+  const token = context.command("gh", ["auth", "token"], context.authority.checkout);
+  const environment = {
+    PATH: process.env.PATH,
+    HOME: repository,
+    LANG: "C.UTF-8",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_LFS_SKIP_SMUDGE: "1",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+    GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+  };
+  const fetched = spawnSync(
+    "git",
+    ["-c", "core.hooksPath=/dev/null", "lfs", "fetch", "--object-id", "origin", receipt.oid],
+    {
+      cwd: repository,
+      env: environment,
+      encoding: "utf8",
+      timeout: 120000,
+      maxBuffer: 64 * 1024,
+    },
+  );
+  assert.equal(fetched.status, 0, "authenticated Git LFS read-back failed");
+  const path = join(
+    repository,
+    ".git",
+    "lfs",
+    "objects",
+    receipt.oid.slice(0, 2),
+    receipt.oid.slice(2, 4),
+    receipt.oid,
+  );
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = fstatSync(fd);
+    assert.ok(info.isFile() && info.size === receipt.size);
+    const bytes = Buffer.alloc(info.size + 1);
+    assert.equal(readSync(fd, bytes, 0, bytes.length, 0), info.size);
+    const raw = bytes.subarray(0, info.size);
+    const remote = assertProducedLfsRemoteBytes(receipt, raw);
+    return {
+      bytes: raw,
+      evidence: {
+        path: receipt.path,
+        oid: receipt.oid,
+        size: receipt.size,
+        receiptDigest: receipt.digest,
+        receiptRef: receipt.receiptRef,
+        transferRef: receipt.rawTransfer.ref,
+        remoteDigest: receipt.remoteDigest,
+        toolVersion: receipt.toolVersion,
+        uploadOutcome: receipt.uploadOutcome,
+        readVerified: receipt.readVerified,
+        remote,
+        authenticatedReadBack: `${stage}-exact-bytes`,
+      },
+    };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function readBackProducedLfs(context, repository, commitSha, receipt) {
+  const observedPointer = spawnSync(
+    "git",
+    ["-c", "core.hooksPath=/dev/null", "cat-file", "blob", `${commitSha}:${receipt.path}`],
+    {
+      cwd: repository,
+      encoding: null,
+      timeout: 15000,
+      maxBuffer: 1024 * 1024,
+      env: {
+        PATH: process.env.PATH,
+        HOME: repository,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_NO_LAZY_FETCH: "1",
+        GIT_LFS_SKIP_SMUDGE: "1",
+      },
+    },
+  );
+  assert.equal(observedPointer.status, 0, "published LFS pointer is unreadable");
+  const pointer = assertProducedLfsPointerBytes(receipt, observedPointer.stdout);
+  const result = fetchProducedLfsObject(context, repository, receipt, "postpublication");
+  result.evidence.pointer = pointer;
+  return result;
+}
+
+function proveProducedLfsBeforePublication(context, fixture, transfer) {
+  assert.equal(transfer.summary.phase, "direct");
+  assert.equal(transfer.summary.continuation, "retained-ready-checkpoint");
+  assert.equal(transfer.artifact.lfsObjects?.length, 1);
+  const receipt = transfer.artifact.lfsObjects[0];
+  const observation = observeLargeFilePatch({
+    repository: fixture.repository,
+    fixture,
+    artifact: transfer.artifact,
+    patch: transfer.patch,
+  });
+  const artifact = assertLargeFileArtifact({
+    fixture,
+    artifact: transfer.artifact,
+    observation,
+    patch: transfer.patch,
+    phase: "payload",
+  });
+  const repository = readOnlyMirror(context, [fixture.baseSha]);
+  const remote = fetchProducedLfsObject(context, repository, receipt, "prepublication");
+  const retained = Buffer.from(transfer.proof.lfs[0].rawBase64, "base64");
+  assert.ok(remote.bytes.equals(retained), "remote LFS bytes differ from retained worker bytes");
+  return {
+    observation,
+    artifact,
+    remote: remote.evidence,
+    retained: { bytes: retained.length, sha256: hash(retained) },
+    attempt: {
+      runId: transfer.summary.runId,
+      workItem: transfer.summary.workItem,
+      attempt: transfer.summary.attempt,
+      artifactDigest: transfer.summary.artifactDigest,
+      terminalOid: transfer.summary.terminalOid,
+    },
+    boundary: "held-before-attempt-success-validation-or-publication",
+  };
+}
+
+function verifyFinalBehavior(context, fixture, repository, commitSha, producedLfsBytes) {
   const root = mkdtempSync(join(dirname(context.authority.evidence), "large-file-final-behavior-"));
   for (const file of [...fixture.baseline, ...fixture.expected]) {
     assert.ok(file.path.startsWith(`${fixture.paths.prefix}/`));
@@ -646,8 +817,14 @@ function verifyFinalBehavior(context, fixture, repository, commitSha) {
       },
     );
     assert.equal(result.status, 0);
-    assert.equal(result.stdout.length, file.bytes);
-    assert.equal(hash(result.stdout), file.digest);
+    const content =
+      fixture.producedLfs && file.path === fixture.paths.payload ? producedLfsBytes : result.stdout;
+    assert.ok(content, "produced LFS behavior bytes unavailable");
+    assert.equal(content.length, file.bytes);
+    assert.equal(hash(content), file.digest);
+    if (!(fixture.producedLfs && file.path === fixture.paths.payload)) {
+      assert.ok(result.stdout.equals(content));
+    }
     const path = join(root, file.path);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const fd = openSync(
@@ -656,7 +833,7 @@ function verifyFinalBehavior(context, fixture, repository, commitSha) {
       file.mode === "100755" ? 0o755 : 0o644,
     );
     try {
-      writeSync(fd, result.stdout);
+      writeSync(fd, content);
     } finally {
       closeSync(fd);
     }
@@ -734,13 +911,16 @@ export function largeFileExtension(authority) {
       fixture = checkedFixture(authority);
       const { port, evidence, save, request } = context;
       const readyProofs = new Map();
-      let priorIntent;
+      let priorIntent, priorDirect;
       const stage = (value) => {
         evidence.largeFileStage = value;
         save();
       };
       const retainedProof = (value, label) => {
-        const path = join(dirname(authority.evidence), `${authority.namespace}-${label}.json`);
+        const path = join(
+          dirname(authority.evidence),
+          `${authority.namespace}-${label}-${evidence.largeFileTransferProofs?.length ?? 0}.json`,
+        );
         const saved = exclusiveJson(path, value.proof);
         (evidence.largeFileTransferProofs ??= []).push({ ...saved, summary: value.summary });
         save();
@@ -752,10 +932,29 @@ export function largeFileExtension(authority) {
           phase,
           ...(witness ? { witness } : {}),
           ...(phase === "ready" && witness ? { priorIntent: priorIntent.proof } : {}),
+          ...(phase === "direct" && witness && priorDirect
+            ? { priorDirect: priorDirect.proof }
+            : {}),
         });
+        if (phase === "direct" && witness && !priorDirect) {
+          assert.equal(
+            evidence.producedLfsPrepublication,
+            undefined,
+            "prepublication LFS proof must not be repeated",
+          );
+          evidence.producedLfsPrepublication = proveProducedLfsBeforePublication(
+            context,
+            fixture,
+            value,
+          );
+          save();
+        }
         retainedProof(value, `${phase}-${workItem}`);
         if (phase === "intent") priorIntent = value;
-        else readyProofs.set(workItem, value);
+        else {
+          if (phase === "direct" && witness && !priorDirect) priorDirect = value;
+          readyProofs.set(workItem, value);
+        }
         return value;
       };
       return {
@@ -769,7 +968,9 @@ export function largeFileExtension(authority) {
           return createLargeFileRefusalPorts(context, fixture).artifactRefusal(observation);
         },
         async armTransfer(original) {
-          assert.equal(authority.largeFile.scenario, "transfer-restart");
+          assert.ok(
+            ["transfer-restart", "produced-lfs-restart"].includes(authority.largeFile.scenario),
+          );
           assert.ok(!evidence.transferArm, "uncertain transfer arm may not be repeated");
           await port.controller("active", original);
           const path = transferArmPath(original.unit, original.invocationId);
@@ -796,7 +997,7 @@ export function largeFileExtension(authority) {
             digest: hash(bytes),
             requestedAt: new Date().toISOString(),
           };
-          stage("arm-transfer-intent");
+          stage(`arm-transfer-${arm.phase}`);
           const fd = openSync(
             path,
             constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
@@ -843,11 +1044,16 @@ export function largeFileExtension(authority) {
           ]);
           evidence.largeFileGitEvidence = { repository, finalSha, fixtureBase: evidence.base };
           save();
+          let producedLfsArtifact;
           for (const [index, publication] of publications.entries()) {
             const phase = ["payload", "metadata", "join"][index];
+            const transferPhase =
+              phase === "payload" && authority.largeFile.scenario === "transfer-restart"
+                ? "ready"
+                : "direct";
             const transfer =
               readyProofs.get(publication.workItem) ??
-              (await verifyTransfer(observation, "ready", undefined, publication.workItem));
+              (await verifyTransfer(observation, transferPhase, undefined, publication.workItem));
             assert.equal(transfer.artifact.baseSha, publication.baseSha);
             assert.equal(transfer.artifact.digest, transfer.summary.artifactDigest);
             const observed = observeLargeFileTree({
@@ -864,6 +1070,7 @@ export function largeFileExtension(authority) {
               patch: transfer.patch,
               phase,
             });
+            if (phase === "payload" && fixture.producedLfs) producedLfsArtifact = transfer.artifact;
             (evidence.largeFileArtifactProofs ??= []).push({
               publication,
               observation: observed,
@@ -876,8 +1083,20 @@ export function largeFileExtension(authority) {
             fixture,
             observation: finalTree,
           });
+          let producedLfsBytes;
+          if (fixture.producedLfs) {
+            assert.equal(producedLfsArtifact?.lfsObjects?.length, 1);
+            const readBack = readBackProducedLfs(
+              context,
+              repository,
+              finalSha,
+              producedLfsArtifact.lfsObjects[0],
+            );
+            producedLfsBytes = readBack.bytes;
+            evidence.producedLfs = readBack.evidence;
+          }
           save();
-          verifyFinalBehavior(context, fixture, repository, finalSha);
+          verifyFinalBehavior(context, fixture, repository, finalSha, producedLfsBytes);
           assert.equal(checkedFixture(authority).baseSha, fixture.baseSha);
           stage("final-large-file-proof-complete");
         },

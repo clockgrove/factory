@@ -35,14 +35,13 @@ const IdentitySchema = z
   .strict();
 export type ArtifactTransferIdentity = z.infer<typeof IdentitySchema>;
 /** Internal qualification seam. No checkpoint can authorize execution or replace bytes. */
-export interface ArtifactTransferIntentCheckpoint {
+export interface ArtifactTransferQualificationCheckpoint {
   identity: ArtifactTransferIdentity;
   artifactDigest: string;
-  payloadDigest: string;
-  payloadBytes: number;
-  payloadChunks: number;
-  intentRef: string;
-  intentCommitSha: string;
+  phase: "intent" | "ready";
+  content: Array<{ digest: string; bytes: number; chunks: number }>;
+  ref: string;
+  commitSha: string;
   descriptorDigest: string;
   proveRetained(): Promise<void>;
 }
@@ -475,7 +474,17 @@ export async function resumeArtifactTransfer(args: {
   assertCurrent: () => Promise<void>;
 }): Promise<NormalizedArtifact | null> {
   const ready = await readDescriptor(args.store, args.identity, "ready");
-  if (ready) return recoverArtifactTransfer(args);
+  if (ready) {
+    const artifact = await recoverArtifactTransfer(args);
+    const root = localDescriptorRoot(args.identity);
+    try {
+      await assertLocalDescriptorRoot(root);
+      await rm(root, { recursive: true, force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    return artifact;
+  }
   const intent = await readDescriptor(args.store, args.identity, "intent");
   if (!intent) {
     // Cache supplies producer bytes, never attempt/host authority: caller must freshly authorize this exact packet and reservation.
@@ -535,7 +544,7 @@ export async function persistArtifactTransfer(args: {
   allowedPaths: string[];
   assertCurrent: () => Promise<void>;
   /** Fresh collection only; resumeArtifactTransfer deliberately never supplies this callback. */
-  afterIntent?: (checkpoint: ArtifactTransferIntentCheckpoint) => Promise<void>;
+  afterCheckpoint?: (checkpoint: ArtifactTransferQualificationCheckpoint) => Promise<void>;
 }): Promise<{ ref: string; commitSha: string; artifactDigest: string; lifecycle: "retained" }> {
   const artifact = verifyArtifact(args.artifact);
   assertArtifactScope(artifact, args.allowedPaths);
@@ -631,6 +640,37 @@ export async function persistArtifactTransfer(args: {
   };
   if (direct) {
     const ready = await save("ready", []);
+    if (artifact.lfsObjects?.length && args.afterCheckpoint) {
+      await args.afterCheckpoint({
+        identity,
+        artifactDigest: artifact.digest,
+        phase: "ready",
+        content: artifact.lfsObjects.map((receipt) => ({
+          digest: receipt.oid,
+          bytes: receipt.size,
+          chunks: receipt.payload.chunks.length,
+        })),
+        ref: ready.ref,
+        commitSha: ready.oid,
+        descriptorDigest: sha256(bytes),
+        proveRetained: async () => {
+          await args.assertCurrent();
+          const local = await readLocalDescriptor(identity);
+          const observed = await readDescriptor(args.store, identity, "ready");
+          if (
+            !local ||
+            JSON.stringify(local) !== JSON.stringify(descriptor) ||
+            !observed ||
+            observed.oid !== ready.oid ||
+            JSON.stringify(observed.descriptor) !== JSON.stringify(descriptor) ||
+            !(await lfsRawRecoveryCopiesAvailable(args.store, artifact))
+          )
+            throw new Error(
+              "qualification requires exact retained artifact and complete LFS content transfers",
+            );
+        },
+      });
+    }
     await assertLocalDescriptorRoot(localDescriptorRoot(identity));
     await rm(localDescriptorRoot(identity), { recursive: true, force: true });
     return {
@@ -644,15 +684,20 @@ export async function persistArtifactTransfer(args: {
   // Reuse only exact bytes verified through the published intent. Historical
   // descriptors may serialize differently; their ready message binds fresh bytes.
   if (intent.descriptorOid === gitBlobOid(bytes)) reusableDescriptorOid = intent.descriptorOid;
-  if (artifact.payload && args.afterIntent)
-    await args.afterIntent({
+  if (artifact.payload && args.afterCheckpoint)
+    await args.afterCheckpoint({
       identity,
       artifactDigest: artifact.digest,
-      payloadDigest: artifact.payload.digest,
-      payloadBytes: artifact.payload.bytes,
-      payloadChunks: artifact.payload.chunks.length,
-      intentRef: intent.ref,
-      intentCommitSha: intent.oid,
+      phase: "intent",
+      content: [
+        {
+          digest: artifact.payload.digest,
+          bytes: artifact.payload.bytes,
+          chunks: artifact.payload.chunks.length,
+        },
+      ],
+      ref: intent.ref,
+      commitSha: intent.oid,
       descriptorDigest: sha256(bytes),
       proveRetained: async () => {
         await args.assertCurrent();

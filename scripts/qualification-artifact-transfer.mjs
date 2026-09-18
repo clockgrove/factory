@@ -53,9 +53,26 @@ const integer = (value, min, max) =>
     "integer exceeds proof bound",
   );
 const exact = (value, names) => assert.deepEqual(Object.keys(value).sort(), [...names].sort());
+const secretPatterns = [
+  /(?:gh[opurs]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})/,
+  /sk-[A-Za-z0-9_-]{20,}/,
+  /(?:AKIA|ASIA)[A-Z0-9]{16}/,
+  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
+  /authorization\s*:\s*(?:bearer|basic)\s+\S+/i,
+];
 const same = (left, right, fields = keys) => {
   for (const key of fields) assert.equal(left[key], right[key], `original ${key} binding differs`);
 };
+export function assertNoProducedLfsSecrets(raw) {
+  assert.ok(Buffer.isBuffer(raw));
+  const text = raw.toString("latin1");
+  assert.equal(
+    secretPatterns.some((pattern) => pattern.test(text)),
+    false,
+    "retained LFS content contains suspected credential bytes",
+  );
+  return true;
+}
 function budgetIdentity(event, reserved) {
   same(event, reserved, ["objective", "workItem", "attempt", "runId"]);
   // Ordinary recorder budgets omit epoch/policy; conservative recovery receipts carry them.
@@ -277,7 +294,7 @@ function session(events, authority, proof) {
   assert.ok(worker.sequence > started.sequence);
   if (worker.reportedModelUsage !== undefined)
     assert.deepEqual(worker.reportedModelUsage, terminal.usage);
-  return { ...refs, start, reserved, started, terminal, binding, worker };
+  return { ...refs, start, reserved, started, terminal, binding, packet, worker };
 }
 function descriptor(proof, ref, parents, identity, phase, externalRequired = true) {
   const value = assertQualificationCheckpoint(
@@ -291,13 +308,17 @@ function descriptor(proof, ref, parents, identity, phase, externalRequired = tru
   assert.equal(value.retention, "repository-audit");
   const artifact = value.artifact,
     payload = artifact.payload,
-    manifest = artifact.fileManifest;
+    manifest = artifact.fileManifest,
+    lfsObjects = artifact.lfsObjects ?? [];
   assert.equal(artifact.protocol, "clockgrove.factory/artifact");
   assert.equal(artifact.outcome, "succeeded");
   assert.equal(artifact.baseSha, identity.baseSha);
   digest(artifact.digest);
-  if (externalRequired || payload)
-    assert.ok(payload && manifest, "large-file proof requires externalized payload and manifest");
+  if (externalRequired || payload || lfsObjects.length)
+    assert.ok(
+      manifest && (payload || lfsObjects.length),
+      "large-file proof requires retained content and manifest",
+    );
   let normalizedPayload;
   if (payload) {
     exact(payload, ["kind", "digest", "bytes", "chunks"]);
@@ -425,9 +446,87 @@ function descriptor(proof, ref, parents, identity, phase, externalRequired = tru
       files,
     };
   }
+  const normalizedLfsObjects = lfsObjects.map((receipt) => {
+    exact(receipt, [
+      "protocol",
+      "path",
+      "mode",
+      "oid",
+      "size",
+      "assignmentDigest",
+      "payload",
+      "rawTransfer",
+      "toolVersion",
+      "remoteDigest",
+      "uploadOutcome",
+      "readVerified",
+      "receiptRef",
+      "digest",
+    ]);
+    assert.equal(receipt.protocol, "clockgrove.factory/lfs-object-receipt");
+    assert.ok(["100644", "100755"].includes(receipt.mode));
+    digest(receipt.oid);
+    digest(receipt.assignmentDigest);
+    digest(receipt.remoteDigest);
+    digest(receipt.digest);
+    integer(receipt.size, 1, 100_000_000);
+    assert.equal(receipt.readVerified, true);
+    assert.ok(["uploaded", "already-present"].includes(receipt.uploadOutcome));
+    assert.ok(typeof receipt.toolVersion === "string" && receipt.toolVersion.length <= 200);
+    const raw = receipt.rawTransfer;
+    exact(raw, ["identity", "ref", "intentCommit", "readyCommit"]);
+    exact(raw.identity, [
+      "domain",
+      "repository",
+      "objective",
+      "baseSha",
+      "requestId",
+      "subjectDigest",
+    ]);
+    assert.equal(raw.identity.domain, "worker-artifact");
+    assert.equal(raw.identity.repository.toLowerCase(), identity.repository);
+    assert.equal(raw.identity.objective, identity.objective);
+    assert.equal(raw.identity.baseSha, identity.baseSha);
+    assert.equal(raw.identity.subjectDigest, receipt.oid);
+    sha(raw.intentCommit);
+    sha(raw.readyCommit);
+    assert.equal(receipt.payload.kind, "content-chunks");
+    assert.equal(receipt.payload.digest, receipt.oid);
+    assert.equal(receipt.payload.bytes, receipt.size);
+    assert.ok(receipt.payload.chunks.length > 0 && receipt.payload.chunks.length <= 64);
+    for (const chunk of receipt.payload.chunks) {
+      exact(chunk, ["digest", "bytes"]);
+      digest(chunk.digest);
+      integer(chunk.bytes, 1, MAX_CHUNK);
+    }
+    const pointer = Buffer.from(
+      `version https://git-lfs.github.com/spec/v1\noid sha256:${receipt.oid}\nsize ${receipt.size}\n`,
+    );
+    const file = manifest?.files.find((candidate) => candidate.path === receipt.path);
+    assert.ok(file, "LFS receipt lacks its pointer manifest entry");
+    assert.equal(file.mode, receipt.mode);
+    assert.equal(file.bytes, pointer.length);
+    assert.equal(file.digest, hash(pointer));
+    const assignment = hash(
+      JSON.stringify({ baseSha: identity.baseSha, path: receipt.path, filter: "lfs" }),
+    );
+    assert.equal(receipt.assignmentDigest, assignment);
+    const transferIdentity = { ...raw.identity, repository: raw.identity.repository.toLowerCase() };
+    assert.equal(
+      raw.ref,
+      `refs/clockgrove-factory/content-transfers/${hash(JSON.stringify(transferIdentity))}`,
+    );
+    const { digest: receiptDigest, ...core } = receipt;
+    assert.equal(receiptDigest, hash(JSON.stringify(core)));
+    return receipt;
+  });
   const content =
-    normalizedPayload || normalizedManifest
-      ? `\0content\0${JSON.stringify({ ...(normalizedPayload ? { payload: normalizedPayload } : {}), ...(normalizedManifest ? { fileManifest: normalizedManifest } : {}) })}`
+    normalizedPayload || normalizedManifest || normalizedLfsObjects.length
+      ? `\0content\0${JSON.stringify({
+          ...(normalizedPayload ? { payload: normalizedPayload } : {}),
+          ...(normalizedManifest ? { fileManifest: normalizedManifest } : {}),
+          ...(normalizedLfsObjects.length ? { lfsObjects: normalizedLfsObjects } : {}),
+        })}`
       : "";
   assert.equal(
     hash(
@@ -528,15 +627,235 @@ function patchBytes(proof, value) {
   return patch;
 }
 
+/** Recheck the worker packet boundary and the exact retained raw bytes without runtime imports. */
+export function assertProducedLfsArtifactBoundary(artifact, packet, proofs) {
+  assert.ok(Array.isArray(packet.allowedPaths) && packet.allowedPaths.length > 0);
+  const permits = (path) =>
+    packet.allowedPaths.some((allowed) =>
+      allowed.endsWith("/") ? path.startsWith(allowed) : path === allowed,
+    );
+  assert.ok(
+    artifact.changedPaths.every(permits),
+    "produced LFS artifact changes a path outside the exact worker packet",
+  );
+  const manifest = artifact.fileManifest;
+  assert.ok(manifest && Array.isArray(manifest.files));
+  for (const file of manifest.files) {
+    assert.ok(permits(file.path), "produced LFS manifest escapes the exact worker packet");
+    assert.notEqual(file.mode, "120000", "produced LFS artifact contains a symlink");
+    assert.equal(
+      file.generated,
+      /(^|\/)(generated|dist|build)\//.test(file.path),
+      "produced LFS generated classification differs from its path",
+    );
+  }
+  const receipts = artifact.lfsObjects ?? [];
+  assert.ok(receipts.length > 0 && receipts.length === proofs?.length);
+  const result = [];
+  for (const receipt of receipts) {
+    const proof = one(
+      proofs.filter(
+        (candidate) =>
+          candidate.path === receipt.path &&
+          candidate.oid === receipt.oid &&
+          candidate.receiptRef === receipt.receiptRef,
+      ),
+      "produced LFS retained-byte proof is missing or repeated",
+    );
+    assert.ok(typeof proof.rawBase64 === "string");
+    const raw = Buffer.from(proof.rawBase64, "base64");
+    assert.equal(raw.toString("base64"), proof.rawBase64, "noncanonical retained LFS encoding");
+    assert.equal(raw.length, receipt.size, "retained LFS byte count differs");
+    assertNoProducedLfsSecrets(raw);
+    assert.equal(hash(raw), receipt.oid, "retained LFS digest differs");
+    const pointer = Buffer.from(
+      `version https://git-lfs.github.com/spec/v1\noid sha256:${receipt.oid}\nsize ${receipt.size}\n`,
+    );
+    const file = one(
+      manifest.files.filter((candidate) => candidate.path === receipt.path),
+      "produced LFS pointer manifest entry is missing or repeated",
+    );
+    assert.equal(file.action, "write");
+    assert.equal(file.mode, receipt.mode);
+    assert.equal(file.bytes, pointer.length);
+    assert.equal(file.digest, hash(pointer));
+    result.push({
+      path: receipt.path,
+      mode: receipt.mode,
+      oid: receipt.oid,
+      size: receipt.size,
+      generated: file.generated,
+      pointerDigest: hash(pointer),
+      retainedDigest: hash(raw),
+      secretScan: "passed",
+      scope: "exact-worker-packet",
+      fileKind: "regular",
+    });
+  }
+  return result;
+}
+
 /** Pure retained-proof recheck. Caller supplies actor-authenticated observation receipts. */
 export function assertArtifactTransferProof(observation, authority, proof, options) {
-  assert.ok(["intent", "ready"].includes(options.phase));
+  assert.ok(["intent", "ready", "direct"].includes(options.phase));
   assert.equal(proof.phase, options.phase);
   if (options.workItem !== undefined) assert.equal(proof.workItem, options.workItem);
   const events = eventsFor(observation, proof.workItem);
   const context = session(events, authority, proof);
-  const { identity, transferRef, start, reserved, started, worker, terminal, binding } = context;
+  const { identity, transferRef, start, reserved, started, worker, terminal, binding, packet } =
+    context;
   assert.deepEqual(proof.receipts, events, "retained receipt snapshot differs");
+  if (options.phase === "direct") {
+    assert.equal(proof.intent, undefined);
+    assert.deepEqual(proof.chunks, []);
+    const ready = descriptor(proof.ready, `${transferRef}/ready`, [], identity, "ready", true);
+    const witness = options.witness;
+    const recovered = Boolean(options.priorDirect);
+    if (options.priorDirect) {
+      assert.equal(options.priorDirect.phase, "direct");
+      assert.deepEqual(
+        proof.ready,
+        options.priorDirect.ready,
+        "recovery changed direct ready proof",
+      );
+      for (const event of options.priorDirect.receipts)
+        assert.ok(
+          events.some((current) => canonical(current) === canonical(event)),
+          "original direct-ready receipt disappeared or changed",
+        );
+    }
+    if (witness)
+      assert.ok(
+        ready.artifact.lfsObjects?.length > 0,
+        "witnessed direct checkpoint lacks produced LFS content",
+      );
+    assert.deepEqual(
+      proof.lfs?.map(({ path, oid, size, receiptRef, transferRef, intentCommit, readyCommit }) => ({
+        path,
+        oid,
+        size,
+        receiptRef,
+        transferRef,
+        intentCommit,
+        readyCommit,
+      })),
+      ready.artifact.lfsObjects.map((receipt) => ({
+        path: receipt.path,
+        oid: receipt.oid,
+        size: receipt.size,
+        receiptRef: receipt.receiptRef,
+        transferRef: receipt.rawTransfer.ref,
+        intentCommit: receipt.rawTransfer.intentCommit,
+        readyCommit: receipt.rawTransfer.readyCommit,
+      })),
+      "produced LFS retained proofs differ from artifact receipts",
+    );
+    const producedBoundary = ready.artifact.lfsObjects?.length
+      ? assertProducedLfsArtifactBoundary(ready.artifact, packet, proof.lfs)
+      : [];
+    if (witness) {
+      same(witness, identity);
+      assert.equal(witness.protocol, "clockgrove.factory/artifact-transfer-checkpoint-reached");
+      assert.equal(witness.phase, "ready");
+      assert.equal(witness.ref, `${transferRef}/ready`);
+      assert.equal(witness.commitSha, proof.ready.commit.oid);
+      assert.equal(witness.descriptorDigest, hash(proof.ready.content));
+      assert.equal(witness.artifactDigest, ready.artifact.digest);
+      assert.deepEqual(
+        witness.content,
+        ready.artifact.lfsObjects.map((receipt) => ({
+          digest: receipt.oid,
+          bytes: receipt.size,
+          chunks: receipt.payload.chunks.length,
+        })),
+      );
+      assert.equal(
+        witness.contentBytes,
+        ready.artifact.lfsObjects.reduce((sum, receipt) => sum + receipt.size, 0),
+      );
+      assert.equal(witness.terminal.reservationReceiptDigest, hash(canonical(reserved)));
+      assert.equal(witness.terminal.startedReceiptDigest, hash(canonical(started)));
+      assert.equal(witness.terminal.modelReceiptDigest, hash(canonical(worker)));
+      assert.equal(witness.terminal.modelTokens, worker.amount);
+      assert.equal(witness.terminal.usageId, worker.usageId);
+      assert.deepEqual(witness.terminal.session, {
+        threadId: binding.threadId,
+        turnId: terminal.turnId,
+        checkpointDigest: hash(JSON.stringify(terminal)),
+      });
+      const succeeded = events.filter((event) => event.event === "AttemptSucceeded");
+      if (recovered) {
+        assert.equal(
+          succeeded.length,
+          1,
+          "recovery did not continue the original retained attempt",
+        );
+        assert.equal(succeeded[0].artifactDigest, ready.artifact.digest);
+        assert.equal(succeeded[0].reportedModelTokens, worker.amount);
+        assert.equal(
+          events.some((event) =>
+            [
+              "AttemptFailed",
+              "AttemptCancelled",
+              "AttemptDeferred",
+              "PublicationRecorded",
+            ].includes(event.event),
+          ),
+          false,
+          "recovered direct checkpoint crossed a failure or publication boundary",
+        );
+      } else
+        assert.equal(
+          events.some((event) =>
+            [
+              "AttemptSucceeded",
+              "AttemptCollected",
+              "AttemptFailed",
+              "AttemptCancelled",
+              "ValidationRecorded",
+              "PublicationRecorded",
+            ].includes(event.event),
+          ),
+          false,
+          "direct retained checkpoint was observed after attempt continuation",
+        );
+    }
+    return {
+      artifact: ready.artifact,
+      patch: Buffer.from(ready.artifact.patch),
+      summary: {
+        phase: "direct",
+        workItem: identity.workItem,
+        runId: identity.runId,
+        attempt: identity.attempt,
+        artifactDigest: ready.artifact.digest,
+        payloadDigest: witness?.content[0]?.digest ?? null,
+        payloadBytes: witness?.contentBytes ?? null,
+        payloadChunks: witness?.content.reduce((sum, subject) => sum + subject.chunks, 0) ?? 0,
+        representation: ready.artifact.lfsObjects?.length ? "produced-lfs" : "inline",
+        producedBoundary,
+        intentOid: proof.ready.commit.oid,
+        readyOid: proof.ready.commit.oid,
+        threadId: binding.threadId,
+        turnId: terminal.turnId,
+        terminalOid: proof.terminal.commit.oid,
+        modelTokens: worker.amount,
+        nativeUsage: {
+          state: "unavailable",
+          amount: null,
+          evidence: "not-measured-by-checkpoint",
+        },
+        executionAuthority: false,
+        continuation: recovered
+          ? "same-attempt-retained-ready"
+          : witness
+            ? "retained-ready-checkpoint"
+            : "not-demonstrated",
+        resourceAbsence: "requires-independent-observation",
+        manifestBehavior: "requires-independent-Git-and-LFS-readback",
+      },
+    };
+  }
   const externalRequired =
     options.phase === "intent" || Boolean(options.witness || options.priorIntent);
   const intent = descriptor(
@@ -610,11 +929,17 @@ export function assertArtifactTransferProof(observation, authority, proof, optio
     same(witness, identity);
     assert.equal(witness.activationRequestId, `${authority.namespace}-activate`);
     assert.equal(witness.artifactDigest, intent.artifact.digest);
-    assert.equal(witness.payloadDigest, intent.artifact.payload.digest);
-    assert.equal(witness.payloadBytes, intent.artifact.payload.bytes);
-    assert.equal(witness.payloadChunks, intent.chunks.length);
-    assert.equal(witness.intentRef, `${transferRef}/intent`);
-    assert.equal(witness.intentCommitSha, proof.intent.commit.oid);
+    assert.equal(witness.phase, "intent");
+    assert.deepEqual(witness.content, [
+      {
+        digest: intent.artifact.payload.digest,
+        bytes: intent.artifact.payload.bytes,
+        chunks: intent.chunks.length,
+      },
+    ]);
+    assert.equal(witness.contentBytes, intent.artifact.payload.bytes);
+    assert.equal(witness.ref, `${transferRef}/intent`);
+    assert.equal(witness.commitSha, proof.intent.commit.oid);
     assert.equal(witness.descriptorDigest, hash(proof.intent.content));
     assert.deepEqual(witness.batch, reserved.localScopeBatch);
     const reported = witness.terminal;
@@ -746,6 +1071,125 @@ export function assertArtifactTransferProof(observation, authority, proof, optio
   };
 }
 
+async function observeProducedLfsReceipt(request, read, receipt) {
+  const retained = await read({
+    kind: "checkpoint",
+    ref: receipt.receiptRef,
+    path: "lfs-object-receipt.json",
+    maxBytes: MAX_DESCRIPTOR,
+  });
+  const retainedValue = assertQualificationCheckpoint(
+    retained,
+    { ref: receipt.receiptRef, path: "lfs-object-receipt.json", maxBytes: MAX_DESCRIPTOR },
+    [],
+  );
+  assert.deepEqual(retainedValue, receipt, "durable LFS upload receipt differs from artifact");
+  assert.equal(
+    retained.commit.message,
+    `Factory LFS object receipt\n\nFactory-LFS-Object: ${receipt.digest}`,
+  );
+  const intent = await read({
+    kind: "checkpoint",
+    ref: `${receipt.rawTransfer.ref}/intent`,
+    path: "content-transfer.json",
+    maxBytes: MAX_DESCRIPTOR,
+  });
+  const ready = await read({
+    kind: "checkpoint",
+    ref: `${receipt.rawTransfer.ref}/ready`,
+    path: "content-transfer.json",
+    maxBytes: MAX_DESCRIPTOR,
+  });
+  const intentValue = assertQualificationCheckpoint(
+    intent,
+    {
+      ref: `${receipt.rawTransfer.ref}/intent`,
+      path: "content-transfer.json",
+      maxBytes: MAX_DESCRIPTOR,
+    },
+    [],
+  );
+  const readyValue = assertQualificationCheckpoint(
+    ready,
+    {
+      ref: `${receipt.rawTransfer.ref}/ready`,
+      path: "content-transfer.json",
+      maxBytes: MAX_DESCRIPTOR,
+    },
+    [intent.commit.oid],
+  );
+  assert.deepEqual(readyValue, intentValue, "LFS content ready differs from intent");
+  assert.equal(intentValue.protocol, "clockgrove.factory/content-transfer");
+  assert.deepEqual(intentValue.identity, receipt.rawTransfer.identity);
+  assert.deepEqual(intentValue.payload, receipt.payload);
+  assert.equal(intent.commit.oid, receipt.rawTransfer.intentCommit);
+  assert.equal(ready.commit.oid, receipt.rawTransfer.readyCommit);
+  assert.equal(
+    intent.commit.message,
+    `Factory content transfer intent\n\nFactory-Content: ${receipt.oid}`,
+  );
+  assert.equal(
+    ready.commit.message,
+    `Factory content transfer ready\n\nFactory-Content: ${receipt.oid}`,
+  );
+  const root = tree(ready.treePaths[0], ready.commit.treeOid, 2);
+  const branch = one(
+    root.filter((entry) => entry.path === "chunks" && entry.type === "tree"),
+    "LFS ready chunk tree missing",
+  );
+  const get = async (route, args) =>
+    (await request(route, { ...args, request: { signal: AbortSignal.timeout(15000) } })).data;
+  const remoteTree = await get("GET /repos/{owner}/{repo}/git/trees/{tree_sha}", {
+    tree_sha: branch.sha,
+  });
+  assert.equal(remoteTree.truncated, false);
+  const entries = tree(
+    {
+      sha: remoteTree.sha,
+      entries: remoteTree.tree.map(({ path, mode, type, sha }) => ({ path, mode, type, sha })),
+    },
+    branch.sha,
+    64,
+  );
+  const bodies = new Map();
+  for (const chunk of intentValue.chunks) {
+    const entry = one(
+      entries.filter(
+        (candidate) =>
+          candidate.path === chunk.digest &&
+          candidate.sha === chunk.oid &&
+          candidate.mode === "100644",
+      ),
+      "LFS retained content chunk missing",
+    );
+    if (bodies.has(chunk.digest)) continue;
+    const blob = await get("GET /repos/{owner}/{repo}/git/blobs/{file_sha}", {
+      file_sha: entry.sha,
+    });
+    const bytes = Buffer.from(blob.content, "base64");
+    assert.equal(blob.encoding, "base64");
+    assert.equal(bytes.length, chunk.bytes);
+    assert.equal(hash(bytes), chunk.digest);
+    assert.equal(git("blob", bytes), chunk.oid);
+    bodies.set(chunk.digest, bytes);
+  }
+  const raw = Buffer.concat(intentValue.chunks.map((chunk) => bodies.get(chunk.digest)));
+  assert.equal(raw.length, receipt.size);
+  assert.equal(hash(raw), receipt.oid);
+  return {
+    path: receipt.path,
+    oid: receipt.oid,
+    size: receipt.size,
+    receiptRef: receipt.receiptRef,
+    receiptCommit: retained.commit.oid,
+    transferRef: receipt.rawTransfer.ref,
+    intentCommit: intent.commit.oid,
+    readyCommit: ready.commit.oid,
+    chunkCount: intentValue.chunks.length,
+    rawBase64: raw.toString("base64"),
+  };
+}
+
 /** Exact GET-only observer. Errors other than the exact ready-ref 404 propagate unchanged. */
 export async function observeArtifactTransfer(request, observation, authority, options) {
   const events = eventsFor(observation, options.workItem);
@@ -774,12 +1218,32 @@ export async function observeArtifactTransfer(request, observation, authority, o
       path: SESSION_PATH,
       maxBytes: 196608,
     });
-  proof.intent = await read({
-    kind: "checkpoint",
-    ref: `${refs.transferRef}/intent`,
-    path: "artifact-transfer.json",
-    maxBytes: MAX_DESCRIPTOR,
-  });
+  if (options.phase === "direct") {
+    proof.ready = await read({
+      kind: "checkpoint",
+      ref: `${refs.transferRef}/ready`,
+      path: "artifact-transfer.json",
+      maxBytes: MAX_DESCRIPTOR,
+    });
+    const value = descriptor(
+      proof.ready,
+      `${refs.transferRef}/ready`,
+      [],
+      refs.identity,
+      "ready",
+      true,
+    );
+    proof.lfs = [];
+    for (const receipt of value.artifact.lfsObjects ?? [])
+      proof.lfs.push(await observeProducedLfsReceipt(request, read, receipt));
+  } else {
+    proof.intent = await read({
+      kind: "checkpoint",
+      ref: `${refs.transferRef}/intent`,
+      path: "artifact-transfer.json",
+      maxBytes: MAX_DESCRIPTOR,
+    });
+  }
   if (options.phase === "intent") {
     let absent = false;
     try {
@@ -790,7 +1254,7 @@ export async function observeArtifactTransfer(request, observation, authority, o
     }
     assert.ok(absent, "ready already exists; not a partial-transfer hold");
     proof.readyAbsence = { ref: `${refs.transferRef}/ready`, status: 404 };
-  } else {
+  } else if (options.phase === "ready") {
     assert.equal(options.phase, "ready");
     proof.ready = await read({
       kind: "checkpoint",
@@ -857,10 +1321,16 @@ export async function observeArtifactTransfer(request, observation, authority, o
       proof.ready.commit.oid,
     );
   }
-  assert.equal(
-    await read({ kind: "ref", ref: `${refs.transferRef}/intent` }),
-    proof.intent.commit.oid,
-  );
+  if (proof.intent)
+    assert.equal(
+      await read({ kind: "ref", ref: `${refs.transferRef}/intent` }),
+      proof.intent.commit.oid,
+    );
+  if (proof.ready)
+    assert.equal(
+      await read({ kind: "ref", ref: `${refs.transferRef}/ready` }),
+      proof.ready.commit.oid,
+    );
   proof.observedReservationAuthority = await reobserveQualificationReservationAuthority(
     request,
     resolved,

@@ -403,6 +403,28 @@ export function assertCheckpointExecutable(pid, expectedNode, readLink = readlin
   assert.equal(readLink(`/proc/${pid}/exe`), expectedNode);
 }
 
+export function assertControllerProcessCommand(text, expected) {
+  assert.ok(Buffer.byteLength(text) <= 16_384, "controller process command exceeds its bound");
+  assert.match(expected.identity, /^[a-f0-9]{64}$/);
+  const command = text.split("\0");
+  assert.equal(command.pop(), "", "controller process command must be NUL-terminated");
+  assert.ok(
+    command.every((argument) => argument.length > 0),
+    "empty controller process argument",
+  );
+  assert.deepEqual(command, [
+    expected.node,
+    expected.bundle,
+    "controller",
+    "run",
+    expected.repository,
+    "--repo",
+    expected.checkout,
+    "--executable-identity",
+    `sha256:${expected.identity}`,
+  ]);
+}
+
 export function assertControllerRuntimeEnvironment(text, linuxHome) {
   assert.ok(Buffer.byteLength(text) <= 65_536, "controller environment exceeds its bound");
   assert.ok(!/^\/mnt(?:\/|$)/.test(linuxHome), "Linux-native home required");
@@ -1676,15 +1698,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
         controllerBoundary = "controller-process-cwd";
         assert.equal(readlinkSync(`/proc/${pid}/cwd`), authority.checkout);
         controllerBoundary = "controller-process-command";
-        assert.deepEqual(readBounded(`/proc/${pid}/cmdline`).split("\0").filter(Boolean), [
-          expected.node,
-          expected.bundle,
-          "controller",
-          "run",
-          authority.repository,
-          "--repo",
-          authority.checkout,
-        ]);
+        assertControllerProcessCommand(readBounded(`/proc/${pid}/cmdline`, 16_384), expected);
         controllerBoundary = "controller-process-environment";
         const runtime = assertControllerRuntimeEnvironment(
           readBounded(`/proc/${pid}/environ`),

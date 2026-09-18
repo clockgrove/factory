@@ -21,8 +21,15 @@ import {
 } from "../src/validation/clean-run.js";
 import { assertReviewOnlyWorkflowArtifacts } from "../src/publication/workflow-safety.js";
 import { verifyValidationEvidence } from "../src/validation/evidence.js";
+import { assertPnpmCommandsGroundedOnManifest } from "../src/validation/plan.js";
 import { pnpmBootstrapLock } from "./helpers/pnpm-bootstrap.js";
 import { selectedManagedRuntimeRequirements } from "./helpers/managed-runtime.js";
+
+const PNPM_RUNTIME_PINS = {
+  devEngines: {
+    runtime: { name: "node", version: "24.15.0", onFail: "error" },
+  },
+} as const;
 
 async function repositoryFixture(): Promise<{ repository: string; baseSha: string }> {
   const repository = await mkdtemp(join(tmpdir(), "factory-validation-repo-"));
@@ -94,6 +101,7 @@ async function pnpmRepositoryFixture(): Promise<{ repository: string; baseSha: s
       version: "1.0.0",
       private: true,
       packageManager: "pnpm@10.34.5",
+      ...PNPM_RUNTIME_PINS,
       scripts: {
         check: "node --test test/check.js",
         verify: "node --test test/verify.js",
@@ -158,6 +166,46 @@ function packet(
 }
 
 describe("clean validation", () => {
+  it("grounds exact Node and pnpm root pins before pnpm dispatch", () => {
+    const exactPacket = packet("a".repeat(40), {
+      validationCommands: ["pnpm check"],
+      requirements: {
+        ...packet("a".repeat(40)).requirements,
+        tools: ["node", "pnpm"],
+        networkDestinations: ["registry.npmjs.org"],
+      },
+      managedRuntimes: selectedManagedRuntimeRequirements(["pnpm check"]),
+    });
+    const manifest = {
+      packageManager: "pnpm@10.34.5",
+      ...PNPM_RUNTIME_PINS,
+      engines: { node: "24.15.0", npm: ">=11" },
+      scripts: { check: "node --test" },
+    };
+    expect(assertPnpmCommandsGroundedOnManifest(exactPacket, JSON.stringify(manifest))).toBe(true);
+    for (const invalid of [
+      { ...manifest, packageManager: "pnpm@^10.34.5" },
+      { ...manifest, devEngines: undefined },
+      {
+        ...manifest,
+        devEngines: { runtime: { name: "node", version: ">=24", onFail: "error" } },
+      },
+      {
+        ...manifest,
+        devEngines: { runtime: { name: "node", version: "24.14.0", onFail: "error" } },
+      },
+      {
+        ...manifest,
+        devEngines: { runtime: { name: "node", version: "24.15.0", onFail: "warn" } },
+      },
+      { ...manifest, engines: { node: "^24.15.0" } },
+    ]) {
+      expect(() =>
+        assertPnpmCommandsGroundedOnManifest(exactPacket, JSON.stringify(invalid)),
+      ).toThrow(/pnpm root/);
+    }
+  });
+
   it("permits workflow publication only when the changed workflow cannot run before protected-branch merge", async () => {
     const root = await mkdtemp(join(tmpdir(), "factory-workflow-publication-"));
     const path = ".github/workflows/ci.yml";
@@ -570,6 +618,7 @@ jobs:
         name: "greenfield",
         private: true,
         packageManager: "pnpm@10.34.5",
+        ...PNPM_RUNTIME_PINS,
         scripts: { check: "turbo run check" },
         devDependencies: { turbo: "2.5.6", typescript: "5.9.2" },
       }),
@@ -603,7 +652,12 @@ jobs:
       .mockImplementation(async (identity) => ({
         exitCode: 0,
         signal: null,
-        stdout: identity.commandIndex === 0 ? "10.34.5\n" : "",
+        stdout:
+          identity.commandIndex === 0
+            ? "v24.15.0\n"
+            : identity.commandIndex === 1
+              ? "10.34.5\n"
+              : "",
         stderr: "",
         durationMs: 1,
         timedOut: false,
@@ -648,6 +702,7 @@ jobs:
         },
       });
       expect(result.evidence.commands.map(({ command }) => command)).toEqual([
+        "node --version",
         "pnpm --version",
         "pnpm install --frozen-lockfile --ignore-scripts --registry=https://registry.npmjs.org/",
         "pnpm check",
@@ -656,13 +711,21 @@ jobs:
         1,
         expect.objectContaining({ commandIndex: 0 }),
         expect.objectContaining({
-          command: expect.stringMatching(/\/pnpm\/root\/pnpm$/),
+          command: expect.stringMatching(/\/node\/root\/node$/),
           args: ["--version"],
         }),
       );
       expect(scoped).toHaveBeenNthCalledWith(
         2,
         expect.objectContaining({ commandIndex: 1 }),
+        expect.objectContaining({
+          command: expect.stringMatching(/\/pnpm\/root\/pnpm$/),
+          args: ["--version"],
+        }),
+      );
+      expect(scoped).toHaveBeenNthCalledWith(
+        3,
+        expect.objectContaining({ commandIndex: 2 }),
         expect.objectContaining({
           command: expect.stringMatching(/\/pnpm\/root\/pnpm$/),
           args: [
@@ -674,8 +737,8 @@ jobs:
         }),
       );
       expect(scoped).toHaveBeenNthCalledWith(
-        3,
-        expect.objectContaining({ commandIndex: 2 }),
+        4,
+        expect.objectContaining({ commandIndex: 3 }),
         expect.objectContaining({
           command: expect.stringMatching(/\/pnpm\/root\/pnpm$/),
           args: ["run", "check"],
@@ -706,6 +769,7 @@ jobs:
         isolatedValidator: async () => ({
           outputTreeSha: artifact.fileManifest!.resultTreeSha,
           commands: [
+            { command: "node --version", exitCode: 0, durationMs: 1 },
             { command: "pnpm --version", exitCode: 0, durationMs: 1 },
             {
               command:
@@ -722,11 +786,12 @@ jobs:
         }),
       });
       expect(isolated.evidence.commands.map(({ command }) => command)).toEqual([
+        "node --version",
         "pnpm --version",
         "pnpm install --frozen-lockfile --ignore-scripts --registry=https://registry.npmjs.org/",
         "pnpm check",
       ]);
-      expect(scoped).toHaveBeenCalledTimes(3);
+      expect(scoped).toHaveBeenCalledTimes(4);
       await discardValidationResult(isolated);
     } finally {
       scoped.mockRestore();
@@ -744,6 +809,7 @@ jobs:
         version: "1.0.0",
         private: true,
         packageManager: "pnpm@10.34.5",
+        ...PNPM_RUNTIME_PINS,
         scripts: {
           check: "node --test test/check.js",
           verify: "node --test test/verify-next.js",
@@ -758,7 +824,12 @@ jobs:
       .mockImplementation(async (identity) => ({
         exitCode: 0,
         signal: null,
-        stdout: identity.commandIndex === 0 ? "10.34.5\n" : "",
+        stdout:
+          identity.commandIndex === 0
+            ? "v24.15.0\n"
+            : identity.commandIndex === 1
+              ? "10.34.5\n"
+              : "",
         stderr: "",
         durationMs: 1,
         timedOut: false,
@@ -819,6 +890,7 @@ jobs:
       expect(result.evidence.passed).toBe(true);
       expect(result.publicationReview.changedPackageScripts).toEqual(["verify"]);
       expect(result.evidence.commands.map(({ command }) => command)).toEqual([
+        "node --version",
         "pnpm --version",
         "pnpm install --frozen-lockfile --ignore-scripts --registry=https://registry.npmjs.org/",
         "pnpm verify",
@@ -865,6 +937,7 @@ jobs:
           version: "1.0.0",
           private: true,
           packageManager: "pnpm@10.34.5",
+          ...PNPM_RUNTIME_PINS,
           scripts,
         }),
       );
@@ -920,6 +993,7 @@ jobs:
         JSON.stringify({
           name: "greenfield",
           packageManager: "pnpm@10.34.5",
+          ...PNPM_RUNTIME_PINS,
           scripts: { check: "tsc --noEmit" },
           devDependencies: { typescript: "5.9.2" },
         }),
@@ -966,6 +1040,7 @@ jobs:
       JSON.stringify({
         name: "greenfield",
         packageManager: "pnpm@10.34.5",
+        ...PNPM_RUNTIME_PINS,
         scripts: { check: "tsc --noEmit" },
         devDependencies: { typescript: "5.9.2" },
       }),
@@ -1002,6 +1077,7 @@ jobs:
       JSON.stringify({
         name: "greenfield",
         packageManager: "pnpm@10.34.5",
+        ...PNPM_RUNTIME_PINS,
         scripts: { check: "tsc --noEmit" },
         devDependencies: { typescript: "5.9.2" },
       }),
@@ -1013,14 +1089,16 @@ jobs:
     execFileSync("git", ["add", "package.json", "pnpm-lock.yaml"], { cwd: worker.path });
     const artifact = await collectLocalArtifact(worker);
     await cleanupLocalWorktree(worker);
-    const scoped = vi.spyOn(localScopeRuntime, "runScopedLocalProcess").mockResolvedValue({
-      exitCode: 0,
-      signal: null,
-      stdout: "10.17.0\n",
-      stderr: "",
-      durationMs: 1,
-      timedOut: false,
-    });
+    const scoped = vi
+      .spyOn(localScopeRuntime, "runScopedLocalProcess")
+      .mockImplementation(async (identity) => ({
+        exitCode: 0,
+        signal: null,
+        stdout: identity.commandIndex === 0 ? "v24.15.0\n" : "10.17.0\n",
+        stderr: "",
+        durationMs: 1,
+        timedOut: false,
+      }));
     try {
       const result = await validateArtifactClean({
         repository: fixture.repository,
@@ -1056,10 +1134,13 @@ jobs:
       });
       expect(result.evidence).toMatchObject({
         passed: false,
-        commands: [{ command: "pnpm --version", exitCode: 1 }],
+        commands: [
+          { command: "node --version", exitCode: 0 },
+          { command: "pnpm --version", exitCode: 1 },
+        ],
         failureReason: expect.stringContaining("expected 10.34.5"),
       });
-      expect(scoped).toHaveBeenCalledOnce();
+      expect(scoped).toHaveBeenCalledTimes(2);
       await discardValidationResult(result);
     } finally {
       scoped.mockRestore();
@@ -1092,6 +1173,7 @@ jobs:
         JSON.stringify({
           name: "greenfield",
           packageManager: "pnpm@10.34.5",
+          ...PNPM_RUNTIME_PINS,
           ...manifest,
         }),
       );
@@ -1149,6 +1231,7 @@ jobs:
         JSON.stringify({
           name: "greenfield",
           packageManager: "pnpm@10.34.5",
+          ...PNPM_RUNTIME_PINS,
           scripts: { check: "turbo run check" },
           devDependencies: unsafe.devDependencies,
         }),
@@ -1210,6 +1293,7 @@ jobs:
         JSON.stringify({
           name: "greenfield",
           packageManager: variant.packageManager,
+          ...PNPM_RUNTIME_PINS,
           scripts: { check: variant.script },
           devDependencies: { typescript: "5.9.2" },
         }),
@@ -1236,7 +1320,7 @@ jobs:
             },
           }),
         }),
-      ).rejects.toThrow(/bootstrap pnpm validation|outside Work Item scope/);
+      ).rejects.toThrow(/bootstrap pnpm validation|outside Work Item scope|packageManager/);
     }
   });
 

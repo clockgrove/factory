@@ -349,6 +349,27 @@ describe("adapter-owned compiler capabilities", () => {
     },
   );
 
+  it("projects node-pnpm runtime pin fields as mechanical adapter authority", () => {
+    const pinned = semanticPinnedFacts({
+      paths: ["package.json", "pnpm-lock.yaml", "src/a.ts"],
+      scripts: { test: "model must not author runtime values" },
+    });
+    const capability = compilerCapabilitiesForRepository(
+      pinned,
+      allToolchainDestinations,
+    ).toolchains.find(({ adapterId }) => adapterId === "node-pnpm");
+    expect(capability?.runtimePins).toEqual([
+      {
+        path: "package.json",
+        fields: ["packageManager", "devEngines.runtime"],
+        source: "activated-runtime",
+      },
+    ]);
+    expect(capability?.runtimePins).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ value: expect.anything() })]),
+    );
+  });
+
   it.each([
     {
       state: "eligible-deferred",

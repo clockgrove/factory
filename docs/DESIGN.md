@@ -1026,11 +1026,18 @@ Only finite root or exact-member `npm run <validation-script>` operations are ad
 repository-observed npm recipes remain on the host-observed compatibility path unless a persisted
 `node-npm` capability explicitly selects the managed adapter.
 
-`node-pnpm` pins the selected pnpm version and exact dependencies; workspace links remain within
-enumerated in-scope direct-child packages; registry lock entries carry SHA-512 integrity; and URL,
-git, tarball, patch, escaping local sources, lifecycle hooks, and package-manager overrides are
-rejected. Selected leaf/Turbo closures use a finite check-only grammar. Its runtime bundle contains
-both the official Node executable and pnpm standalone program.
+`node-pnpm` selects the highest stable patch on the official Node 24 LTS line and the latest stable
+pnpm release for Linux x64 glibc. Its runtime bundle authenticates both the Node executable and pnpm
+standalone program. Root `package.json` is the only repository pin authority: `packageManager` must
+equal the activated exact pnpm version and `devEngines.runtime` must name `node`, equal the activated
+exact Node patch, and use `onFail: error`; an `engines.node` value, when present, must equal that same
+patch. Workspace manifests cannot redefine those pins. Validation probes exact Node first and exact
+pnpm second before frozen, hook-free installation, and retains both results as command evidence.
+The adapter also requires exact dependencies; workspace links remain within enumerated in-scope
+direct-child packages; registry lock entries carry SHA-512 integrity; and URL, git, tarball, patch,
+escaping local sources, lifecycle hooks, and package-manager overrides are rejected. Selected
+leaf/Turbo closures use a finite check-only grammar. Receipts outside the Node 24 LTS contract are
+invalid and explicit reprovisioning replaces the active pointer only after the new bundle succeeds.
 
 `javascript-bun` pins `packageManager: bun@<exact version>`, `bun.lock`, exact registry dependencies,
 and direct-child workspace manifests. It rejects alternate configuration, trusted dependencies,

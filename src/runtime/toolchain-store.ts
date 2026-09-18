@@ -37,6 +37,12 @@ import {
   SUPPORTED_RUNTIME_PLATFORM,
 } from "./toolchain-bundle.js";
 import { extractZipArchive } from "./zip-archive.js";
+import {
+  assertPnpmNodeIdentity,
+  assertPnpmRuntimeReceipt,
+  PNPM_NODE_MAJOR,
+  pnpmRuntimeIdentity,
+} from "../toolchains/pnpm.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_ASSET_BYTES = 512 * 1024 * 1024;
@@ -68,9 +74,9 @@ export interface ToolchainReleaseSource {
     releaseId: number,
   ): Promise<GitHubReleaseAsset[]>;
   downloadAsset(owner: string, repository: string, assetId: number): Promise<Buffer>;
-  resolveLatestNodeDistribution?(requirement?: {
-    embeddedNpm: true;
-  }): Promise<NodeDistributionIdentity>;
+  resolveLatestNodeDistribution?(
+    requirement?: { embeddedNpm: true } | { nodePnpm: true },
+  ): Promise<NodeDistributionIdentity>;
   downloadNodeDistribution?(identity: NodeDistributionIdentity): Promise<Buffer>;
 }
 
@@ -672,15 +678,21 @@ export async function provisionToolchain(
     tool === "npm"
       ? await options.source.resolveLatestNodeDistribution?.({ embeddedNpm: true })
       : tool === "pnpm"
-        ? await options.source.resolveLatestNodeDistribution?.()
+        ? await options.source.resolveLatestNodeDistribution?.({ nodePnpm: true })
         : undefined;
   const selectedPython =
     tool === "uv" ? await selectLatestPythonDistribution(options.source) : undefined;
   if (tool === "pnpm" && !selectedNode)
-    throw new Error("pnpm provisioning source cannot resolve the latest official Node GA");
+    throw new Error(
+      `pnpm provisioning source cannot resolve an official Node ${PNPM_NODE_MAJOR} LTS`,
+    );
   if (tool === "npm" && !selectedNode)
     throw new Error("npm provisioning source cannot resolve a supported official Node LTS");
   if (tool === "npm") assertNpmDistributionIdentity(selectedNode!);
+  if (tool === "pnpm") {
+    assertNodeDistributionIdentity(selectedNode!);
+    assertPnpmNodeIdentity(selectedNode!);
+  }
   try {
     const current = await activeRuntimeBundle(tool, root);
     const currentNpmIdentity = tool === "npm" ? exactNpmRestoreIdentity(current) : undefined;
@@ -746,6 +758,7 @@ export async function provisionToolchain(
     };
     const receipt: RuntimeBundleReceipt = { ...unsigned, digest: runtimeBundleDigest(unsigned) };
     assertRuntimeBundleReceipt(receipt);
+    if (tool === "pnpm") assertPnpmRuntimeReceipt(receipt);
     await installStagedBundle(root, staging, receipt);
     await atomicWrite(activePath(root, tool), `${canonicalJson({ digest: receipt.digest })}\n`);
     return receipt;
@@ -813,47 +826,7 @@ function exactPnpmRestoreIdentity(receipt: RuntimeBundleReceipt): {
   selected: ReturnType<typeof selectLatestGa>;
 } {
   assertRuntimeBundleReceipt(receipt);
-  if (receipt.tool !== "pnpm" || receipt.adapter !== "node-pnpm" || receipt.adapterContract !== 1)
-    throw new Error("managed runtime receipt is not a restorable pnpm adapter");
-  if (
-    receipt.components.length !== 2 ||
-    receipt.components[0]?.id !== "node" ||
-    receipt.components[1]?.id !== "pnpm"
-  )
-    throw new Error("pnpm runtime receipt has an unsupported component topology");
-  const [node, pnpm] = receipt.components as [RuntimeComponentReceipt, RuntimeComponentReceipt];
-  const releaseId = Number(pnpm.release.releaseId);
-  const assetId = Number(pnpm.asset.assetId);
-  if (
-    pnpm.release.provider !== "github" ||
-    pnpm.release.repository !== "pnpm/pnpm" ||
-    !Number.isSafeInteger(releaseId) ||
-    releaseId <= 0 ||
-    pnpm.release.tag !== `v${pnpm.version}` ||
-    !Number.isSafeInteger(assetId) ||
-    assetId <= 0 ||
-    pnpm.asset.name !== "pnpm-linux-x64.tar.gz" ||
-    pnpm.asset.archive !== "tar.gz" ||
-    pnpm.executablePath !== "pnpm" ||
-    pnpm.executableOnly !== undefined
-  )
-    throw new Error("pnpm runtime receipt has an unsupported GitHub origin identity");
-  if (
-    node.release.provider !== "nodejs" ||
-    node.release.repository !== "nodejs/node" ||
-    node.release.releaseId !== node.release.tag ||
-    node.release.tag !== `v${node.version}` ||
-    node.asset.assetId !== node.asset.url ||
-    node.asset.url !== `https://nodejs.org/dist/${node.release.tag}/${node.asset.name}` ||
-    node.asset.name.includes("/") ||
-    (node.asset.archive !== "raw" && node.asset.archive !== "tar.xz") ||
-    (node.asset.archive === "raw" && node.executablePath !== "node") ||
-    (node.asset.archive === "tar.xz" &&
-      (node.asset.name !== `node-${node.release.tag}-linux-x64.tar.xz` ||
-        node.executablePath !== `node-${node.release.tag}-linux-x64/bin/node`)) ||
-    node.executableOnly !== true
-  )
-    throw new Error("pnpm runtime receipt has an unsupported Node origin identity");
+  const { node, pnpm, lts, releaseId, assetId } = pnpmRuntimeIdentity(receipt);
   const nodeIdentity: NodeDistributionIdentity = {
     version: node.version,
     tag: node.release.tag,
@@ -861,8 +834,9 @@ function exactPnpmRestoreIdentity(receipt: RuntimeBundleReceipt): {
     name: node.asset.name,
     url: node.asset.url,
     sha256: node.asset.sha256,
-    archive: node.asset.archive,
+    archive: node.asset.archive === "raw" ? "raw" : "tar.xz",
     executablePath: node.executablePath,
+    lts,
   };
   const selected: ReturnType<typeof selectLatestGa> = {
     version: pnpm.version,
@@ -884,6 +858,7 @@ function exactPnpmRestoreIdentity(receipt: RuntimeBundleReceipt): {
     },
   };
   assertNodeDistributionIdentity(nodeIdentity);
+  assertPnpmNodeIdentity(nodeIdentity);
   assertGithubReleaseSelection("pnpm", selected);
   return { node: nodeIdentity, selected };
 }
@@ -989,6 +964,7 @@ export async function restoreToolchain(
 ): Promise<RuntimeBundleReceipt> {
   assertSupportedRuntimePlatform();
   assertRuntimeBundleReceipt(receipt);
+  if (receipt.tool === "pnpm") assertPnpmRuntimeReceipt(receipt);
   const root = resolve(options.root ?? toolchainStoreRoot());
   await mkdir(join(root, "bundles"), { recursive: true, mode: 0o700 });
   try {
@@ -1077,6 +1053,7 @@ export async function readRuntimeBundle(
   assertRuntimeBundleReceipt(receipt);
   if (receipt.digest !== digest)
     throw new Error("managed toolchain receipt path differs from digest");
+  if (receipt.tool === "pnpm") assertPnpmRuntimeReceipt(receipt);
   return receipt;
 }
 
@@ -1105,6 +1082,7 @@ export function activeRuntimeBundleSync(
     readFileSync(join(directory, RECEIPT_FILE), "utf8"),
   ) as RuntimeBundleReceipt;
   assertRuntimeBundleReceipt(receipt);
+  if (receipt.tool === "pnpm") assertPnpmRuntimeReceipt(receipt);
   if (receipt.tool !== tool || receipt.digest !== pointer.digest)
     throw new Error(`${tool} active receipt identity is inconsistent`);
   for (const component of receipt.components) {
@@ -1154,6 +1132,7 @@ export function runtimeBundleByDigestSync(
     readFileSync(join(directory, RECEIPT_FILE), "utf8"),
   ) as RuntimeBundleReceipt;
   assertRuntimeBundleReceipt(receipt);
+  if (receipt.tool === "pnpm") assertPnpmRuntimeReceipt(receipt);
   if (receipt.tool !== tool || receipt.digest !== digest)
     throw new Error(`${tool} runtime receipt identity is inconsistent`);
   for (const component of receipt.components) {
@@ -1186,6 +1165,7 @@ export async function verifyRuntimeBundle(
   receipt: RuntimeBundleReceipt,
 ): Promise<void> {
   assertRuntimeBundleReceipt(receipt);
+  if (receipt.tool === "pnpm") assertPnpmRuntimeReceipt(receipt);
   const directory = bundlePath(root, receipt.digest);
   for (const component of receipt.components) {
     const componentRoot = safeStoreChild(directory, component.id);

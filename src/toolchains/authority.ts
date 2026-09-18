@@ -74,6 +74,7 @@ import {
   uvPytestOperation,
 } from "./uv.js";
 import { MANAGED_SYSTEM_TOOLS } from "../runtime/system-tools.js";
+import { assertPnpmRuntimeReceipt, PNPM_ADAPTER_ID, PNPM_NODE_VERSION_COMMAND } from "./pnpm.js";
 
 type JsonSchema = Readonly<Record<string, unknown>>;
 
@@ -325,6 +326,13 @@ function pnpmIsolatedPlan(
       },
     ],
     setup: [
+      {
+        display: PNPM_NODE_VERSION_COMMAND,
+        executableId: "node",
+        args: ["--version"],
+        expectedStdout: `v${node.component.version}`,
+        network: "none",
+      },
       {
         display: PNPM_VERSION_COMMAND,
         executableId: "pnpm",
@@ -617,6 +625,7 @@ function assertReceiptMatchesRequirement(
     canonical(receipt.platform) !== canonical(requirement.platform)
   )
     throw new Error(`${requirement.tool} runtime differs from its adapter contract`);
+  if (requirement.adapter === PNPM_ADAPTER_ID) assertPnpmRuntimeReceipt(receipt);
 }
 
 async function providerGenerationRuntime(
@@ -1398,7 +1407,7 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
       withProvisionedToolPath("npm", source, privateRoot, receipt),
   },
   {
-    id: "node-pnpm",
+    id: PNPM_ADAPTER_ID,
     runner: "pnpm",
     provisioning: "factory-provisioned",
     deferredOperations: true,
@@ -1412,7 +1421,11 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
       requiredTools: ["node", "pnpm"],
       networkDestinations: [PACKAGE_SETUP_REGISTRY],
       runtimePins: [
-        { path: "package.json", fields: ["packageManager"], source: "activated-runtime" },
+        {
+          path: "package.json",
+          fields: ["packageManager", "devEngines.runtime"],
+          source: "activated-runtime",
+        },
       ],
       mixedAuthority: "reject",
       descendants: { allowed: true, requiresTransitiveProviderAncestor: true },
@@ -1430,9 +1443,9 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
         (script) => pnpmOperation(`pnpm run ${script}`),
       ),
     },
-    setupCommands: [PNPM_VERSION_COMMAND, PNPM_VALIDATION_SETUP_COMMAND],
+    setupCommands: [PNPM_NODE_VERSION_COMMAND, PNPM_VERSION_COMMAND, PNPM_VALIDATION_SETUP_COMMAND],
     networkDestination: PACKAGE_SETUP_REGISTRY,
-    runtimeRequirement: runtimeRequirement("pnpm", "node-pnpm"),
+    runtimeRequirement: runtimeRequirement("pnpm", PNPM_ADAPTER_ID),
     operation: pnpmOperation,
     resolveIntegratedBase: resolvePnpmIntegratedBase,
     isolatedPlan: pnpmIsolatedPlan,

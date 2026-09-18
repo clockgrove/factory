@@ -245,7 +245,13 @@ wheels = [
                   packageManager: { name: "npm", version: "11.6.0", onFail: "error" },
                 },
               }
-            : {}),
+            : faults.capabilityAdapter === "bun"
+              ? {}
+              : {
+                  devEngines: {
+                    runtime: { name: "node", version: "24.15.0", onFail: "error" },
+                  },
+                }),
           scripts:
             faults.capabilityAdapter === "bun"
               ? { test: "bun test", check: "bun test" }
@@ -1560,6 +1566,9 @@ wheels = [
               name: "greenfield",
               private: true,
               packageManager: "pnpm@10.34.5",
+              devEngines: {
+                runtime: { name: "node", version: "24.15.0", onFail: "error" },
+              },
               scripts: { check: "turbo run check" },
               devDependencies: { turbo: "2.5.6", typescript: "5.9.2" },
             }),

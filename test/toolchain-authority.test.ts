@@ -154,7 +154,10 @@ async function installDistinctRuntime(source: RuntimeBundleReceipt): Promise<Run
   };
   delete unsigned.digest;
   const pnpm = unsigned.components.find(({ id }) => id === "pnpm")!;
-  pnpm.release = { ...pnpm.release, releaseId: "provider-mismatch" };
+  pnpm.release = {
+    ...pnpm.release,
+    releaseId: String(Number(pnpm.release.releaseId) + 1),
+  };
   const receipt = { ...unsigned, digest: runtimeBundleDigest(unsigned) } as RuntimeBundleReceipt;
   const root = toolchainStoreRoot();
   await cp(join(root, "bundles", source.digest), join(root, "bundles", receipt.digest), {
@@ -542,7 +545,7 @@ describe("toolchain authority adapters", () => {
   it("reserves adapter-owned setup slots and refuses mixed package managers", () => {
     expect(validationSetupCommandCount(["node --test test/a.js"])).toBe(1);
     expect(validationSetupCommandCount(["npm test"])).toBe(1);
-    expect(validationSetupCommandCount(["pnpm check", "pnpm test"])).toBe(2);
+    expect(validationSetupCommandCount(["pnpm check", "pnpm test"])).toBe(3);
     expect(() => validationSetupCommandCount(["npm test", "pnpm check"])).toThrow(/mix/);
   });
 
@@ -859,6 +862,9 @@ describe("toolchain authority adapters", () => {
         name: "proof",
         version: "1.0.0",
         packageManager: "pnpm@10.34.5",
+        devEngines: {
+          runtime: { name: "node", version: "24.15.0", onFail: "error" },
+        },
         scripts: {
           check: "node --test test/check.js",
           test: "node --test test/check.js",
@@ -1006,6 +1012,9 @@ describe("toolchain authority adapters", () => {
       name: "proof",
       version: "1.0.0",
       packageManager: "pnpm@10.34.5",
+      devEngines: {
+        runtime: { name: "node", version: "24.15.0", onFail: "error" },
+      },
       scripts: {
         check: "node --test test/check.js",
         test: "node --test test/check.js",
@@ -1039,7 +1048,7 @@ describe("toolchain authority adapters", () => {
         "runtime repin",
         { ...validManifest, packageManager: "pnpm@10.34.4" },
         validLock,
-        /must pin packageManager/,
+        /packageManager must pin/,
       ],
       [
         "lifecycle hook",
@@ -1234,6 +1243,16 @@ describe("toolchain authority adapters", () => {
       ).managedRuntimes,
     );
     expect(plan).not.toBeNull();
+    expect(plan!.setup.map(({ command }) => command)).toEqual([
+      "node --version",
+      "pnpm --version",
+      "pnpm install --frozen-lockfile --ignore-scripts --registry=https://registry.npmjs.org/",
+    ]);
+    expect(plan!.setup.map(({ expectedStdout }) => expectedStdout)).toEqual([
+      "v24.15.0",
+      "10.34.5",
+      undefined,
+    ]);
     expect(plan!.environment).toMatchObject({
       npm_config_ignore_scripts: "true",
       npm_config_registry: "https://registry.npmjs.org/",

@@ -1,7 +1,17 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -18,6 +28,11 @@ import {
   type GitHubRelease,
   type ToolchainReleaseSource,
 } from "../src/runtime/toolchain-store.js";
+import {
+  canonicalJson,
+  runtimeBundleDigest,
+  type RuntimeBundleReceipt,
+} from "../src/runtime/toolchain-bundle.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -40,7 +55,7 @@ function pnpmArchive(version: string): Buffer {
   }
 }
 
-const testNodeBytes = Buffer.from("#!/bin/sh\nprintf 'v22.14.0\\n'\n", "utf8");
+const testNodeBytes = Buffer.from("#!/bin/sh\nprintf 'v24.15.0\\n'\n", "utf8");
 
 function source(bytes: Buffer, releases?: GitHubRelease[]): ToolchainReleaseSource {
   const defaults: GitHubRelease[] = [
@@ -74,22 +89,26 @@ function source(bytes: Buffer, releases?: GitHubRelease[]): ToolchainReleaseSour
   return {
     listReleases: async () => releases ?? defaults,
     downloadAsset: async () => bytes,
-    resolveLatestNodeDistribution: async () => ({
-      version: "22.14.0",
-      tag: "v22.14.0",
-      publishedAt: "2026-09-08T00:00:00.000Z",
-      name: "node-v22.14.0-linux-x64-test",
-      url: "https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64-test",
-      sha256: digest(testNodeBytes),
-      archive: "raw",
-      executablePath: "node",
-    }),
+    resolveLatestNodeDistribution: async (requirement) => {
+      expect(requirement).toEqual({ nodePnpm: true });
+      return {
+        version: "24.15.0",
+        tag: "v24.15.0",
+        publishedAt: "2026-09-08T00:00:00.000Z",
+        name: "node-v24.15.0-linux-x64-test",
+        url: "https://nodejs.org/dist/v24.15.0/node-v24.15.0-linux-x64-test",
+        sha256: digest(testNodeBytes),
+        archive: "raw",
+        executablePath: "node",
+        lts: "Krypton",
+      };
+    },
     downloadNodeDistribution: async () => testNodeBytes,
   };
 }
 
 const fakeRun = (async (command: string) => ({
-  stdout: command.includes("/node/root/") ? "v22.14.0\n" : "12.3.4\n",
+  stdout: command.includes("/node/root/") ? "v24.15.0\n" : "12.3.4\n",
   stderr: "",
 })) as never;
 
@@ -112,7 +131,7 @@ describe("managed toolchain store", () => {
     });
 
     expect(receipt.tool).toBe("pnpm");
-    expect(receipt.components.map(({ version }) => version)).toEqual(["22.14.0", "12.3.4"]);
+    expect(receipt.components.map(({ version }) => version)).toEqual(["24.15.0", "12.3.4"]);
     expect(receipt.resolvedAt).toBe("2026-09-10T01:02:03.000Z");
     expect((await activeRuntimeBundle("pnpm", root)).digest).toBe(receipt.digest);
     expect(activeRuntimeBundleSync("pnpm", root).digest).toBe(receipt.digest);
@@ -154,6 +173,79 @@ describe("managed toolchain store", () => {
     });
   });
 
+  it("rejects a retained Node 26 pnpm receipt and preserves its pointer until reprovision succeeds", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-toolchain-store-"));
+    roots.push(root);
+    const bytes = pnpmArchive("12.3.4");
+    const valid = await provisionToolchain("pnpm", { root, source: source(bytes) });
+    const unsigned = structuredClone(valid) as Omit<RuntimeBundleReceipt, "digest"> & {
+      digest?: string;
+    };
+    delete unsigned.digest;
+    const node = unsigned.components[0]!;
+    node.version = "26.9.0";
+    node.release = {
+      ...node.release,
+      releaseId: "v26.9.0",
+      tag: "v26.9.0",
+      channel: "lts:Future",
+    };
+    node.asset = {
+      ...node.asset,
+      assetId: "https://nodejs.org/dist/v26.9.0/node-v26.9.0-linux-x64-test",
+      name: "node-v26.9.0-linux-x64-test",
+      url: "https://nodejs.org/dist/v26.9.0/node-v26.9.0-linux-x64-test",
+    };
+    const stale = {
+      ...unsigned,
+      digest: runtimeBundleDigest(unsigned),
+    } as RuntimeBundleReceipt;
+    await cp(join(root, "bundles", valid.digest), join(root, "bundles", stale.digest), {
+      recursive: true,
+    });
+    await writeFile(
+      join(root, "bundles", stale.digest, "receipt.json"),
+      `${canonicalJson(stale)}\n`,
+    );
+    await writeFile(
+      join(root, "active", "pnpm.json"),
+      `${canonicalJson({ digest: stale.digest })}\n`,
+    );
+
+    expect(await toolchainStatus("pnpm", root)).toMatchObject({
+      state: "corrupt",
+      reason: expect.stringMatching(/Node 24 LTS/),
+    });
+    expect(() => activeRuntimeBundleSync("pnpm", root)).toThrow(/Node 24 LTS/);
+    await expect(
+      restoreToolchain(stale, {
+        root,
+        source: {
+          listReleases: async () => [],
+          downloadAsset: async () => bytes,
+        },
+      }),
+    ).rejects.toThrow(/Node 24 LTS/);
+
+    const failing = source(bytes);
+    failing.downloadAsset = async () => {
+      throw new Error("simulated pnpm download failure");
+    };
+    await expect(provisionToolchain("pnpm", { root, source: failing })).rejects.toThrow(
+      /simulated pnpm download failure/,
+    );
+    expect(JSON.parse(await readFile(join(root, "active", "pnpm.json"), "utf8"))).toEqual({
+      digest: stale.digest,
+    });
+
+    await expect(
+      provisionToolchain("pnpm", { root, source: source(bytes) }),
+    ).resolves.toMatchObject({
+      digest: valid.digest,
+    });
+    expect((await activeRuntimeBundle("pnpm", root)).digest).toBe(valid.digest);
+  });
+
   it("probes the managed executable from its isolated staging component", async () => {
     const root = await mkdtemp(join(tmpdir(), "factory-toolchain-store-"));
     roots.push(root);
@@ -172,7 +264,7 @@ describe("managed toolchain store", () => {
           await expect(access(options.env!.HOME!)).resolves.toBeUndefined();
         }
         return {
-          stdout: command.includes("/node/root/") ? "v22.14.0\n" : "12.3.4\n",
+          stdout: command.includes("/node/root/") ? "v24.15.0\n" : "12.3.4\n",
           stderr: "",
         };
       },
@@ -190,9 +282,9 @@ describe("managed toolchain store", () => {
     const assets = await mkdtemp(join(tmpdir(), "factory-toolchain-assets-"));
     roots.push(root, assets);
     const nodeTree = join(assets, "node-tree");
-    const nodePrefix = "node-v22.14.0-linux-x64";
+    const nodePrefix = "node-v24.15.0-linux-x64";
     await mkdir(join(nodeTree, nodePrefix, "bin"), { recursive: true });
-    await writeFile(join(nodeTree, nodePrefix, "bin/node"), "#!/bin/sh\nprintf 'v22.14.0\\n'\n");
+    await writeFile(join(nodeTree, nodePrefix, "bin/node"), "#!/bin/sh\nprintf 'v24.15.0\\n'\n");
     await symlink("../lib/node_modules/npm/bin/npm-cli.js", join(nodeTree, nodePrefix, "bin/npm"));
     const archive = join(assets, "node.tar.xz");
     execFileSync("tar", ["-cJf", archive, "-C", nodeTree, nodePrefix]);
@@ -200,14 +292,15 @@ describe("managed toolchain store", () => {
     const pnpmBytes = pnpmArchive("12.3.4");
     const releaseSource = source(pnpmBytes);
     releaseSource.resolveLatestNodeDistribution = async () => ({
-      version: "22.14.0",
-      tag: "v22.14.0",
+      version: "24.15.0",
+      tag: "v24.15.0",
       publishedAt: "2026-09-08T00:00:00.000Z",
       name: `${nodePrefix}.tar.xz`,
-      url: `https://nodejs.org/dist/v22.14.0/${nodePrefix}.tar.xz`,
+      url: `https://nodejs.org/dist/v24.15.0/${nodePrefix}.tar.xz`,
       sha256: digest(nodeBytes),
       archive: "tar.xz",
       executablePath: `${nodePrefix}/bin/node`,
+      lts: "Krypton",
     });
     releaseSource.downloadNodeDistribution = async () => nodeBytes;
     const receipt = await provisionToolchain("pnpm", {
@@ -286,14 +379,15 @@ describe("managed toolchain store", () => {
 
     const badNode = source(bytes);
     badNode.resolveLatestNodeDistribution = async () => ({
-      version: "22.14.0",
-      tag: "v22.14.0",
+      version: "24.15.0",
+      tag: "v24.15.0",
       publishedAt: "2026-09-08T00:00:00.000Z",
-      name: "node-v22.14.0-linux-x64.tar.xz",
-      url: "https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz",
+      name: "node-v24.15.0-linux-x64.tar.xz",
+      url: "https://nodejs.org/dist/v24.15.0/node-v24.15.0-linux-x64.tar.xz",
       sha256: digest(testNodeBytes),
       archive: "tar.xz",
       executablePath: "node",
+      lts: "Krypton",
     });
     await expect(provisionToolchain("pnpm", { root, source: badNode })).rejects.toThrow(
       /official Node distribution identity is invalid/,

@@ -8,8 +8,9 @@ import {
 } from "../toolchains/authority.js";
 import type { ValidationEvidence } from "./evidence.js";
 import { runtimeBundleByDigestSync } from "../runtime/toolchain-store.js";
+import { assertPnpmManifestRuntimePins } from "../toolchains/pnpm.js";
 
-function managedPnpmVersion(packet?: WorkerPacket): string {
+function managedPnpmReceipt(packet?: WorkerPacket) {
   const digests = new Set(
     (packet?.managedRuntimes ?? []).flatMap((runtime) =>
       runtime?.tool === "pnpm" && runtime.bundleDigest ? [runtime.bundleDigest] : [],
@@ -19,10 +20,7 @@ function managedPnpmVersion(packet?: WorkerPacket): string {
     throw new Error(
       `pnpm validation lacks one exact activated runtime; observed ${JSON.stringify(packet?.managedRuntimes ?? [])}`,
     );
-  const receipt = runtimeBundleByDigestSync("pnpm", [...digests][0]!);
-  const component = receipt.components.find(({ id }) => id === "pnpm");
-  if (!component) throw new Error("pnpm runtime bundle lacks its executable component");
-  return component.version;
+  return runtimeBundleByDigestSync("pnpm", [...digests][0]!);
 }
 
 export interface ValidationPlan {
@@ -71,10 +69,8 @@ export function assertPnpmCommandsGroundedOnManifest(
   }
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("pnpm execution-base package.json is invalid");
-  const manifest = value as { packageManager?: unknown; scripts?: unknown };
-  const version = managedPnpmVersion(packet);
-  if (manifest.packageManager !== `pnpm@${version}`)
-    throw new Error(`pnpm execution base must pin packageManager to pnpm@${version}`);
+  const manifest = value as { scripts?: unknown };
+  assertPnpmManifestRuntimePins(manifest, managedPnpmReceipt(packet));
   if (!manifest.scripts || typeof manifest.scripts !== "object" || Array.isArray(manifest.scripts))
     throw new Error("pnpm execution base has no valid script map");
   const scripts = manifest.scripts as Record<string, unknown>;

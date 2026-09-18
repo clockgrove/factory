@@ -952,7 +952,7 @@ export async function main(env = process.env, run = installedMain) {
     console.log("Not exercised: explicit local scheduling opt-in required.");
     return;
   }
-  await run(createSchedulingQualification(authority, env));
+  await run(createSchedulingQualification(authority, env), { env });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {

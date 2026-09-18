@@ -904,8 +904,8 @@ export function assertQualificationCompletion(
     );
 }
 
-function required(name) {
-  const value = process.env[name]?.trim();
+function required(env, name) {
+  const value = env[name]?.trim();
   assert.ok(value, `${name} is required`);
   return value;
 }
@@ -953,9 +953,17 @@ export function qualificationFailure(evidence, error) {
   return new Error(reason, { cause: error });
 }
 
-export async function main(qualification = {}) {
-  const preflightOnly = process.env.FACTORY_LIVE_OBJECTIVE_PREFLIGHT === "1";
-  if (process.env.FACTORY_LIVE_OBJECTIVE !== "1" && !preflightOnly) {
+export async function main(
+  qualification = {},
+  {
+    env = process.env,
+    candidateSourceRoot = sourceRoot,
+    installAuthorityOptions = {},
+    runtimeEnvironmentOptions = {},
+  } = {},
+) {
+  const preflightOnly = env.FACTORY_LIVE_OBJECTIVE_PREFLIGHT === "1";
+  if (env.FACTORY_LIVE_OBJECTIVE !== "1" && !preflightOnly) {
     console.log(
       "Not exercised: set FACTORY_LIVE_OBJECTIVE_PREFLIGHT=1 or FACTORY_LIVE_OBJECTIVE=1.",
     );
@@ -966,15 +974,16 @@ export async function main(qualification = {}) {
     "./qualification-install-identity.mjs"
   );
   assert.equal(
-    process.env.FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT,
+    env.FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT,
     undefined,
     "plugin-root selection was replaced by retained install receipt authority",
   );
-  const candidate = installedQualificationAuthority(process.env, {
-    sourceRoot,
+  const candidate = installedQualificationAuthority(env, {
+    ...installAuthorityOptions,
+    sourceRoot: candidateSourceRoot,
     committedPaths: [...sharedHarnessPaths, ...(qualification.harnessPaths ?? [])],
   });
-  const runtimeEnvironment = qualificationRuntimeEnvironment(process.env);
+  const runtimeEnvironment = qualificationRuntimeEnvironment(env, runtimeEnvironmentOptions);
   const pluginRoot = candidate.installedPluginRoot;
   const manifest = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"));
   const identity = candidate.pluginIdentity;
@@ -997,17 +1006,17 @@ export async function main(qualification = {}) {
     },
   };
   assert.equal(
-    process.env.FACTORY_LIVE_OBJECTIVE_NUMBER,
+    env.FACTORY_LIVE_OBJECTIVE_NUMBER,
     undefined,
     "installed qualification never revives a prior Objective",
   );
   assert.equal(
-    process.env.FACTORY_LIVE_OBJECTIVE_PRIOR_RUN_ID,
+    env.FACTORY_LIVE_OBJECTIVE_PRIOR_RUN_ID,
     undefined,
     "installed qualification never reuses a terminal run",
   );
   const namespace = qualificationNamespace(
-    qualification.namespace ?? process.env.FACTORY_LIVE_OBJECTIVE_NAMESPACE,
+    qualification.namespace ?? env.FACTORY_LIVE_OBJECTIVE_NAMESPACE,
   );
   const fixturePaths = qualificationPaths(namespace);
   const runObjectiveBody = qualification.objectiveBody ?? objectiveBodyFor(namespace);
@@ -1016,17 +1025,17 @@ export async function main(qualification = {}) {
       fixturePaths.files.every((path) => runObjectiveBody.includes(path)),
     "Objective body does not retain its exact qualification namespace",
   );
-  const repository = required("FACTORY_LIVE_OBJECTIVE_REPOSITORY");
+  const repository = required(env, "FACTORY_LIVE_OBJECTIVE_REPOSITORY");
   assert.match(repository, /^[\w.-]+\/[\w.-]+$/);
   assert.notEqual(repository.toLowerCase(), "clockgrove/factory", "use a disposable repository");
   if (!preflightOnly)
     assert.equal(
-      required("FACTORY_LIVE_OBJECTIVE_MUTATION_ACK"),
+      required(env, "FACTORY_LIVE_OBJECTIVE_MUTATION_ACK"),
       repository,
       "acknowledge the exact disposable repository",
     );
   const [owner, repo] = repository.split("/");
-  const checkout = realpathSync(required("FACTORY_LIVE_OBJECTIVE_CHECKOUT"));
+  const checkout = realpathSync(required(env, "FACTORY_LIVE_OBJECTIVE_CHECKOUT"));
   assert.ok(!checkout.startsWith("/mnt/"), "checkout must reside on the Linux filesystem");
   const checkoutClean = run("git", ["status", "--porcelain"], checkout) === "";
   const fixturePathsAbsent = fixturePaths.files.every((path) => !existsSync(join(checkout, path)));
@@ -1043,11 +1052,10 @@ export async function main(qualification = {}) {
   };
   const modelTokenCeiling =
     qualification.policy?.economics?.maxModelTokens ??
-    modelTokenLimit(required("FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS"));
+    modelTokenLimit(required(env, "FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS"));
   const mcp = manifest.mcpServers?.factory;
   assert.equal(mcp?.command, "sh");
-  const token =
-    process.env.GITHUB_TOKEN || process.env.GH_TOKEN || run("gh", ["auth", "token"], checkout);
+  const token = env.GITHUB_TOKEN || env.GH_TOKEN || run("gh", ["auth", "token"], checkout);
   const octokit = new Octokit({
     auth: token,
     request: { headers: { "X-GitHub-Api-Version": "2026-03-10" } },
@@ -1155,7 +1163,7 @@ export async function main(qualification = {}) {
       preflight.blockers.push("scenario-precondition-unobserved");
     }
   }
-  const output = resolve(required("FACTORY_LIVE_OBJECTIVE_EVIDENCE"));
+  const output = resolve(required(env, "FACTORY_LIVE_OBJECTIVE_EVIDENCE"));
   mkdirSync(output, { recursive: true, mode: 0o700 });
   const directory = statSync(output);
   assert.ok(
@@ -1177,13 +1185,13 @@ export async function main(qualification = {}) {
   assert.equal(preflight.result, "passed", `preflight blocked: ${preflight.blockers.join(", ")}`);
   if (!qualification.policy)
     assert.equal(
-      process.env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs",
+      env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs",
       "stacked-prs",
       "installed local qualification requires native delivery",
     );
   const policy =
     qualification.policy ??
-    boundedPolicy(process.env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs", modelTokenCeiling);
+    boundedPolicy(env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs", modelTokenCeiling);
   const evidence = {
     schemaVersion: 1,
     scope: qualification.scope ?? "installed-local-objective-happy-path",

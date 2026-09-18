@@ -60,6 +60,14 @@ const scopeFields = [
 ];
 const sha = /^[a-f0-9]{64}$/;
 const evidenceByteLimit = 8 * 1024 * 1024;
+export const localFaultHarnessPaths = [
+  "scripts/verify-local-faults.mjs",
+  "scripts/verify-live-objective.mjs",
+  "scripts/qualification-model-accounting.mjs",
+  "scripts/qualification-receipts.mjs",
+  "scripts/qualification-merge-proof.mjs",
+  "scripts/qualification-install-identity.mjs",
+];
 
 const faultStages = Object.freeze({
   configuration: "Explicit scenario configuration could not be verified",
@@ -793,17 +801,68 @@ export async function boundedPoll(
   throw new Error("bounded-observation-incomplete");
 }
 
-async function runQualification(progress) {
-  if (process.env.FACTORY_LOCAL_FAULTS !== "1") {
+export function installedLocalFaultAuthority(
+  env,
+  { candidateSourceRoot = root, installAuthorityOptions = {} } = {},
+) {
+  return installedQualificationAuthority(env, {
+    ...installAuthorityOptions,
+    sourceRoot: candidateSourceRoot,
+    committedPaths: localFaultHarnessPaths,
+  });
+}
+
+export function assertFaultControllerAuthority(
+  controller,
+  { artifactIdentity, launcher, bundle, repository, checkout, runningArgv },
+) {
+  for (const field of ["installed", "enabled", "active", "healthy", "launcherCurrent"])
+    assert.equal(controller[field], true, `fault controller ${field} authority differs`);
+  assert.equal(controller.reasonCode, null, "fault controller reports an unhealthy reason");
+  assert.equal(
+    controller.executableIdentity,
+    artifactIdentity,
+    "fault controller retained executable identity differs",
+  );
+  assert.equal(
+    controller.currentExecutableIdentity,
+    artifactIdentity,
+    "fault controller current executable identity differs",
+  );
+  assert.deepEqual(runningArgv, [
+    launcher,
+    bundle,
+    "controller",
+    "run",
+    repository,
+    "--repo",
+    checkout,
+    "--executable-identity",
+    artifactIdentity,
+  ]);
+}
+
+export async function runQualification(
+  progress,
+  env = process.env,
+  { candidateSourceRoot = root, installAuthorityOptions = {} } = {},
+) {
+  if (env.FACTORY_LOCAL_FAULTS !== "1") {
     console.log(
       "Not exercised: FACTORY_LOCAL_FAULTS=1 and explicit phase/repository authority required.",
     );
     return;
   }
+  progress.stage("installed-identity");
+  const candidate = installedLocalFaultAuthority(env, {
+    candidateSourceRoot,
+    installAuthorityOptions,
+  });
+  const runtimeEnvironment = qualificationRuntimeEnvironment(env);
   progress.stage("configuration");
-  assertFaultAuthenticationEnvironment(process.env);
+  assertFaultAuthenticationEnvironment(env);
   const required = (key) => {
-    const value = process.env[`FACTORY_LOCAL_FAULT_${key}`]?.trim();
+    const value = env[`FACTORY_LOCAL_FAULT_${key}`]?.trim();
     assert.ok(value, `FACTORY_LOCAL_FAULT_${key} required`);
     return value;
   };
@@ -826,17 +885,6 @@ async function runQualification(progress) {
   const policy = faultPolicy(maxModelTokens, scenario);
   const evidencePath = resolve(required("EVIDENCE"));
   assert.ok(evidencePath.startsWith("/tmp/"), "private evidence must be in /tmp");
-  progress.stage("installed-identity");
-  const candidate = installedQualificationAuthority(process.env, {
-    sourceRoot: root,
-    committedPaths: [
-      "scripts/verify-local-faults.mjs",
-      "scripts/qualification-model-accounting.mjs",
-      "scripts/qualification-receipts.mjs",
-      "scripts/qualification-install-identity.mjs",
-    ],
-  });
-  const runtimeEnvironment = qualificationRuntimeEnvironment(process.env);
   const pluginRoot = candidate.installedPluginRoot;
   const manifest = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"));
   const artifact = candidate.pluginArtifact;
@@ -947,23 +995,26 @@ async function runQualification(progress) {
       repository: checkout,
       requestId: `${namespace}-inspect`,
     });
-    assert.ok(
-      controller.active && controller.installed,
-      "an explicitly installed active controller is required",
-    );
     const controllerObservation = observeUnit(controller.unit);
     assert.equal(controllerObservation.status, "active");
-    const controllerExec = command("systemctl", [
-      "--user",
-      "show",
-      controller.unit,
-      "--property=ExecStart",
-      "--value",
-    ]);
-    assert.ok(
-      controllerExec.includes(join(realpathSync(pluginRoot), "dist/factory.js")),
-      "controller must execute this exact installed Factory bundle",
+    const controllerPid = Number(
+      command("systemctl", ["--user", "show", controller.unit, "--property=MainPID", "--value"]),
     );
+    assert.ok(
+      Number.isSafeInteger(controllerPid) && controllerPid > 0,
+      "active controller PID unavailable",
+    );
+    const runningArgv = readFileSync(`/proc/${controllerPid}/cmdline`, "utf8")
+      .split("\0")
+      .filter(Boolean);
+    assertFaultControllerAuthority(controller, {
+      artifactIdentity: candidate.artifactIdentity,
+      launcher: realpathSync(process.execPath),
+      bundle: realpathSync(join(pluginRoot, "dist/factory.js")),
+      repository,
+      checkout,
+      runningArgv,
+    });
     if (phase === "preflight") {
       console.log(
         JSON.stringify({
@@ -1282,10 +1333,10 @@ async function runQualification(progress) {
     await client.close().catch(() => {});
   }
 }
-export async function main() {
+export async function main(env = process.env, options = {}) {
   const progress = createFaultProgress({ emit: (event) => console.log(JSON.stringify(event)) });
   try {
-    await runQualification(progress);
+    await runQualification(progress, env, options);
   } catch {
     // Includes failures before MCP setup and failures to persist private evidence.
     // Never print raw exceptions, transport payloads, environment or credentials.

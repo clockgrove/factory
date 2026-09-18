@@ -1,8 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   chmodSync,
-  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -12,175 +9,23 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   installedQualificationAuthority,
   qualificationRuntimeEnvironment,
 } from "../scripts/qualification-install-identity.mjs";
+import {
+  cleanupQualificationInstallFixtures,
+  createQualificationInstallFixture,
+  writeQualificationFixtureFile,
+} from "./helpers/qualification-install.js";
 
-const sha256 = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");
-const roots: string[] = [];
-
-function write(path: string, value: string, mode?: number): void {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, value, mode === undefined ? undefined : { mode });
-}
-
-function git(root: string, args: string[]): string {
-  return execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
-}
-
-function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "factory-qualification-install-"));
-  roots.push(root);
-  chmodSync(root, 0o700);
-  const source = join(root, "source");
-  mkdirSync(source, { mode: 0o700 });
-  const version = "2.0.27-beta.0";
-  const factoryBundle = "#!/usr/bin/env node\nconsole.log('factory');\n";
-  const mcpBundle = "#!/usr/bin/env node\nconsole.log('mcp');\n";
-  const inventory = `${JSON.stringify({
-    protocol: "clockgrove.factory/bundle-inventory-v1",
-    bundles: [
-      {
-        file: "factory.js",
-        bytes: Buffer.byteLength(factoryBundle),
-        sha256: sha256(factoryBundle),
-      },
-      { file: "mcp-server.js", bytes: Buffer.byteLength(mcpBundle), sha256: sha256(mcpBundle) },
-    ],
-  })}\n`;
-  const packageManifest = `${JSON.stringify({ name: "@clockgrove/factory", version })}\n`;
-  const portableManifest = `${JSON.stringify({ name: "factory", version })}\n`;
-  const codexManifest = `${JSON.stringify({
-    name: "factory",
-    version,
-    mcpServers: {
-      factory: {
-        command: "sh",
-        args: ["${PLUGIN_ROOT}/bin/factory-mcp", "${PLUGIN_ROOT}/dist/mcp-server.js"],
-      },
-    },
-  })}\n`;
-  const launcher = '#!/bin/sh\nexec node "$2"\n';
-  write(join(source, ".gitignore"), "release/\n");
-  write(join(source, "package.json"), packageManifest);
-  write(join(source, "plugin.json"), portableManifest);
-  write(join(source, ".codex-plugin/plugin.json"), codexManifest);
-  write(join(source, "dist/factory.js"), factoryBundle, 0o700);
-  write(join(source, "dist/mcp-server.js"), mcpBundle, 0o700);
-  write(join(source, "dist/bundle-inventory.json"), inventory);
-  write(join(source, "bin/factory-mcp"), launcher, 0o700);
-  write(
-    join(source, "scripts/qualification-install-identity.mjs"),
-    "export const authority = true;\n",
-  );
-  write(join(source, "scripts/harness.mjs"), "export const harness = true;\n");
-  git(source, ["init", "-q"]);
-  git(source, ["config", "user.name", "Factory Test"]);
-  git(source, ["config", "user.email", "factory@example.invalid"]);
-  git(source, ["add", "."]);
-  git(source, ["commit", "-qm", "fixture"]);
-  const sourceCommit = git(source, ["rev-parse", "HEAD"]);
-
-  const npmPrefix = join(root, "npm");
-  const installedFactoryRoot = join(npmPrefix, "lib/node_modules/@clockgrove/factory");
-  for (const [path, value, mode] of [
-    ["package.json", packageManifest],
-    ["dist/factory.js", factoryBundle, 0o700],
-    ["dist/mcp-server.js", mcpBundle, 0o700],
-    ["dist/bundle-inventory.json", inventory],
-  ] as const)
-    write(join(installedFactoryRoot, path), value, mode);
-  const factoryCli = join(npmPrefix, "bin/factory");
-  mkdirSync(dirname(factoryCli), { recursive: true });
-  symlinkSync("../lib/node_modules/@clockgrove/factory/dist/factory.js", factoryCli);
-
-  const codexHome = join(root, "codex-home");
-  mkdirSync(codexHome, { mode: 0o700 });
-  const installedPluginRoot = join(codexHome, "plugins/cache/clockgrove-factory/factory", version);
-  cpSync(installedFactoryRoot, installedPluginRoot, { recursive: true });
-  write(join(installedPluginRoot, "plugin.json"), portableManifest);
-  write(join(installedPluginRoot, ".codex-plugin/plugin.json"), codexManifest);
-  write(join(installedPluginRoot, "bin/factory-mcp"), launcher, 0o700);
-
-  const listedPluginSource = join(root, "plugin-marketplace");
-  mkdirSync(listedPluginSource, { mode: 0o700 });
-  const pluginArchive = join(root, `factory-plugin-${sourceCommit}.tar`);
-  execFileSync("git", ["archive", "--format=tar", `--output=${pluginArchive}`, sourceCommit], {
-    cwd: source,
-  });
-  execFileSync("tar", ["-xf", pluginArchive, "-C", listedPluginSource]);
-
-  const codexCli = join(root, "codex");
-  write(codexCli, "#!/bin/sh\nexit 1\n", 0o700);
-  const tarballFile = "clockgrove-factory.tgz";
-  const tarball = join(source, "release", tarballFile);
-  write(tarball, "retained npm tarball\n");
-  write(
-    join(source, "release/release-manifest.json"),
-    `${JSON.stringify({
-      version,
-      provenance: { sourceCommit },
-      tarball: { file: tarballFile, sha256: sha256(readFileSync(tarball)) },
-      bundleInventory: { sha256: sha256(inventory) },
-    })}\n`,
-  );
-  const installReceipt = join(root, "install-identities.txt");
-  writeFileSync(
-    installReceipt,
-    `${[
-      `sourceCommit=${sourceCommit}`,
-      `version=${version}`,
-      `tarballFile=${tarballFile}`,
-      `tarballSha256=${sha256(readFileSync(tarball))}`,
-      `npmPrefix=${npmPrefix}`,
-      `factoryCli=${factoryCli}`,
-      `codexHome=${codexHome}`,
-      `codexCli=${codexCli}`,
-      `pluginArchive=${pluginArchive}`,
-      `pluginArchiveSha256=${sha256(readFileSync(pluginArchive))}`,
-      `installedPluginRoot=${installedPluginRoot}`,
-      `listedPluginSource=${listedPluginSource}`,
-      `bundleInventorySha256=${sha256(inventory)}`,
-      `factoryBundleSha256=${sha256(factoryBundle)}`,
-      `mcpServerBundleSha256=${sha256(mcpBundle)}`,
-      `controllerLauncherIdentity=sha256:${sha256(factoryBundle)}`,
-    ].join("\n")}\n`,
-    { mode: 0o600 },
-  );
-  const listed = {
-    installed: [
-      {
-        name: "factory",
-        installed: true,
-        enabled: true,
-        version,
-        marketplaceName: "clockgrove-factory",
-        pluginId: "factory@clockgrove-factory",
-        source: { source: "local", path: listedPluginSource },
-      },
-    ],
-  };
-  return {
-    root,
-    source,
-    installReceipt,
-    installedFactoryRoot,
-    installedPluginRoot,
-    listedPluginSource,
-    pluginArchive,
-    tarball,
-    codexHome,
-    codexCli,
-    version,
-    listed,
-  };
-}
+const fixture = createQualificationInstallFixture;
+const write = writeQualificationFixtureFile;
 
 afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  cleanupQualificationInstallFixtures();
 });
 
 describe("retained qualification install authority", () => {
@@ -376,7 +221,6 @@ describe("retained qualification install authority", () => {
   it("selects the isolated candidate when the default cache contains another Factory version", () => {
     const value = fixture();
     const defaultHome = mkdtempSync(join(tmpdir(), "factory-runtime-home-"));
-    roots.push(defaultHome);
     chmodSync(defaultHome, 0o700);
     const defaultCodexHome = join(defaultHome, ".codex");
     const otherVersion = join(defaultCodexHome, "plugins/cache/clockgrove-factory/factory/2.0.26");

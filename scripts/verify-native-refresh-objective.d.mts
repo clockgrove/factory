@@ -9,5 +9,8 @@ export function assessNativeRefreshCompletion(evidence: unknown): {
 };
 export function main(
   env?: Record<string, string | undefined>,
-  run?: (qualification: Record<string, unknown>) => Promise<void>,
+  run?: (
+    qualification: Record<string, unknown>,
+    context: { env: Record<string, string | undefined> },
+  ) => Promise<void>,
 ): Promise<void>;

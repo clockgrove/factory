@@ -36,7 +36,15 @@ export function assessCompletion(evidence: unknown): {
   scope: "installed-local-objective-happy-path";
   reason?: string;
 };
-export function main(qualification?: Record<string, unknown>): Promise<void>;
+export function main(
+  qualification?: Record<string, unknown>,
+  options?: {
+    env?: Record<string, string | undefined>;
+    candidateSourceRoot?: string;
+    installAuthorityOptions?: Record<string, unknown>;
+    runtimeEnvironmentOptions?: Record<string, unknown>;
+  },
+): Promise<void>;
 export function verifyQualificationFinalArtifact(input: {
   verifier?: (hooks: Record<string, unknown>) => Promise<void>;
   defaultVerifier: (hooks: Record<string, unknown>) => Promise<void>;

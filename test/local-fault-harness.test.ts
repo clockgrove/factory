@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:f
 import { describe, expect, it, vi } from "vitest";
 import {
   assessLocalFault,
+  assertFaultControllerAuthority,
   assertFaultAuthenticationEnvironment,
   faultRequest,
   faultTerminalReady,
@@ -71,11 +72,86 @@ describe("bounded local-fault progress diagnostics", () => {
     const diagnostic = JSON.parse(result.stderr.trim());
     expect(diagnostic).toMatchObject({
       result: "incomplete",
-      stage: "configuration",
-      code: "local-fault-configuration-incomplete",
+      stage: "installed-identity",
+      code: "local-fault-installed-identity-incomplete",
     });
     expect(`${result.stdout}${result.stderr}`).not.toContain("private-secret-sentinel");
     expect(`${result.stdout}${result.stderr}`).not.toContain("AssertionError");
+  });
+});
+
+describe("local fault controller authority", () => {
+  const artifactIdentity = `sha256:${"a".repeat(64)}`;
+  const expected = {
+    artifactIdentity,
+    launcher: "/usr/bin/node",
+    bundle: "/retained/plugin/dist/factory.js",
+    repository: "fixture/private",
+    checkout: "/home/factory/checkout",
+    runningArgv: [
+      "/usr/bin/node",
+      "/retained/plugin/dist/factory.js",
+      "controller",
+      "run",
+      "fixture/private",
+      "--repo",
+      "/home/factory/checkout",
+      "--executable-identity",
+      artifactIdentity,
+    ],
+  };
+  const status = {
+    installed: true,
+    enabled: true,
+    active: true,
+    healthy: true,
+    launcherCurrent: true,
+    executableIdentity: artifactIdentity,
+    currentExecutableIdentity: artifactIdentity,
+    reasonCode: null,
+  };
+
+  it("accepts only the active healthy controller executing the exact retained candidate", () => {
+    expect(() => assertFaultControllerAuthority(status, expected)).not.toThrow();
+  });
+
+  it.each([
+    ["not installed", { controller: { installed: false } }],
+    ["not enabled", { controller: { enabled: false } }],
+    ["not active", { controller: { active: false } }],
+    ["not healthy", { controller: { healthy: false, reasonCode: "controller-inactive" } }],
+    ["stale launcher", { controller: { launcherCurrent: false } }],
+    ["retained identity drift", { controller: { executableIdentity: `sha256:${"b".repeat(64)}` } }],
+    [
+      "current identity drift",
+      { controller: { currentExecutableIdentity: `sha256:${"b".repeat(64)}` } },
+    ],
+    [
+      "launcher path drift",
+      { authority: { runningArgv: ["/other/node", ...expected.runningArgv.slice(1)] } },
+    ],
+    [
+      "bundle path drift",
+      {
+        authority: {
+          runningArgv: [
+            expected.runningArgv[0],
+            "/other/factory.js",
+            ...expected.runningArgv.slice(2),
+          ],
+        },
+      },
+    ],
+  ])("rejects %s before any Objective mutation", (_name, drift) => {
+    const mutateObjective = vi.fn();
+    expect(() => {
+      assertFaultControllerAuthority(
+        { ...status, ...(drift.controller ?? {}) },
+        { ...expected, ...(drift.authority ?? {}) },
+      );
+      mutateObjective();
+    }).toThrow();
+    expect(mutateObjective).not.toHaveBeenCalled();
   });
 });
 

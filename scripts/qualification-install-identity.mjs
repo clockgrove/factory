@@ -324,7 +324,11 @@ export function installedQualificationAuthority(
   regularFile(pluginArchive, uid, MAX_ARTIFACT_BYTES);
   assert.equal(hash(readFileSync(pluginArchive)), receipt.pluginArchiveSha256);
 
-  assert.equal(git(source, ["status", "--porcelain", "--untracked-files=all"]), "");
+  assert.equal(
+    git(source, ["status", "--porcelain", "--untracked-files=all"]),
+    "",
+    "qualification source must be clean",
+  );
   assert.equal(git(source, ["rev-parse", "HEAD"]), receipt.sourceCommit);
   assert.equal(
     hash(gitBytes(source, ["archive", "--format=tar", receipt.sourceCommit], MAX_ARTIFACT_BYTES)),

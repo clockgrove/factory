@@ -198,7 +198,7 @@ export async function main(env = process.env, run = installedMain) {
     );
     return;
   }
-  await run(qualification);
+  await run(qualification, { env });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {

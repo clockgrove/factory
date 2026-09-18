@@ -10,6 +10,7 @@ import type { CompiledGraphProjectionRecord, CompiledGraphRecord } from "../cont
 import { deduplicateFactoryEvents } from "../control/receipts.js";
 import type { CompilerDraftRecord } from "../control/compiler-drafts.js";
 import { draftDigest } from "../control/compiler-drafts.js";
+import { validatePersistedCompilerDraftJournal } from "../evaluation/compiler-draft-loop.js";
 import { assertCompilerDraftSelection } from "../management/draft-compilation.js";
 import type { FactoryEvent } from "../protocol/events.js";
 import { assertNoSecretMaterial, gitSha, safeId, sha256Digest } from "../protocol/limits.js";
@@ -102,6 +103,7 @@ export function proveCompilerSelectionQualificationBoundary(args: {
   events: readonly FactoryEvent[];
   durableGraph: CompiledGraphRecord | null;
 }): z.infer<typeof CompilerSelectionQualificationProofSchema> {
+  if (args.records.length > 0) validatePersistedCompilerDraftJournal(args.records);
   assertCompilerDraftSelection(args.records, args.graph, args.inputDigest);
   if (args.durableGraph) throw new Error("compiler selection checkpoint follows graph persistence");
   const events = deduplicateFactoryEvents([...args.events]);

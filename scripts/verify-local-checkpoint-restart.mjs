@@ -128,7 +128,10 @@ export function checkpointAuthority(env) {
     namespace: qualificationNamespace(env.FACTORY_CHECKPOINT_NAMESPACE),
     evidence: safePath(env.FACTORY_CHECKPOINT_EVIDENCE),
     ...(compilerRecovery
-      ? { observationWindowMinutes: policy.objectiveTimeoutMinutes }
+      ? {
+          observationWindowMinutes: policy.objectiveTimeoutMinutes,
+          compilerMaxModelTokens: policy.economics.maxModelTokens,
+        }
       : { policy }),
     ...(sessionRecovery ? { sessionRecovery: true } : {}),
     ...(compilerRecovery ? { compilerRecovery: true } : {}),
@@ -1436,6 +1439,13 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
   const observationWindowMinutes =
     authority.policy?.objectiveTimeoutMinutes ?? authority.observationWindowMinutes;
   checkpointDeadline(new Date(0).toISOString(), observationWindowMinutes);
+  const maxObservedChildren = extension.maxObservedChildren ?? 3;
+  assert.ok(
+    Number.isSafeInteger(maxObservedChildren) &&
+      maxObservedChildren >= 0 &&
+      maxObservedChildren <= 100,
+    "invalid observed child bound",
+  );
   assert.equal(process.platform, "linux");
   const home = realpathSync(homedir());
   assert.ok(!home.startsWith("/mnt/"));
@@ -1779,7 +1789,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       ),
     );
     await observationRead("children", () => {
-      assert.ok(children.length <= 3);
+      assert.ok(children.length <= maxObservedChildren);
     });
     const comments = [];
     for (const issue of [objective, ...children])

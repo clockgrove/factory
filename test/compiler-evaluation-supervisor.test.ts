@@ -620,7 +620,7 @@ describe("Supervisor compiler evaluation activation boundary", () => {
       const reports: string[][] = [];
       Object.assign(f.management, { supportsCompilerAdmission: true });
       f.management.extractObligations = async (context, checkpoint, beforeModelInvocation) => {
-        await beforeModelInvocation?.();
+        await beforeModelInvocation?.(invocationProvenance(context.baseSha));
         calls.push("inventory");
         const inventory: ObligationInventory = {
           version: 1,
@@ -769,7 +769,7 @@ describe("Supervisor compiler evaluation activation boundary", () => {
         );
       };
       f.management.judgePlan = async (context, checkpoint, beforeModelInvocation) => {
-        await beforeModelInvocation?.();
+        await beforeModelInvocation?.(invocationProvenance(context.compilation.baseSha));
         calls.push("judge");
         const verdict: CompilerJudgeVerdict = {
           version: 1,
@@ -932,6 +932,21 @@ describe("Supervisor compiler evaluation activation boundary", () => {
         usage: expect.arrayContaining([expect.objectContaining({ stage: "repair", amount: 30 })]),
       });
       expect(proof.usage).toHaveLength(4);
+      const trailingRecord = structuredClone(records.at(-1)!);
+      trailingRecord.sequence = records.length;
+      const malformedRecords = [...records, trailingRecord];
+      expect(() => validatePersistedCompilerDraftJournal(malformedRecords)).toThrow(
+        "compiler draft contains records after its terminal state",
+      );
+      expect(() =>
+        proveCompilerSelectionQualificationBoundary({
+          records: malformedRecords,
+          graph: persisted!.objective,
+          inputDigest: records[0]!.binding.inputDigest,
+          events: f.events(),
+          durableGraph: null,
+        }),
+      ).toThrow("compiler draft contains records after its terminal state");
       expect(() =>
         proveCompilerSelectionQualificationBoundary({
           records,

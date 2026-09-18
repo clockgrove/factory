@@ -4,7 +4,13 @@ export type CompilerCheckpointKind = "compiler-selection" | "graph-projection";
 export interface CompilerCheckpointPolicy extends Record<string, unknown> {
   objectiveTimeoutMinutes: number;
   workItemTimeoutMinutes: number;
-  compilerEvaluation?: { mode?: string };
+  compilerEvaluation?: {
+    mode: "auto-repair";
+    maxRepairs: number;
+    maxInvocations: number;
+    timeoutSeconds: number;
+    maxObservedTokens: number;
+  };
 }
 export interface CompilerCheckpointAuthority extends Record<string, unknown> {
   repository: string;
@@ -15,6 +21,7 @@ export interface CompilerCheckpointAuthority extends Record<string, unknown> {
   evidence: string;
   policy: CompilerCheckpointPolicy;
   compilerRecovery: boolean;
+  compilerMaxModelTokens: number;
 }
 export interface CompilerController extends Record<string, unknown> {
   unit: string;
@@ -40,6 +47,10 @@ export interface CompilerCheckpointArm extends Record<string, unknown> {
 }
 export function compilerCheckpointPath(binding: Record<string, unknown>, uid?: number): string;
 export function compilerQualificationObjectiveBody(authority: { namespace: string }): string;
+export function assertCompilerQualificationDefaults(
+  effectiveDefaults: unknown,
+  maxObservedTokens: number,
+): CompilerCheckpointPolicy;
 export function compilerCheckpointArm(
   authority: CompilerCheckpointAuthority,
   controller: CompilerController,

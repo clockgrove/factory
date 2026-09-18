@@ -5,7 +5,9 @@ import { checkpointAuthority } from "../scripts/verify-local-checkpoint-restart.
 import {
   assertCompilerSelectionHold,
   assertGraphProjectionHold,
+  assertCompilerQualificationDefaults,
   compilerCheckpointArm,
+  compilerCheckpointExtension,
   compilerCheckpointPath,
   compilerQualificationObjectiveBody,
   runCompilerCheckpointScenario,
@@ -19,7 +21,7 @@ const policy = {
   objectiveTimeoutMinutes: 45,
   workItemTimeoutMinutes: 10,
   compilerEvaluation: {
-    mode: "auto-repair",
+    mode: "auto-repair" as const,
     maxRepairs: 2,
     maxInvocations: 7,
     timeoutSeconds: 600,
@@ -35,6 +37,7 @@ const authority = {
   evidence: "/home/example/compiler-checkpoint.json",
   policy,
   compilerRecovery: true,
+  compilerMaxModelTokens: 500_000,
 };
 const artifact = {
   version: "2.0.27-beta.0",
@@ -187,7 +190,7 @@ function selectionWitness() {
   };
 }
 
-function projectionWitness() {
+function projectionWitness(workItemNumbers = [48, 49, 50, 51]) {
   const projected = arm("graph-projection");
   const reachedAt = new Date(Date.now() - 30_000);
   return {
@@ -201,7 +204,7 @@ function projectionWitness() {
     proof: {
       checkpoint: "graph-projection",
       graphDigest: "6".repeat(64),
-      graphSize: 1,
+      graphSize: workItemNumbers.length,
       graphRef: "refs/clockgrove-factory/graphs/objective-47/run-fixture",
       graphCommitOid: "7".repeat(40),
       graphBlobSha: "8".repeat(40),
@@ -211,7 +214,7 @@ function projectionWitness() {
       projectionBlobSha: "b".repeat(40),
       projectionReceiptDigest: "c".repeat(64),
       bindingsDigest: "d".repeat(64),
-      workItemNumbers: [48],
+      workItemNumbers,
       attemptReservations: 0,
       capacityReservations: 0,
     },
@@ -234,7 +237,11 @@ function selectionObservation() {
   };
 }
 
-function projectedObservation(paused = false, acknowledged = false) {
+function projectedObservation(
+  paused = false,
+  acknowledged = false,
+  workItemNumbers = [48, 49, 50, 51],
+) {
   const graph = [
     {
       kind: "graph",
@@ -243,9 +250,9 @@ function projectedObservation(paused = false, acknowledged = false) {
       objective,
       runId: "compiler-case-activate",
       graphDigest: "6".repeat(64),
-      graphSize: 1,
-      graphRef: projectionWitness().proof.graphRef,
-      graphBlobSha: projectionWitness().proof.graphBlobSha,
+      graphSize: workItemNumbers.length,
+      graphRef: projectionWitness(workItemNumbers).proof.graphRef,
+      graphBlobSha: projectionWitness(workItemNumbers).proof.graphBlobSha,
     },
     {
       kind: "graph",
@@ -254,9 +261,9 @@ function projectedObservation(paused = false, acknowledged = false) {
       objective,
       runId: "compiler-case-activate",
       graphDigest: "6".repeat(64),
-      graphSize: 1,
-      projectionRef: projectionWitness().proof.projectionRef,
-      projectionBlobSha: projectionWitness().proof.projectionBlobSha,
+      graphSize: workItemNumbers.length,
+      projectionRef: projectionWitness(workItemNumbers).proof.projectionRef,
+      projectionBlobSha: projectionWitness(workItemNumbers).proof.projectionBlobSha,
     },
   ];
   const commands = paused
@@ -294,8 +301,8 @@ function projectedObservation(paused = false, acknowledged = false) {
       },
       compilerEvaluation: compilerStatus(),
     },
-    children: [{ number: 48, state: "open" }],
-    compilerCheckpoints: { "graph-projection": projectionWitness() },
+    children: workItemNumbers.map((number) => ({ number, state: "open" })),
+    compilerCheckpoints: { "graph-projection": projectionWitness(workItemNumbers) },
   };
 }
 
@@ -317,9 +324,43 @@ describe("installed compiler checkpoint qualifier", () => {
       compilerRecovery: true,
       unit,
       observationWindowMinutes: 45,
+      compilerMaxModelTokens: 500_000,
     });
     expect(checkpointAuthority(env)).not.toHaveProperty("policy");
+    expect(
+      checkpointAuthority({ ...env, FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "250000" }),
+    ).toMatchObject({ compilerMaxModelTokens: 250_000 });
     expect(() => checkpointAuthority({ ...env, FACTORY_CHECKPOINT_ACK: "incomplete" })).toThrow();
+  });
+
+  it("requires the exact documented compiler defaults within the authorized ceiling", () => {
+    expect(assertCompilerQualificationDefaults(policy, 500_000)).toBe(policy);
+    expect(() => assertCompilerQualificationDefaults(policy, 250_000)).toThrow(
+      "installed compiler defaults differ from the documented authorized envelope",
+    );
+    expect(() =>
+      assertCompilerQualificationDefaults(
+        {
+          ...policy,
+          compilerEvaluation: { ...policy.compilerEvaluation, maxInvocations: 6 },
+        },
+        500_000,
+      ),
+    ).toThrow("installed compiler defaults differ from the documented authorized envelope");
+    const incomplete = structuredClone(policy) as Record<string, unknown> & {
+      compilerEvaluation: Record<string, unknown>;
+    };
+    delete incomplete.compilerEvaluation.timeoutSeconds;
+    expect(() => assertCompilerQualificationDefaults(incomplete, 500_000)).toThrow(
+      "installed compiler defaults differ from the documented authorized envelope",
+    );
+  });
+
+  it("raises only the compiler fixture's shared observation bound to four", () => {
+    expect(compilerCheckpointExtension(authority)).toMatchObject({
+      omitActivationPolicy: true,
+      maxObservedChildren: 4,
+    });
   });
 
   it("binds arm paths to run and checkpoint kind", () => {
@@ -369,6 +410,14 @@ describe("installed compiler checkpoint qualifier", () => {
         projectionController,
       ),
     ).toBe(true);
+    expect(() =>
+      assertGraphProjectionHold(
+        projectedObservation(false, false, [48, 49, 50]),
+        authority,
+        { arm: arm("graph-projection") },
+        projectionController,
+      ),
+    ).toThrow("compiler qualification graph must contain four items");
   });
 
   it("orchestrates restart adoption, durable pause, zero admission, and final stop", async () => {

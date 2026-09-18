@@ -35,6 +35,25 @@ const unique = (rows, message) => {
   return rows[0];
 };
 const schedulingAdmission = new Set(["AttemptReserved", "CapacityReserved"]);
+const documentedCompilerEvaluationDefaults = Object.freeze({
+  mode: "auto-repair",
+  maxRepairs: 2,
+  maxInvocations: 7,
+  timeoutSeconds: 600,
+});
+
+export function assertCompilerQualificationDefaults(effectiveDefaults, maxObservedTokens) {
+  assert.ok(
+    Number.isSafeInteger(maxObservedTokens) && maxObservedTokens >= 0,
+    "authorized compiler observed-token ceiling required",
+  );
+  assert.deepEqual(
+    effectiveDefaults?.compilerEvaluation,
+    { ...documentedCompilerEvaluationDefaults, maxObservedTokens },
+    "installed compiler defaults differ from the documented authorized envelope",
+  );
+  return effectiveDefaults;
+}
 
 /** A retained human-authored greenfield shape: one pnpm authority provider and
  * three bounded, otherwise independent descendants. */
@@ -233,6 +252,8 @@ export function assertGraphProjectionHold(observation, authority, armRecord, con
   assert.equal(witness.proof.graphBlobSha, compiled.graphBlobSha);
   assert.equal(witness.proof.projectionRef, projected.projectionRef);
   assert.equal(witness.proof.projectionBlobSha, projected.projectionBlobSha);
+  assert.equal(witness.proof.graphSize, 4, "compiler qualification graph must contain four items");
+  assert.equal(observation.children.length, 4, "compiler projection must contain four Work Items");
   assert.equal(witness.proof.graphSize, observation.children.length);
   assert.deepEqual(
     witness.proof.workItemNumbers.slice().sort((a, b) => a - b),
@@ -356,6 +377,7 @@ export function compilerCheckpointExtension(authority) {
     authority,
     scope: "installed-compiler-qualification-checkpoints",
     omitActivationPolicy: true,
+    maxObservedChildren: 4,
     objectiveBody: compilerQualificationObjectiveBody,
     harnessPaths: ["scripts/verify-compiler-qualification-checkpoints.mjs"],
     observe: ({ observation, evidence }) => {
@@ -384,8 +406,12 @@ export function compilerCheckpointExtension(authority) {
         assert.equal(doctor.repository.toLowerCase(), authority.repository.toLowerCase());
         assert.equal(doctor.objective, evidence.objective.number);
         assert.equal(doctor.activationAuthorized, false);
-        assert.equal(doctor.effectiveDefaults.compilerEvaluation?.mode, "auto-repair");
-        authority.policy = structuredClone(doctor.effectiveDefaults);
+        authority.policy = structuredClone(
+          assertCompilerQualificationDefaults(
+            doctor.effectiveDefaults,
+            authority.compilerMaxModelTokens,
+          ),
+        );
         evidence.defaultPolicyObservation = {
           operation: doctor.operation,
           repository: doctor.repository,

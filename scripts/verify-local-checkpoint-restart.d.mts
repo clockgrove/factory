@@ -228,6 +228,7 @@ export interface CheckpointExtension {
   scope?: string;
   harnessPaths?: string[];
   omitActivationPolicy?: boolean;
+  maxObservedChildren?: number;
   objectiveBody?(authority: CheckpointAuthority): string;
   preflight?(context: Record<string, unknown>): unknown;
   observe?(context: Record<string, unknown>): unknown;

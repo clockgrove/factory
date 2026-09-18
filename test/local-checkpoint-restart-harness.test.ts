@@ -1511,6 +1511,8 @@ describe("strict repository takeover receipt", () => {
 describe("preinstalled configuration identity", () => {
   let root: string;
   let body: string;
+  let pluginBundle: string;
+  let thirdBundle: string;
   let expected: {
     repository: string;
     checkout: string;
@@ -1521,11 +1523,18 @@ describe("preinstalled configuration identity", () => {
 
   beforeAll(async () => {
     root = await mkdtemp(join(tmpdir(), "factory-checkpoint-controller-unit-"));
-    const bundle = join(root, "factory bundle", "factory.js");
+    const bundle = join(root, "npm", "lib/node_modules/@clockgrove/factory/dist/factory.js");
+    pluginBundle = join(
+      root,
+      "codex-home/plugins/cache/clockgrove-factory/factory/2.0.27-beta.0/dist/factory.js",
+    );
+    thirdBundle = join(root, "third-install", "dist/factory.js");
     const codex = join(root, "codex tools", "pinned codex");
-    await mkdir(dirname(bundle), { recursive: true });
+    for (const path of [bundle, pluginBundle, thirdBundle]) {
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, "process.exit(0);\n");
+    }
     await mkdir(dirname(codex), { recursive: true });
-    await writeFile(bundle, "process.exit(0);\n");
     await writeFile(codex, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
     const input = { repository, checkout: root };
     let enabled = false;
@@ -1578,6 +1587,21 @@ describe("preinstalled configuration identity", () => {
     expect(body).toContain('Environment="FACTORY_CODEX_PATH=');
     expect(body).toContain('Environment="FACTORY_MANAGEMENT_TRANSCRIPT_DIR=');
     expect(assertControllerUnit(body, expected)).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("accepts only the retained npm launcher when plugin and npm roots are distinct", async () => {
+    const pluginIdentity = createHash("sha256")
+      .update(await readFile(pluginBundle))
+      .digest("hex");
+    expect(pluginBundle).not.toBe(expected.bundle);
+    expect(pluginIdentity).toBe(expected.identity);
+    expect(assertControllerUnit(body, expected)).toMatch(/^[a-f0-9]{64}$/);
+
+    const pluginUnit = body.replaceAll(expected.bundle, pluginBundle);
+    const thirdUnit = body.replaceAll(expected.bundle, thirdBundle);
+    expect(() => assertControllerUnit(pluginUnit, expected)).toThrow();
+    expect(() => assertControllerUnit(thirdUnit, expected)).toThrow();
+    expect(() => assertControllerUnit(body, { ...expected, identity: "e".repeat(64) })).toThrow();
   });
 
   it("rejects changed identities, guards, lifecycle fields, hooks and environments", () => {

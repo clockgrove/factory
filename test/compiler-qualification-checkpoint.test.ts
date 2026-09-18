@@ -1,6 +1,16 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, mkdir, open, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CompiledGraphProjectionRecord, CompiledGraphRecord } from "../src/control/graphs.js";
@@ -276,6 +286,23 @@ describe.sequential("compiler qualification checkpoint", () => {
       await rm(dirname(f.path), { recursive: true, force: true });
       roots.delete(dirname(f.path));
     }
+  });
+
+  it("fails closed when the exact arm is atomically replaced before witness creation", async () => {
+    const f = fixture();
+    await arm(f);
+    f.args.proveBoundary = async () => {
+      f.order.push("proof");
+      const replacement = `${f.path}.replacement`;
+      await writeFile(replacement, JSON.stringify(f.arm), { mode: 0o600, flag: "wx" });
+      await rename(replacement, f.path);
+      return selectionProof;
+    };
+    await expect(holdCompilerQualificationCheckpoint(f.args)).rejects.toBeInstanceOf(
+      CompilerQualificationCheckpointHeldError,
+    );
+    expect(f.order).toEqual(["controller", "lease", "proof"]);
+    await expect(readFile(`${f.path}.reached`)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("consumes an armed hold on graceful shutdown and refuses a replayed arm", async () => {

@@ -18,6 +18,7 @@ import type { FactoryEvent } from "../src/protocol/events.js";
 import {
   CompilerQualificationCheckpointHeldError,
   CompilerQualificationCheckpointShutdownError,
+  CompilerSelectionQualificationProofSchema,
   compilerQualificationCheckpointPath,
   holdCompilerQualificationCheckpoint,
   proveGraphProjectionQualificationBoundary,
@@ -58,6 +59,7 @@ const selectionProof: CompilerQualificationProof = {
     invocationId: `compiler-${stage}`,
     stage: stage as "inventory" | "compile" | "judge",
     revision: stage === "inventory" ? 0 : 1,
+    state: "completed" as const,
     amount: 10 + index,
     reservationSequence: index * 2 + 1,
     reconciliationSequence: index * 2 + 2,
@@ -161,6 +163,18 @@ async function reached(path: string) {
 }
 
 describe.sequential("compiler qualification checkpoint", () => {
+  it("requires an exact terminal state on every selection usage entry", () => {
+    const missing = structuredClone(selectionProof);
+    delete (missing.usage[0] as Partial<(typeof missing.usage)[number]>).state;
+    expect(() => CompilerSelectionQualificationProofSchema.parse(missing)).toThrow();
+
+    const invalid = structuredClone(selectionProof) as unknown as {
+      usage: Array<{ state: string }>;
+    };
+    invalid.usage[0]!.state = "reserved";
+    expect(() => CompilerSelectionQualificationProofSchema.parse(invalid)).toThrow();
+  });
+
   it("is a no-op without an arm and does not observe authority or proof", async () => {
     const f = fixture();
     await mkdir(dirname(f.path), { mode: 0o700 });

@@ -42,7 +42,10 @@ import {
   type CompilerEvalUsage,
   type CompilerEvidence,
 } from "../evaluation/compiler-eval.js";
-import { validatePersistedCompilerDraftJournal } from "../evaluation/compiler-draft-loop.js";
+import {
+  compilerDraftResultHasError,
+  validatePersistedCompilerDraftJournal,
+} from "../evaluation/compiler-draft-loop.js";
 import { ModelReasoningEffortSchema } from "../protocol/policy.js";
 import type { ApplicationSnapshot } from "./services.js";
 
@@ -527,7 +530,7 @@ function createCalibrationEvidence(args: {
   let proposalConflict = false;
   const proposals = args.results.flatMap((result) => {
     if (
-      result.payload.error ||
+      compilerDraftResultHasError(result) ||
       (result.payload.stage !== "compile" && result.payload.stage !== "repair")
     )
       return [];
@@ -946,7 +949,9 @@ export async function inspectCompilerEvaluation(args: {
     throw new Error("activated graph differs from accepted draft selection");
   const inventoryResults = records.filter(
     (record) =>
-      record.kind === "result" && record.payload.stage === "inventory" && !record.payload.error,
+      record.kind === "result" &&
+      record.payload.stage === "inventory" &&
+      !compilerDraftResultHasError(record),
   );
   if (inventoryResults.length > 1) throw new Error("multiple obligation inventories");
   const inventory = inventoryResults[0]
@@ -1062,7 +1067,7 @@ export async function inspectCompilerEvaluation(args: {
         ? ("reserved" as const)
         : result.payload.preProviderTerminal === true
           ? ("not-invoked" as const)
-          : result.payload.error
+          : compilerDraftResultHasError(result)
             ? ("failed" as const)
             : ("completed" as const),
       inputTokens: counters?.inputTokens ?? null,
@@ -1138,7 +1143,9 @@ export async function inspectCompilerEvaluation(args: {
   >();
   const reports = inventory
     ? results
-        .filter((record) => record.payload.stage === "judge" && !record.payload.error)
+        .filter(
+          (record) => record.payload.stage === "judge" && !compilerDraftResultHasError(record),
+        )
         .flatMap((record) => {
           const validated = records.find(
             (item) =>
@@ -1160,7 +1167,7 @@ export async function inspectCompilerEvaluation(args: {
               (item) =>
                 item.payload.revision === record.payload.revision &&
                 (item.payload.stage === "compile" || item.payload.stage === "repair") &&
-                !item.payload.error,
+                !compilerDraftResultHasError(item),
             );
             if (
               !proposalResult ||
@@ -1363,7 +1370,7 @@ export async function inspectCompilerEvaluation(args: {
     evidenceDigest: draftDigest(record),
     revision: typeof record.payload.revision === "number" ? record.payload.revision : null,
     failed:
-      Boolean(record.payload.error) ||
+      compilerDraftResultHasError(record) ||
       record.payload.valid === false ||
       record.kind === "accounting-failure" ||
       record.kind === "accounting-reconciled" ||

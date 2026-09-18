@@ -135,39 +135,67 @@ function startEvent(policyDigest = arm("compiler-selection").policyDigest) {
   };
 }
 
-const stages = ["inventory", "compile", "judge"];
-function compilerInvocations() {
-  return stages.map((stage, index) => ({
+type FixtureInvocation = {
+  invocationId: string;
+  stage: "inventory" | "compile" | "repair" | "judge";
+  revision: number;
+  state: "completed" | "failed";
+  amount: number;
+};
+const firstDraftInvocations: FixtureInvocation[] = ["inventory", "compile", "judge"].map(
+  (stage, index) => ({
     invocationId: `compiler-${stage}`,
-    stage,
+    stage: stage as FixtureInvocation["stage"],
     revision: 0,
     state: "completed",
+    amount: 10 + index,
+  }),
+);
+const repairedInvocations: FixtureInvocation[] = [
+  {
+    invocationId: "compiler-inventory",
+    stage: "inventory",
+    revision: 0,
+    state: "completed",
+    amount: 10,
+  },
+  { invocationId: "compiler-compile", stage: "compile", revision: 0, state: "failed", amount: 11 },
+  { invocationId: "compiler-repair", stage: "repair", revision: 1, state: "completed", amount: 12 },
+  { invocationId: "compiler-judge", stage: "judge", revision: 1, state: "completed", amount: 13 },
+];
+
+function compilerInvocations(invocations = firstDraftInvocations) {
+  return invocations.map((invocation, index) => ({
+    invocationId: invocation.invocationId,
+    stage: invocation.stage,
+    revision: invocation.revision,
+    state: invocation.state,
     inputTokens: 5,
-    outputTokens: 5 + index,
+    outputTokens: invocation.amount - 5,
     cachedInputTokens: 0,
-    observedTokens: 10 + index,
+    observedTokens: invocation.amount,
     observedMilliseconds: 100 + index,
   }));
 }
 
-function compilerStatus() {
+function compilerStatus(invocations = firstDraftInvocations) {
   return {
     availability: "observed",
     policy: policy.compilerEvaluation,
-    invocations: compilerInvocations(),
+    invocations: compilerInvocations(invocations),
     cumulativeUsage: {
-      inputTokens: 15,
-      outputTokens: 18,
+      inputTokens: invocations.length * 5,
+      outputTokens: invocations.reduce((sum, invocation) => sum + invocation.amount - 5, 0),
       cachedInputTokens: 0,
-      observedTokens: 33,
+      observedTokens: invocations.reduce((sum, invocation) => sum + invocation.amount, 0),
       complete: true,
     },
   };
 }
 
-function accountingEvents() {
-  return stages.flatMap((stage, index) => {
-    const invocationId = `compiler-${stage}`;
+function accountingEvents(invocations = firstDraftInvocations) {
+  return invocations.flatMap((invocation, index) => {
+    const invocationId = invocation.invocationId;
     return [
       {
         kind: "budget",
@@ -190,7 +218,7 @@ function accountingEvents() {
         runId: actualRunId,
         phase: "management",
         unit: "model_tokens",
-        amount: 10 + index,
+        amount: invocation.amount,
         usageId: `draft-${invocationId}`,
         modelInvocationId: invocationId,
         policyDigest: arm("compiler-selection").policyDigest,
@@ -199,7 +227,7 @@ function accountingEvents() {
   });
 }
 
-function selectionWitness() {
+function selectionWitness(invocations = firstDraftInvocations, revision = 0) {
   const selected = arm("compiler-selection");
   const reachedAt = new Date(Date.now() - 60_000);
   return {
@@ -215,14 +243,15 @@ function selectionWitness() {
       checkpoint: "compiler-selection",
       journalDigest: "5".repeat(64),
       selectionSequence: 9,
-      revision: 0,
+      revision,
       graphDigest: "6".repeat(64),
       graphAbsent: true,
-      usage: stages.map((stage, index) => ({
-        invocationId: `compiler-${stage}`,
-        stage,
-        revision: 0,
-        amount: 10 + index,
+      usage: invocations.map((invocation, index) => ({
+        invocationId: invocation.invocationId,
+        stage: invocation.stage,
+        revision: invocation.revision,
+        state: invocation.state,
+        amount: invocation.amount,
         reservationSequence: index * 2 + 1,
         reconciliationSequence: index * 2 + 2,
       })),
@@ -307,15 +336,15 @@ function projectionWitness(workItemNumbers = [48, 49, 50, 51]) {
   };
 }
 
-function selectionObservation() {
+function selectionObservation(invocations = firstDraftInvocations, revision = 0) {
   return {
-    receipts: [startEvent(), ...accountingEvents()].map((event) => ({ event })),
+    receipts: [startEvent(), ...accountingEvents(invocations)].map((event) => ({ event })),
     status: {
       run: { runId: actualRunId, state: "running" },
-      compilerEvaluation: compilerStatus(),
+      compilerEvaluation: compilerStatus(invocations),
     },
     children: [],
-    compilerCheckpoints: { "compiler-selection": selectionWitness() },
+    compilerCheckpoints: { "compiler-selection": selectionWitness(invocations, revision) },
   };
 }
 
@@ -556,6 +585,88 @@ describe("installed compiler checkpoint qualifier", () => {
         projectionController,
       ),
     ).toThrow("compiler qualification graph must contain four items");
+  });
+
+  it("accepts the exact terminal history for a failed draft followed by an accepted repair", () => {
+    expect(
+      assertCompilerSelectionHold(
+        selectionObservation(repairedInvocations, 1),
+        authority,
+        { arm: arm("compiler-selection") },
+        original,
+      ),
+    ).toBe(true);
+  });
+
+  it("fails closed when repaired selection status differs from its authenticated history", () => {
+    const assertHold = (observation: ReturnType<typeof selectionObservation>) =>
+      assertCompilerSelectionHold(
+        observation,
+        authority,
+        { arm: arm("compiler-selection") },
+        original,
+      );
+    const mutateInvocation = (
+      index: number,
+      mutation: Record<string, unknown>,
+    ): ReturnType<typeof selectionObservation> => {
+      const observation = selectionObservation(repairedInvocations, 1);
+      Object.assign(observation.status.compilerEvaluation.invocations[index]!, mutation);
+      return observation;
+    };
+
+    for (const state of ["pending", "running", "reserved", "uncertain"]) {
+      expect(() => assertHold(mutateInvocation(1, { state }))).toThrow(
+        "compiler status differs from the accepted fully-accounted selection",
+      );
+    }
+    for (const index of [2, 3]) {
+      expect(() => assertHold(mutateInvocation(index, { state: "failed" }))).toThrow(
+        "compiler status differs from the accepted fully-accounted selection",
+      );
+    }
+
+    const missingRepair = selectionObservation(repairedInvocations, 1);
+    missingRepair.status.compilerEvaluation.invocations.splice(2, 1);
+    expect(() => assertHold(missingRepair)).toThrow(
+      "compiler status differs from the accepted fully-accounted selection",
+    );
+
+    for (const mutation of [
+      { invocationId: "compiler-other" },
+      { revision: 2 },
+      { observedTokens: 99 },
+    ]) {
+      expect(() => assertHold(mutateInvocation(2, mutation))).toThrow(
+        "compiler status differs from the accepted fully-accounted selection",
+      );
+    }
+
+    const reordered = selectionObservation(repairedInvocations, 1);
+    [
+      reordered.status.compilerEvaluation.invocations[1],
+      reordered.status.compilerEvaluation.invocations[2],
+    ] = [
+      reordered.status.compilerEvaluation.invocations[2]!,
+      reordered.status.compilerEvaluation.invocations[1]!,
+    ];
+    expect(() => assertHold(reordered)).toThrow(
+      "compiler status differs from the accepted fully-accounted selection",
+    );
+
+    const incomplete = selectionObservation(repairedInvocations, 1);
+    incomplete.status.compilerEvaluation.cumulativeUsage.complete = false;
+    expect(() => assertHold(incomplete)).toThrow();
+
+    const receiptMismatch = selectionObservation(repairedInvocations, 1);
+    const reconciliation = receiptMismatch.receipts.find(
+      ({ event }) =>
+        event.event === "BudgetReconciled" &&
+        "modelInvocationId" in event &&
+        event.modelInvocationId === "compiler-repair",
+    )!;
+    Object.assign(reconciliation.event, { amount: 13 });
+    expect(() => assertHold(receiptMismatch)).toThrow();
   });
 
   it("keeps incomplete exact graph projection evidence pending", () => {

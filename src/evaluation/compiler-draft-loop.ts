@@ -76,6 +76,9 @@ function safeValidationReport(error: unknown): CompilerValidationReport | null {
   if (typeof error !== "object" || error === null || !("validationReport" in error)) return null;
   return CompilerValidationReportSchema.safeParse(error.validationReport).data ?? null;
 }
+export function compilerDraftResultHasError(record: CompilerDraftRecord): boolean {
+  return typeof record.payload.error === "string";
+}
 const TimestampSchema = z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const DraftStageSchema = z.enum(["inventory", "compile", "repair", "judge"]);
 export type DraftStage = z.infer<typeof DraftStageSchema>;
@@ -456,7 +459,7 @@ export function validateCompilerDraftJournal(
     expected.adapterMode === "provider" &&
     (intent.payload.stage === "compile" || intent.payload.stage === "repair");
   const retainedProposal = (result: CompilerDraftRecord): unknown =>
-    result.payload.error
+    compilerDraftResultHasError(result)
       ? result.payload.proposal
       : (result.payload.value as { proposal?: unknown } | undefined)?.proposal;
   const failedResultEvidence = (result: CompilerDraftRecord): Record<string, unknown> => ({
@@ -554,7 +557,7 @@ export function validateCompilerDraftJournal(
           if (
             expected.fixedGraph ||
             !priorProposal ||
-            (!priorProposal.payload.error &&
+            (!compilerDraftResultHasError(priorProposal) &&
               (!priorValidation ||
                 (priorValidation.payload.valid === true && !judgeResults.has(priorRevision))))
           )
@@ -571,7 +574,8 @@ export function validateCompilerDraftJournal(
             | CompilerProjectionTrace
             | undefined;
           const structuredJudgeFailure =
-            priorJudge?.payload.error &&
+            priorJudge !== undefined &&
+            compilerDraftResultHasError(priorJudge) &&
             priorInventory.success &&
             priorCandidate.success &&
             priorTrace
@@ -587,10 +591,10 @@ export function validateCompilerDraftJournal(
                 })
               : null;
           const priorFailure = priorJudge
-            ? priorJudge.payload.error
+            ? compilerDraftResultHasError(priorJudge)
               ? (structuredJudgeFailure ?? { error: String(priorJudge.payload.error) })
               : priorJudge.payload.value
-            : priorProposal.payload.error
+            : compilerDraftResultHasError(priorProposal)
               ? failedResultEvidence(priorProposal)
               : priorValidation?.payload.failure;
           const retainedPrevious = retainedProposal(priorProposal);
@@ -846,7 +850,7 @@ export function validateCompilerDraftJournal(
       if (expected.fixedGraph) {
         if (revision !== 0 || proposalResult)
           throw new Error("fixed compiler validation lifecycle is invalid");
-      } else if (!proposalResult || proposalResult.payload.error)
+      } else if (!proposalResult || compilerDraftResultHasError(proposalResult))
         throw new Error("compiler validation lacks its proposal result");
       const proposal = expected.fixedGraph
         ? compilerJudgeCandidateFromCompiled(expected.fixedGraph)
@@ -965,7 +969,7 @@ export function validateCompilerDraftJournal(
         const judged = judgeResults.get(revision);
         if (
           !judged ||
-          judged.payload.error ||
+          compilerDraftResultHasError(judged) ||
           record.payload.graphDigest !== validation.payload.graphDigest ||
           record.payload.proposalDigest !== validation.payload.proposalDigest ||
           record.payload.requestDigest !== validation.payload.requestDigest ||
@@ -1277,7 +1281,10 @@ export async function runCompilerDraftLoop(args: {
   }
   if (terminal?.kind === "selection") {
     const inventoryResults = records.filter(
-      (item) => item.kind === "result" && item.payload.stage === "inventory" && !item.payload.error,
+      (item) =>
+        item.kind === "result" &&
+        item.payload.stage === "inventory" &&
+        !compilerDraftResultHasError(item),
     );
     if (inventoryResults.length !== 1) throw new Error("compiler selection inventory is ambiguous");
     const inventoryResult = inventoryResults[0];
@@ -1411,7 +1418,7 @@ export async function runCompilerDraftLoop(args: {
       }
       if (typeof completed.payload.stopReason === "string")
         throw new Stop(completed.payload.stopReason);
-      if (completed.payload.error)
+      if (compilerDraftResultHasError(completed))
         throw Object.assign(new Error(String(completed.payload.error)), {
           proposal: completed.payload.proposal,
           validationReport: completed.payload.validationReport,
@@ -1924,7 +1931,7 @@ export async function runCompilerDraftLoop(args: {
             item.kind === "result" &&
             item.payload.stage === "inventory" &&
             item.payload.revision === revision &&
-            item.payload.error &&
+            compilerDraftResultHasError(item) &&
             item.payload.usage !== null &&
             retainedRepairableInvalidClaims(item.payload) !== null,
         );

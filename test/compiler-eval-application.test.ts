@@ -839,6 +839,96 @@ describe("read-only compiler evaluation", () => {
     expect(result.activationAuthorized).toBe(false);
     expect(result.modelInvoked).toBe(false);
   });
+  it("classifies an empty persisted error diagnostic as a failed invocation", async () => {
+    const records = history();
+    const compileResult = records.find(
+      (record) => record.kind === "result" && record.payload.stage === "compile",
+    )!;
+    compileResult.payload.error = "";
+    records.find(
+      (record) => record.kind === "invocation" && record.payload.stage === "repair",
+    )!.payload.inputDigest = draftDigest({
+      inventory,
+      previous: compileResult.payload.proposal,
+      projection: null,
+      failure: { error: "", proposal: compileResult.payload.proposal },
+    });
+    validatePersistedCompilerDraftJournal(records);
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+
+    const result = await inspectCompilerEvaluation({
+      repository: binding.repository,
+      snapshot,
+      store,
+    });
+    expect(result.invocationStatus).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          invocationId: compileResult.payload.invocationId,
+          stage: "compile",
+          state: "failed",
+        }),
+      ]),
+    );
+    expect(result.calibrationEvidence?.result).toMatchObject({
+      terminalState: "accepted",
+      availability: "observed",
+      kind: "work-items",
+    });
+    expect(result.records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sequence: compileResult.sequence, failed: true }),
+      ]),
+    );
+    expect(result.reports).toHaveLength(1);
+  });
+  it("excludes an empty-diagnostic failed judge from reports and calibration", async () => {
+    const records = history();
+    const judgeResult = records.find(
+      (record) => record.kind === "result" && record.payload.stage === "judge",
+    )!;
+    judgeResult.payload.error = "";
+    judgeResult.payload.value = null;
+    judgeResult.payload.terminalOutcome = {
+      state: "provider-failed",
+      usage: judgeResult.payload.usage,
+    };
+    records.pop();
+    records.push({
+      protocol: "clockgrove.factory/compiler-draft",
+      binding: structuredClone(binding),
+      sequence: records.length,
+      kind: "stopped",
+      payload: { reason: "judge-failed" },
+    });
+    validatePersistedCompilerDraftJournal(records);
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+
+    const result = await inspectCompilerEvaluation({
+      repository: binding.repository,
+      snapshot,
+      store,
+    });
+    expect(result.invocationStatus).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          invocationId: judgeResult.payload.invocationId,
+          stage: "judge",
+          state: "failed",
+        }),
+      ]),
+    );
+    expect(result.reports).toHaveLength(0);
+    expect(result.calibrationEvidence?.result).toMatchObject({
+      terminalState: "stopped",
+      availability: "missing",
+    });
+    expect(result.records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sequence: judgeResult.sequence, failed: true }),
+      ]),
+    );
+  });
   it("renders unavailable result and obligation authority without claiming authentication", async () => {
     vi.mocked(loadCompilerDrafts).mockResolvedValue(history().slice(0, 2));
 

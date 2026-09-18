@@ -36,11 +36,11 @@ const BASE_TREE = "b".repeat(40);
 function repairableInventoryFailure(
   usage: ManagementUsage,
   proposal = { version: 1, obligations: [] },
+  message = "unknown obligation citation",
 ) {
-  return Object.assign(
-    new ManagementOutputError(new Error("unknown obligation citation"), usage, proposal),
-    { repairableInvalidClaims: repairableInvalidClaimsEvidence(proposal) },
-  );
+  return Object.assign(new ManagementOutputError(new Error(message), usage, proposal), {
+    repairableInvalidClaims: repairableInvalidClaimsEvidence(proposal),
+  });
 }
 
 class MemoryGraphStore implements LeaseStore, CompiledGraphStore {
@@ -711,7 +711,7 @@ describe("compiler draft durable repair", () => {
     const invoke = vi.fn(async (request: Parameters<CompilerDraftCallbacks["invoke"]>[0]) => {
       const usage = { inputTokens: 2, outputTokens: 1 };
       if (request.stage === "inventory" && request.revision === 0)
-        throw repairableInventoryFailure(usage);
+        throw repairableInventoryFailure(usage, { version: 1, obligations: [] }, "");
       return {
         value:
           request.stage === "inventory"
@@ -736,14 +736,13 @@ describe("compiler draft durable repair", () => {
       {
         revision: 1,
         failure: {
-          error: "unknown obligation citation",
+          error: "",
           proposal: { version: 1, obligations: [] },
         },
       },
     ]);
     expect(result.records.filter((record) => record.kind === "invocation")).toHaveLength(6);
     expect(args.callbacks.recordUsage).toHaveBeenCalledTimes(6);
-
     const calls = invoke.mock.calls.length;
     expect((await runCompilerDraftLoop(args)).status).toBe("accepted");
     expect(invoke).toHaveBeenCalledTimes(calls);
@@ -859,7 +858,7 @@ describe("compiler draft durable repair", () => {
       revision: 0,
       value: null,
       usage: { inputTokens: 2, outputTokens: 1 },
-      error: "unknown obligation citation",
+      error: "",
       proposal: { version: 1, obligations: [] },
       repairableInvalidClaims: repairableInvalidClaimsEvidence({ version: 1, obligations: [] }),
       completedAt: startedAt,

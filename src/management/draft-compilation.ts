@@ -14,6 +14,7 @@ import {
 import type { LeaseState } from "../control/lease.js";
 import {
   runCompilerDraftLoop,
+  compilerDraftResultHasError,
   CompilerDraftStopError,
   CompilerDraftAdmissionError,
   CompilerDraftTerminalOutcomeError,
@@ -190,7 +191,9 @@ export function assertCompilerDraftSelection(
   const selected = records.find((record) => record.kind === "selection");
   const inventoryResults = records.filter(
     (record) =>
-      record.kind === "result" && record.payload.stage === "inventory" && !record.payload.error,
+      record.kind === "result" &&
+      record.payload.stage === "inventory" &&
+      !compilerDraftResultHasError(record),
   );
   if (inventoryResults.length !== 1 || !selected)
     throw new Error("compiled graph has no unambiguous accepted assessment");
@@ -200,7 +203,7 @@ export function assertCompilerDraftSelection(
       record.kind === "result" &&
       record.payload.revision === selected.payload.revision &&
       (record.payload.stage === "compile" || record.payload.stage === "repair") &&
-      !record.payload.error,
+      !compilerDraftResultHasError(record),
   );
   const validation = records.find(
     (record) =>
@@ -211,7 +214,7 @@ export function assertCompilerDraftSelection(
       record.kind === "result" &&
       record.payload.stage === "judge" &&
       record.payload.revision === selected.payload.revision &&
-      !record.payload.error,
+      !compilerDraftResultHasError(record),
   );
   if (!proposalResult || !validation || !verdictResult)
     throw new Error("compiler selection lacks proposal, projection, or judgment evidence");

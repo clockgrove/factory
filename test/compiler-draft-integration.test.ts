@@ -27,7 +27,10 @@ import {
 } from "../src/evaluation/compiler-eval.js";
 import type { CompilerRequest } from "../src/compiler/contracts.js";
 import { CompilerInvariantError } from "../src/compiler/invariant-error.js";
-import { validatePersistedCompilerDraftJournal } from "../src/evaluation/compiler-draft-loop.js";
+import {
+  compilerDraftResultHasError,
+  validatePersistedCompilerDraftJournal,
+} from "../src/evaluation/compiler-draft-loop.js";
 import { compiledGraphDigest, type CompiledObjective } from "../src/graph.js";
 import { pinFixtureRepository } from "./helpers/compiler-proposal.js";
 const BASE_SHA = "a".repeat(40);
@@ -540,7 +543,7 @@ describe("production compiler draft adapter", () => {
         record.kind === "result" &&
         (record.payload.stage === "compile" || record.payload.stage === "repair") &&
         record.payload.revision === result.revision &&
-        !record.payload.error,
+        !compilerDraftResultHasError(record),
     )!;
     const persisted = acceptedProposal.payload.value as { request: { revision: number } };
     persisted.request.revision += 1;
@@ -554,7 +557,7 @@ describe("production compiler draft adapter", () => {
         record.kind === "result" &&
         (record.payload.stage === "compile" || record.payload.stage === "repair") &&
         record.payload.revision === result.revision &&
-        !record.payload.error,
+        !compilerDraftResultHasError(record),
     )!;
     const acceptedInvocation = changedReservation.find(
       (record) =>
@@ -806,6 +809,27 @@ describe("production compiler draft adapter", () => {
         obligations: [expect.objectContaining({ evidenceIds: ["foreign"] })],
       },
     });
+    const emptyDiagnostic = structuredClone(result.records);
+    const emptyRejected = emptyDiagnostic.find(
+      (record) =>
+        record.kind === "result" &&
+        record.payload.stage === "inventory" &&
+        record.payload.revision === 0,
+    )!;
+    emptyRejected.payload.error = "";
+    emptyDiagnostic.find(
+      (record) =>
+        record.kind === "invocation" &&
+        record.payload.stage === "inventory" &&
+        record.payload.revision === 1,
+    )!.payload.inputDigest = draftDigest({
+      inventory: null,
+      previous: null,
+      projection: null,
+      failure: { error: "", proposal: emptyRejected.payload.proposal },
+    });
+    validatePersistedCompilerDraftJournal(emptyDiagnostic);
+    expect(() => assertCompilerDraftSelection(emptyDiagnostic, result.graph)).not.toThrow();
     expect((await compileEvaluatedDraft(f.args)).status).toBe("accepted");
     expect(f.runStructured).toHaveBeenCalledTimes(6);
 
@@ -815,7 +839,9 @@ describe("production compiler draft adapter", () => {
     )!;
     const validInventory = ambiguous.find(
       (record) =>
-        record.kind === "result" && record.payload.stage === "inventory" && !record.payload.error,
+        record.kind === "result" &&
+        record.payload.stage === "inventory" &&
+        record.payload.revision === 1,
     )!;
     delete firstInventory.payload.error;
     firstInventory.payload.value = validInventory.payload.value;

@@ -50,6 +50,7 @@ const CompilerUsageProofSchema = z
     invocationId: safeId,
     stage: z.enum(["inventory", "compile", "repair", "judge"]),
     revision: z.number().int().min(0).max(2),
+    state: z.enum(["completed", "failed"]),
     amount: z.number().int().nonnegative(),
     reservationSequence: z.number().int().nonnegative(),
     reconciliationSequence: z.number().int().nonnegative(),
@@ -169,6 +170,10 @@ export function proveCompilerSelectionQualificationBoundary(args: {
         invocationId,
         stage: invocation.payload.stage,
         revision: invocation.payload.revision,
+        state:
+          typeof results[0]!.payload.error === "string"
+            ? ("failed" as const)
+            : ("completed" as const),
         amount,
         reservationSequence: reservation.sequence,
         reconciliationSequence: reconciliation.sequence,

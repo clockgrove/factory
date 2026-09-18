@@ -297,7 +297,10 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
       : [],
   );
   requirePeer(receiverObservations.length > 0);
-  const numbers = await store.readCommitObjectiveCandidates(input.targetBaseSha);
+  const numbers = await store.readCommitObjectiveCandidates(
+    input.targetBaseSha,
+    receiver.defaultBranch,
+  );
   requirePeer(
     numbers.length <= 100 &&
       new Set(numbers).size === numbers.length &&

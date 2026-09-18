@@ -878,6 +878,7 @@ describe("peer refresh proposal/adoption parity", () => {
       expect(repeated).toHaveBeenCalledTimes(1);
       expect(f.store.readCommitObjectiveCandidates).toHaveBeenCalledExactlyOnceWith(
         f.peerPublication.merge,
+        "main",
       );
       expect(vi.mocked(f.store.readObjectiveSnapshot!).mock.calls).toEqual([[7], [17]]);
       expect(f.planRecord.plan.items[0]?.source?.publication?.headSha).toBe(f.original.head);
@@ -942,7 +943,10 @@ describe("retained regular publication refreshed onto authenticated peer integra
     expect(proof.review).toEqual(f.review);
     expect(proof.record.identity.sourceRunId).toBe("receiver-run");
     expect(f.peerPublication.reserved.runId).toBe("peer-run");
-    expect(f.store.readCommitObjectiveCandidates).toHaveBeenCalledWith(f.peerPublication.merge);
+    expect(f.store.readCommitObjectiveCandidates).toHaveBeenCalledWith(
+      f.peerPublication.merge,
+      "main",
+    );
     expect(f.store.readObjectiveSnapshot).toHaveBeenCalledWith(17);
     expect(
       JSON.stringify({

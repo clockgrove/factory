@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { COMPILER_PROPOSAL_JSON_SCHEMA } from "../src/compiler/contracts.js";
 import { CompilerInvariantError } from "../src/compiler/invariant-error.js";
 import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
+import { canonicalDraftJson } from "../src/control/compiler-drafts.js";
 import {
   managementFailureProvenance,
   managementTerminalOutcome,
@@ -569,15 +570,20 @@ describe("single semantic management route", () => {
       usage: null,
     });
 
+    const invalidUsageValue = semanticProposal(request);
     const invalidUsage = await new CodexCliManagementBackend({
       runStructured: async () => ({
-        value: semanticProposal(request),
+        value: invalidUsageValue,
         usage: { inputTokens: -1, outputTokens: 2 },
       }),
     })
       .proposePlan(request, async () => {}, semanticProjectionContext())
       .catch((error) => error);
     expect(invalidUsage).toBeInstanceOf(Error);
+    expect(invalidUsage).toMatchObject({
+      responseBytes: Buffer.byteLength(canonicalDraftJson(invalidUsageValue), "utf8"),
+      responseBytesSource: "canonical-structured-value",
+    });
     expect(managementTerminalOutcome(invalidUsage)).toEqual({
       state: "invalid-response",
       usage: null,
@@ -623,6 +629,8 @@ describe("single semantic management route", () => {
       message: "provider returned an attachable failure",
       usage: { inputTokens: 8, outputTokens: 2, cachedInputTokens: 3 },
       proposal,
+      responseBytes: 91,
+      responseBytesSource: "provider-final-response" as const,
     };
     const failed = await new CodexCliManagementBackend({
       runStructured: async () => {
@@ -646,6 +654,8 @@ describe("single semantic management route", () => {
       proposal,
       providerDiagnostic: rejection.message,
       cleanupError: { message: "cleanup rejected", cause: "cleanup rejected" },
+      responseBytes: 91,
+      responseBytesSource: "provider-final-response",
     });
   });
 

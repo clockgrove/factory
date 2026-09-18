@@ -86,6 +86,53 @@ describe("Codex management backend", () => {
     expect(result?.providerQuota !== null).toBe(quota);
   });
 
+  it("retains the last observed response size when the CLI exits nonzero", () => {
+    const response = "partial structured response";
+    const result = classifyManagementCliProcessFailure({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      durationMs: 20,
+      stdout: [
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: response },
+        }),
+        JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: 100, output_tokens: 20 },
+        }),
+        JSON.stringify({ type: "turn.failed", error: { message: "provider failed" } }),
+      ].join("\n"),
+    });
+
+    expect(result?.error).toMatchObject({
+      responseBytes: Buffer.byteLength(response, "utf8"),
+      responseBytesSource: "provider-final-response",
+    });
+
+    const unknownUsage = classifyManagementCliProcessFailure({
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      durationMs: 20,
+      stdout: [
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: response },
+        }),
+        JSON.stringify({ type: "turn.failed", error: { message: "provider failed" } }),
+      ].join("\n"),
+    });
+    expect(unknownUsage).toMatchObject({
+      usage: null,
+      error: {
+        responseBytes: Buffer.byteLength(response, "utf8"),
+        responseBytesSource: "provider-final-response",
+      },
+    });
+  });
+
   it.each([
     { exitCode: null, signal: null, timedOut: false, durationMs: 1, stdout: "" },
     { exitCode: 0, signal: "SIGTERM", timedOut: false, durationMs: 1, stdout: "" },
@@ -182,14 +229,23 @@ describe("Codex management backend", () => {
     expect(() => parseManagementJsonlOutput(result)).toThrow(
       /stream ended without turn\.completed/i,
     );
-    expect(() =>
+    let invalidUsage: unknown;
+    try {
       parseManagementJsonlOutput(
         `${result}\n${JSON.stringify({
           type: "turn.completed",
           usage: { input_tokens: -1, output_tokens: 2 },
         })}`,
-      ),
-    ).toThrow(/invalid model-token usage/i);
+      );
+    } catch (error) {
+      invalidUsage = error;
+    }
+    expect(invalidUsage).toMatchObject({
+      message: expect.stringMatching(/invalid model-token usage/i),
+      responseBytes: Buffer.byteLength(JSON.stringify({ ok: true }), "utf8"),
+      responseBytesSource: "provider-final-response",
+    });
+    expect(invalidUsage).not.toBeInstanceOf(ManagementOutputError);
     expect(
       parseManagementJsonlOutput(
         `${result}\n${JSON.stringify({
@@ -253,6 +309,8 @@ describe("Codex management backend", () => {
     expect(parseManagementJsonlOutput(stdout)).toEqual({
       value: { final: true },
       usage: { inputTokens: 20, outputTokens: 7 },
+      responseBytes: Buffer.byteLength('{"final":true}', "utf8"),
+      responseBytesSource: "provider-final-response",
     });
   });
 
@@ -301,9 +359,18 @@ describe("Codex management backend", () => {
       usage: { input_tokens: 1, output_tokens: 2 },
     });
     const failure = JSON.stringify({ type: "turn.failed", error: { message: "failed" } });
-    expect(() => parseManagementJsonlOutput(`${result}\n${completed}\n${failure}`)).toThrow(
-      /reported turn\.failed/,
-    );
+    let observed: unknown;
+    try {
+      parseManagementJsonlOutput(`${result}\n${completed}\n${failure}`);
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toBeInstanceOf(ManagementOutputError);
+    expect(observed).toMatchObject({
+      usage: { inputTokens: 1, outputTokens: 2 },
+      responseBytes: Buffer.byteLength(JSON.stringify({ ok: true }), "utf8"),
+      responseBytesSource: "provider-final-response",
+    });
   });
 
   it("rejects EOF after a structured result without terminal completion", () => {

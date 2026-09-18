@@ -76,6 +76,7 @@ const managementFailureAuthorities = new WeakMap<
   {
     terminalOutcome?: ManagementTerminalOutcome;
     provenance?: CompilerInvocationProvenance;
+    responseSize?: ManagementResponseSize;
   }
 >();
 
@@ -126,6 +127,56 @@ export function managementFailureUsage(error: unknown): ManagementUsage | undefi
   };
 }
 
+export type ManagementResponseSize = {
+  responseBytes: number;
+  responseBytesSource:
+    | "provider-final-response"
+    | "canonical-structured-value"
+    | "no-structured-response";
+};
+
+/** Retain a complete response-size observation exposed by an existing provider failure object. */
+export function managementFailureResponseSize(error: unknown): ManagementResponseSize | undefined {
+  if ((typeof error !== "object" || error === null) && typeof error !== "function")
+    return undefined;
+  if (
+    "responseBytes" in error &&
+    Number.isSafeInteger(error.responseBytes) &&
+    Number(error.responseBytes) >= 0 &&
+    "responseBytesSource" in error &&
+    ["provider-final-response", "canonical-structured-value", "no-structured-response"].includes(
+      String(error.responseBytesSource),
+    )
+  )
+    return {
+      responseBytes: Number(error.responseBytes),
+      responseBytesSource:
+        error.responseBytesSource as ManagementResponseSize["responseBytesSource"],
+    };
+  const observed = managementFailureAuthorities.get(error)?.responseSize;
+  return observed ? structuredClone(observed) : undefined;
+}
+
+/** Bind exact response-size evidence without requiring a mutable provider-owned failure object. */
+export function bindManagementFailureResponseSize(
+  error: unknown,
+  responseSize: ManagementResponseSize,
+): object {
+  const normalized = attachableManagementFailure(error);
+  managementFailureAuthorities.set(normalized, {
+    ...managementFailureAuthorities.get(normalized),
+    responseSize: structuredClone(responseSize),
+  });
+  if (Object.isExtensible(normalized)) {
+    try {
+      Object.assign(normalized, responseSize);
+    } catch {
+      // The side-channel authority remains exact for provider-owned objects with read-only fields.
+    }
+  }
+  return normalized;
+}
+
 /** Bind the structured adapter's observed terminal state without changing its public error type. */
 export function bindManagementTerminalOutcome(
   error: unknown,
@@ -149,12 +200,29 @@ export function managementTerminalOutcome(error: unknown): ManagementTerminalOut
 export class ManagementOutputError extends Error {
   readonly usage: ManagementUsage;
   readonly proposal: unknown;
+  readonly responseBytes: number | undefined;
+  readonly responseBytesSource:
+    | "provider-final-response"
+    | "canonical-structured-value"
+    | "no-structured-response"
+    | undefined;
 
-  constructor(cause: unknown, usage: ManagementUsage, proposal?: unknown) {
+  constructor(
+    cause: unknown,
+    usage: ManagementUsage,
+    proposal?: unknown,
+    responseBytes?: number,
+    responseBytesSource?:
+      | "provider-final-response"
+      | "canonical-structured-value"
+      | "no-structured-response",
+  ) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
     this.name = "ManagementOutputError";
     this.usage = { ...usage };
     this.proposal = proposal;
+    this.responseBytes = responseBytes;
+    this.responseBytesSource = responseBytesSource;
   }
 }
 
@@ -168,9 +236,11 @@ export class ManagementCleanupError extends ManagementOutputError {
     usage: ManagementUsage,
     proposal: unknown,
     provenance?: CompilerInvocationProvenance,
+    responseBytes?: number,
+    responseBytesSource?: "provider-final-response" | "canonical-structured-value",
   ) {
     const cleanupError = attachableManagementFailure(cause);
-    super(cleanupError, usage, proposal);
+    super(cleanupError, usage, proposal, responseBytes, responseBytesSource);
     this.name = "ManagementCleanupError";
     this.message = "management provider output cleanup is unresolved";
     this.provenance = provenance ? { ...provenance } : undefined;
@@ -186,6 +256,8 @@ export class ManagementFailureCleanupError extends Error {
   readonly cleanupDiagnostic: string;
   readonly usage?: ManagementUsage;
   readonly proposal?: unknown;
+  readonly responseBytes?: number;
+  readonly responseBytesSource?: ManagementResponseSize["responseBytesSource"];
 
   constructor(primary: unknown, cleanup: unknown) {
     const primaryError = attachableManagementFailure(primary);
@@ -205,6 +277,11 @@ export class ManagementFailureCleanupError extends Error {
     this.cleanupDiagnostic = cleanupDiagnostic;
     const usage = managementFailureUsage(primaryError);
     if (usage) this.usage = usage;
+    const responseSize = managementFailureResponseSize(primaryError);
+    if (responseSize) {
+      this.responseBytes = responseSize.responseBytes;
+      this.responseBytesSource = responseSize.responseBytesSource;
+    }
     if ("proposal" in primaryError) this.proposal = primaryError.proposal;
   }
 }
@@ -279,6 +356,9 @@ export function assertCompilationContextPolicyAuthority(context: CompilationCont
 export interface CompilerInvocationProvenance {
   promptDigest: string;
   schemaDigest: string;
+  promptBytes: number;
+  schemaBytes: number;
+  sizeSource: "provider-dispatch" | "local-callback";
   model: string | null;
   reasoning: string | null;
   baseSha: string;
@@ -337,6 +417,8 @@ export interface CompilerProposalResult {
   report: CompilerValidationReport;
   provenance: CompilerProposalProvenance;
   usage: ManagementUsage;
+  responseBytes: number;
+  responseBytesSource: "provider-final-response" | "canonical-structured-value";
 }
 export interface CompilerWorkItemsProposalResult extends CompilerProposalResult {
   proposal: CompilerProposal;
@@ -347,6 +429,8 @@ export interface ObligationResult {
   inventory: ObligationInventory;
   provenance: CompilerInvocationProvenance;
   usage: ManagementUsage;
+  responseBytes: number;
+  responseBytesSource: "provider-final-response" | "canonical-structured-value";
 }
 export type ObligationCheckpoint = (result: ObligationResult) => Promise<void>;
 export interface ObligationRepairContext {
@@ -366,6 +450,8 @@ export interface PlanJudgeResult {
   verdict: CompilerJudgeVerdict;
   provenance: CompilerInvocationProvenance;
   usage: ManagementUsage;
+  responseBytes: number;
+  responseBytesSource: "provider-final-response" | "canonical-structured-value";
 }
 export type PlanJudgeCheckpoint = (result: PlanJudgeResult) => Promise<void>;
 export interface CompilerCaseLabelContext {
@@ -485,11 +571,16 @@ export interface ManagementBackend {
 /** A durable model result does not prove its private review checkout was removed. */
 export class ReviewCheckoutCleanupError extends Error {
   readonly usage: ManagementUsage | undefined;
+  readonly responseBytes: number | undefined;
+  readonly responseBytesSource: ManagementResponseSize["responseBytesSource"] | undefined;
 
   constructor(cause: unknown, reviewFailure?: unknown) {
     super("semantic review private checkout cleanup is unresolved", { cause });
     this.name = "ReviewCheckoutCleanupError";
     this.usage =
       reviewFailure instanceof ManagementOutputError ? { ...reviewFailure.usage } : undefined;
+    const responseSize = managementFailureResponseSize(reviewFailure);
+    this.responseBytes = responseSize?.responseBytes;
+    this.responseBytesSource = responseSize?.responseBytesSource;
   }
 }

@@ -368,6 +368,8 @@ describe("compiler draft durable repair", () => {
       const error = new ProviderQuotaError(gate, {
         invocationId: request.invocationId,
         usage: { inputTokens: 2, outputTokens: 1 },
+        responseBytes: 37,
+        responseBytesSource: "provider-final-response",
       });
       await checkpointProviderRefusal!(error);
       throw error;
@@ -391,6 +393,8 @@ describe("compiler draft durable repair", () => {
       invocationId: observed!.invocationId,
       usage: { inputTokens: 2, outputTokens: 1 },
       providerQuota: gate,
+      responseBytes: 37,
+      responseBytesSource: "provider-final-response",
     });
 
     const replayInvoke = vi.fn(args.callbacks.invoke);
@@ -408,6 +412,8 @@ describe("compiler draft durable repair", () => {
       gate,
       invocationId: observed!.invocationId,
       usage: { inputTokens: 2, outputTokens: 1 },
+      responseBytes: 37,
+      responseBytesSource: "provider-final-response",
     });
     expect(args.callbacks.recordUsage).not.toHaveBeenCalled();
   });
@@ -829,6 +835,12 @@ describe("compiler draft durable repair", () => {
         protocol: "clockgrove.factory/local-draft-callback",
         stage: "inventory",
       }),
+      promptBytes: Buffer.byteLength(inputDigest, "utf8"),
+      schemaBytes: canonicalDraftJson({
+        protocol: "clockgrove.factory/local-draft-callback",
+        stage: "inventory",
+      }).length,
+      sizeSource: "local-callback" as const,
       baseSha: args.binding.baseSha,
       model: null,
       reasoning: null,
@@ -853,6 +865,8 @@ describe("compiler draft durable repair", () => {
       completedAt: startedAt,
       observedMilliseconds: 0,
       provenance: expectedProvenance,
+      responseBytes: 0,
+      responseBytesSource: "no-structured-response",
     });
     const invoke = vi.mocked(args.callbacks.invoke);
 
@@ -1377,6 +1391,9 @@ describe("compiler draft durable repair", () => {
     const provenance = {
       promptDigest: "1".repeat(64),
       schemaDigest: "2".repeat(64),
+      promptBytes: 100,
+      schemaBytes: 200,
+      sizeSource: "provider-dispatch" as const,
       baseSha: args.binding.baseSha,
       model: "fixture-model",
       reasoning: "low",
@@ -1408,6 +1425,8 @@ describe("compiler draft durable repair", () => {
         value: { accepted: true },
         usage: { inputTokens: 123, outputTokens: 45 },
         provenance,
+        responseBytes: 10,
+        responseBytesSource: "canonical-structured-value",
         completedAt: startedAt,
         observedMilliseconds: 0,
       },
@@ -1558,6 +1577,9 @@ describe("compiler draft durable repair", () => {
     const provenance = {
       promptDigest: "1".repeat(64),
       schemaDigest: "2".repeat(64),
+      promptBytes: 100,
+      schemaBytes: 200,
+      sizeSource: "provider-dispatch" as const,
       baseSha: args.binding.baseSha,
       model: "fixture-model",
       reasoning: "low",
@@ -1639,6 +1661,8 @@ describe("compiler draft durable repair", () => {
             usage: { inputTokens: 7, outputTokens: 3 },
           },
           provenance,
+          responseBytes: 10,
+          responseBytesSource: "canonical-structured-value",
           completedAt: 100,
           observedMilliseconds: 0,
         },
@@ -1679,6 +1703,8 @@ describe("compiler draft durable repair", () => {
             usage: { inputTokens: 11, outputTokens: 5 },
           },
           provenance: compileProvenance,
+          responseBytes: 10,
+          responseBytesSource: "canonical-structured-value",
           completedAt: 100,
           observedMilliseconds: 0,
         },

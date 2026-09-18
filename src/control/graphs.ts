@@ -102,6 +102,10 @@ export interface StagedCompiledGraphProjection {
   bindings: CompiledGraphProjectionBinding[];
 }
 
+export class CompiledGraphProjectionConflictError extends Error {
+  override readonly name = "CompiledGraphProjectionConflictError";
+}
+
 function sameCompilation(
   left: CompilationReceipt | undefined,
   right: CompilationReceipt | undefined,
@@ -136,21 +140,31 @@ function canonicalProjection(
   const parsed = bindings.map((binding) => GraphProjectionBindingSchema.parse(binding));
   const byCompilerId = new Map(parsed.map((binding) => [binding.compilerId, binding]));
   if (byCompilerId.size !== parsed.length) {
-    throw new Error("compiled graph projection contains duplicate compiler IDs");
+    throw new CompiledGraphProjectionConflictError(
+      "compiled graph projection contains duplicate compiler IDs",
+    );
   }
   if (new Set(parsed.map((binding) => binding.issueNodeId)).size !== parsed.length) {
-    throw new Error("compiled graph projection contains duplicate issue node IDs");
+    throw new CompiledGraphProjectionConflictError(
+      "compiled graph projection contains duplicate issue node IDs",
+    );
   }
   if (new Set(parsed.map((binding) => binding.issueNumber)).size !== parsed.length) {
-    throw new Error("compiled graph projection contains duplicate issue numbers");
+    throw new CompiledGraphProjectionConflictError(
+      "compiled graph projection contains duplicate issue numbers",
+    );
   }
   if (parsed.length !== graph.objective.workItems.length) {
-    throw new Error("compiled graph projection cardinality differs from the immutable graph");
+    throw new CompiledGraphProjectionConflictError(
+      "compiled graph projection cardinality differs from the immutable graph",
+    );
   }
   const ordered = graph.objective.workItems.map((item) => {
     const binding = byCompilerId.get(item.id);
     if (!binding) {
-      throw new Error(`compiled graph projection is missing Work Item ${item.id}`);
+      throw new CompiledGraphProjectionConflictError(
+        `compiled graph projection is missing Work Item ${item.id}`,
+      );
     }
     return binding;
   });
@@ -224,10 +238,14 @@ export async function loadCompiledGraphProjection(
   if (!commitOid) return null;
   const commit = await (store.readCommitContent?.(commitOid) ?? store.readCommit(commitOid));
   if (commit.parentOids.length !== 1 || commit.parentOids[0] !== graph.commitOid) {
-    throw new Error("compiled graph projection is not bound to its immutable graph commit");
+    throw new CompiledGraphProjectionConflictError(
+      "compiled graph projection is not bound to its immutable graph commit",
+    );
   }
   const blobOid = await store.readTreeEntry(commit.treeOid, PROJECTION_PATH);
-  if (!blobOid) throw new Error(`${ref} has no compiled graph projection blob`);
+  if (!blobOid) {
+    throw new CompiledGraphProjectionConflictError(`${ref} has no compiled graph projection blob`);
+  }
   const staged = await loadStagedCompiledGraphProjection(store, objective, runId, graph, blobOid);
   return {
     ...staged,
@@ -244,15 +262,28 @@ export async function loadStagedCompiledGraphProjection(
 ): Promise<StagedCompiledGraphProjection> {
   const bytes = await store.readBlob(blobOid);
   if (bytes.byteLength > 256 * 1024) {
-    throw new Error("persisted compiled graph projection exceeds 256 KiB");
+    throw new CompiledGraphProjectionConflictError(
+      "persisted compiled graph projection exceeds 256 KiB",
+    );
   }
-  const parsed = GraphProjectionSchema.parse(JSON.parse(bytes.toString("utf8")));
+  let parsed: z.infer<typeof GraphProjectionSchema>;
+  try {
+    parsed = GraphProjectionSchema.parse(JSON.parse(bytes.toString("utf8")));
+  } catch (error) {
+    if (!(error instanceof SyntaxError) && !(error instanceof z.ZodError)) throw error;
+    throw new CompiledGraphProjectionConflictError(
+      "persisted compiled graph projection is malformed",
+      { cause: error },
+    );
+  }
   const canonical = canonicalProjection(graph, parsed.bindings);
   if (
     parsed.graphDigest !== graph.graphDigest ||
     JSON.stringify(parsed) !== JSON.stringify(canonical)
   ) {
-    throw new Error("persisted compiled graph projection differs from its immutable graph");
+    throw new CompiledGraphProjectionConflictError(
+      "persisted compiled graph projection differs from its immutable graph",
+    );
   }
   return {
     ref: compiledGraphProjectionRef(objective, runId),

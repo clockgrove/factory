@@ -40,6 +40,9 @@ function fixtureInvocationProvenance(baseSha: string, stage: string) {
   return {
     promptDigest: compilerEvalDigest({ stage }),
     schemaDigest: "a".repeat(64),
+    promptBytes: 100,
+    schemaBytes: 200,
+    sizeSource: "provider-dispatch" as const,
     baseSha,
     model: null,
     reasoning: null,
@@ -49,11 +52,18 @@ function proposalAdmissionProvenance(request: Parameters<ManagementBackend["prop
   return {
     promptDigest: compilerEvalDigest(request),
     schemaDigest: "a".repeat(64),
+    promptBytes: Buffer.byteLength(JSON.stringify(request), "utf8"),
+    schemaBytes: 1,
+    sizeSource: "provider-dispatch" as const,
     baseSha: request.baseSha,
     model: null,
     reasoning: null,
   };
 }
+const responseEvidence = {
+  responseBytes: 100,
+  responseBytesSource: "canonical-structured-value" as const,
+};
 const temporary: string[] = [];
 afterEach(async () => {
   await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -252,7 +262,7 @@ describe("bounded independent challenge integration", () => {
           const provenance = fixtureInvocationProvenance(f.context.baseSha, "inventory");
           await beforeModelInvocation?.(provenance);
           calls.push("inventory");
-          return { inventory: f.inventory, usage, provenance };
+          return { inventory: f.inventory, usage, provenance, ...responseEvidence };
         },
         proposePlan: async (
           request: Parameters<ManagementBackend["proposePlan"]>[0],
@@ -337,7 +347,7 @@ describe("bounded independent challenge integration", () => {
             uncertainty: [],
             decision: accepted ? "accept" : "repair",
           };
-          return { verdict, usage, provenance };
+          return { verdict, usage, provenance, ...responseEvidence };
         },
       } as unknown as ManagementBackend;
       const args = {
@@ -375,7 +385,7 @@ describe("bounded independent challenge integration", () => {
         const provenance = fixtureInvocationProvenance(f.context.baseSha, "inventory");
         await beforeModelInvocation?.(provenance);
         calls.push("inventory");
-        return { inventory: f.inventory, usage, provenance };
+        return { inventory: f.inventory, usage, provenance, ...responseEvidence };
       },
       proposePlan: async (
         request: Parameters<ManagementBackend["proposePlan"]>[0],
@@ -400,7 +410,7 @@ describe("bounded independent challenge integration", () => {
         calls.push("judge");
         judges++;
         expect(context.challenges ?? []).toHaveLength(judges === 1 ? 0 : 1);
-        return { verdict: judged(context, judges >= 2), usage, provenance };
+        return { verdict: judged(context, judges >= 2), usage, provenance, ...responseEvidence };
       },
     } as unknown as ManagementBackend;
     const args = {
@@ -436,7 +446,7 @@ describe("bounded independent challenge integration", () => {
         const provenance = fixtureInvocationProvenance(f.context.baseSha, "inventory");
         await beforeModelInvocation?.(provenance);
         calls.push("inventory");
-        return { inventory: f.inventory, usage, provenance };
+        return { inventory: f.inventory, usage, provenance, ...responseEvidence };
       },
       proposePlan: async (
         request: Parameters<ManagementBackend["proposePlan"]>[0],
@@ -460,7 +470,8 @@ describe("bounded independent challenge integration", () => {
         await beforeModelInvocation?.(provenance);
         calls.push("judge");
         judges++;
-        if (judges === 1) return { verdict: judged(context, false), usage, provenance };
+        if (judges === 1)
+          return { verdict: judged(context, false), usage, provenance, ...responseEvidence };
         expect(context.challenges).toEqual([
           {
             findingId: "false-inference",
@@ -507,7 +518,7 @@ describe("bounded independent challenge integration", () => {
           verdict.findings = [];
           verdict.decision = "accept";
         }
-        return { verdict, usage, provenance };
+        return { verdict, usage, provenance, ...responseEvidence };
       },
     } as unknown as ManagementBackend;
     const args = {
@@ -553,7 +564,7 @@ describe("bounded independent challenge integration", () => {
         const provenance = fixtureInvocationProvenance(f.context.baseSha, "inventory");
         await beforeModelInvocation?.(provenance);
         calls.push("inventory");
-        return { inventory: f.inventory, usage, provenance };
+        return { inventory: f.inventory, usage, provenance, ...responseEvidence };
       },
       proposePlan: async (
         request: Parameters<ManagementBackend["proposePlan"]>[0],
@@ -596,7 +607,7 @@ describe("bounded independent challenge integration", () => {
         verdict.inferenceCorrections = [];
         verdict.decision = "repair";
         expect(Buffer.byteLength(JSON.stringify(verdict))).toBeLessThanOrEqual(512 * 1024);
-        return { verdict, usage, provenance };
+        return { verdict, usage, provenance, ...responseEvidence };
       },
     } as unknown as ManagementBackend;
     const args = {
@@ -680,6 +691,7 @@ describe("bounded independent challenge integration", () => {
           inventory: f.inventory,
           usage: { inputTokens: 2, outputTokens: 1 },
           provenance,
+          ...responseEvidence,
         };
       },
       judgePlan: vi.fn(),
@@ -811,7 +823,7 @@ it("does not spend a second judgment on a no-op semantic repair", async () => {
     ) => {
       const provenance = fixtureInvocationProvenance(f.context.baseSha, "inventory");
       await beforeModelInvocation?.(provenance);
-      return { inventory: f.inventory, usage, provenance };
+      return { inventory: f.inventory, usage, provenance, ...responseEvidence };
     },
     proposePlan: async (
       request: Parameters<ManagementBackend["proposePlan"]>[0],
@@ -864,7 +876,7 @@ it("does not spend a second judgment on a no-op semantic repair", async () => {
             evidenceIds: ["objective"],
           },
         ]);
-      return { verdict: review, usage, provenance };
+      return { verdict: review, usage, provenance, ...responseEvidence };
     },
   } as unknown as ManagementBackend;
   const args = {

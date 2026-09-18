@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 import {
+  CompiledGraphProjectionConflictError,
   CompiledGraphManager,
   compiledGraphRef,
   loadCompiledGraph,
@@ -429,6 +430,22 @@ describe("durable compiled graph", () => {
     await expect(loadCompiledGraphProjection(reads, 42, "read-only", graph)).rejects.toThrow(
       "not bound to its immutable graph commit",
     );
+
+    store.commits.get(projection.commitOid)!.parentOids = [graph.commitOid];
+    store.blobs.set(projection.blobOid, Buffer.from("{not-json"));
+    await expect(loadCompiledGraphProjection(reads, 42, "read-only", graph)).rejects.toBeInstanceOf(
+      CompiledGraphProjectionConflictError,
+    );
+
+    const readFailure = new Error("projection blob read unavailable");
+    await expect(
+      loadCompiledGraphProjection(
+        { ...reads, readBlob: async () => Promise.reject(readFailure) },
+        42,
+        "read-only",
+        graph,
+      ),
+    ).rejects.toBe(readFailure);
   });
 
   it.each([

@@ -1227,7 +1227,12 @@ describe("compiler dispatch admission", () => {
       state: "provider-failed" as const,
       cleanup: "primitive cleanup rejection",
       exitCode: 1,
+      response: "partial-provider-response",
       stdout: [
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: "partial-provider-response" },
+        }),
         JSON.stringify({
           type: "turn.completed",
           usage: { input_tokens: usage.inputTokens, output_tokens: usage.outputTokens },
@@ -1240,6 +1245,7 @@ describe("compiler dispatch admission", () => {
       state: "invalid-response" as const,
       cleanup: null,
       exitCode: 0,
+      response: "not-json",
       stdout: [
         JSON.stringify({
           type: "item.completed",
@@ -1289,6 +1295,8 @@ describe("compiler dispatch admission", () => {
       cleanupError: { message: String(testCase.cleanup), cause: testCase.cleanup },
       cleanupDiagnostic: String(testCase.cleanup),
       provenance: { baseSha: f.request.baseSha },
+      responseBytes: Buffer.byteLength(testCase.response, "utf8"),
+      responseBytesSource: "provider-final-response",
     });
     expect(observed.cause).toBeInstanceOf(AggregateError);
     expect((observed.cause as AggregateError).errors).toEqual([

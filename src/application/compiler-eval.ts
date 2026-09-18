@@ -3,12 +3,25 @@ import { open } from "node:fs/promises";
 import { z } from "zod";
 import { assertNoSecretMaterial, assertWithinBytes } from "../protocol/limits.js";
 import type { FactoryEvent } from "../protocol/events.js";
-import { draftDigest, loadCompilerDrafts } from "../control/compiler-drafts.js";
-import { loadCompiledGraph, type CompiledGraphReadStore } from "../control/graphs.js";
+import {
+  canonicalDraftJson,
+  draftDigest,
+  loadCompilerDrafts,
+  type CompilerDraftRecord,
+} from "../control/compiler-drafts.js";
+import {
+  CompiledGraphProjectionConflictError,
+  loadCompiledGraph,
+  loadCompiledGraphProjection,
+  type CompiledGraphProjectionRecord,
+  type CompiledGraphReadStore,
+  type CompiledGraphRecord,
+} from "../control/graphs.js";
 import { latestRunReceipts } from "../control/receipts.js";
 import { summarizeRun } from "../economics/index.js";
 import {
   CompilerWorkItemsProposalSchema,
+  CompilerProposalSchema,
   CompilerRequestSchema,
   CompilerValidationReportSchema,
 } from "../compiler/contracts.js";
@@ -16,7 +29,8 @@ import {
   compilerJudgeCandidateFromCompiled,
   type CompilerJudgeCandidate,
 } from "../compiler/judge-context.js";
-import { compiledGraphDigest } from "../graph.js";
+import { compiledGraphDigest, type CompiledObjective } from "../graph.js";
+import { analyzeDependencies } from "../graph-analysis.js";
 import {
   ObligationInventorySchema,
   createCompilerEvalReport,
@@ -43,7 +57,7 @@ const ProjectionTrace = z
       z
         .object({
           intentId: z.string().min(1).max(64),
-          disposition: z.enum(["imported", "producer", "omitted-helpful"]),
+          disposition: z.enum(["imported", "producer", "repository-capture", "omitted-helpful"]),
           producerWorkItemId: z.string().min(1).max(64).nullable(),
         })
         .strict(),
@@ -217,6 +231,592 @@ const Usage = z.object({
   cachedInputTokens: z.number().int().nonnegative().safe().optional(),
 });
 
+const InvocationProvenance = z
+  .object({
+    promptBytes: z.number().int().nonnegative().safe(),
+    schemaBytes: z.number().int().nonnegative().safe(),
+    sizeSource: z.enum(["provider-dispatch", "local-callback"]),
+  })
+  .passthrough();
+const ResponseSizeSource = z.enum(["provider-final-response", "canonical-structured-value"]);
+
+type CalibrationAvailability = "observed" | "missing" | "conflicting";
+
+function canonicalBytes(value: unknown): number {
+  return Buffer.byteLength(canonicalDraftJson(value), "utf8");
+}
+
+export function mechanicalDependencyCriticalPath(
+  items: readonly { id: string; dependsOn: readonly string[] }[],
+) {
+  const analysis = analyzeDependencies(items);
+  if (
+    analysis.duplicates.length ||
+    analysis.unknownDependencies.length ||
+    analysis.cycleItems.length
+  )
+    return null;
+  const paths = new Map<string, string[]>();
+  for (const id of analysis.order) {
+    const item = items.find((candidate) => candidate.id === id)!;
+    const predecessors = item.dependsOn
+      .map((dependency) => paths.get(dependency))
+      .filter((path): path is string[] => path !== undefined)
+      .sort(
+        (left, right) =>
+          right.length - left.length || left.join("\0").localeCompare(right.join("\0")),
+      );
+    paths.set(id, [...(predecessors[0] ?? []), id]);
+  }
+  const itemIds =
+    [...paths.values()].sort(
+      (left, right) =>
+        right.length - left.length || left.join("\0").localeCompare(right.join("\0")),
+    )[0] ?? [];
+  return { workItems: itemIds.length, dependencyEdges: Math.max(0, itemIds.length - 1), itemIds };
+}
+
+function authorityState(
+  events: readonly FactoryEvent[],
+  objective: number,
+  runId: string,
+  baseSha: string | null,
+  graph: CompiledGraphRecord | null,
+  projection: CompiledGraphProjectionRecord | null,
+) {
+  const graphReceipts = events.filter(
+    (event) =>
+      event.kind === "graph" &&
+      event.event === "GraphCompiled" &&
+      event.objective === objective &&
+      event.runId === runId,
+  );
+  const projectionReceipts = events.filter(
+    (event) =>
+      event.kind === "graph" &&
+      event.event === "GraphProjected" &&
+      event.objective === objective &&
+      event.runId === runId,
+  );
+  const graphReceipt = graphReceipts[0];
+  const graphAvailability: CalibrationAvailability = !graph
+    ? graphReceipts.length === 0
+      ? "missing"
+      : "conflicting"
+    : graphReceipts.length === 0
+      ? "missing"
+      : graphReceipts.length !== 1 ||
+          graphReceipt?.graphDigest !== graph.graphDigest ||
+          graphReceipt.graphSize !== graph.graphSize ||
+          graphReceipt.baseSha !== baseSha ||
+          graphReceipt.graphRef !== graph.ref ||
+          graphReceipt.graphBlobSha !== graph.blobOid
+        ? "conflicting"
+        : "observed";
+  const projectionReceipt = projectionReceipts[0];
+  const projectionAvailability: CalibrationAvailability = !projection
+    ? projectionReceipts.length === 0
+      ? "missing"
+      : "conflicting"
+    : projectionReceipts.length === 0
+      ? "missing"
+      : projectionReceipts.length !== 1 ||
+          projectionReceipt?.graphDigest !== projection.graphDigest ||
+          projectionReceipt.graphSize !== projection.graphSize ||
+          projectionReceipt.projectionRef !== projection.ref ||
+          projectionReceipt.projectionBlobSha !== projection.blobOid
+        ? "conflicting"
+        : "observed";
+  return {
+    graph: {
+      availability: graphAvailability,
+      ...(graphAvailability === "observed" && graph
+        ? {
+            digest: graph.graphDigest,
+            size: graph.graphSize,
+            ref: graph.ref,
+            commitOid: graph.commitOid,
+            blobOid: graph.blobOid,
+            baseSha: graphReceipt?.baseSha,
+          }
+        : {}),
+    },
+    projection: {
+      availability: projectionAvailability,
+      ...(projectionAvailability === "observed" && projection
+        ? {
+            digest: draftDigest({
+              protocol: "clockgrove.factory/graph-projection-v1",
+              graphDigest: projection.graphDigest,
+              bindings: projection.bindings,
+            }),
+            size: projection.graphSize,
+            ref: projection.ref,
+            commitOid: projection.commitOid,
+            blobOid: projection.blobOid,
+          }
+        : {}),
+    },
+  };
+}
+
+function planningStop(records: readonly CompilerDraftRecord[]) {
+  const stopped = records.find((record) => record.kind === "stopped");
+  if (!stopped || typeof stopped.payload.reason !== "string") return null;
+  const match = /^compiler-planning-result:(objectives|clarification):([a-f0-9]{64})$/.exec(
+    stopped.payload.reason,
+  );
+  return match ? { kind: match[1]!, digest: match[2]! } : null;
+}
+
+type PlanningTriggerEvidence = {
+  code: string;
+  source: string;
+  availability: string;
+  threshold: unknown;
+  obligationIds: string[];
+};
+type ObjectivePlanningEvidence = {
+  proposalCount: number;
+  proposalCountAuthority: "model-reported-schema-validated";
+  triggerIdentities: string[];
+  objectives: Array<{
+    id: string;
+    obligationIds: string[];
+    planningEstimate: {
+      workItems: number | null;
+      criticalPathMinutes: number | null;
+      aggregateWorkMinutes: number | null;
+    };
+    outputIds: string[];
+    prerequisiteOutputs: Array<{ objectiveId: string; outputId: string }>;
+  }>;
+  coverage: Array<{
+    obligationId: string;
+    disposition: string;
+    objectiveId?: string;
+    acceptanceId?: string;
+  }>;
+  triggers: PlanningTriggerEvidence[];
+};
+type ClarificationPlanningEvidence = {
+  proposalCount: number;
+  proposalCountAuthority: "model-reported-schema-validated";
+  triggerIdentities: string[];
+  requirements: Array<{ id: string; obligationIds: string[] }>;
+  triggers: PlanningTriggerEvidence[];
+};
+
+function renderCalibrationMarkdown(calibration: ReturnType<typeof createCalibrationEvidence>) {
+  const result = calibration.result;
+  const safe = (value: unknown) => JSON.stringify(value);
+  const nullable = (value: unknown) => (value === null ? "unknown" : String(value));
+  const authorityIdentity = (
+    label: string,
+    value: (typeof calibration.authority)["graph"] | (typeof calibration.authority)["projection"],
+  ) =>
+    value.availability === "observed"
+      ? `- ${label}: observed; digest ${value.digest}; size ${value.size}; ref ${safe(value.ref)}; commit ${value.commitOid}; blob ${value.blobOid}${"baseSha" in value ? `; base ${value.baseSha}` : ""}.`
+      : `- ${label}: ${value.availability}; exact identity unavailable.`;
+  return [
+    "## Qualification evidence",
+    "",
+    `- Terminal state: ${result.terminalState}; result availability: ${result.availability}; proposal kind: ${result.kind ?? "unavailable"}.`,
+    `- Obligations: ${result.obligationCount ?? "unavailable"} (${result.obligationCountAuthority}).`,
+    ...(result.kind === "work-items" && "workItems" in result
+      ? [
+          `- Candidate Work Items: ${result.workItems.modelAuthoredCount} (${result.workItems.modelAuthoredCountAuthority}); Factory-derived producers ${result.workItems.mechanicallyDerivedProducerCount ?? "unavailable"} (${result.workItems.mechanicallyDerivedProducerCountAuthority}); compiled ${result.workItems.compiledTotal ?? "unavailable"} (${result.workItems.compiledTotalAuthority}); projected ${result.workItems.projectedTotal ?? "unavailable"} (${result.workItems.projectedTotalAuthority}).`,
+          `- Dependency critical path: ${result.workItems.criticalPath?.workItems ?? "unavailable"} Work Items (${result.workItems.criticalPath?.dependencyEdges ?? "unavailable"} edges); ${result.workItems.criticalPath?.itemIds.map(safe).join(" -> ") ?? "unavailable"} (${result.workItems.criticalPathAuthority}).`,
+        ]
+      : result.kind === "objectives" && "planning" in result
+        ? [
+            `- Proposed Objectives: ${result.planning.proposalCount} (model-reported, schema-validated); triggers ${result.planning.triggerIdentities.join(", ")}.`,
+            ...result.planning.objectives.map(
+              (objective) =>
+                `- Objective ${safe(objective.id)}: model-reported, schema-validated estimates workItems=${nullable(objective.planningEstimate.workItems)}, criticalPathMinutes=${nullable(objective.planningEstimate.criticalPathMinutes)}, aggregateWorkMinutes=${nullable(objective.planningEstimate.aggregateWorkMinutes)}; obligations=${safe(objective.obligationIds)}; outputs=${safe(objective.outputIds)}; prerequisites=${safe(objective.prerequisiteOutputs)}.`,
+            ),
+            ...result.planning.coverage.map(
+              (coverage) =>
+                `- Coverage ${safe(coverage.obligationId)}: disposition=${coverage.disposition}; objective=${safe("objectiveId" in coverage ? coverage.objectiveId : null)}; acceptance=${safe("acceptanceId" in coverage ? coverage.acceptanceId : null)}.`,
+            ),
+            ...result.planning.triggers.map(
+              (trigger) =>
+                `- Trigger ${trigger.code}:${trigger.source}: availability=${trigger.availability}; threshold=${safe(trigger.threshold)}; obligations=${safe(trigger.obligationIds)}.`,
+            ),
+          ]
+        : result.kind === "clarification" && "planning" in result
+          ? [
+              `- Clarification requirements: ${result.planning.proposalCount} (model-reported, schema-validated); triggers ${result.planning.triggerIdentities.join(", ")}.`,
+              ...result.planning.requirements.map(
+                (requirement) =>
+                  `- Clarification ${safe(requirement.id)}: obligations=${safe(requirement.obligationIds)}.`,
+              ),
+              ...result.planning.triggers.map(
+                (trigger) =>
+                  `- Trigger ${trigger.code}:${trigger.source}: availability=${trigger.availability}; threshold=${safe(trigger.threshold)}; obligations=${safe(trigger.obligationIds)}.`,
+              ),
+            ]
+          : []),
+    authorityIdentity("Immutable graph authority", calibration.authority.graph),
+    authorityIdentity("Immutable projection authority", calibration.authority.projection),
+    "",
+    "### Invocation sizes",
+    "",
+    ...calibration.invocations.map(
+      (invocation) =>
+        `- ${invocation.invocationId} (${invocation.stage} r${invocation.revision}, ${invocation.state}): prompt ${invocation.sizes.prompt.bytes ?? "unavailable"} bytes (${invocation.sizes.prompt.provenance}); schema ${invocation.sizes.schema.bytes ?? "unavailable"} bytes (${invocation.sizes.schema.provenance}); response ${invocation.sizes.response.bytes ?? "unavailable"} bytes (${invocation.sizes.response.provenance}); inventory ${invocation.sizes.inventory.bytes ?? "unavailable"} bytes (${invocation.sizes.inventory.provenance}); evidence ${invocation.sizes.evidence.bytes ?? "unavailable"} bytes (${invocation.sizes.evidence.provenance}).`,
+    ),
+    "",
+  ];
+}
+
+function createCalibrationEvidence(args: {
+  records: readonly CompilerDraftRecord[];
+  events: readonly FactoryEvent[];
+  objective: number;
+  runId: string;
+  inventory: z.infer<typeof ObligationInventorySchema> | null;
+  graph: CompiledGraphRecord | null;
+  fixedGraph: CompiledObjective | null;
+  projection: CompiledGraphProjectionRecord | null;
+  projectionConflict: boolean;
+  invocations: Array<{
+    record: CompilerDraftRecord;
+    invocation: z.infer<typeof Invocation>;
+  }>;
+  results: CompilerDraftRecord[];
+  invocationStatus: Array<{
+    invocationId: string;
+    stage: "inventory" | "compile" | "repair" | "judge";
+    revision: number;
+    state: "reserved" | "not-invoked" | "failed" | "completed";
+    inputTokens: number | null;
+    outputTokens: number | null;
+    cachedInputTokens: number | null;
+    observedTokens: number | null;
+    observedMilliseconds: number | null;
+  }>;
+}) {
+  const selection = args.records.find((record) => record.kind === "selection");
+  const stopped = args.records.find((record) => record.kind === "stopped");
+  const planning = planningStop(args.records);
+  let proposalConflict = false;
+  const proposals = args.results.flatMap((result) => {
+    if (
+      result.payload.error ||
+      (result.payload.stage !== "compile" && result.payload.stage !== "repair")
+    )
+      return [];
+    try {
+      const value = z.record(z.unknown()).parse(result.payload.value);
+      const request = CompilerRequestSchema.parse(value.request);
+      const proposal = CompilerProposalSchema.parse(value.proposal);
+      const report = CompilerValidationReportSchema.parse(value.report);
+      const provenance = z
+        .object({ requestDigest: z.string() })
+        .passthrough()
+        .parse(value.provenance);
+      const invocation = args.invocations.find(
+        (candidate) => candidate.invocation.invocationId === result.payload.invocationId,
+      );
+      const requestDigest = draftDigest(request);
+      if (
+        report.status !== "valid" ||
+        request.revision !== result.payload.revision ||
+        !args.inventory ||
+        draftDigest(request.inventory) !== draftDigest(args.inventory) ||
+        provenance.requestDigest !== requestDigest ||
+        invocation?.invocation.compilerRequestDigest !== requestDigest
+      ) {
+        proposalConflict = true;
+        return [];
+      }
+      return [{ result, proposal, requestDigest, proposalDigest: draftDigest(proposal) }];
+    } catch {
+      proposalConflict = true;
+      return [];
+    }
+  });
+  const fixedProposal =
+    selection && args.fixedGraph
+      ? {
+          result: selection,
+          proposal: {
+            kind: "work-items" as const,
+            workItems: args.fixedGraph.workItems,
+          },
+          requestDigest: String(selection.payload.requestDigest),
+          proposalDigest: String(selection.payload.proposalDigest),
+        }
+      : undefined;
+  const terminalProposal = selection
+    ? (proposals.find((entry) => entry.result.payload.revision === selection.payload.revision) ??
+      fixedProposal)
+    : planning
+      ? proposals.find(
+          (entry) =>
+            entry.proposal.kind === planning.kind &&
+            draftDigest(entry.proposal) === planning.digest,
+        )
+      : undefined;
+  if ((selection || planning) && !terminalProposal) proposalConflict = true;
+
+  const authority = authorityState(
+    args.events,
+    args.objective,
+    args.runId,
+    args.records[0]?.binding.baseSha ?? null,
+    args.graph,
+    args.projection,
+  );
+  if (args.projectionConflict) authority.projection = { availability: "conflicting" };
+
+  const resultBase = {
+    terminalState: selection
+      ? ("accepted" as const)
+      : stopped
+        ? ("stopped" as const)
+        : ("incomplete" as const),
+    availability: proposalConflict
+      ? ("conflicting" as const)
+      : terminalProposal
+        ? ("observed" as const)
+        : ("missing" as const),
+    kind: terminalProposal?.proposal.kind ?? null,
+    proposalDigest: terminalProposal?.proposalDigest ?? null,
+    obligationCount: args.inventory?.obligations.length ?? null,
+    obligationCountAuthority: args.inventory
+      ? ("mechanically-counted-authenticated-inventory" as const)
+      : ("unavailable" as const),
+  };
+  let result:
+    | typeof resultBase
+    | (typeof resultBase & {
+        kind: "work-items";
+        workItems: {
+          modelAuthoredCount: number;
+          modelAuthoredCountAuthority:
+            | "model-reported-schema-validated"
+            | "mechanically-reconstructed-fixed-graph";
+          mechanicallyDerivedProducerCount: number | null;
+          mechanicallyDerivedProducerIds: string[] | null;
+          mechanicallyDerivedProducerCountAuthority:
+            | "mechanically-derived-authenticated-projection-trace"
+            | "unavailable";
+          compiledTotal: number | null;
+          compiledTotalAuthority:
+            | "mechanically-counted-authenticated-fixed-graph"
+            | "mechanically-counted-authenticated-compiled-graph"
+            | "unavailable";
+          projectedTotal: number | null;
+          projectedTotalAuthority: "mechanically-counted-authenticated-projection" | "unavailable";
+          criticalPath: ReturnType<typeof mechanicalDependencyCriticalPath>;
+          criticalPathAuthority:
+            | "mechanically-derived-authenticated-fixed-graph"
+            | "mechanically-derived-authenticated-compiled-graph"
+            | "unavailable";
+        };
+      })
+    | (typeof resultBase & { kind: "objectives"; planning: ObjectivePlanningEvidence })
+    | (typeof resultBase & { kind: "clarification"; planning: ClarificationPlanningEvidence }) =
+    resultBase;
+  if (terminalProposal?.proposal.kind === "work-items") {
+    const authoredIds = new Set(terminalProposal.proposal.workItems.map((item) => item.id));
+    const compiledObjective = args.graph?.objective ?? args.fixedGraph;
+    const derivedIds = compiledObjective
+      ? compiledObjective.workItems
+          .map((item) => item.id)
+          .filter((id) => !authoredIds.has(id))
+          .sort()
+      : null;
+    const validation = args.records.find(
+      (record) =>
+        record.kind === "validation" &&
+        record.payload.valid === true &&
+        record.payload.revision === terminalProposal.result.payload.revision,
+    );
+    const trace = validation ? ProjectionTrace.safeParse(validation.payload.projectionTrace) : null;
+    const tracedProducerIds = trace?.success
+      ? trace.data.mediaIntents
+          .filter((intent) => intent.disposition === "producer")
+          .map((intent) => intent.producerWorkItemId)
+          .filter((id): id is string => id !== null)
+          .sort()
+      : null;
+    const producersVerified =
+      (authority.graph.availability === "observed" || args.fixedGraph !== null) &&
+      derivedIds !== null &&
+      tracedProducerIds !== null &&
+      JSON.stringify(derivedIds) === JSON.stringify([...new Set(tracedProducerIds)]);
+    result = {
+      ...resultBase,
+      kind: "work-items",
+      workItems: {
+        modelAuthoredCount: terminalProposal.proposal.workItems.length,
+        modelAuthoredCountAuthority: args.fixedGraph
+          ? "mechanically-reconstructed-fixed-graph"
+          : "model-reported-schema-validated",
+        mechanicallyDerivedProducerCount: producersVerified ? derivedIds.length : null,
+        mechanicallyDerivedProducerIds: producersVerified ? derivedIds : null,
+        mechanicallyDerivedProducerCountAuthority: producersVerified
+          ? "mechanically-derived-authenticated-projection-trace"
+          : "unavailable",
+        compiledTotal: args.fixedGraph
+          ? args.fixedGraph.workItems.length
+          : authority.graph.availability === "observed"
+            ? (args.graph?.graphSize ?? null)
+            : null,
+        compiledTotalAuthority: args.fixedGraph
+          ? "mechanically-counted-authenticated-fixed-graph"
+          : authority.graph.availability === "observed"
+            ? "mechanically-counted-authenticated-compiled-graph"
+            : "unavailable",
+        projectedTotal:
+          authority.projection.availability === "observed"
+            ? (args.projection?.graphSize ?? null)
+            : null,
+        projectedTotalAuthority:
+          authority.projection.availability === "observed"
+            ? "mechanically-counted-authenticated-projection"
+            : "unavailable",
+        criticalPath:
+          compiledObjective &&
+          (authority.graph.availability === "observed" || args.fixedGraph !== null)
+            ? mechanicalDependencyCriticalPath(compiledObjective.workItems)
+            : null,
+        criticalPathAuthority: args.fixedGraph
+          ? "mechanically-derived-authenticated-fixed-graph"
+          : authority.graph.availability === "observed"
+            ? "mechanically-derived-authenticated-compiled-graph"
+            : "unavailable",
+      },
+    };
+  } else if (terminalProposal?.proposal.kind === "objectives") {
+    result = {
+      ...resultBase,
+      kind: "objectives",
+      planning: {
+        proposalCount: terminalProposal.proposal.objectives.length,
+        proposalCountAuthority: "model-reported-schema-validated",
+        triggerIdentities: terminalProposal.proposal.triggers.map(
+          (trigger) => `${trigger.code}:${trigger.source}`,
+        ),
+        objectives: terminalProposal.proposal.objectives.map((objective) => ({
+          id: objective.id,
+          obligationIds: objective.obligationIds,
+          planningEstimate: {
+            workItems: objective.planningEstimate.workItems,
+            criticalPathMinutes: objective.planningEstimate.criticalPathMinutes,
+            aggregateWorkMinutes: objective.planningEstimate.aggregateWorkMinutes,
+          },
+          outputIds: objective.outputs.map((output) => output.id),
+          prerequisiteOutputs: objective.prerequisiteOutputs,
+        })),
+        coverage: terminalProposal.proposal.coverage.map((coverage) =>
+          coverage.disposition === "deferred"
+            ? {
+                obligationId: coverage.obligationId,
+                disposition: coverage.disposition,
+              }
+            : {
+                obligationId: coverage.obligationId,
+                disposition: coverage.disposition,
+                objectiveId: coverage.objectiveId,
+                acceptanceId: coverage.acceptanceId,
+              },
+        ),
+        triggers: terminalProposal.proposal.triggers.map((trigger) => ({
+          code: trigger.code,
+          source: trigger.source,
+          availability: trigger.availability,
+          threshold: trigger.threshold,
+          obligationIds: trigger.obligationIds,
+        })),
+      },
+    };
+  } else if (terminalProposal?.proposal.kind === "clarification") {
+    result = {
+      ...resultBase,
+      kind: "clarification",
+      planning: {
+        proposalCount: terminalProposal.proposal.requirements.length,
+        proposalCountAuthority: "model-reported-schema-validated",
+        triggerIdentities: terminalProposal.proposal.triggers.map(
+          (trigger) => `${trigger.code}:${trigger.source}`,
+        ),
+        requirements: terminalProposal.proposal.requirements.map((requirement) => ({
+          id: requirement.id,
+          obligationIds: requirement.obligationIds,
+        })),
+        triggers: terminalProposal.proposal.triggers.map((trigger) => ({
+          code: trigger.code,
+          source: trigger.source,
+          availability: trigger.availability,
+          threshold: trigger.threshold,
+          obligationIds: trigger.obligationIds,
+        })),
+      },
+    };
+  }
+
+  const invocations = args.invocations.map(({ record, invocation }) => {
+    const status = args.invocationStatus.find(
+      (candidate) => candidate.invocationId === invocation.invocationId,
+    )!;
+    const providerResult = args.results.find(
+      (candidate) => candidate.payload.invocationId === invocation.invocationId,
+    );
+    const provenance = InvocationProvenance.parse(record.payload.expectedProvenance);
+    const responseBytes =
+      !providerResult || providerResult.payload.preProviderTerminal === true
+        ? null
+        : z.number().int().nonnegative().safe().parse(providerResult?.payload.responseBytes);
+    const responseSource = !providerResult
+      ? "unavailable-unresolved"
+      : providerResult.payload.preProviderTerminal === true
+        ? "not-applicable-pre-provider"
+        : ResponseSizeSource.or(z.literal("no-structured-response")).parse(
+            providerResult?.payload.responseBytesSource,
+          );
+    const hasInventory = invocation.stage !== "inventory" && args.inventory !== null;
+    const sourceEvidence = args.records.find((candidate) => candidate.kind === "source-evidence")
+      ?.payload.sourceEvidence;
+    const evidenceBytes = hasInventory
+      ? canonicalBytes(args.inventory!.evidence)
+      : sourceEvidence === undefined
+        ? null
+        : canonicalBytes(sourceEvidence);
+    return {
+      ...status,
+      sizes: {
+        prompt: { bytes: provenance.promptBytes, provenance: provenance.sizeSource },
+        schema: { bytes: provenance.schemaBytes, provenance: provenance.sizeSource },
+        response: { bytes: responseBytes, provenance: responseSource },
+        inventory: {
+          bytes: hasInventory ? canonicalBytes(args.inventory) : null,
+          provenance: hasInventory ? "reconstructed-authenticated-inventory" : "not-applicable",
+        },
+        evidence: {
+          bytes: evidenceBytes,
+          provenance: hasInventory
+            ? "reconstructed-authenticated-inventory"
+            : evidenceBytes === null
+              ? "unavailable"
+              : "reconstructed-authenticated-source-evidence",
+        },
+      },
+    };
+  });
+  return {
+    authority: {
+      source: "authenticated-durable-records" as const,
+      ...authority,
+    },
+    result,
+    invocations,
+  };
+}
+
 /** Reporting consumes authenticated snapshots and immutable Git objects; it never admits model work. */
 export async function inspectCompilerEvaluation(args: {
   repository: string;
@@ -256,11 +856,9 @@ export async function inspectCompilerEvaluation(args: {
       (run.start.baseSha && binding.baseSha !== run.start.baseSha))
   )
     throw new Error("compiler draft disagrees with authenticated run identity");
+  const journalAuthority = validatePersistedCompilerDraftJournal(records);
   const hasFixedGraphRecord = records.some((record) => record.kind === "fixed-graph");
-  const fixedAuthority = hasFixedGraphRecord
-    ? validatePersistedCompilerDraftJournal(records)
-    : null;
-  const fixedGraph = fixedAuthority?.fixedGraph;
+  const fixedGraph = journalAuthority?.fixedGraph;
   if (hasFixedGraphRecord && !fixedGraph)
     throw new Error("fixed compiler graph is not in its canonical journal position");
   const fixedEvaluation = fixedGraph
@@ -275,6 +873,21 @@ export async function inspectCompilerEvaluation(args: {
       })()
     : null;
   const graph = await loadCompiledGraph(args.store, args.snapshot.number, run.runId);
+  let projection: CompiledGraphProjectionRecord | null = null;
+  let projectionConflict = false;
+  if (graph) {
+    try {
+      projection = await loadCompiledGraphProjection(
+        args.store,
+        args.snapshot.number,
+        run.runId,
+        graph,
+      );
+    } catch (error) {
+      if (!(error instanceof CompiledGraphProjectionConflictError)) throw error;
+      projectionConflict = true;
+    }
+  }
   const selections = records.filter((record) => record.kind === "selection");
   if (selections.length > 1) throw new Error("multiple compiler draft selections");
   const selection = selections[0];
@@ -409,6 +1022,20 @@ export async function inspectCompilerEvaluation(args: {
       observedTokens: counters?.observedTokens ?? null,
       observedMilliseconds: counters?.observedMilliseconds ?? null,
     };
+  });
+  const calibrationEvidence = createCalibrationEvidence({
+    records,
+    events: runtimeEvents,
+    objective: args.snapshot.number,
+    runId: run.runId,
+    inventory,
+    graph,
+    fixedGraph: fixedGraph ?? null,
+    projection,
+    projectionConflict,
+    invocations,
+    results,
+    invocationStatus,
   });
   const cumulativeUsage = {
     inputTokens: usage.reduce((sum, item) => sum + (item.inputTokens ?? 0), 0),
@@ -770,6 +1397,7 @@ export async function inspectCompilerEvaluation(args: {
     usage,
     invocationStatus,
     cumulativeUsage,
+    calibrationEvidence,
     preProviderTerminals,
     correctionBudget,
     unresolvedInvocations,
@@ -792,6 +1420,7 @@ export async function inspectCompilerEvaluation(args: {
       ),
       "",
       ...compilerInvocationAccounting,
+      ...renderCalibrationMarkdown(calibrationEvidence),
       ...reports.map(renderCompilerEvalMarkdown),
       ...(annotations
         ? [

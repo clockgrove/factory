@@ -380,11 +380,14 @@ async function createGithubComponent(
     options.run ?? execFileAsync,
   );
   const executable = join(treeRoot, ...spec.executablePath.split("/"));
+  const isolatedHome = join(staging, "home");
+  await mkdir(isolatedHome, { recursive: true, mode: 0o700 });
   const observed = await (options.run ?? execFileAsync)(executable, spec.versionArgs, {
     encoding: "utf8",
     timeout: 15_000,
     maxBuffer: 1024 * 1024,
-    env: { PATH: "/usr/bin:/bin", HOME: join(staging, "home") },
+    cwd: componentRoot,
+    env: { PATH: "/usr/bin:/bin", HOME: isolatedHome },
   });
   if (observed.stdout.trim() !== spec.versionOutput(resolved.version))
     throw new Error(`${tool} executable does not report release version ${resolved.version}`);

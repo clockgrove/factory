@@ -76,6 +76,7 @@ export function nativeRefreshQualification(env) {
   );
   return {
     scope,
+    harnessPaths: files.map((file) => `scripts/${file}`),
     privateEvidence: true,
     policy: boundedPolicy(
       "stacked-prs",
@@ -197,7 +198,7 @@ export async function main(env = process.env, run = installedMain) {
     );
     return;
   }
-  await run(qualification);
+  await run(qualification, { env });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {

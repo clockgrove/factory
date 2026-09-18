@@ -324,7 +324,11 @@ export function installedQualificationAuthority(
   regularFile(pluginArchive, uid, MAX_ARTIFACT_BYTES);
   assert.equal(hash(readFileSync(pluginArchive)), receipt.pluginArchiveSha256);
 
-  assert.equal(git(source, ["status", "--porcelain", "--untracked-files=all"]), "");
+  assert.equal(
+    git(source, ["status", "--porcelain", "--untracked-files=all"]),
+    "",
+    "qualification source must be clean",
+  );
   assert.equal(git(source, ["rev-parse", "HEAD"]), receipt.sourceCommit);
   assert.equal(
     hash(gitBytes(source, ["archive", "--format=tar", receipt.sourceCommit], MAX_ARTIFACT_BYTES)),
@@ -426,7 +430,7 @@ export function installedQualificationAuthority(
   assert.ok(listedEntry, "exact installed Factory plugin receipt unavailable");
   assert.equal(listedEntry.source?.source, "local");
   assert.equal(realpathSync(listedEntry.source.path), listedPluginSource);
-  installedIdentity({
+  const pluginIdentity = installedIdentity({
     listed,
     codexHome,
     pluginRoot: installedPluginRoot,
@@ -452,6 +456,7 @@ export function installedQualificationAuthority(
     mcpArtifactIdentity: `sha256:${receipt.mcpServerBundleSha256}`,
     inventoryIdentity: `sha256:${receipt.bundleInventorySha256}`,
     pluginArtifact,
+    pluginIdentity,
     committedQualificationFiles,
     installReceipt: receipt,
   };

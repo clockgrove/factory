@@ -14,9 +14,9 @@ import {
   readFileSync,
   realpathSync,
   readlinkSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Octokit } from "@octokit/core";
@@ -25,12 +25,14 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import {
   boundedPolicy,
   installedBundleIdentity,
-  installedIdentity,
-  installedPluginPath,
   modelTokenLimit,
   qualificationNamespace,
   qualificationNamespaceMarker,
 } from "./verify-live-objective.mjs";
+import {
+  installedQualificationAuthority,
+  qualificationRuntimeEnvironment,
+} from "./qualification-install-identity.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const hash = (value) =>
@@ -58,6 +60,14 @@ const scopeFields = [
 ];
 const sha = /^[a-f0-9]{64}$/;
 const evidenceByteLimit = 8 * 1024 * 1024;
+export const localFaultHarnessPaths = [
+  "scripts/verify-local-faults.mjs",
+  "scripts/verify-live-objective.mjs",
+  "scripts/qualification-model-accounting.mjs",
+  "scripts/qualification-receipts.mjs",
+  "scripts/qualification-merge-proof.mjs",
+  "scripts/qualification-install-identity.mjs",
+];
 
 const faultStages = Object.freeze({
   configuration: "Explicit scenario configuration could not be verified",
@@ -173,6 +183,13 @@ export function privateEvidenceFile(path, value) {
     resolve(path).startsWith("/tmp/") && (parent === "/tmp" || parent.startsWith("/tmp/")),
     "private evidence must stay in /tmp",
   );
+  const parentFacts = statSync(parent);
+  assert.ok(
+    parentFacts.isDirectory() &&
+      parentFacts.uid === process.getuid() &&
+      (parentFacts.mode & 0o077) === 0,
+    "private evidence directory must be owner-only",
+  );
   const flags =
     constants.O_NOFOLLOW |
     (value === undefined ? constants.O_RDONLY : constants.O_WRONLY | constants.O_CREAT);
@@ -196,6 +213,16 @@ export function privateEvidenceFile(path, value) {
   } finally {
     closeSync(fd);
   }
+}
+
+export function reservePrivateEvidenceFile(path) {
+  assert.ok(!existsSync(path), "never overwrite prior qualification evidence");
+  const fd = openSync(
+    path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o600,
+  );
+  closeSync(fd);
 }
 
 function assertScopeReceipt(reservation, start, repository, objective) {
@@ -774,17 +801,68 @@ export async function boundedPoll(
   throw new Error("bounded-observation-incomplete");
 }
 
-async function runQualification(progress) {
-  if (process.env.FACTORY_LOCAL_FAULTS !== "1") {
+export function installedLocalFaultAuthority(
+  env,
+  { candidateSourceRoot = root, installAuthorityOptions = {} } = {},
+) {
+  return installedQualificationAuthority(env, {
+    ...installAuthorityOptions,
+    sourceRoot: candidateSourceRoot,
+    committedPaths: localFaultHarnessPaths,
+  });
+}
+
+export function assertFaultControllerAuthority(
+  controller,
+  { artifactIdentity, launcher, bundle, repository, checkout, runningArgv },
+) {
+  for (const field of ["installed", "enabled", "active", "healthy", "launcherCurrent"])
+    assert.equal(controller[field], true, `fault controller ${field} authority differs`);
+  assert.equal(controller.reasonCode, null, "fault controller reports an unhealthy reason");
+  assert.equal(
+    controller.executableIdentity,
+    artifactIdentity,
+    "fault controller retained executable identity differs",
+  );
+  assert.equal(
+    controller.currentExecutableIdentity,
+    artifactIdentity,
+    "fault controller current executable identity differs",
+  );
+  assert.deepEqual(runningArgv, [
+    launcher,
+    bundle,
+    "controller",
+    "run",
+    repository,
+    "--repo",
+    checkout,
+    "--executable-identity",
+    artifactIdentity,
+  ]);
+}
+
+export async function runQualification(
+  progress,
+  env = process.env,
+  { candidateSourceRoot = root, installAuthorityOptions = {} } = {},
+) {
+  if (env.FACTORY_LOCAL_FAULTS !== "1") {
     console.log(
       "Not exercised: FACTORY_LOCAL_FAULTS=1 and explicit phase/repository authority required.",
     );
     return;
   }
+  progress.stage("installed-identity");
+  const candidate = installedLocalFaultAuthority(env, {
+    candidateSourceRoot,
+    installAuthorityOptions,
+  });
+  const runtimeEnvironment = qualificationRuntimeEnvironment(env);
   progress.stage("configuration");
-  assertFaultAuthenticationEnvironment(process.env);
+  assertFaultAuthenticationEnvironment(env);
   const required = (key) => {
-    const value = process.env[`FACTORY_LOCAL_FAULT_${key}`]?.trim();
+    const value = env[`FACTORY_LOCAL_FAULT_${key}`]?.trim();
     assert.ok(value, `FACTORY_LOCAL_FAULT_${key} required`);
     return value;
   };
@@ -807,31 +885,34 @@ async function runQualification(progress) {
   const policy = faultPolicy(maxModelTokens, scenario);
   const evidencePath = resolve(required("EVIDENCE"));
   assert.ok(evidencePath.startsWith("/tmp/"), "private evidence must be in /tmp");
-  const codexHome = realpathSync(join(homedir(), ".codex"));
-  progress.stage("installed-identity");
-  if (process.env.CODEX_HOME) assert.equal(realpathSync(process.env.CODEX_HOME), codexHome);
-  const listed = JSON.parse(command("codex", ["plugin", "list", "--json"], checkout));
-  const pluginRoot = installedPluginPath({ listed, codexHome });
+  const pluginRoot = candidate.installedPluginRoot;
   const manifest = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"));
-  installedIdentity({
-    manifest,
-    listed,
-    pluginRoot,
-    codexHome,
-    portable: JSON.parse(readFileSync(join(pluginRoot, "plugin.json"), "utf8")),
-    packageManifest: JSON.parse(readFileSync(join(pluginRoot, "package.json"), "utf8")),
-  });
-  const artifact = installedBundleIdentity(pluginRoot);
-  assert.equal(
-    artifact.inventorySha256,
-    createHash("sha256")
-      .update(readFileSync(join(root, "dist/bundle-inventory.json")))
-      .digest("hex"),
-  );
-  assert.equal(
-    command("git", ["status", "--porcelain", "--untracked-files=no"], root),
-    "",
-    "harness must be committed",
+  const artifact = candidate.pluginArtifact;
+  const installedCandidate = {
+    sourceCommit: candidate.candidateSourceCommit,
+    version: candidate.candidateVersion,
+    installReceiptIdentity: candidate.installReceiptIdentity,
+    inventoryIdentity: candidate.inventoryIdentity,
+    factoryArtifactIdentity: candidate.artifactIdentity,
+    mcpArtifactIdentity: candidate.mcpArtifactIdentity,
+    artifactAuthority: {
+      qualificationRoot: candidate.qualificationRoot,
+      pluginRoot,
+      codexHome: candidate.codexHome,
+    },
+    providerRuntime: {
+      home: runtimeEnvironment.HOME,
+      codexHome: runtimeEnvironment.CODEX_HOME,
+    },
+  };
+  const evidenceDirectory = realpathSync(dirname(evidencePath));
+  const evidenceDirectoryFacts = statSync(evidenceDirectory);
+  assert.ok(
+    evidenceDirectory.startsWith("/tmp/") &&
+      evidenceDirectoryFacts.isDirectory() &&
+      evidenceDirectoryFacts.uid === process.getuid() &&
+      (evidenceDirectoryFacts.mode & 0o077) === 0,
+    "private evidence directory must be a fresh owner-only /tmp directory",
   );
   progress.stage("repository-preflight");
   const token = command("gh", ["auth", "token"], checkout);
@@ -869,7 +950,7 @@ async function runQualification(progress) {
     command: mcp.command,
     args: mcp.args.map((arg) => arg.replaceAll("${PLUGIN_ROOT}", pluginRoot)),
     cwd: checkout,
-    env: { ...process.env, GITHUB_TOKEN: token },
+    env: { ...runtimeEnvironment, GITHUB_TOKEN: token },
     stderr: "pipe",
   });
   let evidence;
@@ -914,29 +995,34 @@ async function runQualification(progress) {
       repository: checkout,
       requestId: `${namespace}-inspect`,
     });
-    assert.ok(
-      controller.active && controller.installed,
-      "an explicitly installed active controller is required",
-    );
     const controllerObservation = observeUnit(controller.unit);
     assert.equal(controllerObservation.status, "active");
-    const controllerExec = command("systemctl", [
-      "--user",
-      "show",
-      controller.unit,
-      "--property=ExecStart",
-      "--value",
-    ]);
-    assert.ok(
-      controllerExec.includes(join(realpathSync(pluginRoot), "dist/factory.js")),
-      "controller must execute this exact installed Factory bundle",
+    const controllerPid = Number(
+      command("systemctl", ["--user", "show", controller.unit, "--property=MainPID", "--value"]),
     );
+    assert.ok(
+      Number.isSafeInteger(controllerPid) && controllerPid > 0,
+      "active controller PID unavailable",
+    );
+    const runningArgv = readFileSync(`/proc/${controllerPid}/cmdline`, "utf8")
+      .split("\0")
+      .filter(Boolean);
+    assertFaultControllerAuthority(controller, {
+      artifactIdentity: candidate.artifactIdentity,
+      launcher: realpathSync(process.execPath),
+      bundle: realpathSync(join(pluginRoot, "dist/factory.js")),
+      repository,
+      checkout,
+      runningArgv,
+    });
     if (phase === "preflight") {
       console.log(
         JSON.stringify({
           result: "passed",
           phase,
           scenario,
+          installedCandidate,
+          harnessFiles: candidate.committedQualificationFiles,
           installedArtifact: artifact,
           controllerUnit: controller.unit,
           modelTokenLimit: maxModelTokens,
@@ -946,7 +1032,6 @@ async function runQualification(progress) {
     }
     if (phase === "prepare") {
       progress.stage("repository-quiescence");
-      assert.ok(!existsSync(evidencePath), "never overwrite prior qualification evidence");
       assert.equal(command("git", ["status", "--porcelain"], checkout), "");
       const issues = await list("GET /repos/{owner}/{repo}/issues", { state: "all" });
       assert.ok(
@@ -969,6 +1054,7 @@ async function runQualification(progress) {
         "disposable repository must have no open PRs",
       );
       const body = faultObjective(namespace);
+      reservePrivateEvidenceFile(evidencePath);
       progress.stage("objective-create");
       const objective = (
         await request("POST /repos/{owner}/{repo}/issues", {
@@ -987,6 +1073,8 @@ async function runQualification(progress) {
         maxModelTokens,
         policy,
         installedArtifact: artifact,
+        installedCandidate,
+        harnessFiles: candidate.committedQualificationFiles,
         activationRequestId: `${namespace}-activate`,
         faultRequestId: `${namespace}-${scenario}`,
         pauseRequestId: `${namespace}-pause`,
@@ -1010,6 +1098,8 @@ async function runQualification(progress) {
     }))
       assert.deepEqual(evidence[key], expected);
     assert.deepEqual(evidence.installedArtifact, artifact);
+    assert.deepEqual(evidence.installedCandidate, installedCandidate);
+    assert.deepEqual(evidence.harnessFiles, candidate.committedQualificationFiles);
     assert.deepEqual(evidence.actor, { id: actor.id, login: actor.login });
     const observe = async () => {
       const objective = (
@@ -1243,10 +1333,10 @@ async function runQualification(progress) {
     await client.close().catch(() => {});
   }
 }
-export async function main() {
+export async function main(env = process.env, options = {}) {
   const progress = createFaultProgress({ emit: (event) => console.log(JSON.stringify(event)) });
   try {
-    await runQualification(progress);
+    await runQualification(progress, env, options);
   } catch {
     // Includes failures before MCP setup and failures to persist private evidence.
     // Never print raw exceptions, transport payloads, environment or credentials.

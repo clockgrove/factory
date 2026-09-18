@@ -305,6 +305,15 @@ export function createPressureQualification(authority, env = process.env, port =
   };
   return {
     scope: "installed-local-explicit-regular-objective",
+    harnessPaths: [
+      "scripts/verify-local-pressure.mjs",
+      "scripts/local-pressure-resource.mjs",
+      "scripts/local-pressure-allocator.mjs",
+      "scripts/verify-local-scheduling.mjs",
+      "scripts/verify-local-faults.mjs",
+      "scripts/verify-regular-objective.mjs",
+      "scripts/qualification-sibling-refresh-proof.mjs",
+    ],
     policy: authority.policy,
     namespace: authority.namespace,
     privateEvidence: true,
@@ -643,7 +652,7 @@ export async function main(env = process.env, run = installedMain) {
     console.log("Not exercised: separate explicit local pressure opt-in required.");
     return;
   }
-  await run(createPressureQualification(authority, env));
+  await run(createPressureQualification(authority, env), { env });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {

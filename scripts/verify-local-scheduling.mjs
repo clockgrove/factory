@@ -667,6 +667,12 @@ export function createSchedulingQualification(authority, env = process.env, port
     };
   return {
     scope: "installed-local-explicit-regular-objective",
+    harnessPaths: [
+      "scripts/verify-local-scheduling.mjs",
+      "scripts/verify-local-faults.mjs",
+      "scripts/verify-regular-objective.mjs",
+      "scripts/qualification-sibling-refresh-proof.mjs",
+    ],
     policy: authority.policy,
     privateEvidence: true,
     namespace: authority.namespace,
@@ -946,7 +952,7 @@ export async function main(env = process.env, run = installedMain) {
     console.log("Not exercised: explicit local scheduling opt-in required.");
     return;
   }
-  await run(createSchedulingQualification(authority, env));
+  await run(createSchedulingQualification(authority, env), { env });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {

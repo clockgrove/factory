@@ -55,6 +55,7 @@ export FACTORY_LIVE_OBJECTIVE_CHECKOUT=/home/USER/disposable-checkout
 export FACTORY_LIVE_OBJECTIVE_NAMESPACE=fallback-new-unused-namespace
 export FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=250000
 export FACTORY_LIVE_OBJECTIVE_EVIDENCE=/home/USER/private-evidence/fallback-new-unused-namespace
+export FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/USER/Codex/factory-initial-beta/CANDIDATE/install-identities.txt
 
 FACTORY_LIVE_OBJECTIVE_PREFLIGHT=1 node scripts/verify-native-fallback-objective.mjs
 ```
@@ -70,8 +71,8 @@ env -u FACTORY_LIVE_OBJECTIVE_PREFLIGHT \
 ```
 
 Unset other native-refresh/explicit-regular profile selectors. Prior Objective/run IDs are rejected.
-The optional plugin-root override must identify the actual installed receipt, never a worktree MCP
-override. Preflight and exercise write distinct exclusive private files; existing evidence is not
+The retained install receipt is the only artifact selector. Preflight and exercise write distinct
+exclusive private files; existing evidence is not
 overwritten. Neither opt-in grants authority on its own. No provider/paid-cloud authority is added.
 
 The original policy allows SDK-first local workers with CLI fallback, two local workers/two attempts

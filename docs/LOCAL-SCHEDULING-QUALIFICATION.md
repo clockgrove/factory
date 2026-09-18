@@ -50,6 +50,7 @@ export FACTORY_LIVE_OBJECTIVE_CHECKOUT=/home/USER/Codex/disposable
 export FACTORY_LIVE_OBJECTIVE_NAMESPACE=scheduling-unique-20260905-a
 export FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=500000
 export FACTORY_LIVE_OBJECTIVE_EVIDENCE=/home/USER/private-evidence/scheduling-unique-20260905-a
+export FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/USER/Codex/factory-initial-beta/CANDIDATE/install-identities.txt
 
 env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME \
   PATH=/home/USER/.local/bin:/usr/local/bin:/usr/bin:/bin \

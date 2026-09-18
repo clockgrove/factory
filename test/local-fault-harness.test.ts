@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:f
 import { describe, expect, it, vi } from "vitest";
 import {
   assessLocalFault,
+  assertFaultControllerAuthority,
   assertFaultAuthenticationEnvironment,
   faultRequest,
   faultTerminalReady,
@@ -16,6 +17,7 @@ import {
   isQuiescentFaultObjective,
   parseUnitObservation,
   privateEvidenceFile,
+  reservePrivateEvidenceFile,
   scopeUnit,
 } from "../scripts/verify-local-faults.mjs";
 import { parseRunPolicy } from "../src/protocol/policy.js";
@@ -70,11 +72,105 @@ describe("bounded local-fault progress diagnostics", () => {
     const diagnostic = JSON.parse(result.stderr.trim());
     expect(diagnostic).toMatchObject({
       result: "incomplete",
-      stage: "configuration",
-      code: "local-fault-configuration-incomplete",
+      stage: "installed-identity",
+      code: "local-fault-installed-identity-incomplete",
     });
     expect(`${result.stdout}${result.stderr}`).not.toContain("private-secret-sentinel");
     expect(`${result.stdout}${result.stderr}`).not.toContain("AssertionError");
+  });
+});
+
+describe("local fault controller authority", () => {
+  const artifactIdentity = `sha256:${"a".repeat(64)}`;
+  type ExpectedAuthority = {
+    artifactIdentity: string;
+    launcher: string;
+    bundle: string;
+    repository: string;
+    checkout: string;
+    runningArgv: string[];
+  };
+  type ControllerStatus = {
+    installed: boolean;
+    enabled: boolean;
+    active: boolean;
+    healthy: boolean;
+    launcherCurrent: boolean;
+    executableIdentity: string;
+    currentExecutableIdentity: string;
+    reasonCode: string | null;
+  };
+  const expected: ExpectedAuthority = {
+    artifactIdentity,
+    launcher: "/usr/bin/node",
+    bundle: "/retained/plugin/dist/factory.js",
+    repository: "fixture/private",
+    checkout: "/home/factory/checkout",
+    runningArgv: [
+      "/usr/bin/node",
+      "/retained/plugin/dist/factory.js",
+      "controller",
+      "run",
+      "fixture/private",
+      "--repo",
+      "/home/factory/checkout",
+      "--executable-identity",
+      artifactIdentity,
+    ],
+  };
+  const status: ControllerStatus = {
+    installed: true,
+    enabled: true,
+    active: true,
+    healthy: true,
+    launcherCurrent: true,
+    executableIdentity: artifactIdentity,
+    currentExecutableIdentity: artifactIdentity,
+    reasonCode: null,
+  };
+  type AuthorityDrift = {
+    controller?: Partial<typeof status>;
+    authority?: Partial<typeof expected>;
+  };
+  const authorityDrifts: Array<[string, AuthorityDrift]> = [
+    ["not installed", { controller: { installed: false } }],
+    ["not enabled", { controller: { enabled: false } }],
+    ["not active", { controller: { active: false } }],
+    ["not healthy", { controller: { healthy: false, reasonCode: "controller-inactive" } }],
+    ["stale launcher", { controller: { launcherCurrent: false } }],
+    ["retained identity drift", { controller: { executableIdentity: `sha256:${"b".repeat(64)}` } }],
+    [
+      "current identity drift",
+      { controller: { currentExecutableIdentity: `sha256:${"b".repeat(64)}` } },
+    ],
+    [
+      "launcher path drift",
+      { authority: { runningArgv: ["/other/node", ...expected.runningArgv.slice(1)] } },
+    ],
+    [
+      "bundle path drift",
+      {
+        authority: {
+          runningArgv: [expected.launcher, "/other/factory.js", ...expected.runningArgv.slice(2)],
+        },
+      },
+    ],
+  ];
+
+  it("accepts only the active healthy controller executing the exact retained candidate", () => {
+    expect(() => assertFaultControllerAuthority(status, expected)).not.toThrow();
+  });
+
+  it.each(authorityDrifts)("rejects %s before any Objective mutation", (_name, drift) => {
+    const mutateObjective = vi.fn();
+    expect(() => {
+      assertFaultControllerAuthority(
+        { ...status, ...(drift.controller ?? {}) },
+        { ...expected, ...(drift.authority ?? {}) },
+      );
+      mutateObjective();
+    }).toThrow();
+    expect(mutateObjective).not.toHaveBeenCalled();
   });
 });
 
@@ -498,6 +594,17 @@ describe("installed local fault qualification harness", () => {
       symlinkSync(path, `${directory}/linked.json`);
       expect(() => privateEvidenceFile(`${directory}/linked.json`, { wrong: true })).toThrow();
       expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ ok: true });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  it("reserves a fresh evidence file exactly once before remote mutation", () => {
+    const directory = mkdtempSync("/tmp/factory-fault-harness-test-");
+    try {
+      const path = `${directory}/evidence.json`;
+      reservePrivateEvidenceFile(path);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(() => reservePrivateEvidenceFile(path)).toThrow("never overwrite");
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

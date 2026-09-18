@@ -22,7 +22,6 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -31,6 +30,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const sharedHarnessPaths = [
+  "scripts/verify-live-objective.mjs",
+  "scripts/qualification-model-accounting.mjs",
+  "scripts/qualification-receipts.mjs",
+  "scripts/qualification-merge-proof.mjs",
+];
 const localBackends = ["codex-sdk/local-worktree", "codex-cli/local-worktree"];
 const minimumGitHubQuota = 1_000;
 const minimumModelTokens = 250_000;
@@ -899,8 +904,8 @@ export function assertQualificationCompletion(
     );
 }
 
-function required(name) {
-  const value = process.env[name]?.trim();
+function required(env, name) {
+  const value = env[name]?.trim();
   assert.ok(value, `${name} is required`);
   return value;
 }
@@ -948,27 +953,70 @@ export function qualificationFailure(evidence, error) {
   return new Error(reason, { cause: error });
 }
 
-export async function main(qualification = {}) {
-  const preflightOnly = process.env.FACTORY_LIVE_OBJECTIVE_PREFLIGHT === "1";
-  if (process.env.FACTORY_LIVE_OBJECTIVE !== "1" && !preflightOnly) {
+export async function main(
+  qualification = {},
+  {
+    env = process.env,
+    candidateSourceRoot = sourceRoot,
+    installAuthorityOptions = {},
+    runtimeEnvironmentOptions = {},
+  } = {},
+) {
+  const preflightOnly = env.FACTORY_LIVE_OBJECTIVE_PREFLIGHT === "1";
+  if (env.FACTORY_LIVE_OBJECTIVE !== "1" && !preflightOnly) {
     console.log(
       "Not exercised: set FACTORY_LIVE_OBJECTIVE_PREFLIGHT=1 or FACTORY_LIVE_OBJECTIVE=1.",
     );
     return;
   }
   assert.equal(process.platform, "linux", "live Objective harness requires Linux");
+  const { installedQualificationAuthority, qualificationRuntimeEnvironment } = await import(
+    "./qualification-install-identity.mjs"
+  );
   assert.equal(
-    process.env.FACTORY_LIVE_OBJECTIVE_NUMBER,
+    env.FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT,
+    undefined,
+    "plugin-root selection was replaced by retained install receipt authority",
+  );
+  const candidate = installedQualificationAuthority(env, {
+    ...installAuthorityOptions,
+    sourceRoot: candidateSourceRoot,
+    committedPaths: [...sharedHarnessPaths, ...(qualification.harnessPaths ?? [])],
+  });
+  const runtimeEnvironment = qualificationRuntimeEnvironment(env, runtimeEnvironmentOptions);
+  const pluginRoot = candidate.installedPluginRoot;
+  const manifest = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"));
+  const identity = candidate.pluginIdentity;
+  const artifact = candidate.pluginArtifact;
+  const installedCandidate = {
+    sourceCommit: candidate.candidateSourceCommit,
+    version: candidate.candidateVersion,
+    installReceiptIdentity: candidate.installReceiptIdentity,
+    inventoryIdentity: candidate.inventoryIdentity,
+    factoryArtifactIdentity: candidate.artifactIdentity,
+    mcpArtifactIdentity: candidate.mcpArtifactIdentity,
+    artifactAuthority: {
+      qualificationRoot: candidate.qualificationRoot,
+      pluginRoot,
+      codexHome: candidate.codexHome,
+    },
+    providerRuntime: {
+      home: runtimeEnvironment.HOME,
+      codexHome: runtimeEnvironment.CODEX_HOME,
+    },
+  };
+  assert.equal(
+    env.FACTORY_LIVE_OBJECTIVE_NUMBER,
     undefined,
     "installed qualification never revives a prior Objective",
   );
   assert.equal(
-    process.env.FACTORY_LIVE_OBJECTIVE_PRIOR_RUN_ID,
+    env.FACTORY_LIVE_OBJECTIVE_PRIOR_RUN_ID,
     undefined,
     "installed qualification never reuses a terminal run",
   );
   const namespace = qualificationNamespace(
-    qualification.namespace ?? process.env.FACTORY_LIVE_OBJECTIVE_NAMESPACE,
+    qualification.namespace ?? env.FACTORY_LIVE_OBJECTIVE_NAMESPACE,
   );
   const fixturePaths = qualificationPaths(namespace);
   const runObjectiveBody = qualification.objectiveBody ?? objectiveBodyFor(namespace);
@@ -977,17 +1025,17 @@ export async function main(qualification = {}) {
       fixturePaths.files.every((path) => runObjectiveBody.includes(path)),
     "Objective body does not retain its exact qualification namespace",
   );
-  const repository = required("FACTORY_LIVE_OBJECTIVE_REPOSITORY");
+  const repository = required(env, "FACTORY_LIVE_OBJECTIVE_REPOSITORY");
   assert.match(repository, /^[\w.-]+\/[\w.-]+$/);
   assert.notEqual(repository.toLowerCase(), "clockgrove/factory", "use a disposable repository");
   if (!preflightOnly)
     assert.equal(
-      required("FACTORY_LIVE_OBJECTIVE_MUTATION_ACK"),
+      required(env, "FACTORY_LIVE_OBJECTIVE_MUTATION_ACK"),
       repository,
       "acknowledge the exact disposable repository",
     );
   const [owner, repo] = repository.split("/");
-  const checkout = realpathSync(required("FACTORY_LIVE_OBJECTIVE_CHECKOUT"));
+  const checkout = realpathSync(required(env, "FACTORY_LIVE_OBJECTIVE_CHECKOUT"));
   assert.ok(!checkout.startsWith("/mnt/"), "checkout must reside on the Linux filesystem");
   const checkoutClean = run("git", ["status", "--porcelain"], checkout) === "";
   const fixturePathsAbsent = fixturePaths.files.every((path) => !existsSync(join(checkout, path)));
@@ -996,56 +1044,18 @@ export async function main(qualification = {}) {
     origin === `https://github.com/${repository}` || origin === `git@github.com:${repository}`,
     "checkout origin differs from approved repository",
   );
-  const codexHome = realpathSync(join(homedir(), ".codex"));
-  if (process.env.CODEX_HOME)
-    assert.equal(
-      realpathSync(process.env.CODEX_HOME),
-      codexHome,
-      "unset non-Linux-home CODEX_HOME for installed qualification",
-    );
-  const listed = JSON.parse(run("codex", ["plugin", "list", "--json"], checkout));
-  const pluginRoot = realpathSync(
-    installedPluginPath({
-      listed,
-      codexHome,
-      requestedRoot: process.env.FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT?.trim(),
-    }),
-  );
-  assert.ok(
-    pluginRoot.startsWith(`${join(codexHome, "plugins", "cache")}${sep}`),
-    "use the plugin installed in this Codex home's cache",
-  );
-  assert.ok(
-    pluginRoot !== sourceRoot && !pluginRoot.startsWith(`${sourceRoot}${sep}`),
-    "development worktree is not an installation",
-  );
-  const manifest = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"));
-  const identity = installedIdentity({
-    manifest,
-    listed,
-    pluginRoot,
-    codexHome,
-    portable: JSON.parse(readFileSync(join(pluginRoot, "plugin.json"), "utf8")),
-    packageManifest: JSON.parse(readFileSync(join(pluginRoot, "package.json"), "utf8")),
-  });
-  const artifact = installedBundleIdentity(pluginRoot);
-  assert.equal(artifact.version, identity.version, "installed inventory version differs");
-  const candidateInventorySha256 = createHash("sha256")
-    .update(readFileSync(join(sourceRoot, "dist", "bundle-inventory.json")))
-    .digest("hex");
   const harness = {
-    sourceCommit: run("git", ["rev-parse", "HEAD"], sourceRoot),
-    sourceTreeClean:
-      run("git", ["status", "--porcelain", "--untracked-files=no"], sourceRoot) === "",
-    candidateInventorySha256,
+    sourceCommit: candidate.candidateSourceCommit,
+    sourceTreeClean: true,
+    candidateInventorySha256: candidate.installReceipt.bundleInventorySha256,
+    files: candidate.committedQualificationFiles,
   };
   const modelTokenCeiling =
     qualification.policy?.economics?.maxModelTokens ??
-    modelTokenLimit(required("FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS"));
+    modelTokenLimit(required(env, "FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS"));
   const mcp = manifest.mcpServers?.factory;
   assert.equal(mcp?.command, "sh");
-  const token =
-    process.env.GITHUB_TOKEN || process.env.GH_TOKEN || run("gh", ["auth", "token"], checkout);
+  const token = env.GITHUB_TOKEN || env.GH_TOKEN || run("gh", ["auth", "token"], checkout);
   const octokit = new Octokit({
     auth: token,
     request: { headers: { "X-GitHub-Api-Version": "2026-03-10" } },
@@ -1120,6 +1130,7 @@ export async function main(qualification = {}) {
       fixturePathsAbsent,
     },
     installedArtifact: artifact,
+    installedCandidate,
     harness,
     pluginId: identity.pluginId,
     codexManifestVersion: identity.codexManifestVersion,
@@ -1152,17 +1163,13 @@ export async function main(qualification = {}) {
       preflight.blockers.push("scenario-precondition-unobserved");
     }
   }
-  const output = resolve(required("FACTORY_LIVE_OBJECTIVE_EVIDENCE"));
-  mkdirSync(output, { recursive: true, ...(qualification.privateEvidence ? { mode: 0o700 } : {}) });
-  if (qualification.privateEvidence) {
-    const directory = statSync(output);
-    assert.ok(
-      directory.isDirectory() &&
-        directory.uid === process.getuid() &&
-        (directory.mode & 0o077) === 0,
-      "regular qualification evidence directory must be owner-only",
-    );
-  }
+  const output = resolve(required(env, "FACTORY_LIVE_OBJECTIVE_EVIDENCE"));
+  mkdirSync(output, { recursive: true, mode: 0o700 });
+  const directory = statSync(output);
+  assert.ok(
+    directory.isDirectory() && directory.uid === process.getuid() && (directory.mode & 0o077) === 0,
+    "qualification evidence directory must be owner-only",
+  );
   const evidencePath = join(
     output,
     preflightOnly ? "qualification-preflight.json" : "objective-evidence.json",
@@ -1178,13 +1185,13 @@ export async function main(qualification = {}) {
   assert.equal(preflight.result, "passed", `preflight blocked: ${preflight.blockers.join(", ")}`);
   if (!qualification.policy)
     assert.equal(
-      process.env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs",
+      env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs",
       "stacked-prs",
       "installed local qualification requires native delivery",
     );
   const policy =
     qualification.policy ??
-    boundedPolicy(process.env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs", modelTokenCeiling);
+    boundedPolicy(env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs", modelTokenCeiling);
   const evidence = {
     schemaVersion: 1,
     scope: qualification.scope ?? "installed-local-objective-happy-path",
@@ -1197,6 +1204,8 @@ export async function main(qualification = {}) {
     codexManifestVersion: identity.codexManifestVersion,
     pluginId: identity.pluginId,
     installedArtifact: artifact,
+    installedCandidate,
+    harnessFiles: candidate.committedQualificationFiles,
     preflight,
     policy,
     actor: { id: actor.id, login: actor.login },
@@ -1218,7 +1227,7 @@ export async function main(qualification = {}) {
     command: mcp.command,
     args: mcp.args.map((arg) => arg.replaceAll("${PLUGIN_ROOT}", pluginRoot)),
     cwd: checkout,
-    env: { ...process.env, GITHUB_TOKEN: token },
+    env: { ...runtimeEnvironment, GITHUB_TOKEN: token },
     stderr: "pipe",
   };
   const transport = new StdioClientTransport(

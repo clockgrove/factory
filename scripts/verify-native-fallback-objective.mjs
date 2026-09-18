@@ -173,6 +173,12 @@ export function nativeFallbackQualification(env) {
   const policy = fallbackPolicy(modelTokenLimit(env.FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS));
   return {
     scope,
+    harnessPaths: [
+      "scripts/verify-native-fallback-objective.mjs",
+      "scripts/verify-regular-objective.mjs",
+      "scripts/qualification-native-scopes.mjs",
+      "scripts/qualification-sibling-refresh-proof.mjs",
+    ],
     policy,
     privateEvidence: true,
     observePreflight: observeNativeFallbackCapability,
@@ -261,7 +267,7 @@ export async function main(env = process.env, run = installedMain) {
     );
     return;
   }
-  await run(qualification);
+  await run(qualification, { env });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {

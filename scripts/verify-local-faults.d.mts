@@ -23,6 +23,7 @@ export function isQuiescentFaultObjective(
   objective: number,
 ): boolean;
 export function privateEvidenceFile(path: string, value?: unknown): unknown;
+export function reservePrivateEvidenceFile(path: string): void;
 export function scopeUnit(identity: unknown): string;
 export function parseUnitObservation(
   unit: string,
@@ -56,4 +57,41 @@ export function boundedPoll<T>(
     wait?: (milliseconds: number) => Promise<void>;
   },
 ): Promise<T>;
-export function main(): Promise<void>;
+export const localFaultHarnessPaths: string[];
+export function installedLocalFaultAuthority(
+  env: Record<string, string | undefined>,
+  options?: {
+    candidateSourceRoot?: string;
+    installAuthorityOptions?: Record<string, unknown>;
+  },
+): unknown;
+export function assertFaultControllerAuthority(
+  controller: Record<string, unknown>,
+  expected: {
+    artifactIdentity: string;
+    launcher: string;
+    bundle: string;
+    repository: string;
+    checkout: string;
+    runningArgv: string[];
+  },
+): void;
+export function runQualification(
+  progress: {
+    phase(value: string): void;
+    stage(stage: string): void;
+    failure(): unknown;
+  },
+  env?: Record<string, string | undefined>,
+  options?: {
+    candidateSourceRoot?: string;
+    installAuthorityOptions?: Record<string, unknown>;
+  },
+): Promise<void>;
+export function main(
+  env?: Record<string, string | undefined>,
+  options?: {
+    candidateSourceRoot?: string;
+    installAuthorityOptions?: Record<string, unknown>;
+  },
+): Promise<void>;

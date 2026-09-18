@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 
@@ -18,9 +20,15 @@ process.env.XDG_DATA_HOME = join(namespace.root, "xdg-data");
 const require = createRequire(import.meta.url);
 const pnpmRoot = dirname(require.resolve("pnpm"));
 const wrapper = Buffer.from(
-  `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(join(pnpmRoot, "bin/pnpm.cjs"))} "$@"\n`,
+  `#!/bin/sh\nif [ "$1" = "--version" ]; then printf '10.34.5\\n'; exit 0; fi\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(join(pnpmRoot, "bin/pnpm.cjs"))} "$@"\n`,
   "utf8",
 );
+const pnpmAssetRoot = join(namespace.root, "pnpm-asset");
+mkdirSync(pnpmAssetRoot, { recursive: true });
+writeFileSync(join(pnpmAssetRoot, "pnpm"), wrapper, { mode: 0o700 });
+const pnpmArchivePath = join(pnpmAssetRoot, "pnpm-linux-x64.tar.gz");
+execFileSync("tar", ["-czf", pnpmArchivePath, "-C", pnpmAssetRoot, "pnpm"]);
+const pnpmArchive = readFileSync(pnpmArchivePath);
 const nodeWrapper = Buffer.from(
   `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
   "utf8",
@@ -37,19 +45,19 @@ await provisionToolchain("pnpm", {
         assets: [
           {
             id: 1,
-            name: "pnpm-linux-x64",
+            name: "pnpm-linux-x64.tar.gz",
             url: "test://pnpm-release-asset",
             browserDownloadUrl:
-              "https://github.com/pnpm/pnpm/releases/download/v10.34.5/pnpm-linux-x64",
-            size: wrapper.byteLength,
+              "https://github.com/pnpm/pnpm/releases/download/v10.34.5/pnpm-linux-x64.tar.gz",
+            size: pnpmArchive.byteLength,
             digest: `sha256:${await crypto.subtle
-              .digest("SHA-256", wrapper)
+              .digest("SHA-256", pnpmArchive)
               .then((value) => Buffer.from(value).toString("hex"))}`,
           },
         ],
       },
     ],
-    downloadAsset: async () => wrapper,
+    downloadAsset: async () => pnpmArchive,
     resolveLatestNodeDistribution: async () => ({
       version: process.version.slice(1),
       tag: process.version,
@@ -64,10 +72,6 @@ await provisionToolchain("pnpm", {
     }),
     downloadNodeDistribution: async () => nodeWrapper,
   },
-  run: (async (command: string) => ({
-    stdout: command.includes("/node/root/") ? `${process.version}\n` : "10.34.5\n",
-    stderr: "",
-  })) as never,
 });
 
 afterAll(() => {

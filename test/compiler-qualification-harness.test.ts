@@ -103,6 +103,7 @@ const pausedController = {
 };
 const objective = 47;
 const baseSha = "4".repeat(40);
+const actualRunId = "9d69ce85-6810-41d8-af62-1fab153d4574";
 const fixtureStartedAt = new Date(Date.now() - 120_000).toISOString();
 const fixtureEligibleUntil = new Date(Date.parse(fixtureStartedAt) + 45 * 60_000).toISOString();
 function arm(checkpoint: "compiler-selection" | "graph-projection") {
@@ -115,7 +116,7 @@ function startEvent(policyDigest = arm("compiler-selection").policyDigest) {
     event: "FactoryRunStarted",
     sequence: 0,
     objective,
-    runId: "compiler-case-activate",
+    runId: actualRunId,
     activationRequestId: "compiler-case-activate",
     policyDigest,
     policy,
@@ -164,7 +165,7 @@ function accountingEvents() {
         event: "BudgetReserved",
         sequence: index * 2 + 1,
         objective,
-        runId: "compiler-case-activate",
+        runId: actualRunId,
         phase: "management",
         unit: "model_tokens",
         amount: 0,
@@ -177,7 +178,7 @@ function accountingEvents() {
         event: "BudgetReconciled",
         sequence: index * 2 + 2,
         objective,
-        runId: "compiler-case-activate",
+        runId: actualRunId,
         phase: "management",
         unit: "model_tokens",
         amount: 10 + index,
@@ -195,6 +196,7 @@ function selectionWitness() {
   return {
     ...selected,
     protocol: "clockgrove.factory/compiler-qualification-checkpoint-reached",
+    runId: actualRunId,
     armDigest: hash(JSON.stringify(selected)),
     controllerInvocationId: original.invocationId,
     hostIdentity: original.hostIdentity,
@@ -229,6 +231,7 @@ function projectionWitness(workItemNumbers = [48, 49, 50, 51]) {
   return {
     ...projected,
     protocol: "clockgrove.factory/compiler-qualification-checkpoint-reached",
+    runId: actualRunId,
     armDigest: hash(JSON.stringify(projected)),
     controllerInvocationId: projectionController.invocationId,
     hostIdentity: projectionController.hostIdentity,
@@ -262,7 +265,7 @@ function selectionObservation() {
   return {
     receipts: [startEvent(), ...accountingEvents()].map((event) => ({ event })),
     status: {
-      run: { runId: "compiler-case-activate", state: "running" },
+      run: { runId: actualRunId, state: "running" },
       compilerEvaluation: compilerStatus(),
     },
     children: [],
@@ -281,7 +284,7 @@ function projectedObservation(
       event: "GraphCompiled",
       sequence: 10,
       objective,
-      runId: "compiler-case-activate",
+      runId: actualRunId,
       graphDigest: "6".repeat(64),
       graphSize: workItemNumbers.length,
       graphRef: projectionWitness(workItemNumbers).proof.graphRef,
@@ -292,7 +295,7 @@ function projectedObservation(
       event: "GraphProjected",
       sequence: 11,
       objective,
-      runId: "compiler-case-activate",
+      runId: actualRunId,
       graphDigest: "6".repeat(64),
       graphSize: workItemNumbers.length,
       projectionRef: projectionWitness(workItemNumbers).proof.projectionRef,
@@ -306,7 +309,7 @@ function projectedObservation(
           event: "RunPauseRequested",
           sequence: 12,
           objective,
-          runId: "compiler-case-activate",
+          runId: actualRunId,
           requestId: "compiler-case-pause",
         },
         ...(acknowledged
@@ -316,7 +319,7 @@ function projectedObservation(
                 event: "RunPauseAcknowledged",
                 sequence: 13,
                 objective,
-                runId: "compiler-case-activate",
+                runId: actualRunId,
                 commandRequestId: "compiler-case-pause",
               },
             ]
@@ -329,7 +332,7 @@ function projectedObservation(
     })),
     status: {
       run: {
-        runId: "compiler-case-activate",
+        runId: actualRunId,
         state: acknowledged ? "paused" : "running",
       },
       compilerEvaluation: compilerStatus(),
@@ -447,11 +450,15 @@ describe("installed compiler checkpoint qualifier", () => {
     });
   });
 
-  it("binds arm paths to run and checkpoint kind", () => {
+  it("binds arm paths to activation and checkpoint kind before the run exists", () => {
     const selected = arm("compiler-selection");
     const projected = arm("graph-projection");
     expect(selected.bundleIdentity).toBe(`sha256:${"2".repeat(64)}`);
+    expect(selected).not.toHaveProperty("runId");
     expect(compilerCheckpointPath(selected)).not.toBe(compilerCheckpointPath(projected));
+    expect(compilerCheckpointPath(selected)).not.toBe(
+      compilerCheckpointPath({ ...selected, activationRequestId: "another-activation" }),
+    );
   });
 
   it("retains one pnpm provider and three horizontal safety descendants", () => {
@@ -481,6 +488,17 @@ describe("installed compiler checkpoint qualifier", () => {
     expect(() =>
       assertCompilerSelectionHold(
         selected,
+        authority,
+        { arm: arm("compiler-selection") },
+        original,
+      ),
+    ).toThrow();
+    const foreignRun = selectionObservation();
+    foreignRun.compilerCheckpoints["compiler-selection"].runId =
+      "1ca6b1cf-8368-4c8a-9326-32ad468b6bf7";
+    expect(() =>
+      assertCompilerSelectionHold(
+        foreignRun,
         authority,
         { arm: arm("compiler-selection") },
         original,
@@ -538,7 +556,7 @@ describe("installed compiler checkpoint qualifier", () => {
     await expect(runCompilerCheckpointScenario(port, authority)).resolves.toMatchObject({
       result: "passed",
       scope: "installed-compiler-qualification-checkpoints",
-      runId: "compiler-case-activate",
+      runId: actualRunId,
     });
     expect(actions).toEqual([
       "start",
@@ -573,7 +591,7 @@ describe("installed compiler checkpoint qualifier", () => {
           event: "BudgetReserved",
           sequence: 14,
           objective,
-          runId: "compiler-case-activate",
+          runId: actualRunId,
           phase: "management",
           unit: "model_tokens",
           amount: 0,
@@ -588,7 +606,7 @@ describe("installed compiler checkpoint qualifier", () => {
           event: "BudgetReconciled",
           sequence: 15,
           objective,
-          runId: "compiler-case-activate",
+          runId: actualRunId,
           phase: "management",
           unit: "model_tokens",
           amount: 2,

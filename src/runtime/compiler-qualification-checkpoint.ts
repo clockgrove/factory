@@ -28,7 +28,6 @@ export const CompilerQualificationArmSchema = z
     repository: z.string().regex(/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/),
     objective: z.number().int().positive(),
     activationRequestId: safeId,
-    runId: safeId,
     policyDigest: sha256Digest,
     baseSha: gitSha,
     checkpoint: CheckpointKindSchema,
@@ -317,13 +316,13 @@ const directoryPath = (uid = process.geteuid?.()) =>
 export function compilerQualificationCheckpointPath(
   binding: Pick<
     CompilerQualificationArm,
-    "repository" | "objective" | "runId" | "checkpoint" | "effectiveUid"
+    "repository" | "objective" | "activationRequestId" | "checkpoint" | "effectiveUid"
   >,
 ): string {
   return join(
     directoryPath(binding.effectiveUid),
     `${hash(
-      `${binding.repository}\0${binding.objective}\0${binding.runId}\0${binding.checkpoint}`,
+      `${binding.repository}\0${binding.objective}\0${binding.activationRequestId}\0${binding.checkpoint}`,
     )}.json`,
   );
 }
@@ -396,7 +395,7 @@ export async function holdCompilerQualificationCheckpoint(args: {
   const uid = process.geteuid?.();
   if (uid === undefined) return;
   const filename = `${hash(
-    `${args.repository}\0${args.objective}\0${args.runId}\0${args.checkpoint}`,
+    `${args.repository}\0${args.objective}\0${args.activationRequestId}\0${args.checkpoint}`,
   )}.json`;
   const discoveredPath = join(directoryPath(uid), filename);
   if (!(await compilerQualificationArmObserved(discoveredPath))) return;
@@ -426,7 +425,6 @@ export async function holdCompilerQualificationCheckpoint(args: {
       "repository",
       "objective",
       "activationRequestId",
-      "runId",
       "policyDigest",
       "baseSha",
       "checkpoint",

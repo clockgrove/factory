@@ -38,7 +38,6 @@ export interface CompilerCheckpointArm extends Record<string, unknown> {
   repository: string;
   objective: number;
   activationRequestId: string;
-  runId: string;
   policyDigest: string;
   baseSha: string;
   checkpoint: CompilerCheckpointKind;

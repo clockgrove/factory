@@ -14,6 +14,10 @@ export function installedQualificationAuthority(
     uid?: number;
     sourceRoot: string;
     committedPaths?: string[];
-    listPlugins?: (codexCli: string, codexHome: string, environment: NodeJS.ProcessEnv) => unknown;
+    listPlugins?: (
+      codexCli: string,
+      codexHome: string,
+      childEnvironment: NodeJS.ProcessEnv,
+    ) => unknown;
   },
 ): Record<string, unknown>;

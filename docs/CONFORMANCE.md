@@ -149,6 +149,11 @@ whole run. The default `throughput` scenario covers ordinary useful work and sym
 refill; `FACTORY_CONCURRENCY_SCENARIO=lease-fault` separately exercises acknowledged contention,
 expiry, and restart. Neither substitutes for the other. Phase acceptance and final results require
 fresh authenticated Objective, sub-issue, comment, and status observations.
+Both scenarios also require `FACTORY_QUALIFICATION_INSTALL_RECEIPT` set to the exact owner-private
+retained-candidate receipt described by the
+[shared checkpoint preflight](LOCAL-CHECKPOINT-RESTART-QUALIFICATION.md#authority-and-preflight).
+That receipt's isolated plugin install selects the artifact; provider authentication remains in the
+normal Linux `~/.codex` home, whose plugin cache is not candidate authority.
 
 `FACTORY_CONCURRENCY_PER_OBJECTIVE_MAX_MODEL_TOKENS` accepts 250000–500000 and defaults to 250000.
 `FACTORY_CONCURRENCY_MAX_MODEL_TOKENS` must explicitly equal twice that value.

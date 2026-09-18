@@ -16,7 +16,6 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   installedQualificationAuthority,
-  qualificationPluginListEnvironment,
   qualificationRuntimeEnvironment,
 } from "../scripts/qualification-install-identity.mjs";
 
@@ -223,6 +222,22 @@ describe("retained qualification install authority", () => {
       },
     ],
     [
+      "installed MCP launcher content drift",
+      (value: ReturnType<typeof fixture>) => {
+        write(join(value.installedPluginRoot, "bin/factory-mcp"), "#!/bin/sh\nexit 9\n", 0o700);
+      },
+    ],
+    [
+      "installed MCP launcher symlink",
+      (value: ReturnType<typeof fixture>) => {
+        const launcher = join(value.installedPluginRoot, "bin/factory-mcp");
+        const target = join(value.installedPluginRoot, "bin/factory-mcp-target");
+        write(target, readFileSync(launcher, "utf8"), 0o700);
+        rmSync(launcher);
+        symlinkSync("factory-mcp-target", launcher);
+      },
+    ],
+    [
       "plugin archive drift",
       (value: ReturnType<typeof fixture>) => {
         writeFileSync(value.pluginArchive, "substituted archive\n");
@@ -308,33 +323,48 @@ describe("retained qualification install authority", () => {
   });
 
   it("selects the isolated candidate when the default cache contains another Factory version", () => {
-    const root = mkdtempSync(join(tmpdir(), "factory-runtime-home-"));
-    roots.push(root);
-    chmodSync(root, 0o700);
-    mkdirSync(join(root, ".codex/plugins/cache/clockgrove-factory/factory/2.0.26"), {
+    const value = fixture();
+    const defaultHome = mkdtempSync(join(tmpdir(), "factory-runtime-home-"));
+    roots.push(defaultHome);
+    chmodSync(defaultHome, 0o700);
+    const defaultCodexHome = join(defaultHome, ".codex");
+    const otherVersion = join(defaultCodexHome, "plugins/cache/clockgrove-factory/factory/2.0.26");
+    mkdirSync(otherVersion, {
       recursive: true,
     });
-    const isolated = "/home/example/retained/codex-home";
-    const plugin = qualificationPluginListEnvironment(
-      {
-        HOME: "/home/example",
-        CODEX_HOME: "/home/example/.codex",
-        FACTORY_QUALIFICATION_INSTALL_RECEIPT: "/private/receipt",
+    write(join(otherVersion, "package.json"), '{"version":"2.0.26"}\n');
+    const observedEnvironments: NodeJS.ProcessEnv[] = [];
+    const listPlugins = vi.fn(
+      (_codexCli: string, selectedCodexHome: string, childEnvironment: NodeJS.ProcessEnv) => {
+        expect(selectedCodexHome).toBe(value.codexHome);
+        observedEnvironments.push(childEnvironment);
+        return value.listed;
       },
-      isolated,
     );
-    expect(plugin.CODEX_HOME).toBe(isolated);
-    expect(plugin).not.toHaveProperty("FACTORY_QUALIFICATION_INSTALL_RECEIPT");
+    const authority = installedQualificationAuthority(
+      {
+        HOME: defaultHome,
+        CODEX_HOME: defaultCodexHome,
+        FACTORY_QUALIFICATION_INSTALL_RECEIPT: value.installReceipt,
+      },
+      { sourceRoot: value.source, committedPaths: ["scripts/harness.mjs"], listPlugins },
+    );
+    expect(authority.installedPluginRoot).toBe(value.installedPluginRoot);
+    expect(listPlugins).toHaveBeenCalledOnce();
+    expect(observedEnvironments).toHaveLength(1);
+    const observed = observedEnvironments.at(0);
+    expect(observed?.CODEX_HOME).toBe(value.codexHome);
+    expect(observed).not.toHaveProperty("FACTORY_QUALIFICATION_INSTALL_RECEIPT");
 
     const runtime = qualificationRuntimeEnvironment(
       {
         PATH: "/usr/bin:/bin",
-        CODEX_HOME: join(root, ".codex"),
+        CODEX_HOME: defaultCodexHome,
         FACTORY_QUALIFICATION_INSTALL_RECEIPT: "/private/receipt",
       },
-      { linuxHome: root },
+      { linuxHome: defaultHome },
     );
-    expect(runtime.CODEX_HOME).toBe(join(root, ".codex"));
+    expect(runtime.CODEX_HOME).toBe(defaultCodexHome);
     expect(runtime).not.toHaveProperty("FACTORY_QUALIFICATION_INSTALL_RECEIPT");
   });
 });

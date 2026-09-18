@@ -224,11 +224,11 @@ function receiptCommit(source) {
   return git(source, ["rev-parse", "HEAD"]);
 }
 
-function queryInstalledPlugins(codexCli, codexHome, environment) {
+function queryInstalledPlugins(codexCli, _codexHome, childEnvironment) {
   return JSON.parse(
     execFileSync(codexCli, ["plugin", "list", "--json"], {
       encoding: "utf8",
-      env: qualificationPluginListEnvironment(environment, codexHome),
+      env: childEnvironment,
       timeout: 30_000,
       maxBuffer: 1024 * 1024,
       stdio: ["ignore", "pipe", "pipe"],
@@ -396,14 +396,24 @@ export function installedQualificationAuthority(
     "${PLUGIN_ROOT}/bin/factory-mcp",
     "${PLUGIN_ROOT}/dist/mcp-server.js",
   ]);
-  const launcher = realpathSync(join(installedPluginRoot, "bin/factory-mcp"));
+  const launcherPath = join(installedPluginRoot, "bin/factory-mcp");
+  regularFile(launcherPath, uid, MAX_MANIFEST_BYTES);
+  const launcher = realpathSync(launcherPath);
+  assert.equal(launcher, launcherPath, "Factory MCP launcher must not be a symbolic link");
+  const sourceLauncher = join(listedPluginSource, "bin/factory-mcp");
+  regularFile(sourceLauncher, uid, MAX_MANIFEST_BYTES);
+  assert.deepEqual(
+    readFileSync(launcherPath),
+    readFileSync(sourceLauncher),
+    "installed Factory MCP launcher differs from the source commit",
+  );
   const mcpBundle = realpathSync(join(installedPluginRoot, "dist/mcp-server.js"));
   within(installedPluginRoot, launcher, "Factory MCP launcher");
   within(installedPluginRoot, mcpBundle, "Factory MCP bundle");
-  regularFile(launcher, uid, MAX_MANIFEST_BYTES);
   regularFile(mcpBundle, uid, MAX_ARTIFACT_BYTES);
 
-  const listed = listPlugins(codexCli, codexHome, env);
+  const pluginListEnvironment = qualificationPluginListEnvironment(env, codexHome);
+  const listed = listPlugins(codexCli, codexHome, pluginListEnvironment);
   const listedRoot = installedPluginPath({
     listed,
     codexHome,

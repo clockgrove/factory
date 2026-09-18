@@ -649,10 +649,6 @@ describe("Supervisor repository-capability admission", () => {
                 },
                 downloadNodeDistribution: async () => nodeBytes,
               },
-              run: (async (command: string) => ({
-                stdout: command.includes("/node/root/") ? `${process.version}\n` : "10.34.5\n",
-                stderr: "",
-              })) as never,
             });
           }
           return backend.launch(input);
@@ -809,10 +805,6 @@ describe("Supervisor repository-capability admission", () => {
           },
           downloadNodeDistribution: async () => nodeBytes,
         },
-        run: (async (command: string) => ({
-          stdout: command.includes("/node/root/") ? `${process.version}\n` : "10.34.5\n",
-          stderr: "",
-        })) as never,
       });
 
       const recovered = await fixture.run();

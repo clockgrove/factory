@@ -121,8 +121,8 @@ const RELEASE_SPECS: Record<GitHubManagedToolchain, ReleaseSpec> = {
   pnpm: {
     owner: "pnpm",
     repository: "pnpm",
-    assetName: "pnpm-linux-x64",
-    archive: "raw",
+    assetName: "pnpm-linux-x64.tar.gz",
+    archive: "tar.gz",
     executablePath: "pnpm",
     version: (tag) => /^v(\d+\.\d+\.\d+)$/.exec(tag)?.[1] ?? null,
     versionArgs: ["--version"],
@@ -829,8 +829,8 @@ function exactPnpmRestoreIdentity(receipt: RuntimeBundleReceipt): {
     pnpm.release.tag !== `v${pnpm.version}` ||
     !Number.isSafeInteger(assetId) ||
     assetId <= 0 ||
-    pnpm.asset.name !== "pnpm-linux-x64" ||
-    pnpm.asset.archive !== "raw" ||
+    pnpm.asset.name !== "pnpm-linux-x64.tar.gz" ||
+    pnpm.asset.archive !== "tar.gz" ||
     pnpm.executablePath !== "pnpm" ||
     pnpm.executableOnly !== undefined
   )

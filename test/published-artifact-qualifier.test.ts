@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -18,6 +19,7 @@ import {
   assertContainedPath,
   assertLinuxNativePath,
   assessPublishedPreflight,
+  defaultPublishedQualifierPort,
   qualificationInstallReceipt,
   qualifyPublishedArtifacts,
   strictPublishedEnvironment,
@@ -74,6 +76,7 @@ interface TestPort {
   toolPreflight: ReturnType<typeof vi.fn>;
   sourcePreflight: ReturnType<typeof vi.fn>;
   install: ReturnType<typeof vi.fn>;
+  consumeInstallAuthority: ReturnType<typeof vi.fn>;
   proveControllerAbsence: ReturnType<typeof vi.fn>;
   cleanupIncomplete: ReturnType<typeof vi.fn>;
   host: ReturnType<typeof vi.fn>;
@@ -190,7 +193,7 @@ function identity() {
   };
 }
 
-function writeInstallReceipt(root: string): { receiptPath: string; receiptSha256: string } {
+function installReceipt(root: string): { receipt: string; receiptSha256: string } {
   mkdirSync(root, { mode: 0o700 });
   chmodSync(root, 0o700);
   const receipt = qualificationInstallReceipt({
@@ -211,9 +214,7 @@ function writeInstallReceipt(root: string): { receiptPath: string; receiptSha256
     mcpServerBundleSha256,
     controllerLauncherIdentity: `sha256:${factoryBundleSha256}`,
   });
-  const receiptPath = join(root, "install-identities.txt");
-  writeFileSync(receiptPath, receipt, { mode: 0o600 });
-  return { receiptPath, receiptSha256: sha256(Buffer.from(receipt)) };
+  return { receipt, receiptSha256: sha256(Buffer.from(receipt)) };
 }
 
 function port(manifest: TestManifest, overrides: Partial<TestPort> = {}): TestPort {
@@ -227,13 +228,17 @@ function port(manifest: TestManifest, overrides: Partial<TestPort> = {}): TestPo
     })),
     sourcePreflight: vi.fn(async (release) => ({ sourceRoot: dirname(release.directory) })),
     install: vi.fn(async ({ root }) => ({
-      ...writeInstallReceipt(root),
+      ...installReceipt(root),
       npmIdentity: identity(),
       pluginIdentity: identity(),
       surfaces: {
         npm: { command: "factory --version", version },
         plugin: { server: "factory", version, tools: 20 },
       },
+    })),
+    consumeInstallAuthority: vi.fn(async ({ receiptPath }) => ({
+      installReceiptPath: receiptPath,
+      candidateSourceCommit: commit,
     })),
     proveControllerAbsence: vi.fn(async () => ({ absent: true })),
     cleanupIncomplete: vi.fn(async () => ({ preserved: true })),
@@ -308,6 +313,12 @@ describe("published-artifact qualifier", () => {
     expect(existsSync(installRoot)).toBe(true);
     expect(selectedPort.proveControllerAbsence).not.toHaveBeenCalled();
     expect(selectedPort.cleanupIncomplete).not.toHaveBeenCalled();
+    expect(selectedPort.consumeInstallAuthority).toHaveBeenCalledWith({
+      receiptPath: join(installRoot, "install-identities.txt"),
+      root: installRoot,
+      sourceRoot: fixture.root,
+      tools: expect.any(Object),
+    });
     expect(selectedPort.install).toHaveBeenCalledWith(
       expect.not.objectContaining({ repository: expect.anything(), checkout: expect.anything() }),
     );
@@ -380,6 +391,25 @@ describe("published-artifact qualifier", () => {
     ).rejects.toThrow("tag changed during qualification");
     expect(selectedPort.proveControllerAbsence).toHaveBeenCalledWith(installRoot);
     expect(selectedPort.cleanupIncomplete).toHaveBeenCalledWith(installRoot);
+    expect(existsSync(installRoot)).toBe(true);
+    expect(existsSync(join(installRoot, "install-identities.txt"))).toBe(false);
+  });
+
+  it("rejects a syntactically valid receipt that fails the real consumer invariants", async () => {
+    const fixture = releaseFixture();
+    roots.push(fixture.root);
+    const installRoot = join(fixture.root, "consumer-invalid-install");
+    const selectedPort = port(fixture.manifest, {
+      consumeInstallAuthority: vi.fn(defaultPublishedQualifierPort.consumeInstallAuthority),
+    });
+    await expect(
+      qualifyPublishedArtifacts(
+        { releaseDirectory: fixture.releaseDirectory, installRoot },
+        selectedPort,
+      ),
+    ).rejects.toThrow();
+    expect(selectedPort.consumeInstallAuthority).toHaveBeenCalledOnce();
+    expect(existsSync(join(installRoot, "install-identities.txt"))).toBe(false);
     expect(existsSync(installRoot)).toBe(true);
   });
 
@@ -457,6 +487,54 @@ describe("published-artifact qualifier", () => {
     expect(environment.GIT_SSH_COMMAND).toBeUndefined();
     expect(environment.NPM_TOKEN).toBeUndefined();
     expect(environment.FACTORY_PROVIDER).toBeUndefined();
+  });
+
+  it("overrides repository fsmonitor and disables Git redirects for source reads", async () => {
+    const root = mkdtempSync(join(tmpdir(), "factory-published-git-isolation-"));
+    roots.push(root);
+    const source = join(root, "source");
+    const releaseDirectory = join(source, "release");
+    mkdirSync(releaseDirectory, { recursive: true });
+    write(join(source, "tracked.txt"), "tracked\n");
+    execFileSync("/usr/bin/git", ["init", "-q"], { cwd: source });
+    execFileSync("/usr/bin/git", ["config", "user.name", "Factory Test"], { cwd: source });
+    execFileSync("/usr/bin/git", ["config", "user.email", "factory@example.invalid"], {
+      cwd: source,
+    });
+    execFileSync("/usr/bin/git", ["add", "."], { cwd: source });
+    execFileSync("/usr/bin/git", ["commit", "-qm", "fixture"], { cwd: source });
+    const sourceCommit = execFileSync("/usr/bin/git", ["rev-parse", "HEAD"], {
+      cwd: source,
+      encoding: "utf8",
+    }).trim();
+    const fsmonitorMarker = join(root, "fsmonitor-ran");
+    const fsmonitor = join(root, "fsmonitor.sh");
+    write(fsmonitor, `#!/bin/sh\ntouch ${fsmonitorMarker}\nexit 0\n`);
+    chmodSync(fsmonitor, 0o700);
+    execFileSync("/usr/bin/git", ["config", "core.fsmonitor", fsmonitor], { cwd: source });
+
+    const argumentLog = join(root, "git-arguments.txt");
+    const gitWrapper = join(root, "git-wrapper.sh");
+    write(
+      gitWrapper,
+      `#!/bin/sh\nprintf '%s ' "$@" >> ${argumentLog}\nprintf '\\n' >> ${argumentLog}\nexec /usr/bin/git "$@"\n`,
+    );
+    chmodSync(gitWrapper, 0o700);
+    await defaultPublishedQualifierPort.sourcePreflight(
+      {
+        directory: releaseDirectory,
+        manifest: { provenance: { sourceCommit } },
+      },
+      { git: gitWrapper, npm: "/usr/bin/true", codex: "/usr/bin/true" },
+    );
+    expect(existsSync(fsmonitorMarker)).toBe(false);
+    const invocations = readFileSync(argumentLog, "utf8").trim().split("\n");
+    expect(invocations.length).toBeGreaterThan(0);
+    for (const invocation of invocations) {
+      expect(invocation).toContain("http.followRedirects=false");
+      expect(invocation).toContain("core.fsmonitor=false");
+      expect(invocation).toContain("core.hooksPath=/dev/null");
+    }
   });
 
   it("requires Linux-native canonical roots and exact path containment", async () => {

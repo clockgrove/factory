@@ -19,7 +19,10 @@ import { arch, platform, release as hostRelease, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parseQualificationInstallReceipt } from "./qualification-install-identity.mjs";
+import {
+  installedQualificationAuthority,
+  parseQualificationInstallReceipt,
+} from "./qualification-install-identity.mjs";
 import {
   assertSynchronizedReleaseManifests,
   canonicalChecksumBytes,
@@ -319,6 +322,10 @@ function gitArgs(environment, args) {
     "protocol.file.allow=never",
     "-c",
     "protocol.ext.allow=never",
+    "-c",
+    "http.followRedirects=false",
+    "-c",
+    "core.fsmonitor=false",
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
@@ -715,12 +722,9 @@ async function install({ release, published, root, tools }) {
       mcpServerBundleSha256,
       controllerLauncherIdentity: `sha256:${factoryBundleSha256}`,
     });
-    const receiptPath = join(root, "install-identities.txt");
-    writeFileSync(receiptPath, receipt, { flag: "wx", mode: 0o600 });
-    chmodSync(receiptPath, 0o600);
     installationReady = true;
     return {
-      receiptPath,
+      receipt,
       receiptSha256: sha256(Buffer.from(receipt)),
       npmIdentity,
       pluginIdentity,
@@ -758,12 +762,39 @@ function cleanupIncomplete(root) {
   return { preserved: existsSync(root) };
 }
 
+function publishInstallReceipt(root, receipt, expectedSha256) {
+  parseQualificationInstallReceipt(receipt);
+  const receiptBytes = Buffer.from(receipt);
+  assert.equal(sha256(receiptBytes), expectedSha256, "install receipt digest differs");
+  const receiptPath = join(root, "install-identities.txt");
+  writeFileSync(receiptPath, receiptBytes, { flag: "wx", mode: 0o600 });
+  chmodSync(receiptPath, 0o600);
+  assert.deepEqual(regularFile(receiptPath, MAX_RECEIPT_BYTES), receiptBytes);
+  return receiptPath;
+}
+
+function consumeInstallAuthority({ receiptPath, root, sourceRoot, tools }) {
+  const environment = strictPublishedEnvironment(root, tools);
+  return installedQualificationAuthority(
+    {
+      FACTORY_QUALIFICATION_INSTALL_RECEIPT: receiptPath,
+      PATH: environment.PATH,
+    },
+    {
+      sourceRoot,
+      gitCommand: tools.git,
+      gitEnvironment: environment,
+    },
+  );
+}
+
 export const defaultPublishedQualifierPort = {
   registryDocument,
   remoteTag,
   toolPreflight,
   sourcePreflight,
   install,
+  consumeInstallAuthority,
   proveControllerAbsence,
   cleanupIncomplete,
   host: () => ({ platform: platform(), architecture: arch(), release: hostRelease() }),
@@ -799,6 +830,7 @@ export async function qualifyPublishedArtifacts(input, port = defaultPublishedQu
   if (input.preflightOnly) return preflight;
 
   let installed;
+  let receiptPath;
   try {
     installed = await port.install({ release, published, root, tools });
     const finalTag = await port.remoteTag(release.repository, release.tag, tools);
@@ -807,12 +839,29 @@ export async function qualifyPublishedArtifacts(input, port = defaultPublishedQu
       published.tag,
       "remote Agent Plugin tag changed during qualification",
     );
-    assert.equal(realpathSync(installed.receiptPath), join(root, "install-identities.txt"));
-    const receiptBytes = regularFile(installed.receiptPath, MAX_RECEIPT_BYTES);
-    parseQualificationInstallReceipt(receiptBytes.toString("utf8"));
-    assert.equal(sha256(receiptBytes), installed.receiptSha256, "install receipt digest differs");
+    receiptPath = publishInstallReceipt(root, installed.receipt, installed.receiptSha256);
+    const authority = await port.consumeInstallAuthority({
+      receiptPath,
+      root,
+      sourceRoot: source.sourceRoot,
+      tools,
+    });
+    assert.equal(authority.installReceiptPath, receiptPath, "consumer selected another receipt");
+    assert.equal(
+      authority.candidateSourceCommit,
+      release.manifest.provenance.sourceCommit,
+      "consumer selected another source commit",
+    );
   } catch (error) {
-    let cleanupError;
+    const cleanupErrors = [];
+    if (receiptPath) {
+      try {
+        rmSync(receiptPath);
+        assert.ok(!existsSync(receiptPath), "failed receipt remains consumable");
+      } catch (receiptCleanupFailure) {
+        cleanupErrors.push(receiptCleanupFailure);
+      }
+    }
     try {
       const proof = await port.proveControllerAbsence(root);
       assert.equal(proof?.absent, true, "controller absence is unproven");
@@ -822,11 +871,11 @@ export async function qualifyPublishedArtifacts(input, port = defaultPublishedQu
         "incomplete install root was not preserved safely",
       );
     } catch (cleanupFailure) {
-      cleanupError = cleanupFailure;
+      cleanupErrors.push(cleanupFailure);
     }
-    if (cleanupError)
+    if (cleanupErrors.length > 0)
       throw new AggregateError(
-        [error, cleanupError],
+        [error, ...cleanupErrors],
         "published install failed and cleanup could not be proven",
       );
     throw error;
@@ -855,7 +904,7 @@ export async function qualifyPublishedArtifacts(input, port = defaultPublishedQu
       surfaces: installed.surfaces,
     },
     factoryQualificationInstallReceipt: {
-      path: installed.receiptPath,
+      path: receiptPath,
       sha256: installed.receiptSha256,
       environment: "FACTORY_QUALIFICATION_INSTALL_RECEIPT",
     },

@@ -56,7 +56,14 @@ export function strictPublishedEnvironment(
   tools: { git: string; npm: string; codex: string },
 ): NodeJS.ProcessEnv;
 export function qualificationInstallReceipt(fields: Record<string, string>): string;
-export const defaultPublishedQualifierPort: object;
+export const defaultPublishedQualifierPort: {
+  sourcePreflight(
+    release: { directory: string; manifest: { provenance: { sourceCommit: string } } },
+    tools: Record<string, string>,
+  ): Promise<unknown> | unknown;
+  consumeInstallAuthority(input: Record<string, unknown>): Promise<unknown> | unknown;
+  [key: string]: unknown;
+};
 export function qualifyPublishedArtifacts(
   input: PublishedQualifierInput,
   port?: object,

@@ -1,5 +1,7 @@
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -45,6 +47,49 @@ describe("retained qualification install authority", () => {
     });
     expect(listPlugins).toHaveBeenCalledWith(value.codexCli, value.codexHome, expect.any(Object));
     expect(authority.committedQualificationFiles).toHaveLength(2);
+  });
+
+  it("disables repository fsmonitor and Git redirects for every authority read", () => {
+    const value = fixture();
+    const fsmonitorMarker = join(value.root, "authority-fsmonitor-ran");
+    const fsmonitor = join(value.root, "authority-fsmonitor.sh");
+    write(fsmonitor, `#!/bin/sh\ntouch ${fsmonitorMarker}\nexit 0\n`, 0o700);
+    execFileSync("/usr/bin/git", ["config", "core.fsmonitor", fsmonitor], {
+      cwd: value.source,
+    });
+    const argumentLog = join(value.root, "authority-git-arguments.txt");
+    const gitWrapper = join(value.root, "authority-git-wrapper.sh");
+    write(
+      gitWrapper,
+      `#!/bin/sh\nprintf '%s ' "$@" >> ${argumentLog}\nprintf '\\n' >> ${argumentLog}\nexec /usr/bin/git "$@"\n`,
+      0o700,
+    );
+    installedQualificationAuthority(
+      { FACTORY_QUALIFICATION_INSTALL_RECEIPT: value.installReceipt },
+      {
+        sourceRoot: value.source,
+        committedPaths: ["scripts/harness.mjs"],
+        listPlugins: () => value.listed,
+        gitCommand: gitWrapper,
+        gitEnvironment: {
+          HOME: value.root,
+          LANG: "C",
+          LC_ALL: "C",
+          PATH: "/usr/bin:/bin",
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_OPTIONAL_LOCKS: "0",
+        },
+      },
+    );
+    expect(existsSync(fsmonitorMarker)).toBe(false);
+    const invocations = readFileSync(argumentLog, "utf8").trim().split("\n");
+    expect(invocations.length).toBeGreaterThan(0);
+    for (const invocation of invocations) {
+      expect(invocation).toContain("http.followRedirects=false");
+      expect(invocation).toContain("core.fsmonitor=false");
+      expect(invocation).toContain("core.hooksPath=/dev/null");
+    }
   });
 
   it("fails before the isolated plugin query when receipt-selected bytes drift", () => {

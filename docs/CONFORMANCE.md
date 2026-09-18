@@ -201,8 +201,9 @@ npm run verify:published -- \
 
 The full command downloads and authenticates the published npm tarball, checks out the exact remote
 tag, installs the npm and Agent Plugin distributions under isolated homes, starts the CLI and MCP
-entry points, re-resolves the tag, and retains the installation root. It writes the existing bounded
-`install-identities.txt` authority consumed through `FACTORY_QUALIFICATION_INSTALL_RECEIPT`:
+entry points, and re-resolves the tag. Only then does it write the existing bounded
+`install-identities.txt` authority and validate the retained root through the same
+`FACTORY_QUALIFICATION_INSTALL_RECEIPT` consumer used by private smoke:
 
 ```sh
 npm run verify:published -- \
@@ -215,8 +216,9 @@ no repository, checkout, controller lifecycle, activation, or provider path. Iss
 smoke must consume the retained receipt, perform the authorized lifecycle and Objective proof, emit
 the final sanitized completion receipt, and clean the retained root. On an install failure the
 qualifier proves that its isolated root contains no controller unit before entering cleanup; if that
-proof or cleanup fails, it preserves the root and reports both errors. The command performs no
-publication, upload, provider call, Objective activation, or repair.
+proof or cleanup fails, it preserves the root and reports both errors. A changed tag or failed
+consumer validation leaves no canonical receipt. The command performs no publication, upload,
+provider call, Objective activation, or repair.
 
 ## Initial Beta scope and later routes
 

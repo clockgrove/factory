@@ -1594,10 +1594,8 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
   const expected = {
     ...authority,
     node: realpathSync(process.execPath),
-    bundle: realpathSync(join(pluginRoot, "dist/factory.js")),
-    identity: createHash("sha256")
-      .update(readFileSync(join(pluginRoot, "dist/factory.js")))
-      .digest("hex"),
+    bundle: candidate.factoryCli,
+    identity: candidate.artifactIdentity.slice("sha256:".length),
   };
   const unitPath = join(home, ".config/systemd/user", authority.unit);
   let controllerBoundary;

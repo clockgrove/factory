@@ -85,15 +85,22 @@ export function checkpointAuthority(env) {
   assert.equal(env.FACTORY_CHECKPOINT_CONTROLLER_UNIT, unit, "exact installed controller required");
   const phase = env.FACTORY_CHECKPOINT_PHASE;
   const sessionRecovery = env.FACTORY_CHECKPOINT_BACKEND === "app-server";
+  const compilerRecovery = env.FACTORY_CHECKPOINT_BACKEND === "compiler";
   assert.ok(
-    env.FACTORY_CHECKPOINT_BACKEND === undefined || sessionRecovery,
+    env.FACTORY_CHECKPOINT_BACKEND === undefined || sessionRecovery || compilerRecovery,
     "unsupported checkpoint backend",
   );
   assert.ok(["preflight", "exercise"].includes(phase));
   if (phase === "exercise")
     assert.equal(
       env.FACTORY_CHECKPOINT_ACK,
-      `${repository}:${unit}:${sessionRecovery ? "start,arm-terminal-artifact-hold,pause,restart,resume,stop" : "start,pause-drain,restart,resume,stop"}`,
+      `${repository}:${unit}:${
+        sessionRecovery
+          ? "start,arm-terminal-artifact-hold,pause,restart,resume,stop"
+          : compilerRecovery
+            ? "start,arm-compiler-selection,arm-graph-projection,restart,pause,restart,stop"
+            : "start,pause-drain,restart,resume,stop"
+      }`,
       "explicit lifecycle authority required",
     );
   assert.ok(env.FACTORY_CHECKPOINT_NAMESPACE, "explicit new namespace required");
@@ -120,8 +127,14 @@ export function checkpointAuthority(env) {
     phase,
     namespace: qualificationNamespace(env.FACTORY_CHECKPOINT_NAMESPACE),
     evidence: safePath(env.FACTORY_CHECKPOINT_EVIDENCE),
-    policy,
+    ...(compilerRecovery
+      ? {
+          observationWindowMinutes: policy.objectiveTimeoutMinutes,
+          compilerMaxModelTokens: policy.economics.maxModelTokens,
+        }
+      : { policy }),
     ...(sessionRecovery ? { sessionRecovery: true } : {}),
+    ...(compilerRecovery ? { compilerRecovery: true } : {}),
   };
 }
 
@@ -182,6 +195,10 @@ const observationPhases = new Set([
   "checkpoint",
   "paused",
   "accounted-pause",
+  "compiler-selection-hold",
+  "graph-projection-hold",
+  "graph-projection-pause",
+  "projected-paused-restart",
   "observation",
   "continuation",
 ]);
@@ -1419,8 +1436,16 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     console.log("Not exercised: explicit checkpoint-restart opt-in required.");
     return;
   }
-  const observationWindowMinutes = authority.policy.objectiveTimeoutMinutes;
+  const observationWindowMinutes =
+    authority.policy?.objectiveTimeoutMinutes ?? authority.observationWindowMinutes;
   checkpointDeadline(new Date(0).toISOString(), observationWindowMinutes);
+  const maxObservedChildren = extension.maxObservedChildren ?? 3;
+  assert.ok(
+    Number.isSafeInteger(maxObservedChildren) &&
+      maxObservedChildren >= 0 &&
+      maxObservedChildren <= 100,
+    "invalid observed child bound",
+  );
   assert.equal(process.platform, "linux");
   const home = realpathSync(homedir());
   assert.ok(!home.startsWith("/mnt/"));
@@ -1764,7 +1789,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       ),
     );
     await observationRead("children", () => {
-      assert.ok(children.length <= 3);
+      assert.ok(children.length <= maxObservedChildren);
     });
     const comments = [];
     for (const issue of [objective, ...children])
@@ -1970,7 +1995,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
           objectiveNumber: evidence.objective.number,
           requestId: `${authority.namespace}-activate`,
           baseSha: evidence.base,
-          policy: authority.policy,
+          ...(extension.omitActivationPolicy ? {} : { policy: authority.policy }),
         };
         evidence.runRequest = { tool: "factory_activate", arguments: { owner, repo, ...args } };
         save();

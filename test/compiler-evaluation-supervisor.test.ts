@@ -30,6 +30,7 @@ import { CompilerProposalSchema, type CompilerProposal } from "../src/compiler/c
 import { proposalResultFromCompiledFixture } from "./helpers/compiler-proposal.js";
 import { parseAndValidateCompilerProposal } from "../src/compiler/proposal.js";
 import { parseCompilerOperation } from "../src/toolchains/compiler-capabilities.js";
+import { proveCompilerSelectionQualificationBoundary } from "../src/runtime/compiler-qualification-checkpoint.js";
 
 const usage = { inputTokens: 20, outputTokens: 10, cachedInputTokens: 4 };
 const invocationProvenance = (baseSha: string) => ({
@@ -619,7 +620,7 @@ describe("Supervisor compiler evaluation activation boundary", () => {
       const reports: string[][] = [];
       Object.assign(f.management, { supportsCompilerAdmission: true });
       f.management.extractObligations = async (context, checkpoint, beforeModelInvocation) => {
-        await beforeModelInvocation?.();
+        await beforeModelInvocation?.(invocationProvenance(context.baseSha));
         calls.push("inventory");
         const inventory: ObligationInventory = {
           version: 1,
@@ -768,7 +769,7 @@ describe("Supervisor compiler evaluation activation boundary", () => {
         );
       };
       f.management.judgePlan = async (context, checkpoint, beforeModelInvocation) => {
-        await beforeModelInvocation?.();
+        await beforeModelInvocation?.(invocationProvenance(context.compilation.baseSha));
         calls.push("judge");
         const verdict: CompilerJudgeVerdict = {
           version: 1,
@@ -906,6 +907,55 @@ describe("Supervisor compiler evaluation activation boundary", () => {
               event.unit === "model_tokens",
           ),
       ).toHaveLength(4);
+      const records = await loadCompilerDrafts(f.storage, 7, f.runId);
+      const persisted = await new CompiledGraphManager(f.storage, f.leases).load(7, f.runId);
+      expect(persisted).not.toBeNull();
+      const proof = proveCompilerSelectionQualificationBoundary({
+        records,
+        graph: persisted!.objective,
+        inputDigest: compilerEvalDigest({
+          objective: {
+            number: f.snapshot.number,
+            title: f.snapshot.title,
+            body: f.snapshot.body,
+          },
+          assetManifestDigest: null,
+          compilerMediaEgress: f.policy.compilerMediaEgress,
+        }),
+        events: f.events(),
+        durableGraph: null,
+      });
+      expect(proof).toMatchObject({
+        checkpoint: "compiler-selection",
+        graphDigest: persisted!.graphDigest,
+        graphAbsent: true,
+        usage: expect.arrayContaining([expect.objectContaining({ stage: "repair", amount: 30 })]),
+      });
+      expect(proof.usage).toHaveLength(4);
+      const trailingRecord = structuredClone(records.at(-1)!);
+      trailingRecord.sequence = records.length;
+      const malformedRecords = [...records, trailingRecord];
+      expect(() => validatePersistedCompilerDraftJournal(malformedRecords)).toThrow(
+        "compiler draft contains records after its terminal state",
+      );
+      expect(() =>
+        proveCompilerSelectionQualificationBoundary({
+          records: malformedRecords,
+          graph: persisted!.objective,
+          inputDigest: records[0]!.binding.inputDigest,
+          events: f.events(),
+          durableGraph: null,
+        }),
+      ).toThrow("compiler draft contains records after its terminal state");
+      expect(() =>
+        proveCompilerSelectionQualificationBoundary({
+          records,
+          graph: persisted!.objective,
+          inputDigest: records[0]!.binding.inputDigest,
+          events: f.events(),
+          durableGraph: persisted,
+        }),
+      ).toThrow("follows graph persistence");
     } finally {
       await f.dispose();
     }

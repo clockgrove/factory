@@ -519,6 +519,7 @@ export interface RunRepositoryControllerOptions {
     resources: RepositorySupervisorResources,
     controllerObservation?: () => ControllerObservation | undefined,
     signal?: AbortSignal,
+    compilerQualificationShutdownSignal?: AbortSignal,
   ) => {
     run(): Promise<SupervisorResult | void>;
   };
@@ -527,6 +528,8 @@ export interface RunRepositoryControllerOptions {
 export interface CreateGitHubRepositoryControllerOptions extends RunRepositoryControllerOptions {
   /** Internal election-retirement signal supplied by the ownership wrapper. */
   discoverySignal?: AbortSignal;
+  /** Original installed process stop, separate from internal ownership failure. */
+  compilerQualificationShutdownSignal?: AbortSignal;
   beforeDiscovery?: () => Promise<void>;
 }
 
@@ -606,7 +609,13 @@ export function createGitHubRepositoryController(
           });
         }
         const supervisor =
-          options.supervisorFactory?.(activation, shared, options.controllerObservation, signal) ??
+          options.supervisorFactory?.(
+            activation,
+            shared,
+            options.controllerObservation,
+            signal,
+            options.compilerQualificationShutdownSignal,
+          ) ??
           new FactorySupervisor({
             token: options.token,
             owner: options.owner,
@@ -628,6 +637,11 @@ export function createGitHubRepositoryController(
             signal,
             repositoryResources: shared,
             shutdownBehavior: "release-lease",
+            ...(options.compilerQualificationShutdownSignal
+              ? {
+                  compilerQualificationShutdownSignal: options.compilerQualificationShutdownSignal,
+                }
+              : {}),
             ...(options.controllerObservation
               ? { controllerObservation: options.controllerObservation }
               : {}),
@@ -710,6 +724,7 @@ export async function runGitHubRepositoryController(
               capacity: policy.maxActiveObjectives,
               pollIntervalMs: policy.pollIntervalSeconds * 1_000,
               signal: executionSignal,
+              ...(options.signal ? { compilerQualificationShutdownSignal: options.signal } : {}),
               discoverySignal: signal,
               resources,
               activationStore: store,

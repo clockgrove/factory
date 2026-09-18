@@ -16,9 +16,10 @@ node scripts/verify-local-failure-conflict.mjs --print-fixture
 
 This command only prints deterministic file contents and their descriptor SHA-256. Separately
 authorize and commit those exact files to the disposable repository's default branch. Its existing
-`package.json` must contain `scripts.test = "node --test"`; the runner neither modifies package
-scripts nor publishes the fixture baseline. Record the resulting full commit SHA and printed fixture
-digest. Workers may change only the fixture's `value.txt`, never its committed recipe or test.
+`package.json` must contain `scripts.test = "node --test"`, and its matching npm authority must be
+completed by a committed root `package-lock.json`; the runner neither modifies package authority nor
+publishes the fixture baseline. Record the resulting full commit SHA and printed fixture digest.
+Workers may change only the fixture's `value.txt`, never its committed recipe or test.
 
 Set these names privately; no credential values belong in evidence or commands:
 

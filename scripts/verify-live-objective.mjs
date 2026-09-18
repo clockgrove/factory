@@ -200,6 +200,7 @@ export function assessQualificationPreflight(input) {
     blockers.push("qualification-harness-is-not-committed");
   if (input.harness?.candidateInventorySha256 !== input.installedArtifact?.inventorySha256)
     blockers.push("installed-bundle-differs-from-qualification-candidate");
+  if (input.compiler?.result !== "passed") blockers.push("compiler-toolchain-authority-unusable");
   if ((input.namespaceIssues ?? []).length > 0)
     blockers.push("qualification-namespace-already-exists");
   if (input.repository?.private !== true) blockers.push("qualification-repository-must-be-private");
@@ -970,9 +971,11 @@ export async function main(
     return;
   }
   assert.equal(process.platform, "linux", "live Objective harness requires Linux");
-  const { installedQualificationAuthority, qualificationRuntimeEnvironment } = await import(
-    "./qualification-install-identity.mjs"
-  );
+  const {
+    installedQualificationAuthority,
+    installedCompilerPreflight,
+    qualificationRuntimeEnvironment,
+  } = await import("./qualification-install-identity.mjs");
   assert.equal(
     env.FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT,
     undefined,
@@ -1057,6 +1060,9 @@ export async function main(
   const modelTokenCeiling =
     qualification.policy?.economics?.maxModelTokens ??
     modelTokenLimit(required(env, "FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS"));
+  const policy =
+    qualification.policy ??
+    boundedPolicy(env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs", modelTokenCeiling);
   const mcp = manifest.mcpServers?.factory;
   assert.equal(mcp?.command, "sh");
   const token = env.GITHUB_TOKEN || env.GH_TOKEN || run("gh", ["auth", "token"], checkout);
@@ -1104,6 +1110,13 @@ export async function main(
     .filter((pull) => pull.head?.ref?.startsWith("factory/"))
     .map((pull) => ({ number: pull.number, head: pull.head.ref, title: pull.title }));
   const rateLimit = (await octokit.request("GET /rate_limit")).data.resources;
+  const compiler = installedCompilerPreflight({
+    factoryCli: candidate.factoryCli,
+    checkout,
+    baseSha: base,
+    policy,
+    environment: runtimeEnvironment,
+  });
   const preflight = {
     ...assessQualificationPreflight({
       checkout: {
@@ -1113,6 +1126,7 @@ export async function main(
       },
       harness,
       installedArtifact: artifact,
+      compiler,
       namespaceIssues,
       repository: info,
       branch,
@@ -1136,6 +1150,7 @@ export async function main(
     installedArtifact: artifact,
     installedCandidate,
     harness,
+    compiler,
     pluginId: identity.pluginId,
     codexManifestVersion: identity.codexManifestVersion,
     modelTokenCeiling: {
@@ -1193,9 +1208,6 @@ export async function main(
       "stacked-prs",
       "installed local qualification requires native delivery",
     );
-  const policy =
-    qualification.policy ??
-    boundedPolicy(env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs", modelTokenCeiling);
   const evidence = {
     schemaVersion: 1,
     scope: qualification.scope ?? "installed-local-objective-happy-path",

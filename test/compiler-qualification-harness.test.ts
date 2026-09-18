@@ -17,6 +17,7 @@ import {
   compilerQualificationObjectiveBody,
   runCompilerCheckpointScenario,
 } from "../scripts/verify-compiler-qualification-checkpoints.mjs";
+import { installedCompilerPreflight } from "../scripts/qualification-install-identity.mjs";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const canonical = (value: unknown): string => {
@@ -113,6 +114,21 @@ const pausedController = {
 const objective = 47;
 const baseSha = "4".repeat(40);
 const actualRunId = "9d69ce85-6810-41d8-af62-1fab153d4574";
+
+function compilerCheckpointEnvironment() {
+  return {
+    FACTORY_LOCAL_CHECKPOINT_RESTART: "1",
+    FACTORY_CHECKPOINT_REPOSITORY: repository,
+    FACTORY_CHECKPOINT_CHECKOUT: checkout,
+    FACTORY_CHECKPOINT_CONTROLLER_UNIT: unit,
+    FACTORY_CHECKPOINT_PHASE: "exercise",
+    FACTORY_CHECKPOINT_BACKEND: "compiler",
+    FACTORY_CHECKPOINT_NAMESPACE: "compiler-case",
+    FACTORY_CHECKPOINT_EVIDENCE: "/home/example/compiler-checkpoint.json",
+    FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "500000",
+    FACTORY_CHECKPOINT_ACK: `${repository}:${unit}:start,arm-compiler-selection,arm-graph-projection,restart,pause,restart,stop`,
+  };
+}
 const fixtureStartedAt = new Date(Date.now() - 120_000).toISOString();
 const fixtureEligibleUntil = new Date(Date.parse(fixtureStartedAt) + 45 * 60_000).toISOString();
 function arm(checkpoint: "compiler-selection" | "graph-projection") {
@@ -399,18 +415,7 @@ describe("installed compiler checkpoint qualifier", () => {
     expect(() => checkpointAuthority({ FACTORY_CHECKPOINT_BACKEND: "compiler" })).toThrow(
       "compiler checkpoint mode requires scripts/verify-compiler-qualification-checkpoints.mjs",
     );
-    const env = {
-      FACTORY_LOCAL_CHECKPOINT_RESTART: "1",
-      FACTORY_CHECKPOINT_REPOSITORY: repository,
-      FACTORY_CHECKPOINT_CHECKOUT: checkout,
-      FACTORY_CHECKPOINT_CONTROLLER_UNIT: unit,
-      FACTORY_CHECKPOINT_PHASE: "exercise",
-      FACTORY_CHECKPOINT_BACKEND: "compiler",
-      FACTORY_CHECKPOINT_NAMESPACE: "compiler-case",
-      FACTORY_CHECKPOINT_EVIDENCE: "/home/example/compiler-checkpoint.json",
-      FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "500000",
-      FACTORY_CHECKPOINT_ACK: `${repository}:${unit}:start,arm-compiler-selection,arm-graph-projection,restart,pause,restart,stop`,
-    };
+    const env = compilerCheckpointEnvironment();
     expect(() => checkpointAuthority(env)).toThrow(
       "compiler checkpoint mode requires scripts/verify-compiler-qualification-checkpoints.mjs",
     );
@@ -432,6 +437,38 @@ describe("installed compiler checkpoint qualifier", () => {
     expect(() =>
       compilerCheckpointAuthority({ ...env, FACTORY_CHECKPOINT_ACK: "incomplete" }),
     ).toThrow();
+  });
+
+  it("preflights compiler checkpoints with the retained default before policy observation", () => {
+    const accepted = compilerCheckpointAuthority(compilerCheckpointEnvironment());
+    expect(accepted).not.toBeNull();
+    expect(accepted).not.toHaveProperty("policy");
+    const execute = vi.fn(() => ({
+      stdout: `${JSON.stringify({
+        result: "passed",
+        baseSha,
+        pinnedFactsDigest: "5".repeat(64),
+        toolchains: [],
+        validation: { status: "valid", violations: [] },
+      })}\n`,
+      status: 0,
+      signal: null,
+    }));
+    installedCompilerPreflight(
+      {
+        factoryCli: "/installed/factory.js",
+        checkout,
+        baseSha,
+        policy: undefined,
+      },
+      execute,
+    );
+    expect(execute).toHaveBeenCalledWith(
+      "/installed/factory.js",
+      ["compiler-preflight", "--repo", checkout, "--base-sha", baseSha],
+      expect.objectContaining({ stdio: ["ignore", "pipe", "pipe"] }),
+    );
+    expect((execute.mock.calls[0] as unknown[])[2]).not.toHaveProperty("input");
   });
 
   it("requires the exact documented compiler defaults within the authorized ceiling", () => {

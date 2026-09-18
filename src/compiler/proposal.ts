@@ -37,6 +37,7 @@ import { scopeOwnsPath } from "../repository-capabilities/model.js";
 import {
   compilerCapabilitiesForRepository,
   formatCompilerOperation,
+  type CompilerRepositoryCapabilities,
 } from "../toolchains/compiler-capabilities.js";
 import { toolchainAdapterById } from "../toolchains/authority.js";
 import {
@@ -89,6 +90,67 @@ export class CompilerRequestValidationError extends Error {
 }
 
 export const MAX_COMPILER_REQUEST_BYTES = 900 * 1024;
+
+/** The repository-authority portion of request validation. Read-only
+ * qualification preflight calls this same boundary after deriving capabilities
+ * from the exact pinned base, so it cannot maintain a looser copy of the
+ * compiler's mechanical acceptance rules. */
+export function validateCompilerRepositoryAuthority(
+  repository: Pick<CompilerRepositoryCapabilities, "validationRecipes" | "toolchains">,
+  allowedNetworkDestinations: readonly string[],
+): CompilerValidationReport {
+  const violations: CompilerViolation[] = [];
+  const eligible = repository.toolchains.filter(
+    (toolchain) => toolchain.state === "eligible-deferred",
+  );
+  for (const toolchain of repository.toolchains) {
+    if (toolchain.state === "partial")
+      violations.push(
+        violation(
+          "partial-toolchain-authority",
+          "/repository/toolchains",
+          "observed or wholly absent authority",
+          toolchain.adapterId,
+        ),
+      );
+    if (toolchain.state === "mixed")
+      violations.push(
+        violation(
+          "mixed-toolchain-authority",
+          "/repository/toolchains",
+          "one authority owner",
+          toolchain.adapterId,
+        ),
+      );
+  }
+  if (repository.validationRecipes.length === 0 && eligible.length === 0) {
+    for (const toolchain of repository.toolchains) {
+      if (toolchain.state === "policy-blocked")
+        violations.push(
+          violation(
+            "denied-network-destination",
+            "/constraints/allowedNetworkDestinations",
+            toolchain.networkDestinations,
+            [...allowedNetworkDestinations],
+          ),
+        );
+    }
+    violations.push(
+      violation(
+        repository.toolchains.every((entry) => entry.state === "unsupported")
+          ? "unsupported-toolchain"
+          : "no-validation-capability",
+        "/repository",
+        "at least one observed recipe or eligible deferred adapter",
+        {
+          recipes: repository.validationRecipes.length,
+          states: repository.toolchains.map((entry) => entry.state).sort(),
+        },
+      ),
+    );
+  }
+  return createCompilerValidationReport("request", violations);
+}
 
 function compilerRepositoryCaptureFacts(
   context: Pick<CompilationContext, "runPolicy" | "repositoryCapturePlanning">,
@@ -590,55 +652,12 @@ export function validateCompilerRequest(requestInput: unknown): CompilerValidati
         diagnostic.observed as CompilerDiagnosticValue,
       ),
     );
-  const eligible = request.repository.toolchains.filter(
-    (toolchain) => toolchain.state === "eligible-deferred",
+  violations.push(
+    ...validateCompilerRepositoryAuthority(
+      request.repository,
+      request.constraints.allowedNetworkDestinations,
+    ).violations,
   );
-  for (const toolchain of request.repository.toolchains) {
-    if (toolchain.state === "partial")
-      violations.push(
-        violation(
-          "partial-toolchain-authority",
-          "/repository/toolchains",
-          "observed or wholly absent authority",
-          toolchain.adapterId,
-        ),
-      );
-    if (toolchain.state === "mixed")
-      violations.push(
-        violation(
-          "mixed-toolchain-authority",
-          "/repository/toolchains",
-          "one authority owner",
-          toolchain.adapterId,
-        ),
-      );
-  }
-  if (recipes.length === 0 && eligible.length === 0) {
-    for (const toolchain of request.repository.toolchains) {
-      if (toolchain.state === "policy-blocked")
-        violations.push(
-          violation(
-            "denied-network-destination",
-            "/constraints/allowedNetworkDestinations",
-            toolchain.networkDestinations,
-            request.constraints.allowedNetworkDestinations,
-          ),
-        );
-    }
-    violations.push(
-      violation(
-        request.repository.toolchains.every((entry) => entry.state === "unsupported")
-          ? "unsupported-toolchain"
-          : "no-validation-capability",
-        "/repository",
-        "at least one observed recipe or eligible deferred adapter",
-        {
-          recipes: recipes.length,
-          states: request.repository.toolchains.map((entry) => entry.state).sort(),
-        },
-      ),
-    );
-  }
   return createCompilerValidationReport("request", violations);
 }
 

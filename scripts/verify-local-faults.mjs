@@ -30,6 +30,7 @@ import {
   qualificationNamespaceMarker,
 } from "./verify-live-objective.mjs";
 import {
+  installedCompilerPreflight,
   installedQualificationAuthority,
   qualificationRuntimeEnvironment,
 } from "./qualification-install-identity.mjs";
@@ -946,6 +947,24 @@ export async function runQualification(
     "private writable disposable repository required",
   );
   const actor = (await request("GET /user")).data;
+  const base = (
+    await request("GET /repos/{owner}/{repo}/commits/{ref}", { ref: info.default_branch })
+  ).data.sha;
+  assert.equal(command("git", ["rev-parse", "HEAD"], checkout), base);
+  const compilerPreflight = installedCompilerPreflight({
+    factoryCli: candidate.factoryCli,
+    checkout,
+    baseSha: base,
+    policy,
+    environment: runtimeEnvironment,
+  });
+  assert.equal(
+    compilerPreflight.result,
+    "passed",
+    `compiler preflight blocked: ${compilerPreflight.validation.violations
+      .map(({ code }) => code)
+      .join(", ")}`,
+  );
   const mcp = manifest.mcpServers?.factory;
   assert.equal(mcp?.command, "sh");
   const client = new Client({ name: "factory-installed-local-faults", version: "1.0.0" });
@@ -1027,6 +1046,7 @@ export async function runQualification(
           installedCandidate,
           harnessFiles: candidate.committedQualificationFiles,
           installedArtifact: artifact,
+          compilerPreflight,
           controllerUnit: controller.unit,
           modelTokenLimit: maxModelTokens,
         }),
@@ -1078,6 +1098,7 @@ export async function runQualification(
         installedArtifact: artifact,
         installedCandidate,
         harnessFiles: candidate.committedQualificationFiles,
+        compilerPreflight,
         activationRequestId: `${namespace}-activate`,
         faultRequestId: `${namespace}-${scenario}`,
         pauseRequestId: `${namespace}-pause`,
@@ -1103,6 +1124,7 @@ export async function runQualification(
     assert.deepEqual(evidence.installedArtifact, artifact);
     assert.deepEqual(evidence.installedCandidate, installedCandidate);
     assert.deepEqual(evidence.harnessFiles, candidate.committedQualificationFiles);
+    assert.deepEqual(evidence.compilerPreflight, compilerPreflight);
     assert.deepEqual(evidence.actor, { id: actor.id, login: actor.login });
     const observe = async () => {
       const objective = (

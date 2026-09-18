@@ -1,6 +1,6 @@
 /** Exact retained npm and Agent Plugin installation authority for live qualification. */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -37,6 +37,63 @@ const receiptFields = [
 ].sort();
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
+
+/** Invoke the exact retained CLI's production compiler-authority assessment.
+ * A blocked report is returned for private evidence; callers must make it a
+ * hard pre-mutation boundary. */
+export function installedCompilerPreflight(
+  { factoryCli, checkout, baseSha, policy, environment = process.env },
+  execute = spawnSync,
+) {
+  assert.ok(isAbsolute(factoryCli), "installed Factory CLI path must be absolute");
+  assert.ok(isAbsolute(checkout), "compiler preflight checkout must be absolute");
+  assert.match(baseSha, /^[a-f0-9]{40}$/, "exact compiler preflight base required");
+  const explicitPolicy = policy !== undefined;
+  const policyBytes = explicitPolicy ? `${JSON.stringify(policy)}\n` : undefined;
+  if (policyBytes !== undefined)
+    assert.ok(
+      Buffer.byteLength(policyBytes) <= 64 * 1024,
+      "compiler preflight policy is unbounded",
+    );
+  const result = execute(
+    factoryCli,
+    [
+      "compiler-preflight",
+      "--repo",
+      checkout,
+      "--base-sha",
+      baseSha,
+      ...(explicitPolicy ? ["--policy", "-"] : []),
+    ],
+    {
+      cwd: checkout,
+      env: environment,
+      ...(policyBytes === undefined ? {} : { input: policyBytes }),
+      encoding: "utf8",
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024,
+      stdio: [explicitPolicy ? "pipe" : "ignore", "pipe", "pipe"],
+    },
+  );
+  assert.equal(result.signal, null, "installed compiler preflight was interrupted");
+  assert.equal(result.error, undefined, "installed compiler preflight could not execute");
+  assert.ok([0, 2].includes(result.status), "installed compiler preflight failed unexpectedly");
+  assert.ok(
+    typeof result.stdout === "string" && Buffer.byteLength(result.stdout) <= 1024 * 1024,
+    "installed compiler preflight output is unavailable or unbounded",
+  );
+  const report = JSON.parse(result.stdout);
+  assert.ok(["passed", "blocked"].includes(report.result), "compiler preflight result is invalid");
+  assert.equal(report.baseSha, baseSha, "compiler preflight assessed another base");
+  assert.match(report.pinnedFactsDigest ?? "", /^[a-f0-9]{64}$/);
+  assert.ok(Array.isArray(report.toolchains) && report.toolchains.length <= 32);
+  assert.ok(
+    Array.isArray(report.validation?.violations) && report.validation.violations.length <= 128,
+  );
+  assert.equal(report.result === "passed", result.status === 0);
+  assert.equal(report.validation.status === "valid", report.result === "passed");
+  return report;
+}
 
 function required(env, name) {
   const value = env[name]?.trim();

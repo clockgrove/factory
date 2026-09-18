@@ -3,8 +3,8 @@
   "bundles": [
     {
       "file": "factory.js",
-      "bytes": 4863418,
-      "sha256": "15b8963b84323bef4a14270e11a4c34f89bbbce8bedb6a6b72f2bf2257f8d128"
+      "bytes": 4863464,
+      "sha256": "fe953373a9c1f98e534125e75b2129beeb98e0627f1f0a54ddbe7ca93b1b70f6"
     },
     {
       "file": "mcp-server.js",

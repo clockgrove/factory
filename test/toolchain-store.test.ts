@@ -3,9 +3,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   activeRuntimeBundle,
@@ -152,6 +152,37 @@ describe("managed toolchain store", () => {
       state: "corrupt",
       reason: expect.stringMatching(/integrity verification/),
     });
+  });
+
+  it("probes the managed executable from its isolated staging component", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-toolchain-store-"));
+    roots.push(root);
+    const run = vi.fn(
+      async (
+        command: string,
+        args: string[],
+        options: { cwd?: string; env?: NodeJS.ProcessEnv },
+      ) => {
+        if (command === "tar")
+          return { stdout: execFileSync(command, args, { encoding: "utf8" }), stderr: "" };
+        if (command.endsWith("/pnpm")) {
+          const componentRoot = dirname(dirname(command));
+          expect(options.cwd).toBe(componentRoot);
+          expect(options.env?.HOME).toBe(join(dirname(componentRoot), "home"));
+          await expect(access(options.env!.HOME!)).resolves.toBeUndefined();
+        }
+        return {
+          stdout: command.includes("/node/root/") ? "v22.14.0\n" : "12.3.4\n",
+          stderr: "",
+        };
+      },
+    );
+    await provisionToolchain("pnpm", {
+      root,
+      source: source(pnpmArchive("12.3.4")),
+      run: run as never,
+    });
+    expect(run.mock.calls.some(([command]) => String(command).endsWith("/pnpm"))).toBe(true);
   });
 
   it("extracts only exact Node from an official-style tar.xz with sibling symlinks", async () => {

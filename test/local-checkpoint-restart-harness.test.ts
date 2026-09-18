@@ -8,6 +8,7 @@ import { DEFAULT_RUN_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
 import { SystemdUserService } from "../src/service/systemd-user-service.js";
 import { boundedPolicy } from "../scripts/verify-live-objective.mjs";
 import {
+  assertControllerProcessCommand,
   assertControllerUnit,
   checkpointAuthority,
   checkpointDeadline,
@@ -715,6 +716,40 @@ describe("explicit checkpoint restart authority", () => {
     expect(read.mock.calls).toEqual([["/proc/123/exe"]]);
     for (const observed of ["/tmp/spoofed-node", "/usr/bin/node (deleted)"]) {
       expect(() => assertCheckpointExecutable(123, "/usr/bin/node", () => observed)).toThrow();
+    }
+  });
+  it("requires the installed controller command with its exact authenticated bundle identity", () => {
+    const expected = {
+      node: "/usr/bin/node",
+      bundle: "/home/example/npm/lib/node_modules/@clockgrove/factory/dist/factory.js",
+      repository: "example/disposable",
+      checkout: "/home/example/disposable",
+      identity: "a".repeat(64),
+    };
+    const command = [
+      expected.node,
+      expected.bundle,
+      "controller",
+      "run",
+      expected.repository,
+      "--repo",
+      expected.checkout,
+      "--executable-identity",
+      `sha256:${expected.identity}`,
+    ];
+    const cmdline = (arguments_: string[]) => `${arguments_.join("\0")}\0`;
+
+    expect(() => assertControllerProcessCommand(cmdline(command), expected)).not.toThrow();
+
+    const mismatches = [
+      command.slice(0, -2),
+      [...command.slice(0, -1), `sha256:${"b".repeat(64)}`],
+      [...command, "--executable-identity", `sha256:${expected.identity}`],
+      [...command.slice(0, 5), ...command.slice(7), ...command.slice(5, 7)],
+      [...command, "--unrelated"],
+    ];
+    for (const mismatch of mismatches) {
+      expect(() => assertControllerProcessCommand(cmdline(mismatch), expected)).toThrow();
     }
   });
   it("preserves unavailable executable observation as a fixed diagnostic without retry", () => {

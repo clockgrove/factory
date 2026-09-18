@@ -85,6 +85,16 @@ export function assertCheckpointExecutable(
   expectedNode: string,
   readLink?: (path: string) => string,
 ): void;
+export function assertControllerProcessCommand(
+  text: string,
+  expected: {
+    repository: string;
+    checkout: string;
+    node: string;
+    bundle: string;
+    identity: string;
+  },
+): void;
 export function assertControllerRuntimeEnvironment(
   text: string,
   linuxHome: string,

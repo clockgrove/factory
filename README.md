@@ -12,10 +12,11 @@ keeps work moving while it is running and recovers progress from GitHub after a 
 GitHub Actions workflow, hosted service, or database is required.
 
 > [!IMPORTANT]
-> **Development preview.** The plugin currently installs from reviewed repository snapshots on
-> `main`, not a published release tag. Manifest versions identify development builds; older Git tags
-> do not identify the current plugin. The npm CLI/controller is not yet a verified published install
-> path. Record your installed commit/version and read the
+> **Initial Beta candidate.** Version `2.0.27-beta.0` is not publicly available until the
+> [`v2.0.27-beta.0` GitHub Release](https://github.com/clockgrove/factory/releases/tag/v2.0.27-beta.0)
+> exists. Before publication, maintainers qualify the exact local npm tarball and clean plugin
+> snapshot bound by `release/release-manifest.json`; ordinary users should wait for that release.
+> The support claim is limited to Windows WSL2 and the execution surfaces described below. Read the
 > [release qualification](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md)
 > before authorizing unattended work.
 
@@ -29,23 +30,27 @@ the Linux filesystem. Native Linux and a Linux guest hosted by macOS are impleme
 targets whose live release qualification remains separately tracked. The installation procedure is
 verified with Codex CLI 0.153.0; newer clients must expose the same plugin commands.
 
-For the portable prompt layer, install Factory's three public skills directly from this repository:
+For a mutable development-only preview of the prompt layer, install Factory's three public skills
+directly from the repository's current state:
 
 ```bash
 npx skills add clockgrove/factory
 ```
 
-The Skills CLI finds `director`, `factory-setup`, and `objective-compilation` and lets you select the
-agents and project or global scope. This is an ordinary third-party skill installation. It does not
-register the current repository with Factory, install a controller, or start work. Skills alone do
-not supply Factory's MCP execution tools.
+The unpinned command is outside the exact Initial Beta artifact and cannot satisfy release
+qualification. The Skills CLI finds `director`, `factory-setup`, and `objective-compilation` and lets
+you select the agents and project or global scope. It does not register the current repository with
+Factory, install a controller, or start work. Skills alone do not supply Factory's MCP execution
+tools.
 
-For Codex execution, install the full plugin instead of keeping a second copy of the same skills:
+Before publication, maintainers must use the [prepublication candidate procedure](docs/setup/local.md#prepublication-candidate-qualification-maintainers)
+to install the manifest-bound local artifacts. After the `v2.0.27-beta.0` GitHub Release exists,
+install the full plugin instead of keeping a second copy of the same skills:
 
 1. Install the plugin, which bundles those skills and Factory's MCP server:
 
    ```bash
-   codex plugin marketplace add clockgrove/factory --ref main
+   codex plugin marketplace add clockgrove/factory --ref v2.0.27-beta.0
    codex plugin add factory@clockgrove-factory
    codex plugin list
    ```

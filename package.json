@@ -1,6 +1,6 @@
 {
   "name": "@clockgrove/factory",
-  "version": "2.0.26",
+  "version": "2.0.27-beta.0",
   "description": "Coordinate local coding agents to turn GitHub issues into tested pull requests, with dependency-aware scheduling, validation, and restart recovery.",
   "keywords": [
     "ai-agents",
@@ -60,7 +60,7 @@
   },
   "publishConfig": {
     "access": "public",
-    "tag": "latest"
+    "tag": "beta"
   },
   "packageManager": "npm@11.19.0",
   "scripts": {

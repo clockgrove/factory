@@ -4,13 +4,35 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ## Unreleased
 
-The current `2.x` package and plugin manifest versions identify development snapshots;
-they do not by themselves indicate a published or fully qualified release. The historical
-`v1.0.0` and `v1.0.1` Git tags predate this development line. Consult
-[GitHub Releases](https://github.com/clockgrove/factory/releases) for published release notes
-and artifacts, and record the commit SHA when installing from source.
+No changes yet.
+
+## 2.0.27-beta.0 - 2026-09-17
+
+This is Factory's Initial Beta prerelease. Its support claim covers Windows WSL2 with repositories,
+Factory state, credentials, controllers, and workers on the Linux filesystem. The supported
+execution surfaces are local Codex SDK workers with Codex CLI fallback, explicit local Codex App
+Server sessions, and GitHub Copilot managed execution within its documented operator-assisted
+lifecycle limits. Native Linux, Linux guests hosted by macOS, Daytona, managed Codex, and Labs
+adapters remain implemented or tracked targets without an Initial Beta support claim.
+
+The npm package uses version `2.0.27-beta.0` and the `beta` distribution channel. When published, the
+synchronized plugin and GitHub prerelease will use the immutable `v2.0.27-beta.0` tag.
+Prepublication qualification binds the exact version, source commit, and generated artifact
+identities; publication binds that unchanged commit to the tag.
 
 ### Added
+
+- Bind repository capture to one authoritative catalog across setup, compilation, Worker Packet
+  projection, runtime invocation, and evidence validation. Unsupported or divergent capture
+  commands fail before execution. ([#445](https://github.com/clockgrove/factory/issues/445))
+
+- Resolve validation profiles for each exact output role, including mixed structured, raster, text,
+  and explicitly unprofiled outputs, so compilation and review require the correct independent
+  evidence for every produced result. ([#446](https://github.com/clockgrove/factory/issues/446))
+
+- Generate beta release artifacts in a clean sibling staging directory and publish them atomically
+  only after exact package, plugin, SBOM, checksum, provenance, and source identities pass.
+  ([#447](https://github.com/clockgrove/factory/issues/447))
 
 - Add an explainable Objective-planning gate with strict bounded-graph, proposed-Objective, and
   clarification outcomes. Project-sized or serial-heavy requests can now return completely covered,
@@ -37,6 +59,19 @@ and artifacts, and record the commit SHA when installing from source.
   versioning and keep detailed operator guidance available from the README.
 
 ### Fixed
+
+- Resume persisted local validation scope rebounds from authenticated history, and require provider
+  idempotency authority before any remote replacement so restart cannot duplicate billable work.
+  ([#443](https://github.com/clockgrove/factory/issues/443))
+
+- Recheck every Git LFS pointer's exact remote object immediately before each ref or merge mutation,
+  while keeping ordinary non-LFS delivery free of added transport work.
+  ([#444](https://github.com/clockgrove/factory/issues/444))
+
+- Persist terminal validation receipts when repository capture output validation fails, and bind the
+  rebound qualification fixture to its capture criterion so restart evidence exercises the intended
+  path. ([#453](https://github.com/clockgrove/factory/issues/453),
+  [#454](https://github.com/clockgrove/factory/issues/454))
 
 - Give new omitted-policy Objective activations an explicit bounded compiler auto-repair envelope,
   preserving exact historical and caller-supplied policy authority while reporting each compiler

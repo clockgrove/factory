@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assertNativeControllerTakeover,
   assertNativeCancellationBoundary,
+  assertNativeLinearControllerAuthority,
+  assertNativeLinearCandidate,
   assertNativeLinearFinalTree,
   assertNativeLinearHistory,
   assertNativeLinearPublicationProofs,
@@ -11,6 +13,7 @@ import {
   assertNativeLinearTerminal,
   assertNoOpenLiabilities,
   executeNativeLinearControllerCase,
+  main,
   nativeLinearObjectiveBody,
   nativeLinearQualification,
   observeNativeLinearProofs,
@@ -33,6 +36,80 @@ const canonical = (value: unknown): string =>
           )
           .join(",")}}`
     : JSON.stringify(value);
+
+function controllerFields(sequence: number, controllerId: string, epoch: number) {
+  const fields = {
+    objective: 7,
+    runId: "run",
+    sequence,
+    at: "2026-09-18T00:00:00.000Z",
+    expiresAt: `2026-09-18T00:${10 + epoch}:00.000Z`,
+    observationScope: "repository-controller",
+    controllerId,
+    epoch,
+    controllerPolicyDigest: digest("d"),
+    protocolMin: "clockgrove.factory/v2",
+    protocolMax: "clockgrove.factory/v2",
+    writerHolder: `writer-${epoch}`,
+    writerEpoch: epoch,
+    writerPolicyDigest: digest("d"),
+  };
+  return {
+    ...fields,
+    writerOperationId: hash(
+      JSON.stringify([
+        fields.objective,
+        fields.runId,
+        fields.writerHolder,
+        fields.writerEpoch,
+        fields.writerPolicyDigest,
+        fields.sequence,
+      ]),
+    ),
+  };
+}
+
+function checkpointRead(
+  demand: { ref: string; path: string },
+  document: Record<string, unknown>,
+  target: string,
+) {
+  const content = JSON.stringify(document);
+  const bytes = Buffer.from(content);
+  const blobOid = createHash("sha1")
+    .update(Buffer.from(`blob ${bytes.length}\0`))
+    .update(bytes)
+    .digest("hex");
+  const treePaths = [];
+  let child = blobOid;
+  const parts = demand.path.split("/");
+  for (const [index, name] of [...parts].reverse().entries()) {
+    const entry = {
+      path: name,
+      type: index === 0 ? "blob" : "tree",
+      mode: index === 0 ? "100644" : "040000",
+      sha: child,
+    };
+    const encoded = Buffer.concat([
+      Buffer.from(`${entry.mode.replace(/^0/, "")} ${name}\0`),
+      Buffer.from(child, "hex"),
+    ]);
+    child = createHash("sha1")
+      .update(Buffer.from(`tree ${encoded.length}\0`))
+      .update(encoded)
+      .digest("hex");
+    treePaths.unshift({ sha: child, entries: [entry] });
+  }
+  const oid = head("e");
+  return {
+    ref: demand.ref,
+    commit: { oid, treeOid: child, parentOids: [target], message: "checkpoint" },
+    observedRefOid: oid,
+    blobOid,
+    content,
+    treePaths,
+  };
+}
 
 type QualificationEvent = {
   event: string;
@@ -105,7 +182,7 @@ function history(): QualificationEvent[] {
       objective: 1,
       workItem: 2,
       attempt: 1,
-      headSha: head("a"),
+      headSha: head("1"),
       sequence: 20,
     },
     {
@@ -158,7 +235,7 @@ function history(): QualificationEvent[] {
       objective: 1,
       workItem: 3,
       attempt: 1,
-      headSha: head("d"),
+      headSha: head("2"),
       sequence: 30,
     },
     {
@@ -192,7 +269,7 @@ function history(): QualificationEvent[] {
       objective: 1,
       workItem: 4,
       attempt: 1,
-      headSha: head("f"),
+      headSha: head("3"),
       sequence: 40,
     },
     ...["one", "two", "three"].flatMap((suffix, index) => [
@@ -236,6 +313,16 @@ function proofEvents(): QualificationEvent[] {
       baseSha: event.baseSha!,
       outputTreeSha: head(String(index + 7)),
       passed: true,
+    })),
+    ...initial.map((event, index) => ({
+      event: "AttemptPublished",
+      runId: "run",
+      objective: 1,
+      workItem: event.workItem!,
+      attempt: 1,
+      sequence: index + 4,
+      headSha: event.headSha!,
+      artifactDigest: digest("9"),
     })),
   );
   for (const event of events.filter((entry) => entry.event === "AttemptPublished")) {
@@ -361,13 +448,7 @@ function controllerInput(caseName: "response-loss-restart" | "active-cancellatio
     },
     {
       event: "ControllerObserved",
-      runId: "run",
-      objective: 7,
-      sequence: 21,
-      observationScope: "repository-controller",
-      controllerId: "controller-one",
-      epoch: 4,
-      controllerPolicyDigest: digest("d"),
+      ...controllerFields(21, "controller-one", 4),
     },
     validation,
     {
@@ -438,9 +519,83 @@ describe("native linear-stack installed matrix", () => {
       harnessPaths: expect.arrayContaining([
         "scripts/verify-native-linear-objective.mjs",
         "scripts/verify-live-objective.mjs",
+        "scripts/qualification-reservation-authority.mjs",
         "scripts/verify-local-faults.mjs",
       ]),
     });
+  });
+
+  it("forwards the exact retained-install environment before any live work", async () => {
+    const env = {
+      FACTORY_LIVE_NATIVE_LINEAR_OBJECTIVE: "1",
+      FACTORY_LIVE_OBJECTIVE_PREFLIGHT: "1",
+      FACTORY_LIVE_NATIVE_LINEAR_CASE: "cascade",
+      FACTORY_LIVE_OBJECTIVE_NAMESPACE: "native-linear-authority",
+      FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "250000",
+      FACTORY_QUALIFICATION_INSTALL_RECEIPT: "/private/exact/install-identities.txt",
+    };
+    const prior = process.env.FACTORY_QUALIFICATION_INSTALL_RECEIPT;
+    process.env.FACTORY_QUALIFICATION_INSTALL_RECEIPT = "/drifted/global/receipt.txt";
+    const run = vi.fn(async (_qualification, options) => {
+      expect(options.env).toBe(env);
+      expect(options.env.FACTORY_QUALIFICATION_INSTALL_RECEIPT).toBe(
+        "/private/exact/install-identities.txt",
+      );
+    });
+    try {
+      await main(env, run);
+    } finally {
+      if (prior === undefined) delete process.env.FACTORY_QUALIFICATION_INSTALL_RECEIPT;
+      else process.env.FACTORY_QUALIFICATION_INSTALL_RECEIPT = prior;
+    }
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds controller status and exact running argv to the retained candidate", () => {
+    const pluginRoot = process.cwd();
+    const artifactIdentity = `sha256:${digest("a")}`;
+    const controller = {
+      unit: "factory.service",
+      installed: true,
+      enabled: true,
+      active: true,
+      healthy: true,
+      launcherCurrent: true,
+      reasonCode: null,
+      executableIdentity: artifactIdentity,
+      currentExecutableIdentity: artifactIdentity,
+    };
+    const checkout = "/home/operator/project";
+    const expectedArgv = [
+      process.execPath,
+      `${pluginRoot}/dist/factory.js`,
+      "controller",
+      "run",
+      "example/fixture",
+      "--repo",
+      checkout,
+      "--executable-identity",
+      artifactIdentity,
+    ];
+    const evidence = {
+      repository: "example/fixture",
+      installedCandidate: {
+        factoryArtifactIdentity: artifactIdentity,
+        artifactAuthority: { pluginRoot },
+      },
+    };
+    expect(
+      assertNativeLinearControllerAuthority(controller, evidence, checkout, {
+        pid: () => 123,
+        argv: () => expectedArgv,
+      }),
+    ).toMatchObject({ pid: 123, artifactIdentity });
+    expect(() =>
+      assertNativeLinearControllerAuthority(controller, evidence, checkout, {
+        pid: () => 123,
+        argv: () => [...expectedArgv.slice(0, -1), `sha256:${digest("b")}`],
+      }),
+    ).toThrow();
   });
 
   it.each(["", "other", "native-unavailable"])(
@@ -525,17 +680,11 @@ describe("native linear-stack installed matrix", () => {
       },
     ],
     [
-      "duplicate accounting",
+      "unbound lower merge identity",
       (events: ReturnType<typeof history>) => {
-        events.push(
-          structuredClone(
-            events.find(
-              (event) =>
-                event.event === "BudgetReconciled" &&
-                event.usageId === "integration-validation-one",
-            )!,
-          ),
-        );
+        events.find(
+          (event) => event.event === "ValidationInvalidated" && event.workItem === 3,
+        )!.invalidatedByHeadSha = head("9");
       },
     ],
   ] as const)("rejects deterministic %s evidence", (_name, mutate) => {
@@ -613,7 +762,7 @@ describe("native linear-stack installed matrix", () => {
     expect(evidence.nativeLinearProofs).toEqual(
       expect.arrayContaining([expect.objectContaining({ position: 2, publicationIndex: 1 })]),
     );
-    expect(evidence.nativeLinearProofs!.filter((proof) => proof.reviewDemand)).toHaveLength(3);
+    expect(evidence.nativeLinearProofs!.filter((proof) => proof.reviewDemand)).toHaveLength(6);
 
     const missing = structuredClone(evidence);
     missing.nativeLinearProofs!.splice(4, 1);
@@ -661,6 +810,8 @@ describe("native linear-stack installed matrix", () => {
         event.workItem === publication.workItem &&
         event.headSha === publication.headSha,
     )!;
+    published.sequence = 25;
+    publication.sequence = 26;
     const identity = {
       kind: "rebase",
       runId: publication.runId,
@@ -692,13 +843,15 @@ describe("native linear-stack installed matrix", () => {
       ),
       {
         event: "BudgetReconciled",
+        runId: publication.runId,
+        objective: publication.objective,
         workItem: publication.workItem,
         attempt: publication.attempt,
         phase: "management",
         unit: "model_tokens",
         usageId: `rebase-review-${identityDigest}`,
         amount: 8,
-        sequence: publication.sequence! - 1,
+        sequence: 24,
       },
     ];
     expect(assertNativeLinearReview(review, publication, validation, published, reviewEvents)).toBe(
@@ -722,10 +875,206 @@ describe("native linear-stack installed matrix", () => {
         reviewEvents,
       ),
     ).toThrow();
+    expect(() =>
+      assertNativeLinearReview(
+        { ...review, usage: { inputTokens: 0, outputTokens: 3 } },
+        publication,
+        validation,
+        published,
+        reviewEvents,
+      ),
+    ).toThrow(/positive exact counter/);
+    expect(() =>
+      assertNativeLinearReview(
+        { ...review, usage: { inputTokens: 5, outputTokens: 3, cachedInputTokens: 6 } },
+        publication,
+        validation,
+        published,
+        reviewEvents,
+      ),
+    ).toThrow(/cached input/);
+    const wrongAmount = structuredClone(reviewEvents);
+    wrongAmount.at(-1)!.amount = 7;
+    expect(() =>
+      assertNativeLinearReview(review, publication, validation, published, wrongAmount),
+    ).toThrow();
+    const stale = structuredClone(reviewEvents);
+    stale.at(-1)!.sequence = validation.sequence!;
+    expect(() =>
+      assertNativeLinearReview(review, publication, validation, published, stale),
+    ).toThrow(/fence/);
     reviewEvents.at(-1)!.usageId = `rebase-review-${digest("f")}`;
     expect(() =>
       assertNativeLinearReview(review, publication, validation, published, reviewEvents),
     ).toThrow(/accounting/);
+  });
+
+  it("requires an exact positive semantic review for an initial publication", () => {
+    const initialPublication = publication(0, 5, head("a"), head("0"), digest("a"));
+    const validation = {
+      event: "ValidationRecorded",
+      runId: "run",
+      objective: 1,
+      workItem: 2,
+      attempt: 1,
+      sequence: 2,
+      baseSha: head("0"),
+      outputTreeSha: head("7"),
+      evidenceDigest: digest("a"),
+      passed: true,
+    };
+    const published = {
+      event: "AttemptPublished",
+      runId: "run",
+      objective: 1,
+      workItem: 2,
+      attempt: 1,
+      sequence: 4,
+      headSha: head("a"),
+      artifactDigest: digest("9"),
+    };
+    const identity = {
+      kind: "artifact",
+      runId: "run",
+      objective: 1,
+      workItem: 2,
+      attempt: 1,
+      artifactDigest: digest("9"),
+      baseSha: head("0"),
+      outputTreeSha: head("7"),
+      evidenceDigest: digest("a"),
+    };
+    const identityDigest = hash(canonical(identity));
+    const review = {
+      protocol: "clockgrove.factory/review-checkpoint-v1",
+      identity,
+      identityDigest,
+      review: { accepted: true, unmetCriteria: [] },
+      usage: { inputTokens: 3, outputTokens: 2, cachedInputTokens: 1 },
+    };
+    const accounting = [
+      {
+        event: "BudgetReconciled",
+        runId: "run",
+        objective: 1,
+        workItem: 2,
+        attempt: 1,
+        phase: "management",
+        unit: "model_tokens",
+        usageId: `review-${identityDigest}`,
+        amount: 5,
+        sequence: 3,
+      },
+    ];
+    expect(
+      assertNativeLinearReview(review, initialPublication, validation, published, accounting, 0),
+    ).toBe(identityDigest);
+  });
+
+  it("binds integration validation accounting to the exact final candidate", () => {
+    const published = publication(0, 10, head("a"), head("0"), digest("a"));
+    published.pullRequest = 2;
+    published.exactHeadValidationDigest = exactBinding(published, {
+      event: "ValidationRecorded",
+      evidenceDigest: digest("a"),
+      baseSha: head("0"),
+      outputTreeSha: head("7"),
+      passed: true,
+    });
+    const sourceValidation = { outputTreeSha: head("7") };
+    const identity = {
+      runId: "run",
+      objective: 1,
+      workItem: 2,
+      attempt: 1,
+      pullRequest: 2,
+      sourceHeadSha: head("a"),
+      sourceExactHeadValidationDigest: published.exactHeadValidationDigest,
+      targetBaseSha: head("0"),
+      deliveryHeadSha: head("a"),
+    };
+    const identityDigest = hash(JSON.stringify(identity));
+    const demand = {
+      kind: "checkpoint",
+      ref:
+        `refs/clockgrove-factory/merge-candidates/objective-1/` +
+        `work-item-2/attempt-1/candidate-${identityDigest}`,
+      path: ".clockgrove-factory/control/merge-candidate.json",
+      maxBytes: 512 * 1024,
+    };
+    const validationCore = {
+      protocol: "clockgrove.factory/validation-v1",
+      artifactDigest: digest("9"),
+      baseSha: head("0"),
+      outputTreeSha: head("7"),
+      commands: [{ command: "npm test", exitCode: 0, durationMs: 5000 }],
+      passed: true,
+      startedAt: "2026-09-18T00:00:00.000Z",
+      completedAt: "2026-09-18T00:00:05.000Z",
+    };
+    const validation = { ...validationCore, digest: hash(JSON.stringify(validationCore)) };
+    const sourceCore = {
+      protocol: "clockgrove.factory/exact-head-validation-v1",
+      validationDigest: digest("a"),
+      baseSha: head("0"),
+      outputTreeSha: head("7"),
+      publishedHeadSha: head("a"),
+    };
+    const source = { ...sourceCore, digest: hash(JSON.stringify(sourceCore)) };
+    const bound = {
+      protocol: "clockgrove.factory/merge-candidate-validation-v1",
+      sourceExactHeadValidationDigest: source.digest,
+      sourceBaseSha: source.baseSha,
+      sourceHeadSha: source.publishedHeadSha,
+      sourceTreeSha: source.outputTreeSha,
+      targetBaseSha: head("0"),
+      candidateOutputTreeSha: head("7"),
+      candidateArtifactDigest: validation.artifactDigest,
+      candidateValidationDigest: validation.digest,
+    };
+    const document = {
+      protocol: "clockgrove.factory/merge-candidate-checkpoint-v1",
+      identity,
+      identityDigest,
+      source,
+      validation,
+      evidence: { ...bound, digest: hash(JSON.stringify(bound)) },
+    };
+    const proof = {
+      publication: published,
+      validation: sourceValidation,
+      sourcePublication: published,
+      sourceValidation,
+      integration: { sequence: 14 },
+      candidateIdentity: identity,
+      candidateIdentityDigest: identityDigest,
+      candidateDemand: demand,
+      candidateRead: checkpointRead(demand, document, head("0")),
+    };
+    const accounting = [
+      {
+        event: "BudgetReconciled",
+        runId: "run",
+        objective: 1,
+        workItem: 2,
+        attempt: 1,
+        phase: "validation",
+        unit: "validation_milliseconds",
+        usageId: `integration-validation-${identityDigest}`,
+        amount: 5000,
+        sequence: 12,
+      },
+    ];
+    expect(() => assertNativeLinearCandidate(proof, accounting)).not.toThrow();
+    for (const mutate of [
+      (events: typeof accounting) => (events[0]!.amount = 4999),
+      (events: typeof accounting) => (events[0]!.usageId = "integration-validation-other"),
+      (events: typeof accounting) => (events[0]!.sequence = 15),
+    ]) {
+      const changed = structuredClone(accounting);
+      mutate(changed);
+      expect(() => assertNativeLinearCandidate(proof, changed)).toThrow();
+    }
   });
 
   it("uses standard marker-to-actual model accounting and rejects open or duplicate usage", () => {
@@ -776,28 +1125,22 @@ describe("native linear-stack installed matrix", () => {
     const events: QualificationEvent[] = [
       {
         event: "ControllerObserved",
-        sequence: 1,
-        observationScope: "repository-controller",
-        controllerId: "old",
-        epoch: 4,
-        controllerPolicyDigest: digest("a"),
+        ...controllerFields(1, "old", 4),
       },
       trigger,
       {
         event: "ControllerObserved",
-        sequence: 3,
-        observationScope: "repository-controller",
-        controllerId: "new",
-        epoch: 5,
-        controllerPolicyDigest: digest("a"),
+        ...controllerFields(3, "new", 5),
       },
       { event: "AttemptPublished", sequence: 4 },
     ];
-    const expected = {
-      controllerId: "old",
-      epoch: 4,
-      controllerPolicyDigest: digest("a"),
-    };
+    const expectedEvent = { event: "ControllerObserved", ...controllerFields(1, "old", 4) };
+    const expected = Object.fromEntries(
+      Object.entries(expectedEvent).filter(
+        ([key]) =>
+          !["event", "objective", "runId", "sequence", "at", "observationScope"].includes(key),
+      ),
+    );
     expect(assertNativeControllerTakeover(events, trigger, expected)).toMatchObject({
       after: { controllerId: "new", epoch: 5 },
     });
@@ -814,9 +1157,25 @@ describe("native linear-stack installed matrix", () => {
       (copy: typeof events) => {
         copy[2]!.sequence = 5;
       },
+      (copy: typeof events) => {
+        copy[2]!.protocolMax = "clockgrove.factory/future";
+      },
+      (copy: typeof events) => {
+        copy[2]!.writerOperationId = digest("f");
+      },
     ]) {
       const copy = structuredClone(events);
       mutate(copy);
+      expect(() => assertNativeControllerTakeover(copy, trigger, expected)).toThrow();
+    }
+    for (const field of ["controllerId", "expiresAt", "protocolMin", "controllerPolicyDigest"]) {
+      const copy = structuredClone(events);
+      const prior = { event: "ControllerObserved", ...controllerFields(0, "old", 4) };
+      copy.unshift(prior);
+      if (field === "controllerId") copy[1]!.controllerId = "drifted";
+      else if (field === "expiresAt") copy[1]!.expiresAt = "2026-09-18T00:19:00.000Z";
+      else if (field === "protocolMin") copy[1]!.protocolMin = "clockgrove.factory/other";
+      else copy[1]!.controllerPolicyDigest = digest("e");
       expect(() => assertNativeControllerTakeover(copy, trigger, expected)).toThrow();
     }
   });
@@ -902,6 +1261,13 @@ describe("native linear-stack installed matrix", () => {
     const identityDigest = hash(canonical(identity));
     events.push(
       {
+        event: "ActivationRequested",
+        runId: "run",
+        objective: 1,
+        requestId: "activate-once",
+        sequence: 0,
+      },
+      {
         event: "BudgetReconciled",
         runId: "run",
         objective: 1,
@@ -932,6 +1298,19 @@ describe("native linear-stack installed matrix", () => {
     };
     const evidence = {
       repository: "example/fixture",
+      runRequest: { tool: "factory_activate", arguments: { requestId: "activate-once" } },
+      children: [
+        { number: 2, state: "closed" },
+        { number: 3, state: "open" },
+        { number: 4, state: "open" },
+      ],
+      status: {
+        workItems: [
+          { number: 2, state: "done" },
+          { number: 3, state: "running" },
+          { number: 4, state: "blocked" },
+        ],
+      },
       pulls: [pull],
       mergeProofs: [
         {
@@ -944,7 +1323,7 @@ describe("native linear-stack installed matrix", () => {
           repository: "example/fixture",
           repositoryNodeId: "repo-node",
           headSha: head("a"),
-          mergeSha: head("a"),
+          mergeSha: head("1"),
         },
       ],
       nativeLinearIntervention: {
@@ -969,7 +1348,8 @@ describe("native linear-stack installed matrix", () => {
           publicationSequence: 26,
           operationId: "linear-stack-operation",
           integratedWorkItem: 2,
-          integrationHeadSha: head("a"),
+          integrationSourceHeadSha: head("a"),
+          integrationHeadSha: head("1"),
           integrationCompletedSequence: 19,
           attemptIntegratedSequence: 20,
         },
@@ -1020,6 +1400,34 @@ describe("native linear-stack installed matrix", () => {
     advanced.push({ event: "IntegrationCompleted", sequence: 31 });
     expect(() => assertNativeCancellationBoundary(evidence, advanced)).toThrow(
       /advanced after durable cancellation/,
+    );
+    for (const event of [
+      "IntegrationPending",
+      "RunPauseRequested",
+      "RunResumeRequested",
+      "RunDrainRequested",
+      "CloudPauseRequested",
+      "WorkItemRetryRequested",
+      "RecoveryRequested",
+      "ActivationCancellationRequested",
+    ]) {
+      const intervened = structuredClone(events);
+      intervened.push({
+        event,
+        sequence: 31,
+        kind: event.startsWith("Recovery") ? "recovery" : "run",
+      });
+      expect(() => assertNativeCancellationBoundary(evidence, intervened)).toThrow();
+    }
+    const extraActivation = structuredClone(events);
+    extraActivation.push({ event: "ActivationRequested", requestId: "other", sequence: 1 });
+    expect(() => assertNativeCancellationBoundary(evidence, extraActivation)).toThrow(
+      /another activation/,
+    );
+    const resolvedDescendant = structuredClone(evidence);
+    resolvedDescendant.children[1]!.state = "closed";
+    expect(() => assertNativeCancellationBoundary(resolvedDescendant, events)).toThrow(
+      /descendant issue is resolved/,
     );
 
     const replacedSentinel = structuredClone(evidence);
@@ -1076,9 +1484,14 @@ describe("native linear-stack installed matrix", () => {
       ],
       status: { run: { availability: "observed", state: "completed" } },
     }));
-    await expect(executeNativeLinearControllerCase(input)).rejects.toThrow(
-      /ended before its bounded intervention/,
-    );
+    await expect(executeNativeLinearControllerCase(input)).resolves.toEqual({
+      objective: 7,
+      runId: "run",
+      status: "completed",
+    });
+    expect(input.evidence).toMatchObject({
+      nativeLinearEarlyTerminal: { runId: "run", status: "completed" },
+    });
     expect(input.call).toHaveBeenCalledTimes(1);
     expect(input.call).toHaveBeenCalledWith("factory_activate", input.runRequest.arguments);
   });

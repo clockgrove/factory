@@ -23,9 +23,10 @@ Work Items as one root → middle → top delivery stack. The three independentl
 Presence of the runner and credential-free tests is not installed evidence. Each case needs its own
 fresh 8–48 character namespace and owner-private evidence directory. The target must be a writable
 private disposable repository with a clean Linux-native checkout, no active ruleset/default-branch
-protection, no open Factory pull request, and the exact candidate installed in the default Linux
-Codex home. The two controller cases additionally require an active healthy repository controller
-running that installed candidate.
+protection, no open Factory pull request, and the exact candidate in the isolated retained install
+selected by the receipt. The two controller cases additionally require an active healthy repository
+controller whose status and live process argv both identify that retained candidate. The isolated
+install is artifact authority; normal Linux `~/.codex` supplies provider authentication only.
 
 Install the retained npm and Agent Plugin candidate first. Set
 `FACTORY_QUALIFICATION_INSTALL_RECEIPT` to the owner-private `install-identities.txt` created for
@@ -63,6 +64,9 @@ Repeat with `FACTORY_LIVE_NATIVE_LINEAR_CASE=response-loss-restart` and
 `FACTORY_LIVE_NATIVE_LINEAR_CASE=active-cancellation`, using a new namespace and evidence directory
 for each case. Refresh the checkout to the current default branch between completed cases. Never
 rerun an uncertain case with the same namespace or relabel a failed/cancelled case as another case.
+After final evidence is retained, delete every generated fixture path from the disposable repository.
+If deletion cannot be completed, record the exact remaining path, reason, owner, expiry, and scheduled
+review with the qualification result; an unowned or unbounded fixture blocks the gate.
 
 Evidence stays private. It binds the installed bundle inventory, candidate harness hashes, Objective,
 run, controller activation, every initial and rewritten Work Item head/base/tree identity, invalidation

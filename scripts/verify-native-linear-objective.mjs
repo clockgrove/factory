@@ -2,14 +2,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
   assertQualificationNamespace,
-  assertRecordedQualificationPolicy,
   boundedPolicy,
   main as installedMain,
   modelTokenLimit,
@@ -31,7 +30,7 @@ import {
   isQualificationModelMarker,
   qualificationModelAccounting,
 } from "./qualification-model-accounting.mjs";
-import { parseUnitObservation } from "./verify-local-faults.mjs";
+import { assertFaultControllerAuthority, parseUnitObservation } from "./verify-local-faults.mjs";
 
 const scope = "installed-local-native-linear-stack";
 const cases = new Set(["cascade", "response-loss-restart", "active-cancellation"]);
@@ -48,6 +47,7 @@ const harnessFiles = [
   "qualification-sibling-refresh-proof.mjs",
   "qualification-native-scopes.mjs",
   "qualification-model-accounting.mjs",
+  "qualification-reservation-authority.mjs",
   "verify-local-faults.mjs",
 ];
 const hash = (value) =>
@@ -68,9 +68,9 @@ const one = (values, message) => {
   return values[0];
 };
 
-function rebaseIdentity(publication, validation, published) {
+function reviewIdentity(publication, validation, published, kind) {
   return {
-    kind: "rebase",
+    kind,
     runId: publication.runId,
     objective: publication.objective,
     workItem: publication.workItem,
@@ -79,12 +79,14 @@ function rebaseIdentity(publication, validation, published) {
     baseSha: validation.baseSha,
     outputTreeSha: validation.outputTreeSha,
     evidenceDigest: validation.evidenceDigest,
-    headSha: publication.headSha,
+    ...(kind === "rebase" ? { headSha: publication.headSha } : {}),
   };
 }
 
-function rebaseReviewDemand(publication, identity) {
+function reviewDemand(publication, identity) {
   const identityDigest = hash(canonical(identity));
+  const suffix =
+    identity.kind === "artifact" ? `artifact-${identityDigest}` : `rebase-${identityDigest}`;
   return {
     identityDigest,
     demand: {
@@ -92,9 +94,53 @@ function rebaseReviewDemand(publication, identity) {
       ref:
         `refs/clockgrove-factory/reviews/objective-${publication.objective}/` +
         `work-item-${publication.workItem}/attempt-${publication.attempt}/` +
-        `rebase-${identityDigest}`,
+        suffix,
       path: ".clockgrove-factory/control/semantic-review.json",
       maxBytes: 65_536,
+    },
+  };
+}
+
+function publicationReview(publication, validation, published, publicationIndex) {
+  const kind = publicationIndex === 0 ? "artifact" : "rebase";
+  const identity = reviewIdentity(publication, validation, published, kind);
+  const { identityDigest, demand } = reviewDemand(publication, identity);
+  return {
+    identity,
+    identityDigest,
+    demand,
+    usageId: `${kind === "artifact" ? "review" : "rebase-review"}-${identityDigest}`,
+  };
+}
+
+function mergeCandidateIdentity(sourcePublication, publication) {
+  return {
+    runId: publication.runId,
+    objective: publication.objective,
+    workItem: publication.workItem,
+    attempt: publication.attempt,
+    pullRequest: publication.pullRequest,
+    sourceHeadSha: sourcePublication.headSha,
+    sourceExactHeadValidationDigest: sourcePublication.exactHeadValidationDigest,
+    targetBaseSha: publication.baseSha,
+    deliveryHeadSha: publication.headSha,
+  };
+}
+
+function mergeCandidateDemand(sourcePublication, publication) {
+  const identity = mergeCandidateIdentity(sourcePublication, publication);
+  const identityDigest = hash(JSON.stringify(identity));
+  return {
+    identity,
+    identityDigest,
+    demand: {
+      kind: "checkpoint",
+      ref:
+        `refs/clockgrove-factory/merge-candidates/objective-${publication.objective}/` +
+        `work-item-${publication.workItem}/attempt-${publication.attempt}/` +
+        `candidate-${identityDigest}`,
+      path: ".clockgrove-factory/control/merge-candidate.json",
+      maxBytes: 512 * 1024,
     },
   };
 }
@@ -168,6 +214,37 @@ function observeSentinelUnit(unit, port) {
     ),
     port.now(),
   );
+}
+
+function controllerProcessPort() {
+  return {
+    pid: (unit) =>
+      Number(command("systemctl", ["--user", "show", unit, "--property=MainPID", "--value"])),
+    argv: (pid) => readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean),
+  };
+}
+
+export function assertNativeLinearControllerAuthority(
+  controller,
+  evidence,
+  checkout,
+  port = controllerProcessPort(),
+) {
+  const candidate = evidence.installedCandidate;
+  assert.ok(candidate, "retained installed candidate authority is unavailable");
+  const pid = port.pid(controller.unit);
+  assert.ok(Number.isSafeInteger(pid) && pid > 0, "active controller PID unavailable");
+  const runningArgv = port.argv(pid);
+  const authority = {
+    artifactIdentity: candidate.factoryArtifactIdentity,
+    launcher: realpathSync(process.execPath),
+    bundle: realpathSync(join(candidate.artifactAuthority.pluginRoot, "dist/factory.js")),
+    repository: evidence.repository,
+    checkout,
+    runningArgv,
+  };
+  assertFaultControllerAuthority(controller, authority);
+  return { pid, ...authority };
 }
 
 export function startNativeLinearSentinel(port = systemdPort()) {
@@ -315,10 +392,42 @@ function controllerGeneration(event) {
   );
   assert.ok(Number.isSafeInteger(event.epoch) && event.epoch > 0, "controller epoch is invalid");
   assert.match(event.controllerPolicyDigest, /^[a-f0-9]{64}$/);
+  assert.ok(Number.isSafeInteger(Date.parse(event.expiresAt)), "controller expiry is invalid");
+  assert.ok(
+    Date.parse(event.expiresAt) > Date.parse(event.at),
+    "controller observation is expired",
+  );
+  for (const field of ["protocolMin", "protocolMax", "writerHolder"])
+    assert.ok(typeof event[field] === "string" && event[field].length > 0, `${field} is invalid`);
+  assert.ok(
+    Number.isSafeInteger(event.writerEpoch) && event.writerEpoch > 0,
+    "controller writer epoch is invalid",
+  );
+  assert.match(event.writerPolicyDigest, /^[a-f0-9]{64}$/);
+  const writerOperationId = hash([
+    event.objective,
+    event.runId,
+    event.writerHolder,
+    event.writerEpoch,
+    event.writerPolicyDigest,
+    event.sequence,
+  ]);
+  assert.equal(
+    event.writerOperationId,
+    writerOperationId,
+    "controller writer operation is invalid",
+  );
   return {
     controllerId: event.controllerId,
     epoch: event.epoch,
+    expiresAt: event.expiresAt,
     controllerPolicyDigest: event.controllerPolicyDigest,
+    protocolMin: event.protocolMin,
+    protocolMax: event.protocolMax,
+    writerHolder: event.writerHolder,
+    writerEpoch: event.writerEpoch,
+    writerPolicyDigest: event.writerPolicyDigest,
+    writerOperationId: event.writerOperationId,
   };
 }
 
@@ -363,18 +472,17 @@ function revalidatedProgress(events, runId) {
     assert.ok(publishedEvents.length <= 1, "intervention publication attempt is repeated");
     const published = publishedEvents[0];
     if (!published) continue;
-    const review = rebaseReviewDemand(
-      publication,
-      rebaseIdentity(publication, validation, published),
-    );
+    const review = publicationReview(publication, validation, published, 1);
     const reviewUsages = own.filter(
       (event) =>
         event.event === "BudgetReconciled" &&
+        event.runId === publication.runId &&
+        event.objective === publication.objective &&
         event.workItem === publication.workItem &&
         event.attempt === publication.attempt &&
         event.phase === "management" &&
         event.unit === "model_tokens" &&
-        event.usageId === `rebase-review-${review.identityDigest}` &&
+        event.usageId === review.usageId &&
         event.sequence > validation.sequence &&
         event.sequence < publication.sequence,
     );
@@ -391,9 +499,9 @@ function revalidatedProgress(events, runId) {
         event.event === "AttemptIntegrated" &&
         event.workItem === durableOperation.workItem &&
         event.attempt === durableOperation.attempt &&
-        event.headSha === durableOperation.headSha &&
         event.sequence > durableOperation.sequence &&
-        event.sequence < invalidated.sequence,
+        event.sequence < invalidated.sequence &&
+        event.headSha === invalidated.invalidatedByHeadSha,
     );
     if (integrated.length !== 1) continue;
     const predecessor = publication
@@ -426,7 +534,8 @@ function revalidatedProgress(events, runId) {
         publicationSequence: publication.sequence,
         operationId: durableOperation.operationId,
         integratedWorkItem: durableOperation.workItem,
-        integrationHeadSha: durableOperation.headSha,
+        integrationSourceHeadSha: durableOperation.headSha,
+        integrationHeadSha: integrated[0].headSha,
         integrationCompletedSequence: durableOperation.sequence,
         attemptIntegratedSequence: integrated[0].sequence,
         controllerGeneration: controllerGeneration(predecessor),
@@ -468,8 +577,12 @@ export async function executeNativeLinearControllerCase({
       assert.equal(start.runId, runId, "activation started more than one run");
     }
     const state = finalState(observation.status);
-    if (state && !evidence.nativeLinearIntervention)
-      throw new Error("native run ended before its bounded intervention");
+    if (state && !evidence.nativeLinearIntervention) {
+      assert.ok(runId, "terminal controller run has no activation-bound run identity");
+      evidence.nativeLinearEarlyTerminal = { runId, status: state };
+      save();
+      return { objective: evidence.objective.number, runId, status: state };
+    }
     if (!evidence.nativeLinearIntervention && runId) {
       const progress = revalidatedProgress(observation.events, runId);
       if (progress) {
@@ -539,28 +652,54 @@ function publicationsByPosition(events) {
     }));
 }
 
-export function assertNativeLinearReview(review, publication, validation, published, events) {
-  const identity = rebaseIdentity(publication, validation, published);
-  const { identityDigest } = rebaseReviewDemand(publication, identity);
+export function assertNativeLinearReview(
+  review,
+  publication,
+  validation,
+  published,
+  events,
+  publicationIndex = 1,
+) {
+  const expected = publicationReview(publication, validation, published, publicationIndex);
+  const { identity, identityDigest, usageId } = expected;
   assert.equal(review.protocol, "clockgrove.factory/review-checkpoint-v1");
   assert.equal(review.identityDigest, identityDigest);
   assert.deepEqual(review.identity, identity);
   assert.equal(review.review.accepted, true);
   assert.deepEqual(review.review.unmetCriteria, []);
+  for (const name of ["inputTokens", "outputTokens"])
+    assert.ok(
+      Number.isSafeInteger(review.usage?.[name]) && review.usage[name] > 0,
+      `review ${name} must be a positive exact counter`,
+    );
+  if (review.usage.cachedInputTokens !== undefined)
+    assert.ok(
+      Number.isSafeInteger(review.usage.cachedInputTokens) &&
+        review.usage.cachedInputTokens >= 0 &&
+        review.usage.cachedInputTokens <= review.usage.inputTokens,
+      "review cached input counter is invalid",
+    );
   const usage = one(
     events.filter(
       (event) =>
         event.event === "BudgetReconciled" &&
+        event.runId === publication.runId &&
+        event.objective === publication.objective &&
         event.workItem === publication.workItem &&
         event.attempt === publication.attempt &&
         event.phase === "management" &&
         event.unit === "model_tokens" &&
-        event.usageId === `rebase-review-${identityDigest}`,
+        event.usageId === usageId,
     ),
-    "rebase review accounting is missing or repeated",
+    "publication review accounting is missing or repeated",
   );
   assert.equal(usage.amount, review.usage.inputTokens + review.usage.outputTokens);
-  assert.ok(usage.sequence < publication.sequence, "review accounting follows publication");
+  assert.ok(
+    validation.sequence < usage.sequence &&
+      usage.sequence < published.sequence &&
+      published.sequence < publication.sequence,
+    "publication review is outside its validation/publication fence",
+  );
   return identityDigest;
 }
 
@@ -574,15 +713,26 @@ function assertExactReview(proof, events) {
         event.workItem === publication.workItem &&
         event.attempt === publication.attempt &&
         event.headSha === publication.headSha &&
-        event.sequence < publication.sequence,
+        event.sequence < publication.sequence &&
+        event.sequence > validation.sequence,
     ),
-    "revalidated head publication is missing or repeated",
+    "exact head publication is missing or repeated",
   );
-  const identity = rebaseIdentity(publication, validation, published);
-  const { demand } = rebaseReviewDemand(publication, identity);
-  assert.deepEqual(proof.reviewDemand, demand, "rebase review demand changed");
-  const review = assertQualificationCheckpoint(proof.reviewRead, demand, validation.baseSha);
-  return assertNativeLinearReview(review, publication, validation, published, events);
+  const expected = publicationReview(publication, validation, published, proof.publicationIndex);
+  assert.deepEqual(proof.reviewDemand, expected.demand, "publication review demand changed");
+  const review = assertQualificationCheckpoint(
+    proof.reviewRead,
+    expected.demand,
+    validation.baseSha,
+  );
+  return assertNativeLinearReview(
+    review,
+    publication,
+    validation,
+    published,
+    events,
+    proof.publicationIndex,
+  );
 }
 
 export async function observeNativeLinearProofs(
@@ -594,7 +744,18 @@ export async function observeNativeLinearProofs(
   evidence.nativeLinearProofs = [];
   evidence.mergeProofs = [];
   for (const { position, publications } of publicationsByPosition(events)) {
+    const invalidations = events
+      .filter(
+        (event) =>
+          event.event === "ValidationInvalidated" &&
+          event.workItem === publications[0].workItem &&
+          event.attempt === publications[0].attempt,
+      )
+      .sort((left, right) => left.sequence - right.sequence);
     for (const [publicationIndex, publication] of publications.entries()) {
+      const invalidation = publicationIndex === 0 ? undefined : invalidations[publicationIndex - 1];
+      if (publicationIndex > 0)
+        assert.ok(invalidation, "changed publication has no corresponding invalidation");
       const validation = one(
         events.filter(
           (event) =>
@@ -603,6 +764,7 @@ export async function observeNativeLinearProofs(
             event.attempt === publication.attempt &&
             event.evidenceDigest === publication.validationDigest &&
             event.baseSha === publication.baseSha &&
+            event.sequence > (invalidation?.sequence ?? -1) &&
             event.sequence < publication.sequence,
         ),
         "native publication validation is missing or repeated",
@@ -616,26 +778,23 @@ export async function observeNativeLinearProofs(
         validation,
         commitDemand,
         commitRead,
+        ...(invalidation ? { invalidation } : {}),
       };
-      if (publicationIndex > 0) {
-        const published = one(
-          events.filter(
-            (event) =>
-              event.event === "AttemptPublished" &&
-              event.workItem === publication.workItem &&
-              event.attempt === publication.attempt &&
-              event.headSha === publication.headSha &&
-              event.sequence < publication.sequence,
-          ),
-          "changed native publication attempt is missing or repeated",
-        );
-        const review = rebaseReviewDemand(
-          publication,
-          rebaseIdentity(publication, validation, published),
-        );
-        record.reviewDemand = review.demand;
-        record.reviewRead = await read(record.reviewDemand);
-      }
+      const published = one(
+        events.filter(
+          (event) =>
+            event.event === "AttemptPublished" &&
+            event.workItem === publication.workItem &&
+            event.attempt === publication.attempt &&
+            event.headSha === publication.headSha &&
+            event.sequence > validation.sequence &&
+            event.sequence < publication.sequence,
+        ),
+        "native publication attempt is missing or repeated",
+      );
+      const review = publicationReview(publication, validation, published, publicationIndex);
+      record.reviewDemand = review.demand;
+      record.reviewRead = await read(record.reviewDemand);
       evidence.nativeLinearProofs.push(record);
     }
     const publication = publications.at(-1);
@@ -648,6 +807,27 @@ export async function observeNativeLinearProofs(
     assert.ok(integrations.length <= 1, "native integration is repeated");
     const integration = integrations[0];
     if (!integration) continue;
+    const sourcePublication = publications[0];
+    const candidate = mergeCandidateDemand(sourcePublication, publication);
+    const proof = one(
+      evidence.nativeLinearProofs.filter(
+        (entry) =>
+          entry.position === position && entry.publicationIndex === publications.length - 1,
+      ),
+      "final native publication proof is missing or repeated",
+    );
+    proof.integration = integration;
+    proof.sourcePublication = sourcePublication;
+    proof.sourceValidation = one(
+      evidence.nativeLinearProofs.filter(
+        (entry) => entry.position === position && entry.publicationIndex === 0,
+      ),
+      "source native publication proof is missing or repeated",
+    ).validation;
+    proof.candidateIdentity = candidate.identity;
+    proof.candidateIdentityDigest = candidate.identityDigest;
+    proof.candidateDemand = candidate.demand;
+    proof.candidateRead = await read(candidate.demand);
     const pull = one(
       evidence.pulls.filter((entry) => entry.number === publication.pullRequest),
       "native PR identity is missing or repeated",
@@ -893,6 +1073,11 @@ export function assertNativeLinearHistory(events) {
       first.slice(0, position).map((publication) => publication.itemId),
       "native descendant invalidation causes are out of order",
     );
+    assert.deepEqual(
+      invalidations.map((event) => event.invalidatedByHeadSha),
+      integrations.slice(0, position).map((event) => event.headSha),
+      "native descendant invalidation is not bound to the exact lower merge identity",
+    );
     const heads = group.publications.map((publication) => publication.headSha);
     assert.equal(new Set(heads).size, heads.length, "changed native head was silently reused");
     for (const [index, invalidated] of invalidations.entries()) {
@@ -926,21 +1111,6 @@ export function assertNativeLinearHistory(events) {
       );
     }
   }
-  for (const prefix of ["integration-validation-", "rebase-review-"]) {
-    const usage = events.filter(
-      (event) =>
-        event.event === "BudgetReconciled" &&
-        typeof event.usageId === "string" &&
-        event.usageId.startsWith(prefix),
-    );
-    assert.equal(usage.length, 3, `${prefix} accounting does not cover the complete cascade`);
-    assert.equal(
-      new Set(usage.map((event) => event.usageId)).size,
-      usage.length,
-      `${prefix} accounting was duplicated`,
-    );
-    assert.ok(usage.every((event) => Number.isSafeInteger(event.amount) && event.amount >= 0));
-  }
   assertNativeIntegrationOperation(events, groups);
   return groups;
 }
@@ -971,6 +1141,126 @@ export function assertNativeIntegrationOperation(events, groups = publicationsBy
     "completed native cascade contains a conflicting integration outcome",
   );
   return operationId;
+}
+
+function assertValidationCheckpoint(validation) {
+  assert.deepEqual(
+    Object.keys(validation).sort(),
+    [
+      "artifactDigest",
+      "baseSha",
+      "commands",
+      "completedAt",
+      "digest",
+      ...(validation.environmentIdentity === undefined ? [] : ["environmentIdentity"]),
+      "outputTreeSha",
+      "passed",
+      "protocol",
+      "startedAt",
+    ].sort(),
+    "candidate validation fields changed",
+  );
+  assert.equal(validation.protocol, "clockgrove.factory/validation-v1");
+  assert.match(validation.artifactDigest, /^[a-f0-9]{64}$/);
+  assert.match(validation.baseSha, /^[a-f0-9]{40}$/);
+  assert.match(validation.outputTreeSha, /^[a-f0-9]{40}$/);
+  assert.equal(validation.passed, true);
+  assert.ok(Array.isArray(validation.commands) && validation.commands.length > 0);
+  for (const command of validation.commands) {
+    assert.deepEqual(
+      Object.keys(command).sort(),
+      ["command", "durationMs", "exitCode"],
+      "candidate validation command fields changed",
+    );
+    assert.ok(typeof command.command === "string" && command.command.length > 0);
+    assert.equal(command.exitCode, 0);
+    assert.ok(Number.isSafeInteger(command.durationMs) && command.durationMs >= 0);
+  }
+  const duration = Date.parse(validation.completedAt) - Date.parse(validation.startedAt);
+  assert.ok(Number.isSafeInteger(duration) && duration >= 0);
+  const ordered = {
+    protocol: validation.protocol,
+    artifactDigest: validation.artifactDigest,
+    baseSha: validation.baseSha,
+    outputTreeSha: validation.outputTreeSha,
+    commands: validation.commands,
+    passed: true,
+    startedAt: validation.startedAt,
+    completedAt: validation.completedAt,
+    ...(validation.environmentIdentity === undefined
+      ? {}
+      : { environmentIdentity: validation.environmentIdentity }),
+  };
+  assert.equal(
+    validation.digest,
+    hash(JSON.stringify(ordered)),
+    "candidate validation digest differs",
+  );
+  return duration;
+}
+
+export function assertNativeLinearCandidate(proof, events) {
+  const publication = proof.publication;
+  const expected = mergeCandidateDemand(proof.sourcePublication, publication);
+  assert.deepEqual(proof.candidateIdentity, expected.identity);
+  assert.equal(proof.candidateIdentityDigest, expected.identityDigest);
+  assert.deepEqual(proof.candidateDemand, expected.demand);
+  const candidate = assertQualificationCheckpoint(
+    proof.candidateRead,
+    expected.demand,
+    publication.baseSha,
+  );
+  assert.deepEqual(
+    Object.keys(candidate).sort(),
+    ["evidence", "identity", "identityDigest", "protocol", "source", "validation"],
+    "merge candidate fields changed",
+  );
+  assert.equal(candidate.protocol, "clockgrove.factory/merge-candidate-checkpoint-v1");
+  assert.deepEqual(candidate.identity, expected.identity);
+  assert.equal(candidate.identityDigest, expected.identityDigest);
+  const duration = assertValidationCheckpoint(candidate.validation);
+  assert.equal(candidate.validation.baseSha, publication.baseSha);
+  assert.equal(candidate.validation.outputTreeSha, proof.validation.outputTreeSha);
+  const sourceCore = {
+    protocol: "clockgrove.factory/exact-head-validation-v1",
+    validationDigest: proof.sourcePublication.validationDigest,
+    baseSha: proof.sourcePublication.baseSha,
+    outputTreeSha: proof.sourceValidation.outputTreeSha,
+    publishedHeadSha: proof.sourcePublication.headSha,
+  };
+  const source = { ...sourceCore, digest: hash(JSON.stringify(sourceCore)) };
+  assert.deepEqual(candidate.source, source);
+  const bound = {
+    protocol: "clockgrove.factory/merge-candidate-validation-v1",
+    sourceExactHeadValidationDigest: source.digest,
+    sourceBaseSha: source.baseSha,
+    sourceHeadSha: source.publishedHeadSha,
+    sourceTreeSha: source.outputTreeSha,
+    targetBaseSha: publication.baseSha,
+    candidateOutputTreeSha: proof.validation.outputTreeSha,
+    candidateArtifactDigest: candidate.validation.artifactDigest,
+    candidateValidationDigest: candidate.validation.digest,
+  };
+  assert.deepEqual(candidate.evidence, { ...bound, digest: hash(JSON.stringify(bound)) });
+  const accounting = one(
+    events.filter(
+      (event) =>
+        event.event === "BudgetReconciled" &&
+        event.runId === publication.runId &&
+        event.objective === publication.objective &&
+        event.workItem === publication.workItem &&
+        event.attempt === publication.attempt &&
+        event.phase === "validation" &&
+        event.unit === "validation_milliseconds" &&
+        event.usageId === `integration-validation-${expected.identityDigest}`,
+    ),
+    "integration validation accounting is missing or repeated",
+  );
+  assert.equal(accounting.amount, duration);
+  assert.ok(
+    publication.sequence < accounting.sequence && accounting.sequence < proof.integration.sequence,
+    "integration validation accounting is outside its candidate/integration fence",
+  );
 }
 
 export function assertNativeLinearPublicationProofs(
@@ -1006,11 +1296,14 @@ export function assertNativeLinearPublicationProofs(
         "published exact-head validation binding changed",
       );
       assert.ok(proof.validation.sequence < publication.sequence);
-      if (publicationIndex > 0) assertExactReview(proof, events);
-      else {
-        assert.equal(proof.reviewDemand, undefined);
-        assert.equal(proof.reviewRead, undefined);
+      if (publicationIndex > 0) {
+        const invalidation = group.publications[publicationIndex - 1];
+        assert.equal(proof.invalidation.headSha, invalidation.headSha);
+        assert.ok(proof.invalidation.sequence < proof.validation.sequence);
       }
+      assertExactReview(proof, events);
+      if (publicationIndex === group.publications.length - 1 && proof.integration)
+        assertNativeLinearCandidate(proof, events);
     }
 }
 
@@ -1030,9 +1323,24 @@ export function assertNativeControllerTakeover(events, trigger, expectedGenerati
     .sort((left, right) => left.sequence - right.sequence);
   assert.ok(observations.length >= 2, "controller takeover history is incomplete");
   for (const [index, observation] of observations.entries()) {
-    controllerGeneration(observation);
-    if (index > 0)
-      assert.ok(observation.epoch >= observations[index - 1].epoch, "controller epoch regressed");
+    const generation = controllerGeneration(observation);
+    if (index > 0) {
+      const prior = controllerGeneration(observations[index - 1]);
+      assert.ok(generation.epoch >= prior.epoch, "controller epoch regressed");
+      if (generation.epoch === prior.epoch) {
+        for (const field of [
+          "controllerId",
+          "expiresAt",
+          "controllerPolicyDigest",
+          "protocolMin",
+          "protocolMax",
+          "writerHolder",
+          "writerEpoch",
+          "writerPolicyDigest",
+        ])
+          assert.equal(generation[field], prior[field], `controller ${field} drifted in one epoch`);
+      }
+    }
   }
   const before = observations.filter((event) => event.sequence < trigger.sequence).at(-1);
   assert.ok(before, "predecessor controller generation is missing");
@@ -1050,6 +1358,13 @@ export function assertNativeControllerTakeover(events, trigger, expectedGenerati
     after.controllerPolicyDigest,
     before.controllerPolicyDigest,
     "successor controller policy changed",
+  );
+  assert.equal(after.protocolMin, before.protocolMin, "successor minimum protocol changed");
+  assert.equal(after.protocolMax, before.protocolMax, "successor maximum protocol changed");
+  assert.equal(
+    after.writerPolicyDigest,
+    before.writerPolicyDigest,
+    "successor writer policy changed",
   );
   const firstAdvancement = events
     .filter(
@@ -1073,7 +1388,7 @@ export function assertNativeControllerTakeover(events, trigger, expectedGenerati
   return { before: controllerGeneration(before), after: controllerGeneration(after) };
 }
 
-function assertIntegratedPrefix(events, groups, cancellation) {
+function assertIntegratedPrefix(evidence, events, groups, cancellation) {
   const integrations = events
     .filter((event) => event.event === "AttemptIntegrated")
     .sort((left, right) => left.sequence - right.sequence);
@@ -1106,6 +1421,18 @@ function assertIntegratedPrefix(events, groups, cancellation) {
     operationIds.add(completion.operationId);
   }
   assert.equal(operationIds.size, 1, "accepted prefix changed its durable operation identity");
+  for (const integration of integrations) {
+    const child = one(
+      evidence.children.filter((entry) => entry.number === integration.workItem),
+      "accepted prefix issue is missing or repeated",
+    );
+    assert.equal(child.state, "closed", "accepted prefix issue is not closed");
+    const status = one(
+      evidence.status.workItems.filter((entry) => entry.number === integration.workItem),
+      "accepted prefix status is missing or repeated",
+    );
+    assert.equal(status.state, "done", "accepted prefix status is not done");
+  }
   return { integrations, operationId: [...operationIds][0] };
 }
 
@@ -1124,7 +1451,45 @@ export function assertNativeCancellationBoundary(
     ),
     "native cancellation request is missing or repeated",
   );
-  const prefix = assertIntegratedPrefix(events, groups, cancellation);
+  assert.equal(
+    events.filter((event) => event.event === "FactoryRunCancellationRequested").length,
+    1,
+    "native cancellation contains another cancellation request",
+  );
+  const activationRequestId = evidence.runRequest?.arguments?.requestId;
+  const activation = one(
+    events.filter(
+      (event) => event.event === "ActivationRequested" && event.requestId === activationRequestId,
+    ),
+    "native activation request is missing or repeated",
+  );
+  assert.equal(
+    events.filter((event) => event.event === "ActivationRequested").length,
+    1,
+    "native cancellation contains another activation request",
+  );
+  assert.ok(activation.sequence < cancellation.sequence, "native activation follows cancellation");
+  const forbiddenInterventions = new Set([
+    "ActivationRejected",
+    "ActivationCancellationRequested",
+    "RunPauseRequested",
+    "RunPauseAcknowledged",
+    "RunResumeRequested",
+    "RunDrainRequested",
+    "RunDrainCompleted",
+    "CloudPauseRequested",
+    "WorkItemRetryRequested",
+    "RecoveryRequested",
+    "RecoveryConsumed",
+    "RecoveryAdoptionCompleted",
+    "RecoverySourcePublished",
+    "RecoverySourceIntegrated",
+  ]);
+  assert.ok(
+    !events.some((event) => forbiddenInterventions.has(event.event) || event.kind === "recovery"),
+    "native cancellation contains another intervention",
+  );
+  const prefix = assertIntegratedPrefix(evidence, events, groups, cancellation);
   assert.equal(
     intervention.progress.operationId,
     prefix.operationId,
@@ -1151,13 +1516,18 @@ export function assertNativeCancellationBoundary(
       (event) =>
         event.event === "IntegrationCompleted" &&
         event.workItem === intervention.progress.integratedWorkItem &&
-        event.headSha === intervention.progress.integrationHeadSha &&
+        event.headSha === intervention.progress.integrationSourceHeadSha &&
         event.operationId === intervention.progress.operationId &&
         event.sequence === intervention.progress.integrationCompletedSequence,
     ),
     "cancellation accepted-root mutation changed",
   );
   assert.ok(rootCompletion.sequence < prefix.integrations[0].sequence);
+  assert.equal(
+    prefix.integrations[0].headSha,
+    intervention.progress.integrationHeadSha,
+    "cancellation accepted-root merge identity changed",
+  );
   const invalidation = one(
     events.filter(
       (event) =>
@@ -1238,10 +1608,33 @@ export function assertNativeCancellationBoundary(
           "AttemptPublished",
           "PublicationRecorded",
           "StackLinked",
+          "IntegrationPending",
         ].includes(event.event) && event.sequence > cancellation.sequence,
     ),
     "native delivery advanced after durable cancellation",
   );
+  const unresolved = groups.slice(prefix.integrations.length).map((group) => group.publications[0]);
+  assert.ok(unresolved.length > 0, "cancellation has no unresolved descendants");
+  for (const publication of unresolved) {
+    assert.ok(
+      !events.some(
+        (event) =>
+          ["IntegrationCompleted", "AttemptIntegrated"].includes(event.event) &&
+          event.workItem === publication.workItem,
+      ),
+      "cancellation descendant resolved before the cancellation fence",
+    );
+    const child = one(
+      evidence.children.filter((entry) => entry.number === publication.workItem),
+      "cancellation descendant issue is missing or repeated",
+    );
+    assert.equal(child.state, "open", "cancellation descendant issue is resolved");
+    const status = one(
+      evidence.status.workItems.filter((entry) => entry.number === publication.workItem),
+      "cancellation descendant status is missing or repeated",
+    );
+    assert.notEqual(status.state, "done", "cancellation descendant status is resolved");
+  }
   assert.equal(
     evidence.mergeProofs.length,
     prefix.integrations.length,
@@ -1300,16 +1693,28 @@ export function assertNativeLinearLifecycle(evidence, caseName = evidence.native
   assertNativeScopes(evidence);
   if (caseName !== "cascade") {
     const controller = evidence.nativeLinearController;
-    for (const observation of [controller?.before, controller?.after])
+    for (const observation of [controller?.before, controller?.after]) {
       assert.ok(
-        observation?.installed && observation.active && observation.healthy,
+        observation?.status?.installed &&
+          observation.status.enabled &&
+          observation.status.active &&
+          observation.status.healthy &&
+          observation.status.launcherCurrent,
         "installed controller was not healthy across the qualification",
       );
-    assert.equal(controller.before.unit, controller.after.unit);
-    assert.equal(controller.before.executableIdentity, controller.after.executableIdentity);
+      assert.equal(
+        observation.authority.artifactIdentity,
+        evidence.installedCandidate.factoryArtifactIdentity,
+      );
+    }
+    assert.equal(controller.before.status.unit, controller.after.status.unit);
     assert.equal(
-      controller.before.currentExecutableIdentity,
-      controller.after.currentExecutableIdentity,
+      controller.before.status.executableIdentity,
+      controller.after.status.executableIdentity,
+    );
+    assert.equal(
+      controller.before.status.currentExecutableIdentity,
+      controller.after.status.currentExecutableIdentity,
     );
   }
   const events = nativeQualificationEvents(evidence);
@@ -1319,10 +1724,6 @@ export function assertNativeLinearLifecycle(evidence, caseName = evidence.native
   );
   assert.equal(start.runId, evidence.runResult.runId);
   assert.deepEqual(start.policy, evidence.policy);
-  assertRecordedQualificationPolicy(
-    start.policy,
-    boundedPolicy("stacked-prs", evidence.policy.economics.maxModelTokens),
-  );
   const delivery = one(
     events.filter((event) => event.event === "DeliverySelected"),
     "native delivery selection is missing or repeated",
@@ -1559,20 +1960,30 @@ export function nativeLinearQualification(env) {
         controller.installed && controller.active && controller.healthy,
         "exact installed active controller required",
       );
-      evidence.nativeLinearController = { before: controller };
+      evidence.nativeLinearController = {
+        before: {
+          status: controller,
+          authority: assertNativeLinearControllerAuthority(controller, evidence, checkout),
+        },
+      };
     },
     afterRun: async ({ evidence, request, save, call, checkout, owner, repo }) => {
       assertCommittedHarness(evidence);
       try {
         if (evidence.runResult.status !== "completed")
           await observeNativeLinearProofs({ evidence, request });
-        if (caseName !== "cascade")
-          evidence.nativeLinearController.after = await call("factory_controller_status", {
+        if (caseName !== "cascade") {
+          const controller = await call("factory_controller_status", {
             owner,
             repo,
             repository: checkout,
             requestId: `${evidence.qualificationNamespace}-controller-final`,
           });
+          evidence.nativeLinearController.after = {
+            status: controller,
+            authority: assertNativeLinearControllerAuthority(controller, evidence, checkout),
+          };
+        }
         if (caseName === "active-cancellation")
           evidence.nativeLinearUnrelatedSentinel.survived = assertNativeLinearSentinelAlive(
             evidence.nativeLinearUnrelatedSentinel.started,
@@ -1630,7 +2041,7 @@ export async function main(env = process.env, run = installedMain) {
     );
     return;
   }
-  await run(qualification);
+  await run(qualification, { env });
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

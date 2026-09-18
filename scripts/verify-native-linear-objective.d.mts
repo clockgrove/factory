@@ -5,6 +5,12 @@ export function nativeLinearQualification(
   env: Record<string, string | undefined>,
 ): Record<string, unknown> | null;
 export function executeNativeLinearControllerCase(input: Record<string, unknown>): Promise<unknown>;
+export function assertNativeLinearControllerAuthority(
+  controller: Record<string, unknown>,
+  evidence: Record<string, unknown>,
+  checkout: string,
+  port?: Record<string, unknown>,
+): Record<string, unknown>;
 export function observeNativeLinearProofs(
   input: Record<string, unknown>,
   read?: (demand: Record<string, unknown>) => Promise<Record<string, unknown>>,
@@ -22,12 +28,17 @@ export function assertNativeLinearPublicationProofs(
   events: unknown[],
   groups?: unknown[],
 ): void;
+export function assertNativeLinearCandidate(
+  proof: Record<string, unknown>,
+  events: unknown[],
+): void;
 export function assertNativeLinearReview(
   review: Record<string, unknown>,
   publication: Record<string, unknown>,
   validation: Record<string, unknown>,
   published: Record<string, unknown>,
   events: unknown[],
+  publicationIndex?: number,
 ): string;
 export function assertNativeLinearTerminal(events: unknown[], expectedState: string): unknown;
 export function assertNativeControllerTakeover(
@@ -57,5 +68,8 @@ export function assessNativeLinearLifecycle(evidence: unknown): {
 };
 export function main(
   env?: Record<string, string | undefined>,
-  run?: (qualification: Record<string, unknown>) => Promise<void>,
+  run?: (
+    qualification: Record<string, unknown>,
+    options: { env: Record<string, string | undefined> },
+  ) => Promise<void>,
 ): Promise<void>;

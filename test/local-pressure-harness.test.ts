@@ -154,6 +154,15 @@ describe("pressure authority and bounds", () => {
     const run = vi.fn();
     await main({}, run);
     expect(run).not.toHaveBeenCalled();
+    const selected = {
+      ...env,
+      FACTORY_MANAGEMENT_TRANSCRIPT_DIR: "/home/example/private/pressure-transcripts",
+    };
+    await main(selected, run);
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ privateEvidence: true }), {
+      env: selected,
+    });
+    run.mockClear();
     expect(() =>
       pressureAuthority({ ...env, FACTORY_LIVE_LOCAL_PRESSURE_ACK: "example/disposable" }),
     ).toThrow();

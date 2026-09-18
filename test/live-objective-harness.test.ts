@@ -451,6 +451,9 @@ describe("actual native-unavailability regular fallback", () => {
     const run = vi.fn();
     await fallbackMain({}, run);
     expect(run).not.toHaveBeenCalled();
+    await fallbackMain(env, run);
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ privateEvidence: true }), { env });
+    run.mockClear();
     for (const conflict of [
       { FACTORY_LIVE_OBJECTIVE_DELIVERY: "regular-prs" },
       { FACTORY_LIVE_REGULAR_OBJECTIVE: "1" },
@@ -634,6 +637,7 @@ describe("explicit installed regular qualification", () => {
       FACTORY_LIVE_REGULAR_OBJECTIVE: "1",
       FACTORY_LIVE_OBJECTIVE: "1",
       FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "500000",
+      FACTORY_MANAGEMENT_TRANSCRIPT_DIR: "/private/exact/regular-transcripts",
     };
     const selected = regularQualification({ ...env, FACTORY_LIVE_REGULAR_BACKEND: "codex-cli" })!;
     expect(selected.policy).toEqual({
@@ -700,6 +704,8 @@ describe("explicit installed regular qualification", () => {
     await regularMain(env, run);
     expect(run).toHaveBeenCalledTimes(1);
     expect(run.mock.calls[0]![0].policy).toEqual(boundedPolicy("regular-prs"));
+    expect(run.mock.calls[0]![1]).toEqual({ env });
+    expect(run.mock.calls[0]![1].env).toBe(env);
   });
   it("passes only genuinely concurrent regular delivery with exact candidate proof and leaves native API gate unchanged", async () => {
     const value = await regularEvidence();

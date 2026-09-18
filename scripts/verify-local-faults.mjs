@@ -858,7 +858,6 @@ export async function runQualification(
     candidateSourceRoot,
     installAuthorityOptions,
   });
-  const runtimeEnvironment = qualificationRuntimeEnvironment(env);
   progress.stage("configuration");
   assertFaultAuthenticationEnvironment(env);
   const required = (key) => {
@@ -878,6 +877,10 @@ export async function runQualification(
   assert.equal(process.platform, "linux");
   const checkout = realpathSync(required("CHECKOUT"));
   assert.ok(!checkout.startsWith("/mnt/"));
+  const runtimeEnvironment = qualificationRuntimeEnvironment(env, {
+    repositoryRoot: checkout,
+    requireManagementTranscripts: true,
+  });
   const origin = command("git", ["remote", "get-url", "origin"], checkout).replace(/\.git$/, "");
   assert.ok([`https://github.com/${repository}`, `git@github.com:${repository}`].includes(origin));
   const namespace = qualificationNamespace(required("NAMESPACE"));

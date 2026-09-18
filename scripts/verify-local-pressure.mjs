@@ -362,6 +362,7 @@ export function createPressureQualification(authority, env = process.env, port =
         home: homedir(),
         uid: user.uid,
         username: user.username,
+        managementTranscriptDirectory: parameters.env.FACTORY_MANAGEMENT_TRANSCRIPT_DIR,
       });
       transport.args.splice(
         1,

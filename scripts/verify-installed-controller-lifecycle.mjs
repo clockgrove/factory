@@ -346,7 +346,7 @@ function lifecycleAuthority(env) {
     "checkout must be Linux-home native",
   );
   const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const runtimeEnvironment = qualificationRuntimeEnvironment(env);
+  const runtimeEnvironment = qualificationRuntimeEnvironment(env, { repositoryRoot: checkout });
   const candidate = installedQualificationAuthority(env, {
     uid,
     sourceRoot,

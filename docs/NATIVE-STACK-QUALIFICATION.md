@@ -46,10 +46,16 @@ export FACTORY_LIVE_OBJECTIVE_NAMESPACE=native-cascade-unique
 export FACTORY_LIVE_OBJECTIVE_REPOSITORY=OWNER/DISPOSABLE_REPO
 export FACTORY_LIVE_OBJECTIVE_CHECKOUT=/home/USER/Codex/disposable-repo
 export FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/USER/Codex/factory-initial-beta/CANDIDATE/install-identities.txt
+export FACTORY_MANAGEMENT_TRANSCRIPT_DIR=/home/USER/Codex/factory-private-evidence/native-transcripts-UNIQUE
 export FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=500000
 export FACTORY_LIVE_OBJECTIVE_EVIDENCE=/home/USER/Codex/factory-private-evidence/native-cascade
 node scripts/verify-native-linear-objective.mjs
 ```
+
+Create the transcript directory first with mode `0700`. It must be a canonical current-user-owned
+Linux path outside the disposable checkout. The shared installed-runtime builder passes that exact
+validated directory to the foreground MCP child and fails before Objective mutation or model use if
+the authority is missing or redirected. Raw transcript files remain local debug evidence.
 
 Preflight is read-only. For execution, unset `FACTORY_LIVE_OBJECTIVE_PREFLIGHT`, set
 `FACTORY_LIVE_OBJECTIVE=1`, and acknowledge the exact target:

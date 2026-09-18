@@ -983,7 +983,12 @@ export async function main(
     sourceRoot: candidateSourceRoot,
     committedPaths: [...sharedHarnessPaths, ...(qualification.harnessPaths ?? [])],
   });
-  const runtimeEnvironment = qualificationRuntimeEnvironment(env, runtimeEnvironmentOptions);
+  const checkout = realpathSync(required(env, "FACTORY_LIVE_OBJECTIVE_CHECKOUT"));
+  const runtimeEnvironment = qualificationRuntimeEnvironment(env, {
+    ...runtimeEnvironmentOptions,
+    repositoryRoot: checkout,
+    requireManagementTranscripts: true,
+  });
   const pluginRoot = candidate.installedPluginRoot;
   const manifest = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"));
   const identity = candidate.pluginIdentity;
@@ -1035,7 +1040,6 @@ export async function main(
       "acknowledge the exact disposable repository",
     );
   const [owner, repo] = repository.split("/");
-  const checkout = realpathSync(required(env, "FACTORY_LIVE_OBJECTIVE_CHECKOUT"));
   assert.ok(!checkout.startsWith("/mnt/"), "checkout must reside on the Linux filesystem");
   const checkoutClean = run("git", ["status", "--porcelain"], checkout) === "";
   const fixturePathsAbsent = fixturePaths.files.every((path) => !existsSync(join(checkout, path)));

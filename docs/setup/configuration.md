@@ -79,6 +79,13 @@ process starts does not change that process. Reinstalling persists the setting, 
 controller restart above starts the installed unit with it. Restart an existing MCP parent as
 appropriate.
 
+Installed live qualification additionally requires the directory to exist before preflight, use
+mode `0700`, belong to the effective user, resolve without symlinks on the Linux filesystem, and
+remain outside the target checkout. The qualification runtime passes that validated setting to
+foreground and transient MCP children while continuing to use the normal Linux `HOME` and default
+`CODEX_HOME` for provider authentication. A missing or invalid directory stops qualification before
+Objective mutation or model use.
+
 Each Factory-owned JSON record contains the exact user prompt and output schema Factory supplied,
 requested profile/model/reasoning (with provider-resolved values marked unavailable when they are
 not exposed), all assistant messages emitted by Codex CLI, the bounded stdout/stderr visible at the

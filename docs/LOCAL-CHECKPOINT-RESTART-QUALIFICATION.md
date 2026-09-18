@@ -60,6 +60,7 @@ For example, substitute the explicitly approved fixture values:
 ```sh
 env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME -u CODEX_HOME \
   FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/example/Codex/factory-initial-beta/2.0.27-beta.0-COMMIT/install-identities.txt \
+  FACTORY_MANAGEMENT_TRANSCRIPT_DIR=/home/example/private-evidence/checkpoint-transcripts-UNIQUE \
   FACTORY_LOCAL_CHECKPOINT_RESTART=1 \
   FACTORY_CHECKPOINT_PHASE=preflight \
   FACTORY_CHECKPOINT_REPOSITORY=example/disposable-conformance \
@@ -70,6 +71,10 @@ env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME -
   FACTORY_CHECKPOINT_EVIDENCE=/home/example/private-evidence/preflight.json \
   node scripts/verify-local-checkpoint-restart.mjs
 ```
+
+Create that transcript directory before preflight with mode `0700`. It must be a canonical
+current-user-owned Linux path outside the target checkout. The shared runtime builder rejects a
+missing or redirected path before Objective mutation or model use; raw transcripts remain local.
 
 The uppercase placeholders are explanatory, not valid literal inputs. Preflight makes no
 repository or controller mutations. Ambient GitHub token/host/config overrides are rejected in

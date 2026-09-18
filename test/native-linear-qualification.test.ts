@@ -539,7 +539,7 @@ describe("native linear-stack installed matrix", () => {
     });
   });
 
-  it("forwards the exact retained-install environment before any live work", async () => {
+  it("forwards exact retained-install and transcript authority before any live work", async () => {
     const env = {
       FACTORY_LIVE_NATIVE_LINEAR_OBJECTIVE: "1",
       FACTORY_LIVE_OBJECTIVE_PREFLIGHT: "1",
@@ -547,13 +547,19 @@ describe("native linear-stack installed matrix", () => {
       FACTORY_LIVE_OBJECTIVE_NAMESPACE: "native-linear-authority",
       FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "250000",
       FACTORY_QUALIFICATION_INSTALL_RECEIPT: "/private/exact/install-identities.txt",
+      FACTORY_MANAGEMENT_TRANSCRIPT_DIR: "/private/exact/management-transcripts",
     };
     const prior = process.env.FACTORY_QUALIFICATION_INSTALL_RECEIPT;
+    const priorTranscripts = process.env.FACTORY_MANAGEMENT_TRANSCRIPT_DIR;
     process.env.FACTORY_QUALIFICATION_INSTALL_RECEIPT = "/drifted/global/receipt.txt";
+    process.env.FACTORY_MANAGEMENT_TRANSCRIPT_DIR = "/drifted/global/transcripts";
     const run = vi.fn(async (_qualification, options) => {
       expect(options.env).toBe(env);
       expect(options.env.FACTORY_QUALIFICATION_INSTALL_RECEIPT).toBe(
         "/private/exact/install-identities.txt",
+      );
+      expect(options.env.FACTORY_MANAGEMENT_TRANSCRIPT_DIR).toBe(
+        "/private/exact/management-transcripts",
       );
     });
     try {
@@ -561,6 +567,8 @@ describe("native linear-stack installed matrix", () => {
     } finally {
       if (prior === undefined) delete process.env.FACTORY_QUALIFICATION_INSTALL_RECEIPT;
       else process.env.FACTORY_QUALIFICATION_INSTALL_RECEIPT = prior;
+      if (priorTranscripts === undefined) delete process.env.FACTORY_MANAGEMENT_TRANSCRIPT_DIR;
+      else process.env.FACTORY_MANAGEMENT_TRANSCRIPT_DIR = priorTranscripts;
     }
     expect(run).toHaveBeenCalledTimes(1);
   });

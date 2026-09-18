@@ -190,6 +190,7 @@ describe("explicit installed scheduling authority", () => {
       home: "/home/example",
       uid: 1000,
       username: "example",
+      managementTranscriptDirectory: "/home/example/private/management-transcripts",
     });
     expect(config.command).toBe("systemd-run");
     expect(config.args).toContain("--property=CPUQuota=50%");
@@ -201,6 +202,9 @@ describe("explicit installed scheduling authority", () => {
       ),
     ).toEqual(["/usr/bin/env", "-i"]);
     expect(config.args.slice(-2)).toEqual([descriptor.node, descriptor.bundle]);
+    expect(config.args).toContain(
+      "FACTORY_MANAGEMENT_TRANSCRIPT_DIR=/home/example/private/management-transcripts",
+    );
     expect(Object.keys(config.env).sort()).toEqual([
       "DBUS_SESSION_BUS_ADDRESS",
       "HOME",
@@ -222,6 +226,7 @@ describe("explicit installed scheduling authority", () => {
         home: "/home/example",
         uid: 1000,
         username: "example",
+        managementTranscriptDirectory: "/home/example/private/management-transcripts",
       }),
     ).toThrow();
   });

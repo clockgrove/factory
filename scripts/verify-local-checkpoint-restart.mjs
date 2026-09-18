@@ -1576,7 +1576,11 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
   );
   assert.equal(process.platform, "linux");
   const home = realpathSync(homedir());
-  const runtimeEnvironment = qualificationRuntimeEnvironment(env, { linuxHome: home });
+  const runtimeEnvironment = qualificationRuntimeEnvironment(env, {
+    linuxHome: home,
+    repositoryRoot: authority.checkout,
+    requireManagementTranscripts: true,
+  });
   const runtimeCodexHome = runtimeEnvironment.CODEX_HOME;
   assert.equal(runtimeCodexHome, qualificationRuntimeCodexHome(env, home));
   assert.equal(realpathSync(authority.checkout), authority.checkout);

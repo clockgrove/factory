@@ -107,12 +107,28 @@ export function schedulingUnit({ repository, namespace, inventory, nonce, role }
   return `clockgrove-factory-qualification-${hash({ repository, namespace, inventory, nonce, role })}.service`;
 }
 
-export function schedulingTransport({ unit, node, bundle, checkout, path, home, uid, username }) {
+export function schedulingTransport({
+  unit,
+  node,
+  bundle,
+  checkout,
+  path,
+  home,
+  uid,
+  username,
+  managementTranscriptDirectory,
+}) {
   assert.match(unit, unitPattern);
   for (const value of [node, bundle, checkout, home]) assert.match(value, /^\/[A-Za-z0-9_./-]+$/);
   assert.ok(!checkout.startsWith("/mnt/") && !home.startsWith("/mnt/"));
   assert.ok(Number.isSafeInteger(uid) && uid > 0);
   assert.match(username, /^[a-z_][a-z0-9_-]*$/);
+  assert.ok(
+    typeof managementTranscriptDirectory === "string" &&
+      managementTranscriptDirectory.startsWith("/") &&
+      !managementTranscriptDirectory.startsWith("/mnt/"),
+    "validated management transcript directory required",
+  );
   assert.ok(
     path.split(":").every((entry) => /^\/[A-Za-z0-9_./-]+$/.test(entry)),
     "PATH must contain only explicit nonsecret absolute directories",
@@ -139,6 +155,7 @@ export function schedulingTransport({ unit, node, bundle, checkout, path, home, 
       `USER=${username}`,
       `PATH=${path}`,
       `CODEX_HOME=${join(home, ".codex")}`,
+      `FACTORY_MANAGEMENT_TRANSCRIPT_DIR=${managementTranscriptDirectory}`,
       `XDG_RUNTIME_DIR=${runtime}`,
       `DBUS_SESSION_BUS_ADDRESS=unix:path=${runtime}/bus`,
       node,
@@ -653,6 +670,7 @@ export function ownedSchedulingScopes(evidence, primary) {
 export function createSchedulingQualification(authority, env = process.env, port = defaults) {
   let primary;
   let contender;
+  let managementTranscriptDirectory;
   const nonce = randomUUID();
   const safe =
     (fn) =>
@@ -678,6 +696,7 @@ export function createSchedulingQualification(authority, env = process.env, port
     namespace: authority.namespace,
     wrapTransport: safe(async (parameters, context) => {
       assert.deepEqual(parameters.args, [join(context.pluginRoot, "dist/mcp-server.js")]);
+      managementTranscriptDirectory = parameters.env.FACTORY_MANAGEMENT_TRANSCRIPT_DIR;
       const user = userInfo();
       const base = {
         repository: authority.repository,
@@ -709,6 +728,7 @@ export function createSchedulingQualification(authority, env = process.env, port
         home: homedir(),
         uid: user.uid,
         username: user.username,
+        managementTranscriptDirectory,
       });
     }),
     beforeRun: safe(async (hooks) => {
@@ -836,6 +856,7 @@ export function createSchedulingQualification(authority, env = process.env, port
           home: homedir(),
           uid: user.uid,
           username: user.username,
+          managementTranscriptDirectory,
         }),
       );
       try {

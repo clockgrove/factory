@@ -53,6 +53,7 @@ export FACTORY_LIVE_OBJECTIVE_NAMESPACE=scheduling-unique-20260905-a
 export FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=500000
 export FACTORY_LIVE_OBJECTIVE_EVIDENCE=/home/USER/private-evidence/scheduling-unique-20260905-a
 export FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/USER/Codex/factory-initial-beta/CANDIDATE/install-identities.txt
+export FACTORY_MANAGEMENT_TRANSCRIPT_DIR=/home/USER/private-evidence/scheduling-transcripts-UNIQUE
 
 env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME \
   PATH=/home/USER/.local/bin:/usr/local/bin:/usr/bin:/bin \
@@ -78,9 +79,10 @@ The default native qualifier is unchanged. The initial token threshold must rema
 limits and zero paid backends. It is a stop-before-next-call threshold, not a provider
 hard cap. There is no allowance increase or automatic reinjection.
 
-The existing local `gh auth` and Codex login must be usable from their normal Linux
+Create the transcript directory first with mode `0700`; it must be a canonical current-user-owned
+Linux path outside the checkout. The existing local `gh auth` and Codex login must be usable from their normal Linux
 home. The service runs the exact installed bundled MCP server using `env -i` with
-computed HOME/USER, nonsecret PATH/CODEX_HOME, and the local user-bus paths. It never
+computed HOME/USER, nonsecret PATH/CODEX_HOME, the validated transcript directory, and the local user-bus paths. It never
 copies GitHub/model secrets into systemd properties or command arguments. Unlike a
 regular parent process, it cannot rely on an inherited `GITHUB_TOKEN` or `GH_TOKEN`;
 the installed server resolves its existing local authentication itself. Paths with

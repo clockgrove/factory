@@ -162,6 +162,7 @@ const env = {
   FACTORY_LIVE_OBJECTIVE_NAMESPACE: namespace,
   FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "1",
   FACTORY_LIVE_BUDGET_STOP_ACK: `${repository}:pre-projection-refusal-no-cancel`,
+  FACTORY_MANAGEMENT_TRANSCRIPT_DIR: "/private/exact/budget-stop-transcripts",
 };
 
 describe("prospective pre-projection refusal authority", () => {
@@ -201,9 +202,13 @@ describe("prospective pre-projection refusal authority", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
   it("constructs no control/polling hook and calls the shared runner once", async () => {
-    const invoke = vi.fn(async () => {});
+    const invoke = vi.fn(
+      async (_qualification: unknown, _options: { env: Record<string, string | undefined> }) => {},
+    );
     await main(env, invoke);
     expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke.mock.calls[0]![1]).toEqual({ env });
+    expect(invoke.mock.calls[0]![1].env).toBe(env);
     const qualification = createBudgetStopQualification(budgetStopAuthority(env)!);
     expect(qualification.duringRun).toBeUndefined();
     expect(qualification.scope).toBe("installed-local-pre-projection-budget-refusal");

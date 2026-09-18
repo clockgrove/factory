@@ -62,12 +62,16 @@ export FACTORY_LOCAL_FAULT_MAX_MODEL_TOKENS=500000
 export FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/USER/Codex/factory-initial-beta/CANDIDATE/install-identities.txt
 install -d -m 700 /tmp/factory-private-restart-UNIQUE
 export FACTORY_LOCAL_FAULT_EVIDENCE=/tmp/factory-private-restart-UNIQUE/evidence.json
+install -d -m 700 /home/USER/private-evidence/fault-transcripts-UNIQUE
+export FACTORY_MANAGEMENT_TRANSCRIPT_DIR=/home/USER/private-evidence/fault-transcripts-UNIQUE
 ```
 
 Repository owner/name must be lowercase. The script refuses the Factory product repository, public
 repositories, non-private evidence directories, redirected provider Codex homes, `/mnt` checkouts,
 different retained install bytes, and an uncommitted candidate. The receipt's isolated Codex home
-selects the artifact; the actual provider runtime still uses the normal Linux Codex home.
+selects the artifact; the actual provider runtime still uses the normal Linux Codex home. The
+transcript path must remain canonical, current-user-owned, mode `0700`, and outside the checkout;
+its raw files remain local debug evidence.
 
 The opt-in runner also rejects `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`, `GH_CONFIG_DIR` and
 `XDG_CONFIG_HOME` overrides so its REST observations and installed controller use the same default

@@ -147,6 +147,57 @@ decision or mutation. Linux releases the lock automatically if its owning proces
 abandoned client cannot leave a stale owner record or require manual lock cleanup. The lock does not
 coordinate another user, another controller identity, an arbitrary bus, or any Windows process.
 
+Maintainers can qualify that installed serialization boundary with
+`scripts/verify-installed-controller-lifecycle.mjs` from the exact clean source commit. This is a
+destructive test for one explicitly acknowledged, disposable repository unit. It runs installed
+`install`/`start` and `install`/`uninstall` clients in separate processes, observes the second client
+with kernel-authoritative FLOCK waiting evidence correlated to the exact `/usr/bin/flock` process,
+production lock file descriptor, device, and inode. It records the matching pending `FLOCK` entry in
+`/proc/locks` when the kernel exposes one; WSL kernels that omit flock entries must report that exact
+process in the `locks_lock_inode_wait` kernel wait channel. It exercises the fixed 30-second busy
+result, kills a real lock owner, and proves recovery without deleting or replacing the production
+lock inode. It retains a private JSON evidence file and stops/removes only that disposable unit. Do
+not aim it at a retained controller.
+
+The harness requires the retained prepublication qualification root and its owner-private
+`install-identities.txt` receipt. It accepts only the receipt's npm-installed `dist/factory.js`,
+version, inventory, and launcher identity under that root; a source or development worktree is
+rejected mechanically. It also requires a clean Linux-home checkout, an absent unit, a private fresh
+evidence path, working GitHub access, and the exact acknowledgement it derives from the repository
+and deterministic unit. Run it explicitly as follows after replacing every example value:
+
+```bash
+set -euo pipefail
+umask 077
+repository=EXAMPLE/DISPOSABLE
+checkout=/home/you/Codex/disposable
+install_receipt=/home/you/Codex/factory-initial-beta/2.0.27-beta.0-COMMIT/install-identities.txt
+factory_cli="$(realpath /home/you/Codex/factory-initial-beta/2.0.27-beta.0-COMMIT/npm/bin/factory)"
+artifact_identity=sha256:EXPECTED_FROM_RETAINED_INSTALL_RECEIPT
+test "$artifact_identity" = "sha256:$(sha256sum -- "$factory_cli" | cut -d' ' -f1)"
+unit="$(REPOSITORY="$repository" CHECKOUT="$checkout" node -e 'const c=require("node:crypto");const p=require("node:path");const k=`${process.env.REPOSITORY.toLowerCase()}\0${p.resolve(process.env.CHECKOUT)}`;process.stdout.write(`clockgrove-factory-${c.createHash("sha256").update(k).digest("hex").slice(0,16)}.service`)')"
+evidence_directory=/home/you/Codex/factory-lifecycle-evidence
+mkdir "$evidence_directory"
+FACTORY_LIFECYCLE_QUALIFICATION=1 \
+FACTORY_LIFECYCLE_REPOSITORY="$repository" \
+FACTORY_LIFECYCLE_CHECKOUT="$checkout" \
+FACTORY_LIFECYCLE_INSTALL_RECEIPT="$install_receipt" \
+FACTORY_LIFECYCLE_FACTORY_CLI="$factory_cli" \
+FACTORY_LIFECYCLE_ARTIFACT_IDENTITY="$artifact_identity" \
+FACTORY_LIFECYCLE_ACK="$repository:$unit:install-start,install-uninstall,busy,killed-owner,cleanup" \
+FACTORY_LIFECYCLE_EVIDENCE="$evidence_directory/result.json" \
+node scripts/verify-installed-controller-lifecycle.mjs
+```
+
+The checkpoint is otherwise inert. It has no CLI or MCP operation and is not copied into the unit
+environment. A matching owner-private arm is consumed once after a matching owner-private release;
+malformed, expired, changed, foreign, replayed, or abandoned arms fail closed before unit mutation.
+An incomplete run records no pass claim and performs no automatic unit cleanup; inspect the retained
+evidence and exact disposable unit state before deciding how to proceed. The stdout pass receipt is
+safe to attach to the issue: it contains only the unit, artifact identity, source/harness identities,
+candidate version, install-receipt identity, completion time, and confirmation that private evidence
+was retained; local paths stay in that file.
+
 `Restart=on-failure` restarts unexpected process crashes and signals. Fatal controller exits are a
 different contract: durable-state incompatibility (65), internal invariant (70), discovery failure
 (72), local configuration (78), and launcher execution failure (203) trip the service fuse and do

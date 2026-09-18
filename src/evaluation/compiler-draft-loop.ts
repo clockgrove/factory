@@ -452,11 +452,13 @@ export function validateCompilerDraftJournal(
   const reconciledFailures = new Set<number>();
   const proposalResults = new Map<number, CompilerDraftRecord>();
   const judgeResults = new Map<number, CompilerDraftRecord>();
+  const resultHasError = (result: CompilerDraftRecord): boolean =>
+    typeof result.payload.error === "string";
   const isProviderProposalIntent = (intent: CompilerDraftRecord): boolean =>
     expected.adapterMode === "provider" &&
     (intent.payload.stage === "compile" || intent.payload.stage === "repair");
   const retainedProposal = (result: CompilerDraftRecord): unknown =>
-    result.payload.error
+    resultHasError(result)
       ? result.payload.proposal
       : (result.payload.value as { proposal?: unknown } | undefined)?.proposal;
   const failedResultEvidence = (result: CompilerDraftRecord): Record<string, unknown> => ({
@@ -554,7 +556,7 @@ export function validateCompilerDraftJournal(
           if (
             expected.fixedGraph ||
             !priorProposal ||
-            (!priorProposal.payload.error &&
+            (!resultHasError(priorProposal) &&
               (!priorValidation ||
                 (priorValidation.payload.valid === true && !judgeResults.has(priorRevision))))
           )
@@ -571,7 +573,8 @@ export function validateCompilerDraftJournal(
             | CompilerProjectionTrace
             | undefined;
           const structuredJudgeFailure =
-            priorJudge?.payload.error &&
+            priorJudge !== undefined &&
+            resultHasError(priorJudge) &&
             priorInventory.success &&
             priorCandidate.success &&
             priorTrace
@@ -587,10 +590,10 @@ export function validateCompilerDraftJournal(
                 })
               : null;
           const priorFailure = priorJudge
-            ? priorJudge.payload.error
+            ? resultHasError(priorJudge)
               ? (structuredJudgeFailure ?? { error: String(priorJudge.payload.error) })
               : priorJudge.payload.value
-            : priorProposal.payload.error
+            : resultHasError(priorProposal)
               ? failedResultEvidence(priorProposal)
               : priorValidation?.payload.failure;
           const retainedPrevious = retainedProposal(priorProposal);
@@ -846,7 +849,7 @@ export function validateCompilerDraftJournal(
       if (expected.fixedGraph) {
         if (revision !== 0 || proposalResult)
           throw new Error("fixed compiler validation lifecycle is invalid");
-      } else if (!proposalResult || proposalResult.payload.error)
+      } else if (!proposalResult || resultHasError(proposalResult))
         throw new Error("compiler validation lacks its proposal result");
       const proposal = expected.fixedGraph
         ? compilerJudgeCandidateFromCompiled(expected.fixedGraph)
@@ -965,7 +968,7 @@ export function validateCompilerDraftJournal(
         const judged = judgeResults.get(revision);
         if (
           !judged ||
-          judged.payload.error ||
+          resultHasError(judged) ||
           record.payload.graphDigest !== validation.payload.graphDigest ||
           record.payload.proposalDigest !== validation.payload.proposalDigest ||
           record.payload.requestDigest !== validation.payload.requestDigest ||

@@ -170,7 +170,10 @@ export function proveCompilerSelectionQualificationBoundary(args: {
         invocationId,
         stage: invocation.payload.stage,
         revision: invocation.payload.revision,
-        state: results[0]!.payload.error ? ("failed" as const) : ("completed" as const),
+        state:
+          typeof results[0]!.payload.error === "string"
+            ? ("failed" as const)
+            : ("completed" as const),
         amount,
         reservationSequence: reservation.sequence,
         reconciliationSequence: reconciliation.sequence,

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 import { CompiledGraphManager, compiledGraphProjectionRef } from "../src/control/graphs.js";
-import { loadCompilerDrafts } from "../src/control/compiler-drafts.js";
+import { draftDigest, loadCompilerDrafts } from "../src/control/compiler-drafts.js";
 import { GitHubReader, cancellationRequestFromComments } from "../src/github.js";
 import { decodeEventComments, encodeEventComment } from "../src/control/receipts.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
@@ -945,6 +945,40 @@ describe("Supervisor compiler evaluation activation boundary", () => {
         ]),
       });
       expect(proof.usage).toHaveLength(4);
+      const emptyDiagnosticRecords = structuredClone(records);
+      const emptyDiagnosticResult = emptyDiagnosticRecords.find(
+        (record) => record.kind === "result" && record.payload.stage === "compile",
+      )!;
+      emptyDiagnosticResult.payload.error = "";
+      const emptyDiagnosticInventory = emptyDiagnosticRecords.find(
+        (record) => record.kind === "result" && record.payload.stage === "inventory",
+      )!;
+      emptyDiagnosticRecords.find(
+        (record) => record.kind === "invocation" && record.payload.stage === "repair",
+      )!.payload.inputDigest = draftDigest({
+        inventory: emptyDiagnosticInventory.payload.value,
+        previous: emptyDiagnosticResult.payload.proposal,
+        projection: null,
+        failure: {
+          error: "",
+          proposal: emptyDiagnosticResult.payload.proposal,
+          ...(emptyDiagnosticResult.payload.validationReport === undefined
+            ? {}
+            : { validationReport: emptyDiagnosticResult.payload.validationReport }),
+        },
+      });
+      const emptyDiagnosticProof = proveCompilerSelectionQualificationBoundary({
+        records: emptyDiagnosticRecords,
+        graph: persisted!.objective,
+        inputDigest: records[0]!.binding.inputDigest,
+        events: f.events(),
+        durableGraph: null,
+      });
+      expect(emptyDiagnosticProof.usage).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ stage: "compile", state: "failed", amount: 30 }),
+        ]),
+      );
       const trailingRecord = structuredClone(records.at(-1)!);
       trailingRecord.sequence = records.length;
       const malformedRecords = [...records, trailingRecord];

@@ -1062,7 +1062,7 @@ export async function inspectCompilerEvaluation(args: {
         ? ("reserved" as const)
         : result.payload.preProviderTerminal === true
           ? ("not-invoked" as const)
-          : result.payload.error
+          : typeof result.payload.error === "string"
             ? ("failed" as const)
             : ("completed" as const),
       inputTokens: counters?.inputTokens ?? null,

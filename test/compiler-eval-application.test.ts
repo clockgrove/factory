@@ -839,6 +839,38 @@ describe("read-only compiler evaluation", () => {
     expect(result.activationAuthorized).toBe(false);
     expect(result.modelInvoked).toBe(false);
   });
+  it("classifies an empty persisted error diagnostic as a failed invocation", async () => {
+    const records = history();
+    const compileResult = records.find(
+      (record) => record.kind === "result" && record.payload.stage === "compile",
+    )!;
+    compileResult.payload.error = "";
+    records.find(
+      (record) => record.kind === "invocation" && record.payload.stage === "repair",
+    )!.payload.inputDigest = draftDigest({
+      inventory,
+      previous: compileResult.payload.proposal,
+      projection: null,
+      failure: { error: "", proposal: compileResult.payload.proposal },
+    });
+    validatePersistedCompilerDraftJournal(records);
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+
+    const result = await inspectCompilerEvaluation({
+      repository: binding.repository,
+      snapshot,
+      store,
+    });
+    expect(result.invocationStatus).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          invocationId: compileResult.payload.invocationId,
+          stage: "compile",
+          state: "failed",
+        }),
+      ]),
+    );
+  });
   it("renders unavailable result and obligation authority without claiming authentication", async () => {
     vi.mocked(loadCompilerDrafts).mockResolvedValue(history().slice(0, 2));
 

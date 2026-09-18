@@ -145,6 +145,7 @@ describe("controller quota boundary", () => {
       if (boundary === "renewal") renew.mockRejectedValueOnce(refusal);
       const shutdown = new AbortController();
       const signals: AbortSignal[] = [];
+      const qualificationShutdownSignals: AbortSignal[] = [];
       const finish = new Map<number, () => void>();
       const runs = vi.fn(
         (objective: number, signal: AbortSignal) =>
@@ -157,29 +158,45 @@ describe("controller quota boundary", () => {
       const task = runGitHubRepositoryController({
         ...options(shutdown.signal),
         capacity: 2,
-        supervisorFactory: (item, _resources, _observation, signal) => ({
-          run: () => runs(item.objective, signal!),
-        }),
+        supervisorFactory: (
+          item,
+          _resources,
+          _observation,
+          signal,
+          qualificationShutdownSignal,
+        ) => {
+          qualificationShutdownSignals.push(qualificationShutdownSignal!);
+          return { run: () => runs(item.objective, signal!) };
+        },
       });
       await vi.advanceTimersByTimeAsync(1);
       expect(runs).toHaveBeenCalledTimes(2);
+      expect(qualificationShutdownSignals).toEqual([shutdown.signal, shutdown.signal]);
       await vi.advanceTimersByTimeAsync(boundary === "discovery" ? 60_000 : 480_000);
       expect(signals.every((signal) => !signal.aborted)).toBe(true);
+      expect(qualificationShutdownSignals.every((signal) => !signal.aborted)).toBe(true);
       const discoveryCount = mock.discover.mock.calls.length;
       finish.get(1)!();
       await vi.advanceTimersByTimeAsync(3_599_998);
       expect(signals.every((signal) => !signal.aborted)).toBe(true);
+      expect(qualificationShutdownSignals.every((signal) => !signal.aborted)).toBe(true);
       expect(mock.acquire).toHaveBeenCalledTimes(1);
       expect(mock.discover).toHaveBeenCalledTimes(discoveryCount);
       await vi.advanceTimersByTimeAsync(2);
       expect(renew.mock.calls.some(([, options]) => options?.allowExpiredAfterQuota)).toBe(true);
       expect(mock.discover.mock.calls.length).toBeGreaterThan(discoveryCount);
       expect(runs).toHaveBeenCalledTimes(3);
+      expect(qualificationShutdownSignals).toEqual([
+        shutdown.signal,
+        shutdown.signal,
+        shutdown.signal,
+      ]);
       expect(runs.mock.calls.map(([objective]) => objective)).toEqual([1, 2, 3]);
       expect(mock.acquire).toHaveBeenCalledTimes(1);
       shutdown.abort();
       await task;
       expect(signals.every((signal) => signal.aborted)).toBe(true);
+      expect(qualificationShutdownSignals.every((signal) => signal.aborted)).toBe(true);
       expect(mock.release).toHaveBeenCalledTimes(1);
     },
   );

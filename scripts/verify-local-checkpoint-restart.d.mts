@@ -227,6 +227,7 @@ export interface CheckpointExtension {
   authority?: CheckpointAuthority;
   scope?: string;
   harnessPaths?: string[];
+  omitActivationPolicy?: boolean;
   objectiveBody?(authority: CheckpointAuthority): string;
   preflight?(context: Record<string, unknown>): unknown;
   observe?(context: Record<string, unknown>): unknown;

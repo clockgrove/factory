@@ -16,6 +16,7 @@ import { observeLocalScopeBatch } from "./recovery/scope-resources.js";
 import { dirname, join, resolve } from "node:path";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { arch, homedir, platform, tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { readObjectiveAssetManifest, recoverObjectiveAsset } from "./assets/storage.js";
 import { materializeObjectiveAssets, materializeWorkerAssetInputs } from "./assets/materialize.js";
 import {
@@ -98,6 +99,15 @@ import {
   holdArtifactTransferQualificationCheckpoint,
   proveArtifactTransferQualificationReceipts,
 } from "./runtime/artifact-transfer-qualification-checkpoint.js";
+import {
+  CompilerQualificationCheckpointHeldError,
+  CompilerQualificationCheckpointShutdownError,
+  holdCompilerQualificationCheckpoint,
+  proveCompilerSelectionQualificationBoundary,
+  proveGraphProjectionQualificationBoundary,
+  type CompilerQualificationCheckpointKind,
+  type CompilerQualificationProof,
+} from "./runtime/compiler-qualification-checkpoint.js";
 import { AppServerSessionManager } from "./control/app-server-sessions.js";
 import {
   completeSessionUsage,
@@ -578,6 +588,9 @@ export interface SupervisorOptions {
   sharedCapacity?: SharedCapacityCoordinator;
   /** A service stop releases ownership without durably cancelling the run. */
   shutdownBehavior?: "cancel-run" | "release-lease";
+  /** Private qualification authority from the installed controller's outer
+   * lifecycle signal. Internal ownership failures deliberately omit it. */
+  compilerQualificationShutdownSignal?: AbortSignal;
   /** Durable controller activation fence. Foreground runs omit this. */
   activation?: { requestId: string; baseSha: string; assetManifestDigest?: string };
   /** Exact acknowledged successor; selects complete authenticated recovery history reads. */
@@ -755,6 +768,7 @@ function terminalizationVeto(error: unknown): boolean {
     error instanceof SharedCapacitySnapshotLagError ||
     error instanceof PlatformUnavailableError ||
     error instanceof SafeArtifactCheckpointHeldError ||
+    error instanceof CompilerQualificationCheckpointHeldError ||
     error instanceof ArtifactCompletionUnavailableError ||
     error instanceof ArtifactCollectionCheckpointError ||
     error instanceof MediaExecutionPhaseError ||
@@ -1738,6 +1752,64 @@ export class FactorySupervisor {
   #recoveryGraphBootstrap: RecoveryGraphBootstrapRuntime | null = null;
   #compiledProjection: CompiledGraphProjectionRecord | null = null;
   #localScopeHost: ReturnType<typeof discoverLocalScopeHost> | undefined;
+
+  async #holdCompilerQualificationBoundary(
+    checkpoint: CompilerQualificationCheckpointKind,
+    baseSha: string,
+    proveBoundary: () => Promise<CompilerQualificationProof>,
+  ): Promise<void> {
+    if (!this.#run.activationRequestId) return;
+    try {
+      await holdCompilerQualificationCheckpoint({
+        repository: `${this.#options.owner}/${this.#options.repo}`.toLowerCase(),
+        objective: this.#run.objective,
+        activationRequestId: this.#run.activationRequestId,
+        runId: this.#run.runId,
+        policyDigest: this.#run.policyDigest,
+        baseSha,
+        checkpoint,
+        objectiveStartedAt: this.#run.startedAt,
+        objectiveDeadline: new Date(
+          this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+        ),
+        holdDurationMs: this.#policy.workItemTimeoutMinutes * 60_000,
+        // Consuming the arm authorizes only the installed controller's outer
+        // lifecycle stop. Foreground cancellation and ownership failures cannot release it.
+        ...(this.#options.compilerQualificationShutdownSignal &&
+        this.#options.shutdownBehavior === "release-lease"
+          ? { signal: this.#options.compilerQualificationShutdownSignal }
+          : {}),
+        observeController: async () => {
+          const host = await discoverLocalScopeHost();
+          if (!host?.producerUnit || !host.producerInvocationId) return null;
+          const bundleIdentity = `sha256:${createHash("sha256")
+            .update(await readFile(fileURLToPath(import.meta.url)))
+            .digest("hex")}`;
+          return {
+            bundleIdentity,
+            hostIdentity: host.hostIdentity,
+            producerPid: host.producerPid,
+            producerStartTicks: host.producerStartTicks,
+            producerUnit: host.producerUnit,
+            producerInvocationId: host.producerInvocationId,
+          };
+        },
+        assertCurrent: () => this.#lease.assert(),
+        proveBoundary,
+      });
+    } catch (error) {
+      if (
+        error instanceof CompilerQualificationCheckpointShutdownError &&
+        this.#options.compilerQualificationShutdownSignal?.aborted &&
+        this.#options.signal?.aborted &&
+        this.#options.shutdownBehavior === "release-lease"
+      )
+        throw new RunCancellationRequestedError(
+          `repository controller stopped at the ${checkpoint} qualification hold`,
+        );
+      throw error;
+    }
+  }
 
   constructor(options: SupervisorOptions, bootstrap?: { initialSnapshot: Snapshot }) {
     this.#options = { ...options, repository: resolve(options.repository) };
@@ -5894,6 +5966,26 @@ export class FactorySupervisor {
                     { inputTokens: 0, outputTokens: 0 },
                   );
                 const result = { objective: outcome.graph, usage };
+                await this.#holdCompilerQualificationBoundary(
+                  "compiler-selection",
+                  base.oid,
+                  async () => {
+                    const records = await loadCompilerDrafts(
+                      this.#store,
+                      snapshot.number,
+                      this.#run.runId,
+                    );
+                    const fresh = await this.#reader.readObjective(snapshot.number);
+                    this.#fenceSnapshot(fresh);
+                    return proveCompilerSelectionQualificationBoundary({
+                      records,
+                      graph: outcome.graph,
+                      inputDigest,
+                      events: snapshotEvents(fresh),
+                      durableGraph: await graphManager.load(snapshot.number, this.#run.runId),
+                    });
+                  },
+                );
                 await checkpoint(result);
                 return result;
               } finally {
@@ -6305,6 +6397,33 @@ export class FactorySupervisor {
         );
         this.#compiledGraph = compiled;
         this.#compiledProjection = durableProjection;
+        if (this.#policy.compilerEvaluation) {
+          await this.#holdCompilerQualificationBoundary("graph-projection", base.oid, async () => {
+            const fresh = await this.#reader.readObjective(snapshot.number);
+            this.#fenceSnapshot(fresh);
+            const persisted = await graphManager.loadProjection(
+              snapshot.number,
+              this.#run.runId,
+              durableGraph!,
+            );
+            if (!persisted)
+              throw new Error("graph projection checkpoint lacks its durable projection");
+            assertAuthenticatedGraphProjection(
+              snapshotEvents(fresh),
+              snapshot.number,
+              this.#run.runId,
+              persisted,
+            );
+            assertSnapshotMatchesCompiledGraph(compiled, fresh, persisted.bindings);
+            return proveGraphProjectionQualificationBoundary({
+              objective: snapshot.number,
+              runId: this.#run.runId,
+              graph: durableGraph!,
+              projection: persisted,
+              events: snapshotEvents(fresh),
+            });
+          });
+        }
         if (this.#recoveryGraphBootstrap) {
           snapshot = await this.#reader.readObjective(snapshot.number);
           this.#sequences.observe(snapshotEvents(snapshot));

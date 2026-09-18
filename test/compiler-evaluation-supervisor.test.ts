@@ -30,6 +30,7 @@ import { CompilerProposalSchema, type CompilerProposal } from "../src/compiler/c
 import { proposalResultFromCompiledFixture } from "./helpers/compiler-proposal.js";
 import { parseAndValidateCompilerProposal } from "../src/compiler/proposal.js";
 import { parseCompilerOperation } from "../src/toolchains/compiler-capabilities.js";
+import { proveCompilerSelectionQualificationBoundary } from "../src/runtime/compiler-qualification-checkpoint.js";
 
 const usage = { inputTokens: 20, outputTokens: 10, cachedInputTokens: 4 };
 const invocationProvenance = (baseSha: string) => ({
@@ -906,6 +907,40 @@ describe("Supervisor compiler evaluation activation boundary", () => {
               event.unit === "model_tokens",
           ),
       ).toHaveLength(4);
+      const records = await loadCompilerDrafts(f.storage, 7, f.runId);
+      const persisted = await new CompiledGraphManager(f.storage, f.leases).load(7, f.runId);
+      expect(persisted).not.toBeNull();
+      const proof = proveCompilerSelectionQualificationBoundary({
+        records,
+        graph: persisted!.objective,
+        inputDigest: compilerEvalDigest({
+          objective: {
+            number: f.snapshot.number,
+            title: f.snapshot.title,
+            body: f.snapshot.body,
+          },
+          assetManifestDigest: null,
+          compilerMediaEgress: f.policy.compilerMediaEgress,
+        }),
+        events: f.events(),
+        durableGraph: null,
+      });
+      expect(proof).toMatchObject({
+        checkpoint: "compiler-selection",
+        graphDigest: persisted!.graphDigest,
+        graphAbsent: true,
+        usage: expect.arrayContaining([expect.objectContaining({ stage: "repair", amount: 30 })]),
+      });
+      expect(proof.usage).toHaveLength(4);
+      expect(() =>
+        proveCompilerSelectionQualificationBoundary({
+          records,
+          graph: persisted!.objective,
+          inputDigest: records[0]!.binding.inputDigest,
+          events: f.events(),
+          durableGraph: persisted,
+        }),
+      ).toThrow("follows graph persistence");
     } finally {
       await f.dispose();
     }

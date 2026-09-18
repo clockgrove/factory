@@ -2008,7 +2008,15 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       assert.ok(lifecycle.installed && !lifecycle.active);
       const state = await controller("inactive");
       evidence.configDigest = state.configDigest;
-      await extension.preflight?.({ authority, evidence, request, list, command, save });
+      await extension.preflight?.({
+        authority,
+        evidence,
+        request,
+        list,
+        command,
+        installedFactoryCli: candidate.factoryCli,
+        save,
+      });
       save();
       return state;
     },

@@ -51,6 +51,14 @@ export function assertCompilerQualificationDefaults(
   effectiveDefaults: unknown,
   maxObservedTokens: number,
 ): CompilerCheckpointPolicy;
+export function assertCompilerQualificationPnpmRuntime(statuses: unknown): {
+  tool: "pnpm";
+  adapter: "node-pnpm";
+  adapterContract: 1;
+  platform: { os: "linux"; architecture: "x64"; libc: "glibc" };
+  digest: string;
+  components: Array<{ id: string; version: string }>;
+};
 export function compilerCheckpointArm(
   authority: CompilerCheckpointAuthority,
   controller: CompilerController,

@@ -55,6 +55,50 @@ export function assertCompilerQualificationDefaults(effectiveDefaults, maxObserv
   return effectiveDefaults;
 }
 
+export function assertCompilerQualificationPnpmRuntime(statuses) {
+  assert.ok(Array.isArray(statuses), "installed managed-toolchain status inventory required");
+  const status = unique(
+    statuses.filter((candidate) => candidate?.tool === "pnpm"),
+    "one installed pnpm managed-toolchain status required",
+  );
+  assert.equal(
+    status.state,
+    "ready",
+    "compiler qualification requires a ready integrity-verified pnpm managed runtime",
+  );
+  const receipt = status.receipt;
+  assert.ok(receipt && typeof receipt === "object", "ready pnpm runtime receipt required");
+  assert.equal(receipt.protocol, "clockgrove.factory/toolchain-runtime-bundle-v1");
+  assert.equal(receipt.tool, "pnpm");
+  assert.equal(receipt.adapter, "node-pnpm");
+  assert.equal(receipt.adapterContract, 1);
+  assert.deepEqual(receipt.platform, { os: "linux", architecture: "x64", libc: "glibc" });
+  assert.match(receipt.digest, /^[a-f0-9]{64}$/);
+  assert.ok(
+    Number.isFinite(Date.parse(receipt.resolvedAt)),
+    "pnpm runtime resolution time required",
+  );
+  assert.ok(Array.isArray(receipt.components), "pnpm runtime components required");
+  assert.deepEqual(
+    receipt.components.map(({ id }) => id),
+    ["node", "pnpm"],
+    "pnpm runtime requires the exact Node and pnpm component topology",
+  );
+  for (const component of receipt.components) {
+    assert.match(component.version, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
+  }
+  const { digest, resolvedAt: _resolvedAt, ...identity } = receipt;
+  assert.equal(digest, hash(canonical(identity)), "pnpm runtime receipt digest mismatch");
+  return {
+    tool: receipt.tool,
+    adapter: receipt.adapter,
+    adapterContract: receipt.adapterContract,
+    platform: receipt.platform,
+    digest: receipt.digest,
+    components: receipt.components.map(({ id, version }) => ({ id, version })),
+  };
+}
+
 /** A retained human-authored greenfield shape: one pnpm authority provider and
  * three bounded, otherwise independent descendants. */
 export function compilerQualificationObjectiveBody(authority) {
@@ -380,6 +424,22 @@ export function compilerCheckpointExtension(authority) {
     maxObservedChildren: 4,
     objectiveBody: compilerQualificationObjectiveBody,
     harnessPaths: ["scripts/verify-compiler-qualification-checkpoints.mjs"],
+    preflight: ({ authority: observedAuthority, evidence, command, installedFactoryCli, save }) => {
+      assert.equal(observedAuthority, authority);
+      assert.ok(
+        typeof installedFactoryCli === "string" && installedFactoryCli.length > 0,
+        "receipt-authenticated installed Factory CLI required",
+      );
+      const statuses = JSON.parse(
+        command(
+          process.execPath,
+          [installedFactoryCli, "toolchains", "status"],
+          authority.checkout,
+        ),
+      );
+      evidence.compilerRuntime = assertCompilerQualificationPnpmRuntime(statuses);
+      save();
+    },
     observe: ({ observation, evidence }) => {
       if (!evidence.compilerArms) return;
       observation.compilerCheckpoints = {};

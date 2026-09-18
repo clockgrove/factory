@@ -451,6 +451,9 @@ describe("actual native-unavailability regular fallback", () => {
     const run = vi.fn();
     await fallbackMain({}, run);
     expect(run).not.toHaveBeenCalled();
+    await fallbackMain(env, run);
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ privateEvidence: true }), { env });
+    run.mockClear();
     for (const conflict of [
       { FACTORY_LIVE_OBJECTIVE_DELIVERY: "regular-prs" },
       { FACTORY_LIVE_REGULAR_OBJECTIVE: "1" },

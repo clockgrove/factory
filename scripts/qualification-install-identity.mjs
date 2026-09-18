@@ -12,6 +12,7 @@ import {
 } from "./verify-live-objective.mjs";
 
 export const QUALIFICATION_INSTALL_RECEIPT_ENV = "FACTORY_QUALIFICATION_INSTALL_RECEIPT";
+export const QUALIFICATION_MANAGEMENT_TRANSCRIPT_ENV = "FACTORY_MANAGEMENT_TRANSCRIPT_DIR";
 
 const MAX_RECEIPT_BYTES = 16 * 1024;
 const MAX_MANIFEST_BYTES = 64 * 1024;
@@ -165,11 +166,46 @@ export function qualificationPluginListEnvironment(environment, codexHome) {
 /** Build a minimal child environment that keeps provider state in the normal Linux Codex home. */
 export function qualificationRuntimeEnvironment(
   environment,
-  { linuxHome = realpathSync(homedir()), additions = {} } = {},
+  {
+    linuxHome = realpathSync(homedir()),
+    additions = {},
+    repositoryRoot,
+    requireManagementTranscripts = false,
+    uid = process.getuid?.(),
+  } = {},
 ) {
   assert.ok(!/^\/mnt(?:\/|$)/.test(linuxHome), "Linux-native home required");
-  const uid = process.getuid?.();
   assert.ok(Number.isSafeInteger(uid) && uid >= 0, "effective Linux uid unavailable");
+  for (const key of [
+    "HOME",
+    "CODEX_HOME",
+    QUALIFICATION_INSTALL_RECEIPT_ENV,
+    QUALIFICATION_MANAGEMENT_TRANSCRIPT_ENV,
+  ])
+    assert.equal(additions[key], undefined, `${key} cannot be overridden for a runtime child`);
+  const transcriptInput = environment[QUALIFICATION_MANAGEMENT_TRANSCRIPT_ENV]?.trim();
+  if (requireManagementTranscripts)
+    assert.ok(transcriptInput, `${QUALIFICATION_MANAGEMENT_TRANSCRIPT_ENV} is required`);
+  let transcriptDirectory;
+  if (transcriptInput) {
+    assert.ok(repositoryRoot, "target repository is required for transcript validation");
+    assert.ok(isAbsolute(transcriptInput), "management transcript directory must be absolute");
+    transcriptDirectory = resolve(transcriptInput);
+    assert.ok(
+      !/^\/mnt(?:\/|$)/.test(transcriptDirectory),
+      "management transcript directory must be Linux-native",
+    );
+    transcriptDirectory = canonicalDirectory(transcriptDirectory, uid, {
+      privateDirectory: true,
+    });
+    const repository = canonicalDirectory(repositoryRoot, uid);
+    const transcriptInRepository = relative(repository, transcriptDirectory);
+    assert.ok(
+      transcriptInRepository &&
+        (transcriptInRepository.startsWith("..") || isAbsolute(transcriptInRepository)),
+      "management transcript directory must remain outside the target repository",
+    );
+  }
   canonicalDirectory(linuxHome, uid);
   const codexHome = canonicalDirectory(join(linuxHome, ".codex"), uid);
   if (environment.CODEX_HOME !== undefined)
@@ -178,8 +214,6 @@ export function qualificationRuntimeEnvironment(
       codexHome,
       "runtime CODEX_HOME must be unset or the default Linux Codex home",
     );
-  for (const key of ["HOME", "CODEX_HOME", QUALIFICATION_INSTALL_RECEIPT_ENV])
-    assert.equal(additions[key], undefined, `${key} cannot be overridden for a runtime child`);
   return {
     HOME: linuxHome,
     CODEX_HOME: codexHome,
@@ -188,6 +222,9 @@ export function qualificationRuntimeEnvironment(
     PATH: environment.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     ...(environment.LOGNAME ? { LOGNAME: environment.LOGNAME } : {}),
     ...(environment.USER ? { USER: environment.USER } : {}),
+    ...(transcriptDirectory
+      ? { [QUALIFICATION_MANAGEMENT_TRANSCRIPT_ENV]: transcriptDirectory }
+      : {}),
     ...additions,
   };
 }

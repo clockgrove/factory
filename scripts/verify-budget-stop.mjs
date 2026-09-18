@@ -318,6 +318,7 @@ export function createBudgetStopQualification(authority, env = process.env, port
         home: homedir(),
         uid: user.uid,
         username: user.username,
+        managementTranscriptDirectory: parameters.env.FACTORY_MANAGEMENT_TRANSCRIPT_DIR,
       });
       assert.equal(transport.args.filter((arg) => arg === "--property=CPUQuota=50%").length, 1);
       return {

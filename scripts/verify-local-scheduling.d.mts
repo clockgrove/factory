@@ -41,6 +41,7 @@ export function schedulingTransport(
     home: string;
     uid: number;
     username: string;
+    managementTranscriptDirectory: string;
   },
 ): { command: string; args: string[]; cwd: string; env: Record<string, string>; stderr: "pipe" };
 export function observeSchedulingService(

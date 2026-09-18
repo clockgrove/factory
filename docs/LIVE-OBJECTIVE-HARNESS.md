@@ -36,6 +36,10 @@ tarball, plugin archive, npm install, isolated plugin listing, inventory, Factor
 launcher. The receipt's isolated Codex home selects artifact bytes only. Runtime provider
 authentication remains in the normal Linux `/home/.../.codex`; a mutable Desktop plugin cannot
 become artifact authority. The MCP handshake must report the canonical package version.
+Create a separate owner-only (`0700`) transcript directory on the Linux filesystem and set
+`FACTORY_MANAGEMENT_TRANSCRIPT_DIR` before preflight. The installed foreground MCP child receives
+that exact validated path. It must be canonical, owned by the current user, and outside the target
+checkout; raw model messages remain local debug evidence and must not be committed or published.
 
 The operator must authorize Objective/sub-issue creation, local model usage, PR creation and merging
 into the named disposable repository. The exact repository acknowledgement below is a guard against
@@ -56,6 +60,7 @@ env -u CODEX_HOME -u FACTORY_LIVE_OBJECTIVE_PREFLIGHT \
   FACTORY_LIVE_OBJECTIVE_MUTATION_ACK=OWNER/DISPOSABLE-REPO \
   FACTORY_LIVE_OBJECTIVE_CHECKOUT=/home/you/conformance-fixture \
   FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/you/Codex/factory-initial-beta/CANDIDATE/install-identities.txt \
+  FACTORY_MANAGEMENT_TRANSCRIPT_DIR=/home/you/private-evidence/management-transcripts-UNIQUE \
   FACTORY_LIVE_OBJECTIVE_NAMESPACE=qualification-example-001 \
   FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=250000 \
   FACTORY_LIVE_OBJECTIVE_EVIDENCE=/tmp/factory-objective-evidence-UNIQUE \

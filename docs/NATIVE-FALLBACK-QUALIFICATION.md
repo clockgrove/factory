@@ -56,9 +56,14 @@ export FACTORY_LIVE_OBJECTIVE_NAMESPACE=fallback-new-unused-namespace
 export FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=250000
 export FACTORY_LIVE_OBJECTIVE_EVIDENCE=/home/USER/private-evidence/fallback-new-unused-namespace
 export FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/USER/Codex/factory-initial-beta/CANDIDATE/install-identities.txt
+export FACTORY_MANAGEMENT_TRANSCRIPT_DIR=/home/USER/private-evidence/fallback-transcripts-UNIQUE
 
 FACTORY_LIVE_OBJECTIVE_PREFLIGHT=1 node scripts/verify-native-fallback-objective.mjs
 ```
+
+Create the transcript directory first with mode `0700`. It must be a canonical current-user-owned
+Linux path outside the disposable checkout. The qualifier fails before Objective creation or model
+use if it is missing, redirected, non-private, or inside the repository. Its raw files remain local.
 
 If and only if the actual preflight passes and this scenario's model/mutation authority is already
 granted, invoke with preflight mode unset and the exact repository acknowledgement:

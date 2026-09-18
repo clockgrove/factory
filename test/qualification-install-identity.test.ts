@@ -262,4 +262,87 @@ describe("retained qualification install authority", () => {
     expect(runtime.CODEX_HOME).toBe(defaultCodexHome);
     expect(runtime).not.toHaveProperty("FACTORY_QUALIFICATION_INSTALL_RECEIPT");
   });
+
+  it("preserves validated private transcripts without changing provider or artifact authority", () => {
+    const value = fixture();
+    const runtimeHome = join(value.root, "runtime-home");
+    const runtimeCodexHome = join(runtimeHome, ".codex");
+    const checkout = join(value.root, "target-checkout");
+    const transcripts = join(value.root, "management-transcripts");
+    for (const directory of [runtimeHome, runtimeCodexHome, checkout, transcripts])
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const runtime = qualificationRuntimeEnvironment(
+      {
+        PATH: "/usr/bin:/bin",
+        CODEX_HOME: runtimeCodexHome,
+        FACTORY_QUALIFICATION_INSTALL_RECEIPT: value.installReceipt,
+        FACTORY_MANAGEMENT_TRANSCRIPT_DIR: transcripts,
+      },
+      {
+        linuxHome: runtimeHome,
+        repositoryRoot: checkout,
+        requireManagementTranscripts: true,
+      },
+    );
+    expect(runtime).toMatchObject({
+      HOME: runtimeHome,
+      CODEX_HOME: runtimeCodexHome,
+      FACTORY_MANAGEMENT_TRANSCRIPT_DIR: transcripts,
+    });
+    expect(runtime).not.toHaveProperty("FACTORY_QUALIFICATION_INSTALL_RECEIPT");
+  });
+
+  it("requires transcript recording before a managed qualification child can start", () => {
+    const value = fixture();
+    const runtimeHome = join(value.root, "runtime-home");
+    const checkout = join(value.root, "target-checkout");
+    mkdirSync(join(runtimeHome, ".codex"), { recursive: true, mode: 0o700 });
+    mkdirSync(checkout, { mode: 0o700 });
+    expect(() =>
+      qualificationRuntimeEnvironment(
+        {},
+        { linuxHome: runtimeHome, repositoryRoot: checkout, requireManagementTranscripts: true },
+      ),
+    ).toThrow(/FACTORY_MANAGEMENT_TRANSCRIPT_DIR is required/);
+  });
+
+  it.each([
+    "relative",
+    "symlinked",
+    "repository-contained",
+    "non-private",
+    "mismatched-owner",
+  ] as const)("rejects %s transcript authority before child launch", (kind) => {
+    const value = fixture();
+    const runtimeHome = join(value.root, "runtime-home");
+    const checkout = join(value.root, "target-checkout");
+    const privateDirectory = join(value.root, "management-transcripts");
+    mkdirSync(join(runtimeHome, ".codex"), { recursive: true, mode: 0o700 });
+    mkdirSync(checkout, { mode: 0o700 });
+    mkdirSync(privateDirectory, { mode: 0o700 });
+    let transcriptDirectory = privateDirectory;
+    let uid = process.getuid?.() ?? 0;
+    if (kind === "relative") transcriptDirectory = "management-transcripts";
+    if (kind === "symlinked") {
+      transcriptDirectory = join(value.root, "redirected-transcripts");
+      symlinkSync(privateDirectory, transcriptDirectory);
+    }
+    if (kind === "repository-contained") {
+      transcriptDirectory = join(checkout, "transcripts");
+      mkdirSync(transcriptDirectory, { mode: 0o700 });
+    }
+    if (kind === "non-private") chmodSync(privateDirectory, 0o750);
+    if (kind === "mismatched-owner") uid += 1;
+    expect(() =>
+      qualificationRuntimeEnvironment(
+        { FACTORY_MANAGEMENT_TRANSCRIPT_DIR: transcriptDirectory },
+        {
+          linuxHome: runtimeHome,
+          repositoryRoot: checkout,
+          requireManagementTranscripts: true,
+          uid,
+        },
+      ),
+    ).toThrow();
+  });
 });

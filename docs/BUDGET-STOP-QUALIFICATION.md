@@ -45,11 +45,17 @@ export FACTORY_LIVE_OBJECTIVE_CHECKOUT=/home/USER/Codex/disposable
 export FACTORY_LIVE_OBJECTIVE_NAMESPACE=budget-refusal-unique-20260905-a
 export FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=1
 export FACTORY_LIVE_OBJECTIVE_EVIDENCE=/home/USER/private-evidence/budget-refusal-unique-20260905-a
+install -d -m 700 /home/USER/private-evidence/budget-refusal-transcripts-unique-20260905-a
+export FACTORY_MANAGEMENT_TRANSCRIPT_DIR="$(realpath -e /home/USER/private-evidence/budget-refusal-transcripts-unique-20260905-a)"
 
 env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME \
   PATH=/home/USER/.local/bin:/usr/local/bin:/usr/bin:/bin \
   FACTORY_LIVE_OBJECTIVE_PREFLIGHT=1 node scripts/verify-budget-stop.mjs
 ```
+
+The transcript directory must be a canonical, current-user-owned, mode-`0700`, non-symlink Linux
+directory outside the disposable checkout. The shared runtime validates it before Objective
+mutation or model use, and raw transcripts remain local debug evidence.
 
 Preflight does not start a service/model or mutate GitHub. For an authorized fresh
 execution, unset `FACTORY_LIVE_OBJECTIVE_PREFLIGHT` and supply the exact-scope

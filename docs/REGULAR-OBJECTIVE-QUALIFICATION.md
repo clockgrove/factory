@@ -36,12 +36,17 @@ export FACTORY_LIVE_OBJECTIVE_CHECKOUT=/home/USER/Codex/disposable-repo
 export FACTORY_LIVE_OBJECTIVE_NAMESPACE=regular-unique-20260905-a
 export FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=500000
 export FACTORY_LIVE_OBJECTIVE_EVIDENCE=/home/USER/private-evidence/regular-unique-20260905-a
+install -d -m 700 /home/USER/private-evidence/regular-transcripts-unique-20260905-a
+export FACTORY_MANAGEMENT_TRANSCRIPT_DIR="$(realpath -e /home/USER/private-evidence/regular-transcripts-unique-20260905-a)"
 
 FACTORY_LIVE_OBJECTIVE_PREFLIGHT=1 node scripts/verify-regular-objective.mjs
 ```
 
 The output directory is created owner-only; an existing directory must already be
 owner-only and owned by the current user. Private JSON evidence files use mode `0600`.
+The transcript directory must be a canonical, current-user-owned, mode-`0700`, non-symlink Linux
+directory outside the disposable checkout. The shared runtime validates it before Objective
+mutation or model use, and raw transcripts remain local debug evidence.
 Preflight performs bounded reads and writes only local evidence. Execution requires
 both the shared execution opt-in and acknowledgment of the exact disposable repository:
 

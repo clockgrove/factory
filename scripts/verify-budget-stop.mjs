@@ -401,7 +401,7 @@ export async function main(env = process.env, run = installedMain) {
     console.log("Not exercised: explicit pre-projection budget refusal opt-in required.");
     return;
   }
-  await run(createBudgetStopQualification(authority, env));
+  await run(createBudgetStopQualification(authority, env), { env });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {

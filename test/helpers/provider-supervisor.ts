@@ -1297,6 +1297,12 @@ wheels = [
       return true;
     },
   );
+  vi.spyOn(
+    GitHubControlStore.prototype,
+    "prepareCompareAndSwapRefAtPublicationBoundary",
+  ).mockImplementation(async function (this: GitHubControlStore, args) {
+    return () => this.compareAndSwapRef(args);
+  });
   const createPull = async (workItem: number, head: string, branch: string, baseRef = "main") => {
     const number = 100 + workItem;
     const item = snapshot.workItems.find((item) => item.number === workItem)!;

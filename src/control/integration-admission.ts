@@ -127,6 +127,11 @@ type Store = Pick<
   LeaseStore,
   "readRef" | "readCommit" | "createCommit" | "createRef" | "compareAndSwapRef"
 > & {
+  prepareCompareAndSwapRefAtPublicationBoundary?(args: {
+    ref: string;
+    beforeOid: string;
+    afterOid: string;
+  }): Promise<() => Promise<boolean>>;
   withMutationFence?<T>(fence: () => Promise<void>, operation: () => Promise<T>): Promise<T>;
   readPullRequest(number: number): Promise<
     Awaited<ReturnType<PublicationStore["readPullRequest"]>> & {
@@ -204,6 +209,11 @@ export interface IntegrationAdmission {
   readonly dispatch: IntegrationDispatch | null;
   /** Persist uncertain-send ownership before handing the request to GitHub. */
   markDispatched(kind: IntegrationDispatch["kind"]): Promise<void>;
+  /** Prepare an immutable dispatch record, then publish it only from the
+   * request's transport fence after every fallible safety read succeeds. */
+  prepareDispatch(kind: IntegrationDispatch["kind"]): Promise<{
+    markDispatchedAtPublicationBoundary(): Promise<void>;
+  }>;
   /** Bind the UUID returned by the one native request before journaling or polling it. */
   bindAsynchronousMerge(uuid: string): Promise<void>;
   /** Persist exact authoritative non-execution and retire only this claim by CAS. */
@@ -267,20 +277,36 @@ async function integrationAdmission<T>(
       throw Error("integration admission scope changed");
   }
 
-  const append = async (next: Record, treeOid: string): Promise<void> => {
+  const prepareAppend = async (next: Record, treeOid: string) => {
     await assertBeforeMutation();
     const nextOid = await store.createCommit({
       treeOid,
       parentOids: oid ? [oid] : [identity.baseSha],
       message: `Factory default-branch integration\n\nFactory-Integration: ${Buffer.from(JSON.stringify(next)).toString("base64url")}`,
     });
+    return { beforeOid: oid, nextOid, next };
+  };
+  const applyAppend = async (
+    prepared: Awaited<ReturnType<typeof prepareAppend>>,
+    boundaryMutation?: () => Promise<boolean>,
+  ): Promise<void> => {
     await assertBeforeMutation();
-    const changed = oid
-      ? await store.compareAndSwapRef({ ref, beforeOid: oid, afterOid: nextOid })
-      : await store.createRef(ref, nextOid);
+    const changed = prepared.beforeOid
+      ? boundaryMutation
+        ? await boundaryMutation()
+        : await store.compareAndSwapRef({
+            ref,
+            beforeOid: prepared.beforeOid,
+            afterOid: prepared.nextOid,
+          })
+      : await store.createRef(ref, prepared.nextOid);
     if (!changed)
       throw new IntegrationAdmissionPendingError(identity.objective, identity.pullRequest);
-    oid = nextOid;
+    oid = prepared.nextOid;
+  };
+  const append = async (next: Record, treeOid: string): Promise<void> => {
+    const prepared = await prepareAppend(next, treeOid);
+    await applyAppend(prepared);
   };
 
   if (prior) {
@@ -365,6 +391,38 @@ async function integrationAdmission<T>(
       await append(next, treeOid);
       record = next;
     };
+    const prepareDispatch = async (kind: IntegrationDispatch["kind"]) => {
+      if (dispatchAttempted || record.state !== "prepared")
+        throw Error("integration request already dispatched");
+      const next = recordSchema.parse({
+        ...record,
+        state: "dispatched",
+        dispatch: dispatchSchema.parse({
+          kind,
+          pullRequest: record.identity.pullRequest,
+          expectedHeadSha: record.identity.headSha,
+        }),
+      });
+      const prepared = await prepareAppend(next, treeOid);
+      const boundaryMutation = prepared.beforeOid
+        ? await store.prepareCompareAndSwapRefAtPublicationBoundary?.({
+            ref,
+            beforeOid: prepared.beforeOid,
+            afterOid: prepared.nextOid,
+          })
+        : undefined;
+      let marked = false;
+      return {
+        markDispatchedAtPublicationBoundary: async () => {
+          if (marked) return;
+          // Set before awaiting: marker-write uncertainty must never release ownership.
+          dispatchAttempted = true;
+          await applyAppend(prepared, boundaryMutation);
+          record = next;
+          marked = true;
+        },
+      };
+    };
     const assertNoIntegratedMember = async (): Promise<void> => {
       for (const member of record.identity.members ?? [record.identity]) {
         const pull = await store.readPullRequest(member.pullRequest);
@@ -396,6 +454,7 @@ async function integrationAdmission<T>(
           if ((await store.readRef(ref)) !== oid)
             throw Error("integration admission lost before dispatch");
         },
+        prepareDispatch,
         bindAsynchronousMerge: async (uuid) => {
           uuid = z.string().min(1).max(200).parse(uuid);
           if (record.state !== "dispatched" || record.dispatch?.kind !== "native")

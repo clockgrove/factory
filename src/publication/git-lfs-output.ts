@@ -559,6 +559,85 @@ export function assertLfsReceiptRemoteIdentity(
     throw new Error("Git LFS remote identity changed after artifact verification");
 }
 
+export interface RemoteLfsObjectSubject {
+  /** Immutable artifact that authenticates the upload receipts and raw bytes. */
+  artifact: NormalizedArtifact;
+  /** Exact tree about to cross the mutable publication boundary. */
+  resultTreeSha?: string;
+  /** Exact parent used only to construct the isolated LFS verification commit. */
+  baseSha?: string;
+}
+
+/** Recheck the exact authenticated remote objects at the mutable ref boundary.
+ * Upload receipts remain immutable historical evidence; this assertion proves
+ * that their objects are still readable immediately before publication. */
+export async function assertRemoteLfsObjectsCurrent(args: {
+  subjects: readonly RemoteLfsObjectSubject[];
+  repositoryPath: string;
+  allowedNetworkDestinations: string[];
+  transport?: LfsOutputTransport;
+}): Promise<void> {
+  const subjects = args.subjects.map((subject) => {
+    const artifact = verifyArtifact(subject.artifact);
+    const resultTreeSha = subject.resultTreeSha ?? artifact.fileManifest?.resultTreeSha;
+    const baseSha = subject.baseSha ?? artifact.baseSha;
+    if (artifact.lfsObjects?.length && !resultTreeSha)
+      throw new Error("LFS publication artifact lacks its exact result tree");
+    if (
+      (resultTreeSha && !/^[a-f0-9]{40}$/i.test(resultTreeSha)) ||
+      !/^[a-f0-9]{40}$/i.test(baseSha)
+    )
+      throw new Error("LFS publication requires exact Git tree and base identities");
+    return { artifact, resultTreeSha, baseSha };
+  });
+  const withLfs = subjects.filter(({ artifact }) => artifact.lfsObjects?.length);
+  if (withLfs.length === 0) return;
+
+  const repositories = new Set(
+    withLfs.flatMap(({ artifact }) =>
+      artifact.lfsObjects!.map((receipt) => receipt.rawTransfer.identity.repository.toLowerCase()),
+    ),
+  );
+  if (repositories.size !== 1)
+    throw new Error("Git LFS receipts name conflicting authenticated repositories");
+  const expectedRepository = [...repositories][0]!;
+  const transport = args.transport ?? new GitLfsOutputTransport();
+  const remote = await transport.preflight(
+    args.repositoryPath,
+    expectedRepository,
+    args.allowedNetworkDestinations,
+  );
+  if (!destinationAllowedByPolicy(remote.remoteHost, args.allowedNetworkDestinations))
+    throw new Error("Git LFS publication endpoint is outside run-policy egress");
+
+  const checked = new Set<string>();
+  for (const { artifact, resultTreeSha, baseSha } of withLfs) {
+    assertLfsReceiptRemoteIdentity(artifact, remote);
+    for (const receipt of artifact.lfsObjects!) {
+      const objectIdentity = JSON.stringify({
+        repository: expectedRepository,
+        remoteDigest: receipt.remoteDigest,
+        oid: receipt.oid,
+        size: receipt.size,
+        path: receipt.path,
+        resultTreeSha,
+        baseSha,
+      });
+      if (checked.has(objectIdentity)) continue;
+      checked.add(objectIdentity);
+      const bytes = await transport.read({
+        repository: args.repositoryPath,
+        object: receipt,
+        resultTreeSha: resultTreeSha!,
+        baseSha,
+        endpoint: remote.endpoint,
+      });
+      if (bytes.length !== receipt.size || sha256(bytes) !== receipt.oid)
+        throw new Error("remote LFS object changed before pointer publication");
+    }
+  }
+}
+
 /** Direct Git LFS CLI adapter. It never invokes clean/smudge filters or hooks. */
 export class GitLfsOutputTransport implements LfsOutputTransport {
   #tool: Awaited<ReturnType<typeof resolveGitLfsTool>> | undefined;

@@ -124,11 +124,13 @@ import {
 import {
   artifactRecoveryCopyAvailable,
   persistArtifactTransfer,
+  recoverArtifactTransfer,
   resumeArtifactTransfer,
   type ArtifactTransferIdentity,
   type ArtifactTransferIntentCheckpoint,
 } from "./control/artifact-transfers.js";
 import {
+  assertRemoteLfsObjectsCurrent,
   finalizeLfsArtifact,
   reconstructNativeLfsArtifact,
   restoreLfsArtifactContent,
@@ -10976,17 +10978,7 @@ export class FactorySupervisor {
   /** Native publication rewrites contain committed LFS pointers, not worker raw
    * bytes. Recover those bytes only through the original immutable artifact
    * transfer, then issue receipts bound to the rewritten target base. */
-  async #reconstructNativeArtifact(
-    item: DerivedWorkItem,
-    reservation: AttemptReservation,
-    range: {
-      sourceBaseSha: string;
-      headSha: string;
-      baseSha: string;
-      changedPaths: string[];
-      emptyReason?: string;
-    },
-  ): Promise<NormalizedArtifact> {
+  async #nativeArtifactContext(item: DerivedWorkItem, reservation: AttemptReservation) {
     const adopted = reservation.runId !== this.#run.runId;
     const assertCurrent = adopted
       ? () =>
@@ -11023,6 +11015,104 @@ export class FactorySupervisor {
           return lease.epoch;
         })
       : reservation.directorEpoch;
+    return { adopted, assertCurrent, successorEpoch };
+  }
+
+  async #nativeSourceArtifact(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    providedContext?: {
+      adopted: boolean;
+      assertCurrent: () => Promise<void>;
+      successorEpoch: number;
+    },
+  ): Promise<NormalizedArtifact> {
+    const context = providedContext ?? (await this.#nativeArtifactContext(item, reservation));
+    const originalPacket = this.#packetBoundToReservation(item, reservation);
+    const source = await resumeArtifactTransfer({
+      store: this.#store,
+      identity: this.#artifactTransferIdentity(reservation),
+      allowedPaths: originalPacket.allowedPaths,
+      assertCurrent: context.assertCurrent,
+    });
+    if (!source)
+      throw new Error(
+        "native LFS reconstruction requires the original immutable artifact transfer",
+      );
+    const adoptedDigest = context.adopted
+      ? this.#plannedRecoveryItem(item.number)?.source?.artifactDigest
+      : null;
+    if (context.adopted && (!adoptedDigest || source.digest !== adoptedDigest))
+      throw new Error("adopted native LFS artifact differs from its accepted recovery source");
+    if (source.outcome !== "succeeded")
+      throw new Error("native LFS source artifact did not succeed");
+    return this.#retainArtifactContent(source);
+  }
+
+  /** Load the immutable worker artifact that supplied a regular delivery head.
+   * Provider-owned publications have no host artifact authority and never enter
+   * Factory's LFS output path. */
+  async #regularIntegrationArtifact(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    adoptedSource: boolean,
+  ): Promise<NormalizedArtifact | undefined> {
+    let sourceReservation = reservation;
+    if (adoptedSource) {
+      const source = this.#plannedRecoveryItem(item.number)?.source;
+      if (!source?.artifactDigest)
+        throw new Error("adopted regular integration lacks its accepted source artifact");
+      const observed = (await this.#attempts.list(this.#run.objective, item.number)).find(
+        (candidate) =>
+          candidate.runId === source.runId &&
+          candidate.attempt === source.attempt &&
+          candidate.ref === source.reservationRef &&
+          candidate.oid === source.reservationCommitOid,
+      );
+      if (!observed)
+        throw new Error("adopted regular integration source reservation is unavailable");
+      sourceReservation = observed;
+    }
+    if (this.#registry.get(sourceReservation.backend)?.capabilities.providerManagedPublication)
+      return undefined;
+    const artifact = await recoverArtifactTransfer({
+      store: this.#store,
+      identity: this.#artifactTransferIdentity(sourceReservation),
+    });
+    // Artifact absence preserves the ordinary delivery path. LFS-producing
+    // paths persist this transfer before publication and cannot reach this branch.
+    if (!artifact) return undefined;
+    if (artifact.outcome !== "succeeded")
+      throw new Error("regular integration retained source artifact did not succeed");
+    const expectedDigest = adoptedSource
+      ? this.#plannedRecoveryItem(item.number)?.source?.artifactDigest
+      : [...(item.factoryEvents ?? [])]
+          .sort((left, right) => right.sequence - left.sequence)
+          .find(
+            (event) =>
+              event.kind === "attempt" &&
+              event.event === "AttemptPublished" &&
+              event.runId === sourceReservation.runId &&
+              event.attempt === sourceReservation.attempt,
+          )?.artifactDigest;
+    if (!expectedDigest || artifact.digest !== expectedDigest)
+      throw new Error("regular integration artifact differs from its published delivery authority");
+    return artifact;
+  }
+
+  async #reconstructNativeArtifact(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    range: {
+      sourceBaseSha: string;
+      headSha: string;
+      baseSha: string;
+      changedPaths: string[];
+      emptyReason?: string;
+    },
+    sourceArtifact?: NormalizedArtifact,
+  ): Promise<NormalizedArtifact> {
+    const context = await this.#nativeArtifactContext(item, reservation);
     const artifact = await reconstructNativeLfsArtifact({
       store: this.#store,
       authority: {
@@ -11030,34 +11120,18 @@ export class FactorySupervisor {
         objective: this.#run.objective,
         workItem: item.number,
         attempt: reservation.attempt,
-        runId: adopted ? this.#run.runId : reservation.runId,
-        directorEpoch: successorEpoch,
-        policyDigest: adopted ? this.#run.policyDigest : reservation.policyDigest,
+        runId: context.adopted ? this.#run.runId : reservation.runId,
+        directorEpoch: context.successorEpoch,
+        policyDigest: context.adopted ? this.#run.policyDigest : reservation.policyDigest,
       },
       repositoryPath: this.#options.repository,
       allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
-      assertCurrent,
+      assertCurrent: context.assertCurrent,
       range,
-      loadSourceArtifact: async () => {
-        const originalPacket = this.#packetBoundToReservation(item, reservation);
-        const source = await resumeArtifactTransfer({
-          store: this.#store,
-          identity: this.#artifactTransferIdentity(reservation),
-          allowedPaths: originalPacket.allowedPaths,
-          assertCurrent,
-        });
-        if (!source)
-          throw new Error(
-            "native LFS reconstruction requires the original immutable artifact transfer",
-          );
-        const adoptedDigest = adopted
-          ? this.#plannedRecoveryItem(item.number)?.source?.artifactDigest
-          : null;
-        if (adopted && (!adoptedDigest || source.digest !== adoptedDigest))
-          throw new Error("adopted native LFS artifact differs from its accepted recovery source");
-        this.#retainArtifactContent(source);
-        return source;
-      },
+      loadSourceArtifact: () =>
+        sourceArtifact
+          ? Promise.resolve(sourceArtifact)
+          : this.#nativeSourceArtifact(item, reservation, context),
     });
     return this.#retainArtifactContent(artifact);
   }
@@ -14809,6 +14883,24 @@ export class FactorySupervisor {
                 target.pull.commitSha,
               );
             }
+            const mutationArtifacts: Array<{
+              artifact: NormalizedArtifact;
+              resultTreeSha: string;
+              baseSha: string;
+            }> = [];
+            for (const member of integratingMembers) {
+              const item = ordered.find(
+                (candidate) => candidate.number === member.receipt.workItem,
+              );
+              if (!item) throw new Error("native integration member is outside its delivery unit");
+              const sourceArtifact = await this.#nativeSourceArtifact(item, member.reservation);
+              if (!sourceArtifact.lfsObjects?.length) continue;
+              mutationArtifacts.push({
+                artifact: sourceArtifact,
+                resultTreeSha: member.pull.exactHeadValidation.outputTreeSha,
+                baseSha: member.pull.exactHeadValidation.baseSha,
+              });
+            }
             const assertNativeMergeCurrent = async () => {
               if (
                 (await this.#store.getBranchHeadOid(this.#baseBranch)) !==
@@ -14847,17 +14939,38 @@ export class FactorySupervisor {
                   throw new Error("native required checks changed before dispatch");
             };
             await assertNativeMergeCurrent();
-            await admission.markDispatched("native");
-            const result = await this.#store.withPublicationSafetyFence(
-              assertNativeMergeCurrent,
-              () =>
-                this.#stacks.requestMerge({
-                  pullRequest: target.pull.number,
-                  expectedHeadSha: target.pull.commitSha,
-                  title: target.receipt.itemId,
-                  action: "default",
-                }),
-            );
+            const dispatch = await admission.prepareDispatch("native");
+            let mutationStarted = false;
+            let result: Awaited<ReturnType<GitHubStacks["requestMerge"]>>;
+            try {
+              result = await this.#store.withPublicationSafetyFence(
+                async () => {
+                  await assertNativeMergeCurrent();
+                  await assertRemoteLfsObjectsCurrent({
+                    subjects: mutationArtifacts,
+                    repositoryPath: this.#options.repository,
+                    allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                  });
+                  await dispatch.markDispatchedAtPublicationBoundary();
+                },
+                () => {
+                  mutationStarted = true;
+                  return this.#stacks.requestMerge({
+                    pullRequest: target.pull.number,
+                    expectedHeadSha: target.pull.commitSha,
+                    title: target.receipt.itemId,
+                    action: "default",
+                  });
+                },
+              );
+            } catch (error) {
+              if (!mutationStarted && admission.dispatch)
+                await admission.authoritativeNonExecution({
+                  kind: "native-request-rejection",
+                  reason: "native pre-dispatch safety check refused the exact merge request",
+                });
+              throw error;
+            }
             if (result.state === "pending") await admission.bindAsynchronousMerge(result.uuid);
             return result;
           });
@@ -15921,6 +16034,7 @@ export class FactorySupervisor {
     item: DerivedWorkItem,
     member: NativeStackMember,
     targetBaseSha: string,
+    sourceArtifact?: NormalizedArtifact,
   ): Promise<NormalizedArtifact> {
     await ensureLocalCommit(this.#options.repository, member.pull.exactHeadValidation.baseSha);
     await ensureLocalCommit(this.#options.repository, member.pull.commitSha);
@@ -15936,12 +16050,17 @@ export class FactorySupervisor {
     )
       .split("\0")
       .filter(Boolean);
-    return await this.#reconstructNativeArtifact(item, member.reservation, {
-      sourceBaseSha: source[0]!,
-      headSha: source[1]!,
-      baseSha: targetBaseSha,
-      changedPaths,
-    });
+    return await this.#reconstructNativeArtifact(
+      item,
+      member.reservation,
+      {
+        sourceBaseSha: source[0]!,
+        headSha: source[1]!,
+        baseSha: targetBaseSha,
+        changedPaths,
+      },
+      sourceArtifact,
+    );
   }
 
   async #assertSiblingRefreshCurrent(
@@ -16029,6 +16148,7 @@ export class FactorySupervisor {
     assertAdmission();
     const identity = await this.#siblingRefreshIdentity(item, member, targetBaseSha);
     let record = await this.#siblingRefreshes.load(identity);
+    let refreshArtifact: NormalizedArtifact | undefined;
     const observed = await this.#store.readPullRequest(member.pull.number);
     const previous = await this.#observedSiblingRefresh(item, member, observed.headSha);
     if (previous?.identity.targetBaseSha === targetBaseSha) {
@@ -16059,6 +16179,7 @@ export class FactorySupervisor {
       if (budget.modelTokens !== null && budget.modelTokens <= 0)
         throw new Error("model-token budget exhausted before sibling refresh");
       const artifact = await this.#siblingArtifact(item, member, targetBaseSha);
+      refreshArtifact = artifact;
       const packet = this.#packetBoundToReservation(item, member.reservation, targetBaseSha);
       const outputTreeSha = await prepareSiblingRefreshTree({
         repository: this.#options.repository,
@@ -16126,11 +16247,20 @@ export class FactorySupervisor {
         };
         const branchHead = await assertRefreshCurrent();
         if (branchHead === pinned.expectedOldHeadSha) {
+          refreshArtifact ??= await this.#siblingArtifact(item, member, targetBaseSha);
+          if (refreshArtifact.fileManifest?.resultTreeSha !== pinned.outputTreeSha)
+            throw new Error("sibling refresh artifact differs from its pinned result tree");
+          const mutationArtifact = refreshArtifact;
           await this.#lease.use(async () => {
             if (
               !(await this.#store.withPublicationSafetyFence(
                 async () => {
                   await assertRefreshCurrent();
+                  await assertRemoteLfsObjectsCurrent({
+                    subjects: [{ artifact: mutationArtifact }],
+                    repositoryPath: this.#options.repository,
+                    allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                  });
                 },
                 () =>
                   this.#store.compareAndSwapRef({
@@ -19473,7 +19603,12 @@ export class FactorySupervisor {
             };
             const current = await readCurrentReadiness();
             if (current.state !== "ready") return current;
-            await admission.markDispatched("regular");
+            const mutationArtifact = await this.#regularIntegrationArtifact(
+              item,
+              reservation,
+              adoptedSource,
+            );
+            const dispatch = await admission.prepareDispatch("regular");
             let mergeSha: string;
             try {
               mergeSha = await this.#store.withPublicationSafetyFence(
@@ -19481,6 +19616,22 @@ export class FactorySupervisor {
                   const refreshed = await readCurrentReadiness();
                   if (refreshed.state !== "ready" || refreshed.headSha !== current.headSha)
                     throw new Error("merge readiness changed while awaiting GitHub admission");
+                  if (mutationArtifact) {
+                    await assertRemoteLfsObjectsCurrent({
+                      subjects: [
+                        {
+                          artifact: mutationArtifact,
+                          resultTreeSha:
+                            candidate?.validation.outputTreeSha ??
+                            pull.exactHeadValidation.outputTreeSha,
+                          baseSha: validatedBase,
+                        },
+                      ],
+                      repositoryPath: this.#options.repository,
+                      allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                    });
+                  }
+                  await dispatch.markDispatchedAtPublicationBoundary();
                 },
                 () =>
                   this.#store.mergePullRequest({
@@ -21376,6 +21527,11 @@ export class FactorySupervisor {
               } catch (cause) {
                 throw new PrepublicationApprovalRequiredError(cause);
               }
+              await assertRemoteLfsObjectsCurrent({
+                subjects: [{ artifact }],
+                repositoryPath: this.#options.repository,
+                allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+              });
             },
             mutate: () => this.#store.createRef(`refs/heads/${branch}`, plannedHead),
           });

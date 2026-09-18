@@ -8,6 +8,17 @@ export interface CheckpointAuthority {
   policy: Record<string, unknown>;
   sessionRecovery?: true;
 }
+export interface CompilerCheckpointBootstrapAuthority {
+  repository: string;
+  checkout: string;
+  unit: string;
+  phase: "preflight" | "exercise";
+  namespace: string;
+  evidence: string;
+  compilerRecovery: true;
+  observationWindowMinutes: number;
+  compilerMaxModelTokens: number;
+}
 export function checkpointDeadline(startedAt: string, minutes: number): number;
 export function checkpointObjectiveDeadline(
   observation: unknown,
@@ -52,7 +63,7 @@ export function checkpointAuthority(
 /** Internal adapter for the committed compiler-specific entrypoint. */
 export function compilerQualificationCheckpointAuthority(
   env: Record<string, string | undefined>,
-): CheckpointAuthority | null;
+): CompilerCheckpointBootstrapAuthority | null;
 export function checkpointFacts(
   observation: unknown,
   authority: CheckpointAuthority,

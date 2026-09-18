@@ -355,16 +355,17 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
       bytes = "x".repeat(5 * 1024 * 1024 + 1);
     const value = await artifact(id.baseSha, bytes),
       prefix = artifactTransferRef(id);
-    const afterIntent = vi.fn(
+    const afterCheckpoint = vi.fn(
       async (
-        checkpoint: import("../src/control/artifact-transfers.js").ArtifactTransferIntentCheckpoint,
+        checkpoint: import("../src/control/artifact-transfers.js").ArtifactTransferQualificationCheckpoint,
       ) => {
         expect(checkpoint.identity).toEqual(id);
         expect(checkpoint.artifactDigest).toBe(value.digest);
-        expect(checkpoint.payloadDigest).toBe(sha256(bytes));
-        expect(checkpoint.payloadBytes).toBe(Buffer.byteLength(bytes));
-        expect(checkpoint.payloadChunks).toBe(2);
-        expect(memory.refs.get(`${prefix}/intent`)).toBe(checkpoint.intentCommitSha);
+        expect(checkpoint.phase).toBe("intent");
+        expect(checkpoint.content).toEqual([
+          { digest: sha256(bytes), bytes: Buffer.byteLength(bytes), chunks: 2 },
+        ]);
+        expect(memory.refs.get(`${prefix}/intent`)).toBe(checkpoint.commitSha);
         expect(memory.refs.has(`${prefix}/ready`)).toBe(false);
         // Only the descriptor exists remotely; all chunk bytes are still private.
         expect(memory.blobs.size).toBe(1);
@@ -381,7 +382,7 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
       assertCurrent: async () => {
         admissions++;
       },
-      afterIntent,
+      afterCheckpoint,
     };
     await expect(persistArtifactTransfer(args)).rejects.toThrow("one-shot transfer interruption");
     const originalIntent = memory.refs.get(`${prefix}/intent`);
@@ -391,7 +392,7 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
     await releaseAllArtifactContent();
     const recovered = await resumeArtifactTransfer(args);
     expect(recovered).toEqual(value);
-    expect(afterIntent).toHaveBeenCalledTimes(1); // Even an extra callback on args cannot rearm resume.
+    expect(afterCheckpoint).toHaveBeenCalledTimes(1); // Even an extra callback on args cannot rearm resume.
     expect(memory.refs.get(`${prefix}/intent`)).toBe(originalIntent);
     const ready = memory.commits.get(memory.refs.get(`${prefix}/ready`)!);
     expect(ready!.parentOids).toEqual([originalIntent]);
@@ -405,7 +406,7 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
   it("never arms inline artifact publication", async () => {
     const memory = store(),
       id = identity(),
-      afterIntent = vi.fn();
+      afterCheckpoint = vi.fn();
     const value = normalizeArtifact({
       baseSha: id.baseSha,
       patch: "inline",
@@ -418,9 +419,9 @@ describe("immutable GitHub artifact transfer lifecycle", () => {
       artifact: value,
       allowedPaths: ["asset.dat"],
       assertCurrent: async () => {},
-      afterIntent,
+      afterCheckpoint,
     });
-    expect(afterIntent).not.toHaveBeenCalled();
+    expect(afterCheckpoint).not.toHaveBeenCalled();
     expect(await recoverArtifactTransfer({ store: memory.api, identity: id })).toEqual(value);
   });
 

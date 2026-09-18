@@ -137,7 +137,7 @@ import {
   recoverArtifactTransfer,
   resumeArtifactTransfer,
   type ArtifactTransferIdentity,
-  type ArtifactTransferIntentCheckpoint,
+  type ArtifactTransferQualificationCheckpoint,
 } from "./control/artifact-transfers.js";
 import {
   assertRemoteLfsObjectsCurrent,
@@ -11508,7 +11508,7 @@ export class FactorySupervisor {
       assertCurrent: () => this.#externalAdmission(async () => {}),
       ...(qualification && reservation.localScopeBatch
         ? {
-            afterIntent: async (checkpoint: ArtifactTransferIntentCheckpoint) =>
+            afterCheckpoint: async (checkpoint: ArtifactTransferQualificationCheckpoint) =>
               holdArtifactTransferQualificationCheckpoint({
                 checkpoint,
                 ...(this.#run.activationRequestId

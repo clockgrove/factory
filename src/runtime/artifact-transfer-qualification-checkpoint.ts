@@ -7,7 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
 import {
   artifactTransferRef,
-  type ArtifactTransferIntentCheckpoint,
+  type ArtifactTransferQualificationCheckpoint,
 } from "../control/artifact-transfers.js";
 import { MAX_ARTIFACT_PATCH_BYTES } from "../execution/artifacts.js";
 import { assertNoSecretMaterial, gitSha, sha256Digest } from "../protocol/limits.js";
@@ -30,7 +30,8 @@ export const ArtifactTransferQualificationArmSchema = z
     hostIdentity: sha256Digest,
     producerPid: z.number().int().positive(),
     producerStartTicks: z.string().regex(/^[0-9]{1,30}$/),
-    minPayloadBytes: z
+    phase: z.enum(["intent", "ready"]),
+    minContentBytes: z
       .number()
       .int()
       .min(MAX_ARTIFACT_PATCH_BYTES + 1)
@@ -74,7 +75,7 @@ export type ArtifactTransferQualificationTerminal = z.infer<
 /** The caller supplies a freshly authenticated snapshot, not arbitrary comments.
  * This narrows it to the exact successful observation's durable accounting. */
 export function proveArtifactTransferQualificationReceipts(args: {
-  checkpoint: ArtifactTransferIntentCheckpoint;
+  checkpoint: ArtifactTransferQualificationCheckpoint;
   activationRequestId: string | undefined;
   backend: string;
   reservationSequence: number;
@@ -210,7 +211,7 @@ async function privateArm(path: string) {
  * cleanup is deliberately NOT claimed here: existing collection-error recovery owns it.
  * Resume never calls this hook. Once armed and reached, it cannot release to ready. */
 export async function holdArtifactTransferQualificationCheckpoint(args: {
-  checkpoint: ArtifactTransferIntentCheckpoint;
+  checkpoint: ArtifactTransferQualificationCheckpoint;
   activationRequestId?: string;
   batch: unknown;
   objectiveStartedAt: Date;
@@ -221,7 +222,8 @@ export async function holdArtifactTransferQualificationCheckpoint(args: {
   proveTerminal(): Promise<ArtifactTransferQualificationTerminal>;
 }): Promise<void> {
   const { checkpoint } = args;
-  if (checkpoint.payloadBytes <= MAX_ARTIFACT_PATCH_BYTES) return;
+  const contentBytes = checkpoint.content.reduce((sum, subject) => sum + subject.bytes, 0);
+  if (contentBytes <= MAX_ARTIFACT_PATCH_BYTES) return;
   const batch = LocalScopeBatchSchema.parse(args.batch),
     id = batch.identity;
   if (!id.producerUnit || !id.producerInvocationId) return;
@@ -277,18 +279,27 @@ export async function holdArtifactTransferQualificationCheckpoint(args: {
       id.commandIndex !== 0
     )
       throw new Error("artifact transfer checkpoint invocation differs");
-    if (checkpoint.payloadBytes < arm.minPayloadBytes) return;
+    if (contentBytes < arm.minContentBytes || checkpoint.phase !== arm.phase) return;
     sha256Digest.parse(checkpoint.artifactDigest);
-    sha256Digest.parse(checkpoint.payloadDigest);
     sha256Digest.parse(checkpoint.descriptorDigest);
-    gitSha.parse(checkpoint.intentCommitSha);
+    gitSha.parse(checkpoint.commitSha);
     if (
-      checkpoint.intentRef !== `${artifactTransferRef(identity)}/intent` ||
-      !Number.isSafeInteger(checkpoint.payloadBytes) ||
-      checkpoint.payloadBytes > 256 * 1024 * 1024 ||
-      !Number.isSafeInteger(checkpoint.payloadChunks) ||
-      checkpoint.payloadChunks < 2 ||
-      checkpoint.payloadChunks > 64 ||
+      checkpoint.content.length === 0 ||
+      checkpoint.content.length > 256 ||
+      checkpoint.content.some(
+        (subject) =>
+          !Number.isSafeInteger(subject.bytes) ||
+          subject.bytes <= 0 ||
+          subject.bytes > 256 * 1024 * 1024 ||
+          !Number.isSafeInteger(subject.chunks) ||
+          subject.chunks < 1 ||
+          subject.chunks > 64,
+      )
+    )
+      throw new Error("artifact transfer checkpoint content is outside its bound");
+    for (const subject of checkpoint.content) sha256Digest.parse(subject.digest);
+    if (
+      checkpoint.ref !== `${artifactTransferRef(identity)}/${checkpoint.phase}` ||
       !(args.objectiveStartedAt instanceof Date) ||
       !Number.isFinite(args.objectiveStartedAt.getTime()) ||
       !(args.objectiveDeadline instanceof Date) ||
@@ -335,11 +346,11 @@ export async function holdArtifactTransferQualificationCheckpoint(args: {
       activationRequestId: arm.activationRequestId,
       ...identity,
       artifactDigest: checkpoint.artifactDigest,
-      payloadDigest: checkpoint.payloadDigest,
-      payloadBytes: checkpoint.payloadBytes,
-      payloadChunks: checkpoint.payloadChunks,
-      intentRef: checkpoint.intentRef,
-      intentCommitSha: checkpoint.intentCommitSha,
+      phase: checkpoint.phase,
+      content: checkpoint.content,
+      contentBytes,
+      ref: checkpoint.ref,
+      commitSha: checkpoint.commitSha,
       descriptorDigest: checkpoint.descriptorDigest,
       terminal,
       batch,

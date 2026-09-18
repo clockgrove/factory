@@ -393,11 +393,11 @@ function fixture() {
     ...identity,
     activationRequestId: "large-case-activate",
     artifactDigest: artifact.digest,
-    payloadDigest: payload.digest,
-    payloadBytes: payload.bytes,
-    payloadChunks: chunks.length,
-    intentRef: intent.ref,
-    intentCommitSha: intent.commit.oid,
+    phase: "intent",
+    content: [{ digest: payload.digest, bytes: payload.bytes, chunks: chunks.length }],
+    contentBytes: payload.bytes,
+    ref: intent.ref,
+    commitSha: intent.commit.oid,
     descriptorDigest: hash(intent.content),
     batch,
     terminal: {
@@ -434,6 +434,141 @@ function fixture() {
 }
 
 describe("independent installed externalized artifact transfer proof", () => {
+  it("proves a produced LFS direct-ready checkpoint and its durable raw-transfer receipts", () => {
+    const f = fixture();
+    const source = JSON.parse(f.proof.ready.content);
+    const raw = f.patch;
+    const path = source.artifact.changedPaths[0];
+    const rawIdentity = {
+      domain: "worker-artifact",
+      repository: f.authority.repository,
+      objective: source.identity.objective,
+      baseSha: source.identity.baseSha,
+      requestId: "lfs-produced-8-1",
+      subjectDigest: hash(raw),
+    };
+    const rawRef = `refs/clockgrove-factory/content-transfers/${hash(JSON.stringify(rawIdentity))}`;
+    const pointer = Buffer.from(
+      `version https://git-lfs.github.com/spec/v1\noid sha256:${hash(raw)}\nsize ${raw.length}\n`,
+    );
+    const payload = source.artifact.payload;
+    const receiptCore = {
+      protocol: "clockgrove.factory/lfs-object-receipt",
+      path,
+      mode: "100644",
+      oid: hash(raw),
+      size: raw.length,
+      assignmentDigest: hash(
+        JSON.stringify({ baseSha: source.identity.baseSha, path, filter: "lfs" }),
+      ),
+      payload,
+      rawTransfer: {
+        identity: rawIdentity,
+        ref: rawRef,
+        intentCommit: "7".repeat(40),
+        readyCommit: "8".repeat(40),
+      },
+      toolVersion: "git-lfs/3.7.0",
+      remoteDigest: "9".repeat(64),
+      uploadOutcome: "uploaded",
+      readVerified: true,
+      receiptRef: `refs/clockgrove-factory/lfs-object-receipts/${"a".repeat(64)}`,
+    };
+    const receipt = { ...receiptCore, digest: hash(JSON.stringify(receiptCore)) };
+    const manifest = {
+      baseTreeSha: source.artifact.fileManifest.baseTreeSha,
+      resultTreeSha: source.artifact.fileManifest.resultTreeSha,
+      files: [
+        {
+          ...source.artifact.fileManifest.files[0],
+          bytes: pointer.length,
+          digest: hash(pointer),
+        },
+      ],
+    };
+    const artifactCore = {
+      ...source.artifact,
+      patch: "inline canonical LFS pointer patch\n",
+      fileManifest: manifest,
+      lfsObjects: [receipt],
+    };
+    delete artifactCore.payload;
+    delete artifactCore.digest;
+    artifactCore.digest = hash(
+      `${artifactCore.baseSha}\0${artifactCore.changedPaths.slice().sort().join("\0")}\0${artifactCore.patch}\0content\0${JSON.stringify({ fileManifest: manifest, lfsObjects: [receipt] })}`,
+    );
+    const value = { ...source, artifact: artifactCore, chunks: [] };
+    const proof = {
+      ...f.held,
+      phase: "direct",
+      intent: undefined,
+      ready: document(
+        f.proof.ready.ref,
+        "artifact-transfer.json",
+        value,
+        [],
+        `Factory artifact transfer ready\n\nFactory-Artifact: ${artifactCore.digest}\nFactory-Descriptor: ${hash(Buffer.from(JSON.stringify(value)))}\nFactory-Retention: repository-audit`,
+      ),
+      chunks: [],
+      lfs: [
+        {
+          path,
+          oid: receipt.oid,
+          size: receipt.size,
+          receiptRef: receipt.receiptRef,
+          transferRef: rawRef,
+          intentCommit: receipt.rawTransfer.intentCommit,
+          readyCommit: receipt.rawTransfer.readyCommit,
+        },
+      ],
+    };
+    const witness = {
+      ...f.witness,
+      phase: "ready",
+      artifactDigest: artifactCore.digest,
+      content: [{ digest: receipt.oid, bytes: receipt.size, chunks: payload.chunks.length }],
+      contentBytes: receipt.size,
+      ref: proof.ready.ref,
+      commitSha: proof.ready.commit.oid,
+      descriptorDigest: hash(proof.ready.content),
+    };
+    const result = assertArtifactTransferProof(f.heldObservation, f.authority, proof, {
+      phase: "direct",
+      witness,
+    });
+    expect(result.summary).toMatchObject({
+      representation: "produced-lfs",
+      continuation: "retained-ready-checkpoint",
+      payloadDigest: receipt.oid,
+    });
+    expect(result.patch?.toString()).toBe(artifactCore.patch);
+    const succeeded = {
+      ...f.heldObservation.receipts[0]!.event,
+      kind: "attempt",
+      event: "AttemptSucceeded",
+      workItem: source.identity.workItem,
+      attempt: source.identity.attempt,
+      sequence: 8,
+      artifactDigest: artifactCore.digest,
+      reportedModelTokens: 110,
+    };
+    const recoveredReceipts = [...f.heldObservation.receipts.map(({ event }) => event), succeeded];
+    const recovered = assertArtifactTransferProof(
+      {
+        status: f.heldObservation.status,
+        receipts: recoveredReceipts.map((event) => ({ event })),
+      },
+      f.authority,
+      { ...proof, receipts: recoveredReceipts },
+      { phase: "direct", witness, priorDirect: proof },
+    );
+    expect(recovered.summary).toMatchObject({
+      representation: "produced-lfs",
+      continuation: "same-attempt-retained-ready",
+      payloadDigest: receipt.oid,
+    });
+    expect(recovered.patch?.toString()).toBe(artifactCore.patch);
+  });
   it("proves partial intent then exact same-attempt ready bytes without inventing measured time", () => {
     const f = fixture();
     const held = assertArtifactTransferProof(f.heldObservation, f.authority, f.held, {
@@ -557,7 +692,7 @@ describe("independent installed externalized artifact transfer proof", () => {
           phase: "ready",
           priorIntent: f.held,
         }),
-      ).toThrow("requires externalized");
+      ).toThrow("requires retained content");
     },
   );
   it.each([

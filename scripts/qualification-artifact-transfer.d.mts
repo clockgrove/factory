@@ -1,10 +1,12 @@
 import type { Buffer } from "node:buffer";
 export interface ArtifactTransferOptions {
   workItem?: number;
-  phase: "intent" | "ready";
+  phase: "intent" | "ready" | "direct";
   witness?: unknown;
   /** Exact raw `proof` returned at the intent hold, not a summary or caller assertion. */
   priorIntent?: unknown;
+  /** Exact raw direct-ready proof captured before the qualified controller restart. */
+  priorDirect?: unknown;
 }
 export interface ArtifactTransferResult {
   summary: Record<string, unknown>;

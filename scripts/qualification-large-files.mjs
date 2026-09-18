@@ -243,7 +243,7 @@ function recipeSource(namespace) {
     namespace,
   );
 }
-function baselineFiles(namespace) {
+function baselineFiles(namespace, producedLfs = false) {
   const paths = largeFilePaths(namespace);
   const lfs = [
     {
@@ -268,7 +268,9 @@ function baselineFiles(namespace) {
     files: [
       {
         path: paths.attributes,
-        bytes: Buffer.from("lfs/*.bin filter=lfs diff=lfs merge=lfs -text\n"),
+        bytes: Buffer.from(
+          `lfs/*.bin filter=lfs diff=lfs merge=lfs -text\n${producedLfs ? "generated/qualification-audio.wav filter=lfs diff=lfs merge=lfs -text\n" : ""}`,
+        ),
       },
       { path: paths.recipe, bytes: Buffer.from(recipeSource(namespace)) },
       {
@@ -435,7 +437,7 @@ function installScopedValidationRecipe(repository, namespace, deadline) {
   assert.equal(
     packageJson.scripts.test,
     "vitest run",
-    "version-2 large-file fixture requires the committed Vitest npm test recipe",
+    "large-file fixture requires the committed Vitest npm test recipe",
   );
   assert.equal(
     packageJson.scripts[LARGE_FILE_VALIDATION_SCRIPT],
@@ -473,7 +475,13 @@ function installScopedValidationRecipe(repository, namespace, deadline) {
   };
 }
 
-export function createLargeFileFixture({ parent, namespace, sourceRepository, baseSha }) {
+export function createLargeFileFixture({
+  parent,
+  namespace,
+  sourceRepository,
+  baseSha,
+  producedLfs = false,
+}) {
   assertNamespace(namespace);
   assert.equal(
     sourceRepository === undefined,
@@ -502,7 +510,8 @@ export function createLargeFileFixture({ parent, namespace, sourceRepository, ba
   const validation = sourceRepository
     ? installScopedValidationRecipe(repository, namespace, deadline)
     : undefined;
-  const baseline = baselineFiles(namespace);
+  assert.equal(typeof producedLfs, "boolean");
+  const baseline = baselineFiles(namespace, producedLfs);
   for (const file of baseline.files) {
     exclusiveFile(repository, file.path, file.bytes);
     const oid = gitText(repository, ["hash-object", "-w", "--stdin"], file.bytes, 1024, deadline);
@@ -550,6 +559,7 @@ export function createLargeFileFixture({ parent, namespace, sourceRepository, ba
     version: LARGE_FILE_RECIPE_VERSION,
     id,
     namespace,
+    producedLfs,
     root,
     repository,
     baseSha: fixtureBase,
@@ -673,6 +683,21 @@ export function largeFileObjectiveBody(namespace) {
   return `Qualify deterministic large-file handling for namespace ${namespace}. Create exactly three linear Work Items in this order, never parallel roots. Use existing committed ${p.recipe}; do not rewrite the recipe, test, attributes, or LFS files. Do not fetch/install/upload LFS or add dependencies.\n\n1. Payload (the sole root): run node ${p.recipe} payload. Create only ${p.payload}, exactly 6291500 bytes of valid PCM WAV from the existing bounded deterministic recipe. It must produce a genuine binary Git patch above 5 MiB.\n2. Metadata (depends on Payload): run node ${p.recipe} metadata. Create only ${p.executable} (Git mode 100755) and ${p.metadata}, with exact recipe bytes.\n3. Verification join (depends on Payload and Metadata): run node ${p.recipe} join. Create only ${p.result}; run node ${p.recipe} verify to check all generated content.\n\nEach Work Item validates with ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest recipe scoped to ${p.test}. The final result must preserve both existing canonical LFS pointers in Git, while their unchanged locally provisioned objects remain available. No other paths may change. Real installed workers and independent validation/review are required; fixture generation alone is not an execution pass.\n`;
 }
 
+export function producedLfsObjectiveBody(namespace) {
+  const p = largeFilePaths(namespace);
+  return `Qualify deterministic produced Git LFS handling for namespace ${namespace}. Create exactly three linear Work Items in this order, never parallel roots. Use existing committed ${p.recipe}; do not rewrite the recipe, test, attributes, or existing LFS files. Do not install dependencies or change LFS configuration.\n\n1. Payload (the sole root): run node ${p.recipe} payload. Create only ${p.payload}, exactly 6291500 bytes from the existing bounded deterministic recipe. The pinned repository rule selects this path for authenticated Git LFS upload.\n2. Metadata (depends on Payload): run node ${p.recipe} metadata. Create only ${p.executable} (Git mode 100755) and ${p.metadata}, with exact recipe bytes.\n3. Verification join (depends on Payload and Metadata): run node ${p.recipe} join. Create only ${p.result}; run node ${p.recipe} verify to check all generated content.\n\nEach Work Item validates with ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest recipe scoped to ${p.test}. The final Git tree must contain the canonical pointer for ${p.payload}, its exact authenticated remote object must remain readable, and both existing LFS pointers must remain unchanged. No other paths may change. Real installed workers and independent validation/review are required; fixture generation alone is not an execution pass.\n`;
+}
+
+function treeOutputFiles(fixture) {
+  return outputFiles(fixture.namespace).map((file) => {
+    if (!fixture.producedLfs || file.path !== fixture.paths.payload) return file;
+    const pointer = Buffer.from(
+      `version https://git-lfs.github.com/spec/v1\noid sha256:${hash(file.bytes)}\nsize ${file.bytes.length}\n`,
+    );
+    return { ...file, bytes: pointer };
+  });
+}
+
 export function observeLargeFileTree({
   repository,
   treeish,
@@ -707,10 +732,10 @@ export function observeLargeFileTree({
     entries.length <= 16 && entries.every((entry) => entry.bytes <= LARGE_FILE_AUDIO_BYTES),
   );
   const expected = new Map(
-    [...baselineFiles(fixture.namespace).files, ...outputFiles(fixture.namespace)].map((file) => [
-      file.path,
-      file,
-    ]),
+    [
+      ...baselineFiles(fixture.namespace, fixture.producedLfs).files,
+      ...treeOutputFiles(fixture),
+    ].map((file) => [file.path, file]),
   );
   const files = entries.map((entry) => {
     const spec = expected.get(entry.path);
@@ -736,7 +761,7 @@ export function observeLargeFileTree({
       generated: spec.generated ?? false,
     };
   });
-  for (const file of baselineFiles(fixture.namespace).files)
+  for (const file of baselineFiles(fixture.namespace, fixture.producedLfs).files)
     assert.ok(
       files.some((observed) => observed.path === file.path),
       "baseline/LFS pointer missing",
@@ -785,7 +810,10 @@ export function observeLargeFileTree({
   };
 }
 export function assertLargeFileFinalTree({ fixture, observation }) {
-  const expected = [...baselineFiles(fixture.namespace).files, ...outputFiles(fixture.namespace)];
+  const expected = [
+    ...baselineFiles(fixture.namespace, fixture.producedLfs).files,
+    ...treeOutputFiles(fixture),
+  ];
   assert.equal(observation.provenance, "independent-local-raw-git-object-read");
   assert.equal(observation.files.length, expected.length);
   for (const spec of expected) {
@@ -798,21 +826,30 @@ export function assertLargeFileFinalTree({ fixture, observation }) {
 }
 export function assertLargeFileArtifact({ fixture, artifact, observation, patch, phase }) {
   const expected = phaseFiles(fixture.namespace, phase);
+  const treeExpected = expected.map((file) => {
+    if (!fixture.producedLfs || file.path !== fixture.paths.payload) return file;
+    return {
+      ...file,
+      bytes: Buffer.from(
+        `version https://git-lfs.github.com/spec/v1\noid sha256:${hash(file.bytes)}\nsize ${file.bytes.length}\n`,
+      ),
+    };
+  });
   assert.equal(artifact.protocol, "clockgrove.factory/artifact");
   assert.equal(artifact.outcome, "succeeded");
   assert.equal(artifact.baseSha, observation.baseSha);
   assert.equal(observation.provenance, "independent-local-raw-git-object-read");
   assert.ok(
-    Array.isArray(artifact.changedPaths) && artifact.changedPaths.length === expected.length,
+    Array.isArray(artifact.changedPaths) && artifact.changedPaths.length === treeExpected.length,
   );
   assert.ok(Array.isArray(observation.files) && observation.files.length <= 16);
-  assert.deepEqual([...artifact.changedPaths].sort(), expected.map((file) => file.path).sort());
+  assert.deepEqual([...artifact.changedPaths].sort(), treeExpected.map((file) => file.path).sort());
   const manifest = artifact.fileManifest;
   assert.ok(manifest);
   assert.equal(manifest.baseTreeSha, observation.baseTreeSha);
   assert.equal(manifest.resultTreeSha, observation.treeSha);
-  assert.equal(manifest.files.length, expected.length);
-  for (const spec of expected) {
+  assert.equal(manifest.files.length, treeExpected.length);
+  for (const spec of treeExpected) {
     const file = manifest.files.find((item) => item.path === spec.path);
     const actual = observation.files.find((item) => item.path === spec.path);
     assert.ok(file && actual, "artifact manifest path lacks actual Git content");
@@ -837,7 +874,7 @@ export function assertLargeFileArtifact({ fixture, artifact, observation, patch,
     { bytes: bytes.length, digest: hash(bytes), appliedTreeSha: observation.treeSha },
     "artifact patch lacks independent exact-tree application proof",
   );
-  if (phase === "payload") {
+  if (phase === "payload" && !fixture.producedLfs) {
     assert.ok(bytes.length > INLINE_BYTES, "fixture did not exercise oversized transfer");
     const payload = artifact.payload;
     assert.equal(payload?.kind, "content-chunks");
@@ -856,6 +893,43 @@ export function assertLargeFileArtifact({ fixture, artifact, observation, patch,
     assert.equal(artifact.payload, undefined);
     assert.equal(artifact.patch, bytes.toString("utf8"));
   }
+  let normalizedLfsObjects;
+  if (phase === "payload" && fixture.producedLfs) {
+    assert.equal(artifact.lfsObjects?.length, 1);
+    const receipt = artifact.lfsObjects[0];
+    const raw = expected[0];
+    assert.equal(receipt.protocol, "clockgrove.factory/lfs-object-receipt");
+    assert.equal(receipt.path, raw.path);
+    assert.equal(receipt.mode, raw.mode);
+    assert.equal(receipt.oid, hash(raw.bytes));
+    assert.equal(receipt.size, raw.bytes.length);
+    assert.equal(receipt.payload.kind, "content-chunks");
+    assert.equal(receipt.payload.digest, receipt.oid);
+    assert.equal(receipt.payload.bytes, receipt.size);
+    assert.equal(receipt.payload.chunks.length, Math.ceil(receipt.size / CHUNK_BYTES));
+    assert.equal(receipt.rawTransfer.identity.domain, "worker-artifact");
+    assert.equal(receipt.rawTransfer.identity.baseSha, artifact.baseSha);
+    assert.equal(receipt.rawTransfer.identity.subjectDigest, receipt.oid);
+    assert.equal(receipt.readVerified, true);
+    assert.ok(["uploaded", "already-present"].includes(receipt.uploadOutcome));
+    assert.match(receipt.toolVersion, /^git-lfs\//);
+    for (const value of [
+      receipt.assignmentDigest,
+      receipt.remoteDigest,
+      receipt.digest,
+      ...receipt.payload.chunks.map((chunk) => chunk.digest),
+    ])
+      assert.match(value, /^[a-f0-9]{64}$/);
+    assert.match(receipt.rawTransfer.intentCommit, /^[a-f0-9]{40}$/);
+    assert.match(receipt.rawTransfer.readyCommit, /^[a-f0-9]{40}$/);
+    assert.equal(
+      receipt.rawTransfer.ref,
+      `refs/clockgrove-factory/content-transfers/${hash(JSON.stringify({ ...receipt.rawTransfer.identity, repository: receipt.rawTransfer.identity.repository.toLowerCase() }))}`,
+    );
+    const { digest: receiptDigest, ...receiptCore } = receipt;
+    assert.equal(receiptDigest, hash(JSON.stringify(receiptCore)));
+    normalizedLfsObjects = [receipt];
+  } else assert.equal(artifact.lfsObjects, undefined);
   // Rebuild the public artifact digest with normalized field order, independently of runtime.
   const normalizedManifest = {
     baseTreeSha: manifest.baseTreeSha,
@@ -892,6 +966,7 @@ export function assertLargeFileArtifact({ fixture, artifact, observation, patch,
       JSON.stringify({
         ...(normalizedPayload ? { payload: normalizedPayload } : {}),
         fileManifest: normalizedManifest,
+        ...(normalizedLfsObjects ? { lfsObjects: normalizedLfsObjects } : {}),
       }),
     )
     .digest("hex");

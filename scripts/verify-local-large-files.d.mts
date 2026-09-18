@@ -5,6 +5,7 @@ import type {
 } from "./verify-local-checkpoint-restart.mjs";
 export type LargeFileCase =
   | "transfer-restart"
+  | "produced-lfs-restart"
   | "lfs-missing-tool"
   | "lfs-missing-object"
   | "scope"
@@ -19,7 +20,7 @@ export interface LargeFilePort extends CheckpointPort {
   armTransfer(original: unknown): Promise<unknown>;
   transferProof(
     observation: unknown,
-    phase: "intent" | "ready",
+    phase: "intent" | "ready" | "direct",
     witness: unknown,
   ): Promise<unknown>;
 }

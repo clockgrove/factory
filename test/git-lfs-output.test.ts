@@ -10,6 +10,7 @@ import type { GitCommitObject } from "../src/control/lease.js";
 import {
   artifactRecoveryCopyAvailable,
   persistArtifactTransfer,
+  resumeArtifactTransfer,
 } from "../src/control/artifact-transfers.js";
 import { releaseAllArtifactContent, sha256 } from "../src/execution/artifact-content.js";
 import {
@@ -259,6 +260,70 @@ describe("preconfigured Git LFS output normalization", () => {
     expect(value.git("show", `${finalized.fileManifest!.resultTreeSha}:asset.bin`)).toBe(
       pointer.toString("utf8").trim(),
     );
+  });
+
+  it("holds after produced LFS readiness and resumes the exact artifact without another upload", async () => {
+    const value = await fixture();
+    const bytes = Buffer.alloc(64 * 1024, 73);
+    const collected = await collectRaw(value, "asset.bin", bytes);
+    const store = memoryStore();
+    const remote = transport(bytes);
+    const finalized = await finalizeLfsArtifact({
+      store,
+      artifact: collected,
+      authority,
+      repositoryPath: value.repository,
+      allowedNetworkDestinations: ["github.com"],
+      assertCurrent: async () => {},
+      transport: remote.value,
+    });
+    const identity = {
+      repository: authority.repository,
+      objective: authority.objective,
+      workItem: authority.workItem,
+      attempt: authority.attempt,
+      runId: authority.runId,
+      directorEpoch: authority.directorEpoch,
+      policyDigest: authority.policyDigest,
+      baseSha: finalized.baseSha,
+    };
+    const afterCheckpoint = vi.fn(async (checkpoint) => {
+      expect(checkpoint.phase).toBe("ready");
+      expect(checkpoint.artifactDigest).toBe(finalized.digest);
+      expect(checkpoint.content).toEqual([
+        {
+          digest: sha256(bytes),
+          bytes: bytes.length,
+          chunks: finalized.lfsObjects![0]!.payload.chunks.length,
+        },
+      ]);
+      await checkpoint.proveRetained();
+      throw new Error("simulated controller loss after ready persistence");
+    });
+    await expect(
+      persistArtifactTransfer({
+        store,
+        identity,
+        artifact: finalized,
+        allowedPaths: finalized.changedPaths,
+        assertCurrent: async () => {},
+        afterCheckpoint,
+      }),
+    ).rejects.toThrow(/controller loss/);
+    await releaseAllArtifactContent();
+    const recovered = await resumeArtifactTransfer({
+      store,
+      identity,
+      allowedPaths: finalized.changedPaths,
+      assertCurrent: async () => {},
+    });
+    expect(recovered).toEqual(finalized);
+    await expect(
+      restoreLfsArtifactContent({ store, artifact: recovered! }),
+    ).resolves.toBeUndefined();
+    expect(afterCheckpoint).toHaveBeenCalledOnce();
+    expect(remote.upload).toHaveBeenCalledOnce();
+    expect(remote.read).toHaveBeenCalledOnce();
   });
 
   it("rechecks each bound remote object once and skips ordinary Git artifacts", async () => {

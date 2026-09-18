@@ -186,6 +186,40 @@ release attachment bound to the unchanged version tag, source commit, and publis
 digests. If it fails, document the failure and prepare a new version; never overwrite the release.
 See [release delivery](DELIVERY-PLAN.md#recording-evidence-and-publishing) for retention guidance.
 
+Run the repository-owned qualifier from the exact clean source commit that owns the retained
+`release/` directory, with a fresh, absent Linux-native installation root. Preflight resolves the
+official npm registry metadata and immutable remote tag under an isolated environment. It does not
+create the installation root, accept a repository target, change a controller, call a provider, or
+write a receipt:
+
+```sh
+npm run verify:published -- \
+  --release-dir /absolute/path/to/release \
+  --install-root /home/you/Codex/factory-published/VERSION \
+  --preflight-only
+```
+
+The full command downloads and authenticates the published npm tarball, checks out the exact remote
+tag, installs the npm and Agent Plugin distributions under isolated homes, starts the CLI and MCP
+entry points, and re-resolves the tag. Only then does it write the existing bounded
+`install-identities.txt` authority and validate the retained root through the same
+`FACTORY_QUALIFICATION_INSTALL_RECEIPT` consumer used by private smoke:
+
+```sh
+npm run verify:published -- \
+  --release-dir /absolute/path/to/release \
+  --install-root /home/you/Codex/factory-published/VERSION
+```
+
+This command is an install handoff, not the completion gate. It cannot schedule work because it has
+no repository, checkout, controller lifecycle, activation, or provider path. Issue #89's private
+smoke must consume the retained receipt, perform the authorized lifecycle and Objective proof, emit
+the final sanitized completion receipt, and clean the retained root. On an install failure the
+qualifier proves that its isolated root contains no controller unit before entering cleanup; if that
+proof or cleanup fails, it preserves the root and reports both errors. A changed tag or failed
+consumer validation leaves no canonical receipt. The command performs no publication, upload,
+provider call, Objective activation, or repair.
+
 ## Initial Beta scope and later routes
 
 The explicit Codex App Server route is supported local implementation with installed session

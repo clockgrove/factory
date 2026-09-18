@@ -46,6 +46,8 @@ export function installedQualificationAuthority(
     uid?: number;
     sourceRoot: string;
     committedPaths?: string[];
+    gitCommand?: string;
+    gitEnvironment?: NodeJS.ProcessEnv;
     listPlugins?: (
       codexCli: string,
       codexHome: string,

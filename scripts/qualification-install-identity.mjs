@@ -157,8 +157,13 @@ function snapshotFiles(root, uid) {
   return files.sort();
 }
 
-function assertCommitSnapshot(source, commit, snapshot, uid) {
-  const tree = gitBytes(source, ["ls-tree", "-r", "-z", "--full-tree", commit], 4 * 1024 * 1024)
+function assertCommitSnapshot(source, commit, snapshot, uid, gitContext) {
+  const tree = gitBytes(
+    source,
+    ["ls-tree", "-r", "-z", "--full-tree", commit],
+    4 * 1024 * 1024,
+    gitContext,
+  )
     .toString("utf8")
     .split("\0")
     .filter(Boolean)
@@ -189,9 +194,22 @@ function boundedJson(path, uid, maximum = MAX_MANIFEST_BYTES) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
-function git(root, args, maximum = MAX_MANIFEST_BYTES) {
-  return execFileSync("git", args, {
+function qualificationGitArguments(args) {
+  return [
+    "-c",
+    "http.followRedirects=false",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    ...args,
+  ];
+}
+
+function git(root, args, maximum = MAX_MANIFEST_BYTES, context = {}) {
+  return execFileSync(context.command ?? "git", qualificationGitArguments(args), {
     cwd: root,
+    env: context.environment,
     encoding: "utf8",
     timeout: 30_000,
     maxBuffer: maximum,
@@ -199,9 +217,10 @@ function git(root, args, maximum = MAX_MANIFEST_BYTES) {
   }).trim();
 }
 
-function gitBytes(root, args, maximum = MAX_MANIFEST_BYTES) {
-  return execFileSync("git", args, {
+function gitBytes(root, args, maximum = MAX_MANIFEST_BYTES, context = {}) {
+  return execFileSync(context.command ?? "git", qualificationGitArguments(args), {
     cwd: root,
+    env: context.environment,
     timeout: 30_000,
     maxBuffer: maximum,
     stdio: ["ignore", "pipe", "pipe"],
@@ -298,15 +317,20 @@ function executable(path, uid, label) {
   return canonical;
 }
 
-function committedFiles(source, uid, paths) {
+function committedFiles(source, uid, paths, gitContext) {
   return [...new Set(["scripts/qualification-install-identity.mjs", ...paths])].map((path) => {
     assert.match(path, /^scripts\/[A-Za-z0-9_.-]+\.mjs$/, "invalid qualification source path");
-    assert.equal(git(source, ["ls-files", "--error-unmatch", path]), path);
+    assert.equal(git(source, ["ls-files", "--error-unmatch", path], undefined, gitContext), path);
     const current = readFileSync(join(source, path));
     assert.ok(current.length > 0 && current.length <= 262_144, `${path} is outside its bound`);
     assert.equal(lstatSync(join(source, path)).uid, uid, `${path} owner differs`);
     assert.deepEqual(
-      gitBytes(source, ["show", `${receiptCommit(source)}:${path}`], 262_144),
+      gitBytes(
+        source,
+        ["show", `${receiptCommit(source, gitContext)}:${path}`],
+        262_144,
+        gitContext,
+      ),
       current,
       `${path} differs from committed source`,
     );
@@ -314,8 +338,8 @@ function committedFiles(source, uid, paths) {
   });
 }
 
-function receiptCommit(source) {
-  return git(source, ["rev-parse", "HEAD"]);
+function receiptCommit(source, gitContext) {
+  return git(source, ["rev-parse", "HEAD"], undefined, gitContext);
 }
 
 function queryInstalledPlugins(codexCli, _codexHome, childEnvironment) {
@@ -354,10 +378,13 @@ export function installedQualificationAuthority(
     sourceRoot,
     listPlugins = queryInstalledPlugins,
     committedPaths = [],
+    gitCommand = "git",
+    gitEnvironment,
   } = {},
 ) {
   assert.ok(Number.isSafeInteger(uid) && uid >= 0, "effective Linux uid unavailable");
   assert.ok(sourceRoot, "qualification source root is required");
+  const gitContext = { command: gitCommand, environment: gitEnvironment };
   const source = canonicalDirectory(sourceRoot, uid);
   const receiptInput = required(env, QUALIFICATION_INSTALL_RECEIPT_ENV);
   assert.ok(isAbsolute(receiptInput), "installed candidate receipt path must be absolute");
@@ -419,22 +446,36 @@ export function installedQualificationAuthority(
   assert.equal(hash(readFileSync(pluginArchive)), receipt.pluginArchiveSha256);
 
   assert.equal(
-    git(source, ["status", "--porcelain", "--untracked-files=all"]),
+    git(source, ["status", "--porcelain", "--untracked-files=all"], undefined, gitContext),
     "",
     "qualification source must be clean",
   );
-  assert.equal(git(source, ["rev-parse", "HEAD"]), receipt.sourceCommit);
+  assert.equal(git(source, ["rev-parse", "HEAD"], undefined, gitContext), receipt.sourceCommit);
   assert.equal(
-    hash(gitBytes(source, ["archive", "--format=tar", receipt.sourceCommit], MAX_ARTIFACT_BYTES)),
+    hash(
+      gitBytes(
+        source,
+        ["archive", "--format=tar", receipt.sourceCommit],
+        MAX_ARTIFACT_BYTES,
+        gitContext,
+      ),
+    ),
     receipt.pluginArchiveSha256,
     "plugin archive differs from source commit",
   );
-  assertCommitSnapshot(source, receipt.sourceCommit, listedPluginSource, uid);
-  const committedQualificationFiles = committedFiles(source, uid, committedPaths);
+  assertCommitSnapshot(source, receipt.sourceCommit, listedPluginSource, uid, gitContext);
+  const committedQualificationFiles = committedFiles(source, uid, committedPaths, gitContext);
   const sourceInventory = readFileSync(join(source, "dist/bundle-inventory.json"));
   assert.equal(hash(sourceInventory), receipt.bundleInventorySha256);
   assert.equal(
-    hash(gitBytes(source, ["show", `${receipt.sourceCommit}:dist/bundle-inventory.json`])),
+    hash(
+      gitBytes(
+        source,
+        ["show", `${receipt.sourceCommit}:dist/bundle-inventory.json`],
+        undefined,
+        gitContext,
+      ),
+    ),
     receipt.bundleInventorySha256,
   );
   const sourceManifest = boundedJson(join(source, "package.json"), uid);

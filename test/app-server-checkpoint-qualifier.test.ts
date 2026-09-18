@@ -11,6 +11,8 @@ import {
 import {
   appServerHoldReady,
   checkpointAuthority,
+  phaseKillCommand,
+  phaseKillReplacementObservation,
   runAppServerCheckpointScenario,
 } from "../scripts/verify-local-checkpoint-restart.mjs";
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -680,5 +682,57 @@ describe("installed App Server checkpoint qualification", () => {
       eligibilityDurationMs: 45 * 60_000,
       holdDurationMs: 600_000,
     });
+  });
+  it("binds the phase kill to the exact systemd main process and a new invocation", () => {
+    const original = { unit, invocationId: "a".repeat(32) };
+    expect(phaseKillCommand(unit)).toEqual([
+      "--user",
+      "kill",
+      "--kill-whom=main",
+      "--signal=KILL",
+      unit,
+    ]);
+    expect(
+      phaseKillReplacementObservation(
+        {
+          Id: unit,
+          LoadState: "loaded",
+          ActiveState: "active",
+          SubState: "running",
+          Job: "",
+          InvocationID: "b".repeat(32),
+          MainPID: "456",
+        },
+        original,
+      ),
+    ).toMatchObject({ ready: true, invocationId: "b".repeat(32), pid: "456" });
+    expect(
+      phaseKillReplacementObservation(
+        {
+          Id: unit,
+          LoadState: "loaded",
+          ActiveState: "active",
+          SubState: "running",
+          Job: "",
+          InvocationID: original.invocationId,
+          MainPID: "123",
+        },
+        original,
+      ).ready,
+    ).toBe(false);
+    expect(() =>
+      phaseKillReplacementObservation(
+        {
+          Id: "other.service",
+          LoadState: "loaded",
+          ActiveState: "active",
+          SubState: "running",
+          Job: "",
+          InvocationID: "b".repeat(32),
+          MainPID: "456",
+        },
+        original,
+      ),
+    ).toThrow();
   });
 });

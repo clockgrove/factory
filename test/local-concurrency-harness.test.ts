@@ -1421,6 +1421,19 @@ describe("bounded existing installed-controller composition", () => {
       ),
     ).toContain("exclusive resource");
   });
+  it("retains an ambiguous inner collision without final proof, stop, or cleanup", async () => {
+    const f = scenarioPort();
+    f.port.innerCasCollision = async () => {
+      throw Error(
+        "inner collision response loss is ambiguous; retain the repository without retry or cleanup",
+      );
+    };
+    await expect(runDirectorContentionScenario(f.port, directorAuthority)).rejects.toThrow(
+      /response loss is ambiguous/,
+    );
+    for (const action of ["completed", "director-contention-final-proofs", "stop"])
+      expect(f.actions).not.toContain(action);
+  });
   it("does not retry or automatically restart/stop after an ambiguous exercise failure", async () => {
     const f = scenarioPort();
     f.port.scoped = async () => {

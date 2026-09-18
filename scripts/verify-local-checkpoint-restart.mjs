@@ -1382,6 +1382,32 @@ export function assertControllerUnit(body, expected) {
   return hash(body);
 }
 
+export function phaseKillCommand(unit) {
+  assert.match(unit, /^clockgrove-factory-[a-f0-9]{16}\.service$/);
+  return ["--user", "kill", "--kill-whom=main", "--signal=KILL", unit];
+}
+
+export function phaseKillReplacementObservation(fields, original) {
+  assert.equal(fields.Id, original.unit);
+  assert.equal(fields.LoadState, "loaded");
+  const pid = Number(fields.MainPID);
+  const ready =
+    fields.ActiveState === "active" &&
+    Number.isSafeInteger(pid) &&
+    pid > 1 &&
+    typeof fields.InvocationID === "string" &&
+    /^[a-f0-9]{32}$/.test(fields.InvocationID) &&
+    fields.InvocationID !== original.invocationId;
+  return {
+    ready,
+    activeState: fields.ActiveState,
+    subState: fields.SubState,
+    job: fields.Job,
+    invocationId: fields.InvocationID,
+    pid: fields.MainPID,
+  };
+}
+
 function systemdQuote(value) {
   return `"${value.replaceAll("%", "%%").replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
@@ -2137,7 +2163,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       save();
       command(
         "systemctl",
-        ["--user", "kill", "--kill-whom=main", "--signal=KILL", authority.unit],
+        phaseKillCommand(authority.unit),
         undefined,
         checkpointTimeout(scenarioDeadline(), 15000),
       );
@@ -2163,26 +2189,14 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
             return [line.slice(0, separator), line.slice(separator + 1)];
           }),
         );
-        assert.equal(fields.Id, authority.unit);
-        assert.equal(fields.LoadState, "loaded");
-        const pid = Number(fields.MainPID);
-        const replacementReady =
-          fields.ActiveState === "active" &&
-          Number.isSafeInteger(pid) &&
-          pid > 1 &&
-          fields.InvocationID &&
-          fields.InvocationID !== original.invocationId;
+        const replacement = phaseKillReplacementObservation(fields, original);
         entry.lastObservation = {
           attempt: attempt + 1,
-          activeState: fields.ActiveState,
-          subState: fields.SubState,
-          job: fields.Job,
-          invocationId: fields.InvocationID,
-          pid: fields.MainPID,
+          ...replacement,
           observedAt: new Date().toISOString(),
         };
         save();
-        if (replacementReady) {
+        if (replacement.ready) {
           observed = fields;
           break;
         }

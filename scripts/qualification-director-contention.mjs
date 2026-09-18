@@ -82,16 +82,12 @@ export function assertInnerDirectorCollision(input) {
     "one inner Director must win",
   );
   const loser = one(
-    input.contenders.filter((entry) => ["lease-cas-lost", "response-lost"].includes(entry.outcome)),
-    "one inner Director must lose or be durably reconciled after response loss",
+    input.contenders.filter((entry) => entry.outcome === "lease-cas-lost"),
+    "one inner Director must return the exact lease CAS loss",
   );
   assert.equal(winner.automaticRetry, false);
   assert.equal(loser.automaticRetry, false);
-  if (loser.outcome === "lease-cas-lost") assert.equal(loser.errorCode, "inner-lease-cas-lost");
-  else {
-    assert.equal(loser.processAbsent, true, "response-lost contender process remains unknown");
-    assert.equal(loser.remoteSettlement, "reconciled-to-winning-run");
-  }
+  assert.equal(loser.errorCode, "inner-lease-cas-lost");
   const lease = input.afterLease;
   assert.match(lease.oid, /^[a-f0-9]{40}$/);
   assert.equal(lease.event.kind, "lease");

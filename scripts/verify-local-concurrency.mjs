@@ -1656,14 +1656,14 @@ export async function main(env = process.env, run = checkpointMain) {
                 save();
               }
               assert.ok(processAbsence.every(Boolean), "inner contender process absence unproved");
-              const responses = results.map((result) =>
-                result.status === "fulfilled"
-                  ? {
-                      status: "fulfilled",
-                      response: result.value,
-                    }
-                  : { status: "rejected", reason: "response-lost" },
+              assert.ok(
+                results.every((result) => result.status === "fulfilled"),
+                "inner collision response loss is ambiguous; retain the repository without retry or cleanup",
               );
+              const responses = results.map((result) => ({
+                status: "fulfilled",
+                response: result.value,
+              }));
               const winnerIndex = responses.findIndex(
                 (result) => result.status === "fulfilled" && !result.response.isError,
               );
@@ -1677,15 +1677,14 @@ export async function main(env = process.env, run = checkpointMain) {
               );
               const loserIndex = 1 - winnerIndex,
                 loser = responses[loserIndex];
-              if (loser.status === "fulfilled")
-                assert.deepEqual(
-                  { isError: loser.response.isError, content: loser.response.content },
-                  {
-                    isError: true,
-                    content: [{ type: "text", text: "another Director won lease acquisition" }],
-                  },
-                  "losing Director did not report the exact create-ref CAS loss",
-                );
+              assert.deepEqual(
+                { isError: loser.response.isError, content: loser.response.content },
+                {
+                  isError: true,
+                  content: [{ type: "text", text: "another Director won lease acquisition" }],
+                },
+                "losing Director did not report the exact create-ref CAS loss",
+              );
               const afterLease = await readLease(objective),
                 final = await observeOne(record),
                 start = one(
@@ -1723,18 +1722,11 @@ export async function main(env = process.env, run = checkpointMain) {
                   automaticRetry: false,
                   ...(index === winnerIndex
                     ? { outcome: "won", observedHolder: afterLease.event.holder }
-                    : loser.status === "fulfilled"
-                      ? {
-                          outcome: "lease-cas-lost",
-                          errorCode: "inner-lease-cas-lost",
-                          observedHolder: "unavailable-before-winning-CAS",
-                        }
-                      : {
-                          outcome: "response-lost",
-                          processAbsent: processAbsence[index],
-                          remoteSettlement: "reconciled-to-winning-run",
-                          observedHolder: "unavailable-before-winning-CAS",
-                        }),
+                    : {
+                        outcome: "lease-cas-lost",
+                        errorCode: "inner-lease-cas-lost",
+                        observedHolder: "unavailable-before-winning-CAS",
+                      }),
                 })),
                 events: eventsOf(final),
                 peer: {

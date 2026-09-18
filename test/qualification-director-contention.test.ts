@@ -316,9 +316,7 @@ describe("inner Director qualification assertions", () => {
       processAbsent: true,
       remoteSettlement: "reconciled-to-winning-run",
     });
-    expect(assertInnerDirectorCollision(lostResponse)).toMatchObject({
-      loserOutcome: "response-lost",
-    });
+    expect(() => assertInnerDirectorCollision(lostResponse)).toThrow(/exact lease CAS loss/);
     const reversed = collision();
     reversed.contenders.reverse();
     expect(assertInnerDirectorCollision(reversed)).toMatchObject({

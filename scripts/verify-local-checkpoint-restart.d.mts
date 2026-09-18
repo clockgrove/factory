@@ -211,6 +211,18 @@ export function assertControllerUnit(
     identity: string;
   },
 ): string;
+export function phaseKillCommand(unit: string): string[];
+export function phaseKillReplacementObservation(
+  fields: Record<string, string>,
+  original: { unit: string; invocationId: string },
+): {
+  ready: boolean;
+  activeState: string;
+  subState: string;
+  job: string;
+  invocationId: string;
+  pid: string;
+};
 export interface CheckpointPort {
   pauseRequestId: string;
   preflight(): Promise<unknown>;

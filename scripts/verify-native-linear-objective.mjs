@@ -145,6 +145,56 @@ function mergeCandidateDemand(sourcePublication, publication) {
   };
 }
 
+function integrationReview(publication, candidate) {
+  const identity = {
+    kind: "integration-candidate",
+    runId: publication.runId,
+    objective: publication.objective,
+    workItem: publication.workItem,
+    attempt: publication.attempt,
+    artifactDigest: candidate.validation.artifactDigest,
+    baseSha: publication.baseSha,
+    outputTreeSha: candidate.validation.outputTreeSha,
+    evidenceDigest: candidate.validation.digest,
+    headSha: publication.headSha,
+  };
+  const identityDigest = hash(canonical(identity));
+  return {
+    identity,
+    identityDigest,
+    usageId: `integration-review-${identityDigest}`,
+    demand: {
+      kind: "checkpoint",
+      ref:
+        `refs/clockgrove-factory/reviews/objective-${publication.objective}/` +
+        `work-item-${publication.workItem}/attempt-${publication.attempt}/` +
+        `integration-candidate-${identityDigest}`,
+      path: ".clockgrove-factory/control/semantic-review.json",
+      maxBytes: 65_536,
+    },
+  };
+}
+
+function assertReviewDocument(review, expected) {
+  assert.equal(review.protocol, "clockgrove.factory/review-checkpoint-v1");
+  assert.equal(review.identityDigest, expected.identityDigest);
+  assert.deepEqual(review.identity, expected.identity);
+  assert.equal(review.review.accepted, true);
+  assert.deepEqual(review.review.unmetCriteria, []);
+  for (const name of ["inputTokens", "outputTokens"])
+    assert.ok(
+      Number.isSafeInteger(review.usage?.[name]) && review.usage[name] > 0,
+      `review ${name} must be a positive exact counter`,
+    );
+  if (review.usage.cachedInputTokens !== undefined)
+    assert.ok(
+      Number.isSafeInteger(review.usage.cachedInputTokens) &&
+        review.usage.cachedInputTokens >= 0 &&
+        review.usage.cachedInputTokens <= review.usage.inputTokens,
+      "review cached input counter is invalid",
+    );
+}
+
 function exactHeadValidationDigest(publication, validation) {
   assert.equal(validation.passed, true, "published validation did not pass");
   const binding = {
@@ -662,23 +712,7 @@ export function assertNativeLinearReview(
 ) {
   const expected = publicationReview(publication, validation, published, publicationIndex);
   const { identity, identityDigest, usageId } = expected;
-  assert.equal(review.protocol, "clockgrove.factory/review-checkpoint-v1");
-  assert.equal(review.identityDigest, identityDigest);
-  assert.deepEqual(review.identity, identity);
-  assert.equal(review.review.accepted, true);
-  assert.deepEqual(review.review.unmetCriteria, []);
-  for (const name of ["inputTokens", "outputTokens"])
-    assert.ok(
-      Number.isSafeInteger(review.usage?.[name]) && review.usage[name] > 0,
-      `review ${name} must be a positive exact counter`,
-    );
-  if (review.usage.cachedInputTokens !== undefined)
-    assert.ok(
-      Number.isSafeInteger(review.usage.cachedInputTokens) &&
-        review.usage.cachedInputTokens >= 0 &&
-        review.usage.cachedInputTokens <= review.usage.inputTokens,
-      "review cached input counter is invalid",
-    );
+  assertReviewDocument(review, { identity, identityDigest });
   const usage = one(
     events.filter(
       (event) =>
@@ -828,6 +862,16 @@ export async function observeNativeLinearProofs(
     proof.candidateIdentityDigest = candidate.identityDigest;
     proof.candidateDemand = candidate.demand;
     proof.candidateRead = await read(candidate.demand);
+    assert.ok(
+      typeof proof.candidateRead.content === "string",
+      "merge candidate checkpoint content is unavailable",
+    );
+    const candidateDocument = JSON.parse(proof.candidateRead.content);
+    const candidateReview = integrationReview(publication, candidateDocument);
+    proof.candidateReviewIdentity = candidateReview.identity;
+    proof.candidateReviewIdentityDigest = candidateReview.identityDigest;
+    proof.candidateReviewDemand = candidateReview.demand;
+    proof.candidateReviewRead = await read(candidateReview.demand);
     const pull = one(
       evidence.pulls.filter((entry) => entry.number === publication.pullRequest),
       "native PR identity is missing or repeated",
@@ -1242,7 +1286,7 @@ export function assertNativeLinearCandidate(proof, events) {
     candidateValidationDigest: candidate.validation.digest,
   };
   assert.deepEqual(candidate.evidence, { ...bound, digest: hash(JSON.stringify(bound)) });
-  const accounting = one(
+  const validationUsage = one(
     events.filter(
       (event) =>
         event.event === "BudgetReconciled" &&
@@ -1256,10 +1300,165 @@ export function assertNativeLinearCandidate(proof, events) {
     ),
     "integration validation accounting is missing or repeated",
   );
-  assert.equal(accounting.amount, duration);
+  assert.equal(validationUsage.amount, duration);
   assert.ok(
-    publication.sequence < accounting.sequence && accounting.sequence < proof.integration.sequence,
+    publication.sequence < validationUsage.sequence &&
+      validationUsage.sequence < proof.integration.sequence,
     "integration validation accounting is outside its candidate/integration fence",
+  );
+  const expectedReview = integrationReview(publication, candidate);
+  assert.deepEqual(proof.candidateReviewIdentity, expectedReview.identity);
+  assert.equal(proof.candidateReviewIdentityDigest, expectedReview.identityDigest);
+  assert.deepEqual(proof.candidateReviewDemand, expectedReview.demand);
+  const review = assertQualificationCheckpoint(
+    proof.candidateReviewRead,
+    expectedReview.demand,
+    publication.baseSha,
+  );
+  assertReviewDocument(review, expectedReview);
+  const reviewUsage = one(
+    events.filter(
+      (event) =>
+        event.event === "BudgetReconciled" &&
+        event.runId === publication.runId &&
+        event.objective === publication.objective &&
+        event.workItem === publication.workItem &&
+        event.attempt === publication.attempt &&
+        event.phase === "management" &&
+        event.unit === "model_tokens" &&
+        event.usageId === expectedReview.usageId,
+    ),
+    "integration review accounting is missing or repeated",
+  );
+  assert.equal(reviewUsage.amount, review.usage.inputTokens + review.usage.outputTokens);
+  assert.ok(
+    validationUsage.sequence < reviewUsage.sequence &&
+      reviewUsage.sequence < proof.integration.sequence,
+    "integration review accounting is outside its candidate/integration fence",
+  );
+}
+
+function eventIdentity(event, fields) {
+  return JSON.stringify(fields.map((field) => event[field]));
+}
+
+export function assertNativeLinearGenerationSets(evidence, events) {
+  const proofs = evidence.nativeLinearProofs;
+  const cancelled = evidence.nativeLinearCase === "active-cancellation";
+  if (!cancelled)
+    assert.equal(
+      proofs.length,
+      6,
+      "native linear run must contain exactly six publication generations",
+    );
+  const runId = evidence.runResult.runId;
+  const validationFields = [
+    "runId",
+    "objective",
+    "workItem",
+    "attempt",
+    "sequence",
+    "evidenceDigest",
+    "baseSha",
+    "outputTreeSha",
+    "passed",
+  ];
+  const publicationFields = [
+    "runId",
+    "objective",
+    "workItem",
+    "attempt",
+    "sequence",
+    "headSha",
+    "artifactDigest",
+  ];
+  const expectedValidations = proofs.map((proof) =>
+    eventIdentity(proof.validation, validationFields),
+  );
+  const expectedPublications = proofs.map((proof) => {
+    const publication = proof.publication;
+    const published = one(
+      events.filter(
+        (event) =>
+          event.event === "AttemptPublished" &&
+          event.runId === runId &&
+          event.workItem === publication.workItem &&
+          event.attempt === publication.attempt &&
+          event.headSha === publication.headSha &&
+          event.sequence > proof.validation.sequence &&
+          event.sequence < publication.sequence,
+      ),
+      "exact publication generation is missing or repeated",
+    );
+    return eventIdentity(published, publicationFields);
+  });
+  const actualValidations = events
+    .filter((event) => event.runId === runId && event.event === "ValidationRecorded")
+    .map((event) => eventIdentity(event, validationFields));
+  const actualPublications = events
+    .filter((event) => event.runId === runId && event.event === "AttemptPublished")
+    .map((event) => eventIdentity(event, publicationFields));
+  assert.deepEqual(
+    actualValidations.sort(),
+    expectedValidations.sort(),
+    "unmatched validation generation",
+  );
+  assert.deepEqual(
+    actualPublications.sort(),
+    expectedPublications.sort(),
+    "unmatched attempt-publication generation",
+  );
+  const expectedSemantic = proofs.map((proof) => {
+    const publication = proof.publication;
+    const published = events.find(
+      (event) =>
+        event.event === "AttemptPublished" &&
+        event.runId === runId &&
+        event.workItem === publication.workItem &&
+        event.attempt === publication.attempt &&
+        event.headSha === publication.headSha,
+    );
+    assert.ok(published, "publication generation is unavailable");
+    return publicationReview(publication, proof.validation, published, proof.publicationIndex)
+      .usageId;
+  });
+  const expectedFinals = proofs.filter((proof) => proof.integration);
+  assert.equal(
+    expectedFinals.length,
+    cancelled ? 1 : 3,
+    "native integration generation coverage differs",
+  );
+  const expectedIntegrationValidation = expectedFinals.map(
+    (proof) => `integration-validation-${proof.candidateIdentityDigest}`,
+  );
+  const expectedIntegrationReview = expectedFinals.map(
+    (proof) => `integration-review-${proof.candidateReviewIdentityDigest}`,
+  );
+  const actualUsageIds = (pattern) =>
+    events
+      .filter(
+        (event) =>
+          event.runId === runId &&
+          event.event === "BudgetReconciled" &&
+          typeof event.usageId === "string" &&
+          pattern.test(event.usageId),
+      )
+      .map((event) => event.usageId)
+      .sort();
+  assert.deepEqual(
+    actualUsageIds(/^(?:review-|rebase-review-)/),
+    expectedSemantic.sort(),
+    "unmatched semantic-review usage generation",
+  );
+  assert.deepEqual(
+    actualUsageIds(/^integration-validation-/),
+    expectedIntegrationValidation.sort(),
+    "unmatched integration-validation usage generation",
+  );
+  assert.deepEqual(
+    actualUsageIds(/^integration-review-/),
+    expectedIntegrationReview.sort(),
+    "unmatched integration-review usage generation",
   );
 }
 
@@ -1305,6 +1504,7 @@ export function assertNativeLinearPublicationProofs(
       if (publicationIndex === group.publications.length - 1 && proof.integration)
         assertNativeLinearCandidate(proof, events);
     }
+  assertNativeLinearGenerationSets(evidence, events);
 }
 
 export function assertNativeLinearTerminal(events, expectedState) {
@@ -1322,11 +1522,33 @@ export function assertNativeControllerTakeover(events, trigger, expectedGenerati
     )
     .sort((left, right) => left.sequence - right.sequence);
   assert.ok(observations.length >= 2, "controller takeover history is incomplete");
+  const runGeneration = controllerGeneration(observations[0]);
   for (const [index, observation] of observations.entries()) {
     const generation = controllerGeneration(observation);
+    assert.equal(
+      generation.controllerPolicyDigest,
+      runGeneration.controllerPolicyDigest,
+      "controller policy drifted within the run",
+    );
+    assert.equal(
+      generation.protocolMin,
+      runGeneration.protocolMin,
+      "controller minimum protocol drifted within the run",
+    );
+    assert.equal(
+      generation.protocolMax,
+      runGeneration.protocolMax,
+      "controller maximum protocol drifted within the run",
+    );
+    assert.equal(
+      generation.writerPolicyDigest,
+      runGeneration.writerPolicyDigest,
+      "controller writer policy drifted within the run",
+    );
     if (index > 0) {
       const prior = controllerGeneration(observations[index - 1]);
       assert.ok(generation.epoch >= prior.epoch, "controller epoch regressed");
+      assert.ok(generation.writerEpoch >= prior.writerEpoch, "controller writer epoch regressed");
       if (generation.epoch === prior.epoch) {
         for (const field of [
           "controllerId",
@@ -1340,6 +1562,13 @@ export function assertNativeControllerTakeover(events, trigger, expectedGenerati
         ])
           assert.equal(generation[field], prior[field], `controller ${field} drifted in one epoch`);
       }
+      if (generation.writerEpoch === prior.writerEpoch)
+        for (const field of ["writerHolder", "writerPolicyDigest"])
+          assert.equal(
+            generation[field],
+            prior[field],
+            `controller ${field} drifted in one writer epoch`,
+          );
     }
   }
   const before = observations.filter((event) => event.sequence < trigger.sequence).at(-1);

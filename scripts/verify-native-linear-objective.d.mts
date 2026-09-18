@@ -32,6 +32,7 @@ export function assertNativeLinearCandidate(
   proof: Record<string, unknown>,
   events: unknown[],
 ): void;
+export function assertNativeLinearGenerationSets(evidence: unknown, events: unknown[]): void;
 export function assertNativeLinearReview(
   review: Record<string, unknown>,
   publication: Record<string, unknown>,

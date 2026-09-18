@@ -6,6 +6,7 @@ import {
   assertNativeLinearControllerAuthority,
   assertNativeLinearCandidate,
   assertNativeLinearFinalTree,
+  assertNativeLinearGenerationSets,
   assertNativeLinearHistory,
   assertNativeLinearPublicationProofs,
   assertNativeLinearReview,
@@ -67,6 +68,19 @@ function controllerFields(sequence: number, controllerId: string, epoch: number)
       ]),
     ),
   };
+}
+
+function rebindWriter(event: QualificationEvent) {
+  event.writerOperationId = hash(
+    JSON.stringify([
+      event.objective,
+      event.runId,
+      event.writerHolder,
+      event.writerEpoch,
+      event.writerPolicyDigest,
+      event.sequence,
+    ]),
+  );
 }
 
 function checkpointRead(
@@ -744,7 +758,21 @@ describe("native linear-stack installed matrix", () => {
         ]),
     );
     const read = vi.fn(async (demand: Record<string, unknown>) => {
-      if (demand.kind === "checkpoint") return { demand };
+      if (demand.kind === "checkpoint")
+        return {
+          demand,
+          ...(String(demand.path).endsWith("merge-candidate.json")
+            ? {
+                content: JSON.stringify({
+                  validation: {
+                    artifactDigest: digest("9"),
+                    outputTreeSha: head("8"),
+                    digest: digest("8"),
+                  },
+                }),
+              }
+            : {}),
+        };
       const validation = validationByHead.get(String(demand.oid))!;
       return {
         oid: demand.oid,
@@ -788,6 +816,119 @@ describe("native linear-stack installed matrix", () => {
     expect(() => assertNativeLinearPublicationProofs(changedDigest, changedDigestEvents)).toThrow(
       /exact-head validation binding/,
     );
+  });
+
+  it("rejects fresh-digest and fresh-usage restart duplicates outside all six generations", () => {
+    const events = proofEvents();
+    const publications = events
+      .filter((event) => event.event === "PublicationRecorded")
+      .sort((left, right) => left.sequence! - right.sequence!);
+    const counts = new Map<number, number>();
+    const proofs: Array<{
+      publication: QualificationEvent;
+      publicationIndex: number;
+      validation: QualificationEvent;
+      integration?: { sequence: number };
+      candidateIdentityDigest?: string;
+      candidateReviewIdentityDigest?: string;
+    }> = publications.map((published) => {
+      const publicationIndex = counts.get(published.workItem!) ?? 0;
+      counts.set(published.workItem!, publicationIndex + 1);
+      const validation = events.find(
+        (event) =>
+          event.event === "ValidationRecorded" &&
+          event.workItem === published.workItem &&
+          event.evidenceDigest === published.validationDigest,
+      )!;
+      const attempt = events.find(
+        (event) =>
+          event.event === "AttemptPublished" &&
+          event.workItem === published.workItem &&
+          event.headSha === published.headSha,
+      )!;
+      const identity = {
+        kind: publicationIndex === 0 ? "artifact" : "rebase",
+        runId: published.runId,
+        objective: published.objective,
+        workItem: published.workItem!,
+        attempt: published.attempt,
+        artifactDigest: attempt.artifactDigest,
+        baseSha: validation.baseSha,
+        outputTreeSha: validation.outputTreeSha,
+        evidenceDigest: validation.evidenceDigest,
+        ...(publicationIndex === 0 ? {} : { headSha: published.headSha }),
+      };
+      const reviewDigest = hash(canonical(identity));
+      events.push({
+        event: "BudgetReconciled",
+        runId: "run",
+        objective: 1,
+        workItem: published.workItem!,
+        attempt: 1,
+        phase: "management",
+        unit: "model_tokens",
+        usageId: `${publicationIndex === 0 ? "review" : "rebase-review"}-${reviewDigest}`,
+      });
+      return { publication: published, publicationIndex, validation };
+    });
+    for (const proof of proofs.filter((entry) =>
+      [head("a"), head("d"), head("f")].includes(String(entry.publication.headSha)),
+    )) {
+      proof.integration = { sequence: 200 };
+      proof.candidateIdentityDigest = hash(`candidate-${proof.publication.workItem}`);
+      proof.candidateReviewIdentityDigest = hash(`candidate-review-${proof.publication.workItem}`);
+      events.push(
+        {
+          event: "BudgetReconciled",
+          runId: "run",
+          usageId: `integration-validation-${proof.candidateIdentityDigest}`,
+        },
+        {
+          event: "BudgetReconciled",
+          runId: "run",
+          usageId: `integration-review-${proof.candidateReviewIdentityDigest}`,
+        },
+      );
+    }
+    const evidence = { runResult: { runId: "run" }, nativeLinearProofs: proofs };
+    expect(() => assertNativeLinearGenerationSets(evidence, events)).not.toThrow();
+    const restarted = structuredClone(events);
+    restarted.push(
+      {
+        event: "ValidationRecorded",
+        runId: "run",
+        objective: 1,
+        workItem: 4,
+        attempt: 1,
+        sequence: 300,
+        evidenceDigest: digest("1"),
+        baseSha: head("3"),
+        outputTreeSha: head("9"),
+        passed: true,
+      },
+      {
+        event: "AttemptPublished",
+        runId: "run",
+        objective: 1,
+        workItem: 4,
+        attempt: 1,
+        sequence: 301,
+        headSha: head("9"),
+        artifactDigest: digest("1"),
+      },
+      { event: "BudgetReconciled", runId: "run", usageId: `rebase-review-${digest("1")}` },
+      {
+        event: "BudgetReconciled",
+        runId: "run",
+        usageId: `integration-validation-${digest("1")}`,
+      },
+      {
+        event: "BudgetReconciled",
+        runId: "run",
+        usageId: `integration-review-${digest("1")}`,
+      },
+    );
+    expect(() => assertNativeLinearGenerationSets(evidence, restarted)).toThrow(/unmatched/);
   });
 
   it("binds every rewritten-head review decision and accounting to its exact identity", () => {
@@ -1040,6 +1181,34 @@ describe("native linear-stack installed matrix", () => {
       validation,
       evidence: { ...bound, digest: hash(JSON.stringify(bound)) },
     };
+    const candidateReviewIdentity = {
+      kind: "integration-candidate",
+      runId: "run",
+      objective: 1,
+      workItem: 2,
+      attempt: 1,
+      artifactDigest: validation.artifactDigest,
+      baseSha: head("0"),
+      outputTreeSha: head("7"),
+      evidenceDigest: validation.digest,
+      headSha: head("a"),
+    };
+    const candidateReviewIdentityDigest = hash(canonical(candidateReviewIdentity));
+    const candidateReviewDemand = {
+      kind: "checkpoint",
+      ref:
+        `refs/clockgrove-factory/reviews/objective-1/work-item-2/attempt-1/` +
+        `integration-candidate-${candidateReviewIdentityDigest}`,
+      path: ".clockgrove-factory/control/semantic-review.json",
+      maxBytes: 65_536,
+    };
+    const candidateReview = {
+      protocol: "clockgrove.factory/review-checkpoint-v1",
+      identity: candidateReviewIdentity,
+      identityDigest: candidateReviewIdentityDigest,
+      review: { accepted: true, unmetCriteria: [] },
+      usage: { inputTokens: 4, outputTokens: 2, cachedInputTokens: 1 },
+    };
     const proof = {
       publication: published,
       validation: sourceValidation,
@@ -1050,6 +1219,10 @@ describe("native linear-stack installed matrix", () => {
       candidateIdentityDigest: identityDigest,
       candidateDemand: demand,
       candidateRead: checkpointRead(demand, document, head("0")),
+      candidateReviewIdentity,
+      candidateReviewIdentityDigest,
+      candidateReviewDemand,
+      candidateReviewRead: checkpointRead(candidateReviewDemand, candidateReview, head("0")),
     };
     const accounting = [
       {
@@ -1063,6 +1236,18 @@ describe("native linear-stack installed matrix", () => {
         usageId: `integration-validation-${identityDigest}`,
         amount: 5000,
         sequence: 12,
+      },
+      {
+        event: "BudgetReconciled",
+        runId: "run",
+        objective: 1,
+        workItem: 2,
+        attempt: 1,
+        phase: "management",
+        unit: "model_tokens",
+        usageId: `integration-review-${candidateReviewIdentityDigest}`,
+        amount: 6,
+        sequence: 13,
       },
     ];
     expect(() => assertNativeLinearCandidate(proof, accounting)).not.toThrow();
@@ -1162,6 +1347,19 @@ describe("native linear-stack installed matrix", () => {
       },
       (copy: typeof events) => {
         copy[2]!.writerOperationId = digest("f");
+      },
+      (copy: typeof events) => {
+        copy[2]!.writerEpoch = 3;
+        rebindWriter(copy[2]!);
+      },
+      (copy: typeof events) => {
+        copy[2]!.writerEpoch = 4;
+        copy[2]!.writerHolder = "drifted-same-writer-epoch";
+        rebindWriter(copy[2]!);
+      },
+      (copy: typeof events) => {
+        copy[2]!.writerPolicyDigest = digest("e");
+        rebindWriter(copy[2]!);
       },
     ]) {
       const copy = structuredClone(events);

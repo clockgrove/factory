@@ -35,6 +35,7 @@ import {
   largeFileObjectiveBody,
   producedLfsObjectiveBody,
   largeFileValidationRecipe,
+  observeLargeFilePatch,
   observeLargeFileTree,
   largeFilePaths,
   assertLargeFileFinalTree,
@@ -643,33 +644,27 @@ function readOnlyMirror(context, shas) {
   return root;
 }
 
-function readBackProducedLfs(context, repository, commitSha, receipt) {
-  assert.equal(context.authority.largeFile.scenario, "produced-lfs-restart");
-  assert.match(receipt.oid, /^[a-f0-9]{64}$/);
-  assert.ok(Number.isSafeInteger(receipt.size) && receipt.size > 5 * 1024 * 1024);
+export function assertProducedLfsPointerBytes(receipt, observed) {
+  assert.ok(Buffer.isBuffer(observed));
   const pointer = Buffer.from(
     `version https://git-lfs.github.com/spec/v1\noid sha256:${receipt.oid}\nsize ${receipt.size}\n`,
   );
-  const observedPointer = spawnSync(
-    "git",
-    ["-c", "core.hooksPath=/dev/null", "cat-file", "blob", `${commitSha}:${receipt.path}`],
-    {
-      cwd: repository,
-      encoding: null,
-      timeout: 15000,
-      maxBuffer: 1024 * 1024,
-      env: {
-        PATH: process.env.PATH,
-        HOME: repository,
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "/dev/null",
-        GIT_NO_LAZY_FETCH: "1",
-        GIT_LFS_SKIP_SMUDGE: "1",
-      },
-    },
-  );
-  assert.equal(observedPointer.status, 0, "published LFS pointer is unreadable");
-  assert.ok(observedPointer.stdout.equals(pointer), "published LFS pointer identity differs");
+  assert.ok(observed.equals(pointer), "published LFS pointer identity differs");
+  return { bytes: pointer.length, sha256: hash(pointer) };
+}
+
+export function assertProducedLfsRemoteBytes(receipt, observed) {
+  assert.ok(Buffer.isBuffer(observed));
+  assert.equal(observed.length, receipt.size, "authenticated LFS byte count differs");
+  assert.equal(hash(observed), receipt.oid, "authenticated LFS digest differs");
+  return { bytes: observed.length, sha256: hash(observed) };
+}
+
+function fetchProducedLfsObject(context, repository, receipt, stage) {
+  assert.equal(context.authority.largeFile.scenario, "produced-lfs-restart");
+  assert.match(receipt.oid, /^[a-f0-9]{64}$/);
+  assert.ok(Number.isSafeInteger(receipt.size) && receipt.size > 5 * 1024 * 1024);
+  assert.ok(["prepublication", "postpublication"].includes(stage));
   const token = context.command("gh", ["auth", "token"], context.authority.checkout);
   const environment = {
     PATH: process.env.PATH,
@@ -712,14 +707,13 @@ function readBackProducedLfs(context, repository, commitSha, receipt) {
     const bytes = Buffer.alloc(info.size + 1);
     assert.equal(readSync(fd, bytes, 0, bytes.length, 0), info.size);
     const raw = bytes.subarray(0, info.size);
-    assert.equal(hash(raw), receipt.oid);
+    const remote = assertProducedLfsRemoteBytes(receipt, raw);
     return {
       bytes: raw,
       evidence: {
         path: receipt.path,
         oid: receipt.oid,
         size: receipt.size,
-        pointerSha256: hash(pointer),
         receiptDigest: receipt.digest,
         receiptRef: receipt.receiptRef,
         transferRef: receipt.rawTransfer.ref,
@@ -727,12 +721,77 @@ function readBackProducedLfs(context, repository, commitSha, receipt) {
         toolVersion: receipt.toolVersion,
         uploadOutcome: receipt.uploadOutcome,
         readVerified: receipt.readVerified,
-        postPublicationReadBack: "authenticated-exact-bytes",
+        remote,
+        authenticatedReadBack: `${stage}-exact-bytes`,
       },
     };
   } finally {
     closeSync(fd);
   }
+}
+
+function readBackProducedLfs(context, repository, commitSha, receipt) {
+  const observedPointer = spawnSync(
+    "git",
+    ["-c", "core.hooksPath=/dev/null", "cat-file", "blob", `${commitSha}:${receipt.path}`],
+    {
+      cwd: repository,
+      encoding: null,
+      timeout: 15000,
+      maxBuffer: 1024 * 1024,
+      env: {
+        PATH: process.env.PATH,
+        HOME: repository,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_NO_LAZY_FETCH: "1",
+        GIT_LFS_SKIP_SMUDGE: "1",
+      },
+    },
+  );
+  assert.equal(observedPointer.status, 0, "published LFS pointer is unreadable");
+  const pointer = assertProducedLfsPointerBytes(receipt, observedPointer.stdout);
+  const result = fetchProducedLfsObject(context, repository, receipt, "postpublication");
+  result.evidence.pointer = pointer;
+  return result;
+}
+
+function proveProducedLfsBeforePublication(context, fixture, transfer) {
+  assert.equal(transfer.summary.phase, "direct");
+  assert.equal(transfer.summary.continuation, "retained-ready-checkpoint");
+  assert.equal(transfer.artifact.lfsObjects?.length, 1);
+  const receipt = transfer.artifact.lfsObjects[0];
+  const observation = observeLargeFilePatch({
+    repository: fixture.repository,
+    fixture,
+    artifact: transfer.artifact,
+    patch: transfer.patch,
+  });
+  const artifact = assertLargeFileArtifact({
+    fixture,
+    artifact: transfer.artifact,
+    observation,
+    patch: transfer.patch,
+    phase: "payload",
+  });
+  const repository = readOnlyMirror(context, [fixture.baseSha]);
+  const remote = fetchProducedLfsObject(context, repository, receipt, "prepublication");
+  const retained = Buffer.from(transfer.proof.lfs[0].rawBase64, "base64");
+  assert.ok(remote.bytes.equals(retained), "remote LFS bytes differ from retained worker bytes");
+  return {
+    observation,
+    artifact,
+    remote: remote.evidence,
+    retained: { bytes: retained.length, sha256: hash(retained) },
+    attempt: {
+      runId: transfer.summary.runId,
+      workItem: transfer.summary.workItem,
+      attempt: transfer.summary.attempt,
+      artifactDigest: transfer.summary.artifactDigest,
+      terminalOid: transfer.summary.terminalOid,
+    },
+    boundary: "held-before-attempt-success-validation-or-publication",
+  };
 }
 
 function verifyFinalBehavior(context, fixture, repository, commitSha, producedLfsBytes) {
@@ -877,6 +936,19 @@ export function largeFileExtension(authority) {
             ? { priorDirect: priorDirect.proof }
             : {}),
         });
+        if (phase === "direct" && witness && !priorDirect) {
+          assert.equal(
+            evidence.producedLfsPrepublication,
+            undefined,
+            "prepublication LFS proof must not be repeated",
+          );
+          evidence.producedLfsPrepublication = proveProducedLfsBeforePublication(
+            context,
+            fixture,
+            value,
+          );
+          save();
+        }
         retainedProof(value, `${phase}-${workItem}`);
         if (phase === "intent") priorIntent = value;
         else {

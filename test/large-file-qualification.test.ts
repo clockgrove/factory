@@ -24,6 +24,7 @@ import {
   largeFilePaths,
   largeFileScenario,
   renderLargeFileRecipe,
+  observeLargeFilePatch,
   observeLargeFileTree,
   writeLargeFileOutput,
   type LargeFileFixture,
@@ -347,6 +348,91 @@ describe("installed large-file qualifier fixture and proof contracts", () => {
     expect(() =>
       observeLargeFileTree({ repository: prepared.repository, treeish: head, fixture: prepared }),
     ).toThrow(/actual Git blob/);
+  });
+
+  it("applies the produced LFS pointer patch independently before publication", () => {
+    const prepared = createLargeFileFixture({
+      parent: parent(),
+      namespace: "large-files-produced-patch",
+      producedLfs: true,
+    });
+    execFileSync(process.execPath, [join(prepared.repository, prepared.recipePath), "payload"], {
+      cwd: prepared.repository,
+      timeout: 15_000,
+      env: { PATH: "/usr/bin:/bin", HOME: prepared.root },
+    });
+    const raw = readFileSync(join(prepared.repository, prepared.paths.payload));
+    const pointer = Buffer.from(
+      `version https://git-lfs.github.com/spec/v1\noid sha256:${sha256(raw)}\nsize ${raw.length}\n`,
+    );
+    const oid = git(prepared.repository, ["hash-object", "-w", "--stdin"], pointer)
+      .toString()
+      .trim();
+    git(prepared.repository, [
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      "100644",
+      oid,
+      prepared.paths.payload,
+    ]);
+    const patch = git(prepared.repository, [
+      "diff",
+      "--cached",
+      "--binary",
+      "--no-ext-diff",
+      "--no-textconv",
+      prepared.baseSha,
+    ]);
+    const resultTreeSha = git(prepared.repository, ["write-tree"]).toString().trim();
+    const artifact = normalizeArtifact({
+      baseSha: prepared.baseSha,
+      patch: patch.toString("utf8"),
+      changedPaths: [prepared.paths.payload],
+      fileManifest: {
+        baseTreeSha: prepared.baseTreeSha,
+        resultTreeSha,
+        files: [
+          {
+            path: prepared.paths.payload,
+            action: "write",
+            mode: "100644",
+            bytes: pointer.length,
+            digest: sha256(pointer),
+            mediaType: "audio/wav",
+            generated: true,
+          },
+        ],
+      },
+      outcome: "succeeded",
+    });
+    const observation = observeLargeFilePatch({
+      repository: prepared.repository,
+      fixture: prepared,
+      artifact,
+      patch,
+    });
+    expect(observation).toMatchObject({
+      baseSha: prepared.baseSha,
+      treeSha: resultTreeSha,
+      patchProof: { bytes: patch.length, digest: sha256(patch), appliedTreeSha: resultTreeSha },
+    });
+    expect(observation.files.find((file) => file.path === prepared.paths.payload)).toMatchObject({
+      mode: "100644",
+      bytes: pointer.length,
+      digest: sha256(pointer),
+      generated: true,
+    });
+    const changed = Buffer.from(patch);
+    changed[changed.length - 2] = changed[changed.length - 2]! ^ 1;
+    expect(() =>
+      observeLargeFilePatch({
+        repository: prepared.repository,
+        fixture: prepared,
+        artifact,
+        patch: changed,
+      }),
+    ).toThrow();
   });
 
   it("does not write through symlink parents, outside its owned fixture, or over existing output", () => {

@@ -251,6 +251,10 @@ the immutable LFS receipt, raw content transfer, and direct artifact-ready check
 but before the supervisor receives success. Restart must adopt that exact ready artifact without a
 second worker, upload, accounting entry, or publication. After integration, the runner reads the Git
 pointer and authenticated remote object independently and rechecks their exact size and digest.
+While the controller is held and before restart, the runner independently applies the pointer patch,
+checks the exact worker scope, regular-file mode, generated classification and credential scan, then
+performs its own authenticated remote LFS fetch and compares those bytes with the retained worker
+content. The later postpublication pointer/object read is a separate proof.
 
 Negative cases use independent fresh fixtures. Missing-tool preparation uses a controlled process
 PATH without `git-lfs`; missing-object preparation leaves a named synthetic cache object absent in

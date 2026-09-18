@@ -688,6 +688,49 @@ export function producedLfsObjectiveBody(namespace) {
   return `Qualify deterministic produced Git LFS handling for namespace ${namespace}. Create exactly three linear Work Items in this order, never parallel roots. Use existing committed ${p.recipe}; do not rewrite the recipe, test, attributes, or existing LFS files. Do not install dependencies or change LFS configuration.\n\n1. Payload (the sole root): run node ${p.recipe} payload. Create only ${p.payload}, exactly 6291500 bytes from the existing bounded deterministic recipe. The pinned repository rule selects this path for authenticated Git LFS upload.\n2. Metadata (depends on Payload): run node ${p.recipe} metadata. Create only ${p.executable} (Git mode 100755) and ${p.metadata}, with exact recipe bytes.\n3. Verification join (depends on Payload and Metadata): run node ${p.recipe} join. Create only ${p.result}; run node ${p.recipe} verify to check all generated content.\n\nEach Work Item validates with ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest recipe scoped to ${p.test}. The final Git tree must contain the canonical pointer for ${p.payload}, its exact authenticated remote object must remain readable, and both existing LFS pointers must remain unchanged. No other paths may change. Real installed workers and independent validation/review are required; fixture generation alone is not an execution pass.\n`;
 }
 
+/** Apply a held artifact before publication and inspect the exact resulting raw Git tree. */
+export function observeLargeFilePatch({ repository, fixture, artifact, patch }) {
+  assert.equal(fixture.producedLfs, true);
+  assert.match(artifact?.baseSha ?? "", /^[a-f0-9]{40}$/);
+  assert.match(artifact?.fileManifest?.resultTreeSha ?? "", /^[a-f0-9]{40}$/);
+  assert.ok(
+    patch instanceof Uint8Array && patch.byteLength > 0 && patch.byteLength <= MAX_PATCH_BYTES,
+  );
+  ownedFixture(fixture);
+  assert.ok(
+    fs.readdirSync(fixture.root).filter((name) => name.startsWith("prepublication-proof-")).length <
+      4,
+    "fixture prepublication proof directory bound exceeded",
+  );
+  const deadline = Date.now() + 120_000;
+  const proof = fs.mkdtempSync(join(fixture.root, "prepublication-proof-"));
+  git(proof, ["init", "--quiet", "--template=", "--object-format=sha1"], undefined, 1024, deadline);
+  importBase(repository, proof, artifact.baseSha, deadline);
+  git(
+    proof,
+    ["apply", "--cached", "--binary", "--whitespace=error-all", "-"],
+    patch,
+    1024,
+    deadline,
+  );
+  const treeSha = gitText(proof, ["write-tree"], undefined, 1024, deadline);
+  assert.equal(
+    treeSha,
+    artifact.fileManifest.resultTreeSha,
+    "held produced-LFS patch differs from its manifest tree",
+  );
+  const observation = observeLargeFileTree({
+    repository: proof,
+    treeish: treeSha,
+    fixture,
+    baseSha: artifact.baseSha,
+  });
+  return {
+    ...observation,
+    patchProof: { bytes: patch.byteLength, digest: hash(patch), appliedTreeSha: treeSha },
+  };
+}
+
 function treeOutputFiles(fixture) {
   return outputFiles(fixture.namespace).map((file) => {
     if (!fixture.producedLfs || file.path !== fixture.paths.payload) return file;

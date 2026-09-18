@@ -4,8 +4,14 @@ import { normalizeArtifact } from "../src/execution/artifacts.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
 import {
   assertArtifactTransferProof,
+  assertNoProducedLfsSecrets,
+  assertProducedLfsArtifactBoundary,
   observeArtifactTransfer,
 } from "../scripts/qualification-artifact-transfer.mjs";
+import {
+  assertProducedLfsPointerBytes,
+  assertProducedLfsRemoteBytes,
+} from "../scripts/verify-local-large-files.mjs";
 
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const canonical = (value: unknown): string =>
@@ -519,6 +525,7 @@ describe("independent installed externalized artifact transfer proof", () => {
           transferRef: rawRef,
           intentCommit: receipt.rawTransfer.intentCommit,
           readyCommit: receipt.rawTransfer.readyCommit,
+          rawBase64: raw.toString("base64"),
         },
       ],
     };
@@ -568,6 +575,70 @@ describe("independent installed externalized artifact transfer proof", () => {
       payloadDigest: receipt.oid,
     });
     expect(recovered.patch?.toString()).toBe(artifactCore.patch);
+    const packet = JSON.parse(f.held.prepared.content).packet;
+    expect(assertProducedLfsArtifactBoundary(artifactCore, packet, proof.lfs)).toEqual([
+      expect.objectContaining({
+        path,
+        oid: receipt.oid,
+        generated: false,
+        secretScan: "passed",
+        scope: "exact-worker-packet",
+      }),
+    ]);
+    expect(() =>
+      assertProducedLfsArtifactBoundary(
+        artifactCore,
+        { ...packet, allowedPaths: ["other/"] },
+        proof.lfs,
+      ),
+    ).toThrow(/outside the exact worker packet/);
+    expect(() =>
+      assertProducedLfsArtifactBoundary(
+        {
+          ...artifactCore,
+          fileManifest: {
+            ...artifactCore.fileManifest,
+            files: artifactCore.fileManifest.files.map((file: Record<string, unknown>) => ({
+              ...file,
+              generated: true,
+            })),
+          },
+        },
+        packet,
+        proof.lfs,
+      ),
+    ).toThrow(/generated classification/);
+    expect(() =>
+      assertProducedLfsArtifactBoundary(
+        {
+          ...artifactCore,
+          fileManifest: {
+            ...artifactCore.fileManifest,
+            files: artifactCore.fileManifest.files.map((file: Record<string, unknown>) => ({
+              ...file,
+              mode: "120000",
+            })),
+          },
+        },
+        packet,
+        proof.lfs,
+      ),
+    ).toThrow(/symlink/);
+    expect(() =>
+      assertNoProducedLfsSecrets(Buffer.from("github_pat_abcdefghijklmnopqrstuvwxyz123456")),
+    ).toThrow(/credential bytes/);
+    expect(assertProducedLfsPointerBytes(receipt, pointer)).toEqual({
+      bytes: pointer.length,
+      sha256: hash(pointer),
+    });
+    expect(assertProducedLfsRemoteBytes(receipt, raw)).toEqual({
+      bytes: raw.length,
+      sha256: hash(raw),
+    });
+    expect(() => assertProducedLfsPointerBytes(receipt, Buffer.from("changed pointer\n"))).toThrow(
+      /pointer identity/,
+    );
+    expect(() => assertProducedLfsRemoteBytes(receipt, raw.subarray(1))).toThrow(/byte count/);
   });
   it("proves partial intent then exact same-attempt ready bytes without inventing measured time", () => {
     const f = fixture();

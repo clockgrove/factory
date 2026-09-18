@@ -53,9 +53,26 @@ const integer = (value, min, max) =>
     "integer exceeds proof bound",
   );
 const exact = (value, names) => assert.deepEqual(Object.keys(value).sort(), [...names].sort());
+const secretPatterns = [
+  /(?:gh[opurs]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})/,
+  /sk-[A-Za-z0-9_-]{20,}/,
+  /(?:AKIA|ASIA)[A-Z0-9]{16}/,
+  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
+  /authorization\s*:\s*(?:bearer|basic)\s+\S+/i,
+];
 const same = (left, right, fields = keys) => {
   for (const key of fields) assert.equal(left[key], right[key], `original ${key} binding differs`);
 };
+export function assertNoProducedLfsSecrets(raw) {
+  assert.ok(Buffer.isBuffer(raw));
+  const text = raw.toString("latin1");
+  assert.equal(
+    secretPatterns.some((pattern) => pattern.test(text)),
+    false,
+    "retained LFS content contains suspected credential bytes",
+  );
+  return true;
+}
 function budgetIdentity(event, reserved) {
   same(event, reserved, ["objective", "workItem", "attempt", "runId"]);
   // Ordinary recorder budgets omit epoch/policy; conservative recovery receipts carry them.
@@ -277,7 +294,7 @@ function session(events, authority, proof) {
   assert.ok(worker.sequence > started.sequence);
   if (worker.reportedModelUsage !== undefined)
     assert.deepEqual(worker.reportedModelUsage, terminal.usage);
-  return { ...refs, start, reserved, started, terminal, binding, worker };
+  return { ...refs, start, reserved, started, terminal, binding, packet, worker };
 }
 function descriptor(proof, ref, parents, identity, phase, externalRequired = true) {
   const value = assertQualificationCheckpoint(
@@ -610,6 +627,74 @@ function patchBytes(proof, value) {
   return patch;
 }
 
+/** Recheck the worker packet boundary and the exact retained raw bytes without runtime imports. */
+export function assertProducedLfsArtifactBoundary(artifact, packet, proofs) {
+  assert.ok(Array.isArray(packet.allowedPaths) && packet.allowedPaths.length > 0);
+  const permits = (path) =>
+    packet.allowedPaths.some((allowed) =>
+      allowed.endsWith("/") ? path.startsWith(allowed) : path === allowed,
+    );
+  assert.ok(
+    artifact.changedPaths.every(permits),
+    "produced LFS artifact changes a path outside the exact worker packet",
+  );
+  const manifest = artifact.fileManifest;
+  assert.ok(manifest && Array.isArray(manifest.files));
+  for (const file of manifest.files) {
+    assert.ok(permits(file.path), "produced LFS manifest escapes the exact worker packet");
+    assert.notEqual(file.mode, "120000", "produced LFS artifact contains a symlink");
+    assert.equal(
+      file.generated,
+      /(^|\/)(generated|dist|build)\//.test(file.path),
+      "produced LFS generated classification differs from its path",
+    );
+  }
+  const receipts = artifact.lfsObjects ?? [];
+  assert.ok(receipts.length > 0 && receipts.length === proofs?.length);
+  const result = [];
+  for (const receipt of receipts) {
+    const proof = one(
+      proofs.filter(
+        (candidate) =>
+          candidate.path === receipt.path &&
+          candidate.oid === receipt.oid &&
+          candidate.receiptRef === receipt.receiptRef,
+      ),
+      "produced LFS retained-byte proof is missing or repeated",
+    );
+    assert.ok(typeof proof.rawBase64 === "string");
+    const raw = Buffer.from(proof.rawBase64, "base64");
+    assert.equal(raw.toString("base64"), proof.rawBase64, "noncanonical retained LFS encoding");
+    assert.equal(raw.length, receipt.size, "retained LFS byte count differs");
+    assertNoProducedLfsSecrets(raw);
+    assert.equal(hash(raw), receipt.oid, "retained LFS digest differs");
+    const pointer = Buffer.from(
+      `version https://git-lfs.github.com/spec/v1\noid sha256:${receipt.oid}\nsize ${receipt.size}\n`,
+    );
+    const file = one(
+      manifest.files.filter((candidate) => candidate.path === receipt.path),
+      "produced LFS pointer manifest entry is missing or repeated",
+    );
+    assert.equal(file.action, "write");
+    assert.equal(file.mode, receipt.mode);
+    assert.equal(file.bytes, pointer.length);
+    assert.equal(file.digest, hash(pointer));
+    result.push({
+      path: receipt.path,
+      mode: receipt.mode,
+      oid: receipt.oid,
+      size: receipt.size,
+      generated: file.generated,
+      pointerDigest: hash(pointer),
+      retainedDigest: hash(raw),
+      secretScan: "passed",
+      scope: "exact-worker-packet",
+      fileKind: "regular",
+    });
+  }
+  return result;
+}
+
 /** Pure retained-proof recheck. Caller supplies actor-authenticated observation receipts. */
 export function assertArtifactTransferProof(observation, authority, proof, options) {
   assert.ok(["intent", "ready", "direct"].includes(options.phase));
@@ -617,7 +702,8 @@ export function assertArtifactTransferProof(observation, authority, proof, optio
   if (options.workItem !== undefined) assert.equal(proof.workItem, options.workItem);
   const events = eventsFor(observation, proof.workItem);
   const context = session(events, authority, proof);
-  const { identity, transferRef, start, reserved, started, worker, terminal, binding } = context;
+  const { identity, transferRef, start, reserved, started, worker, terminal, binding, packet } =
+    context;
   assert.deepEqual(proof.receipts, events, "retained receipt snapshot differs");
   if (options.phase === "direct") {
     assert.equal(proof.intent, undefined);
@@ -664,6 +750,9 @@ export function assertArtifactTransferProof(observation, authority, proof, optio
       })),
       "produced LFS retained proofs differ from artifact receipts",
     );
+    const producedBoundary = ready.artifact.lfsObjects?.length
+      ? assertProducedLfsArtifactBoundary(ready.artifact, packet, proof.lfs)
+      : [];
     if (witness) {
       same(witness, identity);
       assert.equal(witness.protocol, "clockgrove.factory/artifact-transfer-checkpoint-reached");
@@ -744,6 +833,7 @@ export function assertArtifactTransferProof(observation, authority, proof, optio
         payloadBytes: witness?.contentBytes ?? null,
         payloadChunks: witness?.content.reduce((sum, subject) => sum + subject.chunks, 0) ?? 0,
         representation: ready.artifact.lfsObjects?.length ? "produced-lfs" : "inline",
+        producedBoundary,
         intentOid: proof.ready.commit.oid,
         readyOid: proof.ready.commit.oid,
         threadId: binding.threadId,
@@ -1096,6 +1186,7 @@ async function observeProducedLfsReceipt(request, read, receipt) {
     intentCommit: intent.commit.oid,
     readyCommit: ready.commit.oid,
     chunkCount: intentValue.chunks.length,
+    rawBase64: raw.toString("base64"),
   };
 }
 

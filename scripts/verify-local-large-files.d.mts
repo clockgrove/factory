@@ -11,6 +11,14 @@ export type LargeFileCase =
   | "scope"
   | "secret"
   | "symlink";
+export function assertProducedLfsPointerBytes(
+  receipt: { oid: string; size: number },
+  observed: Buffer,
+): { bytes: number; sha256: string };
+export function assertProducedLfsRemoteBytes(
+  receipt: { oid: string; size: number },
+  observed: Buffer,
+): { bytes: number; sha256: string };
 export interface LargeFileAuthority extends CheckpointAuthority {
   largeFile: { scenario: LargeFileCase; fixture: string; fixtureDigest: string };
 }

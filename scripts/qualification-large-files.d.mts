@@ -121,6 +121,12 @@ export function observeLargeFileTree(input: {
   baseSha?: string;
   patch?: Uint8Array;
 }): LargeFileTreeObservation;
+export function observeLargeFilePatch(input: {
+  repository: string;
+  fixture: LargeFileFixture;
+  artifact: unknown;
+  patch: Uint8Array;
+}): LargeFileTreeObservation;
 export function assertLargeFileFinalTree(input: {
   fixture: LargeFileFixture;
   observation: LargeFileTreeObservation;

@@ -20,6 +20,12 @@ export function assertArtifactTransferProof(
   proof: unknown,
   options: ArtifactTransferOptions,
 ): ArtifactTransferResult;
+export function assertProducedLfsArtifactBoundary(
+  artifact: Record<string, unknown>,
+  packet: Record<string, unknown>,
+  proofs: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>>;
+export function assertNoProducedLfsSecrets(raw: Buffer): true;
 export function observeArtifactTransfer(
   request: (route: string, args: Record<string, unknown>) => Promise<unknown>,
   observation: unknown,

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { open, unlink } from "node:fs/promises";
+import { lstat, open, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -362,8 +362,21 @@ async function privateFile(path: string, label: string) {
   }
 }
 
+/** Arm discovery is positive-only. Metadata lookup never consumes the entry,
+ * and an absent or unreachable exact path leaves ordinary production unchanged.
+ * Once observed, the descriptor-based path below treats every race or authority
+ * mismatch as a failed armed checkpoint. */
+async function compilerQualificationArmObserved(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Qualification-only delay at two existing durable controller boundaries.
- * No private arm is a no-op. The arm and witness never authorize replay or recovery. */
+ * An absent exact private arm is a no-op. The arm and witness never authorize replay or recovery. */
 export async function holdCompilerQualificationCheckpoint(args: {
   repository: string;
   objective: number;
@@ -385,6 +398,8 @@ export async function holdCompilerQualificationCheckpoint(args: {
   const filename = `${hash(
     `${args.repository}\0${args.objective}\0${args.runId}\0${args.checkpoint}`,
   )}.json`;
+  const discoveredPath = join(directoryPath(uid), filename);
+  if (!(await compilerQualificationArmObserved(discoveredPath))) return;
   let directory;
   try {
     directory = await open(
@@ -392,7 +407,6 @@ export async function holdCompilerQualificationCheckpoint(args: {
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY,
     );
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw new CompilerQualificationCheckpointHeldError(error);
   }
   try {
@@ -400,13 +414,7 @@ export async function holdCompilerQualificationCheckpoint(args: {
     if (!info.isDirectory() || info.uid !== uid || (info.mode & 0o777) !== 0o700)
       throw new Error("compiler qualification checkpoint directory is not private owned storage");
     const path = `/proc/self/fd/${directory.fd}/${filename}`;
-    let original;
-    try {
-      original = await privateFile(path, "compiler qualification arm");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw error;
-    }
+    const original = await privateFile(path, "compiler qualification arm");
     try {
       await privateFile(`${path}.reached`, "compiler qualification witness");
       throw new Error("compiler qualification arm was replayed after its one-shot witness");

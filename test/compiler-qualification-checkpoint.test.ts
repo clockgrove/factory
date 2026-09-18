@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CompiledGraphProjectionRecord, CompiledGraphRecord } from "../src/control/graphs.js";
@@ -152,6 +152,69 @@ describe.sequential("compiler qualification checkpoint", () => {
     await mkdir(dirname(f.path), { mode: 0o700 });
     await expect(holdCompilerQualificationCheckpoint(f.args)).resolves.toBeUndefined();
     expect(f.order).toEqual([]);
+  });
+
+  it("ignores shared-directory state when this run has no exact arm", async () => {
+    for (const state of ["public-empty", "inaccessible-empty", "unrelated", "symlink"] as const) {
+      const f = fixture();
+      const directory = dirname(f.path);
+      if (state === "symlink") {
+        const target = `${directory}-unrelated`;
+        roots.add(target);
+        await mkdir(target, { mode: 0o755 });
+        await symlink(target, directory);
+      } else {
+        await mkdir(directory, { mode: state === "inaccessible-empty" ? 0o700 : 0o755 });
+        if (state === "unrelated") {
+          await writeFile(`${directory}/unrelated.json`, "not an arm", { mode: 0o644 });
+        }
+        if (state === "inaccessible-empty") await chmod(directory, 0o000);
+      }
+      await expect(holdCompilerQualificationCheckpoint(f.args)).resolves.toBeUndefined();
+      expect(f.order).toEqual([]);
+      if (state === "inaccessible-empty") await chmod(directory, 0o700);
+      await rm(directory, { recursive: true, force: true });
+      roots.delete(directory);
+    }
+  });
+
+  it("refuses a malformed or symlinked exact arm after positive discovery", async () => {
+    for (const kind of [
+      "malformed",
+      "public-directory",
+      "public-file",
+      "file-symlink",
+      "directory-symlink",
+    ] as const) {
+      const f = fixture();
+      const directory = dirname(f.path);
+      if (kind === "directory-symlink") {
+        const target = `${directory}-foreign`;
+        roots.add(target);
+        await mkdir(target, { mode: 0o700 });
+        await writeFile(`${target}/${f.path.slice(directory.length + 1)}`, JSON.stringify(f.arm), {
+          mode: 0o600,
+        });
+        await symlink(target, directory);
+      } else if (["malformed", "public-directory", "public-file"].includes(kind)) {
+        await mkdir(directory, { mode: kind === "public-directory" ? 0o755 : 0o700 });
+        await writeFile(f.path, kind === "malformed" ? "{not-json" : JSON.stringify(f.arm), {
+          mode: kind === "public-file" ? 0o644 : 0o600,
+        });
+      } else {
+        await mkdir(directory, { mode: 0o700 });
+        const target = `${f.path}.foreign`;
+        await writeFile(target, JSON.stringify(f.arm), { mode: 0o600 });
+        await symlink(target, f.path);
+      }
+      await expect(holdCompilerQualificationCheckpoint(f.args)).rejects.toBeInstanceOf(
+        CompilerQualificationCheckpointHeldError,
+      );
+      expect(f.order).toEqual([]);
+      await expect(readFile(`${f.path}.reached`)).rejects.toMatchObject({ code: "ENOENT" });
+      await rm(directory, { recursive: true, force: true });
+      roots.delete(directory);
+    }
   });
 
   it.each(["compiler-selection", "graph-projection"] as const)(

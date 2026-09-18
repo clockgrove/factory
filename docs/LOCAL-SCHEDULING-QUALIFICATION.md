@@ -26,7 +26,9 @@ The additional scope is deliberately narrow:
 - A second installed MCP service makes one identical foreground `factory_run` call.
   It must be refused by the existing **outer repository-controller lease**, with the
   same authenticated controller ID, epoch, and policy around that refusal. This is
-  not an inner Objective Director CAS race or a multi-computer controller test.
+  not an inner Objective Director CAS race or a multi-computer controller test. The
+  installed inner create-ref race is the separate `director-contention` scenario in
+  `scripts/verify-local-concurrency.mjs`.
 - After those observations, the harness rechecks zero admissions and changes only
   the captured primary service's cap to `CPUQuota=400%` (4 CPUs). Every reservation
   must follow that barrier and record a fresh 4-CPU resource measurement. The

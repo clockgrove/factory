@@ -7,6 +7,8 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
   checkpointAuthority,
   checkpointDeadline,
@@ -18,6 +20,11 @@ import {
 } from "./verify-local-checkpoint-restart.mjs";
 import { authenticatedFaultEvents, isQuiescentFaultObjective } from "./verify-local-faults.mjs";
 import { qualificationModelAccounting } from "./qualification-model-accounting.mjs";
+import {
+  assertExplainReplayEvidence,
+  assertInnerDirectorCollision,
+  assertResourceCeilingEvidence,
+} from "./qualification-director-contention.mjs";
 import {
   installedBundleIdentity,
   modelTokenLimit,
@@ -61,6 +68,44 @@ const endNames = new Set([
   "AttemptCancelled",
   "AttemptDeferred",
 ]);
+
+function workerPacketScope(issue) {
+  assert.equal(typeof issue.body, "string", "Work Item body unavailable");
+  const matches = [
+    ...issue.body.matchAll(/<!--\s*clockgrove-factory:worker-packet\s+([A-Za-z0-9_-]+)\s*-->/g),
+  ];
+  const encoded = one(matches, "Work Item packet envelope missing or repeated")[1];
+  const packet = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  assert.equal(packet.protocol, "clockgrove.factory/worker-packet");
+  assert.ok(Array.isArray(packet.allowedPaths) && packet.allowedPaths.length > 0);
+  const exclusiveResources = packet.changeSurface?.exclusiveResources ?? [];
+  assert.ok(Array.isArray(exclusiveResources));
+  return { paths: packet.allowedPaths, exclusiveResources };
+}
+
+function capacitySnapshot(observations) {
+  const reservations = [];
+  for (const observation of observations) {
+    const scopes = new Map(
+      observation.children.map((issue) => [issue.number, workerPacketScope(issue)]),
+    );
+    for (const reservation of observation.status.capacity?.activeReservations ?? []) {
+      const scope = scopes.get(reservation.workItem);
+      assert.ok(scope, "active reservation has no authenticated Work Item packet");
+      reservations.push({
+        objective: observation.status.objective.number,
+        ...reservation,
+        ...scope,
+      });
+    }
+  }
+  const identities = reservations.map(
+    (reservation) =>
+      `${reservation.objective}:${reservation.workItem}:${reservation.attempt}:${reservation.phase}:${reservation.backendId}`,
+  );
+  assert.equal(new Set(identities).size, identities.length, "duplicate capacity reservation");
+  return { observedAt: new Date().toISOString(), reservations };
+}
 
 export function concurrencyReceiptProgress(phase, pair) {
   const hasChangedReceiptBoundary = pair.some((observation) =>
@@ -298,7 +343,7 @@ export function concurrencyAuthority(env) {
   assert.equal(
     env.FACTORY_CHECKPOINT_BACKEND,
     undefined,
-    "this scenario uses the existing SDK/CLI local chain",
+    "concurrency uses the SDK/CLI local chain",
   );
   const phase = env.FACTORY_CONCURRENCY_PHASE;
   const namespace = qualificationNamespace(env.FACTORY_CONCURRENCY_NAMESPACE);
@@ -309,13 +354,18 @@ export function concurrencyAuthority(env) {
   const repository = env.FACTORY_CONCURRENCY_REPOSITORY;
   const unit = env.FACTORY_CONCURRENCY_CONTROLLER_UNIT;
   const scenario = env.FACTORY_CONCURRENCY_SCENARIO ?? "throughput";
-  assert.ok(["throughput", "lease-fault"].includes(scenario), "unsupported concurrency scenario");
+  assert.ok(
+    ["throughput", "lease-fault", "director-contention"].includes(scenario),
+    "unsupported concurrency scenario",
+  );
   if (phase === "exercise")
     assert.equal(
       env.FACTORY_CONCURRENCY_ACK,
       scenario === "throughput"
         ? `${repository}:${unit}:start,activate-two,stop`
-        : `${repository}:${unit}:start,activate-two,contend,pause-b,freeze-inner-contend-unfreeze,stop-stale,restart,resume-b,stop`,
+        : scenario === "lease-fault"
+          ? `${repository}:${unit}:start,activate-two,contend,pause-b,freeze-inner-contend-unfreeze,stop-stale,restart,resume-b,stop`
+          : `${repository}:${unit}:start,activate-peer,race-inner-cas,observe-path-exclusive-refill,explain,replay,stop`,
       "explicit two-Objective lifecycle authority required",
     );
   const authority = checkpointAuthority({
@@ -330,9 +380,10 @@ export function concurrencyAuthority(env) {
     FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: String(perObjectiveThreshold),
     FACTORY_CHECKPOINT_ACK: `${repository}:${unit}:start,pause-drain,restart,resume,stop`,
   });
-  authority.policy.maxParallel = 1;
+  const directorContention = scenario === "director-contention";
+  authority.policy.maxParallel = directorContention ? 2 : 1;
   authority.policy.objectiveTimeoutMinutes = durationMinutes;
-  authority.policy.capacity.local.maxWorkers = 1;
+  authority.policy.capacity.local.maxWorkers = directorContention ? 2 : 1;
   authority.policy.models = qualificationModels(env);
   return {
     ...authority,
@@ -340,7 +391,7 @@ export function concurrencyAuthority(env) {
     namespaces,
     aggregateObservedThreshold,
     controllerLocalCeiling: 8,
-    authorizedScenarioWorkerMaximum: 2,
+    authorizedScenarioWorkerMaximum: directorContention ? 4 : 2,
   };
 }
 
@@ -350,6 +401,16 @@ export function concurrencyObjectiveBody(namespace, index) {
       ? "Make clamp the first root in native sub-issue order. Its implementation must also handle infinities and negative zero consistently with Math.min(Math.max(value,min),max). Add at least 24 individually named edge-case assertions covering negative/fractional inputs, both infinities, negative zero, equal bounds and inverted bounds. Do not introduce artificial delays, sleeps, services, network calls or resource pressure."
       : "Keep both roots minimal: only the specified deterministic implementation and acceptance cases. Make clamp first and slugify second in native sub-issue order."
   }\nKeep all six new files ordinary non-executable Git mode 100644. Do not combine the roots or add Work Items. This requests useful asymmetric work, not a guarantee about model speed. The observer records an incomplete result if actual overlap/refill does not occur.`;
+}
+
+export function directorContentionObjectiveBody(namespace, index, sharedPath, sharedResource) {
+  assert.match(sharedPath, /^src\/factory-qualification\/[a-z0-9-]+\/shared\/$/);
+  assert.match(sharedResource, /^factory-qualification-[a-z0-9-]+$/);
+  return `${objectiveBodyFor(namespace)}\n\nThis is one of exactly two Director-contention qualification Objectives. Keep the three modules and dependency graph above unchanged. The clamp root must additionally include ${sharedPath} in its allowed paths and add ${sharedPath}${namespace}.js exporting the string '${namespace}'; the peer Objective writes a different file in that directory. The slugify root must declare the exact exclusive resource ${sharedResource}. Preserve those exact path and exclusive-resource declarations in the Work Packets. ${
+    index === 0
+      ? "Make both roots useful but smaller, with at least 12 individually named deterministic edge-case assertions each; keep the join minimal."
+      : "Make both roots materially larger with at least 48 individually named deterministic edge-case assertions each; keep the join minimal."
+  } Do not add sleeps, services, network calls, generated artifacts or unrelated dependencies. All files are ordinary mode 100644. Both Objectives edit disjoint files and must merge cleanly.`;
 }
 
 /** Observed execution lifetimes only. Receipt clocks never imply simultaneous CPU use. */
@@ -426,25 +487,31 @@ export function concurrencyRefill(pair) {
   return null;
 }
 
-export function assertConcurrencySettlement(observation, authority, { paused = false } = {}) {
+export function assertConcurrencySettlement(
+  observation,
+  authority,
+  { paused = false, activated = true } = {},
+) {
   const events = eventsOf(observation),
     start = one(
       events.filter((event) => event.event === "FactoryRunStarted"),
       "one exact run required",
     );
-  const activation = one(
-    events.filter((event) => event.event === "ActivationRequested"),
-    "one exact activation required",
-  );
-  assert.equal(activation.requestId, `${authority.namespace}-activate`);
-  assert.equal(start.activationRequestId, activation.requestId);
-  for (const event of [activation, start]) {
+  const activations = events.filter((event) => event.event === "ActivationRequested");
+  let activation;
+  if (activated) activation = one(activations, "one exact activation required");
+  else assert.equal(activations.length, 0, "foreground collision gained activation authority");
+  if (activation) {
+    assert.equal(activation.requestId, `${authority.namespace}-activate`);
+    assert.equal(start.activationRequestId, activation.requestId);
+  } else assert.equal(start.activationRequestId, undefined);
+  for (const event of activation ? [activation, start] : [start]) {
     assert.equal(event.repository, authority.repository);
     assert.deepEqual(event.policy, authority.policy);
     assert.equal(event.policyDigest, start.policyDigest);
     assert.equal(event.objective, observation.status.objective.number);
   }
-  assert.equal(activation.requestedBy.toLowerCase(), start.actor.toLowerCase());
+  if (activation) assert.equal(activation.requestedBy.toLowerCase(), start.actor.toLowerCase());
   assert.equal(observation.status.run.runId, start.runId);
   assert.equal(observation.status.summary.runId, start.runId);
   assert.equal(observation.status.run.policyDigest, start.policyDigest);
@@ -847,6 +914,35 @@ export async function runConcurrencyLeaseFaultScenario(port, authority) {
   };
 }
 
+/** Two process-isolated foreground Directors race one absent inner lease while a peer progresses. */
+export async function runDirectorContentionScenario(port, authority) {
+  const preflight = await port.preflight();
+  if (authority.phase === "preflight") return { result: "preflight-only", preflight };
+  assert.equal(authority.scenario, "director-contention");
+  await port.prepare("create");
+  await port.action("start");
+  const controller = await port.controller("active");
+  await port.prepare("activate-peer");
+  await port.pollPeer("started");
+  const collision = await port.innerCasCollision(controller);
+  const final = await port.pollPair("completed", (pair) =>
+    pair.every((observation, index) => port.settled(observation, false, index, index === 1)),
+  );
+  const proofs = await port.finishDirectorContention(final, controller, collision);
+  await port.action("stop");
+  const stopped = await port.controller("inactive");
+  return {
+    result: "passed",
+    scope: "installed-inner-Director-CAS-resource-ceilings-explain-replay",
+    controllerLocalCeiling: authority.controllerLocalCeiling,
+    authorizedScenarioWorkerMaximum: authority.authorizedScenarioWorkerMaximum,
+    aggregateObservedThreshold: authority.aggregateObservedThreshold,
+    outerRepositoryLeaseEvidence: "separate",
+    proofs,
+    cleanup: { controller: stopped, workerScopes: "proved-in-report" },
+  };
+}
+
 export async function main(env = process.env, run = checkpointMain) {
   const authority = concurrencyAuthority(env);
   if (!authority) {
@@ -862,17 +958,22 @@ export async function main(env = process.env, run = checkpointMain) {
     const scenario =
       authority.scenario === "throughput"
         ? runConcurrencyScenario
-        : runConcurrencyLeaseFaultScenario;
+        : authority.scenario === "lease-fault"
+          ? runConcurrencyLeaseFaultScenario
+          : runDirectorContentionScenario;
     return await run(env, scenario, {
       authority,
       scope:
         authority.scenario === "throughput"
           ? "installed-two-objective-useful-throughput"
-          : "installed-two-objective-controller-expiry-fault",
+          : authority.scenario === "lease-fault"
+            ? "installed-two-objective-controller-expiry-fault"
+            : "installed-inner-Director-contention-resource-ceilings",
       harnessPaths: [
         "scripts/verify-local-concurrency.mjs",
         "scripts/qualification-controller-freeze.mjs",
         "scripts/qualification-model-accounting.mjs",
+        "scripts/qualification-director-contention.mjs",
         "scripts/qualification-sibling-refresh-proof.mjs",
         "scripts/qualification-merge-proof.mjs",
         "scripts/qualification-receipts.mjs",
@@ -903,6 +1004,7 @@ export async function main(env = process.env, run = checkpointMain) {
         readBounded,
         pluginRoot,
         artifact,
+        runtimeEnvironment,
         retireClient,
       }) => {
         assert.equal(typeof retireClient, "function", "owned MCP retirement boundary unavailable");
@@ -1213,7 +1315,7 @@ export async function main(env = process.env, run = checkpointMain) {
             parents: commit.parents.map((parent) => parent.sha),
           };
         };
-        const settled = (observation, paused, index = paused ? 1 : 0) => {
+        const settled = (observation, paused, index = paused ? 1 : 0, activated = true) => {
           if (observation.status.run.state !== (paused ? "paused" : "completed")) return false;
           const events = eventsOf(observation),
             reservations = events.filter((event) => event.event === "AttemptReserved");
@@ -1242,8 +1344,64 @@ export async function main(env = process.env, run = checkpointMain) {
           )
             return false;
           // Status and comments are independently fetched; one-sided completion is pending, not proof.
-          assertConcurrencySettlement(observation, policyFor(authority, index), { paused });
+          assertConcurrencySettlement(observation, policyFor(authority, index), {
+            paused,
+            activated,
+          });
           return true;
+        };
+        const startInstalledClient = async (name) => {
+          const manifest = JSON.parse(
+            readBounded(join(pluginRoot, ".codex-plugin/plugin.json"), 65536),
+          );
+          const mcp = manifest.mcpServers.factory;
+          assert.equal(mcp.command, "sh");
+          const token = command("gh", ["auth", "token"], authority.checkout);
+          const client = new Client({ name, version: "1.0.0" });
+          const transport = new StdioClientTransport({
+            command: mcp.command,
+            args: mcp.args.map((arg) => arg.replaceAll("${PLUGIN_ROOT}", pluginRoot)),
+            cwd: authority.checkout,
+            env: { ...runtimeEnvironment, GITHUB_TOKEN: token },
+            stderr: "pipe",
+          });
+          await client.connect(transport);
+          transport.stderr?.on("data", () => {});
+          assert.equal(client.getServerVersion()?.version, artifact.version);
+          const pid = transport.pid;
+          assert.ok(Number.isSafeInteger(pid) && pid > 1);
+          const stat = readBounded(`/proc/${pid}/stat`, 16384),
+            startTicks = stat
+              .slice(stat.lastIndexOf(")") + 2)
+              .trim()
+              .split(/\s+/)[19];
+          assert.match(startTicks, /^\d+$/);
+          assert.equal(realpathSync(`/proc/${pid}/cwd`), authority.checkout);
+          const clientInvocationId = hash({
+            artifact,
+            pid,
+            startTicks,
+            name,
+          });
+          const close = async () => {
+            await client.close().catch(() => undefined);
+            for (let attempt = 0; attempt < 30; attempt++) {
+              try {
+                const currentStat = readBounded(`/proc/${pid}/stat`, 16384);
+                const current = currentStat
+                  .slice(currentStat.lastIndexOf(")") + 2)
+                  .trim()
+                  .split(/\s+/)[19];
+                if (current !== startTicks) return true;
+              } catch (error) {
+                if (error.code === "ENOENT") return true;
+                throw error;
+              }
+              await sleep(100);
+            }
+            return false;
+          };
+          return { client, pid, startTicks, clientInvocationId, close };
         };
         return {
           ...port,
@@ -1253,11 +1411,28 @@ export async function main(env = process.env, run = checkpointMain) {
             return port.action(action);
           },
           prepare: async (stage) => {
-            assert.ok(["create", "activate"].includes(stage));
+            assert.ok(["create", "activate", "activate-peer"].includes(stage));
             if (stage === "create") {
               evidence.objectives = [];
+              const sharedSlug = authority.namespace.replace(/[^a-z0-9-]/g, "-");
+              evidence.directorContention =
+                authority.scenario === "director-contention"
+                  ? {
+                      sharedPath: `src/factory-qualification/${sharedSlug}/shared/`,
+                      sharedResource: `factory-qualification-${sharedSlug}`,
+                      capacitySnapshots: [],
+                    }
+                  : undefined;
               for (const [index, namespace] of authority.namespaces.entries()) {
-                const body = concurrencyObjectiveBody(namespace, index);
+                const body =
+                  authority.scenario === "director-contention"
+                    ? directorContentionObjectiveBody(
+                        namespace,
+                        index,
+                        evidence.directorContention.sharedPath,
+                        evidence.directorContention.sharedResource,
+                      )
+                    : concurrencyObjectiveBody(namespace, index);
                 const objective = await once(
                   `create-${index}`,
                   async () =>
@@ -1279,7 +1454,11 @@ export async function main(env = process.env, run = checkpointMain) {
               }
               return;
             }
-            for (const [index, record] of evidence.objectives.entries()) {
+            const selected =
+              stage === "activate-peer"
+                ? [[1, evidence.objectives[1]]]
+                : evidence.objectives.entries();
+            for (const [index, record] of selected) {
               const args = {
                 owner,
                 repo,
@@ -1356,6 +1535,229 @@ export async function main(env = process.env, run = checkpointMain) {
               return assertObjectiveContention({ response, before, after, objective });
             });
           },
+          pollPeer: async () => {
+            const record = evidence.objectives[1];
+            for (let attempt = 0; attempt < 48; attempt++) {
+              abort.signal.throwIfAborted();
+              checkpointTimeout(deadline(), 1);
+              const observation = await observeOne(record);
+              evidence.latestPeer = observation;
+              save();
+              const events = eventsOf(observation);
+              const snapshot = capacitySnapshot([observation]);
+              if (
+                events.some((event) => event.event === "FactoryRunStarted") &&
+                events.some((event) => event.event === "ControllerObserved") &&
+                snapshot.reservations.some((reservation) =>
+                  reservation.paths.includes(evidence.directorContention.sharedPath),
+                ) &&
+                snapshot.reservations.some((reservation) =>
+                  reservation.exclusiveResources.includes(
+                    evidence.directorContention.sharedResource,
+                  ),
+                )
+              ) {
+                evidence.directorContention.capacitySnapshots.push(snapshot);
+                save();
+                return observation;
+              }
+              await wait(checkpointTimeout(deadline(), 10000));
+            }
+            throw Error("peer Objective did not start within the bounded observation window");
+          },
+          innerCasCollision: async (controller) =>
+            once("inner-cas-collision", async () => {
+              const record = evidence.objectives[0],
+                peerRecord = evidence.objectives[1],
+                objective = record.objective.number;
+              const beforeRefs = (
+                await request("GET /repos/{owner}/{repo}/git/matching-refs/{ref}", {
+                  ref: `clockgrove-factory/leases/objective-${objective}`,
+                })
+              ).data;
+              assert.deepEqual(beforeRefs, [], "inner collision lease already exists");
+              assert.equal(
+                (
+                  await request("GET /repos/{owner}/{repo}/commits/{ref}", {
+                    ref: evidence.defaultBranch,
+                  })
+                ).data.sha,
+                evidence.base,
+                "peer integrated before the absent-lease collision boundary",
+              );
+              const peerBefore = await observeOne(peerRecord),
+                peerBeforeSequence = Math.max(
+                  0,
+                  ...eventsOf(peerBefore).map((event) => event.sequence),
+                ),
+                contenders = [];
+              try {
+                contenders.push(await startInstalledClient("factory-inner-cas-a"));
+                contenders.push(await startInstalledClient("factory-inner-cas-b"));
+              } catch (error) {
+                for (const contender of contenders) await contender.close();
+                throw error;
+              }
+              const barrierDigest = hash({
+                repository: authority.repository,
+                objective,
+                clients: contenders.map((entry) => entry.clientInvocationId).sort(),
+              });
+              const args = {
+                owner,
+                repo,
+                objectiveNumber: objective,
+                repository: authority.checkout,
+                untilTerminal: true,
+                policy: authority.policy,
+              };
+              evidence.directorContention.collision = {
+                barrierDigest,
+                objective,
+                beforeLease: null,
+                clients: contenders.map(({ clientInvocationId, pid, startTicks }) => ({
+                  clientInvocationId,
+                  pid,
+                  startTicks,
+                })),
+                requestedAt: new Date().toISOString(),
+              };
+              save();
+              let completed = false;
+              const calls = contenders.map((entry) =>
+                entry.client.callTool({ name: "factory_run", arguments: args }, undefined, {
+                  timeout: checkpointTimeout(deadline(), 7_200_000),
+                  maxTotalTimeout: checkpointTimeout(deadline(), 7_200_000),
+                }),
+              );
+              const settlement = Promise.allSettled(calls).then((value) => {
+                completed = true;
+                return value;
+              });
+              let results;
+              const processAbsence = [];
+              try {
+                for (let sample = 0; !completed; sample++) {
+                  assert.ok(sample < 254, "inner collision observation bound exhausted");
+                  const done = await Promise.race([
+                    settlement.then(() => true),
+                    wait(checkpointTimeout(deadline(), 10000)).then(() => false),
+                  ]);
+                  if (done) break;
+                  const pair = [];
+                  for (const current of evidence.objectives) pair.push(await observeOne(current));
+                  evidence.directorContention.capacitySnapshots.push(capacitySnapshot(pair));
+                  save();
+                }
+                results = await settlement;
+              } finally {
+                for (const contender of contenders) processAbsence.push(await contender.close());
+                evidence.directorContention.collision.processAbsence = processAbsence;
+                save();
+              }
+              assert.ok(processAbsence.every(Boolean), "inner contender process absence unproved");
+              const responses = results.map((result) =>
+                result.status === "fulfilled"
+                  ? {
+                      status: "fulfilled",
+                      response: result.value,
+                    }
+                  : { status: "rejected", reason: "response-lost" },
+              );
+              const winnerIndex = responses.findIndex(
+                (result) => result.status === "fulfilled" && !result.response.isError,
+              );
+              assert.ok(winnerIndex >= 0, "inner collision has no completed winner");
+              assert.equal(
+                responses.filter(
+                  (result) => result.status === "fulfilled" && !result.response.isError,
+                ).length,
+                1,
+                "inner collision produced multiple winners",
+              );
+              const loserIndex = 1 - winnerIndex,
+                loser = responses[loserIndex];
+              if (loser.status === "fulfilled")
+                assert.deepEqual(
+                  { isError: loser.response.isError, content: loser.response.content },
+                  {
+                    isError: true,
+                    content: [{ type: "text", text: "another Director won lease acquisition" }],
+                  },
+                  "losing Director did not report the exact create-ref CAS loss",
+                );
+              const afterLease = await readLease(objective),
+                final = await observeOne(record),
+                start = one(
+                  eventsOf(final).filter((event) => event.event === "FactoryRunStarted"),
+                  "winning inner run missing",
+                ),
+                peerAfter = await observeOne(peerRecord);
+              const winnerText = responses[winnerIndex].response.content
+                .filter((part) => part.type === "text")
+                .map((part) => part.text)
+                .join("\n");
+              assert.ok(Buffer.byteLength(winnerText) <= 65536, "winning response is unbounded");
+              const winnerReport = JSON.parse(winnerText);
+              assert.deepEqual(
+                {
+                  objective: winnerReport.objective,
+                  runId: winnerReport.runId,
+                  status: winnerReport.status,
+                },
+                { objective, runId: start.runId, status: "completed" },
+                "winning response differs from the authenticated terminal run",
+              );
+              const collision = {
+                objective,
+                runId: start.runId,
+                policyDigest: start.policyDigest,
+                baseSha: evidence.base,
+                beforeLease: null,
+                afterLease,
+                contenders: contenders.map((entry, index) => ({
+                  clientInvocationId: entry.clientInvocationId,
+                  pid: entry.pid,
+                  startTicks: entry.startTicks,
+                  barrierDigest,
+                  automaticRetry: false,
+                  ...(index === winnerIndex
+                    ? { outcome: "won", observedHolder: afterLease.event.holder }
+                    : loser.status === "fulfilled"
+                      ? {
+                          outcome: "lease-cas-lost",
+                          errorCode: "inner-lease-cas-lost",
+                          observedHolder: "unavailable-before-winning-CAS",
+                        }
+                      : {
+                          outcome: "response-lost",
+                          processAbsent: processAbsence[index],
+                          remoteSettlement: "reconciled-to-winning-run",
+                          observedHolder: "unavailable-before-winning-CAS",
+                        }),
+                })),
+                events: eventsOf(final),
+                peer: {
+                  objective: peerRecord.objective.number,
+                  beforeSequence: peerBeforeSequence,
+                  events: eventsOf(peerAfter),
+                  outerLeaseEvidence: "separate",
+                },
+              };
+              evidence.directorContention.collision = {
+                ...evidence.directorContention.collision,
+                completedAt: new Date().toISOString(),
+                processAbsence,
+                proof: assertInnerDirectorCollision(collision),
+              };
+              save();
+              await port.controller("active", controller);
+              return {
+                ...collision,
+                events: [],
+                peer: { ...collision.peer, events: [] },
+              };
+            }),
           scoped: async (action) =>
             once(`${action}-b`, () =>
               call(`factory_${action}`, {
@@ -1719,6 +2121,143 @@ export async function main(env = process.env, run = checkpointMain) {
             }
             throw Error("original inner lease expiry not observed within bound");
           },
+          finishDirectorContention: async (_pair, controller, collision) => {
+            checkpointTimeout(deadline(), 1);
+            const final = [];
+            for (const record of evidence.objectives) final.push(await observeOne(record, true));
+            const peerSnapshots = final.map((entry) => structuredClone(entry));
+            for (const [index, entry] of final.entries()) {
+              assertConcurrencySettlement(entry, policyFor(authority, index), {
+                activated: index === 1,
+              });
+              entry.controllerQualification = {
+                boundary: index === 0 ? "foreground-inner-Director" : "repository-controller",
+                peers: [peerSnapshots[1 - index]],
+              };
+              entry.modelConfiguration = concurrencyModelConfiguration(
+                entry,
+                policyFor(authority, index),
+              );
+              entry.measurements = concurrencyMeasurements(entry, evidence.observer);
+              entry.mergeProofs = await observeSettledConcurrencyMergeProofs({
+                entry,
+                request,
+                repository: authority.repository,
+              });
+            }
+            evidence.directorContention.capacitySnapshots.push(capacitySnapshot(final));
+            const allEvents = final.flatMap((entry) => entry.events);
+            const innerCollision = assertInnerDirectorCollision({
+              ...collision,
+              events: final[0].events,
+              peer: { ...collision.peer, events: final[1].events },
+            });
+            const resourceCeilings = assertResourceCeilingEvidence({
+              snapshots: evidence.directorContention.capacitySnapshots,
+              events: allEvents,
+            });
+            const beforeReadOnly = {
+              branch: (
+                await request("GET /repos/{owner}/{repo}/commits/{ref}", {
+                  ref: evidence.defaultBranch,
+                })
+              ).data.sha,
+              receipts: final.map((entry) => hash(entry.receipts.map(({ event }) => event))),
+            };
+            const readOnlyEvidence = [];
+            for (const [index, record] of evidence.objectives.entries()) {
+              const explain = await call("factory_explain", {
+                objectiveNumber: record.objective.number,
+              });
+              const replay = await call("factory_replay", {
+                objectiveNumber: record.objective.number,
+              });
+              readOnlyEvidence.push(
+                assertExplainReplayEvidence({
+                  repository: authority.repository,
+                  objective: record.objective.number,
+                  events: final[index].events,
+                  explain,
+                  replay,
+                }),
+              );
+            }
+            const afterReadOnly = {
+              branch: (
+                await request("GET /repos/{owner}/{repo}/commits/{ref}", {
+                  ref: evidence.defaultBranch,
+                })
+              ).data.sha,
+              receipts: [],
+            };
+            for (const record of evidence.objectives) {
+              const observation = await observeOne(record);
+              afterReadOnly.receipts.push(hash(observation.receipts.map(({ event }) => event)));
+            }
+            assert.deepEqual(
+              afterReadOnly,
+              beforeReadOnly,
+              "read-only evidence changed durable state",
+            );
+            await port.controller("active", controller);
+            const absence = [];
+            for (const [index, observation] of final.entries()) {
+              evidence.objective = evidence.objectives[index].objective;
+              absence.push(await port.absence(observation, [controller]));
+            }
+            assert.deepEqual(installedBundleIdentity(pluginRoot), artifact);
+            const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+            for (const entry of evidence.harnessFiles)
+              assert.equal(
+                hash(readBounded(join(sourceRoot, entry.path), 262144)),
+                entry.sha256,
+                "qualifier dependency changed during execution",
+              );
+            const artifactProof = await verifyConcurrencyArtifacts(
+              request,
+              authority,
+              evidence.defaultBranch,
+              final,
+              deadline(),
+            );
+            const report = {
+              protocol: "clockgrove.factory/director-contention-qualification",
+              scenario: "director-contention",
+              candidate: artifact,
+              innerCollision,
+              resourceCeilings,
+              readOnlyEvidence,
+              controllerGeneration: {
+                unit: controller.unit,
+                invocationId: controller.invocationId,
+                pid: controller.pid,
+                startTicks: controller.startTicks,
+                hostIdentity: controller.hostIdentity,
+                configDigest: controller.configDigest,
+                outerRepositoryLeaseEvidence: "separate",
+              },
+              usage: {
+                modelTokensExact: final.map(
+                  (entry, index) =>
+                    assertConcurrencySettlement(entry, policyFor(authority, index), {
+                      activated: index === 1,
+                    }).modelTokens,
+                ),
+                nativeAccounting: "exact",
+                unknown: [],
+              },
+              cleanup: { workerScopes: absence },
+              artifactProof,
+            };
+            assert.ok(
+              Buffer.byteLength(JSON.stringify(report)) <= 262144,
+              "director contention report is unbounded",
+            );
+            evidence.finalObjectives = final;
+            evidence.concurrencyProof = report;
+            save();
+            return report;
+          },
           finishThroughput: async (_pair, controller, refill) => {
             checkpointTimeout(deadline(), 1);
             const final = [];
@@ -1983,8 +2522,11 @@ export async function verifyConcurrencyArtifacts(request, authority, branch, evi
   try {
     writeFileSync(join(root, "package.json"), '{"type":"module"}', { flag: "wx", mode: 0o600 });
     const files = [];
-    for (const namespace of authority.namespaces)
-      for (const path of qualificationPaths(namespace).files) {
+    for (const namespace of authority.namespaces) {
+      const paths = qualificationPaths(namespace).files;
+      if (authority.scenario === "director-contention")
+        paths.push(`src/factory-qualification/${authority.namespace}/shared/${namespace}.js`);
+      for (const path of paths) {
         const entry = one(
           tree.tree.filter((entry) => entry.path === path),
           "fixture blob missing or repeated",
@@ -2008,6 +2550,7 @@ export async function verifyConcurrencyArtifacts(request, authority, branch, evi
         writeFileSync(join(root, path), bytes, { flag: "wx", mode: 0o600 });
         files.push({ path, sha: entry.sha, size: bytes.length, sha256: hash(bytes) });
       }
+    }
     const command = `import assert from 'node:assert/strict'; ${authority.namespaces
       .map((namespace, index) => {
         const dir = qualificationPaths(namespace).sourceDirectory;

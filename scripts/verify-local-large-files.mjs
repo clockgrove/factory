@@ -101,7 +101,7 @@ export function largeFileAuthority(env) {
     FACTORY_CHECKPOINT_EVIDENCE: env.FACTORY_LARGE_FILE_EVIDENCE,
     // The broader lifecycle is authorized above by the exact scenario ACK; this
     // mapping reuses the existing authority validator, not an authorization bypass.
-    FACTORY_CHECKPOINT_ACK: `${env.FACTORY_LARGE_FILE_REPOSITORY}:${env.FACTORY_LARGE_FILE_CONTROLLER_UNIT}:start,arm-terminal-artifact-hold,pause,restart,resume,stop`,
+    FACTORY_CHECKPOINT_ACK: `${env.FACTORY_LARGE_FILE_REPOSITORY}:${env.FACTORY_LARGE_FILE_CONTROLLER_UNIT}:start,arm-terminal-artifact-hold,pause,phase-kill-restart,resume,stop`,
   };
   const authority = checkpointAuthority(mapped);
   assert.ok(authority);

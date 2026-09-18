@@ -6,6 +6,7 @@ import {
   concurrencyMeasurements,
   concurrencyModelConfiguration,
   concurrencyObjectiveBody,
+  directorContentionObjectiveBody,
   concurrencyRefill,
   concurrencyReceiptProgress,
   observeSettledConcurrencyMergeProofs,
@@ -14,6 +15,7 @@ import {
   assertRetiredController,
   main,
   runConcurrencyLeaseFaultScenario,
+  runDirectorContentionScenario,
   runConcurrencyScenario,
   verifyConcurrencyArtifacts,
   type ConcurrencyPort,
@@ -43,6 +45,12 @@ const faultEnv = {
   FACTORY_CONCURRENCY_ACK: `${repository}:${unit}:start,activate-two,contend,pause-b,freeze-inner-contend-unfreeze,stop-stale,restart,resume-b,stop`,
 };
 const faultAuthority = concurrencyAuthority(faultEnv)!;
+const directorEnv = {
+  ...env,
+  FACTORY_CONCURRENCY_SCENARIO: "director-contention",
+  FACTORY_CONCURRENCY_ACK: `${repository}:${unit}:start,activate-peer,race-inner-cas,observe-path-exclusive-refill,explain,replay,stop`,
+};
+const directorAuthority = concurrencyAuthority(directorEnv)!;
 describe("prospective concurrency observation window", () => {
   it("keeps omitted and explicit 45-minute authority byte-equivalent", () => {
     const original = JSON.stringify(authority);
@@ -1270,6 +1278,14 @@ function scenarioPort() {
     contend: async () => {
       actions.push("same-objective-contend");
     },
+    pollPeer: async () => {
+      actions.push("peer-path-resource-active");
+      return {};
+    },
+    innerCasCollision: async () => {
+      actions.push("inner-cas-collision");
+      return {};
+    },
     pollPair: async (phase, accept) => {
       actions.push(phase);
       const value = pair();
@@ -1291,6 +1307,10 @@ function scenarioPort() {
     },
     finishThroughput: async () => {
       actions.push("throughput-final-proofs");
+      return {};
+    },
+    finishDirectorContention: async () => {
+      actions.push("director-contention-final-proofs");
       return {};
     },
     finish: async () => {
@@ -1365,6 +1385,41 @@ describe("bounded existing installed-controller composition", () => {
       "controller:inactive",
       "exact-final-proofs",
     ]);
+  });
+  it("races two inner Directors while the activated peer holds shared path and resource claims", async () => {
+    const f = scenarioPort();
+    const result = await runDirectorContentionScenario(f.port, directorAuthority);
+    expect(result).toMatchObject({
+      result: "passed",
+      scope: "installed-inner-Director-CAS-resource-ceilings-explain-replay",
+      authorizedScenarioWorkerMaximum: 4,
+      outerRepositoryLeaseEvidence: "separate",
+    });
+    expect(f.actions).toEqual([
+      "preflight",
+      "prepare:create",
+      "start",
+      "controller:active",
+      "prepare:activate-peer",
+      "peer-path-resource-active",
+      "inner-cas-collision",
+      "completed",
+      "director-contention-final-proofs",
+      "stop",
+      "controller:inactive",
+    ]);
+    expect(directorAuthority.policy.maxParallel).toBe(2);
+    expect(
+      (directorAuthority.policy.capacity as { local: { maxWorkers: number } }).local.maxWorkers,
+    ).toBe(2);
+    expect(
+      directorContentionObjectiveBody(
+        directorAuthority.namespaces[0]!,
+        0,
+        `src/factory-qualification/${directorAuthority.namespace}/shared/`,
+        `factory-qualification-${directorAuthority.namespace}`,
+      ),
+    ).toContain("exclusive resource");
   });
   it("does not retry or automatically restart/stop after an ambiguous exercise failure", async () => {
     const f = scenarioPort();

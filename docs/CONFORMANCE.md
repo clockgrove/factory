@@ -147,9 +147,18 @@ The installed `scripts/verify-local-concurrency.mjs` qualifier requires explicit
 `FACTORY_CONCURRENCY_MODEL` and `FACTORY_CONCURRENCY_REASONING`, fixed before preflight for the
 whole run. The default `throughput` scenario covers ordinary useful work and symmetric freed-slot
 refill; `FACTORY_CONCURRENCY_SCENARIO=lease-fault` separately exercises acknowledged contention,
-expiry, and restart. Neither substitutes for the other. Phase acceptance and final results require
+expiry, and restart. `FACTORY_CONCURRENCY_SCENARIO=director-contention` separately races two
+process-isolated foreground Directors on one absent Objective lease while an activated peer holds
+path and exclusive-resource claims. It requires exactly one create-ref CAS winner, losing-process
+absence or the exact CAS-loss result, peer progress, durable queue/refill receipts, non-overlapping
+active claims, and write-free explain/replay reports bound to the authenticated reservations and
+accounting. Outer repository-lease evidence remains in the `lease-fault` scenario. No scenario
+substitutes for another. Phase acceptance and final results require
 fresh authenticated Objective, sub-issue, comment, and status observations.
-Both scenarios also require `FACTORY_QUALIFICATION_INSTALL_RECEIPT` set to the exact owner-private
+Run each `director-contention` exercise once in a fresh private disposable repository. An unknown
+client response, process identity, controller generation, or mutation result leaves that repository
+as retained incomplete evidence; the harness does not retry, relabel, or clean it for another run.
+All scenarios also require `FACTORY_QUALIFICATION_INSTALL_RECEIPT` set to the exact owner-private
 retained-candidate receipt described by the
 [shared checkpoint preflight](LOCAL-CHECKPOINT-RESTART-QUALIFICATION.md#authority-and-preflight).
 That receipt's isolated plugin install selects the artifact; provider authentication remains in the
@@ -159,8 +168,10 @@ normal Linux `~/.codex` home, whose plugin cache is not candidate authority.
 `FACTORY_CONCURRENCY_MAX_MODEL_TOKENS` must explicitly equal twice that value.
 `FACTORY_CONCURRENCY_DURATION_MINUTES` accepts integers 45–120 and defaults to 45. Select these
 before activation under matching authority. They are observed-stop thresholds, not provider-enforced
-caps. One attempt per Work Item, two one-worker Objectives, and the installed controller ceiling
-still apply. One deadline includes preparation and waiting; phases never reset it. Changes cannot
+caps. One attempt per Work Item and the installed controller ceiling still apply. Throughput and
+lease-fault use one worker per Objective; director-contention explicitly authorizes two workers per
+Objective so its two independent roots can exercise both shared claim classes. One deadline
+includes preparation and waiting; phases never reset it. Changes cannot
 extend an existing run, rewrite its policy, or turn unavailable usage into an observed value.
 
 ## Post-publication completion gate

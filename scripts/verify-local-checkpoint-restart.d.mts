@@ -216,6 +216,12 @@ export interface CheckpointPort {
   preflight(): Promise<unknown>;
   action(action: string): Promise<unknown>;
   controller(state: string, prior?: unknown): Promise<unknown>;
+  phaseKillRestart?(original: unknown): Promise<{
+    restart: "systemd-on-failure";
+    signal: "SIGKILL";
+    originalAbsent: true;
+    replacement: unknown;
+  }>;
   observe(): Promise<unknown>;
   poll(phase: string, accept: (observation: unknown) => boolean): Promise<unknown>;
   absence(observation: unknown, controllers: unknown[], executionOnly?: boolean): Promise<unknown>;
@@ -248,7 +254,7 @@ export function continueAppServerCheckpointScenario(
     sessionProofs: unknown[];
     scopes: unknown;
     originalEvents: unknown[];
-    restartAction?: "restart" | "start";
+    restartAction?: "phase-kill-restart" | "start";
   },
 ): Promise<unknown>;
 /** Internal committed adapters only; no operator-supplied module is loaded. */

@@ -36,7 +36,7 @@ const env = {
   FACTORY_CHECKPOINT_EVIDENCE: "/tmp/private/session.json",
   FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "250000",
   FACTORY_CHECKPOINT_BACKEND: "app-server",
-  FACTORY_CHECKPOINT_ACK: `${repository}:${unit}:start,arm-terminal-artifact-hold,pause,restart,resume,stop`,
+  FACTORY_CHECKPOINT_ACK: `${repository}:${unit}:start,arm-terminal-artifact-hold,pause,phase-kill-restart,resume,stop`,
 };
 const authority = checkpointAuthority(env)!;
 const gitOid = (kind: string, bytes: Buffer) =>

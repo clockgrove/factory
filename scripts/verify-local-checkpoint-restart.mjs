@@ -54,6 +54,7 @@ import {
   observeAppServerCheckpoints,
 } from "./qualification-app-server-checkpoint.mjs";
 import { boundedQualificationEvidenceText } from "./qualification-evidence-boundary.mjs";
+import { assertPhaseKillRecovery } from "./qualification-director-contention.mjs";
 import {
   installedQualificationAuthority,
   qualificationRuntimeEnvironment,
@@ -117,7 +118,7 @@ function parseCheckpointAuthority(env, compilerQualificationEntrypoint) {
       env.FACTORY_CHECKPOINT_ACK,
       `${repository}:${unit}:${
         sessionRecovery
-          ? "start,arm-terminal-artifact-hold,pause,restart,resume,stop"
+          ? "start,arm-terminal-artifact-hold,pause,phase-kill-restart,resume,stop"
           : compilerRecovery
             ? "start,arm-compiler-selection,arm-graph-projection,restart,pause,restart,stop"
             : "start,pause-drain,restart,resume,stop"
@@ -1111,6 +1112,7 @@ export async function runAppServerCheckpointScenario(port, authority) {
     sessionProofs: sessionReceipts,
     scopes,
     originalEvents,
+    restartAction: "phase-kill-restart",
   });
 }
 
@@ -1119,12 +1121,19 @@ export async function runAppServerCheckpointScenario(port, authority) {
 export async function continueAppServerCheckpointScenario(
   port,
   authority,
-  { held, original, sessionProofs, scopes, originalEvents, restartAction = "restart" },
+  { held, original, sessionProofs, scopes, originalEvents, restartAction = "phase-kill-restart" },
 ) {
-  assert.ok(restartAction === "restart" || restartAction === "start");
-  if (restartAction === "restart") await port.controller("active", original);
-  await port.action(restartAction);
-  const replacement = await port.controller("active");
+  assert.ok(restartAction === "phase-kill-restart" || restartAction === "start");
+  let replacement, phaseKill;
+  if (restartAction === "phase-kill-restart") {
+    await port.controller("active", original);
+    assert.equal(typeof port.phaseKillRestart, "function", "phase-kill port unavailable");
+    phaseKill = await port.phaseKillRestart(original);
+    replacement = phaseKill.replacement;
+  } else {
+    await port.action("start");
+    replacement = await port.controller("active");
+  }
   assert.notEqual(replacement.invocationId, original.invocationId);
   assert.equal(replacement.hostIdentity, original.hostIdentity);
   await port.takeover(held);
@@ -1144,6 +1153,19 @@ export async function continueAppServerCheckpointScenario(
     sessionProofs.map(appServerCheckpointIdentity),
     "session or ready artifact changed across same-attempt continuation",
   );
+  const phaseRecovery = phaseKill
+    ? assertPhaseKillRecovery({
+        kill: phaseKill,
+        original,
+        replacement,
+        beforeEvents: held.receipts.map(({ event }) => event),
+        afterEvents: paused.receipts.map(({ event }) => event),
+        sessionIdentityBefore: sessionProofs.map(appServerCheckpointIdentity),
+        sessionIdentityAfter: resumedReceipts.map(appServerCheckpointIdentity),
+        automaticProviderRetry: false,
+        automaticLifecycleRetry: false,
+      })
+    : undefined;
   await port.absence(paused, [original, replacement]);
   await port.controller("active", replacement);
   await port.action("resume");
@@ -1174,6 +1196,7 @@ export async function continueAppServerCheckpointScenario(
     finalSessionProofs: finalSessionReceipts,
     original,
     replacement,
+    ...(phaseRecovery ? { phaseRecovery } : {}),
     scopes,
     finalScopes,
     stopped,
@@ -1546,7 +1569,12 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       "scripts/qualification-reservation-authority.mjs",
       "scripts/qualification-evidence-boundary.mjs",
       "scripts/qualification-merge-proof.mjs",
-      ...(authority.sessionRecovery ? ["scripts/qualification-app-server-checkpoint.mjs"] : []),
+      ...(authority.sessionRecovery
+        ? [
+            "scripts/qualification-app-server-checkpoint.mjs",
+            "scripts/qualification-director-contention.mjs",
+          ]
+        : []),
       ...(extension.harnessPaths ?? []),
     ]),
   ];
@@ -2086,6 +2114,108 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       evidence.actions.at(-1).response = result;
       save();
     },
+    phaseKillRestart: async (original) => {
+      assert.equal(authority.sessionRecovery, true);
+      assert.ok(
+        !evidence.actions.some((entry) => entry.action === "phase-kill-restart"),
+        "uncertain phase kill must never be repeated",
+      );
+      await controller("active", original);
+      const entry = {
+        action: "phase-kill-restart",
+        requestedAt: new Date().toISOString(),
+        original: {
+          unit: original.unit,
+          pid: original.pid,
+          startTicks: original.startTicks,
+          invocationId: original.invocationId,
+          hostIdentity: original.hostIdentity,
+          configDigest: original.configDigest,
+        },
+      };
+      evidence.actions.push(entry);
+      save();
+      command(
+        "systemctl",
+        ["--user", "kill", "--kill-whom=main", "--signal=KILL", authority.unit],
+        undefined,
+        checkpointTimeout(scenarioDeadline(), 15000),
+      );
+      entry.killReturnedAt = new Date().toISOString();
+      save();
+      let observed;
+      for (let attempt = 0; attempt < 18; attempt++) {
+        const raw = command(
+          "systemctl",
+          [
+            "--user",
+            "show",
+            authority.unit,
+            "--property=Id,LoadState,ActiveState,SubState,Job,InvocationID,MainPID",
+          ],
+          undefined,
+          checkpointTimeout(scenarioDeadline(), 15000),
+        );
+        const fields = Object.fromEntries(
+          raw.split("\n").map((line) => {
+            const separator = line.indexOf("=");
+            assert.ok(separator > 0, "invalid phase-kill service observation");
+            return [line.slice(0, separator), line.slice(separator + 1)];
+          }),
+        );
+        assert.equal(fields.Id, authority.unit);
+        assert.equal(fields.LoadState, "loaded");
+        const pid = Number(fields.MainPID);
+        const replacementReady =
+          fields.ActiveState === "active" &&
+          Number.isSafeInteger(pid) &&
+          pid > 1 &&
+          fields.InvocationID &&
+          fields.InvocationID !== original.invocationId;
+        entry.lastObservation = {
+          attempt: attempt + 1,
+          activeState: fields.ActiveState,
+          subState: fields.SubState,
+          job: fields.Job,
+          invocationId: fields.InvocationID,
+          pid: fields.MainPID,
+          observedAt: new Date().toISOString(),
+        };
+        save();
+        if (replacementReady) {
+          observed = fields;
+          break;
+        }
+        await sleep(checkpointTimeout(scenarioDeadline(), 5000));
+      }
+      assert.ok(observed, "systemd did not restart the phase-killed controller within the bound");
+      let originalPresent = false;
+      try {
+        const stat = readBounded(`/proc/${original.pid}/stat`, 16384);
+        originalPresent =
+          stat
+            .slice(stat.lastIndexOf(")") + 2)
+            .trim()
+            .split(/\s+/)[19] === original.startTicks;
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      assert.equal(originalPresent, false, "phase-killed controller incarnation remains present");
+      const replacement = await controller("active");
+      assert.notEqual(replacement.invocationId, original.invocationId);
+      assert.notEqual(replacement.pid, original.pid);
+      assert.equal(replacement.hostIdentity, original.hostIdentity);
+      assert.equal(replacement.configDigest, original.configDigest);
+      entry.returnedAt = new Date().toISOString();
+      entry.response = {
+        restart: "systemd-on-failure",
+        signal: "SIGKILL",
+        originalAbsent: true,
+        replacement,
+      };
+      save();
+      return entry.response;
+    },
     poll: async (phase, accept) => {
       assert.ok(scenarioDeadline(), "one completed activation required before observation");
       const selectedDeadline = scenarioDeadline;
@@ -2493,6 +2623,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
           readBounded,
           pluginRoot,
           artifact,
+          runtimeEnvironment,
           retireClient,
         })
       : port;

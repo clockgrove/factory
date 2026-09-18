@@ -2,6 +2,7 @@ import {
   compiledGraphDigest,
   isCompiledAssetProductionWorkItem,
   parsePersistedCompiledObjective,
+  serializeCompiledObjective,
   type CompiledObjective,
 } from "../graph.js";
 import {
@@ -214,6 +215,13 @@ export function assertCompilerDraftSelection(
   );
   if (!proposalResult || !validation || !verdictResult)
     throw new Error("compiler selection lacks proposal, projection, or judgment evidence");
+  const retainedGraph = parsePersistedCompiledObjective(validation.payload.graph);
+  serializeCompiledObjective(retainedGraph);
+  if (
+    compiledGraphDigest(retainedGraph) !== validation.payload.graphDigest ||
+    compiledGraphDigest(retainedGraph) !== compiledGraphDigest(graph)
+  )
+    throw new Error("compiled graph differs from its retained validated projection");
   const persisted = persistedProposalResult(proposalResult.payload.value);
   if (persisted.proposal.kind !== "work-items")
     throw new Error("compiler selection cannot project an Objective planning result");
@@ -381,12 +389,15 @@ export async function compileEvaluatedDraft(args: {
         value,
         revision,
         expectedCompilerRequestDigest,
+        retained,
       ): Promise<ValidatedCompilerDraft> => {
         if (!activeInventory) throw new Error("draft validation has no obligation inventory");
         if (value && typeof value === "object" && "fixedGraph" in value) {
-          const objective = parsePersistedCompiledObjective(value.fixedGraph);
+          const objective =
+            retained?.objective ?? parsePersistedCompiledObjective(value.fixedGraph);
           const proposal = compilerJudgeCandidateFromCompiled(objective);
-          const projectionTrace = fixedProjectionTrace(objective, proposal);
+          const projectionTrace =
+            retained?.projectionTrace ?? fixedProjectionTrace(objective, proposal);
           await args.validate(objective);
           return {
             proposal,
@@ -419,6 +430,16 @@ export async function compileEvaluatedDraft(args: {
         });
         if (compilerEvalDigest(prepared.request) !== persisted.provenance.requestDigest)
           throw new Error("persisted compiler request differs from pinned reconstruction");
+        if (retained) {
+          await args.validate(retained.objective);
+          return {
+            proposal: persisted.proposal,
+            objective: retained.objective,
+            projectionTrace: retained.projectionTrace,
+            report: persisted.report,
+            requestDigest: persisted.provenance.requestDigest,
+          };
+        }
         const economics = frozenContext.economicEvidence
           ? await frozenContext.economicEvidence(
               compilerWorkItemsForEconomics(

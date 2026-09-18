@@ -49,6 +49,10 @@ export function checkpointBoundedCall<T>(
 export function checkpointAuthority(
   env: Record<string, string | undefined>,
 ): CheckpointAuthority | null;
+/** Internal adapter for the committed compiler-specific entrypoint. */
+export function compilerQualificationCheckpointAuthority(
+  env: Record<string, string | undefined>,
+): CheckpointAuthority | null;
 export function checkpointFacts(
   observation: unknown,
   authority: CheckpointAuthority,

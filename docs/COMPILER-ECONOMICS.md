@@ -28,11 +28,13 @@ durations. Retain/combine feedback identifies duplicated work and distinct revie
 does not fabricate comparative cost or semantic reviewability. Exact-duplicate rejection also
 requires matching execution requirements, conventions and change-surface constraints.
 
-The management compiler obtains this evidence after grounding and before its existing immutable
-checkpoint, without another model call. Each Work Item's bounded economic rationale persists the
-snapshot time, advisory local fit and that item's paid-eligibility classification. Recovering a
-checkpoint retains the original rationale; it does not resample or rewrite the graph. Structured
-assessment is available through the pure compiler API; no new persisted graph schema is required.
+The management compiler obtains this evidence after grounding and before its successful validation
+record, without another model call. That record retains the exact bounded projected graph before
+judge dispatch. Each Work Item's bounded economic rationale persists the snapshot time, advisory
+local fit and that item's paid-eligibility classification. Recovery parses and revalidates the
+retained graph and its existing immutable bindings; it does not resample or rewrite the graph.
+Structured assessment is available through the pure compiler API; no sidecar or new compiled-graph
+schema is required.
 
 Runtime observed metrics are a separate report. No historical-duration estimator is wired here;
 configured first-release estimates remain the source. Comparative benefit qualification is #109.

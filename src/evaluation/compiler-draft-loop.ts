@@ -8,6 +8,7 @@ import {
 import {
   compiledGraphDigest,
   parsePersistedCompiledObjective,
+  serializeCompiledObjective,
   type CompiledObjective,
 } from "../graph.js";
 import type { CompilerProposalValue, CompilerValidationReport } from "../compiler/contracts.js";
@@ -287,6 +288,7 @@ export interface CompilerDraftCallbacks {
     value: unknown,
     revision: number,
     compilerRequestDigest?: string,
+    retained?: RetainedValidatedCompilerDraft,
   ): ValidatedCompilerDraft | Promise<ValidatedCompilerDraft>;
   /** Parse full-coverage judge evidence and enforce its exact graph/inventory binding. */
   accept(
@@ -328,6 +330,66 @@ const LimitsSchema = z
   .strict();
 
 const DraftAdapterModeSchema = z.enum(["local", "provider"]);
+const CompilerProjectionTraceSchema = z
+  .object({
+    protocol: z.literal("clockgrove.factory/compiler-projection"),
+    requestDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    proposalDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    graphDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    addedEdges: z.array(
+      z
+        .object({
+          itemId: z.string(),
+          dependsOn: z.string(),
+          reason: z.enum(["scope-overlap", "exclusive-resource", "media-input"]),
+        })
+        .strict(),
+    ),
+    adapterBindings: z.array(
+      z
+        .object({
+          itemId: z.string(),
+          adapterId: z.string(),
+          providerWorkItem: z.string(),
+          operation: z.object({ kind: z.string(), key: z.string() }).strict(),
+        })
+        .strict(),
+    ),
+    mediaIntents: z.array(
+      z
+        .object({
+          intentId: z.string(),
+          disposition: z.enum(["imported", "producer", "repository-capture", "omitted-helpful"]),
+          producerWorkItemId: z.string().nullable(),
+        })
+        .strict(),
+    ),
+    riskElevations: z
+      .object({
+        count: z.number().int().nonnegative(),
+        digest: z.string().regex(/^[a-f0-9]{64}$/),
+      })
+      .strict(),
+  })
+  .strict();
+
+export interface RetainedValidatedCompilerDraft {
+  objective: CompiledObjective;
+  projectionTrace: CompilerProjectionTrace;
+}
+
+function retainedValidatedDraft(payload: Record<string, unknown>): RetainedValidatedCompilerDraft {
+  try {
+    const objective = parsePersistedCompiledObjective(payload.graph);
+    serializeCompiledObjective(objective);
+    const projectionTrace = CompilerProjectionTraceSchema.parse(payload.projectionTrace);
+    if (compiledGraphDigest(objective) !== payload.graphDigest)
+      throw new Error("retained graph digest differs");
+    return { objective, projectionTrace };
+  } catch (error) {
+    throw new Error("compiler validation retained graph is invalid", { cause: error });
+  }
+}
 
 /** Pure grammar check for the whole immutable chain. It must run before replay causes effects. */
 export function validateCompilerDraftJournal(
@@ -815,9 +877,10 @@ export function validateCompilerDraftJournal(
           z.string()
             .regex(/^[a-f0-9]{64}$/)
             .parse(record.payload[field]);
-        if (draftDigest(record.payload.projectionTrace) !== record.payload.traceDigest)
+        const retained = retainedValidatedDraft(record.payload);
+        if (draftDigest(retained.projectionTrace) !== record.payload.traceDigest)
           throw new Error("compiler validation projection trace differs");
-        const trace = record.payload.projectionTrace as Record<string, unknown>;
+        const trace = retained.projectionTrace;
         if (
           trace.proposalDigest !== record.payload.proposalDigest ||
           trace.requestDigest !== record.payload.requestDigest ||
@@ -1251,6 +1314,12 @@ export async function runCompilerDraftLoop(args: {
       typeof proposalInvocation?.payload.compilerRequestDigest === "string"
         ? proposalInvocation.payload.compilerRequestDigest
         : undefined,
+      retainedValidatedDraft(
+        records.find(
+          (item) =>
+            item.kind === "validation" && item.payload.revision === terminal.payload.revision,
+        )!.payload,
+      ),
     );
     const graph = draft.objective;
     const reviewEvidence = terminal.payload.reviewEvidence ?? null;
@@ -1899,12 +1968,19 @@ export async function runCompilerDraftLoop(args: {
             item.payload.stage === (revision === 0 ? "compile" : "repair") &&
             item.payload.revision === revision,
         );
+        const retainedValidation = records.find(
+          (item) =>
+            item.kind === "validation" &&
+            item.payload.revision === revision &&
+            item.payload.valid === true,
+        );
         draft = await callbacks.validate(
           value,
           revision,
           typeof proposalInvocation?.payload.compilerRequestDigest === "string"
             ? proposalInvocation.payload.compilerRequestDigest
             : undefined,
+          retainedValidation ? retainedValidatedDraft(retainedValidation.payload) : undefined,
         );
         graph = draft.objective;
       } catch (error) {
@@ -2012,6 +2088,7 @@ export async function runCompilerDraftLoop(args: {
           traceDigest: draftDigest(draft.projectionTrace),
           projectionTrace: draft.projectionTrace,
           requestDigest: draft.requestDigest,
+          graph,
         });
       try {
         const verdict = await invoke(

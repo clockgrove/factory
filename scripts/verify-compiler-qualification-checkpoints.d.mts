@@ -45,6 +45,9 @@ export interface CompilerCheckpointArm extends Record<string, unknown> {
   holdDurationMs: number;
 }
 export function compilerCheckpointPath(binding: Record<string, unknown>, uid?: number): string;
+export function compilerCheckpointAuthority(
+  env: Record<string, string | undefined>,
+): CompilerCheckpointAuthority | null;
 export function compilerQualificationObjectiveBody(authority: { namespace: string }): string;
 export function assertCompilerQualificationDefaults(
   effectiveDefaults: unknown,

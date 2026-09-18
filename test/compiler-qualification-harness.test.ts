@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { checkpointAuthority } from "../scripts/verify-local-checkpoint-restart.mjs";
+import {
+  checkpointAuthority,
+  main as genericCheckpointMain,
+} from "../scripts/verify-local-checkpoint-restart.mjs";
 import {
   assertCompilerSelectionHold,
   assertGraphProjectionHold,
@@ -9,6 +12,7 @@ import {
   assertCompilerQualificationPnpmRuntime,
   compilerCheckpointArm,
   compilerCheckpointExtension,
+  compilerCheckpointAuthority,
   compilerCheckpointPath,
   compilerQualificationObjectiveBody,
   runCompilerCheckpointScenario,
@@ -343,7 +347,10 @@ function projectedObservation(
 }
 
 describe("installed compiler checkpoint qualifier", () => {
-  it("requires explicit authority for both holds and two controller restarts", () => {
+  it("requires the compiler entrypoint before generic harness effects", async () => {
+    expect(() => checkpointAuthority({ FACTORY_CHECKPOINT_BACKEND: "compiler" })).toThrow(
+      "compiler checkpoint mode requires scripts/verify-compiler-qualification-checkpoints.mjs",
+    );
     const env = {
       FACTORY_LOCAL_CHECKPOINT_RESTART: "1",
       FACTORY_CHECKPOINT_REPOSITORY: repository,
@@ -356,17 +363,27 @@ describe("installed compiler checkpoint qualifier", () => {
       FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "500000",
       FACTORY_CHECKPOINT_ACK: `${repository}:${unit}:start,arm-compiler-selection,arm-graph-projection,restart,pause,restart,stop`,
     };
-    expect(checkpointAuthority(env)).toMatchObject({
+    expect(() => checkpointAuthority(env)).toThrow(
+      "compiler checkpoint mode requires scripts/verify-compiler-qualification-checkpoints.mjs",
+    );
+    const runner = vi.fn();
+    await expect(genericCheckpointMain(env, runner)).rejects.toThrow(
+      "compiler checkpoint mode requires scripts/verify-compiler-qualification-checkpoints.mjs",
+    );
+    expect(runner).not.toHaveBeenCalled();
+    expect(compilerCheckpointAuthority(env)).toMatchObject({
       compilerRecovery: true,
       unit,
       observationWindowMinutes: 45,
       compilerMaxModelTokens: 500_000,
     });
-    expect(checkpointAuthority(env)).not.toHaveProperty("policy");
+    expect(compilerCheckpointAuthority(env)).not.toHaveProperty("policy");
     expect(
-      checkpointAuthority({ ...env, FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "250000" }),
+      compilerCheckpointAuthority({ ...env, FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "250000" }),
     ).toMatchObject({ compilerMaxModelTokens: 250_000 });
-    expect(() => checkpointAuthority({ ...env, FACTORY_CHECKPOINT_ACK: "incomplete" })).toThrow();
+    expect(() =>
+      compilerCheckpointAuthority({ ...env, FACTORY_CHECKPOINT_ACK: "incomplete" }),
+    ).toThrow();
   });
 
   it("requires the exact documented compiler defaults within the authorized ceiling", () => {

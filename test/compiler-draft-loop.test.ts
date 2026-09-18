@@ -1809,6 +1809,42 @@ describe("compiler draft durable repair", () => {
     },
   );
 
+  it.each(["missing", "corrupt", "foreign"] as const)(
+    "rejects a %s retained validated graph before replay effects",
+    async (fault) => {
+      const args = await setup();
+      const first = await runCompilerDraftLoop(args);
+      const records = structuredClone(first.records);
+      const validation = records.find(
+        (record) => record.kind === "validation" && record.payload.valid === true,
+      )!;
+      if (fault === "missing") delete validation.payload.graph;
+      else if (fault === "corrupt") validation.payload.graph = { title: "Incomplete" };
+      else validation.payload.graph = objective("foreign accepted projection");
+      const recordUsage = vi.fn(async () => {});
+      const validate = vi.fn(args.callbacks.validate);
+      const invoke = vi.fn(async () => {
+        throw new Error("must not invoke");
+      });
+
+      await expect(
+        runCompilerDraftLoop({
+          ...args,
+          manager: {
+            load: async () => structuredClone(records),
+            append: async () => {
+              throw new Error("must not append");
+            },
+          } as unknown as CompilerDraftManager,
+          callbacks: { ...args.callbacks, invoke, recordUsage, validate },
+        }),
+      ).rejects.toThrow("compiler validation retained graph is invalid");
+      expect(invoke).not.toHaveBeenCalled();
+      expect(recordUsage).not.toHaveBeenCalled();
+      expect(validate).not.toHaveBeenCalled();
+    },
+  );
+
   it("rejects an invocation tail while prior usage reconciliation is unresolved", async () => {
     const args = await setup();
     const first = await runCompilerDraftLoop(args);

@@ -102,7 +102,7 @@ function baseCallbacks(
 }
 
 describe("semantic compiler draft lifecycle", () => {
-  it("accepts a valid first proposal and stores proposal/trace identities without a draft graph copy", async () => {
+  it("accepts a valid first proposal and retains its exact validated projection", async () => {
     const { inventory, draft } = validDraft();
     const store = memoryManager();
     const invoke = vi.fn<CompilerDraftCallbacks["invoke"]>(async (request, checkpoint) => {
@@ -136,8 +136,8 @@ describe("semantic compiler draft lifecycle", () => {
       proposalDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       traceDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       requestDigest: draft.requestDigest,
+      graph: draft.objective,
     });
-    expect(validation.payload).not.toHaveProperty("objective");
     const selection = store.records.find((record) => record.kind === "selection")!;
     expect(selection.payload).not.toHaveProperty("graph");
   });

@@ -20,23 +20,6 @@ interface LifecycleRacePort {
   cleanup(): Promise<unknown>;
 }
 
-export function parseInstalledCandidateReceipt(text: string): Record<string, string>;
-
-export function installedCandidateAuthority(
-  env: NodeJS.ProcessEnv,
-  uid: number,
-): {
-  factoryCli: string;
-  installedFactoryRoot: string;
-  qualificationRoot: string;
-  installReceiptPath: string;
-  installReceiptIdentity: string;
-  candidateSourceCommit: string;
-  candidateVersion: string;
-  artifactIdentity: string;
-  inventoryIdentity: string;
-};
-
 export function findPendingFlock(
   text: string,
   expected: { pid: number; major: string; minor: string; inode: string },

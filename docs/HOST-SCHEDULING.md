@@ -160,11 +160,16 @@ lock inode. It retains a private JSON evidence file and stops/removes only that 
 not aim it at a retained controller.
 
 The harness requires the retained prepublication qualification root and its owner-private
-`install-identities.txt` receipt. It accepts only the receipt's npm-installed `dist/factory.js`,
-version, inventory, and launcher identity under that root; a source or development worktree is
-rejected mechanically. It also requires a clean Linux-home checkout, an absent unit, a private fresh
-evidence path, working GitHub access, and the exact acknowledgement it derives from the repository
-and deterministic unit. Run it explicitly as follows after replacing every example value:
+`install-identities.txt` receipt. The shared receipt validator binds the exact clean source commit,
+release tarball, npm CLI, plugin archive and snapshot, isolated Codex marketplace listing, installed
+plugin cache, bundle inventory, both executable bundles, and committed harness files before evidence,
+GitHub, or systemd activity. A source or development worktree is rejected mechanically. Only the
+read-only plugin-list check uses the receipt's isolated Codex home. Installed Factory clients and the
+controller use the normal Linux home and default `~/.codex` provider authentication; an isolated
+candidate `CODEX_HOME` cannot leak into those children. The harness also requires a clean Linux-home
+checkout, an absent unit, a private fresh evidence path, working GitHub access, and the exact
+acknowledgement it derives from the repository and deterministic unit. Run it explicitly as follows
+after replacing every example value:
 
 ```bash
 set -euo pipefail
@@ -172,18 +177,14 @@ umask 077
 repository=EXAMPLE/DISPOSABLE
 checkout=/home/you/Codex/disposable
 install_receipt=/home/you/Codex/factory-initial-beta/2.0.27-beta.0-COMMIT/install-identities.txt
-factory_cli="$(realpath /home/you/Codex/factory-initial-beta/2.0.27-beta.0-COMMIT/npm/bin/factory)"
-artifact_identity=sha256:EXPECTED_FROM_RETAINED_INSTALL_RECEIPT
-test "$artifact_identity" = "sha256:$(sha256sum -- "$factory_cli" | cut -d' ' -f1)"
 unit="$(REPOSITORY="$repository" CHECKOUT="$checkout" node -e 'const c=require("node:crypto");const p=require("node:path");const k=`${process.env.REPOSITORY.toLowerCase()}\0${p.resolve(process.env.CHECKOUT)}`;process.stdout.write(`clockgrove-factory-${c.createHash("sha256").update(k).digest("hex").slice(0,16)}.service`)')"
 evidence_directory=/home/you/Codex/factory-lifecycle-evidence
 mkdir "$evidence_directory"
+env -u CODEX_HOME \
 FACTORY_LIFECYCLE_QUALIFICATION=1 \
 FACTORY_LIFECYCLE_REPOSITORY="$repository" \
 FACTORY_LIFECYCLE_CHECKOUT="$checkout" \
-FACTORY_LIFECYCLE_INSTALL_RECEIPT="$install_receipt" \
-FACTORY_LIFECYCLE_FACTORY_CLI="$factory_cli" \
-FACTORY_LIFECYCLE_ARTIFACT_IDENTITY="$artifact_identity" \
+FACTORY_QUALIFICATION_INSTALL_RECEIPT="$install_receipt" \
 FACTORY_LIFECYCLE_ACK="$repository:$unit:install-start,install-uninstall,busy,killed-owner,cleanup" \
 FACTORY_LIFECYCLE_EVIDENCE="$evidence_directory/result.json" \
 node scripts/verify-installed-controller-lifecycle.mjs

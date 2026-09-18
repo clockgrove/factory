@@ -1,24 +1,12 @@
-import { createHash } from "node:crypto";
-import {
-  chmodSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   findPendingFlock,
-  installedCandidateAuthority,
   isExactLifecycleFlockWaiter,
   kernelFlockWaitEvidence,
-  parseInstalledCandidateReceipt,
   runLifecycleRaceMatrix,
 } from "../scripts/verify-installed-controller-lifecycle.mjs";
+import { parseQualificationInstallReceipt } from "../scripts/qualification-install-identity.mjs";
 
 const receipt = [
   `sourceCommit=${"a".repeat(40)}`,
@@ -38,64 +26,6 @@ const receipt = [
   `mcpServerBundleSha256=${"f".repeat(64)}`,
   `controllerLauncherIdentity=sha256:${"e".repeat(64)}`,
 ].join("\n");
-
-const sha256 = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");
-
-function installedCandidateFixture() {
-  const root = mkdtempSync(join(tmpdir(), "factory-installed-candidate-"));
-  chmodSync(root, 0o700);
-  const npmPrefix = join(root, "npm");
-  const factoryRoot = join(npmPrefix, "lib/node_modules/@clockgrove/factory");
-  const factoryCli = join(npmPrefix, "bin/factory");
-  const factoryBundle = "#!/usr/bin/env node\nconsole.log('candidate');\n";
-  const factoryBundleSha256 = sha256(factoryBundle);
-  const inventory = `${JSON.stringify({
-    bundles: [
-      { file: "factory.js", bytes: Buffer.byteLength(factoryBundle), sha256: factoryBundleSha256 },
-    ],
-  })}\n`;
-  mkdirSync(join(factoryRoot, "dist"), { recursive: true });
-  mkdirSync(dirname(factoryCli), { recursive: true });
-  writeFileSync(join(factoryRoot, "dist/factory.js"), factoryBundle, { mode: 0o700 });
-  writeFileSync(join(factoryRoot, "dist/bundle-inventory.json"), inventory);
-  writeFileSync(
-    join(factoryRoot, "package.json"),
-    `${JSON.stringify({ name: "@clockgrove/factory", version: "2.0.27-beta.0" })}\n`,
-  );
-  symlinkSync("../lib/node_modules/@clockgrove/factory/dist/factory.js", factoryCli);
-  const installReceipt = join(root, "install-identities.txt");
-  writeFileSync(
-    installReceipt,
-    `${[
-      `sourceCommit=${"a".repeat(40)}`,
-      "version=2.0.27-beta.0",
-      "tarballFile=clockgrove-factory.tgz",
-      `tarballSha256=${"b".repeat(64)}`,
-      `npmPrefix=${npmPrefix}`,
-      `factoryCli=${factoryCli}`,
-      `codexHome=${join(root, "codex-home")}`,
-      "codexCli=/usr/bin/codex",
-      `pluginArchive=${join(root, "factory-plugin.tar")}`,
-      `pluginArchiveSha256=${"c".repeat(64)}`,
-      `installedPluginRoot=${join(root, "codex-home/plugins/cache/factory")}`,
-      `listedPluginSource=${join(root, "plugin-marketplace")}`,
-      `bundleInventorySha256=${sha256(inventory)}`,
-      `factoryBundleSha256=${factoryBundleSha256}`,
-      `mcpServerBundleSha256=${"f".repeat(64)}`,
-      `controllerLauncherIdentity=sha256:${factoryBundleSha256}`,
-    ].join("\n")}\n`,
-    { mode: 0o600 },
-  );
-  return {
-    root,
-    factoryRoot,
-    env: {
-      FACTORY_LIFECYCLE_INSTALL_RECEIPT: installReceipt,
-      FACTORY_LIFECYCLE_FACTORY_CLI: factoryCli,
-      FACTORY_LIFECYCLE_ARTIFACT_IDENTITY: `sha256:${factoryBundleSha256}`,
-    },
-  };
-}
 
 function fakePort(trace: string[]) {
   let nextHandle = 0;
@@ -196,34 +126,18 @@ describe("installed controller lifecycle harness", () => {
   });
 
   it("requires the exact retained installed-candidate receipt fields", () => {
-    expect(parseInstalledCandidateReceipt(`${receipt}\n`)).toMatchObject({
+    expect(parseQualificationInstallReceipt(`${receipt}\n`)).toMatchObject({
       sourceCommit: "a".repeat(40),
       npmPrefix: "/home/example/Codex/candidate/npm",
       factoryCli: "/home/example/Codex/candidate/npm/bin/factory",
       controllerLauncherIdentity: `sha256:${"e".repeat(64)}`,
     });
-    expect(() => parseInstalledCandidateReceipt(`${receipt}\nsourceCommit=other\n`)).toThrow(
+    expect(() => parseQualificationInstallReceipt(`${receipt}\nsourceCommit=other\n`)).toThrow(
       "duplicate install receipt field",
     );
     expect(() =>
-      parseInstalledCandidateReceipt(`${receipt.split("\n").slice(1).join("\n")}\n`),
+      parseQualificationInstallReceipt(`${receipt.split("\n").slice(1).join("\n")}\n`),
     ).toThrow("install receipt fields differ");
-  });
-
-  it("binds qualification to the retained npm install and rejects a development root", () => {
-    const fixture = installedCandidateFixture();
-    const uid = process.getuid?.();
-    expect(uid).toBeTypeOf("number");
-    try {
-      expect(installedCandidateAuthority(fixture.env, uid!)).toMatchObject({
-        installedFactoryRoot: fixture.factoryRoot,
-        candidateVersion: "2.0.27-beta.0",
-      });
-      mkdirSync(join(fixture.factoryRoot, ".git"));
-      expect(() => installedCandidateAuthority(fixture.env, uid!)).toThrow();
-    } finally {
-      rmSync(fixture.root, { recursive: true, force: true });
-    }
   });
 
   it("binds the installed inventory to the recorded source before opening evidence", () => {
@@ -231,15 +145,10 @@ describe("installed controller lifecycle harness", () => {
       new URL("../scripts/verify-installed-controller-lifecycle.mjs", import.meta.url),
       "utf8",
     );
-    const binding = source.indexOf(
-      '"installed bundle inventory differs from recorded source commit"',
-    );
+    const binding = source.indexOf("installedQualificationAuthority(env");
     const evidence = source.indexOf("const evidenceFd = openSync(");
-    const retainedInstall = source.indexOf('"retained npm-installed Factory bundle required"');
     expect(binding).toBeGreaterThan(-1);
     expect(evidence).toBeGreaterThan(binding);
-    expect(retainedInstall).toBeGreaterThan(-1);
-    expect(evidence).toBeGreaterThan(retainedInstall);
   });
 
   it("orders separate install/start and install/uninstall processes before recovery", async () => {

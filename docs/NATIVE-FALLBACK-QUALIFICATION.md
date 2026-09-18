@@ -5,6 +5,16 @@
 live gate. It reuses the existing three-item `clamp`/`slugify`/dependent-`describe` Objective and
 installed `factory_run`, not a fake Supervisor, transport denial, or manually orchestrated Work Items.
 
+## Conditional release boundary
+
+This qualifier remains implemented and fail-closed, but it is not mandatory Initial Beta evidence
+when the authorized release target exposes native stacks. Initial Beta qualifies explicit regular-PR
+delivery and available native-stack delivery independently. Issue
+[#82](https://github.com/clockgrove/factory/issues/82) retains the deferred live observation until an
+authorized target genuinely lacks the native capability. An available endpoint, an ambiguous or
+authentication failure, or a synthetic transport result must stop without Objective creation,
+repository mutation, or model use; none can be relabeled as fallback evidence.
+
 ## Actual unavailable-capability prerequisite
 
 The initial immutable policy requests `stacked-prs`, with `onUnavailable: regular-prs`. Selecting
@@ -30,7 +40,8 @@ or quota signals, malformed responses, timeouts and unknown failures block the s
 read has a 15-second abort signal; there is no retry or setting/permission change to manufacture a
 404. If the authorized fixture supports stacks, this case is **not exercised**. A genuinely eligible
 authorized disposable repository is an external prerequisite, not permission to modify a repository
-or token until the probe fails.
+or token until the probe fails. Record the stopped preflight on #82 and retain its private evidence
+locally; it is not a failed Initial Beta gate.
 
 The full observation is repeated before Objective creation. If it changes, no Objective/model call
 is started. This does not replace Factory's own subsequent probe: the run must independently record

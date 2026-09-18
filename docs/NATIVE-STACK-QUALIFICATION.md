@@ -85,8 +85,12 @@ the same policy before resumed delivery.
 The runner performs no provider fallback, paid-provider selection, completed-run revival, package
 publication or mutation of the Factory product repository.
 
-These cases contribute to the [live native-stack conformance gate](CONFORMANCE.md#verification-required-before-publication).
-Native capability unavailability remains exclusively in the separate fallback qualifier.
+These cases contribute to the [live native-stack conformance gate](CONFORMANCE.md#verification-required-before-publication)
+when the target exposes authenticated native-stack support. Native capability unavailability remains
+exclusively in the fail-closed [conditional fallback qualifier](NATIVE-FALLBACK-QUALIFICATION.md)
+tracked by [#82](https://github.com/clockgrove/factory/issues/82). That conditional observation is
+deferred until a genuine unsupported-capability target exists and does not block Initial Beta while
+the release target supports native stacks.
 
 Focused credential-free checks:
 

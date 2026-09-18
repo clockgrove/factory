@@ -1,12 +1,10 @@
 export interface PublishedQualifierInput {
   releaseDirectory: string;
   installRoot: string;
-  repository: string;
-  checkout: string;
   version?: string;
-  output?: string;
+  npmCommand?: string;
   codexCommand?: string;
-  lifecycleAck?: string;
+  gitCommand?: string;
   preflightOnly?: boolean;
 }
 
@@ -41,6 +39,8 @@ export interface PublishedTag {
   url: string;
 }
 
+export function assertLinuxNativePath(path: string, label: string): string;
+export function assertContainedPath(root: string, path: string, label: string): void;
 export function verifyRetainedRelease(releaseDirectory: string): RetainedRelease;
 export function assessPublishedPreflight(
   release: RetainedRelease,
@@ -51,8 +51,11 @@ export function verifyPublishedTarball(
   tarball: Uint8Array,
   manifest: RetainedRelease["manifest"],
 ): void;
-export function lifecycleTargetBinding(repository: string, checkout: string): string;
-export function receiptWithDigest(value: Record<string, unknown>): Record<string, unknown>;
+export function strictPublishedEnvironment(
+  root: string,
+  tools: { git: string; npm: string; codex: string },
+): NodeJS.ProcessEnv;
+export function qualificationInstallReceipt(fields: Record<string, string>): string;
 export const defaultPublishedQualifierPort: object;
 export function qualifyPublishedArtifacts(
   input: PublishedQualifierInput,

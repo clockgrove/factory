@@ -1,14 +1,26 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { parseQualificationInstallReceipt } from "../scripts/qualification-install-identity.mjs";
 import {
+  assertContainedPath,
+  assertLinuxNativePath,
   assessPublishedPreflight,
-  lifecycleTargetBinding,
+  qualificationInstallReceipt,
   qualifyPublishedArtifacts,
-  receiptWithDigest,
+  strictPublishedEnvironment,
   verifyPublishedTarball,
   verifyRetainedRelease,
 } from "../scripts/verify-published-artifacts.mjs";
@@ -17,6 +29,8 @@ import { canonicalChecksumBytes, sha256 } from "../scripts/release-integrity.mjs
 const version = "2.0.27-beta.0";
 const commit = "a".repeat(40);
 const inventorySha256 = "b".repeat(64);
+const factoryBundleSha256 = "e".repeat(64);
+const mcpServerBundleSha256 = "f".repeat(64);
 const tarball = Buffer.from("published npm tarball fixture\n");
 const integrity = `sha512-${createHash("sha512").update(tarball).digest("base64")}`;
 const npmShasum = createHash("sha1").update(tarball).digest("hex");
@@ -57,10 +71,11 @@ interface NpmDocument {
 interface TestPort {
   registryDocument: ReturnType<typeof vi.fn>;
   remoteTag: ReturnType<typeof vi.fn>;
-  hostPreflight: ReturnType<typeof vi.fn>;
-  targetPreflight: ReturnType<typeof vi.fn>;
+  toolPreflight: ReturnType<typeof vi.fn>;
+  sourcePreflight: ReturnType<typeof vi.fn>;
   install: ReturnType<typeof vi.fn>;
-  cleanup: ReturnType<typeof vi.fn>;
+  proveControllerAbsence: ReturnType<typeof vi.fn>;
+  cleanupIncomplete: ReturnType<typeof vi.fn>;
   host: ReturnType<typeof vi.fn>;
 }
 
@@ -169,41 +184,59 @@ function identity() {
     version,
     inventorySha256,
     bundles: [
-      { file: "factory.js", bytes: 100, sha256: "e".repeat(64) },
-      { file: "mcp-server.js", bytes: 200, sha256: "f".repeat(64) },
+      { file: "factory.js", bytes: 100, sha256: factoryBundleSha256 },
+      { file: "mcp-server.js", bytes: 200, sha256: mcpServerBundleSha256 },
     ],
   };
+}
+
+function writeInstallReceipt(root: string): { receiptPath: string; receiptSha256: string } {
+  mkdirSync(root, { mode: 0o700 });
+  chmodSync(root, 0o700);
+  const receipt = qualificationInstallReceipt({
+    sourceCommit: commit,
+    version,
+    tarballFile: `clockgrove-factory-${version}.tgz`,
+    tarballSha256: sha256(tarball),
+    npmPrefix: join(root, "npm"),
+    factoryCli: join(root, "npm/bin/factory"),
+    codexHome: join(root, "codex-home"),
+    codexCli: "/usr/bin/codex",
+    pluginArchive: join(root, `factory-plugin-${commit}.tar`),
+    pluginArchiveSha256: "1".repeat(64),
+    installedPluginRoot: join(root, "codex-home/plugins/factory"),
+    listedPluginSource: join(root, "plugin-marketplace"),
+    bundleInventorySha256: inventorySha256,
+    factoryBundleSha256,
+    mcpServerBundleSha256,
+    controllerLauncherIdentity: `sha256:${factoryBundleSha256}`,
+  });
+  const receiptPath = join(root, "install-identities.txt");
+  writeFileSync(receiptPath, receipt, { mode: 0o600 });
+  return { receiptPath, receiptSha256: sha256(Buffer.from(receipt)) };
 }
 
 function port(manifest: TestManifest, overrides: Partial<TestPort> = {}): TestPort {
   return {
     registryDocument: vi.fn(async () => npmDocument(manifest)),
     remoteTag: vi.fn(async () => tag()),
-    hostPreflight: vi.fn(async () => undefined),
-    targetPreflight: vi.fn(async () => ({
-      controllerAbsent: true,
-      codexCommand: "codex",
-      managerVersion: "259",
+    toolPreflight: vi.fn(async () => ({
+      npm: "/usr/bin/npm",
+      codex: "/usr/bin/codex",
+      git: "/usr/bin/git",
     })),
-    install: vi.fn(async () => ({
+    sourcePreflight: vi.fn(async (release) => ({ sourceRoot: dirname(release.directory) })),
+    install: vi.fn(async ({ root }) => ({
+      ...writeInstallReceipt(root),
       npmIdentity: identity(),
       pluginIdentity: identity(),
       surfaces: {
         npm: { command: "factory --version", version },
         plugin: { server: "factory", version, tools: 20 },
       },
-      lifecycle: {
-        results: [
-          { operation: "install" },
-          { operation: "status" },
-          { operation: "restart" },
-          { operation: "status-after-restart" },
-          { operation: "uninstall" },
-        ],
-        cleanup: { installed: true, enabled: true, active: true },
-      },
     })),
-    cleanup: vi.fn(() => undefined),
+    proveControllerAbsence: vi.fn(async () => ({ absent: true })),
+    cleanupIncomplete: vi.fn(async () => ({ preserved: true })),
     host: vi.fn(() => ({ platform: "linux", architecture: "x64", release: "fixture" })),
     ...overrides,
   };
@@ -212,105 +245,90 @@ function port(manifest: TestManifest, overrides: Partial<TestPort> = {}): TestPo
 describe("published-artifact qualifier", () => {
   const roots: string[] = [];
   afterEach(() => {
+    vi.unstubAllEnvs();
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   });
 
-  it("authenticates retained manifest, checksums, provenance, npm metadata, and tag", () => {
+  it("authenticates the retained manifest, registry metadata, tarball, and immutable tag", () => {
     const fixture = releaseFixture();
     roots.push(fixture.root);
     const release = verifyRetainedRelease(fixture.releaseDirectory);
-
     expect(assessPublishedPreflight(release, npmDocument(fixture.manifest), tag())).toMatchObject({
       package: { name: "@clockgrove/factory", version },
       registry: { integrity, shasum: npmShasum },
       tag: { name: `v${version}`, commit },
     });
-    expect(release.releaseManifestSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(() => verifyPublishedTarball(tarball, release.manifest)).not.toThrow();
     expect(() => verifyPublishedTarball(Buffer.from("different"), release.manifest)).toThrow(
       "npm tarball size differs",
     );
   });
 
-  it("performs a read-only preflight without installing or creating the root", async () => {
+  it("preflights public and source authority without creating an install or lifecycle target", async () => {
     const fixture = releaseFixture();
     roots.push(fixture.root);
     const installRoot = join(fixture.root, "published-install");
     const selectedPort = port(fixture.manifest);
-
     const result = await qualifyPublishedArtifacts(
-      {
-        releaseDirectory: fixture.releaseDirectory,
-        installRoot,
-        repository: "private/example",
-        checkout: "/home/example/private",
-        preflightOnly: true,
-      },
+      { releaseDirectory: fixture.releaseDirectory, installRoot, preflightOnly: true },
       selectedPort,
     );
-
     expect(result).toMatchObject({
       kind: "published-artifact-preflight",
       result: "passed",
-      version,
-      lifecycleTargetBinding: lifecycleTargetBinding("private/example", "/home/example/private"),
+      behavior: "authenticate-and-install-only",
+      controllerLifecycle: "not-permitted",
     });
+    expect(existsSync(installRoot)).toBe(false);
     expect(selectedPort.install).not.toHaveBeenCalled();
-    expect(selectedPort.cleanup).not.toHaveBeenCalled();
-    expect(selectedPort.targetPreflight).toHaveBeenCalledWith(
-      "private/example",
-      "/home/example/private",
-      "codex",
-    );
+    expect(selectedPort.proveControllerAbsence).not.toHaveBeenCalled();
   });
 
-  it("emits one bounded digest-bearing receipt only after complete cleanup", async () => {
+  it("retains the exact standard install authority for private smoke without claiming completion", async () => {
     const fixture = releaseFixture();
     roots.push(fixture.root);
     const installRoot = join(fixture.root, "published-install");
-    const output = join(fixture.root, "evidence", "published.json");
     const selectedPort = port(fixture.manifest);
-    const binding = lifecycleTargetBinding("private/example", "/home/example/private");
-
     const result = await qualifyPublishedArtifacts(
-      {
-        releaseDirectory: fixture.releaseDirectory,
-        installRoot,
-        repository: "private/example",
-        checkout: "/home/example/private",
-        lifecycleAck: binding,
-        output,
-      },
+      { releaseDirectory: fixture.releaseDirectory, installRoot },
       selectedPort,
     );
-
-    expect(selectedPort.install).toHaveBeenCalledTimes(1);
-    expect(selectedPort.cleanup).toHaveBeenCalledWith(installRoot);
-    expect(selectedPort.remoteTag).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({
-      kind: "published-artifact-qualification",
-      result: "passed",
-      source: { commit, tag: `v${version}` },
-      release: { bundleInventorySha256: inventorySha256 },
-      privateSmokeHandoff: { targetBinding: binding, status: "artifact-authority-ready" },
-      cleanup: { controllerAbsent: true, installRootRemoved: true },
+      kind: "published-artifact-install-handoff",
+      result: "ready-for-private-smoke",
+      completion: {
+        status: "pending-private-smoke",
+        ownerIssue: 89,
+        installRootRetained: true,
+      },
+      factoryQualificationInstallReceipt: {
+        path: join(installRoot, "install-identities.txt"),
+      },
     });
-    const receipt = JSON.parse(readFileSync(output, "utf8"));
-    const expected = receiptWithDigest(receipt);
-    expect(receipt.receiptDigest).toBe(expected.receiptDigest);
-    expect(readFileSync(output).length).toBeLessThan(128 * 1024);
-    expect(readFileSync(output, "utf8")).not.toContain("private/example");
-    expect(readFileSync(output, "utf8")).not.toContain("/home/example/private");
+    expect(existsSync(installRoot)).toBe(true);
+    expect(selectedPort.proveControllerAbsence).not.toHaveBeenCalled();
+    expect(selectedPort.cleanupIncomplete).not.toHaveBeenCalled();
+    expect(selectedPort.install).toHaveBeenCalledWith(
+      expect.not.objectContaining({ repository: expect.anything(), checkout: expect.anything() }),
+    );
+    const receipt = readFileSync(join(installRoot, "install-identities.txt"), "utf8");
+    expect(parseQualificationInstallReceipt(receipt)).toMatchObject({
+      sourceCommit: commit,
+      version,
+      factoryBundleSha256,
+    });
+    expect(receipt.length).toBeLessThan(16 * 1024);
+    expect(JSON.stringify(result)).not.toContain('"result":"passed"');
   });
 
   it.each([
     [
-      "registry integrity",
+      "integrity",
       (document: NpmDocument) => (document.dist.integrity = `sha512-${"A".repeat(88)}`),
     ],
-    ["registry shasum", (document: NpmDocument) => (document.dist.shasum = "0".repeat(40))],
-    ["registry dist-tag", (document: NpmDocument) => (document._distTagVersion = "2.0.26")],
-  ])("fails closed on a mismatched %s", async (_name, mutate) => {
+    ["shasum", (document: NpmDocument) => (document.dist.shasum = "0".repeat(40))],
+    ["dist-tag", (document: NpmDocument) => (document._distTagVersion = "2.0.26")],
+  ])("fails closed on mismatched registry %s", async (_name, mutate) => {
     const fixture = releaseFixture();
     roots.push(fixture.root);
     const document = npmDocument(fixture.manifest);
@@ -318,51 +336,23 @@ describe("published-artifact qualifier", () => {
     const selectedPort = port(fixture.manifest, {
       registryDocument: vi.fn(async () => document),
     });
-
     await expect(
       qualifyPublishedArtifacts(
         {
           releaseDirectory: fixture.releaseDirectory,
           installRoot: join(fixture.root, "install"),
-          repository: "private/example",
-          checkout: "/home/example/private",
           preflightOnly: true,
         },
         selectedPort,
       ),
-    ).rejects.toThrow(/npm registry/);
+    ).rejects.toThrow();
     expect(selectedPort.install).not.toHaveBeenCalled();
   });
 
-  it("reports an unavailable publication without installing", async () => {
+  it("fails closed when the tag moved or changes after install", async () => {
     const fixture = releaseFixture();
     roots.push(fixture.root);
-    const selectedPort = port(fixture.manifest, {
-      registryDocument: vi.fn(async () => {
-        throw new Error(`published npm package @clockgrove/factory@${version} is unavailable`);
-      }),
-    });
-
-    await expect(
-      qualifyPublishedArtifacts(
-        {
-          releaseDirectory: fixture.releaseDirectory,
-          installRoot: join(fixture.root, "install"),
-          repository: "private/example",
-          checkout: "/home/example/private",
-          preflightOnly: true,
-        },
-        selectedPort,
-      ),
-    ).rejects.toThrow("published npm package");
-    expect(selectedPort.remoteTag).not.toHaveBeenCalled();
-    expect(selectedPort.install).not.toHaveBeenCalled();
-  });
-
-  it("fails closed when the tag moved or changes during qualification", async () => {
-    const fixture = releaseFixture();
-    roots.push(fixture.root);
-    const movedPort = port(fixture.manifest, {
+    const moved = port(fixture.manifest, {
       remoteTag: vi.fn(async () => ({ ...tag(), commit: "0".repeat(40) })),
     });
     await expect(
@@ -370,11 +360,9 @@ describe("published-artifact qualifier", () => {
         {
           releaseDirectory: fixture.releaseDirectory,
           installRoot: join(fixture.root, "install-a"),
-          repository: "private/example",
-          checkout: "/home/example/private",
           preflightOnly: true,
         },
-        movedPort,
+        moved,
       ),
     ).rejects.toThrow("remote tag moved");
 
@@ -382,104 +370,119 @@ describe("published-artifact qualifier", () => {
       .fn()
       .mockResolvedValueOnce(tag())
       .mockResolvedValueOnce({ ...tag(), object: "0".repeat(40) });
-    const changingPort = port(fixture.manifest, { remoteTag: changing });
+    const selectedPort = port(fixture.manifest, { remoteTag: changing });
+    const installRoot = join(fixture.root, "install-b");
     await expect(
       qualifyPublishedArtifacts(
-        {
-          releaseDirectory: fixture.releaseDirectory,
-          installRoot: join(fixture.root, "install-b"),
-          repository: "private/example",
-          checkout: "/home/example/private",
-          lifecycleAck: lifecycleTargetBinding("private/example", "/home/example/private"),
-          output: join(fixture.root, "receipt.json"),
-        },
-        changingPort,
+        { releaseDirectory: fixture.releaseDirectory, installRoot },
+        selectedPort,
       ),
     ).rejects.toThrow("tag changed during qualification");
-    expect(changingPort.cleanup).toHaveBeenCalledTimes(1);
+    expect(selectedPort.proveControllerAbsence).toHaveBeenCalledWith(installRoot);
+    expect(selectedPort.cleanupIncomplete).toHaveBeenCalledWith(installRoot);
+    expect(existsSync(installRoot)).toBe(true);
   });
 
-  it("rejects dirty or aliased install roots before public resolution", async () => {
+  it("aggregates the install error with absence-proof or cleanup failure and preserves the root", async () => {
     const fixture = releaseFixture();
     roots.push(fixture.root);
-    const dirty = join(fixture.root, "dirty");
-    mkdirSync(dirty);
-    write(join(dirty, "retained.txt"), "keep\n");
+    for (const [name, overrides] of [
+      [
+        "proof",
+        {
+          proveControllerAbsence: vi.fn(async () => {
+            throw new Error("controller absence unknown");
+          }),
+        },
+      ],
+      [
+        "cleanup",
+        {
+          cleanupIncomplete: vi.fn(async () => {
+            throw new Error("cleanup failed");
+          }),
+        },
+      ],
+    ] as const) {
+      const installRoot = join(fixture.root, `install-${name}`);
+      const selectedPort = port(fixture.manifest, {
+        install: vi.fn(async () => {
+          mkdirSync(installRoot, { mode: 0o700 });
+          throw new Error("install failed");
+        }),
+        ...overrides,
+      });
+      let thrown: unknown;
+      try {
+        await qualifyPublishedArtifacts(
+          { releaseDirectory: fixture.releaseDirectory, installRoot },
+          selectedPort,
+        );
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(AggregateError);
+      expect((thrown as AggregateError).errors.map((error) => error.message)).toEqual([
+        "install failed",
+        expect.stringMatching(/controller absence unknown|cleanup failed/),
+      ]);
+      expect(existsSync(installRoot)).toBe(true);
+    }
+  });
+
+  it("uses a whitelist environment and blocks ambient npm and git injection", () => {
+    vi.stubEnv("NPM_CONFIG_REGISTRY", "https://mirror.example.invalid/");
+    vi.stubEnv("NPM_CONFIG_SCRIPT_SHELL", "/tmp/attacker-shell");
+    vi.stubEnv("GIT_CONFIG_GLOBAL", "/tmp/attacker-gitconfig");
+    vi.stubEnv("GIT_SSH_COMMAND", "attacker-ssh");
+    vi.stubEnv("FACTORY_PROVIDER", "ambient-provider");
+    const root = mkdtempSync(join(tmpdir(), "factory-published-env-test-"));
+    roots.push(root);
+    const environment = strictPublishedEnvironment(root, {
+      git: "/usr/bin/git",
+      npm: "/usr/bin/npm",
+      codex: "/usr/bin/codex",
+    });
+    expect(environment).toMatchObject({
+      HOME: root,
+      NPM_CONFIG_REGISTRY: "https://registry.npmjs.org/",
+      NPM_CONFIG_GLOBALCONFIG: "/dev/null",
+      NPM_CONFIG_USERCONFIG: "/dev/null",
+      NPM_CONFIG_SCRIPT_SHELL: "/bin/false",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_OPTIONAL_LOCKS: "0",
+    });
+    expect(environment.GITHUB_TOKEN).toBeUndefined();
+    expect(environment.GIT_SSH_COMMAND).toBeUndefined();
+    expect(environment.NPM_TOKEN).toBeUndefined();
+    expect(environment.FACTORY_PROVIDER).toBeUndefined();
+  });
+
+  it("requires Linux-native canonical roots and exact path containment", async () => {
+    expect(() => assertLinuxNativePath("/mnt/c/factory", "root")).toThrow("Linux-native");
+    expect(() => assertContainedPath("/tmp/factory", "/tmp/factory-other/item", "item")).toThrow(
+      "escapes its root",
+    );
+    expect(() => assertContainedPath("/tmp/factory", "/tmp/factory/item", "item")).not.toThrow();
+
+    const fixture = releaseFixture();
+    roots.push(fixture.root);
+    const aliasParent = join(fixture.root, "alias-parent");
+    const actualParent = join(fixture.root, "actual-parent");
+    mkdirSync(actualParent);
+    symlinkSync(actualParent, aliasParent);
     const selectedPort = port(fixture.manifest);
     await expect(
       qualifyPublishedArtifacts(
         {
           releaseDirectory: fixture.releaseDirectory,
-          installRoot: dirty,
-          repository: "private/example",
-          checkout: "/home/example/private",
+          installRoot: join(aliasParent, "install"),
           preflightOnly: true,
         },
         selectedPort,
       ),
-    ).rejects.toThrow("install root must be absent");
-
-    const aliased = join(fixture.root, "alias");
-    symlinkSync(fixture.releaseDirectory, aliased);
-    await expect(
-      qualifyPublishedArtifacts(
-        {
-          releaseDirectory: fixture.releaseDirectory,
-          installRoot: aliased,
-          repository: "private/example",
-          checkout: "/home/example/private",
-          preflightOnly: true,
-        },
-        selectedPort,
-      ),
-    ).rejects.toThrow("install root must be absent");
+    ).rejects.toThrow("install root parent must be canonical");
     expect(selectedPort.registryDocument).not.toHaveBeenCalled();
-  });
-
-  it("does not write success when lifecycle or root cleanup is incomplete", async () => {
-    const fixture = releaseFixture();
-    roots.push(fixture.root);
-    const output = join(fixture.root, "receipt.json");
-    const incomplete = port(fixture.manifest);
-    incomplete.install.mockResolvedValueOnce({
-      npmIdentity: identity(),
-      pluginIdentity: identity(),
-      surfaces: {},
-      lifecycle: { results: [], cleanup: { installed: false, enabled: true, active: true } },
-    });
-    await expect(
-      qualifyPublishedArtifacts(
-        {
-          releaseDirectory: fixture.releaseDirectory,
-          installRoot: join(fixture.root, "install-a"),
-          repository: "private/example",
-          checkout: "/home/example/private",
-          lifecycleAck: lifecycleTargetBinding("private/example", "/home/example/private"),
-          output,
-        },
-        incomplete,
-      ),
-    ).rejects.toThrow("controller cleanup is incomplete");
-    expect(() => readFileSync(output)).toThrow();
-
-    const failedCleanup = port(fixture.manifest, {
-      cleanup: vi.fn(() => {
-        throw new Error("root cleanup incomplete");
-      }),
-    });
-    await expect(
-      qualifyPublishedArtifacts(
-        {
-          releaseDirectory: fixture.releaseDirectory,
-          installRoot: join(fixture.root, "install-b"),
-          repository: "private/example",
-          checkout: "/home/example/private",
-          lifecycleAck: lifecycleTargetBinding("private/example", "/home/example/private"),
-          output,
-        },
-        failedCleanup,
-      ),
-    ).rejects.toThrow("root cleanup incomplete");
-    expect(() => readFileSync(output)).toThrow();
   });
 });

@@ -186,42 +186,37 @@ release attachment bound to the unchanged version tag, source commit, and publis
 digests. If it fails, document the failure and prepare a new version; never overwrite the release.
 See [release delivery](DELIVERY-PLAN.md#recording-evidence-and-publishing) for retention guidance.
 
-Run the repository-owned qualifier against the retained release directory and a fresh, absent
-Linux-native installation root. Preflight resolves the registry metadata and immutable remote tag,
-checks the host, and prints the lifecycle target binding without installing, changing a controller,
-or writing a receipt:
+Run the repository-owned qualifier from the exact clean source commit that owns the retained
+`release/` directory, with a fresh, absent Linux-native installation root. Preflight resolves the
+official npm registry metadata and immutable remote tag under an isolated environment. It does not
+create the installation root, accept a repository target, change a controller, call a provider, or
+write a receipt:
 
 ```sh
 npm run verify:published -- \
   --release-dir /absolute/path/to/release \
   --install-root /home/you/Codex/factory-published/VERSION \
-  --repository OWNER/PRIVATE-SMOKE-REPO \
-  --checkout /home/you/Codex/private-smoke-checkout \
   --preflight-only
 ```
 
-Use the printed `lifecycleTargetBinding` as the explicit acknowledgement for the full run. The
-target must be a dedicated private smoke repository with no activated Factory run and no existing
-repository controller. The qualifier downloads and authenticates the published npm tarball, checks
-out the exact remote tag, installs npm and Agent Plugin distributions under isolated homes, starts
-both entry points, exercises controller install/status/restart/uninstall, re-resolves the tag, and
-removes the installation root before atomically creating the owner-private receipt:
+The full command downloads and authenticates the published npm tarball, checks out the exact remote
+tag, installs the npm and Agent Plugin distributions under isolated homes, starts the CLI and MCP
+entry points, re-resolves the tag, and retains the installation root. It writes the existing bounded
+`install-identities.txt` authority consumed through `FACTORY_QUALIFICATION_INSTALL_RECEIPT`:
 
 ```sh
 npm run verify:published -- \
   --release-dir /absolute/path/to/release \
-  --install-root /home/you/Codex/factory-published/VERSION \
-  --repository OWNER/PRIVATE-SMOKE-REPO \
-  --checkout /home/you/Codex/private-smoke-checkout \
-  --lifecycle-ack SHA256_FROM_PREFLIGHT \
-  --output /absolute/private/evidence/published-artifacts.json
+  --install-root /home/you/Codex/factory-published/VERSION
 ```
 
-The receipt contains public artifact identities, bounded command results, a digest-bound private
-smoke handoff, cleanup proof, and its own digest. It excludes credentials, prompts, provider output,
-private repository names and paths, and full transcripts. The command performs no publication,
-upload, provider call, Objective activation, or repair. A blocked preflight or failed full run is
-evidence that the existing release cannot complete delivery; create a new version after fixing it.
+This command is an install handoff, not the completion gate. It cannot schedule work because it has
+no repository, checkout, controller lifecycle, activation, or provider path. Issue #89's private
+smoke must consume the retained receipt, perform the authorized lifecycle and Objective proof, emit
+the final sanitized completion receipt, and clean the retained root. On an install failure the
+qualifier proves that its isolated root contains no controller unit before entering cleanup; if that
+proof or cleanup fails, it preserves the root and reports both errors. The command performs no
+publication, upload, provider call, Objective activation, or repair.
 
 ## Initial Beta scope and later routes
 

@@ -483,6 +483,112 @@ describe("strict semantic compiler contracts", () => {
   const jsonProposal = (value: unknown) =>
     jsonProviderProposal(providerEnvelope(value as Record<string, unknown>));
   const jsonRequest = ajv.compile(COMPILER_REQUEST_JSON_SCHEMA);
+  const duplicateMediaReferenceCases: Array<
+    [string, string, CompilerWorkItemsProposal["mediaIntents"][number]["fulfillment"], string[]]
+  > = [
+    [
+      "assetIds",
+      "/mediaIntents/0/fulfillment/assetIds",
+      { kind: "imported", assetIds: ["asset-1", "asset-1"] },
+      [],
+    ],
+    [
+      "importedAssetIds",
+      "/mediaIntents/0/fulfillment/inputRoleBindings/0/importedAssetIds",
+      {
+        kind: "produced",
+        inputRoleBindings: [
+          {
+            roleId: "source",
+            importedAssetIds: ["asset-1", "asset-1"],
+            inputIntentIds: [],
+          },
+        ],
+      },
+      [],
+    ],
+    [
+      "inputIntentIds",
+      "/mediaIntents/0/fulfillment/inputRoleBindings/0/inputIntentIds",
+      {
+        kind: "produced",
+        inputRoleBindings: [
+          {
+            roleId: "source",
+            importedAssetIds: [],
+            inputIntentIds: ["source-intent", "source-intent"],
+          },
+        ],
+      },
+      [],
+    ],
+    [
+      "criterionIds",
+      "/mediaIntents/0/bindings/0/criterionIds",
+      { kind: "imported", assetIds: ["asset-1"] },
+      ["implemented", "implemented"],
+    ],
+  ];
+
+  it.each(duplicateMediaReferenceCases)(
+    "accepts duplicate %s on the provider wire and rejects it canonically",
+    (_field, expectedPath, fulfillment, criterionIds) => {
+      const request = semanticRequest();
+      const proposal = semanticProposal(request);
+      proposal.mediaIntents.push({
+        id: "media-1",
+        role: "reference",
+        purpose: "implementation-reference",
+        necessity: "helpful",
+        obligationIds: ["explicit-contract"],
+        rationale: "The implementation needs an exact reference.",
+        brief: "Use the provided reference while implementing the contract.",
+        fulfillment: structuredClone(fulfillment),
+        output: {
+          mediaTypes: ["image/png"],
+          minimumCount: 1,
+          maximumCount: 1,
+          profile: null,
+        },
+        review: { kind: "human-required" },
+        repositoryCapture: null,
+        bindings: [
+          {
+            workItemId: "item-1",
+            direction: "input-to",
+            criterionIds: [...criterionIds],
+          },
+        ],
+      });
+      const wire = providerEnvelope(proposal as unknown as Record<string, unknown>);
+
+      expect(jsonProviderProposal(wire)).toBe(true);
+      const repairRequest = structuredClone(request);
+      repairRequest.revision = 1;
+      repairRequest.previousProposal = proposal;
+      repairRequest.validationReport = createCompilerValidationReport("proposal", [
+        {
+          code: "schema-invalid",
+          itemId: null,
+          field: expectedPath,
+          expected: "unique reference IDs",
+          observed: "duplicate reference ID",
+        },
+      ]);
+      expect(jsonRequest(repairRequest)).toBe(false);
+      expect(jsonRequest.errors).toContainEqual(
+        expect.objectContaining({
+          instancePath: `/previousProposal${expectedPath}`,
+          keyword: "uniqueItems",
+        }),
+      );
+      const checked = parseAndValidateCompilerProposal(request, wire);
+      expect(checked.proposal).toBeUndefined();
+      expect(checked.report.violations).toContainEqual(
+        expect.objectContaining({ code: "schema-invalid", field: expectedPath }),
+      );
+    },
+  );
 
   it.each([
     { status: "valid", violations: [{ code: "unknown-dependency" }] },

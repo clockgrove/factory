@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { parseRunPolicy } from "../src/protocol/policy.js";
 import {
+  ConcurrencyObservedStopError,
+  assessConcurrencyObservedStop,
   concurrencyAuthority,
   concurrencyMeasurements,
   concurrencyModelConfiguration,
@@ -10,6 +13,7 @@ import {
   concurrencyRefill,
   concurrencyReceiptProgress,
   observeSettledConcurrencyMergeProofs,
+  qualifyConcurrencyAttempts,
   assertInnerTakeover,
   assertObjectiveContention,
   assertRetiredController,
@@ -39,6 +43,12 @@ const env = {
   FACTORY_CONCURRENCY_ACK: `${repository}:${unit}:start,activate-two,stop`,
 };
 const authority = concurrencyAuthority(env)!;
+const observedStopAuthority = structuredClone(authority);
+observedStopAuthority.policy.economics = {
+  ...(observedStopAuthority.policy.economics as Record<string, unknown>),
+  maxModelTokens: 500000,
+};
+observedStopAuthority.aggregateObservedThreshold = 1000000;
 const faultEnv = {
   ...env,
   FACTORY_CONCURRENCY_SCENARIO: "lease-fault",
@@ -1014,6 +1024,269 @@ function pair(closed = true) {
   ];
 }
 
+function sourceRefreshAttemptEvents(): Array<Record<string, unknown>> {
+  const attempt = (name: string, sequence: number, attemptNumber: number, extra = {}) => ({
+    objective: 1,
+    runId: "run-1",
+    kind: "attempt",
+    event: name,
+    sequence,
+    at: at(sequence),
+    workItem: 10,
+    attempt: attemptNumber,
+    backend: "codex-sdk/local-worktree",
+    baseSha: (attemptNumber === 1 ? "a" : "b").repeat(40),
+    ...extra,
+  });
+  return [
+    attempt("AttemptReserved", 1, 1),
+    {
+      ...attempt("BudgetReserved", 2, 1),
+      kind: "budget",
+      phase: "execution",
+      unit: "local_milliseconds",
+      amount: 600000,
+    },
+    {
+      ...attempt("BudgetReconciled", 3, 1),
+      kind: "budget",
+      phase: "execution",
+      unit: "local_milliseconds",
+      amount: 0,
+    },
+    attempt("AttemptDeferred", 4, 1, {
+      reason: "execution source ref changed after attempt reservation",
+    }),
+    attempt("AttemptReserved", 5, 2),
+    attempt("AttemptStarted", 6, 2),
+    attempt("AttemptSucceeded", 7, 2),
+    attempt("AttemptCollected", 8, 2),
+    attempt("AttemptIntegrated", 9, 2),
+  ];
+}
+
+function allocate(total: number, capacities: number[]) {
+  let remaining = total;
+  const values = capacities.map((capacity) => {
+    const value = Math.min(capacity, remaining);
+    remaining -= value;
+    return value;
+  });
+  expect(remaining).toBe(0);
+  return values;
+}
+
+function observedStopPair() {
+  const digest = "d".repeat(64);
+  const make = (
+    index: number,
+    amounts: number[],
+    totals: { inputTokens: number; outputTokens: number; cachedInputTokens: number },
+    stopped: boolean,
+  ) => {
+    const objective = index + 1,
+      runId = `run-${objective}`,
+      namespace = observedStopAuthority.namespaces[index]!,
+      common = { objective, runId, at: at(1) },
+      output = allocate(totals.outputTokens, amounts),
+      input = amounts.map((amount, call) => amount - output[call]!),
+      cached = allocate(totals.cachedInputTokens, input),
+      usage = amounts.map((amount, call) => ({
+        amount,
+        inputTokens: input[call]!,
+        outputTokens: output[call]!,
+        cachedInputTokens: cached[call]!,
+      })),
+      events: Record<string, unknown>[] = [
+        {
+          ...common,
+          kind: "run",
+          event: "ActivationRequested",
+          sequence: 1,
+          runId: `${namespace}-activate`,
+          requestId: `${namespace}-activate`,
+          requestedBy: "operator",
+          repository,
+          policy: observedStopAuthority.policy,
+          policyDigest: digest,
+        },
+        {
+          ...common,
+          kind: "run",
+          event: "FactoryRunStarted",
+          sequence: 2,
+          activationRequestId: `${namespace}-activate`,
+          actor: "operator",
+          repository,
+          policy: observedStopAuthority.policy,
+          policyDigest: digest,
+        },
+      ];
+    let sequence = 3;
+    const workItems = stopped ? [] : [objective * 10 + 1, objective * 10 + 2, objective * 10 + 3];
+    for (const [call, counters] of usage.entries()) {
+      const worker = !stopped && [1, 3, 6].includes(call),
+        workerIndex = [1, 3, 6].indexOf(call),
+        workItem = worker ? workItems[workerIndex] : undefined,
+        phase = worker ? "execution" : "management",
+        modelInvocationId = worker ? `worker-${workItem}-1` : `management-${objective}-${call}`,
+        usageId =
+          call === 0
+            ? `compile-${"e".repeat(63)}${objective}`
+            : worker
+              ? modelInvocationId
+              : `review-${objective}-${call}`;
+      events.push(
+        {
+          ...common,
+          kind: "budget",
+          event: "BudgetReserved",
+          sequence: sequence++,
+          ...(workItem ? { workItem, attempt: 1 } : {}),
+          phase,
+          unit: "model_tokens",
+          amount: 0,
+          usageId: `invocation-${modelInvocationId}`,
+          modelInvocationId,
+          policyDigest: digest,
+          directorEpoch: 1,
+        },
+        {
+          ...common,
+          kind: "budget",
+          event: "BudgetReconciled",
+          sequence: sequence++,
+          ...(workItem ? { workItem, attempt: 1 } : {}),
+          phase,
+          unit: "model_tokens",
+          amount: counters.amount,
+          usageId,
+          modelInvocationId,
+          policyDigest: digest,
+          directorEpoch: 1,
+          reportedModelUsage: {
+            inputTokens: counters.inputTokens,
+            outputTokens: counters.outputTokens,
+            cachedInputTokens: counters.cachedInputTokens,
+          },
+        },
+      );
+    }
+    if (stopped) {
+      const attempt = {
+        ...common,
+        kind: "attempt",
+        workItem: 11,
+        attempt: 1,
+        backend: "codex-sdk/local-worktree",
+        baseSha: "a".repeat(40),
+      };
+      events.push(
+        { ...attempt, event: "AttemptStarted", sequence: sequence++ },
+        { ...attempt, event: "AttemptSucceeded", sequence: sequence++ },
+        { ...attempt, event: "AttemptCollected", sequence: sequence++ },
+        {
+          ...attempt,
+          event: "AttemptFailed",
+          sequence: sequence++,
+          reason: "model-token budget is exhausted; refusing semantic review",
+        },
+        {
+          ...common,
+          kind: "run",
+          event: "FactoryRunEscalated",
+          sequence: sequence++,
+          reason: "Work Item #11: attempt budget exhausted (1)",
+        },
+      );
+    } else {
+      for (const workItem of workItems) {
+        const attempt = {
+          ...common,
+          kind: "attempt",
+          workItem,
+          attempt: 1,
+          backend: "codex-sdk/local-worktree",
+          baseSha: "b".repeat(40),
+        };
+        events.push(
+          { ...attempt, event: "AttemptReserved", sequence: sequence++ },
+          { ...attempt, event: "AttemptStarted", sequence: sequence++ },
+          {
+            ...attempt,
+            event: "AttemptSucceeded",
+            sequence: sequence++,
+            reportedModelTokens: usage[[1, 3, 6][workItems.indexOf(workItem)]!]!.amount,
+          },
+          { ...attempt, event: "AttemptIntegrated", sequence: sequence++ },
+        );
+      }
+      events.push({ ...common, kind: "run", event: "FactoryRunCompleted", sequence: sequence++ });
+    }
+    const reconciled = amounts.reduce((total, amount) => total + amount, 0),
+      configured = 500000,
+      breakdown = Object.fromEntries(
+        ["inputTokens", "outputTokens", "cachedInputTokens"].map((field) => [
+          field,
+          {
+            tokens: { availability: "observed", value: totals[field as keyof typeof totals] },
+            receiptsWithValue: amounts.length,
+            receiptsWithoutValue: 0,
+          },
+        ]),
+      );
+    return {
+      receipts: events.map((event) => ({ event })),
+      children: workItems.map((number) => ({ number, state: "closed" })),
+      status: {
+        objective: { number: objective, closed: !stopped },
+        run: {
+          availability: "observed",
+          runId,
+          policyDigest: digest,
+          state: stopped ? "escalated" : "completed",
+        },
+        summary: {
+          runId,
+          attempts: { active: 0 },
+          economics: {
+            modelTokenBudgetIntent: {
+              mode: "observed-stop",
+              limit: configured,
+              hardCapEnforced: false,
+            },
+            unresolvedModelInvocations: 0,
+            usage: { model_tokens: { availability: "observed", value: reconciled } },
+            budgets: {
+              modelTokens: { value: { configured, committed: reconciled, remaining: 0 } },
+            },
+            modelTokenBreakdown: {
+              source: "model-token-reconciliations",
+              reconciledCalls: amounts.length,
+              ...breakdown,
+            },
+          },
+        },
+        capacity: { activeReservations: [] },
+      },
+    };
+  };
+  return [
+    make(
+      0,
+      [22503, 108810, 30396, 130212, 30333, 45889, 30996, 30185, 142211],
+      { inputTokens: 552181, outputTokens: 19354, cachedInputTokens: 391424 },
+      true,
+    ),
+    make(
+      1,
+      [22324, 82033, 14567, 82366, 14580, 14566, 84733, 30116],
+      { inputTokens: 332948, outputTokens: 12337, cachedInputTokens: 218752 },
+      false,
+    ),
+  ];
+}
+
 describe("installed two-Objective qualification authority", () => {
   it("preserves controller8 and derives scenario2 from two explicit one-worker policies", () => {
     expect(authority).toMatchObject({
@@ -1111,7 +1384,10 @@ describe("installed two-Objective qualification authority", () => {
   it("keeps useful asymmetric work in disjoint original fixture namespaces, never sleep/pressure injection", () => {
     const a = concurrencyObjectiveBody(authority.namespaces[0]!, 0);
     const b = concurrencyObjectiveBody(authority.namespaces[1]!, 1);
-    expect(a).toContain("24 individually named edge-case assertions");
+    expect(a).toContain(
+      "exactly five named edge-case assertions: +Infinity, -Infinity, negative zero, negative fractional, and inverted fractional",
+    );
+    expect(a).not.toMatch(/at least 24/i);
     expect(a).toContain("Do not introduce artificial delays");
     expect(b).toContain("Keep both roots minimal");
     expect(a).not.toContain(authority.namespaces[1]!);
@@ -1165,15 +1441,199 @@ describe("independent authenticated timing assertions", () => {
     invalid[1]!.receipts[2]!.event.sequence = 5;
     expect(() => concurrencyRefill(invalid)).toThrow(/one-worker ceiling/);
   });
-  it("rejects conflicting terminal events instead of guessing the shorter lifetime", () => {
-    const invalid = pair();
-    invalid[1]!.receipts.push({ event: event(2, 7, "AttemptFailed", 5) });
-    expect(() => concurrencyRefill(invalid)).toThrow(/conflicting worker terminals/);
+  it("uses the first execution terminal when a later semantic-review failure shares the attempt", () => {
+    const reviewed = pair();
+    reviewed[1]!.receipts.push({ event: event(2, 7, "AttemptFailed", 5) });
+    expect(concurrencyRefill(reviewed)).toMatchObject({
+      released: { event: "AttemptSucceeded", sequence: 3 },
+      refill: { event: "AttemptStarted", sequence: 4 },
+    });
   });
   it("rejects a refill lifetime with missing attempt identity", () => {
     const invalid = pair();
     delete invalid[1]!.receipts[1]!.event.attempt;
     expect(() => concurrencyRefill(invalid)).toThrow(/identity missing/);
+  });
+});
+
+describe("bounded source refresh and observed-stop outcomes", () => {
+  it("excludes one reconciled zero-model source refresh from useful work and retry counts", () => {
+    const result = qualifyConcurrencyAttempts(sourceRefreshAttemptEvents(), [
+      "codex-sdk/local-worktree",
+    ]) as {
+      windows: unknown[];
+      deferred: unknown[];
+      useful: unknown[];
+      reservations: Array<{ attempt: number }>;
+    };
+    expect(result).toMatchObject({
+      windows: expect.any(Array),
+      deferred: [expect.any(Object)],
+      useful: [expect.any(Object)],
+      reservations: [{ attempt: 2 }],
+    });
+    expect(result.windows).toHaveLength(2);
+  });
+
+  it("refuses a source refresh with model use, unreconciled capacity, or no later integration", () => {
+    const withModel = sourceRefreshAttemptEvents();
+    withModel.splice(3, 0, {
+      ...withModel[1],
+      event: "BudgetReserved",
+      unit: "model_tokens",
+      amount: 0,
+      usageId: "invocation-worker-10-1",
+      modelInvocationId: "worker-10-1",
+    });
+    expect(() => qualifyConcurrencyAttempts(withModel, ["codex-sdk/local-worktree"])).toThrow(
+      /consumed model tokens/,
+    );
+
+    const unreconciled = sourceRefreshAttemptEvents().filter(
+      (entry) => entry.event !== "BudgetReconciled",
+    );
+    expect(() => qualifyConcurrencyAttempts(unreconciled, ["codex-sdk/local-worktree"])).toThrow(
+      /capacity was not reconciled/,
+    );
+
+    const notIntegrated = sourceRefreshAttemptEvents().filter(
+      (entry) => entry.event !== "AttemptIntegrated",
+    );
+    expect(() => qualifyConcurrencyAttempts(notIntegrated, ["codex-sdk/local-worktree"])).toThrow(
+      /later integrated execution/,
+    );
+  });
+
+  it.each([
+    ["reserved objective", "BudgetReserved", "objective", 2],
+    ["reconciled run", "BudgetReconciled", "runId", "foreign-run"],
+    ["deferred attempt", "AttemptDeferred", "attempt", 9],
+  ])("refuses a source refresh with mismatched %s identity", (_name, eventName, field, value) => {
+    const events = sourceRefreshAttemptEvents();
+    const changed = events.find((entry) => entry.event === eventName)!;
+    changed[field] = value;
+    expect(() => qualifyConcurrencyAttempts(events, ["codex-sdk/local-worktree"])).toThrow();
+  });
+
+  it("reports exact per-Objective and aggregate observed-stop totals", () => {
+    const result = assessConcurrencyObservedStop(observedStopPair(), observedStopAuthority);
+    expect(result).toMatchObject({
+      kind: "observed-stop",
+      state: "terminal-incomplete",
+      objective: 1,
+      budget: {
+        configured: 500000,
+        reconciled: 571535,
+        overshoot: 71535,
+      },
+      objectives: [
+        {
+          objective: 1,
+          state: "escalated",
+          budget: { configured: 500000, reconciled: 571535, overshoot: 71535 },
+          tokens: {
+            reconciledCalls: 9,
+            inputTokens: 552181,
+            outputTokens: 19354,
+            cachedInputTokens: 391424,
+          },
+        },
+        {
+          objective: 2,
+          state: "completed",
+          budget: { configured: 500000, reconciled: 345285, overshoot: 0 },
+          tokens: {
+            reconciledCalls: 8,
+            inputTokens: 332948,
+            outputTokens: 12337,
+            cachedInputTokens: 218752,
+          },
+        },
+      ],
+      aggregate: {
+        configured: 1000000,
+        reconciled: 916820,
+        overshoot: 0,
+        reconciledCalls: 17,
+        inputTokens: 885129,
+        outputTokens: 31691,
+        cachedInputTokens: 610176,
+      },
+      automaticActions: { retry: false, restart: false },
+    });
+  });
+
+  it.each([
+    [
+      "status run",
+      (pair: ReturnType<typeof observedStopPair>) => (pair[0]!.status.run.runId = "foreign"),
+    ],
+    [
+      "summary run",
+      (pair: ReturnType<typeof observedStopPair>) => (pair[0]!.status.summary.runId = "foreign"),
+    ],
+    [
+      "policy",
+      (pair: ReturnType<typeof observedStopPair>) =>
+        (pair[0]!.status.run.policyDigest = "f".repeat(64)),
+    ],
+    [
+      "objective",
+      (pair: ReturnType<typeof observedStopPair>) => (pair[0]!.status.objective.number = 99),
+    ],
+    [
+      "availability",
+      (pair: ReturnType<typeof observedStopPair>) =>
+        (pair[0]!.status.run.availability = "unavailable"),
+    ],
+  ])("refuses foreign %s identity", (_name, mutate) => {
+    const pair = observedStopPair();
+    mutate(pair);
+    expect(() => assessConcurrencyObservedStop(pair, observedStopAuthority)).toThrow();
+  });
+
+  it.each(["missing", "wrong"])("refuses a %s peer terminal receipt", (kind) => {
+    const pair = observedStopPair();
+    const terminal = pair[1]!.receipts.find(({ event }) => event.event === "FactoryRunCompleted")!;
+    if (kind === "missing") pair[1]!.receipts.splice(pair[1]!.receipts.indexOf(terminal), 1);
+    else terminal.event.event = "FactoryRunCancelled";
+    expect(() => assessConcurrencyObservedStop(pair, observedStopAuthority)).toThrow(
+      /terminal|completion/i,
+    );
+  });
+
+  it("fails closed when a receipt component or status subtotal is missing", () => {
+    const missingReceipt = observedStopPair();
+    const usage = missingReceipt[0]!.receipts.find(
+      ({ event }) => event.event === "BudgetReconciled",
+    )!.event;
+    delete (usage.reportedModelUsage as Record<string, unknown>).cachedInputTokens;
+    expect(() => assessConcurrencyObservedStop(missingReceipt, observedStopAuthority)).toThrow(
+      /cachedInputTokens evidence missing/,
+    );
+
+    const wrongStatus = observedStopPair();
+    const breakdown = wrongStatus[0]!.status.summary.economics
+      .modelTokenBreakdown as unknown as Record<string, { tokens: { value: number } }>;
+    breakdown.inputTokens!.tokens.value++;
+    expect(() => assessConcurrencyObservedStop(wrongStatus, observedStopAuthority)).toThrow();
+  });
+
+  it("keeps unknown and ambiguous adverse outcomes fail-closed", () => {
+    const unknown = observedStopPair();
+    const failure = unknown[0]!.receipts.find(
+      ({ event }) => event.event === "AttemptFailed",
+    )!.event;
+    failure.reason = "unrelated delivery failure";
+    expect(() => assessConcurrencyObservedStop(unknown, observedStopAuthority)).toThrow(
+      /observed-stop receipt missing/,
+    );
+
+    const cancelled = observedStopPair();
+    cancelled[0]!.status.run.state = "cancelled";
+    expect(() => assessConcurrencyObservedStop(cancelled, observedStopAuthority)).toThrow(
+      /not observed-stop/,
+    );
   });
 });
 
@@ -1352,6 +1812,82 @@ describe("bounded existing installed-controller composition", () => {
       "controller:inactive",
       "throughput-final-proofs",
     ]);
+  });
+  it("returns an authenticated policy stop without retry, restart, stop, or final proofs", async () => {
+    const f = scenarioPort();
+    const outcome = assessConcurrencyObservedStop(observedStopPair(), observedStopAuthority)!;
+    f.port.pollPair = async (phase) => {
+      f.actions.push(phase);
+      throw new ConcurrencyObservedStopError(outcome);
+    };
+    const priorExitCode = process.exitCode;
+    try {
+      await expect(runConcurrencyScenario(f.port, observedStopAuthority)).resolves.toMatchObject({
+        result: "incomplete",
+        outcome: {
+          kind: "observed-stop",
+          state: "terminal-incomplete",
+          automaticActions: { retry: false, restart: false },
+        },
+      });
+      expect(process.exitCode).toBe(2);
+      expect(f.actions).toEqual([
+        "preflight",
+        "prepare:create",
+        "start",
+        "controller:active",
+        "prepare:activate",
+        "both-started",
+      ]);
+      for (const action of ["restart", "stop", "throughput-final-proofs"])
+        expect(f.actions).not.toContain(action);
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+  });
+  it("exits 2 through main without controller cleanup for a structured incomplete outcome", () => {
+    const source = `
+      import { main, ConcurrencyObservedStopError } from './scripts/verify-local-concurrency.mjs';
+      const actions = [];
+      const port = {
+        preflight: async () => (actions.push('preflight'), {}),
+        prepare: async (stage) => actions.push('prepare:' + stage),
+        action: async (action) => actions.push(action),
+        controller: async (state) => (actions.push('controller:' + state), {}),
+        pollPair: async (phase) => {
+          actions.push(phase);
+          throw new ConcurrencyObservedStopError({
+            kind: 'observed-stop', state: 'terminal-incomplete',
+            automaticActions: { retry: false, restart: false }
+          });
+        }
+      };
+      await main(process.env, async (_env, scenario, extension) => {
+        const result = await scenario(port, extension.authority);
+        console.log(JSON.stringify({ actions, result }));
+        return result;
+      });
+    `;
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], {
+      cwd: process.cwd(),
+      env: { PATH: process.env.PATH, ...env },
+      encoding: "utf8",
+      timeout: 15000,
+    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toBe("");
+    const report = JSON.parse(result.stdout.trim());
+    expect(report.result).toMatchObject({ result: "incomplete" });
+    expect(report.actions).toEqual([
+      "preflight",
+      "prepare:create",
+      "start",
+      "controller:active",
+      "prepare:activate",
+      "both-started",
+    ]);
+    for (const action of ["restart", "stop", "controller:inactive", "throughput-final-proofs"])
+      expect(report.actions).not.toContain(action);
   });
   it("keeps expiry, same-Objective contention and restart in an explicit fault scenario", async () => {
     const f = scenarioPort();

@@ -969,9 +969,6 @@ describe("read-only compiler evaluation", () => {
             projection: null,
             failure: priorJudge.payload.value,
           }),
-          expectedProvenance: structuredClone(
-            records.find((record) => record.kind === "invocation")!.payload.expectedProvenance,
-          ),
         },
       },
       {
@@ -1025,7 +1022,30 @@ describe("read-only compiler evaluation", () => {
       bytes: null,
       provenance: "not-applicable-pre-provider",
     });
+    expect(result.calibrationEvidence!.invocations.at(-1)!.sizes.prompt).toEqual({
+      bytes: null,
+      provenance: "not-applicable-pre-provider",
+    });
+    expect(result.calibrationEvidence!.invocations.at(-1)!.sizes.schema).toEqual({
+      bytes: null,
+      provenance: "not-applicable-pre-provider",
+    });
     expect(result.markdown).toContain("bytes (not-applicable-pre-provider); inventory");
+  });
+  it("rejects missing dispatch provenance outside an authenticated pre-provider terminal", async () => {
+    const records = history();
+    const invocation = records.find((record) => record.kind === "invocation")!;
+    delete invocation.payload.expectedProvenance;
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+    await expect(
+      inspectCompilerEvaluation({
+        repository: binding.repository,
+        snapshot,
+        store,
+      }),
+    ).rejects.toThrow(
+      /compiler (?:result provenance differs|invocation dispatch provenance unavailable)/,
+    );
   });
   it("keeps uncertain paid calls visible and refuses a known total", async () => {
     const records = history();

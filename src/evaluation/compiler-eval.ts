@@ -194,6 +194,70 @@ export function repairableCompilerJudgeVerdict(
   const parsed = CompilerJudgeVerdictSchema.safeParse(value);
   if (!parsed.success || parsed.data.decision !== "accept") return null;
   const verdict = parsed.data;
+  const projectedItems = new Map(expected.graph.workItems.map((item) => [item.id, item]));
+  const ungroundedObligations = new Set<string>();
+  const ungroundedItems = new Set<string>();
+  const ungroundedEvidence = new Set<string>();
+  const coverage = verdict.coverage.map((entry) => {
+    const validBindings = entry.acceptanceBindings.filter((binding) => {
+      const item = projectedItems.get(binding.itemId);
+      const valid =
+        entry.itemIds.includes(binding.itemId) &&
+        item?.criteria.some((criterion) => criterion.id === binding.criterionId) === true;
+      if (!valid) {
+        ungroundedObligations.add(entry.obligationId);
+        if (item) ungroundedItems.add(item.id);
+        for (const evidenceId of entry.evidenceIds) ungroundedEvidence.add(evidenceId);
+      }
+      return valid;
+    });
+    if (validBindings.length === entry.acceptanceBindings.length) return entry;
+    return {
+      ...entry,
+      acceptanceBindings: validBindings,
+      status: entry.status === "covered" && validBindings.length === 0 ? "unknown" : entry.status,
+      reason:
+        `${entry.reason} The judge supplied an acceptance binding outside the exact projected criterion catalog.`.slice(
+          0,
+          4000,
+        ),
+    };
+  });
+  if (ungroundedObligations.size > 0) {
+    const availableEvidence = new Set(expected.inventory.evidence.map((entry) => entry.id));
+    const evidenceIds = [...ungroundedEvidence].filter((id) => availableEvidence.has(id));
+    if (evidenceIds.length === 0) return null;
+    const usedIds = new Set(verdict.findings.map((entry) => entry.id));
+    let id = "invalid-acceptance-binding";
+    for (let suffix = 2; usedIds.has(id); suffix++) id = `invalid-acceptance-binding-${suffix}`;
+    const repair = {
+      ...verdict,
+      coverage,
+      findings: [
+        ...verdict.findings,
+        {
+          id,
+          dimension: "coverage" as const,
+          severity: "blocking" as const,
+          confidence: 1,
+          obligationIds: [...ungroundedObligations],
+          itemIds: [...ungroundedItems],
+          evidenceIds,
+          rootCause:
+            "The judge cited acceptance criteria that are not present in the exact projected Work Item graph.",
+          correction:
+            "Preserve every obligation and revise the proposal only as needed so each covered obligation can bind to an existing projected item and criterion ID.",
+          uncertainty: "",
+        },
+      ],
+      decision: "repair" as const,
+    };
+    try {
+      return validateCompilerJudgeVerdict(repair, expected);
+    } catch {
+      return null;
+    }
+  }
   let unsupported: Set<string>;
   try {
     unsupported = unsupportedInferenceObligationIds(verdict, expected);

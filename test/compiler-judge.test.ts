@@ -228,6 +228,58 @@ describe("independent semantic compiler judgment", () => {
     },
   );
 
+  it("turns an ungrounded acceptance binding into exact semantic repair evidence", () => {
+    const pinned = semanticPinnedFacts();
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request);
+    const projection = projectCompilerProposal({
+      request,
+      proposal,
+      pinnedFacts: pinned,
+      runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
+    });
+    const raw = acceptedVerdict(request, proposal, compiledGraphDigest(projection.objective));
+    raw.coverage[0]!.acceptanceBindings[0]!.criterionId = "missing-criterion";
+
+    expect(() =>
+      validateCompilerJudgeVerdict(raw, {
+        draftDigest: compiledGraphDigest(projection.objective),
+        inventory: request.inventory,
+        graph: proposal,
+        addedEdges: projection.trace.addedEdges,
+      }),
+    ).toThrow("ungrounded acceptance binding");
+
+    const repair = repairableCompilerJudgeVerdict(raw, {
+      draftDigest: compiledGraphDigest(projection.objective),
+      inventory: request.inventory,
+      graph: proposal,
+      addedEdges: projection.trace.addedEdges,
+    });
+    expect(repair).toMatchObject({
+      decision: "repair",
+      coverage: [{ status: "unknown", acceptanceBindings: [] }],
+      findings: [
+        {
+          id: "invalid-acceptance-binding",
+          dimension: "coverage",
+          severity: "blocking",
+          obligationIds: [request.inventory.obligations[0]!.id],
+          itemIds: [proposal.workItems[0]!.id],
+          evidenceIds: ["objective"],
+        },
+      ],
+    });
+    expect(() =>
+      validateCompilerJudgeVerdict(repair, {
+        draftDigest: compiledGraphDigest(projection.objective),
+        inventory: request.inventory,
+        graph: proposal,
+        addedEdges: projection.trace.addedEdges,
+      }),
+    ).not.toThrow();
+  });
+
   it("does not reintroduce an adjudicated unsupported prerequisite into dimension repair", () => {
     const pinned = semanticPinnedFacts();
     const request = semanticRequest(pinned);

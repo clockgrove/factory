@@ -790,7 +790,13 @@ function createCalibrationEvidence(args: {
     const providerResult = args.results.find(
       (candidate) => candidate.payload.invocationId === invocation.invocationId,
     );
-    const provenance = InvocationProvenance.parse(record.payload.expectedProvenance);
+    const preProviderTerminal = providerResult?.payload.preProviderTerminal === true;
+    if (record.payload.expectedProvenance === undefined && !preProviderTerminal)
+      throw new Error("compiler invocation dispatch provenance unavailable");
+    const provenance =
+      record.payload.expectedProvenance === undefined
+        ? null
+        : InvocationProvenance.parse(record.payload.expectedProvenance);
     const responseBytes =
       !providerResult || providerResult.payload.preProviderTerminal === true
         ? null
@@ -813,8 +819,12 @@ function createCalibrationEvidence(args: {
     return {
       ...status,
       sizes: {
-        prompt: { bytes: provenance.promptBytes, provenance: provenance.sizeSource },
-        schema: { bytes: provenance.schemaBytes, provenance: provenance.sizeSource },
+        prompt: provenance
+          ? { bytes: provenance.promptBytes, provenance: provenance.sizeSource }
+          : { bytes: null, provenance: "not-applicable-pre-provider" },
+        schema: provenance
+          ? { bytes: provenance.schemaBytes, provenance: provenance.sizeSource }
+          : { bytes: null, provenance: "not-applicable-pre-provider" },
         response: { bytes: responseBytes, provenance: responseSource },
         inventory: {
           bytes: hasInventory ? canonicalBytes(args.inventory) : null,

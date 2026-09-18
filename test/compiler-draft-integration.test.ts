@@ -200,6 +200,7 @@ async function setup(
     schemaInvalidFirst?: boolean;
     acceptFirst?: boolean;
     invalidAcceptUnknownFirst?: boolean;
+    invalidAcceptUngroundedFirst?: boolean;
     primitiveCompileFailure?: "string" | "null";
     frozenCompileFailure?: "error" | "object";
   } = {},
@@ -290,6 +291,7 @@ async function setup(
       const accept =
         (options.acceptFirst === true ||
           options.invalidAcceptUnknownFirst === true ||
+          options.invalidAcceptUngroundedFirst === true ||
           repairs > 0) &&
         !options.rejectAll;
       const verdict: CompilerJudgeVerdict = {
@@ -366,6 +368,8 @@ async function setup(
         dimension.status = "unknown";
         dimension.reason = "The existing proposal leaves its assumptions unclear.";
       }
+      if (options.invalidAcceptUngroundedFirst && repairs === 0)
+        verdict.coverage[0]!.acceptanceBindings[0]!.criterionId = "missing-criterion";
       return { value: verdict, usage };
     }
     if (prompt.includes("This is a repair")) {
@@ -597,6 +601,32 @@ describe("production compiler draft adapter", () => {
         dimension: "assumption-grounding",
         severity: "blocking",
         obligationIds: [],
+        itemIds: ["feature"],
+        evidenceIds: ["objective"],
+      }),
+    ]);
+    expect(() => validatePersistedCompilerDraftJournal(result.records)).not.toThrow();
+    const calls = f.runStructured.mock.calls.length;
+    await expect(compileEvaluatedDraft(f.args)).resolves.toMatchObject({
+      status: "accepted",
+      revision: 1,
+    });
+    expect(f.runStructured).toHaveBeenCalledTimes(calls);
+  });
+  it("repairs a schema-valid accept verdict with an ungrounded criterion binding", async () => {
+    const f = await setup({ invalidAcceptUngroundedFirst: true });
+    const result = await compileEvaluatedDraft(f.args);
+    expect(result).toMatchObject({ status: "accepted", revision: 1 });
+    expect(f.stages).toEqual(["inventory", "compile", "judge", "repair", "judge"]);
+    const repairPrompt = f.prompts.find((prompt) => prompt.includes("This is a repair"))!;
+    const repairRequest = JSON.parse(repairPrompt.split("\n\n").at(-1)!) as CompilerRequest;
+    expect(repairRequest.validationReport.status).toBe("valid");
+    expect(repairRequest.semanticFindings).toEqual([
+      expect.objectContaining({
+        id: "invalid-acceptance-binding",
+        dimension: "coverage",
+        severity: "blocking",
+        obligationIds: ["values"],
         itemIds: ["feature"],
         evidenceIds: ["objective"],
       }),

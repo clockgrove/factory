@@ -4,7 +4,7 @@
 delivery contract. It does not qualify native stacked PRs, native worker concurrency,
 automatic fallback when native support is unavailable, controller discovery, or
 restart recovery. No live pass is implied by the harness or its deterministic tests.
-The distinct [native-unavailability fallback qualifier](NATIVE-FALLBACK-QUALIFICATION.md) reuses
+The conditional [native-unavailability fallback qualifier](NATIVE-FALLBACK-QUALIFICATION.md) reuses
 the regular pipeline proof while retaining its native-requested policy and real capability evidence;
 this explicit-regular wrapper remains strict and does not qualify fallback.
 

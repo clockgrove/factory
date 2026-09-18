@@ -2,7 +2,8 @@
 
 Date: 2026-09-04
 
-Amended: 2026-09-17 for the Initial Beta support boundary
+Amended: 2026-09-17 for the Initial Beta support boundary; 2026-09-18 for observable
+native-stack qualification
 
 Status: accepted
 
@@ -55,7 +56,12 @@ out of scope.
 - Copilot has limited automation, including an operator boundary when exact-session termination cannot
   be automated. Codex managed execution remains unavailable until an authoritative identity and real
   provider-specific lifecycle interface are implemented and qualified; a display name is not identity.
-- Native stacked pull requests are release-critical and retain a recorded regular-PR fallback.
+- Regular and native stacked pull-request delivery are release-critical and qualify independently.
+  Factory retains the fail-closed transition from an originally requested native stack to regular
+  PRs, but its live qualification is conditional on observing a genuine authenticated unsupported
+  native-stack surface. When the release target supports native stacks, [#82](https://github.com/clockgrove/factory/issues/82)
+  remains deferred and does not block Initial Beta. Available capability, ambiguous failures,
+  authentication failures, and synthetic fixtures cannot qualify that transition.
 - Application dogfood retains the complete scenario coverage in implementation-plan Wave 8.
   The rich-media appendix supplies generic acceptance inputs, not an exclusion from that gate;
   a bounded first pilot cannot discharge the remaining application scenarios.

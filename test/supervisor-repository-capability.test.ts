@@ -225,6 +225,50 @@ async function installAlternativePnpmReceipt(
 }
 
 describe("Supervisor repository-capability admission", () => {
+  it.each(["missing", "mismatched"] as const)(
+    "rejects ordinary pnpm exact-base pins before attempt admission when they are %s",
+    async (ordinaryPnpmPins) => {
+      const fixture = await providerSupervisorFixture("daytona-burst", {
+        localOnly: true,
+        capabilityAdmission: "valid",
+        ordinaryPnpmPins,
+      });
+      fixtures.push(fixture);
+      const result = await fixture.run();
+      expect(result).toMatchObject({
+        status: "escalated",
+        reason: expect.stringMatching(/pnpm root devEngines/),
+      });
+      expect(fixture.events().some((event) => event.event === "AttemptReserved")).toBe(false);
+      expect(fixture.activity.some((entry) => entry.operation === "launch")).toBe(false);
+    },
+    60_000,
+  );
+
+  it("rechecks ordinary pnpm exact-base pins after reservation and before model launch", async () => {
+    const fixture = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      capabilityAdmission: "valid",
+      ordinaryPnpmPins: "valid",
+      pnpmPinMismatchAfterReservation: true,
+    });
+    fixtures.push(fixture);
+    const result = await fixture.run();
+    expect(result).toMatchObject({ status: "escalated" });
+    expect(
+      fixture
+        .events()
+        .some(
+          (event) =>
+            event.kind === "attempt" &&
+            event.event === "AttemptFailed" &&
+            /pnpm root devEngines/.test(event.reason ?? ""),
+        ),
+    ).toBe(true);
+    expect(fixture.events().some((event) => event.event === "AttemptReserved")).toBe(true);
+    expect(fixture.activity.some((entry) => entry.operation === "launch")).toBe(false);
+  }, 60_000);
+
   it("runs an npm provider through integration before its exact-base consumer", async () => {
     await provisionNpmFixture();
     const fixture = await providerSupervisorFixture("daytona-burst", {

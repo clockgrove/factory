@@ -79,12 +79,14 @@ Factory initially exposes four provisioned bundles:
 
 - `node-pnpm`: the highest stable patch on the official Node 24 LTS line plus the latest stable pnpm
   standalone program. The root `package.json` alone pins runtime identity through exact
-  `packageManager` and `devEngines.runtime` values; an optional `engines.node` value must agree
-  exactly, and workspace manifests cannot redefine the pins. Validation probes Node and then pnpm
-  before frozen, hook-free installation and retains both results. Repository authority also includes
-  `pnpm-lock.yaml` and explicitly enumerated workspace/task files. A retained receipt outside the
-  Node 24 LTS contract is invalid and requires explicit reprovisioning; a failed reprovision leaves
-  the previous active pointer unchanged.
+  `packageManager` and sole `devEngines.runtime` values; alternate `devEngines` package-manager
+  authority is rejected, an optional `engines.node` value must agree exactly, and workspace manifests
+  cannot redefine the pins. Observed manifests are checked during admission and at final dispatch;
+  greenfield prompts receive the mechanically derived activated values and clean validation requires
+  them before setup. Validation probes Node and then pnpm before frozen, hook-free installation and
+  retains both results. Repository authority also includes `pnpm-lock.yaml` and explicitly enumerated
+  workspace/task files. A retained receipt outside the Node 24 LTS contract is invalid and requires
+  explicit reprovisioning; a failed reprovision leaves the previous active pointer unchanged.
 - `javascript-bun`: the latest stable official baseline Linux x64 Bun ZIP. Factory extracts ZIPs in
   its bounded materializer rather than requiring an ambient archive utility. Repository authority is
   an exact `packageManager` pin, `bun.lock`, and declared direct-child workspace manifests.

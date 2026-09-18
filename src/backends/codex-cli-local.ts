@@ -71,6 +71,7 @@ import {
 } from "../providers/quota.js";
 import { githubCopilotQuotaFromStreamEvent } from "../providers/github-copilot-quota.js";
 import { assertProviderStructuredOutputSchema } from "../providers/structured-output-schema.js";
+import { activatedPnpmRuntimePins } from "../validation/plan.js";
 
 export const CODEX_WORKER_OUTPUT_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -206,6 +207,10 @@ export function workerPacketPrompt(context: AttemptContext): string {
     packet.validationCommands.length === 1 && packet.allowedPaths.includes("package.json")
       ? packageScriptValidationCommand(packet.validationCommands[0]!)
       : null;
+  const pnpmRuntimePins =
+    bootstrapValidation?.manager === "pnpm" ? activatedPnpmRuntimePins(packet) : null;
+  if (bootstrapValidation?.manager === "pnpm" && !pnpmRuntimePins)
+    throw new Error("greenfield pnpm prompt lacks its exact activated runtime pins");
   return [
     "You are a restricted Factory implementation worker.",
     "Edit only the supplied workspace. Do not create commits, branches, pull requests, issues, releases, or contact GitHub.",
@@ -251,7 +256,7 @@ export function workerPacketPrompt(context: AttemptContext): string {
       : "This is the first attempt; there is no prior-attempt diagnostic.",
     ...(bootstrapValidation?.manager === "pnpm"
       ? [
-          `Greenfield bootstrap validation is intentionally narrow. The root package.json must pin packageManager to the exact pnpm tool version and define ${bootstrapValidation.script}. Pin every external dependency to an exact version; workspace dependencies may use only workspace:*. The pnpm v9 lock must enumerate every workspace importer, bind registry packages by sha512 integrity, and contain no URL, git, tarball, patch, or escaping local source. Do not define install/prepare lifecycle hooks, package-manager overrides, .npmrc, or pnpm hook files. The selected script body may be one finite allowlisted check, or exactly "turbo run ${bootstrapValidation.script}". For Turborepo, pnpm-workspace.yaml may contain only repository-relative direct-child package patterns, turbo.json may give ${bootstrapValidation.script} no dependency or only "^${bootstrapValidation.script}", and each package's matching script may be absent or exactly tsc --noEmit, vitest run, eslint ., prettier --check ., or node --test followed by explicit scoped JavaScript test paths. Declare registry.npmjs.org as the package-setup network destination. Authoritative setup first verifies pnpm's exact version, then performs a frozen install only from that registry with scripts disabled and store integrity enabled; do not add an installation command to the validation recipe.`,
+          `Greenfield bootstrap validation is intentionally narrow. Factory mechanically derived this exact root package.json runtime authority from the activated receipt: ${JSON.stringify({ packageManager: pnpmRuntimePins!.packageManager, devEngines: { runtime: pnpmRuntimePins!.runtime } })}. Reproduce those values exactly; do not infer, select, or range runtime versions. devEngines may contain only runtime. If engines.node is present, it must equal ${JSON.stringify(pnpmRuntimePins!.node)}. Define ${bootstrapValidation.script}. Pin every external dependency to an exact version; workspace dependencies may use only workspace:*. The pnpm v9 lock must enumerate every workspace importer, bind registry packages by sha512 integrity, and contain no URL, git, tarball, patch, or escaping local source. Do not define install/prepare lifecycle hooks, package-manager overrides, .npmrc, or pnpm hook files. The selected script body may be one finite allowlisted check, or exactly "turbo run ${bootstrapValidation.script}". For Turborepo, pnpm-workspace.yaml may contain only repository-relative direct-child package patterns, turbo.json may give ${bootstrapValidation.script} no dependency or only "^${bootstrapValidation.script}", and each package's matching script may be absent or exactly tsc --noEmit, vitest run, eslint ., prettier --check ., or node --test followed by explicit scoped JavaScript test paths. Declare registry.npmjs.org as the package-setup network destination. Authoritative setup first verifies exact Node, then exact pnpm, then performs a frozen install only from that registry with scripts disabled and store integrity enabled; do not add an installation command to the validation recipe.`,
         ]
       : []),
     `Authoritative validation will run later. You may run these checks while working:\n${packet.validationCommands.map((item) => `- ${item}`).join("\n")}`,

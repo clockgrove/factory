@@ -198,6 +198,13 @@ describe("clean validation", () => {
         ...manifest,
         devEngines: { runtime: { name: "node", version: "24.15.0", onFail: "warn" } },
       },
+      {
+        ...manifest,
+        devEngines: {
+          runtime: { name: "node", version: "24.15.0", onFail: "error" },
+          packageManager: { name: "pnpm", version: ">=10", onFail: "warn" },
+        },
+      },
       { ...manifest, engines: { node: "^24.15.0" } },
     ]) {
       expect(() =>
@@ -1222,6 +1229,19 @@ jobs:
         devDependencies: { typescript: "5.9.2" },
         reason: /turbo runner is not pinned/,
       },
+      {
+        workspace: "packages:\n  - packages/*\n",
+        turbo: '{"tasks":{"check":{"dependsOn":["^check"]}}}\n',
+        devDependencies: { turbo: "2.5.6", typescript: "5.9.2" },
+        workspaceManifest: {
+          name: "example",
+          devEngines: {
+            packageManager: { name: "pnpm", version: ">=10", onFail: "warn" },
+          },
+          scripts: { check: "tsc --noEmit" },
+        },
+        reason: /runtime authority/,
+      },
     ]) {
       const fixture = await repositoryFixture();
       const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
@@ -1244,7 +1264,12 @@ jobs:
       await writeFile(join(worker.path, "turbo.json"), unsafe.turbo);
       await writeFile(
         join(worker.path, "packages", "example", "package.json"),
-        JSON.stringify({ name: "example", scripts: { check: "tsc --noEmit" } }),
+        JSON.stringify(
+          unsafe.workspaceManifest ?? {
+            name: "example",
+            scripts: { check: "tsc --noEmit" },
+          },
+        ),
       );
       execFileSync("git", ["add", "."], { cwd: worker.path });
       const artifact = await collectLocalArtifact(worker);

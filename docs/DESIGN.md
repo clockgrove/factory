@@ -1030,9 +1030,13 @@ repository-observed npm recipes remain on the host-observed compatibility path u
 pnpm release for Linux x64 glibc. Its runtime bundle authenticates both the Node executable and pnpm
 standalone program. Root `package.json` is the only repository pin authority: `packageManager` must
 equal the activated exact pnpm version and `devEngines.runtime` must name `node`, equal the activated
-exact Node patch, and use `onFail: error`; an `engines.node` value, when present, must equal that same
-patch. Workspace manifests cannot redefine those pins. Validation probes exact Node first and exact
-pnpm second before frozen, hook-free installation, and retains both results as command evidence.
+exact Node patch, and use `onFail: error`; `devEngines` may contain no alternate package-manager or
+other authority, and an `engines.node` value, when present, must equal that same patch. Workspace
+manifests cannot redefine those pins. Factory checks an observed root manifest during admission and
+again at the final dispatch fence. For a missing greenfield manifest, the implementation prompt
+receives the exact activated values mechanically and clean validation requires them before setup.
+Validation probes exact Node first and exact pnpm second before frozen, hook-free installation, and
+retains both results as command evidence.
 The adapter also requires exact dependencies; workspace links remain within enumerated in-scope
 direct-child packages; registry lock entries carry SHA-512 integrity; and URL, git, tarball, patch,
 escaping local sources, lifecycle hooks, and package-manager overrides are rejected. Selected

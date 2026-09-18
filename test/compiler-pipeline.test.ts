@@ -13,6 +13,7 @@ import { workerPacketPrompt } from "../src/backends/codex-cli-local.js";
 import type { AttemptContext } from "../src/execution/backend.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import { inferCriterionRisk } from "../src/compiler/validation-design.js";
+import { selectedManagedRuntimeRequirements } from "./helpers/managed-runtime.js";
 
 const sha = "a".repeat(40);
 const ordinaryRisks = (criteria: string[]) =>
@@ -149,8 +150,13 @@ describe("compiled worker navigation context", () => {
     ];
     context.packet.validationCommands = ["pnpm check"];
     context.packet.requirements.tools = ["node", "pnpm"];
+    context.packet.managedRuntimes = selectedManagedRuntimeRequirements(["pnpm check"]);
     const prompt = workerPacketPrompt(context);
     expect(prompt).toContain("Greenfield bootstrap validation is intentionally narrow");
+    expect(prompt).toContain(
+      '"packageManager":"pnpm@10.34.5","devEngines":{"runtime":{"name":"node","version":"24.15.0","onFail":"error"}}',
+    );
+    expect(prompt).toContain("do not infer, select, or range runtime versions");
     expect(prompt).toContain('exactly "turbo run check"');
     expect(prompt).toContain("frozen install only from that registry with scripts disabled");
   });

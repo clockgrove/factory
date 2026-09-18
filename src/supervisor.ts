@@ -483,6 +483,7 @@ import {
   isReviewOnlyWorkflowSurface,
 } from "./publication/workflow-safety.js";
 import {
+  assertActivatedPnpmPinsGroundedOnManifest,
   bindValidationToPublishedHead,
   validationLocalCommandCount,
   validationPlanFromPacket,
@@ -2650,6 +2651,24 @@ export class FactorySupervisor {
         observe: async (identity) => (await observeLocalScope(identity)).status,
       },
     };
+  }
+
+  async #assertPnpmExecutionBasePins(packet: WorkerPacket, base: GitCommitObject): Promise<void> {
+    assertRepositoryChangeWorkerPacket(packet);
+    if (!(packet.managedRuntimes ?? []).some(({ tool }) => tool === "pnpm")) return;
+    const packageJson = await this.#store.readTreeEntry(base.treeOid, "package.json");
+    if (packageJson === null) {
+      const command =
+        packet.validationCommands.length === 1
+          ? packageScriptValidationCommand(packet.validationCommands[0]!)
+          : null;
+      if (command?.manager === "pnpm" && packet.allowedPaths.includes("package.json")) return;
+      throw new Error("pnpm execution base lacks root package.json runtime authority");
+    }
+    assertActivatedPnpmPinsGroundedOnManifest(
+      packet,
+      (await this.#store.readBlob(packageJson)).toString("utf8"),
+    );
   }
 
   async #resolveExecutionBaseCapabilities(
@@ -7410,6 +7429,7 @@ export class FactorySupervisor {
                 packet = await activateManagedRuntimePacket(packet, (id) =>
                   providerIdentities.get(id),
                 );
+                await this.#assertPnpmExecutionBasePins(packet, executionBase);
                 const proofs = await this.#resolveExecutionBaseCapabilities(
                   priority.item,
                   packet,
@@ -8668,6 +8688,7 @@ export class FactorySupervisor {
         sourceRef: capabilitySourceRef,
         proofDigests: currentRepositoryCapabilityProofs.map(({ digest }) => digest),
       });
+      await this.#assertPnpmExecutionBasePins(packet, base);
       const timeoutMs = Math.min(
         (packet.requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000,
         Math.max(1, objectiveDeadline - Date.now()),
@@ -9046,6 +9067,7 @@ export class FactorySupervisor {
             sourceRef: capabilitySourceRef,
             proofDigests: dispatchProofs.map(({ digest }) => digest),
           });
+          await this.#assertPnpmExecutionBasePins(packet, base);
           if ((await this.#store.readRef(capabilitySourceRef)) !== base.oid)
             throw new ExecutionSourceAdvancedBeforeDispatchError(
               "execution source ref changed during final dispatch validation",

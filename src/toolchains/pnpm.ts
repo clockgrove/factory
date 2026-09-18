@@ -114,7 +114,10 @@ export function assertPnpmManifestRuntimePins(
     Array.isArray(manifest.devEngines)
   )
     throw new Error("pnpm root devEngines.runtime must exactly pin Node with onFail error");
-  const runtime = (manifest.devEngines as Record<string, unknown>).runtime;
+  const devEngines = manifest.devEngines as Record<string, unknown>;
+  if (Object.keys(devEngines).length !== 1 || !Object.hasOwn(devEngines, "runtime"))
+    throw new Error("pnpm root devEngines must contain only the exact runtime pin");
+  const runtime = devEngines.runtime;
   if (!runtime || typeof runtime !== "object" || Array.isArray(runtime))
     throw new Error("pnpm root devEngines.runtime must exactly pin Node with onFail error");
   const pin = runtime as Record<string, unknown>;

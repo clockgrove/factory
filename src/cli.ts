@@ -92,7 +92,7 @@ const USAGE = [
   "  factory backends probe",
   "  factory management probe",
   "  factory validate-captures [FILE]  (canonical .factory/validation-captures.json validation)",
-  "  factory compiler-preflight --repo DIR --base-sha SHA --policy FILE|-  (read-only)",
+  "  factory compiler-preflight --repo DIR --base-sha SHA [--policy FILE|-]  (read-only)",
   "  factory toolchains provision npm|pnpm|bun|uv|all",
   "  factory toolchains restore RECEIPT.json",
   "  factory toolchains status",
@@ -770,27 +770,32 @@ async function validateCaptureCatalog(args: string[]): Promise<void> {
 }
 
 async function compilerPreflightCommand(args: string[]): Promise<void> {
-  if (args.length !== 6)
-    fail("usage: factory compiler-preflight --repo DIR --base-sha SHA --policy FILE|-");
+  if (![4, 6].includes(args.length))
+    fail("usage: factory compiler-preflight --repo DIR --base-sha SHA [--policy FILE|-]");
   const names = args.filter((_, index) => index % 2 === 0);
   if (
-    new Set(names).size !== 3 ||
-    !names.every((name) => ["--repo", "--base-sha", "--policy"].includes(name))
+    new Set(names).size !== names.length ||
+    !names.every((name) => ["--repo", "--base-sha", "--policy"].includes(name)) ||
+    !names.includes("--repo") ||
+    !names.includes("--base-sha")
   )
-    fail("usage: factory compiler-preflight --repo DIR --base-sha SHA --policy FILE|-");
+    fail("usage: factory compiler-preflight --repo DIR --base-sha SHA [--policy FILE|-]");
   const checkout = option(args, "--repo");
   const baseSha = option(args, "--base-sha");
   const policyPath = option(args, "--policy");
-  if (!checkout || !baseSha || !policyPath || !/^[a-f0-9]{40}$/.test(baseSha))
-    fail("compiler-preflight requires an exact base, repository, and policy");
-  let policyText: string;
-  if (policyPath === "-") {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin)
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    policyText = Buffer.concat(chunks).toString("utf8");
-  } else policyText = await readFile(resolve(policyPath), "utf8");
-  const policy = parseRunPolicy(JSON.parse(policyText));
+  if (!checkout || !baseSha || !/^[a-f0-9]{40}$/.test(baseSha))
+    fail("compiler-preflight requires an exact base and repository");
+  let policy = DEFAULT_RUN_POLICY;
+  if (policyPath) {
+    let policyText: string;
+    if (policyPath === "-") {
+      const chunks: Buffer[] = [];
+      for await (const chunk of process.stdin)
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      policyText = Buffer.concat(chunks).toString("utf8");
+    } else policyText = await readFile(resolve(policyPath), "utf8");
+    policy = parseRunPolicy(JSON.parse(policyText));
+  }
   const result = await inspectCompilerPreflight({
     checkout: resolve(checkout),
     baseSha,

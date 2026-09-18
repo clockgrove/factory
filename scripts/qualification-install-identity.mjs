@@ -48,19 +48,31 @@ export function installedCompilerPreflight(
   assert.ok(isAbsolute(factoryCli), "installed Factory CLI path must be absolute");
   assert.ok(isAbsolute(checkout), "compiler preflight checkout must be absolute");
   assert.match(baseSha, /^[a-f0-9]{40}$/, "exact compiler preflight base required");
-  const policyBytes = `${JSON.stringify(policy)}\n`;
-  assert.ok(Buffer.byteLength(policyBytes) <= 64 * 1024, "compiler preflight policy is unbounded");
+  const explicitPolicy = policy !== undefined;
+  const policyBytes = explicitPolicy ? `${JSON.stringify(policy)}\n` : undefined;
+  if (policyBytes !== undefined)
+    assert.ok(
+      Buffer.byteLength(policyBytes) <= 64 * 1024,
+      "compiler preflight policy is unbounded",
+    );
   const result = execute(
     factoryCli,
-    ["compiler-preflight", "--repo", checkout, "--base-sha", baseSha, "--policy", "-"],
+    [
+      "compiler-preflight",
+      "--repo",
+      checkout,
+      "--base-sha",
+      baseSha,
+      ...(explicitPolicy ? ["--policy", "-"] : []),
+    ],
     {
       cwd: checkout,
       env: environment,
-      input: policyBytes,
+      ...(policyBytes === undefined ? {} : { input: policyBytes }),
       encoding: "utf8",
       timeout: 30_000,
       maxBuffer: 1024 * 1024,
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: [explicitPolicy ? "pipe" : "ignore", "pipe", "pipe"],
     },
   );
   assert.equal(result.signal, null, "installed compiler preflight was interrupted");

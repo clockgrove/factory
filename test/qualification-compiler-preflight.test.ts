@@ -95,6 +95,27 @@ describe("installed compiler qualification boundary", () => {
     ).toThrow();
   });
 
+  it("uses the retained CLI default without a policy option or stdin", () => {
+    const execute = vi.fn(() => execution(report("passed"), 0));
+    expect(
+      installedCompilerPreflight(
+        {
+          factoryCli: "/installed/factory.js",
+          checkout: "/home/example/repository",
+          baseSha,
+          environment: { PATH: "/usr/bin:/bin" },
+        },
+        execute,
+      ),
+    ).toMatchObject({ result: "passed", baseSha });
+    expect(execute).toHaveBeenCalledWith(
+      "/installed/factory.js",
+      ["compiler-preflight", "--repo", "/home/example/repository", "--base-sha", baseSha],
+      expect.objectContaining({ stdio: ["ignore", "pipe", "pipe"] }),
+    );
+    expect((execute.mock.calls[0] as unknown[])[2]).not.toHaveProperty("input");
+  });
+
   it("propagates through the shared live and checkpoint bases and the standalone fault base", () => {
     for (const path of [
       "scripts/verify-live-objective.mjs",
@@ -110,6 +131,7 @@ describe("installed compiler qualification boundary", () => {
       "scripts/verify-local-concurrency.mjs": "main as checkpointMain",
       "scripts/verify-local-failure-conflict.mjs": "main as checkpointMain",
       "scripts/verify-local-large-files.mjs": "main as checkpointMain",
+      "scripts/verify-compiler-qualification-checkpoints.mjs": "main as checkpointMain",
     };
     for (const [path, inheritedBoundary] of Object.entries(routes))
       expect(readFileSync(resolve(path), "utf8"), path).toContain(inheritedBoundary);

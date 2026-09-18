@@ -5,7 +5,7 @@ export function installedCompilerPreflight(
     factoryCli: string;
     checkout: string;
     baseSha: string;
-    policy: unknown;
+    policy?: unknown;
     environment?: NodeJS.ProcessEnv;
   },
   execute?: (

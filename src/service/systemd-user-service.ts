@@ -20,6 +20,10 @@ import {
   controllerFatalAction,
   type ControllerFatalDiagnosticCode,
 } from "../controller/failure.js";
+import {
+  holdLifecycleQualificationCheckpoint,
+  LIFECYCLE_QUALIFICATION_ARM_ENV,
+} from "./lifecycle-qualification.js";
 
 const execFileAsync = promisify(execFile);
 const FACTORY_UNIT_MARKER = "# Managed by Clockgrove Factory";
@@ -208,19 +212,68 @@ export class SystemdUserService {
     const manager = await this.#connectUserManager("install", input);
     const lock = await this.#acquireLifecycleLock("install", input, manager);
     try {
-      const old = await readOptionalFile(path);
-      if (old !== undefined && !old.startsWith(FACTORY_UNIT_MARKER)) {
-        throw new Error(`refusing to overwrite unmanaged unit ${path}`);
-      }
-      const [executableIdentity, commandAvailable, installedLauncher] = await Promise.all([
-        controllerExecutableIdentity(this.#artifactPath()),
-        this.#commandAvailable(),
-        old === undefined ? undefined : this.#installedLauncher(input, old),
-      ]);
-      if (!executableIdentity || !commandAvailable) {
-        throw new Error(
-          "controller-launcher-failure: the exact Factory launch command is unavailable; restore it before installing the controller",
-        );
+      const qualificationArmPath = process.env[LIFECYCLE_QUALIFICATION_ARM_ENV];
+      let old: string | undefined;
+      let executableIdentity: string;
+      let installedLauncher: InstalledLauncher | null | undefined;
+      if (qualificationArmPath) {
+        // An armed qualification binds the exact post-lock artifact before it
+        // can observe or mutate unit state. The ordinary path below retains its
+        // original read and concurrent validation ordering.
+        const [armedExecutableIdentity, armedCommandAvailable] = await Promise.all([
+          controllerExecutableIdentity(this.#artifactPath()),
+          this.#commandAvailable(),
+        ]);
+        if (!armedExecutableIdentity || !armedCommandAvailable) {
+          throw new Error(
+            "controller-launcher-failure: the exact Factory launch command is unavailable; restore it before installing the controller",
+          );
+        }
+        await holdLifecycleQualificationCheckpoint({
+          configuredArmPath: qualificationArmPath,
+          runtimeDirectory: manager.runtimeDirectory,
+          effectiveUid: manager.uid,
+          unit: this.unitName(input),
+          lockPath: join(manager.runtimeDirectory, `.${this.unitName(input)}.lifecycle.lock`),
+          repository: input.repository,
+          checkout: input.checkout,
+          requestId: input.requestId,
+          artifactIdentity: armedExecutableIdentity,
+        });
+        const [resumedExecutableIdentity, resumedCommandAvailable] = await Promise.all([
+          controllerExecutableIdentity(this.#artifactPath()),
+          this.#commandAvailable(),
+        ]);
+        if (resumedExecutableIdentity !== armedExecutableIdentity || !resumedCommandAvailable) {
+          throw new Error(
+            "controller-lifecycle-qualification-invalid: the exact Factory launch command changed while held",
+          );
+        }
+        old = await readOptionalFile(path);
+        if (old !== undefined && !old.startsWith(FACTORY_UNIT_MARKER)) {
+          throw new Error(`refusing to overwrite unmanaged unit ${path}`);
+        }
+        executableIdentity = armedExecutableIdentity;
+        installedLauncher =
+          old === undefined ? undefined : await this.#installedLauncher(input, old);
+      } else {
+        old = await readOptionalFile(path);
+        if (old !== undefined && !old.startsWith(FACTORY_UNIT_MARKER)) {
+          throw new Error(`refusing to overwrite unmanaged unit ${path}`);
+        }
+        const [observedExecutableIdentity, commandAvailable, observedInstalledLauncher] =
+          await Promise.all([
+            controllerExecutableIdentity(this.#artifactPath()),
+            this.#commandAvailable(),
+            old === undefined ? undefined : this.#installedLauncher(input, old),
+          ]);
+        if (!observedExecutableIdentity || !commandAvailable) {
+          throw new Error(
+            "controller-launcher-failure: the exact Factory launch command is unavailable; restore it before installing the controller",
+          );
+        }
+        executableIdentity = observedExecutableIdentity;
+        installedLauncher = observedInstalledLauncher;
       }
       const before = await this.#managerState(input, manager, "install");
       const beforeActiveState = classifyActiveState(before.activeState);

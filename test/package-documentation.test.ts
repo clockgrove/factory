@@ -154,6 +154,33 @@ describe("distributed operator documentation", () => {
     );
   });
 
+  it("documents an exact installed lifecycle qualification without exposing a control API", () => {
+    const guide = readFileSync(new URL("docs/HOST-SCHEDULING.md", root), "utf8");
+    expect(guide).toContain("scripts/verify-installed-controller-lifecycle.mjs");
+    expect(guide).toContain("artifact_identity=sha256:EXPECTED_FROM_RETAINED_INSTALL_RECEIPT");
+    expect(guide).toContain(
+      'test "$artifact_identity" = "sha256:$(sha256sum -- "$factory_cli" | cut -d\' \' -f1)"',
+    );
+    expect(guide).toContain(
+      "It accepts only the receipt's npm-installed `dist/factory.js`,\nversion, inventory, and launcher identity under that root",
+    );
+    expect(guide).toContain("a source or development worktree is\nrejected mechanically");
+    expect(guide).toContain('FACTORY_LIFECYCLE_INSTALL_RECEIPT="$install_receipt"');
+    expect(guide).toContain('FACTORY_LIFECYCLE_ARTIFACT_IDENTITY="$artifact_identity"');
+    expect(guide).toContain(
+      'FACTORY_LIFECYCLE_ACK="$repository:$unit:install-start,install-uninstall,busy,killed-owner,cleanup"',
+    );
+    expect(guide).toContain("kernel-authoritative FLOCK waiting evidence");
+    expect(guide).toContain("production lock file descriptor, device, and inode");
+    expect(guide).toContain("matching pending `FLOCK` entry in\n`/proc/locks`");
+    expect(guide).toContain("`locks_lock_inode_wait` kernel wait channel");
+    expect(guide).toContain("without deleting or replacing the production\nlock inode");
+    expect(guide).toContain("no CLI or MCP operation");
+    expect(guide).toContain("performs no automatic unit cleanup");
+    expect(guide).toContain("The stdout pass receipt is\nsafe to attach to the issue");
+    expect(guide).toContain("local paths stay in that file");
+  });
+
   it.each([
     "docs/release-evidence/private-observation.json",
     "docs/IMPLEMENTATION-HANDOFF.md",

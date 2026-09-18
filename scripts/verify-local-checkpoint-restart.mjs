@@ -56,6 +56,7 @@ import {
 import { boundedQualificationEvidenceText } from "./qualification-evidence-boundary.mjs";
 import { assertPhaseKillRecovery } from "./qualification-director-contention.mjs";
 import {
+  installedCompilerPreflight,
   installedQualificationAuthority,
   qualificationRuntimeEnvironment,
 } from "./qualification-install-identity.mjs";
@@ -2053,6 +2054,21 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
         await request("GET /repos/{owner}/{repo}/commits/{ref}", { ref: repository.default_branch })
       ).data.sha;
       assert.equal(command("git", ["rev-parse", "HEAD"], authority.checkout), evidence.base);
+      evidence.compilerPreflight = installedCompilerPreflight({
+        factoryCli: candidate.factoryCli,
+        checkout: authority.checkout,
+        baseSha: evidence.base,
+        policy: authority.policy,
+        environment: runtimeEnvironment,
+      });
+      save();
+      assert.equal(
+        evidence.compilerPreflight.result,
+        "passed",
+        `compiler preflight blocked: ${evidence.compilerPreflight.validation.violations
+          .map(({ code }) => code)
+          .join(", ")}`,
+      );
       const issues = await list("GET /repos/{owner}/{repo}/issues", { state: "all" });
       assert.ok(
         !issues.some((issue) =>

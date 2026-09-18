@@ -15,8 +15,9 @@ linear-stack operation.
 ## Setup and authority
 
 Use an explicitly authorized private disposable GitHub repository whose default branch has a
-dependency-free ESM `package.json` with `"type":"module"` and `"scripts":{"test":"node --test"}`, plus a passing initial
-smoke test. Clone it to Linux-native storage; its clean HEAD must match GitHub's default branch. The
+dependency-free ESM `package.json` with `"type":"module"` and `"scripts":{"test":"node --test"}`,
+the committed `package-lock.json` that completes npm's root authority, and a passing initial smoke
+test. Clone it to Linux-native storage; its clean HEAD must match GitHub's default branch. The
 six new `src/factory-qualification/NAMESPACE/{clamp,slugify,describe}.js` and
 `test/factory-qualification/NAMESPACE/{clamp,slugify,describe}.test.js` paths must be absent.
 The namespace must be unused across all repository issues. Set an 8–48 character lowercase namespace
@@ -28,6 +29,9 @@ Preflight requires push permission, an unarchived private repository, an unprote
 no active repository rulesets, no open prior Factory PRs, and at least 1,000 remaining REST requests
 and 1,000 GraphQL points. Use an appropriate disposable repository; do not weaken a production
 repository to run this exercise. Preserve GitHub event comments and partial results as evidence.
+The exact retained CLI also evaluates the pinned base with Factory's production compiler adapters
+and request validator. Partial or mixed authority, or a base with neither an observed validation
+recipe nor a policy-eligible deferred adapter, blocks before Objective creation or model use.
 
 Install the retained npm and Agent Plugin candidate first and set
 `FACTORY_QUALIFICATION_INSTALL_RECEIPT` to its owner-private `install-identities.txt`. Before any

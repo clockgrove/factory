@@ -1066,6 +1066,7 @@ describe("installed live Objective harness evidence boundary", () => {
       checkout: { clean: true, headMatchesDefault: true, fixturePathsAbsent: true },
       harness: { sourceTreeClean: true, candidateInventorySha256: "candidate" },
       installedArtifact: { inventorySha256: "candidate" },
+      compiler: { result: "passed" },
       repository: { private: true, archived: false, permissions: { push: true } },
       branch: { protected: false },
       rulesets: [],
@@ -1077,6 +1078,20 @@ describe("installed live Objective harness evidence boundary", () => {
     expect(assessQualificationPreflight(ready)).toMatchObject({
       result: "passed",
       blockers: [],
+    });
+    expect(
+      assessQualificationPreflight({
+        ...ready,
+        compiler: {
+          result: "blocked",
+          validation: {
+            violations: [{ code: "partial-toolchain-authority" }],
+          },
+        },
+      }),
+    ).toMatchObject({
+      result: "blocked",
+      blockers: ["compiler-toolchain-authority-unusable"],
     });
     expect(
       assessQualificationPreflight({

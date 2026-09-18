@@ -288,12 +288,23 @@ describe("explicit plan pinned LFS preflight", () => {
         const provenance = {
           promptDigest: "1".repeat(64),
           schemaDigest: "2".repeat(64),
+          promptBytes: 100,
+          schemaBytes: 200,
+          sizeSource: "provider-dispatch" as const,
           baseSha: request.baseSha,
           model: null,
           reasoning: null,
           requestDigest: compilerEvalDigest(request),
         };
-        const result = { request, proposal, report, usage, provenance };
+        const result = {
+          request,
+          proposal,
+          report,
+          usage,
+          provenance,
+          responseBytes: 100,
+          responseBytesSource: "canonical-structured-value" as const,
+        };
         await checkpoint(result);
         return result;
       },

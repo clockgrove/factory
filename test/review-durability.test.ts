@@ -114,8 +114,18 @@ describe("durable semantic review transaction", () => {
   it("retains exact malformed-response usage when private cleanup also fails before a checkpoint", async () => {
     const failure = new ReviewCheckoutCleanupError(
       Error("owned checkout removal failed"),
-      new ManagementOutputError(Error("malformed paid review"), result.usage),
+      new ManagementOutputError(
+        Error("malformed paid review"),
+        result.usage,
+        undefined,
+        43,
+        "provider-final-response",
+      ),
     );
+    expect(failure).toMatchObject({
+      responseBytes: 43,
+      responseBytesSource: "provider-final-response",
+    });
     const recordFailureUsage = vi.fn();
     const recordOutcome = vi.fn();
     const recordUsage = vi.fn();

@@ -45,16 +45,33 @@ export class ProviderQuotaError extends Error {
   readonly gate: ProviderQuotaGate;
   usage: ProviderQuotaUsage | undefined;
   invocationId: string | undefined;
+  responseBytes: number | undefined;
+  responseBytesSource:
+    | "provider-final-response"
+    | "canonical-structured-value"
+    | "no-structured-response"
+    | undefined;
 
   constructor(
     gate: ProviderQuotaGate,
-    options: { usage?: ProviderQuotaUsage; invocationId?: string; cause?: unknown } = {},
+    options: {
+      usage?: ProviderQuotaUsage;
+      invocationId?: string;
+      cause?: unknown;
+      responseBytes?: number;
+      responseBytesSource?:
+        | "provider-final-response"
+        | "canonical-structured-value"
+        | "no-structured-response";
+    } = {},
   ) {
     super(gate.message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = "ProviderQuotaError";
     this.gate = { ...gate };
     this.usage = options.usage ? { ...options.usage } : undefined;
     this.invocationId = options.invocationId;
+    this.responseBytes = options.responseBytes;
+    this.responseBytesSource = options.responseBytesSource;
   }
 
   bindInvocation(invocationId: string): this {
@@ -86,6 +103,12 @@ export function preserveProviderQuotaError(
   return new ProviderQuotaError(error.gate, {
     ...(error.usage ? { usage: error.usage } : {}),
     ...(error.invocationId ? { invocationId: error.invocationId } : {}),
+    ...(error.responseBytes === undefined || error.responseBytesSource === undefined
+      ? {}
+      : {
+          responseBytes: error.responseBytes,
+          responseBytesSource: error.responseBytesSource,
+        }),
     cause: error.cause === undefined ? cause : new AggregateError([error.cause, cause], message),
   });
 }

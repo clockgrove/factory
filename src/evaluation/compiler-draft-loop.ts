@@ -26,13 +26,18 @@ import {
 import {
   type CompilerDraftManager,
   CompilerDraftReservationConflictError,
+  canonicalDraftJson,
   draftDigest,
   type CompilerDraftBinding,
   type CompilerDraftRecord,
 } from "../control/compiler-drafts.js";
 import type { LeaseState } from "../control/lease.js";
 import { ProviderQuotaError } from "../providers/quota.js";
-import { managementFailureProvenance, managementTerminalOutcome } from "../management/backend.js";
+import {
+  managementFailureProvenance,
+  managementFailureResponseSize,
+  managementTerminalOutcome,
+} from "../management/backend.js";
 import {
   ObligationInventorySchema,
   repairableCompilerJudgeVerdict,
@@ -126,6 +131,9 @@ const CompilerInvocationProvenanceSchema = z
   .object({
     promptDigest: z.string().regex(/^[0-9a-f]{64}$/),
     schemaDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    promptBytes: z.number().int().nonnegative().safe(),
+    schemaBytes: z.number().int().nonnegative().safe(),
+    sizeSource: z.enum(["provider-dispatch", "local-callback"]),
     baseSha: z.string().regex(/^[0-9a-f]{40,64}$/),
     model: z.string().min(1).max(200).nullable(),
     reasoning: z.string().min(1).max(200).nullable(),
@@ -190,6 +198,8 @@ export class CompilerDraftTerminalOutcomeError extends Error {
     );
     this.name = "CompilerDraftTerminalOutcomeError";
     if (typeof cause === "object" && cause !== null) Object.assign(this, cause);
+    const responseSize = managementFailureResponseSize(cause);
+    if (responseSize) Object.assign(this, responseSize);
     this.terminalOutcome = DraftTerminalOutcomeSchema.parse(terminalOutcome);
     if (parsedDiagnostic) this.timeoutDiagnostic = parsedDiagnostic;
     if (provenance) Object.assign(this, { provenance });
@@ -248,6 +258,11 @@ export interface DraftInvocationResult {
   value: unknown;
   usage: DraftUsage | null;
   provenance?: z.infer<typeof CompilerInvocationProvenanceSchema>;
+  responseBytes?: number;
+  responseBytesSource?:
+    | "provider-final-response"
+    | "canonical-structured-value"
+    | "no-structured-response";
   terminalOutcome?: DraftTerminalOutcome;
 }
 export interface DraftReservationEvidence {
@@ -632,6 +647,22 @@ export function validateCompilerDraftJournal(
         record.payload.cleanupDiagnostic === undefined
           ? undefined
           : boundedText(4_000).parse(record.payload.cleanupDiagnostic);
+      const responseBytes =
+        record.payload.responseBytes === undefined
+          ? undefined
+          : z.number().int().nonnegative().safe().parse(record.payload.responseBytes);
+      const responseBytesSource =
+        record.payload.responseBytesSource === undefined
+          ? undefined
+          : z
+              .enum([
+                "provider-final-response",
+                "canonical-structured-value",
+                "no-structured-response",
+              ])
+              .parse(record.payload.responseBytesSource);
+      if ((responseBytes === undefined) !== (responseBytesSource === undefined))
+        throw new Error("compiler result response size provenance is incomplete");
       if (localTerminal) {
         if (
           usage !== null ||
@@ -642,7 +673,8 @@ export function validateCompilerDraftJournal(
           record.payload.provenance !== undefined ||
           terminalOutcome !== undefined ||
           timeoutDiagnostic !== undefined ||
-          cleanupDiagnostic !== undefined
+          cleanupDiagnostic !== undefined ||
+          responseBytes !== undefined
         )
           throw new Error("compiler pre-provider terminal payload is invalid");
       } else {
@@ -657,6 +689,8 @@ export function validateCompilerDraftJournal(
           draftDigest(provenance) !== draftDigest(intent.payload.expectedProvenance)
         )
           throw new Error("compiler result provenance differs from reserved invocation");
+        if (responseBytes === undefined)
+          throw new Error("compiler result lacks response size provenance");
         if (hasError ? record.payload.value !== null : usage === null)
           throw new Error("compiler result terminal shape is invalid");
         if (!hasError && (record.payload.value === null || record.payload.stopReason !== undefined))
@@ -1125,9 +1159,11 @@ export async function runCompilerDraftLoop(args: {
       providerQuotaResult.payload.timeoutDiagnostic === undefined
         ? undefined
         : CompilerTimeoutDiagnosticSchema.parse(providerQuotaResult.payload.timeoutDiagnostic);
+    const responseSize = managementFailureResponseSize(providerQuotaResult.payload);
     const recovered = new ProviderQuotaError(gate, {
       invocationId,
       ...(usage ? { usage } : {}),
+      ...(responseSize ?? {}),
       ...(cleanupDiagnostic ? { cause: new Error(cleanupDiagnostic) } : {}),
     });
     if (cleanupDiagnostic) Object.assign(recovered, { cleanupDiagnostic });
@@ -1359,6 +1395,15 @@ export async function runCompilerDraftLoop(args: {
         expectedProvenance: {
           promptDigest: inputDigest,
           schemaDigest: draftDigest({ protocol: "clockgrove.factory/local-draft-callback", stage }),
+          promptBytes: Buffer.byteLength(inputDigest, "utf8"),
+          schemaBytes: Buffer.byteLength(
+            canonicalDraftJson({
+              protocol: "clockgrove.factory/local-draft-callback",
+              stage,
+            }),
+            "utf8",
+          ),
+          sizeSource: "local-callback",
           baseSha: binding.baseSha,
           model: null,
           reasoning: null,
@@ -1399,6 +1444,26 @@ export async function runCompilerDraftLoop(args: {
         result.terminalOutcome === undefined
           ? { success: true as const, data: undefined }
           : DraftTerminalOutcomeSchema.safeParse(result.terminalOutcome);
+      const responseBytes =
+        result.responseBytes === undefined
+          ? callbacks.reserveAtDispatch
+            ? undefined
+            : Buffer.byteLength(canonicalDraftJson(result.value), "utf8")
+          : z.number().int().nonnegative().safe().parse(result.responseBytes);
+      const responseBytesSource =
+        result.responseBytesSource === undefined
+          ? callbacks.reserveAtDispatch
+            ? undefined
+            : "canonical-structured-value"
+          : z
+              .enum([
+                "provider-final-response",
+                "canonical-structured-value",
+                "no-structured-response",
+              ])
+              .parse(result.responseBytesSource);
+      if ((responseBytes === undefined) !== (responseBytesSource === undefined))
+        throw new Error("compiler result response size provenance is incomplete");
       const effectiveProvenance =
         parsedProvenance.success && parsedProvenance.data
           ? parsedProvenance.data
@@ -1409,6 +1474,9 @@ export async function runCompilerDraftLoop(args: {
         value: result.value,
         usage: parsedUsage.success ? parsedUsage.data : null,
         ...(effectiveProvenance ? { provenance: effectiveProvenance } : {}),
+        ...(responseBytes === undefined || responseBytesSource === undefined
+          ? {}
+          : { responseBytes, responseBytesSource }),
         ...(parsedTerminalOutcome.success && parsedTerminalOutcome.data
           ? { terminalOutcome: parsedTerminalOutcome.data }
           : {}),
@@ -1434,6 +1502,8 @@ export async function runCompilerDraftLoop(args: {
         throw new Error("compiler result has invalid invocation provenance");
       if (!parsedTerminalOutcome.success)
         throw new Error("compiler result has invalid terminal outcome");
+      if (callbacks.reserveAtDispatch && responseBytes === undefined)
+        throw new Error("compiler provider result lacks response size provenance");
       if (
         reservedExpectedProvenance !== undefined &&
         (!effectiveProvenance ||
@@ -1460,6 +1530,9 @@ export async function runCompilerDraftLoop(args: {
           value: result.value,
           usage,
           ...(effectiveProvenance ? { provenance: effectiveProvenance } : {}),
+          ...(responseBytes === undefined || responseBytesSource === undefined
+            ? {}
+            : { responseBytes, responseBytesSource }),
           ...(terminalOutcome ? { terminalOutcome } : {}),
           ...timing(),
         });
@@ -1473,6 +1546,9 @@ export async function runCompilerDraftLoop(args: {
         value: result.value,
         usage,
         ...(effectiveProvenance ? { provenance: effectiveProvenance } : {}),
+        ...(responseBytes === undefined || responseBytesSource === undefined
+          ? {}
+          : { responseBytes, responseBytesSource }),
         ...(terminalOutcome ? { terminalOutcome } : {}),
       };
     };
@@ -1481,6 +1557,7 @@ export async function runCompilerDraftLoop(args: {
       error.bindInvocation(invocationId);
       const gate = ProviderQuotaCheckpointSchema.parse(error.gate);
       const usage = error.usage ? UsageSchema.parse(error.usage) : null;
+      const responseSize = managementFailureResponseSize(error);
       const boundTerminalOutcome = managementTerminalOutcome(error);
       const terminalOutcome = callbacks.reserveAtDispatch
         ? DraftTerminalOutcomeSchema.parse(
@@ -1522,12 +1599,14 @@ export async function runCompilerDraftLoop(args: {
                 ? diagnostic(savedProviderQuota.cleanupDiagnostic)
                 : null,
             terminalOutcome: managementTerminalOutcome(savedProviderQuota),
+            responseSize: managementFailureResponseSize(savedProviderQuota) ?? null,
           }) !==
           draftDigest({
             gate,
             usage,
             cleanupDiagnostic: cleanupDiagnostic ?? null,
             terminalOutcome: terminalOutcome ?? null,
+            responseSize: responseSize ?? null,
           })
         )
           throw new Error("conflicting compiler provider refusal checkpoint");
@@ -1539,6 +1618,8 @@ export async function runCompilerDraftLoop(args: {
         revision,
         value: null,
         usage,
+        responseBytes: responseSize?.responseBytes ?? 0,
+        responseBytesSource: responseSize?.responseBytesSource ?? "no-structured-response",
         ...timing(),
         error: timeoutDiagnostic
           ? compilerTimeoutDiagnosticMessage(timeoutDiagnostic)
@@ -1643,6 +1724,44 @@ export async function runCompilerDraftLoop(args: {
             ? diagnostic(error.cleanupDiagnostic)
             : undefined;
         const recoveredProvenance = managementFailureProvenance(error);
+        const reportedResponseBytes =
+          typeof error === "object" &&
+          error !== null &&
+          "responseBytes" in error &&
+          typeof error.responseBytes === "number"
+            ? z.number().int().nonnegative().safe().parse(error.responseBytes)
+            : undefined;
+        const reportedResponseBytesSource =
+          typeof error === "object" &&
+          error !== null &&
+          "responseBytesSource" in error &&
+          (error.responseBytesSource === "provider-final-response" ||
+            error.responseBytesSource === "canonical-structured-value" ||
+            error.responseBytesSource === "no-structured-response")
+            ? error.responseBytesSource
+            : undefined;
+        if ((reportedResponseBytes === undefined) !== (reportedResponseBytesSource === undefined))
+          throw new Stop("invocation-response-size-provenance-unavailable");
+        if (
+          !preProviderTerminal &&
+          callbacks.reserveAtDispatch &&
+          reportedResponseBytes === undefined &&
+          (terminalOutcome?.state !== "provider-failed" || proposal.proposal !== undefined)
+        )
+          throw new Stop("invocation-response-size-provenance-unavailable");
+        const locallyReconstructedResponse =
+          !callbacks.reserveAtDispatch && proposal.proposal !== undefined
+            ? Buffer.byteLength(canonicalDraftJson(proposal.proposal), "utf8")
+            : 0;
+        const responseBytes = preProviderTerminal
+          ? undefined
+          : (reportedResponseBytes ?? locallyReconstructedResponse);
+        const responseBytesSource = preProviderTerminal
+          ? undefined
+          : (reportedResponseBytesSource ??
+            (proposal.proposal !== undefined && !callbacks.reserveAtDispatch
+              ? "canonical-structured-value"
+              : "no-structured-response"));
         const provenance = recoveredProvenance
           ? CompilerInvocationProvenanceSchema.safeParse(recoveredProvenance).data
           : !callbacks.reserveAtDispatch && reservedExpectedProvenance
@@ -1671,6 +1790,9 @@ export async function runCompilerDraftLoop(args: {
           ...(validationReport ? { validationReport } : {}),
           ...retainedRepairability,
           ...(!preProviderTerminal && provenance ? { provenance } : {}),
+          ...(!preProviderTerminal && responseBytes !== undefined
+            ? { responseBytes, responseBytesSource }
+            : {}),
           ...(!preProviderTerminal && terminalOutcome ? { terminalOutcome } : {}),
           ...(!preProviderTerminal && timeoutDiagnostic ? { timeoutDiagnostic } : {}),
           ...(cleanupDiagnostic ? { cleanupDiagnostic } : {}),

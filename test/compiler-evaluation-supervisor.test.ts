@@ -35,6 +35,9 @@ const usage = { inputTokens: 20, outputTokens: 10, cachedInputTokens: 4 };
 const invocationProvenance = (baseSha: string) => ({
   promptDigest: "a".repeat(64),
   schemaDigest: "b".repeat(64),
+  promptBytes: 100,
+  schemaBytes: 200,
+  sizeSource: "provider-dispatch" as const,
   baseSha,
   model: null,
   reasoning: null,
@@ -68,7 +71,13 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
         },
       ],
     };
-    const result = { inventory, provenance: invocationProvenance(context.baseSha), usage };
+    const result = {
+      inventory,
+      provenance: invocationProvenance(context.baseSha),
+      usage,
+      responseBytes: 100,
+      responseBytesSource: "canonical-structured-value" as const,
+    };
     await checkpoint(result);
     return result;
   };
@@ -200,6 +209,8 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
       verdict,
       provenance: invocationProvenance(context.compilation.baseSha),
       usage,
+      responseBytes: 100,
+      responseBytesSource: "canonical-structured-value" as const,
     };
     await checkpoint(result);
     return result;
@@ -442,7 +453,13 @@ describe("Supervisor compiler evaluation activation boundary", () => {
             },
           ],
         };
-        const result = { inventory, provenance: invocationProvenance(context.baseSha), usage };
+        const result = {
+          inventory,
+          provenance: invocationProvenance(context.baseSha),
+          usage,
+          responseBytes: 100,
+          responseBytesSource: "canonical-structured-value" as const,
+        };
         await checkpoint(result);
         return result;
       };
@@ -543,6 +560,8 @@ describe("Supervisor compiler evaluation activation boundary", () => {
           proposal,
           report,
           usage,
+          responseBytes: 100,
+          responseBytesSource: "canonical-structured-value" as const,
           provenance: {
             ...invocationProvenance(request.baseSha),
             requestDigest: compilerEvalDigest(request),
@@ -617,7 +636,13 @@ describe("Supervisor compiler evaluation activation boundary", () => {
             },
           ],
         };
-        const result = { inventory, provenance: invocationProvenance(context.baseSha), usage };
+        const result = {
+          inventory,
+          provenance: invocationProvenance(context.baseSha),
+          usage,
+          responseBytes: 100,
+          responseBytesSource: "canonical-structured-value" as const,
+        };
         await checkpoint(result);
         return result;
       };
@@ -708,6 +733,8 @@ describe("Supervisor compiler evaluation activation boundary", () => {
             proposal,
             report,
             usage,
+            responseBytes: 100,
+            responseBytesSource: "canonical-structured-value" as const,
             provenance: {
               ...invocationProvenance(request.baseSha),
               requestDigest: compilerEvalDigest(request),
@@ -734,6 +761,8 @@ describe("Supervisor compiler evaluation activation boundary", () => {
             proposal,
             validationReport: report,
             provenance: invocationProvenance(request.baseSha),
+            responseBytes: 100,
+            responseBytesSource: "canonical-structured-value" as const,
           }),
           { state: "succeeded", usage },
         );
@@ -800,6 +829,8 @@ describe("Supervisor compiler evaluation activation boundary", () => {
           verdict,
           provenance: invocationProvenance(context.compilation.baseSha),
           usage,
+          responseBytes: 100,
+          responseBytesSource: "canonical-structured-value" as const,
         };
         await checkpoint(result);
         return result;

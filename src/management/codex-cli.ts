@@ -1,6 +1,7 @@
 import { access, rm, symlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { createHash } from "node:crypto";
+import { canonicalDraftJson } from "../control/compiler-drafts.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -71,11 +72,13 @@ import {
 } from "../evaluation/compiler-draft-loop.js";
 import {
   attachableManagementFailure,
+  bindManagementFailureResponseSize,
   assertCompilationContextPolicyAuthority,
   bindManagementFailureProvenance,
   bindManagementTerminalOutcome,
   managementFailureDiagnostic,
   managementFailureProvenance,
+  managementFailureResponseSize,
   managementFailureUsage,
   managementTerminalOutcome,
   ManagementCleanupError,
@@ -134,6 +137,9 @@ function managementInvocationProvenance(
   return {
     promptDigest: managementTranscriptDigest(prompt),
     schemaDigest: managementTranscriptDigest(serializedSchema),
+    promptBytes: Buffer.byteLength(prompt, "utf8"),
+    schemaBytes: Buffer.byteLength(serializedSchema, "utf8"),
+    sizeSource: "provider-dispatch",
     model: context.modelSelection?.model ?? fallbackModel ?? null,
     reasoning: context.modelSelection?.reasoning ?? null,
     baseSha: context.baseSha,
@@ -567,17 +573,28 @@ function assertManagementUsage(value: unknown): ManagementUsage {
 export function parseManagementJsonlOutput<T>(stdout: string): {
   value: T;
   usage: ManagementUsage;
+  responseBytes: number;
+  responseBytesSource: "provider-final-response";
 } {
   try {
     return parseManagementJsonlResult<T>(stdout);
   } catch (error) {
     const usage = observedManagementCompletionUsage(stdout);
+    const responseSize =
+      observedManagementFinalResponseSize(stdout) ?? managementFailureResponseSize(error);
     if (error instanceof ProviderQuotaError) {
       if (usage) error.bindUsage(usage);
-      throw error;
+      throw responseSize ? bindManagementFailureResponseSize(error, responseSize) : error;
     }
-    if (usage) throw new ManagementOutputError(error, usage);
-    throw error;
+    if (usage)
+      throw new ManagementOutputError(
+        error,
+        usage,
+        undefined,
+        responseSize?.responseBytes ?? 0,
+        responseSize?.responseBytesSource ?? "no-structured-response",
+      );
+    throw responseSize ? bindManagementFailureResponseSize(error, responseSize) : error;
   }
 }
 
@@ -639,12 +656,17 @@ export function classifyManagementCliProcessFailure(
     throw new Error("management backend returned no process terminal evidence");
 
   const usage = observedManagementCompletionUsage(process.stdout) ?? null;
+  const responseSize = observedManagementFinalResponseSize(process.stdout);
   for (const event of managementJsonlEvents(process.stdout)) {
     const gate = githubCopilotQuotaFromStreamEvent(event);
     if (!gate) continue;
     const providerQuota = new ProviderQuotaError(gate, {
       ...(usage ? { usage } : {}),
       ...(invocationId ? { invocationId } : {}),
+      ...(responseSize ?? {
+        responseBytes: 0,
+        responseBytesSource: "no-structured-response" as const,
+      }),
     });
     return {
       error: providerQuota,
@@ -656,11 +678,22 @@ export function classifyManagementCliProcessFailure(
     };
   }
   if (process.exitCode === 0 && process.signal === null && !process.timedOut) return null;
-  const error = new Error(
-    `management backend failed: Codex CLI exited with status ${process.exitCode ?? "unknown"}${process.signal ? ` after signal ${process.signal}` : ""}${process.timedOut ? " after timeout" : ""}; inspect the local management transcript when enabled`,
+  const error = Object.assign(
+    new Error(
+      `management backend failed: Codex CLI exited with status ${process.exitCode ?? "unknown"}${process.signal ? ` after signal ${process.signal}` : ""}${process.timedOut ? " after timeout" : ""}; inspect the local management transcript when enabled`,
+    ),
+    responseSize ?? { responseBytes: 0, responseBytesSource: "no-structured-response" as const },
   );
   return {
-    error: usage ? new ManagementOutputError(error, usage) : error,
+    error: usage
+      ? new ManagementOutputError(
+          error,
+          usage,
+          undefined,
+          error.responseBytes,
+          error.responseBytesSource,
+        )
+      : error,
     usage,
     providerQuota: null,
     ...(process.timedOut && process.durationMs !== undefined
@@ -669,7 +702,36 @@ export function classifyManagementCliProcessFailure(
   };
 }
 
-function parseManagementJsonlResult<T>(stdout: string): { value: T; usage: ManagementUsage } {
+function observedManagementFinalResponseSize(
+  stdout: string,
+): { responseBytes: number; responseBytesSource: "provider-final-response" } | undefined {
+  let finalResponse: string | undefined;
+  for (const event of managementJsonlEvents(stdout)) {
+    if (
+      event.type === "item.completed" &&
+      event.item !== null &&
+      typeof event.item === "object" &&
+      "type" in event.item &&
+      event.item.type === "agent_message" &&
+      "text" in event.item &&
+      typeof event.item.text === "string"
+    )
+      finalResponse = event.item.text;
+  }
+  return finalResponse === undefined
+    ? undefined
+    : {
+        responseBytes: Buffer.byteLength(finalResponse, "utf8"),
+        responseBytesSource: "provider-final-response",
+      };
+}
+
+function parseManagementJsonlResult<T>(stdout: string): {
+  value: T;
+  usage: ManagementUsage;
+  responseBytes: number;
+  responseBytesSource: "provider-final-response";
+} {
   let finalResponse: string | undefined;
   let usage: ManagementUsage | undefined;
   let completionCount = 0;
@@ -727,9 +789,17 @@ function parseManagementJsonlResult<T>(stdout: string): { value: T; usage: Manag
   }
   if (!usage) throw new Error("management backend returned no model-token usage");
   try {
-    return { value: JSON.parse(finalResponse) as T, usage };
+    return {
+      value: JSON.parse(finalResponse) as T,
+      usage,
+      responseBytes: Buffer.byteLength(finalResponse, "utf8"),
+      responseBytesSource: "provider-final-response",
+    };
   } catch {
-    throw new Error("management backend returned invalid structured JSON");
+    throw Object.assign(new Error("management backend returned invalid structured JSON"), {
+      responseBytes: Buffer.byteLength(finalResponse, "utf8"),
+      responseBytesSource: "provider-final-response" as const,
+    });
   }
 }
 
@@ -912,6 +982,9 @@ export class CodexCliManagementBackend implements ManagementBackend {
     const invocationProvenance: CompilerInvocationProvenance = {
       promptDigest: managementTranscriptDigest(prompt),
       schemaDigest: managementTranscriptDigest(JSON.stringify(COMPILER_PROPOSAL_JSON_SCHEMA)),
+      promptBytes: Buffer.byteLength(prompt, "utf8"),
+      schemaBytes: Buffer.byteLength(JSON.stringify(COMPILER_PROPOSAL_JSON_SCHEMA), "utf8"),
+      sizeSource: "provider-dispatch",
       model: execution?.modelSelection?.model ?? this.#options.model ?? null,
       reasoning: execution?.modelSelection?.reasoning ?? null,
       baseSha: request.baseSha,
@@ -924,7 +997,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
           ? { mediaEgressDigest: execution.mediaPlanning.assetEgress.policyDigest }
           : {}),
     };
-    const { value, usage } = await withManagementProvenance(
+    const { value, usage, responseBytes, responseBytesSource } = await withManagementProvenance(
       this.#run<unknown>(
         execution?.repository ?? process.cwd(),
         COMPILER_PROPOSAL_JSON_SCHEMA,
@@ -969,7 +1042,13 @@ export class CodexCliManagementBackend implements ManagementBackend {
         const diagnostic = repeated
           ? new CompilerDraftStopError("compiler repair repeated the unchanged invalid proposal")
           : new Error(renderCompilerValidationReport(report));
-        const error = new ManagementOutputError(diagnostic, usage, value);
+        const error = new ManagementOutputError(
+          diagnostic,
+          usage,
+          value,
+          responseBytes,
+          responseBytesSource,
+        );
         throw Object.assign(error, { validationReport: report, provenance: invocationProvenance });
       }
       const result: CompilerProposalResult = {
@@ -977,6 +1056,8 @@ export class CodexCliManagementBackend implements ManagementBackend {
         proposal: checked.proposal,
         report,
         usage,
+        responseBytes,
+        responseBytesSource,
         provenance: {
           ...invocationProvenance,
           requestDigest: compilerEvalDigest(request),
@@ -988,9 +1069,12 @@ export class CodexCliManagementBackend implements ManagementBackend {
       const terminalError =
         error instanceof CompilerInvariantError || error instanceof ManagementOutputError
           ? error
-          : Object.assign(new ManagementOutputError(error, usage, value), {
-              provenance: invocationProvenance,
-            });
+          : Object.assign(
+              new ManagementOutputError(error, usage, value, responseBytes, responseBytesSource),
+              {
+                provenance: invocationProvenance,
+              },
+            );
       throw bindManagementTerminalOutcome(terminalError, succeededManagementOutcome(usage));
     }
   }
@@ -1102,7 +1186,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       context,
       this.#options.model,
     );
-    const { value, usage } = await withManagementProvenance(
+    const { value, usage, responseBytes, responseBytesSource } = await withManagementProvenance(
       this.#run<unknown>(
         context.repository,
         CODEX_OBLIGATION_SCHEMA,
@@ -1121,9 +1205,18 @@ export class CodexCliManagementBackend implements ManagementBackend {
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       throw bindManagementTerminalOutcome(
-        Object.assign(new ManagementOutputError(new CompilerDraftStopError(reason), usage), {
-          provenance,
-        }),
+        Object.assign(
+          new ManagementOutputError(
+            new CompilerDraftStopError(reason),
+            usage,
+            value,
+            responseBytes,
+            responseBytesSource,
+          ),
+          {
+            provenance,
+          },
+        ),
         succeededManagementOutcome(usage),
       );
     }
@@ -1132,19 +1225,31 @@ export class CodexCliManagementBackend implements ManagementBackend {
       inventory = hydrateObligationInventory(proposal, identity);
     } catch (error) {
       throw bindManagementTerminalOutcome(
-        Object.assign(new ManagementOutputError(error, usage, proposal), {
-          provenance,
-          repairableInvalidClaims: repairableInvalidClaimsEvidence(proposal),
-        }),
+        Object.assign(
+          new ManagementOutputError(error, usage, proposal, responseBytes, responseBytesSource),
+          {
+            provenance,
+            repairableInvalidClaims: repairableInvalidClaimsEvidence(proposal),
+          },
+        ),
         succeededManagementOutcome(usage),
       );
     }
-    const result: ObligationResult = { inventory, provenance, usage };
+    const result: ObligationResult = {
+      inventory,
+      provenance,
+      usage,
+      responseBytes,
+      responseBytesSource,
+    };
     try {
       await checkpoint(result);
     } catch (error) {
       throw bindManagementTerminalOutcome(
-        Object.assign(new ManagementOutputError(error, usage), { provenance }),
+        Object.assign(
+          new ManagementOutputError(error, usage, value, responseBytes, responseBytesSource),
+          { provenance },
+        ),
         succeededManagementOutcome(usage),
       );
     }
@@ -1193,7 +1298,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       compilation,
       this.#options.model,
     );
-    const { value, usage } = await withManagementProvenance(
+    const { value, usage, responseBytes, responseBytesSource } = await withManagementProvenance(
       this.#run<unknown>(
         compilation.repository,
         CODEX_PLAN_JUDGE_SCHEMA,
@@ -1216,12 +1321,21 @@ export class CodexCliManagementBackend implements ManagementBackend {
         addedEdges: projectionTrace.addedEdges,
         challenges,
       });
-      const result: PlanJudgeResult = { verdict, provenance, usage };
+      const result: PlanJudgeResult = {
+        verdict,
+        provenance,
+        usage,
+        responseBytes,
+        responseBytesSource,
+      };
       await checkpoint(result);
       return result;
     } catch (error) {
       throw bindManagementTerminalOutcome(
-        Object.assign(new ManagementOutputError(error, usage, value), { provenance }),
+        Object.assign(
+          new ManagementOutputError(error, usage, value, responseBytes, responseBytesSource),
+          { provenance },
+        ),
         succeededManagementOutcome(usage),
       );
     }
@@ -1372,7 +1486,12 @@ export class CodexCliManagementBackend implements ManagementBackend {
     beforeModelInvocation?: CompilerModelAdmission,
     expectedProvenance?: CompilerInvocationProvenance,
     mediaPaths: readonly string[] = [],
-  ): Promise<{ value: T; usage: ManagementUsage }> {
+  ): Promise<{
+    value: T;
+    usage: ManagementUsage;
+    responseBytes: number;
+    responseBytesSource: "provider-final-response" | "canonical-structured-value";
+  }> {
     assertProviderStructuredOutputSchema(schema);
     assertUtf8WithinBytes(prompt, MANAGEMENT_PROMPT_MAX_BYTES, "management prompt");
     assertNoSecretMaterial(prompt, "management prompt");
@@ -1399,6 +1518,12 @@ export class CodexCliManagementBackend implements ManagementBackend {
         transport: "structured-adapter",
       });
       let adapterReturned = false;
+      let adapterResponseSize:
+        | {
+            responseBytes: number;
+            responseBytesSource: "canonical-structured-value";
+          }
+        | undefined;
       try {
         const result = await this.#options.runStructured(
           cwd,
@@ -1408,6 +1533,10 @@ export class CodexCliManagementBackend implements ManagementBackend {
           effectiveTimeoutMs,
         );
         adapterReturned = true;
+        adapterResponseSize = {
+          responseBytes: Buffer.byteLength(canonicalDraftJson(result.value), "utf8"),
+          responseBytesSource: "canonical-structured-value",
+        };
         const usage = assertManagementUsage(result.usage);
         this.#finishTranscript(transcript, {
           state: "succeeded",
@@ -1417,9 +1546,12 @@ export class CodexCliManagementBackend implements ManagementBackend {
         return {
           value: result.value as T,
           usage,
+          ...adapterResponseSize,
         };
       } catch (error) {
-        const normalized = attachableManagementFailure(error);
+        const normalized = adapterResponseSize
+          ? bindManagementFailureResponseSize(error, adapterResponseSize)
+          : attachableManagementFailure(error);
         const state =
           adapterReturned || normalized instanceof ManagementOutputError
             ? "invalid-response"
@@ -1443,7 +1575,14 @@ export class CodexCliManagementBackend implements ManagementBackend {
     const codexHome = await (this.#options.createCodexHome ?? createIsolatedCodexHome)(
       "management",
     );
-    let output: { value: T; usage: ManagementUsage } | undefined;
+    let output:
+      | {
+          value: T;
+          usage: ManagementUsage;
+          responseBytes: number;
+          responseBytesSource: "provider-final-response" | "canonical-structured-value";
+        }
+      | undefined;
     let failed = false;
     let primaryError: unknown;
     let cliAdmission: number | void | CompilerModelAdmissionReceipt;
@@ -1628,6 +1767,8 @@ export class CodexCliManagementBackend implements ManagementBackend {
             output.usage,
             output.value,
             expectedProvenance,
+            output.responseBytes,
+            output.responseBytesSource,
           ),
           succeededManagementOutcome(output.usage),
         );

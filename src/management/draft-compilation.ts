@@ -108,6 +108,9 @@ function durableInvocationProvenance(
   return {
     promptDigest: provenance.promptDigest,
     schemaDigest: provenance.schemaDigest,
+    promptBytes: provenance.promptBytes,
+    schemaBytes: provenance.schemaBytes,
+    sizeSource: provenance.sizeSource,
     baseSha: provenance.baseSha,
     model: provenance.model,
     reasoning: provenance.reasoning,
@@ -551,6 +554,8 @@ export async function compileEvaluatedDraft(args: {
                 checkpoint({
                   value: result.inventory,
                   usage: result.usage,
+                  responseBytes: result.responseBytes,
+                  responseBytesSource: result.responseBytesSource,
                   terminalOutcome: succeededTerminalOutcome(result.usage),
                   ...durableInvocationProvenanceField(result.provenance),
                 }),
@@ -560,6 +565,8 @@ export async function compileEvaluatedDraft(args: {
             return {
               value: result.inventory,
               usage: result.usage,
+              responseBytes: result.responseBytes,
+              responseBytesSource: result.responseBytesSource,
               terminalOutcome: succeededTerminalOutcome(result.usage),
               ...durableInvocationProvenanceField(result.provenance),
             };
@@ -618,6 +625,8 @@ export async function compileEvaluatedDraft(args: {
                 checkpoint({
                   value: result.verdict,
                   usage: result.usage,
+                  responseBytes: result.responseBytes,
+                  responseBytesSource: result.responseBytesSource,
                   terminalOutcome: succeededTerminalOutcome(result.usage),
                   ...durableInvocationProvenanceField(result.provenance),
                 }),
@@ -626,6 +635,8 @@ export async function compileEvaluatedDraft(args: {
             return {
               value: result.verdict,
               usage: result.usage,
+              responseBytes: result.responseBytes,
+              responseBytesSource: result.responseBytesSource,
               terminalOutcome: succeededTerminalOutcome(result.usage),
               ...durableInvocationProvenanceField(result.provenance),
             };
@@ -722,6 +733,8 @@ export async function compileEvaluatedDraft(args: {
                   provenance: result.provenance,
                 },
                 usage: result.usage,
+                responseBytes: result.responseBytes,
+                responseBytesSource: result.responseBytesSource,
                 terminalOutcome: succeededTerminalOutcome(result.usage),
                 ...durableInvocationProvenanceField(result.provenance),
               }),
@@ -737,6 +750,8 @@ export async function compileEvaluatedDraft(args: {
               provenance: result.provenance,
             },
             usage: result.usage,
+            responseBytes: result.responseBytes,
+            responseBytesSource: result.responseBytesSource,
             terminalOutcome: succeededTerminalOutcome(result.usage),
             ...durableInvocationProvenanceField(result.provenance),
           };

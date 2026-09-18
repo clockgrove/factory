@@ -46,8 +46,8 @@ export type RecoveryReadStore = Pick<
 > &
   Partial<ResultReceiptReadStore> & {
     readStack?: (number: number) => Promise<GitHubStack>;
-    /** Exact-commit association hints only; never activation or integration authority. */
-    readCommitObjectiveCandidates?: (sha: string) => Promise<number[]>;
+    /** Exact-commit association or serialized-admission hints only; never authority. */
+    readCommitObjectiveCandidates?: (sha: string, branch: string) => Promise<number[]>;
     /** Complete GitHubReader-authenticated snapshot, not caller-supplied envelopes. */
     readObjectiveSnapshot?: (objective: number) => Promise<FactoryReadSnapshot>;
   };
@@ -185,8 +185,10 @@ export async function assessRecovery(input: {
     readChecks: (sha) => read(`checks:${sha}`, () => store.readChecks(sha)),
     ...(store.readCommitObjectiveCandidates
       ? {
-          readCommitObjectiveCandidates: (sha: string) =>
-            read(`peer-candidates:${sha}`, () => store.readCommitObjectiveCandidates!(sha)),
+          readCommitObjectiveCandidates: (sha: string, branch: string) =>
+            read(`peer-candidates:${branch}:${sha}`, () =>
+              store.readCommitObjectiveCandidates!(sha, branch),
+            ),
         }
       : {}),
     ...(store.readObjectiveSnapshot

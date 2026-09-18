@@ -291,8 +291,10 @@ export async function buildRecoveryProposal(input: {
     readChecks: (head) => read("checks", [head], () => input.store.readChecks(head)),
     ...(input.store.readCommitObjectiveCandidates
       ? {
-          readCommitObjectiveCandidates: (sha: string) =>
-            read("peer-candidates", [sha], () => input.store.readCommitObjectiveCandidates!(sha)),
+          readCommitObjectiveCandidates: (sha: string, branch: string) =>
+            read("peer-candidates", [sha, branch], () =>
+              input.store.readCommitObjectiveCandidates!(sha, branch),
+            ),
         }
       : {}),
     ...(input.store.readObjectiveSnapshot

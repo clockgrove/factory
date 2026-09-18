@@ -123,16 +123,7 @@ const recordSchema = z
     }
   });
 type Record = z.infer<typeof recordSchema>;
-type Store = Pick<
-  LeaseStore,
-  "readRef" | "readCommit" | "createCommit" | "createRef" | "compareAndSwapRef"
-> & {
-  prepareCompareAndSwapRefAtPublicationBoundary?(args: {
-    ref: string;
-    beforeOid: string;
-    afterOid: string;
-  }): Promise<() => Promise<boolean>>;
-  withMutationFence?<T>(fence: () => Promise<void>, operation: () => Promise<T>): Promise<T>;
+export type IntegrationAdmissionReadStore = Pick<LeaseStore, "readRef" | "readCommit"> & {
   readPullRequest(number: number): Promise<
     Awaited<ReturnType<PublicationStore["readPullRequest"]>> & {
       baseRepository?: string;
@@ -140,6 +131,16 @@ type Store = Pick<
     }
   >;
 };
+
+type Store = IntegrationAdmissionReadStore &
+  Pick<LeaseStore, "createCommit" | "createRef" | "compareAndSwapRef"> & {
+    prepareCompareAndSwapRefAtPublicationBoundary?(args: {
+      ref: string;
+      beforeOid: string;
+      afterOid: string;
+    }): Promise<() => Promise<boolean>>;
+    withMutationFence?<T>(fence: () => Promise<void>, operation: () => Promise<T>): Promise<T>;
+  };
 
 /** Only serializes the irreversible default-branch boundary. It grants no Objective,
  * worker, validation, spending or publication authority. No expiry can steal a dispatch. */
@@ -164,6 +165,7 @@ export class IntegrationAdmissionPendingError extends Error {
  * window. Once it elapses, another fenced Objective may replace the preparation by
  * CAS. A dispatched claim never expires. */
 export const INTEGRATION_PREPARATION_TIMEOUT_MS = 120_000;
+export const INTEGRATION_ADMISSION_DISCOVERY_RECORD_LIMIT = 512;
 
 function parse(message: string): Record {
   if (Buffer.byteLength(message) > 65536) throw Error("integration admission record exceeds bound");
@@ -175,7 +177,7 @@ function parse(message: string): Record {
 }
 
 async function confirmedOutcome(
-  store: Store,
+  store: IntegrationAdmissionReadStore,
   identity: IntegrationAdmissionIdentity,
 ): Promise<Extract<z.infer<typeof outcomeSchema>, { kind: "confirmed" }> | null> {
   let parent = identity.baseSha;
@@ -202,6 +204,83 @@ async function confirmedOutcome(
     mergeCommitShas.push(commit.oid);
   }
   return { kind: "confirmed", mergeCommitShas };
+}
+
+async function dispatchedMergeMatches(
+  store: IntegrationAdmissionReadStore,
+  record: Record,
+  mergeSha: string,
+): Promise<boolean> {
+  if (record.state !== "dispatched" || !record.dispatch) return false;
+  let matched = false;
+  for (const member of record.identity.members ?? [record.identity]) {
+    const pull = await store.readPullRequest(member.pullRequest);
+    if (!pull.merged || pull.mergeCommitSha !== mergeSha) continue;
+    if (matched) throw Error("dispatched integration merge ownership is ambiguous");
+    if (
+      pull.headSha !== member.headSha ||
+      (!record.identity.members && pull.baseRef !== record.identity.branch) ||
+      pull.baseRepository?.toLowerCase() !== record.identity.repository.toLowerCase() ||
+      pull.headRepository?.toLowerCase() !== record.identity.repository.toLowerCase()
+    )
+      throw Error("dispatched integration PR identity changed");
+    matched = true;
+  }
+  return matched;
+}
+
+const discoveryInputSchema = z
+  .object({
+    repository: z.string().regex(/^[^/]+\/[^/]+$/),
+    branch: z.string().min(1).max(1024),
+    mergeSha: gitSha,
+  })
+  .strict();
+
+/** Read-only discovery hints from Factory's existing repository integration journal.
+ * The returned Objective numbers grant no activation, execution, or integration authority. */
+export async function readIntegrationAdmissionObjectiveCandidates(
+  store: IntegrationAdmissionReadStore,
+  input: { repository: string; branch: string; mergeSha: string },
+): Promise<number[]> {
+  const requested = discoveryInputSchema.parse(input);
+  let oid = await store.readRef(integrationAdmissionRef(requested.repository, requested.branch));
+  if (!oid) return [];
+
+  const visited = new Set<string>();
+  for (let reads = 0; reads < INTEGRATION_ADMISSION_DISCOVERY_RECORD_LIMIT; reads += 1) {
+    gitSha.parse(oid);
+    if (visited.has(oid)) throw Error("integration admission discovery chain is cyclic");
+    visited.add(oid);
+    const commit = await store.readCommit(oid);
+    if (commit.oid !== oid) throw Error("integration admission discovery OID changed");
+    if (commit.parentOids.length !== 1)
+      throw Error("integration admission discovery record lacks one parent");
+    const record = parse(commit.message);
+    if (
+      record.identity.repository.toLowerCase() !== requested.repository.toLowerCase() ||
+      record.identity.branch !== requested.branch
+    )
+      throw Error("integration admission discovery scope changed");
+
+    let mergeMatches =
+      record.state === "released" &&
+      record.outcome?.kind === "confirmed" &&
+      record.outcome.mergeCommitShas.includes(requested.mergeSha);
+    mergeMatches ||= await dispatchedMergeMatches(store, record, requested.mergeSha);
+    if (mergeMatches) {
+      // The nearest exact journal match is only a discovery hint. Returning it
+      // avoids making mature repositories replay their complete admission history;
+      // the caller still authenticates the Objective and exact integration.
+      return [record.identity.objective];
+    }
+
+    const parent = commit.parentOids[0]!;
+    gitSha.parse(parent);
+    if (parent === record.identity.baseSha) return [];
+    oid = parent;
+  }
+  throw Error("integration admission discovery exceeds its record-read bound");
 }
 
 export interface IntegrationAdmission {

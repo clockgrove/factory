@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   withIntegrationAdmission,
   integrationAdmissionRef,
+  readIntegrationAdmissionObjectiveCandidates,
+  INTEGRATION_ADMISSION_DISCOVERY_RECORD_LIMIT,
   INTEGRATION_PREPARATION_TIMEOUT_MS,
   IntegrationAdmissionPendingError,
+  type IntegrationAdmissionReadStore,
   type IntegrationAdmissionIdentity,
 } from "../src/control/integration-admission.js";
 import type { GitCommitObject } from "../src/control/lease.js";
@@ -563,5 +566,205 @@ describe("short cross-session default-branch admission", () => {
       f.fence,
       async () => "wait",
     );
+  });
+});
+
+describe("integration-admission Objective discovery hints", () => {
+  const candidates = (store: IntegrationAdmissionReadStore, mergeSha: string): Promise<number[]> =>
+    readIntegrationAdmissionObjectiveCandidates(store, {
+      repository: "o/r",
+      branch: "main",
+      mergeSha,
+    });
+
+  const decodeRecord = (message: string) => {
+    const line = message.split(/\r?\n/).find((value) => value.startsWith("Factory-Integration: "))!;
+    return JSON.parse(Buffer.from(line.slice(21), "base64url").toString("utf8"));
+  };
+  const encodeRecord = (value: unknown) =>
+    `Factory default-branch integration\n\nFactory-Integration: ${Buffer.from(
+      JSON.stringify(value),
+    ).toString("base64url")}`;
+
+  it("finds a released exact merge without relying on provider association indexing", async () => {
+    const f = fixture();
+    const mergeSha = await withIntegrationAdmission(f.store, identity, f.fence, async (claim) => {
+      await claim.markDispatched("regular");
+      return f.merge(identity);
+    });
+
+    f.store.readCommit.mockClear();
+    await expect(candidates(f.store, mergeSha)).resolves.toEqual([1]);
+    expect(f.store.readCommit).toHaveBeenCalledOnce();
+    await expect(candidates(f.store, sha(98))).resolves.toEqual([]);
+  });
+
+  it("does not treat a prepared claim as evidence even if its PR merges externally", async () => {
+    const f = fixture();
+    let prepared!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      prepared = resolve;
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const admission = withIntegrationAdmission(f.store, identity, f.fence, async () => {
+      prepared();
+      await held;
+      return "not-dispatched";
+    });
+    await ready;
+    const mergeSha = await f.merge(identity);
+
+    await expect(candidates(f.store, mergeSha)).resolves.toEqual([]);
+    release();
+    await admission;
+  });
+
+  it("finds the exact dispatched PR during the merge-visible release-record race", async () => {
+    const f = fixture();
+    let reportMerge!: (mergeSha: string) => void;
+    const merged = new Promise<string>((resolve) => {
+      reportMerge = resolve;
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const integration = withIntegrationAdmission(f.store, identity, f.fence, async (claim) => {
+      await claim.markDispatched("regular");
+      const mergeSha = await f.merge(identity);
+      reportMerge(mergeSha);
+      await held;
+      return mergeSha;
+    });
+    const mergeSha = await merged;
+
+    await expect(candidates(f.store, mergeSha)).resolves.toEqual([1]);
+    release();
+    await expect(integration).resolves.toBe(mergeSha);
+  });
+
+  it("finds an exact dispatched native member before the remaining members merge", async () => {
+    const f = fixture();
+    const native: IntegrationAdmissionIdentity = {
+      ...identity,
+      pullRequest: 12,
+      headSha: sha(12),
+      outputTreeSha: sha(22),
+      members: [
+        { pullRequest: 11, headSha: sha(11), outputTreeSha: sha(21) },
+        { pullRequest: 12, headSha: sha(12), outputTreeSha: sha(22) },
+      ],
+    };
+    let reportMerge!: (mergeSha: string) => void;
+    const merged = new Promise<string>((resolve) => {
+      reportMerge = resolve;
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const integration = withIntegrationAdmission(f.store, native, f.fence, async (claim) => {
+      await claim.markDispatched("native");
+      const firstMerge = await f.merge(identity);
+      reportMerge(firstMerge);
+      await held;
+      await f.merge(native, firstMerge);
+      return firstMerge;
+    });
+    const firstMerge = await merged;
+
+    await expect(candidates(f.store, firstMerge)).resolves.toEqual([1]);
+    release();
+    await integration;
+  });
+
+  it.each([
+    ["head", { headSha: sha(77) }],
+    ["base branch", { baseRef: "other" }],
+    ["head repository", { headRepository: "x/y" }],
+    ["base repository", { baseRepository: "x/y" }],
+  ])("refuses a dispatched PR with changed %s identity", async (_name, changed) => {
+    const f = fixture();
+    let reportMerge!: (mergeSha: string) => void;
+    const merged = new Promise<string>((resolve) => {
+      reportMerge = resolve;
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const integration = withIntegrationAdmission(f.store, identity, f.fence, async (claim) => {
+      await claim.markDispatched("regular");
+      const mergeSha = await f.merge(identity);
+      reportMerge(mergeSha);
+      await held;
+      return mergeSha;
+    });
+    const mergeSha = await merged;
+    const readStore: IntegrationAdmissionReadStore = {
+      ...f.store,
+      readPullRequest: async (number) => ({
+        ...(await f.store.readPullRequest(number)),
+        ...changed,
+      }),
+    };
+
+    await expect(candidates(readStore, mergeSha)).rejects.toThrow(
+      "dispatched integration PR identity changed",
+    );
+    release();
+    await integration;
+  });
+
+  it("fails closed on an ambiguous record, changed scope, and a cyclic chain", async () => {
+    const ambiguous = fixture();
+    await withIntegrationAdmission(ambiguous.store, identity, ambiguous.fence, async () => "wait");
+    const ambiguousOid = ambiguous.refs.get(integrationAdmissionRef("o/r", "main"))!;
+    ambiguous.commits.get(ambiguousOid)!.message +=
+      "\nFactory-Integration: eyJub3QiOiJhIHJlY29yZCJ9";
+    await expect(candidates(ambiguous.store, sha(98))).rejects.toThrow("missing or ambiguous");
+
+    const changedScope = fixture();
+    await withIntegrationAdmission(
+      changedScope.store,
+      identity,
+      changedScope.fence,
+      async () => "wait",
+    );
+    const changedOid = changedScope.refs.get(integrationAdmissionRef("o/r", "main"))!;
+    const changedCommit = changedScope.commits.get(changedOid)!;
+    const changedRecord = decodeRecord(changedCommit.message);
+    changedRecord.identity.repository = "x/y";
+    changedCommit.message = encodeRecord(changedRecord);
+    await expect(candidates(changedScope.store, sha(98))).rejects.toThrow("scope changed");
+
+    const cyclic = fixture();
+    await withIntegrationAdmission(cyclic.store, identity, cyclic.fence, async () => "wait");
+    const cyclicOid = cyclic.refs.get(integrationAdmissionRef("o/r", "main"))!;
+    cyclic.commits.get(cyclicOid)!.parentOids = [cyclicOid];
+    await expect(candidates(cyclic.store, sha(98))).rejects.toThrow("cyclic");
+  });
+
+  it("fails closed when record traversal exceeds its bound", async () => {
+    const records = fixture();
+    await withIntegrationAdmission(records.store, identity, records.fence, async () => "wait");
+    const recordsRef = integrationAdmissionRef("o/r", "main");
+    let parent = records.refs.get(recordsRef)!;
+    const record = decodeRecord(records.commits.get(parent)!.message);
+    for (let index = 0; index < INTEGRATION_ADMISSION_DISCOVERY_RECORD_LIMIT; index += 1) {
+      parent = await records.store.createCommit({
+        treeOid: sha(2),
+        parentOids: [parent],
+        message: encodeRecord({
+          ...record,
+          nonce: `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`,
+        }),
+      });
+    }
+    records.refs.set(recordsRef, parent);
+    await expect(candidates(records.store, sha(98))).rejects.toThrow("record-read bound");
   });
 });

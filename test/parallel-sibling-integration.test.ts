@@ -54,6 +54,7 @@ import { PlatformUnavailableError } from "../src/platform.js";
 import { parseIssueAdmissionCommit } from "../src/control/issue-admission.js";
 import {
   integrationAdmissionRef,
+  readIntegrationAdmissionObjectiveCandidates,
   withIntegrationAdmission,
 } from "../src/control/integration-admission.js";
 import * as cleanValidation from "../src/validation/clean-run.js";
@@ -81,6 +82,7 @@ async function fixture(
     missingPeerAccounting?: boolean;
     stalePeerSnapshot?: boolean;
     missingPeerHints?: boolean;
+    laggedPeerAssociation?: boolean;
     peerPullFault?: "unmerged" | "different-merge";
     peerIsolated?: boolean;
     externalAdvance?: boolean;
@@ -1161,6 +1163,34 @@ async function fixture(
     commits.get(reservedOid)!.message = encodeEventTrailer(
       item.factoryEvents.find((entry) => entry.event === "AttemptReserved")!,
     );
+    if (options.laggedPeerAssociation) {
+      const admissionOid = await storage.createCommit({
+        treeOid: (await readCommit(baseSha)).treeOid,
+        parentOids: [baseSha],
+        message: `Factory default-branch integration\n\nFactory-Integration: ${Buffer.from(
+          JSON.stringify({
+            protocol: "clockgrove.factory/integration-admission-v1",
+            identity: {
+              repository: "o/r",
+              branch: "main",
+              objective: 6,
+              runId: "peer",
+              epoch: 1,
+              pullRequest: 88,
+              headSha: peerHead,
+              baseSha,
+              outputTreeSha: peerTree,
+            },
+            nonce: "00000000-0000-4000-8000-000000000528",
+            preparedAt: now.toISOString(),
+            state: "released",
+            dispatch: { kind: "regular", pullRequest: 88, expectedHeadSha: peerHead },
+            outcome: { kind: "confirmed", mergeCommitShas: [peerMergeSha] },
+          }),
+        ).toString("base64url")}`,
+      });
+      refs.set(integrationAdmissionRef("o/r", "main"), admissionOid);
+    }
   }
   for (const name of Object.keys(storage) as Array<keyof CompiledGraphStore>) {
     // The complete immutable-store API is the transport boundary; no protocol
@@ -1183,8 +1213,39 @@ async function fixture(
   vi.spyOn(GitHubControlStore.prototype, "listRefs").mockImplementation(async (prefix) =>
     [...refs].filter(([ref]) => ref.startsWith(prefix)).map(([ref, id]) => ({ ref, oid: id })),
   );
+  const immediateCommitAssociations = vi.fn(async (_sha: string) => [] as number[]);
   vi.spyOn(GitHubControlStore.prototype, "readCommitObjectiveCandidates").mockImplementation(
-    async (sha) => (sha === peerMergeSha && !options.missingPeerHints ? [6] : []),
+    async (sha, branch) => {
+      if (sha === peerMergeSha && options.laggedPeerAssociation) {
+        const associated = await immediateCommitAssociations(sha);
+        if (associated.length) return associated;
+        return readIntegrationAdmissionObjectiveCandidates(
+          {
+            readRef: storage.readRef,
+            readCommit: storage.readCommit,
+            readPullRequest: async (number) => ({
+              number,
+              nodeId: `PR_${number}`,
+              baseRepository: "o/r",
+              headRepository: "o/r",
+              headRef: publicationBranch(7, number - 10, 1),
+              state: "open",
+              draft: false,
+              merged: false,
+              mergeable: true,
+              mergeableState: "clean",
+              headSha: heads[number - 18] ?? peerHead!,
+              baseRef: "main",
+              baseSha,
+              mergeCommitSha: null,
+              createdAt: now,
+            }),
+          },
+          { repository: "o/r", branch, mergeSha: sha },
+        );
+      }
+      return sha === peerMergeSha && !options.missingPeerHints ? [6] : [];
+    },
   );
   vi.spyOn(GitHubControlStore.prototype, "serverTime").mockImplementation(async () => new Date());
   vi.spyOn(GitHubControlStore.prototype, "getRepositoryFacts").mockResolvedValue({
@@ -1570,6 +1631,7 @@ async function fixture(
     lfsUpload,
     lfsRead,
     sourceArtifacts,
+    immediateCommitAssociations,
     failRemoteLfs: (failure: RemoteLfsFailure | null) => {
       remoteLfsFailure = failure;
     },
@@ -1774,6 +1836,28 @@ describe("Supervisor parallel independent sibling integration", () => {
     // Keep every acceptance assertion and a bounded per-case deadline.
     15000,
   );
+
+  it("completes through the admission journal while the immediate peer commit association is empty", async () => {
+    const f = await fixture({
+      regular: true,
+      peerAdvance: true,
+      laggedPeerAssociation: true,
+      stalePeerSnapshot: true,
+    });
+    const result = await f.run();
+    expect(result, result.reason).toMatchObject({ status: "completed" });
+    expect(f.immediateCommitAssociations).toHaveBeenCalledWith(f.peerMergeSha);
+    expect(f.immediateCommitAssociations.mock.calls).toSatisfy(
+      (calls: Array<[string]>) =>
+        calls.length > 0 && calls.every(([sha]) => sha === f.peerMergeSha),
+    );
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18, 19]);
+    expect(f.refresh).toHaveBeenCalled();
+    expect(f.validate).toHaveBeenCalled();
+    expect(f.review).toHaveBeenCalled();
+    expect(f.git("show", "HEAD:peer.txt")).toBe("peer");
+    expect(f.launch).not.toHaveBeenCalled();
+  }, 15_000);
 
   it.each([false, true])(
     "verifies an exact peer merge despite an OPEN linked-PR snapshot (regular=%s)",

@@ -16437,9 +16437,9 @@ export class FactorySupervisor {
     requiresIsolation: boolean;
     executionRequiresIsolation: boolean;
   } | null> {
-    const objectives = (await this.#store.readCommitObjectiveCandidates(mergeSha)).filter(
-      (number) => number !== receiver.number,
-    );
+    const objectives = (
+      await this.#store.readCommitObjectiveCandidates(mergeSha, receiver.defaultBranch)
+    ).filter((number) => number !== receiver.number);
     if (objectives.length > 100)
       throw new Error("repository integration provenance exceeds 100 Objectives");
     let proof: {

@@ -77,6 +77,7 @@ import {
   retireDiscoveryLocator,
   type DiscoveryLocatorScope,
 } from "./discovery-locators.js";
+import { readIntegrationAdmissionObjectiveCandidates } from "./integration-admission.js";
 
 const DISCOVERY_ISSUES = `query FactoryDiscoveryIssues($owner:String!, $repo:String!, $states:[IssueState!]!, $since:DateTime, $cursor:String) {
   repository(owner:$owner,name:$repo) {
@@ -1961,7 +1962,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
 
   /** Bounded discovery only: callers must authenticate each Objective's durable
    * run, graph, publication and exact merge proof before trusting these hints. */
-  async readCommitObjectiveCandidates(sha: string): Promise<number[]> {
+  async readCommitObjectiveCandidates(sha: string, branch: string): Promise<number[]> {
     if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error("invalid integration commit identity");
     const pulls = await this.#call(() =>
       this.#octokit.request("GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls", {
@@ -2007,6 +2008,15 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           if (issue.parent) candidates.add(issue.parent.number);
       }
     }
+    if (candidates.size === 0)
+      for (const objective of await readIntegrationAdmissionObjectiveCandidates(this, {
+        repository: `${this.#owner}/${this.#repo}`,
+        branch,
+        mergeSha: sha,
+      }))
+        candidates.add(objective);
+    if (candidates.size > 100)
+      throw new Error("integration Objective discovery exceeds bounded candidates");
     return [...candidates]
       .filter((number) => Number.isSafeInteger(number) && number > 0)
       .sort((a, b) => a - b);

@@ -1228,7 +1228,9 @@ The single-host controller defaults to two active Objectives (configurable 1–3
 paid, backend, path, and exclusive-resource limits. Starting cohorts reconstruct every resumed run's
 durable capacity before fresh admission. Receipt timestamps seed least-recently-served local
 fairness; unused shares are lent and releases wake waiting Supervisors. Historical peer receipts
-never activate a terminal run. An exact-commit PR association only discovers candidate Objectives;
+never activate a terminal run. An exact-commit PR association, or the newest exact matching record
+in Factory's serialized integration-admission journal while that association converges, only
+discovers candidate Objectives;
 authenticated explicit activation/recovery, a shared observed controller generation, immutable
 graph/projection, reservation, original acceptance/accounting, and actual exact squash/candidate
 proof establish permissible ancestry. Unrelated trunk changes remain a hard stop.

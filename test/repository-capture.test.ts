@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -48,6 +48,7 @@ import {
   executeLocalValidationCommand,
   executeLocalRepositoryCaptures,
   inspectLocalRepositoryCaptureDispatchState,
+  LocalRepositoryCaptureCommandFailure,
   localRepositoryCaptureScopeRecoveryAction,
   observeLocalValidationResult,
   persistLocalValidationResult,
@@ -123,6 +124,7 @@ async function checkpointMockCommand(env: NodeJS.ProcessEnv, command: string) {
       completedAt: "2026-09-16T00:00:00.001Z",
       stdout: "",
       stderr: "",
+      outcome: { kind: "command-exit", exitCode: 0 },
     }),
   );
 }
@@ -194,8 +196,73 @@ async function checkpointValidationCommand(args: {
       completedAt: "2026-09-17T00:00:00.001Z",
       stdout: args.stdout ?? "",
       stderr: args.stderr ?? "",
+      outcome: { kind: "command-exit", exitCode: args.exitCode ?? 0 },
     }),
   );
+}
+
+function shellArgument(value: string) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function captureNodeCommand(source: string) {
+  return `${shellArgument(process.execPath)} -e ${shellArgument(source)}`;
+}
+
+function runCaptureWrapper(input: {
+  executable: string;
+  args: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+}): { exitCode: number; durationMs: number; stdout: string; stderr: string } {
+  const began = Date.now();
+  const result = spawnSync(input.executable, input.args, {
+    cwd: input.cwd,
+    env: { ...process.env, ...input.env },
+    encoding: "utf8",
+  });
+  return {
+    exitCode: result.status ?? 1,
+    durationMs: Date.now() - began,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+}
+
+function captureTerminalPath(
+  root: string,
+  invocation: ValidationInvocation,
+  recipe: RepositoryCaptureRecipe,
+) {
+  return join(
+    root,
+    invocation.digest,
+    `terminal-capture-${sha(canonical(recipe.captureCommand))}.json`,
+  );
+}
+
+function captureRequestPath(
+  root: string,
+  invocation: ValidationInvocation,
+  recipe: RepositoryCaptureRecipe,
+) {
+  return join(root, invocation.digest, `capture-${sha(canonical(recipe.captureCommand))}.json`);
+}
+
+async function writeCaptureWrapperPreload(root: string, source: string) {
+  const path = join(root, `capture-wrapper-preload-${sha(source).slice(0, 12)}.cjs`);
+  await writeFile(
+    path,
+    `
+const fs = require("node:fs");
+const { syncBuiltinESMExports } = require("node:module");
+if (process.argv[1] && process.argv[1].endsWith("command-wrapper.mjs")) {
+${source}
+  syncBuiltinESMExports();
+}
+`,
+  );
+  return path;
 }
 
 function localValidationInvocation(recipe: RepositoryCaptureRecipe, expectedBytes: Buffer) {
@@ -421,6 +488,27 @@ function invocationFor(args: {
       environmentIdentity: "node:test",
       egress: "local",
       toolReceiptDigests: [sha("tool")],
+    },
+  });
+}
+
+function invocationForRecipes(
+  entries: Array<{ recipe: RepositoryCaptureRecipe; expectedBytes: Buffer }>,
+): ValidationInvocation {
+  const parts = entries.map((entry) => invocationFor(entry));
+  const { digest: _digest, ...core } = parts[0]!;
+  return createValidationInvocation({
+    ...core,
+    validationCommands: ["npm test", ...entries.map(({ recipe }) => recipe.captureCommand.command)],
+    repositoryCaptureRecipes: entries.map(({ recipe }) => recipe),
+    captureOutputAuthorities: parts.flatMap(
+      ({ captureOutputAuthorities }) => captureOutputAuthorities,
+    ),
+    comparisonAuthorities: parts.flatMap(({ comparisonAuthorities }) => comparisonAuthorities),
+    mediaInputs: parts.flatMap(({ mediaInputs }) => mediaInputs),
+    egressPolicy: {
+      deterministicGateIds: parts.flatMap(({ egressPolicy }) => egressPolicy.deterministicGateIds),
+      review: core.egressPolicy.review,
     },
   });
 }
@@ -2206,6 +2294,355 @@ describe("local validation and capture staging", () => {
     });
     expect(second.collection).toEqual(first.collection);
     expect(command).toHaveBeenCalledTimes(1);
+  });
+
+  it("durably adopts an exit-zero missing-output failure without another dispatch", async () => {
+    const commandText = `printf '%s\\n' "$FACTORY_CAPTURE_REQUEST" >&2`;
+    const recipe = exactRecipe({
+      command: commandText,
+      expectedDescriptorDigest: sha("missing-output-descriptor"),
+    });
+    const invocation = invocationFor({ recipe, expectedBytes: Buffer.from("unused\n") });
+    const root = await mkdtemp(join(tmpdir(), "factory-local-missing-output-"));
+    roots.push(root);
+    await checkpointMockValidation(root, invocation);
+    const command = vi.fn(async (input: Parameters<typeof runCaptureWrapper>[0]) =>
+      runCaptureWrapper(input),
+    );
+    const execute = (allowLaunch: boolean) =>
+      executeLocalRepositoryCaptures({
+        stagingRoot: root,
+        invocation,
+        resultTreeRoot: root,
+        environment: {},
+        runCommand: command,
+        observeCommand: async () => "absent",
+        commandDeadline: null,
+        allowLaunch,
+        assertOutputTree: async () => undefined,
+      });
+
+    const first = await execute(true).catch((error: unknown) => error);
+    expect(first).toBeInstanceOf(LocalRepositoryCaptureCommandFailure);
+    expect(first).toMatchObject({
+      message: "repository capture output failed (capture-output-missing)",
+      commandResults: [{ command: commandText, exitCode: 1, durationMs: expect.any(Number) }],
+    });
+    const terminal = JSON.parse(
+      await readFile(captureTerminalPath(root, invocation, recipe), "utf8"),
+    );
+    expect(terminal).toMatchObject({
+      commandDigest: sha(recipe.captureCommand.command),
+      requestDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      exitCode: 1,
+      stdout: "",
+      stderr: "",
+      outcome: {
+        kind: "capture-output-failure",
+        commandExitCode: 0,
+        code: "capture-output-missing",
+      },
+    });
+    expect(JSON.stringify(terminal)).not.toContain(root);
+    expect(JSON.stringify(terminal)).not.toContain(recipe.captureCommand.command);
+    await expect(
+      inspectLocalRepositoryCaptureDispatchState({ stagingRoot: root, invocation }),
+    ).resolves.toBe("complete");
+
+    const restarted = await execute(false).catch((error: unknown) => error);
+    expect(restarted).toBeInstanceOf(LocalRepositoryCaptureCommandFailure);
+    expect(restarted).toMatchObject({
+      message: first instanceof Error ? first.message : "",
+      commandResults:
+        first instanceof LocalRepositoryCaptureCommandFailure ? first.commandResults : [],
+    });
+    expect(command).toHaveBeenCalledTimes(1);
+  });
+
+  it("durably adopts an aggregate output-limit failure without duplicate dispatch", async () => {
+    const firstRecipe = exactRecipe({
+      id: "capture-first-budget",
+      command: captureNodeCommand(`
+const fs = require("node:fs");
+const request = JSON.parse(fs.readFileSync(process.env.FACTORY_CAPTURE_REQUEST, "utf8"));
+const output = request.recipes[0].outputs[0];
+const fd = fs.openSync(output.path, "w");
+try { fs.ftruncateSync(fd, Math.floor(output.maxBytes * 3 / 5)); } finally { fs.closeSync(fd); }
+`),
+      expectedDescriptorDigest: sha("first-budget-descriptor"),
+    });
+    const secondRecipe = exactRecipe({
+      id: "capture-over-remaining-budget",
+      outputs: [
+        { roleId: "first-result", mediaType: "application/octet-stream" },
+        { roleId: "second-result", mediaType: "application/octet-stream" },
+      ],
+      command: captureNodeCommand(`
+const fs = require("node:fs");
+const request = JSON.parse(fs.readFileSync(process.env.FACTORY_CAPTURE_REQUEST, "utf8"));
+for (const output of request.recipes[0].outputs) {
+  const fd = fs.openSync(output.path, "w");
+  try { fs.ftruncateSync(fd, output.maxBytes - 1024 * 1024); } finally { fs.closeSync(fd); }
+}
+`),
+      expectedDescriptorDigest: sha("over-budget-descriptor"),
+    });
+    const invocation = invocationForRecipes([
+      { recipe: firstRecipe, expectedBytes: Buffer.from("first expected\n") },
+      { recipe: secondRecipe, expectedBytes: Buffer.from("second expected\n") },
+    ]);
+    const root = await mkdtemp(join(tmpdir(), "factory-local-aggregate-output-limit-"));
+    roots.push(root);
+    await checkpointMockValidation(root, invocation);
+    const command = vi.fn(async (input: Parameters<typeof runCaptureWrapper>[0]) =>
+      runCaptureWrapper(input),
+    );
+    const execute = (allowLaunch: boolean) =>
+      executeLocalRepositoryCaptures({
+        stagingRoot: root,
+        invocation,
+        resultTreeRoot: root,
+        environment: {},
+        runCommand: command,
+        observeCommand: async () => "absent",
+        commandDeadline: null,
+        allowLaunch,
+        assertOutputTree: async () => undefined,
+      });
+
+    const first = await execute(true).catch((error: unknown) => error);
+    expect(first).toBeInstanceOf(LocalRepositoryCaptureCommandFailure);
+    expect(first).toMatchObject({
+      message: "repository capture output failed (capture-output-too-large)",
+      commandResults: [
+        {
+          command: firstRecipe.captureCommand.command,
+          exitCode: 0,
+          durationMs: expect.any(Number),
+        },
+        {
+          command: secondRecipe.captureCommand.command,
+          exitCode: 1,
+          durationMs: expect.any(Number),
+        },
+      ],
+    });
+    const runtimeRequest = JSON.parse(
+      await readFile(join(root, invocation.digest, "request.json"), "utf8"),
+    );
+    const firstBytes = Math.floor((runtimeRequest.recipes[0].outputs[0].maxBytes * 3) / 5);
+    const commandRequest = JSON.parse(
+      await readFile(captureRequestPath(root, invocation, secondRecipe), "utf8"),
+    );
+    expect(commandRequest.remainingTotalBytes).toBe(runtimeRequest.maximumTotalBytes - firstBytes);
+    const terminal = JSON.parse(
+      await readFile(captureTerminalPath(root, invocation, secondRecipe), "utf8"),
+    );
+    expect(terminal).toMatchObject({
+      requestDigest: sha(canonical(commandRequest)),
+      exitCode: 1,
+      stdout: "",
+      stderr: "",
+      outcome: {
+        kind: "capture-output-failure",
+        commandExitCode: 0,
+        code: "capture-output-too-large",
+      },
+    });
+    await expect(
+      inspectLocalRepositoryCaptureDispatchState({ stagingRoot: root, invocation }),
+    ).resolves.toBe("complete");
+
+    const restarted = await execute(false).catch((error: unknown) => error);
+    expect(restarted).toBeInstanceOf(LocalRepositoryCaptureCommandFailure);
+    expect(restarted).toMatchObject({
+      message: first instanceof Error ? first.message : "",
+      commandResults:
+        first instanceof LocalRepositoryCaptureCommandFailure ? first.commandResults : [],
+    });
+    expect(command).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a command exit distinct from capture-output validation", async () => {
+    const recipe = exactRecipe({
+      command: "exit 7",
+      expectedDescriptorDigest: sha("command-exit-descriptor"),
+    });
+    const invocation = invocationFor({ recipe, expectedBytes: Buffer.from("unused\n") });
+    const root = await mkdtemp(join(tmpdir(), "factory-local-command-exit-"));
+    roots.push(root);
+    await checkpointMockValidation(root, invocation);
+
+    await expect(
+      executeLocalRepositoryCaptures({
+        stagingRoot: root,
+        invocation,
+        resultTreeRoot: root,
+        environment: {},
+        runCommand: async (input) => runCaptureWrapper(input),
+        observeCommand: async () => "absent",
+        commandDeadline: null,
+        allowLaunch: true,
+        assertOutputTree: async () => undefined,
+      }),
+    ).rejects.toThrow("repository capture command failed with exit code 7");
+    const terminal = JSON.parse(
+      await readFile(captureTerminalPath(root, invocation, recipe), "utf8"),
+    );
+    expect(terminal.outcome).toEqual({ kind: "command-exit", exitCode: 7 });
+  });
+
+  it.each([
+    {
+      code: "capture-output-empty",
+      source: `
+const fs = require("node:fs");
+const request = JSON.parse(fs.readFileSync(process.env.FACTORY_CAPTURE_REQUEST, "utf8"));
+fs.writeFileSync(request.recipes[0].outputs[0].path, "");
+`,
+    },
+    {
+      code: "capture-output-not-regular",
+      source: `
+const fs = require("node:fs");
+const request = JSON.parse(fs.readFileSync(process.env.FACTORY_CAPTURE_REQUEST, "utf8"));
+fs.mkdirSync(request.recipes[0].outputs[0].path);
+`,
+    },
+    {
+      code: "capture-output-too-large",
+      source: `
+const fs = require("node:fs");
+const request = JSON.parse(fs.readFileSync(process.env.FACTORY_CAPTURE_REQUEST, "utf8"));
+const output = request.recipes[0].outputs[0];
+const fd = fs.openSync(output.path, "w");
+try { fs.ftruncateSync(fd, output.maxBytes + 1); } finally { fs.closeSync(fd); }
+`,
+    },
+  ])("records a bounded $code terminal outcome", async ({ code, source }) => {
+    const recipe = exactRecipe({
+      command: captureNodeCommand(source),
+      expectedDescriptorDigest: sha(code),
+    });
+    const invocation = invocationFor({ recipe, expectedBytes: Buffer.from("unused\n") });
+    const root = await mkdtemp(join(tmpdir(), "factory-local-invalid-output-"));
+    roots.push(root);
+    await checkpointMockValidation(root, invocation);
+
+    await expect(
+      executeLocalRepositoryCaptures({
+        stagingRoot: root,
+        invocation,
+        resultTreeRoot: root,
+        environment: {},
+        runCommand: async (input) => runCaptureWrapper(input),
+        observeCommand: async () => "absent",
+        commandDeadline: null,
+        allowLaunch: true,
+        assertOutputTree: async () => undefined,
+      }),
+    ).rejects.toThrow(`repository capture output failed (${code})`);
+    const terminal = JSON.parse(
+      await readFile(captureTerminalPath(root, invocation, recipe), "utf8"),
+    );
+    expect(terminal.outcome).toEqual({
+      kind: "capture-output-failure",
+      commandExitCode: 0,
+      code,
+    });
+  });
+
+  it.each([
+    {
+      code: "capture-output-unreadable",
+      preload: `
+  const originalOpen = fs.openSync;
+  fs.openSync = function (path, ...args) {
+    if (path === process.env.FACTORY_TEST_CAPTURE_PATH) {
+      const error = new Error("injected unreadable output");
+      error.code = "EACCES";
+      throw error;
+    }
+    return originalOpen.call(this, path, ...args);
+  };
+`,
+    },
+    {
+      code: "capture-output-changed",
+      preload: `
+  const originalRead = fs.readSync;
+  let changed = false;
+  fs.readSync = function (fd, ...args) {
+    const bytes = originalRead.call(this, fd, ...args);
+    if (!changed && bytes > 0 && fs.readlinkSync("/proc/self/fd/" + fd) === process.env.FACTORY_TEST_CAPTURE_PATH) {
+      changed = true;
+      fs.appendFileSync(process.env.FACTORY_TEST_CAPTURE_PATH, "changed");
+    }
+    return bytes;
+  };
+`,
+    },
+    {
+      code: "capture-output-file-sync-failed",
+      preload: `
+  const originalSync = fs.fsyncSync;
+  fs.fsyncSync = function (fd) {
+    if (fs.readlinkSync("/proc/self/fd/" + fd) === process.env.FACTORY_TEST_CAPTURE_PATH) {
+      const error = new Error("injected output sync failure");
+      error.code = "EIO";
+      throw error;
+    }
+    return originalSync.call(this, fd);
+  };
+`,
+    },
+  ])("records a bounded $code terminal outcome", async ({ code, preload }) => {
+    const source = `
+const fs = require("node:fs");
+const request = JSON.parse(fs.readFileSync(process.env.FACTORY_CAPTURE_REQUEST, "utf8"));
+fs.writeFileSync(request.recipes[0].outputs[0].path, "captured output");
+`;
+    const recipe = exactRecipe({
+      command: captureNodeCommand(source),
+      expectedDescriptorDigest: sha(code),
+    });
+    const invocation = invocationFor({ recipe, expectedBytes: Buffer.from("unused\n") });
+    const root = await mkdtemp(join(tmpdir(), "factory-local-output-fault-"));
+    roots.push(root);
+    await checkpointMockValidation(root, invocation);
+    const preloadPath = await writeCaptureWrapperPreload(root, preload);
+
+    await expect(
+      executeLocalRepositoryCaptures({
+        stagingRoot: root,
+        invocation,
+        resultTreeRoot: root,
+        environment: {},
+        runCommand: async (input) => {
+          const request = JSON.parse(await readFile(input.env["FACTORY_CAPTURE_REQUEST"]!, "utf8"));
+          return runCaptureWrapper({
+            ...input,
+            env: {
+              ...input.env,
+              NODE_OPTIONS: `--require=${preloadPath}`,
+              FACTORY_TEST_CAPTURE_PATH: request.recipes[0].outputs[0].path,
+            },
+          });
+        },
+        observeCommand: async () => "absent",
+        commandDeadline: null,
+        allowLaunch: true,
+        assertOutputTree: async () => undefined,
+      }),
+    ).rejects.toThrow(`repository capture output failed (${code})`);
+    const terminal = JSON.parse(
+      await readFile(captureTerminalPath(root, invocation, recipe), "utf8"),
+    );
+    expect(terminal.outcome).toEqual({
+      kind: "capture-output-failure",
+      commandExitCode: 0,
+      code,
+    });
   });
 
   it("refuses to replay a capture command after ambiguous partial output", async () => {

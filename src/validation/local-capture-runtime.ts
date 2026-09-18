@@ -63,6 +63,19 @@ const RuntimeRecipeSchema = z
   })
   .strict();
 
+const LocalCaptureCommandRequestSchema = z
+  .object({
+    protocol: z.literal("clockgrove.factory/repository-capture-command-request"),
+    validationInvocationDigest: sha256Digest,
+    command: RuntimeRecipeSchema.shape.command,
+    recipes: z
+      .array(RuntimeRecipeSchema.omit({ command: true }))
+      .min(1)
+      .max(32),
+    remainingTotalBytes: z.number().int().nonnegative().max(MAX_CAPTURE_TOTAL_BYTES),
+  })
+  .strict();
+
 export const RepositoryCaptureRuntimeRequestSchema = z
   .object({
     protocol: z.literal("clockgrove.factory/repository-capture-request"),
@@ -137,14 +150,53 @@ const LocalCommandTerminalSchema = z
     completedAt: isoDate,
     stdout: z.string().max(128 * 1024),
     stderr: z.string().max(128 * 1024),
+    outcome: z.discriminatedUnion("kind", [
+      z
+        .object({
+          kind: z.literal("command-exit"),
+          exitCode: z.number().int().min(0).max(255),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("capture-output-failure"),
+          commandExitCode: z.literal(0),
+          code: z.enum([
+            "capture-output-missing",
+            "capture-output-not-regular",
+            "capture-output-empty",
+            "capture-output-too-large",
+            "capture-output-unreadable",
+            "capture-output-changed",
+            "capture-output-file-sync-failed",
+            "capture-output-directory-sync-failed",
+            "capture-output-validation-failed",
+          ]),
+        })
+        .strict(),
+    ]),
   })
   .strict()
-  .refine(
-    (receipt) =>
-      Date.parse(receipt.completedAt) >= Date.parse(receipt.startedAt) &&
-      Date.parse(receipt.completedAt) - Date.parse(receipt.startedAt) === receipt.durationMs,
-    "local command terminal timestamps differ from duration",
-  );
+  .superRefine((receipt, context) => {
+    if (
+      Date.parse(receipt.completedAt) < Date.parse(receipt.startedAt) ||
+      Date.parse(receipt.completedAt) - Date.parse(receipt.startedAt) !== receipt.durationMs
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["durationMs"],
+        message: "local command terminal timestamps differ from duration",
+      });
+    if (
+      (receipt.outcome.kind === "command-exit" && receipt.exitCode !== receipt.outcome.exitCode) ||
+      (receipt.outcome.kind === "capture-output-failure" && receipt.exitCode !== 1)
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["outcome"],
+        message: "local command terminal outcome differs from its process exit",
+      });
+  });
 
 const LocalCommandStartedSchema = z
   .object({
@@ -153,6 +205,18 @@ const LocalCommandStartedSchema = z
     requestDigest: sha256Digest,
   })
   .strict();
+
+type LocalCommandTerminal = z.infer<typeof LocalCommandTerminalSchema>;
+
+function terminalFailed(terminal: LocalCommandTerminal): boolean {
+  return terminal.exitCode !== 0;
+}
+
+function terminalFailureReason(terminal: LocalCommandTerminal): string {
+  return terminal.outcome.kind === "capture-output-failure"
+    ? `repository capture output failed (${terminal.outcome.code})`
+    : `repository capture command failed with exit code ${terminal.exitCode}`;
+}
 
 const LocalValidationCommandRequestSchema = z
   .object({
@@ -225,7 +289,7 @@ class LocalRepositoryCaptureAmbiguousDispatch extends Error {
 
 const COMMAND_WRAPPER = `
 import { createHash } from "node:crypto";
-import { readFileSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, fstatSync, constants } from "node:fs";
+import { readFileSync, readSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, fstatSync, constants } from "node:fs";
 import { dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 const requestPath = process.argv[2];
@@ -249,26 +313,110 @@ const stdout = String(result.stdout ?? "");
 const stderr = String(result.stderr ?? result.error?.message ?? "");
 process.stdout.write(stdout);
 process.stderr.write(stderr);
-const exitCode = Number.isInteger(result.status) ? result.status : 1;
-if (exitCode === 0) {
-  const outputs = request.recipes
-    ? request.recipes.flatMap((recipe) => recipe.outputs.map((output) => output.path))
-    : [];
-  for (const output of outputs) {
-    const fd = openSync(output, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      if (!fstatSync(fd).isFile()) throw new Error("capture output is not a regular file");
-      fsyncSync(fd);
-    } finally { closeSync(fd); }
-  }
-  for (const directoryPath of new Set(outputs.map(dirname))) {
-    const directory = openSync(directoryPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-    try { fsyncSync(directory); } finally { closeSync(directory); }
+const commandExitCode = Number.isInteger(result.status) ? result.status : 1;
+class CaptureOutputFailure extends Error {
+  constructor(code) { super(code); this.code = code; }
+}
+const fail = (code) => { throw new CaptureOutputFailure(code); };
+let outputFailure = null;
+if (commandExitCode === 0 && request.recipes) {
+  const outputs = request.recipes.flatMap((recipe) => recipe.outputs);
+  let outputBytes = 0;
+  try {
+    for (const output of outputs) {
+      let outputFd;
+      try {
+        outputFd = openSync(
+          output.path,
+          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+        );
+      } catch (error) {
+        fail(
+          error && error.code === "ENOENT"
+            ? "capture-output-missing"
+            : error && error.code === "ELOOP"
+              ? "capture-output-not-regular"
+              : "capture-output-unreadable",
+        );
+      }
+      let failure = null;
+      try {
+        let before;
+        try { before = fstatSync(outputFd); } catch { fail("capture-output-unreadable"); }
+        if (!before.isFile()) fail("capture-output-not-regular");
+        if (before.size === 0) fail("capture-output-empty");
+        if (before.size > output.maxBytes) fail("capture-output-too-large");
+        outputBytes += before.size;
+        if (outputBytes > request.remainingTotalBytes) fail("capture-output-too-large");
+        const chunk = Buffer.alloc(64 * 1024);
+        let bytes = 0;
+        try {
+          for (;;) {
+            const read = readSync(outputFd, chunk, 0, chunk.length, null);
+            if (!read) break;
+            bytes += read;
+            if (bytes > output.maxBytes) fail("capture-output-too-large");
+          }
+        } catch (error) {
+          if (error instanceof CaptureOutputFailure) throw error;
+          fail("capture-output-unreadable");
+        }
+        let afterRead;
+        try { afterRead = fstatSync(outputFd); } catch { fail("capture-output-unreadable"); }
+        if (
+          bytes !== before.size ||
+          afterRead.size !== before.size ||
+          afterRead.mtimeMs !== before.mtimeMs ||
+          afterRead.ctimeMs !== before.ctimeMs
+        ) fail("capture-output-changed");
+        try { fsyncSync(outputFd); } catch { fail("capture-output-file-sync-failed"); }
+        let afterSync;
+        try { afterSync = fstatSync(outputFd); } catch { fail("capture-output-unreadable"); }
+        if (
+          afterSync.size !== before.size ||
+          afterSync.mtimeMs !== before.mtimeMs ||
+          afterSync.ctimeMs !== before.ctimeMs
+        ) fail("capture-output-changed");
+      } catch (error) {
+        failure = error;
+      } finally {
+        try { closeSync(outputFd); } catch {
+          if (!failure) failure = new CaptureOutputFailure("capture-output-file-sync-failed");
+        }
+      }
+      if (failure) throw failure;
+    }
+    for (const directoryPath of new Set(outputs.map((output) => dirname(output.path)))) {
+      let directoryFd;
+      try {
+        directoryFd = openSync(
+          directoryPath,
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        );
+        fsyncSync(directoryFd);
+      } catch {
+        fail("capture-output-directory-sync-failed");
+      } finally {
+        if (directoryFd !== undefined) {
+          try { closeSync(directoryFd); } catch { fail("capture-output-directory-sync-failed"); }
+        }
+      }
+    }
+  } catch (error) {
+    outputFailure = {
+      kind: "capture-output-failure",
+      commandExitCode: 0,
+      code: error instanceof CaptureOutputFailure
+        ? error.code
+        : "capture-output-validation-failed",
+    };
   }
 }
+const exitCode = outputFailure ? 1 : commandExitCode;
+const outcome = outputFailure ?? { kind: "command-exit", exitCode: commandExitCode };
 const completed = Date.now();
 const bounded = (value) => Buffer.from(value).subarray(0, 128 * 1024).toString("utf8");
-const receipt = JSON.stringify({ protocol: "clockgrove.factory/local-capture-command-terminal", commandDigest: createHash("sha256").update(command).digest("hex"), requestDigest, exitCode, durationMs: completed - began, startedAt, completedAt: new Date(completed).toISOString(), stdout: bounded(stdout), stderr: bounded(stderr) });
+const receipt = JSON.stringify({ protocol: "clockgrove.factory/local-capture-command-terminal", commandDigest: createHash("sha256").update(command).digest("hex"), requestDigest, exitCode, durationMs: completed - began, startedAt, completedAt: new Date(completed).toISOString(), stdout: outputFailure ? "" : bounded(stdout), stderr: outputFailure ? "" : bounded(stderr), outcome });
 const temporary = receiptPath + ".pending-" + process.pid;
 const fd = openSync(temporary, "wx", 0o600);
 try { writeFileSync(fd, receipt); fsyncSync(fd); } finally { closeSync(fd); }
@@ -439,19 +587,26 @@ async function durableCommand(args: {
       throw new Error("local capture terminal receipt belongs to another command request");
     return terminal;
   };
-  const existing = await readJson(receiptPath);
-  if (existing) {
-    const terminal = parseTerminal(existing);
-    return { command: args.command, terminal, stdout: terminal.stdout, stderr: terminal.stderr };
-  }
-  const existingStarted = await readJson(startedPath);
-  if (existingStarted) {
-    const started = LocalCommandStartedSchema.parse(existingStarted);
+  const parseStarted = (value: unknown) => {
+    const started = LocalCommandStartedSchema.parse(value);
     if (
       started.commandDigest !== digestText(args.command) ||
       started.requestDigest !== requestDigest
     )
       throw new Error("local capture command start belongs to another request");
+    return started;
+  };
+  const existing = await readJson(receiptPath);
+  if (existing) {
+    const started = await readJson(startedPath);
+    if (!started) throw new Error("local capture terminal receipt lacks its dispatch receipt");
+    parseStarted(started);
+    const terminal = parseTerminal(existing);
+    return { command: args.command, terminal, stdout: terminal.stdout, stderr: terminal.stderr };
+  }
+  const existingStarted = await readJson(startedPath);
+  if (existingStarted) {
+    parseStarted(existingStarted);
     for (;;) {
       const scope = await args.observeCommand({ plannedCommand: args.command });
       const terminalValue = await readJson(receiptPath);
@@ -474,6 +629,10 @@ async function durableCommand(args: {
   while (scope === "active") {
     const terminalValue = await readJson(receiptPath);
     if (terminalValue) {
+      const startedValue = await readJson(startedPath);
+      if (!startedValue)
+        throw new Error("local capture terminal receipt lacks its dispatch receipt");
+      parseStarted(startedValue);
       const terminal = parseTerminal(terminalValue);
       return {
         command: args.command,
@@ -483,14 +642,7 @@ async function durableCommand(args: {
       };
     }
     const startedValue = await readJson(startedPath);
-    if (startedValue) {
-      const started = LocalCommandStartedSchema.parse(startedValue);
-      if (
-        started.commandDigest !== digestText(args.command) ||
-        started.requestDigest !== requestDigest
-      )
-        throw new Error("local capture command start belongs to another request");
-    }
+    if (startedValue) parseStarted(startedValue);
     if (args.commandDeadline && Date.now() >= Date.parse(args.commandDeadline))
       throw new LocalRepositoryCaptureAmbiguousDispatch();
     await delay(100);
@@ -527,6 +679,10 @@ async function durableCommand(args: {
   const observed = await readJson(receiptPath);
   if (!observed)
     throw new Error("local capture command returned without its durable terminal receipt");
+  const observedStarted = await readJson(startedPath);
+  if (!observedStarted)
+    throw new Error("local capture terminal receipt lacks its dispatch receipt");
+  parseStarted(observedStarted);
   const terminal = parseTerminal(observed);
   if (terminal.exitCode !== result.exitCode)
     throw new Error("local capture terminal receipt differs from process observation");
@@ -668,9 +824,10 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
     key: string;
     requestName: string;
     captureIdentity: unknown;
+    recipes: RuntimeRequest["recipes"];
     checkpoints: Array<{
       name: string;
-      parse(value: unknown): { recipeId: string; recipeDigest: string; command: unknown };
+      parse(value: unknown): z.infer<typeof LocalRecipeCheckpointSchema>;
       recipeId: string;
       recipeDigest: string;
       identity: unknown;
@@ -685,8 +842,12 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
     checkpoints: never[];
   };
   const captureByCommand = new Map<string, CaptureAction>();
-  for (const recipe of invocation.repositoryCaptureRecipes) {
-    const captureIdentity = recipe.captureCommand;
+  const runtimeRequest = localRepositoryCaptureRequest({
+    stagingRoot: args.stagingRoot,
+    invocation,
+  });
+  for (const recipe of runtimeRequest.recipes) {
+    const captureIdentity = recipe.command;
     const captureKey = `capture-${digestText(canonical(captureIdentity))}`;
     const capture: CaptureAction = captureByCommand.get(captureIdentity.command) ?? {
       kind: "capture",
@@ -694,6 +855,7 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
       key: captureKey,
       requestName: `${captureKey}.json`,
       captureIdentity,
+      recipes: [],
       checkpoints: [],
     };
     if (capture.key !== captureKey)
@@ -705,6 +867,7 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
       recipeDigest: recipe.digest,
       identity: captureIdentity,
     });
+    capture.recipes.push(recipe);
     captureByCommand.set(captureIdentity.command, capture);
   }
   const actions: Array<CaptureAction | ValidationAction> = invocation.validationCommands.map(
@@ -739,6 +902,7 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
   );
   if (unexpected.length)
     throw new Error("local capture dispatch journal contains an unexpected action identity");
+  let capturedBytes = 0;
   for (const [index, action] of actions.entries()) {
     if (validationValue && action.kind === "validation") continue;
     const requestPath = join(root, action.requestName);
@@ -748,7 +912,7 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
     const checkpoints = await Promise.all(
       action.checkpoints.map(async (expected) => {
         const value = await readJson(join(root, expected.name));
-        if (!value) return false;
+        if (!value) return null;
         const checkpoint = expected.parse(value);
         if (
           checkpoint.recipeId !== expected.recipeId ||
@@ -756,7 +920,7 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
           canonical(checkpoint.command) !== canonical(expected.identity)
         )
           throw new Error("local capture action checkpoint differs from its invocation");
-        return true;
+        return checkpoint;
       }),
     );
     if (checkpoints.some(Boolean) && !checkpoints.every(Boolean))
@@ -765,11 +929,17 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
       throw new Error("local capture action evidence lacks its immutable request");
     if (requestValue) {
       if ("captureIdentity" in action) {
-        const request = requestValue as Record<string, unknown>;
+        const request = LocalCaptureCommandRequestSchema.parse(requestValue);
+        const expectedRequest = LocalCaptureCommandRequestSchema.parse({
+          protocol: "clockgrove.factory/repository-capture-command-request",
+          validationInvocationDigest: invocation.digest,
+          command: action.captureIdentity,
+          recipes: action.recipes.map(({ command: _command, ...recipe }) => recipe),
+          remainingTotalBytes: runtimeRequest.maximumTotalBytes - capturedBytes,
+        });
         if (
-          request["protocol"] !== "clockgrove.factory/repository-capture-command-request" ||
-          request["validationInvocationDigest"] !== invocation.digest ||
-          canonical(request["command"]) !== canonical(action.captureIdentity)
+          request.validationInvocationDigest !== invocation.digest ||
+          canonical(request) !== canonical(expectedRequest)
         )
           throw new Error("local capture action request differs from its invocation");
       } else {
@@ -797,8 +967,9 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
       )
         throw new Error("local capture dispatch receipt differs from its action");
     }
+    let terminal: LocalCommandTerminal | null = null;
     if (terminalValue) {
-      const terminal = LocalCommandTerminalSchema.parse(terminalValue);
+      terminal = LocalCommandTerminalSchema.parse(terminalValue);
       if (
         terminal.commandDigest !== digestText(action.command) ||
         terminal.requestDigest !== requestDigest
@@ -807,6 +978,23 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
     }
     if (checkpoints.some(Boolean) && !terminalValue)
       throw new Error("local capture action checkpoint lacks its terminal receipt");
+    if (terminal && terminalFailed(terminal)) {
+      if (checkpoints.some(Boolean))
+        throw new Error("failed local capture action has a recipe checkpoint");
+      for (const later of actions.slice(index + 1)) {
+        if (validationValue && later.kind === "validation") continue;
+        if (
+          (await readJson(join(root, later.requestName))) ||
+          (await readJson(join(root, `started-${later.key}.json`))) ||
+          (await readJson(join(root, `terminal-${later.key}.json`))) ||
+          (await Promise.all(later.checkpoints.map(({ name }) => readJson(join(root, name))))).some(
+            Boolean,
+          )
+        )
+          throw new Error("local capture dispatch journal continues after a failed action");
+      }
+      return "complete";
+    }
     if (startedValue && !terminalValue) return "ambiguous";
     if (!startedValue) {
       for (const later of actions.slice(index + 1)) {
@@ -822,6 +1010,12 @@ export async function inspectLocalRepositoryCaptureDispatchState(args: {
           throw new Error("local capture dispatch journal skips an incomplete action");
       }
       return "rebound-safe";
+    }
+    if (action.kind === "capture" && checkpoints.every(Boolean)) {
+      for (const checkpoint of checkpoints)
+        for (const file of checkpoint!.files) capturedBytes += file.bytes;
+      if (capturedBytes > runtimeRequest.maximumTotalBytes)
+        throw new Error("repository capture outputs exceed the aggregate byte limit");
     }
   }
   return "complete";
@@ -909,6 +1103,32 @@ function relativeOwnedPath(root: string, path: string) {
   if (!target.startsWith(`${base}${sep}`))
     throw new Error("local repository capture output escaped owned staging");
   return target.slice(base.length + 1);
+}
+
+function exactRecipeCheckpoint(
+  root: string,
+  recipe: RuntimeRequest["recipes"][number],
+  value: unknown,
+) {
+  const checkpoint = LocalRecipeCheckpointSchema.parse(value);
+  if (
+    checkpoint.recipeId !== recipe.id ||
+    checkpoint.recipeDigest !== recipe.digest ||
+    canonical(checkpoint.command) !== canonical(recipe.command) ||
+    checkpoint.commandResult.command !== recipe.command.command ||
+    checkpoint.files.length !== recipe.outputs.length ||
+    recipe.outputs.some((output) => {
+      const file = checkpoint.files.find(({ roleId }) => roleId === output.roleId);
+      return (
+        !file ||
+        file.recipeId !== recipe.id ||
+        file.path !== relativeOwnedPath(root, output.path) ||
+        file.mediaType !== output.mediaType
+      );
+    })
+  )
+    throw new Error("local capture recipe checkpoint differs from its invocation");
+  return checkpoint;
 }
 
 export function localRepositoryCaptureRequest(args: {
@@ -1014,6 +1234,7 @@ export async function executeLocalRepositoryCaptures(args: {
     if (invocation.validationCommands.filter((candidate) => candidate === command).length !== 1)
       throw new Error("repository capture command must occur exactly once in validation order");
   const commandResults: Array<{ command: string; exitCode: number; durationMs: number }> = [];
+  let capturedBytes = 0;
   for (const command of invocation.validationCommands) {
     const action = actionByCommand.get(command);
     if (!action) continue;
@@ -1023,10 +1244,14 @@ export async function executeLocalRepositoryCaptures(args: {
           const marker = await readJson(
             join(ownedRoot, `recipe-${Buffer.from(recipe.id).toString("hex")}.json`),
           );
-          return marker ? LocalRecipeCheckpointSchema.parse(marker) : null;
+          return marker ? exactRecipeCheckpoint(root, recipe, marker) : null;
         }),
       );
       if (existing.every(Boolean)) {
+        for (const checkpoint of existing)
+          for (const file of checkpoint!.files) capturedBytes += file.bytes;
+        if (capturedBytes > request.maximumTotalBytes)
+          throw new Error("repository capture outputs exceed the aggregate byte limit");
         commandResults.push(existing[0]!.commandResult);
         continue;
       }
@@ -1059,12 +1284,17 @@ export async function executeLocalRepositoryCaptures(args: {
         ownedRoot,
         `capture-${digestText(canonical(action.identity))}.json`,
       );
-      await atomicJson(groupRequestPath, {
+      const groupRequest = LocalCaptureCommandRequestSchema.parse({
         protocol: "clockgrove.factory/repository-capture-command-request",
         validationInvocationDigest: invocation.digest,
         command: action.identity,
         recipes: action.recipes.map(({ command: _command, ...recipe }) => recipe),
+        remainingTotalBytes: request.maximumTotalBytes - capturedBytes,
       });
+      const existingGroupRequest = await readJson(groupRequestPath);
+      if (existingGroupRequest && canonical(existingGroupRequest) !== canonical(groupRequest))
+        throw new Error("local capture command request conflicts with retained staging");
+      if (!existingGroupRequest) await atomicJson(groupRequestPath, groupRequest);
       const observed = await durableCommand({
         ownedRoot,
         key: captureTerminalKey,
@@ -1083,11 +1313,11 @@ export async function executeLocalRepositoryCaptures(args: {
         durationMs: observed.terminal.durationMs,
       });
       commandResults.push(commandResult);
-      if (observed.terminal.exitCode !== 0)
-        throw new LocalRepositoryCaptureCommandFailure(
-          `repository capture command failed with exit code ${observed.terminal.exitCode}`,
-          [...commandResults],
-        );
+      if (terminalFailed(observed.terminal))
+        throw new LocalRepositoryCaptureCommandFailure(terminalFailureReason(observed.terminal), [
+          ...commandResults,
+        ]);
+      const checkpoints: Array<z.infer<typeof LocalRecipeCheckpointSchema>> = [];
       for (const recipe of action.recipes) {
         const checkpoint = LocalRecipeCheckpointSchema.parse({
           recipeId: recipe.id,
@@ -1112,7 +1342,12 @@ export async function executeLocalRepositoryCaptures(args: {
           join(ownedRoot, `recipe-${Buffer.from(recipe.id).toString("hex")}.json`),
           checkpoint,
         );
+        checkpoints.push(checkpoint);
       }
+      for (const checkpoint of checkpoints)
+        for (const file of checkpoint.files) capturedBytes += file.bytes;
+      if (capturedBytes > request.maximumTotalBytes)
+        throw new Error("repository capture outputs exceed the aggregate byte limit");
     }
   }
   const files: RepositoryCaptureCollectionManifest["files"] = [];

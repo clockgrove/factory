@@ -704,18 +704,16 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
   async cleanup(handle: BackendHandle): Promise<void> {
     const attempt = this.#require(handle);
     if (!terminalState(attempt.state)) await this.cancel(handle);
+    // The terminal checkpoint is the recovery boundary. Keep the exact live
+    // attempt, observers, and provider connection intact until it is durable so
+    // active stale reconciliation can retry this same checkpoint without a
+    // replacement turn or lost usage.
+    if (attempt.providerTerminal) await this.observe(handle);
     attempt.unsubscribeNotification?.();
     attempt.unsubscribeRequest?.();
-    let checkpointError: unknown;
-    try {
-      if (attempt.providerTerminal) await this.observe(handle);
-    } catch (error) {
-      checkpointError = error;
-    }
     await this.#closeConnection(attempt.home);
     this.#attempts.delete(handle.resourceId);
     // Retain provider-owned thread history. It is not a Factory scheduler DB.
-    if (checkpointError) throw checkpointError;
   }
 
   async resume(context: AttemptContext, handle: BackendHandle): Promise<BackendHandle> {

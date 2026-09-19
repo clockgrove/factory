@@ -297,16 +297,16 @@ function finish(
   connection: FakeConnection,
   handle: BackendHandle,
   final: { outcome: "succeeded" | "failed" | "declined"; summary: string },
-): void {
-  const workerFinal = { ...final, commands: [] };
-  const tokens = {
+  tokens = {
     inputTokens: 10,
     outputTokens: 2,
     cachedInputTokens: 3,
     cacheWriteInputTokens: 0,
     reasoningOutputTokens: 0,
     totalTokens: 12,
-  };
+  },
+): void {
+  const workerFinal = { ...final, commands: [] };
   connection.emit("rawResponse/completed", {
     threadId: handle.resourceId,
     turnId: handle.metadata!.turnId,
@@ -554,6 +554,75 @@ describe("Codex App Server local backend", () => {
     expect(await backend.observe(handle)).toMatchObject({ state: "succeeded" });
     expect(await ctx.sessionJournal!.load("terminal")).not.toBeNull();
     await backend.cleanup(handle);
+  });
+
+  it("retains the live terminal attempt until its exact checkpoint persists", async () => {
+    const root = join(suiteRoot, "terminal-checkpoint-retry");
+    const connections = new Map<string, FakeConnection>();
+    const backend = factory(root, connections);
+    const ctx = await context(109);
+    const handle = await backend.launch(ctx);
+    const connection = connections.get(handle.metadata!.codexHome!)!;
+    const persist = ctx.sessionJournal!.persist.bind(ctx.sessionJournal);
+    let terminalPersists = 0;
+    ctx.sessionJournal!.persist = async (checkpoint) => {
+      if (checkpoint.stage === "terminal" && terminalPersists++ === 0)
+        throw new Error("terminal checkpoint unavailable");
+      await persist(checkpoint);
+    };
+    finish(
+      connection,
+      handle,
+      { outcome: "succeeded", summary: "exact terminal" },
+      {
+        inputTokens: 40_359,
+        outputTokens: 783,
+        cachedInputTokens: 25_984,
+        cacheWriteInputTokens: 0,
+        reasoningOutputTokens: 0,
+        totalTokens: 41_142,
+      },
+    );
+
+    await expect(backend.cleanup(handle)).rejects.toThrow("terminal checkpoint unavailable");
+    expect(await ctx.sessionJournal!.load("terminal")).toBeNull();
+    expect(connection.closedByClient).toBe(false);
+    expect(connection.notificationListeners.size).toBe(1);
+    expect(connection.requestListeners.size).toBe(1);
+    expect(connection.calls.filter(({ method }) => method === "turn/start")).toHaveLength(1);
+
+    await backend.reconcileStale({
+      repository: ctx.repository,
+      objective: ctx.objective,
+      workItem: ctx.workItem,
+      attempt: ctx.attempt,
+      runId: ctx.runId,
+      directorEpoch: ctx.directorEpoch,
+      providerResourceId: handle.resourceId,
+      localScopeBatch: ctx.localExecutionScope!.batch,
+      policyDigest: ctx.policyDigest,
+    });
+
+    const terminal = await ctx.sessionJournal!.load("terminal");
+    expect(terminal).toMatchObject({
+      state: "succeeded",
+      providerStatus: "completed",
+      usage: {
+        inputTokens: 40_359,
+        outputTokens: 783,
+        cachedInputTokens: 25_984,
+      },
+      rawTokenUsage: {
+        total: { totalTokens: 41_142 },
+      },
+    });
+    expect(terminal!.usage!.inputTokens! + terminal!.usage!.outputTokens!).toBe(41_142);
+    expect(terminalPersists).toBe(2);
+    expect(connection.closedByClient).toBe(true);
+    expect(connection.notificationListeners.size).toBe(0);
+    expect(connection.requestListeners.size).toBe(0);
+    expect(connection.calls.filter(({ method }) => method === "turn/start")).toHaveLength(1);
+    await expect(backend.observe(handle)).rejects.toThrow("unknown Codex thread");
   });
 
   it("resumes the fenced durable turn after an adapter restart without launching duplicate work", async () => {

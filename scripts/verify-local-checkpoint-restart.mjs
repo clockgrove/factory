@@ -419,11 +419,10 @@ export async function checkpointObservationRead(
       return await operation(remainingMs);
     } catch (error) {
       const diagnostic = checkpointObservationFailure(error, { phase, stage, now: now() });
-      const headers = error?.response?.headers ?? {};
       const quotaBoundary =
-        headers["retry-after"] !== undefined ||
-        headers["x-ratelimit-reset"] !== undefined ||
-        headers["x-ratelimit-remaining"] === "0";
+        diagnostic.retryAfter !== undefined ||
+        diagnostic.rateLimitRemaining === 0 ||
+        (diagnostic.rateLimitReset !== undefined && diagnostic.rateLimitRemaining === undefined);
       const retry =
         retryableReadStages.has(stage) &&
         !quotaBoundary &&

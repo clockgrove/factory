@@ -129,6 +129,30 @@ export interface CodexAppServerOptions {
 }
 
 const MAX_REPOSITORY_INSTRUCTIONS_BYTES = 32 * 1024;
+const MAX_SERVER_USER_AGENT_BYTES = 512;
+const CODEX_CLI_VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/;
+
+function appServerIdentity(value: unknown): { userAgent: string } {
+  const initialization = record(value);
+  const userAgent = initialization.userAgent;
+  if (
+    typeof userAgent !== "string" ||
+    userAgent.trim().length === 0 ||
+    Buffer.byteLength(userAgent, "utf8") > MAX_SERVER_USER_AGENT_BYTES ||
+    [...userAgent].some((value) => {
+      const code = value.codePointAt(0)!;
+      return code < 32 || code === 127;
+    })
+  )
+    throw new Error("Codex App Server omitted its bounded initialize identity");
+  return { userAgent };
+}
+
+function appServerCliVersion(value: unknown): string {
+  if (typeof value !== "string" || value.length > 64 || !CODEX_CLI_VERSION.test(value))
+    throw new Error("Codex App Server returned an invalid CLI version identity");
+  return value;
+}
 
 export function codexAppServerArgs(home: string, profile?: string): string[] {
   return [
@@ -349,7 +373,6 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       providerStorage: "local",
       recovery: "exact-terminal-read-only",
       coldRepair: "unavailable-raw-usage-subscription",
-      supportedCodexVersion: "0.153.0",
       preferredRouteQualification: "required",
     },
     supportsLocalInference: false,
@@ -365,6 +388,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
   readonly #options: CodexAppServerOptions;
   readonly #attempts = new Map<string, AppAttempt>();
   readonly #connections = new Map<string, AppServerConnection>();
+  readonly #serverIdentities = new Map<string, { userAgent: string }>();
   readonly #ownedScopes = new Map<
     string,
     NonNullable<AttemptContext["localExecutionScope"]>["batch"]
@@ -419,6 +443,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       };
     } finally {
       await connection?.close();
+      this.#serverIdentities.delete(home);
       await rm(home, { recursive: true, force: true });
     }
   }
@@ -455,11 +480,11 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         previous.binding.hostIdentity !== host)
     )
       throw new Error("prior thread does not authorize an exact known-usage repair attempt");
-    // Pinned 0.153.0 cold thread/resume cannot opt into rawResponse/completed.
+    // The current cold thread/resume request cannot opt into rawResponse/completed.
     // Never dispatch a repair with a knowingly unavailable accounting stream.
     if (previous)
       throw new Error(
-        "cold same-thread repair is unavailable in Codex 0.153.0: thread/resume cannot enable exact raw-response accounting",
+        "cold same-thread repair is unavailable: thread/resume cannot enable exact raw-response accounting",
       );
     const attemptId = durableAttemptId(context);
     this.#ownedScopes.set(attemptId, scope);
@@ -471,6 +496,8 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       await this.#installAuth(home);
       remainingBeforeAttemptDeadline(context.deadline, deadlineFailure);
       connection = await this.#connection(home, context.workspace, attemptId, context);
+      const serverIdentity = this.#serverIdentities.get(home);
+      if (!serverIdentity) throw new Error("Codex App Server initialize identity is unavailable");
       await journal.assertCurrent();
       const boundary = await threadBoundary(context);
       remainingBeforeAttemptDeadline(context.deadline, deadlineFailure);
@@ -491,12 +518,12 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         thread.cwd !== context.workspace ||
         typeof thread.modelProvider !== "string" ||
         typeof response.model !== "string" ||
-        thread.cliVersion !== "0.153.0" ||
         response.approvalPolicy !== "never" ||
         ((context.modelSelection?.model ?? this.#options.model) &&
           response.model !== (context.modelSelection?.model ?? this.#options.model))
       )
         throw new Error("App Server returned an incompatible thread, model, or permission binding");
+      const cliVersion = appServerCliVersion(thread.cliVersion);
       const priorTurns = Array.isArray(thread.turns) ? thread.turns.map(turnFrom) : [];
       if (!Array.isArray(thread.turns) || priorTurns.length)
         throw new Error("App Server thread contains missing, active, or unexpected prior turns");
@@ -519,7 +546,8 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         sessionId: thread.sessionId,
         modelProvider: thread.modelProvider,
         model: response.model,
-        cliVersion: "0.153.0",
+        cliVersion,
+        serverUserAgent: serverIdentity.userAgent,
         usageBaseline: { ...EMPTY_APP_SERVER_USAGE },
         startedAt: new Date().toISOString(),
         deadline: context.deadline.toISOString(),
@@ -540,6 +568,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
           codexHome: home,
           resourceHostIdentity: host,
           sessionId: binding.sessionId,
+          cliVersion: binding.cliVersion,
           ...(connection.pid === null ? {} : { pid: String(connection.pid) }),
         },
       };
@@ -585,6 +614,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       if (resourceId) this.#attempts.delete(resourceId);
       await connection?.close();
       this.#connections.delete(home);
+      this.#serverIdentities.delete(home);
       // Even a lost turn/start response may have consumed model work. Preserve
       // provider history and its immutable intent; never re-dispatch here.
       throw error;
@@ -975,7 +1005,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
           "attempt deadline elapsed before App Server initialization",
         );
       }
-      const initialization = record(
+      const serverIdentity = appServerIdentity(
         await connection.request("initialize", {
           clientInfo: {
             name: "clockgrove-factory",
@@ -991,16 +1021,11 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
           },
         }),
       );
-      if (
-        typeof initialization.userAgent !== "string" ||
-        !/(?:^|[^\d])0\.153\.0(?:[^\d]|$)/.test(initialization.userAgent)
-      )
-        throw new Error(
-          "durable App Server requires the source-pinned Codex 0.153.0 protocol before dispatch",
-        );
+      this.#serverIdentities.set(home, serverIdentity);
       connection.notify("initialized");
       return connection;
     } catch (error) {
+      this.#serverIdentities.delete(home);
       await connection.close();
       throw error;
     }
@@ -1290,6 +1315,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
 
   async #closeConnection(home: string): Promise<void> {
     const connection = this.#connections.get(home);
+    this.#serverIdentities.delete(home);
     if (!connection) return;
     this.#connections.delete(home);
     await connection.close();

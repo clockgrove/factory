@@ -23,9 +23,11 @@ For a background controller, also follow [unattended setup](unattended.md); a te
 is not proof the service can find the same executable. FACTORY_CODEX_PATH selects an executable,
 not an authentication mode or a command with arguments.
 
-The durable-session implementation is pinned to Codex **0.153.0**. Initialization rejects
-other versions before a model turn. Each attempt retains its exact provider home, thread
-and turn, with immutable preparation/dispatch/terminal checkpoints in GitHub. Cancellation
+The durable-session implementation validates the App Server behavior it uses before a model turn.
+Initialization must return a bounded server identity, and thread creation must return the exact
+session, workspace, model, approval and empty-history contract. Each attempt retains the observed
+server user agent and CLI version with its exact provider home, thread and turn, with immutable
+preparation/dispatch/terminal checkpoints in GitHub. Cancellation
 interrupts the owned turn and drains its process scope; a successful interrupt request is
 not a terminal receipt or known usage.
 
@@ -34,7 +36,7 @@ durable artifact wins before session collection; otherwise a successful terminal
 with complete usage can continue through ordinary artifact validation/publication, preserving
 the original attempt. Exact resource absence and current ownership remain required.
 
-**Cold same-thread repair is currently unavailable:** pinned `thread/resume` cannot enable
+**Cold same-thread repair is currently unavailable:** the observed `thread/resume` behavior cannot enable
 the raw-response accounting subscription needed for a new repair turn. Factory refuses
 that dispatch rather than replacing the thread or estimating missing model usage. Missing
 provider state, ambiguous dispatch, unknown interrupted usage and partial validation remain

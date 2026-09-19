@@ -167,6 +167,7 @@ function fixture() {
     threadId: "thread-original",
     sessionId: "session-original",
     cliVersion: "0.153.0",
+    serverUserAgent: "codex_cli_rs/0.153.0",
     priorTurnIds: [],
     usageBaseline: Object.fromEntries(Object.keys(tokens).map((key) => [key, 0])),
   };

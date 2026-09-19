@@ -29,7 +29,6 @@ export interface ExecutionBackendCapabilities {
     providerStorage: "local";
     recovery: "exact-terminal-read-only";
     coldRepair: "unavailable-raw-usage-subscription";
-    supportedCodexVersion: "0.153.0";
     preferredRouteQualification: "required";
   };
   supportsLocalInference: boolean;

@@ -105,6 +105,12 @@ export function proposalFromCompiledFixture(
     protocol: "clockgrove.factory/compiler-proposal",
     kind: "work-items",
     mediaIntents: [],
+    coverage: explicit.map((obligationId) => ({
+      obligationId,
+      bindings: [
+        { kind: "criterion", itemId: objective.workItems[0]!.id, criterionId: "criterion-1" },
+      ],
+    })),
     workItems: objective.workItems.map((item, itemIndex) => ({
       id: item.id,
       title: item.title,

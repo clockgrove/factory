@@ -4,6 +4,7 @@ import type {
   CompilerInferenceChallenge,
   CompilerEvidence,
   CompilerCaseLabel,
+  FactoryCompilerCapability,
 } from "../evaluation/compiler-eval.js";
 import type { LegacyGraphConstraints } from "../graph.js";
 import type {
@@ -442,6 +443,7 @@ export interface PlanJudgeContext {
   challenges?: CompilerInferenceChallenge[];
   compilation: CompilationContext;
   inventory: ObligationInventory;
+  factoryCapabilities?: FactoryCompilerCapability[];
   proposal: CompilerJudgeCandidate;
   projectionTrace: CompilerProjectionTrace;
   graphDigest: string;

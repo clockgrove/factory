@@ -3,14 +3,17 @@ import { declaredAssetHandlerContract } from "../assets/handlers.js";
 
 import {
   CompilerInferenceChallengesSchema,
+  CompilerPlanningInventorySchema,
+  FactoryCompilerCapabilitySchema,
   CompilerJudgeVerdictSchema,
   MAX_COMPILER_INFERENCE_CHALLENGES,
   MAX_COMPILER_ITEM_CHALLENGES,
   MAX_COMPILER_OBLIGATION_CHALLENGES,
-  ObligationInventorySchema,
+  ObligationCoverageBindingSchema,
   type CompilerInferenceChallenge,
   type CompilerJudgeVerdict,
-  type ObligationInventory,
+  type CompilerPlanningInventory,
+  type FactoryCompilerCapability,
 } from "../evaluation/compiler-eval.js";
 import { NetworkDestinationSchema, RepositoryScopePathSchema } from "../protocol/worker-packet.js";
 import { MAX_PRODUCT_FILE_BYTES } from "../protocol/limits.js";
@@ -276,6 +279,13 @@ export const CompilerWorkItemProposalSchema = z
   .strict();
 export type CompilerWorkItemProposal = z.infer<typeof CompilerWorkItemProposalSchema>;
 
+export const CompilerObligationCoverageSchema = z
+  .object({
+    obligationId: z.string().min(1).max(160),
+    bindings: z.array(ObligationCoverageBindingSchema).min(1).max(128),
+  })
+  .strict();
+
 export const ProposedObjectiveAcceptanceSchema = z
   .object({
     id: Id,
@@ -340,6 +350,13 @@ export const RequirementDispositionSchema = z.discriminatedUnion("disposition", 
   z
     .object({
       obligationId: z.string().min(1).max(160),
+      disposition: z.literal("factory-capability"),
+      capabilityId: FactoryCompilerCapabilitySchema.shape.id,
+    })
+    .strict(),
+  z
+    .object({
+      obligationId: z.string().min(1).max(160),
       disposition: z.literal("deferred"),
       reason: Text,
     })
@@ -383,6 +400,7 @@ export const CompilerWorkItemsProposalSchema = z
     protocol: z.literal("clockgrove.factory/compiler-proposal"),
     kind: z.literal("work-items"),
     workItems: z.array(CompilerWorkItemProposalSchema).min(1).max(100),
+    coverage: z.array(CompilerObligationCoverageSchema).max(128),
     mediaIntents: z.array(MediaIntentSchema).max(32),
   })
   .strict();
@@ -428,34 +446,57 @@ export function normalizeCompilerProposalProviderOutput(value: unknown): unknown
     "triggers",
     "requirements",
   ] as const;
-  if (!arrays.every((field) => Array.isArray(candidate[field]))) return value;
   const providerKeys = ["protocol", "kind", ...arrays].sort();
-  if (
-    Object.keys(candidate)
-      .sort()
-      .some((key, index) => key !== providerKeys[index]) ||
-    Object.keys(candidate).length !== providerKeys.length
-  )
-    return value;
+  const durableKeys =
+    candidate.kind === "work-items"
+      ? ["protocol", "kind", "workItems", "coverage", "mediaIntents"].sort()
+      : candidate.kind === "objectives"
+        ? ["protocol", "kind", "objectives", "coverage", "triggers"].sort()
+        : candidate.kind === "clarification"
+          ? ["protocol", "kind", "requirements", "triggers"].sort()
+          : [];
+  const actualKeys = Object.keys(candidate).sort();
+  const hasExactKeys = (expected: string[]) =>
+    actualKeys.length === expected.length &&
+    actualKeys.every((key, index) => key === expected[index]);
+  const providerShape =
+    hasExactKeys(providerKeys) && arrays.every((field) => Array.isArray(candidate[field]));
+  const durableShape = hasExactKeys(durableKeys);
+  if (!providerShape && !durableShape) return value;
   const empty = (field: (typeof arrays)[number]) => (candidate[field] as unknown[]).length === 0;
   if (
     candidate.kind === "work-items" &&
-    empty("objectives") &&
-    empty("coverage") &&
-    empty("triggers") &&
-    empty("requirements")
+    Array.isArray(candidate.workItems) &&
+    Array.isArray(candidate.coverage) &&
+    Array.isArray(candidate.mediaIntents) &&
+    (!providerShape || (empty("objectives") && empty("triggers") && empty("requirements")))
   )
     return {
       protocol: candidate.protocol,
       kind: candidate.kind,
-      workItems: candidate.workItems,
+      workItems: (candidate.workItems as Array<Record<string, unknown>>).map((item) => ({
+        ...item,
+        obligationIds: (candidate.coverage as Array<Record<string, unknown>>)
+          .filter(
+            (entry) =>
+              Array.isArray(entry.bindings) &&
+              (entry.bindings as Array<Record<string, unknown>>).some(
+                (binding) => binding.kind === "criterion" && binding.itemId === item.id,
+              ),
+          )
+          .map((entry) => entry.obligationId)
+          .filter((id): id is string => typeof id === "string")
+          .sort(),
+      })),
+      coverage: candidate.coverage,
       mediaIntents: candidate.mediaIntents,
     };
   if (
     candidate.kind === "objectives" &&
-    empty("workItems") &&
-    empty("mediaIntents") &&
-    empty("requirements")
+    Array.isArray(candidate.objectives) &&
+    Array.isArray(candidate.coverage) &&
+    Array.isArray(candidate.triggers) &&
+    (!providerShape || (empty("workItems") && empty("mediaIntents") && empty("requirements")))
   )
     return {
       protocol: candidate.protocol,
@@ -466,10 +507,10 @@ export function normalizeCompilerProposalProviderOutput(value: unknown): unknown
     };
   if (
     candidate.kind === "clarification" &&
-    empty("workItems") &&
-    empty("mediaIntents") &&
-    empty("objectives") &&
-    empty("coverage")
+    Array.isArray(candidate.requirements) &&
+    Array.isArray(candidate.triggers) &&
+    (!providerShape ||
+      (empty("workItems") && empty("mediaIntents") && empty("objectives") && empty("coverage")))
   )
     return {
       protocol: candidate.protocol,
@@ -1061,8 +1102,9 @@ export const CompilerRequestSchema = z
       })
       .strict(),
     baseSha: z.string().regex(/^[a-f0-9]{40}$/),
-    inventory: ObligationInventorySchema,
+    inventory: CompilerPlanningInventorySchema,
     inventorySource: z.enum(["structural-source", "independent-extraction"]),
+    factoryCapabilities: z.array(FactoryCompilerCapabilitySchema).max(6),
     repository: z
       .object({
         manifests: z.array(RepositoryScopePathSchema).max(64),
@@ -1106,7 +1148,8 @@ export const CompilerRequestSchema = z
   })
   .strict();
 export type CompilerRequest = z.infer<typeof CompilerRequestSchema> & {
-  inventory: ObligationInventory;
+  inventory: CompilerPlanningInventory;
+  factoryCapabilities: FactoryCompilerCapability[];
   semanticFindings: CompilerJudgeVerdict["findings"];
   challenges: CompilerInferenceChallenge[];
 };
@@ -1189,12 +1232,15 @@ const jsonCompilerWorkItemProposal = (
   scopePath: Record<string, unknown>,
   networkDestination: Record<string, unknown>,
   exclusiveResourcePattern: string,
+  includeDerivedObligationIds: boolean,
 ) =>
   strictObject({
     id: jsonId,
     title: { type: "string", minLength: 1, maxLength: 256 },
     goal: { type: "string", minLength: 1, maxLength: 4_000 },
-    obligationIds: stringArray(128, { type: "string", minLength: 1, maxLength: 160 }),
+    ...(includeDerivedObligationIds
+      ? { obligationIds: stringArray(128, { type: "string", minLength: 1, maxLength: 160 }) }
+      : {}),
     criteria: {
       type: "array",
       minItems: 1,
@@ -1809,6 +1855,17 @@ const jsonProposedObjective = strictObject({
     items: strictObject({ objectiveId: jsonId, outputId: jsonId }),
   },
 });
+const jsonFactoryCapabilityId = {
+  type: "string",
+  enum: [
+    "exact-activation-binding",
+    "execution-network-policy",
+    "protected-pr-integration",
+    "exact-integration-candidate-validation",
+    "authorized-finding-reporting",
+    "terminal-objective-handling",
+  ],
+};
 const jsonRequirementDisposition = {
   anyOf: [
     strictObject({
@@ -1825,21 +1882,45 @@ const jsonRequirementDisposition = {
     }),
     strictObject({
       obligationId: jsonEvalId,
+      disposition: { type: "string", const: "factory-capability" },
+      capabilityId: jsonFactoryCapabilityId,
+    }),
+    strictObject({
+      obligationId: jsonEvalId,
       disposition: { type: "string", const: "deferred" },
       reason: jsonText,
     }),
   ],
 };
+const jsonObligationCoverageBinding = {
+  anyOf: [
+    strictObject({
+      kind: { type: "string", const: "criterion" },
+      itemId: jsonId,
+      criterionId: jsonId,
+    }),
+    strictObject({
+      kind: { type: "string", const: "factory-capability" },
+      capabilityId: jsonFactoryCapabilityId,
+    }),
+  ],
+};
+const jsonObligationCoverage = strictObject({
+  obligationId: jsonEvalId,
+  bindings: { type: "array", minItems: 1, maxItems: 128, items: jsonObligationCoverageBinding },
+});
 const compilerProposalSchemas = (
   scopePath: Record<string, unknown>,
   networkDestination: Record<string, unknown>,
   exclusiveResourcePattern: string,
   mediaIntent: Record<string, unknown>,
+  includeDerivedObligationIds: boolean,
 ) => {
   const workItem = jsonCompilerWorkItemProposal(
     scopePath,
     networkDestination,
     exclusiveResourcePattern,
+    includeDerivedObligationIds,
   );
   const proposedObjective = {
     ...jsonProposedObjective,
@@ -1859,6 +1940,7 @@ const compilerProposalSchemas = (
       protocol: { type: "string", const: "clockgrove.factory/compiler-proposal" },
       kind: { type: "string", const: "work-items" },
       workItems: { type: "array", minItems: 1, maxItems: 100, items: workItem },
+      coverage: { type: "array", maxItems: 128, items: jsonObligationCoverage },
       mediaIntents: { type: "array", maxItems: 32, items: mediaIntent },
     }),
     strictObject({
@@ -1886,7 +1968,11 @@ const compilerProposalSchemas = (
     workItems: { type: "array", maxItems: 100, items: workItem },
     mediaIntents: { type: "array", maxItems: 32, items: mediaIntent },
     objectives: { type: "array", maxItems: 32, items: proposedObjective },
-    coverage: { type: "array", maxItems: 128, items: jsonRequirementDisposition },
+    coverage: {
+      type: "array",
+      maxItems: 128,
+      items: { anyOf: [jsonRequirementDisposition, jsonObligationCoverage] },
+    },
     triggers: { type: "array", maxItems: 32, items: jsonPlanningTrigger },
     requirements: { type: "array", maxItems: 32, items: clarificationRequirement },
   });
@@ -1898,12 +1984,14 @@ const providerCompilerProposalObjectSchema = compilerProposalSchemas(
   providerJsonNetworkDestination,
   "^[a-z0-9][a-z0-9:._/-]*$",
   jsonMediaIntent(false),
+  false,
 ).provider;
 const durableCompilerProposalObjectSchema = compilerProposalSchemas(
   jsonScopePath,
   jsonNetworkDestination,
   "^(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*//)(?!.*\\/$)[a-z0-9][a-z0-9:._/-]*$",
   jsonMediaIntent(true),
+  true,
 ).durable;
 
 export const COMPILER_PROPOSAL_JSON_SCHEMA = {
@@ -1911,11 +1999,12 @@ export const COMPILER_PROPOSAL_JSON_SCHEMA = {
   ...providerCompilerProposalObjectSchema,
 } as const;
 
-const jsonEvidence = strictObject({
+const jsonPlanningEvidence = strictObject({
   id: jsonEvalId,
   kind: { enum: ["objective", "repository", "artifact", "receipt"] },
   identity: jsonText,
-  excerpt: jsonText,
+  digest: jsonDigest,
+  citation: jsonText,
 });
 const jsonObligation = strictObject({
   id: jsonEvalId,
@@ -1928,7 +2017,7 @@ const jsonInventory = strictObject({
   version: { const: 1 },
   objectiveDigest: jsonDigest,
   baseSha: { type: "string", pattern: "^[a-f0-9]{40,64}$" },
-  evidence: { type: "array", minItems: 1, maxItems: 128, items: jsonEvidence },
+  evidence: { type: "array", minItems: 1, maxItems: 128, items: jsonPlanningEvidence },
   obligations: { type: "array", minItems: 1, maxItems: 128, items: jsonObligation },
 });
 const jsonViolation = strictObject({
@@ -2172,6 +2261,15 @@ export const COMPILER_REQUEST_JSON_SCHEMA = {
     baseSha: jsonBaseSha,
     inventory: jsonInventory,
     inventorySource: { enum: ["structural-source", "independent-extraction"] },
+    factoryCapabilities: {
+      type: "array",
+      maxItems: 6,
+      items: strictObject({
+        id: jsonFactoryCapabilityId,
+        description: jsonText,
+        authorityDigest: jsonDigest,
+      }),
+    },
     repository: strictObject({
       manifests: stringArray(64, jsonScopePath),
       requiredTools: stringArray(64, jsonId),

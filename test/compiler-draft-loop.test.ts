@@ -200,7 +200,13 @@ function validatedObjective(graph: CompiledObjective): ValidatedCompilerDraft {
         objectiveDigest: "d".repeat(64),
         baseSha: BASE_SHA,
         evidence: [
-          { id: "objective", kind: "objective", identity: "fixture", excerpt: "Ship feature" },
+          {
+            id: "objective",
+            kind: "objective",
+            identity: "fixture",
+            digest: compilerEvalDigest("Ship feature"),
+            citation: "Objective",
+          },
         ],
         obligations: [
           {
@@ -213,6 +219,7 @@ function validatedObjective(graph: CompiledObjective): ValidatedCompilerDraft {
         ],
       },
       inventorySource: "independent-extraction",
+      factoryCapabilities: [],
       repository: {
         manifests: ["package.json"],
         requiredTools: [],

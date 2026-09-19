@@ -3,6 +3,8 @@ import type { CompilerProjectionTrace } from "./proposal.js";
 import type { CompiledObjective, CompiledWorkItem } from "../graph.js";
 import type {
   CompilerInferenceChallenge,
+  CompilerPlanningInventory,
+  FactoryCompilerCapability,
   ObligationInventory,
 } from "../evaluation/compiler-eval.js";
 
@@ -58,7 +60,8 @@ export interface CompilerJudgeSourceInput {
   originalObjective: { number: number; title: string; body: string };
   baseSha: string;
   priorCompilationFailure?: { reason: string; rawProposalAvailable: false };
-  inventory: ObligationInventory;
+  inventory: ObligationInventory | CompilerPlanningInventory;
+  factoryCapabilities?: FactoryCompilerCapability[];
   challenges: CompilerInferenceChallenge[];
   proposal: CompilerJudgeCandidate;
   projectionTrace: CompilerProjectionTrace;
@@ -74,6 +77,7 @@ export function buildCompilerJudgeSource(input: CompilerJudgeSourceInput) {
       ? { priorCompilationFailure: input.priorCompilationFailure }
       : {}),
     inventory: input.inventory,
+    factoryCapabilities: input.factoryCapabilities ?? [],
     challenges: input.challenges,
     proposal: input.proposal,
     projectionTrace: input.projectionTrace,

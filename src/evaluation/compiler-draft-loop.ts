@@ -40,8 +40,10 @@ import {
   managementTerminalOutcome,
 } from "../management/backend.js";
 import {
+  FactoryCompilerCapabilitySchema,
   ObligationInventorySchema,
   repairableCompilerJudgeVerdict,
+  type FactoryCompilerCapability,
   validateCompilerInferenceChallenges,
 } from "./compiler-eval.js";
 import { CompilerDraftStopError } from "./compiler-draft-errors.js";
@@ -274,6 +276,8 @@ export interface DraftReservationEvidence {
   expectedProvenance?: z.infer<typeof CompilerInvocationProvenanceSchema>;
 }
 export interface CompilerDraftCallbacks {
+  /** Exact closed lifecycle capabilities authenticated outside the model. */
+  factoryCapabilities?: readonly FactoryCompilerCapability[];
   /** Admission and provider call use the same immutable invocation ID. */
   invoke(
     request: DraftInvocation,
@@ -392,6 +396,13 @@ function retainedValidatedDraft(payload: Record<string, unknown>): RetainedValid
   } catch (error) {
     throw new Error("compiler validation retained graph is invalid", { cause: error });
   }
+}
+
+function factoryCapabilitiesFromSourceEvidence(value: unknown): FactoryCompilerCapability[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const capabilities = (value as { factoryCapabilities?: unknown }).factoryCapabilities;
+  if (capabilities === undefined) return [];
+  return z.array(FactoryCompilerCapabilitySchema).parse(capabilities);
 }
 
 /** Pure grammar check for the whole immutable chain. It must run before replay causes effects. */
@@ -582,6 +593,9 @@ export function validateCompilerDraftJournal(
               ? repairableCompilerJudgeVerdict(priorJudge.payload.proposal, {
                   draftDigest: String(priorValidation?.payload.graphDigest),
                   inventory: priorInventory.data,
+                  factoryCapabilities: factoryCapabilitiesFromSourceEvidence(
+                    expected.sourceEvidence,
+                  ),
                   graph: priorCandidate.data,
                   addedEdges: priorTrace.addedEdges,
                   challenges: validateCompilerInferenceChallenges(
@@ -2179,6 +2193,9 @@ export async function runCompilerDraftLoop(args: {
           repairableCompilerJudgeVerdict(rawVerdict, {
             draftDigest: graphDigest,
             inventory: ObligationInventorySchema.parse(inventory),
+            factoryCapabilities: callbacks.factoryCapabilities
+              ? z.array(FactoryCompilerCapabilitySchema).parse(callbacks.factoryCapabilities)
+              : [],
             graph: draft.proposal,
             addedEdges: draft.projectionTrace.addedEdges,
             challenges: validateCompilerInferenceChallenges(

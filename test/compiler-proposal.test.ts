@@ -7,8 +7,13 @@ import {
   type CompilerRequest,
 } from "../src/compiler/contracts.js";
 import {
+  COMPILER_JUDGE_DIMENSIONS,
   compilerEvalDigest,
   deriveCompilerInferenceChallenges,
+  repairableCompilerJudgeVerdict,
+  validateCompilerJudgeVerdict,
+  type CompilerJudgeVerdict,
+  type ObligationInventory,
 } from "../src/evaluation/compiler-eval.js";
 import {
   compilerJudgeSourceBytes,
@@ -78,6 +83,24 @@ function projectionPolicy(request: CompilerRequest) {
       deterministicGateIds: [...request.repositoryCapture.egress.deterministicGateIds],
       review: structuredClone(request.repositoryCapture.egress.review),
     },
+  };
+}
+
+function fullInventoryFor(
+  request: CompilerRequest,
+  repositoryExcerptBytes = 0,
+): ObligationInventory {
+  return {
+    version: request.inventory.version,
+    objectiveDigest: request.inventory.objectiveDigest,
+    baseSha: request.inventory.baseSha,
+    evidence: request.inventory.evidence.map((entry) => ({
+      id: entry.id,
+      kind: entry.kind,
+      identity: entry.identity,
+      excerpt: `${entry.citation}${"e".repeat(repositoryExcerptBytes)}`.slice(0, 4_000),
+    })),
+    obligations: structuredClone(request.inventory.obligations),
   };
 }
 
@@ -324,6 +347,163 @@ function judgeSourceBytes(
 }
 
 describe("semantic proposal validation", () => {
+  it("repairs unavailable lifecycle coverage once and accepts criterion, capability, and mixed bindings", () => {
+    const request = semanticRequest();
+    request.inventory.obligations.push(
+      {
+        id: "lifecycle-only",
+        text: "Close the Objective after supervised settlement.",
+        kind: "explicit",
+        evidenceIds: ["objective"],
+        acceptanceEvidence: "Factory records terminal state after cleanup.",
+      },
+      {
+        id: "mixed-delivery",
+        text: "Implement the contract and integrate it through protected controls.",
+        kind: "explicit",
+        evidenceIds: ["objective"],
+        acceptanceEvidence: "The product behavior passes and Factory protects integration.",
+      },
+    );
+    const initial = semanticProposal(request);
+    const lifecycle = initial.coverage.find((entry) => entry.obligationId === "lifecycle-only")!;
+    lifecycle.bindings = [
+      { kind: "factory-capability", capabilityId: "authorized-finding-reporting" },
+    ];
+    const mixed = initial.coverage.find((entry) => entry.obligationId === "mixed-delivery")!;
+    mixed.bindings.push({
+      kind: "factory-capability",
+      capabilityId: "protected-pr-integration",
+    });
+
+    const invalid = parseAndValidateCompilerProposal(request, initial);
+    expect(invalid.report).toMatchObject({
+      status: "repairable",
+      violations: [
+        expect.objectContaining({
+          code: "schema-invalid",
+          field: expect.stringContaining("/bindings/"),
+          observed: "authorized-finding-reporting",
+        }),
+      ],
+    });
+
+    const repaired = structuredClone(initial);
+    repaired.coverage.find((entry) => entry.obligationId === "lifecycle-only")!.bindings = [
+      { kind: "factory-capability", capabilityId: "terminal-objective-handling" },
+    ];
+    const valid = parseAndValidateCompilerProposal(request, repaired);
+    expect(valid.report).toMatchObject({ status: "valid", violations: [] });
+    if (!valid.proposal || valid.proposal.kind !== "work-items")
+      throw new Error("fixture requires valid Work Items");
+    expect(valid.proposal.workItems).toHaveLength(1);
+    expect(valid.proposal.workItems[0]!.obligationIds).not.toContain("lifecycle-only");
+    const structuralRequest = structuredClone(request);
+    structuralRequest.inventorySource = "structural-source";
+    expect(parseAndValidateCompilerProposal(structuralRequest, repaired).report.status).toBe(
+      "valid",
+    );
+
+    const fullInventory = fullInventoryFor(request);
+    const draftDigest = compilerEvalDigest(valid.proposal);
+    const criterionBinding = {
+      kind: "criterion" as const,
+      itemId: "item-1",
+      criterionId: "implemented",
+    };
+    const verdict: CompilerJudgeVerdict = {
+      version: 1 as const,
+      rubricVersion: 1 as const,
+      draftDigest,
+      inventoryDigest: compilerEvalDigest(fullInventory),
+      coverage: [
+        {
+          obligationId: "explicit-contract",
+          status: "covered" as const,
+          itemIds: ["item-1"],
+          acceptanceBindings: [criterionBinding],
+          evidenceIds: ["objective"],
+          reason: "The product criterion covers the contract.",
+        },
+        {
+          obligationId: "lifecycle-only",
+          status: "covered" as const,
+          itemIds: [],
+          acceptanceBindings: [
+            {
+              kind: "factory-capability" as const,
+              capabilityId: "terminal-objective-handling" as const,
+            },
+          ],
+          evidenceIds: ["objective"],
+          reason: "Authenticated terminal handling owns this lifecycle clause.",
+        },
+        {
+          obligationId: "mixed-delivery",
+          status: "covered" as const,
+          itemIds: ["item-1"],
+          acceptanceBindings: [
+            criterionBinding,
+            {
+              kind: "factory-capability" as const,
+              capabilityId: "protected-pr-integration" as const,
+            },
+          ],
+          evidenceIds: ["objective"],
+          reason: "Both product behavior and protected integration are covered.",
+        },
+      ],
+      items: [
+        {
+          itemId: "item-1",
+          granularity: "cohesive" as const,
+          reason: "One product deliverable.",
+          evidenceIds: ["objective"],
+        },
+      ],
+      dimensions: COMPILER_JUDGE_DIMENSIONS.map((dimension) => ({
+        dimension,
+        status: "assessed" as const,
+        reason: "Assessed against exact evidence.",
+        evidenceIds: ["objective"],
+      })),
+      dependencies: [
+        {
+          itemId: "item-1",
+          dependsOn: [],
+          reason: "No prerequisites.",
+          evidenceIds: ["objective"],
+        },
+      ],
+      findings: [],
+      inferenceCorrections: [],
+      uncertainty: [],
+      decision: "accept" as const,
+    };
+    const judgeContext = {
+      draftDigest,
+      inventory: fullInventory,
+      factoryCapabilities: request.factoryCapabilities,
+      graph: valid.proposal,
+    };
+    expect(validateCompilerJudgeVerdict(verdict, judgeContext).decision).toBe("accept");
+    expect(repairableCompilerJudgeVerdict(verdict, judgeContext)).toBeNull();
+
+    const omittedMixedCriterion = structuredClone(verdict);
+    const mixedReview = omittedMixedCriterion.coverage.find(
+      (entry) => entry.obligationId === "mixed-delivery",
+    )!;
+    mixedReview.acceptanceBindings = mixedReview.acceptanceBindings.filter(
+      (binding) => binding.kind !== "criterion",
+    );
+    expect(() => validateCompilerJudgeVerdict(omittedMixedCriterion, judgeContext)).toThrow(
+      "omits proposed binding",
+    );
+    expect(repairableCompilerJudgeVerdict(omittedMixedCriterion, judgeContext)).toMatchObject({
+      decision: "repair",
+      findings: [expect.objectContaining({ id: "omitted-proposal-coverage" })],
+    });
+  });
   it.each([
     {
       name: "duplicate Work Item ID",
@@ -363,19 +543,24 @@ describe("semantic proposal validation", () => {
       name: "unknown obligation",
       mutate(_request: CompilerRequest, proposal: CompilerProposal) {
         proposal.workItems[0]!.obligationIds.push("not-in-inventory");
+        proposal.coverage.push({
+          obligationId: "not-in-inventory",
+          bindings: [{ kind: "criterion", itemId: "item-1", criterionId: "implemented" }],
+        });
       },
       expected: {
         code: "unknown-obligation",
-        itemId: "item-1",
-        field: "/workItems/0/obligationIds",
+        itemId: null,
+        field: "/coverage/1/obligationId",
       },
     },
     {
       name: "unmapped explicit obligation",
       mutate(_request: CompilerRequest, proposal: CompilerProposal) {
         proposal.workItems[0]!.obligationIds = [];
+        proposal.coverage = [];
       },
-      expected: { code: "unmapped-obligation", itemId: null, field: "/workItems" },
+      expected: { code: "unmapped-obligation", itemId: null, field: "/coverage" },
     },
     {
       name: "unknown dependency",
@@ -715,6 +900,7 @@ describe("semantic proposal validation", () => {
     );
 
     overflow.proposal.workItems[0]!.obligationIds = [];
+    overflow.proposal.coverage = [];
     const combined = codes(overflow.request, overflow.proposal, overflow.pinned);
     expect(combined.map((entry) => entry.code)).toEqual(
       expect.arrayContaining(["unmapped-obligation", "dependency-limit"]),
@@ -769,6 +955,9 @@ describe("semantic proposal validation", () => {
         risk: "ordinary" as const,
         validation: structuredClone(evidence),
       }));
+      proposal.coverage[0]!.bindings = [
+        { kind: "criterion", itemId: "item-1", criterionId: "criterion-1" },
+      ];
       return { pinned, request, proposal };
     };
     const boundary = fixture(7);
@@ -2109,8 +2298,10 @@ describe("media intent compilation", () => {
     proposal.workItems[1]!.dependsOn = ["item-1"];
     proposal.workItems[2]!.dependsOn = ["item-1"];
     proposal.workItems[3]!.dependsOn = ["item-2", "item-3"];
-    proposal.workItems[1]!.obligationIds = ["explicit-contract"];
-    proposal.workItems[2]!.obligationIds = ["explicit-contract"];
+    proposal.coverage[0]!.bindings.push(
+      { kind: "criterion", itemId: "item-2", criterionId: "implemented" },
+      { kind: "criterion", itemId: "item-3", criterionId: "implemented" },
+    );
     proposal.mediaIntents = [
       mediaIntent({
         role: "acceptance-capture",
@@ -3299,6 +3490,12 @@ describe("deferred capability provider validation", () => {
       protocol: "clockgrove.factory/compiler-proposal",
       kind: "work-items",
       mediaIntents: [],
+      coverage: [
+        {
+          obligationId: "explicit-contract",
+          bindings: [{ kind: "criterion", itemId: "provider", criterionId: "validated" }],
+        },
+      ],
       workItems: [
         item("provider", ["package.json", "package-lock.json"], []),
         item("child", ["src/child.ts"], ["provider"]),
@@ -3315,6 +3512,12 @@ describe("deferred capability provider validation", () => {
       protocol: "clockgrove.factory/compiler-proposal",
       kind: "work-items",
       mediaIntents: [],
+      coverage: [
+        {
+          obligationId: "explicit-contract",
+          bindings: [{ kind: "criterion", itemId: "provider", criterionId: "validated" }],
+        },
+      ],
       workItems: [
         item("provider", ["package.json", "package-lock.json"], []),
         later,
@@ -3358,6 +3561,18 @@ describe("deferred capability provider validation", () => {
       protocol: "clockgrove.factory/compiler-proposal",
       kind: "work-items",
       mediaIntents: [],
+      coverage: [
+        {
+          obligationId: "explicit-contract",
+          bindings: [
+            {
+              kind: "criterion",
+              itemId: build(item).find((entry) => entry.obligationIds.length > 0)!.id,
+              criterionId: "validated",
+            },
+          ],
+        },
+      ],
       workItems: build(item),
     };
     expect(codes(request, proposal)).toContainEqual(
@@ -3380,6 +3595,12 @@ describe("deferred capability provider validation", () => {
       protocol: "clockgrove.factory/compiler-proposal",
       kind: "work-items",
       mediaIntents: [],
+      coverage: [
+        {
+          obligationId: "explicit-contract",
+          bindings: [{ kind: "criterion", itemId: "provider", criterionId: "validated" }],
+        },
+      ],
       workItems: [provider, ...consumers],
     };
     const boundary = structuredClone(proposal);
@@ -3418,6 +3639,12 @@ describe("deferred capability provider validation", () => {
         protocol: "clockgrove.factory/compiler-proposal",
         kind: "work-items",
         mediaIntents: [],
+        coverage: [
+          {
+            obligationId: "explicit-contract",
+            bindings: [{ kind: "criterion", itemId: "provider", criterionId: "validated" }],
+          },
+        ],
         workItems: [provider],
       }),
     ).toContainEqual(
@@ -3643,6 +3870,7 @@ describe("deterministic semantic projection", () => {
       pinnedFacts: pinned,
       repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
+      obligationInventory: fullInventoryFor(request),
     }).report;
     expect(report.violations).toContainEqual(
       expect.objectContaining({
@@ -3691,6 +3919,7 @@ describe("deterministic semantic projection", () => {
       pinnedFacts: pinned,
       repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
+      obligationInventory: fullInventoryFor(request),
     }).report;
     expect(report.violations).toContainEqual(
       expect.objectContaining({
@@ -3715,7 +3944,8 @@ describe("deterministic semantic projection", () => {
         id: `e-${index}`,
         kind: "repository" as const,
         identity: `identity-${index}`,
-        excerpt: `${index}:` + "e".repeat(995),
+        digest: compilerEvalDigest(`${index}:` + "e".repeat(995)),
+        citation: `source-${index}`,
       })),
     );
     request.inventory.obligations.push(
@@ -3763,27 +3993,28 @@ describe("deterministic semantic projection", () => {
       proposal,
       carried: request.challenges,
     });
+    const fullInventory = fullInventoryFor(request, 600);
     const sourceBytes = (effectiveChallenges: typeof challenges) =>
       compilerJudgeSourceBytes({
         originalObjective: request.objective,
         baseSha: request.baseSha,
         priorCompilationFailure: { reason: "x".repeat(8_000), rawProposalAvailable: false },
-        inventory: request.inventory,
+        inventory: fullInventory,
         challenges: effectiveChallenges,
         proposal,
         projectionTrace: trace,
         draftDigest: trace.graphDigest,
-        inventoryDigest: compilerEvalDigest(request.inventory),
+        inventoryDigest: compilerEvalDigest(fullInventory),
       });
     expect(challenges).toHaveLength(64);
     expect(sourceBytes([])).toBeLessThan(MAX_COMPILER_JUDGE_SOURCE_BYTES);
     expect(sourceBytes(challenges)).toBeGreaterThan(MAX_COMPILER_JUDGE_SOURCE_BYTES);
-    expect(sourceBytes(challenges)).toBeGreaterThan(960_000);
     expect(
       parseAndValidateCompilerProposal(request, proposal, {
         pinnedFacts: pinned,
         repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
         runPolicy: projectionPolicy(request),
+        obligationInventory: fullInventory,
       }).report.violations,
     ).toContainEqual(expect.objectContaining({ code: "judge-context-limit" }));
   });
@@ -3813,6 +4044,9 @@ describe("deterministic semantic projection", () => {
         ],
       }));
     }
+    proposal.coverage[0]!.bindings = [
+      { kind: "criterion", itemId: "item-1", criterionId: "criterion-1" },
+    ];
     proposal.workItems[0]!.preconditions = Array.from({ length: 64 }, () => "p".repeat(2_000));
     proposal.workItems[0]!.outOfScope = Array.from({ length: 64 }, () => "o".repeat(2_000));
 
@@ -3820,6 +4054,7 @@ describe("deterministic semantic projection", () => {
       pinnedFacts: pinned,
       repositoryCapturePlanning: semanticRepositoryCapturePlanning(pinned),
       runPolicy: projectionPolicy(request),
+      obligationInventory: fullInventoryFor(request),
     }).report;
     expect(report.violations.map((entry) => entry.code)).toEqual(
       expect.arrayContaining([

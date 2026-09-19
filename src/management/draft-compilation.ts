@@ -26,6 +26,7 @@ import {
 import {
   compilerEvalDigest,
   deriveCompilerInferenceChallenges,
+  FactoryCompilerCapabilitySchema,
   validateCompilerInferenceChallenges,
   parseObligationInventory,
   validateCompilerJudgeVerdict,
@@ -43,6 +44,7 @@ import {
 } from "../compiler/contracts.js";
 import {
   prepareCompilerRequest,
+  factoryCompilerCapabilities,
   compilerWorkItemsForEconomics,
   MAX_COMPILER_REQUEST_BYTES,
   projectCompilerProposal,
@@ -198,6 +200,16 @@ export function assertCompilerDraftSelection(
   if (inventoryResults.length !== 1 || !selected)
     throw new Error("compiled graph has no unambiguous accepted assessment");
   const inventory = ObligationInventorySchema.parse(inventoryResults[0]!.payload.value);
+  const sourceCapabilityValue = (
+    records.find((record) => record.kind === "source-evidence")?.payload.sourceEvidence as
+      | { factoryCapabilities?: unknown }
+      | undefined
+  )?.factoryCapabilities;
+  if (sourceCapabilityValue !== undefined && !Array.isArray(sourceCapabilityValue))
+    throw new Error("compiler source capability evidence is invalid");
+  const sourceCapabilities = (sourceCapabilityValue ?? []).map((entry) =>
+    FactoryCompilerCapabilitySchema.parse(entry),
+  );
   const proposalResult = records.find(
     (record) =>
       record.kind === "result" &&
@@ -270,6 +282,7 @@ export function assertCompilerDraftSelection(
   const verdict = validateCompilerJudgeVerdict(verdictResult.payload.value, {
     draftDigest: compiledGraphDigest(graph),
     inventory,
+    factoryCapabilities: sourceCapabilities,
     graph: persisted.proposal,
     addedEdges: trace.addedEdges,
     challenges,
@@ -373,6 +386,7 @@ export async function compileEvaluatedDraft(args: {
     sourceEvidence: {
       objective: context.objective,
       evidence,
+      factoryCapabilities: factoryCompilerCapabilities(frozenContext.runPolicy),
       modelSelection: context.modelSelection ?? null,
     },
     ...(args.fixedGraph ? { fixedGraph: args.fixedGraph } : {}),
@@ -385,6 +399,7 @@ export async function compileEvaluatedDraft(args: {
         : { maxObservedTokens: policy.maxObservedTokens }),
     },
     callbacks: {
+      factoryCapabilities: factoryCompilerCapabilities(frozenContext.runPolicy),
       reserveAtDispatch: true,
       recordUsage: args.recordUsage,
       validateInventory: inventory,
@@ -395,6 +410,7 @@ export async function compileEvaluatedDraft(args: {
         retained,
       ): Promise<ValidatedCompilerDraft> => {
         if (!activeInventory) throw new Error("draft validation has no obligation inventory");
+        projectionContext.obligationInventory = activeInventory;
         if (value && typeof value === "object" && "fixedGraph" in value) {
           const objective =
             retained?.objective ?? parsePersistedCompiledObjective(value.fixedGraph);
@@ -497,6 +513,7 @@ export async function compileEvaluatedDraft(args: {
           graph: draft.proposal,
           addedEdges: draft.projectionTrace.addedEdges,
           inventory: original,
+          factoryCapabilities: factoryCompilerCapabilities(frozenContext.runPolicy),
           challenges: validateCompilerInferenceChallenges(reviewEvidence ?? [], original),
         });
         if (verdict.decision === "abstain")
@@ -596,6 +613,7 @@ export async function compileEvaluatedDraft(args: {
             };
           }
           const obligations = inventory(request.inventory);
+          projectionContext.obligationInventory = obligations;
           if (request.stage === "judge") {
             if (!request.previous || !("workItems" in request.previous) || !request.projection)
               throw new Error("judge has no mechanically valid proposal and projection");
@@ -612,6 +630,7 @@ export async function compileEvaluatedDraft(args: {
               baseSha: frozenContext.baseSha,
               ...(priorCompilationFailure ? { priorCompilationFailure } : {}),
               inventory: obligations,
+              factoryCapabilities: factoryCompilerCapabilities(frozenContext.runPolicy),
               challenges,
               proposal: judgeProposal,
               projectionTrace: request.projection,
@@ -640,6 +659,7 @@ export async function compileEvaluatedDraft(args: {
               {
                 compilation: frozenContext,
                 inventory: obligations,
+                factoryCapabilities: factoryCompilerCapabilities(frozenContext.runPolicy),
                 proposal: judgeProposal,
                 projectionTrace: request.projection,
                 graphDigest: request.projection.graphDigest,

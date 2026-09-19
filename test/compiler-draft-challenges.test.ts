@@ -36,6 +36,7 @@ import {
   validatedDraftFromCompiledFixture,
 } from "./helpers/compiler-proposal.js";
 import { semanticRequest } from "./helpers/semantic-compiler.js";
+import { parseAndValidateCompilerProposal } from "../src/compiler/proposal.js";
 function fixtureInvocationProvenance(baseSha: string, stage: string) {
   return {
     promptDigest: compilerEvalDigest({ stage }),
@@ -185,7 +186,13 @@ function judged(context: PlanJudgeContext, accepted: boolean): CompilerJudgeVerd
       acceptanceBindings:
         entry.id === "invented"
           ? []
-          : [{ itemId: graph.workItems[0]!.id, criterionId: graph.workItems[0]!.criteria[0]!.id }],
+          : [
+              {
+                kind: "criterion" as const,
+                itemId: graph.workItems[0]!.id,
+                criterionId: graph.workItems[0]!.criteria[0]!.id,
+              },
+            ],
       reason: "Original evidence assessed",
       evidenceIds: ["objective"],
     })),
@@ -457,7 +464,25 @@ describe("bounded independent challenge integration", () => {
         await beforeModelInvocation?.(proposalAdmissionProvenance(request));
         calls.push(request.revision === 0 ? "compile" : "repair");
         const result = proposalResultFromCompiledFixture(request, f.graph, usage);
-        if (request.revision === 2) result.proposal.workItems[0]!.obligationIds.push("invented");
+        if (request.revision === 2) {
+          result.proposal.coverage.push({
+            obligationId: "invented",
+            bindings: [
+              {
+                kind: "criterion",
+                itemId: result.proposal.workItems[0]!.id,
+                criterionId: result.proposal.workItems[0]!.criteria[0]!.id,
+              },
+            ],
+          });
+          result.proposal.workItems[0]!.obligationIds.push("invented");
+          result.proposal.coverage.sort((left, right) =>
+            left.obligationId.localeCompare(right.obligationId),
+          );
+          result.proposal.workItems[0]!.obligationIds.sort();
+          result.report = parseAndValidateCompilerProposal(request, result.proposal).report;
+          result.responseBytes = Buffer.byteLength(JSON.stringify(result.proposal), "utf8");
+        }
         await checkpoint(result);
         return result;
       },
@@ -511,6 +536,7 @@ describe("bounded independent challenge integration", () => {
           covered.itemIds = [context.proposal.workItems[0]!.id];
           covered.acceptanceBindings = [
             {
+              kind: "criterion",
               itemId: context.proposal.workItems[0]!.id,
               criterionId: context.proposal.workItems[0]!.criteria[0]!.id,
             },

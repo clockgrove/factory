@@ -42,9 +42,11 @@ import {
 import { toolchainAdapterById } from "../toolchains/authority.js";
 import {
   compilerEvalDigest,
+  compilerPlanningInventory,
   deriveCompilerInferenceChallenges,
-  ObligationInventorySchema,
+  FactoryCompilerCapabilitySchema,
   type CompilerInferenceChallenge,
+  type FactoryCompilerCapability,
   type CompilerJudgeVerdict,
   type ObligationInventory,
 } from "../evaluation/compiler-eval.js";
@@ -90,6 +92,71 @@ export class CompilerRequestValidationError extends Error {
 }
 
 export const MAX_COMPILER_REQUEST_BYTES = 900 * 1024;
+
+/** Closed compiler view over lifecycle authority Factory already owns. Policy
+ * can remove an optional capability; it can never create a new capability ID. */
+export function factoryCompilerCapabilities(runPolicy: RunPolicy): FactoryCompilerCapability[] {
+  const entries: Array<{
+    id: FactoryCompilerCapability["id"];
+    description: string;
+    authority: unknown;
+    available?: boolean;
+  }> = [
+    {
+      id: "exact-activation-binding",
+      description:
+        "Factory binds activation and execution to the authenticated Objective and exact base.",
+      authority: { trust: runPolicy.trust },
+    },
+    {
+      id: "execution-network-policy",
+      description: "Factory enforces execution trust, backend, and allowed network destinations.",
+      authority: {
+        trust: runPolicy.trust,
+        backendOrder: runPolicy.backendOrder,
+        allowedNetworkDestinations: [...runPolicy.allowedNetworkDestinations].sort(),
+      },
+    },
+    {
+      id: "protected-pr-integration",
+      description:
+        "Factory publishes repository changes by pull request and integrates through protected repository controls.",
+      authority: { delivery: runPolicy.delivery ?? { mode: "regular-prs" } },
+    },
+    {
+      id: "exact-integration-candidate-validation",
+      description:
+        "Factory validates the exact integration candidate before accepting the integrated tree.",
+      authority: { contract: "integration-candidate-validation" },
+    },
+    {
+      id: "authorized-finding-reporting",
+      description:
+        "Factory may publish bounded evidence-backed findings only to destinations authorized by policy.",
+      authority: runPolicy.findingReporting ?? null,
+      available: runPolicy.findingReporting !== undefined,
+    },
+    {
+      id: "terminal-objective-handling",
+      description:
+        "Factory records terminal Objective state only after supervised settlement and cleanup.",
+      authority: {
+        maxAttemptsPerItem: runPolicy.maxAttemptsPerItem,
+        objectiveTimeoutMinutes: runPolicy.objectiveTimeoutMinutes,
+      },
+    },
+  ];
+  return entries
+    .filter((entry) => entry.available !== false)
+    .map(({ id, description, authority }) =>
+      FactoryCompilerCapabilitySchema.parse({
+        id,
+        description,
+        authorityDigest: compilerEvalDigest(authority),
+      }),
+    )
+    .sort((left, right) => left.id.localeCompare(right.id));
+}
 
 /** The repository-authority portion of request validation. Read-only
  * qualification preflight calls this same boundary after deriving capabilities
@@ -233,6 +300,7 @@ interface CompilerProjectionFacts {
 export interface CompilerProjectionContext {
   pinnedFacts: PinnedRepositoryFacts;
   runPolicy: RunPolicy;
+  obligationInventory?: ObligationInventory;
   repositoryCapturePlanning?: CompilationContext["repositoryCapturePlanning"];
   mediaPlanning?: {
     assetBindings: Array<{ assetId: string; input: WorkerAssetInput }>;
@@ -338,6 +406,11 @@ export function assertCompilerProjectionAuthority(
       compilerEvalDigest([...request.constraints.allowedNetworkDestinations].sort())
   )
     throw new Error("run policy differs from the compiler request constraints");
+  if (
+    compilerEvalDigest(factoryCompilerCapabilities(runPolicy)) !==
+    compilerEvalDigest(request.factoryCapabilities)
+  )
+    throw new Error("Factory lifecycle capabilities differ from immutable run policy");
   const egress = runPolicy.compilerMediaEgress;
   if (
     request.media.assetEgress.mode !== egress.mode ||
@@ -504,6 +577,30 @@ export function validateCompilerRequest(requestInput: unknown): CompilerValidati
           objectiveDigest: request.inventory.objectiveDigest,
           baseSha: request.inventory.baseSha,
         },
+      ),
+    );
+  const planningEvidenceIds = new Set(request.inventory.evidence.map((entry) => entry.id));
+  for (const obligation of request.inventory.obligations)
+    if (obligation.evidenceIds.some((id) => !planningEvidenceIds.has(id)))
+      violations.push(
+        violation(
+          "schema-invalid",
+          "/inventory/obligations",
+          "citations from the prompt-safe planning evidence catalog",
+          obligation.evidenceIds,
+        ),
+      );
+  const capabilityIds = request.factoryCapabilities.map((entry) => entry.id);
+  if (
+    new Set(capabilityIds).size !== capabilityIds.length ||
+    capabilityIds.some((id, index) => id !== [...capabilityIds].sort()[index])
+  )
+    violations.push(
+      violation(
+        "schema-invalid",
+        "/factoryCapabilities",
+        "unique canonical Factory lifecycle capability IDs",
+        capabilityIds,
       ),
     );
   if (
@@ -713,8 +810,9 @@ export async function prepareCompilerRequest(input: {
       digest: compilerEvalDigest(context.objective),
     },
     baseSha: context.baseSha,
-    inventory: ObligationInventorySchema.parse(input.inventory),
+    inventory: compilerPlanningInventory(input.inventory),
     inventorySource: input.inventorySource ?? "independent-extraction",
+    factoryCapabilities: factoryCompilerCapabilities(context.runPolicy),
     repository: {
       manifests: pinnedFacts.manifests,
       requiredTools: [...new Set(pinnedFacts.repository.lfs?.requiredTools ?? [])].sort(),
@@ -1440,6 +1538,14 @@ function projectedMediaProducerCount(request: CompilerRequest, proposal: Compile
   ).length;
 }
 
+function proposalObligationsForItem(proposal: CompilerProposal, itemId: string): string[] {
+  return proposal.coverage
+    .filter((entry) =>
+      entry.bindings.some((binding) => binding.kind === "criterion" && binding.itemId === itemId),
+    )
+    .map((entry) => entry.obligationId);
+}
+
 function projectedWorkItemsForEconomics(
   request: CompilerRequest,
   proposal: CompilerProposal,
@@ -1676,7 +1782,12 @@ function mediaIntentViolations(
           ),
         );
       seenBindings.add(bindingKey);
-      if (item.obligationIds.some((id) => intent.obligationIds.includes(id))) grounded = true;
+      if (
+        proposalObligationsForItem(proposal, item.id).some((id) =>
+          intent.obligationIds.includes(id),
+        )
+      )
+        grounded = true;
       const criterionIds = new Set(item.criteria.map((criterion) => criterion.id));
       const unknownCriteria = binding.criterionIds.filter((id) => !criterionIds.has(id));
       if (unknownCriteria.length)
@@ -1880,6 +1991,14 @@ export function parseAndValidateCompilerProposal(
     parsed.data.kind === "work-items"
       ? {
           ...parsed.data,
+          coverage: parsed.data.coverage
+            .map((entry) => ({
+              ...entry,
+              bindings: [...entry.bindings].sort((left, right) =>
+                compilerEvalDigest(left).localeCompare(compilerEvalDigest(right)),
+              ),
+            }))
+            .sort((left, right) => left.obligationId.localeCompare(right.obligationId)),
           mediaIntents: parsed.data.mediaIntents
             .map(canonicalMediaIntent)
             .sort((left, right) => left.id.localeCompare(right.id)),
@@ -1947,6 +2066,7 @@ export function parseAndValidateCompilerProposal(
     const planningViolations = validateObjectivePlan(
       proposal,
       request.inventory.obligations.map((entry) => entry.id),
+      request.factoryCapabilities.map((entry) => entry.id),
     ) as CompilerViolation[];
     const objectiveBoundViolations = proposal.objectives.flatMap(
       (objective, index): CompilerViolation[] => {
@@ -2110,6 +2230,69 @@ export function parseAndValidateCompilerProposal(
     );
   const obligationIds = new Set(request.inventory.obligations.map((entry) => entry.id));
   const mapped = new Set<string>();
+  const advertisedFactoryCapabilities = new Set(
+    request.factoryCapabilities.map((entry) => entry.id),
+  );
+  const coverageIds = new Set<string>();
+  for (const [coverageIndex, coverage] of proposal.coverage.entries()) {
+    const base = pointer("coverage", coverageIndex);
+    if (coverageIds.has(coverage.obligationId))
+      violations.push(
+        violation(
+          "schema-invalid",
+          `${base}/obligationId`,
+          "one complete coverage row per obligation",
+          coverage.obligationId,
+        ),
+      );
+    coverageIds.add(coverage.obligationId);
+    if (!obligationIds.has(coverage.obligationId))
+      violations.push(
+        violation(
+          "unknown-obligation",
+          `${base}/obligationId`,
+          [...obligationIds].sort(),
+          coverage.obligationId,
+        ),
+      );
+    else mapped.add(coverage.obligationId);
+    const bindingIds = new Set<string>();
+    for (const [bindingIndex, binding] of coverage.bindings.entries()) {
+      const bindingPath = `${base}/bindings/${bindingIndex}`;
+      const identity =
+        binding.kind === "criterion"
+          ? `${binding.kind}\0${binding.itemId}\0${binding.criterionId}`
+          : `${binding.kind}\0${binding.capabilityId}`;
+      if (bindingIds.has(identity))
+        violations.push(
+          violation("schema-invalid", bindingPath, "unique coverage bindings", binding),
+        );
+      bindingIds.add(identity);
+      if (binding.kind === "factory-capability") {
+        if (!advertisedFactoryCapabilities.has(binding.capabilityId))
+          violations.push(
+            violation(
+              "schema-invalid",
+              bindingPath,
+              [...advertisedFactoryCapabilities].sort(),
+              binding.capabilityId,
+            ),
+          );
+        continue;
+      }
+      const item = proposal.workItems.find((candidate) => candidate.id === binding.itemId);
+      if (!item?.criteria.some((criterion) => criterion.id === binding.criterionId))
+        violations.push(
+          violation(
+            "schema-invalid",
+            bindingPath,
+            "an exact criterion in the proposed graph",
+            binding,
+            binding.itemId,
+          ),
+        );
+    }
+  }
   const recipes = new Map(
     request.repository.validationRecipes.map((recipe) => [recipe.id, recipe]),
   );
@@ -2218,19 +2401,27 @@ export function parseAndValidateCompilerProposal(
           ),
         );
     }
-    for (const id of item.obligationIds) {
-      if (!obligationIds.has(id))
-        violations.push(
-          violation(
-            "unknown-obligation",
-            pointer("workItems", itemIndex, "obligationIds"),
-            [...obligationIds].sort(),
-            id,
-            item.id,
-          ),
-        );
-      else mapped.add(id);
-    }
+    const derivedObligationIds = proposal.coverage
+      .filter((entry) =>
+        entry.bindings.some(
+          (binding) => binding.kind === "criterion" && binding.itemId === item.id,
+        ),
+      )
+      .map((entry) => entry.obligationId)
+      .sort();
+    if (
+      compilerEvalDigest([...item.obligationIds].sort()) !==
+      compilerEvalDigest(derivedObligationIds)
+    )
+      violations.push(
+        violation(
+          "schema-invalid",
+          pointer("workItems", itemIndex, "obligationIds"),
+          { mechanicallyDerivedFrom: "/coverage" },
+          item.obligationIds,
+          item.id,
+        ),
+      );
     const criterionIds = new Set<string>();
     const criterionTexts = new Set<string>();
     let itemEvidenceCount = 0;
@@ -2521,7 +2712,7 @@ export function parseAndValidateCompilerProposal(
     (entry) => entry.kind === "explicit",
   ))
     if (!mapped.has(obligation.id))
-      violations.push(violation("unmapped-obligation", "/workItems", obligation.id, null));
+      violations.push(violation("unmapped-obligation", "/coverage", obligation.id, null));
 
   violations.push(...mediaIntentViolations(request, proposal));
 
@@ -3663,29 +3854,35 @@ function projectedEnvelopeViolations(
       mediaDispositions,
       dependencyShapeInvalid ? compilerEvalDigest(projected) : compiledGraphDigest(projected),
     );
-    const effectiveChallenges = deriveCompilerInferenceChallenges({
-      inventory: request.inventory,
-      findings: request.semanticFindings,
-      proposal,
-      carried: request.challenges,
-    });
-    const observedBytes = compilerJudgeSourceBytes({
-      originalObjective: {
-        number: request.objective.number,
-        title: request.objective.title,
-        body: request.objective.body,
-      },
-      baseSha: request.baseSha,
-      // A retry may carry the maximum bounded failure reason even when the
-      // first judge call does not. Reserve it before accepting paid output.
-      priorCompilationFailure: { reason: "x".repeat(8_000), rawProposalAvailable: false },
-      inventory: request.inventory,
-      challenges: effectiveChallenges,
-      proposal,
-      projectionTrace: trace,
-      draftDigest: trace.graphDigest,
-      inventoryDigest: compilerEvalDigest(request.inventory),
-    });
+    const judgeInventory = projectionContext?.obligationInventory;
+    const effectiveChallenges = judgeInventory
+      ? deriveCompilerInferenceChallenges({
+          inventory: judgeInventory,
+          findings: request.semanticFindings,
+          proposal,
+          carried: request.challenges,
+        })
+      : request.challenges;
+    const observedBytes = judgeInventory
+      ? compilerJudgeSourceBytes({
+          originalObjective: {
+            number: request.objective.number,
+            title: request.objective.title,
+            body: request.objective.body,
+          },
+          baseSha: request.baseSha,
+          // A retry may carry the maximum bounded failure reason even when the
+          // first judge call does not. Reserve it before accepting paid output.
+          priorCompilationFailure: { reason: "x".repeat(8_000), rawProposalAvailable: false },
+          inventory: judgeInventory,
+          factoryCapabilities: request.factoryCapabilities,
+          challenges: effectiveChallenges,
+          proposal,
+          projectionTrace: trace,
+          draftDigest: trace.graphDigest,
+          inventoryDigest: compilerEvalDigest(judgeInventory),
+        })
+      : 0;
     if (observedBytes > MAX_COMPILER_JUDGE_SOURCE_BYTES)
       violations.push(
         violation(

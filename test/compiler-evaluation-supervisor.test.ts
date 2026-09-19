@@ -167,7 +167,9 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
           status: decision === "accept" ? "covered" : "missing",
           itemIds: decision === "accept" ? ["answer"] : [],
           acceptanceBindings:
-            decision === "accept" ? [{ itemId: "answer", criterionId: "criterion-1" }] : [],
+            decision === "accept"
+              ? [{ kind: "criterion" as const, itemId: "answer", criterionId: "criterion-1" }]
+              : [],
           evidenceIds: ["objective"],
           reason: "Fixture coverage assessment",
         },
@@ -718,6 +720,12 @@ describe("Supervisor compiler evaluation activation boundary", () => {
           protocol: "clockgrove.factory/compiler-proposal",
           kind: "work-items",
           mediaIntents: [],
+          coverage: [
+            {
+              obligationId: "greenfield-pnpm",
+              bindings: [{ kind: "criterion", itemId: "bootstrap", criterionId: "criterion-1" }],
+            },
+          ],
           workItems: [
             item(
               "bootstrap",
@@ -792,6 +800,7 @@ describe("Supervisor compiler evaluation activation boundary", () => {
               itemIds: context.proposal.workItems.map((item) => item.id),
               acceptanceBindings: context.proposal.workItems.flatMap((item) =>
                 item.criteria.map((criterion) => ({
+                  kind: "criterion" as const,
                   itemId: item.id,
                   criterionId: criterion.id,
                 })),

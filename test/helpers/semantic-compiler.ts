@@ -1,12 +1,16 @@
 import type { CompilerProposal, CompilerRequest } from "../../src/compiler/contracts.js";
 import { emptyCompilerValidationReport } from "../../src/compiler/violations.js";
-import { compilerEvalDigest } from "../../src/evaluation/compiler-eval.js";
+import {
+  compilerEvalDigest,
+  compilerPlanningInventory,
+} from "../../src/evaluation/compiler-eval.js";
 import { normalizeRepositoryFacts } from "../../src/repository-profiles/index.js";
 import type { PinnedLfsFacts } from "../../src/repository-profiles/git-lfs.js";
 import type { PinnedRepositoryFacts } from "../../src/repository-profiles/read.js";
 import { DEFAULT_RUN_POLICY, type RunPolicy } from "../../src/protocol/policy.js";
 import {
   summarizeCompilerValidationSurfaces,
+  factoryCompilerCapabilities,
   type CompilerProjectionContext,
 } from "../../src/compiler/proposal.js";
 import { compilerCapabilitiesForRepository } from "../../src/toolchains/compiler-capabilities.js";
@@ -136,7 +140,7 @@ export function semanticRequest(
     revision: 0,
     objective: { ...objective, digest: objectiveDigest },
     baseSha: pinned.baseSha,
-    inventory: {
+    inventory: compilerPlanningInventory({
       version: 1,
       objectiveDigest,
       baseSha: pinned.baseSha,
@@ -157,8 +161,12 @@ export function semanticRequest(
           acceptanceEvidence: "The contract is covered by bound acceptance criteria.",
         },
       ],
-    },
+    }),
     inventorySource: "independent-extraction",
+    factoryCapabilities: factoryCompilerCapabilities({
+      ...DEFAULT_RUN_POLICY,
+      allowedNetworkDestinations,
+    }),
     repository: {
       manifests: pinned.manifests,
       requiredTools: [...new Set(pinned.repository.lfs?.requiredTools ?? [])].sort(),
@@ -218,17 +226,24 @@ export function semanticRequest(
 export function semanticProposal(request: CompilerRequest, count = 1): CompilerProposal {
   const recipe = request.repository.validationRecipes.find(({ capture }) => capture === null);
   if (!recipe) throw new Error("semantic fixture requires an observed validation recipe");
+  const explicit = request.inventory.obligations
+    .filter((entry) => entry.kind === "explicit")
+    .map((entry) => entry.id);
   return {
     protocol: "clockgrove.factory/compiler-proposal",
     kind: "work-items",
     mediaIntents: [],
+    coverage: explicit.map((obligationId) => ({
+      obligationId,
+      bindings: [{ kind: "criterion", itemId: "item-1", criterionId: "implemented" }],
+    })),
     workItems: Array.from({ length: count }, (_, index) => {
       const number = index + 1;
       return {
         id: `item-${number}`,
         title: `Implement item ${number}`,
         goal: `Deliver item ${number}.`,
-        obligationIds: index === 0 ? ["explicit-contract"] : [],
+        obligationIds: index === 0 ? explicit : [],
         criteria: [
           {
             id: "implemented",

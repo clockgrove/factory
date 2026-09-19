@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { COMPILER_PROPOSAL_JSON_SCHEMA } from "../src/compiler/contracts.js";
 import { CompilerInvariantError } from "../src/compiler/invariant-error.js";
-import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
+import { compilerEvalDigest, compilerPlanningInventory } from "../src/evaluation/compiler-eval.js";
 import { canonicalDraftJson } from "../src/control/compiler-drafts.js";
 import {
   managementFailureProvenance,
@@ -189,15 +189,18 @@ describe("single semantic management route", () => {
       ...context.objective,
       digest: compilerEvalDigest(context.objective),
     };
-    request.inventory = inventory;
+    request.inventory = compilerPlanningInventory(inventory);
     request.inventorySource = "structural-source";
     const proposal = semanticProposal(request);
-    proposal.workItems[0]!.obligationIds = inventory.obligations
-      .slice(0, -1)
-      .map((entry) => entry.id);
+    const omitted = inventory.obligations.at(-1)!.id;
+    proposal.workItems[0]!.obligationIds = proposal.workItems[0]!.obligationIds.filter(
+      (obligationId) => obligationId !== omitted,
+    );
+    proposal.coverage = proposal.coverage.filter((row) => row.obligationId !== omitted);
     expect(parseAndValidateCompilerProposal(request, proposal).report.violations).toContainEqual(
       expect.objectContaining({
         code: "unmapped-obligation",
+        field: "/coverage",
         expected: inventory.obligations.at(-1)!.id,
         observed: null,
       }),
@@ -256,14 +259,16 @@ describe("single semantic management route", () => {
       title: request.objective.title,
       body: request.objective.body,
     });
-    request.inventory = structuralObjectiveInventory({
-      objective: {
-        number: request.objective.number,
-        title: request.objective.title,
-        body: request.objective.body,
-      },
-      baseSha: request.baseSha,
-    } as CompilationContext);
+    request.inventory = compilerPlanningInventory(
+      structuralObjectiveInventory({
+        objective: {
+          number: request.objective.number,
+          title: request.objective.title,
+          body: request.objective.body,
+        },
+        baseSha: request.baseSha,
+      } as CompilationContext),
+    );
     request.inventorySource = "structural-source";
     expect(() => compilerProposalPrompt(request)).not.toThrow();
   });
@@ -716,7 +721,9 @@ describe("single semantic management route", () => {
   it("terminates an unchanged repair report after exactly one paid repair call", async () => {
     const initial = semanticRequest();
     const invalid = semanticProposal(initial);
-    invalid.workItems[0]!.obligationIds = [];
+    invalid.coverage[0]!.bindings = [
+      { kind: "criterion", itemId: "item-1", criterionId: "missing-criterion" },
+    ];
     const report = parseAndValidateCompilerProposal(initial, invalid).report;
     const repair = structuredClone(initial);
     repair.revision = 1;

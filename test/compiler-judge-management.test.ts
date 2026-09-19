@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -161,6 +161,12 @@ async function fixture() {
     protocol: "clockgrove.factory/compiler-proposal" as const,
     kind: "work-items",
     mediaIntents: [],
+    coverage: [
+      {
+        obligationId: "tests",
+        bindings: [{ kind: "criterion", itemId: "code", criterionId: "tests-pass" }],
+      },
+    ],
     workItems: [
       {
         id: "code",
@@ -213,7 +219,7 @@ function verdict(
         obligationId: "tests",
         status: "covered",
         itemIds: ["code"],
-        acceptanceBindings: [{ itemId: "code", criterionId: "tests-pass" }],
+        acceptanceBindings: [{ kind: "criterion", itemId: "code", criterionId: "tests-pass" }],
         evidenceIds: ["objective"],
         reason: "Tests required",
       },
@@ -541,6 +547,12 @@ describe("independent compiler management boundaries", () => {
     const { context, inventory, proposal: single } = await fixture();
     const proposal: CompilerProposal = {
       ...single,
+      coverage: [
+        {
+          obligationId: "tests",
+          bindings: [{ kind: "criterion", itemId: "item-1", criterionId: "tests-pass" }],
+        },
+      ],
       workItems: Array.from({ length: 51 }, (_, index) => ({
         ...structuredClone(single.workItems[0]!),
         id: `item-${index + 1}`,
@@ -591,7 +603,7 @@ describe("independent compiler management boundaries", () => {
           obligationId: "tests",
           status: "covered",
           itemIds: ["item-1"],
-          acceptanceBindings: [{ itemId: "item-1", criterionId: "tests-pass" }],
+          acceptanceBindings: [{ kind: "criterion", itemId: "item-1", criterionId: "tests-pass" }],
           evidenceIds: ["objective"],
           reason: "Tests required",
         },
@@ -697,11 +709,83 @@ describe("independent compiler management boundaries", () => {
       encoding: "utf8",
     }).trim();
     await writeFile(join(context.repository, "package.json"), "MUTABLE_SENTINEL");
-    context.repositoryFiles.push("missing.ts");
+    context.objective.body += "\nFollow the contract in `missing.ts`.";
     const evidence = await readCompilerObligationEvidence(context);
     expect(JSON.stringify(evidence)).toContain("node --test");
     expect(JSON.stringify(evidence)).not.toContain("MUTABLE_SENTINEL");
-    expect(evidence.some((entry) => entry.id === "unavailable-sources")).toBe(true);
+    expect(evidence.some((entry) => entry.id === "evidence-gaps")).toBe(true);
+  });
+
+  it("builds a canonical bounded relevance closure without unrelated repository bodies", async () => {
+    const { context } = await fixture();
+    delete context.repositoryEvidence;
+    await mkdir(join(context.repository, "docs"), { recursive: true });
+    const boundedReferences = Array.from(
+      { length: 40 },
+      (_, index) => `- [bounded ${index}](docs/z-${String(index).padStart(2, "0")}.md)`,
+    );
+    await writeFile(
+      join(context.repository, "AGENTS.md"),
+      [
+        "# Repository authority",
+        "- [direct authority](docs/a.md)",
+        "- [missing authority](docs/missing.md)",
+        "- Run `npm run test` after changes.",
+        ...boundedReferences,
+      ].join("\n"),
+    );
+    await writeFile(
+      join(context.repository, "docs/a.md"),
+      "DIRECT_AUTHORITY_SENTINEL\n[cycle](../AGENTS.md)",
+    );
+    await writeFile(join(context.repository, "docs/unrelated.md"), "UNRELATED_SENTINEL");
+    await Promise.all(
+      Array.from({ length: 40 }, (_, index) =>
+        writeFile(
+          join(context.repository, `docs/z-${String(index).padStart(2, "0")}.md`),
+          `bounded authority ${index}`,
+        ),
+      ),
+    );
+    execFileSync("git", ["init", "-q"], { cwd: context.repository });
+    execFileSync("git", ["add", "-A"], { cwd: context.repository });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-qm",
+        "relevance closure",
+      ],
+      { cwd: context.repository },
+    );
+    context.baseSha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: context.repository,
+      encoding: "utf8",
+    }).trim();
+    context.repositoryFiles = execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD"], {
+      cwd: context.repository,
+      encoding: "utf8",
+    })
+      .trim()
+      .split("\n");
+    const forward = await readCompilerObligationEvidence(context);
+    const shuffled = await readCompilerObligationEvidence({
+      ...context,
+      repositoryFiles: [...context.repositoryFiles].reverse(),
+    });
+    expect(shuffled).toEqual(forward);
+    const serialized = JSON.stringify(forward);
+    expect(serialized).toContain("DIRECT_AUTHORITY_SENTINEL");
+    expect(serialized).not.toContain("UNRELATED_SENTINEL");
+    const gaps = forward.find((entry) => entry.id === "evidence-gaps")?.excerpt ?? "";
+    expect(gaps).toContain("cycle:AGENTS.md->docs/a.md->AGENTS.md");
+    expect(gaps).toContain("unavailable:docs/missing.md");
+    expect(gaps).toContain("bound:docs/z-");
+    expect(gaps).not.toContain("npm run test");
   });
 
   it("keeps independent LLM labels distinct from human calibration and checkpointed", async () => {

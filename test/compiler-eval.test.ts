@@ -3,6 +3,7 @@ import type { CompilerProposal } from "../src/compiler/contracts.js";
 import {
   COMPILER_JUDGE_DIMENSIONS,
   CompilerInferenceChallengeLimitError,
+  compilerPlanningInventory,
   deriveCompilerInferenceChallenges,
   validateCompilerCaseLabel,
   compilerEvalDigest,
@@ -61,7 +62,7 @@ const verdict = (): CompilerJudgeVerdict => ({
   inventoryDigest: compilerEvalDigest(inventory),
   coverage: inventory.obligations.map((obligation) => ({
     obligationId: obligation.id,
-    acceptanceBindings: [{ itemId: "api", criterionId: "requested-outcome" }],
+    acceptanceBindings: [{ kind: "criterion", itemId: "api", criterionId: "requested-outcome" }],
     status: "covered",
     itemIds: ["api"],
     evidenceIds: ["objective"],
@@ -95,6 +96,35 @@ const verdict = (): CompilerJudgeVerdict => ({
   decision: "accept",
 });
 describe("obligation-first compiler evidence", () => {
+  it("projects prompt-safe evidence identities without carrying repository source excerpts", () => {
+    const marker = `PRIVATE_REPOSITORY_SOURCE_${"x".repeat(3_000)}`;
+    const full = {
+      ...inventory,
+      evidence: [
+        ...inventory.evidence,
+        {
+          id: "authority",
+          kind: "repository" as const,
+          identity: "base:path:digest",
+          excerpt: `docs/authority.md\n${marker}`,
+        },
+      ],
+      obligations: inventory.obligations.map((entry) => ({
+        ...entry,
+        evidenceIds: ["objective", "authority"],
+      })),
+    };
+    const planning = compilerPlanningInventory(full);
+    expect(JSON.stringify(planning)).not.toContain(marker);
+    expect(planning.evidence.find((entry) => entry.id === "authority")).toMatchObject({
+      identity: "base:path:digest",
+      citation: "docs/authority.md",
+      digest: compilerEvalDigest(`docs/authority.md\n${marker}`),
+    });
+    expect(Buffer.byteLength(JSON.stringify(planning))).toBeLessThan(
+      Buffer.byteLength(JSON.stringify(full)) / 2,
+    );
+  });
   it("grounds citation identity and exact excerpts before graph review", () => {
     expect(parseObligationInventory(inventory, { ...inventory, evidence })).toEqual(inventory);
     const changed = structuredClone(inventory);
@@ -139,6 +169,27 @@ describe("obligation-first compiler evidence", () => {
     expect(validateCompilerJudgeVerdict(partial, expected).decision).toBe("repair");
     partial.coverage.pop();
     expect(() => validateCompilerJudgeVerdict(partial, expected)).toThrow("incomplete Objective");
+  });
+  it("accepts authenticated Factory coverage for fixed and report-only judge candidates", () => {
+    const capability = {
+      id: "terminal-objective-handling" as const,
+      description: "Factory settles terminal Objective state under supervision.",
+      authorityDigest: "f".repeat(64),
+    };
+    const review = verdict();
+    review.coverage[1]!.itemIds = [];
+    review.coverage[1]!.acceptanceBindings = [
+      { kind: "factory-capability", capabilityId: capability.id },
+    ];
+    expect(
+      validateCompilerJudgeVerdict(review, {
+        ...expected,
+        factoryCapabilities: [capability],
+      }).decision,
+    ).toBe("accept");
+    expect(() => validateCompilerJudgeVerdict(review, expected)).toThrow(
+      "ungrounded Factory capability",
+    );
   });
   it("refuses preference-only repair and requires a material finding or non-waived coverage gap", () => {
     const review = verdict();
@@ -593,7 +644,7 @@ describe("bounded inference challenge derivation", () => {
     const challenges = deriveCompilerInferenceChallenges({
       inventory: bounded,
       findings: [finding(ids)],
-      proposal: { workItems: [{ obligationIds: [] }] },
+      proposal: { coverage: [] },
     });
     expect(challenges).toHaveLength(count);
     expect(challenges.map((entry) => entry.obligationId)).toEqual([...ids].sort());
@@ -606,12 +657,26 @@ describe("bounded inference challenge derivation", () => {
     const forward = deriveCompilerInferenceChallenges({
       inventory: bounded,
       findings: [finding(ids, "z-finding"), finding(ids, "a-finding")],
-      proposal: { workItems: [{ obligationIds: [ids[1]!] }] },
+      proposal: {
+        coverage: [
+          {
+            obligationId: ids[1]!,
+            bindings: [{ kind: "factory-capability", capabilityId: "terminal-objective-handling" }],
+          },
+        ],
+      },
     });
     const reverse = deriveCompilerInferenceChallenges({
       inventory: bounded,
       findings: [finding(ids, "a-finding"), finding(ids, "z-finding")],
-      proposal: { workItems: [{ obligationIds: [ids[1]!] }] },
+      proposal: {
+        coverage: [
+          {
+            obligationId: ids[1]!,
+            bindings: [{ kind: "factory-capability", capabilityId: "terminal-objective-handling" }],
+          },
+        ],
+      },
     });
     expect(forward).toEqual(reverse);
     expect(forward).toEqual([

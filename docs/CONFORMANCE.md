@@ -38,7 +38,9 @@ Maintainers qualify a stable release candidate as follows:
    focused checks, let related fixes settle, and select a new stable candidate before repeating the
    broad gate.
 3. Run `npm run release:artifacts` once to generate the candidate tarball, release manifest,
-   SBOM, checksums, and provenance in ignored `release/`. Record the SHA-256 of
+   SBOM, checksums, and provenance in ignored `release/`. The generator authenticates the exact
+   candidate receipt from step 2 and carries it unchanged into the complete artifact set; any other
+   preexisting release output remains a refusal. Record the SHA-256 of
    `release/release-manifest.json`.
 4. Install that exact artifact and execute all six prepublication gates below under their
    separately accepted authority. Keep output and the evidence index in ignored `release/evidence/`.

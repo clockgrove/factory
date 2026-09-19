@@ -1,6 +1,7 @@
 node_modules/
 coverage/
 release/
+.release.tmp-*/
 *.log
 .env
 .DS_Store

@@ -33,6 +33,7 @@ import { compiledGraphDigest, type CompiledObjective } from "../graph.js";
 import { analyzeDependencies } from "../graph-analysis.js";
 import {
   CompilerEvidenceSchema,
+  compilerPlanningInventory,
   type ObligationInventorySchema,
   compilerEvalDigest,
   createCompilerEvalReport,
@@ -41,6 +42,7 @@ import {
   validateCompilerInferenceChallenges,
   type CompilerEvalUsage,
   type CompilerEvidence,
+  type FactoryCompilerCapability,
 } from "../evaluation/compiler-eval.js";
 import {
   compilerDraftResultHasError,
@@ -551,7 +553,7 @@ function createCalibrationEvidence(args: {
         report.status !== "valid" ||
         request.revision !== result.payload.revision ||
         !args.inventory ||
-        draftDigest(request.inventory) !== draftDigest(args.inventory) ||
+        draftDigest(request.inventory) !== draftDigest(compilerPlanningInventory(args.inventory)) ||
         provenance.requestDigest !== requestDigest ||
         invocation?.invocation.compilerRequestDigest !== requestDigest
       ) {
@@ -745,12 +747,18 @@ function createCalibrationEvidence(args: {
                 obligationId: coverage.obligationId,
                 disposition: coverage.disposition,
               }
-            : {
-                obligationId: coverage.obligationId,
-                disposition: coverage.disposition,
-                objectiveId: coverage.objectiveId,
-                acceptanceId: coverage.acceptanceId,
-              },
+            : coverage.disposition === "factory-capability"
+              ? {
+                  obligationId: coverage.obligationId,
+                  disposition: coverage.disposition,
+                  capabilityId: coverage.capabilityId,
+                }
+              : {
+                  obligationId: coverage.obligationId,
+                  disposition: coverage.disposition,
+                  objectiveId: coverage.objectiveId,
+                  acceptanceId: coverage.acceptanceId,
+                },
         ),
         triggers: terminalProposal.proposal.triggers.map((trigger) => ({
           code: trigger.code,
@@ -1158,6 +1166,7 @@ export async function inspectCompilerEvaluation(args: {
           let proposal: CompilerJudgeCandidate;
           let requestDigest: string;
           let requestRevision: number;
+          let factoryCapabilities: FactoryCompilerCapability[] = [];
           if (fixedEvaluation) {
             proposal = fixedEvaluation.candidate;
             requestDigest = fixedEvaluation.requestDigest;
@@ -1185,10 +1194,12 @@ export async function inspectCompilerEvaluation(args: {
             );
             requestDigest = draftDigest(request);
             requestRevision = request.revision;
+            factoryCapabilities = request.factoryCapabilities;
             if (
               proposalReport.status !== "valid" ||
               requestRevision !== record.payload.revision ||
-              draftDigest(request.inventory) !== draftDigest(inventory) ||
+              draftDigest(request.inventory) !==
+                draftDigest(compilerPlanningInventory(inventory)) ||
               provenance?.requestDigest !== requestDigest ||
               proposalInvocation?.invocation.compilerRequestDigest !== requestDigest
             )
@@ -1225,6 +1236,7 @@ export async function inspectCompilerEvaluation(args: {
               throw new Error("judge result is not bound to its exact invocation input");
             const report = createCompilerEvalReport({
               inventory,
+              factoryCapabilities,
               challenges,
               graph: proposal,
               addedEdges: trace.addedEdges,
@@ -1334,6 +1346,7 @@ export async function inspectCompilerEvaluation(args: {
     )!;
     const annotated = createCompilerEvalReport({
       inventory: original.inventory,
+      factoryCapabilities: original.factoryCapabilities,
       challenges: original.challenges,
       graph: annotatedProposal,
       addedEdges: (

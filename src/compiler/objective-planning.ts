@@ -118,9 +118,11 @@ function objectiveDependencies(objective: ProposedObjective): string[] {
 export function validateObjectivePlan(
   proposal: CompilerObjectivesProposal,
   obligationIds: readonly string[],
+  factoryCapabilityIds: readonly string[] = [],
 ): ObjectivePlanningViolation[] {
   const violations: ObjectivePlanningViolation[] = [];
   const inventory = new Set(obligationIds);
+  const factoryCapabilities = new Set(factoryCapabilityIds);
   const objectiveIndexes = new Map<string, number>();
   const objectivesById = new Map<string, ProposedObjective>();
 
@@ -472,6 +474,18 @@ export function validateObjectivePlan(
         );
       continue;
     }
+    if (entry.disposition === "factory-capability") {
+      if (!factoryCapabilities.has(entry.capabilityId))
+        violations.push(
+          violation(
+            "invalid-obligation-disposition",
+            field,
+            [...factoryCapabilities].sort(),
+            entry.capabilityId,
+          ),
+        );
+      continue;
+    }
     const objective = objectivesById.get(entry.objectiveId);
     const acceptance = acceptanceOwners.get(entry.acceptanceId);
     if (!objective || !acceptance || acceptance.objectiveId !== entry.objectiveId) {
@@ -559,6 +573,7 @@ export function validateObjectivePlan(
         (entry) =>
           entry.obligationId === obligationId &&
           entry.disposition !== "deferred" &&
+          entry.disposition !== "factory-capability" &&
           ((entry.disposition === "owned" && entry.objectiveId === objective.id) ||
             (entry.disposition === "aggregate-integration" &&
               (entry.objectiveId === objective.id ||

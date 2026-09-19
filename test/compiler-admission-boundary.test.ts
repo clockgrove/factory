@@ -149,7 +149,9 @@ async function fixture() {
         obligationId: "core",
         status: "covered",
         itemIds: [graph.workItems[0]!.id],
-        acceptanceBindings: [{ itemId: graph.workItems[0]!.id, criterionId: "criterion-1" }],
+        acceptanceBindings: [
+          { kind: "criterion", itemId: graph.workItems[0]!.id, criterionId: "criterion-1" },
+        ],
         evidenceIds: ["objective"],
         reason: "Tests establish behavior",
       },
@@ -415,6 +417,18 @@ describe("compiler dispatch admission", () => {
     };
     f.binding.policyDigest = policyDigest(f.context.runPolicy);
     f.proposal.workItems[0]!.obligationIds = ["core"];
+    f.proposal.coverage = [
+      {
+        obligationId: "core",
+        bindings: [
+          {
+            kind: "criterion",
+            itemId: f.proposal.workItems[0]!.id,
+            criterionId: f.proposal.workItems[0]!.criteria[0]!.id,
+          },
+        ],
+      },
+    ];
     const backend = new CodexCliManagementBackend({
       createCodexHome: home,
       authFile: join(f.directory, "no-auth"),

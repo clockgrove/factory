@@ -40,6 +40,16 @@ export const CompilerEvidenceSchema = z
   })
   .strict();
 export type CompilerEvidence = z.infer<typeof CompilerEvidenceSchema>;
+export const CompilerPlanningEvidenceSchema = z
+  .object({
+    id: Id,
+    kind: z.enum(["objective", "repository", "artifact", "receipt"]),
+    identity: Text,
+    digest: Digest,
+    citation: Text,
+  })
+  .strict();
+export type CompilerPlanningEvidence = z.infer<typeof CompilerPlanningEvidenceSchema>;
 const ObligationSchema = z
   .object({
     id: Id,
@@ -67,6 +77,75 @@ export const ObligationInventorySchema = z
   })
   .strict();
 export type ObligationInventory = z.infer<typeof ObligationInventorySchema>;
+export const CompilerPlanningInventorySchema = z
+  .object({
+    version: z.literal(1),
+    objectiveDigest: Digest,
+    baseSha: z.string().regex(/^[a-f0-9]{40,64}$/),
+    evidence: z.array(CompilerPlanningEvidenceSchema).min(1).max(128),
+    obligations: z.array(ObligationSchema).min(1).max(128),
+  })
+  .strict();
+export type CompilerPlanningInventory = z.infer<typeof CompilerPlanningInventorySchema>;
+export const FACTORY_COMPILER_CAPABILITY_IDS = [
+  "exact-activation-binding",
+  "execution-network-policy",
+  "protected-pr-integration",
+  "exact-integration-candidate-validation",
+  "authorized-finding-reporting",
+  "terminal-objective-handling",
+] as const;
+export const FactoryCompilerCapabilityIdSchema = z.enum(FACTORY_COMPILER_CAPABILITY_IDS);
+export const FactoryCompilerCapabilitySchema = z
+  .object({
+    id: FactoryCompilerCapabilityIdSchema,
+    description: Text,
+    authorityDigest: Digest,
+  })
+  .strict();
+export type FactoryCompilerCapability = z.infer<typeof FactoryCompilerCapabilitySchema>;
+export const ObligationCoverageBindingSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("criterion"), itemId: Id, criterionId: Id }).strict(),
+  z
+    .object({
+      kind: z.literal("factory-capability"),
+      capabilityId: FactoryCompilerCapabilityIdSchema,
+    })
+    .strict(),
+]);
+export type ObligationCoverageBinding = z.infer<typeof ObligationCoverageBindingSchema>;
+
+function planningCitation(evidence: CompilerEvidence): string {
+  if (evidence.kind === "objective") return "Objective";
+  const firstLine = evidence.excerpt.split(/\r?\n/, 1)[0]?.trim();
+  if (firstLine && firstLine.length <= 240) return firstLine;
+  return `${evidence.kind}:${evidence.id}`;
+}
+
+/** Prompt-safe projection for planning and repair. Source bytes remain in the
+ * authenticated inventory used by extraction and judgment. */
+export function compilerPlanningInventory(
+  inventoryInput: ObligationInventory,
+): CompilerPlanningInventory {
+  const inventory = ObligationInventorySchema.parse(inventoryInput);
+  return CompilerPlanningInventorySchema.parse({
+    version: 1,
+    objectiveDigest: inventory.objectiveDigest,
+    baseSha: inventory.baseSha,
+    evidence: inventory.evidence
+      .map((entry) => ({
+        id: entry.id,
+        kind: entry.kind,
+        identity: entry.identity,
+        digest: compilerEvalDigest(entry.excerpt),
+        citation: planningCitation(entry),
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id)),
+    obligations: inventory.obligations
+      .map((entry) => ({ ...entry, evidenceIds: [...entry.evidenceIds].sort() }))
+      .sort((left, right) => left.id.localeCompare(right.id)),
+  });
+}
 export const MAX_COMPILER_OBLIGATION_CHALLENGES = 128;
 export const MAX_COMPILER_ITEM_CHALLENGES = 64;
 export const MAX_COMPILER_INFERENCE_CHALLENGES =
@@ -83,9 +162,7 @@ export const CompilerJudgeVerdictSchema = z
         z
           .object({
             obligationId: Id,
-            acceptanceBindings: z
-              .array(z.object({ itemId: Id, criterionId: Id }).strict())
-              .max(128),
+            acceptanceBindings: z.array(ObligationCoverageBindingSchema).max(128),
             status: z.enum(["covered", "partial", "missing", "unknown"]),
             itemIds: Refs,
             evidenceIds: Refs.min(1),
@@ -170,8 +247,13 @@ export type CompilerJudgeVerdict = z.infer<typeof CompilerJudgeVerdictSchema>;
 
 export interface CompilerJudgeValidationContext {
   draftDigest: string;
-  inventory: ObligationInventory;
+  inventory: ObligationInventory | CompilerPlanningInventory;
+  factoryCapabilities?: FactoryCompilerCapability[];
   graph: {
+    coverage?: Array<{
+      obligationId: string;
+      bindings: ObligationCoverageBinding[];
+    }>;
     workItems: Array<{
       id: string;
       dependsOn: string[];
@@ -180,6 +262,12 @@ export interface CompilerJudgeValidationContext {
   };
   addedEdges?: Array<{ itemId: string; dependsOn: string }>;
   challenges?: CompilerInferenceChallenge[];
+}
+
+function coverageBindingKey(binding: ObligationCoverageBinding): string {
+  return binding.kind === "criterion"
+    ? `${binding.kind}\0${binding.itemId}\0${binding.criterionId}`
+    : `${binding.kind}\0${binding.capabilityId}`;
 }
 
 /**
@@ -195,15 +283,20 @@ export function repairableCompilerJudgeVerdict(
   if (!parsed.success || parsed.data.decision !== "accept") return null;
   const verdict = parsed.data;
   const projectedItems = new Map(expected.graph.workItems.map((item) => [item.id, item]));
+  const factoryCapabilities = new Set(
+    (expected.factoryCapabilities ?? []).map((entry) => entry.id),
+  );
   const ungroundedObligations = new Set<string>();
   const ungroundedItems = new Set<string>();
   const ungroundedEvidence = new Set<string>();
   const coverage = verdict.coverage.map((entry) => {
     const validBindings = entry.acceptanceBindings.filter((binding) => {
-      const item = projectedItems.get(binding.itemId);
+      const item = binding.kind === "criterion" ? projectedItems.get(binding.itemId) : undefined;
       const valid =
-        entry.itemIds.includes(binding.itemId) &&
-        item?.criteria.some((criterion) => criterion.id === binding.criterionId) === true;
+        binding.kind === "factory-capability"
+          ? factoryCapabilities.has(binding.capabilityId)
+          : entry.itemIds.includes(binding.itemId) &&
+            item?.criteria.some((criterion) => criterion.id === binding.criterionId) === true;
       if (!valid) {
         ungroundedObligations.add(entry.obligationId);
         if (item) ungroundedItems.add(item.id);
@@ -247,6 +340,59 @@ export function repairableCompilerJudgeVerdict(
             "The judge cited acceptance criteria that are not present in the exact projected Work Item graph.",
           correction:
             "Preserve every obligation and revise the proposal only as needed so each covered obligation can bind to an existing projected item and criterion ID.",
+          uncertainty: "",
+        },
+      ],
+      decision: "repair" as const,
+    };
+    try {
+      return validateCompilerJudgeVerdict(repair, expected);
+    } catch {
+      return null;
+    }
+  }
+  const omittedProposalBindings = verdict.coverage.flatMap((entry) => {
+    const observed = new Set(entry.acceptanceBindings.map(coverageBindingKey));
+    const declared =
+      expected.graph.coverage?.find((row) => row.obligationId === entry.obligationId)?.bindings ??
+      [];
+    return declared
+      .filter((binding) => !observed.has(coverageBindingKey(binding)))
+      .map((binding) => ({ entry, binding }));
+  });
+  if (omittedProposalBindings.length > 0) {
+    const obligationIds = [
+      ...new Set(omittedProposalBindings.map(({ entry }) => entry.obligationId)),
+    ];
+    const itemIds = [
+      ...new Set(
+        omittedProposalBindings.flatMap(({ binding }) =>
+          binding.kind === "criterion" ? [binding.itemId] : [],
+        ),
+      ),
+    ];
+    const evidenceIds = [
+      ...new Set(omittedProposalBindings.flatMap(({ entry }) => entry.evidenceIds)),
+    ];
+    const usedIds = new Set(verdict.findings.map((entry) => entry.id));
+    let id = "omitted-proposal-coverage";
+    for (let suffix = 2; usedIds.has(id); suffix++) id = `omitted-proposal-coverage-${suffix}`;
+    const repair = {
+      ...verdict,
+      findings: [
+        ...verdict.findings,
+        {
+          id,
+          dimension: "coverage" as const,
+          severity: "blocking" as const,
+          confidence: 1,
+          obligationIds,
+          itemIds,
+          evidenceIds,
+          rootCause:
+            "The acceptance decision omitted authenticated coverage bindings declared by the exact proposal.",
+          correction:
+            "Reassess every declared criterion and Factory capability binding; preserve both kinds for mixed obligations.",
           uncertainty: "",
         },
       ],
@@ -482,6 +628,11 @@ export function validateCompilerJudgeVerdict(
   const evidence = new Set(expected.inventory.evidence.map((entry) => entry.id));
   const obligations = new Set(expected.inventory.obligations.map((entry) => entry.id));
   const items = new Set(expected.graph.workItems.map((entry) => entry.id));
+  const factoryCapabilities = new Set(
+    (expected.factoryCapabilities ?? []).map(
+      (entry) => FactoryCompilerCapabilitySchema.parse(entry).id,
+    ),
+  );
   const coverageIds = verdict.coverage.map((entry) => entry.obligationId);
   references(coverageIds, obligations, "coverage obligation");
   if (coverageIds.length !== obligations.size)
@@ -503,11 +654,13 @@ export function validateCompilerJudgeVerdict(
     references(entry.evidenceIds, evidence, "judge citation");
   for (const entry of verdict.coverage) {
     references(entry.itemIds, items, "coverage item");
-    unique(
-      entry.acceptanceBindings.map((binding) => `${binding.itemId}\0${binding.criterionId}`),
-      "acceptance binding",
-    );
+    unique(entry.acceptanceBindings.map(coverageBindingKey), "acceptance binding");
     for (const binding of entry.acceptanceBindings) {
+      if (binding.kind === "factory-capability") {
+        if (!factoryCapabilities.has(binding.capabilityId))
+          throw new Error("ungrounded Factory capability binding");
+        continue;
+      }
       const item = expected.graph.workItems.find((candidate) => candidate.id === binding.itemId);
       if (
         !entry.itemIds.includes(binding.itemId) ||
@@ -517,8 +670,20 @@ export function validateCompilerJudgeVerdict(
     }
     if (entry.status === "covered" && entry.acceptanceBindings.length === 0)
       throw new Error("covered obligation requires acceptance binding");
-    if (entry.status === "covered" && entry.itemIds.length === 0)
-      throw new Error("covered obligation requires item mapping");
+    if (
+      entry.status === "covered" &&
+      entry.acceptanceBindings.some((binding) => binding.kind === "criterion") &&
+      entry.itemIds.length === 0
+    )
+      throw new Error("criterion-covered obligation requires item mapping");
+    if (entry.status === "covered" && verdict.decision === "accept") {
+      const observed = new Set(entry.acceptanceBindings.map(coverageBindingKey));
+      const omitted =
+        expected.graph.coverage
+          ?.find((row) => row.obligationId === entry.obligationId)
+          ?.bindings.filter((binding) => !observed.has(coverageBindingKey(binding))) ?? [];
+      if (omitted.length > 0) throw new Error("accepted coverage omits proposed binding");
+    }
   }
   const expectedDependencies = new Map(
     expected.graph.workItems.map((entry) => [entry.id, new Set(entry.dependsOn)] as const),
@@ -609,6 +774,7 @@ export interface CompilerPostMortemCause {
 }
 export function createCompilerEvalReport(input: {
   inventory: ObligationInventory;
+  factoryCapabilities?: FactoryCompilerCapability[];
   graph: {
     workItems: Array<{ id: string; dependsOn: string[]; criteria: Array<{ id: string }> }>;
   };
@@ -702,6 +868,7 @@ export function createCompilerEvalReport(input: {
     format: "compiler-eval" as const,
     mode: input.mode ?? "plan-review",
     inventory: input.inventory,
+    factoryCapabilities: input.factoryCapabilities ?? [],
     draftDigest: input.draftDigest,
     verdict,
     challenges: input.challenges ?? [],
@@ -1181,7 +1348,7 @@ export class CompilerInferenceChallengeLimitError extends CompilerDraftStopError
 
 export function validateCompilerInferenceChallenges(
   value: unknown,
-  inventory: ObligationInventory,
+  inventory: ObligationInventory | CompilerPlanningInventory,
 ): CompilerInferenceChallenge[] {
   const challenges = z.array(CompilerInferenceChallengeSchema).parse(value);
   const obligationChallenges = challenges.filter(
@@ -1253,9 +1420,11 @@ function canonicalInferenceChallenges(
 /** Derive the exact post-repair judge challenges from durable request evidence.
  * Explicit obligations and obligations mapped by the repaired proposal are never challenged. */
 export function deriveCompilerInferenceChallenges(input: {
-  inventory: ObligationInventory;
+  inventory: ObligationInventory | CompilerPlanningInventory;
   findings: CompilerJudgeVerdict["findings"];
-  proposal: { workItems: Array<{ obligationIds: string[] }> };
+  proposal: {
+    coverage: Array<{ obligationId: string; bindings: ObligationCoverageBinding[] }>;
+  };
   carried?: unknown;
 }): CompilerInferenceChallenge[] {
   const carried = validateCompilerInferenceChallenges(input.carried ?? [], input.inventory);
@@ -1264,7 +1433,11 @@ export function deriveCompilerInferenceChallenges(input: {
       challenge.obligationId === undefined ? [] : [challenge.obligationId],
     ),
   );
-  const mapped = new Set(input.proposal.workItems.flatMap((item) => item.obligationIds));
+  const mapped = new Set(
+    input.proposal.coverage
+      .filter((entry) => entry.bindings.length > 0)
+      .map((entry) => entry.obligationId),
+  );
   const challengeable = new Set(
     input.inventory.obligations
       .filter((obligation) => obligation.kind !== "explicit" && !mapped.has(obligation.id))

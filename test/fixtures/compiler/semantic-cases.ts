@@ -110,6 +110,12 @@ function genericProposal(
       protocol: "clockgrove.factory/compiler-proposal",
       kind: "work-items",
       mediaIntents: [],
+      coverage: [
+        {
+          obligationId: "explicit-contract",
+          bindings: [{ kind: "criterion", itemId: "item-1", criterionId: "implemented" }],
+        },
+      ],
       workItems: dependencies.map((_, index) => ({
         id: `item-${index + 1}`,
         title: `Implement item ${index + 1}`,
@@ -243,6 +249,18 @@ function deferredProposal(request: CompilerRequest, capability: Capability): Com
   return {
     protocol: "clockgrove.factory/compiler-proposal",
     kind: "work-items",
+    coverage: [
+      {
+        obligationId: "explicit-contract",
+        bindings: [
+          {
+            kind: "criterion",
+            itemId: workItems.find((entry) => entry.obligationIds.length > 0)!.id,
+            criterionId: "validated",
+          },
+        ],
+      },
+    ],
     workItems,
     mediaIntents: [],
   };

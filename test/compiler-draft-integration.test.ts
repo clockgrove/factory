@@ -154,6 +154,12 @@ function proposal(request: CompilerRequest, repaired = false) {
     protocol: "clockgrove.factory/compiler-proposal" as const,
     kind: "work-items" as const,
     mediaIntents: [],
+    coverage: [
+      {
+        obligationId: "values",
+        bindings: [{ kind: "criterion" as const, itemId: "feature", criterionId: "values-work" }],
+      },
+    ],
     workItems: [
       {
         id: "feature",
@@ -309,7 +315,11 @@ async function setup(
             status: accept ? "covered" : "partial",
             itemIds: ["feature"],
             acceptanceBindings: [
-              { itemId: "feature", criterionId: source.proposal.workItems[0]!.criteria[0]!.id },
+              {
+                kind: "criterion",
+                itemId: "feature",
+                criterionId: source.proposal.workItems[0]!.criteria[0]!.id,
+              },
             ],
             evidenceIds: ["objective"],
             reason: accept ? "Both cases specified" : "Negative case missing",
@@ -372,8 +382,11 @@ async function setup(
         dimension.status = "unknown";
         dimension.reason = "The existing proposal leaves its assumptions unclear.";
       }
-      if (options.invalidAcceptUngroundedFirst && repairs === 0)
-        verdict.coverage[0]!.acceptanceBindings[0]!.criterionId = "missing-criterion";
+      if (options.invalidAcceptUngroundedFirst && repairs === 0) {
+        const binding = verdict.coverage[0]!.acceptanceBindings[0]!;
+        if (binding.kind !== "criterion") throw new Error("fixture requires criterion binding");
+        binding.criterionId = "missing-criterion";
+      }
       return { value: verdict, usage };
     }
     if (prompt.includes("This is a repair")) {
@@ -396,7 +409,12 @@ async function setup(
     const request = JSON.parse(prompt.split("\n\n").at(-1)!) as CompilerRequest;
     if (options.schemaInvalidFirst) return { value: { unexpected: true }, usage };
     const initial = proposal(request);
-    if (options.mechanicallyInvalidFirst) initial.workItems[0]!.obligationIds = [];
+    if (options.mechanicallyInvalidFirst)
+      initial.coverage[0]!.bindings[0] = {
+        kind: "criterion",
+        itemId: "feature",
+        criterionId: "missing-criterion",
+      };
     return { value: initial, usage };
   });
   const backend = new CodexCliManagementBackend({ runStructured });
@@ -471,7 +489,7 @@ describe("production compiler draft adapter", () => {
         validationReport: {
           phase: "proposal",
           status: "repairable",
-          violations: [expect.objectContaining({ code: "unmapped-obligation" })],
+          violations: [expect.objectContaining({ code: "schema-invalid" })],
         },
       },
     });

@@ -26,6 +26,7 @@ import { compiledGraphDigest, parsePersistedCompiledObjective } from "../src/gra
 import {
   COMPILER_JUDGE_DIMENSIONS,
   compilerEvalDigest,
+  compilerPlanningInventory,
   type ObligationInventory,
 } from "../src/evaluation/compiler-eval.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
@@ -33,7 +34,10 @@ import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import type { ApplicationSnapshot } from "../src/application/services.js";
 import { CompilerProposalSchema, CompilerRequestSchema } from "../src/compiler/contracts.js";
 import { compilerJudgeCandidateFromCompiled } from "../src/compiler/judge-context.js";
-import type { CompilerProjectionTrace } from "../src/compiler/proposal.js";
+import {
+  factoryCompilerCapabilities,
+  type CompilerProjectionTrace,
+} from "../src/compiler/proposal.js";
 import {
   runCompilerDraftLoop,
   validatePersistedCompilerDraftJournal,
@@ -113,6 +117,18 @@ const proposal = CompilerProposalSchema.parse({
   protocol: "clockgrove.factory/compiler-proposal",
   kind: "work-items",
   mediaIntents: [],
+  coverage: [
+    {
+      obligationId: "change",
+      bindings: [
+        {
+          kind: "criterion",
+          itemId: graph.workItems[0]!.id,
+          criterionId: `${graph.workItems[0]!.id}-criterion-1`,
+        },
+      ],
+    },
+  ],
   workItems: graph.workItems.map((item, itemIndex) => ({
     id: item.id,
     title: item.title,
@@ -149,8 +165,9 @@ const proposalRequest = CompilerRequestSchema.parse({
   revision: 1,
   objective: { ...objective, digest: objectiveDigest },
   baseSha: binding.baseSha,
-  inventory,
+  inventory: compilerPlanningInventory(inventory),
   inventorySource: "independent-extraction",
+  factoryCapabilities: factoryCompilerCapabilities(runPolicy),
   repository: {
     manifests: ["package.json"],
     requiredTools: [],
@@ -399,6 +416,7 @@ function history() {
         itemIds: [graph.workItems[0]!.id],
         acceptanceBindings: [
           {
+            kind: "criterion" as const,
             itemId: graph.workItems[0]!.id,
             criterionId:
               proposal.kind === "work-items"

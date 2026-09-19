@@ -493,13 +493,19 @@ describe("strict semantic compiler contracts", () => {
   const providerEnvelope = (value: Record<string, unknown>) => ({
     protocol: value.protocol,
     kind: value.kind,
-    workItems: [],
+    workItems: Array.isArray(value.workItems)
+      ? value.workItems.map((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+          const { obligationIds: _derived, ...modelOwned } = entry as Record<string, unknown>;
+          return modelOwned;
+        })
+      : [],
     mediaIntents: [],
     objectives: [],
     coverage: [],
     triggers: [],
     requirements: [],
-    ...value,
+    ...Object.fromEntries(Object.entries(value).filter(([key]) => key !== "workItems")),
   });
   const jsonProposal = (value: unknown) =>
     jsonProviderProposal(providerEnvelope(value as Record<string, unknown>));

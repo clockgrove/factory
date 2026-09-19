@@ -183,6 +183,27 @@ describe("Objective plan semantic validation", () => {
     expect(validateObjectivePlan(validPlan(), obligations)).toEqual([]);
   });
 
+  it("covers lifecycle-only parent obligations with authenticated Factory capability dispositions", () => {
+    const plan = validPlan();
+    plan.coverage.push({
+      obligationId: "supervised-settlement",
+      disposition: "factory-capability",
+      capabilityId: "terminal-objective-handling",
+    });
+    plan.triggers[0]!.obligationIds.push("supervised-settlement");
+    const inventory = [...obligations, "supervised-settlement"];
+    expect(validateObjectivePlan(plan, inventory, ["terminal-objective-handling"])).toEqual([]);
+    expect(validateObjectivePlan(plan, inventory, ["protected-pr-integration"])).toContainEqual(
+      expect.objectContaining({
+        code: "invalid-obligation-disposition",
+        observed: "terminal-objective-handling",
+      }),
+    );
+    expect(plan.objectives.flatMap((objective) => objective.obligationIds)).not.toContain(
+      "supervised-settlement",
+    );
+  });
+
   it("allows one broad parent obligation to decompose through a prerequisite support Objective", () => {
     const plan = validPlan();
     plan.objectives[0]!.obligationIds = ["broad-outcome"];
@@ -307,7 +328,8 @@ describe("Objective plan semantic validation", () => {
   it("requires aggregate dispositions to resolve prerequisite-backed integration acceptance", () => {
     const wrongKind = validPlan();
     const disposition = wrongKind.coverage[2]!;
-    if (disposition.disposition === "deferred") throw new Error("fixture disposition changed");
+    if (disposition.disposition === "deferred" || disposition.disposition === "factory-capability")
+      throw new Error("fixture disposition changed");
     disposition.acceptanceId = "consumer-works";
     expect(codes(wrongKind)).toContain("invalid-integration-acceptance");
 

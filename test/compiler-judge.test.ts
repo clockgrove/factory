@@ -29,7 +29,9 @@ function acceptedVerdict(
     inventoryDigest: compilerEvalDigest(request.inventory),
     coverage: request.inventory.obligations.map((obligation) => ({
       obligationId: obligation.id,
-      acceptanceBindings: [{ itemId: proposal.workItems[0]!.id, criterionId: "implemented" }],
+      acceptanceBindings: [
+        { kind: "criterion", itemId: proposal.workItems[0]!.id, criterionId: "implemented" },
+      ],
       status: "covered",
       itemIds: [proposal.workItems[0]!.id],
       evidenceIds: ["objective"],
@@ -94,7 +96,9 @@ describe("independent semantic compiler judgment", () => {
       }),
     ).toEqual(verdict);
     const invalid = structuredClone(verdict);
-    invalid.coverage[0]!.acceptanceBindings[0]!.criterionId = "unknown-criterion";
+    const invalidBinding = invalid.coverage[0]!.acceptanceBindings[0]!;
+    if (invalidBinding.kind !== "criterion") throw new Error("fixture requires criterion binding");
+    invalidBinding.criterionId = "unknown-criterion";
     expect(() =>
       validateCompilerJudgeVerdict(invalid, {
         draftDigest: compiledGraphDigest(projection.objective),
@@ -239,7 +243,9 @@ describe("independent semantic compiler judgment", () => {
       runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
     });
     const raw = acceptedVerdict(request, proposal, compiledGraphDigest(projection.objective));
-    raw.coverage[0]!.acceptanceBindings[0]!.criterionId = "missing-criterion";
+    const rawBinding = raw.coverage[0]!.acceptanceBindings[0]!;
+    if (rawBinding.kind !== "criterion") throw new Error("fixture requires criterion binding");
+    rawBinding.criterionId = "missing-criterion";
 
     expect(() =>
       validateCompilerJudgeVerdict(raw, {

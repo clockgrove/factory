@@ -142,20 +142,30 @@ async function within(promise, milliseconds, label) {
   }
 }
 
-async function waitForFile(path, child, timeoutMs = REACHED_TIMEOUT_MS) {
+async function waitForPrivateJson(path, child, uid, timeoutMs = REACHED_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null)
-      throw new Error(`client exited before ${path} appeared`);
+      throw new Error(`client exited before ${path} was complete`);
     try {
-      lstatSync(path);
-      return;
+      const bytes = readPrivate(path, uid);
+      JSON.parse(bytes);
+      return bytes;
     } catch (error) {
-      if (error.code !== "ENOENT") throw error;
+      const incomplete =
+        error.code === "ENOENT" ||
+        error.name === "SyntaxError" ||
+        (error.code === "ERR_ASSERTION" && String(error.message).endsWith(" is unbounded"));
+      if (!incomplete) throw error;
+      if (error.code !== "ENOENT" && openFileDescriptor(child.pid, path) === null) {
+        const settledBytes = readPrivate(path, uid);
+        JSON.parse(settledBytes);
+        return settledBytes;
+      }
     }
     await sleep(25);
   }
-  throw new Error(`timed out waiting for ${path}`);
+  throw new Error(`timed out waiting for complete ${path}`);
 }
 
 function openFileDescriptor(pid, expectedPath) {
@@ -552,9 +562,12 @@ export async function main(env = process.env) {
     },
     spawn: (operation, requestId, environment = {}) => factory(operation, requestId, environment),
     reached: async (name, arm, installing) => {
-      await waitForFile(arm.paths.reached, installing.child);
       const armBytes = readPrivate(arm.paths.arm, authority.uid);
-      const reachedBytes = readPrivate(arm.paths.reached, authority.uid);
+      const reachedBytes = await waitForPrivateJson(
+        arm.paths.reached,
+        installing.child,
+        authority.uid,
+      );
       const reached = JSON.parse(reachedBytes);
       assert.equal(reached.protocol, "clockgrove.factory/lifecycle-checkpoint-reached");
       assert.equal(reached.checkpointId, arm.checkpointId);

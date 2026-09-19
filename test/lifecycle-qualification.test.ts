@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -20,10 +20,11 @@ afterEach(async () => {
 async function waitFor(path: string): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt++) {
     try {
-      await stat(path);
+      JSON.parse(await readFile(path, "utf8"));
       return;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof SyntaxError))
+        throw error;
     }
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 5));
   }

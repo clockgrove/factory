@@ -17,6 +17,7 @@
     "trust",
     "managementBackend",
     "allowedNetworkDestinations",
+    "gitLfsOutputNetworkDestinations",
     "compilerMediaEgress",
     "repositoryCaptureEgress"
   ],
@@ -177,6 +178,16 @@
     },
     "modelProfile": { "type": "string", "minLength": 1, "maxLength": 160 },
     "allowedNetworkDestinations": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 253,
+        "pattern": "^(?:\\*\\.)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}$"
+      }
+    },
+    "gitLfsOutputNetworkDestinations": {
       "type": "array",
       "maxItems": 64,
       "items": {

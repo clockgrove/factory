@@ -1393,9 +1393,14 @@ the authenticated Objective remainder is always the outer cap.
     "registry.npmjs.org",
     "*.npmjs.org",
     "api.openai.com"
-  ]
+  ],
+  "gitLfsOutputNetworkDestinations": []
 }
 ```
+
+`allowedNetworkDestinations` bounds compiler and Worker Packet egress.
+`gitLfsOutputNetworkDestinations` is separate authority used only by Factory-owned Git LFS output
+upload and authenticated read-back. It does not expand Work Item or compiler network access.
 
 Routing first ranks dependency-ready work by native sub-issue order or a pinned organization
 single-select issue field, then scans the complete queue for safe resource fits. Local admission is

@@ -30,6 +30,7 @@ const POLICY = {
   trust: "explicitly_activated_repo",
   managementBackend: "codex-cli/local",
   allowedNetworkDestinations: ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"],
+  gitLfsOutputNetworkDestinations: [],
   compilerMediaEgress: {
     mode: "denied",
     maxAssets: 0,

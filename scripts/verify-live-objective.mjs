@@ -369,6 +369,7 @@ export function boundedPolicy(
     trust: "explicitly_activated_repo",
     managementBackend: "codex-cli/local",
     allowedNetworkDestinations: ["api.openai.com"],
+    gitLfsOutputNetworkDestinations: [],
     compilerMediaEgress: {
       mode: "denied",
       maxAssets: 0,

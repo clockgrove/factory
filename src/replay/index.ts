@@ -171,6 +171,7 @@ function pinnedPolicy(value: RunPolicy): RunPolicy {
     managementBackend: policy.managementBackend,
     ...(policy.modelProfile ? { modelProfile: policy.modelProfile } : {}),
     allowedNetworkDestinations: [...policy.allowedNetworkDestinations],
+    gitLfsOutputNetworkDestinations: [...policy.gitLfsOutputNetworkDestinations],
     compilerMediaEgress: structuredClone(policy.compilerMediaEgress),
     repositoryCaptureEgress: structuredClone(policy.repositoryCaptureEgress),
     ...(policy.priority ? { priority: structuredClone(policy.priority) } : {}),

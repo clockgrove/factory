@@ -109,8 +109,22 @@ export function largeFileAuthority(env) {
   assert.ok(authority);
   // The shared checkpoint policy also fences replacement during transfer restart.
   assert.equal(authority.policy.maxAttemptsPerItem, 1);
+  const policy =
+    scenario === "produced-lfs-restart"
+      ? {
+          ...authority.policy,
+          // This qualifier supports only the canonical github.com target already
+          // enforced by checkpoint authority and preflight. Grant that endpoint
+          // only to Factory-owned LFS output upload and authenticated read-back.
+          gitLfsOutputNetworkDestinations: [
+            ...authority.policy.gitLfsOutputNetworkDestinations,
+            new URL(`https://github.com/${authority.repository}.git`).hostname,
+          ],
+        }
+      : authority.policy;
   return {
     ...authority,
+    policy,
     largeFile: {
       scenario,
       fixture: safePath(env.FACTORY_LARGE_FILE_FIXTURE),

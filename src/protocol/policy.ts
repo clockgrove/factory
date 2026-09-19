@@ -349,6 +349,8 @@ export const RunPolicySchema = z
     managementBackend: safeId,
     modelProfile: boundedText(160).optional(),
     allowedNetworkDestinations: z.array(NetworkDestinationSchema).max(64),
+    /** Factory-owned Git LFS output upload and authenticated read-back egress. */
+    gitLfsOutputNetworkDestinations: z.array(NetworkDestinationSchema).max(64),
     priority: PriorityPolicySchema.optional(),
     capacity: CapacityPolicySchema.optional(),
     burst: BurstPolicySchema.optional(),
@@ -393,6 +395,7 @@ export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
   compilerMediaEgress: DEFAULT_COMPILER_MEDIA_EGRESS_POLICY,
   repositoryCaptureEgress: DEFAULT_REPOSITORY_CAPTURE_EGRESS_POLICY,
   allowedNetworkDestinations: ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"],
+  gitLfsOutputNetworkDestinations: [],
   priority: {
     source: "subissue-order" as const,
     unsetRank: 100,

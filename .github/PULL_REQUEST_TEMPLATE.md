@@ -15,8 +15,9 @@ Describe the user-visible result and link the issue or product-contract decision
 List the commands and live gates actually run. Do not claim a paid provider, published artifact, or
 external behavior from a fake alone.
 
-- [ ] Relevant checks cover the change; documentation-only changes have checked links and examples.
-- [ ] Release candidates only: `npm run verify:release` (maintainer-coordinated; otherwise N/A).
+- [ ] Code changes: `npm run test:pr -- --base <revision>` passed; documentation-only changes
+      have checked links and examples.
+- [ ] Stable release candidates only: `npm run verify:candidate` (maintainer-coordinated; otherwise N/A).
 - [ ] Applicable live conformance gates were run, or the open gate is recorded honestly.
 - [ ] Docs, schemas, changelog, generated bundles, and conformance evidence are updated where needed.
 - [ ] No credentials, local Factory state, installation receipts, private fixtures, or unrelated churn are included.

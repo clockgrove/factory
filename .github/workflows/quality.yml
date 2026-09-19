@@ -1,0 +1,68 @@
+name: Quality gates
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pull-request:
+    if: github.event_name == 'pull_request'
+    name: pull request / critical + affected
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install declared npm
+        run: npm install --global npm@11.19.0
+      - run: npm ci
+      - name: Verify critical and affected contracts
+        env:
+          FACTORY_TEST_BASE: ${{ github.event.pull_request.base.sha }}
+        run: npm run test:pr -- --base "$FACTORY_TEST_BASE"
+
+  main:
+    if: github.event_name == 'push'
+    name: main / deterministic
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install declared npm
+        run: npm install --global npm@11.19.0
+      - run: npm ci
+      - name: Record verification start
+        run: echo "FACTORY_VERIFICATION_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - run: npm run test:main
+      - name: Write exact-commit result
+        run: >-
+          node scripts/write-verification-receipt.mjs
+          --gate test:main
+          --command "npm run test:main"
+          --expected-commit "$GITHUB_SHA"
+          --output "$RUNNER_TEMP/factory-test-main-$GITHUB_SHA.json"
+      - name: Retain exact-commit result
+        uses: actions/upload-artifact@v7
+        with:
+          name: factory-test-main-${{ github.sha }}
+          path: ${{ runner.temp }}/factory-test-main-${{ github.sha }}.json
+          if-no-files-found: error
+          retention-days: 90

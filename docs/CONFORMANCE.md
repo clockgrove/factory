@@ -27,10 +27,16 @@ The [design](DESIGN.md#definition-of-done) defines the complete behavior and bou
 Ordinary PR checks are in [CONTRIBUTING.md](../CONTRIBUTING.md#validate-changes).
 Maintainers qualify a stable release candidate as follows:
 
-1. Finish review and commit the candidate's source, bundles, tests, manifests, and documentation.
-2. Run `npm run verify:release` on that candidate. It checks the Linux host, typecheck, lint,
-   formatting, coverage, schemas, deterministic bundles, plugin/npm installation, and production
-   dependency audit. Fix failures and repeat affected checks before the next stable candidate.
+1. Let the related implementation batch settle on `main`. The `main / deterministic` CI job must
+   have passed `npm run test:main` and retained its exact-commit JSON result for the proposed source
+   commit and tree.
+2. Finish review and commit the candidate's source, bundles, tests, manifests, and documentation.
+   From a clean checkout of that exact commit, run `npm run verify:candidate`. It checks the Linux
+   host, typecheck, lint, formatting, coverage, schemas, deterministic bundles, plugin/npm
+   installation, npm packaging, and production dependency audit, then writes
+   `release/evidence/candidate-deterministic.json` only after every gate passes. Fix failures with
+   focused checks, let related fixes settle, and select a new stable candidate before repeating the
+   broad gate.
 3. Run `npm run release:artifacts` once to generate the candidate tarball, release manifest,
    SBOM, checksums, and provenance in ignored `release/`. Record the SHA-256 of
    `release/release-manifest.json`.
@@ -44,9 +50,10 @@ Maintainers qualify a stable release candidate as follows:
    Complete the separate [published-artifact check](#post-publication-completion-gate) afterward.
 
 Every gate must identify the exact current Git commit and release manifest hash. There is no
-exception for later evidence-only commits. If the candidate or artifact changes, qualify the new
-candidate; do not relabel an earlier observation. Repeated readiness checks preserve the tested
-artifacts. The release tag stays on its original commit.
+exception for later evidence-only commits. Any later source change invalidates the candidate's CI,
+deterministic, artifact, and live evidence. Qualify the new candidate; do not relabel an earlier
+observation. Several related fixes should settle before selecting it. Repeated readiness checks
+preserve the tested artifacts. The release tag stays on its original commit.
 
 The integrated Initial Beta release suite requires Windows WSL2, systemd 254 or newer, and a
 reachable Linux user manager. Diagnose the user bus with

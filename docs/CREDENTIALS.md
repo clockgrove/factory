@@ -39,7 +39,7 @@ MCP bundle, and runs the installed controller's read-only backend probe. The pro
 and authentication availability but creates no worker, sandbox, session, repository mutation, or
 billable resource.
 
-Production dependency auditing is part of `npm run verify:release`. Live Daytona or managed-agent
+Production dependency auditing is part of `npm run verify:candidate`. Live Daytona or managed-agent
 conformance is a separate gate and requires explicit authorization for the
 credentials, target repository, hard spending cap, and billable run. Passing a fake-provider or
 credential-free package test is never presented as evidence that a paid provider was exercised.

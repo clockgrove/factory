@@ -60,20 +60,25 @@ instructions.
 
 ## Validate changes
 
-For code changes, run the static checks and tests that cover the affected behavior:
+During implementation, run typecheck, changed-file format/lint checks, and the tests that cover the
+affected behavior. Before opening or merging a code pull request, run the repository PR gate against
+the intended base:
 
 ```sh
-npm run typecheck
-npm run lint
-npm run format:check
-npm test -- test/graph.test.ts
+npm run test:pr -- --base origin/main
 ```
 
-The last command is a focused-test example; select the relevant test file for your change. Add a
-regression test for a bug fix. `npm run format` applies formatting to the configured code files.
-`npm test` runs the default suite; live-provider tests use separate, opt-in commands. Some local
-lifecycle tests require Linux systemd 254+ and a reachable user manager. Record any checks you could
-not run and the reason.
+`test:pr` runs typecheck, Biome only on changed code/configuration, eight critical contract files,
+and Vitest's dependency-selected affected regressions. Package, schema, and workflow surfaces add
+their direct contract tests. The PR gate never promotes itself to the complete deterministic suite.
+Add a regression test for a bug fix. `npm run format` applies formatting to the configured code
+files. Live-provider tests use separate, opt-in commands. Record any checks you could not run and
+the reason.
+
+After a related batch lands on `main`, CI runs `npm run test:main` once: full typecheck, lint,
+formatting, deterministic tests, and schemas. Its uploaded JSON result names the exact successful
+commit and tree. Do not rerun the full suite between each repair when focused checks cover the
+change.
 
 For documentation-only changes, check the diff, links, and examples. The current format command
 covers code and configuration, not Markdown. If you change install, upgrade, or uninstall
@@ -86,8 +91,10 @@ Live checks that mutate repositories or use paid providers require explicit auth
 
 Maintainers coordinate release qualification using
 [docs/CONFORMANCE.md](docs/CONFORMANCE.md#release-verification-procedure). A routine contributor PR
-does not require publishing, installing the plugin, or running the full release gate. Keep concise
-verification results in the PR; generated release observations belong in ignored `release/evidence/`.
+does not require coverage, packaging, reproducibility, installation, audit, publishing, or live
+qualification. Maintainers run `npm run verify:candidate` once on a stable exact commit after related
+fixes settle. Keep concise verification results in the PR; generated release observations belong in
+ignored `release/evidence/`.
 
 ## Submit a pull request
 

@@ -493,8 +493,37 @@ describe("installed large-file lifecycle authority", () => {
       })!;
       expect(parseRunPolicy(accepted.policy).maxAttemptsPerItem).toBe(1);
       expect(accepted.policy.economics).toEqual(authority.policy.economics);
+      expect(accepted.policy.allowedNetworkDestinations).toEqual(
+        scenario === "produced-lfs-restart" ? ["api.openai.com", "github.com"] : ["api.openai.com"],
+      );
     },
   );
+  it("rejects ambiguous or unsupported repository hosts before granting LFS egress", () => {
+    for (const host of ["github.example.com", "*.github.com", "GITHUB.COM"])
+      expect(() =>
+        largeFileAuthority({
+          ...env,
+          FACTORY_LARGE_FILE_CASE: "produced-lfs-restart",
+          FACTORY_LARGE_FILE_PHASE: "preflight",
+          GH_HOST: host,
+        }),
+      ).toThrow(/default Linux-home authentication required/);
+    for (const target of [
+      "github.com/example/disposable",
+      "https://github.com/example/disposable",
+      "example/disposable/other",
+      "example@github.com/disposable",
+      "Example/disposable",
+    ])
+      expect(() =>
+        largeFileAuthority({
+          ...env,
+          FACTORY_LARGE_FILE_CASE: "produced-lfs-restart",
+          FACTORY_LARGE_FILE_PHASE: "preflight",
+          FACTORY_LARGE_FILE_REPOSITORY: target,
+        }),
+      ).toThrow();
+  });
   it("never mutates during preflight", async () => {
     const f = scenario();
     expect(

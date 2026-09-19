@@ -29,7 +29,7 @@ afterEach(async () => {
 });
 
 describe("Supervisor collected artifact durability", () => {
-  it("does not turn an unknown post-dispatch observation into a retryable failure", async () => {
+  it("stops an unknown post-dispatch observation for explicit recovery without replacement", async () => {
     const f = await providerSupervisorFixture("daytona-burst", {
       localOnly: true,
       configureLocalBackend: (backend) => ({
@@ -47,18 +47,20 @@ describe("Supervisor collected artifact durability", () => {
       return worker;
     });
     await expect(f.run()).rejects.toThrow(/artifact transfer recovery/);
-    await expect(f.run()).rejects.toThrow(/completion is unknown after dispatch/);
-    expect(
-      f
-        .events()
-        .some(
-          (event) =>
-            event.kind === "run" &&
-            ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
-              event.event,
-            ),
-        ),
-    ).toBe(false);
+    const markers = unresolvedModelInvocations(f.events());
+    expect(markers).toHaveLength(1);
+    expect(await f.run()).toMatchObject({
+      status: "escalated",
+      reason: expect.stringMatching(/model usage remains unknown.*explicit recovery/),
+    });
+    expect(unresolvedModelInvocations(f.events())).toEqual(markers);
+    expect(f.events().filter((event) => event.event === "AttemptRecoveryBlocked")).toMatchObject([
+      {
+        modelUsageAccounting: "unknown",
+        nextDisposition: "explicit-recovery",
+      },
+    ]);
+    expect(f.events().filter((event) => event.event === "FactoryRunEscalated")).toHaveLength(1);
     expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
     await expect(access(retained[0]!.path)).resolves.toBeUndefined();
     expect(

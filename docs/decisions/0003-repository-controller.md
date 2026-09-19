@@ -19,8 +19,12 @@ The foreground `factory run` command uses the same application services but cann
 repository controller owns the lease.
 
 One running process generates one controller ID and acquires one repository-lease epoch. All
-Objective Supervisors started by it carry that observation. Restart/takeover creates a new identity
-and epoch; unit names, PIDs, process-local queues, and cursors are not ownership evidence.
+Objective Supervisors started by it carry that observation. The repository lease distinguishes a
+manual process from an authenticated managed-service generation. A crash replacement can take over
+before expiry only after stable local observations bind its MainPID, InvocationID, host, exact unit
+configuration and executable to the same managed service and policy; the takeover CAS creates a new
+controller ID and epoch. Other valid claimants wait for server-time expiry. Unit names, PIDs,
+process-local queues, and cursors alone are not ownership evidence.
 
 Application commands cross process boundaries through the Objective's authenticated issue-comment
 stream, which is the single atomic request journal. Every transport uses the same semantic

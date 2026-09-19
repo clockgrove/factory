@@ -30,6 +30,8 @@ import {
   assertCheckpointModelAdmission,
   readCheckpointMergeProof,
   checkpointLease,
+  checkpointLeaseTakeoverReady,
+  phaseKillReplacementObservation,
   assertScopeCoverage,
   main,
   runCheckpointScenario,
@@ -37,6 +39,34 @@ import {
 } from "../scripts/verify-local-checkpoint-restart.mjs";
 
 const repository = "example/disposable";
+describe("phase-kill replacement observation", () => {
+  const original = {
+    unit: "clockgrove-factory-0123456789abcdef.service",
+    invocationId: "1".repeat(32),
+  };
+  const fields = {
+    Id: original.unit,
+    LoadState: "loaded",
+    ActiveState: "active",
+    SubState: "running",
+    Job: "0 /",
+    InvocationID: "2".repeat(32),
+    MainPID: "1234",
+  };
+
+  it("accepts only an active, running, job-free replacement generation", () => {
+    expect(phaseKillReplacementObservation(fields, original).ready).toBe(true);
+    for (const delta of [
+      { SubState: "start" },
+      { Job: "99 /org/freedesktop/systemd1/job/99" },
+      { ActiveState: "activating" },
+      { InvocationID: original.invocationId },
+    ]) {
+      expect(phaseKillReplacementObservation({ ...fields, ...delta }, original).ready).toBe(false);
+    }
+  });
+});
+
 describe("controller runtime home authority", () => {
   const home = "/home/example";
 
@@ -1525,17 +1555,128 @@ describe("strict repository takeover receipt", () => {
     kind: "repository-lease",
     policyDigest: "b".repeat(64),
     controllerId: "controller",
+    owner: {
+      kind: "managed-service",
+      hostIdentity: "c".repeat(64),
+      configDigest: "d".repeat(64),
+      executableIdentity: `sha256:${"e".repeat(64)}`,
+      unit: "clockgrove-factory-0123456789abcdef.service",
+      invocationId: "1".repeat(32),
+    },
     sequence: 2,
     epoch: 2,
     event: "RepositoryLeaseAcquired",
+    at: "2026-09-05T11:59:00.000Z",
     expiresAt: "2026-09-05T12:00:00.000Z",
+    previousOid: "9".repeat(40),
   };
   const commit = (value: unknown) => ({
     sha: oid,
     message: `Factory-Repository-Lease: ${Buffer.from(JSON.stringify(value)).toString("base64url")}`,
+    parents: [{ sha: record.previousOid }],
   });
   it("accepts a strictly typed immutable receipt", () =>
     expect(checkpointLease(commit(record), oid)).toEqual(record));
+  it("waits through the predecessor lease before accepting the replacement generation", () => {
+    const previous = { controllerId: "controller", epoch: 2 };
+    const original = {
+      hostIdentity: record.owner.hostIdentity,
+      configDigest: record.owner.configDigest,
+      invocationId: record.owner.invocationId,
+    };
+    const replacement = { ...original, invocationId: "2".repeat(32) };
+    const successorOid = "f".repeat(40);
+    const common = {
+      previous,
+      original,
+      replacement,
+      policyDigest: record.policyDigest,
+      executableIdentity: record.owner.executableIdentity,
+      unit: record.owner.unit,
+      predecessor: { oid, lease: record },
+      successorOid,
+      successorParents: [oid],
+      nowMs: Date.parse("2026-09-05T11:00:00.000Z"),
+    };
+    expect(
+      checkpointLeaseTakeoverReady({
+        ...common,
+        lease: { ...record, event: "RepositoryLeaseRenewed" },
+      }),
+    ).toBe(false);
+    expect(
+      checkpointLeaseTakeoverReady({
+        ...common,
+        lease: {
+          ...record,
+          controllerId: "replacement",
+          epoch: 3,
+          at: "2026-09-05T11:59:30.000Z",
+          expiresAt: "2026-09-05T12:09:30.000Z",
+          previousOid: oid,
+          owner: { ...record.owner, invocationId: replacement.invocationId },
+        },
+      }),
+    ).toBe(true);
+    expect(() =>
+      checkpointLeaseTakeoverReady({
+        ...common,
+        lease: { ...record, controllerId: "replacement", epoch: 3 },
+      }),
+    ).toThrow();
+    expect(() =>
+      checkpointLeaseTakeoverReady({
+        ...common,
+        lease: {
+          ...record,
+          owner: { ...record.owner, invocationId: "3".repeat(32) },
+        },
+      }),
+    ).toThrow("neither observed controller generation");
+    expect(() =>
+      checkpointLeaseTakeoverReady({
+        ...common,
+        lease: {
+          ...record,
+          controllerId: "replacement",
+          epoch: 4,
+          at: "2026-09-05T11:59:30.000Z",
+          expiresAt: "2026-09-05T12:09:30.000Z",
+          previousOid: oid,
+          owner: { ...record.owner, invocationId: replacement.invocationId },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      checkpointLeaseTakeoverReady({
+        ...common,
+        lease: {
+          ...record,
+          controllerId: "replacement",
+          epoch: 3,
+          at: "2026-09-05T11:59:30.000Z",
+          expiresAt: "2026-09-05T12:09:30.000Z",
+          previousOid: "8".repeat(40),
+          owner: { ...record.owner, invocationId: replacement.invocationId },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      checkpointLeaseTakeoverReady({
+        ...common,
+        successorParents: ["8".repeat(40)],
+        lease: {
+          ...record,
+          controllerId: "replacement",
+          epoch: 3,
+          at: "2026-09-05T11:59:30.000Z",
+          expiresAt: "2026-09-05T12:09:30.000Z",
+          previousOid: oid,
+          owner: { ...record.owner, invocationId: replacement.invocationId },
+        },
+      }),
+    ).toThrow();
+  });
   it.each([
     { epoch: "3" },
     { epoch: 0 },
@@ -1544,6 +1685,16 @@ describe("strict repository takeover receipt", () => {
     { controllerId: "" },
     { controllerId: "x".repeat(161) },
     { policyDigest: "bad" },
+    { owner: { kind: "process" } },
+    { owner: { ...record.owner, invocationId: "bad" } },
+    { owner: { ...record.owner, extra: true } },
+    { extra: true },
+    { at: "2026-09-05" },
+    { previousOid: undefined },
+    { epoch: 1, sequence: 1 },
+    { epoch: 9, sequence: 1 },
+    { event: "RepositoryLeaseRenewed", sequence: 2 },
+    { expiresAt: "2026-09-05T13:00:00.000Z" },
     { expiresAt: "bad" },
     { event: "Unknown" },
   ])("rejects malformed authority before resume", (delta) => {
@@ -1552,6 +1703,16 @@ describe("strict repository takeover receipt", () => {
   it("rejects malformed or mismatching immutable commit identities", () => {
     expect(() => checkpointLease(commit(record), "bad")).toThrow();
     expect(() => checkpointLease({ ...commit(record), sha: "c".repeat(40) }, oid)).toThrow();
+    expect(() => checkpointLease({ ...commit(record), parents: [] }, oid)).toThrow();
+    expect(() =>
+      checkpointLease({ ...commit(record), parents: [{ sha: "8".repeat(40) }] }, oid),
+    ).toThrow();
+    const duplicate = commit(record);
+    duplicate.message += `\n${duplicate.message}`;
+    expect(() => checkpointLease(duplicate, oid)).toThrow();
+    expect(() =>
+      checkpointLease({ ...commit(record), message: `${commit(record).message}=` }, oid),
+    ).toThrow();
   });
 });
 

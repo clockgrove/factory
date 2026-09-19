@@ -448,7 +448,7 @@ describe("independent-session durable capacity", () => {
       b = coordinator(store);
     await a.initialize();
     await new RepositoryLeaseManager({ store }).acquire(
-      { controllerId: "crashed-scheduler", policyDigest: digest },
+      { controllerId: "crashed-scheduler", policyDigest: digest, owner: { kind: "process" } },
       await store.readCommit(base),
     );
     const [one, two] = await Promise.all([owner(store, 1), owner(store, 2)]);

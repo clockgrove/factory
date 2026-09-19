@@ -256,8 +256,10 @@ async function fixture(
     treeOid: base.treeOid,
     controllerId: "controller",
     policyDigest: policyDigest(policy),
+    owner: { kind: "process" },
     epoch: 1,
     sequence: 1,
+    at,
     expiresAt: new Date(at.getTime() + 600_000),
   };
   const graphInput: CompiledObjective = {

@@ -135,7 +135,11 @@ The unattended service uses a repository lease only to elect its discovery sched
 is an observation, not permission for an Objective mutation. Independent foreground sessions acquire
 their own Objective leases and share atomic capacity reservations with the service. A crashed service
 does not prevent those sessions from starting unrelated Objectives. Process-local queues and cursors
-never survive as authority.
+never survive as authority. The lease records whether its holder is an unmanaged process or an
+authenticated managed-service generation. After a crash, a replacement may advance an unexpired
+lease to a new controller ID and epoch only when stable systemd observations prove that it is the
+new MainPID and InvocationID of the same host, unit configuration, executable and policy. Every
+other well-formed claimant waits for authoritative lease expiry; malformed state remains fatal.
 
 Losing that election retires discovery, new activation and recovery dispatch, election-scoped
 observations, and explicit shared-capacity configuration. It does not abort an already-dispatched

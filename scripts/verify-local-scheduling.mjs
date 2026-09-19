@@ -424,6 +424,20 @@ async function repositoryLease(hooks) {
   );
   assert.equal(record.protocol, "clockgrove.factory/v2");
   assert.equal(record.kind, "repository-lease");
+  assert.deepEqual(Object.keys(record.owner ?? {}).sort(), [
+    "configDigest",
+    "executableIdentity",
+    "hostIdentity",
+    "invocationId",
+    "kind",
+    "unit",
+  ]);
+  assert.equal(record.owner.kind, "managed-service");
+  assert.match(record.owner.hostIdentity, /^[a-f0-9]{64}$/);
+  assert.match(record.owner.configDigest, /^[a-f0-9]{64}$/);
+  assert.match(record.owner.executableIdentity, /^sha256:[a-f0-9]{64}$/);
+  assert.match(record.owner.unit, /^clockgrove-factory-[a-f0-9]{16}\.service$/);
+  assert.match(record.owner.invocationId, /^[a-f0-9]{32}$/);
   assert.match(commit.sha, /^[a-f0-9]{40}$/);
   assert.match(record.policyDigest, /^[a-f0-9]{64}$/);
   assert.ok(

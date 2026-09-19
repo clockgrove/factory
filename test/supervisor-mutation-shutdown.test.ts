@@ -106,6 +106,7 @@ it("the actual Supervisor drains and releases its owned lease after a queued rec
       treeOid: base.treeOid,
       epoch: 1,
       sequence: 1,
+      at: new Date(),
       expiresAt: new Date(Date.now() + 600_000),
     }));
   vi.spyOn(RepositoryLeaseManager.prototype, "assertCurrent").mockResolvedValue();

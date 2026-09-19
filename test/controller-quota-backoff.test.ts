@@ -2,6 +2,7 @@ import { CapacityLedger } from "../src/scheduling/capacity-ledger.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import {
+  RepositoryLeaseContendedError,
   RepositoryLeaseLostError,
   RepositoryLeaseManager,
 } from "../src/controller/repository-lease.js";
@@ -81,6 +82,7 @@ function ownershipMocks() {
       treeOid: "b".repeat(40),
       epoch: 1,
       sequence: 1,
+      at: new Date(),
       expiresAt: new Date(Date.now() + 600_000),
     }));
   const release = vi
@@ -119,6 +121,32 @@ async function parkedFailure(error: unknown) {
 }
 
 describe("controller quota boundary", () => {
+  it("waits for authoritative repository-lease expiry instead of classifying contention as incompatible state", async () => {
+    const mock = ownershipMocks();
+    const abort = new AbortController();
+    const observedAt = new Date();
+    mock.acquire.mockRejectedValueOnce(
+      new RepositoryLeaseContendedError(new Date(observedAt.getTime() + 60_000), observedAt),
+    );
+    mock.discover.mockResolvedValue([]);
+    const logs: string[] = [];
+    const task = runGitHubRepositoryController({
+      ...options(abort.signal),
+      onStatus: (message) => logs.push(message),
+    });
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(mock.acquire).toHaveBeenCalledTimes(1);
+    expect(mock.discover).not.toHaveBeenCalled();
+    expect(logs.join("\n")).toContain("repository lease contended");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mock.acquire).toHaveBeenCalledTimes(2);
+    expect(mock.discover).toHaveBeenCalled();
+
+    abort.abort();
+    await task;
+  });
+
   it.each(["discovery", "renewal"] as const)(
     "keeps concurrent Objectives and the same controller generation through definite %s quota",
     async (boundary) => {

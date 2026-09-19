@@ -67,11 +67,16 @@ factory controller run OWNER/REPO --repo /absolute/path/to/repository
 ```
 
 The running process generates one controller identity and acquires the checkout's repository lease
-under that identity for discovery leadership only. Every Objective has its own fenced lease epoch;
-normal mutations never recheck the service lease. Independent foreground sessions can run alongside
-the service and after its failure, subject to shared atomic capacity reservations. A restarted service
-must reacquire leadership, but unrelated Objectives do not wait for that election. The unit name, PID,
-or an in-memory queue is never used as durable ownership evidence.
+under that identity for discovery leadership only. The lease also binds a managed launch to its
+observed host, exact Factory unit bytes, executable identity and systemd InvocationID. A replacement
+MainPID of that same unit may atomically advance an unexpired lease to a new controller identity and
+epoch; this fences the dead generation before discovery resumes. Another unit, host, configuration,
+executable, policy, invocation or manual process waits for authoritative expiry and cannot admit
+work. Every Objective has its own fenced lease epoch; normal mutations never recheck the service
+lease. Independent foreground sessions can run alongside the service and after its failure, subject
+to shared atomic capacity reservations. A restarted service must reacquire leadership, but unrelated
+Objectives do not wait for that election. A unit name, PID or process-local queue alone is never
+durable ownership evidence.
 
 The service's admission ceiling defaults to eight local workers and zero paid workers, shared across
 the Objectives it starts. This is not a per-Objective adaptive default: a new run defaults to fixed concurrency

@@ -859,6 +859,86 @@ describe("installed App Server checkpoint qualification", () => {
     );
     expect(advancedProof!.canonicalAuthorityAncestors).toMatchObject([{ oid: ledgerOid }]);
 
+    for (const failure of ["missing-current", "malformed-current"] as const) {
+      let caught: unknown;
+      try {
+        await observeAppServerCheckpoints(
+          async (route, args) => {
+            if (route.endsWith("/git/commits/{commit_sha}") && args.commit_sha === advancedOid) {
+              if (failure === "missing-current")
+                throw Object.assign(new Error("private missing current authority"), {
+                  status: 404,
+                });
+              return {
+                data: {
+                  sha: advancedOid,
+                  tree: { sha: advancedLedger.treeOid },
+                  parents: advancedLedger.parentOids.map((sha) => ({ sha })),
+                  message: "malformed current issue admission authority",
+                },
+              };
+            }
+            return advancedRequest(route, args);
+          },
+          f.observation,
+          authority,
+          f.witness,
+          "final",
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(checkpointFailure(caught)).toMatchObject({
+        boundary: "scenario",
+        checkpointStage: "final",
+        checkpointField: "canonicalAuthorityOid",
+        checkpointInvariant: "authenticated-authority",
+        category: failure === "missing-current" ? "http" : "assertion",
+        ...(failure === "missing-current" ? { httpStatus: 404 } : { code: "ERR_ASSERTION" }),
+      });
+    }
+
+    const skippedOid = "7".repeat(40);
+    const skippedRecord = { ...advancedRecord, revision: 3 };
+    let skipped: unknown;
+    try {
+      await observeAppServerCheckpoints(
+        async (route, args) => {
+          if (
+            route.endsWith("/git/ref/{ref}") &&
+            args.ref === "clockgrove-factory/admission/work-item-8"
+          ) {
+            const ref = `refs/${args.ref}`;
+            return { data: { ref, object: { type: "commit", sha: skippedOid } } };
+          }
+          if (route.endsWith("/git/commits/{commit_sha}") && args.commit_sha === skippedOid)
+            return {
+              data: {
+                sha: skippedOid,
+                tree: { sha: advancedLedger.treeOid },
+                parents: [{ sha: ledgerOid }],
+                message: `Factory issue admission\nFactory-Issue-Admission: ${Buffer.from(JSON.stringify(skippedRecord)).toString("base64url")}`,
+              },
+            };
+          return request(route, args);
+        },
+        f.observation,
+        authority,
+        f.witness,
+        "final",
+      );
+    } catch (error) {
+      skipped = error;
+    }
+    expect(checkpointFailure(skipped)).toMatchObject({
+      boundary: "scenario",
+      checkpointStage: "final",
+      checkpointField: "canonicalAuthorityChain",
+      checkpointInvariant: "authority-descendant",
+      category: "assertion",
+      code: "ERR_ASSERTION",
+    });
+
     for (const failure of ["missing", "malformed"] as const) {
       let caught: unknown;
       try {

@@ -595,8 +595,13 @@ export async function observeAppServerCheckpoints(
     );
   assert.ok(reservations.length > 0 && reservations.length <= 3);
   for (const reserved of reservations) {
-    const refs = identities(authority, reserved),
-      reservation = await observeQualificationReservationAuthority(request, reserved);
+    const refs = identities(authority, reserved);
+    const reservation = await continuationRead(
+      continuationStage,
+      "canonicalAuthorityOid",
+      "authenticated-authority",
+      () => observeQualificationReservationAuthority(request, reserved),
+    );
     const proof = {
       workItem: reserved.workItem,
       reservationRef: reservation.logicalRef,
@@ -664,16 +669,19 @@ export async function observeAppServerCheckpoints(
       path: "artifact-transfer.json",
       maxBytes: 1048576,
     });
-    proof.observedReservationAuthority = await reobserveQualificationReservationAuthority(
-      request,
-      reservation,
-      reserved,
+    proof.observedReservationAuthority = await continuationRead(
+      continuationStage,
+      "canonicalAuthorityOid",
+      "stable-authority",
+      () => reobserveQualificationReservationAuthority(request, reservation, reserved),
     );
     assertAppServerCheckpoint(
       observation,
       authority,
       proof,
       witness?.workItem === reserved.workItem ? witness : undefined,
+      undefined,
+      continuationStage,
     );
     proofs.push(proof);
   }

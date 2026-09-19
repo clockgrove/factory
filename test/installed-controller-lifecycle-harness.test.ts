@@ -1,10 +1,15 @@
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   findPendingFlock,
   isExactLifecycleFlockWaiter,
   kernelFlockWaitEvidence,
   runLifecycleRaceMatrix,
+  waitForPrivateJson,
 } from "../scripts/verify-installed-controller-lifecycle.mjs";
 import { parseQualificationInstallReceipt } from "../scripts/qualification-install-identity.mjs";
 
@@ -73,6 +78,45 @@ function fakePort(trace: string[]) {
 }
 
 describe("installed controller lifecycle harness", () => {
+  it("waits for complete private JSON and fails closed when its producer dies incomplete", async () => {
+    const root = await mkdtemp("/tmp/factory-lifecycle-witness-reader-");
+    const uid = process.getuid!();
+    const launch = (path: string, complete: boolean) =>
+      spawn(
+        process.execPath,
+        [
+          "--input-type=module",
+          "--eval",
+          `import { open } from "node:fs/promises";
+const handle = await open(${JSON.stringify(path)}, "wx", 0o600);
+await handle.write('{"ready":');
+process.stdout.write("partial\\n");
+await new Promise((resolve) => setTimeout(resolve, 100));
+${complete ? 'await handle.write("true}\\n"); await handle.sync(); await handle.close();' : "process.exit(0);"}
+await new Promise((resolve) => setTimeout(resolve, 100));`,
+        ],
+        { stdio: ["ignore", "pipe", "pipe"] },
+      );
+    try {
+      const completePath = join(root, "complete.json");
+      const completing = launch(completePath, true);
+      const completingClosed = once(completing, "close");
+      await once(completing.stdout!, "data");
+      const completeBytes = await waitForPrivateJson(completePath, completing, uid, 2_000);
+      expect(JSON.parse(completeBytes)).toEqual({ ready: true });
+      await completingClosed;
+
+      const incompletePath = join(root, "incomplete.json");
+      const dying = launch(incompletePath, false);
+      const dyingClosed = once(dying, "close");
+      await once(dying.stdout!, "data");
+      await expect(waitForPrivateJson(incompletePath, dying, uid, 2_000)).rejects.toThrow();
+      await dyingClosed;
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("accepts only the exact pending kernel FLOCK for the competing process and inode", () => {
     const locks = [
       "40: FLOCK  ADVISORY  WRITE 700 00:2a:999 0 EOF",

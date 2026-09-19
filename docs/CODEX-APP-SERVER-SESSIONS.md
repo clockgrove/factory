@@ -33,9 +33,13 @@ does not replay it speculatively.
 
 ## Usage evidence, not field-name inference
 
-This adapter pins Codex `rust-v0.153.0`, annotated tag
+The accounting contract was originally verified against Codex `rust-v0.153.0`, annotated tag
 `6bc50f104dcc0192e696cdeae721dfc19b507391`, source commit
-`41e22fee981a63b3698df7ed36bad393cda24715`.
+`41e22fee981a63b3698df7ed36bad393cda24715`. That source establishes the required behavior; its
+version is not an admission gate. Factory validates the initialize and fresh-thread contract before
+model dispatch, retains the observed server user agent and CLI version, and then requires the exact
+raw terminal and usage evidence below. A later build that changes those behaviors fails closed at
+the affected boundary.
 The [official protocol source](https://github.com/openai/codex/blob/41e22fee981a63b3698df7ed36bad393cda24715/codex-rs/protocol/src/protocol.rs)
 updates `last` for each upstream response and adds it to `total`; `last` is not whole-turn
 usage. Fresh `thread/start` opts into `experimentalRawEvents`. Factory correlates every
@@ -44,7 +48,7 @@ usage honestly, and requires provider completion plus a matching cumulative delt
 the verified empty-thread baseline. Duplicate equal notifications do not add usage twice;
 conflicting, missing, overflowing or incomplete observations cannot yield known totals.
 
-The pinned [response recorder](https://github.com/openai/codex/blob/41e22fee981a63b3698df7ed36bad393cda24715/codex-rs/core/src/session/mod.rs)
+The referenced [response recorder](https://github.com/openai/codex/blob/41e22fee981a63b3698df7ed36bad393cda24715/codex-rs/core/src/session/mod.rs)
 emits raw completion but skips persisted `TokenUsageRecord` when usage is missing.
 [Rollout policy](https://github.com/openai/codex/blob/41e22fee981a63b3698df7ed36bad393cda24715/codex-rs/rollout/src/policy.rs)
 does not persist the raw completion event. Consequently, matching sums of persisted known
@@ -52,8 +56,8 @@ records cannot establish that all completed responses supplied usage. Factory do
 scan unrelated sessions or call this a complete cold usage-reconstruction interface.
 
 Cold [`thread/resume` subscription](https://github.com/openai/codex/blob/41e22fee981a63b3698df7ed36bad393cda24715/codex-rs/app-server/src/request_processors/thread_processor.rs)
-attaches with raw events disabled. The pinned protocol offers no verified cold opt-in for
-that accounting stream. New same-thread repair turns therefore remain refused. Supported
+attaches with raw events disabled. Factory has no verified cold opt-in for that accounting stream.
+New same-thread repair turns therefore remain refused. Supported
 cold terminal recovery reuses a complete immutable usage checkpoint, not new model work.
 Provider support for a complete durable response ledger or explicit raw resubscription is
 the remaining dependency for cold repairs. Interrupted/failed incomplete usage stays unknown.

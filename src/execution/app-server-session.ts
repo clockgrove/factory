@@ -9,6 +9,24 @@ import { LocalScopeBatchSchema } from "../protocol/local-scope.js";
 export const APP_SERVER_SESSION_PROTOCOL = "clockgrove.factory/app-server-session-v1";
 export const APP_SERVER_SESSION_STAGES = ["prepared", "turn", "terminal"] as const;
 const text = z.string().min(1).max(4096);
+const serverUserAgent = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine(
+    (value) =>
+      value.trim().length > 0 &&
+      Buffer.byteLength(value, "utf8") <= 512 &&
+      ![...value].some((character) => {
+        const code = character.codePointAt(0)!;
+        return code < 32 || code === 127;
+      }),
+  );
+const codexCliVersion = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/);
 const counter = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable();
 const Usage = z
   .object({ inputTokens: counter, outputTokens: counter, cachedInputTokens: counter })
@@ -46,7 +64,8 @@ export const AppServerSessionBindingSchema = z
     sessionId: text,
     modelProvider: text,
     model: text,
-    cliVersion: z.literal("0.153.0"),
+    cliVersion: codexCliVersion,
+    serverUserAgent,
     usageBaseline: AppServerRawTokensSchema,
     startedAt: z.string().datetime(),
     deadline: z.string().datetime(),
@@ -186,7 +205,7 @@ export const EMPTY_APP_SERVER_USAGE: AppServerRawTokens = {
   cacheWriteInputTokens: 0,
   reasoningOutputTokens: 0,
 };
-/** Pinned 0.153.0: raw upstream response usage, never last-response/thread estimates.
+/** Raw upstream response usage, never last-response/thread estimates.
  * Completion plus a matching full cumulative delta closes the observation window.
  * Interrupted, missing, conflicting, replayed, overflowing, or partial data stays unknown. */
 export function completedAppServerUsage(args: {

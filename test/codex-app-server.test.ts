@@ -43,6 +43,8 @@ interface FakeOptions {
   liveProducer?: boolean;
   presentScope?: boolean;
   version?: string;
+  userAgent?: string | null;
+  threadCliVersion?: string | null;
   afterThreadStart?: () => void;
 }
 const storedThreads = new Map<string, Record<string, unknown>>();
@@ -74,7 +76,12 @@ class FakeConnection implements AppServerConnection {
   async request<T>(method: string, params?: unknown): Promise<T> {
     this.calls.push({ method, params });
     if (method === "initialize")
-      return { userAgent: `codex_cli_rs/${this.options.version ?? "0.153.0"}` } as T;
+      return {
+        userAgent:
+          this.options.userAgent === undefined
+            ? `codex_cli_rs/${this.options.version ?? "0.153.0"}`
+            : this.options.userAgent,
+      } as T;
     if (method === "thread/start") {
       const input = params as { cwd: string; model?: string };
       const thread = {
@@ -83,7 +90,10 @@ class FakeConnection implements AppServerConnection {
         cwd: input.cwd,
         modelProvider: "openai",
         model: input.model ?? "gpt-5",
-        cliVersion: "0.153.0",
+        cliVersion:
+          this.options.threadCliVersion === undefined
+            ? (this.options.version ?? "0.153.0")
+            : this.options.threadCliVersion,
         turns: [],
       };
       storedThreads.set(thread.id, thread);
@@ -728,17 +738,50 @@ describe("Codex App Server local backend", () => {
     expect([...connections.values()].every((connection) => connection.closedByClient)).toBe(true);
   });
 
-  it("refuses unsupported versions and missing journals before any model turn", async () => {
-    const root = join(suiteRoot, "unsupported"),
+  it.each(["0.153.0", "0.153.2", "0.154.0"])(
+    "accepts conforming App Server behavior from Codex %s",
+    async (version) => {
+      const root = join(suiteRoot, `conforming-${version}`),
+        connections = new Map<string, FakeConnection>();
+      const backend = factory(root, connections, { version });
+      const ctx = await context(103);
+      const handle = await backend.launch(ctx);
+      const prepared = await ctx.sessionJournal!.load("prepared");
+      expect(prepared?.binding).toMatchObject({
+        cliVersion: version,
+        serverUserAgent: `codex_cli_rs/${version}`,
+      });
+      expect(handle.metadata?.cliVersion).toBe(version);
+      await backend.cancel(handle);
+      await backend.cleanup(handle);
+    },
+  );
+
+  it.each([
+    { userAgent: null, threadCliVersion: "0.153.2" },
+    { userAgent: " ", threadCliVersion: "0.153.2" },
+    { userAgent: "codex\nprivate", threadCliVersion: "0.153.2" },
+    { userAgent: "x".repeat(513), threadCliVersion: "0.153.2" },
+    { userAgent: "codex/current", threadCliVersion: null },
+    { userAgent: "codex/current", threadCliVersion: "current" },
+  ])("refuses malformed App Server identities before any model turn", async (identity) => {
+    const root = join(suiteRoot, "malformed-identity"),
       connections = new Map<string, FakeConnection>();
-    const backend = factory(root, connections, { version: "0.152.0" });
+    const backend = factory(root, connections, identity);
     const ctx = await context(103);
-    await expect(backend.launch(ctx)).rejects.toThrow(/0\.153\.0|protocol|version/i);
+    await expect(backend.launch(ctx)).rejects.toThrow(/identity|version/i);
     expect(
       [...connections.values()]
         .flatMap((connection) => connection.calls)
         .some((call) => call.method === "turn/start"),
     ).toBe(false);
+  });
+
+  it("refuses missing journals before any model turn", async () => {
+    const root = join(suiteRoot, "missing-journal"),
+      connections = new Map<string, FakeConnection>();
+    const backend = factory(root, connections);
+    const ctx = await context(103);
     const { sessionJournal: _journal, ...withoutJournal } = ctx;
     await expect(backend.launch(withoutJournal)).rejects.toThrow("journal");
   });

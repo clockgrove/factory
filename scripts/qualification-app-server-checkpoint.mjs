@@ -11,6 +11,8 @@ import {
   assertQualificationReservationAuthority,
   assertQualificationReservationAuthorityReobservation,
   observeQualificationReservationAuthority,
+  qualificationIssueAdmissionSnapshot,
+  qualificationReservationReadPort,
   qualificationReservationAuthorityExpectation,
   reobserveQualificationReservationAuthority,
 } from "./qualification-reservation-authority.mjs";
@@ -41,6 +43,68 @@ const keys = [
   "baseSha",
 ];
 const sessionPath = ".clockgrove-factory/control/app-server-session.json";
+const continuationFailureContexts = new WeakMap();
+const continuationStages = new Set(["post-takeover", "final"]);
+const continuationFields = [
+  "protocol",
+  "workItem",
+  "runId",
+  "attempt",
+  "reservationRef",
+  "reservationOid",
+  "authoritySource",
+  "canonicalAuthorityRef",
+  "legacyAuthorityRef",
+  "legacyAuthorityOid",
+  "threadId",
+  "turnId",
+  "modelTokens",
+  "artifactDigest",
+  "sessionRef",
+  "terminalOid",
+  "readyOid",
+];
+const maxAdmissionContinuationRevisions = 3;
+
+export function appServerCheckpointContinuationFailureContext(error) {
+  if (error === null || (typeof error !== "object" && typeof error !== "function"))
+    return undefined;
+  return continuationFailureContexts.get(error);
+}
+
+function continuationAssertion(stage, field, invariant, operation) {
+  try {
+    operation();
+  } catch (error) {
+    const retained =
+      error !== null && (typeof error === "object" || typeof error === "function")
+        ? error
+        : new Error("App Server checkpoint continuation failed");
+    continuationFailureContexts.set(retained, {
+      checkpointStage: stage,
+      checkpointField: field,
+      checkpointInvariant: invariant,
+    });
+    throw retained;
+  }
+}
+
+function admissionContinuation(proof, reserved) {
+  if (proof.reservationAuthority.source !== "issue-admission") return undefined;
+  const commits = [
+    proof.reservationAuthority.canonical.commit,
+    ...(proof.canonicalAuthorityAncestors ?? []),
+  ];
+  assert.ok(commits.length <= maxAdmissionContinuationRevisions);
+  const snapshots = commits.map((commit) =>
+    qualificationIssueAdmissionSnapshot(commit, reserved, proof.reservationAuthority.canonical.ref),
+  );
+  for (let index = 1; index < snapshots.length; index++) {
+    assert.equal(snapshots[index - 1].priorOid, snapshots[index].oid);
+    assert.equal(snapshots[index - 1].revision, snapshots[index].revision + 1);
+  }
+  return snapshots;
+}
 export const appServerCheckpointPath = (unit, invocationId, uid = process.getuid()) =>
   join(
     tmpdir(),
@@ -313,6 +377,7 @@ export function assertAppServerCheckpoint(
     );
   }
   assert.ok(Number.isFinite(Date.parse(verifiedAt)), "invalid verification timestamp");
+  const admission = admissionContinuation(proof, reserved);
   return {
     protocol: "clockgrove.factory/app-server-checkpoint-verification",
     verifiedAt,
@@ -324,6 +389,7 @@ export function assertAppServerCheckpoint(
     authoritySource: proof.reservationAuthority.source,
     canonicalAuthorityRef: proof.reservationAuthority.canonical.ref,
     canonicalAuthorityOid: proof.reservationAuthority.canonical.closingOid,
+    ...(admission ? { canonicalAuthorityChain: admission } : {}),
     legacyAuthorityRef: proof.reservationAuthority.legacy.ref,
     legacyAuthorityOid: proof.reservationAuthority.legacy.closingOid,
     threadId: binding.threadId,
@@ -337,9 +403,130 @@ export function assertAppServerCheckpoint(
 }
 
 export function appServerCheckpointIdentity(receipt) {
-  const { verifiedAt, ...identity } = receipt;
+  const { verifiedAt, canonicalAuthorityOid, canonicalAuthorityChain, ...identity } = receipt;
   assert.ok(Number.isFinite(Date.parse(verifiedAt)), "invalid verification timestamp");
   return identity;
+}
+
+/** Preserve exact session/artifact identity while accepting a bounded,
+ * authenticated admission progression through recovery and settlement. */
+export function assertAppServerCheckpointContinuation(before, after, stage) {
+  assert.ok(continuationStages.has(stage), "unsupported App Server continuation stage");
+  continuationAssertion(stage, "receipt-count", "stable-identity", () =>
+    assert.equal(after.length, before.length, "App Server checkpoint receipt count changed"),
+  );
+  const current = new Map(after.map((receipt) => [receipt.workItem, receipt]));
+  for (const prior of before) {
+    const next = current.get(prior.workItem);
+    continuationAssertion(stage, "workItem", "stable-identity", () =>
+      assert.ok(next, "App Server checkpoint work item disappeared"),
+    );
+    for (const field of continuationFields)
+      continuationAssertion(stage, field, "stable-identity", () =>
+        assert.deepEqual(next[field], prior[field], `App Server checkpoint ${field} changed`),
+      );
+    if (prior.authoritySource !== "issue-admission") {
+      continuationAssertion(stage, "canonicalAuthorityOid", "stable-authority", () =>
+        assert.equal(
+          next.canonicalAuthorityOid,
+          prior.canonicalAuthorityOid,
+          "legacy checkpoint acquired canonical authority",
+        ),
+      );
+      continue;
+    }
+    continuationAssertion(stage, "canonicalAuthorityChain", "stable-authority", () => {
+      assert.ok(
+        Array.isArray(prior.canonicalAuthorityChain) && prior.canonicalAuthorityChain.length > 0,
+        "prior admission ancestry is unavailable",
+      );
+      assert.ok(
+        Array.isArray(next.canonicalAuthorityChain) && next.canonicalAuthorityChain.length > 0,
+        "current admission ancestry is unavailable",
+      );
+      assert.equal(
+        prior.canonicalAuthorityChain[0].oid,
+        prior.canonicalAuthorityOid,
+        "prior admission ancestry does not start at its authority",
+      );
+      assert.equal(
+        next.canonicalAuthorityChain[0].oid,
+        next.canonicalAuthorityOid,
+        "current admission ancestry does not start at its authority",
+      );
+    });
+    if (next.canonicalAuthorityOid === prior.canonicalAuthorityOid) {
+      continuationAssertion(stage, "canonicalAuthorityChain", "stable-authority", () =>
+        assert.deepEqual(
+          next.canonicalAuthorityChain[0],
+          prior.canonicalAuthorityChain[0],
+          "unchanged admission authority has different state",
+        ),
+      );
+      continue;
+    }
+    const ancestry = next.canonicalAuthorityChain;
+    const priorIndex = ancestry.findIndex(
+      (snapshot) => snapshot.oid === prior.canonicalAuthorityOid,
+    );
+    continuationAssertion(stage, "canonicalAuthorityChain", "authority-descendant", () =>
+      assert.ok(
+        priorIndex > 0,
+        "advanced admission does not retain bounded ancestry to the observed authority",
+      ),
+    );
+    const evolution = ancestry.slice(0, priorIndex + 1).reverse();
+    continuationAssertion(stage, "canonicalAuthorityChain", "stable-authority", () =>
+      assert.deepEqual(
+        evolution[0],
+        prior.canonicalAuthorityChain[0],
+        "prior admission state changed within descendant ancestry",
+      ),
+    );
+    for (let index = 1; index < evolution.length; index++) {
+      const from = evolution[index - 1];
+      const to = evolution[index];
+      continuationAssertion(stage, "canonicalAuthorityChain", "authority-descendant", () => {
+        assert.equal(to.priorOid, from.oid, "admission ancestry forked");
+        assert.equal(to.revision, from.revision + 1, "admission revision skipped or regressed");
+      });
+      continuationAssertion(stage, "historyIdentityDigest", "stable-identity", () =>
+        assert.equal(
+          to.historyIdentityDigest,
+          from.historyIdentityDigest,
+          "admission history target identity changed",
+        ),
+      );
+      continuationAssertion(stage, "writerEpoch", "authority-revision", () => {
+        assert.ok(to.writerEpoch >= from.writerEpoch, "admission writer epoch regressed");
+        if (to.writerEpoch === from.writerEpoch)
+          assert.equal(
+            to.currentWriterHolder,
+            from.currentWriterHolder,
+            "admission writer changed without an epoch advance",
+          );
+      });
+      continuationAssertion(stage, "dispatchPossible", "authority-transition", () =>
+        assert.equal(
+          to.dispatchPossible,
+          from.dispatchPossible,
+          "admission dispatch evidence changed during continuation",
+        ),
+      );
+      const allowed = {
+        dispatching: new Set(["terminal"]),
+        terminal: new Set(["terminal", "reconciled", "released"]),
+        reconciled: new Set(["reconciled", "released"]),
+      };
+      continuationAssertion(stage, "disposition", "authority-transition", () =>
+        assert.ok(
+          allowed[from.disposition]?.has(to.disposition),
+          "admission disposition regressed or followed an unsupported transition",
+        ),
+      );
+    }
+  }
+  return after;
 }
 export async function observeAppServerCheckpoints(request, observation, authority, witness) {
   const read = nativeProofReader(request),
@@ -360,6 +547,28 @@ export async function observeAppServerCheckpoints(request, observation, authorit
       reservationCommit: reservation.reservationCommit,
       reservationAuthority: reservation.authority,
     };
+    if (reservation.authority.source === "issue-admission") {
+      const ancestors = [],
+        authorityRead = qualificationReservationReadPort(request);
+      let snapshot = qualificationIssueAdmissionSnapshot(
+        reservation.authority.canonical.commit,
+        reserved,
+        reservation.authority.canonical.ref,
+      );
+      while (
+        snapshot.priorOid !== null &&
+        ancestors.length < maxAdmissionContinuationRevisions - 1
+      ) {
+        const commit = await authorityRead.readCommit(snapshot.priorOid);
+        ancestors.push(commit);
+        snapshot = qualificationIssueAdmissionSnapshot(
+          commit,
+          reserved,
+          reservation.authority.canonical.ref,
+        );
+      }
+      proof.canonicalAuthorityAncestors = ancestors;
+    }
     for (const stage of ["prepared", "turn", "terminal"])
       proof[stage] = await read({
         kind: "checkpoint",

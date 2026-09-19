@@ -156,6 +156,14 @@ export interface CheckpointDiagnostic {
   rateLimitReset?: number;
   /** Delay in seconds. */
   retryAfter?: number;
+  checkpointStage?: "post-takeover" | "final";
+  checkpointField?: string;
+  checkpointInvariant?:
+    | "stable-identity"
+    | "stable-authority"
+    | "authority-descendant"
+    | "authority-revision"
+    | "authority-transition";
 }
 export interface CheckpointObservationDiagnostic extends CheckpointDiagnostic {
   boundary: "observation";

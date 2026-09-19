@@ -513,6 +513,35 @@ function parseLedger(commit, reserved, authorityRef) {
   return { record, entry, authorityRef };
 }
 
+/** Compact, authenticated state for comparing a bounded issue-admission ancestry.
+ * Mutable lifecycle fields remain explicit; the digest covers the immutable
+ * identity of every admission-history target. */
+export function qualificationIssueAdmissionSnapshot(commit, reserved, authorityRef) {
+  sha(commit?.oid, "invalid issue admission commit OID");
+  const { record, entry } = parseLedger(commit, reserved, authorityRef);
+  const immutableHistory = record.history.map(
+    ({
+      disposition,
+      writerEpoch,
+      currentWriterHolder,
+      dispatchPossible,
+      evidence,
+      settledBySuccessor,
+      ...identity
+    }) => identity,
+  );
+  return {
+    oid: commit.oid,
+    revision: record.revision,
+    priorOid: record.priorRevisionOid,
+    disposition: entry.disposition,
+    writerEpoch: entry.writerEpoch,
+    currentWriterHolder: entry.currentWriterHolder,
+    dispatchPossible: entry.dispatchPossible,
+    historyIdentityDigest: digest(canonical(immutableHistory)),
+  };
+}
+
 function reservationCommit(commit, oid, reserved) {
   sha(oid);
   assert.equal(commit.oid, oid, "reservation commit OID changed");

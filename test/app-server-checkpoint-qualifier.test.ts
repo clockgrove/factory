@@ -5,11 +5,13 @@ import { boundedQualificationEvidenceText } from "../scripts/qualification-evide
 import {
   appServerCheckpointArm,
   appServerCheckpointIdentity,
+  assertAppServerCheckpointContinuation,
   assertAppServerCheckpoint,
   observeAppServerCheckpoints,
 } from "../scripts/qualification-app-server-checkpoint.mjs";
 import {
   appServerHoldReady,
+  checkpointFailure,
   checkpointAuthority,
   phaseKillCommand,
   phaseKillReplacementObservation,
@@ -469,16 +471,217 @@ describe("installed App Server checkpoint qualification", () => {
     expect(
       Buffer.byteLength(boundedQualificationEvidenceText({ receipts: final }, "unused-token")),
     ).toBeLessThan(8192);
-    for (const field of [
-      "reservationOid",
-      "canonicalAuthorityOid",
-      "terminalOid",
-      "readyOid",
-      "artifactDigest",
-    ])
+    for (const field of ["reservationOid", "terminalOid", "readyOid", "artifactDigest"])
       expect(appServerCheckpointIdentity({ ...finalHeld, [field]: "changed" })).not.toEqual(
         appServerCheckpointIdentity(preRestart),
       );
+  });
+  it("accepts only an authenticated dispatching-to-terminal admission child", () => {
+    const receipt = assertAppServerCheckpoint(
+      fixture().observation,
+      authority,
+      fixture().proof,
+      fixture().witness,
+      "2026-09-11T01:02:03.000Z",
+    );
+    const before = {
+      ...receipt,
+      authoritySource: "issue-admission",
+      canonicalAuthorityOid: "d".repeat(40),
+      canonicalAuthorityChain: [
+        {
+          oid: "d".repeat(40),
+          revision: 2,
+          priorOid: "c".repeat(40),
+          disposition: "dispatching",
+          writerEpoch: 2,
+          currentWriterHolder: "holder-2",
+          dispatchPossible: true,
+          historyIdentityDigest: "1".repeat(64),
+        },
+      ],
+    };
+    const after = {
+      ...before,
+      verifiedAt: "2026-09-11T01:03:04.000Z",
+      canonicalAuthorityOid: "e".repeat(40),
+      canonicalAuthorityChain: [
+        {
+          ...before.canonicalAuthorityChain[0],
+          oid: "e".repeat(40),
+          revision: 3,
+          priorOid: before.canonicalAuthorityOid,
+          disposition: "terminal",
+          writerEpoch: 3,
+          currentWriterHolder: "holder-3",
+        },
+        before.canonicalAuthorityChain[0],
+      ],
+    };
+    expect(assertAppServerCheckpointContinuation([before], [after], "post-takeover")).toEqual([
+      after,
+    ]);
+    expect(appServerCheckpointIdentity(after)).toEqual(appServerCheckpointIdentity(before));
+
+    expect(() =>
+      assertAppServerCheckpointContinuation(
+        [before],
+        [
+          {
+            ...after,
+            canonicalAuthorityChain: after.canonicalAuthorityChain.map((snapshot, index) =>
+              index === 0 ? { ...snapshot, priorOid: "f".repeat(40) } : snapshot,
+            ),
+          },
+        ],
+        "post-takeover",
+      ),
+    ).toThrow(/forked/);
+    expect(() =>
+      assertAppServerCheckpointContinuation(
+        [after],
+        [
+          {
+            ...after,
+            canonicalAuthorityOid: "f".repeat(40),
+            canonicalAuthorityChain: [
+              {
+                ...after.canonicalAuthorityChain[0],
+                oid: "f".repeat(40),
+                revision: 2,
+                priorOid: after.canonicalAuthorityOid,
+                disposition: "dispatching",
+              },
+              after.canonicalAuthorityChain[0],
+            ],
+          },
+        ],
+        "final",
+      ),
+    ).toThrow(/skipped or regressed/);
+    expect(() =>
+      assertAppServerCheckpointContinuation(
+        [before],
+        [
+          {
+            ...after,
+            canonicalAuthorityChain: [after.canonicalAuthorityChain[0]],
+          },
+        ],
+        "post-takeover",
+      ),
+    ).toThrow(/does not retain bounded ancestry/);
+
+    try {
+      assertAppServerCheckpointContinuation(
+        [before],
+        [
+          {
+            ...after,
+            canonicalAuthorityChain: after.canonicalAuthorityChain.map((snapshot, index) =>
+              index === 0 ? { ...snapshot, historyIdentityDigest: "2".repeat(64) } : snapshot,
+            ),
+          },
+        ],
+        "post-takeover",
+      );
+      expect.fail("changed admission target identity was accepted");
+    } catch (error) {
+      expect(checkpointFailure(error)).toMatchObject({
+        boundary: "scenario",
+        checkpointStage: "post-takeover",
+        checkpointField: "historyIdentityDigest",
+        checkpointInvariant: "stable-identity",
+        category: "assertion",
+        code: "ERR_ASSERTION",
+      });
+    }
+
+    expect(() =>
+      assertAppServerCheckpointContinuation(
+        [before],
+        [
+          {
+            ...after,
+            canonicalAuthorityChain: after.canonicalAuthorityChain.map((snapshot, index) =>
+              index === 0
+                ? { ...snapshot, writerEpoch: 2, currentWriterHolder: "unfenced-holder" }
+                : snapshot,
+            ),
+          },
+        ],
+        "post-takeover",
+      ),
+    ).toThrow(/writer changed without an epoch advance/);
+
+    const released = {
+      ...after,
+      canonicalAuthorityOid: "f".repeat(40),
+      canonicalAuthorityChain: [
+        {
+          ...after.canonicalAuthorityChain[0],
+          oid: "f".repeat(40),
+          revision: 4,
+          priorOid: after.canonicalAuthorityOid,
+          disposition: "released",
+        },
+        ...after.canonicalAuthorityChain,
+      ],
+    };
+    expect(assertAppServerCheckpointContinuation([after], [released], "final")).toEqual([released]);
+    const reconciled = {
+      ...after,
+      canonicalAuthorityOid: "a".repeat(40),
+      canonicalAuthorityChain: [
+        {
+          ...after.canonicalAuthorityChain[0],
+          oid: "a".repeat(40),
+          revision: 4,
+          priorOid: after.canonicalAuthorityOid,
+          disposition: "reconciled",
+        },
+        ...after.canonicalAuthorityChain,
+      ],
+    };
+    const releasedAfterReconciliation = {
+      ...reconciled,
+      canonicalAuthorityOid: "0".repeat(40),
+      canonicalAuthorityChain: [
+        {
+          ...reconciled.canonicalAuthorityChain[0],
+          oid: "0".repeat(40),
+          revision: 5,
+          priorOid: reconciled.canonicalAuthorityOid,
+          disposition: "released",
+        },
+        ...reconciled.canonicalAuthorityChain.slice(0, 2),
+      ],
+    };
+    expect(
+      assertAppServerCheckpointContinuation([after], [releasedAfterReconciliation], "final"),
+    ).toEqual([releasedAfterReconciliation]);
+    expect(() =>
+      assertAppServerCheckpointContinuation(
+        [released],
+        [
+          {
+            ...released,
+            canonicalAuthorityOid: "0".repeat(40),
+            canonicalAuthorityChain: [
+              {
+                ...released.canonicalAuthorityChain[0],
+                oid: "0".repeat(40),
+                revision: 5,
+                priorOid: released.canonicalAuthorityOid,
+                disposition: "terminal",
+              },
+              ...released.canonicalAuthorityChain,
+            ],
+          },
+        ],
+        "final",
+      ),
+    ).toThrow(/regressed or followed an unsupported transition/);
   });
   it("observes the complete App Server proof through ledger-only reservation authority", async () => {
     const f = fixture();
@@ -580,6 +783,18 @@ describe("installed App Server checkpoint qualification", () => {
       authoritySource: "issue-admission",
       canonicalAuthorityRef: "refs/clockgrove-factory/admission/work-item-8",
       canonicalAuthorityOid: ledgerOid,
+      canonicalAuthorityChain: [
+        {
+          oid: ledgerOid,
+          revision: 1,
+          priorOid: null,
+          disposition: "terminal",
+          writerEpoch: reserved.directorEpoch,
+          currentWriterHolder: "fixture",
+          dispatchPossible: true,
+          historyIdentityDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+      ],
       legacyAuthorityRef: f.proof.reservationRef,
       legacyAuthorityOid: null,
     });

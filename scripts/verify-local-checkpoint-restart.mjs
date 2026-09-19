@@ -48,9 +48,11 @@ import {
   qualificationProofFailureContext,
 } from "./qualification-sibling-refresh-proof.mjs";
 import {
+  appServerCheckpointContinuationFailureContext,
   appServerCheckpointIdentity,
   appServerCheckpointArm,
   appServerCheckpointPath,
+  assertAppServerCheckpointContinuation,
   assertAppServerCheckpoint,
   observeAppServerCheckpoints,
 } from "./qualification-app-server-checkpoint.mjs";
@@ -264,10 +266,12 @@ export function checkpointFailure(error, boundary) {
       ? qualificationFailureStages.get(error)
       : undefined;
   const proofFailure = qualificationProofFailureContext(error);
+  const checkpointContinuationFailure = appServerCheckpointContinuationFailureContext(error);
   return {
     boundary: boundaries.has(boundary) ? boundary : "scenario",
     ...(qualificationStage === undefined ? {} : { qualificationStage }),
     ...(proofFailure === undefined ? {} : proofFailure),
+    ...(checkpointContinuationFailure === undefined ? {} : checkpointContinuationFailure),
     ...classifyCheckpointFailure(error),
   };
 }
@@ -1200,11 +1204,7 @@ export async function continueAppServerCheckpointScenario(
       "original worker receipt changed",
     );
   const resumedReceipts = await port.sessionProof(paused, held.checkpointReached);
-  assert.deepEqual(
-    resumedReceipts.map(appServerCheckpointIdentity),
-    sessionProofs.map(appServerCheckpointIdentity),
-    "session or ready artifact changed across same-attempt continuation",
-  );
+  assertAppServerCheckpointContinuation(sessionProofs, resumedReceipts, "post-takeover");
   const phaseRecovery = phaseKill
     ? assertPhaseKillRecovery({
         kill: phaseKill,
@@ -1228,11 +1228,10 @@ export async function continueAppServerCheckpointScenario(
   assert.equal(final.runId, facts.runId);
   const finalSessionReceipts = await port.sessionProof(completed);
   assert.equal(finalSessionReceipts.length, 3);
-  assert.deepEqual(
-    appServerCheckpointIdentity(
-      finalSessionReceipts.find((receipt) => receipt.workItem === sessionProofs[0].workItem),
-    ),
-    appServerCheckpointIdentity(sessionProofs[0]),
+  assertAppServerCheckpointContinuation(
+    [resumedReceipts.find((receipt) => receipt.workItem === sessionProofs[0].workItem)],
+    [finalSessionReceipts.find((receipt) => receipt.workItem === sessionProofs[0].workItem)],
+    "final",
   );
   await port.finalProof(completed, original, replacement);
   const finalScopes = await port.absence(completed, [original, replacement]);

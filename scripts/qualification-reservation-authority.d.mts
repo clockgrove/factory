@@ -12,6 +12,21 @@ export function assertQualificationReservationAuthority(
   proof: QualificationReservationAuthorityProof,
   reserved: Record<string, unknown>,
 ): QualificationReservationAuthorityProof;
+export interface QualificationIssueAdmissionSnapshot {
+  oid: string;
+  revision: number;
+  priorOid: string | null;
+  disposition: "prepared" | "dispatching" | "terminal" | "reconciled" | "released";
+  writerEpoch: number;
+  currentWriterHolder: string;
+  dispatchPossible: boolean;
+  historyIdentityDigest: string;
+}
+export function qualificationIssueAdmissionSnapshot(
+  commit: Record<string, unknown>,
+  reserved: Record<string, unknown>,
+  authorityRef: string,
+): QualificationIssueAdmissionSnapshot;
 export function resolveQualificationReservationAuthority(
   port: {
     readRef(ref: string): Promise<string | null>;

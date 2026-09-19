@@ -11,13 +11,33 @@ export function assertAppServerCheckpoint(
   proof: unknown,
   witness?: unknown,
   verifiedAt?: string,
+  continuationStage?: "checkpoint" | "post-takeover" | "final",
 ): Record<string, unknown>;
 export function appServerCheckpointIdentity(
   receipt: Record<string, unknown>,
 ): Record<string, unknown>;
+export function assertAppServerCheckpointContinuation(
+  before: Record<string, unknown>[],
+  after: Record<string, unknown>[],
+  stage: "checkpoint" | "post-takeover" | "final",
+): Record<string, unknown>[];
+export function appServerCheckpointContinuationFailureContext(error: unknown):
+  | {
+      checkpointStage: "checkpoint" | "post-takeover" | "final";
+      checkpointField: string;
+      checkpointInvariant:
+        | "stable-identity"
+        | "stable-authority"
+        | "authenticated-authority"
+        | "authority-descendant"
+        | "authority-revision"
+        | "authority-transition";
+    }
+  | undefined;
 export function observeAppServerCheckpoints(
   request: (route: string, args: Record<string, unknown>) => Promise<unknown>,
   observation: unknown,
   authority: CheckpointAuthority,
   witness?: unknown,
+  continuationStage?: "checkpoint" | "post-takeover" | "final",
 ): Promise<Record<string, unknown>[]>;

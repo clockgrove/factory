@@ -5,11 +5,13 @@ import { boundedQualificationEvidenceText } from "../scripts/qualification-evide
 import {
   appServerCheckpointArm,
   appServerCheckpointIdentity,
+  assertAppServerCheckpointContinuation,
   assertAppServerCheckpoint,
   observeAppServerCheckpoints,
 } from "../scripts/qualification-app-server-checkpoint.mjs";
 import {
   appServerHoldReady,
+  checkpointFailure,
   checkpointAuthority,
   phaseKillCommand,
   phaseKillReplacementObservation,
@@ -469,16 +471,231 @@ describe("installed App Server checkpoint qualification", () => {
     expect(
       Buffer.byteLength(boundedQualificationEvidenceText({ receipts: final }, "unused-token")),
     ).toBeLessThan(8192);
-    for (const field of [
-      "reservationOid",
-      "canonicalAuthorityOid",
-      "terminalOid",
-      "readyOid",
-      "artifactDigest",
-    ])
+    for (const field of ["reservationOid", "terminalOid", "readyOid", "artifactDigest"])
       expect(appServerCheckpointIdentity({ ...finalHeld, [field]: "changed" })).not.toEqual(
         appServerCheckpointIdentity(preRestart),
       );
+  });
+  it("accepts only an authenticated dispatching-to-terminal admission child", () => {
+    const receipt = assertAppServerCheckpoint(
+      fixture().observation,
+      authority,
+      fixture().proof,
+      fixture().witness,
+      "2026-09-11T01:02:03.000Z",
+    );
+    const before = {
+      ...receipt,
+      authoritySource: "issue-admission",
+      canonicalAuthorityOid: "d".repeat(40),
+      canonicalAuthorityChain: [
+        {
+          oid: "d".repeat(40),
+          revision: 2,
+          priorOid: "c".repeat(40),
+          disposition: "dispatching",
+          writerEpoch: 2,
+          currentWriterHolder: "holder-2",
+          dispatchPossible: true,
+          historyIdentityDigest: "1".repeat(64),
+        },
+      ],
+    };
+    const after = {
+      ...before,
+      verifiedAt: "2026-09-11T01:03:04.000Z",
+      canonicalAuthorityOid: "e".repeat(40),
+      canonicalAuthorityChain: [
+        {
+          ...before.canonicalAuthorityChain[0],
+          oid: "e".repeat(40),
+          revision: 3,
+          priorOid: before.canonicalAuthorityOid,
+          disposition: "terminal",
+          writerEpoch: 3,
+          currentWriterHolder: "holder-3",
+        },
+        before.canonicalAuthorityChain[0],
+      ],
+    };
+    expect(assertAppServerCheckpointContinuation([before], [after], "post-takeover")).toEqual([
+      after,
+    ]);
+    expect(appServerCheckpointIdentity(after)).toEqual(appServerCheckpointIdentity(before));
+
+    expect(() =>
+      assertAppServerCheckpointContinuation(
+        [before],
+        [
+          {
+            ...after,
+            canonicalAuthorityChain: after.canonicalAuthorityChain.map((snapshot, index) =>
+              index === 0 ? { ...snapshot, priorOid: "f".repeat(40) } : snapshot,
+            ),
+          },
+        ],
+        "post-takeover",
+      ),
+    ).toThrow(/forked/);
+    expect(() =>
+      assertAppServerCheckpointContinuation(
+        [after],
+        [
+          {
+            ...after,
+            canonicalAuthorityOid: "f".repeat(40),
+            canonicalAuthorityChain: [
+              {
+                ...after.canonicalAuthorityChain[0],
+                oid: "f".repeat(40),
+                revision: 2,
+                priorOid: after.canonicalAuthorityOid,
+                disposition: "dispatching",
+              },
+              after.canonicalAuthorityChain[0],
+            ],
+          },
+        ],
+        "final",
+      ),
+    ).toThrow(/skipped or regressed/);
+    expect(() =>
+      assertAppServerCheckpointContinuation(
+        [before],
+        [
+          {
+            ...after,
+            canonicalAuthorityChain: [after.canonicalAuthorityChain[0]],
+          },
+        ],
+        "post-takeover",
+      ),
+    ).toThrow(/does not retain bounded ancestry/);
+
+    try {
+      assertAppServerCheckpointContinuation(
+        [before],
+        [
+          {
+            ...after,
+            canonicalAuthorityChain: after.canonicalAuthorityChain.map((snapshot, index) =>
+              index === 0 ? { ...snapshot, historyIdentityDigest: "2".repeat(64) } : snapshot,
+            ),
+          },
+        ],
+        "post-takeover",
+      );
+      expect.fail("changed admission target identity was accepted");
+    } catch (error) {
+      expect(checkpointFailure(error)).toMatchObject({
+        boundary: "scenario",
+        checkpointStage: "post-takeover",
+        checkpointField: "historyIdentityDigest",
+        checkpointInvariant: "stable-identity",
+        category: "assertion",
+        code: "ERR_ASSERTION",
+      });
+    }
+
+    expect(() =>
+      assertAppServerCheckpointContinuation(
+        [before],
+        [
+          {
+            ...after,
+            canonicalAuthorityChain: after.canonicalAuthorityChain.map((snapshot, index) =>
+              index === 0
+                ? { ...snapshot, writerEpoch: 2, currentWriterHolder: "unfenced-holder" }
+                : snapshot,
+            ),
+          },
+        ],
+        "post-takeover",
+      ),
+    ).toThrow(/writer changed without an epoch advance/);
+
+    try {
+      assertAppServerCheckpointContinuation([before], [undefined as never], "final");
+      expect.fail("missing selected receipt was accepted");
+    } catch (error) {
+      expect(checkpointFailure(error)).toMatchObject({
+        boundary: "scenario",
+        checkpointStage: "final",
+        checkpointField: "workItem",
+        checkpointInvariant: "stable-identity",
+        category: "assertion",
+        code: "ERR_ASSERTION",
+      });
+    }
+
+    const released = {
+      ...after,
+      canonicalAuthorityOid: "f".repeat(40),
+      canonicalAuthorityChain: [
+        {
+          ...after.canonicalAuthorityChain[0],
+          oid: "f".repeat(40),
+          revision: 4,
+          priorOid: after.canonicalAuthorityOid,
+          disposition: "released",
+        },
+        ...after.canonicalAuthorityChain,
+      ],
+    };
+    expect(assertAppServerCheckpointContinuation([after], [released], "final")).toEqual([released]);
+    const reconciled = {
+      ...after,
+      canonicalAuthorityOid: "a".repeat(40),
+      canonicalAuthorityChain: [
+        {
+          ...after.canonicalAuthorityChain[0],
+          oid: "a".repeat(40),
+          revision: 4,
+          priorOid: after.canonicalAuthorityOid,
+          disposition: "reconciled",
+        },
+        ...after.canonicalAuthorityChain,
+      ],
+    };
+    const releasedAfterReconciliation = {
+      ...reconciled,
+      canonicalAuthorityOid: "0".repeat(40),
+      canonicalAuthorityChain: [
+        {
+          ...reconciled.canonicalAuthorityChain[0],
+          oid: "0".repeat(40),
+          revision: 5,
+          priorOid: reconciled.canonicalAuthorityOid,
+          disposition: "released",
+        },
+        ...reconciled.canonicalAuthorityChain.slice(0, 2),
+      ],
+    };
+    expect(
+      assertAppServerCheckpointContinuation([after], [releasedAfterReconciliation], "final"),
+    ).toEqual([releasedAfterReconciliation]);
+    expect(() =>
+      assertAppServerCheckpointContinuation(
+        [released],
+        [
+          {
+            ...released,
+            canonicalAuthorityOid: "0".repeat(40),
+            canonicalAuthorityChain: [
+              {
+                ...released.canonicalAuthorityChain[0],
+                oid: "0".repeat(40),
+                revision: 5,
+                priorOid: released.canonicalAuthorityOid,
+                disposition: "terminal",
+              },
+              ...released.canonicalAuthorityChain,
+            ],
+          },
+        ],
+        "final",
+      ),
+    ).toThrow(/regressed or followed an unsupported transition/);
   });
   it("observes the complete App Server proof through ledger-only reservation authority", async () => {
     const f = fixture();
@@ -580,9 +797,185 @@ describe("installed App Server checkpoint qualification", () => {
       authoritySource: "issue-admission",
       canonicalAuthorityRef: "refs/clockgrove-factory/admission/work-item-8",
       canonicalAuthorityOid: ledgerOid,
+      canonicalAuthorityChain: [
+        {
+          oid: ledgerOid,
+          revision: 1,
+          priorOid: null,
+          disposition: "terminal",
+          writerEpoch: reserved.directorEpoch,
+          currentWriterHolder: "fixture",
+          dispatchPossible: true,
+          historyIdentityDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+      ],
       legacyAuthorityRef: f.proof.reservationRef,
       legacyAuthorityOid: null,
     });
+    const advancedOid = "8".repeat(40);
+    const advancedRecord = {
+      ...record,
+      revision: 2,
+      priorRevisionOid: ledgerOid,
+      history: [
+        {
+          ...record.history[0],
+          writerEpoch: Number(reserved.directorEpoch) + 1,
+          currentWriterHolder: "replacement-fixture",
+        },
+      ],
+    };
+    const advancedLedger = {
+      ...ledger,
+      oid: advancedOid,
+      parentOids: [ledgerOid],
+      message: `Factory issue admission\nFactory-Issue-Admission: ${Buffer.from(JSON.stringify(advancedRecord)).toString("base64url")}`,
+    };
+    const advancedRequest = async (route: string, args: Record<string, unknown>) => {
+      if (
+        route.endsWith("/git/ref/{ref}") &&
+        args.ref === "clockgrove-factory/admission/work-item-8"
+      ) {
+        const ref = `refs/${args.ref}`;
+        return { data: { ref, object: { type: "commit", sha: advancedOid } } };
+      }
+      if (route.endsWith("/git/commits/{commit_sha}") && args.commit_sha === advancedOid)
+        return {
+          data: {
+            sha: advancedLedger.oid,
+            tree: { sha: advancedLedger.treeOid },
+            parents: advancedLedger.parentOids.map((sha) => ({ sha })),
+            message: advancedLedger.message,
+          },
+        };
+      return request(route, args);
+    };
+    const [advancedProof] = await observeAppServerCheckpoints(
+      advancedRequest,
+      f.observation,
+      authority,
+      f.witness,
+      "post-takeover",
+    );
+    expect(advancedProof!.canonicalAuthorityAncestors).toMatchObject([{ oid: ledgerOid }]);
+
+    for (const failure of ["missing-current", "malformed-current"] as const) {
+      let caught: unknown;
+      try {
+        await observeAppServerCheckpoints(
+          async (route, args) => {
+            if (route.endsWith("/git/commits/{commit_sha}") && args.commit_sha === advancedOid) {
+              if (failure === "missing-current")
+                throw Object.assign(new Error("private missing current authority"), {
+                  status: 404,
+                });
+              return {
+                data: {
+                  sha: advancedOid,
+                  tree: { sha: advancedLedger.treeOid },
+                  parents: advancedLedger.parentOids.map((sha) => ({ sha })),
+                  message: "malformed current issue admission authority",
+                },
+              };
+            }
+            return advancedRequest(route, args);
+          },
+          f.observation,
+          authority,
+          f.witness,
+          "final",
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(checkpointFailure(caught)).toMatchObject({
+        boundary: "scenario",
+        checkpointStage: "final",
+        checkpointField: "canonicalAuthorityOid",
+        checkpointInvariant: "authenticated-authority",
+        category: failure === "missing-current" ? "http" : "assertion",
+        ...(failure === "missing-current" ? { httpStatus: 404 } : { code: "ERR_ASSERTION" }),
+      });
+    }
+
+    const skippedOid = "7".repeat(40);
+    const skippedRecord = { ...advancedRecord, revision: 3 };
+    let skipped: unknown;
+    try {
+      await observeAppServerCheckpoints(
+        async (route, args) => {
+          if (
+            route.endsWith("/git/ref/{ref}") &&
+            args.ref === "clockgrove-factory/admission/work-item-8"
+          ) {
+            const ref = `refs/${args.ref}`;
+            return { data: { ref, object: { type: "commit", sha: skippedOid } } };
+          }
+          if (route.endsWith("/git/commits/{commit_sha}") && args.commit_sha === skippedOid)
+            return {
+              data: {
+                sha: skippedOid,
+                tree: { sha: advancedLedger.treeOid },
+                parents: [{ sha: ledgerOid }],
+                message: `Factory issue admission\nFactory-Issue-Admission: ${Buffer.from(JSON.stringify(skippedRecord)).toString("base64url")}`,
+              },
+            };
+          return request(route, args);
+        },
+        f.observation,
+        authority,
+        f.witness,
+        "final",
+      );
+    } catch (error) {
+      skipped = error;
+    }
+    expect(checkpointFailure(skipped)).toMatchObject({
+      boundary: "scenario",
+      checkpointStage: "final",
+      checkpointField: "canonicalAuthorityChain",
+      checkpointInvariant: "authority-descendant",
+      category: "assertion",
+      code: "ERR_ASSERTION",
+    });
+
+    for (const failure of ["missing", "malformed"] as const) {
+      let caught: unknown;
+      try {
+        await observeAppServerCheckpoints(
+          async (route, args) => {
+            if (route.endsWith("/git/commits/{commit_sha}") && args.commit_sha === ledgerOid) {
+              if (failure === "missing")
+                throw Object.assign(new Error("private missing ancestor"), { status: 404 });
+              return {
+                data: {
+                  sha: ledgerOid,
+                  tree: { sha: ledger.treeOid },
+                  parents: ledger.parentOids.map((sha: string) => ({ sha })),
+                  message: "malformed issue admission ancestor",
+                },
+              };
+            }
+            return advancedRequest(route, args);
+          },
+          f.observation,
+          authority,
+          f.witness,
+          "post-takeover",
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(checkpointFailure(caught)).toMatchObject({
+        boundary: "scenario",
+        checkpointStage: "post-takeover",
+        checkpointField: "canonicalAuthorityChain",
+        checkpointInvariant:
+          failure === "missing" ? "authority-descendant" : "authenticated-authority",
+        category: failure === "missing" ? "http" : "assertion",
+        ...(failure === "missing" ? { httpStatus: 404 } : { code: "ERR_ASSERTION" }),
+      });
+    }
     // Exercise the complete bounded reader at its byte ceiling, then serialize
     // the same observation envelope used by the runner. Raw evidence cannot fit.
     ledger.message += `\n${"x".repeat(8 * 1024 * 1024 - Buffer.byteLength(ledger.message) - 1)}`;

@@ -264,6 +264,79 @@ describe("checkpoint observation diagnostics", () => {
     expect(f.records[1]?.failedAt).toBe("2026-09-07T05:00:29.000Z");
   });
 
+  it("retries one HTTP 500 from a comments read within the original deadline", async () => {
+    const f = readFixture();
+    const operation = vi.fn().mockRejectedValueOnce({ status: 500 }).mockResolvedValue("observed");
+    expect(await checkpointObservationRead(operation, { ...f.context, stage: "comments" })).toBe(
+      "observed",
+    );
+    expect(operation.mock.calls.map(([remaining]) => remaining)).toEqual([10000, 9000]);
+    expect(f.records).toEqual([
+      {
+        boundary: "observation",
+        phase: "terminal-artifact-hold",
+        stage: "comments",
+        failedAt: "2026-09-07T05:00:28.000Z",
+        category: "http",
+        code: "UNAVAILABLE",
+        httpStatus: 500,
+        attempt: 1,
+        retry: true,
+      },
+    ]);
+  });
+
+  it("retries HTTP 500 when GitHub reports positive remaining quota with its reset", async () => {
+    const f = readFixture();
+    const operation = vi
+      .fn()
+      .mockRejectedValueOnce({
+        status: 500,
+        response: {
+          headers: { "x-ratelimit-remaining": "45", "x-ratelimit-reset": "1788759000" },
+        },
+      })
+      .mockResolvedValue("observed");
+    await expect(checkpointObservationRead(operation, f.context)).resolves.toBe("observed");
+    expect(operation).toHaveBeenCalledTimes(2);
+    expect(f.records[0]).toMatchObject({
+      httpStatus: 500,
+      rateLimitRemaining: 45,
+      rateLimitReset: 1788759000,
+      attempt: 1,
+      retry: true,
+    });
+  });
+
+  it.each(["000", 0])(
+    "does not retry HTTP 500 when normalized remaining quota is zero (%j)",
+    async (remaining) => {
+      const f = readFixture();
+      const failure = {
+        status: 500,
+        response: { headers: { "x-ratelimit-remaining": remaining } },
+      };
+      const operation = vi.fn().mockRejectedValue(failure);
+      await expect(checkpointObservationRead(operation, f.context)).rejects.toBe(failure);
+      expect(operation).toHaveBeenCalledTimes(1);
+      expect(f.wait).not.toHaveBeenCalled();
+      expect(f.records[0]).toMatchObject({ rateLimitRemaining: 0, retry: false });
+    },
+  );
+
+  it("does not retry HTTP 500 with a reset header but no normalized remaining quota", async () => {
+    const f = readFixture();
+    const failure = {
+      status: 500,
+      response: { headers: { "x-ratelimit-reset": "1788759000" } },
+    };
+    const operation = vi.fn().mockRejectedValue(failure);
+    await expect(checkpointObservationRead(operation, f.context)).rejects.toBe(failure);
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(f.wait).not.toHaveBeenCalled();
+    expect(f.records[0]).toMatchObject({ rateLimitReset: 1788759000, retry: false });
+  });
+
   it("exhausts at most two retries and throws the original failure object", async () => {
     const f = readFixture();
     const failure = Object.assign(Error("not serialized"), { status: 502 });
@@ -275,10 +348,24 @@ describe("checkpoint observation diagnostics", () => {
     expect(JSON.stringify(f.records)).not.toContain("not serialized");
   });
 
+  it("exhausts repeated HTTP 500s after three reads and throws the original failure object", async () => {
+    const f = readFixture();
+    const failure = Object.assign(Error("not serialized"), { status: 500 });
+    const operation = vi.fn().mockRejectedValue(failure);
+    await expect(checkpointObservationRead(operation, f.context)).rejects.toBe(failure);
+    expect(operation).toHaveBeenCalledTimes(3);
+    expect(f.wait).toHaveBeenCalledTimes(2);
+    expect(f.records.map(({ retry }) => retry)).toEqual([true, true, false]);
+    expect(f.records.map(({ httpStatus }) => httpStatus)).toEqual([500, 500, 500]);
+    expect(JSON.stringify(f.records)).not.toContain("not serialized");
+  });
+
   it.each([
     { status: 401 },
     { status: 403 },
     { status: 429 },
+    { status: 500, response: { headers: { "retry-after": "1" } } },
+    { status: 500, response: { headers: { "x-ratelimit-remaining": "0" } } },
     { status: 503, response: { headers: { "retry-after": "1" } } },
     { status: 503, response: { headers: { "x-ratelimit-remaining": "0" } } },
     { status: 503, response: { headers: { "x-ratelimit-reset": "9999999999" } } },
@@ -305,6 +392,21 @@ describe("checkpoint observation diagnostics", () => {
         failure,
       );
       expect(operation).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["receipts", "witness", "extension", "accept", "poll"])(
+    "does not retry HTTP 500 for nonread stage %s",
+    async (stage) => {
+      const f = readFixture();
+      const failure = { status: 500 };
+      const operation = vi.fn().mockRejectedValue(failure);
+      await expect(checkpointObservationRead(operation, { ...f.context, stage })).rejects.toBe(
+        failure,
+      );
+      expect(operation).toHaveBeenCalledTimes(1);
+      expect(f.wait).not.toHaveBeenCalled();
+      expect(f.records[0]?.retry).toBe(false);
     },
   );
 

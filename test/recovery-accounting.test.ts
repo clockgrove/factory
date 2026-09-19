@@ -299,6 +299,75 @@ describe("historical successor accounting assessment", () => {
       assess(history("one").filter((event) => event.kind !== "budget")).unknownModelUsage[0]?.phase,
     ).toBe("management");
   });
+  it("preserves recovery-blocked local usage as unknown for the existing acknowledgement flow", () => {
+    const attempt = {
+      ...common("one", 2),
+      kind: "attempt" as const,
+      workItem: 2,
+      attempt: 1,
+      backend: "codex-sdk/local-worktree",
+      baseSha: "a".repeat(40),
+      directorEpoch: 1,
+      policyDigest: digest,
+    };
+    const marker = parseFactoryEvent({
+      ...common("one", 3),
+      kind: "budget",
+      event: "BudgetReserved",
+      workItem: 2,
+      attempt: 1,
+      phase: "execution",
+      unit: "model_tokens",
+      amount: 0,
+      usageId: "invocation-worker-2-1",
+      modelInvocationId: "worker-2-1",
+      directorEpoch: 1,
+      policyDigest: digest,
+    });
+    const block = parseFactoryEvent({
+      ...attempt,
+      sequence: 4,
+      event: "AttemptRecoveryBlocked",
+      recoveryEpoch: 2,
+      modelInvocationId: "worker-2-1",
+      producerState: "absent",
+      sameAttemptResume: "unavailable",
+      terminalEvidence: "unavailable",
+      artifactEvidence: "unavailable",
+      modelUsageAccounting: "unknown",
+      nextDisposition: "explicit-recovery",
+    });
+    const result = assess([
+      ...history("one"),
+      parseFactoryEvent({ ...attempt, event: "AttemptStarted" }),
+      marker,
+      block,
+    ]);
+    expect(result.usage?.modelTokens).toBe(10);
+    expect(result.unknownModelUsageCount).toBe(2);
+    expect(result.unknownModelUsage).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          runId: "one",
+          workItem: 2,
+          attempt: 1,
+          phase: "execution",
+          reason: expect.stringContaining("zero-valued intent marker"),
+        }),
+        expect.objectContaining({
+          runId: "one",
+          workItem: 2,
+          attempt: 1,
+          phase: "execution",
+          reason: expect.stringContaining("terminal counters"),
+        }),
+      ]),
+    );
+    expect(result.unreconciledReservations).toEqual([marker]);
+    expect(codes(result)).toEqual(
+      expect.arrayContaining(["unknown-model-usage", "unreconciled-budget-reservations"]),
+    );
+  });
   it("reports contradictory worker counters without hiding the recorded subtotal", () => {
     const events = [...history("one"), ...worker("one")];
     Object.assign(events.find((event) => event.event === "AttemptSucceeded")!, {

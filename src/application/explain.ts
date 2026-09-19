@@ -159,6 +159,23 @@ export function buildExplanationReport(input: {
     });
   }
   if (
+    status.operatorAction.code === "attempt-recovery-blocked" ||
+    status.operatorAction.code === "attempt-recovery-draining"
+  ) {
+    explanations.push({
+      code: EXPLANATION_CODES.attemptRecoveryBlocked,
+      category: "recovery",
+      disposition: "blocked",
+      summary: status.operatorAction.summary,
+      gate: "recovery",
+      requiredAction: status.operatorAction.requiredAction,
+      evidence: {
+        ...status.operatorAction.evidence,
+        monitoring: status.operatorAction.monitoring,
+      },
+    });
+  }
+  if (
     (status.operatorAction.code === "run-escalated" ||
       status.operatorAction.code === "recovery-successor-escalated") &&
     run?.terminal?.event === "FactoryRunEscalated"

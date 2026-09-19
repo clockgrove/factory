@@ -57,6 +57,7 @@ const terminalWorkers = new Set([
   "AttemptTimedOut",
   "AttemptCancelled",
   "AttemptDeferred",
+  "AttemptRecoveryBlocked",
 ]);
 const identity = (event: BudgetEvent) =>
   JSON.stringify([

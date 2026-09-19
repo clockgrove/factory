@@ -447,6 +447,7 @@ const executionTerminal = new Set([
   "AttemptCancelled",
   "AttemptDeferred",
   "AttemptIntegrated",
+  "AttemptRecoveryBlocked",
 ]);
 
 /** Rebuild all live execution and validation capacity with their durable receipt owners. */

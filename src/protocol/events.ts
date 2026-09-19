@@ -374,6 +374,7 @@ const attemptEventNames = [
   "AttemptPublished",
   "AttemptValidated",
   "AttemptIntegrated",
+  "AttemptRecoveryBlocked",
 ] as const;
 
 export const ArtifactConsumerBindingSchema = z
@@ -419,6 +420,13 @@ const Attempt = Common.extend({
   modelProfile: boundedText(160).optional(),
   reportedModelTokens: z.number().int().nonnegative().optional(),
   reportedModelUsage: ReportedModelUsageSchema.optional(),
+  modelInvocationId: safeId.optional(),
+  producerState: z.literal("absent").optional(),
+  sameAttemptResume: z.literal("unavailable").optional(),
+  terminalEvidence: z.literal("unavailable").optional(),
+  artifactEvidence: z.literal("unavailable").optional(),
+  modelUsageAccounting: z.literal("unknown").optional(),
+  nextDisposition: z.literal("explicit-recovery").optional(),
   admissionClass: z.enum(["local", "remote-required", "burst"]).optional(),
   admissionReason: z
     .enum(["local-capacity", "capability-required", "local-saturated", "queue-delay", "deadline"])
@@ -440,6 +448,25 @@ const Attempt = Common.extend({
   minimumCloudTimeSavedMinutes: z.number().nonnegative().finite().optional(),
   reason: boundedText(8_000).optional(),
 }).superRefine((event, context) => {
+  const recoveryFields = [
+    event.modelInvocationId,
+    event.producerState,
+    event.sameAttemptResume,
+    event.terminalEvidence,
+    event.artifactEvidence,
+    event.modelUsageAccounting,
+    event.nextDisposition,
+  ];
+  if (
+    event.event === "AttemptRecoveryBlocked"
+      ? recoveryFields.some((field) => field === undefined)
+      : recoveryFields.some((field) => field !== undefined)
+  )
+    context.addIssue({
+      code: "custom",
+      message:
+        "recovery-blocked evidence must completely bind one absent producer and belongs only to AttemptRecoveryBlocked",
+    });
   if ((event.sourceArchiveDigest === undefined) !== (event.sourceArchiveBytes === undefined))
     context.addIssue({
       code: "custom",
@@ -1235,5 +1262,6 @@ export function isTerminalAttemptEvent(event: AttemptEvent): boolean {
     "AttemptCancelled",
     "AttemptDeferred",
     "AttemptIntegrated",
+    "AttemptRecoveryBlocked",
   ].includes(event.event);
 }

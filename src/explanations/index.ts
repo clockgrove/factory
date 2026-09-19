@@ -41,6 +41,7 @@ export const EXPLANATION_CODES = {
   admissionBurst: "admission.burst",
   executionFailed: "execution.failed",
   executionRunEscalated: "execution.run-escalated",
+  attemptRecoveryBlocked: "recovery.attempt-blocked",
   recoverySuccessorEscalated: "recovery.successor-escalated",
   executionRunning: "execution.running",
   deliveryPending: "delivery.pending",
@@ -87,7 +88,7 @@ export interface Explanation {
     | "complete"
     | "informational";
   summary: string;
-  gate?: "activation" | "execution" | "provider" | "recovery-successor";
+  gate?: "activation" | "execution" | "provider" | "recovery" | "recovery-successor";
   requiredAction?: string;
   evidence: Record<string, unknown>;
 }

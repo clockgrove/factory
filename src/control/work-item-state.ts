@@ -132,6 +132,7 @@ export function deriveWorkItemState(
     (event) =>
       event.kind === "attempt" &&
       (["AttemptFailed", "AttemptTimedOut"].includes(event.event) ||
+        event.event === "AttemptRecoveryBlocked" ||
         (event.event === "AttemptCancelled" && !recoveredCollection)),
   );
   if (terminalFailure) return "failed";

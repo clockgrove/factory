@@ -76,6 +76,7 @@ function hasAcceptedRetainedArtifactProducerCompletion(
             "AttemptTimedOut",
             "AttemptCancelled",
             "AttemptDeferred",
+            "AttemptRecoveryBlocked",
           ].includes(event.event)),
     )
   );

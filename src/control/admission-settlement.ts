@@ -4,6 +4,7 @@ import { unreconciledCapacityReservations } from "../scheduling/capacity-ledger.
 import { deduplicateFactoryEvents, hasCurrentWriterAuthority } from "./receipts.js";
 import type { IssueAdmissionEntry, IssueAdmissionEvidence } from "./issue-admission.js";
 import type { ObjectiveAuthorityObservation } from "./authority.js";
+import { attemptRecoveryBlockForAttempt } from "./recovery-dispositions.js";
 
 export interface AdmissionCleanupProof {
   reservationOid: string;
@@ -40,6 +41,7 @@ const terminal = new Set([
   "AttemptDeferred",
   "AttemptIntegrated",
   "AttemptSucceeded",
+  "AttemptRecoveryBlocked",
 ]);
 
 /**
@@ -286,6 +288,14 @@ export function buildAdmissionSettlementEvidence(args: {
   }
   const unreconciled = unreconciledBudgetReservations(scoped);
   const retainedUnknownModelInvocationId = args.retainedUnknownModelInvocationId;
+  const recoveryBlock = attemptRecoveryBlockForAttempt(
+    scoped,
+    entry.runId,
+    entry.workItem,
+    entry.reservation.attempt,
+  );
+  if (recoveryBlock && recoveryBlock.modelInvocationId !== retainedUnknownModelInvocationId)
+    throw new Error("attempt recovery-blocked evidence differs from retained model usage");
   if (unreconciled.length) {
     if (
       !retainedUnknownModelInvocationId ||

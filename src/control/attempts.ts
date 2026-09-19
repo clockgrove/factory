@@ -581,6 +581,7 @@ export class AttemptManager {
     modelProfile?: string;
     reportedModelTokens?: number;
     reportedModelUsage?: ReportedModelUsage;
+    recoveryBlocked?: { modelInvocationId: string };
     allowRecovery?: boolean;
   }): Promise<AttemptEvent> {
     const mutationClass = [
@@ -590,6 +591,7 @@ export class AttemptManager {
       "AttemptCancelled",
       "AttemptDeferred",
       "AttemptIntegrated",
+      "AttemptRecoveryBlocked",
     ].includes(args.event)
       ? "cleanup"
       : "normal";
@@ -598,6 +600,10 @@ export class AttemptManager {
       if (args.environmentIdentity) {
         assertNoSecretMaterial(args.environmentIdentity, "attempt environment identity");
       }
+      if ((args.event === "AttemptRecoveryBlocked") !== Boolean(args.recoveryBlocked))
+        throw new Error(
+          "AttemptRecoveryBlocked requires its exact model invocation recovery evidence",
+        );
       if (
         args.reservation.runId !== args.lease.runId ||
         args.reservation.policyDigest !== args.lease.policyDigest
@@ -649,6 +655,17 @@ export class AttemptManager {
           ? {}
           : { reportedModelTokens: args.reportedModelTokens }),
         ...(args.reportedModelUsage ? { reportedModelUsage: args.reportedModelUsage } : {}),
+        ...(args.recoveryBlocked
+          ? {
+              modelInvocationId: args.recoveryBlocked.modelInvocationId,
+              producerState: "absent" as const,
+              sameAttemptResume: "unavailable" as const,
+              terminalEvidence: "unavailable" as const,
+              artifactEvidence: "unavailable" as const,
+              modelUsageAccounting: "unknown" as const,
+              nextDisposition: "explicit-recovery" as const,
+            }
+          : {}),
       };
       await this.#store.addIssueComment(
         args.workItemNodeId,
@@ -666,6 +683,7 @@ export class AttemptManager {
           "AttemptCancelled",
           "AttemptDeferred",
           "AttemptIntegrated",
+          "AttemptRecoveryBlocked",
         ].includes(args.event) &&
         !["released", "reconciled", "terminal"].includes(admission.disposition) &&
         // A dispatched current writer already cannot dispatch twice or admit a

@@ -13,6 +13,7 @@ import {
   qualificationReservationAuthorityExpectation,
   reobserveQualificationReservationAuthority,
 } from "./qualification-reservation-authority.mjs";
+import { assertQualificationAppServerIdentity } from "./qualification-app-server-identity.mjs";
 
 const MAX_PATCH = 256 * 1024 * 1024;
 const MAX_CHUNK = 4 * 1024 * 1024;
@@ -192,7 +193,7 @@ function session(events, authority, proof) {
   const { binding, packet } = stages.prepared;
   same(binding, identity);
   assert.equal(binding.attemptId, refs.attemptId);
-  assert.equal(binding.cliVersion, "0.153.0");
+  assertQualificationAppServerIdentity(binding);
   assert.equal(binding.packetDigest, hash(canonical(packet)));
   assert.equal(packet.baseSha, identity.baseSha);
   assert.deepEqual(binding.localScopeBatch, reserved.localScopeBatch);

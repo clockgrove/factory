@@ -39,6 +39,7 @@ interface FakeOptions {
   failResume?: boolean;
   resumeTurns?: unknown[];
   omitInterruptTerminal?: boolean;
+  failInterrupt?: boolean;
   loseTurnResponse?: boolean;
   liveProducer?: boolean;
   presentScope?: boolean;
@@ -46,6 +47,10 @@ interface FakeOptions {
   userAgent?: string | null;
   threadCliVersion?: string | null;
   afterThreadStart?: () => void;
+  afterInterrupt?: (
+    connection: FakeConnection,
+    input: { threadId: string; turnId: string },
+  ) => void;
 }
 const storedThreads = new Map<string, Record<string, unknown>>();
 
@@ -115,6 +120,12 @@ class FakeConnection implements AppServerConnection {
           backwardsCursor: null,
         },
       } as T;
+    }
+    if (method === "turn/interrupt" && this.options.failInterrupt)
+      throw new Error("fixture interrupt unavailable");
+    if (method === "turn/interrupt" && this.options.afterInterrupt) {
+      this.options.afterInterrupt(this, params as { threadId: string; turnId: string });
+      return {} as T;
     }
     if (method === "turn/interrupt" && !this.options.omitInterruptTerminal) {
       const input = params as { threadId: string; turnId: string };
@@ -271,6 +282,14 @@ async function context(
   return value;
 }
 
+function deadlineIn(context: AttemptContext, milliseconds: number): void {
+  context.deadline = new Date(Date.now() + milliseconds);
+  context.localExecutionScope!.batch = LocalScopeBatchSchema.parse({
+    ...context.localExecutionScope!.batch,
+    deadline: context.deadline.toISOString(),
+  });
+}
+
 function factory(
   root: string,
   connections: Map<string, FakeConnection>,
@@ -306,7 +325,11 @@ function factory(
 function finish(
   connection: FakeConnection,
   handle: BackendHandle,
-  final: { outcome: "succeeded" | "failed" | "declined"; summary: string },
+  final: {
+    outcome: "succeeded" | "failed" | "declined";
+    summary: string;
+    findings?: unknown[];
+  },
   tokens = {
     inputTokens: 10,
     outputTokens: 2,
@@ -566,6 +589,270 @@ describe("Codex App Server local backend", () => {
     await backend.cleanup(handle);
   });
 
+  it("recovers an exact provider completion at the deadline before sending an interrupt", async () => {
+    const options: FakeOptions = { resumeTurns: [] };
+    const connections = new Map<string, FakeConnection>();
+    const backend = factory(join(suiteRoot, "deadline-terminal-race"), connections, options);
+    const ctx = await context(110);
+    deadlineIn(ctx, 40);
+    const handle = await backend.launch(ctx);
+    const connection = connections.get(handle.metadata!.codexHome!)!;
+    const final = { outcome: "succeeded" as const, summary: "completed at boundary" };
+    const tokens = {
+      inputTokens: 20,
+      outputTokens: 4,
+      cachedInputTokens: 8,
+      cacheWriteInputTokens: 0,
+      reasoningOutputTokens: 1,
+      totalTokens: 24,
+    };
+    connection.emit("rawResponse/completed", {
+      threadId: handle.resourceId,
+      turnId: handle.metadata!.turnId,
+      responseId: "response-deadline",
+      usage: tokens,
+    });
+    connection.emit("thread/tokenUsage/updated", {
+      threadId: handle.resourceId,
+      turnId: handle.metadata!.turnId,
+      tokenUsage: { total: tokens, last: tokens },
+    });
+    const item = {
+      type: "agentMessage",
+      id: "message-deadline",
+      text: JSON.stringify({ ...final, commands: [], findings: [] }),
+    };
+    connection.emit("item/completed", {
+      threadId: handle.resourceId,
+      turnId: handle.metadata!.turnId,
+      item,
+    });
+    options.resumeTurns = [
+      {
+        id: handle.metadata!.turnId,
+        status: "completed",
+        items: [item],
+        error: null,
+      },
+    ];
+
+    await waitForState(backend, handle, "succeeded");
+    expect(await backend.observe(handle)).toMatchObject({
+      state: "succeeded",
+      usage: { inputTokens: 20, outputTokens: 4, cachedInputTokens: 8 },
+    });
+    expect(connection.calls.filter(({ method }) => method === "thread/read")).toHaveLength(1);
+    expect(connection.calls.filter(({ method }) => method === "turn/interrupt")).toHaveLength(0);
+    expect(await ctx.sessionJournal!.load("terminal")).toMatchObject({
+      state: "succeeded",
+      providerStatus: "completed",
+      final: { findings: [] },
+      usageStreamComplete: true,
+    });
+    await backend.cleanup(handle);
+  });
+
+  it("recovers an exact provider completion after the live connection closes", async () => {
+    const options: FakeOptions = { resumeTurns: [] };
+    const connections = new Map<string, FakeConnection>();
+    const backend = factory(join(suiteRoot, "closed-terminal-read"), connections, options);
+    const ctx = await context(116);
+    const handle = await backend.launch(ctx);
+    const connection = connections.get(handle.metadata!.codexHome!)!;
+    const tokens = {
+      inputTokens: 14,
+      outputTokens: 3,
+      cachedInputTokens: 5,
+      cacheWriteInputTokens: 0,
+      reasoningOutputTokens: 0,
+      totalTokens: 17,
+    };
+    connection.emit("rawResponse/completed", {
+      threadId: handle.resourceId,
+      turnId: handle.metadata!.turnId,
+      responseId: "response-closed",
+      usage: tokens,
+    });
+    connection.emit("thread/tokenUsage/updated", {
+      threadId: handle.resourceId,
+      turnId: handle.metadata!.turnId,
+      tokenUsage: { total: tokens, last: tokens },
+    });
+    const item = {
+      type: "agentMessage",
+      id: "message-closed",
+      text: JSON.stringify({
+        outcome: "succeeded",
+        summary: "persisted before close",
+        commands: [],
+        findings: [],
+      }),
+    };
+    connection.emit("item/completed", {
+      threadId: handle.resourceId,
+      turnId: handle.metadata!.turnId,
+      item,
+    });
+    options.resumeTurns = [
+      {
+        id: handle.metadata!.turnId,
+        status: "completed",
+        items: [item],
+        error: null,
+      },
+    ];
+
+    await connection.close();
+    await waitForState(backend, handle, "succeeded");
+    expect(await backend.observe(handle)).toMatchObject({
+      state: "succeeded",
+      usage: { inputTokens: 14, outputTokens: 3, cachedInputTokens: 5 },
+    });
+    expect(connection.calls.filter(({ method }) => method === "thread/read")).toHaveLength(1);
+    expect(connection.calls.filter(({ method }) => method === "turn/interrupt")).toHaveLength(0);
+    expect(await ctx.sessionJournal!.load("terminal")).toMatchObject({
+      state: "succeeded",
+      providerStatus: "completed",
+      usageStreamComplete: true,
+    });
+    await backend.cleanup(handle);
+  });
+
+  it("persists nonempty worker findings in the strict terminal checkpoint", async () => {
+    const connections = new Map<string, FakeConnection>();
+    const backend = factory(join(suiteRoot, "terminal-findings"), connections);
+    const ctx = await context(111);
+    const handle = await backend.launch(ctx);
+    const finding = {
+      protocol: "clockgrove.factory/finding-v1",
+      phase: "worker",
+      failureClass: "fixture-failure",
+      supportedBehavior: "The fixture should preserve worker findings.",
+      observedBehavior: "The worker emitted one structured finding.",
+      reproduction: ["Complete one App Server turn with a finding."],
+      impact: "The finding must remain available to Factory.",
+      evidence: [{ kind: "worker-packet", digest: "a".repeat(64) }],
+    };
+    finish(connections.get(handle.metadata!.codexHome!)!, handle, {
+      outcome: "succeeded",
+      summary: "finding retained",
+      findings: [finding],
+    });
+
+    expect(await backend.observe(handle)).toMatchObject({ state: "succeeded" });
+    expect(await ctx.sessionJournal!.load("terminal")).toMatchObject({
+      final: { findings: [finding] },
+    });
+    await backend.cleanup(handle);
+  });
+
+  it("interrupts an expired live turn once and retains its exact provider terminal", async () => {
+    const options: FakeOptions = { resumeTurns: [] };
+    const connections = new Map<string, FakeConnection>();
+    const backend = factory(join(suiteRoot, "deadline-interrupt"), connections, options);
+    const ctx = await context(112);
+    deadlineIn(ctx, 40);
+    const handle = await backend.launch(ctx);
+    const connection = connections.get(handle.metadata!.codexHome!)!;
+    options.resumeTurns = [{ id: handle.metadata!.turnId, status: "inProgress", items: [] }];
+
+    await waitForState(backend, handle, "timed_out");
+    expect(connection.calls.filter(({ method }) => method === "thread/read")).toHaveLength(2);
+    expect(connection.calls.filter(({ method }) => method === "turn/interrupt")).toHaveLength(1);
+    expect(await ctx.sessionJournal!.load("terminal")).toMatchObject({
+      state: "timed_out",
+      providerStatus: "interrupted",
+    });
+    await backend.cleanup(handle);
+    expect(connection.calls.filter(({ method }) => method === "turn/interrupt")).toHaveLength(1);
+  });
+
+  it("retains exact usage when provider completion races the deadline interrupt", async () => {
+    const options: FakeOptions = { resumeTurns: [] };
+    options.afterInterrupt = (connection, input) => {
+      const tokens = {
+        inputTokens: 30,
+        outputTokens: 6,
+        cachedInputTokens: 9,
+        cacheWriteInputTokens: 0,
+        reasoningOutputTokens: 2,
+        totalTokens: 36,
+      };
+      connection.emit("rawResponse/completed", {
+        threadId: input.threadId,
+        turnId: input.turnId,
+        responseId: "response-race",
+        usage: tokens,
+      });
+      connection.emit("thread/tokenUsage/updated", {
+        threadId: input.threadId,
+        turnId: input.turnId,
+        tokenUsage: { total: tokens, last: tokens },
+      });
+      const item = {
+        type: "agentMessage",
+        id: "message-race",
+        text: JSON.stringify({
+          outcome: "succeeded",
+          summary: "completed after deadline latch",
+          commands: [],
+          findings: [],
+        }),
+      };
+      connection.emit("item/completed", {
+        threadId: input.threadId,
+        turnId: input.turnId,
+        item,
+      });
+      connection.emit("turn/completed", {
+        threadId: input.threadId,
+        turn: { id: input.turnId, status: "completed", items: [item], error: null },
+      });
+    };
+    const connections = new Map<string, FakeConnection>();
+    const backend = factory(join(suiteRoot, "deadline-completion-race"), connections, options);
+    const ctx = await context(117);
+    deadlineIn(ctx, 40);
+    const handle = await backend.launch(ctx);
+    const connection = connections.get(handle.metadata!.codexHome!)!;
+    options.resumeTurns = [{ id: handle.metadata!.turnId, status: "inProgress", items: [] }];
+
+    await waitForState(backend, handle, "timed_out");
+    expect(await backend.observe(handle)).toMatchObject({
+      state: "timed_out",
+      usage: { inputTokens: 30, outputTokens: 6, cachedInputTokens: 9 },
+    });
+    expect(connection.calls.filter(({ method }) => method === "turn/interrupt")).toHaveLength(1);
+    expect(await ctx.sessionJournal!.load("terminal")).toMatchObject({
+      state: "timed_out",
+      providerStatus: "completed",
+      usage: { inputTokens: 30, outputTokens: 6, cachedInputTokens: 9 },
+      usageStreamComplete: true,
+    });
+    await backend.cleanup(handle);
+  });
+
+  it("closes the exact live scope after an interrupt failure and keeps provider authority unknown", async () => {
+    const options: FakeOptions = { failInterrupt: true, resumeTurns: [] };
+    const connections = new Map<string, FakeConnection>();
+    const backend = factory(join(suiteRoot, "deadline-close-fallback"), connections, options);
+    const ctx = await context(113);
+    deadlineIn(ctx, 40);
+    const handle = await backend.launch(ctx);
+    const connection = connections.get(handle.metadata!.codexHome!)!;
+    options.resumeTurns = [{ id: handle.metadata!.turnId, status: "inProgress", items: [] }];
+
+    await waitForState(backend, handle, "timed_out");
+    expect(await backend.observe(handle)).toMatchObject({
+      state: "timed_out",
+      usage: { inputTokens: null, outputTokens: null },
+    });
+    expect(connection.calls.filter(({ method }) => method === "turn/interrupt")).toHaveLength(1);
+    expect(connection.closedByClient).toBe(true);
+    expect(await ctx.sessionJournal!.load("terminal")).toBeNull();
+    await backend.cleanup(handle);
+  });
+
   it("retains the live terminal attempt until its exact checkpoint persists", async () => {
     const root = join(suiteRoot, "terminal-checkpoint-retry");
     const connections = new Map<string, FakeConnection>();
@@ -678,6 +965,37 @@ describe("Codex App Server local backend", () => {
     expect((await second.collect(resumed)).patch).toContain("resumed");
     await second.cleanup(resumed);
   });
+
+  it.each([
+    { elapsed: false, state: "failed" },
+    { elapsed: true, state: "timed_out" },
+  ])(
+    "classifies an orphaned cold turn as $state after one fenced read (elapsed=$elapsed)",
+    async ({ elapsed, state }) => {
+      const root = join(suiteRoot, `cold-in-progress-${state}`);
+      const firstConnections = new Map<string, FakeConnection>();
+      const first = factory(root, firstConnections);
+      const ctx = await context(elapsed ? 115 : 114);
+      if (elapsed) deadlineIn(ctx, 100);
+      const handle = await first.launch(ctx);
+      await firstConnections.get(handle.metadata!.codexHome!)!.close();
+      if (elapsed) await new Promise((resolveWait) => setTimeout(resolveWait, 120));
+      const connections = new Map<string, FakeConnection>();
+      const recovered = factory(root, connections, {
+        resumeTurns: [{ id: handle.metadata!.turnId, status: "inProgress", items: [] }],
+      });
+
+      const resumed = await recovered.resume(ctx, handle);
+      expect(await recovered.observe(resumed)).toMatchObject({
+        state,
+        usage: { inputTokens: null, outputTokens: null },
+      });
+      const connection = connections.get(handle.metadata!.codexHome!)!;
+      expect(connection.calls.map(({ method }) => method)).toEqual(["initialize", "thread/read"]);
+      expect(await ctx.sessionJournal!.load("terminal")).toBeNull();
+      await recovered.cleanup(resumed);
+    },
+  );
 
   it("terminates only the owned session and records a durable cancellation", async () => {
     const root = join(suiteRoot, "cancel");
@@ -1199,7 +1517,12 @@ describe("Codex App Server local backend", () => {
         }
       }
       expect(() => process.kill(pid, 0)).toThrow();
-      await waitForState(original, handle, "unknown");
+      await waitForState(original, handle, "failed");
+      expect(await original.observe(handle)).toMatchObject({
+        state: "failed",
+        usage: { inputTokens: null, outputTokens: null },
+      });
+      expect(await ctx.sessionJournal!.load("terminal")).toBeNull();
       await original.cleanup(handle);
     },
   );

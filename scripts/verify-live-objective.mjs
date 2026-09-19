@@ -40,6 +40,7 @@ const localBackends = ["codex-sdk/local-worktree", "codex-cli/local-worktree"];
 const minimumGitHubQuota = 1_000;
 const minimumModelTokens = 250_000;
 const maximumModelTokens = 500_000;
+const maximumConcurrencyModelTokens = 750_000;
 const namespacePattern = /^[a-z](?:[a-z0-9-]{6,46}[a-z0-9])$/;
 
 export function qualificationNamespace(value, generate = randomUUID) {
@@ -179,12 +180,16 @@ export function installedBundleIdentity(pluginRoot) {
   };
 }
 
-export function modelTokenLimit(value) {
+export function modelTokenLimit(value, ceiling = maximumModelTokens) {
+  assert.ok(
+    ceiling === maximumModelTokens || ceiling === maximumConcurrencyModelTokens,
+    "unsupported qualification model-token ceiling",
+  );
   assert.match(value ?? "", /^[1-9]\d*$/, "explicit model-token limit required");
   const limit = Number(value);
   assert.ok(
-    Number.isSafeInteger(limit) && limit >= minimumModelTokens && limit <= maximumModelTokens,
-    `model-token limit must be ${minimumModelTokens}-${maximumModelTokens}`,
+    Number.isSafeInteger(limit) && limit >= minimumModelTokens && limit <= ceiling,
+    `model-token limit must be ${minimumModelTokens}-${ceiling}`,
   );
   return limit;
 }
@@ -335,12 +340,20 @@ export function assertRecordedQualificationPolicy(recorded, expected) {
   assert.deepEqual(recorded, comparison, "requested bounded policy differs");
 }
 
-export function boundedPolicy(delivery = "stacked-prs", maxModelTokens = maximumModelTokens) {
+export function boundedPolicy(
+  delivery = "stacked-prs",
+  maxModelTokens = maximumModelTokens,
+  ceiling = maximumModelTokens,
+) {
   assert.ok(["regular-prs", "stacked-prs"].includes(delivery), "unsupported delivery mode");
+  assert.ok(
+    ceiling === maximumModelTokens || ceiling === maximumConcurrencyModelTokens,
+    "unsupported qualification model-token ceiling",
+  );
   assert.ok(
     Number.isSafeInteger(maxModelTokens) &&
       maxModelTokens >= minimumModelTokens &&
-      maxModelTokens <= maximumModelTokens,
+      maxModelTokens <= ceiling,
     "model-token limit is outside qualification bounds",
   );
   return {

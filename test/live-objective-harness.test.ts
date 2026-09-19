@@ -1126,6 +1126,9 @@ describe("installed live Objective harness evidence boundary", () => {
   });
   it("requires an explicit bounded model quota", () => {
     expect(modelTokenLimit("500000")).toBe(500_000);
+    expect(modelTokenLimit("750000", 750_000)).toBe(750_000);
+    expect(() => modelTokenLimit("750000")).toThrow();
+    expect(() => modelTokenLimit("750001", 750_000)).toThrow();
     for (const value of [undefined, "249999", "500001", "3.5", "tokens"])
       expect(() => modelTokenLimit(value)).toThrow();
   });

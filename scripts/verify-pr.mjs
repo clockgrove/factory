@@ -111,6 +111,10 @@ function normalized(path) {
   return path.replaceAll("\\", "/").replace(/^\.\//, "");
 }
 
+function biomeFile(path) {
+  return /\.(?:[cm]?[jt]sx?|jsonc?)$/.test(path);
+}
+
 function testFile(path) {
   return /^test\/.*\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path);
 }
@@ -153,7 +157,11 @@ export function selectPrChecks(paths) {
       path.startsWith(".github/ISSUE_TEMPLATE/")) &&
     !path.startsWith("skills/");
   const biome = changed.filter(
-    (path) => path !== "package-lock.json" && !path.startsWith("dist/") && !documentationOnly(path),
+    (path) =>
+      path !== "package-lock.json" &&
+      !path.startsWith("dist/") &&
+      !documentationOnly(path) &&
+      biomeFile(path),
   );
   const directTests = new Set(changed.filter(testFile));
   const mappedTests = new Set();

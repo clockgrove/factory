@@ -429,7 +429,7 @@ export async function checkpointObservationRead(
         !quotaBoundary &&
         attempt < 3 &&
         now() + 1000 < deadline &&
-        ((diagnostic.category === "http" && [502, 503, 504].includes(diagnostic.httpStatus)) ||
+        ((diagnostic.category === "http" && [500, 502, 503, 504].includes(diagnostic.httpStatus)) ||
           (diagnostic.httpStatus === undefined &&
             ["transport", "timeout"].includes(diagnostic.category)));
       await record({ ...diagnostic, attempt, retry }, error);

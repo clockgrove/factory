@@ -192,7 +192,11 @@ accepted risks.
   violation. Retain other requirements in their milestone issues instead of expanding the batch.
 - During implementation, run typecheck, changed-file format/lint checks, and affected regressions.
   Use `npm run test:pr -- --base <revision>` before a code PR merges; it adds the small
-  critical-contract suite to those focused checks. Add a regression for each concrete defect.
+  critical-contract suite to those focused checks. Directly changed tests always run. Import-based
+  selection covers ordinary source changes; shared test-support files require an explicit
+  `prImpactRules` entry. Deep Supervisor scenario matrices run pre-merge only when directly changed
+  or named by that impact map, then run completely under `test:main`. Add a regression for each
+  concrete defect.
 - After a related batch lands on `main`, run `npm run test:main` once. CI owns that complete
   deterministic run and retains a machine-readable result bound to the exact commit and tree.
   Restore broken main promptly; do not make unrelated lanes inherit known integration failures while

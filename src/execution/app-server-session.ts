@@ -5,6 +5,7 @@ import { durableAttemptId } from "./session.js";
 import { gitSha, sha256Digest } from "../protocol/limits.js";
 import { parseWorkerPacket, workerPacketDigest } from "../protocol/worker-packet.js";
 import { LocalScopeBatchSchema } from "../protocol/local-scope.js";
+import { FindingCandidateSchema } from "../protocol/findings.js";
 
 export const APP_SERVER_SESSION_PROTOCOL = "clockgrove.factory/app-server-session-v1";
 export const APP_SERVER_SESSION_STAGES = ["prepared", "turn", "terminal"] as const;
@@ -80,7 +81,7 @@ const SessionCheckpointSchema = z
     binding: AppServerSessionBindingSchema,
     packet: z.unknown(),
     turnId: text.optional(),
-    state: z.enum(["succeeded", "failed", "cancelled"]).optional(),
+    state: z.enum(["succeeded", "failed", "cancelled", "timed_out"]).optional(),
     providerStatus: z.enum(["completed", "interrupted", "failed"]).optional(),
     usage: Usage.optional(),
     rawTokenUsage: z
@@ -96,6 +97,7 @@ const SessionCheckpointSchema = z
         commands: z
           .array(z.object({ command: z.string().max(2000), exitCode: z.number().int() }).strict())
           .max(128),
+        findings: z.array(FindingCandidateSchema).max(16).optional(),
       })
       .strict()
       .optional(),
@@ -158,6 +160,7 @@ export function parseAppServerSessionCheckpoint(input: unknown): AppServerSessio
     (value.state === "succeeded" &&
       (value.providerStatus !== "completed" || value.final?.outcome !== "succeeded")) ||
     (value.state === "cancelled" && value.providerStatus !== "interrupted") ||
+    (value.state === "timed_out" && !value.providerStatus) ||
     binding.priorTurnIds.length !== new Set(binding.priorTurnIds).size ||
     (value.turnId && binding.priorTurnIds.includes(value.turnId))
   )

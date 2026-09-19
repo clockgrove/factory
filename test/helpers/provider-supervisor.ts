@@ -94,6 +94,7 @@ export interface ProviderFaults {
   compilerEvaluation?: RunPolicy["compilerEvaluation"];
   repositoryFence?: () => Promise<void>;
   configureLocalBackend?: (backend: ExecutionBackend) => ExecutionBackend;
+  localBackendId?: string;
   controllerActivation?: boolean;
   includeObjectiveAuthority?: boolean;
   enforceCurrentLease?: boolean;
@@ -343,6 +344,7 @@ wheels = [
     ? git("rev-parse", `${baseSha}:package.json`)
     : null;
   const managed = scenario !== "daytona-burst";
+  const localBackendId = faults.localBackendId ?? LOCAL;
   const provider =
     scenario === "copilot-objective" ? COPILOT : scenario === "codex-objective" ? CODEX : DAYTONA;
   const {
@@ -354,7 +356,11 @@ wheels = [
     ...fixtureDefaultPolicy,
     ...(faults.compilerEvaluation ? { compilerEvaluation: faults.compilerEvaluation } : {}),
     ...(faults.sandboxUntrusted ? { trust: "sandbox_untrusted" } : {}),
-    backendOrder: faults.localOnly ? [LOCAL] : managed ? [provider, DAYTONA] : [LOCAL, DAYTONA],
+    backendOrder: faults.localOnly
+      ? [localBackendId]
+      : managed
+        ? [provider, DAYTONA]
+        : [localBackendId, DAYTONA],
     maxParallel:
       faults.maxParallel ?? (faults.localOnly ? (faults.localMaxParallel ?? 1) : managed ? 1 : 2),
     maxAttemptsPerItem: faults.maxAttemptsPerItem ?? 1,
@@ -1590,7 +1596,7 @@ wheels = [
   }> = [];
   const resources = new Set<string>();
   const execution = (id: string): ExecutionBackend => {
-    const remote = id !== LOCAL;
+    const remote = id !== localBackendId;
     const providerManaged = [COPILOT, CODEX].includes(id);
     const capabilities: ExecutionBackendCapabilities = {
       id,
@@ -1612,7 +1618,7 @@ wheels = [
       supportsObservation: true,
       supportsResume: false,
       supportsLocalInference: false,
-      supportsManagedToolchainExecution: id === LOCAL || id === DAYTONA,
+      supportsManagedToolchainExecution: id === localBackendId || id === DAYTONA,
       reportsModelUsage: !remote,
       requiresPaidRuntime: remote,
       providerManagedPublication: providerManaged,
@@ -1744,7 +1750,7 @@ jobs:
                 entry.operation === "launch" &&
                 entry.workItem === (running.get(handle.resourceId)!.workItem === 8 ? 9 : 8),
             )) ||
-            ((faults.localFinishesFirst ? id === DAYTONA : id === LOCAL) &&
+            ((faults.localFinishesFirst ? id === DAYTONA : id === localBackendId) &&
               running.get(handle.resourceId)!.workItem === (faults.localFinishesFirst ? 9 : 8) &&
               !snapshot.workItems[faults.localFinishesFirst ? 0 : 1]!.closed))
             ? "running"
@@ -1864,7 +1870,7 @@ jobs:
     };
   };
   const registry = new BackendRegistry();
-  const local = execution(LOCAL);
+  const local = execution(localBackendId);
   registry.register(faults.configureLocalBackend?.(local) ?? local);
   registry.register(execution(DAYTONA));
   if (managed) registry.register(execution(provider));

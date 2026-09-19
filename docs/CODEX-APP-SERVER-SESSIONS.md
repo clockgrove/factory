@@ -12,11 +12,29 @@ attempt, original policy/lease epoch, packet/base, model/network boundary, host,
 provider home, thread/session/turn and the exact reserved execution scope. Reads verify
 blob identity, reservation ancestry and predecessor-stage equality. Writes require the
 current run lease; an exact replay is idempotent, a conflicting document is not replaced.
+The checkpoint byte ceiling covers the complete accepted Worker Packet, response ledger,
+commands and findings schema, so a schema-valid terminal result cannot fail only because
+the older storage bound was smaller than the accepted output contract.
 
 Preparation is durable before the sole `turn/start`. A lost reply authorizes observation,
 not another dispatch. Read-only cold recovery checks complete `thread/read` history
 against the exact prior-turn set and recorded turn. It never calls `thread/resume` or
-`turn/start`. Unknown or active turns do not become successes because their process stopped.
+`turn/start`. Once the original producer and exact scope are absent, recovery reads the
+fenced turn once. An exact terminal turn is recovered; an `inProgress` turn becomes a
+Factory failure, or a timeout if the immutable attempt deadline already elapsed. Cold
+recovery never polls or interrupts a turn whose prior interrupt delivery is unknowable.
+
+The live owning adapter arms the reservation's immutable deadline after the one turn is
+dispatched. The deadline latches at its actual time even if its timer callback is delayed or
+the first read is still pending. At expiry it reads the exact fenced turn first, so only a
+provider terminal established by that read may win. Otherwise it sends at most one exact-turn
+interrupt, waits for a bounded interval, closes the owned connection/scope, and performs one
+final fenced read through a fresh reader process. A provider terminal observed after the
+deadline is retained as a timed-out terminal; if terminal provider authority is still
+unavailable, Factory records the timeout without inventing a terminal session checkpoint.
+An unexpected live connection close also gets one fenced terminal read. It can recover terminal
+and final-result authority, but the broken notification stream makes usage coverage incomplete,
+so recovered usage remains unknown.
 
 The original execution scope must be independently absent on the bound host, with current
 fencing and repeated observation around the provider read. Without an immutable terminal
@@ -54,6 +72,8 @@ emits raw completion but skips persisted `TokenUsageRecord` when usage is missin
 does not persist the raw completion event. Consequently, matching sums of persisted known
 records cannot establish that all completed responses supplied usage. Factory does not
 scan unrelated sessions or call this a complete cold usage-reconstruction interface.
+In particular, the three retained `TokenUsageRecord` entries from the motivating rollout
+prove nonzero consumption only; they do not prove complete response coverage.
 
 Cold [`thread/resume` subscription](https://github.com/openai/codex/blob/41e22fee981a63b3698df7ed36bad393cda24715/codex-rs/app-server/src/request_processors/thread_processor.rs)
 attaches with raw events disabled. Factory has no verified cold opt-in for that accounting stream.
@@ -61,6 +81,9 @@ New same-thread repair turns therefore remain refused. Supported
 cold terminal recovery reuses a complete immutable usage checkpoint, not new model work.
 Provider support for a complete durable response ledger or explicit raw resubscription is
 the remaining dependency for cold repairs. Interrupted/failed incomplete usage stays unknown.
+Factory still terminalizes the physical attempt, settles native usage, releases capacity and
+admission exactly once, and retains the original unresolved model invocation. That unknown
+accounting blocks replacement work without fabricating a quota refusal or token count.
 
 If exact compute absence is established but elapsed native time was not durably recorded,
 the original reserved local/sandbox time can be conservatively charged, never zero-filled.

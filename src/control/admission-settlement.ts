@@ -287,21 +287,14 @@ export function buildAdmissionSettlementEvidence(args: {
   const unreconciled = unreconciledBudgetReservations(scoped);
   const retainedUnknownModelInvocationId = args.retainedUnknownModelInvocationId;
   if (unreconciled.length) {
-    const matchingUnknownGates = scoped.filter(
-      (event) =>
-        event.kind === "provider" &&
-        event.event === "ProviderQuotaBlocked" &&
-        event.accounting === "unknown" &&
-        event.modelInvocationId === retainedUnknownModelInvocationId,
-    );
     if (
       !retainedUnknownModelInvocationId ||
-      matchingUnknownGates.length !== 1 ||
+      unreconciled.length !== 1 ||
       unreconciled.some(
         (event) =>
           event.kind !== "budget" ||
           event.unit !== "model_tokens" ||
-          event.phase !== matchingUnknownGates[0]!.phase ||
+          event.phase !== "execution" ||
           event.modelInvocationId !== retainedUnknownModelInvocationId,
       )
     )

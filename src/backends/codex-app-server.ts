@@ -99,6 +99,11 @@ interface AppAttempt {
   final?: WorkerFinal;
   cancellationRequested: boolean;
   interruptSent: boolean;
+  connectionCloseRequested: boolean;
+  deadlineExpired: boolean;
+  deadlineReadPending: boolean;
+  deadlineTimer?: NodeJS.Timeout;
+  deadlineSettlement?: Promise<void>;
   terminal: Promise<void>;
   resolveTerminal(): void;
   unsubscribeNotification?: () => void;
@@ -166,6 +171,21 @@ export function codexAppServerArgs(home: string, profile?: string): string[] {
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+async function bounded<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), Math.max(1, timeoutMs));
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function idOf(value: unknown, key: "thread" | "turn"): string {
@@ -320,7 +340,7 @@ async function threadBoundary(context: AttemptContext): Promise<Record<string, u
 }
 
 function terminalState(state: BackendObservationState): boolean {
-  return ["succeeded", "failed", "cancelled"].includes(state);
+  return ["succeeded", "failed", "cancelled", "timed_out"].includes(state);
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -491,6 +511,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     const home = await this.#prepareHome(context);
     let connection: AppServerConnection | undefined;
     let resourceId: string | undefined;
+    let activeAttempt: AppAttempt | undefined;
     try {
       remainingBeforeAttemptDeadline(context.deadline, deadlineFailure);
       await this.#installAuth(home);
@@ -573,6 +594,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         },
       };
       const attempt = this.#newAttempt(context, handle, threadId, "", home);
+      activeAttempt = attempt;
       attempt.binding = binding;
       this.#attempts.set(threadId, attempt);
       this.#attach(attempt, connection);
@@ -600,6 +622,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         throw new Error("App Server turn dispatch returned a different invocation");
       attempt.turnId = turnId;
       handle.metadata = { ...handle.metadata, turnId };
+      this.#armDeadline(attempt);
       await journal.persist({
         protocol: APP_SERVER_SESSION_PROTOCOL,
         stage: "turn",
@@ -611,6 +634,8 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       if (returnedTurn && !attempt.providerTerminal) this.#applyTurn(attempt, returnedTurn);
       return handle;
     } catch (error) {
+      if (activeAttempt?.deadlineTimer) clearTimeout(activeAttempt.deadlineTimer);
+      if (activeAttempt) activeAttempt.connectionCloseRequested = true;
       if (resourceId) this.#attempts.delete(resourceId);
       await connection?.close();
       this.#connections.delete(home);
@@ -646,7 +671,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         binding: attempt.binding,
         packet: attempt.context.packet,
         turnId: attempt.turnId,
-        state: attempt.state as "succeeded" | "failed" | "cancelled",
+        state: attempt.state as "succeeded" | "failed" | "cancelled" | "timed_out",
         providerStatus: attempt.providerStatus!,
         ...(attempt.rawTokenUsage ? { rawTokenUsage: attempt.rawTokenUsage } : {}),
         responseUsage: [...attempt.responseUsage.values()],
@@ -679,6 +704,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       interruptError = error;
     }
     await Promise.race([attempt.terminal, wait(this.#options.cancellationWaitMs ?? 5_000)]);
+    attempt.connectionCloseRequested = true;
     await this.#closeConnection(attempt.home);
     if (!terminalState(attempt.state)) {
       attempt.state = "unknown";
@@ -733,6 +759,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
 
   async cleanup(handle: BackendHandle): Promise<void> {
     const attempt = this.#require(handle);
+    if (attempt.deadlineTimer) clearTimeout(attempt.deadlineTimer);
     if (!terminalState(attempt.state)) await this.cancel(handle);
     // The terminal checkpoint is the recovery boundary. Keep the exact live
     // attempt, observers, and provider connection intact until it is durable so
@@ -741,6 +768,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     if (attempt.providerTerminal) await this.observe(handle);
     attempt.unsubscribeNotification?.();
     attempt.unsubscribeRequest?.();
+    attempt.connectionCloseRequested = true;
     await this.#closeConnection(attempt.home);
     this.#attempts.delete(handle.resourceId);
     // Retain provider-owned thread history. It is not a Factory scheduler DB.
@@ -781,31 +809,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       `${binding.attemptId}-read`,
     );
     try {
-      const response = record(
-        await connection.request("thread/read", { threadId: binding.threadId, includeTurns: true }),
-      );
-      const thread = record(response.thread);
-      if (
-        thread.id !== binding.threadId ||
-        thread.sessionId !== binding.sessionId ||
-        thread.cwd !== binding.workspace ||
-        thread.modelProvider !== binding.modelProvider ||
-        thread.cliVersion !== binding.cliVersion ||
-        (thread.model !== null && thread.model !== binding.model) ||
-        !Array.isArray(thread.turns) ||
-        thread.turns.length > 101
-      )
-        throw new Error("stored App Server thread identity or complete history changed");
-      const turns = thread.turns.map(turnFrom);
-      if (
-        turns.some((turn) => !turn) ||
-        turns.length !== binding.priorTurnIds.length + 1 ||
-        binding.priorTurnIds.some((id, index) => turns[index]!.id !== id)
-      )
-        throw new Error(
-          "App Server dispatch outcome is unavailable or ambiguous; no duplicate turn authorized",
-        );
-      const selected = turns.at(-1)!;
+      const selected = await this.#readFencedTurn(connection, binding, handle.metadata?.turnId);
       const started = await journal.load("turn"),
         terminal = await journal.load("terminal");
       if (canonicalSessionJson(terminal) !== canonicalSessionJson(terminalCheckpoint))
@@ -816,10 +820,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         (handle.metadata?.turnId && handle.metadata.turnId !== selected.id)
       )
         throw new Error("stored App Server turn differs from its immutable dispatch");
-      if (selected.status === "inProgress")
-        throw new Error(
-          "App Server turn has no terminal provider outcome; stopped process is not completion",
-        );
+      const deadlineElapsed = Date.now() >= new Date(binding.deadline).getTime();
       await journal.assertCurrent();
       await this.#assertPriorStopped(binding, terminal !== null);
       if (!started) await journal.persist({ ...prepared, stage: "turn", turnId: selected.id });
@@ -837,15 +838,21 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       );
       attempt.binding = binding;
       attempt.cancellationRequested = terminal?.state === "cancelled";
+      attempt.deadlineExpired = terminal?.state === "timed_out";
       attempt.usageStreamComplete = false;
-      this.#applyTurn(attempt, selected);
       if (terminal) {
+        const selectedFinal = finalFromItems(selected.items);
         if (
-          terminal.state !== attempt.state ||
+          selected.status === "inProgress" ||
           terminal.providerStatus !== selected.status ||
-          canonicalSessionJson(terminal.final) !== canonicalSessionJson(attempt.final)
+          canonicalSessionJson(terminal.final) !== canonicalSessionJson(selectedFinal)
         )
           throw new Error("provider terminal differs from its durable completion");
+        attempt.providerTerminal = true;
+        attempt.providerCompleted = selected.status === "completed";
+        attempt.providerStatus = selected.status;
+        if (terminal.final) attempt.final = terminal.final;
+        else delete attempt.final;
         attempt.usage = terminal.usage;
         attempt.rawTokenUsage = terminal.rawTokenUsage;
         attempt.responseUsage = new Map(
@@ -853,14 +860,60 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         );
         attempt.usageStreamComplete = terminal.usageStreamComplete === true;
         attempt.terminalPersisted = true;
-      }
+        this.#markTerminal(attempt, terminal.state!);
+      } else this.#applyTurn(attempt, selected);
       this.#attempts.set(resumed.resourceId, attempt);
       this.#ownedScopes.set(binding.attemptId, binding.localScopeBatch);
+      if (selected.status === "inProgress") {
+        attempt.deadlineExpired = deadlineElapsed;
+        this.#markTerminal(
+          attempt,
+          deadlineElapsed ? "timed_out" : "failed",
+          deadlineElapsed
+            ? "App Server deadline elapsed after restart with no authoritative terminal provider outcome"
+            : "App Server process ended before an authoritative terminal provider outcome",
+        );
+      }
       await this.observe(resumed);
       return resumed;
     } finally {
       await this.#closeConnection(binding.codexHome);
     }
+  }
+
+  async #readFencedTurn(
+    connection: AppServerConnection,
+    binding: AppServerSessionBinding,
+    expectedTurnId?: string,
+  ): Promise<AppServerTurn> {
+    const response = record(
+      await connection.request("thread/read", { threadId: binding.threadId, includeTurns: true }),
+    );
+    const thread = record(response.thread);
+    if (
+      thread.id !== binding.threadId ||
+      thread.sessionId !== binding.sessionId ||
+      thread.cwd !== binding.workspace ||
+      thread.modelProvider !== binding.modelProvider ||
+      thread.cliVersion !== binding.cliVersion ||
+      (thread.model !== null && thread.model !== binding.model) ||
+      !Array.isArray(thread.turns) ||
+      thread.turns.length > 101
+    )
+      throw new Error("stored App Server thread identity or complete history changed");
+    const turns = thread.turns.map(turnFrom);
+    if (
+      turns.some((turn) => !turn) ||
+      turns.length !== binding.priorTurnIds.length + 1 ||
+      binding.priorTurnIds.some((id, index) => turns[index]!.id !== id)
+    )
+      throw new Error(
+        "App Server dispatch outcome is unavailable or ambiguous; no duplicate turn authorized",
+      );
+    const selected = turns.at(-1)!;
+    if (expectedTurnId && selected.id !== expectedTurnId)
+      throw new Error("stored App Server turn differs from its immutable dispatch");
+    return selected;
   }
 
   async #assertPriorStopped(
@@ -1064,11 +1117,116 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       state: "running",
       cancellationRequested: false,
       interruptSent: false,
+      connectionCloseRequested: false,
+      deadlineExpired: false,
+      deadlineReadPending: false,
       responseUsage: new Map(),
       usageStreamComplete: true,
       terminal,
       resolveTerminal,
     };
+  }
+
+  #armDeadline(attempt: AppAttempt): void {
+    if (terminalState(attempt.state) || attempt.deadlineTimer || attempt.deadlineSettlement) return;
+    const remaining = Math.max(0, attempt.context.deadline.getTime() - Date.now());
+    attempt.deadlineTimer = setTimeout(() => {
+      delete attempt.deadlineTimer;
+      attempt.deadlineExpired = true;
+      void this.#expireAttempt(attempt).catch((error) => {
+        attempt.deadlineExpired = true;
+        this.#markTerminal(
+          attempt,
+          "timed_out",
+          `App Server deadline fallback failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }, remaining);
+    attempt.deadlineTimer.unref();
+  }
+
+  #expireAttempt(attempt: AppAttempt): Promise<void> {
+    if (attempt.deadlineSettlement) return attempt.deadlineSettlement;
+    attempt.deadlineSettlement = this.#settleDeadline(attempt);
+    return attempt.deadlineSettlement;
+  }
+
+  async #settleDeadline(attempt: AppAttempt): Promise<void> {
+    if (terminalState(attempt.state)) return;
+    attempt.deadlineExpired = true;
+    const connection = this.#connections.get(attempt.home);
+    const binding = attempt.binding;
+    const boundedWait = this.#options.cancellationWaitMs ?? 5_000;
+    if (connection && binding) {
+      attempt.deadlineReadPending = true;
+      try {
+        const selected = await bounded(
+          this.#readFencedTurn(connection, binding, attempt.turnId),
+          boundedWait,
+          "App Server deadline terminal read timed out",
+        );
+        if (selected.status !== "inProgress") {
+          this.#applyTurn(attempt, selected, true);
+          return;
+        }
+      } catch {
+        // The exact interrupt and close below remain the bounded fallback.
+      } finally {
+        attempt.deadlineReadPending = false;
+      }
+    }
+    attempt.reason = "immutable App Server attempt deadline elapsed";
+    try {
+      await bounded(
+        this.#interrupt(attempt),
+        boundedWait,
+        "App Server deadline interrupt timed out",
+      );
+    } catch {
+      // Closing the one per-attempt connection below is the fallback.
+    }
+    await Promise.race([attempt.terminal, wait(boundedWait)]);
+    if (
+      !attempt.providerTerminal ||
+      !completedAppServerUsage({
+        completed: attempt.providerCompleted === true,
+        baseline: attempt.binding?.usageBaseline ?? EMPTY_APP_SERVER_USAGE,
+        total: attempt.rawTokenUsage?.total,
+        responses: [...attempt.responseUsage.values()],
+        streamComplete: attempt.usageStreamComplete,
+      })
+    )
+      attempt.usageStreamComplete = false;
+    attempt.connectionCloseRequested = true;
+    await this.#closeConnection(attempt.home);
+    if (binding) {
+      let reader: AppServerConnection | undefined;
+      try {
+        reader = await this.#connection(
+          attempt.home,
+          attempt.context.workspace,
+          `${binding.attemptId}-deadline-read`,
+        );
+        const selected = await bounded(
+          this.#readFencedTurn(reader, binding, attempt.turnId),
+          boundedWait,
+          "App Server post-interrupt terminal read timed out",
+        );
+        if (selected.status !== "inProgress") this.#applyTurn(attempt, selected);
+      } catch {
+        // Missing final provider authority remains unknown after close.
+      } finally {
+        await this.#closeConnection(attempt.home);
+      }
+    }
+    if (!terminalState(attempt.state))
+      this.#markTerminal(
+        attempt,
+        "timed_out",
+        attempt.providerTerminal
+          ? "App Server turn reached a terminal provider state after its immutable deadline"
+          : "App Server deadline elapsed without an authoritative terminal provider outcome",
+      );
   }
 
   #attach(attempt: AppAttempt, connection: AppServerConnection): void {
@@ -1079,12 +1237,70 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       void this.#serverRequest(attempt, connection, request);
     });
     void connection.closed.then(() => {
-      if (!terminalState(attempt.state)) {
-        attempt.state = "unknown";
-        attempt.reason = "Codex App Server exited before a provider terminal turn was observed";
-        attempt.resolveTerminal();
-      }
+      void this.#recoverAfterConnectionClose(attempt, connection);
     });
+  }
+
+  async #recoverAfterConnectionClose(
+    attempt: AppAttempt,
+    closed: AppServerConnection,
+  ): Promise<void> {
+    if (this.#connections.get(attempt.home) === closed) {
+      this.#connections.delete(attempt.home);
+      this.#serverIdentities.delete(attempt.home);
+    }
+    if (attempt.connectionCloseRequested || terminalState(attempt.state)) return;
+    attempt.usageStreamComplete = false;
+    const binding = attempt.binding;
+    if (!binding) {
+      this.#markTerminal(
+        attempt,
+        "failed",
+        "App Server exited before session identity was durable",
+      );
+      return;
+    }
+    const boundedWait = this.#options.cancellationWaitMs ?? 5_000;
+    try {
+      const connection = await this.#connection(
+        attempt.home,
+        attempt.context.workspace,
+        `${binding.attemptId}-terminal-read`,
+      );
+      try {
+        const selected = await bounded(
+          this.#readFencedTurn(connection, binding, attempt.turnId),
+          boundedWait,
+          "App Server closed-connection terminal read timed out",
+        );
+        if (selected.status !== "inProgress") {
+          this.#applyTurn(attempt, selected);
+          return;
+        }
+        const deadlineElapsed = Date.now() >= attempt.context.deadline.getTime();
+        attempt.deadlineExpired = deadlineElapsed;
+        this.#markTerminal(
+          attempt,
+          deadlineElapsed ? "timed_out" : "failed",
+          deadlineElapsed
+            ? "App Server deadline elapsed after its process exited without a terminal provider outcome"
+            : "App Server process exited before an authoritative terminal provider outcome",
+        );
+      } finally {
+        attempt.connectionCloseRequested = true;
+        await this.#closeConnection(attempt.home);
+      }
+    } catch {
+      const deadlineElapsed = Date.now() >= attempt.context.deadline.getTime();
+      attempt.deadlineExpired = deadlineElapsed;
+      this.#markTerminal(
+        attempt,
+        deadlineElapsed ? "timed_out" : "failed",
+        deadlineElapsed
+          ? "App Server deadline elapsed and its exact terminal provider outcome is unavailable"
+          : "App Server exited and its exact terminal provider outcome is unavailable",
+      );
+    }
   }
 
   #notification(attempt: AppAttempt, event: AppServerNotification): void {
@@ -1235,11 +1451,12 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     } catch {
       // Closing the per-attempt process below is the cancellation fallback.
     }
+    attempt.connectionCloseRequested = true;
     await this.#closeConnection(attempt.home);
     this.#markTerminal(attempt, "failed", attempt.reason ?? method);
   }
 
-  #applyTurn(attempt: AppAttempt, turn: AppServerTurn): void {
+  #applyTurn(attempt: AppAttempt, turn: AppServerTurn, deadlineReadWinner = false): void {
     if (turn.id !== attempt.turnId && attempt.turnId) return;
     attempt.turnId = turn.id;
     const final = finalFromItems(turn.items);
@@ -1254,9 +1471,22 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       attempt.state = "running";
       return;
     }
+    if (attempt.deadlineReadPending && !deadlineReadWinner) return;
     attempt.providerTerminal = true;
     attempt.providerCompleted = turn.status === "completed";
     attempt.providerStatus = turn.status;
+    if (
+      !deadlineReadWinner &&
+      (attempt.deadlineExpired || Date.now() >= attempt.context.deadline.getTime())
+    ) {
+      attempt.deadlineExpired = true;
+      this.#markTerminal(
+        attempt,
+        "timed_out",
+        "App Server turn reached a terminal provider state after its immutable deadline",
+      );
+      return;
+    }
     if (turn.status === "interrupted") {
       this.#markTerminal(
         attempt,
@@ -1286,10 +1516,14 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
 
   #markTerminal(
     attempt: AppAttempt,
-    state: "succeeded" | "failed" | "cancelled",
+    state: "succeeded" | "failed" | "cancelled" | "timed_out",
     reason?: string,
   ): void {
     if (terminalState(attempt.state)) return;
+    if (attempt.deadlineTimer) {
+      clearTimeout(attempt.deadlineTimer);
+      delete attempt.deadlineTimer;
+    }
     attempt.state = state;
     if (reason) attempt.reason = reason;
     else delete attempt.reason;
@@ -1315,10 +1549,10 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
 
   async #closeConnection(home: string): Promise<void> {
     const connection = this.#connections.get(home);
-    this.#serverIdentities.delete(home);
     if (!connection) return;
-    this.#connections.delete(home);
     await connection.close();
+    if (this.#connections.get(home) === connection) this.#connections.delete(home);
+    this.#serverIdentities.delete(home);
   }
 
   #require(handle: BackendHandle): AppAttempt {

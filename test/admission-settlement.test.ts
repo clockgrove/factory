@@ -292,12 +292,12 @@ describe("admission settlement evidence", () => {
         retainedUnknownModelInvocationId: "worker",
       }),
     ).toMatchObject({ accountingSettled: false, unknownModelUsageRetained: true });
-    expect(() =>
+    expect(
       settle([...events, marker], {
         modelUsageExpected: true,
         retainedUnknownModelInvocationId: "worker",
       }),
-    ).toThrow("remains unknown");
+    ).toMatchObject({ accountingSettled: false, unknownModelUsageRetained: true });
     expect(() =>
       settle([...events, marker, gate], {
         modelUsageExpected: true,

@@ -40,6 +40,76 @@ function errorChain(error: unknown): unknown[] {
 }
 
 describe("Supervisor model dispatch journal", () => {
+  it("settles one timed-out physical attempt while retaining one unknown model invocation", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      maxAttemptsPerItem: 3,
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        observe: async (handle) => {
+          await backend.observe(handle);
+          return {
+            state: "timed_out" as const,
+            observedAt: new Date().toISOString(),
+            usage: { inputTokens: null, outputTokens: null, cachedInputTokens: null },
+            reason: "immutable adapter deadline elapsed",
+          };
+        },
+      }),
+    });
+    try {
+      await f.run();
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+      expect(
+        f.events().filter((event) => event.kind === "attempt" && event.event === "AttemptTimedOut"),
+      ).toHaveLength(1);
+      expect(
+        f.events().filter((event) => event.kind === "attempt" && event.event === "AttemptFailed"),
+      ).toHaveLength(0);
+      expect(f.events().some((event) => event.event === "ProviderQuotaBlocked")).toBe(false);
+      expect(unresolvedModelInvocations(f.events())).toHaveLength(1);
+      expect(f.resources.size).toBe(0);
+      const nativeSettlements = () =>
+        f
+          .events()
+          .filter(
+            (event) =>
+              event.kind === "budget" &&
+              event.event === "BudgetReconciled" &&
+              event.phase === "execution" &&
+              event.unit === "local_milliseconds" &&
+              event.workItem === 8 &&
+              event.attempt === 1,
+          );
+      expect(nativeSettlements()).toHaveLength(1);
+      const ledger = new IssueAdmissionLedger(
+        new GitHubControlStore({
+          token: "fixture-only",
+          owner: "fixture",
+          repo: "provider-qualification",
+        }),
+      );
+      const settled = await ledger.read(8);
+      expect(settled?.history.at(-1)).toMatchObject({
+        disposition: "released",
+        evidence: { accountingSettled: false, unknownModelUsageRetained: true },
+      });
+      const historyLength = settled!.history.length;
+
+      await f.run();
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+      expect(
+        f.events().filter((event) => event.kind === "attempt" && event.event === "AttemptTimedOut"),
+      ).toHaveLength(1);
+      expect(unresolvedModelInvocations(f.events())).toHaveLength(1);
+      expect(nativeSettlements()).toHaveLength(1);
+      expect((await ledger.read(8))?.history).toHaveLength(historyLength);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
   it("terminalizes an ordinary run after worker usage exhausts review and retry admission", async () => {
     const f = await providerSupervisorFixture("daytona-burst", {
       localOnly: true,

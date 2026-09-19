@@ -160,6 +160,7 @@ export type BackendObservationState =
   | "succeeded"
   | "failed"
   | "cancelled"
+  | "timed_out"
   | "unknown";
 
 export interface BackendObservation {

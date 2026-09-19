@@ -563,6 +563,7 @@ class ExecutionSourceAdvancedBeforeDispatchError extends Error {
 }
 
 class ExecutionCapacityUnavailableBeforeDispatchError extends Error {}
+class AttemptDeadlineExceededError extends Error {}
 
 export interface SupervisorOptions {
   token: string;
@@ -9256,7 +9257,7 @@ export class FactorySupervisor {
               throw new Error(
                 "App Server outcome is unknown; automated replacement is blocked pending exact session recovery",
               );
-            if (["succeeded", "failed", "cancelled"].includes(observation.state)) {
+            if (["succeeded", "failed", "cancelled", "timed_out"].includes(observation.state)) {
               executionTerminalObserved = true;
               terminalModelUsage = reportedModelUsage(observation.usage);
               const observedTokens = reportedModelTokens(observation.usage);
@@ -9325,6 +9326,7 @@ export class FactorySupervisor {
                   this.#budgetEvents.push(event);
                 });
               } else if (selected.capabilities.reportsModelUsage) {
+                const invocationId = `worker-${item.number}-${reservation!.attempt}`;
                 this.#modelInvocations.retire(
                   modelInvocationKey({
                     objective: reservation!.objective,
@@ -9332,17 +9334,24 @@ export class FactorySupervisor {
                     workItem: item.number,
                     attempt: reservation!.attempt,
                     phase: "execution",
-                    modelInvocationId: `worker-${item.number}-${reservation!.attempt}`,
+                    modelInvocationId: invocationId,
                   }),
                 );
-                if (selected.capabilities.id === "codex-app-server/local-worktree")
+                if (
+                  observation.state === "timed_out" ||
+                  selected.capabilities.id === "codex-app-server/local-worktree"
+                ) {
+                  retainedUnknownModelInvocationId = invocationId;
+                } else {
                   throw new Error(
-                    "App Server final model usage is unavailable; automated replacement is blocked",
+                    `backend ${selected.capabilities.id} omitted terminal model-token usage; consumption remains unknown`,
                   );
-                throw new Error(
-                  `backend ${selected.capabilities.id} omitted terminal model-token usage; consumption remains unknown`,
-                );
+                }
               }
+              if (observation.state === "timed_out")
+                throw new AttemptDeadlineExceededError(
+                  observation.reason ?? "worker exceeded its immutable attempt deadline",
+                );
               if (observation.state !== "succeeded") {
                 throw new Error(observation.reason ?? `worker ${observation.state}`);
               }
@@ -10163,7 +10172,7 @@ export class FactorySupervisor {
               // Cancellation drains some backends' terminal stream. Read any real
               // counters before cleanup discards the handle; absence stays unknown.
               const observation = await selected.observe(handle);
-              if (["succeeded", "failed", "cancelled"].includes(observation.state)) {
+              if (["succeeded", "failed", "cancelled", "timed_out"].includes(observation.state)) {
                 terminalModelUsage = reportedModelUsage(observation.usage);
                 const tokens = reportedModelTokens(observation.usage);
                 if (tokens !== null) {
@@ -10408,7 +10417,9 @@ export class FactorySupervisor {
                 ? "AttemptDeferred"
                 : cancellation
                   ? "AttemptCancelled"
-                  : "AttemptFailed",
+                  : error instanceof AttemptDeadlineExceededError
+                    ? "AttemptTimedOut"
+                    : "AttemptFailed",
               sequence: this.#sequences.take(),
               reason,
               ...(backendLaunchAttempted && terminalModelProfile
@@ -10912,6 +10923,7 @@ export class FactorySupervisor {
     reservation: AttemptReservation,
     deadline: number,
     events: readonly FactoryEvent[],
+    objectiveItems: readonly DerivedWorkItem[],
   ): Promise<void> {
     const repository = `${this.#options.owner}/${this.#options.repo}`;
     const prepared = await this.#sessions.load(repository, reservation, "prepared");
@@ -10971,10 +10983,16 @@ export class FactorySupervisor {
         !usage ||
         usage.inputTokens === undefined ||
         usage.outputTokens === undefined
-      )
-        throw new Error(
-          "App Server terminal success and complete model usage are required for artifact continuation",
+      ) {
+        await backend.cleanup(handle);
+        handle = undefined;
+        await this.#reconcileInterruptedForEarlyTerminal(
+          item,
+          objectiveItems,
+          observed.state === "timed_out" ? "AttemptTimedOut" : "AttemptFailed",
         );
+        return;
+      }
       const model = events.filter(
         (event) =>
           event.kind === "budget" &&
@@ -21025,7 +21043,7 @@ export class FactorySupervisor {
   async #reconcileInterruptedForEarlyTerminal(
     item: DerivedWorkItem,
     objectiveItems: readonly DerivedWorkItem[],
-    terminalEvent: "AttemptCancelled" | "AttemptTimedOut" | "AttemptDeferred",
+    terminalEvent: "AttemptCancelled" | "AttemptTimedOut" | "AttemptDeferred" | "AttemptFailed",
   ): Promise<void> {
     const reservations = await this.#attempts.list(this.#run.objective, item.number);
     const reservation = reservations
@@ -21037,7 +21055,11 @@ export class FactorySupervisor {
     // admission protocol. Never ask a repository execution backend to classify it.
     if (reservation.mediaInvocation) {
       if (await this.#recoverUndispatchedAdmission(item, reservation)) return;
-      await this.#recoverInterruptedMedia(item, reservation, terminalEvent);
+      await this.#recoverInterruptedMedia(
+        item,
+        reservation,
+        terminalEvent === "AttemptFailed" ? undefined : terminalEvent,
+      );
       return;
     }
     if (
@@ -21146,8 +21168,13 @@ export class FactorySupervisor {
       const elapsed = phaseStart ? Math.max(0, Date.now() - new Date(phaseStart).getTime()) : 0;
       const ambiguousPaidLaunch =
         budget.phase === "execution" && budget.unit === "sandbox_milliseconds" && !started;
+      const ambiguousAppServerLaunch =
+        budget.phase === "execution" &&
+        budget.unit === "local_milliseconds" &&
+        reservation.backend === "codex-app-server/local-worktree" &&
+        !started;
       const amount =
-        budget.unit === "managed_sessions" || ambiguousPaidLaunch
+        budget.unit === "managed_sessions" || ambiguousPaidLaunch || ambiguousAppServerLaunch
           ? budget.amount
           : Math.min(budget.amount, elapsed);
       await this.#lease.use(async (lease) => {
@@ -21160,27 +21187,68 @@ export class FactorySupervisor {
           unit: budget.unit,
           phase: budget.phase,
           amount,
+          ...(ambiguousAppServerLaunch
+            ? {
+                usageEvidence: "conservative-reservation" as const,
+                reason:
+                  "The durable App Server turn proves dispatch before the AttemptStarted receipt; charging the original reserved duration as the bounded upper limit",
+              }
+            : {}),
         });
         this.#budgetEvents.push(event);
       });
     }
-    if (this.#hasUnfinishedAttempt(item))
-      await this.#lease.use((lease) =>
-        this.#attempts.record({
-          lease,
-          workItemNodeId: item.id,
-          reservation,
-          event: terminalEvent,
-          sequence: this.#sequences.take(),
-          reason:
-            terminalEvent === "AttemptCancelled"
-              ? "operator cancellation interrupted the recovered attempt"
-              : terminalEvent === "AttemptTimedOut"
-                ? "objective deadline interrupted the recovered attempt"
-                : "controller retirement deferred the recovered attempt",
-          allowRecovery: true,
-        }),
-      );
+    if (this.#hasUnfinishedAttempt(item)) {
+      const reason =
+        terminalEvent === "AttemptCancelled"
+          ? "operator cancellation interrupted the recovered attempt"
+          : terminalEvent === "AttemptTimedOut"
+            ? "objective deadline interrupted the recovered attempt"
+            : terminalEvent === "AttemptFailed"
+              ? "the recovered App Server attempt lacked an authoritative complete terminal result"
+              : "controller retirement deferred the recovered attempt";
+      try {
+        await this.#lease.use((lease) =>
+          this.#attempts.record({
+            lease,
+            workItemNodeId: item.id,
+            reservation,
+            event: terminalEvent,
+            sequence: this.#sequences.take(),
+            reason,
+            allowRecovery: true,
+          }),
+        );
+      } catch (error) {
+        const observed = await this.#reader.readObjective(this.#run.objective);
+        this.#fenceSnapshot(observed);
+        this.#sequences.observe(snapshotEvents(observed));
+        const observedItem = this.#deriveObjective(observed).items.find(
+          (candidate) => candidate.id === item.id && candidate.number === item.number,
+        );
+        const terminal = (observedItem?.factoryEvents ?? []).filter(
+          (event) =>
+            event.kind === "attempt" &&
+            event.runId === reservation.runId &&
+            event.workItem === reservation.workItem &&
+            event.attempt === reservation.attempt &&
+            ["AttemptFailed", "AttemptTimedOut", "AttemptCancelled", "AttemptDeferred"].includes(
+              event.event,
+            ),
+        );
+        const exact = terminal.filter(
+          (event) =>
+            event.kind === "attempt" &&
+            event.event === terminalEvent &&
+            event.reason === reason &&
+            event.backend === reservation.backend &&
+            event.baseSha === reservation.baseSha &&
+            event.directorEpoch === reservation.directorEpoch &&
+            event.policyDigest === reservation.policyDigest,
+        );
+        if (terminal.length !== 1 || exact.length !== 1) throw error;
+      }
+    }
     const capacity = await this.#capacitySnapshot();
     for (const held of capacity.reservations.filter(
       (held) =>
@@ -21192,10 +21260,16 @@ export class FactorySupervisor {
     if (adoptedSource) {
       await this.#settleArtifactConsumerAdmission(item, reservation, adoptedSource);
     } else {
+      const unresolvedModel = unreconciledBudgetReservations(events).filter(
+        (event) => event.phase === "execution" && event.unit === "model_tokens",
+      );
+      const retainedUnknownModelInvocationId =
+        unresolvedModel.length === 1 ? unresolvedModel[0]!.modelInvocationId : undefined;
       await this.#settleIssueAdmission(item, reservation, {
         cleanupConfirmed: true,
         definitiveNonExecution: false,
         modelUsageExpected: backend.capabilities.reportsModelUsage ?? false,
+        ...(retainedUnknownModelInvocationId ? { retainedUnknownModelInvocationId } : {}),
       });
     }
     if (await this.#hasUnsettledIssueAdmission(item)) throw new ProviderQuotaDrainIncompleteError();
@@ -21876,7 +21950,7 @@ export class FactorySupervisor {
     }
     // Ready artifact-transfer recovery is inserted before this provider fallback.
     if (reservation.backend === "codex-app-server/local-worktree" && !validation) {
-      await this.#recoverAppServerSession(item, reservation, deadline, events);
+      await this.#recoverAppServerSession(item, reservation, deadline, events, objectiveItems);
       return;
     }
     const providerResourceId = latest?.kind === "attempt" ? latest.providerResourceId : undefined;

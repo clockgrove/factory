@@ -150,6 +150,7 @@ model invocation. Each use is additionally capped by the remaining authenticated
     "*.npmjs.org",
     "api.openai.com"
   ],
+  "gitLfsOutputNetworkDestinations": [],
   "priority": {
     "source": "subissue-order",
     "unsetRank": 100,
@@ -299,7 +300,7 @@ running the same command again.
 Product delivery follows repository transport rather than capture MIME. Outputs within the ordinary
 artifact bounds use Git blobs. A changed path may use Git LFS only when the pinned base already
 assigns that exact path `filter=lfs`. Factory requires the installed Git LFS CLI, the repository's
-authenticated effective endpoint, a destination allowed by `allowedNetworkDestinations`, and
+authenticated effective endpoint, a destination allowed by `gitLfsOutputNetworkDestinations`, and
 preflighted credentials. It retains the raw output through the normal immutable artifact transfer,
 uploads the exact SHA-256 object, independently reads and verifies it, and commits the canonical LFS
 pointer. Artifact identity includes the assignment, tool, endpoint, raw transfer, upload and read-back

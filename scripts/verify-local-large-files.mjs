@@ -114,10 +114,10 @@ export function largeFileAuthority(env) {
       ? {
           ...authority.policy,
           // This qualifier supports only the canonical github.com target already
-          // enforced by checkpoint authority and preflight. Permit that exact
-          // authenticated LFS endpoint for this scenario alone.
-          allowedNetworkDestinations: [
-            ...authority.policy.allowedNetworkDestinations,
+          // enforced by checkpoint authority and preflight. Grant that endpoint
+          // only to Factory-owned LFS output upload and authenticated read-back.
+          gitLfsOutputNetworkDestinations: [
+            ...authority.policy.gitLfsOutputNetworkDestinations,
             new URL(`https://github.com/${authority.repository}.git`).hostname,
           ],
         }

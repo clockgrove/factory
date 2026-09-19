@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { parseRunPolicy } from "../src/protocol/policy.js";
+import { assertRequirementsWithinPolicy, parseRunPolicy } from "../src/protocol/policy.js";
+import { parseWorkerPacket } from "../src/protocol/worker-packet.js";
 import {
   discoverValidationCommands,
   isGroundedValidationCommand,
@@ -493,11 +494,47 @@ describe("installed large-file lifecycle authority", () => {
       })!;
       expect(parseRunPolicy(accepted.policy).maxAttemptsPerItem).toBe(1);
       expect(accepted.policy.economics).toEqual(authority.policy.economics);
-      expect(accepted.policy.allowedNetworkDestinations).toEqual(
-        scenario === "produced-lfs-restart" ? ["api.openai.com", "github.com"] : ["api.openai.com"],
+      expect(accepted.policy.allowedNetworkDestinations).toEqual(["api.openai.com"]);
+      expect(accepted.policy.gitLfsOutputNetworkDestinations).toEqual(
+        scenario === "produced-lfs-restart" ? ["github.com"] : [],
       );
     },
   );
+  it("does not grant compiled Work Items or observed Worker Packets GitHub egress", () => {
+    const accepted = largeFileAuthority({
+      ...env,
+      FACTORY_LARGE_FILE_CASE: "produced-lfs-restart",
+      FACTORY_LARGE_FILE_PHASE: "preflight",
+    })!;
+    const policy = parseRunPolicy(accepted.policy);
+    const requirements = {
+      os: ["linux"],
+      architecture: [],
+      tools: ["node"],
+      services: [],
+      networkDestinations: ["github.com"],
+      permittedSecretNames: [],
+      trust: "trusted_local" as const,
+    };
+    expect(() =>
+      assertRequirementsWithinPolicy(requirements, policy, "compiled Work Item"),
+    ).toThrow(/compiled Work Item requests network destinations outside run policy: github\.com/);
+    const observedPacket = parseWorkerPacket({
+      protocol: "clockgrove.factory/worker-packet",
+      goal: "Create a dependency-free module.",
+      acceptanceCriteria: ["The smoke test passes."],
+      baseSha,
+      requirements,
+      deliverable: { kind: "repository-change", contract: "clockgrove.factory/artifact" },
+      allowedPaths: ["src/index.js"],
+      validationCommands: ["node --test"],
+    });
+    expect(() =>
+      assertRequirementsWithinPolicy(observedPacket.requirements, policy, "observed Worker Packet"),
+    ).toThrow(
+      /observed Worker Packet requests network destinations outside run policy: github\.com/,
+    );
+  });
   it("rejects ambiguous or unsupported repository hosts before granting LFS egress", () => {
     for (const host of ["github.example.com", "*.github.com", "GITHUB.COM"])
       expect(() =>

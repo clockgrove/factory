@@ -632,6 +632,15 @@ describe("preconfigured Git LFS output normalization", () => {
           expectedRepository: "fixture/project",
         }),
       ).toThrow(/endpoint/);
+    expect(() =>
+      resolvedGitLfsEndpoint({
+        environment:
+          "Endpoint=https://github.com/fixture/project.git/info/lfs (auth=basic)\n" +
+          "Endpoint (origin)=https://github.com/fixture/other.git/info/lfs (auth=basic)\n",
+        expectedHost: "github.com",
+        expectedRepository: "fixture/project",
+      }),
+    ).toThrow(/authenticated repository/);
   });
 
   it("fails missing config/auth and missing or corrupt independent reads before a receipt exists", async () => {

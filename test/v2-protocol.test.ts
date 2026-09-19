@@ -108,6 +108,33 @@ describe("v2 run policy", () => {
       ),
     ).toThrow(/unsupported task secrets/);
   });
+
+  it("keeps Git LFS output egress separate and explicitly required", () => {
+    const { gitLfsOutputNetworkDestinations: _omitted, ...missingLfsAuthority } =
+      DEFAULT_RUN_POLICY;
+    expect(() => parseRunPolicy(missingLfsAuthority)).toThrow(/gitLfsOutputNetworkDestinations/);
+    const policy = parseRunPolicy({
+      ...DEFAULT_RUN_POLICY,
+      allowedNetworkDestinations: ["api.openai.com"],
+      gitLfsOutputNetworkDestinations: ["github.com"],
+    });
+    expect(policy.gitLfsOutputNetworkDestinations).toEqual(["github.com"]);
+    expect(() =>
+      assertRequirementsWithinPolicy(
+        {
+          os: [],
+          architecture: [],
+          tools: [],
+          services: [],
+          networkDestinations: ["github.com"],
+          permittedSecretNames: [],
+          trust: "trusted_local",
+        },
+        policy,
+        "observed Worker Packet",
+      ),
+    ).toThrow(/outside run policy: github\.com/);
+  });
 });
 
 describe("v2 event protocol", () => {

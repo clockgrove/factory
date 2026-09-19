@@ -9980,7 +9980,7 @@ export class FactorySupervisor {
           title: item.title,
           baseBranch: publicationBaseBranch,
           repositoryPath: this.#options.repository,
-          allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+          allowedNetworkDestinations: this.#policy.gitLfsOutputNetworkDestinations,
           beforeRefMutation: assertPublicationSafety,
           beforePullRequestMutation: assertPublicationSafety,
         });
@@ -11266,7 +11266,7 @@ export class FactorySupervisor {
         policyDigest: context.adopted ? this.#run.policyDigest : reservation.policyDigest,
       },
       repositoryPath: this.#options.repository,
-      allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+      allowedNetworkDestinations: this.#policy.gitLfsOutputNetworkDestinations,
       assertCurrent: context.assertCurrent,
       range,
       loadSourceArtifact: () =>
@@ -11515,7 +11515,7 @@ export class FactorySupervisor {
         policyDigest: reservation.policyDigest,
       },
       repositoryPath: this.#options.repository,
-      allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+      allowedNetworkDestinations: this.#policy.gitLfsOutputNetworkDestinations,
       assertCurrent: () =>
         this.#lease.use(async (lease) => {
           await this.#attempts.assertReservation(lease, reservation, workItemNodeId);
@@ -15090,7 +15090,7 @@ export class FactorySupervisor {
                   await assertRemoteLfsObjectsCurrent({
                     subjects: mutationArtifacts,
                     repositoryPath: this.#options.repository,
-                    allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                    allowedNetworkDestinations: this.#policy.gitLfsOutputNetworkDestinations,
                   });
                   await dispatch.markDispatchedAtPublicationBoundary();
                 },
@@ -16400,7 +16400,7 @@ export class FactorySupervisor {
                   await assertRemoteLfsObjectsCurrent({
                     subjects: [{ artifact: mutationArtifact }],
                     repositoryPath: this.#options.repository,
-                    allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                    allowedNetworkDestinations: this.#policy.gitLfsOutputNetworkDestinations,
                   });
                 },
                 () =>
@@ -19782,7 +19782,7 @@ export class FactorySupervisor {
                         },
                       ],
                       repositoryPath: this.#options.repository,
-                      allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                      allowedNetworkDestinations: this.#policy.gitLfsOutputNetworkDestinations,
                     });
                   }
                   await dispatch.markDispatchedAtPublicationBoundary();
@@ -21684,7 +21684,7 @@ export class FactorySupervisor {
               await assertRemoteLfsObjectsCurrent({
                 subjects: [{ artifact }],
                 repositoryPath: this.#options.repository,
-                allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                allowedNetworkDestinations: this.#policy.gitLfsOutputNetworkDestinations,
               });
             },
             mutate: () => this.#store.createRef(`refs/heads/${branch}`, plannedHead),

@@ -156,11 +156,12 @@ export interface CheckpointDiagnostic {
   rateLimitReset?: number;
   /** Delay in seconds. */
   retryAfter?: number;
-  checkpointStage?: "post-takeover" | "final";
+  checkpointStage?: "checkpoint" | "post-takeover" | "final";
   checkpointField?: string;
   checkpointInvariant?:
     | "stable-identity"
     | "stable-authority"
+    | "authenticated-authority"
     | "authority-descendant"
     | "authority-revision"
     | "authority-transition";
@@ -267,7 +268,11 @@ export interface CheckpointPort {
   poll(phase: string, accept: (observation: unknown) => boolean): Promise<unknown>;
   absence(observation: unknown, controllers: unknown[], executionOnly?: boolean): Promise<unknown>;
   armSession?(original: unknown): Promise<unknown>;
-  sessionProof?(observation: unknown, witness?: unknown): Promise<unknown[]>;
+  sessionProof?(
+    observation: unknown,
+    witness?: unknown,
+    stage?: "checkpoint" | "post-takeover" | "final",
+  ): Promise<unknown[]>;
   checkpoint(value: unknown): Promise<void>;
   takeover(checkpoint: unknown): Promise<void>;
   finalProof(observation: unknown, original: unknown, replacement: unknown): Promise<void>;

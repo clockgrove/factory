@@ -44,7 +44,7 @@ const keys = [
 ];
 const sessionPath = ".clockgrove-factory/control/app-server-session.json";
 const continuationFailureContexts = new WeakMap();
-const continuationStages = new Set(["post-takeover", "final"]);
+const continuationStages = new Set(["checkpoint", "post-takeover", "final"]);
 const continuationFields = [
   "protocol",
   "workItem",
@@ -74,7 +74,7 @@ export function appServerCheckpointContinuationFailureContext(error) {
 
 function continuationAssertion(stage, field, invariant, operation) {
   try {
-    operation();
+    return operation();
   } catch (error) {
     const retained =
       error !== null && (typeof error === "object" || typeof error === "function")
@@ -89,19 +89,52 @@ function continuationAssertion(stage, field, invariant, operation) {
   }
 }
 
-function admissionContinuation(proof, reserved) {
+async function continuationRead(stage, field, invariant, operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    const retained =
+      error !== null && (typeof error === "object" || typeof error === "function")
+        ? error
+        : new Error("App Server checkpoint continuation read failed");
+    continuationFailureContexts.set(retained, {
+      checkpointStage: stage,
+      checkpointField: field,
+      checkpointInvariant: invariant,
+    });
+    throw retained;
+  }
+}
+
+function admissionContinuation(proof, reserved, stage) {
   if (proof.reservationAuthority.source !== "issue-admission") return undefined;
-  const commits = [
-    proof.reservationAuthority.canonical.commit,
-    ...(proof.canonicalAuthorityAncestors ?? []),
-  ];
-  assert.ok(commits.length <= maxAdmissionContinuationRevisions);
+  const commits = continuationAssertion(
+    stage,
+    "canonicalAuthorityChain",
+    "stable-authority",
+    () => {
+      const values = [
+        proof.reservationAuthority.canonical.commit,
+        ...(proof.canonicalAuthorityAncestors ?? []),
+      ];
+      assert.ok(values.length <= maxAdmissionContinuationRevisions);
+      return values;
+    },
+  );
   const snapshots = commits.map((commit) =>
-    qualificationIssueAdmissionSnapshot(commit, reserved, proof.reservationAuthority.canonical.ref),
+    continuationAssertion(stage, "canonicalAuthorityChain", "authenticated-authority", () =>
+      qualificationIssueAdmissionSnapshot(
+        commit,
+        reserved,
+        proof.reservationAuthority.canonical.ref,
+      ),
+    ),
   );
   for (let index = 1; index < snapshots.length; index++) {
-    assert.equal(snapshots[index - 1].priorOid, snapshots[index].oid);
-    assert.equal(snapshots[index - 1].revision, snapshots[index].revision + 1);
+    continuationAssertion(stage, "canonicalAuthorityChain", "authority-descendant", () => {
+      assert.equal(snapshots[index - 1].priorOid, snapshots[index].oid);
+      assert.equal(snapshots[index - 1].revision, snapshots[index].revision + 1);
+    });
   }
   return snapshots;
 }
@@ -172,7 +205,9 @@ export function assertAppServerCheckpoint(
   proof,
   witness,
   verifiedAt = new Date().toISOString(),
+  continuationStage = "checkpoint",
 ) {
+  assert.ok(continuationStages.has(continuationStage), "unsupported App Server continuation stage");
   const events = observation.receipts.map(({ event }) => event),
     runId = observation.status.run.runId;
   const start = one(events.filter((event) => event.event === "FactoryRunStarted"));
@@ -377,7 +412,7 @@ export function assertAppServerCheckpoint(
     );
   }
   assert.ok(Number.isFinite(Date.parse(verifiedAt)), "invalid verification timestamp");
-  const admission = admissionContinuation(proof, reserved);
+  const admission = admissionContinuation(proof, reserved, continuationStage);
   return {
     protocol: "clockgrove.factory/app-server-checkpoint-verification",
     verifiedAt,
@@ -412,11 +447,26 @@ export function appServerCheckpointIdentity(receipt) {
  * authenticated admission progression through recovery and settlement. */
 export function assertAppServerCheckpointContinuation(before, after, stage) {
   assert.ok(continuationStages.has(stage), "unsupported App Server continuation stage");
-  continuationAssertion(stage, "receipt-count", "stable-identity", () =>
-    assert.equal(after.length, before.length, "App Server checkpoint receipt count changed"),
-  );
-  const current = new Map(after.map((receipt) => [receipt.workItem, receipt]));
+  continuationAssertion(stage, "receipt-count", "stable-identity", () => {
+    assert.ok(Array.isArray(before), "prior App Server checkpoint receipts are unavailable");
+    assert.ok(Array.isArray(after), "current App Server checkpoint receipts are unavailable");
+    assert.equal(after.length, before.length, "App Server checkpoint receipt count changed");
+  });
+  const current = continuationAssertion(stage, "workItem", "stable-identity", () => {
+    const indexed = new Map();
+    for (const receipt of after) {
+      assert.ok(receipt !== null && typeof receipt === "object");
+      assert.ok(Number.isSafeInteger(receipt.workItem) && receipt.workItem > 0);
+      assert.ok(!indexed.has(receipt.workItem), "duplicate App Server checkpoint work item");
+      indexed.set(receipt.workItem, receipt);
+    }
+    return indexed;
+  });
   for (const prior of before) {
+    continuationAssertion(stage, "workItem", "stable-identity", () => {
+      assert.ok(prior !== null && typeof prior === "object");
+      assert.ok(Number.isSafeInteger(prior.workItem) && prior.workItem > 0);
+    });
     const next = current.get(prior.workItem);
     continuationAssertion(stage, "workItem", "stable-identity", () =>
       assert.ok(next, "App Server checkpoint work item disappeared"),
@@ -528,7 +578,14 @@ export function assertAppServerCheckpointContinuation(before, after, stage) {
   }
   return after;
 }
-export async function observeAppServerCheckpoints(request, observation, authority, witness) {
+export async function observeAppServerCheckpoints(
+  request,
+  observation,
+  authority,
+  witness,
+  continuationStage = "checkpoint",
+) {
+  assert.ok(continuationStages.has(continuationStage), "unsupported App Server continuation stage");
   const read = nativeProofReader(request),
     proofs = [];
   const reservations = observation.receipts
@@ -550,21 +607,38 @@ export async function observeAppServerCheckpoints(request, observation, authorit
     if (reservation.authority.source === "issue-admission") {
       const ancestors = [],
         authorityRead = qualificationReservationReadPort(request);
-      let snapshot = qualificationIssueAdmissionSnapshot(
-        reservation.authority.canonical.commit,
-        reserved,
-        reservation.authority.canonical.ref,
+      let snapshot = continuationAssertion(
+        continuationStage,
+        "canonicalAuthorityChain",
+        "authenticated-authority",
+        () =>
+          qualificationIssueAdmissionSnapshot(
+            reservation.authority.canonical.commit,
+            reserved,
+            reservation.authority.canonical.ref,
+          ),
       );
       while (
         snapshot.priorOid !== null &&
         ancestors.length < maxAdmissionContinuationRevisions - 1
       ) {
-        const commit = await authorityRead.readCommit(snapshot.priorOid);
+        const commit = await continuationRead(
+          continuationStage,
+          "canonicalAuthorityChain",
+          "authority-descendant",
+          () => authorityRead.readCommit(snapshot.priorOid),
+        );
         ancestors.push(commit);
-        snapshot = qualificationIssueAdmissionSnapshot(
-          commit,
-          reserved,
-          reservation.authority.canonical.ref,
+        snapshot = continuationAssertion(
+          continuationStage,
+          "canonicalAuthorityChain",
+          "authenticated-authority",
+          () =>
+            qualificationIssueAdmissionSnapshot(
+              commit,
+              reserved,
+              reservation.authority.canonical.ref,
+            ),
         );
       }
       proof.canonicalAuthorityAncestors = ancestors;

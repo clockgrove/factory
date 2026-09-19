@@ -1149,7 +1149,7 @@ export async function runAppServerCheckpointScenario(port, authority) {
   const held = await port.poll("terminal-artifact-hold", (value) =>
     appServerHoldReady(value, authority, arm),
   );
-  const sessionReceipts = await port.sessionProof(held, held.checkpointReached);
+  const sessionReceipts = await port.sessionProof(held, held.checkpointReached, "checkpoint");
   assert.equal(sessionReceipts.length, 1);
   const scopes = await port.absence(held, [original], true);
   const originalEvents = held.receipts
@@ -1203,7 +1203,7 @@ export async function continueAppServerCheckpointScenario(
       facts.stable.some((current) => JSON.stringify(current) === JSON.stringify(event)),
       "original worker receipt changed",
     );
-  const resumedReceipts = await port.sessionProof(paused, held.checkpointReached);
+  const resumedReceipts = await port.sessionProof(paused, held.checkpointReached, "post-takeover");
   assertAppServerCheckpointContinuation(sessionProofs, resumedReceipts, "post-takeover");
   const phaseRecovery = phaseKill
     ? assertPhaseKillRecovery({
@@ -1226,7 +1226,7 @@ export async function continueAppServerCheckpointScenario(
   );
   const final = checkpointFacts(completed, authority, port.pauseRequestId, false);
   assert.equal(final.runId, facts.runId);
-  const finalSessionReceipts = await port.sessionProof(completed);
+  const finalSessionReceipts = await port.sessionProof(completed, undefined, "final");
   assert.equal(finalSessionReceipts.length, 3);
   assertAppServerCheckpointContinuation(
     [resumedReceipts.find((receipt) => receipt.workItem === sessionProofs[0].workItem)],
@@ -2171,21 +2171,26 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       save();
       return evidence.sessionArm;
     },
-    sessionProof: async (observation, witness) => {
+    sessionProof: async (observation, witness, continuationStage = "checkpoint") => {
       assert.equal(authority.sessionRecovery, true);
       const proofs = await withQualificationStage("app-server-artifact-proof", () =>
-        observeAppServerCheckpoints(request, observation, authority, witness),
+        observeAppServerCheckpoints(request, observation, authority, witness, continuationStage),
       );
       const verifiedAt = new Date().toISOString();
-      const receipts = proofs.map((proof) =>
-        assertAppServerCheckpoint(
-          observation,
-          authority,
-          proof,
-          witness?.workItem === proof.workItem ? witness : undefined,
-          verifiedAt,
-        ),
-      );
+      const receipts = [];
+      for (const proof of proofs)
+        receipts.push(
+          await withQualificationStage("app-server-artifact-proof", () =>
+            assertAppServerCheckpoint(
+              observation,
+              authority,
+              proof,
+              witness?.workItem === proof.workItem ? witness : undefined,
+              verifiedAt,
+              continuationStage,
+            ),
+          ),
+        );
       (evidence.sessionObservations ??= []).push({
         at: verifiedAt,
         runId: observation.status.run.runId,

@@ -614,6 +614,20 @@ describe("installed App Server checkpoint qualification", () => {
       ),
     ).toThrow(/writer changed without an epoch advance/);
 
+    try {
+      assertAppServerCheckpointContinuation([before], [undefined as never], "final");
+      expect.fail("missing selected receipt was accepted");
+    } catch (error) {
+      expect(checkpointFailure(error)).toMatchObject({
+        boundary: "scenario",
+        checkpointStage: "final",
+        checkpointField: "workItem",
+        checkpointInvariant: "stable-identity",
+        category: "assertion",
+        code: "ERR_ASSERTION",
+      });
+    }
+
     const released = {
       ...after,
       canonicalAuthorityOid: "f".repeat(40),
@@ -798,6 +812,90 @@ describe("installed App Server checkpoint qualification", () => {
       legacyAuthorityRef: f.proof.reservationRef,
       legacyAuthorityOid: null,
     });
+    const advancedOid = "8".repeat(40);
+    const advancedRecord = {
+      ...record,
+      revision: 2,
+      priorRevisionOid: ledgerOid,
+      history: [
+        {
+          ...record.history[0],
+          writerEpoch: Number(reserved.directorEpoch) + 1,
+          currentWriterHolder: "replacement-fixture",
+        },
+      ],
+    };
+    const advancedLedger = {
+      ...ledger,
+      oid: advancedOid,
+      parentOids: [ledgerOid],
+      message: `Factory issue admission\nFactory-Issue-Admission: ${Buffer.from(JSON.stringify(advancedRecord)).toString("base64url")}`,
+    };
+    const advancedRequest = async (route: string, args: Record<string, unknown>) => {
+      if (
+        route.endsWith("/git/ref/{ref}") &&
+        args.ref === "clockgrove-factory/admission/work-item-8"
+      ) {
+        const ref = `refs/${args.ref}`;
+        return { data: { ref, object: { type: "commit", sha: advancedOid } } };
+      }
+      if (route.endsWith("/git/commits/{commit_sha}") && args.commit_sha === advancedOid)
+        return {
+          data: {
+            sha: advancedLedger.oid,
+            tree: { sha: advancedLedger.treeOid },
+            parents: advancedLedger.parentOids.map((sha) => ({ sha })),
+            message: advancedLedger.message,
+          },
+        };
+      return request(route, args);
+    };
+    const [advancedProof] = await observeAppServerCheckpoints(
+      advancedRequest,
+      f.observation,
+      authority,
+      f.witness,
+      "post-takeover",
+    );
+    expect(advancedProof!.canonicalAuthorityAncestors).toMatchObject([{ oid: ledgerOid }]);
+
+    for (const failure of ["missing", "malformed"] as const) {
+      let caught: unknown;
+      try {
+        await observeAppServerCheckpoints(
+          async (route, args) => {
+            if (route.endsWith("/git/commits/{commit_sha}") && args.commit_sha === ledgerOid) {
+              if (failure === "missing")
+                throw Object.assign(new Error("private missing ancestor"), { status: 404 });
+              return {
+                data: {
+                  sha: ledgerOid,
+                  tree: { sha: ledger.treeOid },
+                  parents: ledger.parentOids.map((sha: string) => ({ sha })),
+                  message: "malformed issue admission ancestor",
+                },
+              };
+            }
+            return advancedRequest(route, args);
+          },
+          f.observation,
+          authority,
+          f.witness,
+          "post-takeover",
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(checkpointFailure(caught)).toMatchObject({
+        boundary: "scenario",
+        checkpointStage: "post-takeover",
+        checkpointField: "canonicalAuthorityChain",
+        checkpointInvariant:
+          failure === "missing" ? "authority-descendant" : "authenticated-authority",
+        category: failure === "missing" ? "http" : "assertion",
+        ...(failure === "missing" ? { httpStatus: 404 } : { code: "ERR_ASSERTION" }),
+      });
+    }
     // Exercise the complete bounded reader at its byte ceiling, then serialize
     // the same observation envelope used by the runner. Raw evidence cannot fit.
     ledger.message += `\n${"x".repeat(8 * 1024 * 1024 - Buffer.byteLength(ledger.message) - 1)}`;

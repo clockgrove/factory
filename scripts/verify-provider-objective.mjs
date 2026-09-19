@@ -123,11 +123,12 @@ export function providerPolicy(authority) {
 }
 
 export function providerObjective(profile, namespace) {
+  const executionTrust = profile === "daytona-burst" ? "trusted_local" : "managed";
   return (
-    objectiveBodyFor(namespace).replace("cloud workers, ", "") +
+    objectiveBodyFor(namespace, executionTrust).replace("cloud workers, ", "") +
     (profile === "daytona-burst"
-      ? "\nThe two foundations must be independent root sibling delivery units; the final unit must join-after-merge. Their code is trusted_local. Factory may overflow one concurrent worker to the explicitly authorized Daytona sandbox; independent provider validation must remain isolated."
-      : `\nEvery Work Item must declare managed execution trust and use only the ${PROFILES[profile]} managed profile. Daytona is authorized only for independent validation. Do not substitute local execution or a different managed profile.`)
+      ? "\nThe two foundations must be independent root sibling delivery units; the final unit must join-after-merge. Factory may overflow one concurrent worker to the explicitly authorized Daytona sandbox; independent provider validation must remain isolated."
+      : `\nUse only the ${PROFILES[profile]} managed profile. Daytona is authorized only for independent validation. Do not substitute local execution or a different managed profile.`)
   );
 }
 

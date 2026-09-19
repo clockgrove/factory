@@ -2123,7 +2123,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       else if (action === "create") {
         const body = extension.objectiveBody
           ? extension.objectiveBody(authority)
-          : objectiveBodyFor(authority.namespace);
+          : objectiveBodyFor(authority.namespace, "trusted_local");
         assert.equal(typeof body, "string");
         assert.ok(body.includes(qualificationNamespaceMarker(authority.namespace)));
         assert.ok(Buffer.byteLength(body) <= 65536);

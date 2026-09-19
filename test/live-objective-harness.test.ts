@@ -8,7 +8,6 @@ import {
   assessCompletion,
   assessQualificationPreflight,
   applyQualificationScenarioPreflight,
-  assertRetryableObjective,
   assertQualificationCompletion,
   assertRecordedQualificationPolicy,
   boundedPolicy,
@@ -16,7 +15,6 @@ import {
   installedIdentity,
   installedPluginPath,
   modelTokenLimit,
-  objectiveBody,
   objectiveBodyFor,
   qualificationNamespace,
   qualificationNamespaceMarker,
@@ -268,7 +266,11 @@ function evidence() {
         openDependencies: [],
       })),
     },
-    objective: { number: 1, state: "closed", body: objectiveBodyFor(namespace) },
+    objective: {
+      number: 1,
+      state: "closed",
+      body: objectiveBodyFor(namespace, "trusted_local"),
+    },
     children,
     dependencies: [
       { workItem: 2, blockedBy: [] },
@@ -987,38 +989,6 @@ describe("explicit installed regular qualification", () => {
 });
 
 describe("installed live Objective harness evidence boundary", () => {
-  it("permits only an acknowledged same-actor failure before graph creation", () => {
-    const value = {
-      issue: {
-        number: 1,
-        state: "open",
-        body: objectiveBody,
-        user: { id: 42 },
-      },
-      actorId: 42,
-      status: {
-        objective: { number: 1 },
-        run: { runId: "old", state: "escalated" },
-        workItems: [],
-        summary: { attempts: { total: 0 } },
-      },
-      children: [],
-      events: [{ runId: "old", event: "FactoryRunEscalated" }],
-      runId: "old",
-    };
-    expect(() => assertRetryableObjective(value)).not.toThrow();
-    for (const change of [
-      { actorId: 43 },
-      { runId: "different" },
-      { children: [{}] },
-      { issue: { ...value.issue, body: "different" } },
-      { issue: { ...value.issue, state: "closed" } },
-      { status: { ...value.status, run: { runId: "old", state: "running" } } },
-      { status: { ...value.status, summary: { attempts: { total: 1 } } } },
-      { events: [...value.events, { runId: "old", event: "GraphCompiled" }] },
-    ])
-      expect(() => assertRetryableObjective({ ...value, ...change })).toThrow();
-  });
   it("binds the documented Codex cachebuster to the canonical package and exact installed marketplace", () => {
     const input = {
       manifest: { name: "factory", version: "2.0.26+codex.20260904205148" },
@@ -1094,12 +1064,25 @@ describe("installed live Objective harness evidence boundary", () => {
     const paths = qualificationPaths(namespace);
     expect(paths.files).toHaveLength(6);
     expect(paths.files.every((path) => path.includes(`/${namespace}/`))).toBe(true);
-    const body = objectiveBodyFor(namespace);
+    const body = objectiveBodyFor(namespace, "trusted_local");
     expect(body).toContain(qualificationNamespaceMarker(namespace));
     expect(paths.files.every((path) => body.includes(path))).toBe(true);
+    expect(body).toContain("Every Work Item must declare trusted_local execution trust.");
+    expect(body).not.toContain("declare managed execution trust");
     expect(body).not.toMatch(/publication|issue closure|integration through Factory/i);
     for (const invalid of ["short", "UPPERCASE-NAMESPACE", "bad/path-name", "ends-with-"])
       expect(() => qualificationNamespace(invalid)).toThrow(/namespace/);
+  });
+  it("requires an explicit supported execution trust for every shared Objective body", () => {
+    const unsafeObjectiveBodyFor = objectiveBodyFor as (
+      namespace: string,
+      executionTrust?: string,
+    ) => string;
+    expect(() => unsafeObjectiveBodyFor("local-20260905-a")).toThrow(/execution trust/);
+    expect(() => unsafeObjectiveBodyFor("local-20260905-a", "isolated")).toThrow(/execution trust/);
+    const managed = objectiveBodyFor("managed-20260905-a", "managed");
+    expect(managed).toContain("Every Work Item must declare managed execution trust.");
+    expect(managed).not.toContain("declare trusted_local execution trust");
   });
   it("binds both installed bundles to their inventory", async () => {
     const root = await mkdtemp(join(tmpdir(), "factory-live-installed-"));

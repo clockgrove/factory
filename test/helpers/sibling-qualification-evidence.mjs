@@ -659,7 +659,11 @@ export async function completeSiblingQualificationFixture(options) {
   e.scope = "installed-local-native-sibling-refresh-objective";
   e.qualificationNamespace = "native-fixture";
   e.fixturePaths = qualificationPaths(e.qualificationNamespace);
-  e.objective = { number: 1, state: "closed", body: objectiveBodyFor(e.qualificationNamespace) };
+  e.objective = {
+    number: 1,
+    state: "closed",
+    body: objectiveBodyFor(e.qualificationNamespace, "trusted_local"),
+  };
   e.children = e.children.map((child) => ({ ...child, state: "closed" }));
   e.dependencies = [
     { workItem: 2, blockedBy: [] },

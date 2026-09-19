@@ -304,7 +304,11 @@ export function assertMcpSurface(tools) {
   }
 }
 
-export function objectiveBodyFor(namespace) {
+export function objectiveBodyFor(namespace, executionTrust) {
+  assert.ok(
+    executionTrust === "trusted_local" || executionTrust === "managed",
+    "qualification execution trust must be trusted_local or managed",
+  );
   const paths = qualificationPaths(namespace);
   return `Build three tiny dependency-free ESM modules with node:test tests.
 
@@ -313,45 +317,13 @@ ${qualificationNamespaceMarker(namespace)}
 
 Compile three Work Items: two independent foundational modules, followed by one integration module that depends on both. Use native blocked-by relationships for that final Work Item. Keep each module and its own tests in its Work Item's allowed paths. Do not modify package.json or existing tests.
 
+Every Work Item must declare ${executionTrust} execution trust.
+
 1. ${paths.sourceDirectory}/clamp.js exports clamp(value, min, max): return value bounded inclusively to min and max; throw RangeError when min > max. Add ${paths.testDirectory}/clamp.test.js covering below, within, above, equal bounds, and inverted bounds.
 2. ${paths.sourceDirectory}/slugify.js exports slugify(text): lowercase ASCII text, replace each run of non-ASCII-alphanumeric characters with one hyphen, remove leading and trailing hyphens. Add ${paths.testDirectory}/slugify.test.js covering spaces, punctuation, repeated separators, empty input, and uppercase.
 3. ${paths.sourceDirectory}/describe.js imports those two modules and exports describe(name, value, min, max), returning slugify(name) + ':' + clamp(value, min, max). Add ${paths.testDirectory}/describe.test.js: describe(' Hello World ', 12, 0, 10) equals 'hello-world:10', and inverted bounds propagate RangeError.
 
 Use node --test ${paths.testDirectory}/<module>.test.js as each foundation's independent validation, and npm test for the final integration. No dependencies, services, credentials, cloud workers, workflows, or network access are needed by these modules. Preserve all existing modules and tests.`;
-}
-
-/** Legacy fixture constant retained for pure retry-boundary tests; live runs always use a namespace. */
-export const objectiveBody = objectiveBodyFor("legacy-qualification");
-
-export function assertRetryableObjective({ issue, actorId, status, children, events, runId }) {
-  assert.equal(issue.state, "open", "retry requires an open Objective");
-  assert.ok(!issue.pull_request, "retry target must be an issue");
-  assert.equal(issue.body, objectiveBody, "retry Objective differs from this fixture");
-  assert.ok(Number.isInteger(actorId) && actorId > 0, "authenticated actor ID required");
-  assert.equal(issue.user?.id, actorId, "retry Objective belongs to another actor");
-  assert.equal(status.objective?.number, issue.number, "status belongs to another Objective");
-  assert.ok(typeof runId === "string" && runId.length > 0, "prior run ID required");
-  assert.equal(status.run?.runId, runId, "latest run differs from acknowledged failed run");
-  assert.equal(status.run?.state, "escalated", "retry requires a terminal escalated run");
-  assert.equal(children.length, 0, "retry cannot replace existing Work Items");
-  assert.equal(status.workItems?.length, 0, "retry cannot replace projected work");
-  assert.equal(status.summary?.attempts?.total, 0, "retry cannot replace attempted work");
-  const beforeCompilation = new Set([
-    "FactoryRunStarted",
-    "ControllerObserved",
-    "DeliverySelected",
-    "FactoryRunEscalated",
-    "BudgetReserved",
-    "BudgetReconciled",
-  ]);
-  assert.ok(
-    events.some((event) => event.runId === runId && event.event === "FactoryRunEscalated"),
-    "missing terminal failure receipt",
-  );
-  assert.ok(
-    events.every((event) => beforeCompilation.has(event.event)),
-    "retry requires failure before graph or execution receipts",
-  );
 }
 
 /** Read-only comparison; legacy evidence retains its original bytes and source identity. */
@@ -1036,7 +1008,8 @@ export async function main(
     qualification.namespace ?? env.FACTORY_LIVE_OBJECTIVE_NAMESPACE,
   );
   const fixturePaths = qualificationPaths(namespace);
-  const runObjectiveBody = qualification.objectiveBody ?? objectiveBodyFor(namespace);
+  const runObjectiveBody =
+    qualification.objectiveBody ?? objectiveBodyFor(namespace, "trusted_local");
   assert.ok(
     runObjectiveBody.includes(qualificationNamespaceMarker(namespace)) &&
       fixturePaths.files.every((path) => runObjectiveBody.includes(path)),

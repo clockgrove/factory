@@ -5,7 +5,6 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import {
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -21,6 +20,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { installedPluginRoot, optionalHostQualification } from "./qualify-linux-host.mjs";
 import { qualifyInstalledForegroundReconnect } from "./qualification-foreground-reconnect.mjs";
+import { stagePluginPackage } from "./plugin-package.mjs";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const codexCommand = process.env.FACTORY_CODEX_COMMAND || "codex";
@@ -28,32 +28,6 @@ const temporaryRoot = mkdtempSync(join(tmpdir(), "factory-plugin-install-"));
 const marketplaceRoot = join(temporaryRoot, "marketplace");
 const stagedRoot = join(marketplaceRoot, "plugins", "factory");
 const codexHome = join(temporaryRoot, "codex-home");
-
-// Supported Codex Git marketplace installations may use a cone-mode sparse
-// checkout: root files remain, while plugin directories must be one of the
-// selected component roots below. Keep this staged install aligned with that
-// path so arbitrary top-level directories cannot pass verification and then
-// disappear from a sparse installation.
-const shippedEntries = [
-  ".agents",
-  ".claude-plugin",
-  ".codex-plugin",
-  ".github",
-  ".mcp.json",
-  "CONTRIBUTING.md",
-  "LICENSE",
-  "README.md",
-  "THIRD_PARTY_NOTICES.txt",
-  "assets",
-  "bin",
-  "dist",
-  "docs",
-  "mcp.json",
-  "package.json",
-  "plugin.json",
-  "schemas",
-  "skills",
-];
 
 function cleanEnvironment() {
   const result = {};
@@ -78,15 +52,6 @@ function cleanEnvironment() {
     DAYTONA_API_KEY: "",
     VERCEL_OIDC_TOKEN: "",
   };
-}
-
-function copyPackage() {
-  mkdirSync(stagedRoot, { recursive: true });
-  for (const entry of shippedEntries) {
-    const source = join(sourceRoot, entry);
-    if (!existsSync(source)) throw new Error(`shipped entry is missing: ${entry}`);
-    cpSync(source, join(stagedRoot, entry), { recursive: true });
-  }
 }
 
 function run(command, args, options = {}) {
@@ -225,7 +190,10 @@ async function inspectMcp(command, args, cwd, options = {}) {
 }
 
 async function main() {
-  copyPackage();
+  // Repository-owned CI stays in the source checkout. Stage and inspect the
+  // actual plugin surface so only plugin marketplace metadata under .github
+  // can enter an installed package.
+  stagePluginPackage(sourceRoot, stagedRoot);
   mkdirSync(join(marketplaceRoot, ".agents", "plugins"), { recursive: true });
   mkdirSync(codexHome, { recursive: true });
   const marketplace = {

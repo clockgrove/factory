@@ -1,6 +1,33 @@
 export function regularQualification(
   env: Record<string, string | undefined>,
 ): Record<string, unknown> | null;
+export function observeRegularLocalScopeCapability(
+  input: {
+    factoryCli: string;
+    checkout: string;
+    environment?: NodeJS.ProcessEnv;
+  },
+  observe?: (input: {
+    factoryCli: string;
+    checkout: string;
+    environment?: NodeJS.ProcessEnv;
+  }) => unknown,
+): Promise<unknown>;
+export function enterRegularQualification(
+  input: {
+    evidence: Record<string, unknown>;
+    save: () => void;
+    factoryCli: string;
+    checkout: string;
+    environment?: NodeJS.ProcessEnv;
+    profile: string;
+  },
+  observe?: (input: {
+    factoryCli: string;
+    checkout: string;
+    environment?: NodeJS.ProcessEnv;
+  }) => unknown,
+): Promise<void>;
 export function assertRegularCompletion(evidence: unknown): void;
 export function assertRegularPipelineCompletion(
   evidence: unknown,

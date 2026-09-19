@@ -74,6 +74,10 @@ export function assessQualificationPreflight(input: unknown): {
   blockers: string[];
   requiredMinimumRemaining: { core: number; graphql: number };
 };
+export function applyQualificationScenarioPreflight(
+  preflight: { result: "passed" | "blocked"; blockers: string[]; scenario?: unknown },
+  scenario: { result: "passed" | "blocked"; blocker?: string; reason?: string },
+): { result: "passed" | "blocked"; blockers: string[]; scenario?: unknown };
 export function assertMcpSurface(tools: unknown): void;
 export function assertRetryableObjective(input: unknown): void;
 export function qualificationFailure(evidence: unknown, error: unknown): unknown;

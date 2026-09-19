@@ -57,6 +57,7 @@ import { readRepositoryFacts } from "./repository-profiles/index.js";
 import { compilerEvalDigest } from "./evaluation/compiler-eval.js";
 import { inspectRepositoryCaptureCatalogForRepository } from "./toolchains/compiler-capabilities.js";
 import { inspectCompilerPreflight } from "./application/compiler-preflight.js";
+import { discoverLocalScopeHost } from "./runtime/local-scope.js";
 
 const controllerLifecycle = new SystemdControllerLifecycle(
   new SystemdUserService({
@@ -93,6 +94,7 @@ const USAGE = [
   "  factory management probe",
   "  factory validate-captures [FILE]  (canonical .factory/validation-captures.json validation)",
   "  factory compiler-preflight --repo DIR --base-sha SHA [--policy FILE|-]  (read-only)",
+  "  factory local-scope-preflight  (read-only)",
   "  factory toolchains provision npm|pnpm|bun|uv|all",
   "  factory toolchains restore RECEIPT.json",
   "  factory toolchains status",
@@ -805,6 +807,32 @@ async function compilerPreflightCommand(args: string[]): Promise<void> {
   if (result.result !== "passed") process.exitCode = 2;
 }
 
+const durableLocalScopeDiagnostic =
+  "durable local-scope qualification requires Linux systemd 254+ and a reachable user systemd manager; run Factory from the Linux or WSL host where `systemctl --user` is available";
+
+async function localScopePreflightCommand(args: string[]): Promise<void> {
+  if (args.length > 0) fail("usage: factory local-scope-preflight");
+  const available = (await discoverLocalScopeHost()) !== null;
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        protocol: "clockgrove.factory/local-scope-preflight-v1",
+        result: available ? "passed" : "blocked",
+        capability: "durable-local-scopes",
+        ...(available
+          ? {}
+          : {
+              blocker: "durable-local-scopes-unavailable",
+              reason: durableLocalScopeDiagnostic,
+            }),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  if (!available) process.exitCode = 2;
+}
+
 async function inspectPriorityFields(args: string[]): Promise<void> {
   if (!args[0]) fail("usage: factory priority-fields OWNER/REPO");
   const repository = parseRepository(args[0]);
@@ -882,6 +910,10 @@ export async function main(argv: string[]): Promise<void> {
   }
   if (command === "compiler-preflight") {
     await compilerPreflightCommand(rest);
+    return;
+  }
+  if (command === "local-scope-preflight") {
+    await localScopePreflightCommand(rest);
     return;
   }
   if (command === "toolchains") {

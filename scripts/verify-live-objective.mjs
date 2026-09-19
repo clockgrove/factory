@@ -223,6 +223,15 @@ export function assessQualificationPreflight(input) {
   };
 }
 
+export function applyQualificationScenarioPreflight(preflight, scenario) {
+  preflight.scenario = scenario;
+  if (scenario.result !== "passed") {
+    preflight.result = "blocked";
+    preflight.blockers.push(scenario.blocker ?? "scenario-precondition-unobserved");
+  }
+  return preflight;
+}
+
 export function installedIdentity({
   manifest,
   portable,
@@ -1169,18 +1178,20 @@ export async function main(
       graphql: rateLimit.graphql,
     },
   };
-  // Opt-in scenario evidence is collected before any Objective creation/model call.
-  // Hookless native and explicit-regular qualification retain their original path.
+  // Qualification-specific scenario evidence is collected before any Objective
+  // creation or model call; hookless scenarios retain the shared path.
   if (qualification.observePreflight) {
-    preflight.scenario = await qualification.observePreflight({
-      request,
-      repository,
-      actor: { id: actor.id, login: actor.login },
-    });
-    if (preflight.scenario.result !== "passed") {
-      preflight.result = "blocked";
-      preflight.blockers.push("scenario-precondition-unobserved");
-    }
+    applyQualificationScenarioPreflight(
+      preflight,
+      await qualification.observePreflight({
+        request,
+        repository,
+        actor: { id: actor.id, login: actor.login },
+        factoryCli: candidate.factoryCli,
+        checkout,
+        environment: runtimeEnvironment,
+      }),
+    );
   }
   const output = resolve(required(env, "FACTORY_LIVE_OBJECTIVE_EVIDENCE"));
   mkdirSync(output, { recursive: true, mode: 0o700 });
@@ -1274,7 +1285,19 @@ export async function main(
     );
     const tools = (await client.listTools()).tools;
     assertMcpSurface(tools);
-    const hooks = { call, request, octokit, evidence, checkout, owner, repo, save, tools };
+    const hooks = {
+      call,
+      request,
+      octokit,
+      evidence,
+      checkout,
+      owner,
+      repo,
+      save,
+      tools,
+      factoryCli: candidate.factoryCli,
+      environment: runtimeEnvironment,
+    };
     if (qualification.beforeRun) await qualification.beforeRun(hooks);
     evidence.objective = (
       await request("POST /repos/{owner}/{repo}/issues", {

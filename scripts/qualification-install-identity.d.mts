@@ -25,6 +25,29 @@ export function installedCompilerPreflight(
   toolchains: unknown[];
   validation: { status: string; violations: Array<{ code: string }> };
 };
+export function installedLocalScopePreflight(
+  input: {
+    factoryCli: string;
+    checkout: string;
+    environment?: NodeJS.ProcessEnv;
+  },
+  execute?: (
+    command: string,
+    args: string[],
+    options: Record<string, unknown>,
+  ) => {
+    stdout: string;
+    status: number | null;
+    signal: NodeJS.Signals | null;
+    error?: Error;
+  },
+): {
+  protocol: "clockgrove.factory/local-scope-preflight-v1";
+  result: "passed" | "blocked";
+  capability: "durable-local-scopes";
+  blocker?: "durable-local-scopes-unavailable";
+  reason?: string;
+};
 export function parseQualificationInstallReceipt(text: string): Record<string, string>;
 export function qualificationPluginListEnvironment(
   environment: NodeJS.ProcessEnv,

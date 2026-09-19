@@ -11,6 +11,7 @@ import {
   modelTokenLimit,
 } from "./verify-live-objective.mjs";
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
+import { installedLocalScopePreflight } from "./qualification-install-identity.mjs";
 import {
   assertNativeMergeProof,
   observeNativeMergeProofs,
@@ -34,6 +35,25 @@ const canonical = (value) => {
       .join(",")}}`;
   return JSON.stringify(value);
 };
+
+export async function observeRegularLocalScopeCapability(
+  input,
+  observe = installedLocalScopePreflight,
+) {
+  return observe(input);
+}
+
+export async function enterRegularQualification(
+  { evidence, save, factoryCli, checkout, environment, profile },
+  observe = installedLocalScopePreflight,
+) {
+  const capability = await observe({ factoryCli, checkout, environment });
+  evidence.liveLocalScopeCapability = capability;
+  save();
+  assert.equal(capability.result, "passed", capability.reason);
+  evidence.regularBackendProfile = profile;
+  evidence.nativeDefaultBranch = evidence.preflight?.defaultBranch;
+}
 function eventsOf(evidence) {
   return deduplicateQualificationReceipts(
     evidence.events
@@ -67,10 +87,8 @@ export function regularQualification(env) {
     scope,
     policy,
     privateEvidence: true,
-    beforeRun: async ({ evidence }) => {
-      evidence.regularBackendProfile = profile;
-      evidence.nativeDefaultBranch = evidence.preflight?.defaultBranch;
-    },
+    observePreflight: observeRegularLocalScopeCapability,
+    beforeRun: (input) => enterRegularQualification({ ...input, profile }),
     observeMergeProofs: observeNativeMergeProofs,
     assessCompletion: assessRegularCompletion,
     afterRun: observeRegularCommits,

@@ -21168,8 +21168,13 @@ export class FactorySupervisor {
       const elapsed = phaseStart ? Math.max(0, Date.now() - new Date(phaseStart).getTime()) : 0;
       const ambiguousPaidLaunch =
         budget.phase === "execution" && budget.unit === "sandbox_milliseconds" && !started;
+      const ambiguousAppServerLaunch =
+        budget.phase === "execution" &&
+        budget.unit === "local_milliseconds" &&
+        reservation.backend === "codex-app-server/local-worktree" &&
+        !started;
       const amount =
-        budget.unit === "managed_sessions" || ambiguousPaidLaunch
+        budget.unit === "managed_sessions" || ambiguousPaidLaunch || ambiguousAppServerLaunch
           ? budget.amount
           : Math.min(budget.amount, elapsed);
       await this.#lease.use(async (lease) => {
@@ -21182,29 +21187,68 @@ export class FactorySupervisor {
           unit: budget.unit,
           phase: budget.phase,
           amount,
+          ...(ambiguousAppServerLaunch
+            ? {
+                usageEvidence: "conservative-reservation" as const,
+                reason:
+                  "The durable App Server turn proves dispatch before the AttemptStarted receipt; charging the original reserved duration as the bounded upper limit",
+              }
+            : {}),
         });
         this.#budgetEvents.push(event);
       });
     }
-    if (this.#hasUnfinishedAttempt(item))
-      await this.#lease.use((lease) =>
-        this.#attempts.record({
-          lease,
-          workItemNodeId: item.id,
-          reservation,
-          event: terminalEvent,
-          sequence: this.#sequences.take(),
-          reason:
-            terminalEvent === "AttemptCancelled"
-              ? "operator cancellation interrupted the recovered attempt"
-              : terminalEvent === "AttemptTimedOut"
-                ? "objective deadline interrupted the recovered attempt"
-                : terminalEvent === "AttemptFailed"
-                  ? "the recovered App Server attempt lacked an authoritative complete terminal result"
-                  : "controller retirement deferred the recovered attempt",
-          allowRecovery: true,
-        }),
-      );
+    if (this.#hasUnfinishedAttempt(item)) {
+      const reason =
+        terminalEvent === "AttemptCancelled"
+          ? "operator cancellation interrupted the recovered attempt"
+          : terminalEvent === "AttemptTimedOut"
+            ? "objective deadline interrupted the recovered attempt"
+            : terminalEvent === "AttemptFailed"
+              ? "the recovered App Server attempt lacked an authoritative complete terminal result"
+              : "controller retirement deferred the recovered attempt";
+      try {
+        await this.#lease.use((lease) =>
+          this.#attempts.record({
+            lease,
+            workItemNodeId: item.id,
+            reservation,
+            event: terminalEvent,
+            sequence: this.#sequences.take(),
+            reason,
+            allowRecovery: true,
+          }),
+        );
+      } catch (error) {
+        const observed = await this.#reader.readObjective(this.#run.objective);
+        this.#fenceSnapshot(observed);
+        this.#sequences.observe(snapshotEvents(observed));
+        const observedItem = this.#deriveObjective(observed).items.find(
+          (candidate) => candidate.id === item.id && candidate.number === item.number,
+        );
+        const terminal = (observedItem?.factoryEvents ?? []).filter(
+          (event) =>
+            event.kind === "attempt" &&
+            event.runId === reservation.runId &&
+            event.workItem === reservation.workItem &&
+            event.attempt === reservation.attempt &&
+            ["AttemptFailed", "AttemptTimedOut", "AttemptCancelled", "AttemptDeferred"].includes(
+              event.event,
+            ),
+        );
+        const exact = terminal.filter(
+          (event) =>
+            event.kind === "attempt" &&
+            event.event === terminalEvent &&
+            event.reason === reason &&
+            event.backend === reservation.backend &&
+            event.baseSha === reservation.baseSha &&
+            event.directorEpoch === reservation.directorEpoch &&
+            event.policyDigest === reservation.policyDigest,
+        );
+        if (terminal.length !== 1 || exact.length !== 1) throw error;
+      }
+    }
     const capacity = await this.#capacitySnapshot();
     for (const held of capacity.reservations.filter(
       (held) =>

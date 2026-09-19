@@ -13,6 +13,7 @@ import {
 import type { AttemptContext, BackendHandle } from "../src/execution/backend.js";
 import { durableAttemptId } from "../src/execution/session.js";
 import {
+  canonicalSessionJson,
   parseAppServerSessionCheckpoint,
   type AppServerSessionCheckpoint,
   type AppServerSessionStage,
@@ -22,6 +23,7 @@ import { readLocalResourceHostIdentity } from "../src/recovery/local-resources.j
 import { LocalScopeBatchSchema } from "../src/protocol/local-scope.js";
 import {
   AppServerSessionManager,
+  MAX_APP_SERVER_SESSION_CHECKPOINT_BYTES,
   appServerSessionRef,
 } from "../src/control/app-server-sessions.js";
 import type { CompiledGraphStore } from "../src/control/graphs.js";
@@ -51,6 +53,8 @@ interface FakeOptions {
     connection: FakeConnection,
     input: { threadId: string; turnId: string },
   ) => void;
+  beforeThreadRead?: () => Promise<void>;
+  afterClose?: (connection: FakeConnection) => void;
 }
 const storedThreads = new Map<string, Record<string, unknown>>();
 
@@ -110,6 +114,7 @@ class FakeConnection implements AppServerConnection {
       return { turn: { id: `turn-${this.name}`, status: "inProgress", items: [] } } as T;
     }
     if (method === "thread/read") {
+      await this.options.beforeThreadRead?.();
       if (this.options.failResume) throw new Error("thread is no longer active");
       const threadId = (params as { threadId: string }).threadId;
       return {
@@ -174,6 +179,7 @@ class FakeConnection implements AppServerConnection {
   async close(): Promise<void> {
     if (this.closedByClient) return;
     this.closedByClient = true;
+    this.options.afterClose?.(this);
     this.#resolveClosed({ exitCode: 0, signal: null, stderr: "" });
   }
 }
@@ -314,7 +320,7 @@ function factory(
     resolveCodexHome: (identity) => join(root, durableAttemptId(identity)),
     connect: (home) => {
       const found = connections.get(home);
-      if (found) return found;
+      if (found && !found.closedByClient) return found;
       const connection = new FakeConnection(String(connections.size + 1), options);
       connections.set(home, connection);
       return connection;
@@ -652,7 +658,7 @@ describe("Codex App Server local backend", () => {
     await backend.cleanup(handle);
   });
 
-  it("recovers an exact provider completion after the live connection closes", async () => {
+  it("recovers terminal authority but not usage authority after the live connection closes", async () => {
     const options: FakeOptions = { resumeTurns: [] };
     const connections = new Map<string, FakeConnection>();
     const backend = factory(join(suiteRoot, "closed-terminal-read"), connections, options);
@@ -706,15 +712,18 @@ describe("Codex App Server local backend", () => {
     await waitForState(backend, handle, "succeeded");
     expect(await backend.observe(handle)).toMatchObject({
       state: "succeeded",
-      usage: { inputTokens: 14, outputTokens: 3, cachedInputTokens: 5 },
+      usage: { inputTokens: null, outputTokens: null, cachedInputTokens: null },
     });
-    expect(connection.calls.filter(({ method }) => method === "thread/read")).toHaveLength(1);
+    const reader = connections.get(handle.metadata!.codexHome!)!;
+    expect(reader).not.toBe(connection);
+    expect(reader.calls.filter(({ method }) => method === "thread/read")).toHaveLength(1);
     expect(connection.calls.filter(({ method }) => method === "turn/interrupt")).toHaveLength(0);
     expect(await ctx.sessionJournal!.load("terminal")).toMatchObject({
       state: "succeeded",
       providerStatus: "completed",
-      usageStreamComplete: true,
+      usageStreamComplete: false,
     });
+    expect((await ctx.sessionJournal!.load("terminal"))!.usage).toBeUndefined();
     await backend.cleanup(handle);
   });
 
@@ -757,7 +766,10 @@ describe("Codex App Server local backend", () => {
     options.resumeTurns = [{ id: handle.metadata!.turnId, status: "inProgress", items: [] }];
 
     await waitForState(backend, handle, "timed_out");
-    expect(connection.calls.filter(({ method }) => method === "thread/read")).toHaveLength(2);
+    const reader = connections.get(handle.metadata!.codexHome!)!;
+    expect(reader).not.toBe(connection);
+    expect(connection.calls.filter(({ method }) => method === "thread/read")).toHaveLength(1);
+    expect(reader.calls.filter(({ method }) => method === "thread/read")).toHaveLength(1);
     expect(connection.calls.filter(({ method }) => method === "turn/interrupt")).toHaveLength(1);
     expect(await ctx.sessionJournal!.load("terminal")).toMatchObject({
       state: "timed_out",
@@ -765,6 +777,66 @@ describe("Codex App Server local backend", () => {
     });
     await backend.cleanup(handle);
     expect(connection.calls.filter(({ method }) => method === "turn/interrupt")).toHaveLength(1);
+  });
+
+  it("keeps the deadline latch while its read-first observation is pending", async () => {
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const options: FakeOptions = {
+      resumeTurns: [],
+      beforeThreadRead: () => readGate,
+    };
+    const connections = new Map<string, FakeConnection>();
+    const backend = factory(join(suiteRoot, "deadline-pending-read"), connections, options);
+    const ctx = await context(118);
+    deadlineIn(ctx, 40);
+    const handle = await backend.launch(ctx);
+    const connection = connections.get(handle.metadata!.codexHome!)!;
+    options.resumeTurns = [{ id: handle.metadata!.turnId, status: "inProgress", items: [] }];
+    for (let check = 0; check < 100; check += 1) {
+      if (connection.calls.some(({ method }) => method === "thread/read")) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+    }
+    expect(connection.calls.filter(({ method }) => method === "thread/read")).toHaveLength(1);
+
+    finish(connection, handle, { outcome: "succeeded", summary: "late notification" });
+    expect(await backend.observe(handle)).toMatchObject({ state: "running" });
+    releaseRead();
+
+    await waitForState(backend, handle, "timed_out");
+    expect(await backend.observe(handle)).toMatchObject({
+      state: "timed_out",
+      usage: { inputTokens: null, outputTokens: null },
+    });
+    expect(connection.calls.filter(({ method }) => method === "turn/interrupt")).toHaveLength(1);
+    await backend.cleanup(handle);
+  });
+
+  it("lets actual deadline time win when the timer callback is delayed", async () => {
+    const connections = new Map<string, FakeConnection>();
+    const backend = factory(join(suiteRoot, "deadline-delayed-callback"), connections);
+    const ctx = await context(119);
+    const handle = await backend.launch(ctx);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(ctx.deadline.getTime());
+    try {
+      finish(connections.get(handle.metadata!.codexHome!)!, handle, {
+        outcome: "succeeded",
+        summary: "notification after actual deadline",
+      });
+      expect(await backend.observe(handle)).toMatchObject({
+        state: "timed_out",
+        usage: { inputTokens: 10, outputTokens: 2 },
+      });
+      expect(await ctx.sessionJournal!.load("terminal")).toMatchObject({
+        state: "timed_out",
+        providerStatus: "completed",
+      });
+    } finally {
+      clock.mockRestore();
+      await backend.cleanup(handle);
+    }
   });
 
   it("retains exact usage when provider completion races the deadline interrupt", async () => {
@@ -850,6 +922,54 @@ describe("Codex App Server local backend", () => {
     expect(connection.calls.filter(({ method }) => method === "turn/interrupt")).toHaveLength(1);
     expect(connection.closedByClient).toBe(true);
     expect(await ctx.sessionJournal!.load("terminal")).toBeNull();
+    await backend.cleanup(handle);
+  });
+
+  it("closes the live process before the fresh final fenced read", async () => {
+    const options: FakeOptions = {
+      failInterrupt: true,
+      resumeTurns: [],
+      afterClose: (closed) => {
+        if (closed.name !== "1") return;
+        options.resumeTurns = [
+          {
+            id: "turn-1",
+            status: "completed",
+            items: [
+              {
+                type: "agentMessage",
+                id: "message-after-close",
+                text: JSON.stringify({
+                  outcome: "succeeded",
+                  summary: "terminal persisted while closing",
+                  commands: [],
+                  findings: [],
+                }),
+              },
+            ],
+            error: null,
+          },
+        ];
+      },
+    };
+    const connections = new Map<string, FakeConnection>();
+    const backend = factory(join(suiteRoot, "deadline-close-then-read"), connections, options);
+    const ctx = await context(120);
+    deadlineIn(ctx, 40);
+    const handle = await backend.launch(ctx);
+    const connection = connections.get(handle.metadata!.codexHome!)!;
+    options.resumeTurns = [{ id: handle.metadata!.turnId, status: "inProgress", items: [] }];
+
+    await waitForState(backend, handle, "timed_out");
+    const reader = connections.get(handle.metadata!.codexHome!)!;
+    expect(connection.closedByClient).toBe(true);
+    expect(reader).not.toBe(connection);
+    expect(reader.calls.filter(({ method }) => method === "thread/read")).toHaveLength(1);
+    expect(await ctx.sessionJournal!.load("terminal")).toMatchObject({
+      state: "timed_out",
+      providerStatus: "completed",
+      usageStreamComplete: true,
+    });
     await backend.cleanup(handle);
   });
 
@@ -1214,9 +1334,39 @@ describe("Codex App Server local backend", () => {
     });
     await backend.observe(handle);
     await backend.cleanup(handle);
-    const prepared = (await ctx.sessionJournal!.load("prepared"))!,
-      turn = (await ctx.sessionJournal!.load("turn"))!,
-      terminal = (await ctx.sessionJournal!.load("terminal"))!;
+    const prepared = (await ctx.sessionJournal!.load("prepared"))!;
+    const turn = (await ctx.sessionJournal!.load("turn"))!;
+    const maximalFinding = {
+      protocol: "clockgrove.factory/finding-v1" as const,
+      phase: "worker" as const,
+      failureClass: "maximal-fixture",
+      supportedBehavior: "s".repeat(2_000),
+      observedBehavior: "o".repeat(4_000),
+      reproduction: Array.from({ length: 16 }, () => "r".repeat(1_000)),
+      impact: "i".repeat(2_000),
+      possibleCause: "c".repeat(2_000),
+      evidence: Array.from({ length: 16 }, () => ({
+        kind: "worker-packet" as const,
+        digest: "a".repeat(64),
+        path: "p".repeat(500),
+      })),
+      commonCauseEvidence: Array.from({ length: 8 }, () => "b".repeat(64)),
+    };
+    const terminal = parseAppServerSessionCheckpoint({
+      ...(await ctx.sessionJournal!.load("terminal"))!,
+      final: {
+        outcome: "succeeded",
+        summary: "s".repeat(8_000),
+        commands: Array.from({ length: 128 }, (_, index) => ({
+          command: `${index} ${"c".repeat(990)}`,
+          exitCode: 0,
+        })),
+        findings: Array.from({ length: 16 }, () => structuredClone(maximalFinding)),
+      },
+    });
+    const terminalBytes = Buffer.byteLength(canonicalSessionJson(terminal));
+    expect(terminalBytes).toBeGreaterThan(192 * 1024);
+    expect(terminalBytes).toBeLessThanOrEqual(MAX_APP_SERVER_SESSION_CHECKPOINT_BYTES);
     const refs = new Map<string, string>(),
       blobs = new Map<string, Buffer>(),
       trees = new Map<string, Map<string, string>>(),

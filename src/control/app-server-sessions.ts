@@ -12,7 +12,8 @@ import {
 import { PlatformUnavailableError } from "../platform.js";
 
 const PATH = ".clockgrove-factory/control/app-server-session.json";
-const MAX_BYTES = 192 * 1024;
+/** Covers the complete bounded packet, response ledger, commands, and findings schema. */
+export const MAX_APP_SERVER_SESSION_CHECKPOINT_BYTES = 64 * 1024 * 1024;
 export function appServerSessionRef(
   repository: string,
   reservation: AttemptReservation,
@@ -87,7 +88,7 @@ export class AppServerSessionManager {
     if (!blob) throw new Error("durable session checkpoint document is missing");
     const bytes = await this.store.readBlob(blob);
     if (
-      bytes.length > MAX_BYTES ||
+      bytes.length > MAX_APP_SERVER_SESSION_CHECKPOINT_BYTES ||
       createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex") !== blob
     )
       throw new Error("durable session checkpoint blob is invalid");
@@ -113,7 +114,7 @@ export class AppServerSessionManager {
     )
       throw new Error("durable session write is fenced from current run ownership");
     const bytes = Buffer.from(canonicalSessionJson(checkpoint));
-    if (bytes.length > MAX_BYTES)
+    if (bytes.length > MAX_APP_SERVER_SESSION_CHECKPOINT_BYTES)
       throw new Error("durable session checkpoint exceeds its byte bound");
     const existing = await this.load(args.repository, args.reservation, checkpoint.stage);
     if (existing) {

@@ -13,9 +13,9 @@ import {
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
 import { installedLocalScopePreflight } from "./qualification-install-identity.mjs";
 import {
-  assertNativeMergeProof,
-  observeNativeMergeProofs,
-} from "./qualification-sibling-refresh-proof.mjs";
+  assertSettledQualificationMergeProof,
+  observeSettledQualificationMergeProofs,
+} from "./qualification-settled-merge-proof.mjs";
 
 const scope = "installed-local-explicit-regular-objective";
 function regularPolicy(profile, ceiling) {
@@ -89,7 +89,12 @@ export function regularQualification(env) {
     privateEvidence: true,
     observePreflight: observeRegularLocalScopeCapability,
     beforeRun: (input) => enterRegularQualification({ ...input, profile }),
-    observeMergeProofs: observeNativeMergeProofs,
+    observeMergeProofs: ({ evidence, request }) =>
+      observeSettledQualificationMergeProofs({
+        entry: evidence,
+        request,
+        repository: evidence.repository,
+      }),
     assessCompletion: assessRegularCompletion,
     afterRun: observeRegularCommits,
   };
@@ -138,7 +143,7 @@ export function assertRegularCompletion(evidence) {
 export function assertRegularPipelineCompletion(evidence, { expected, scope, deliveryMode }) {
   assert.ok(["regular-prs", "native-fallback"].includes(deliveryMode));
   assertQualificationCompletion(evidence, deliveryMode, expected.backendOrder, (proof, input) =>
-    assertNativeMergeProof(evidence, proof, input),
+    assertSettledQualificationMergeProof(proof, input),
   );
   assert.equal(evidence.scope, scope, "qualification scope differs");
   assertRecordedQualificationPolicy(evidence.policy, expected);
@@ -247,11 +252,17 @@ export function assertRegularPipelineCompletion(evidence, { expected, scope, del
     }
     base = integration.headSha;
   }
+  const reservations = events.filter((event) => event.event === "AttemptReserved");
   const attempts = events.filter((event) => event.event === "AttemptStarted");
   assert.equal(
     new Set(attempts.map((event) => JSON.stringify([event.workItem, event.attempt]))).size,
     attempts.length,
     "duplicate worker launch identity",
+  );
+  assert.equal(
+    new Set(reservations.map((event) => JSON.stringify([event.workItem, event.attempt]))).size,
+    reservations.length,
+    "duplicate worker reservation identity",
   );
   const completion = events.find((event) => event.event === "FactoryRunCompleted");
   const usages = events.filter(
@@ -279,6 +290,18 @@ export function assertRegularPipelineCompletion(evidence, { expected, scope, del
   }
   for (const attempt of attempts) {
     assert.equal(attempt.policyDigest, start.policyDigest, "worker policy binding differs");
+    const reserved = reservations.filter(
+      (event) => event.workItem === attempt.workItem && event.attempt === attempt.attempt,
+    );
+    assert.equal(reserved.length, 1, "worker lacks one exact reservation");
+    assert.ok(reserved[0].sequence < attempt.sequence, "worker started before its reservation");
+    assert.equal(reserved[0].backend, attempt.backend, "worker backend differs from reservation");
+    assert.equal(reserved[0].baseSha, attempt.baseSha, "worker base differs from reservation");
+    assert.equal(
+      reserved[0].policyDigest,
+      attempt.policyDigest,
+      "worker policy differs from reservation",
+    );
     const outcome = integrated.find((event) => event.workItem === attempt.workItem);
     assert.ok(
       outcome && attempt.sequence < outcome.sequence,
@@ -330,14 +353,17 @@ export function assessRegularCompletion(evidence) {
   try {
     assertRegularCompletion(evidence);
     return { result: "passed", scope };
-  } catch {
+  } catch (error) {
     return {
       result: ["cancelled", "escalated"].includes(evidence?.status?.run?.state)
         ? "failed"
         : "incomplete",
       scope,
       reason:
-        "Explicit regular delivery evidence is incomplete or conflicting; inspect private receipts",
+        `Explicit regular delivery evidence failed: ${error instanceof Error ? error.message : String(error)}`.slice(
+          0,
+          2000,
+        ),
     };
   }
 }

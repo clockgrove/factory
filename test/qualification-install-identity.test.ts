@@ -305,7 +305,33 @@ describe("retained qualification install authority", () => {
       { linuxHome: defaultHome },
     );
     expect(runtime.CODEX_HOME).toBe(defaultCodexHome);
+    expect(runtime.XDG_RUNTIME_DIR).toBe(`/run/user/${process.getuid?.()}`);
     expect(runtime).not.toHaveProperty("FACTORY_QUALIFICATION_INSTALL_RECEIPT");
+  });
+
+  it("derives the user runtime directory and rejects additions that could replace it", () => {
+    const value = fixture();
+    const runtimeHome = join(value.root, "runtime-home");
+    mkdirSync(join(runtimeHome, ".codex"), { recursive: true, mode: 0o700 });
+    const uid = process.getuid?.();
+    if (uid === undefined) throw new Error("effective Linux uid unavailable");
+
+    const runtime = qualificationRuntimeEnvironment(
+      { XDG_RUNTIME_DIR: join(value.root, "ambient-substitution") },
+      { linuxHome: runtimeHome, uid },
+    );
+    expect(runtime.XDG_RUNTIME_DIR).toBe(`/run/user/${uid}`);
+
+    expect(() =>
+      qualificationRuntimeEnvironment(
+        {},
+        {
+          linuxHome: runtimeHome,
+          uid,
+          additions: { XDG_RUNTIME_DIR: join(value.root, "addition-substitution") },
+        },
+      ),
+    ).toThrow(/XDG_RUNTIME_DIR cannot be overridden/);
   });
 
   it("preserves validated private transcripts without changing provider or artifact authority", () => {

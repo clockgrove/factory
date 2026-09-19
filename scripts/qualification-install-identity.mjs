@@ -298,6 +298,7 @@ export function qualificationRuntimeEnvironment(
   for (const key of [
     "HOME",
     "CODEX_HOME",
+    "XDG_RUNTIME_DIR",
     QUALIFICATION_INSTALL_RECEIPT_ENV,
     QUALIFICATION_MANAGEMENT_TRANSCRIPT_ENV,
   ])
@@ -336,6 +337,7 @@ export function qualificationRuntimeEnvironment(
   return {
     HOME: linuxHome,
     CODEX_HOME: codexHome,
+    XDG_RUNTIME_DIR: `/run/user/${uid}`,
     LANG: "C",
     LC_ALL: "C",
     PATH: environment.PATH ?? "/usr/local/bin:/usr/bin:/bin",

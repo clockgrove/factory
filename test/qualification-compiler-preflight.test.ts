@@ -1,13 +1,20 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   installedCompilerPreflight,
   installedLocalScopePreflight,
+  qualificationRuntimeEnvironment,
 } from "../scripts/qualification-install-identity.mjs";
 
 const baseSha = "a".repeat(40);
 const digest = "b".repeat(64);
+const temporaryRoots: string[] = [];
+
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 function execution(report: unknown, status: number) {
   return {
@@ -180,6 +187,41 @@ describe("installed local-scope qualification boundary", () => {
         stdio: ["ignore", "pipe", "pipe"],
       }),
     );
+  });
+
+  it("carries the derived user runtime directory into the retained CLI process", () => {
+    const root = mkdtempSync(join(tmpdir(), "factory-local-scope-environment-"));
+    temporaryRoots.push(root);
+    const home = join(root, "home");
+    const checkout = join(root, "repository");
+    const factoryCli = join(root, "factory");
+    mkdirSync(join(home, ".codex"), { recursive: true, mode: 0o700 });
+    mkdirSync(checkout, { mode: 0o700 });
+    const uid = process.getuid?.();
+    if (uid === undefined) throw new Error("effective Linux uid unavailable");
+    writeFileSync(
+      factoryCli,
+      [
+        "#!/bin/sh",
+        'test "$1" = local-scope-preflight || exit 64',
+        `test "$XDG_RUNTIME_DIR" = /run/user/${uid} || exit 65`,
+        `printf '%s\\n' '${JSON.stringify(capability("passed"))}'`,
+      ].join("\n"),
+    );
+    chmodSync(factoryCli, 0o700);
+
+    const environment = qualificationRuntimeEnvironment(
+      {
+        PATH: "/usr/bin:/bin",
+        XDG_RUNTIME_DIR: join(root, "ambient-substitution"),
+      },
+      { linuxHome: home, uid },
+    );
+
+    expect(installedLocalScopePreflight({ factoryCli, checkout, environment })).toMatchObject({
+      result: "passed",
+      capability: "durable-local-scopes",
+    });
   });
 
   it("rejects a CLI exit/result disagreement", () => {

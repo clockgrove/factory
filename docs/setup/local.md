@@ -129,7 +129,7 @@ observed_factory_bundle_sha256="$(sha256sum -- "$installed_factory_root/dist/fac
 test "$observed_factory_bundle_sha256" = "$expected_factory_bundle_sha256"
 test "$(sha256sum -- "$installed_factory_root/dist/mcp-server.js" | cut -d' ' -f1)" = "$expected_mcp_bundle_sha256"
 controller_launcher_identity="sha256:$observed_factory_bundle_sha256"
-git archive --format=tar --output="$plugin_archive" "$source_commit"
+node "$candidate_root/scripts/plugin-package.mjs" archive --source "$candidate_root" --commit "$source_commit" --output "$plugin_archive"
 plugin_archive_sha256="$(sha256sum -- "$plugin_archive" | cut -d' ' -f1)"
 tar -xf "$plugin_archive" -C "$plugin_snapshot"
 test "$(node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(m.version)' "$plugin_snapshot/.codex-plugin/plugin.json")" = "$candidate_version"
@@ -176,9 +176,11 @@ printf 'Factory candidate root: %s\nFactory install identity receipt: %s\n' "$qu
 
 This path is for the authorized qualification sequence in
 [release verification](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md#release-verification-procedure).
-The release manifest,
-tarball, and plugin source snapshot are local candidate inputs; they are not evidence of a published
-package or GitHub Release. Run qualification in the required fresh installation environments, keep
+The release manifest, tarball, and selectively archived plugin source snapshot are local candidate
+inputs; they are not evidence of a published package or GitHub Release. The archive helper uses the
+same authoritative plugin surface as package verification, so repository CI and other development
+paths cannot enter the marketplace source or installed cache. Run qualification in the required
+fresh installation environments, keep
 its evidence private under ignored `release/evidence/`, and do not substitute a mutable worktree MCP
 override for the installed plugin cache path. The clean-tree check includes every visible untracked
 path; the ignored `release/` directory remains excluded. The npm install occurs only after the exact

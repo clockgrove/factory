@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -41,6 +42,48 @@ describe("packaged workflow boundary", () => {
 
     expect(() => assertNoPackagedWorkflows(packagedPaths(root), "fixture package")).toThrow(
       "fixture package includes Factory GitHub Actions workflows: .github/workflows, .github/workflows/quality.yml",
+    );
+  });
+
+  it("selectively archives and extracts the authoritative marketplace surface", () => {
+    const root = mkdtempSync(join(tmpdir(), "factory-plugin-archive-"));
+    temporaryRoots.push(root);
+    const archive = join(root, "plugin.tar");
+    const snapshot = join(root, "snapshot");
+    mkdirSync(snapshot);
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: sourceRoot,
+      encoding: "utf8",
+    }).trim();
+
+    execFileSync(process.execPath, [
+      join(sourceRoot, "scripts/plugin-package.mjs"),
+      "archive",
+      "--source",
+      sourceRoot,
+      "--commit",
+      commit,
+      "--output",
+      archive,
+    ]);
+    execFileSync("tar", ["-xf", archive, "-C", snapshot]);
+    const paths = packagedPaths(snapshot);
+
+    expect(paths).toContain(".github/plugin/marketplace.json");
+    expect(paths.some((path) => path.startsWith(".github/workflows"))).toBe(false);
+    expect(() => assertNoPackagedWorkflows(paths, "archive snapshot")).not.toThrow();
+  });
+
+  it.each([
+    "/.github/workflows/quality.yml",
+    "../.github/workflows/quality.yml",
+    ".github/../.github/workflows/quality.yml",
+    ".github//workflows/quality.yml",
+    "C:/repo/.github/workflows/quality.yml",
+    ".github\\workflows\\quality.yml",
+  ])("rejects a noncanonical package path %j", (path) => {
+    expect(() => assertNoPackagedWorkflows([path], "fixture package")).toThrow(
+      "package path is not canonical and relative",
     );
   });
 });

@@ -20,7 +20,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { installedPluginRoot, optionalHostQualification } from "./qualify-linux-host.mjs";
 import { qualifyInstalledForegroundReconnect } from "./qualification-foreground-reconnect.mjs";
-import { stagePluginPackage } from "./plugin-package.mjs";
+import { assertNoPackagedWorkflows, packagedPaths, stagePluginPackage } from "./plugin-package.mjs";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const codexCommand = process.env.FACTORY_CODEX_COMMAND || "codex";
@@ -221,6 +221,7 @@ async function main() {
   if (installedRoot === sourceRoot || installedRoot.startsWith(`${sourceRoot}${sep}`)) {
     throw new Error("clean install resolved back to the development worktree");
   }
+  assertNoPackagedWorkflows(packagedPaths(installedRoot), "installed plugin cache");
 
   const objectiveFormPath = join(installedRoot, "assets", "templates", "github", "objective.yml");
   const objectiveForm = readFileSync(objectiveFormPath, "utf8");

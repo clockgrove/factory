@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { pluginArchiveArguments } from "../../scripts/plugin-package.mjs";
 
 const sha256 = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");
 const roots: string[] = [];
@@ -66,11 +67,41 @@ export function createQualificationInstallFixture({
   writeQualificationFixtureFile(join(source, "package.json"), packageManifest);
   writeQualificationFixtureFile(join(source, "plugin.json"), portableManifest);
   writeQualificationFixtureFile(join(source, ".codex-plugin/plugin.json"), codexManifest);
+  writeQualificationFixtureFile(
+    join(source, ".agents/plugins/marketplace.json"),
+    '{"name":"clockgrove-factory","plugins":[]}\n',
+  );
+  writeQualificationFixtureFile(join(source, ".claude-plugin/plugin.json"), portableManifest);
+  writeQualificationFixtureFile(
+    join(source, ".github/plugin/marketplace.json"),
+    '{"name":"clockgrove","plugins":[]}\n',
+  );
+  writeQualificationFixtureFile(
+    join(source, ".github/workflows/quality.yml"),
+    "name: source-only CI\n",
+  );
+  writeQualificationFixtureFile(join(source, ".mcp.json"), "{}\n");
+  writeQualificationFixtureFile(join(source, "mcp.json"), "{}\n");
+  for (const path of [
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "README.md",
+    "THIRD_PARTY_NOTICES.txt",
+    "assets/fixture.txt",
+    "docs/fixture.md",
+    "schemas/fixture.json",
+    "skills/fixture/SKILL.md",
+  ])
+    writeQualificationFixtureFile(join(source, path), `fixture ${path}\n`);
   writeQualificationFixtureFile(join(source, "dist/factory.js"), factoryBundle, 0o700);
   writeQualificationFixtureFile(join(source, "dist/mcp-server.js"), mcpBundle, 0o700);
   writeQualificationFixtureFile(join(source, "dist/bundle-inventory.json"), inventory);
   writeQualificationFixtureFile(join(source, "bin/factory-mcp"), launcher, 0o700);
-  for (const path of new Set(["scripts/qualification-install-identity.mjs", ...harnessPaths]))
+  for (const path of new Set([
+    "scripts/qualification-install-identity.mjs",
+    "scripts/plugin-package.mjs",
+    ...harnessPaths,
+  ]))
     writeQualificationFixtureFile(
       join(source, path),
       `export const fixture = ${JSON.stringify(path)};\n`,
@@ -109,9 +140,7 @@ export function createQualificationInstallFixture({
   const listedPluginSource = join(root, "plugin-marketplace");
   mkdirSync(listedPluginSource, { mode: 0o700 });
   const pluginArchive = join(root, `factory-plugin-${sourceCommit}.tar`);
-  execFileSync("git", ["archive", "--format=tar", `--output=${pluginArchive}`, sourceCommit], {
-    cwd: source,
-  });
+  execFileSync("git", pluginArchiveArguments(sourceCommit, pluginArchive), { cwd: source });
   execFileSync("tar", ["-xf", pluginArchive, "-C", listedPluginSource]);
 
   const codexCli = join(root, "codex");

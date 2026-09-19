@@ -179,7 +179,6 @@ function fixture(workItem = 8) {
     artifact: { baseSha, patch, changedPaths, digest: artifactDigest, outcome: "succeeded" },
   };
   const transfer = `refs/clockgrove-factory/artifact-transfers/${hash(JSON.stringify(identity))}`;
-  const intent = proofDocument(`${transfer}/intent`, "artifact-transfer.json", descriptor, []);
   const proof = {
     workItem,
     reservationRef,
@@ -234,10 +233,8 @@ function fixture(workItem = 8) {
       terminal,
       [reservationOid],
     ),
-    intent,
-    ready: proofDocument(`${transfer}/ready`, "artifact-transfer.json", descriptor, [
-      intent.commit.oid,
-    ]),
+    intentAbsence: { ref: `${transfer}/intent`, status: 404 },
+    ready: proofDocument(`${transfer}/ready`, "artifact-transfer.json", descriptor, []),
   };
   const events = [
     {
@@ -361,6 +358,24 @@ describe("installed App Server checkpoint qualification", () => {
       turnId: "turn-7",
       modelTokens: 110,
     });
+  });
+  it("requires the direct artifact ready ref to be parentless and the intent ref absent", () => {
+    const parented = fixture();
+    parented.proof.ready.commit.parentOids = ["f".repeat(40)];
+    expect(() =>
+      assertAppServerCheckpoint(parented.observation, authority, parented.proof, parented.witness),
+    ).toThrow("checkpoint target parent differs");
+
+    const intentPresent = fixture();
+    intentPresent.proof.intentAbsence.status = 200;
+    expect(() =>
+      assertAppServerCheckpoint(
+        intentPresent.observation,
+        authority,
+        intentPresent.proof,
+        intentPresent.witness,
+      ),
+    ).toThrow();
   });
   it("persists only a bounded compact receipt after validating complete proof objects", () => {
     const f = fixture();
@@ -488,17 +503,13 @@ describe("installed App Server checkpoint qualification", () => {
       parentOids: [reserved.baseSha as string, f.proof.reservationOid],
       message: `Factory issue admission\nFactory-Issue-Admission: ${Buffer.from(JSON.stringify(record)).toString("base64url")}`,
     };
-    const documents = [
-      f.proof.prepared,
-      f.proof.turn,
-      f.proof.terminal,
-      f.proof.intent,
-      f.proof.ready,
-    ];
+    const documents = [f.proof.prepared, f.proof.turn, f.proof.terminal, f.proof.ready];
     const request = async (route: string, args: Record<string, unknown>) => {
       if (route.endsWith("/git/ref/{ref}")) {
         const ref = `refs/${args.ref}`;
         if (ref === f.proof.reservationRef)
+          throw Object.assign(new Error("missing"), { status: 404 });
+        if (ref === f.proof.intentAbsence.ref)
           throw Object.assign(new Error("missing"), { status: 404 });
         const oid =
           ref === "refs/clockgrove-factory/admission/work-item-8"
@@ -539,6 +550,7 @@ describe("installed App Server checkpoint qualification", () => {
       };
     };
     const [proof] = await observeAppServerCheckpoints(request, f.observation, authority, f.witness);
+    expect(proof!.intentAbsence).toEqual(f.proof.intentAbsence);
     expect((proof!.reservationAuthority as { source: string }).source).toBe("issue-admission");
     expect(assertAppServerCheckpoint(f.observation, authority, proof, f.witness)).toMatchObject({
       authoritySource: "issue-admission",

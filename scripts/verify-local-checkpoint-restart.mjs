@@ -45,6 +45,7 @@ import { selectQualificationPublicationRecord } from "./qualification-merge-proo
 import {
   observeNativeMergeProofs,
   assertNativeMergeProof,
+  qualificationProofFailureContext,
 } from "./qualification-sibling-refresh-proof.mjs";
 import {
   appServerCheckpointIdentity,
@@ -197,6 +198,7 @@ const qualificationStages = new Set([
   "concurrency-refill-observation",
   "concurrency-refill-consistency",
   "concurrency-evidence-save",
+  "app-server-artifact-proof",
 ]);
 const qualificationFailureStages = new WeakMap();
 
@@ -261,9 +263,11 @@ export function checkpointFailure(error, boundary) {
     error !== null && (typeof error === "object" || typeof error === "function")
       ? qualificationFailureStages.get(error)
       : undefined;
+  const proofFailure = qualificationProofFailureContext(error);
   return {
     boundary: boundaries.has(boundary) ? boundary : "scenario",
     ...(qualificationStage === undefined ? {} : { qualificationStage }),
+    ...(proofFailure === undefined ? {} : proofFailure),
     ...classifyCheckpointFailure(error),
   };
 }
@@ -2062,7 +2066,9 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     },
     sessionProof: async (observation, witness) => {
       assert.equal(authority.sessionRecovery, true);
-      const proofs = await observeAppServerCheckpoints(request, observation, authority, witness);
+      const proofs = await withQualificationStage("app-server-artifact-proof", () =>
+        observeAppServerCheckpoints(request, observation, authority, witness),
+      );
       const verifiedAt = new Date().toISOString();
       const receipts = proofs.map((proof) =>
         assertAppServerCheckpoint(

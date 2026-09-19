@@ -146,10 +146,11 @@ The hold has no release-to-validation operation. Timeout, stop or abort leaves t
 attempt resumable without a fabricated cancellation/failure/deferral receipt. The already durable
 artifact permits normal exact-owned workspace cleanup; provider session history is retained.
 
-The runner independently reloads reservation ancestry, prepared/turn/terminal stage refs and
-intent/ready artifact refs, validating exact tree-path/blob identity and complete raw response
-usage. It checks the reached witness against those GitHub facts, proves the reserved worker scope
-absent, records the mutation request, and sends exactly one `systemctl --user kill
+The runner independently reloads reservation ancestry, prepared/turn/terminal stage refs and the
+parentless direct-ready artifact ref, proving the obsolete intent ref absent and validating exact
+tree-path/blob identity and complete raw response usage. It checks the reached witness against those
+GitHub facts, proves the reserved worker scope absent, records the mutation request, and sends
+exactly one `systemctl --user kill
 --kill-whom=main --signal=KILL` to the captured unit. The service must recover through
 `Restart=on-failure` with a new PID and InvocationID, the same host and config digests, and proved
 absence of the original process incarnation. The earlier Pause request prevents new workers while

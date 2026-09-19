@@ -6,6 +6,7 @@ import {
   withQualificationStage,
   type CheckpointObservationDiagnostic,
 } from "../scripts/verify-local-checkpoint-restart.mjs";
+import { nativeProofReader } from "../scripts/qualification-sibling-refresh-proof.mjs";
 
 const instant = Date.parse("2026-09-07T05:00:28.000Z");
 type Recorded = CheckpointObservationDiagnostic & { attempt: number; retry: boolean };
@@ -55,6 +56,24 @@ describe("checkpoint observation diagnostics", () => {
       });
       expect(JSON.stringify(diagnostic)).not.toContain(secret);
     }
+
+    const ref = `refs/clockgrove-factory/artifact-transfers/${"a".repeat(64)}/ready`;
+    const appServerFailure = Object.assign(new Error(secret), { status: 404 });
+    const read = nativeProofReader(async () => {
+      throw appServerFailure;
+    });
+    await expect(
+      withQualificationStage("app-server-artifact-proof", () => read({ kind: "ref", ref })),
+    ).rejects.toBe(appServerFailure);
+    expect(checkpointFailure(appServerFailure)).toEqual({
+      boundary: "scenario",
+      qualificationStage: "app-server-artifact-proof",
+      operation: "git-ref-read",
+      ref,
+      category: "http",
+      code: "UNAVAILABLE",
+      httpStatus: 404,
+    });
 
     const operation = vi.fn();
     await expect(withQualificationStage(secret, operation)).rejects.toThrow(

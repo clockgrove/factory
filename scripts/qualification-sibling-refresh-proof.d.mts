@@ -8,6 +8,12 @@ export function assertQualificationCheckpoint(
 export function nativeProofReader(
   request: (route: string, parameters: Record<string, unknown>) => Promise<unknown>,
 ): (demand: unknown) => Promise<unknown>;
+export function qualificationProofFailureContext(error: unknown):
+  | {
+      operation: "git-ref-read";
+      ref: string;
+    }
+  | undefined;
 /** Foreground evidence remains same-run-only. Controller exercises may supply
  * controllerQualification: { peers: [] | [one full, noncyclic evidence object],
  * generation: { controllerId, epoch, controllerPolicyDigest } }.

@@ -253,21 +253,17 @@ export function assertAppServerCheckpoint(
   );
   assert.ok(Number.isSafeInteger(native.amount) && native.amount >= 0);
   assert.notEqual(native.usageEvidence, "conservative-reservation");
-  const intent = document(
-    proof.intent,
-    `${transferRef}/intent`,
-    "artifact-transfer.json",
-    [],
-    1048576,
-  );
+  assert.deepEqual(proof.intentAbsence, {
+    ref: `${transferRef}/intent`,
+    status: 404,
+  });
   const ready = document(
     proof.ready,
     `${transferRef}/ready`,
     "artifact-transfer.json",
-    [proof.intent.commit.oid],
+    [],
     1048576,
   );
-  assert.deepEqual(intent, ready);
   assert.equal(ready.protocol, "clockgrove.factory/artifact-transfer");
   assert.deepEqual(ready.identity, identity);
   assert.equal(ready.retention, "repository-audit");
@@ -370,13 +366,20 @@ export async function observeAppServerCheckpoints(request, observation, authorit
         path: sessionPath,
         maxBytes: 196608,
       });
-    for (const stage of ["intent", "ready"])
-      proof[stage] = await read({
-        kind: "checkpoint",
-        ref: `${refs.transferRef}/${stage}`,
-        path: "artifact-transfer.json",
-        maxBytes: 1048576,
-      });
+    const intentRef = `${refs.transferRef}/intent`;
+    try {
+      await read({ kind: "ref", ref: intentRef });
+      assert.fail("direct artifact transfer intent unexpectedly exists");
+    } catch (error) {
+      if (error?.status !== 404) throw error;
+      proof.intentAbsence = { ref: intentRef, status: 404 };
+    }
+    proof.ready = await read({
+      kind: "checkpoint",
+      ref: `${refs.transferRef}/ready`,
+      path: "artifact-transfer.json",
+      maxBytes: 1048576,
+    });
     proof.observedReservationAuthority = await reobserveQualificationReservationAuthority(
       request,
       reservation,

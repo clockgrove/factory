@@ -94,6 +94,7 @@ function setup(input: { queued?: boolean; fetch?: typeof globalThis.fetch } = {}
       treeOid: "b".repeat(40),
       epoch: 1,
       sequence: 1,
+      at: new Date(),
       expiresAt: new Date(Date.now() + 600_000),
     }));
   const release = vi

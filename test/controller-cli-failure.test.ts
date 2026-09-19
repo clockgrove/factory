@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { ControllerFatalError } from "../src/controller/failure.js";
+import { fileURLToPath } from "node:url";
+import { ControllerFatalError, controllerExecutableIdentity } from "../src/controller/failure.js";
 import { ControllerGenerationRetirement } from "../src/controller/retirement.js";
 
 const runController = vi.hoisted(() => vi.fn());
+const observeManagedGeneration = vi.hoisted(() => vi.fn());
 vi.mock("../src/controller/index.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/controller/index.js")>()),
   runGitHubRepositoryController: runController,
+}));
+vi.mock("../src/controller/managed-generation.js", () => ({
+  observeManagedControllerGeneration: observeManagedGeneration,
 }));
 
 import { main } from "../src/cli.js";
@@ -18,6 +23,7 @@ beforeEach(() => {
   process.env.GITHUB_TOKEN = "test-only";
   process.exitCode = undefined;
   runController.mockReset();
+  observeManagedGeneration.mockReset();
   stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 });
 
@@ -49,6 +55,70 @@ it("fuses changed installed bytes before any controller or GitHub work", async (
     "fatal code=controller-launcher-failure identity=controller-artifact-identity-mismatch",
   );
   expect(log).toContain("fingerprint=sha256:");
+  expect(observeManagedGeneration).not.toHaveBeenCalled();
+});
+
+it("refuses an installed launch whose exact managed-service generation is unproved", async () => {
+  const identity = await controllerExecutableIdentity(
+    fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
+  );
+  expect(identity).not.toBeNull();
+  observeManagedGeneration.mockResolvedValueOnce(null);
+
+  await main([
+    "controller",
+    "run",
+    "owner/repo",
+    "--repo",
+    "/tmp",
+    "--executable-identity",
+    identity!,
+  ]);
+
+  expect(runController).not.toHaveBeenCalled();
+  expect(process.exitCode).toBe(78);
+  expect(stderrText()).toContain(
+    "fatal code=controller-local-configuration identity=managed-controller-generation-unavailable",
+  );
+});
+
+it("passes the authenticated installed generation to repository election", async () => {
+  const identity = await controllerExecutableIdentity(
+    fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
+  );
+  expect(identity).not.toBeNull();
+  const owner = {
+    kind: "managed-service" as const,
+    hostIdentity: "a".repeat(64),
+    configDigest: "b".repeat(64),
+    executableIdentity: identity!,
+    unit: "clockgrove-factory-d0fc20d770ef78d6.service",
+    invocationId: "c".repeat(32),
+  };
+  observeManagedGeneration.mockResolvedValueOnce(owner);
+  runController.mockResolvedValueOnce(undefined);
+
+  await main([
+    "controller",
+    "run",
+    "owner/repo",
+    "--repo",
+    "/tmp",
+    "--executable-identity",
+    identity!,
+  ]);
+
+  expect(observeManagedGeneration).toHaveBeenCalledWith({
+    expectedUnit: expect.stringMatching(/^clockgrove-factory-[a-f0-9]{16}\.service$/),
+    expectedFragmentPath: expect.stringMatching(
+      /\/\.config\/systemd\/user\/clockgrove-factory-[a-f0-9]{16}\.service$/,
+    ),
+    executableIdentity: identity,
+  });
+  expect(runController).toHaveBeenCalledWith(
+    expect.objectContaining({ repositoryLeaseOwner: owner }),
+  );
+  expect(process.exitCode).toBeUndefined();
 });
 
 it("prints only the bounded fatal contract and retains the non-restartable status", async () => {
@@ -64,6 +134,9 @@ it("prints only the bounded fatal contract and retains the non-restartable statu
   expect(log).toContain("identity=controller-invariant-failure");
   expect(log).not.toContain(secret);
   expect(log).not.toContain("Error:");
+  expect(runController).toHaveBeenCalledWith(
+    expect.objectContaining({ repositoryLeaseOwner: { kind: "process" } }),
+  );
 });
 
 it("keeps deliberate generation retirement restartable and redacted", async () => {

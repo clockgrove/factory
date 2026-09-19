@@ -231,6 +231,19 @@ export function phaseKillReplacementObservation(
   invocationId: string;
   pid: string;
 };
+export function checkpointLeaseTakeoverReady(input: {
+  lease: Record<string, unknown>;
+  previous: { controllerId: string; epoch: number };
+  original: { hostIdentity: string; configDigest: string; invocationId: string };
+  replacement: { hostIdentity: string; configDigest: string; invocationId: string };
+  policyDigest: string;
+  executableIdentity: string;
+  unit: string;
+  predecessor?: { oid: string; lease: Record<string, unknown> };
+  successorOid?: string;
+  successorParents?: string[];
+  nowMs?: number;
+}): boolean;
 export interface CheckpointPort {
   pauseRequestId: string;
   preflight(): Promise<unknown>;

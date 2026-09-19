@@ -209,7 +209,8 @@ The acknowledgement authorizes only this one-shot sequence:
    artifact-to-validation invocation bindings and exact original producer ownership. Independently
    observe every named scope absent. An orphan, unknown or surviving resource blocks restart.
 5. Restart the exact captured controller once. Observe a different InvocationID on the same
-   host, then a strictly parsed higher repository-controller lease epoch. While still paused,
+   host, then a strictly parsed higher repository-controller lease epoch whose managed owner binds
+   that replacement InvocationID, exact unit configuration and executable. While still paused,
    verify unchanged work/accounting receipts and resource absence; recheck the exact replacement
    incarnation immediately before requesting Resume once. An acknowledged paused run need not
    emit its new `ControllerObserved` until Resume makes it eligible again.

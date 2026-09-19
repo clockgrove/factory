@@ -6,8 +6,10 @@ import type { RepositoryAdmission } from "./repository-controls.js";
 import type { RepositoryControls } from "./repository-controls.js";
 import {
   DEFAULT_REPOSITORY_LEASE_RENEWAL_INTERVAL_MS,
+  RepositoryLeaseContendedError,
   RepositoryLeaseLostError,
   RepositoryLeaseManager,
+  type RepositoryLeaseOwner,
 } from "./repository-lease.js";
 import {
   SharedCapacityCoordinator,
@@ -496,6 +498,8 @@ export interface RunRepositoryControllerOptions {
   owner: string;
   repo: string;
   repository: string;
+  /** Authenticated process or installed-service generation for repository election. */
+  repositoryLeaseOwner?: RepositoryLeaseOwner;
   capacity?: number;
   maxLocalWorkers?: number;
   maxPaidWorkers?: number;
@@ -684,6 +688,7 @@ export async function runGitHubRepositoryController(
   // One process identity can safely rediscover its own ambiguously acquired
   // lease. Every retry acquires from GitHub anew after the prior loop settles.
   const controllerId = randomUUID();
+  const repositoryLeaseOwner = options.repositoryLeaseOwner ?? { kind: "process" as const };
   // Only the deliberate outer stop retires normal writes. A quota or lost
   // ownership signal must retain its own failure and recovery semantics.
   const stopNormalAdmission = () => resources.mutationScheduler.stopNormalAdmission();
@@ -700,6 +705,7 @@ export async function runGitHubRepositoryController(
             policy,
             resources,
             controllerId,
+            repositoryLeaseOwner,
             sharedPaidCeiling: options.maxPaidWorkers ?? DEFAULT_CONTROLLER_POLICY.maxLocalWorkers,
             configureCapacity: [
               ...(options.maxLocalWorkers !== undefined ? ["maxLocalParallel" as const] : []),
@@ -736,6 +742,16 @@ export async function runGitHubRepositoryController(
         return;
       } catch (error) {
         if (options.signal?.aborted && error === options.signal.reason) return;
+        if (error instanceof RepositoryLeaseContendedError) {
+          const delayMs = Math.max(1_000, error.retryAfterMs);
+          options.onStatus?.(
+            `repository lease contended; waiting ${delayMs}ms for authoritative expiry before fresh election`,
+          );
+          const retryAt = performance.now() + delayMs;
+          while (!options.signal?.aborted && performance.now() < retryAt)
+            await interruptibleDelay(Math.min(60_000, retryAt - performance.now()), options.signal);
+          continue;
+        }
         if (error instanceof LeaseAcquisitionContendedError) {
           // The complete cohort and repository generation have settled before
           // reaching here. Do not redispatch while another Objective holder may
@@ -871,6 +887,7 @@ async function attachSharedCapacity(
       {
         controllerId: `capacity-migration-${randomUUID()}`,
         policyDigest: controllerPolicyDigest(policy),
+        owner: { kind: "process" },
       },
       base,
     );
@@ -934,6 +951,7 @@ async function attachSharedCapacity(
 
 interface RepositoryOwnershipOptions {
   controllerId?: string;
+  repositoryLeaseOwner: RepositoryLeaseOwner;
   token: string;
   owner: string;
   repo: string;
@@ -994,6 +1012,7 @@ async function withRepositoryOwnership<T>(
         {
           controllerId: options.controllerId ?? randomUUID(),
           policyDigest: controllerPolicyDigest(options.policy),
+          owner: options.repositoryLeaseOwner,
         },
         base,
       ),
@@ -1169,7 +1188,12 @@ async function coldStartPhase<T>(
       operation,
     );
   } catch (error) {
-    if (platformFailure(error) || error instanceof ControllerFatalError) throw error;
+    if (
+      platformFailure(error) ||
+      error instanceof ControllerFatalError ||
+      error instanceof RepositoryLeaseContendedError
+    )
+      throw error;
     throw fatalControllerFailure(
       isDurableStateCompatibilityError(error) ? "controller-durable-state-incompatible" : code,
       error,
@@ -1230,6 +1254,7 @@ function controllerFailureDiagnostic(error: unknown): string {
     return "normal-mutation-admission-stopped; durable cleanup may remain unresolved";
   if (error instanceof LeaseAcquisitionContendedError)
     return "objective-lease-acquisition-contended";
+  if (error instanceof RepositoryLeaseContendedError) return "repository-lease-contended";
   const unavailable = platformFailure(error);
   if (unavailable)
     return `platform-${unavailable.refusal.kind}; retryAfterMs=${unavailable.retryAfterMs}`;

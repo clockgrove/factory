@@ -1025,7 +1025,7 @@ export async function runCheckpointScenario(port, authority) {
   const replacement = await port.controller("active");
   assert.notEqual(replacement.invocationId, original.invocationId, "controller did not restart");
   assert.equal(replacement.hostIdentity, original.hostIdentity, "host changed");
-  await port.takeover(checkpoint);
+  await port.takeover(checkpoint, original, replacement);
   const paused = await port.observe();
   assert.deepEqual(
     checkpointFacts(paused, authority, port.pauseRequestId).stable,
@@ -1180,7 +1180,7 @@ export async function continueAppServerCheckpointScenario(
   if (restartAction === "phase-kill-restart") {
     await port.controller("active", original);
     assert.equal(typeof port.phaseKillRestart, "function", "phase-kill port unavailable");
-    phaseKill = await port.phaseKillRestart(original);
+    phaseKill = await port.phaseKillRestart(original, held);
     replacement = phaseKill.replacement;
   } else {
     await port.action("start");
@@ -1188,7 +1188,7 @@ export async function continueAppServerCheckpointScenario(
   }
   assert.notEqual(replacement.invocationId, original.invocationId);
   assert.equal(replacement.hostIdentity, original.hostIdentity);
-  await port.takeover(held);
+  await port.takeover(held, original, replacement, phaseKill?.predecessorLease);
   const paused = await port.poll("recovered-accounted-pause", (value) =>
     checkpointReady(value, authority, port.pauseRequestId),
   );
@@ -1274,17 +1274,47 @@ export function assertScopeCoverage(events) {
 export function checkpointLease(commit, oid) {
   assert.match(oid, /^[a-f0-9]{40}$/);
   assert.equal(commit.sha, oid);
+  const prefix = "Factory-Repository-Lease: ";
   const trailer = unique(
-    commit.message.split(/\r?\n/).filter((line) => line.startsWith("Factory-Repository-Lease: ")),
+    commit.message.split(/\r?\n/).filter((line) => line.startsWith(prefix)),
     "repository lease unavailable",
   );
   assert.ok(trailer.length < 8192);
-  const lease = JSON.parse(
-    Buffer.from(trailer.slice("Factory-Repository-Lease: ".length), "base64url").toString("utf8"),
-  );
+  const encoded = trailer.slice(prefix.length);
+  const bytes = Buffer.from(encoded, "base64url");
+  assert.ok(encoded && bytes.toString("base64url") === encoded, "invalid lease trailer encoding");
+  const lease = JSON.parse(bytes.toString("utf8"));
+  const expectedKeys = [
+    "at",
+    "controllerId",
+    "epoch",
+    "event",
+    "expiresAt",
+    "kind",
+    "owner",
+    "policyDigest",
+    "protocol",
+    "sequence",
+    ...(lease.previousOid === undefined ? [] : ["previousOid"]),
+  ].sort();
+  assert.deepEqual(Object.keys(lease).sort(), expectedKeys);
   assert.equal(lease.protocol, "clockgrove.factory/v2");
   assert.equal(lease.kind, "repository-lease");
   assert.match(lease.policyDigest, /^[a-f0-9]{64}$/);
+  assert.deepEqual(Object.keys(lease.owner ?? {}).sort(), [
+    "configDigest",
+    "executableIdentity",
+    "hostIdentity",
+    "invocationId",
+    "kind",
+    "unit",
+  ]);
+  assert.equal(lease.owner.kind, "managed-service");
+  assert.match(lease.owner.hostIdentity, /^[a-f0-9]{64}$/);
+  assert.match(lease.owner.configDigest, /^[a-f0-9]{64}$/);
+  assert.match(lease.owner.executableIdentity, /^sha256:[a-f0-9]{64}$/);
+  assert.match(lease.owner.unit, /^clockgrove-factory-[a-f0-9]{16}\.service$/);
+  assert.match(lease.owner.invocationId, /^[a-f0-9]{32}$/);
   assert.ok(
     typeof lease.controllerId === "string" &&
       lease.controllerId.length > 0 &&
@@ -1297,8 +1327,83 @@ export function checkpointLease(commit, oid) {
       lease.event,
     ),
   );
-  assert.ok(typeof lease.expiresAt === "string" && Number.isFinite(Date.parse(lease.expiresAt)));
+  assert.ok(typeof lease.at === "string" && new Date(lease.at).toISOString() === lease.at);
+  assert.ok(
+    typeof lease.expiresAt === "string" &&
+      new Date(lease.expiresAt).toISOString() === lease.expiresAt,
+  );
+  const durationMs = Date.parse(lease.expiresAt) - Date.parse(lease.at);
+  assert.ok(
+    lease.event === "RepositoryLeaseReleased"
+      ? durationMs === 0 && lease.previousOid !== undefined
+      : durationMs > 0 && durationMs <= 10 * 60_000,
+  );
+  if (lease.previousOid === undefined) {
+    assert.equal(lease.event, "RepositoryLeaseAcquired");
+    assert.equal(lease.epoch, 1);
+    assert.equal(lease.sequence, 1);
+  } else {
+    assert.ok(lease.sequence >= lease.epoch);
+    if (lease.event === "RepositoryLeaseAcquired") assert.ok(lease.epoch > 1);
+    else assert.ok(lease.sequence > lease.epoch);
+  }
+  if (lease.previousOid !== undefined) assert.match(lease.previousOid, /^[a-f0-9]{40}$/);
+  const parents = (commit.parents ?? []).map((parent) => parent.sha);
+  assert.equal(parents.length, 1, "repository lease commit must have one parent");
+  assert.match(parents[0], /^[a-f0-9]{40}$/);
+  if (lease.previousOid !== undefined) assert.equal(parents[0], lease.previousOid);
   return lease;
+}
+
+export function checkpointLeaseTakeoverReady({
+  lease,
+  previous,
+  original,
+  replacement,
+  policyDigest,
+  executableIdentity,
+  unit,
+  predecessor,
+  successorOid,
+  successorParents,
+  nowMs = Date.now(),
+}) {
+  assert.equal(lease.policyDigest, policyDigest);
+  assert.equal(lease.owner.hostIdentity, original.hostIdentity);
+  assert.equal(lease.owner.hostIdentity, replacement.hostIdentity);
+  assert.equal(lease.owner.configDigest, original.configDigest);
+  assert.equal(lease.owner.configDigest, replacement.configDigest);
+  assert.equal(lease.owner.executableIdentity, executableIdentity);
+  assert.equal(lease.owner.unit, unit);
+  assert.ok(
+    [original.invocationId, replacement.invocationId].includes(lease.owner.invocationId),
+    "repository lease names neither observed controller generation",
+  );
+  const successor =
+    ["RepositoryLeaseAcquired", "RepositoryLeaseRenewed"].includes(lease.event) &&
+    lease.controllerId !== previous.controllerId &&
+    lease.epoch === previous.epoch + 1 &&
+    Date.parse(lease.expiresAt) > nowMs + 60000;
+  if (successor) {
+    assert.equal(lease.owner.invocationId, replacement.invocationId);
+    assert.notEqual(lease.owner.invocationId, original.invocationId);
+    if (predecessor) {
+      assert.match(successorOid, /^[a-f0-9]{40}$/);
+      assert.deepEqual(successorParents, [predecessor.oid]);
+      assert.equal(predecessor.lease.controllerId, previous.controllerId);
+      assert.equal(predecessor.lease.epoch, previous.epoch);
+      assert.equal(lease.previousOid, predecessor.oid);
+      assert.ok(
+        Date.parse(lease.at) < Date.parse(predecessor.lease.expiresAt),
+        "repository takeover did not precede predecessor lease expiry",
+      );
+    }
+    return true;
+  }
+  assert.equal(lease.controllerId, previous.controllerId);
+  assert.equal(lease.epoch, previous.epoch);
+  assert.equal(lease.owner.invocationId, original.invocationId);
+  return false;
 }
 
 function command(name, args, cwd, timeoutMs = 15000) {
@@ -1445,6 +1550,8 @@ export function phaseKillReplacementObservation(fields, original) {
   const pid = Number(fields.MainPID);
   const ready =
     fields.ActiveState === "active" &&
+    fields.SubState === "running" &&
+    ["", "0", "0 /"].includes(fields.Job) &&
     Number.isSafeInteger(pid) &&
     pid > 1 &&
     typeof fields.InvocationID === "string" &&
@@ -1798,6 +1905,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
           return { unit: authority.unit, state, hostIdentity: host, configDigest };
         }
         assert.equal(fields.ActiveState, "active");
+        assert.equal(fields.SubState, "running");
         assert.match(fields.InvocationID, /^[a-f0-9]{32}$/);
         const pid = Number(fields.MainPID);
         assert.ok(Number.isSafeInteger(pid) && pid > 1);
@@ -2213,13 +2321,44 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       evidence.actions.at(-1).response = result;
       save();
     },
-    phaseKillRestart: async (original) => {
+    phaseKillRestart: async (original, checkpoint) => {
       assert.equal(authority.sessionRecovery, true);
       assert.ok(
         !evidence.actions.some((entry) => entry.action === "phase-kill-restart"),
         "uncertain phase kill must never be repeated",
       );
       await controller("active", original);
+      const old = checkpoint.receipts
+        .map(({ event }) => event)
+        .filter((event) => event.event === "ControllerObserved")
+        .at(-1);
+      assert.ok(old, "original authenticated controller identity missing before phase kill");
+      const predecessorRef = (
+        await request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
+          ref: "clockgrove-factory/leases/repository-controller",
+        })
+      ).data;
+      const predecessorCommit = (
+        await request("GET /repos/{owner}/{repo}/git/commits/{commit_sha}", {
+          commit_sha: predecessorRef.object.sha,
+        })
+      ).data;
+      const predecessorLease = checkpointLease(predecessorCommit, predecessorRef.object.sha);
+      assert.ok(
+        ["RepositoryLeaseAcquired", "RepositoryLeaseRenewed"].includes(predecessorLease.event),
+      );
+      assert.equal(predecessorLease.controllerId, old.controllerId);
+      assert.equal(predecessorLease.epoch, old.epoch);
+      assert.equal(predecessorLease.policyDigest, old.controllerPolicyDigest);
+      assert.equal(predecessorLease.owner.hostIdentity, original.hostIdentity);
+      assert.equal(predecessorLease.owner.configDigest, original.configDigest);
+      assert.equal(predecessorLease.owner.executableIdentity, candidate.artifactIdentity);
+      assert.equal(predecessorLease.owner.unit, authority.unit);
+      assert.equal(predecessorLease.owner.invocationId, original.invocationId);
+      assert.ok(
+        Date.parse(predecessorLease.expiresAt) > Date.now() + 60000,
+        "predecessor repository lease is too near expiry for crash-takeover proof",
+      );
       const entry = {
         action: "phase-kill-restart",
         requestedAt: new Date().toISOString(),
@@ -2231,6 +2370,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
           hostIdentity: original.hostIdentity,
           configDigest: original.configDigest,
         },
+        predecessorLease: { oid: predecessorCommit.sha, lease: predecessorLease },
       };
       evidence.actions.push(entry);
       save();
@@ -2298,6 +2438,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
         restart: "systemd-on-failure",
         signal: "SIGKILL",
         originalAbsent: true,
+        predecessorLease: { oid: predecessorCommit.sha, lease: predecessorLease },
         replacement,
       };
       save();
@@ -2340,7 +2481,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       evidence.checkpoint = value;
       save();
     },
-    takeover: async (checkpoint) => {
+    takeover: async (checkpoint, original, replacement, predecessor) => {
       const old = checkpoint.receipts
         .map(({ event }) => event)
         .filter((event) => event.event === "ControllerObserved")
@@ -2358,12 +2499,19 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
           })
         ).data;
         const lease = checkpointLease(commit, ref.object.sha);
-        assert.equal(lease.policyDigest, old.controllerPolicyDigest);
         if (
-          ["RepositoryLeaseAcquired", "RepositoryLeaseRenewed"].includes(lease.event) &&
-          lease.controllerId !== old.controllerId &&
-          lease.epoch > old.epoch &&
-          Date.parse(lease.expiresAt) > Date.now() + 60000
+          checkpointLeaseTakeoverReady({
+            lease,
+            previous: old,
+            original,
+            replacement,
+            policyDigest: old.controllerPolicyDigest,
+            executableIdentity: candidate.artifactIdentity,
+            unit: authority.unit,
+            predecessor,
+            successorOid: commit.sha,
+            successorParents: (commit.parents ?? []).map((parent) => parent.sha),
+          })
         ) {
           evidence.takeover = { oid: commit.sha, lease };
           save();

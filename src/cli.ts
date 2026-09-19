@@ -58,12 +58,12 @@ import { compilerEvalDigest } from "./evaluation/compiler-eval.js";
 import { inspectRepositoryCaptureCatalogForRepository } from "./toolchains/compiler-capabilities.js";
 import { inspectCompilerPreflight } from "./application/compiler-preflight.js";
 import { discoverLocalScopeHost } from "./runtime/local-scope.js";
+import { observeManagedControllerGeneration } from "./controller/managed-generation.js";
 
-const controllerLifecycle = new SystemdControllerLifecycle(
-  new SystemdUserService({
-    factoryCommand: [process.execPath, fileURLToPath(import.meta.url)],
-  }),
-);
+const controllerService = new SystemdUserService({
+  factoryCommand: [process.execPath, fileURLToPath(import.meta.url)],
+});
+const controllerLifecycle = new SystemdControllerLifecycle(controllerService);
 
 const USAGE = [
   "usage:",
@@ -667,6 +667,28 @@ async function runRepositoryController(args: string[]): Promise<void> {
       );
       return;
     }
+    const serviceInput = {
+      repository: `${repository.owner}/${repository.repo}`,
+      checkout,
+    };
+    const repositoryLeaseOwner = expectedExecutableIdentity
+      ? await observeManagedControllerGeneration({
+          expectedUnit: controllerService.unitName(serviceInput),
+          expectedFragmentPath: controllerService.unitPath(serviceInput),
+          executableIdentity,
+        })
+      : { kind: "process" as const };
+    if (!repositoryLeaseOwner) {
+      emitControllerFatalFailure(
+        new ControllerFatalError(
+          "controller-local-configuration",
+          "managed-controller-generation-unavailable",
+          new Error("installed controller generation could not be authenticated"),
+        ),
+        executableIdentity,
+      );
+      return;
+    }
     let token: string;
     try {
       token = resolveGitHubToken();
@@ -687,6 +709,7 @@ async function runRepositoryController(args: string[]): Promise<void> {
         owner: repository.owner,
         repo: repository.repo,
         repository: checkout,
+        repositoryLeaseOwner,
         capacity: maxActiveObjectives,
         maxLocalWorkers,
         maxPaidWorkers,

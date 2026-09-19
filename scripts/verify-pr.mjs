@@ -34,7 +34,14 @@ export const deepScenarioTests = Object.freeze([
   "test/provider-supervisor-qualification.test.ts",
   "test/regular-pipeline-supervisor.test.ts",
   "test/sibling-publication-recovery.test.ts",
-  "test/successor-supervisor.test.ts",
+  "test/successor-supervisor-adopted-recovery.test.ts",
+  "test/successor-supervisor-adopted-validation.test.ts",
+  "test/successor-supervisor-publication.test.ts",
+  "test/successor-supervisor-recompilation.test.ts",
+  "test/successor-supervisor-refresh-fences.test.ts",
+  "test/successor-supervisor-refresh.test.ts",
+  "test/successor-supervisor-stack-integrity.test.ts",
+  "test/successor-supervisor-stack-recovery.test.ts",
   "test/supervisor-activation-withdrawal.test.ts",
   "test/supervisor-artifact-checkpoint.test.ts",
   "test/supervisor-backend-wake.test.ts",
@@ -53,7 +60,9 @@ export const deepScenarioTests = Object.freeze([
   "test/supervisor-quota-heartbeat.test.ts",
   "test/supervisor-quota-merge-fence.test.ts",
   "test/supervisor-read-cadence.test.ts",
-  "test/supervisor-repository-capability.test.ts",
+  "test/supervisor-capability-admission.test.ts",
+  "test/supervisor-capability-fences.test.ts",
+  "test/supervisor-capability-runtime.test.ts",
   "test/supervisor-repository-fairness.test.ts",
   "test/supervisor-result-receipts.test.ts",
   "test/supervisor-resume.test.ts",
@@ -62,6 +71,8 @@ export const deepScenarioTests = Object.freeze([
   "test/supervisor-session-shutdown.test.ts",
   "test/supervisor-stale-base-cancellation.test.ts",
   "test/supervisor-writer-generation.test.ts",
+  "test/supervisor-workflow-publication.test.ts",
+  "test/supervisor-workflow-recovery.test.ts",
 ]);
 
 export const prImpactRules = Object.freeze([
@@ -79,6 +90,29 @@ export const prImpactRules = Object.freeze([
     tests: [
       "test/provider-supervisor-lifecycle.test.ts",
       "test/provider-supervisor-qualification.test.ts",
+    ],
+  },
+  {
+    path: "test/helpers/successor-supervisor-cases.ts",
+    tests: [
+      "test/successor-supervisor-adopted-recovery.test.ts",
+      "test/successor-supervisor-adopted-validation.test.ts",
+      "test/successor-supervisor-publication.test.ts",
+      "test/successor-supervisor-recompilation.test.ts",
+      "test/successor-supervisor-refresh-fences.test.ts",
+      "test/successor-supervisor-refresh.test.ts",
+      "test/successor-supervisor-stack-integrity.test.ts",
+      "test/successor-supervisor-stack-recovery.test.ts",
+    ],
+  },
+  {
+    path: "test/helpers/supervisor-repository-capability-cases.ts",
+    tests: [
+      "test/supervisor-capability-admission.test.ts",
+      "test/supervisor-capability-fences.test.ts",
+      "test/supervisor-capability-runtime.test.ts",
+      "test/supervisor-workflow-publication.test.ts",
+      "test/supervisor-workflow-recovery.test.ts",
     ],
   },
   {

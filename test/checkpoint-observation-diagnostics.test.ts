@@ -3,6 +3,7 @@ import {
   checkpointFailure,
   checkpointObservationFailure,
   checkpointObservationRead,
+  withQualificationStage,
   type CheckpointObservationDiagnostic,
 } from "../scripts/verify-local-checkpoint-restart.mjs";
 
@@ -32,6 +33,39 @@ function readFixture(deadline = instant + 10000) {
 }
 
 describe("checkpoint observation diagnostics", () => {
+  it("retains only an allowlisted qualification stage with the normalized failure", async () => {
+    const secret = "private assertion value and path";
+    const failure = Object.assign(new Error(secret), {
+      code: "ERR_ASSERTION",
+      actual: secret,
+      expected: secret,
+    });
+    try {
+      await withQualificationStage("concurrency-artifact-proof", () => {
+        throw failure;
+      });
+      expect.fail("qualification failure was accepted");
+    } catch (error) {
+      const diagnostic = checkpointFailure(error);
+      expect(diagnostic).toEqual({
+        boundary: "scenario",
+        qualificationStage: "concurrency-artifact-proof",
+        category: "assertion",
+        code: "ERR_ASSERTION",
+      });
+      expect(JSON.stringify(diagnostic)).not.toContain(secret);
+    }
+
+    const operation = vi.fn();
+    await expect(withQualificationStage(secret, operation)).rejects.toThrow(
+      "unsupported qualification stage",
+    );
+    expect(operation).not.toHaveBeenCalled();
+    expect(
+      checkpointFailure(Object.assign(new Error(secret), { qualificationStage: secret })),
+    ).toEqual({ boundary: "scenario", category: "unavailable", code: "UNAVAILABLE" });
+  });
+
   it("records fixed phase, stage, time and status without disclosing arbitrary error content", () => {
     const secret = "private-response-and-credential";
     const diagnostic = checkpointObservationFailure(

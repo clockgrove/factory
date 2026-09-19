@@ -126,8 +126,13 @@ export function checkpointStartupObservation(
   },
 ): Promise<unknown>;
 export function checkpointFailure(error: unknown, boundary?: string): CheckpointDiagnostic;
+export function withQualificationStage<T>(
+  stage: string,
+  operation: () => T | Promise<T>,
+): Promise<T>;
 export interface CheckpointDiagnostic {
   boundary: string;
+  qualificationStage?: string;
   category:
     | "rate-limit"
     | "http-refusal"

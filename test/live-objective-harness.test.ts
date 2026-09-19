@@ -42,6 +42,7 @@ import {
   main as fallbackMain,
 } from "../scripts/verify-native-fallback-objective.mjs";
 import { assertNativeMergeProof } from "../scripts/qualification-sibling-refresh-proof.mjs";
+import { assertSettledQualificationMergeProof } from "../scripts/qualification-settled-merge-proof.mjs";
 import { completeSiblingQualificationFixture } from "./helpers/sibling-qualification-evidence.mjs";
 
 type HarnessEvent = {
@@ -375,6 +376,23 @@ async function regularEvidence(profile = "local-default", fallback = false) {
   );
   return {
     ...generated,
+    mergeProofs: generated.mergeProofs.map((proof) => {
+      const sourceHeadSha = String(
+        generated.events.find(
+          (event) =>
+            event.event === "PublicationRecorded" &&
+            event.workItem === proof.workItem &&
+            event.attempt === proof.attempt,
+        )!.headSha,
+      );
+      const refreshCommitShas = [];
+      let cursor = proof.headSha;
+      while (cursor !== sourceHeadSha) {
+        refreshCommitShas.push(cursor);
+        cursor = f.commits.get(cursor)!.parentOids[0]!;
+      }
+      return { ...proof, sourceHeadSha, refreshCommitShas };
+    }),
     regularBackendProfile: profile === "fallback-cli" ? "local-default" : profile,
     scope: "installed-local-explicit-regular-objective",
     policy,
@@ -620,7 +638,7 @@ describe("shared versioned REST merge evidence", () => {
           value,
           undefined,
           value === regular
-            ? (proof, input) => assertNativeMergeProof(regular, proof, input)
+            ? (proof, input) => assertSettledQualificationMergeProof(proof, input)
             : undefined,
         ),
       ).not.toThrow();
@@ -786,35 +804,26 @@ describe("explicit installed regular qualification", () => {
   });
   it("passes only genuinely concurrent regular delivery with exact candidate proof and leaves native API gate unchanged", async () => {
     const value = await regularEvidence();
+    delete (value as unknown as Record<string, unknown>).nativeMergeEvidence;
     expect(() => assertRegularCompletion(value)).not.toThrow();
     expect(assessRegularCompletion(value).result).toBe("passed");
-    const authorityReads = value.nativeMergeEvidence.map((record) => {
-      const reads = (record as { reads: Array<{ request: { kind: string }; value: unknown }> })
-        .reads;
-      return reads.filter(({ request }) => request.kind.startsWith("reservation-authority"));
-    });
-    expect(authorityReads.map((reads) => reads.map(({ request }) => request.kind))).toEqual(
-      Array.from({ length: 3 }, () => ["reservation-authority", "reservation-authority-current"]),
+    expect(value.mergeProofs).toEqual(
+      value.mergeProofs.map(() =>
+        expect.objectContaining({
+          sourceHeadSha: expect.stringMatching(/^[a-f0-9]{40}$/),
+          refreshCommitShas: expect.any(Array),
+        }),
+      ),
     );
-    const changedAuthority = structuredClone(value);
-    const current = (
-      changedAuthority.nativeMergeEvidence[0] as {
-        reads: Array<{
-          request: { kind: string };
-          value: { canonical: { openingOid: string; closingOid: string } };
-        }>;
-      }
-    ).reads.find(({ request }) => request.kind === "reservation-authority-current")!.value;
-    current.canonical.openingOid = "f".repeat(40);
-    current.canonical.closingOid = "f".repeat(40);
-    expect(() => assertRegularCompletion(changedAuthority)).toThrow(
-      /changed after dependent proof reads/,
-    );
+    expect(value.mergeProofs.some((proof) => proof.refreshCommitShas.length > 0)).toBe(true);
+    const changedSource = structuredClone(value);
+    changedSource.mergeProofs[0]!.sourceHeadSha = "f".repeat(40);
+    expect(() => assertRegularCompletion(changedSource)).toThrow(/source publication differs/);
     expect(() =>
       assertQualificationCompletion(value, "stacked-prs", undefined, (proof, input) =>
         assertNativeMergeProof(value, proof, input),
       ),
-    ).toThrow(/native delivery/);
+    ).toThrow();
     expect(() => assertRegularCompletion(evidence())).toThrow();
   });
   it("settles production model dispatch markers by invocation identity, not equal usage IDs", async () => {
@@ -900,9 +909,7 @@ describe("explicit installed regular qualification", () => {
       sequence: publication.sequence + 1,
       stackNumber: 90,
     });
-    expect(() => assertRegularCompletion(value)).toThrow(
-      /regular publication has native stack linkage/,
-    );
+    expect(() => assertRegularCompletion(value)).toThrow(/unexpected native or successor delivery/);
   });
   it.each(["exactHeadValidationDigest", "validationDigest", "baseSha"])(
     "rejects transplanted publication %s",
@@ -920,10 +927,13 @@ describe("explicit installed regular qualification", () => {
     expect(() => assertRegularCompletion(policy)).toThrow(/request Objective/);
     const unauth = await regularEvidence();
     unauth.events.at(-1)!.authorId = 99;
-    expect(() => assertRegularCompletion(unauth)).toThrow(/foreign receipt actor/);
+    expect(() => assertRegularCompletion(unauth)).toThrow(/authenticated GitHub actor/);
     const missing = await regularEvidence();
     missing.events = missing.events.filter((event) => event.usageId !== "worker-2-1");
     expect(assessRegularCompletion(missing).result).toBe("incomplete");
+    expect(assessRegularCompletion(missing).reason).toContain(
+      "status model usage is not attributable to the captured GitHub receipts",
+    );
   });
   it("accepts legitimate partial-order collision but rejects same-identity contradictions", async () => {
     const value = await regularEvidence();

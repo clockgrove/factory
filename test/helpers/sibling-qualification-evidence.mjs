@@ -304,6 +304,7 @@ function fixture({
         ...common(number, number === 3 ? 203 : number === 4 ? 402 : 202),
         event: "AttemptStarted",
         backend: localBackend,
+        baseSha: rootBase,
         resourceHostIdentity: hostIdentity,
         providerResourceId: localBackend.startsWith("codex-cli/")
           ? `local-${1000 + number}`

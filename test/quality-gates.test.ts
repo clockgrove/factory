@@ -18,6 +18,7 @@ import {
   criticalContractTests,
   deepScenarioTests,
   parsePrArguments,
+  prAffectedWorkerCount,
   prImpactRules,
   prWorkerCount,
   selectPrChecks,
@@ -171,6 +172,9 @@ describe("proportional quality gates", () => {
     expect(prWorkerCount(4)).toBe(4);
     expect(prWorkerCount(32)).toBe(4);
     expect(() => prWorkerCount(0)).toThrow("positive integer");
+    expect(prAffectedWorkerCount(["test/platform.test.ts"], 4)).toBe(4);
+    expect(prAffectedWorkerCount(["test/successor-supervisor-refresh.test.ts"], 4)).toBe(2);
+    expect(prAffectedWorkerCount(["test/successor-supervisor-refresh.test.ts"], 1)).toBe(1);
 
     const config = readFileSync(new URL("../vitest.config.ts", import.meta.url), "utf8");
     expect(config).toContain('from "node:os"');

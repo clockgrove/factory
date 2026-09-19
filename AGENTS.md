@@ -202,8 +202,9 @@ accepted risks.
   concrete defect.
 - After a related batch lands on `main`, run `npm run test:main` once. CI owns that complete
   deterministic run and retains a machine-readable result bound to the exact commit and tree.
-  Its default two-worker limit protects process-heavy Supervisor scenarios from resource starvation;
-  the smaller PR gate may use up to four workers.
+  Its default two-worker limit protects process-heavy Supervisor scenarios from resource starvation.
+  The smaller PR gate may use up to four workers for ordinary tests, but caps an affected phase that
+  contains deep Supervisor scenarios at two.
   Restore broken main promptly; do not make unrelated lanes inherit known integration failures while
   waiting for a release candidate.
 - For instruction-only or documentation-only changes, check the diff, links, and applicable

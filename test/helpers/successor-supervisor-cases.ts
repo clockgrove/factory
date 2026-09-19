@@ -217,8 +217,8 @@ async function fixture(
     ...oneShotFixturePolicy,
     ...(options.interruptedRetainedLfs
       ? {
-          allowedNetworkDestinations: [
-            ...oneShotFixturePolicy.allowedNetworkDestinations,
+          gitLfsOutputNetworkDestinations: [
+            ...oneShotFixturePolicy.gitLfsOutputNetworkDestinations,
             "github.com",
           ],
         }
@@ -1726,7 +1726,7 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
             policyDigest: scopedReserved.policyDigest,
           },
           repositoryPath: f.repository,
-          allowedNetworkDestinations: f.policy.allowedNetworkDestinations,
+          allowedNetworkDestinations: f.policy.gitLfsOutputNetworkDestinations,
           assertCurrent: async () => {},
           transport: lfsTransport,
         })

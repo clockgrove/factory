@@ -393,8 +393,8 @@ async function fixture(
     ...oneShotFixturePolicy,
     ...(options.lfs
       ? {
-          allowedNetworkDestinations: [
-            ...oneShotFixturePolicy.allowedNetworkDestinations,
+          gitLfsOutputNetworkDestinations: [
+            ...oneShotFixturePolicy.gitLfsOutputNetworkDestinations,
             "github.com",
           ],
         }
@@ -740,7 +740,7 @@ async function fixture(
             policyDigest: pd,
           },
           repositoryPath: repository,
-          allowedNetworkDestinations: policy.allowedNetworkDestinations,
+          allowedNetworkDestinations: policy.gitLfsOutputNetworkDestinations,
           assertCurrent,
           transport: lfsTransport,
         })

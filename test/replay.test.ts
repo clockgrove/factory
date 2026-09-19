@@ -331,6 +331,18 @@ describe("pure admission replay", () => {
     expect(result.decisions).toEqual(expected);
   });
 
+  it("retains nonempty Git LFS output authority in the pinned snapshot and its digest", () => {
+    const snapshot = pinAdmissionSnapshot({
+      ...input,
+      policy: { ...input.policy, gitLfsOutputNetworkDestinations: ["github.com"] },
+    });
+    expect(snapshot.input.policy.gitLfsOutputNetworkDestinations).toEqual(["github.com"]);
+    expect(replayAdmissions(snapshot).reproduced).toBe(true);
+    const tampered = structuredClone(snapshot);
+    tampered.input.policy.gitLfsOutputNetworkDestinations = [];
+    expect(() => replayAdmissions(tampered)).toThrow("policy digest mismatch");
+  });
+
   it("reports exact per-item mismatches for a valid but incorrect conformance expectation", () => {
     const wrong = structuredClone(expected);
     wrong.queued[0]!.reason = "wrong expected reason";

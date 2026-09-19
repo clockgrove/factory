@@ -14,6 +14,7 @@ import {
   qualificationReservationAuthorityExpectation,
   reobserveQualificationReservationAuthority,
 } from "./qualification-reservation-authority.mjs";
+import { assertQualificationAppServerIdentity } from "./qualification-app-server-identity.mjs";
 
 const hash = (text) => createHash("sha256").update(text).digest("hex");
 const canonical = (value) =>
@@ -164,7 +165,7 @@ export function assertAppServerCheckpoint(
   assert.equal(stages.prepared.turnId, undefined);
   for (const key of keys) assert.equal(binding[key], identity[key], `session ${key} differs`);
   assert.equal(binding.attemptId, attemptId);
-  assert.equal(binding.cliVersion, "0.153.0");
+  assertQualificationAppServerIdentity(binding);
   assert.deepEqual(binding.localScopeBatch, reserved.localScopeBatch);
   assert.equal(binding.hostIdentity, reserved.localScopeBatch.identity.hostIdentity);
   assert.equal(binding.packetDigest, hash(canonical(packet)));

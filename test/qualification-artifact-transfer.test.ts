@@ -77,7 +77,7 @@ function document(
     treePaths,
   };
 }
-function fixture() {
+function fixture(cliVersion: unknown = "0.153.0", includeCliVersion = true) {
   const authority = {
     repository: "example/disposable",
     namespace: "large-case",
@@ -166,8 +166,8 @@ function fixture() {
     hostIdentity: batch.identity.hostIdentity,
     threadId: "thread-original",
     sessionId: "session-original",
-    cliVersion: "0.153.0",
-    serverUserAgent: "codex_cli_rs/0.153.0",
+    ...(includeCliVersion ? { cliVersion } : {}),
+    serverUserAgent: `codex_cli_rs/${String(cliVersion)}`,
     priorTurnIds: [],
     usageBaseline: Object.fromEntries(Object.keys(tokens).map((key) => [key, 0])),
   };
@@ -441,6 +441,30 @@ function fixture() {
 }
 
 describe("independent installed externalized artifact transfer proof", () => {
+  it.each(["0.153.2", "0.154.0", "1.0.0"])(
+    "accepts behavior-qualified App Server CLI identity %s",
+    (cliVersion) => {
+      const f = fixture(cliVersion);
+      expect(
+        assertArtifactTransferProof(f.heldObservation, f.authority, f.held, {
+          phase: "intent",
+          witness: f.witness,
+        }).summary,
+      ).toMatchObject({ modelTokens: 110 });
+    },
+  );
+  it.each([
+    { label: "missing", cliVersion: undefined, includeCliVersion: false },
+    { label: "malformed", cliVersion: "current", includeCliVersion: true },
+  ])("refuses $label App Server CLI identity", ({ cliVersion, includeCliVersion }) => {
+    const f = fixture(cliVersion, includeCliVersion);
+    expect(() =>
+      assertArtifactTransferProof(f.heldObservation, f.authority, f.held, {
+        phase: "intent",
+        witness: f.witness,
+      }),
+    ).toThrow("session CLI version identity is invalid");
+  });
   it("proves a produced LFS direct-ready checkpoint and its durable raw-transfer receipts", () => {
     const f = fixture();
     const source = JSON.parse(f.proof.ready.content);

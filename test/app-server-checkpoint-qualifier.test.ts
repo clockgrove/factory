@@ -77,7 +77,7 @@ function proofDocument(ref: string, path: string, document: unknown, parents: st
     treePaths,
   };
 }
-function fixture(workItem = 8) {
+function fixture(workItem = 8, cliVersion: unknown = "0.153.0", includeCliVersion = true) {
   const digest = hash(canonical(authority.policy)),
     baseSha = "b".repeat(40),
     host = "a".repeat(64);
@@ -145,8 +145,8 @@ function fixture(workItem = 8) {
     hostIdentity: host,
     threadId: "thread-7",
     sessionId: "session-7",
-    cliVersion: "0.153.0",
-    serverUserAgent: "codex_cli_rs/0.153.0",
+    ...(includeCliVersion ? { cliVersion } : {}),
+    serverUserAgent: `codex_cli_rs/${String(cliVersion)}`,
     priorTurnIds: [],
     usageBaseline: Object.fromEntries(Object.keys(tokens).map((key) => [key, 0])),
   };
@@ -358,6 +358,30 @@ describe("installed App Server checkpoint qualification", () => {
       turnId: "turn-7",
       modelTokens: 110,
     });
+  });
+  it.each(["0.153.2", "0.154.0", "1.0.0", "27.4.3-beta.1", "27.4.3+build.9"])(
+    "accepts behavior-qualified App Server CLI identity %s",
+    (cliVersion) => {
+      const f = fixture(8, cliVersion);
+      expect(assertAppServerCheckpoint(f.observation, authority, f.proof, f.witness)).toMatchObject(
+        { workItem: 8, runId: "run-7" },
+      );
+    },
+  );
+  it.each([
+    { label: "missing", cliVersion: undefined, includeCliVersion: false },
+    { label: "null", cliVersion: null, includeCliVersion: true },
+    { label: "empty", cliVersion: "", includeCliVersion: true },
+    { label: "unversioned", cliVersion: "current", includeCliVersion: true },
+    { label: "incomplete", cliVersion: "0.153", includeCliVersion: true },
+    { label: "four-part", cliVersion: "0.153.2.1", includeCliVersion: true },
+    { label: "control character", cliVersion: "0.153.2\n", includeCliVersion: true },
+    { label: "oversized", cliVersion: `1.0.0+${"x".repeat(64)}`, includeCliVersion: true },
+  ])("refuses $label App Server CLI identity", ({ cliVersion, includeCliVersion }) => {
+    const f = fixture(8, cliVersion, includeCliVersion);
+    expect(() => assertAppServerCheckpoint(f.observation, authority, f.proof, f.witness)).toThrow(
+      "session CLI version identity is invalid",
+    );
   });
   it("requires the direct artifact ready ref to be parentless and the intent ref absent", () => {
     const parented = fixture();

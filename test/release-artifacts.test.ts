@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -12,10 +13,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalChecksumBytes } from "../scripts/release-integrity.mjs";
-import { candidateCommands, verifyCandidate } from "../scripts/verify-candidate.mjs";
+import { candidateCommands } from "../scripts/verify-candidate.mjs";
 
 const version = "2.0.27-beta.0";
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -120,8 +121,40 @@ describe("release artifact generation", () => {
     write(root, "THIRD_PARTY_NOTICES.txt", "fixture notices\n");
     write(root, ".gitignore", "release/\n.release.tmp-*/\n.npm-cache/\n");
     mkdirSync(join(root, "scripts"));
-    for (const script of ["create-release-artifacts.mjs", "release-integrity.mjs"])
+    for (const script of [
+      "create-release-artifacts.mjs",
+      "release-integrity.mjs",
+      "verification-receipt.mjs",
+      "verify-candidate.mjs",
+    ])
       copyFileSync(new URL(`../scripts/${script}`, import.meta.url), join(root, "scripts", script));
+    write(
+      root,
+      "scripts/verify-release-preflight.mjs",
+      `import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+const log = process.env.FACTORY_TEST_CANDIDATE_COMMAND_LOG;
+mkdirSync(dirname(log), { recursive: true });
+appendFileSync(log, JSON.stringify({ command: process.execPath, args: ["scripts/verify-release-preflight.mjs"] }) + "\\n");
+`,
+    );
+    write(
+      root,
+      "bin/npm",
+      `#!/usr/bin/env node
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+const args = process.argv.slice(2);
+if (args.length === 1 && args[0] === "--version") {
+  process.stdout.write("11.19.0\\n");
+} else {
+  const log = process.env.FACTORY_TEST_CANDIDATE_COMMAND_LOG;
+  mkdirSync(dirname(log), { recursive: true });
+  appendFileSync(log, JSON.stringify({ command: "npm", args }) + "\\n");
+}
+`,
+    );
+    chmodSync(join(root, "bin/npm"), 0o700);
     git(root, "init", "--initial-branch=main", "-q");
     git(root, "add", ".");
     git(
@@ -167,6 +200,19 @@ describe("release artifact generation", () => {
       encoding: "utf8",
       env: { ...process.env, FACTORY_NPM_CACHE: join(root, ".npm-cache"), ...env },
     });
+  const verify = (root: string) => {
+    const log = join(root, ".npm-cache/candidate-commands.jsonl");
+    const result = spawnSync(process.execPath, [join(root, "scripts/verify-candidate.mjs")], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${join(root, "bin")}${delimiter}${process.env.PATH ?? ""}`,
+        FACTORY_TEST_CANDIDATE_COMMAND_LOG: log,
+      },
+    });
+    return { result, log };
+  };
   const receiptPath = (root: string) => join(root, "release/evidence/candidate-deterministic.json");
   const mutateReceipt = (root: string, mutate: (receipt: MutableCandidateReceipt) => void) => {
     const path = receiptPath(root);
@@ -183,18 +229,19 @@ describe("release artifact generation", () => {
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   });
 
-  it("consumes the default receipt from the production candidate verifier", async () => {
+  it("consumes the default receipt from the production candidate verifier CLI", () => {
     const root = fixture({ skipCandidateReceipt: true });
-    const commands: Array<[string, readonly string[], string]> = [];
-    const receipt = await verifyCandidate({
-      argv: [],
-      cwd: root,
-      runCommand: (command, args, cwd) => {
-        commands.push([command, args, cwd]);
-        return Promise.resolve();
-      },
-    });
-    expect(commands).toEqual(candidateCommands.map(([command, args]) => [command, args, root]));
+    const verified = verify(root);
+    expect(verified.result.stderr).toBe("");
+    expect(verified.result.status).toBe(0);
+    const commands = readFileSync(verified.log, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(commands).toEqual(
+      candidateCommands.map(([command, args]) => ({ command, args: [...args] })),
+    );
+    const receipt = JSON.parse(readFileSync(receiptPath(root), "utf8"));
     expect(receipt).toMatchObject({
       kind: "factory-exact-commit-verification",
       gate: "verify:candidate",
@@ -297,6 +344,7 @@ describe("release artifact generation", () => {
     );
     expect(readFileSync(receiptPath(root))).toEqual(candidateReceipt);
     expect(existsSync(join(root, "release/release-manifest.json"))).toBe(true);
+    expect(git(root, "status", "--porcelain", "--untracked-files=all")).toBe("");
     const backups = readdirSync(root).filter(
       (entry) => entry.startsWith(".release.tmp-") && entry.endsWith("-previous"),
     );

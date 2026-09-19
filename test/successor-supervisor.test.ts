@@ -97,6 +97,7 @@ async function retireFixtureRuns() {
 afterEach(async () => {
   await retireFixtureRuns();
   await releaseAllArtifactContent();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
   for (const directory of directories.splice(0))
     await rm(directory, { recursive: true, force: true });
@@ -149,6 +150,10 @@ async function fixture(
     compilerNpmAuthority?: boolean;
   } = {},
 ) {
+  if (options.interruptedRetainedLfs) {
+    vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+  }
   const repository = await mkdtemp(join(tmpdir(), "factory-successor-integration-"));
   directories.push(repository);
   const git = (...args: string[]) =>

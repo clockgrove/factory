@@ -3,7 +3,7 @@ import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GitCommitObject } from "../src/control/lease.js";
 import {
@@ -43,6 +43,10 @@ function exactHeadValidation(headSha: string) {
 }
 
 async function fixture(lfs = false) {
+  if (lfs) {
+    vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+  }
   const repository = await mkdtemp(join(tmpdir(), "factory-publication-"));
   git(repository, ["init", "-q", "-b", "main"]);
   git(repository, ["config", "user.name", "Factory Test"]);
@@ -69,6 +73,8 @@ async function fixture(lfs = false) {
     } satisfies GitCommitObject,
   };
 }
+
+afterEach(() => vi.unstubAllEnvs());
 
 class GitObjectStore implements PublicationStore {
   refs = new Map<string, string>();

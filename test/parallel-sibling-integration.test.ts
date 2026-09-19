@@ -64,6 +64,7 @@ const runContainedProcess = processGroup.runContainedProcess;
 const directories: string[] = [];
 afterEach(async () => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
   await releaseAllArtifactContent();
   for (const directory of directories.splice(0))
@@ -109,6 +110,10 @@ async function fixture(
     atomicStack?: boolean;
   } = {},
 ) {
+  if (options.lfs) {
+    vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+  }
   // This integration fixture validates graph and publication behavior. Keep it
   // independent of ambient user-manager scopes; the one scope-accounting case
   // below opts back into a deterministic mocked host explicitly.

@@ -177,6 +177,44 @@ export function compilerQualificationCheckpointAuthority(env) {
 
 class CheckpointPending extends Error {}
 
+const qualificationStages = new Set([
+  "concurrency-final-observation-0",
+  "concurrency-final-observation-1",
+  "concurrency-controller-generation",
+  "concurrency-settlement-0",
+  "concurrency-settlement-1",
+  "concurrency-model-configuration-0",
+  "concurrency-model-configuration-1",
+  "concurrency-measurements-0",
+  "concurrency-measurements-1",
+  "concurrency-merge-proofs-0",
+  "concurrency-merge-proofs-1",
+  "concurrency-scope-absence-0",
+  "concurrency-scope-absence-1",
+  "concurrency-installed-identity",
+  "concurrency-harness-identity",
+  "concurrency-artifact-proof",
+  "concurrency-refill-observation",
+  "concurrency-refill-consistency",
+  "concurrency-evidence-save",
+]);
+const qualificationFailureStages = new WeakMap();
+
+/** Attach only a fixed local stage to the original failure without serializing its private detail. */
+export async function withQualificationStage(stage, operation) {
+  assert.ok(qualificationStages.has(stage), "unsupported qualification stage");
+  try {
+    return await operation();
+  } catch (error) {
+    const retained =
+      error !== null && (typeof error === "object" || typeof error === "function")
+        ? error
+        : new Error("qualification stage failed");
+    qualificationFailureStages.set(retained, stage);
+    throw retained;
+  }
+}
+
 export function checkpointOperatorFailure(tool, args, response) {
   assert.equal(response.isError, true);
   const text = (response.content ?? [])
@@ -219,8 +257,13 @@ export function checkpointFailure(error, boundary) {
     "controller-process-cgroup",
     "controller-generation",
   ]);
+  const qualificationStage =
+    error !== null && (typeof error === "object" || typeof error === "function")
+      ? qualificationFailureStages.get(error)
+      : undefined;
   return {
     boundary: boundaries.has(boundary) ? boundary : "scenario",
+    ...(qualificationStage === undefined ? {} : { qualificationStage }),
     ...classifyCheckpointFailure(error),
   };
 }
@@ -2676,14 +2719,24 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       }),
     );
   } catch (error) {
+    const scenarioDiagnostic = checkpointFailure(error, controllerBoundary);
+    const observationDiagnostic =
+      lastObservationError === error && evidence.observationFailures?.length
+        ? evidence.observationFailures.at(-1)
+        : undefined;
     evidence.result = {
       result: "incomplete",
       reason:
         "checkpoint boundary unavailable; inspect exact retained authority before any further action",
       diagnostic:
-        lastObservationError === error && evidence.observationFailures?.length
-          ? evidence.observationFailures.at(-1)
-          : checkpointFailure(error, controllerBoundary),
+        observationDiagnostic === undefined
+          ? scenarioDiagnostic
+          : {
+              ...observationDiagnostic,
+              ...(scenarioDiagnostic.qualificationStage === undefined
+                ? {}
+                : { qualificationStage: scenarioDiagnostic.qualificationStage }),
+            },
       automaticRetry: false,
       automaticRestart: false,
     };

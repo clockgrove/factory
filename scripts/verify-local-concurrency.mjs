@@ -17,6 +17,7 @@ import {
   main as checkpointMain,
   assertScopeCoverage,
   assertControllerUnit,
+  withQualificationStage,
 } from "./verify-local-checkpoint-restart.mjs";
 import { authenticatedFaultEvents, isQuiescentFaultObjective } from "./verify-local-faults.mjs";
 import { qualificationModelAccounting } from "./qualification-model-accounting.mjs";
@@ -2460,81 +2461,120 @@ export async function main(env = process.env, run = checkpointMain) {
             return report;
           },
           finishThroughput: async (_pair, controller, refill) => {
-            checkpointTimeout(deadline(), 1);
             const final = [];
-            for (const record of evidence.objectives) final.push(await observeOne(record, true));
-            const originalController = final[0].events.find(
-              (event) => event.event === "ControllerObserved",
-            );
-            assert.ok(originalController);
-            const generation = Object.fromEntries(
-              ["controllerId", "epoch", "controllerPolicyDigest"].map((key) => [
-                key,
-                originalController[key],
-              ]),
-            );
-            assert.ok(
-              final[1].events.some(
-                (event) =>
-                  event.event === "ControllerObserved" &&
-                  Object.keys(generation).every((key) => event[key] === generation[key]),
-              ),
-              "Objectives did not share one authenticated discovery generation",
-            );
-            const peerSnapshots = final.map((entry) => structuredClone(entry));
-            for (const [index, entry] of final.entries()) {
-              assertConcurrencySettlement(entry, policyFor(authority, index));
-              entry.controllerQualification = { generation, peers: [peerSnapshots[1 - index]] };
-              entry.modelConfiguration = concurrencyModelConfiguration(
-                entry,
-                policyFor(authority, index),
+            for (const [index, record] of evidence.objectives.entries())
+              final.push(
+                await withQualificationStage(`concurrency-final-observation-${index}`, async () => {
+                  checkpointTimeout(deadline(), 1);
+                  return observeOne(record, true);
+                }),
               );
-              entry.measurements = concurrencyMeasurements(entry, evidence.observer);
-              entry.mergeProofs = await observeSettledConcurrencyMergeProofs({
-                entry,
-                request,
-                repository: authority.repository,
-              });
+            const { generation, peerSnapshots } = await withQualificationStage(
+              "concurrency-controller-generation",
+              () => {
+                const originalController = final[0].events.find(
+                  (event) => event.event === "ControllerObserved",
+                );
+                assert.ok(originalController);
+                const generation = Object.fromEntries(
+                  ["controllerId", "epoch", "controllerPolicyDigest"].map((key) => [
+                    key,
+                    originalController[key],
+                  ]),
+                );
+                assert.ok(
+                  final[1].events.some(
+                    (event) =>
+                      event.event === "ControllerObserved" &&
+                      Object.keys(generation).every((key) => event[key] === generation[key]),
+                  ),
+                  "Objectives did not share one authenticated discovery generation",
+                );
+                return { generation, peerSnapshots: final.map((entry) => structuredClone(entry)) };
+              },
+            );
+            const settlements = [];
+            for (const [index, entry] of final.entries()) {
+              settlements.push(
+                await withQualificationStage(`concurrency-settlement-${index}`, () =>
+                  assertConcurrencySettlement(entry, policyFor(authority, index)),
+                ),
+              );
+              entry.controllerQualification = { generation, peers: [peerSnapshots[1 - index]] };
+              entry.modelConfiguration = await withQualificationStage(
+                `concurrency-model-configuration-${index}`,
+                () => concurrencyModelConfiguration(entry, policyFor(authority, index)),
+              );
+              entry.measurements = await withQualificationStage(
+                `concurrency-measurements-${index}`,
+                () => concurrencyMeasurements(entry, evidence.observer),
+              );
+              entry.mergeProofs = await withQualificationStage(
+                `concurrency-merge-proofs-${index}`,
+                () =>
+                  observeSettledConcurrencyMergeProofs({
+                    entry,
+                    request,
+                    repository: authority.repository,
+                  }),
+              );
             }
             const absence = [];
             for (const [index, observation] of final.entries()) {
               evidence.objective = evidence.objectives[index].objective;
-              absence.push(await port.absence(observation, [controller]));
-            }
-            assert.deepEqual(installedBundleIdentity(pluginRoot), artifact);
-            const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-            for (const entry of evidence.harnessFiles)
-              assert.equal(
-                hash(readBounded(join(sourceRoot, entry.path), 262144)),
-                entry.sha256,
-                "qualifier dependency changed during execution",
+              absence.push(
+                await withQualificationStage(`concurrency-scope-absence-${index}`, () =>
+                  port.absence(observation, [controller]),
+                ),
               );
-            const artifactProof = await verifyConcurrencyArtifacts(
-              request,
-              authority,
-              evidence.defaultBranch,
-              final,
-              deadline(),
+            }
+            await withQualificationStage("concurrency-installed-identity", () =>
+              assert.deepEqual(installedBundleIdentity(pluginRoot), artifact),
             );
-            const observedRefill = concurrencyRefill(final);
-            assert.ok(observedRefill);
-            assert.deepEqual(observedRefill.refill, refill.refill);
-            evidence.finalObjectives = final;
-            evidence.concurrencyProof = {
-              scenario: "throughput",
-              artificialDelayMs: 0,
-              refill: observedRefill,
-              absence,
-              artifactProof,
-              measurements: final.map((entry) => entry.measurements),
-            };
-            save();
+            await withQualificationStage("concurrency-harness-identity", () => {
+              const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+              for (const entry of evidence.harnessFiles)
+                assert.equal(
+                  hash(readBounded(join(sourceRoot, entry.path), 262144)),
+                  entry.sha256,
+                  "qualifier dependency changed during execution",
+                );
+            });
+            const artifactProof = await withQualificationStage("concurrency-artifact-proof", () =>
+              verifyConcurrencyArtifacts(
+                request,
+                authority,
+                evidence.defaultBranch,
+                final,
+                deadline(),
+              ),
+            );
+            const observedRefill = await withQualificationStage(
+              "concurrency-refill-observation",
+              () => {
+                const observed = concurrencyRefill(final);
+                assert.ok(observed);
+                return observed;
+              },
+            );
+            await withQualificationStage("concurrency-refill-consistency", () =>
+              assert.deepEqual(observedRefill.refill, refill.refill),
+            );
+            await withQualificationStage("concurrency-evidence-save", () => {
+              evidence.finalObjectives = final;
+              evidence.concurrencyProof = {
+                scenario: "throughput",
+                artificialDelayMs: 0,
+                refill: observedRefill,
+                absence,
+                artifactProof,
+                measurements: final.map((entry) => entry.measurements),
+              };
+              save();
+            });
             return {
               refill: observedRefill,
-              modelTokensKnown: final.map(
-                (entry, index) =>
-                  assertConcurrencySettlement(entry, policyFor(authority, index)).modelTokens,
-              ),
+              modelTokensKnown: settlements.map((settlement) => settlement.modelTokens),
               modelConfiguration: final.map((entry) => entry.modelConfiguration),
               measurements: final.map((entry) => entry.measurements),
               artifactProof,

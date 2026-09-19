@@ -10,6 +10,11 @@ import {
   installedIdentity,
   installedPluginPath,
 } from "./verify-live-objective.mjs";
+import {
+  assertNoPackagedWorkflows,
+  pluginArchiveArguments,
+  pluginTreeArguments,
+} from "./plugin-package.mjs";
 
 export const QUALIFICATION_INSTALL_RECEIPT_ENV = "FACTORY_QUALIFICATION_INSTALL_RECEIPT";
 export const QUALIFICATION_MANAGEMENT_TRANSCRIPT_ENV = "FACTORY_MANAGEMENT_TRANSCRIPT_DIR";
@@ -201,12 +206,7 @@ function snapshotFiles(root, uid) {
 }
 
 function assertCommitSnapshot(source, commit, snapshot, uid, gitContext) {
-  const tree = gitBytes(
-    source,
-    ["ls-tree", "-r", "-z", "--full-tree", commit],
-    4 * 1024 * 1024,
-    gitContext,
-  )
+  const tree = gitBytes(source, pluginTreeArguments(commit), 4 * 1024 * 1024, gitContext)
     .toString("utf8")
     .split("\0")
     .filter(Boolean)
@@ -217,6 +217,11 @@ function assertCommitSnapshot(source, commit, snapshot, uid, gitContext) {
       return { path: match[3], oid: match[2] };
     });
   const files = snapshotFiles(snapshot, uid);
+  assertNoPackagedWorkflows(
+    tree.map(({ path }) => path),
+    "committed plugin surface",
+  );
+  assertNoPackagedWorkflows(files, "retained plugin snapshot");
   assert.deepEqual(
     files,
     tree.map(({ path }) => path).sort(),
@@ -363,7 +368,13 @@ function executable(path, uid, label) {
 }
 
 function committedFiles(source, uid, paths, gitContext) {
-  return [...new Set(["scripts/qualification-install-identity.mjs", ...paths])].map((path) => {
+  return [
+    ...new Set([
+      "scripts/qualification-install-identity.mjs",
+      "scripts/plugin-package.mjs",
+      ...paths,
+    ]),
+  ].map((path) => {
     assert.match(path, /^scripts\/[A-Za-z0-9_.-]+\.mjs$/, "invalid qualification source path");
     assert.equal(git(source, ["ls-files", "--error-unmatch", path], undefined, gitContext), path);
     const current = readFileSync(join(source, path));
@@ -500,7 +511,7 @@ export function installedQualificationAuthority(
     hash(
       gitBytes(
         source,
-        ["archive", "--format=tar", receipt.sourceCommit],
+        pluginArchiveArguments(receipt.sourceCommit),
         MAX_ARTIFACT_BYTES,
         gitContext,
       ),
@@ -509,6 +520,7 @@ export function installedQualificationAuthority(
     "plugin archive differs from source commit",
   );
   assertCommitSnapshot(source, receipt.sourceCommit, listedPluginSource, uid, gitContext);
+  assertNoPackagedWorkflows(snapshotFiles(installedPluginRoot, uid), "installed plugin cache");
   const committedQualificationFiles = committedFiles(source, uid, committedPaths, gitContext);
   const sourceInventory = readFileSync(join(source, "dist/bundle-inventory.json"));
   assert.equal(hash(sourceInventory), receipt.bundleInventorySha256);

@@ -262,11 +262,6 @@ check(
     agentMarketplacePlugin?.policy?.products === undefined,
   "the Agent marketplace declares portable install and authentication policy",
 );
-check(
-  !existsSync(resolve(root, ".github", "workflows")),
-  "the package ships no Factory GitHub Actions workflows",
-);
-
 const objectiveFormPath = resolve(root, "assets", "templates", "github", "objective.yml");
 check(existsSync(objectiveFormPath), "the package ships the human Objective issue form");
 if (existsSync(objectiveFormPath)) {

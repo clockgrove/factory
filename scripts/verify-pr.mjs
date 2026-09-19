@@ -93,6 +93,13 @@ export const prImpactRules = Object.freeze([
     ],
   },
   {
+    path: "test/helpers/qualification-install.ts",
+    tests: [
+      "test/phase4-qualification-install-authority.test.ts",
+      "test/qualification-install-identity.test.ts",
+    ],
+  },
+  {
     path: "test/helpers/successor-supervisor-cases.ts",
     tests: [
       "test/successor-supervisor-adopted-recovery.test.ts",

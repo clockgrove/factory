@@ -133,6 +133,10 @@ describe("proportional quality gates", () => {
       ],
     });
     expect(prImpactRules.some(({ path }) => path === "src/supervisor.ts")).toBe(true);
+    expect(selectPrChecks(["test/helpers/qualification-install.ts"]).mappedTests).toEqual([
+      "test/phase4-qualification-install-authority.test.ts",
+      "test/qualification-install-identity.test.ts",
+    ]);
   });
 
   it("runs directly changed deep scenarios while deferring dependency-only deep matrices", () => {

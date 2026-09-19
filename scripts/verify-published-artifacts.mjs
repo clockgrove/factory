@@ -29,6 +29,11 @@ import {
   sha256,
 } from "./release-integrity.mjs";
 import { installedBundleIdentity, installedPluginPath } from "./verify-live-objective.mjs";
+import {
+  assertNoPackagedWorkflows,
+  packagedPaths,
+  pluginArchiveArguments,
+} from "./plugin-package.mjs";
 
 const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_JSON_BYTES = 1024 * 1024;
@@ -632,14 +637,12 @@ async function install({ release, published, root, tools }) {
       git(tools, environment, ["rev-parse", "HEAD"], { cwd: pluginClone }),
       published.tag.commit,
     );
-    git(
-      tools,
-      environment,
-      ["archive", "--format=tar", `--output=${pluginArchive}`, published.tag.commit],
-      { cwd: pluginClone },
-    );
+    git(tools, environment, pluginArchiveArguments(published.tag.commit, pluginArchive), {
+      cwd: pluginClone,
+    });
     run("/usr/bin/tar", ["-xf", pluginArchive, "-C", pluginSource], { env: environment });
     assert.ok(!existsSync(join(pluginSource, ".git")), "plugin marketplace is a worktree");
+    assertNoPackagedWorkflows(packagedPaths(pluginSource), "published plugin tag snapshot");
     const sourceIdentity = assertInstalledIdentity(
       installedBundleIdentity(pluginSource),
       release,
@@ -678,6 +681,7 @@ async function install({ release, published, root, tools }) {
     );
     assertContainedPath(environment.CODEX_HOME, pluginRoot, "installed plugin root");
     assert.ok(!existsSync(join(pluginRoot, ".git")), "installed plugin contains worktree metadata");
+    assertNoPackagedWorkflows(packagedPaths(pluginRoot), "installed published plugin cache");
     const pluginIdentity = assertInstalledIdentity(
       installedBundleIdentity(pluginRoot),
       release,

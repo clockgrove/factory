@@ -65,7 +65,8 @@ describe("distributed operator documentation", () => {
     const freshRoot = 'test ! -e "$qualification_root"';
     const install =
       'npm_config_cache="$npm_cache" npm install --global --prefix "$npm_prefix" --ignore-scripts=false --no-audit --no-fund "$candidate_root/release/$tarball_file"';
-    const archive = 'git archive --format=tar --output="$plugin_archive" "$source_commit"';
+    const archive =
+      'node "$candidate_root/scripts/plugin-package.mjs" archive --source "$candidate_root" --commit "$source_commit" --output "$plugin_archive"';
     const marketplace =
       'CODEX_HOME="$codex_home" "$codex_cli" plugin marketplace add "$plugin_snapshot" --json';
 
@@ -96,6 +97,9 @@ describe("distributed operator documentation", () => {
     );
     expect(commands).toContain('plugin_snapshot="$qualification_root/plugin-marketplace"');
     expect(commands).toContain(archive);
+    expect(commands).not.toContain(
+      'git archive --format=tar --output="$plugin_archive" "$source_commit"',
+    );
     expect(commands).toContain(marketplace);
     expect(commands).not.toContain('codex plugin marketplace add "$candidate_root"');
     expect(commands.indexOf(archive)).toBeLessThan(commands.indexOf(marketplace));

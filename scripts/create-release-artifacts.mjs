@@ -395,8 +395,20 @@ try {
     if (!swapped) await rename(previousDirectory, outputDirectory);
     throw error;
   }
-  await rm(previousDirectory, { recursive: true });
   completed = true;
+  try {
+    if (
+      process.env.NODE_ENV === "test" &&
+      process.env.FACTORY_TEST_RELEASE_BACKUP_CLEANUP_FAILURE === "1"
+    ) {
+      throw new Error("injected release backup cleanup failure");
+    }
+    await rm(previousDirectory, { recursive: true });
+  } catch {
+    process.stderr.write(
+      `warning: release artifacts committed; previous evidence backup cleanup is incomplete at ${previousDirectory}\n`,
+    );
+  }
   process.stdout.write(`created release artifacts in ${outputDirectory}\n`);
 } finally {
   if (!completed) await rm(stagingDirectory, { recursive: true, force: true });

@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -14,6 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalChecksumBytes } from "../scripts/release-integrity.mjs";
+import { candidateCommands, verifyCandidate } from "../scripts/verify-candidate.mjs";
 
 const version = "2.0.27-beta.0";
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -39,6 +41,7 @@ describe("release artifact generation", () => {
       missingBundle?: boolean;
       pluginVersion?: string;
       pluginName?: string;
+      skipCandidateReceipt?: boolean;
     } = {},
   ) => {
     const root = mkdtempSync(join(tmpdir(), "factory-release-artifacts-"));
@@ -131,29 +134,31 @@ describe("release artifact generation", () => {
       "-qm",
       "fixture",
     );
-    const subjects = [
-      "package.json",
-      "package-lock.json",
-      "dist/factory.js",
-      "dist/mcp-server.js",
-      "dist/bundle-inventory.json",
-    ].map((path) => ({ path, sha256: hash(readFileSync(join(root, path))) }));
-    write(
-      root,
-      "release/evidence/candidate-deterministic.json",
-      `${JSON.stringify(
-        {
-          kind: "factory-exact-commit-verification",
-          gate: "verify:candidate",
-          status: "passed",
-          commit: git(root, "rev-parse", "HEAD"),
-          tree: git(root, "rev-parse", "HEAD^{tree}"),
-          subjects,
-        },
-        null,
-        2,
-      )}\n`,
-    );
+    if (!overrides.skipCandidateReceipt) {
+      const subjects = [
+        "package.json",
+        "package-lock.json",
+        "dist/factory.js",
+        "dist/mcp-server.js",
+        "dist/bundle-inventory.json",
+      ].map((path) => ({ path, sha256: hash(readFileSync(join(root, path))) }));
+      write(
+        root,
+        "release/evidence/candidate-deterministic.json",
+        `${JSON.stringify(
+          {
+            kind: "factory-exact-commit-verification",
+            gate: "verify:candidate",
+            status: "passed",
+            commit: git(root, "rev-parse", "HEAD"),
+            tree: git(root, "rev-parse", "HEAD^{tree}"),
+            subjects,
+          },
+          null,
+          2,
+        )}\n`,
+      );
+    }
     return root;
   };
   const generate = (root: string, env: Record<string, string> = {}) =>
@@ -178,8 +183,25 @@ describe("release artifact generation", () => {
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   });
 
-  it("creates one clean prerelease candidate with authenticated SBOM and checksums", () => {
-    const root = fixture();
+  it("consumes the default receipt from the production candidate verifier", async () => {
+    const root = fixture({ skipCandidateReceipt: true });
+    const commands: Array<[string, readonly string[], string]> = [];
+    const receipt = await verifyCandidate({
+      argv: [],
+      cwd: root,
+      runCommand: (command, args, cwd) => {
+        commands.push([command, args, cwd]);
+        return Promise.resolve();
+      },
+    });
+    expect(commands).toEqual(candidateCommands.map(([command, args]) => [command, args, root]));
+    expect(receipt).toMatchObject({
+      kind: "factory-exact-commit-verification",
+      gate: "verify:candidate",
+      status: "passed",
+      commit: git(root, "rev-parse", "HEAD"),
+      tree: git(root, "rev-parse", "HEAD^{tree}"),
+    });
     const candidateReceipt = readFileSync(receiptPath(root));
     const result = generate(root);
     expect(result.stderr).toBe("");
@@ -259,6 +281,29 @@ describe("release artifact generation", () => {
     expect(readFileSync(receiptPath(root))).toEqual(candidateReceipt);
     expect(existsSync(join(root, "release/release-manifest.json"))).toBe(false);
     expect(transientDirectories(root)).toBe("");
+  });
+
+  it("reports success and retains the backup when cleanup fails after the committed swap", () => {
+    const root = fixture();
+    const candidateReceipt = readFileSync(receiptPath(root));
+    const result = generate(root, {
+      NODE_ENV: "test",
+      FACTORY_TEST_RELEASE_BACKUP_CLEANUP_FAILURE: "1",
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("created release artifacts");
+    expect(result.stderr).toContain(
+      "warning: release artifacts committed; previous evidence backup cleanup is incomplete",
+    );
+    expect(readFileSync(receiptPath(root))).toEqual(candidateReceipt);
+    expect(existsSync(join(root, "release/release-manifest.json"))).toBe(true);
+    const backups = readdirSync(root).filter(
+      (entry) => entry.startsWith(".release.tmp-") && entry.endsWith("-previous"),
+    );
+    expect(backups).toHaveLength(1);
+    expect(readFileSync(join(root, backups[0]!, "evidence/candidate-deterministic.json"))).toEqual(
+      candidateReceipt,
+    );
   });
 
   it("refuses a completed artifact set without changing it", () => {

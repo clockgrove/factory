@@ -39,12 +39,16 @@ async function run(command, args, cwd) {
   }
 }
 
-export async function verifyCandidate({ argv = process.argv.slice(2), cwd = process.cwd() } = {}) {
+export async function verifyCandidate({
+  argv = process.argv.slice(2),
+  cwd = process.cwd(),
+  runCommand = run,
+} = {}) {
   const { output } = parseArguments(argv);
   const startedAt = new Date().toISOString();
   const initial = await sourceIdentity(cwd);
   if (!initial.clean) throw new Error("verify:candidate requires a clean committed working tree");
-  for (const [command, args] of candidateCommands) await run(command, args, cwd);
+  for (const [command, args] of candidateCommands) await runCommand(command, args, cwd);
   const final = await sourceIdentity(cwd);
   if (!final.clean || final.commit !== initial.commit || final.tree !== initial.tree) {
     throw new Error(

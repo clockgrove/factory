@@ -252,9 +252,10 @@ npm ci
 npm run verify:candidate
 ```
 
-Routine pull requests use `npm run test:pr -- --base origin/main`; main CI runs the complete
-deterministic `npm run test:main` gate once per landed batch. Candidate verification requires
-supported Linux, systemd 254+, and a reachable systemd user manager. See the
+Routine pull requests use `npm run test:pr -- --base origin/main`; it reports the selected direct,
+dependency-affected, and explicitly mapped tests plus any deep scenarios deferred to main. Main CI
+runs the complete deterministic `npm run test:main` gate once per landed batch. Candidate
+verification requires supported Linux, systemd 254+, and a reachable systemd user manager. See the
 [release verification procedure](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md#release-verification-procedure)
 for exact prerequisites and remaining external gates.
 

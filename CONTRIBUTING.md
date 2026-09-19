@@ -69,16 +69,21 @@ npm run test:pr -- --base origin/main
 ```
 
 `test:pr` runs typecheck, Biome only on changed code/configuration, eight critical contract files,
-and Vitest's dependency-selected affected regressions. Package, schema, and workflow surfaces add
-their direct contract tests. The PR gate never promotes itself to the complete deterministic suite.
-Add a regression test for a bug fix. `npm run format` applies formatting to the configured code
-files. Live-provider tests use separate, opt-in commands. Record any checks you could not run and
-the reason.
+directly changed tests, and dependency-selected regressions for ordinary source changes. Package,
+schema, workflow, and shared test-support surfaces use explicit impact rules. Deep Supervisor
+scenario matrices run here only when directly changed or selected by an impact rule; the complete
+matrix remains in `test:main`. The command prints its selected files, worker count, phase timings,
+and deferred deep scenarios in the log and CI summary. The PR gate never promotes itself to the
+complete deterministic suite. Add a regression test for a bug fix. If you add or change shared test
+support, add its fail-closed `prImpactRules` mapping in `scripts/verify-pr.mjs`. `npm run format`
+applies formatting to the configured code files. Live-provider tests use separate, opt-in commands.
+Record any checks you could not run and the reason.
 
 After a related batch lands on `main`, CI runs `npm run test:main` once: full typecheck, lint,
 formatting, deterministic tests, and schemas. Its uploaded JSON result names the exact successful
-commit and tree. Do not rerun the full suite between each repair when focused checks cover the
-change.
+commit and tree. PR and main test phases use at most four available CPUs so GitHub's four-core
+runner does not collapse to one worker. Do not rerun the full suite between each repair when
+focused checks cover the change.
 
 For documentation-only changes, check the diff, links, and examples. The current format command
 covers code and configuration, not Markdown. If you change install, upgrade, or uninstall

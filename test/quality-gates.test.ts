@@ -13,7 +13,15 @@ import { describe, expect, it } from "vitest";
 import YAML from "yaml";
 
 import { candidateCommands } from "../scripts/verify-candidate.mjs";
-import { criticalContractTests, parsePrArguments, selectPrChecks } from "../scripts/verify-pr.mjs";
+import {
+  buildPrTestPlan,
+  criticalContractTests,
+  deepScenarioTests,
+  parsePrArguments,
+  prImpactRules,
+  prWorkerCount,
+  selectPrChecks,
+} from "../scripts/verify-pr.mjs";
 import {
   assertExpectedCommit,
   createVerificationReceipt,
@@ -51,38 +59,109 @@ describe("proportional quality gates", () => {
         "test/platform.test.ts",
       ],
       biome: ["scripts/example.mjs", "src/platform.ts", "test/platform.test.ts"],
-      affected: [
-        "scripts/example.mjs",
-        "src/platform.ts",
+      directTests: ["test/platform.test.ts"],
+      mappedTests: [
         "test/manifest-consistency.test.ts",
         "test/package-documentation.test.ts",
         "test/package-install.test.ts",
-        "test/platform.test.ts",
       ],
+      relatedInputs: ["scripts/example.mjs", "src/platform.ts"],
       code: true,
     });
     expect(selectPrChecks(["README.md", "docs/CONFORMANCE.md"]).code).toBe(false);
   });
 
   it("routes package, schema, and workflow surfaces to their direct contracts", () => {
-    expect(selectPrChecks(["package.json", "package-lock.json"]).affected).toEqual([
+    expect(selectPrChecks(["package.json", "package-lock.json"]).mappedTests).toEqual([
       "test/manifest-consistency.test.ts",
       "test/package-documentation.test.ts",
       "test/package-install.test.ts",
     ]);
-    expect(selectPrChecks(["schemas/compiler-request.schema.json"]).affected).toEqual([
+    expect(selectPrChecks(["schemas/compiler-request.schema.json"]).mappedTests).toEqual([
       "test/provider-structured-output-schema.test.ts",
       "test/worker-packet-schema-parity.test.ts",
     ]);
-    expect(selectPrChecks([".github/workflows/quality.yml"]).affected).toEqual([
+    expect(selectPrChecks([".github/workflows/quality.yml"]).mappedTests).toEqual([
       "test/quality-gates.test.ts",
     ]);
     expect(selectPrChecks(["skills/director/SKILL.md"]).code).toBe(true);
   });
 
+  it("maps shared test support explicitly and fails closed for an unknown helper", () => {
+    expect(selectPrChecks(["test/helpers/provider-supervisor.ts"])).toMatchObject({
+      directTests: [],
+      relatedInputs: [],
+      mappedTests: [
+        "test/provider-supervisor-lifecycle.test.ts",
+        "test/provider-supervisor-qualification.test.ts",
+      ],
+    });
+    expect(() => selectPrChecks(["test/helpers/unmapped-fixture.ts"])).toThrow(
+      "test-support impact is unmapped",
+    );
+    expect(selectPrChecks(["src/supervisor.ts"])).toMatchObject({
+      relatedInputs: ["src/supervisor.ts"],
+      mappedTests: [
+        "test/regular-pipeline-supervisor.test.ts",
+        "test/supervisor-commands.test.ts",
+        "test/supervisor-preflight.test.ts",
+        "test/supervisor-result-receipts.test.ts",
+      ],
+    });
+    expect(prImpactRules.some(({ path }) => path === "src/supervisor.ts")).toBe(true);
+  });
+
+  it("runs directly changed deep scenarios while deferring dependency-only deep matrices", () => {
+    const selection = selectPrChecks(["src/platform.ts", "test/successor-supervisor.test.ts"]);
+    const plan = buildPrTestPlan(selection, [
+      "test/platform.test.ts",
+      "test/supervisor-late-completion.test.ts",
+      "test/successor-supervisor.test.ts",
+    ]);
+    expect(plan).toEqual({
+      selectedTests: ["test/platform.test.ts", "test/successor-supervisor.test.ts"],
+      deferredDeepTests: ["test/supervisor-late-completion.test.ts"],
+    });
+    expect(deepScenarioTests).toContain("test/successor-supervisor.test.ts");
+
+    const mapped = selectPrChecks(["test/helpers/provider-supervisor.ts"]);
+    expect(buildPrTestPlan(mapped, []).selectedTests).toEqual([
+      "test/provider-supervisor-lifecycle.test.ts",
+      "test/provider-supervisor-qualification.test.ts",
+    ]);
+  });
+
+  it("keeps every explicit impact target and deep scenario attached to a real test", () => {
+    const paths = [...deepScenarioTests, ...prImpactRules.flatMap(({ tests }) => tests)];
+    for (const path of paths) {
+      expect(existsSync(new URL(`../${path}`, import.meta.url)), path).toBe(true);
+    }
+    expect(new Set(deepScenarioTests).size).toBe(deepScenarioTests.length);
+  });
+
+  it("uses up to four actual CPUs for PR test files", () => {
+    expect(prWorkerCount(1)).toBe(1);
+    expect(prWorkerCount(2)).toBe(2);
+    expect(prWorkerCount(4)).toBe(4);
+    expect(prWorkerCount(32)).toBe(4);
+    expect(() => prWorkerCount(0)).toThrow("positive integer");
+
+    const config = readFileSync(new URL("../vitest.config.ts", import.meta.url), "utf8");
+    expect(config).toContain('from "node:os"');
+    expect(config).toContain("maxWorkers: Math.min(4, availableParallelism())");
+  });
+
   it("never promotes a pull request to the complete deterministic suite", () => {
     const source = readFileSync(new URL("../scripts/verify-pr.mjs", import.meta.url), "utf8");
     expect(source).not.toContain('run("npm", ["test"]');
+  });
+
+  it("reports phase timing, worker count, and deep deferrals", () => {
+    const source = readFileSync(new URL("../scripts/verify-pr.mjs", import.meta.url), "utf8");
+    expect(source).toContain("available parallelism");
+    expect(source).toContain("Vitest workers");
+    expect(source).toContain("deep scenarios deferred to test:main");
+    expect(source).toContain("GITHUB_STEP_SUMMARY");
   });
 
   it("keeps the critical suite small and anchored in core contracts", () => {

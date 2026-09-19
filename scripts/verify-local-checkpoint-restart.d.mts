@@ -133,6 +133,8 @@ export function withQualificationStage<T>(
 export interface CheckpointDiagnostic {
   boundary: string;
   qualificationStage?: string;
+  operation?: "git-ref-read";
+  ref?: string;
   category:
     | "rate-limit"
     | "http-refusal"

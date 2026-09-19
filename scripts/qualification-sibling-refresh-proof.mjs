@@ -16,6 +16,14 @@ import {
 } from "./qualification-reservation-authority.mjs";
 
 const hash = (text) => createHash("sha256").update(text).digest("hex");
+const proofFailureContexts = new WeakMap();
+
+export function qualificationProofFailureContext(error) {
+  if (error === null || (typeof error !== "object" && typeof error !== "function"))
+    return undefined;
+  return proofFailureContexts.get(error);
+}
+
 const canonical = (value) => {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object")
@@ -1152,7 +1160,17 @@ export function nativeProofReader(request) {
         /^refs\/clockgrove-factory\/sessions\/[a-f0-9]{64}\/(prepared|turn|terminal)$/.test(ref) ||
         /^refs\/clockgrove-factory\/artifact-transfers\/[a-f0-9]{64}\/(intent|ready)$/.test(ref),
     );
-    const data = await get("GET /repos/{owner}/{repo}/git/ref/{ref}", { ref: ref.slice(5) });
+    let data;
+    try {
+      data = await get("GET /repos/{owner}/{repo}/git/ref/{ref}", { ref: ref.slice(5) });
+    } catch (error) {
+      const retained =
+        error !== null && (typeof error === "object" || typeof error === "function")
+          ? error
+          : new Error("qualification Git ref read failed");
+      proofFailureContexts.set(retained, { operation: "git-ref-read", ref });
+      throw retained;
+    }
     assert.equal(data.ref, ref);
     assert.equal(data.object.type, "commit");
     sha(data.object.sha);

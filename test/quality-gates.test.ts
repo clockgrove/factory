@@ -87,6 +87,29 @@ describe("proportional quality gates", () => {
     expect(selectPrChecks(["skills/director/SKILL.md"]).code).toBe(true);
   });
 
+  it("keeps generated metadata out of Biome without weakening the PR gate", () => {
+    expect(
+      selectPrChecks([
+        "THIRD_PARTY_NOTICES.txt",
+        "dist/bundle-inventory.json",
+        "dist/factory.js",
+        "dist/mcp-server.js",
+      ]),
+    ).toMatchObject({
+      biome: [],
+      directTests: [],
+      mappedTests: [],
+      relatedInputs: [],
+      code: true,
+    });
+    expect(selectPrChecks([".github/workflows/quality.yml"]).biome).toEqual([]);
+    expect(selectPrChecks(["src/platform.ts", "package.json", "biome.json"]).biome).toEqual([
+      "biome.json",
+      "package.json",
+      "src/platform.ts",
+    ]);
+  });
+
   it("maps shared test support explicitly and fails closed for an unknown helper", () => {
     expect(selectPrChecks(["test/helpers/provider-supervisor.ts"])).toMatchObject({
       directTests: [],

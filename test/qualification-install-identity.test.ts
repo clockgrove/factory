@@ -33,6 +33,16 @@ afterEach(() => {
 describe("retained qualification install authority", () => {
   it("binds the source, tarball, npm install, plugin archive, isolated listing, and cache", () => {
     const value = fixture();
+    const archivePaths = execFileSync("tar", ["-tf", value.pluginArchive], {
+      encoding: "utf8",
+    })
+      .trim()
+      .split("\n");
+    expect(existsSync(join(value.source, ".github/workflows/quality.yml"))).toBe(true);
+    expect(archivePaths).toContain(".github/plugin/marketplace.json");
+    expect(archivePaths.some((path) => path.startsWith(".github/workflows"))).toBe(false);
+    expect(existsSync(join(value.listedPluginSource, ".github/workflows"))).toBe(false);
+    expect(existsSync(join(value.installedPluginRoot, ".github/workflows"))).toBe(false);
     const listPlugins = vi.fn(() => value.listed);
     const authority = installedQualificationAuthority(
       { FACTORY_QUALIFICATION_INSTALL_RECEIPT: value.installReceipt },
@@ -46,7 +56,7 @@ describe("retained qualification install authority", () => {
       candidateVersion: value.version,
     });
     expect(listPlugins).toHaveBeenCalledWith(value.codexCli, value.codexHome, expect.any(Object));
-    expect(authority.committedQualificationFiles).toHaveLength(2);
+    expect(authority.committedQualificationFiles).toHaveLength(3);
   });
 
   it("disables repository fsmonitor and Git redirects for every authority read", () => {
@@ -156,6 +166,21 @@ describe("retained qualification install authority", () => {
       "plugin snapshot drift",
       (value: ReturnType<typeof fixture>) => {
         write(join(value.listedPluginSource, "plugin.json"), '{"name":"other"}\n');
+      },
+    ],
+    [
+      "workflow in plugin snapshot",
+      (value: ReturnType<typeof fixture>) => {
+        write(join(value.listedPluginSource, ".github/workflows/quality.yml"), "name: forbidden\n");
+      },
+    ],
+    [
+      "workflow in installed plugin cache",
+      (value: ReturnType<typeof fixture>) => {
+        write(
+          join(value.installedPluginRoot, ".github/workflows/quality.yml"),
+          "name: forbidden\n",
+        );
       },
     ],
     [

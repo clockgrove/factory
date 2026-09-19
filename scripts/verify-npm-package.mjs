@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { optionalHostQualification } from "./qualify-linux-host.mjs";
 import { assertPackageDocumentation } from "./package-documentation.mjs";
+import { assertNoPackagedWorkflows } from "./plugin-package.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const temporaryRoot = await mkdtemp(resolve(tmpdir(), "factory-npm-package-"));
@@ -124,6 +125,7 @@ try {
   }
 
   const paths = new Set(first.files.map((file) => file.path));
+  assertNoPackagedWorkflows(paths, "npm packlist");
   for (const required of [
     ".agents/plugins/marketplace.json",
     ".codex-plugin/plugin.json",

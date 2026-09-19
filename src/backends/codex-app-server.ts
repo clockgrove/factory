@@ -840,14 +840,19 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       attempt.cancellationRequested = terminal?.state === "cancelled";
       attempt.deadlineExpired = terminal?.state === "timed_out";
       attempt.usageStreamComplete = false;
-      this.#applyTurn(attempt, selected);
       if (terminal) {
+        const selectedFinal = finalFromItems(selected.items);
         if (
-          terminal.state !== attempt.state ||
+          selected.status === "inProgress" ||
           terminal.providerStatus !== selected.status ||
-          canonicalSessionJson(terminal.final) !== canonicalSessionJson(attempt.final)
+          canonicalSessionJson(terminal.final) !== canonicalSessionJson(selectedFinal)
         )
           throw new Error("provider terminal differs from its durable completion");
+        attempt.providerTerminal = true;
+        attempt.providerCompleted = selected.status === "completed";
+        attempt.providerStatus = selected.status;
+        if (terminal.final) attempt.final = terminal.final;
+        else delete attempt.final;
         attempt.usage = terminal.usage;
         attempt.rawTokenUsage = terminal.rawTokenUsage;
         attempt.responseUsage = new Map(
@@ -855,7 +860,8 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         );
         attempt.usageStreamComplete = terminal.usageStreamComplete === true;
         attempt.terminalPersisted = true;
-      }
+        this.#markTerminal(attempt, terminal.state!);
+      } else this.#applyTurn(attempt, selected);
       this.#attempts.set(resumed.resourceId, attempt);
       this.#ownedScopes.set(binding.attemptId, binding.localScopeBatch);
       if (selected.status === "inProgress") {
@@ -1180,6 +1186,17 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       // Closing the one per-attempt connection below is the fallback.
     }
     await Promise.race([attempt.terminal, wait(boundedWait)]);
+    if (
+      !attempt.providerTerminal ||
+      !completedAppServerUsage({
+        completed: attempt.providerCompleted === true,
+        baseline: attempt.binding?.usageBaseline ?? EMPTY_APP_SERVER_USAGE,
+        total: attempt.rawTokenUsage?.total,
+        responses: [...attempt.responseUsage.values()],
+        streamComplete: attempt.usageStreamComplete,
+      })
+    )
+      attempt.usageStreamComplete = false;
     attempt.connectionCloseRequested = true;
     await this.#closeConnection(attempt.home);
     if (binding) {

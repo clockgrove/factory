@@ -925,7 +925,7 @@ describe("Codex App Server local backend", () => {
     await backend.cleanup(handle);
   });
 
-  it("closes the live process before the fresh final fenced read", async () => {
+  it("closes the live process before the fresh final fenced read without extending live usage authority", async () => {
     const options: FakeOptions = {
       failInterrupt: true,
       resumeTurns: [],
@@ -958,6 +958,25 @@ describe("Codex App Server local backend", () => {
     deadlineIn(ctx, 40);
     const handle = await backend.launch(ctx);
     const connection = connections.get(handle.metadata!.codexHome!)!;
+    const tokens = {
+      inputTokens: 18,
+      outputTokens: 4,
+      cachedInputTokens: 6,
+      cacheWriteInputTokens: 0,
+      reasoningOutputTokens: 1,
+      totalTokens: 22,
+    };
+    connection.emit("rawResponse/completed", {
+      threadId: handle.resourceId,
+      turnId: handle.metadata!.turnId,
+      responseId: "response-before-deadline-close",
+      usage: tokens,
+    });
+    connection.emit("thread/tokenUsage/updated", {
+      threadId: handle.resourceId,
+      turnId: handle.metadata!.turnId,
+      tokenUsage: { total: tokens, last: tokens },
+    });
     options.resumeTurns = [{ id: handle.metadata!.turnId, status: "inProgress", items: [] }];
 
     await waitForState(backend, handle, "timed_out");
@@ -968,8 +987,9 @@ describe("Codex App Server local backend", () => {
     expect(await ctx.sessionJournal!.load("terminal")).toMatchObject({
       state: "timed_out",
       providerStatus: "completed",
-      usageStreamComplete: true,
+      usageStreamComplete: false,
     });
+    expect((await ctx.sessionJournal!.load("terminal"))!.usage).toBeUndefined();
     await backend.cleanup(handle);
   });
 
@@ -1042,11 +1062,12 @@ describe("Codex App Server local backend", () => {
     await expect(backend.observe(handle)).rejects.toThrow("unknown Codex thread");
   });
 
-  it("resumes the fenced durable turn after an adapter restart without launching duplicate work", async () => {
+  it("hydrates a successful durable terminal after its deadline without reclassifying or replaying it", async () => {
     const root = join(suiteRoot, "resume");
     const firstConnections = new Map<string, FakeConnection>();
     const first = factory(root, firstConnections);
     const ctx = await context(4);
+    deadlineIn(ctx, 60_000);
     const handle = await first.launch(ctx);
 
     const turn = {
@@ -1070,7 +1091,10 @@ describe("Codex App Server local backend", () => {
     const resumedConnections = new Map<string, FakeConnection>();
     // The same parent controller can stay alive after this exact invocation drains.
     const second = factory(root, resumedConnections, { resumeTurns: [turn], liveProducer: true });
-    const resumed = await second.resume(ctx, structuredClone(handle));
+    const clock = vi.spyOn(Date, "now").mockReturnValue(ctx.deadline.getTime() + 1);
+    const resumed = await second.resume(ctx, structuredClone(handle)).finally(() => {
+      clock.mockRestore();
+    });
     expect(await second.observe(resumed)).toMatchObject({
       state: "succeeded",
       usage: { inputTokens: 10, outputTokens: 2, cachedInputTokens: 3 },
@@ -1083,6 +1107,62 @@ describe("Codex App Server local backend", () => {
 
     expect((await second.observe(resumed)).state).toBe("succeeded");
     expect((await second.collect(resumed)).patch).toContain("resumed");
+    await second.cleanup(resumed);
+  });
+
+  it("hydrates a timed-out durable terminal after its deadline without replaying it", async () => {
+    const root = join(suiteRoot, "resume-timed-out");
+    const options: FakeOptions = {
+      omitInterruptTerminal: true,
+      resumeTurns: [],
+      afterClose: (closed) => {
+        if (closed.name !== "1") return;
+        options.resumeTurns = [
+          {
+            id: "turn-1",
+            status: "completed",
+            items: [
+              {
+                type: "agentMessage",
+                id: "message-timed-out",
+                text: JSON.stringify({
+                  outcome: "succeeded",
+                  summary: "completed only after the deadline",
+                  commands: [],
+                }),
+              },
+            ],
+            error: null,
+          },
+        ];
+      },
+    };
+    const firstConnections = new Map<string, FakeConnection>();
+    const first = factory(root, firstConnections, options);
+    const ctx = await context(121);
+    deadlineIn(ctx, 40);
+    const handle = await first.launch(ctx);
+    options.resumeTurns = [{ id: handle.metadata!.turnId, status: "inProgress", items: [] }];
+
+    await waitForState(first, handle, "timed_out");
+    expect(await ctx.sessionJournal!.load("terminal")).toMatchObject({
+      state: "timed_out",
+      providerStatus: "completed",
+    });
+    await first.cleanup(handle);
+
+    const resumedConnections = new Map<string, FakeConnection>();
+    const second = factory(root, resumedConnections, {
+      resumeTurns: options.resumeTurns,
+      liveProducer: true,
+    });
+    const resumed = await second.resume(ctx, structuredClone(handle));
+    expect(await second.observe(resumed)).toMatchObject({
+      state: "timed_out",
+      usage: { inputTokens: null, outputTokens: null, cachedInputTokens: null },
+    });
+    const connection = resumedConnections.get(resumed.metadata!.codexHome!)!;
+    expect(connection.calls.map(({ method }) => method)).toEqual(["initialize", "thread/read"]);
     await second.cleanup(resumed);
   });
 

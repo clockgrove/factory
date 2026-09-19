@@ -47,6 +47,17 @@ export function isExactLifecycleFlockWaiter(
   lockFd: number | null,
 ): boolean;
 
+export function waitForPrivateJson(
+  path: string,
+  child: {
+    pid?: number | undefined;
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+  },
+  uid: number,
+  timeoutMs?: number,
+): Promise<string>;
+
 export function runLifecycleRaceMatrix(port: LifecycleRacePort): Promise<{
   cases: Array<{ name: string } & Record<string, unknown>>;
   contention: unknown;

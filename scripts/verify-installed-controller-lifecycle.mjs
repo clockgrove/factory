@@ -142,7 +142,7 @@ async function within(promise, milliseconds, label) {
   }
 }
 
-async function waitForPrivateJson(path, child, uid, timeoutMs = REACHED_TIMEOUT_MS) {
+export async function waitForPrivateJson(path, child, uid, timeoutMs = REACHED_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null)

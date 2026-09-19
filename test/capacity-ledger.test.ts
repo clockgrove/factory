@@ -61,7 +61,8 @@ function attemptEvent(
     | "AttemptStarted"
     | "AttemptSucceeded"
     | "AttemptCollected"
-    | "AttemptFailed",
+    | "AttemptFailed"
+    | "AttemptRecoveryBlocked",
   sequence: number,
   extra: Record<string, unknown> = {},
 ): FactoryEvent {
@@ -511,6 +512,33 @@ describe("repository-wide capacity ledger", () => {
         },
       ]),
     ).toHaveLength(1);
+  });
+
+  it("does not reconstruct execution capacity after an absent-producer recovery block", () => {
+    expect(
+      deriveCapacityReservations([
+        {
+          objective: 1,
+          workItem: 10,
+          events: [
+            attemptEvent("AttemptReserved", 1),
+            attemptEvent("AttemptRecoveryBlocked", 2, {
+              recoveryEpoch: 2,
+              modelInvocationId: "worker-10-1",
+              producerState: "absent",
+              sameAttemptResume: "unavailable",
+              terminalEvidence: "unavailable",
+              artifactEvidence: "unavailable",
+              modelUsageAccounting: "unknown",
+              nextDisposition: "explicit-recovery",
+              reason: "fixture producer is absent and exact output is unavailable",
+            }),
+          ],
+          defaultCpu: 1,
+          defaultMemoryMb: 2_048,
+        },
+      ]),
+    ).toEqual([]);
   });
 
   it("reconstructs validation capacity until its idempotent reconciliation", () => {

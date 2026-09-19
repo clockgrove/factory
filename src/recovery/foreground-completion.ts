@@ -136,9 +136,13 @@ export async function deriveForegroundCompletion(
         event.directorEpoch === reserved.directorEpoch &&
         event.policyDigest === reserved.policyDigest &&
         !event.recoveryEpoch &&
-        !["AttemptFailed", "AttemptCancelled", "AttemptTimedOut", "AttemptDeferred"].includes(
-          event.event,
-        ),
+        ![
+          "AttemptFailed",
+          "AttemptCancelled",
+          "AttemptTimedOut",
+          "AttemptDeferred",
+          "AttemptRecoveryBlocked",
+        ].includes(event.event),
     ),
   );
   const ref = attemptRef(plan.objective, reserved.workItem, reserved.attempt);

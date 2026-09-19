@@ -384,6 +384,11 @@ import {
 import { compilePlan, compilePlanWithLegacyAdmission } from "./management/compile.js";
 import { preserveProviderQuotaError, ProviderQuotaError } from "./providers/quota.js";
 import { providerQuotaGates, providerQuotaGateState } from "./control/provider-gates.js";
+import {
+  attemptRecoveryBlockForAttempt,
+  attemptRecoveryBlocks,
+  type AttemptRecoveryBlockedEvent,
+} from "./control/recovery-dispositions.js";
 import { reportedModelUsage, type ReportedModelUsage } from "./protocol/model-usage.js";
 import type {
   CompilationContext,
@@ -755,6 +760,17 @@ class ProviderQuotaDrainIncompleteError extends Error {
   }
 }
 
+class AttemptRecoveryDrainIncompleteError extends Error {
+  constructor() {
+    super("attempt recovery is blocked while durable native cleanup remains incomplete");
+    this.name = "AttemptRecoveryDrainIncompleteError";
+  }
+}
+
+function recoveryBlockTerminalReason(block: AttemptRecoveryBlockedEvent): string {
+  return `Work Item #${block.workItem} attempt ${block.attempt} lost its local result after the producer stopped; model usage remains unknown and explicit recovery is required`;
+}
+
 class MediaTerminalDrainIncompleteError extends Error {
   constructor() {
     super(
@@ -776,6 +792,7 @@ function terminalizationVeto(error: unknown): boolean {
     error instanceof MediaExecutionPhaseError ||
     error instanceof MediaTerminalDrainIncompleteError ||
     error instanceof ProviderQuotaDrainIncompleteError ||
+    error instanceof AttemptRecoveryDrainIncompleteError ||
     error instanceof ProviderResourceCleanupError ||
     error instanceof CancellationAccountingPublicationError ||
     (error instanceof Error &&
@@ -4527,6 +4544,7 @@ export class FactorySupervisor {
                   "AttemptCancelled",
                   "AttemptDeferred",
                   "AttemptIntegrated",
+                  "AttemptRecoveryBlocked",
                 ].includes(event.event),
             )
           ) {
@@ -5207,6 +5225,7 @@ export class FactorySupervisor {
     }, 30_000);
     heartbeat.unref();
     const deadline = this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000;
+    let latchedRecoveryBlock = attemptRecoveryBlocks(initialEvents, this.#run.runId).at(-1);
     const activeExecutions = new ContinuousExecutionPool<number>();
     // Full identities survive phase transitions only until this process's child settles.
     const activeExecutionClaims = new Set<string>();
@@ -5267,10 +5286,14 @@ export class FactorySupervisor {
         throw new Error("terminal drain produced an invalid release outcome");
       let terminalEvent = outcome.event;
       let terminalReason = outcome.reason;
+      if (latchedRecoveryBlock) {
+        terminalEvent = "FactoryRunEscalated";
+        terminalReason = recoveryBlockTerminalReason(latchedRecoveryBlock);
+      }
       snapshot = await this.#reader.readObjective(snapshot.number);
       this.#fenceSnapshot(snapshot);
       this.#sequences.observe(snapshotEvents(snapshot));
-      if (outcome.event === "FactoryRunEscalated") {
+      if (terminalEvent === "FactoryRunEscalated") {
         const cancellation = await this.#reader.readRunCancellationRequest(
           this.#run.objective,
           this.#run.runId,
@@ -5278,9 +5301,10 @@ export class FactorySupervisor {
           this.#activationBinding(),
         );
         if (
-          cancellation ||
-          hasCancellationRequest(snapshot, this.#run.runId) ||
-          (this.#options.signal?.aborted && this.#options.shutdownBehavior !== "release-lease")
+          !latchedRecoveryBlock &&
+          (cancellation ||
+            hasCancellationRequest(snapshot, this.#run.runId) ||
+            (this.#options.signal?.aborted && this.#options.shutdownBehavior !== "release-lease"))
         ) {
           if (cancellation) this.#sequences.observe([cancellation]);
           terminalEvent = "FactoryRunCancelled";
@@ -5376,6 +5400,11 @@ export class FactorySupervisor {
       );
       const startupProviderGate = startupProviderGateState?.gate;
       const startupProviderAccounting = startupProviderGateState?.accounting ?? "unknown";
+      const startupRecoveryBlock = attemptRecoveryBlocks(
+        snapshotEvents(snapshot),
+        this.#run.runId,
+      ).at(-1);
+      if (startupRecoveryBlock) latchedRecoveryBlock = startupRecoveryBlock;
       const startupCompilerFailure = this.#budgetEvents.find(
         (event): event is Extract<FactoryEvent, { kind: "budget" }> & { usageId: string } =>
           event.kind === "budget" &&
@@ -5407,7 +5436,11 @@ export class FactorySupervisor {
         !this.#options.signal?.aborted
       )
         return await terminalAfterDrain("FactoryRunEscalated", startupCompilerFailureReason);
-      if (Date.now() >= deadline && startupProviderGate?.workItem === undefined)
+      if (
+        Date.now() >= deadline &&
+        startupProviderGate?.workItem === undefined &&
+        !startupRecoveryBlock
+      )
         return await finishExpired();
       if (startupProviderGate?.kind === "provider" && startupProviderGate.workItem === undefined) {
         if (this.#options.signal?.aborted) {
@@ -6549,6 +6582,12 @@ export class FactorySupervisor {
           snapshotEvents(snapshot),
           this.#run.runId,
         );
+        const durableRecoveryBlocks = attemptRecoveryBlocks(
+          snapshotEvents(snapshot),
+          this.#run.runId,
+        );
+        const durableRecoveryBlock = durableRecoveryBlocks.at(-1);
+        if (durableRecoveryBlock) latchedRecoveryBlock = durableRecoveryBlock;
         const cancellationReason = this.#options.signal?.aborted
           ? "operator cancelled run"
           : hasCancellationRequest(snapshot, this.#run.runId)
@@ -6557,13 +6596,21 @@ export class FactorySupervisor {
         const deadlineExpired = Date.now() >= deadline;
         if (
           (cancellationReason || deadlineExpired) &&
-          durableProviderGates.some((gate) => gate.workItem !== undefined)
+          (durableProviderGates.some((gate) => gate.workItem !== undefined) ||
+            durableRecoveryBlocks.length > 0)
         ) {
           const gatedObjective = this.#deriveObjective(snapshot);
           const gatedRecoverable: DerivedWorkItem[] = [];
           for (const item of gatedObjective.items) {
             if (activeExecutions.has(item.number)) continue;
-            if (await this.#needsDurableAttemptRecovery(item, durableProviderGates, true))
+            if (
+              await this.#needsDurableAttemptRecovery(
+                item,
+                durableProviderGates,
+                durableRecoveryBlocks,
+                true,
+              )
+            )
               gatedRecoverable.push(item);
           }
           const interruptedTerminal =
@@ -6586,7 +6633,12 @@ export class FactorySupervisor {
           for (const item of settledObjective.items) {
             if (
               !activeExecutions.has(item.number) &&
-              (await this.#needsDurableAttemptRecovery(item, durableProviderGates, true))
+              (await this.#needsDurableAttemptRecovery(
+                item,
+                durableProviderGates,
+                durableRecoveryBlocks,
+                true,
+              ))
             )
               await this.#reconcileInterruptedForEarlyTerminal(
                 item,
@@ -6601,13 +6653,21 @@ export class FactorySupervisor {
           for (const item of this.#deriveObjective(snapshot).items) {
             if (
               !activeExecutions.has(item.number) &&
-              (await this.#needsDurableAttemptRecovery(item, durableProviderGates, true))
+              (await this.#needsDurableAttemptRecovery(
+                item,
+                durableProviderGates,
+                durableRecoveryBlocks,
+                true,
+              ))
             ) {
               remaining = true;
               break;
             }
           }
-          if (remaining) throw new ProviderQuotaDrainIncompleteError();
+          if (remaining) {
+            if (durableRecoveryBlocks.length > 0) throw new AttemptRecoveryDrainIncompleteError();
+            throw new ProviderQuotaDrainIncompleteError();
+          }
         }
         if (this.#options.signal?.aborted && this.#options.shutdownBehavior === "release-lease")
           return await releaseAfterDrain();
@@ -6630,7 +6690,7 @@ export class FactorySupervisor {
         // All resumed peers seed their durable execution/validation liabilities
         // before any member of the starting cohort may acquire fresh capacity.
         this.#fairness.markReconciled(objective.number);
-        if (!this.#fairness.reconciled && !durableProviderGate) {
+        if (!this.#fairness.reconciled && !durableProviderGate && !durableRecoveryBlock) {
           await this.#waitForProgress(
             activeExecutions,
             executionRevision,
@@ -6646,12 +6706,19 @@ export class FactorySupervisor {
         for (const item of objective.items) {
           if (
             activeExecutions.has(item.number) ||
-            !durableProviderGates.some(
+            (!durableProviderGates.some(
               (gate) => gate.workItem === item.number && gate.attempt !== undefined,
-            )
+            ) &&
+              !durableRecoveryBlocks.some((block) => block.workItem === item.number))
           )
             continue;
-          if (await this.#needsDurableAttemptRecovery(item, durableProviderGates))
+          if (
+            await this.#needsDurableAttemptRecovery(
+              item,
+              durableProviderGates,
+              durableRecoveryBlocks,
+            )
+          )
             gatedRecoverable.push(item);
         }
         if (gatedRecoverable.length > 0) {
@@ -6822,6 +6889,7 @@ export class FactorySupervisor {
               !durableProviderGates.some(
                 (gate) => gate.workItem === item.number && gate.attempt !== undefined,
               ) &&
+              !durableRecoveryBlocks.some((block) => block.workItem === item.number) &&
               !this.#hasRecoverablePostSuccessCancellation(item),
           );
           if (exhausted) {
@@ -6837,7 +6905,13 @@ export class FactorySupervisor {
         const recoverable: DerivedWorkItem[] = [];
         for (const item of objective.items) {
           if (activeExecutions.has(item.number)) continue;
-          if (await this.#needsDurableAttemptRecovery(item, durableProviderGates))
+          if (
+            await this.#needsDurableAttemptRecovery(
+              item,
+              durableProviderGates,
+              durableRecoveryBlocks,
+            )
+          )
             recoverable.push(item);
         }
         if (recoverable.length > 0) {
@@ -6852,6 +6926,11 @@ export class FactorySupervisor {
           continue;
         }
         if (this.#options.signal?.aborted) continue;
+        if (durableRecoveryBlock)
+          return await terminalAfterDrain(
+            "FactoryRunEscalated",
+            recoveryBlockTerminalReason(durableRecoveryBlock),
+          );
         if (durableProviderGate?.kind === "provider") {
           return await terminalAfterDrain(
             "FactoryRunEscalated",
@@ -7886,6 +7965,19 @@ export class FactorySupervisor {
         failure instanceof RunCancellationRequestedError ||
         (!claimed && this.#options.signal?.aborted)
       ) {
+        if (latchedRecoveryBlock) {
+          const observed = await this.#reader.readObjective(this.#run.objective);
+          this.#fenceSnapshot(observed);
+          const blockedItem = this.#deriveObjective(observed).items.find(
+            (item) => item.number === latchedRecoveryBlock!.workItem,
+          );
+          if (!blockedItem || (await this.#hasUnsettledIssueAdmission(blockedItem)))
+            throw new AttemptRecoveryDrainIncompleteError();
+          return await terminalAfterDrain(
+            "FactoryRunEscalated",
+            recoveryBlockTerminalReason(latchedRecoveryBlock),
+          );
+        }
         return await terminalAfterDrain(
           "FactoryRunCancelled",
           failure instanceof RunCancellationRequestedError
@@ -10588,6 +10680,7 @@ export class FactorySupervisor {
               "AttemptTimedOut",
               ...(recoverablePostSuccessCancellation ? [] : ["AttemptCancelled"]),
               "AttemptDeferred",
+              "AttemptRecoveryBlocked",
             ].includes(event.event)),
       )
     )
@@ -11389,6 +11482,7 @@ export class FactorySupervisor {
               "AttemptTimedOut",
               ...(recoverablePostSuccessCancellation ? [] : ["AttemptCancelled"]),
               "AttemptDeferred",
+              "AttemptRecoveryBlocked",
             ].includes(event.event)),
       )
     )
@@ -20819,6 +20913,7 @@ export class FactorySupervisor {
               "AttemptTimedOut",
               "AttemptCancelled",
               "AttemptDeferred",
+              "AttemptRecoveryBlocked",
             ].includes(event.event)),
       )
     )
@@ -21065,9 +21160,9 @@ export class FactorySupervisor {
     if (
       (item.factoryEvents ?? []).some(
         (event) =>
-          event.kind === "provider" &&
-          event.event === "ProviderQuotaBlocked" &&
-          event.runId === this.#run.runId,
+          event.runId === this.#run.runId &&
+          ((event.kind === "provider" && event.event === "ProviderQuotaBlocked") ||
+            (event.kind === "attempt" && event.event === "AttemptRecoveryBlocked")),
       )
     ) {
       await this.#recoverInterrupted(item, this.#run.startedAt.getTime(), objectiveItems);
@@ -21273,6 +21368,89 @@ export class FactorySupervisor {
       });
     }
     if (await this.#hasUnsettledIssueAdmission(item)) throw new ProviderQuotaDrainIncompleteError();
+  }
+
+  async #finalizeRecoveryBlockedAttempt(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    backend: ExecutionBackend,
+    events: FactoryEvent[],
+    block: AttemptRecoveryBlockedEvent,
+  ): Promise<void> {
+    const startedAt = events.find(
+      (event) => event.kind === "attempt" && event.event === "AttemptStarted",
+    )?.at;
+    const validationStartedAt = events.find(
+      (event) => event.kind === "attempt" && event.event === "AttemptCollected",
+    )?.at;
+    for (const budget of unreconciledBudgetReservations(events)) {
+      // The blocked disposition deliberately retains this exact marker as
+      // unknown. Physical absence and elapsed time cannot measure tokens.
+      if (budget.unit === "model_tokens") continue;
+      const phaseStart = budget.phase === "validation" ? validationStartedAt : startedAt;
+      const elapsed = phaseStart ? Math.max(0, Date.now() - new Date(phaseStart).getTime()) : 0;
+      const ambiguousPaidLaunch =
+        budget.phase === "execution" && budget.unit === "sandbox_milliseconds" && !startedAt;
+      const ambiguousLocalLaunch =
+        budget.phase === "execution" && budget.unit === "local_milliseconds" && !startedAt;
+      const amount =
+        budget.unit === "managed_sessions" || ambiguousPaidLaunch || ambiguousLocalLaunch
+          ? budget.amount
+          : Math.min(budget.amount, elapsed);
+      await this.#lease.use(async (lease) => {
+        const reconciled = await this.#recorder.budget({
+          lease,
+          workItemNodeId: item.id,
+          reservation,
+          sequence: this.#sequences.take(),
+          event: "BudgetReconciled",
+          unit: budget.unit,
+          phase: budget.phase,
+          amount,
+          ...(ambiguousPaidLaunch || ambiguousLocalLaunch
+            ? {
+                usageEvidence: "conservative-reservation" as const,
+                reason:
+                  "Producer absence was proven after dispatch became possible before the AttemptStarted receipt; charging the original reserved duration as the bounded upper limit",
+              }
+            : {}),
+        });
+        this.#budgetEvents.push(reconciled);
+      });
+    }
+    const capacity = await this.#capacitySnapshot();
+    for (const held of capacity.reservations.filter(
+      (held) =>
+        held.objective === reservation.objective &&
+        held.workItem === reservation.workItem &&
+        held.attempt === reservation.attempt,
+    ))
+      await this.#releaseCapacity(held.key);
+    await this.#lease.use(async (lease) => {
+      const blockWrittenByCurrentController =
+        block.writerEpoch === lease.epoch &&
+        block.writerHolder === lease.holder &&
+        block.writerPolicyDigest === lease.policyDigest;
+      if (blockWrittenByCurrentController) return;
+      await this.#attempts.record({
+        lease,
+        workItemNodeId: item.id,
+        reservation,
+        event: "AttemptFailed",
+        sequence: this.#sequences.take(),
+        reason:
+          "the current controller reconciled the durable absent-producer recovery block; explicit recovery remains required",
+        allowRecovery: true,
+      });
+    });
+    await this.#settleIssueAdmission(item, reservation, {
+      cleanupConfirmed: true,
+      definitiveNonExecution: false,
+      modelUsageExpected: backend.capabilities.reportsModelUsage ?? false,
+      retainedUnknownModelInvocationId: block.modelInvocationId,
+    });
+    if (await this.#hasUnsettledIssueAdmission(item))
+      throw new AttemptRecoveryDrainIncompleteError();
   }
 
   async #recoverInterrupted(
@@ -21965,24 +22143,21 @@ export class FactorySupervisor {
             new Date(executionBudget.at).getTime() + executionBudget.amount + 60_000,
           ).toISOString()
         : undefined;
-    if (backend.reconcileStale) {
-      await backend.reconcileStale({
-        repository: `${this.#options.owner}/${this.#options.repo}`,
-        objective: reservation.objective,
-        workItem: reservation.workItem,
-        attempt: reservation.attempt,
-        runId: reservation.runId,
-        directorEpoch: reservation.directorEpoch,
-        phase: "execution",
-        ...(reservation.localScopeBatch ? { localScopeBatch: reservation.localScopeBatch } : {}),
-        policyDigest: reservation.policyDigest,
-        ...(providerResourceId ? { providerResourceId } : {}),
-        ...(noHandleReplacementNotBefore ? { noHandleReplacementNotBefore } : {}),
-      });
-    } else if (
-      events.some((event) => event.kind === "attempt" && event.event === "AttemptStarted")
-    ) {
-      throw new Error(`backend ${reservation.backend} cannot prove the stale resource was stopped`);
+    const existingRecoveryBlock = attemptRecoveryBlockForAttempt(
+      events,
+      reservation.runId,
+      reservation.workItem,
+      reservation.attempt,
+    );
+    if (existingRecoveryBlock) {
+      await this.#finalizeRecoveryBlockedAttempt(
+        item,
+        reservation,
+        backend,
+        events,
+        existingRecoveryBlock,
+      );
+      return;
     }
     // Exact artifact and provider-session recovery have already had first refusal.
     // Dispatch may have completed before the first collection-marker write, so
@@ -22001,13 +22176,84 @@ export class FactorySupervisor {
           event.event === "BudgetReserved" &&
           event.phase === "execution"),
     );
-    if (
+    const needsRecoveryBlock =
       !backend.capabilities.providerManagedPublication &&
       dispatchPossible &&
       !knownTerminal &&
-      !validation
-    )
-      throw new ArtifactCompletionUnavailableError();
+      !validation;
+    if (backend.reconcileStale) {
+      try {
+        await backend.reconcileStale({
+          repository: `${this.#options.owner}/${this.#options.repo}`,
+          objective: reservation.objective,
+          workItem: reservation.workItem,
+          attempt: reservation.attempt,
+          runId: reservation.runId,
+          directorEpoch: reservation.directorEpoch,
+          phase: "execution",
+          ...(reservation.localScopeBatch ? { localScopeBatch: reservation.localScopeBatch } : {}),
+          policyDigest: reservation.policyDigest,
+          ...(providerResourceId ? { providerResourceId } : {}),
+          ...(noHandleReplacementNotBefore ? { noHandleReplacementNotBefore } : {}),
+        });
+      } catch (cause) {
+        if (!needsRecoveryBlock) throw cause;
+        throw new ProviderResourceCleanupError(
+          `backend ${reservation.backend} cannot prove the dispatch-possible producer absent`,
+          { cause },
+        );
+      }
+    } else if (
+      events.some((event) => event.kind === "attempt" && event.event === "AttemptStarted") ||
+      needsRecoveryBlock
+    ) {
+      throw new ProviderResourceCleanupError(
+        `backend ${reservation.backend} cannot prove the dispatch-possible producer absent`,
+      );
+    }
+    if (needsRecoveryBlock) {
+      const unresolvedModel = unreconciledBudgetReservations(events).filter(
+        (event) => event.phase === "execution" && event.unit === "model_tokens",
+      );
+      const unresolvedModelInvocationId = unresolvedModel[0]?.modelInvocationId;
+      if (
+        !backend.capabilities.reportsModelUsage ||
+        unresolvedModel.length !== 1 ||
+        !unresolvedModelInvocationId
+      )
+        throw new ArtifactCompletionUnavailableError();
+      const recoveryBlock = await this.#lease.use((lease) =>
+        this.#attempts.record({
+          lease,
+          workItemNodeId: item.id,
+          reservation,
+          event: "AttemptRecoveryBlocked",
+          sequence: this.#sequences.take(),
+          reason:
+            "the local producer is absent after controller interruption, but no terminal result or publishable artifact can be recovered; model usage remains unknown",
+          ...(providerResourceId ? { providerResourceId } : {}),
+          recoveryBlocked: { modelInvocationId: unresolvedModelInvocationId },
+          allowRecovery: true,
+        }),
+      );
+      events.push(recoveryBlock);
+      const exactRecoveryBlock = attemptRecoveryBlockForAttempt(
+        events,
+        reservation.runId,
+        reservation.workItem,
+        reservation.attempt,
+      );
+      if (!exactRecoveryBlock)
+        throw new Error("attempt recovery-blocked event was not durably linked to its dispatch");
+      await this.#finalizeRecoveryBlockedAttempt(
+        item,
+        reservation,
+        backend,
+        events,
+        exactRecoveryBlock,
+      );
+      return;
+    }
     const attemptStartedAt = events.find(
       (event) => event.kind === "attempt" && event.event === "AttemptStarted",
     )?.at;
@@ -22373,6 +22619,7 @@ export class FactorySupervisor {
         "AttemptCancelled",
         "AttemptDeferred",
         "AttemptIntegrated",
+        "AttemptRecoveryBlocked",
       ].includes(event.event),
     );
   }
@@ -22491,6 +22738,7 @@ export class FactorySupervisor {
   async #needsDurableAttemptRecovery(
     item: DerivedWorkItem,
     providerGates: readonly ProviderQuotaEvent[],
+    recoveryBlocks: readonly AttemptRecoveryBlockedEvent[] = [],
     includeAnyUnsettledAdmission = false,
   ): Promise<boolean> {
     if (item.state === "for_review") {
@@ -22554,6 +22802,8 @@ export class FactorySupervisor {
       (this.#hasUnfinishedAttempt(item) || (await this.#hasUnsettledIssueAdmission(item)))
     )
       return true;
+    const recoveryBlocked = recoveryBlocks.some((block) => block.workItem === item.number);
+    if (recoveryBlocked && (await this.#hasUnsettledIssueAdmission(item))) return true;
     return includeAnyUnsettledAdmission && (await this.#hasUnsettledIssueAdmission(item));
   }
 

@@ -196,6 +196,94 @@ function processTelemetry(
 }
 
 describe("bounded status, explain, and replay output", () => {
+  it("monitors blocked recovery cleanup until the terminal receipt, then stops", () => {
+    const current = snapshot();
+    current.workItems[0]!.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        sequence: 6,
+        workItem: 10,
+        attempt: 1,
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: "invocation-worker-10-1",
+        modelInvocationId: "worker-10-1",
+        directorEpoch: 4,
+        policyDigest: policyDigest(policy),
+      }),
+      event({
+        kind: "attempt",
+        event: "AttemptRecoveryBlocked",
+        sequence: 7,
+        workItem: 10,
+        attempt: 1,
+        backend: cloudId,
+        baseSha: sha,
+        directorEpoch: 4,
+        recoveryEpoch: 5,
+        policyDigest: policyDigest(policy),
+        modelInvocationId: "worker-10-1",
+        producerState: "absent",
+        sameAttemptResume: "unavailable",
+        terminalEvidence: "unavailable",
+        artifactEvidence: "unavailable",
+        modelUsageAccounting: "unknown",
+        nextDisposition: "explicit-recovery",
+        reason: "provider-private text must not appear in status",
+      }),
+    );
+
+    const draining = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
+    expect(draining.run).toMatchObject({ state: "recovery-blocked" });
+    expect(draining.operatorAction).toMatchObject({
+      required: true,
+      monitoring: "continue",
+      code: "attempt-recovery-draining",
+      evidence: {
+        workItem: 10,
+        attempt: 1,
+        backend: cloudId,
+        modelInvocationId: "worker-10-1",
+        producerState: "absent",
+        modelUsageAccounting: "unknown",
+        nextDisposition: "explicit-recovery",
+        factoryWorkActive: true,
+      },
+    });
+    expect(JSON.stringify(draining)).not.toContain("provider-private text");
+    current.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "FactoryRunEscalated",
+        sequence: 8,
+        at: "2026-09-04T12:02:00.000Z",
+        reason: "local recovery is blocked pending explicit recovery",
+      }),
+    );
+    const stopped = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
+    expect(stopped.run).toMatchObject({ state: "escalated" });
+    expect(stopped.operatorAction).toMatchObject({
+      required: true,
+      monitoring: "stop",
+      code: "attempt-recovery-blocked",
+      evidence: { factoryWorkActive: false },
+    });
+    expect(
+      buildExplanationReport({ repository: "clockgrove/factory", snapshot: current }).explanations,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: EXPLANATION_CODES.attemptRecoveryBlocked,
+          category: "recovery",
+          disposition: "blocked",
+          gate: "recovery",
+        }),
+      ]),
+    );
+  });
+
   it("reports latest observed queue transitions while preserving original age and old sample timestamps", () => {
     const current = snapshot();
     const waiting = current.workItems.find((item) => item.number === 11)!;

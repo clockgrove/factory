@@ -487,6 +487,8 @@ export interface RunSummary {
 
 function terminalAttemptName(events: readonly FactoryEvent[]): string | null {
   const attemptEvents = events.filter((event) => event.kind === "attempt");
+  if (attemptEvents.some((event) => event.event === "AttemptRecoveryBlocked"))
+    return "AttemptFailed";
   for (const name of [
     "AttemptIntegrated",
     "AttemptDeferred",

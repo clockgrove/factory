@@ -79,6 +79,7 @@ const workerTerminals = new Set([
   "AttemptTimedOut",
   "AttemptCancelled",
   "AttemptDeferred",
+  "AttemptRecoveryBlocked",
 ]);
 const attemptKey = (event: { runId: string; workItem?: unknown; attempt?: unknown }) =>
   JSON.stringify([event.runId, event.workItem, event.attempt]);

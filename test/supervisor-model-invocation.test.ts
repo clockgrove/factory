@@ -21,6 +21,7 @@ import * as cleanValidation from "../src/validation/clean-run.js";
 import { classifyGitHubCopilotQuota } from "../src/providers/github-copilot-quota.js";
 import { ProviderQuotaError } from "../src/providers/quota.js";
 import { providerQuotaGates } from "../src/control/provider-gates.js";
+import { deriveCapacityReservations } from "../src/scheduling/capacity-ledger.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
 type Fixture = Awaited<ReturnType<typeof providerSupervisorFixture>>;
@@ -31,6 +32,16 @@ const modelBudgets = (f: Fixture): BudgetEvent[] =>
     .filter(
       (event): event is BudgetEvent => event.kind === "budget" && event.unit === "model_tokens",
     );
+const durableCapacity = (f: Fixture) =>
+  deriveCapacityReservations([
+    {
+      objective: 7,
+      workItem: 8,
+      events: f.events(),
+      defaultCpu: 1,
+      defaultMemoryMb: 2_048,
+    },
+  ]);
 
 function errorChain(error: unknown): unknown[] {
   if (error instanceof AggregateError) return error.errors.flatMap(errorChain);
@@ -40,6 +51,503 @@ function errorChain(error: unknown): unknown[] {
 }
 
 describe("Supervisor model dispatch journal", () => {
+  it("durably blocks a replacement when a restarted local producer is absent and usage is unknown", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      maxAttemptsPerItem: 3,
+    });
+    const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation();
+    if (!write) throw new Error("fixture receipt transport missing");
+    let loseStartedResponse = true;
+    let loseRecoveryBlockResponse = true;
+    vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+      async (node, body) => {
+        const receipts = decodeEventComments(body);
+        await write(node, body);
+        if (
+          loseStartedResponse &&
+          receipts.some(
+            (event) =>
+              event.kind === "attempt" && event.event === "AttemptStarted" && event.workItem === 8,
+          )
+        ) {
+          loseStartedResponse = false;
+          throw new PlatformUnavailableError(
+            { kind: "server_error", retryAfterMs: 1 },
+            new Error("fixture: repository returned HTTP 500 after persisting AttemptStarted"),
+          );
+        }
+        if (
+          loseRecoveryBlockResponse &&
+          receipts.some((event) => event.event === "AttemptRecoveryBlocked")
+        ) {
+          loseRecoveryBlockResponse = false;
+          throw new PlatformUnavailableError(
+            { kind: "server_error", retryAfterMs: 1 },
+            new Error("fixture: repository returned HTTP 500 after persisting recovery block"),
+          );
+        }
+      },
+    );
+    try {
+      await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+      expect(f.events().some((event) => event.event === "AttemptRecoveryBlocked")).toBe(false);
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+
+      await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+      expect(f.events().filter((event) => event.event === "AttemptRecoveryBlocked")).toHaveLength(
+        1,
+      );
+
+      expect(await f.run()).toMatchObject({
+        status: "escalated",
+        reason: expect.stringContaining("model usage remains unknown"),
+      });
+      const blocks = f
+        .events()
+        .filter((event) => event.kind === "attempt" && event.event === "AttemptRecoveryBlocked");
+      expect(blocks).toHaveLength(1);
+      const block = blocks[0];
+      if (block?.kind !== "attempt") throw new Error("fixture recovery block missing");
+      expect(block).toMatchObject({
+        workItem: 8,
+        attempt: 1,
+        backend: "codex-sdk/local-worktree",
+        modelInvocationId: "worker-8-1",
+        producerState: "absent",
+        sameAttemptResume: "unavailable",
+        terminalEvidence: "unavailable",
+        artifactEvidence: "unavailable",
+        modelUsageAccounting: "unknown",
+        nextDisposition: "explicit-recovery",
+      });
+      expect(block.recoveryEpoch).toBeGreaterThan(block.directorEpoch);
+      const adoptedTerminal = f
+        .events()
+        .filter(
+          (event) =>
+            event.kind === "attempt" && event.event === "AttemptFailed" && event.workItem === 8,
+        );
+      expect(adoptedTerminal).toHaveLength(1);
+      expect(adoptedTerminal[0]!.sequence).toBeGreaterThan(block.sequence);
+      expect(f.events().some((event) => event.event === "ProviderQuotaBlocked")).toBe(false);
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+      expect(
+        f.activity.filter((entry) => entry.operation === "reconcile-stale" && entry.workItem === 8),
+      ).toHaveLength(1);
+      expect(durableCapacity(f)).toEqual([]);
+      expect(unresolvedModelInvocations(f.events())).toHaveLength(1);
+      expect(
+        f
+          .events()
+          .filter(
+            (event) =>
+              event.kind === "budget" &&
+              event.event === "BudgetReconciled" &&
+              event.phase === "execution" &&
+              event.unit === "local_milliseconds" &&
+              event.workItem === 8 &&
+              event.attempt === 1,
+          ),
+      ).toHaveLength(1);
+      expect(
+        (
+          await new IssueAdmissionLedger(
+            new GitHubControlStore({
+              token: "fixture-only",
+              owner: "fixture",
+              repo: "provider-qualification",
+            }),
+          ).read(8)
+        )?.history.at(-1),
+      ).toMatchObject({
+        disposition: "released",
+        evidence: { accountingSettled: false, unknownModelUsageRetained: true },
+      });
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
+  it("retains the original liability when stale producer absence cannot be proved", async () => {
+    const absenceFailure = new Error("fixture: local producer absence is not proven");
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      maxAttemptsPerItem: 3,
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        reconcileStale: async () => {
+          throw absenceFailure;
+        },
+      }),
+    });
+    const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation();
+    if (!write) throw new Error("fixture receipt transport missing");
+    let loseStartedResponse = true;
+    vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+      async (node, body) => {
+        const receipts = decodeEventComments(body);
+        await write(node, body);
+        if (
+          loseStartedResponse &&
+          receipts.some(
+            (event) =>
+              event.kind === "attempt" && event.event === "AttemptStarted" && event.workItem === 8,
+          )
+        ) {
+          loseStartedResponse = false;
+          throw new PlatformUnavailableError(
+            { kind: "server_error", retryAfterMs: 1 },
+            new Error("fixture: repository returned HTTP 500 after persisting AttemptStarted"),
+          );
+        }
+      },
+    );
+    try {
+      await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+      await expect(f.run()).rejects.toThrow("cannot prove the dispatch-possible producer absent");
+      expect(f.events().some((event) => event.event === "AttemptRecoveryBlocked")).toBe(false);
+      expect(f.events().some((event) => event.event === "FactoryRunEscalated")).toBe(false);
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+      expect(unresolvedModelInvocations(f.events())).toHaveLength(1);
+      expect(
+        (
+          await new IssueAdmissionLedger(
+            new GitHubControlStore({
+              token: "fixture-only",
+              owner: "fixture",
+              repo: "provider-qualification",
+            }),
+          ).read(8)
+        )?.history.at(-1)?.disposition,
+      ).not.toBe("released");
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
+  it("closes a prepared pre-dispatch admission with exact zero usage", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      maxAttemptsPerItem: 3,
+    });
+    const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation();
+    if (!write) throw new Error("fixture receipt transport missing");
+    let loseNativeReservationResponse = true;
+    vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+      async (node, body) => {
+        const receipts = decodeEventComments(body);
+        await write(node, body);
+        if (
+          loseNativeReservationResponse &&
+          receipts.some(
+            (event) =>
+              event.kind === "budget" &&
+              event.event === "BudgetReserved" &&
+              event.phase === "execution" &&
+              event.unit === "local_milliseconds" &&
+              event.workItem === 8,
+          )
+        ) {
+          loseNativeReservationResponse = false;
+          throw new PlatformUnavailableError(
+            { kind: "server_error", retryAfterMs: 1 },
+            new Error("fixture: native reservation response was lost before dispatch authority"),
+          );
+        }
+      },
+    );
+    try {
+      await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(0);
+      expect(
+        (
+          await new IssueAdmissionLedger(
+            new GitHubControlStore({
+              token: "fixture-only",
+              owner: "fixture",
+              repo: "provider-qualification",
+            }),
+          ).read(8)
+        )?.history.at(-1),
+      ).toMatchObject({ disposition: "prepared", dispatchPossible: false });
+      expect(await f.run()).toMatchObject({ status: "completed" });
+      expect(f.events().some((event) => event.event === "AttemptRecoveryBlocked")).toBe(false);
+      expect(
+        f.activity.filter((entry) => entry.operation === "reconcile-stale" && entry.workItem === 8),
+      ).toHaveLength(0);
+      expect(
+        f
+          .events()
+          .filter(
+            (event) =>
+              event.kind === "budget" &&
+              event.event === "BudgetReconciled" &&
+              event.phase === "execution" &&
+              event.unit === "local_milliseconds" &&
+              event.workItem === 8 &&
+              event.attempt === 1,
+          ),
+      ).toEqual([expect.objectContaining({ amount: 0 })]);
+      expect(durableCapacity(f)).toEqual([]);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
+  it("charges the bounded native reservation when dispatch became possible before AttemptStarted", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      maxAttemptsPerItem: 3,
+    });
+    const transition = IssueAdmissionLedger.prototype.transition;
+    let loseDispatchAuthorityResponse = true;
+    vi.spyOn(IssueAdmissionLedger.prototype, "transition").mockImplementation(async function (
+      this: IssueAdmissionLedger,
+      args,
+    ) {
+      const result = await transition.call(this, args);
+      if (
+        loseDispatchAuthorityResponse &&
+        args.workItem === 8 &&
+        args.disposition === "dispatching"
+      ) {
+        loseDispatchAuthorityResponse = false;
+        throw new PlatformUnavailableError(
+          { kind: "server_error", retryAfterMs: 1 },
+          new Error("fixture: dispatch authority response was lost before launch"),
+        );
+      }
+      return result;
+    });
+    try {
+      await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(0);
+      expect(f.events().some((event) => event.event === "AttemptStarted")).toBe(false);
+
+      expect(await f.run()).toMatchObject({
+        status: "escalated",
+        reason: expect.stringContaining("model usage remains unknown"),
+      });
+      expect(
+        f.activity.filter((entry) => entry.operation === "reconcile-stale" && entry.workItem === 8),
+      ).toHaveLength(1);
+      const native = f
+        .events()
+        .filter(
+          (event) =>
+            event.kind === "budget" &&
+            event.phase === "execution" &&
+            event.unit === "local_milliseconds" &&
+            event.workItem === 8 &&
+            event.attempt === 1,
+        );
+      const reserved = native.find((event) => event.event === "BudgetReserved");
+      const reconciled = native.find((event) => event.event === "BudgetReconciled");
+      expect(reserved?.amount).toBeGreaterThan(0);
+      expect(reconciled).toMatchObject({
+        amount: reserved?.amount,
+        usageEvidence: "conservative-reservation",
+        reason: expect.stringContaining("bounded upper limit"),
+      });
+      expect(f.events().filter((event) => event.event === "AttemptRecoveryBlocked")).toHaveLength(
+        1,
+      );
+      expect(durableCapacity(f)).toEqual([]);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
+  it.each(["missing", "failing"] as const)(
+    "keeps a pre-AttemptStarted dispatch fenced when stale reconciliation is %s",
+    async (reconciler) => {
+      const absenceFailure = new Error("fixture: producer absence cannot be established");
+      const f = await providerSupervisorFixture("daytona-burst", {
+        localOnly: true,
+        dependencyChain: true,
+        maxAttemptsPerItem: 3,
+        configureLocalBackend: (backend) => {
+          if (reconciler === "failing")
+            return {
+              ...backend,
+              reconcileStale: async (input) => {
+                await backend.reconcileStale!(input);
+                throw absenceFailure;
+              },
+            };
+          const { reconcileStale: _reconcileStale, ...withoutReconciler } = backend;
+          return withoutReconciler;
+        },
+      });
+      const transition = IssueAdmissionLedger.prototype.transition;
+      let loseDispatchAuthorityResponse = true;
+      vi.spyOn(IssueAdmissionLedger.prototype, "transition").mockImplementation(async function (
+        this: IssueAdmissionLedger,
+        args,
+      ) {
+        const result = await transition.call(this, args);
+        if (
+          loseDispatchAuthorityResponse &&
+          args.workItem === 8 &&
+          args.disposition === "dispatching"
+        ) {
+          loseDispatchAuthorityResponse = false;
+          throw new PlatformUnavailableError(
+            { kind: "server_error", retryAfterMs: 1 },
+            new Error("fixture: dispatch authority response was lost before launch"),
+          );
+        }
+        return result;
+      });
+      try {
+        await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+        await expect(f.run()).rejects.toThrow("cannot prove the dispatch-possible producer absent");
+        expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(0);
+        expect(f.events().some((event) => event.event === "AttemptStarted")).toBe(false);
+        expect(f.events().some((event) => event.event === "AttemptRecoveryBlocked")).toBe(false);
+        expect(f.events().some((event) => event.event === "CapacityReconciled")).toBe(false);
+        expect(f.events().some((event) => event.event === "FactoryRunEscalated")).toBe(false);
+        expect(durableCapacity(f)).toMatchObject([{ workItem: 8, attempt: 1, phase: "execution" }]);
+        expect(
+          (
+            await new IssueAdmissionLedger(
+              new GitHubControlStore({
+                token: "fixture-only",
+                owner: "fixture",
+                repo: "provider-qualification",
+              }),
+            ).read(8)
+          )?.history.at(-1),
+        ).toMatchObject({ disposition: "dispatching", dispatchPossible: true });
+      } finally {
+        await f.dispose();
+      }
+    },
+    30_000,
+  );
+
+  it.each(["cancellation", "deadline", "release-lease"] as const)(
+    "preserves the recovery-block terminal cause across a %s race",
+    async (terminalRace) => {
+      const shutdown = new AbortController();
+      let armShutdown = false;
+      const f = await providerSupervisorFixture("daytona-burst", {
+        localOnly: true,
+        dependencyChain: true,
+        maxAttemptsPerItem: 3,
+        controllerActivation: terminalRace === "release-lease",
+        afterControllerObservation: () => {
+          if (armShutdown) shutdown.abort();
+        },
+      });
+      const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation();
+      if (!write) throw new Error("fixture receipt transport missing");
+      let loseStartedResponse = true;
+      let loseRecoveryBlockResponse = true;
+      vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+        async (node, body) => {
+          const receipts = decodeEventComments(body);
+          await write(node, body);
+          if (
+            loseStartedResponse &&
+            receipts.some(
+              (event) =>
+                event.kind === "attempt" &&
+                event.event === "AttemptStarted" &&
+                event.workItem === 8,
+            )
+          ) {
+            loseStartedResponse = false;
+            throw new PlatformUnavailableError(
+              { kind: "server_error", retryAfterMs: 1 },
+              new Error("fixture: AttemptStarted response was lost"),
+            );
+          }
+          if (
+            loseRecoveryBlockResponse &&
+            receipts.some((event) => event.event === "AttemptRecoveryBlocked")
+          ) {
+            loseRecoveryBlockResponse = false;
+            throw new PlatformUnavailableError(
+              { kind: "server_error", retryAfterMs: 1 },
+              new Error("fixture: recovery-block response was lost"),
+            );
+          }
+        },
+      );
+      try {
+        await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+        await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+        expect(f.events().filter((event) => event.event === "AttemptRecoveryBlocked")).toHaveLength(
+          1,
+        );
+
+        if (terminalRace === "cancellation") {
+          f.snapshot.factoryEvents!.push(
+            parseFactoryEvent({
+              protocol: "clockgrove.factory/v2",
+              kind: "run",
+              event: "FactoryRunCancellationRequested",
+              objective: 7,
+              runId: f.runId,
+              sequence: 10_000,
+              at: new Date().toISOString(),
+              requestId: "cancel-recovery-block",
+              requestedBy: "operator",
+            }),
+          );
+        } else if (terminalRace === "deadline") {
+          const started = f.events().find((event) => event.event === "FactoryRunStarted");
+          if (!started) throw new Error("fixture run start missing");
+          started.at = new Date(
+            Date.now() - f.policy.objectiveTimeoutMinutes * 60_000 - 1,
+          ).toISOString();
+        } else {
+          armShutdown = true;
+          expect(await f.run(shutdown.signal)).toMatchObject({
+            status: "cancelled",
+            reason: "repository controller stopped; durable run remains active",
+          });
+          expect(
+            f
+              .events()
+              .some((event) =>
+                ["FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event),
+              ),
+          ).toBe(false);
+          armShutdown = false;
+        }
+
+        expect(await f.run()).toMatchObject({
+          status: "escalated",
+          reason: expect.stringContaining("model usage remains unknown"),
+        });
+        expect(f.events().filter((event) => event.event === "FactoryRunEscalated")).toHaveLength(1);
+        expect(f.events().some((event) => event.event === "FactoryRunCancelled")).toBe(false);
+        expect(durableCapacity(f)).toEqual([]);
+        expect(
+          (
+            await new IssueAdmissionLedger(
+              new GitHubControlStore({
+                token: "fixture-only",
+                owner: "fixture",
+                repo: "provider-qualification",
+              }),
+            ).read(8)
+          )?.history.at(-1)?.disposition,
+        ).toBe("released");
+      } finally {
+        await f.dispose();
+      }
+    },
+    30_000,
+  );
+
   it("settles one timed-out physical attempt while retaining one unknown model invocation", async () => {
     const f = await providerSupervisorFixture("daytona-burst", {
       localOnly: true,
@@ -1048,22 +1556,19 @@ describe("Supervisor model dispatch journal", () => {
       });
       expect(modelBudgets(f).filter((event) => event.event === "BudgetReconciled")).toEqual([]);
       expect(unresolvedModelInvocations(f.events())).toEqual(markers);
-      await expect(f.run()).rejects.toThrow(/completion is unknown after dispatch/);
+      expect(await f.run()).toMatchObject({
+        status: "escalated",
+        reason: expect.stringContaining("model usage remains unknown"),
+      });
       expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
       expect(f.activity.filter((entry) => entry.operation.includes("review"))).toEqual([]);
       expect(modelBudgets(f)).toEqual(markers);
+      expect(f.events().filter((event) => event.event === "AttemptRecoveryBlocked")).toHaveLength(
+        1,
+      );
+      expect(f.events().filter((event) => event.event === "FactoryRunEscalated")).toHaveLength(1);
       expect(
-        f
-          .events()
-          .filter((event) =>
-            [
-              "FactoryRunCompleted",
-              "FactoryRunCancelled",
-              "FactoryRunEscalated",
-              "AttemptFailed",
-              "AttemptDeferred",
-            ].includes(event.event),
-          ),
+        f.events().filter((event) => ["AttemptFailed", "AttemptDeferred"].includes(event.event)),
       ).toEqual([]);
       expect(retained).toHaveLength(1);
       await expect(access(retained[0]!.path)).resolves.toBeUndefined();

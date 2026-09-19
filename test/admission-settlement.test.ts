@@ -9,6 +9,7 @@ import { PROTOCOL_V2 } from "../src/protocol/limits.js";
 import { objectiveAuthorityObservation, writerAuthority } from "../src/control/authority.js";
 import type { LeaseState } from "../src/control/lease.js";
 import { MediaInvocationSchema, withMediaDigest } from "../src/media/contracts.js";
+import { attemptRecoveryBlocks } from "../src/control/recovery-dispositions.js";
 
 const sha = "a".repeat(40),
   digest = "b".repeat(64);
@@ -78,6 +79,23 @@ function unknownProviderGate(modelInvocationId: string, sequence: number) {
     modelInvocationId,
     providerMessage: "fixture provider quota exhausted",
     accounting: "unknown",
+  });
+}
+function recoveryBlocked(modelInvocationId: string, sequence: number) {
+  return parseFactoryEvent({
+    ...common,
+    kind: "attempt",
+    event: "AttemptRecoveryBlocked",
+    sequence,
+    backend: "codex-sdk-local",
+    baseSha: sha,
+    modelInvocationId,
+    producerState: "absent",
+    sameAttemptResume: "unavailable",
+    terminalEvidence: "unavailable",
+    artifactEvidence: "unavailable",
+    modelUsageAccounting: "unknown",
+    nextDisposition: "explicit-recovery",
   });
 }
 const events = [
@@ -304,6 +322,52 @@ describe("admission settlement evidence", () => {
         retainedUnknownModelInvocationId: "other",
       }),
     ).toThrow("remains unknown");
+  });
+  it("binds provider-neutral recovery blocking to one exact unresolved invocation", () => {
+    const marker = budget("BudgetReserved", 5, {
+      unit: "model_tokens",
+      amount: 0,
+      modelInvocationId: "worker",
+      usageId: "invocation-worker",
+    });
+    const block = recoveryBlocked("worker", 6);
+    const observed = [events[0]!, events[1]!, events[3]!, marker, block];
+    expect(attemptRecoveryBlocks(observed, "run")).toEqual([block]);
+    expect(
+      settle(observed, {
+        modelUsageExpected: true,
+        retainedUnknownModelInvocationId: "worker",
+      }),
+    ).toMatchObject({ accountingSettled: false, unknownModelUsageRetained: true });
+    expect(() =>
+      settle(observed, {
+        modelUsageExpected: true,
+        retainedUnknownModelInvocationId: "other",
+      }),
+    ).toThrow("differs from retained model usage");
+    expect(() => attemptRecoveryBlocks([...observed, recoveryBlocked("worker", 7)], "run")).toThrow(
+      "duplicated",
+    );
+    expect(() => attemptRecoveryBlocks([block], "run")).toThrow("dispatch marker");
+  });
+  it("rejects incomplete recovery-blocked event fields", () => {
+    expect(() =>
+      parseFactoryEvent({
+        ...common,
+        kind: "attempt",
+        event: "AttemptRecoveryBlocked",
+        sequence: 6,
+        backend: "codex-sdk-local",
+        baseSha: sha,
+        modelInvocationId: "worker",
+      }),
+    ).toThrow("completely bind one absent producer");
+    expect(() =>
+      parseFactoryEvent({
+        ...attempt("AttemptFailed", 6),
+        producerState: "absent",
+      }),
+    ).toThrow("belongs only to AttemptRecoveryBlocked");
   });
   it("requires actual worker usage when the backend reports it", () => {
     expect(() => settle(events, { modelUsageExpected: true })).toThrow("actual worker model usage");

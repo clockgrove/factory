@@ -110,6 +110,7 @@ const executionTerminals = new Set([
   "AttemptTimedOut",
   "AttemptCancelled",
   "AttemptDeferred",
+  "AttemptRecoveryBlocked",
 ]);
 const capacityTerminals = new Set([
   "AttemptFailed",
@@ -117,6 +118,7 @@ const capacityTerminals = new Set([
   "AttemptCancelled",
   "AttemptDeferred",
   "AttemptIntegrated",
+  "AttemptRecoveryBlocked",
 ]);
 const operatorEvents = new Set([
   "FactoryRunCancellationRequested",

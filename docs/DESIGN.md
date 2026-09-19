@@ -679,8 +679,10 @@ pushed by the host.
 Crash recovery is reconstruction:
 
 - an admitted immutable reservation without a comment repairs the comment;
-- a stale reservation is reconciled and marked infrastructure-deferred unless durable validation
-  already proves a real work failure;
+- a stale reservation with recoverable output is resumed from that exact evidence; if the local
+  producer is positively absent while terminal output, a publishable artifact and model usage all
+  remain unavailable, Factory records one `AttemptRecoveryBlocked` disposition before releasing
+  native capacity and stops the run for explicit recovery;
 - deterministic provider names locate and stop a partially recorded remote launch before replacement;
 - orderly local exit kills the worker process group; restart identifies any surviving Linux
   group by its attempt marker and stops it before replacement;
@@ -1464,6 +1466,25 @@ missing outcomes stay unknown and prevent new model admission. Reports preserve 
 while marking total model usage and remaining threshold unavailable when invocation receipts are
 unresolved.
 
+`AttemptRecoveryBlocked` is the provider-neutral observer-loss boundary for a dispatched local
+attempt. It binds the original run, Work Item, attempt, backend, optional provider resource and
+model invocation, and fixes the observed facts: producer absent; same-attempt resume, terminal
+evidence and artifact evidence unavailable; model usage unknown; explicit recovery required. It is
+written only after the backend positively reconciles the exact stale producer and after retained
+artifact/session recovery has first refusal. The event is written before native budget and capacity
+release so a replacement controller can finish that cleanup idempotently. It is also the durable
+terminal for the attempt's execution-capacity projection. If dispatch became possible before an
+`AttemptStarted` receipt, Factory charges the original bounded native reservation with
+`conservative-reservation` evidence; only a prepared admission that was atomically closed before
+dispatch authority can record zero. A missing or failed stale-producer reconciler cannot create the
+disposition or release ownership. Its model invocation marker remains unresolved; process absence
+never becomes a zero-token receipt. Once cleanup completes, cancellation and deadline observation
+cannot replace this terminal cause; an orderly controller release may hand it off, and the resumed
+controller escalates the same blocked run. Status stops claiming autonomous progress, and the
+existing recovery assessment requires acknowledgement of the exact unknown-usage digest before any
+successor can be proposed. No controller may replay the model call or admit a replacement attempt
+from this disposition.
+
 Use matching controller and plugin artifacts for this event extension. Older controllers do not
 understand invocation-intent fences; downgrading an active run to them is unsupported. Preserve
 original receipts and qualify recovery with the build that implements this contract.
@@ -1718,8 +1739,11 @@ the repository controller keeps the request eligible and applies a bounded retry
 
 Read-only status always returns a machine-readable `operatorAction`. Accepted queued activations,
 non-terminal unpaused runs, and pause/drain requests still reconciling admitted work report
-`monitoring: continue`. Inactive, withdrawn, completed, cancelled, acknowledged-paused, rejected, or
-escalated states report `monitoring: stop`. Stopped states say plainly that no Factory work is active
+`monitoring: continue`. A durable recovery-blocked attempt also continues monitoring until its
+native ownership, admission and terminal run receipt are reconciled; the absent producer still
+forbids replacement during that drain. Once the terminal receipt proves the drain complete it
+reports `monitoring: stop`. Inactive, withdrawn, completed, cancelled, acknowledged-paused,
+rejected, or escalated states also report `monitoring: stop`. Stopped states say plainly that no Factory work is active
 and, when authority is required, identify exactly one next action. Recovery proposals use the same
 stop contract to distinguish evidence repair, exact unknown usage acknowledgement, and submission
 of an already authorized digest-bound request. A client must not turn a terminal or human-authority

@@ -62,6 +62,7 @@ import {
 const roots: string[] = [];
 afterEach(async () => {
   await releaseAllArtifactContent();
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
@@ -1504,6 +1505,8 @@ describe("repository result capture evidence", () => {
   });
 
   it("captures hydrated LFS bytes while preserving the pointer tree and rejects raw mutation", async () => {
+    vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
     const repository = await mkdtemp(join(tmpdir(), "factory-repository-capture-lfs-"));
     roots.push(repository);
     execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repository });
@@ -1511,6 +1514,9 @@ describe("repository result capture evidence", () => {
     execFileSync("git", ["config", "user.email", "factory@example.invalid"], {
       cwd: repository,
     });
+    execFileSync("git", ["config", "filter.lfs.clean", "cat"], { cwd: repository });
+    execFileSync("git", ["config", "filter.lfs.smudge", "cat"], { cwd: repository });
+    execFileSync("git", ["config", "filter.lfs.required", "false"], { cwd: repository });
     await writeFile(join(repository, ".gitattributes"), "*.bin filter=lfs diff=lfs -text\n");
     execFileSync("git", ["add", ".gitattributes"], { cwd: repository });
     execFileSync("git", ["commit", "-q", "-m", "base"], { cwd: repository });

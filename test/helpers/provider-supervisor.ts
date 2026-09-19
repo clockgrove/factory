@@ -59,6 +59,8 @@ import type {
 } from "../../src/execution/backend.js";
 import type { ManagementBackend } from "../../src/management/backend.js";
 import { validateArtifactClean, discardValidationResult } from "../../src/validation/clean-run.js";
+import * as localScopes from "../../src/runtime/local-scope.js";
+import { runContainedProcess } from "../../src/runtime/process-group.js";
 import type { ObjectiveSnapshot, LinkedPullRequest } from "../../src/types.js";
 import { GitHubStacks } from "../../src/publication/github-stacks.js";
 import { PlatformUnavailableError } from "../../src/platform.js";
@@ -164,6 +166,30 @@ export async function providerSupervisorFixture(
       { status: 401, headers: { "content-type": "application/json" } },
     );
   });
+  const localScopeHostIdentity = "b".repeat(64);
+  vi.spyOn(localScopes, "discoverLocalScopeHost").mockResolvedValue({
+    hostIdentity: localScopeHostIdentity,
+    producerPid: process.pid,
+    producerStartTicks: "456",
+    producerUnit: "factory-fixture.service",
+    producerInvocationId: "c".repeat(32),
+  });
+  vi.spyOn(localScopes, "runScopedLocalProcess").mockImplementation(async (_identity, options) =>
+    runContainedProcess(options),
+  );
+  const absentScope = (unit: string) =>
+    `Id=${unit}\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nControlGroup=\nJob=\nInvocationID=\nKillMode=control-group\n`;
+  for (const port of [
+    localScopes.linuxLocalScopeReadPort,
+    localScopes.linuxLocalScopeProcessPort,
+  ]) {
+    vi.spyOn(port, "hostIdentity").mockResolvedValue(localScopeHostIdentity);
+    vi.spyOn(port, "read").mockRejectedValue(
+      Object.assign(new Error("fixture scope is absent"), { code: "ENOENT" }),
+    );
+    vi.spyOn(port, "show").mockImplementation(async (unit) => absentScope(unit));
+  }
+  vi.spyOn(localScopes.linuxLocalScopeProcessPort, "stop").mockResolvedValue(undefined);
   const repository = await mkdtemp(join(tmpdir(), "factory-provider-supervisor-"));
   const git = (...args: string[]) =>
     execFileSync("git", args, {

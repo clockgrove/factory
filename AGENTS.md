@@ -190,19 +190,23 @@ accepted risks.
 - Declare each candidate's capability set, owner and acceptance before qualification. Finish that
   batch; admit additional work only for a demonstrated acceptance blocker or non-negotiable safety
   violation. Retain other requirements in their milestone issues instead of expanding the batch.
-- Before a code PR merges, check the proposed integrated tree with typecheck, changed-file checks
-  and affected interface regressions. Restore broken main promptly; do not make unrelated lanes
-  inherit known integration failures while waiting for a release candidate.
-- During implementation, use focused checks and captured platform contracts when they reduce risk.
-  Add a regression for each concrete defect.
+- During implementation, run typecheck, changed-file format/lint checks, and affected regressions.
+  Use `npm run test:pr -- --base <revision>` before a code PR merges; it adds the small
+  critical-contract suite to those focused checks. Add a regression for each concrete defect.
+- After a related batch lands on `main`, run `npm run test:main` once. CI owns that complete
+  deterministic run and retains a machine-readable result bound to the exact commit and tree.
+  Restore broken main promptly; do not make unrelated lanes inherit known integration failures while
+  waiting for a release candidate.
 - For instruction-only or documentation-only changes, check the diff, links, and applicable
   formatting. Runtime suites, builds, and installed qualification are required only when the changed
   behavior or documented procedure needs them; editing contributor guidance is not a release gate.
 - Do not repeatedly run broad suites, packaging, plugin reinstalls, or live qualification between
   intermediate fixes.
-- At a stable candidate boundary, freeze the candidate and run the release gates in
-  [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md#release-verification-procedure). Fix failures and rerun
-  affected checks first; repeat broad gates only at the next stable boundary.
+- At a stable candidate boundary, freeze the candidate and run `npm run verify:candidate` plus the
+  release gates in [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md#release-verification-procedure). Fix
+  failures and rerun affected checks first; let related fixes settle before choosing the next
+  candidate and repeat broad gates only at that next stable boundary. Any source change invalidates
+  candidate evidence.
 - Build and install the exact passing artifact once per stable candidate. Installed qualification
   must use that artifact, not a mutable worktree or handwritten MCP configuration.
 - Evidence proves only its exact candidate, host, and scenario. Never relabel it more broadly.

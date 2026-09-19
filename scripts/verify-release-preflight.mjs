@@ -9,7 +9,7 @@ const COMMAND_TIMEOUT_MS = 5_000;
 const COMMAND_MAX_BUFFER = 4_096;
 
 export const releasePreflightDiagnostic =
-  "Factory release verification requires Linux systemd 254+ and a reachable systemd user manager. Run `systemctl --user show --property=Version --value --no-pager` in the Linux or WSL host and rerun `npm run verify:release` there; a nested sandbox without the user bus cannot run this gate.";
+  "Factory candidate verification requires Linux systemd 254+ and a reachable systemd user manager. Run `systemctl --user show --property=Version --value --no-pager` in the Linux or WSL host and rerun `npm run verify:candidate` there; a nested sandbox without the user bus cannot run this gate.";
 
 function majorVersion(value) {
   const match = /^\s*(?:systemd\s+)?(\d+)/.exec(value);

@@ -1,0 +1,198 @@
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+
+import { describe, expect, it } from "vitest";
+import YAML from "yaml";
+
+import { candidateCommands } from "../scripts/verify-candidate.mjs";
+import { criticalContractTests, parsePrArguments, selectPrChecks } from "../scripts/verify-pr.mjs";
+import {
+  assertExpectedCommit,
+  createVerificationReceipt,
+  sourceIdentity,
+  writeVerificationReceipt,
+} from "../scripts/verification-receipt.mjs";
+
+describe("proportional quality gates", () => {
+  it("selects one explicit merge base and rejects ambiguous CLI input", () => {
+    expect(parsePrArguments([], { FACTORY_TEST_BASE: "base-sha" })).toEqual({
+      base: "base-sha",
+    });
+    expect(parsePrArguments(["--base", "main"], {})).toEqual({ base: "main" });
+    expect(() => parsePrArguments(["--base"], {})).toThrow("requires a Git revision");
+    expect(() => parsePrArguments(["--unknown", "main"], {})).toThrow("unknown test:pr argument");
+  });
+
+  it("limits changed-file checks while selecting affected runtime inputs", () => {
+    expect(
+      selectPrChecks([
+        "README.md",
+        "src/platform.ts",
+        "test/platform.test.ts",
+        "scripts/example.mjs",
+        "package-lock.json",
+        "dist/factory.js",
+      ]),
+    ).toEqual({
+      changed: [
+        "README.md",
+        "dist/factory.js",
+        "package-lock.json",
+        "scripts/example.mjs",
+        "src/platform.ts",
+        "test/platform.test.ts",
+      ],
+      biome: ["scripts/example.mjs", "src/platform.ts", "test/platform.test.ts"],
+      affected: [
+        "scripts/example.mjs",
+        "src/platform.ts",
+        "test/manifest-consistency.test.ts",
+        "test/package-documentation.test.ts",
+        "test/package-install.test.ts",
+        "test/platform.test.ts",
+      ],
+      code: true,
+    });
+    expect(selectPrChecks(["README.md", "docs/CONFORMANCE.md"]).code).toBe(false);
+  });
+
+  it("routes package, schema, and workflow surfaces to their direct contracts", () => {
+    expect(selectPrChecks(["package.json", "package-lock.json"]).affected).toEqual([
+      "test/manifest-consistency.test.ts",
+      "test/package-documentation.test.ts",
+      "test/package-install.test.ts",
+    ]);
+    expect(selectPrChecks(["schemas/compiler-request.schema.json"]).affected).toEqual([
+      "test/provider-structured-output-schema.test.ts",
+      "test/worker-packet-schema-parity.test.ts",
+    ]);
+    expect(selectPrChecks([".github/workflows/quality.yml"]).affected).toEqual([
+      "test/quality-gates.test.ts",
+    ]);
+    expect(selectPrChecks(["skills/director/SKILL.md"]).code).toBe(true);
+  });
+
+  it("never promotes a pull request to the complete deterministic suite", () => {
+    const source = readFileSync(new URL("../scripts/verify-pr.mjs", import.meta.url), "utf8");
+    expect(source).not.toContain('run("npm", ["test"]');
+  });
+
+  it("keeps the critical suite small and anchored in core contracts", () => {
+    expect(criticalContractTests).toHaveLength(8);
+    expect(criticalContractTests).toEqual(
+      expect.arrayContaining([
+        "test/compiler-pipeline.test.ts",
+        "test/admission-settlement.test.ts",
+        "test/integration-admission.test.ts",
+        "test/mutation-fencing.test.ts",
+      ]),
+    );
+    for (const path of criticalContractTests) {
+      expect(existsSync(new URL(`../${path}`, import.meta.url))).toBe(true);
+    }
+  });
+
+  it("runs the candidate suite once under coverage before package and audit gates", () => {
+    const rendered = candidateCommands.map(([command, args]) => [command, ...args].join(" "));
+    expect(rendered[0]).toContain("scripts/verify-release-preflight.mjs");
+    expect(rendered.filter((command) => command.includes("test:coverage"))).toHaveLength(1);
+    expect(rendered).toEqual(
+      expect.arrayContaining([
+        "npm run verify:dist",
+        "npm run verify:package",
+        "npm run verify:npm",
+        "npm audit",
+      ]),
+    );
+    expect(rendered).not.toContain("npm test");
+  });
+
+  it("binds receipts to the exact expected source commit", () => {
+    const identity = { commit: "a".repeat(40), tree: "b".repeat(40), clean: true, status: "" };
+    expect(() => assertExpectedCommit(identity, identity.commit)).not.toThrow();
+    expect(() => assertExpectedCommit(identity, "c".repeat(40))).toThrow("differs from expected");
+  });
+
+  it("writes a clean exact-commit receipt and rejects later source changes", async () => {
+    const root = mkdtempSync("/tmp/factory-quality-receipt-");
+    const destination = `${root}-receipt.json`;
+    try {
+      mkdirSync(`${root}/dist`);
+      writeFileSync(
+        `${root}/package.json`,
+        JSON.stringify({ name: "@clockgrove/factory", version: "1.0.0" }),
+      );
+      writeFileSync(`${root}/package-lock.json`, "{}\n");
+      for (const path of ["factory.js", "mcp-server.js", "bundle-inventory.json"])
+        writeFileSync(`${root}/dist/${path}`, `${path}\n`);
+      execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root });
+      execFileSync("git", ["config", "user.name", "Factory Test"], { cwd: root });
+      execFileSync("git", ["config", "user.email", "factory@example.invalid"], { cwd: root });
+      execFileSync("git", ["add", "."], { cwd: root });
+      execFileSync("git", ["commit", "-qm", "fixture"], { cwd: root });
+      const identity = await sourceIdentity(root);
+      const receipt = await createVerificationReceipt({
+        gate: "test:main",
+        command: "npm run test:main",
+        startedAt: "2026-09-18T00:00:00.000Z",
+        completedAt: "2026-09-18T00:01:00.000Z",
+        cwd: root,
+        expectedCommit: identity.commit,
+      });
+      expect(receipt).toMatchObject({
+        kind: "factory-exact-commit-verification",
+        gate: "test:main",
+        status: "passed",
+        commit: identity.commit,
+        tree: identity.tree,
+      });
+      expect(receipt.subjects as unknown[]).toHaveLength(5);
+      await writeVerificationReceipt(receipt, destination);
+      expect(statSync(destination).mode & 0o777).toBe(0o600);
+
+      writeFileSync(`${root}/README.md`, "changed\n");
+      await expect(
+        createVerificationReceipt({
+          gate: "test:main",
+          command: "npm run test:main",
+          startedAt: "2026-09-18T00:00:00.000Z",
+          cwd: root,
+        }),
+      ).rejects.toThrow("clean working tree");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(destination, { force: true });
+    }
+  });
+
+  it("defines PR and main CI as separate exact-purpose jobs", () => {
+    const source = readFileSync(
+      new URL("../.github/workflows/quality.yml", import.meta.url),
+      "utf8",
+    );
+    const workflow = YAML.parse(source);
+    expect(workflow.on).toEqual({ pull_request: null, push: { branches: ["main"] } });
+    expect(source).toContain("npm run test:pr");
+    expect(source).toContain("npm run test:main");
+    expect(source).toContain('--expected-commit "$GITHUB_SHA"');
+    expect(source).toContain("actions/upload-artifact@v7");
+  });
+
+  it("exposes the three stage commands without the old monolithic alias", () => {
+    const manifest = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { scripts: Record<string, string> };
+    expect(manifest.scripts["test:pr"]).toBe("node scripts/verify-pr.mjs");
+    expect(manifest.scripts["test:main"]).toContain("npm test");
+    expect(manifest.scripts["verify:candidate"]).toBe("node scripts/verify-candidate.mjs");
+    expect(manifest.scripts["verify:release"]).toBeUndefined();
+  });
+});

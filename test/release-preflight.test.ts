@@ -6,6 +6,7 @@ import {
   verifyReleasePreflight,
   type ReleasePreflightRunner,
 } from "../scripts/verify-release-preflight.mjs";
+import { candidateCommands } from "../scripts/verify-candidate.mjs";
 
 describe("coordinated release preflight", () => {
   it("accepts an injected available user manager without ambient host dependence", async () => {
@@ -62,14 +63,16 @@ describe("coordinated release preflight", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("runs before every coordinated release check and does not disable host tests", () => {
+  it("runs first in the exact-candidate gate and does not disable host tests", () => {
     const manifest = JSON.parse(
       readFileSync(new URL("../package.json", import.meta.url), "utf8"),
     ) as { scripts: Record<string, string> };
-    const release = manifest.scripts["verify:release"];
+    const candidate = manifest.scripts["verify:candidate"];
+    const commands = candidateCommands.map(([command, args]) => [command, ...args].join(" "));
 
-    expect(release?.startsWith("node scripts/verify-release-preflight.mjs && ")).toBe(true);
-    expect(release).toContain("npm run test:coverage");
-    expect(release).not.toMatch(/--exclude|--skip|FACTORY_.*=0/);
+    expect(candidate).toBe("node scripts/verify-candidate.mjs");
+    expect(commands[0]).toContain("scripts/verify-release-preflight.mjs");
+    expect(commands).toContain("npm run test:coverage");
+    expect(commands.join(" ")).not.toMatch(/--exclude|--skip|FACTORY_.*=0/);
   });
 });

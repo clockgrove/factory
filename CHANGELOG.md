@@ -4,7 +4,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ## Unreleased
 
-No changes yet.
+### Changed
+
+- Split routine verification into proportional pull-request and complete post-merge deterministic
+  gates, retain an exact-commit CI result, and reserve coverage, packaging, reproducibility,
+  installation, audit, and live qualification for a stable release candidate. ([#560](https://github.com/clockgrove/factory/issues/560))
 
 ## 2.0.27-beta.0 - 2026-09-17
 

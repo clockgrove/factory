@@ -27,6 +27,8 @@ import {
   COMPILER_JUDGE_DIMENSIONS,
   compilerEvalDigest,
   compilerPlanningInventory,
+  validateCompilerJudgeVerdict,
+  type CompilerJudgeVerdict,
   type ObligationInventory,
 } from "../src/evaluation/compiler-eval.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
@@ -72,6 +74,7 @@ const sourceEvidence = {
       excerpt: "Objective\nDeliver change",
     },
   ],
+  factoryCapabilities: factoryCompilerCapabilities(runPolicy),
   modelSelection: null,
 };
 const binding = {
@@ -569,11 +572,17 @@ async function emitFixedGraphHistory(): Promise<CompilerDraftRecord[]> {
   const verdict = structuredClone(
     history().find((record) => record.kind === "result" && record.payload.stage === "judge")!
       .payload.value,
-  ) as {
-    coverage: Array<{ acceptanceBindings: Array<{ criterionId: string }> }>;
+  ) as CompilerJudgeVerdict;
+  verdict.coverage[0] = {
+    ...verdict.coverage[0]!,
+    itemIds: [],
+    acceptanceBindings: [
+      { kind: "factory-capability", capabilityId: "terminal-objective-handling" },
+    ],
+    reason: "Authenticated Factory terminal handling covers this fixed lifecycle obligation.",
   };
-  verdict.coverage[0]!.acceptanceBindings[0]!.criterionId = candidate.workItems[0]!.criteria[0]!.id;
   const callbacks: CompilerDraftCallbacks = {
+    factoryCapabilities: sourceEvidence.factoryCapabilities,
     invoke: async (request, checkpoint) => {
       const result = {
         value:
@@ -592,7 +601,14 @@ async function emitFixedGraphHistory(): Promise<CompilerDraftRecord[]> {
       report: emptyCompilerValidationReport(),
       requestDigest,
     }),
-    accept: () => true,
+    accept: (value, draft, retainedInventory) =>
+      validateCompilerJudgeVerdict(value, {
+        draftDigest: compiledGraphDigest(draft.objective),
+        inventory: retainedInventory as ObligationInventory,
+        factoryCapabilities: sourceEvidence.factoryCapabilities,
+        graph: draft.proposal,
+        addedEdges: draft.projectionTrace.addedEdges,
+      }).decision === "accept",
   };
   let now = Date.parse("2026-09-15T20:00:00.000Z");
   const result = await runCompilerDraftLoop({
@@ -648,6 +664,7 @@ describe("read-only compiler evaluation", () => {
       revision: 0,
       draftDigest: compiledGraphDigest(graph),
       observedTotalTokens: 24,
+      factoryCapabilities: sourceEvidence.factoryCapabilities,
     });
     expect(result.usage).toHaveLength(2);
     expect(result.invocationStatus).toEqual([
@@ -737,6 +754,23 @@ describe("read-only compiler evaluation", () => {
     await expect(
       inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
     ).rejects.toThrow("requires current durable source evidence");
+  });
+  it("authenticates persisted source capabilities against the run policy", async () => {
+    const records = fixedGraphHistory();
+    const started = records.find((record) => record.kind === "started")!;
+    const evidence = records.find((record) => record.kind === "source-evidence")!;
+    const changed = structuredClone(sourceEvidence);
+    changed.factoryCapabilities[0]!.authorityDigest = "f".repeat(64);
+    const sourceEvidenceDigest = draftDigest(changed);
+    started.payload.sourceEvidenceDigest = sourceEvidenceDigest;
+    evidence.payload.sourceEvidence = changed;
+    evidence.payload.sourceEvidenceDigest = sourceEvidenceDigest;
+    validatePersistedCompilerDraftJournal(records);
+    vi.mocked(loadCompilerDrafts).mockResolvedValue(records);
+
+    await expect(
+      inspectCompilerEvaluation({ repository: binding.repository, snapshot, store }),
+    ).rejects.toThrow("compiler source capabilities differ from authenticated run policy");
   });
   it("authenticates the composite compiler input envelope independently of the Objective digest", async () => {
     expect(binding.inputDigest).not.toBe(objectiveDigest);

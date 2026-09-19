@@ -473,12 +473,38 @@ export async function readCompilerObligationEvidence(
   ].sort();
   const available = new Set(paths);
   const objectiveText = `${context.objective.title}\n${context.objective.body}`;
+  const referencedPaths = (directory: string, source: string): string[] => {
+    const raw = [
+      ...source.matchAll(/\]\(([^)#?\s]+)(?:[?#][^)]*)?\)/g),
+      ...source.matchAll(/`([^`\r\n]+)`/g),
+      ...source.matchAll(/(?:^|[\s"'(])((?:\.?\.?\/)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+)/gm),
+    ].map((match) => match[1] ?? "");
+    return [
+      ...new Set(
+        raw.flatMap((candidate) => {
+          const clean = candidate.trim().replace(/^<|>$/g, "");
+          if (!clean || /\s/.test(clean) || /^[a-z]+:/i.test(clean)) return [];
+          const resolved = posix.normalize(
+            clean.startsWith("/") ? clean.slice(1) : posix.join(directory, clean),
+          );
+          if (resolved === "." || resolved.startsWith("../")) return [];
+          if (!RepositoryScopePathSchema.safeParse(resolved).success) return [];
+          return [resolved];
+        }),
+      ),
+    ].sort();
+  };
   const manifests = paths.filter((path) =>
     /(?:^|\/)(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|bun\.lock|bun\.lockb|bunfig\.toml|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|uv\.lock|\.python-version)$/.test(
       path,
     ),
   );
-  const explicit = paths.filter((path) => objectiveText.includes(path));
+  const explicit = [
+    ...new Set([
+      ...paths.filter((path) => objectiveText.includes(path)),
+      ...referencedPaths(".", objectiveText),
+    ]),
+  ].sort();
   const instructionAncestors = explicit.flatMap((path) => {
     const parts = posix.dirname(path).split("/").filter(Boolean);
     return [
@@ -492,35 +518,13 @@ export async function readCompilerObligationEvidence(
     ),
   );
   const pending = [...new Set([...roots, ...explicit, ...instructionAncestors, ...manifests])]
-    .filter((path) => available.has(path))
+    .filter((path) => explicit.includes(path) || available.has(path))
     .sort()
     .map((path) => ({ path, ancestors: [] as string[] }));
   const queued = new Set(pending.map(({ path }) => path));
   const read = new Set<string>();
   const gaps = new Set<string>();
   const maximumSources = Math.min(32, 127 - evidence.length);
-  const sourceReferences = (path: string, source: string): string[] => {
-    const raw = [
-      ...source.matchAll(/\]\(([^)#?\s]+)(?:[?#][^)]*)?\)/g),
-      ...source.matchAll(/`([^`\r\n]+)`/g),
-      ...source.matchAll(/(?:^|[\s"'(])((?:\.?\.?\/)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+)/gm),
-    ].map((match) => match[1] ?? "");
-    const directory = posix.dirname(path);
-    return [
-      ...new Set(
-        raw.flatMap((candidate) => {
-          const clean = candidate.trim().replace(/^<|>$/g, "");
-          if (!clean || /^[a-z]+:/i.test(clean)) return [];
-          const resolved = posix.normalize(
-            clean.startsWith("/") ? clean.slice(1) : posix.join(directory, clean),
-          );
-          if (resolved === "." || resolved.startsWith("../")) return [];
-          if (!RepositoryScopePathSchema.safeParse(resolved).success) return [];
-          return [resolved];
-        }),
-      ),
-    ].sort();
-  };
   while (pending.length > 0 && read.size < maximumSources) {
     pending.sort((left, right) => left.path.localeCompare(right.path));
     const next = pending.shift()!;
@@ -552,7 +556,7 @@ export async function readCompilerObligationEvidence(
         }),
       );
       read.add(path);
-      for (const reference of sourceReferences(path, result.stdout)) {
+      for (const reference of referencedPaths(posix.dirname(path), result.stdout)) {
         if (reference === path || next.ancestors.includes(reference)) {
           gaps.add(`cycle:${[...next.ancestors, path, reference].join("->")}`);
           continue;

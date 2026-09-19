@@ -709,7 +709,6 @@ describe("independent compiler management boundaries", () => {
       encoding: "utf8",
     }).trim();
     await writeFile(join(context.repository, "package.json"), "MUTABLE_SENTINEL");
-    context.repositoryFiles.push("missing.ts");
     context.objective.body += "\nFollow the contract in `missing.ts`.";
     const evidence = await readCompilerObligationEvidence(context);
     expect(JSON.stringify(evidence)).toContain("node --test");
@@ -731,6 +730,7 @@ describe("independent compiler management boundaries", () => {
         "# Repository authority",
         "- [direct authority](docs/a.md)",
         "- [missing authority](docs/missing.md)",
+        "- Run `npm run test` after changes.",
         ...boundedReferences,
       ].join("\n"),
     );
@@ -785,6 +785,7 @@ describe("independent compiler management boundaries", () => {
     expect(gaps).toContain("cycle:AGENTS.md->docs/a.md->AGENTS.md");
     expect(gaps).toContain("unavailable:docs/missing.md");
     expect(gaps).toContain("bound:docs/z-");
+    expect(gaps).not.toContain("npm run test");
   });
 
   it("keeps independent LLM labels distinct from human calibration and checkpointed", async () => {

@@ -29,10 +29,12 @@ import {
   compilerJudgeCandidateFromCompiled,
   type CompilerJudgeCandidate,
 } from "../compiler/judge-context.js";
+import { factoryCompilerCapabilities } from "../compiler/proposal.js";
 import { compiledGraphDigest, type CompiledObjective } from "../graph.js";
 import { analyzeDependencies } from "../graph-analysis.js";
 import {
   CompilerEvidenceSchema,
+  FactoryCompilerCapabilitySchema,
   compilerPlanningInventory,
   type ObligationInventorySchema,
   compilerEvalDigest,
@@ -258,6 +260,7 @@ const CompilerSourceEvidence = z
       })
       .strict(),
     evidence: z.array(CompilerEvidenceSchema).min(1).max(128),
+    factoryCapabilities: z.array(FactoryCompilerCapabilitySchema).max(6),
     modelSelection: z
       .object({
         profile: z.string().min(1).max(160),
@@ -919,6 +922,13 @@ export async function inspectCompilerEvaluation(args: {
         }))
   )
     throw new Error("compiler draft input envelope identity mismatch");
+  if (
+    binding &&
+    sourceEvidence &&
+    compilerEvalDigest(sourceEvidence.factoryCapabilities) !==
+      compilerEvalDigest(factoryCompilerCapabilities(run.start.policy))
+  )
+    throw new Error("compiler source capabilities differ from authenticated run policy");
   const hasFixedGraphRecord = records.some((record) => record.kind === "fixed-graph");
   const fixedGraph = journalAuthority?.fixedGraph;
   if (hasFixedGraphRecord && !fixedGraph)
@@ -1166,7 +1176,8 @@ export async function inspectCompilerEvaluation(args: {
           let proposal: CompilerJudgeCandidate;
           let requestDigest: string;
           let requestRevision: number;
-          let factoryCapabilities: FactoryCompilerCapability[] = [];
+          let factoryCapabilities: FactoryCompilerCapability[] =
+            sourceEvidence!.factoryCapabilities;
           if (fixedEvaluation) {
             proposal = fixedEvaluation.candidate;
             requestDigest = fixedEvaluation.requestDigest;
@@ -1200,6 +1211,8 @@ export async function inspectCompilerEvaluation(args: {
               requestRevision !== record.payload.revision ||
               draftDigest(request.inventory) !==
                 draftDigest(compilerPlanningInventory(inventory)) ||
+              draftDigest(request.factoryCapabilities) !==
+                draftDigest(sourceEvidence!.factoryCapabilities) ||
               provenance?.requestDigest !== requestDigest ||
               proposalInvocation?.invocation.compilerRequestDigest !== requestDigest
             )

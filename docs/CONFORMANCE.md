@@ -164,7 +164,7 @@ retained-candidate receipt described by the
 That receipt's isolated plugin install selects the artifact; provider authentication remains in the
 normal Linux `~/.codex` home, whose plugin cache is not candidate authority.
 
-`FACTORY_CONCURRENCY_PER_OBJECTIVE_MAX_MODEL_TOKENS` accepts 250000–500000 and defaults to 250000.
+`FACTORY_CONCURRENCY_PER_OBJECTIVE_MAX_MODEL_TOKENS` accepts 250000–750000 and defaults to 250000.
 `FACTORY_CONCURRENCY_MAX_MODEL_TOKENS` must explicitly equal twice that value.
 `FACTORY_CONCURRENCY_DURATION_MINUTES` accepts integers 45–120 and defaults to 45. Select these
 before activation under matching authority. They are observed-stop thresholds, not provider-enforced

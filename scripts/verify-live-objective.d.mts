@@ -16,7 +16,11 @@ export function waitForCreatedObjectiveNamespace(input: {
   createdIssue: { number: number; id: number; body: string; pull_request?: unknown };
   wait?: (milliseconds: number) => Promise<void>;
 }): Promise<void>;
-export function boundedPolicy(delivery?: string, maxModelTokens?: number): unknown;
+export function boundedPolicy(
+  delivery?: string,
+  maxModelTokens?: number,
+  ceiling?: number,
+): unknown;
 export function assertRecordedQualificationPolicy(recorded: unknown, expected: unknown): void;
 export type QualificationMergeAssertion = (
   proof: unknown,
@@ -71,7 +75,7 @@ export function installedBundleIdentity(input: string): {
   inventorySha256: string;
   bundles: Array<{ file: string; bytes: number; sha256: string }>;
 };
-export function modelTokenLimit(value: string | undefined): number;
+export function modelTokenLimit(value: string | undefined, ceiling?: number): number;
 export function assessQualificationPreflight(input: unknown): {
   result: "passed" | "blocked";
   blockers: string[];

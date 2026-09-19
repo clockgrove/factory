@@ -91,7 +91,11 @@ export function qualificationRuntimeCodexHome(env, linuxHome = realpathSync(home
   return codexHome;
 }
 
-function parseCheckpointAuthority(env, compilerQualificationEntrypoint) {
+function parseCheckpointAuthority(
+  env,
+  compilerQualificationEntrypoint,
+  modelTokenCeiling = 500_000,
+) {
   const compilerRecovery = env.FACTORY_CHECKPOINT_BACKEND === "compiler";
   assert.ok(
     !compilerRecovery || compilerQualificationEntrypoint,
@@ -129,7 +133,8 @@ function parseCheckpointAuthority(env, compilerQualificationEntrypoint) {
   assert.ok(env.FACTORY_CHECKPOINT_NAMESPACE, "explicit new namespace required");
   const policy = boundedPolicy(
     "regular-prs",
-    modelTokenLimit(env.FACTORY_CHECKPOINT_MAX_MODEL_TOKENS),
+    modelTokenLimit(env.FACTORY_CHECKPOINT_MAX_MODEL_TOKENS, modelTokenCeiling),
+    modelTokenCeiling,
   );
   // These scenarios prove same-attempt continuation, not implementation retry.
   // Fence replacement at admission; an observer pause can arrive too late.
@@ -161,8 +166,8 @@ function parseCheckpointAuthority(env, compilerQualificationEntrypoint) {
   };
 }
 
-export function checkpointAuthority(env) {
-  return parseCheckpointAuthority(env, false);
+export function checkpointAuthority(env, options = {}) {
+  return parseCheckpointAuthority(env, false, options.modelTokenCeiling);
 }
 
 /** Internal adapter for the committed compiler-specific entrypoint. */

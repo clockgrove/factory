@@ -468,6 +468,7 @@ export function concurrencyAuthority(env) {
   checkpointDeadline(new Date(0).toISOString(), durationMinutes);
   const perObjectiveThreshold = modelTokenLimit(
     env.FACTORY_CONCURRENCY_PER_OBJECTIVE_MAX_MODEL_TOKENS ?? "250000",
+    750_000,
   );
   const aggregateObservedThreshold = 2 * perObjectiveThreshold;
   assert.equal(
@@ -503,18 +504,21 @@ export function concurrencyAuthority(env) {
           : `${repository}:${unit}:start,activate-peer,race-inner-cas,observe-path-exclusive-refill,explain,replay,stop`,
       "explicit two-Objective lifecycle authority required",
     );
-  const authority = checkpointAuthority({
-    ...env,
-    FACTORY_LOCAL_CHECKPOINT_RESTART: "1",
-    FACTORY_CHECKPOINT_REPOSITORY: repository,
-    FACTORY_CHECKPOINT_CHECKOUT: env.FACTORY_CONCURRENCY_CHECKOUT,
-    FACTORY_CHECKPOINT_CONTROLLER_UNIT: unit,
-    FACTORY_CHECKPOINT_PHASE: phase,
-    FACTORY_CHECKPOINT_NAMESPACE: namespace,
-    FACTORY_CHECKPOINT_EVIDENCE: env.FACTORY_CONCURRENCY_EVIDENCE,
-    FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: String(perObjectiveThreshold),
-    FACTORY_CHECKPOINT_ACK: `${repository}:${unit}:start,pause-drain,restart,resume,stop`,
-  });
+  const authority = checkpointAuthority(
+    {
+      ...env,
+      FACTORY_LOCAL_CHECKPOINT_RESTART: "1",
+      FACTORY_CHECKPOINT_REPOSITORY: repository,
+      FACTORY_CHECKPOINT_CHECKOUT: env.FACTORY_CONCURRENCY_CHECKOUT,
+      FACTORY_CHECKPOINT_CONTROLLER_UNIT: unit,
+      FACTORY_CHECKPOINT_PHASE: phase,
+      FACTORY_CHECKPOINT_NAMESPACE: namespace,
+      FACTORY_CHECKPOINT_EVIDENCE: env.FACTORY_CONCURRENCY_EVIDENCE,
+      FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: String(perObjectiveThreshold),
+      FACTORY_CHECKPOINT_ACK: `${repository}:${unit}:start,pause-drain,restart,resume,stop`,
+    },
+    { modelTokenCeiling: 750_000 },
+  );
   const directorContention = scenario === "director-contention";
   authority.policy.maxParallel = directorContention ? 2 : 1;
   authority.policy.objectiveTimeoutMinutes = durationMinutes;

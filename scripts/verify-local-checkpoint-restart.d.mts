@@ -59,6 +59,7 @@ export function checkpointBoundedCall<T>(
 ): T;
 export function checkpointAuthority(
   env: Record<string, string | undefined>,
+  options?: { modelTokenCeiling?: number },
 ): CheckpointAuthority | null;
 /** Internal adapter for the committed compiler-specific entrypoint. */
 export function compilerQualificationCheckpointAuthority(

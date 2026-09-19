@@ -839,6 +839,7 @@ describe("prospective concurrent qualification attempts", () => {
     [250000, 45],
     [400000, 60],
     [500000, 120],
+    [750000, 120],
   ])(
     "binds both prospective activations to the explicit %i threshold and %i minute window",
     async (limit, minutes) => {
@@ -910,7 +911,7 @@ describe("prospective concurrent qualification attempts", () => {
     ["400000", "800001"],
     ["400000", "0800000"],
     ["249999", "499998"],
-    ["500001", "1000002"],
+    ["750001", "1500002"],
     ["0", "0"],
     ["250000.5", "500001"],
     ["2.5e5", "500000"],

@@ -691,6 +691,18 @@ describe("explicit checkpoint restart authority", () => {
       expect(() =>
         checkpointAuthority({ ...env, FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: value }),
       ).toThrow();
+    expect(
+      checkpointAuthority(
+        { ...env, FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "750000" },
+        { modelTokenCeiling: 750_000 },
+      )!.policy,
+    ).toMatchObject({ economics: { maxModelTokens: 750_000 } });
+    expect(() =>
+      checkpointAuthority(
+        { ...env, FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "750001" },
+        { modelTokenCeiling: 750_000 },
+      ),
+    ).toThrow();
     const bounded = checkpointAuthority({ ...env, FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "250000" })!;
     expect(bounded.policy).toEqual({
       ...parseRunPolicy(boundedPolicy("regular-prs", 250000)),

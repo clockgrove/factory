@@ -18,6 +18,7 @@ import {
   criticalContractTests,
   deepScenarioTests,
   parsePrArguments,
+  prAffectedWorkerCount,
   prImpactRules,
   prWorkerCount,
   selectPrChecks,
@@ -135,17 +136,20 @@ describe("proportional quality gates", () => {
   });
 
   it("runs directly changed deep scenarios while deferring dependency-only deep matrices", () => {
-    const selection = selectPrChecks(["src/platform.ts", "test/successor-supervisor.test.ts"]);
+    const selection = selectPrChecks([
+      "src/platform.ts",
+      "test/successor-supervisor-refresh.test.ts",
+    ]);
     const plan = buildPrTestPlan(selection, [
       "test/platform.test.ts",
       "test/supervisor-late-completion.test.ts",
-      "test/successor-supervisor.test.ts",
+      "test/successor-supervisor-refresh.test.ts",
     ]);
     expect(plan).toEqual({
-      selectedTests: ["test/platform.test.ts", "test/successor-supervisor.test.ts"],
+      selectedTests: ["test/platform.test.ts", "test/successor-supervisor-refresh.test.ts"],
       deferredDeepTests: ["test/supervisor-late-completion.test.ts"],
     });
-    expect(deepScenarioTests).toContain("test/successor-supervisor.test.ts");
+    expect(deepScenarioTests).toContain("test/successor-supervisor-refresh.test.ts");
 
     const mapped = selectPrChecks(["test/helpers/provider-supervisor.ts"]);
     expect(buildPrTestPlan(mapped, []).selectedTests).toEqual([
@@ -162,16 +166,19 @@ describe("proportional quality gates", () => {
     expect(new Set(deepScenarioTests).size).toBe(deepScenarioTests.length);
   });
 
-  it("uses up to four actual CPUs for PR test files", () => {
+  it("uses up to four actual CPUs for PR files while capping the full suite at two", () => {
     expect(prWorkerCount(1)).toBe(1);
     expect(prWorkerCount(2)).toBe(2);
     expect(prWorkerCount(4)).toBe(4);
     expect(prWorkerCount(32)).toBe(4);
     expect(() => prWorkerCount(0)).toThrow("positive integer");
+    expect(prAffectedWorkerCount(["test/platform.test.ts"], 4)).toBe(4);
+    expect(prAffectedWorkerCount(["test/successor-supervisor-refresh.test.ts"], 4)).toBe(2);
+    expect(prAffectedWorkerCount(["test/successor-supervisor-refresh.test.ts"], 1)).toBe(1);
 
     const config = readFileSync(new URL("../vitest.config.ts", import.meta.url), "utf8");
     expect(config).toContain('from "node:os"');
-    expect(config).toContain("maxWorkers: Math.min(4, availableParallelism())");
+    expect(config).toContain("maxWorkers: Math.min(2, availableParallelism())");
   });
 
   it("never promotes a pull request to the complete deterministic suite", () => {

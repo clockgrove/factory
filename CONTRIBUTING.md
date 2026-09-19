@@ -81,9 +81,11 @@ Record any checks you could not run and the reason.
 
 After a related batch lands on `main`, CI runs `npm run test:main` once: full typecheck, lint,
 formatting, deterministic tests, and schemas. Its uploaded JSON result names the exact successful
-commit and tree. PR and main test phases use at most four available CPUs so GitHub's four-core
-runner does not collapse to one worker. Do not rerun the full suite between each repair when
-focused checks cover the change.
+commit and tree. The small PR gate uses up to four file workers for ordinary and critical tests. An
+affected phase containing deep Supervisor scenarios and the complete main suite use at most two
+because those scenarios also consume subprocess and mock-service capacity; higher file concurrency
+causes resource starvation rather than useful parallelism. Do not rerun the full suite between each
+repair when focused checks cover the change.
 
 For documentation-only changes, check the diff, links, and examples. The current format command
 covers code and configuration, not Markdown. If you change install, upgrade, or uninstall

@@ -191,6 +191,9 @@ accepted risks.
   batch; admit additional work only for a demonstrated acceptance blocker or non-negotiable safety
   violation. Retain other requirements in their milestone issues instead of expanding the batch.
 - During implementation, run typecheck, changed-file format/lint checks, and affected regressions.
+  Factory's test setup creates fixture archives with the `tar` subprocess. On Codex sandbox hosts,
+  run Vitest with the existing elevated command permission; a restricted-sandbox attempt reliably
+  fails with `spawnSync tar EPERM` before collecting tests.
   Use `npm run test:pr -- --base <revision>` before a code PR merges; it adds the small
   critical-contract suite to those focused checks. Directly changed tests always run. Import-based
   selection covers ordinary source changes; shared test-support files require an explicit
@@ -199,6 +202,9 @@ accepted risks.
   concrete defect.
 - After a related batch lands on `main`, run `npm run test:main` once. CI owns that complete
   deterministic run and retains a machine-readable result bound to the exact commit and tree.
+  Its default two-worker limit protects process-heavy Supervisor scenarios from resource starvation.
+  The smaller PR gate may use up to four workers for ordinary tests, but caps an affected phase that
+  contains deep Supervisor scenarios at two.
   Restore broken main promptly; do not make unrelated lanes inherit known integration failures while
   waiting for a release candidate.
 - For instruction-only or documentation-only changes, check the diff, links, and applicable

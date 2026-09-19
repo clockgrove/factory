@@ -21,6 +21,7 @@ export function parsePrArguments(argv: string[], environment?: NodeJS.ProcessEnv
 export function selectPrChecks(paths: string[]): PrCheckSelection;
 export function buildPrTestPlan(selection: PrCheckSelection, relatedTests: string[]): PrTestPlan;
 export function prWorkerCount(parallelism?: number): number;
+export function prAffectedWorkerCount(selectedTests: string[], parallelism?: number): number;
 
 export function resolvePrBase(base: string, cwd?: string): Promise<string>;
 export function changedFilesSince(base: string, cwd?: string): Promise<string[]>;
@@ -29,6 +30,7 @@ export function verifyPullRequest(options?: { argv?: string[]; cwd?: string }): 
     mergeBase: string;
     parallelism?: number;
     workers?: number;
+    affectedWorkers?: number;
     selectedTests?: string[];
     deferredDeepTests?: string[];
   } & PrCheckSelection

@@ -1389,6 +1389,10 @@ describe("installed two-Objective qualification authority", () => {
     );
     expect(a).not.toMatch(/at least 24/i);
     expect(a).toContain("Do not introduce artificial delays");
+    expect(a).toContain("Every Work Item must declare trusted_local execution trust.");
+    expect(b).toContain("Every Work Item must declare trusted_local execution trust.");
+    expect(a).not.toContain("declare managed execution trust");
+    expect(b).not.toContain("declare managed execution trust");
     expect(b).toContain("Keep both roots minimal");
     expect(a).not.toContain(authority.namespaces[1]!);
     expect(b).not.toContain(authority.namespaces[0]!);
@@ -1948,14 +1952,15 @@ describe("bounded existing installed-controller composition", () => {
     expect(
       (directorAuthority.policy.capacity as { local: { maxWorkers: number } }).local.maxWorkers,
     ).toBe(2);
-    expect(
-      directorContentionObjectiveBody(
-        directorAuthority.namespaces[0]!,
-        0,
-        `src/factory-qualification/${directorAuthority.namespace}/shared/`,
-        `factory-qualification-${directorAuthority.namespace}`,
-      ),
-    ).toContain("exclusive resource");
+    const body = directorContentionObjectiveBody(
+      directorAuthority.namespaces[0]!,
+      0,
+      `src/factory-qualification/${directorAuthority.namespace}/shared/`,
+      `factory-qualification-${directorAuthority.namespace}`,
+    );
+    expect(body).toContain("exclusive resource");
+    expect(body).toContain("Every Work Item must declare trusted_local execution trust.");
+    expect(body).not.toContain("declare managed execution trust");
   });
   it("retains an ambiguous inner collision without final proof, stop, or cleanup", async () => {
     const f = scenarioPort();

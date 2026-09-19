@@ -534,7 +534,7 @@ export function concurrencyAuthority(env) {
 }
 
 export function concurrencyObjectiveBody(namespace, index) {
-  return `${objectiveBodyFor(namespace)}\n\nThis is one of exactly two explicitly activated, disjoint qualification Objectives. Keep exactly three Work Items and two independent roots, then the dependent join. Do not edit the other namespace. ${
+  return `${objectiveBodyFor(namespace, "trusted_local")}\n\nThis is one of exactly two explicitly activated, disjoint qualification Objectives. Keep exactly three Work Items and two independent roots, then the dependent join. Do not edit the other namespace. ${
     index === 0
       ? "Make clamp the first root in native sub-issue order. Its implementation must also handle infinities and negative zero consistently with Math.min(Math.max(value,min),max). Add exactly five named edge-case assertions: +Infinity, -Infinity, negative zero, negative fractional, and inverted fractional. Do not introduce artificial delays, sleeps, services, network calls or resource pressure."
       : "Keep both roots minimal: only the specified deterministic implementation and acceptance cases. Make clamp first and slugify second in native sub-issue order."
@@ -544,7 +544,7 @@ export function concurrencyObjectiveBody(namespace, index) {
 export function directorContentionObjectiveBody(namespace, index, sharedPath, sharedResource) {
   assert.match(sharedPath, /^src\/factory-qualification\/[a-z0-9-]+\/shared\/$/);
   assert.match(sharedResource, /^factory-qualification-[a-z0-9-]+$/);
-  return `${objectiveBodyFor(namespace)}\n\nThis is one of exactly two Director-contention qualification Objectives. Keep the three modules and dependency graph above unchanged. The clamp root must additionally include ${sharedPath} in its allowed paths and add ${sharedPath}${namespace}.js exporting the string '${namespace}'; the peer Objective writes a different file in that directory. The slugify root must declare the exact exclusive resource ${sharedResource}. Preserve those exact path and exclusive-resource declarations in the Work Packets. ${
+  return `${objectiveBodyFor(namespace, "trusted_local")}\n\nThis is one of exactly two Director-contention qualification Objectives. Keep the three modules and dependency graph above unchanged. The clamp root must additionally include ${sharedPath} in its allowed paths and add ${sharedPath}${namespace}.js exporting the string '${namespace}'; the peer Objective writes a different file in that directory. The slugify root must declare the exact exclusive resource ${sharedResource}. Preserve those exact path and exclusive-resource declarations in the Work Packets. ${
     index === 0
       ? "Make both roots useful but smaller, with at least 12 individually named deterministic edge-case assertions each; keep the join minimal."
       : "Make both roots materially larger with at least 48 individually named deterministic edge-case assertions each; keep the join minimal."

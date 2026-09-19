@@ -1,5 +1,8 @@
-export const objectiveBody: string;
-export function objectiveBodyFor(namespace: string): string;
+export type QualificationExecutionTrust = "trusted_local" | "managed";
+export function objectiveBodyFor(
+  namespace: string,
+  executionTrust: QualificationExecutionTrust,
+): string;
 export function qualificationNamespace(value?: string, generate?: () => string): string;
 export function qualificationPaths(namespace: string): {
   sourceDirectory: string;
@@ -79,5 +82,4 @@ export function applyQualificationScenarioPreflight(
   scenario: { result: "passed" | "blocked"; blocker?: string; reason?: string },
 ): { result: "passed" | "blocked"; blockers: string[]; scenario?: unknown };
 export function assertMcpSurface(tools: unknown): void;
-export function assertRetryableObjective(input: unknown): void;
 export function qualificationFailure(evidence: unknown, error: unknown): unknown;

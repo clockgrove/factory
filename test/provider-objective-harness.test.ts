@@ -328,8 +328,15 @@ describe("installed provider Objective harness (no live calls)", () => {
       const objective = providerObjective(profile, "provider-20260905-a");
       expect(objective).toContain("src/factory-qualification/provider-20260905-a/clamp.js");
       expect(objective).toContain(
-        profile === "daytona-burst" ? "join-after-merge" : "managed execution trust",
+        profile === "daytona-burst" ? "join-after-merge" : "managed profile",
       );
+      const executionTrust = profile === "daytona-burst" ? "trusted_local" : "managed";
+      const otherTrust = profile === "daytona-burst" ? "managed" : "trusted_local";
+      expect(objective).toContain(
+        `Every Work Item must declare ${executionTrust} execution trust.`,
+      );
+      expect(objective).not.toContain(`declare ${otherTrust} execution trust`);
+      expect(objective.match(/Every Work Item must declare .* execution trust\./g)).toHaveLength(1);
     },
   );
   it("qualifies only the explicitly bounded burst happy-path scope", () => {

@@ -113,7 +113,7 @@ function terminalEvidence() {
     base: "a".repeat(40),
     qualificationNamespace: namespace,
     fixturePaths: qualificationPaths(namespace),
-    objective: { number: 1, body: objectiveBodyFor(namespace) },
+    objective: { number: 1, body: objectiveBodyFor(namespace, "trusted_local") },
     policy: budgetStopPolicy(),
     preflight: {
       qualificationNamespace: namespace,

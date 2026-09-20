@@ -201,10 +201,22 @@ const qualificationStages = new Set([
   "concurrency-refill-observation",
   "concurrency-refill-consistency",
   "concurrency-evidence-save",
+  "director-response-capture",
+  "director-response-parsing",
+  "director-lease-proof",
+  "director-process-absence",
+  "director-final-proof-assembly",
   "app-server-artifact-proof",
   "app-server-final-settlement",
 ]);
 const qualificationFailureStages = new WeakMap();
+const qualificationAssertionMessages = new Map([
+  ["director-response-capture", "foreground contender responses were not retained"],
+  ["director-response-parsing", "foreground contender response proof was invalid"],
+  ["director-lease-proof", "inner Director lease proof was invalid"],
+  ["director-process-absence", "foreground contender process absence was unproved"],
+  ["director-final-proof-assembly", "Director contention final proof was invalid"],
+]);
 
 /** Attach only a fixed local stage to the original failure without serializing its private detail. */
 export async function withQualificationStage(stage, operation) {
@@ -216,7 +228,7 @@ export async function withQualificationStage(stage, operation) {
       error !== null && (typeof error === "object" || typeof error === "function")
         ? error
         : new Error("qualification stage failed");
-    qualificationFailureStages.set(retained, stage);
+    if (!qualificationFailureStages.has(retained)) qualificationFailureStages.set(retained, stage);
     throw retained;
   }
 }
@@ -312,12 +324,18 @@ export function checkpointFailure(error, boundary) {
       : undefined;
   const proofFailure = qualificationProofFailureContext(error);
   const checkpointContinuationFailure = appServerCheckpointContinuationFailureContext(error);
+  const classification = classifyCheckpointFailure(error);
+  const assertionMessage =
+    classification.category === "assertion"
+      ? qualificationAssertionMessages.get(qualificationStage)
+      : undefined;
   return {
     boundary: boundaries.has(boundary) ? boundary : "scenario",
     ...(qualificationStage === undefined ? {} : { qualificationStage }),
     ...(proofFailure === undefined ? {} : proofFailure),
     ...(checkpointContinuationFailure === undefined ? {} : checkpointContinuationFailure),
-    ...classifyCheckpointFailure(error),
+    ...classification,
+    ...(assertionMessage === undefined ? {} : { assertionMessage }),
   };
 }
 

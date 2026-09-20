@@ -5,6 +5,7 @@ import {
   assertInnerDirectorCollision,
   assertPhaseKillRecovery,
   assertResourceCeilingEvidence,
+  directorContentionResponseRecord,
 } from "../scripts/qualification-director-contention.mjs";
 
 const policyDigest = "a".repeat(64);
@@ -19,6 +20,8 @@ const canonical = (value: unknown): string =>
           .join(",")}}`
       : JSON.stringify(value);
 const digest = (value: unknown) => createHash("sha256").update(canonical(value)).digest("hex");
+const responseProof = (clientInvocationId: string, response: Record<string, unknown>) =>
+  directorContentionResponseRecord(clientInvocationId, response);
 
 function modelEvents(runId = "run-7", workItem = 11, sequence = 3) {
   const common = {
@@ -78,6 +81,16 @@ function runEvents() {
       at: "2026-09-18T12:00:02.000Z",
     },
     ...modelEvents(),
+    {
+      protocol: "clockgrove.factory/v2",
+      kind: "run",
+      event: "FactoryRunCompleted",
+      objective: 7,
+      runId: "run-7",
+      policyDigest,
+      sequence: 5,
+      at: "2026-09-18T12:00:05.000Z",
+    },
   ];
 }
 
@@ -142,6 +155,24 @@ function collision() {
         errorCode: "inner-lease-cas-lost",
         observedHolder: "unavailable-before-winning-CAS",
       },
+    ],
+    responses: [
+      responseProof("client-a", {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ objective: 7, runId: "run-7", status: "completed" }),
+          },
+        ],
+      }),
+      responseProof("client-b", {
+        isError: true,
+        content: [{ type: "text", text: "another Director won lease acquisition" }],
+      }),
+    ],
+    processAbsence: [
+      { clientInvocationId: "client-a", absent: true },
+      { clientInvocationId: "client-b", absent: true },
     ],
     events: runEvents(),
     peer: {
@@ -327,6 +358,8 @@ describe("inner Director qualification assertions", () => {
     expect(assertInnerDirectorCollision(collision())).toMatchObject({
       boundary: "inner-Director-create-ref-CAS",
       loserOutcome: "lease-cas-lost",
+      loserWorkItems: 0,
+      retiredContenderProcesses: 2,
       modelTokens: 37,
       outerLeaseEvidence: "separate",
     });
@@ -346,6 +379,38 @@ describe("inner Director qualification assertions", () => {
     });
   });
 
+  it("binds a production success without isError to its exact noncanonical JSON bytes", () => {
+    const value = collision();
+    const response = {
+      structuredContent: { status: "completed" },
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ objective: 7, runId: "run-7", status: "completed" }),
+        },
+      ],
+    };
+    const record = directorContentionResponseRecord("client-a", response);
+    expect(record.responseSha256).toBe(
+      createHash("sha256").update(JSON.stringify(response)).digest("hex"),
+    );
+    expect(record.responseSha256).not.toBe(digest(response));
+    value.responses[0] = record;
+    expect(assertInnerDirectorCollision(value)).toMatchObject({
+      winner: "client-a",
+      winnerResponseSha256: record.responseSha256,
+    });
+
+    const refused = collision();
+    refused.responses[0] = directorContentionResponseRecord("client-a", {
+      isError: true,
+      content: [{ type: "text", text: "unexpected refusal" }],
+    });
+    expect(() => assertInnerDirectorCollision(refused)).toThrow(
+      /winning contender returned an error/,
+    );
+  });
+
   it("rejects duplicate winners, duplicate admission, and absent peer progress", () => {
     const twoWinners = collision();
     Object.assign(twoWinners.contenders[1]!, {
@@ -362,6 +427,44 @@ describe("inner Director qualification assertions", () => {
     const duplicateAccounting = collision();
     duplicateAccounting.events.push({ ...duplicateAccounting.events[3]!, sequence: 10 });
     expect(() => assertInnerDirectorCollision(duplicateAccounting)).toThrow(/usage repeated/);
+  });
+
+  it("fails closed when retained response, completion, or process authority is missing", () => {
+    const missingResponse = collision();
+    missingResponse.responses.pop();
+    expect(() => assertInnerDirectorCollision(missingResponse)).toThrow(
+      /exactly two bounded contender responses/,
+    );
+
+    const changedResponse = collision();
+    changedResponse.responses[0]!.responseSha256 = "f".repeat(64);
+    expect(() => assertInnerDirectorCollision(changedResponse)).toThrow(
+      /contender response changed/,
+    );
+
+    const contradictoryLoser = collision();
+    contradictoryLoser.responses[1]!.response = {
+      isError: true,
+      content: [{ type: "text", text: "some other refusal" }],
+    };
+    const contradictoryBytes = Buffer.from(
+      JSON.stringify(contradictoryLoser.responses[1]!.response),
+    );
+    contradictoryLoser.responses[1]!.responseBytes = contradictoryBytes.length;
+    contradictoryLoser.responses[1]!.responseSha256 = createHash("sha256")
+      .update(contradictoryBytes)
+      .digest("hex");
+    expect(() => assertInnerDirectorCollision(contradictoryLoser)).toThrow(/exact create-ref CAS/);
+
+    const activeProcess = collision();
+    activeProcess.processAbsence[1]!.absent = false;
+    expect(() => assertInnerDirectorCollision(activeProcess)).toThrow(/process absence unproved/);
+
+    const incompleteWinner = collision();
+    incompleteWinner.events = incompleteWinner.events.filter(
+      (event) => event.event !== "FactoryRunCompleted",
+    );
+    expect(() => assertInnerDirectorCollision(incompleteWinner)).toThrow(/complete exactly once/);
   });
 
   it("accepts renewal history only beneath a released terminal lease", () => {

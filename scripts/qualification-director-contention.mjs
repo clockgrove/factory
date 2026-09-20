@@ -6,6 +6,7 @@ const hash = (value) =>
   createHash("sha256")
     .update(typeof value === "string" ? value : canonical(value))
     .digest("hex");
+const responseBytes = (value) => Buffer.from(JSON.stringify(value));
 
 const canonical = (value) =>
   Array.isArray(value)
@@ -39,6 +40,22 @@ const pathsOverlap = (left, right) =>
 
 function assertDistinct(values, reason) {
   assert.equal(new Set(values).size, values.length, reason);
+}
+
+/** Capture the exact bounded JSON bytes later replayed by the collision proof. */
+export function directorContentionResponseRecord(clientInvocationId, response) {
+  assert.ok(
+    typeof clientInvocationId === "string" && clientInvocationId.length > 0,
+    "contender response identity unavailable",
+  );
+  const bytes = responseBytes(response);
+  assert.ok(bytes.length > 0 && bytes.length <= 65536, "contender response is unbounded");
+  return {
+    clientInvocationId,
+    response,
+    responseBytes: bytes.length,
+    responseSha256: createHash("sha256").update(bytes).digest("hex"),
+  };
 }
 
 function assertAccounting(events) {
@@ -88,6 +105,76 @@ export function assertInnerDirectorCollision(input) {
   assert.equal(winner.automaticRetry, false);
   assert.equal(loser.automaticRetry, false);
   assert.equal(loser.errorCode, "inner-lease-cas-lost");
+  assert.ok(Array.isArray(input.responses), "bounded contender responses are required");
+  assert.equal(input.responses.length, 2, "exactly two bounded contender responses are required");
+  assertDistinct(
+    input.responses.map((entry) => entry.clientInvocationId),
+    "contender response identity is repeated",
+  );
+  assert.deepEqual(
+    input.responses.map((entry) => entry.clientInvocationId).sort(),
+    input.contenders.map((entry) => entry.clientInvocationId).sort(),
+    "contender responses do not match the owned processes",
+  );
+  for (const record of input.responses) {
+    const captured = directorContentionResponseRecord(record.clientInvocationId, record.response);
+    assert.equal(
+      record.responseBytes,
+      captured.responseBytes,
+      "contender response byte count changed",
+    );
+    assert.equal(record.responseSha256, captured.responseSha256, "contender response changed");
+  }
+  const winnerResponse = one(
+      input.responses.filter((entry) => entry.clientInvocationId === winner.clientInvocationId),
+      "winning contender response missing",
+    ),
+    loserResponse = one(
+      input.responses.filter((entry) => entry.clientInvocationId === loser.clientInvocationId),
+      "losing contender response missing",
+    );
+  assert.notEqual(winnerResponse.response.isError, true, "winning contender returned an error");
+  assert.ok(
+    Array.isArray(winnerResponse.response.content),
+    "winning contender response content unavailable",
+  );
+  const winnerText = one(
+    winnerResponse.response.content.filter((part) => part.type === "text").map((part) => part.text),
+    "winning contender response must contain one text report",
+  );
+  const winnerReport = JSON.parse(winnerText);
+  assert.deepEqual(
+    {
+      objective: winnerReport.objective,
+      runId: winnerReport.runId,
+      status: winnerReport.status,
+    },
+    { objective: input.objective, runId: input.runId, status: "completed" },
+    "winning response differs from the authenticated terminal run",
+  );
+  assert.deepEqual(
+    { isError: loserResponse.response.isError, content: loserResponse.response.content },
+    {
+      isError: true,
+      content: [{ type: "text", text: "another Director won lease acquisition" }],
+    },
+    "losing Director did not report the exact create-ref CAS loss",
+  );
+  assert.ok(Array.isArray(input.processAbsence), "process absence proofs are required");
+  assert.equal(input.processAbsence.length, 2, "exactly two process absence proofs are required");
+  assertDistinct(
+    input.processAbsence.map((entry) => entry.clientInvocationId),
+    "process absence identity is repeated",
+  );
+  assert.deepEqual(
+    input.processAbsence.map((entry) => entry.clientInvocationId).sort(),
+    input.contenders.map((entry) => entry.clientInvocationId).sort(),
+    "process absence does not match the owned contenders",
+  );
+  assert.ok(
+    input.processAbsence.every((entry) => entry.absent === true),
+    "inner contender process absence unproved",
+  );
   assert.ok(
     input.leaseChain.length >= 2 && input.leaseChain.length <= 256,
     "bounded acquired-to-released lease chain required",
@@ -145,6 +232,10 @@ export function assertInnerDirectorCollision(input) {
   );
   assert.equal(start.objective, input.objective);
   assert.equal(start.policyDigest, input.policyDigest);
+  one(
+    run.filter((event) => event.event === "FactoryRunCompleted"),
+    "winning inner run did not complete exactly once",
+  );
   const reservations = run.filter((event) => event.event === "AttemptReserved");
   assert.ok(reservations.length > 0, "winning Director admitted no Work Item");
   assertDistinct(
@@ -169,8 +260,12 @@ export function assertInnerDirectorCollision(input) {
     terminalLeaseOid: terminalLease.oid,
     leaseTransitions: input.leaseChain.length,
     winner: winner.clientInvocationId,
+    winnerResponseSha256: winnerResponse.responseSha256,
     loser: loser.clientInvocationId,
     loserOutcome: loser.outcome,
+    loserResponseSha256: loserResponse.responseSha256,
+    loserWorkItems: 0,
+    retiredContenderProcesses: input.processAbsence.length,
     reservations: reservations.length,
     modelTokens: accounting.total,
     peerObjective: input.peer.objective,

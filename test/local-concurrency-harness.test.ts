@@ -25,6 +25,7 @@ import {
   verifyConcurrencyArtifacts,
   type ConcurrencyPort,
 } from "../scripts/verify-local-concurrency.mjs";
+import { directorContentionResponseRecord } from "../scripts/qualification-director-contention.mjs";
 import { qualificationPaths } from "../scripts/verify-live-objective.mjs";
 
 const repository = "example/disposable";
@@ -2041,6 +2042,59 @@ describe("bounded existing installed-controller composition", () => {
     expect(body).toContain("exclusive resource");
     expect(body).toContain("Every Work Item must declare trusted_local execution trust.");
     expect(body).not.toContain("declare managed execution trust");
+  });
+  it("retains retired contender response and lease authority through final cleanup", async () => {
+    const f = scenarioPort();
+    const collision = {
+      responses: [
+        directorContentionResponseRecord("winner", {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ objective: 1, runId: "run-1", status: "completed" }),
+            },
+          ],
+        }),
+        directorContentionResponseRecord("loser", {
+          isError: true,
+          content: [{ type: "text", text: "another Director won lease acquisition" }],
+        }),
+      ],
+      leaseChain: [{ oid: "a".repeat(40) }, { oid: "b".repeat(40) }],
+      processAbsence: [
+        { clientInvocationId: "winner", absent: true },
+        { clientInvocationId: "loser", absent: true },
+      ],
+      proof: { winner: "winner", loser: "loser", loserWorkItems: 0 },
+    };
+    f.port.innerCasCollision = async () => {
+      f.actions.push("inner-cas-collision");
+      return collision;
+    };
+    f.port.finishDirectorContention = async (final, _controller, retained) => {
+      f.actions.push("director-contention-final-proofs");
+      const retainedCollision = retained as typeof collision;
+      expect(final).toHaveLength(2);
+      expect(retainedCollision).toEqual(collision);
+      expect(retainedCollision).toMatchObject({
+        processAbsence: [
+          { clientInvocationId: "winner", absent: true },
+          { clientInvocationId: "loser", absent: true },
+        ],
+        proof: { winner: "winner", loser: "loser", loserWorkItems: 0 },
+      });
+      return retainedCollision.proof;
+    };
+    await expect(runDirectorContentionScenario(f.port, directorAuthority)).resolves.toMatchObject({
+      result: "passed",
+      proofs: { winner: "winner", loser: "loser", loserWorkItems: 0 },
+      cleanup: { controller: { hostIdentity: "same-host" } },
+    });
+    expect(f.actions.slice(-3)).toEqual([
+      "director-contention-final-proofs",
+      "stop",
+      "controller:inactive",
+    ]);
   });
   it("retains an ambiguous inner collision without final proof, stop, or cleanup", async () => {
     const f = scenarioPort();

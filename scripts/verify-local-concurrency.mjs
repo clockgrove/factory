@@ -25,6 +25,7 @@ import {
   assertExplainReplayEvidence,
   assertInnerDirectorCollision,
   assertResourceCeilingEvidence,
+  directorContentionResponseRecord,
 } from "./qualification-director-contention.mjs";
 import {
   installedBundleIdentity,
@@ -1878,7 +1879,7 @@ export async function main(env = process.env, run = checkpointMain) {
                 completed = true;
                 return value;
               });
-              let results;
+              let results, responseRecords, responseProof, collision;
               const processAbsence = [];
               try {
                 for (let sample = 0; !completed; sample++) {
@@ -1894,97 +1895,142 @@ export async function main(env = process.env, run = checkpointMain) {
                   save();
                 }
                 results = await settlement;
-              } finally {
-                for (const contender of contenders) processAbsence.push(await contender.close());
-                evidence.directorContention.collision.processAbsence = processAbsence;
+                responseRecords = await withQualificationStage("director-response-capture", () => {
+                  assert.ok(
+                    results.every((result) => result.status === "fulfilled"),
+                    "inner collision response loss is ambiguous; retain the repository without retry or cleanup",
+                  );
+                  return results.map((result, index) => {
+                    return directorContentionResponseRecord(
+                      contenders[index].clientInvocationId,
+                      structuredClone(result.value),
+                    );
+                  });
+                });
+                evidence.directorContention.collision.responses = responseRecords;
+                evidence.directorContention.collision.responsesCapturedAt =
+                  new Date().toISOString();
                 save();
+                responseProof = await withQualificationStage("director-response-parsing", () => {
+                  const winnerIndex = responseRecords.findIndex(
+                    (record) => record.response.isError !== true,
+                  );
+                  assert.ok(winnerIndex >= 0, "inner collision has no completed winner");
+                  assert.equal(
+                    responseRecords.filter((record) => record.response.isError !== true).length,
+                    1,
+                    "inner collision produced multiple winners",
+                  );
+                  const loserIndex = 1 - winnerIndex,
+                    loser = responseRecords[loserIndex];
+                  assert.deepEqual(
+                    { isError: loser.response.isError, content: loser.response.content },
+                    {
+                      isError: true,
+                      content: [{ type: "text", text: "another Director won lease acquisition" }],
+                    },
+                    "losing Director did not report the exact create-ref CAS loss",
+                  );
+                  const winnerContent = responseRecords[winnerIndex].response.content;
+                  assert.ok(Array.isArray(winnerContent), "winning response content unavailable");
+                  const winnerText = one(
+                    winnerContent.filter((part) => part.type === "text").map((part) => part.text),
+                    "winning response must contain one text report",
+                  );
+                  assert.ok(
+                    Buffer.byteLength(winnerText) <= 65536,
+                    "winning response is unbounded",
+                  );
+                  const winnerReport = JSON.parse(winnerText);
+                  assert.deepEqual(
+                    { objective: winnerReport.objective, status: winnerReport.status },
+                    { objective, status: "completed" },
+                    "winning response differs from the requested Objective",
+                  );
+                  return { winnerIndex, loserIndex, winnerReport };
+                });
+                evidence.directorContention.collision.responseProof = {
+                  winner: responseRecords[responseProof.winnerIndex].clientInvocationId,
+                  winnerResponseSha256: responseRecords[responseProof.winnerIndex].responseSha256,
+                  loser: responseRecords[responseProof.loserIndex].clientInvocationId,
+                  loserResponseSha256: responseRecords[responseProof.loserIndex].responseSha256,
+                };
+                save();
+                collision = await withQualificationStage("director-lease-proof", async () => {
+                  const leaseChain = await readLeaseChain(objective),
+                    final = await observeOne(record),
+                    start = one(
+                      eventsOf(final).filter((event) => event.event === "FactoryRunStarted"),
+                      "winning inner run missing",
+                    ),
+                    peerAfter = await observeOne(peerRecord);
+                  evidence.directorContention.collision.leaseChain = leaseChain;
+                  evidence.directorContention.collision.runId = start.runId;
+                  evidence.directorContention.collision.policyDigest = start.policyDigest;
+                  save();
+                  assert.deepEqual(
+                    {
+                      objective: responseProof.winnerReport.objective,
+                      runId: responseProof.winnerReport.runId,
+                      status: responseProof.winnerReport.status,
+                    },
+                    { objective, runId: start.runId, status: "completed" },
+                    "winning response differs from the authenticated terminal run",
+                  );
+                  return {
+                    objective,
+                    runId: start.runId,
+                    policyDigest: start.policyDigest,
+                    baseSha: evidence.base,
+                    beforeLease: null,
+                    leaseChain,
+                    contenders: contenders.map((entry, index) => ({
+                      clientInvocationId: entry.clientInvocationId,
+                      pid: entry.pid,
+                      startTicks: entry.startTicks,
+                      barrierDigest,
+                      automaticRetry: false,
+                      ...(index === responseProof.winnerIndex
+                        ? { outcome: "won", observedHolder: leaseChain.at(-1).event.holder }
+                        : {
+                            outcome: "lease-cas-lost",
+                            errorCode: "inner-lease-cas-lost",
+                            observedHolder: "unavailable-before-winning-CAS",
+                          }),
+                    })),
+                    responses: responseRecords,
+                    events: eventsOf(final),
+                    peer: {
+                      objective: peerRecord.objective.number,
+                      beforeSequence: peerBeforeSequence,
+                      events: eventsOf(peerAfter),
+                      outerLeaseEvidence: "separate",
+                    },
+                  };
+                });
+              } finally {
+                await withQualificationStage("director-process-absence", async () => {
+                  for (const contender of contenders) {
+                    processAbsence.push({
+                      clientInvocationId: contender.clientInvocationId,
+                      absent: await contender.close(),
+                    });
+                    evidence.directorContention.collision.processAbsence = processAbsence;
+                    save();
+                  }
+                  assert.ok(
+                    processAbsence.every((entry) => entry.absent),
+                    "inner contender process absence unproved",
+                  );
+                });
               }
-              assert.ok(processAbsence.every(Boolean), "inner contender process absence unproved");
-              assert.ok(
-                results.every((result) => result.status === "fulfilled"),
-                "inner collision response loss is ambiguous; retain the repository without retry or cleanup",
-              );
-              const responses = results.map((result) => ({
-                status: "fulfilled",
-                response: result.value,
-              }));
-              const winnerIndex = responses.findIndex(
-                (result) => result.status === "fulfilled" && !result.response.isError,
-              );
-              assert.ok(winnerIndex >= 0, "inner collision has no completed winner");
-              assert.equal(
-                responses.filter(
-                  (result) => result.status === "fulfilled" && !result.response.isError,
-                ).length,
-                1,
-                "inner collision produced multiple winners",
-              );
-              const loserIndex = 1 - winnerIndex,
-                loser = responses[loserIndex];
-              assert.deepEqual(
-                { isError: loser.response.isError, content: loser.response.content },
-                {
-                  isError: true,
-                  content: [{ type: "text", text: "another Director won lease acquisition" }],
-                },
-                "losing Director did not report the exact create-ref CAS loss",
-              );
-              const leaseChain = await readLeaseChain(objective),
-                final = await observeOne(record),
-                start = one(
-                  eventsOf(final).filter((event) => event.event === "FactoryRunStarted"),
-                  "winning inner run missing",
-                ),
-                peerAfter = await observeOne(peerRecord);
-              const winnerText = responses[winnerIndex].response.content
-                .filter((part) => part.type === "text")
-                .map((part) => part.text)
-                .join("\n");
-              assert.ok(Buffer.byteLength(winnerText) <= 65536, "winning response is unbounded");
-              const winnerReport = JSON.parse(winnerText);
-              assert.deepEqual(
-                {
-                  objective: winnerReport.objective,
-                  runId: winnerReport.runId,
-                  status: winnerReport.status,
-                },
-                { objective, runId: start.runId, status: "completed" },
-                "winning response differs from the authenticated terminal run",
-              );
-              const collision = {
-                objective,
-                runId: start.runId,
-                policyDigest: start.policyDigest,
-                baseSha: evidence.base,
-                beforeLease: null,
-                leaseChain,
-                contenders: contenders.map((entry, index) => ({
-                  clientInvocationId: entry.clientInvocationId,
-                  pid: entry.pid,
-                  startTicks: entry.startTicks,
-                  barrierDigest,
-                  automaticRetry: false,
-                  ...(index === winnerIndex
-                    ? { outcome: "won", observedHolder: leaseChain.at(-1).event.holder }
-                    : {
-                        outcome: "lease-cas-lost",
-                        errorCode: "inner-lease-cas-lost",
-                        observedHolder: "unavailable-before-winning-CAS",
-                      }),
-                })),
-                events: eventsOf(final),
-                peer: {
-                  objective: peerRecord.objective.number,
-                  beforeSequence: peerBeforeSequence,
-                  events: eventsOf(peerAfter),
-                  outerLeaseEvidence: "separate",
-                },
-              };
+              collision.processAbsence = processAbsence;
               evidence.directorContention.collision = {
                 ...evidence.directorContention.collision,
                 completedAt: new Date().toISOString(),
-                processAbsence,
-                proof: assertInnerDirectorCollision(collision),
+                proof: await withQualificationStage("director-lease-proof", () =>
+                  assertInnerDirectorCollision(collision),
+                ),
               };
               save();
               await port.controller("active", controller);
@@ -2381,11 +2427,13 @@ export async function main(env = process.env, run = checkpointMain) {
             }
             evidence.directorContention.capacitySnapshots.push(capacitySnapshot(final));
             const allEvents = final.flatMap((entry) => entry.events);
-            const innerCollision = assertInnerDirectorCollision({
-              ...collision,
-              events: final[0].events,
-              peer: { ...collision.peer, events: final[1].events },
-            });
+            const innerCollision = await withQualificationStage("director-lease-proof", () =>
+              assertInnerDirectorCollision({
+                ...collision,
+                events: final[0].events,
+                peer: { ...collision.peer, events: final[1].events },
+              }),
+            );
             const resourceCeilings = assertResourceCeilingEvidence({
               snapshots: evidence.directorContention.capacitySnapshots,
               events: allEvents,
@@ -2483,13 +2531,15 @@ export async function main(env = process.env, run = checkpointMain) {
               cleanup: { workerScopes: absence },
               artifactProof,
             };
-            assert.ok(
-              Buffer.byteLength(JSON.stringify(report)) <= 262144,
-              "director contention report is unbounded",
-            );
-            evidence.finalObjectives = final;
-            evidence.concurrencyProof = report;
-            save();
+            await withQualificationStage("director-final-proof-assembly", () => {
+              assert.ok(
+                Buffer.byteLength(JSON.stringify(report)) <= 262144,
+                "director contention report is unbounded",
+              );
+              evidence.finalObjectives = final;
+              evidence.concurrencyProof = report;
+              save();
+            });
             return report;
           },
           finishThroughput: async (_pair, controller, refill) => {

@@ -14,7 +14,11 @@ const environment = {
   PATH: "/usr/bin:/bin",
   FACTORY_MANAGEMENT_TRANSCRIPT_DIR: "/home/example/private/transcripts",
 };
-const authority = { repository, namespace, policy: budgetStopPolicy() };
+const authority = {
+  repository,
+  namespace,
+  policy: budgetStopPolicy("gpt-5.6-sol", "xhigh"),
+};
 
 type TransportWrapper = (
   parameters: {

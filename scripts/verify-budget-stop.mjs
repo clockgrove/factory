@@ -9,6 +9,7 @@ import {
   assertQualificationNamespace,
   boundedPolicy,
   main as installedMain,
+  qualificationModels,
   qualificationNamespace,
 } from "./verify-live-objective.mjs";
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
@@ -34,9 +35,13 @@ const canonical = (value) => {
 export const budgetRefusalReason =
   "no execution backend satisfies policy and requirements: codex-sdk/local-worktree (model-token budget exhausted), codex-cli/local-worktree (model-token budget exhausted)";
 
-export function budgetStopPolicy() {
+export function budgetStopPolicy(model, reasoning) {
   const policy = boundedPolicy("regular-prs", 500000);
-  return { ...policy, economics: { ...policy.economics, maxModelTokens: 1 } };
+  return {
+    ...policy,
+    models: qualificationModels(model, reasoning),
+    economics: { ...policy.economics, maxModelTokens: 1 },
+  };
 }
 
 export function budgetStopAuthority(env) {
@@ -62,7 +67,10 @@ export function budgetStopAuthority(env) {
   return {
     repository,
     namespace: qualificationNamespace(env.FACTORY_LIVE_OBJECTIVE_NAMESPACE),
-    policy: budgetStopPolicy(),
+    policy: budgetStopPolicy(
+      env.FACTORY_LIVE_OBJECTIVE_MODEL,
+      env.FACTORY_LIVE_OBJECTIVE_REASONING,
+    ),
   };
 }
 
@@ -116,7 +124,7 @@ export function assessBudgetStopObservation({ receipts, status, context }) {
   const start = starts[0];
   assert.equal(start.repository, context.repository);
   assert.equal(start.actor.toLowerCase(), context.actor.login.toLowerCase());
-  assert.deepEqual(start.policy, budgetStopPolicy());
+  assert.deepEqual(start.policy, context.policy);
   assert.match(start.policyDigest, /^[a-f0-9]{64}$/);
   assert.equal(
     start.policyDigest,
@@ -276,7 +284,7 @@ function finalReceipts(evidence) {
 function assertTerminal(evidence) {
   assert.equal(evidence.scope, scope);
   assertQualificationNamespace(evidence);
-  assert.deepEqual(evidence.policy, budgetStopPolicy());
+  assert.deepEqual(evidence.policy, evidence.runRequest.arguments.policy);
   assert.equal(
     evidence.preflight.harness.candidateInventorySha256,
     evidence.installedArtifact.inventorySha256,
@@ -300,6 +308,7 @@ function assertTerminal(evidence) {
       repository: evidence.repository,
       objective: evidence.objective.number,
       actor: evidence.actor,
+      policy: evidence.policy,
     },
   });
   assert.equal(evidence.runResult.runId, observation.runId);

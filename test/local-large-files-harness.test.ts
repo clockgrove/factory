@@ -46,6 +46,8 @@ const env = {
   FACTORY_LARGE_FILE_CONTROLLER_UNIT: unit,
   FACTORY_LARGE_FILE_NAMESPACE: "large-file-case",
   FACTORY_LARGE_FILE_MAX_MODEL_TOKENS: "250000",
+  FACTORY_LARGE_FILE_MODEL: "gpt-5.6-sol",
+  FACTORY_LARGE_FILE_REASONING: "xhigh",
   FACTORY_LARGE_FILE_EVIDENCE: "/tmp/private/result.json",
   FACTORY_LARGE_FILE_FIXTURE: "/tmp/private/fixture.json",
   FACTORY_LARGE_FILE_FIXTURE_SHA256: "a".repeat(64),
@@ -465,6 +467,8 @@ describe("installed large-file lifecycle authority", () => {
     for (const key of [
       "FACTORY_LARGE_FILE_ACK",
       "FACTORY_LARGE_FILE_MAX_MODEL_TOKENS",
+      "FACTORY_LARGE_FILE_MODEL",
+      "FACTORY_LARGE_FILE_REASONING",
       "FACTORY_LARGE_FILE_CASE",
     ])
       expect(() => largeFileAuthority({ ...env, [key]: undefined })).toThrow();
@@ -472,6 +476,9 @@ describe("installed large-file lifecycle authority", () => {
     expect(authority.policy).toMatchObject({
       backendOrder: ["codex-app-server/local-worktree"],
       maxParallel: 1,
+      models: {
+        profiles: { qualification: { model: "gpt-5.6-sol", reasoning: "xhigh" } },
+      },
     });
     expect(parseRunPolicy(authority.policy).capacity?.local?.maxWorkers).toBe(1);
     expect(parseRunPolicy(authority.policy).maxAttemptsPerItem).toBe(1);

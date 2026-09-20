@@ -526,11 +526,18 @@ describe("native linear-stack installed matrix", () => {
         FACTORY_LIVE_NATIVE_LINEAR_CASE: "cascade",
         FACTORY_LIVE_OBJECTIVE_NAMESPACE: namespace,
         FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "250000",
+        FACTORY_LIVE_OBJECTIVE_MODEL: "gpt-5.6-sol",
+        FACTORY_LIVE_OBJECTIVE_REASONING: "xhigh",
       }),
     ).toMatchObject({
       scope: "installed-local-native-linear-stack-cascade",
       namespace,
       privateEvidence: true,
+      policy: {
+        models: {
+          profiles: { qualification: { model: "gpt-5.6-sol", reasoning: "xhigh" } },
+        },
+      },
       harnessPaths: expect.arrayContaining([
         "scripts/verify-native-linear-objective.mjs",
         "scripts/verify-live-objective.mjs",
@@ -540,6 +547,24 @@ describe("native linear-stack installed matrix", () => {
     });
   });
 
+  it("rejects missing immutable model configuration before live work", () => {
+    const base = {
+      FACTORY_LIVE_NATIVE_LINEAR_OBJECTIVE: "1",
+      FACTORY_LIVE_OBJECTIVE_PREFLIGHT: "1",
+      FACTORY_LIVE_NATIVE_LINEAR_CASE: "cascade",
+      FACTORY_LIVE_OBJECTIVE_NAMESPACE: "native-linear-model-authority",
+      FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "250000",
+      FACTORY_LIVE_OBJECTIVE_MODEL: "gpt-5.6-sol",
+      FACTORY_LIVE_OBJECTIVE_REASONING: "xhigh",
+    };
+    expect(() =>
+      nativeLinearQualification({ ...base, FACTORY_LIVE_OBJECTIVE_MODEL: undefined }),
+    ).toThrow();
+    expect(() =>
+      nativeLinearQualification({ ...base, FACTORY_LIVE_OBJECTIVE_REASONING: undefined }),
+    ).toThrow();
+  });
+
   it("forwards exact retained-install and transcript authority before any live work", async () => {
     const env = {
       FACTORY_LIVE_NATIVE_LINEAR_OBJECTIVE: "1",
@@ -547,6 +572,8 @@ describe("native linear-stack installed matrix", () => {
       FACTORY_LIVE_NATIVE_LINEAR_CASE: "cascade",
       FACTORY_LIVE_OBJECTIVE_NAMESPACE: "native-linear-authority",
       FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "250000",
+      FACTORY_LIVE_OBJECTIVE_MODEL: "gpt-5.6-sol",
+      FACTORY_LIVE_OBJECTIVE_REASONING: "xhigh",
       FACTORY_QUALIFICATION_INSTALL_RECEIPT: "/private/exact/install-identities.txt",
       FACTORY_MANAGEMENT_TRANSCRIPT_DIR: "/private/exact/management-transcripts",
     };
@@ -696,6 +723,8 @@ describe("native linear-stack installed matrix", () => {
           FACTORY_LIVE_NATIVE_LINEAR_CASE: caseName,
           FACTORY_LIVE_OBJECTIVE_NAMESPACE: "native-linear-fixture",
           FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "250000",
+          FACTORY_LIVE_OBJECTIVE_MODEL: "gpt-5.6-sol",
+          FACTORY_LIVE_OBJECTIVE_REASONING: "xhigh",
         }),
       ).toThrow();
     },
@@ -710,6 +739,8 @@ describe("native linear-stack installed matrix", () => {
         FACTORY_LIVE_NATIVE_LINEAR_CASE: "cascade",
         FACTORY_LIVE_OBJECTIVE_NAMESPACE: "native-linear-fixture",
         FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "250000",
+        FACTORY_LIVE_OBJECTIVE_MODEL: "gpt-5.6-sol",
+        FACTORY_LIVE_OBJECTIVE_REASONING: "xhigh",
       }),
     ).toThrow(/separate fallback qualification/);
   });

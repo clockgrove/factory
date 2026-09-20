@@ -384,7 +384,7 @@ function fixture(scenario: "cancel" | "restart" = "cancel") {
       deadline: "2026-09-05T12:10:00Z",
     },
   };
-  const policy = parseRunPolicy(faultPolicy(250000, scenario));
+  const policy = parseRunPolicy(faultPolicy(250000, scenario, "gpt-5.6-sol", "xhigh"));
   const events: Record<string, unknown>[] = [
     {
       runId: "fixture",
@@ -731,9 +731,11 @@ describe("installed local fault qualification harness", () => {
     }
   });
   it("uses bounded local-only authority and namespaced single-item paths", () => {
-    const policy = parseRunPolicy(faultPolicy(250000));
+    const policy = parseRunPolicy(faultPolicy(250000, "cancel", "gpt-5.6-sol", "xhigh"));
     expect(policy.maxAttemptsPerItem).toBe(1);
-    expect(parseRunPolicy(faultPolicy(250000, "restart")).maxAttemptsPerItem).toBe(2);
+    expect(
+      parseRunPolicy(faultPolicy(250000, "restart", "gpt-5.6-sol", "xhigh")).maxAttemptsPerItem,
+    ).toBe(2);
     expect(policy.maxParallel).toBe(1);
     expect(policy.allowedPaidBackends).toEqual([]);
     expect(policy.economics?.maxModelTokens).toBe(250000);

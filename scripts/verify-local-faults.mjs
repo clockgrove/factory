@@ -26,6 +26,7 @@ import {
   boundedPolicy,
   installedBundleIdentity,
   modelTokenLimit,
+  qualificationModels,
   qualificationNamespace,
   qualificationNamespaceMarker,
 } from "./verify-live-objective.mjs";
@@ -241,11 +242,12 @@ function assertScopeReceipt(reservation, start, repository, objective) {
   return scopeUnit(batch.identity);
 }
 
-export function faultPolicy(tokens, scenario = "cancel") {
+export function faultPolicy(tokens, scenario = "cancel", model, reasoning) {
   assert.ok(["cancel", "restart"].includes(scenario));
   const policy = boundedPolicy("regular-prs", tokens);
   return {
     ...policy,
+    models: qualificationModels(model, reasoning),
     maxParallel: 1,
     maxAttemptsPerItem: scenario === "restart" ? 2 : 1,
     workItemTimeoutMinutes: 10,
@@ -960,7 +962,7 @@ export async function runQualification(
   assert.ok([`https://github.com/${repository}`, `git@github.com:${repository}`].includes(origin));
   const namespace = qualificationNamespace(required("NAMESPACE"));
   const maxModelTokens = modelTokenLimit(required("MAX_MODEL_TOKENS"));
-  const policy = faultPolicy(maxModelTokens, scenario);
+  const policy = faultPolicy(maxModelTokens, scenario, required("MODEL"), required("REASONING"));
   const evidencePath = resolve(required("EVIDENCE"));
   assert.ok(evidencePath.startsWith("/tmp/"), "private evidence must be in /tmp");
   const pluginRoot = candidate.installedPluginRoot;

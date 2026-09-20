@@ -31,6 +31,7 @@ import {
   installedBundleIdentity,
   modelTokenLimit,
   objectiveBodyFor,
+  qualificationModels,
   qualificationNamespace,
   qualificationNamespaceMarker,
   qualificationPaths,
@@ -373,24 +374,6 @@ export function assertRetiredController(fields, original, configPath) {
 }
 const policyFor = (authority, index) => ({ ...authority, namespace: authority.namespaces[index] });
 
-const reasoningEfforts = new Set(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
-
-function qualificationModels(env) {
-  const model = env.FACTORY_CONCURRENCY_MODEL;
-  const reasoning = env.FACTORY_CONCURRENCY_REASONING;
-  assert.ok(model, "explicit concurrency qualification model required");
-  assert.ok(Buffer.byteLength(model) <= 160 && /^[A-Za-z0-9._:/+-]+$/.test(model));
-  assert.ok(reasoningEfforts.has(reasoning), "explicit supported reasoning effort required");
-  const profile = "qualification";
-  return {
-    mode: "single-profile",
-    profiles: { [profile]: { model, reasoning } },
-    phaseProfiles: Object.fromEntries(
-      ["compile", "implement", "review", "recover"].map((phase) => [phase, profile]),
-    ),
-  };
-}
-
 /** Policy resolution and authenticated backend receipts; provider-returned settings stay unavailable. */
 export function concurrencyModelConfiguration(observation, authority) {
   const events = eventsOf(observation);
@@ -549,7 +532,10 @@ export function concurrencyAuthority(env) {
   authority.policy.maxParallel = directorContention ? 2 : 1;
   authority.policy.objectiveTimeoutMinutes = durationMinutes;
   authority.policy.capacity.local.maxWorkers = directorContention ? 2 : 1;
-  authority.policy.models = qualificationModels(env);
+  authority.policy.models = qualificationModels(
+    env.FACTORY_CONCURRENCY_MODEL,
+    env.FACTORY_CONCURRENCY_REASONING,
+  );
   return {
     ...authority,
     scenario,

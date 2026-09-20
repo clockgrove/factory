@@ -12,6 +12,7 @@ import {
   boundedPolicy,
   main as installedMain,
   modelTokenLimit,
+  qualificationModels,
   qualificationNamespace,
   qualificationNamespaceMarker,
   qualificationPaths,
@@ -2139,6 +2140,10 @@ export function nativeLinearQualification(env) {
   const policy = boundedPolicy(
     "stacked-prs",
     modelTokenLimit(env.FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS),
+  );
+  policy.models = qualificationModels(
+    env.FACTORY_LIVE_OBJECTIVE_MODEL,
+    env.FACTORY_LIVE_OBJECTIVE_REASONING,
   );
   const qualification = {
     scope: `${scope}-${caseName}`,

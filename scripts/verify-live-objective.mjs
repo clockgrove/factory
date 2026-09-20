@@ -340,6 +340,37 @@ export function assertRecordedQualificationPolicy(recorded, expected) {
   assert.deepEqual(recorded, comparison, "requested bounded policy differs");
 }
 
+const qualificationReasoningEfforts = new Set([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+]);
+
+/** One provider-neutral immutable model profile for installed live qualification. */
+export function qualificationModels(model, reasoning) {
+  assert.ok(model, "explicit qualification model required");
+  assert.ok(
+    Buffer.byteLength(model) <= 160 && /^[A-Za-z0-9._:/+-]+$/.test(model),
+    "qualification model is invalid",
+  );
+  assert.ok(
+    qualificationReasoningEfforts.has(reasoning),
+    "explicit supported qualification reasoning effort required",
+  );
+  const profile = "qualification";
+  return {
+    mode: "single-profile",
+    profiles: { [profile]: { model, reasoning } },
+    phaseProfiles: Object.fromEntries(
+      ["compile", "implement", "review", "recover"].map((phase) => [phase, profile]),
+    ),
+  };
+}
+
 export function boundedPolicy(
   delivery = "stacked-prs",
   maxModelTokens = maximumModelTokens,

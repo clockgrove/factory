@@ -41,6 +41,8 @@ const env = (scenario: "failed-validation" | "real-conflict" = "failed-validatio
   FACTORY_FAILURE_BASE_SHA: base,
   FACTORY_FAILURE_FIXTURE_SHA256: failureHash(JSON.stringify(failureFixture(namespace, scenario))),
   FACTORY_FAILURE_MAX_MODEL_TOKENS: "250000",
+  FACTORY_FAILURE_MODEL: "gpt-5.6-sol",
+  FACTORY_FAILURE_REASONING: "xhigh",
   FACTORY_FAILURE_ACK: `${repository}:${unit}:${scenario}:${scenario === "failed-validation" ? "start,create,activate,stop" : "start,create,arm-terminal-artifact-hold,activate,pause,stop-original,cas-fixture-trunk,resume,restart,cancel,stop"}`,
 });
 
@@ -218,11 +220,16 @@ describe("installed failed-validation/conflict authority and evidence", () => {
       failureAuthority({ ...env(), FACTORY_FAILURE_FIXTURE_SHA256: "0".repeat(64) }),
     ).toThrow();
     expect(() => failureAuthority({ ...env(), GH_TOKEN: "not-a-real-token" })).toThrow();
+    expect(() => failureAuthority({ ...env(), FACTORY_FAILURE_MODEL: undefined })).toThrow();
+    expect(() => failureAuthority({ ...env(), FACTORY_FAILURE_REASONING: undefined })).toThrow();
     expect(failureAuthority(env())?.policy).toMatchObject({
       maxAttemptsPerItem: 1,
       maxParallel: 1,
       allowedPaidBackends: [],
       economics: { modelTokenBudgetMode: "observed-stop" },
+      models: {
+        profiles: { qualification: { model: "gpt-5.6-sol", reasoning: "xhigh" } },
+      },
     });
     expect(failureObjectiveBody(namespace, "failed-validation")).toContain(
       "Do not repair intentional qualification failures",

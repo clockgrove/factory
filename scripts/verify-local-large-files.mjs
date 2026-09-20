@@ -27,7 +27,7 @@ import {
   checkpointCompletionReady,
   main as checkpointMain,
 } from "./verify-local-checkpoint-restart.mjs";
-import { qualificationNamespaceMarker } from "./verify-live-objective.mjs";
+import { qualificationModels, qualificationNamespaceMarker } from "./verify-live-objective.mjs";
 import {
   LARGE_FILE_RECIPE_VERSION,
   LARGE_FILE_VALIDATION_COMMAND,
@@ -109,6 +109,10 @@ export function largeFileAuthority(env) {
   };
   const authority = checkpointAuthority(mapped);
   assert.ok(authority);
+  authority.policy.models = qualificationModels(
+    env.FACTORY_LARGE_FILE_MODEL,
+    env.FACTORY_LARGE_FILE_REASONING,
+  );
   // The shared checkpoint policy also fences replacement during transfer restart.
   assert.equal(authority.policy.maxAttemptsPerItem, 1);
   const policy =

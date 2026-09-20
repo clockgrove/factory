@@ -16,6 +16,7 @@ import {
   installedPluginPath,
   modelTokenLimit,
   objectiveBodyFor,
+  qualificationModels,
   qualificationNamespace,
   qualificationNamespaceMarker,
   qualificationPaths,
@@ -52,6 +53,22 @@ type HarnessEvent = {
 };
 
 describe("qualification token intent compatibility", () => {
+  it("builds one validated immutable profile for every model-backed phase", () => {
+    expect(qualificationModels("gpt-5.6-sol", "xhigh")).toEqual({
+      mode: "single-profile",
+      profiles: { qualification: { model: "gpt-5.6-sol", reasoning: "xhigh" } },
+      phaseProfiles: {
+        compile: "qualification",
+        implement: "qualification",
+        review: "qualification",
+        recover: "qualification",
+      },
+    });
+    expect(() => qualificationModels(undefined, "xhigh")).toThrow(/model required/);
+    expect(() => qualificationModels("gpt-5.6-sol", undefined)).toThrow(/reasoning effort/);
+    expect(() => qualificationModels("bad model", "xhigh")).toThrow(/model is invalid/);
+  });
+
   it("opts new scenarios into observed stopping without rewriting historical evidence", () => {
     const current = parseRunPolicy(boundedPolicy());
     expect(current.economics?.modelTokenBudgetMode).toBe("observed-stop");

@@ -14,6 +14,7 @@ import {
   appServerCheckpointIdentity,
 } from "./qualification-app-server-checkpoint.mjs";
 import { assertQualificationCheckpoint } from "./qualification-sibling-refresh-proof.mjs";
+import { qualificationModels } from "./verify-live-objective.mjs";
 import {
   failureFixture,
   failureObjectiveBody,
@@ -78,6 +79,10 @@ export function failureAuthority(env) {
     FACTORY_CHECKPOINT_ACK: `${repository}:${unit}:start,arm-terminal-artifact-hold,pause,phase-kill-restart,resume,stop`,
   });
   authority.policy.maxAttemptsPerItem = 1;
+  authority.policy.models = qualificationModels(
+    env.FACTORY_FAILURE_MODEL,
+    env.FACTORY_FAILURE_REASONING,
+  );
   authority.policy.maxParallel = 1;
   authority.policy.capacity.local.maxWorkers = 1;
   authority.policy.workItemTimeoutMinutes = 10;

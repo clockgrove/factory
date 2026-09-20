@@ -1,5 +1,5 @@
 export const budgetRefusalReason: string;
-export function budgetStopPolicy(): Record<string, unknown>;
+export function budgetStopPolicy(model: string, reasoning: string): Record<string, unknown>;
 export function budgetStopAuthority(
   env: Record<string, string | undefined>,
 ): { repository: string; namespace: string; policy: Record<string, unknown> } | null;

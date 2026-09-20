@@ -1,4 +1,9 @@
-export function faultPolicy(tokens: number, scenario?: "cancel" | "restart"): unknown;
+export function faultPolicy(
+  tokens: number,
+  scenario: "cancel" | "restart" | undefined,
+  model: string,
+  reasoning: string,
+): unknown;
 export function assertFaultAuthenticationEnvironment(env: Record<string, string | undefined>): void;
 export function faultRequest<T>(
   request: (route: string, parameters: Record<string, unknown>) => Promise<T>,

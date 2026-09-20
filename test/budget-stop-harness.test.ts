@@ -14,14 +14,17 @@ import {
   boundedPolicy,
   modelTokenLimit,
   objectiveBodyFor,
+  qualificationModels,
   qualificationPaths,
   verifyQualificationFinalArtifact,
 } from "../scripts/verify-live-objective.mjs";
 
 const repository = "example/disposable";
 const namespace = "budget-negative-fixture";
+const model = "gpt-5.6-sol";
+const reasoning = "xhigh";
 const actor = { id: 7, login: "operator" };
-const policyDigest = digestPolicy(parseRunPolicy(budgetStopPolicy()));
+const policyDigest = digestPolicy(parseRunPolicy(budgetStopPolicy(model, reasoning)));
 type Event = Record<string, unknown> & {
   event: string;
   kind: string;
@@ -46,12 +49,12 @@ const event = (
 });
 function observation() {
   return {
-    context: { repository, objective: 1, actor },
+    context: { repository, objective: 1, actor, policy: budgetStopPolicy(model, reasoning) },
     receipts: [
       event("FactoryRunStarted", "run", 1, {
         repository,
         actor: actor.login,
-        policy: budgetStopPolicy(),
+        policy: budgetStopPolicy(model, reasoning),
         policyDigest,
         baseBranch: "main",
       }),
@@ -133,7 +136,7 @@ function terminalEvidence() {
     qualificationNamespace: namespace,
     fixturePaths: qualificationPaths(namespace),
     objective: { number: 1, body: objectiveBodyFor(namespace, "trusted_local") },
-    policy: budgetStopPolicy(),
+    policy: budgetStopPolicy(model, reasoning),
     preflight: {
       qualificationNamespace: namespace,
       namespaceIssues: [],
@@ -159,7 +162,7 @@ function terminalEvidence() {
         repo: "disposable",
         objectiveNumber: 1,
         untilTerminal: true,
-        policy: budgetStopPolicy(),
+        policy: budgetStopPolicy(model, reasoning),
       },
     },
     budgetStop: {
@@ -180,6 +183,8 @@ const env = {
   FACTORY_LIVE_OBJECTIVE_REPOSITORY: repository,
   FACTORY_LIVE_OBJECTIVE_NAMESPACE: namespace,
   FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "1",
+  FACTORY_LIVE_OBJECTIVE_MODEL: model,
+  FACTORY_LIVE_OBJECTIVE_REASONING: reasoning,
   FACTORY_LIVE_BUDGET_STOP_ACK: `${repository}:pre-projection-refusal-no-cancel`,
   FACTORY_MANAGEMENT_TRANSCRIPT_DIR: "/private/exact/budget-stop-transcripts",
 };
@@ -197,12 +202,13 @@ describe("prospective pre-projection refusal authority", () => {
   });
   it("reduces only the initial budget and leaves happy guard unchanged", () => {
     const full = boundedPolicy("regular-prs", 500000) as Record<string, unknown>;
-    expect(budgetStopPolicy()).toEqual({
+    expect(budgetStopPolicy(model, reasoning)).toEqual({
       ...full,
+      models: qualificationModels(model, reasoning),
       economics: { ...(full.economics as object), maxModelTokens: 1 },
     });
     expect(() => modelTokenLimit("1")).toThrow();
-    expect(budgetStopAuthority(env)?.policy).toEqual(budgetStopPolicy());
+    expect(budgetStopAuthority(env)?.policy).toEqual(budgetStopPolicy(model, reasoning));
   });
   it.each([
     ["FACTORY_LIVE_BUDGET_STOP_ACK", `${repository}:compile-once-budget-stop-no-worker`],
@@ -218,6 +224,16 @@ describe("prospective pre-projection refusal authority", () => {
   ])("rejects changed %s before any invocation", async (key, value) => {
     const invoke = vi.fn(async () => {});
     await expect(main({ ...env, [key!]: value }, invoke)).rejects.toThrow();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+  it("rejects missing model authority before invocation", async () => {
+    const invoke = vi.fn(async () => {});
+    await expect(
+      main({ ...env, FACTORY_LIVE_OBJECTIVE_MODEL: undefined }, invoke),
+    ).rejects.toThrow();
+    await expect(
+      main({ ...env, FACTORY_LIVE_OBJECTIVE_REASONING: undefined }, invoke),
+    ).rejects.toThrow();
     expect(invoke).not.toHaveBeenCalled();
   });
   it("constructs no control/polling hook and calls the shared runner once", async () => {

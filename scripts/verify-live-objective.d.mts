@@ -21,6 +21,14 @@ export function boundedPolicy(
   maxModelTokens?: number,
   ceiling?: number,
 ): unknown;
+export function qualificationModels(
+  model: string | undefined,
+  reasoning: string | undefined,
+): {
+  mode: "single-profile";
+  profiles: Record<string, { model: string; reasoning: string }>;
+  phaseProfiles: Record<"compile" | "implement" | "review" | "recover", string>;
+};
 export function assertRecordedQualificationPolicy(recorded: unknown, expected: unknown): void;
 export type QualificationMergeAssertion = (
   proof: unknown,

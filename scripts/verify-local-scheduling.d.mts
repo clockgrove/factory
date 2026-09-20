@@ -23,6 +23,10 @@ export type ServiceObservation = Partial<ServiceIdentity> & {
   effectiveCpu?: number;
   cgroup?: string;
 };
+export function installedMcpTransport(
+  parameters: { command: string; args: string[] },
+  pluginRoot: string,
+): { launcher: string; bundle: string };
 export function schedulingAuthority(env: Record<string, string | undefined>): {
   repository: string;
   namespace: string;
@@ -37,6 +41,7 @@ export function schedulingUnit(input: {
 }): string;
 export function schedulingTransport(
   input: ServiceIdentity & {
+    launcher: string;
     path: string;
     home: string;
     uid: number;

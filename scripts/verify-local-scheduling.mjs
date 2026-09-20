@@ -107,9 +107,23 @@ export function schedulingUnit({ repository, namespace, inventory, nonce, role }
   return `clockgrove-factory-qualification-${hash({ repository, namespace, inventory, nonce, role })}.service`;
 }
 
+export function installedMcpTransport(parameters, pluginRoot) {
+  assert.equal(parameters.command, "sh", "installed Factory MCP command differs");
+  assert.deepEqual(
+    parameters.args,
+    [join(pluginRoot, "bin/factory-mcp"), join(pluginRoot, "dist/mcp-server.js")],
+    "installed Factory MCP arguments differ",
+  );
+  return {
+    launcher: realpathSync(parameters.args[0]),
+    bundle: realpathSync(parameters.args[1]),
+  };
+}
+
 export function schedulingTransport({
   unit,
   node,
+  launcher,
   bundle,
   checkout,
   path,
@@ -119,7 +133,8 @@ export function schedulingTransport({
   managementTranscriptDirectory,
 }) {
   assert.match(unit, unitPattern);
-  for (const value of [node, bundle, checkout, home]) assert.match(value, /^\/[A-Za-z0-9_./-]+$/);
+  for (const value of [node, launcher, bundle, checkout, home])
+    assert.match(value, /^\/[A-Za-z0-9_./-]+$/);
   assert.ok(!checkout.startsWith("/mnt/") && !home.startsWith("/mnt/"));
   assert.ok(Number.isSafeInteger(uid) && uid > 0);
   assert.match(username, /^[a-z_][a-z0-9_-]*$/);
@@ -158,7 +173,8 @@ export function schedulingTransport({
       `FACTORY_MANAGEMENT_TRANSCRIPT_DIR=${managementTranscriptDirectory}`,
       `XDG_RUNTIME_DIR=${runtime}`,
       `DBUS_SESSION_BUS_ADDRESS=unix:path=${runtime}/bus`,
-      node,
+      "sh",
+      launcher,
       bundle,
     ],
     cwd: checkout,
@@ -226,11 +242,12 @@ export function observeSchedulingService(expected, port = defaults) {
     assert.equal(pid, expected.pid);
     assert.equal(ticks, expected.startTicks, "service process reused");
   }
+  assert.equal(port.link(`/proc/${pid}/exe`), expected.node, "service executable changed");
   assert.equal(port.link(`/proc/${pid}/cwd`), expected.checkout, "service checkout changed");
   assert.deepEqual(
     port.read(`/proc/${pid}/cmdline`).split("\0").filter(Boolean),
-    [expected.node, expected.bundle],
-    "service executable changed",
+    ["node", expected.bundle],
+    "service command changed",
   );
   assert.ok(
     port.read(`/proc/${pid}/cgroup`).split("\n").includes(`0::${fields.ControlGroup}`),
@@ -684,6 +701,7 @@ export function ownedSchedulingScopes(evidence, primary) {
 export function createSchedulingQualification(authority, env = process.env, port = defaults) {
   let primary;
   let contender;
+  let launcher;
   let managementTranscriptDirectory;
   const nonce = randomUUID();
   const safe =
@@ -692,6 +710,14 @@ export function createSchedulingQualification(authority, env = process.env, port
       try {
         return await fn(...args);
       } catch {
+        const context = args[1];
+        if (context?.evidence && typeof context.save === "function") {
+          context.evidence.qualificationFailure = {
+            stage: "wrap-transport",
+            code: "qualification-transport-unavailable",
+          };
+          context.save();
+        }
         throw Error(
           "local scheduling qualification boundary unavailable; inspect private evidence",
         );
@@ -709,7 +735,8 @@ export function createSchedulingQualification(authority, env = process.env, port
     privateEvidence: true,
     namespace: authority.namespace,
     wrapTransport: safe(async (parameters, context) => {
-      assert.deepEqual(parameters.args, [join(context.pluginRoot, "dist/mcp-server.js")]);
+      const installed = installedMcpTransport(parameters, context.pluginRoot);
+      launcher = installed.launcher;
       managementTranscriptDirectory = parameters.env.FACTORY_MANAGEMENT_TRANSCRIPT_DIR;
       const user = userInfo();
       const base = {
@@ -721,7 +748,7 @@ export function createSchedulingQualification(authority, env = process.env, port
       const expected = {
         unit: schedulingUnit({ ...base, role: "primary" }),
         node: realpathSync(process.execPath),
-        bundle: realpathSync(parameters.args[0]),
+        bundle: installed.bundle,
         checkout: realpathSync(parameters.cwd),
       };
       assert.equal(
@@ -738,6 +765,7 @@ export function createSchedulingQualification(authority, env = process.env, port
       context.save();
       return schedulingTransport({
         ...expected,
+        launcher,
         path: env.PATH,
         home: homedir(),
         uid: user.uid,
@@ -866,6 +894,7 @@ export function createSchedulingQualification(authority, env = process.env, port
       const secondTransport = new StdioClientTransport(
         schedulingTransport({
           ...contender,
+          launcher,
           path: env.PATH,
           home: homedir(),
           uid: user.uid,

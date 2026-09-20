@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertQualificationNamespace,
@@ -14,6 +14,7 @@ import {
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
 import {
   changeSchedulingService,
+  installedMcpTransport,
   observeSchedulingService,
   schedulingRequest,
   schedulingTransport,
@@ -284,6 +285,14 @@ export function createBudgetStopQualification(authority, env = process.env, port
       try {
         return await fn(...args);
       } catch {
+        const context = args[1];
+        if (context?.evidence && typeof context.save === "function") {
+          context.evidence.qualificationFailure = {
+            stage: "wrap-transport",
+            code: "qualification-transport-unavailable",
+          };
+          context.save();
+        }
         throw Error(
           "pre-projection budget refusal incomplete; preserve evidence without reinjection",
         );
@@ -295,7 +304,7 @@ export function createBudgetStopQualification(authority, env = process.env, port
     namespace: authority.namespace,
     privateEvidence: true,
     wrapTransport: safe(async (parameters, context) => {
-      assert.deepEqual(parameters.args, [join(context.pluginRoot, "dist/mcp-server.js")]);
+      const installed = installedMcpTransport(parameters, context.pluginRoot);
       const user = userInfo();
       primary = {
         unit: schedulingUnit({
@@ -306,7 +315,7 @@ export function createBudgetStopQualification(authority, env = process.env, port
           role: "primary",
         }),
         node: realpathSync(process.execPath),
-        bundle: realpathSync(parameters.args[0]),
+        bundle: installed.bundle,
         checkout: realpathSync(parameters.cwd),
       };
       assert.equal(observeSchedulingService(primary, port).state, "absent");
@@ -314,6 +323,7 @@ export function createBudgetStopQualification(authority, env = process.env, port
       context.save();
       const transport = schedulingTransport({
         ...primary,
+        launcher: installed.launcher,
         path: env.PATH,
         home: homedir(),
         uid: user.uid,

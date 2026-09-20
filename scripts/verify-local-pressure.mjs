@@ -19,6 +19,7 @@ import { parseUnitObservation } from "./verify-local-faults.mjs";
 import { observeNativeMergeProofs } from "./qualification-sibling-refresh-proof.mjs";
 import {
   schedulingAuthority,
+  installedMcpTransport,
   schedulingUnit,
   schedulingTransport,
   schedulingSnapshot,
@@ -288,6 +289,23 @@ export function createPressureQualification(authority, env = process.env, port =
   let allocator;
   let allocatorDigest;
   const nonce = randomUUID();
+  const safe =
+    (fn) =>
+    async (...args) => {
+      try {
+        return await fn(...args);
+      } catch {
+        const context = args[1];
+        if (context?.evidence && typeof context.save === "function") {
+          context.evidence.qualificationFailure = {
+            stage: "wrap-transport",
+            code: "qualification-transport-unavailable",
+          };
+          context.save();
+        }
+        throw Error("local pressure qualification boundary unavailable; inspect private evidence");
+      }
+    };
   const artifacts = (evidence) => {
     assert.deepEqual(
       installedBundleIdentity(pluginRoot),
@@ -317,9 +335,9 @@ export function createPressureQualification(authority, env = process.env, port =
     policy: authority.policy,
     namespace: authority.namespace,
     privateEvidence: true,
-    wrapTransport: async (parameters, context) => {
+    wrapTransport: safe(async (parameters, context) => {
       pluginRoot = context.pluginRoot;
-      assert.deepEqual(parameters.args, [join(pluginRoot, "dist/mcp-server.js")]);
+      const installed = installedMcpTransport(parameters, pluginRoot);
       const user = userInfo();
       const base = {
         repository: authority.repository,
@@ -330,7 +348,7 @@ export function createPressureQualification(authority, env = process.env, port =
       primary = {
         unit: schedulingUnit({ ...base, role: "primary" }),
         node: realpathSync(process.execPath),
-        bundle: realpathSync(parameters.args[0]),
+        bundle: installed.bundle,
         checkout: realpathSync(parameters.cwd),
       };
       allocator = realpathSync(
@@ -358,6 +376,7 @@ export function createPressureQualification(authority, env = process.env, port =
       context.save();
       const transport = schedulingTransport({
         ...primary,
+        launcher: installed.launcher,
         path: env.PATH,
         home: homedir(),
         uid: user.uid,
@@ -376,7 +395,7 @@ export function createPressureQualification(authority, env = process.env, port =
         "--property=MemorySwapMax=0",
       );
       return transport;
-    },
+    }),
     beforeRun: async (hooks) => {
       artifacts(hooks.evidence);
       primary = observePressureDirector(primary, port);

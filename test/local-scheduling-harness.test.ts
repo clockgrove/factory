@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
   assertNativePriorityReadback,
   assertRepositoryContention,
   assertSchedulingBarrier,
   changeSchedulingService,
+  installedMcpTransport,
   main,
   observeSchedulingService,
   ownedSchedulingScopes,
@@ -31,6 +35,7 @@ const descriptor: ServiceIdentity = {
   bundle: "/home/example/.codex/plugins/cache/factory/dist/mcp-server.js",
   checkout: "/home/example/disposable",
 };
+const launcher = "/home/example/.codex/plugins/cache/factory/bin/factory-mcp";
 const identity = {
   ...descriptor,
   pid: 321,
@@ -58,7 +63,7 @@ function service() {
   const files: Record<string, string> = {
     "/proc/sys/kernel/random/boot_id": boot,
     "/proc/321/stat": `321 (node) ${["S", ...Array(18).fill("0"), "10001", ...Array(8).fill("0")].join(" ")}`,
-    "/proc/321/cmdline": `${descriptor.node}\0${descriptor.bundle}\0`,
+    "/proc/321/cmdline": `node\0${descriptor.bundle}\0`,
     "/proc/321/cgroup": `0::${group}\n`,
   };
   const port = {
@@ -96,7 +101,7 @@ function service() {
       if (Object.hasOwn(files, path)) return files[path]!;
       throw Error("unknown file");
     }),
-    link: vi.fn(() => descriptor.checkout),
+    link: vi.fn((path: string) => (path.endsWith("/exe") ? descriptor.node : descriptor.checkout)),
     now: () => now,
     wait: vi.fn(async () => {}),
   };
@@ -183,9 +188,27 @@ describe("explicit installed scheduling authority", () => {
       units.every((unit) => /^clockgrove-factory-qualification-[a-f0-9]{64}\.service$/.test(unit)),
     ).toBe(true);
   });
+  it("accepts only the installed portable MCP launcher contract", () => {
+    const pluginRoot = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
+    const launcher = join(pluginRoot, "bin/factory-mcp");
+    const bundle = join(pluginRoot, "dist/mcp-server.js");
+    expect(installedMcpTransport({ command: "sh", args: [launcher, bundle] }, pluginRoot)).toEqual({
+      launcher: realpathSync(launcher),
+      bundle: realpathSync(bundle),
+    });
+    for (const parameters of [
+      { command: "node", args: [launcher, bundle] },
+      { command: "sh", args: [bundle] },
+      { command: "sh", args: [bundle, launcher] },
+      { command: "sh", args: [launcher, bundle, bundle] },
+      { command: "sh", args: [launcher, join(pluginRoot, "dist/factory.js")] },
+    ])
+      expect(() => installedMcpTransport(parameters, pluginRoot)).toThrow();
+  });
   it("launches only the installed executable with cleared secrets and no systemd environment properties", () => {
     const config = schedulingTransport({
       ...descriptor,
+      launcher,
       path: "/usr/bin:/home/example/.local/bin",
       home: "/home/example",
       uid: 1000,
@@ -201,7 +224,7 @@ describe("explicit installed scheduling authority", () => {
         config.args.indexOf("/usr/bin/env") + 2,
       ),
     ).toEqual(["/usr/bin/env", "-i"]);
-    expect(config.args.slice(-2)).toEqual([descriptor.node, descriptor.bundle]);
+    expect(config.args.slice(-3)).toEqual(["sh", launcher, descriptor.bundle]);
     expect(config.args).toContain(
       "FACTORY_MANAGEMENT_TRANSCRIPT_DIR=/home/example/private/management-transcripts",
     );
@@ -222,6 +245,7 @@ describe("explicit installed scheduling authority", () => {
     expect(() =>
       schedulingTransport({
         ...descriptor,
+        launcher,
         path,
         home: "/home/example",
         uid: 1000,

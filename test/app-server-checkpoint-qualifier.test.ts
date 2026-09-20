@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseRunPolicy } from "../src/protocol/policy.js";
+import { completeSiblingQualificationFixture } from "./helpers/sibling-qualification-evidence.mjs";
 import { boundedQualificationEvidenceText } from "../scripts/qualification-evidence-boundary.mjs";
 import {
   appServerCheckpointArm,
@@ -11,12 +12,14 @@ import {
 } from "../scripts/qualification-app-server-checkpoint.mjs";
 import {
   appServerHoldReady,
+  appServerSettledDeliveryProof,
   checkpointFailure,
   checkpointAuthority,
   phaseKillCommand,
   phaseKillReplacementObservation,
   runAppServerCheckpointScenario,
 } from "../scripts/verify-local-checkpoint-restart.mjs";
+import { boundedPolicy } from "../scripts/verify-live-objective.mjs";
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const canonical = (value: unknown): string =>
   Array.isArray(value)
@@ -29,6 +32,20 @@ const canonical = (value: unknown): string =>
       : JSON.stringify(value);
 const repository = "example/disposable",
   checkout = "/home/example/disposable";
+type SettledFixture = {
+  evidence: {
+    repository: string;
+    events: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  commits: Map<string, { oid: string; treeOid: string; parentOids: string[]; message?: string }>;
+  request: (route: string, parameters: Record<string, unknown>) => Promise<unknown>;
+};
+const settledFixture = (repository: string) =>
+  completeSiblingQualificationFixture({
+    policy: boundedPolicy("regular-prs"),
+    repository,
+  }) as Promise<SettledFixture>;
 const unit = `clockgrove-factory-${hash(`${repository}\0${checkout}`).slice(0, 16)}.service`;
 const env = {
   FACTORY_LOCAL_CHECKPOINT_RESTART: "1",
@@ -320,6 +337,72 @@ function fixture(workItem = 8, cliVersion: unknown = "0.153.0", includeCliVersio
   return { proof, observation, witness };
 }
 describe("installed App Server checkpoint qualification", () => {
+  it("uses durable settlement after disposable semantic-review refs are retired", async () => {
+    const f = await settledFixture("example/app-server-settlement");
+    const request = vi.fn(async (route: string, parameters: Record<string, unknown>) => {
+      if (route.endsWith("/git/ref/{ref}"))
+        throw Object.assign(new Error("disposable semantic-review ref retired"), { status: 404 });
+      if (route.endsWith("/git/commits/{commit_sha}")) {
+        const commit = f.commits.get(String(parameters.commit_sha));
+        if (!commit) throw Object.assign(new Error("immutable commit missing"), { status: 404 });
+        return {
+          data: {
+            sha: commit.oid,
+            tree: { sha: commit.treeOid },
+            parents: commit.parentOids.map((sha: string) => ({ sha })),
+            message: commit.message ?? "fixture",
+          },
+        };
+      }
+      return f.request(route, parameters);
+    });
+
+    await expect(
+      appServerSettledDeliveryProof(f.evidence, request, f.evidence.repository),
+    ).resolves.toHaveLength(3);
+    expect(request.mock.calls.some(([route]) => route.endsWith("/git/ref/{ref}"))).toBe(false);
+  });
+
+  it.each([
+    [
+      "missing validation",
+      (events: Array<Record<string, unknown>>) => {
+        const index = events.findIndex((event) => event.event === "ValidationRecorded");
+        events.splice(index, 1);
+      },
+    ],
+    [
+      "conflicting review",
+      (events: Array<Record<string, unknown>>) => {
+        const review = events.find((event) => event.event === "AttemptValidated")!;
+        events.push({
+          ...review,
+          sequence: Number(review.sequence) + 10_000,
+          artifactDigest: "0".repeat(64),
+        });
+      },
+    ],
+  ])("reports structured final settlement diagnostics for %s", async (_name, mutate) => {
+    const f = await settledFixture("example/app-server-settlement-failure");
+    const entry = structuredClone(f.evidence);
+    mutate(entry.events);
+    let caught: unknown;
+    try {
+      await appServerSettledDeliveryProof(entry, f.request, entry.repository);
+    } catch (error) {
+      caught = error;
+    }
+    expect(checkpointFailure(caught)).toMatchObject({
+      boundary: "scenario",
+      qualificationStage: "app-server-final-settlement",
+      checkpointStage: "final",
+      checkpointField: "settledDelivery",
+      checkpointInvariant: "authenticated-settlement",
+      category: "assertion",
+      code: "ERR_ASSERTION",
+    });
+  });
+
   it("requires separate explicit backend/hold authority and leaves the old default unchanged", () => {
     expect(authority.policy.backendOrder).toEqual(["codex-app-server/local-worktree"]);
     expect(authority.policy.maxParallel).toBe(1);

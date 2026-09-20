@@ -164,7 +164,8 @@ export interface CheckpointDiagnostic {
     | "authenticated-authority"
     | "authority-descendant"
     | "authority-revision"
-    | "authority-transition";
+    | "authority-transition"
+    | "authenticated-settlement";
 }
 export interface CheckpointObservationDiagnostic extends CheckpointDiagnostic {
   boundary: "observation";
@@ -275,8 +276,13 @@ export interface CheckpointPort {
   ): Promise<unknown[]>;
   checkpoint(value: unknown): Promise<void>;
   takeover(checkpoint: unknown): Promise<void>;
-  finalProof(observation: unknown, original: unknown, replacement: unknown): Promise<void>;
+  finalProof(observation: unknown, original: unknown, replacement: unknown): Promise<unknown>;
 }
+export function appServerSettledDeliveryProof(
+  entry: unknown,
+  request: (route: string, parameters: Record<string, unknown>) => Promise<unknown>,
+  repository: string,
+): Promise<unknown[]>;
 export function runCheckpointScenario(
   port: CheckpointPort,
   authority: CheckpointAuthority,

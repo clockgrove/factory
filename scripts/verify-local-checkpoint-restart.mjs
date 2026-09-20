@@ -42,11 +42,7 @@ import {
   qualificationModelAccounting,
 } from "./qualification-model-accounting.mjs";
 import { selectQualificationPublicationRecord } from "./qualification-merge-proof.mjs";
-import {
-  observeNativeMergeProofs,
-  assertNativeMergeProof,
-  qualificationProofFailureContext,
-} from "./qualification-sibling-refresh-proof.mjs";
+import { qualificationProofFailureContext } from "./qualification-sibling-refresh-proof.mjs";
 import {
   appServerCheckpointContinuationFailureContext,
   appServerCheckpointIdentity,
@@ -55,7 +51,12 @@ import {
   assertAppServerCheckpointContinuation,
   assertAppServerCheckpoint,
   observeAppServerCheckpoints,
+  withAppServerCheckpointDiagnostic,
 } from "./qualification-app-server-checkpoint.mjs";
+import {
+  assertSettledQualificationMergeProof,
+  observeSettledQualificationMergeProofs,
+} from "./qualification-settled-merge-proof.mjs";
 import { boundedQualificationEvidenceText } from "./qualification-evidence-boundary.mjs";
 import { assertPhaseKillRecovery } from "./qualification-director-contention.mjs";
 import {
@@ -201,6 +202,7 @@ const qualificationStages = new Set([
   "concurrency-refill-consistency",
   "concurrency-evidence-save",
   "app-server-artifact-proof",
+  "app-server-final-settlement",
 ]);
 const qualificationFailureStages = new WeakMap();
 
@@ -217,6 +219,49 @@ export async function withQualificationStage(stage, operation) {
     qualificationFailureStages.set(retained, stage);
     throw retained;
   }
+}
+
+/** Authenticate the durable terminal delivery without reopening disposable review refs. */
+export async function appServerSettledDeliveryProof(entry, request, repository) {
+  return withQualificationStage("app-server-final-settlement", () =>
+    withAppServerCheckpointDiagnostic(
+      "final",
+      "settledDelivery",
+      "authenticated-settlement",
+      async () => {
+        const proofs = await observeSettledQualificationMergeProofs({ entry, request, repository });
+        const runId = entry.runResult.runId;
+        const events = entry.events.filter((event) => event.runId === runId);
+        for (const proof of proofs) {
+          const integration = unique(
+            events.filter(
+              (event) => event.event === "AttemptIntegrated" && event.workItem === proof.workItem,
+            ),
+            "integration identity missing",
+          );
+          const publication = selectQualificationPublicationRecord(
+            events.filter(
+              (event) =>
+                event.event === "PublicationRecorded" &&
+                ["objective", "runId", "workItem", "attempt"].every(
+                  (key) => event[key] === integration[key],
+                ),
+            ),
+          );
+          assertSettledQualificationMergeProof(proof, {
+            repository,
+            pull: unique(
+              entry.pulls.filter((pull) => pull.number === proof.pullRequest),
+              "PR identity missing",
+            ),
+            publication,
+            integration,
+          });
+        }
+        return proofs;
+      },
+    ),
+  );
 }
 
 export function checkpointOperatorFailure(tool, args, response) {
@@ -1226,14 +1271,7 @@ export async function continueAppServerCheckpointScenario(
   );
   const final = checkpointFacts(completed, authority, port.pauseRequestId, false);
   assert.equal(final.runId, facts.runId);
-  const finalSessionReceipts = await port.sessionProof(completed, undefined, "final");
-  assert.equal(finalSessionReceipts.length, 3);
-  assertAppServerCheckpointContinuation(
-    [resumedReceipts.find((receipt) => receipt.workItem === sessionProofs[0].workItem)],
-    [finalSessionReceipts.find((receipt) => receipt.workItem === sessionProofs[0].workItem)],
-    "final",
-  );
-  await port.finalProof(completed, original, replacement);
+  const finalDeliveryProofs = await port.finalProof(completed, original, replacement);
   const finalScopes = await port.absence(completed, [original, replacement]);
   await port.controller("active", replacement);
   await port.action("stop");
@@ -1244,7 +1282,7 @@ export async function continueAppServerCheckpointScenario(
     checkpoint: facts,
     final,
     sessionProofs,
-    finalSessionProofs: finalSessionReceipts,
+    finalDeliveryProofs,
     original,
     replacement,
     ...(phaseRecovery ? { phaseRecovery } : {}),
@@ -1757,6 +1795,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       "scripts/qualification-reservation-authority.mjs",
       "scripts/qualification-evidence-boundary.mjs",
       "scripts/qualification-merge-proof.mjs",
+      "scripts/qualification-settled-merge-proof.mjs",
       ...(authority.sessionRecovery
         ? [
             "scripts/qualification-app-server-checkpoint.mjs",
@@ -2745,6 +2784,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
         dependencies,
         pulls,
         events: proofEvents,
+        status: observation.status,
         policy: authority.policy,
         base: evidence.base,
         nativeDefaultBranch: start.baseBranch,
@@ -2758,30 +2798,11 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
         },
       };
       evidence.checkpointDelivery = delivery;
-      delivery.mergeProofs = await observeNativeMergeProofs({ evidence: delivery, request });
-      for (const proof of delivery.mergeProofs) {
-        const integration = unique(
-          proofEvents.filter(
-            (event) => event.event === "AttemptIntegrated" && event.workItem === proof.workItem,
-          ),
-          "integration identity missing",
-        );
-        const publication = selectQualificationPublicationRecord(
-          publications.filter(
-            (event) =>
-              event.workItem === integration.workItem && event.attempt === integration.attempt,
-          ),
-        );
-        assertNativeMergeProof(delivery, proof, {
-          repository: authority.repository,
-          pull: unique(
-            pulls.filter((pull) => pull.number === proof.pullRequest),
-            "PR identity missing",
-          ),
-          publication,
-          integration,
-        });
-      }
+      delivery.mergeProofs = await appServerSettledDeliveryProof(
+        delivery,
+        request,
+        authority.repository,
+      );
       evidence.mergeProofs = delivery.mergeProofs;
       save();
       assert.deepEqual(installedBundleIdentity(pluginRoot), artifact);
@@ -2795,6 +2816,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       evidence.original = original;
       evidence.replacement = replacement;
       save();
+      return delivery.mergeProofs;
     },
   };
   try {

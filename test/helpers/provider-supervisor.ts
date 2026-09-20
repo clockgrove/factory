@@ -75,6 +75,12 @@ export const COPILOT = "github-copilot/github-managed";
 export const CODEX = "openai-codex/github-managed";
 export type ProviderScenario = "daytona-burst" | "copilot-objective" | "codex-objective";
 const pendingFixtureRetirements = new Set<object>();
+const retiredProviderFixtureRemovalOptions = {
+  recursive: true,
+  force: true,
+  maxRetries: 5,
+  retryDelay: 100,
+} as const;
 const PNPM_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-pnpm")!
   .runtimeRequirement!;
 const NPM_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-npm")!
@@ -2060,8 +2066,8 @@ jobs:
           vi.unstubAllGlobals();
           // Never enumerate or sweep user caches, including interrupted real runs.
           for (const root of retainedArtifactRoots)
-            await rm(root, { recursive: true, force: true });
-          await rm(repository, { recursive: true, force: true });
+            await rm(root, retiredProviderFixtureRemovalOptions);
+          await rm(repository, retiredProviderFixtureRemovalOptions);
         } finally {
           // After a timeout this callback only opens fixture admission once the
           // old run actually settles; it never restores mocks or deletes files.

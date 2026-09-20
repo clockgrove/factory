@@ -23,7 +23,7 @@ import {
   qualificationFailure,
   waitForCreatedObjectiveNamespace,
 } from "../scripts/verify-live-objective.mjs";
-import { parseRunPolicy } from "../src/protocol/policy.js";
+import { DEFAULT_COMPILER_EVALUATION_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
 import { assertSchedulingCompletion } from "../scripts/verify-local-scheduling.mjs";
 import {
   assertRegularCompletion,
@@ -72,6 +72,7 @@ describe("qualification token intent compatibility", () => {
   it("opts new scenarios into observed stopping without rewriting historical evidence", () => {
     const current = parseRunPolicy(boundedPolicy());
     expect(current.economics?.modelTokenBudgetMode).toBe("observed-stop");
+    expect(current.compilerEvaluation).toEqual(DEFAULT_COMPILER_EVALUATION_POLICY);
     const legacy = structuredClone(current);
     delete legacy.economics!.modelTokenBudgetMode;
     const before = JSON.stringify(legacy);

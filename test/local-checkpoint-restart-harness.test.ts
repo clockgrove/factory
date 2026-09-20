@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -39,6 +40,19 @@ import {
 } from "../scripts/verify-local-checkpoint-restart.mjs";
 
 const repository = "example/disposable";
+
+function committedAdapterPollPhases() {
+  const directory = new URL("../scripts/", import.meta.url);
+  const phases = new Set<string>();
+  for (const entry of readdirSync(directory).filter((name) => name.endsWith(".mjs"))) {
+    const source = readFileSync(new URL(entry, directory), "utf8");
+    for (const match of source.matchAll(/\bport\.poll\(\s*(["'`])([^"'`\\\r\n]+)\1/g)) {
+      phases.add(match[2]!);
+    }
+  }
+  return [...phases].sort();
+}
+
 describe("phase-kill replacement observation", () => {
   const original = {
     unit: "clockgrove-factory-0123456789abcdef.service",
@@ -210,9 +224,10 @@ describe("opt-in original-start observation window", () => {
     expect(result.elapsed).toBe(5 * 60_000);
     expect(reads).toBe(11);
   });
-  it.each(["failed-validation", "cancelled"])(
-    "admits the %s failure qualifier phase through polling and acceptance",
-    async (phase) => {
+  it("admits every literal poll phase used by a committed qualification adapter", async () => {
+    const phases = committedAdapterPollPhases();
+    expect(phases).not.toHaveLength(0);
+    for (const phase of phases) {
       const observation = { phase };
       const observe = vi.fn(async () => observation);
       const accept = vi.fn(() => true);
@@ -228,9 +243,9 @@ describe("opt-in original-start observation window", () => {
       ).resolves.toBe(observation);
       expect(observe).toHaveBeenCalledOnce();
       expect(accept).toHaveBeenCalledWith(observation);
-    },
-  );
-  it("keeps the failure qualifier observation-phase contract closed", async () => {
+    }
+  });
+  it("keeps the observation-phase contract closed", async () => {
     const observe = vi.fn(async () => ({}));
     const accept = vi.fn(() => true);
 

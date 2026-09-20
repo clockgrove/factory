@@ -426,7 +426,7 @@ function controllerInput(caseName: "response-loss-restart" | "active-cancellatio
     headSha: head("b"),
   };
   const reviewIdentityDigest = hash(canonical(reviewIdentity));
-  const progressEvents = [
+  const progressEvents: QualificationEvent[] = [
     {
       event: "FactoryRunStarted",
       runId: "run",
@@ -506,6 +506,7 @@ function controllerInput(caseName: "response-loss-restart" | "active-cancellatio
     observe: vi.fn(async () => observations.shift()!),
     wait: vi.fn(async () => {}),
     maximumObservations: 3,
+    progressEvents,
   };
 }
 
@@ -563,6 +564,52 @@ describe("native linear-stack installed matrix", () => {
     expect(() =>
       nativeLinearQualification({ ...base, FACTORY_LIVE_OBJECTIVE_REASONING: undefined }),
     ).toThrow();
+  });
+
+  it("records retained run and controller state when failure cleanup cannot stop it", async () => {
+    const qualification = nativeLinearQualification({
+      FACTORY_LIVE_NATIVE_LINEAR_OBJECTIVE: "1",
+      FACTORY_LIVE_OBJECTIVE_PREFLIGHT: "1",
+      FACTORY_LIVE_NATIVE_LINEAR_CASE: "active-cancellation",
+      FACTORY_LIVE_OBJECTIVE_NAMESPACE: "native-linear-failure-cleanup",
+      FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "250000",
+      FACTORY_LIVE_OBJECTIVE_MODEL: "gpt-5.6-sol",
+      FACTORY_LIVE_OBJECTIVE_REASONING: "xhigh",
+    }) as unknown as {
+      onFailure: (hooks: Record<string, unknown>) => Promise<void>;
+    };
+    const evidence = {
+      qualificationNamespace: "native-linear-failure-cleanup",
+      status: { run: { runId: "run", state: "running" } },
+      nativeLinearController: { before: { status: { active: true } } },
+    };
+    const call = vi.fn(async (name: string) => {
+      if (name === "factory_controller_stop") throw new Error("stop transport unavailable");
+      return { installed: true, active: true, healthy: true };
+    });
+    const save = vi.fn();
+
+    await qualification.onFailure({
+      evidence,
+      call,
+      checkout: "/home/operator/fixture",
+      owner: "example",
+      repo: "fixture",
+      save,
+    });
+
+    expect(call.mock.calls.map(([name]) => name)).toEqual([
+      "factory_controller_stop",
+      "factory_controller_status",
+    ]);
+    expect(evidence).toMatchObject({
+      nativeLinearFailureCleanup: {
+        run: { runId: "run", state: "running" },
+        controllerStop: { status: "unknown", reason: "stop transport unavailable" },
+        controllerStatus: { installed: true, active: true, healthy: true },
+      },
+    });
+    expect(save).toHaveBeenCalledTimes(1);
   });
 
   it("forwards exact retained-install and transcript authority before any live work", async () => {
@@ -1773,6 +1820,133 @@ describe("native linear-stack installed matrix", () => {
       requested: true,
       responseLost: false,
     });
+  });
+
+  it("selects the latest complete revalidation epoch for active cancellation", async () => {
+    const input = controllerInput("active-cancellation");
+    const validation = {
+      event: "ValidationRecorded",
+      runId: "run",
+      objective: 7,
+      workItem: 3,
+      attempt: 1,
+      sequence: 33,
+      evidenceDigest: digest("e"),
+      baseSha: head("2"),
+      outputTreeSha: head("3"),
+      passed: true,
+    };
+    const published = {
+      event: "AttemptPublished",
+      runId: "run",
+      objective: 7,
+      workItem: 3,
+      attempt: 1,
+      sequence: 35,
+      headSha: head("d"),
+      artifactDigest: digest("f"),
+    };
+    const reviewIdentity = {
+      kind: "rebase",
+      runId: "run",
+      objective: 7,
+      workItem: 3,
+      attempt: 1,
+      artifactDigest: published.artifactDigest,
+      baseSha: validation.baseSha,
+      outputTreeSha: validation.outputTreeSha,
+      evidenceDigest: validation.evidenceDigest,
+      headSha: published.headSha,
+    };
+    const reviewIdentityDigest = hash(canonical(reviewIdentity));
+    input.progressEvents.push(
+      {
+        event: "IntegrationCompleted",
+        runId: "run",
+        objective: 7,
+        workItem: 2,
+        attempt: 1,
+        sequence: 29,
+        headSha: head("b"),
+        operationId: "linear-stack-operation",
+      },
+      {
+        event: "AttemptIntegrated",
+        runId: "run",
+        objective: 7,
+        workItem: 2,
+        attempt: 1,
+        sequence: 30,
+        headSha: head("2"),
+      },
+      {
+        event: "ValidationInvalidated",
+        runId: "run",
+        objective: 7,
+        workItem: 3,
+        attempt: 1,
+        sequence: 32,
+        headSha: head("b"),
+        invalidatedByItem: "middle",
+        invalidatedByHeadSha: head("2"),
+      },
+      validation,
+      {
+        event: "BudgetReconciled",
+        runId: "run",
+        objective: 7,
+        workItem: 3,
+        attempt: 1,
+        sequence: 34,
+        phase: "management",
+        unit: "model_tokens",
+        usageId: `rebase-review-${reviewIdentityDigest}`,
+        amount: 2,
+      },
+      published,
+      {
+        event: "PublicationRecorded",
+        runId: "run",
+        objective: 7,
+        workItem: 3,
+        attempt: 1,
+        sequence: 36,
+        headSha: published.headSha,
+        baseSha: validation.baseSha,
+        validationDigest: validation.evidenceDigest,
+      },
+    );
+
+    await expect(executeNativeLinearControllerCase(input)).resolves.toMatchObject({
+      runId: "run",
+      status: "cancelled",
+    });
+    expect(input.evidence.nativeLinearIntervention).toMatchObject({
+      progress: {
+        invalidationSequence: 32,
+        durableHeadSha: head("d"),
+        validationSequence: 33,
+        integrationCompletedSequence: 29,
+        attemptIntegratedSequence: 30,
+      },
+    });
+    expect(input.call.mock.calls.map(([name]) => name)).toEqual([
+      "factory_activate",
+      "factory_cancel",
+    ]);
+  });
+
+  it("rejects competing publications inside one revalidation epoch", async () => {
+    const input = controllerInput("active-cancellation");
+    input.progressEvents.push({
+      ...input.progressEvents.find((event) => event.event === "PublicationRecorded")!,
+      sequence: 27,
+      headSha: head("c"),
+    });
+    await expect(executeNativeLinearControllerCase(input)).rejects.toThrow(
+      /intervention publication is repeated/,
+    );
+    expect(input.call).toHaveBeenCalledTimes(1);
   });
 
   it("does not retry or relabel a run that becomes terminal before intervention", async () => {

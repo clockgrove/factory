@@ -474,13 +474,23 @@ function revalidatedProgress(events, runId) {
   const own = events
     .filter((event) => event.runId === runId)
     .sort((left, right) => left.sequence - right.sequence);
-  for (const invalidated of own.filter((event) => event.event === "ValidationInvalidated")) {
+  const invalidations = own.filter((event) => event.event === "ValidationInvalidated");
+  for (const invalidated of [...invalidations].reverse()) {
+    const nextInvalidation = invalidations.find(
+      (event) =>
+        event.workItem === invalidated.workItem &&
+        event.attempt === invalidated.attempt &&
+        event.sequence > invalidated.sequence,
+    );
+    const withinEpoch = (event) =>
+      event.sequence > invalidated.sequence &&
+      (!nextInvalidation || event.sequence < nextInvalidation.sequence);
     const publications = own.filter(
       (event) =>
         event.event === "PublicationRecorded" &&
         event.workItem === invalidated.workItem &&
         event.attempt === invalidated.attempt &&
-        event.sequence > invalidated.sequence &&
+        withinEpoch(event) &&
         event.headSha !== invalidated.headSha,
     );
     assert.ok(publications.length <= 1, "intervention publication is repeated");
@@ -528,21 +538,38 @@ function revalidatedProgress(events, runId) {
     assert.ok(reviewUsages.length <= 1, "intervention review accounting is repeated");
     const reviewUsage = reviewUsages[0];
     if (!reviewUsage) continue;
-    const durableOperations = own.filter(
+    const integrations = own.filter(
       (event) => event.event === "IntegrationCompleted" && event.sequence < invalidated.sequence,
     );
-    if (durableOperations.length !== 1) continue;
-    const durableOperation = durableOperations[0];
-    const integrated = own.filter(
-      (event) =>
-        event.event === "AttemptIntegrated" &&
-        event.workItem === durableOperation.workItem &&
-        event.attempt === durableOperation.attempt &&
-        event.sequence > durableOperation.sequence &&
-        event.sequence < invalidated.sequence &&
-        event.headSha === invalidated.invalidatedByHeadSha,
+    const durableOperations = integrations
+      .map((operation) => {
+        const nextOperation = integrations.find(
+          (event) =>
+            event.workItem === operation.workItem &&
+            event.attempt === operation.attempt &&
+            event.sequence > operation.sequence,
+        );
+        return {
+          operation,
+          integrated: own.filter(
+            (event) =>
+              event.event === "AttemptIntegrated" &&
+              event.workItem === operation.workItem &&
+              event.attempt === operation.attempt &&
+              event.sequence > operation.sequence &&
+              event.sequence < invalidated.sequence &&
+              (!nextOperation || event.sequence < nextOperation.sequence) &&
+              event.headSha === invalidated.invalidatedByHeadSha,
+          ),
+        };
+      })
+      .filter(({ integrated }) => integrated.length > 0);
+    assert.ok(
+      durableOperations.every(({ integrated }) => integrated.length === 1),
+      "intervention integration receipt is repeated",
     );
-    if (integrated.length !== 1) continue;
+    if (durableOperations.length !== 1) continue;
+    const { operation: durableOperation, integrated } = durableOperations[0];
     const predecessor = publication
       ? own
           .filter(
@@ -2223,15 +2250,56 @@ export function nativeLinearQualification(env) {
         save();
       }
     },
-    onFailure: async ({ evidence }) => {
+    onFailure: async ({ evidence, call, checkout, owner, repo, save }) => {
+      const cleanup = (evidence.nativeLinearFailureCleanup ??= {
+        run: evidence.status?.run
+          ? structuredClone(evidence.status.run)
+          : { state: "unknown", reason: "run status unavailable during failure cleanup" },
+      });
       if (
         caseName === "active-cancellation" &&
         evidence.nativeLinearUnrelatedSentinel?.started &&
         !evidence.nativeLinearUnrelatedSentinel.stopped
-      )
-        evidence.nativeLinearUnrelatedSentinel.stopped = stopNativeLinearSentinel(
-          evidence.nativeLinearUnrelatedSentinel.started,
-        );
+      ) {
+        try {
+          evidence.nativeLinearUnrelatedSentinel.stopped = stopNativeLinearSentinel(
+            evidence.nativeLinearUnrelatedSentinel.started,
+          );
+          cleanup.sentinel = evidence.nativeLinearUnrelatedSentinel.stopped;
+        } catch (error) {
+          cleanup.sentinel = {
+            status: "unknown",
+            reason: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }
+      if (caseName !== "cascade" && evidence.nativeLinearController?.before) {
+        try {
+          cleanup.controllerStop = await call("factory_controller_stop", {
+            repository: checkout,
+            requestId: `${evidence.qualificationNamespace}-controller-failure-stop`,
+          });
+        } catch (error) {
+          cleanup.controllerStop = {
+            status: "unknown",
+            reason: error instanceof Error ? error.message : String(error),
+          };
+        }
+        try {
+          cleanup.controllerStatus = await call("factory_controller_status", {
+            owner,
+            repo,
+            repository: checkout,
+            requestId: `${evidence.qualificationNamespace}-controller-failure-status`,
+          });
+        } catch (error) {
+          cleanup.controllerStatus = {
+            status: "unknown",
+            reason: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }
+      save();
     },
     observeMergeProofs: observeNativeLinearProofs,
     assessCompletion: assessNativeLinearLifecycle,

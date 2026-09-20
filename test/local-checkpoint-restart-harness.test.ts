@@ -210,6 +210,42 @@ describe("opt-in original-start observation window", () => {
     expect(result.elapsed).toBe(5 * 60_000);
     expect(reads).toBe(11);
   });
+  it.each(["failed-validation", "cancelled"])(
+    "admits the %s failure qualifier phase through polling and acceptance",
+    async (phase) => {
+      const observation = { phase };
+      const observe = vi.fn(async () => observation);
+      const accept = vi.fn(() => true);
+
+      await expect(
+        checkpointPoll({
+          phase,
+          deadline: () => 1_000,
+          now: () => 0,
+          observe,
+          accept,
+        }),
+      ).resolves.toBe(observation);
+      expect(observe).toHaveBeenCalledOnce();
+      expect(accept).toHaveBeenCalledWith(observation);
+    },
+  );
+  it("keeps the failure qualifier observation-phase contract closed", async () => {
+    const observe = vi.fn(async () => ({}));
+    const accept = vi.fn(() => true);
+
+    await expect(
+      checkpointPoll({
+        phase: "arbitrary-failure-phase",
+        deadline: () => 1_000,
+        now: () => 0,
+        observe,
+        accept,
+      }),
+    ).rejects.toThrow("unsupported checkpoint observation phase");
+    expect(observe).not.toHaveBeenCalled();
+    expect(accept).not.toHaveBeenCalled();
+  });
   it("fails at the immutable Objective deadline without granting a phase reset", async () => {
     let now = 0;
     await expect(

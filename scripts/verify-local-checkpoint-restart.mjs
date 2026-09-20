@@ -324,6 +324,8 @@ export function checkpointFailure(error, boundary) {
 const observationPhases = new Set([
   "worker-start",
   "terminal-artifact-hold",
+  "failed-validation",
+  "cancelled",
   "recovered-accounted-pause",
   "completed",
   "checkpoint",

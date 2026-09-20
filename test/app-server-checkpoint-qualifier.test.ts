@@ -32,12 +32,14 @@ const canonical = (value: unknown): string =>
       : JSON.stringify(value);
 const repository = "example/disposable",
   checkout = "/home/example/disposable";
+type SettledEntry = {
+  repository: string;
+  events: Array<Record<string, unknown>>;
+  pulls: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+};
 type SettledFixture = {
-  evidence: {
-    repository: string;
-    events: Array<Record<string, unknown>>;
-    [key: string]: unknown;
-  };
+  evidence: SettledEntry;
   commits: Map<string, { oid: string; treeOid: string; parentOids: string[]; message?: string }>;
   request: (route: string, parameters: Record<string, unknown>) => Promise<unknown>;
 };
@@ -366,26 +368,32 @@ describe("installed App Server checkpoint qualification", () => {
   it.each([
     [
       "missing validation",
-      (events: Array<Record<string, unknown>>) => {
-        const index = events.findIndex((event) => event.event === "ValidationRecorded");
-        events.splice(index, 1);
+      (entry: SettledEntry) => {
+        const index = entry.events.findIndex((event) => event.event === "ValidationRecorded");
+        entry.events.splice(index, 1);
       },
     ],
     [
       "conflicting review",
-      (events: Array<Record<string, unknown>>) => {
-        const review = events.find((event) => event.event === "AttemptValidated")!;
-        events.push({
+      (entry: SettledEntry) => {
+        const review = entry.events.find((event) => event.event === "AttemptValidated")!;
+        entry.events.push({
           ...review,
           sequence: Number(review.sequence) + 10_000,
           artifactDigest: "0".repeat(64),
         });
       },
     ],
+    [
+      "missing delivery",
+      (entry: SettledEntry) => {
+        entry.pulls.splice(0, 1);
+      },
+    ],
   ])("reports structured final settlement diagnostics for %s", async (_name, mutate) => {
     const f = await settledFixture("example/app-server-settlement-failure");
     const entry = structuredClone(f.evidence);
-    mutate(entry.events);
+    mutate(entry);
     let caught: unknown;
     try {
       await appServerSettledDeliveryProof(entry, f.request, entry.repository);

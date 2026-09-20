@@ -85,6 +85,39 @@ describe("checkpoint observation diagnostics", () => {
     ).toEqual({ boundary: "scenario", category: "unavailable", code: "UNAVAILABLE" });
   });
 
+  it.each([
+    ["director-response-capture", "foreground contender responses were not retained"],
+    ["director-response-parsing", "foreground contender response proof was invalid"],
+    ["director-lease-proof", "inner Director lease proof was invalid"],
+    ["director-process-absence", "foreground contender process absence was unproved"],
+    ["director-final-proof-assembly", "Director contention final proof was invalid"],
+  ])("reports bounded safe telemetry for %s", async (stage, assertionMessage) => {
+    const secret = "/private/path token=response-payload";
+    const failure = Object.assign(new Error(secret), {
+      code: "ERR_ASSERTION",
+      actual: secret,
+      expected: secret,
+    });
+    let caught: unknown;
+    try {
+      await withQualificationStage(stage, () => {
+        throw failure;
+      });
+    } catch (error) {
+      caught = error;
+    }
+    const diagnostic = checkpointFailure(caught);
+    expect(diagnostic).toEqual({
+      boundary: "scenario",
+      qualificationStage: stage,
+      category: "assertion",
+      code: "ERR_ASSERTION",
+      assertionMessage,
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain(secret);
+    expect(Buffer.byteLength(assertionMessage)).toBeLessThanOrEqual(80);
+  });
+
   it("records fixed phase, stage, time and status without disclosing arbitrary error content", () => {
     const secret = "private-response-and-credential";
     const diagnostic = checkpointObservationFailure(

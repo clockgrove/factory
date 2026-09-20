@@ -10,6 +10,7 @@ import {
   assertNativeLinearGenerationSets,
   assertNativeLinearHistory,
   assertNativeLinearPublicationProofs,
+  assertNativeLinearSettledPublicationProofs,
   assertNativeLinearReview,
   assertNativeLinearSentinelAlive,
   assertNativeLinearTerminal,
@@ -504,6 +505,7 @@ function controllerInput(caseName: "response-loss-restart" | "active-cancellatio
     request: vi.fn(),
     save: vi.fn(),
     observe: vi.fn(async () => observations.shift()!),
+    capturePreterminalProofs: vi.fn(async () => {}),
     wait: vi.fn(async () => {}),
     maximumObservations: 3,
     progressEvents,
@@ -968,6 +970,141 @@ describe("native linear-stack installed matrix", () => {
     expect(() => assertNativeLinearPublicationProofs(changedDigest, changedDigestEvents)).toThrow(
       /exact-head validation binding/,
     );
+  });
+
+  it("proves every completed generation from durable receipts and immutable commits", () => {
+    const events: QualificationEvent[] = proofEvents().map((event) => ({
+      ...event,
+      ...(Number.isSafeInteger(event.sequence) ? { sequence: Number(event.sequence) * 10 } : {}),
+    }));
+    const publications = events
+      .filter((event) => event.event === "PublicationRecorded")
+      .sort((left, right) => Number(left.sequence) - Number(right.sequence));
+    const counts = new Map<number, number>();
+    const nativeLinearCommits = publications.map((published) => {
+      const publicationIndex = counts.get(published.workItem!) ?? 0;
+      counts.set(published.workItem!, publicationIndex + 1);
+      const validation = events.find(
+        (event) =>
+          event.event === "ValidationRecorded" &&
+          event.workItem === published.workItem &&
+          event.evidenceDigest === published.validationDigest,
+      )!;
+      const attempt = events.find(
+        (event) =>
+          event.event === "AttemptPublished" &&
+          event.workItem === published.workItem &&
+          event.headSha === published.headSha,
+      )!;
+      const identity = {
+        kind: publicationIndex === 0 ? "artifact" : "rebase",
+        runId: "run",
+        objective: 1,
+        workItem: published.workItem,
+        attempt: 1,
+        artifactDigest: attempt.artifactDigest,
+        baseSha: validation.baseSha,
+        outputTreeSha: validation.outputTreeSha,
+        evidenceDigest: validation.evidenceDigest,
+        ...(publicationIndex === 0 ? {} : { headSha: published.headSha }),
+      };
+      const identityDigest = hash(canonical(identity));
+      const reviewSequence = Number(validation.sequence) + 2;
+      const modelInvocationId = `review-${identityDigest}`;
+      events.push(
+        {
+          event: "BudgetReserved",
+          kind: "budget",
+          runId: "run",
+          objective: 1,
+          workItem: published.workItem!,
+          attempt: 1,
+          sequence: reviewSequence - 1,
+          phase: "management",
+          unit: "model_tokens",
+          usageId: `invocation-${modelInvocationId}`,
+          modelInvocationId,
+          amount: 0,
+          policyDigest: digest("a"),
+          directorEpoch: 1,
+        },
+        {
+          event: "BudgetReconciled",
+          kind: "budget",
+          runId: "run",
+          objective: 1,
+          workItem: published.workItem!,
+          attempt: 1,
+          sequence: reviewSequence,
+          phase: "management",
+          unit: "model_tokens",
+          usageId: `${publicationIndex === 0 ? "review" : "rebase-review"}-${identityDigest}`,
+          modelInvocationId,
+          amount: 3,
+          reportedModelUsage: { inputTokens: 2, outputTokens: 1, cachedInputTokens: 1 },
+          policyDigest: digest("a"),
+          directorEpoch: 1,
+        },
+        {
+          event: "AttemptValidated",
+          runId: "run",
+          objective: 1,
+          workItem: published.workItem!,
+          attempt: 1,
+          sequence: reviewSequence + 1,
+          artifactDigest: attempt.artifactDigest!,
+        },
+      );
+      return {
+        position: Number(published.position),
+        publicationIndex,
+        publicationSequence: published.sequence,
+        demand: { kind: "commit", oid: published.headSha },
+        commit: {
+          oid: published.headSha,
+          parentOids: [validation.baseSha],
+          treeOid: validation.outputTreeSha,
+          message: "durable fixture commit",
+        },
+        validation,
+      };
+    });
+    events.push({
+      event: "FactoryRunCompleted",
+      kind: "run",
+      runId: "run",
+      objective: 1,
+      sequence: 500,
+    });
+    const evidence = {
+      runResult: { runId: "run" },
+      nativeLinearCommits,
+      status: {
+        summary: {
+          economics: {
+            unresolvedModelInvocations: 0,
+            usage: { model_tokens: { value: 18 } },
+            modelTokenBreakdown: {
+              inputTokens: { tokens: { value: 12 } },
+              outputTokens: { tokens: { value: 6 } },
+              cachedInputTokens: { tokens: { value: 6 } },
+            },
+          },
+        },
+      },
+    };
+    expect(() => assertNativeLinearSettledPublicationProofs(evidence, events)).not.toThrow();
+    const missing = structuredClone(events).filter(
+      (event) => !(event.event === "AttemptValidated" && event.workItem === 4),
+    );
+    expect(() => assertNativeLinearSettledPublicationProofs(evidence, missing)).toThrow();
+    const wrongCounters = structuredClone(events);
+    wrongCounters.find((event) => event.reportedModelUsage !== undefined)!.reportedModelUsage = {
+      inputTokens: 2,
+      outputTokens: 2,
+      cachedInputTokens: 1,
+    };
+    expect(() => assertNativeLinearSettledPublicationProofs(evidence, wrongCounters)).toThrow();
   });
 
   it("rejects fresh-digest and fresh-usage restart duplicates outside all six generations", () => {
@@ -1802,6 +1939,7 @@ describe("native linear-stack installed matrix", () => {
       responseLost: true,
       progress: { workItem: 3, durableHeadSha: head("b") },
     });
+    expect(input.capturePreterminalProofs).toHaveBeenCalledTimes(1);
   });
 
   it("requests active cancellation once after durable partial native progress", async () => {
@@ -1820,6 +1958,7 @@ describe("native linear-stack installed matrix", () => {
       requested: true,
       responseLost: false,
     });
+    expect(input.capturePreterminalProofs).toHaveBeenCalledTimes(1);
   });
 
   it("selects the latest complete revalidation epoch for active cancellation", async () => {

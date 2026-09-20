@@ -16,6 +16,9 @@ export function observeNativeLinearProofs(
   read?: (demand: Record<string, unknown>) => Promise<Record<string, unknown>>,
   readMerge?: (expected: Record<string, unknown>) => Promise<Record<string, unknown>>,
 ): Promise<unknown[]>;
+export function observeNativeLinearSettledProofs(
+  input: Record<string, unknown>,
+): Promise<unknown[]>;
 export function assertNativeLinearHistory(events: unknown[]): unknown[];
 export function assertNativeIntegrationOperation(events: unknown[], groups?: unknown[]): string;
 export function assertNativeLinearFinalTree(
@@ -28,6 +31,12 @@ export function assertNativeLinearPublicationProofs(
   events: unknown[],
   groups?: unknown[],
 ): void;
+export function assertNativeLinearSettledPublicationProofs(
+  evidence: unknown,
+  events: unknown[],
+  groups?: unknown[],
+): unknown;
+export function assertNativeLinearPreterminalProof(evidence: unknown, events: unknown[]): unknown;
 export function assertNativeLinearCandidate(
   proof: Record<string, unknown>,
   events: unknown[],

@@ -308,12 +308,53 @@ function fixture(scenario = "scope") {
     },
     reserved,
     { ...reserved, event: "AttemptStarted", sequence: 4, providerResourceId: "thread-original" },
+    {
+      ...reserved,
+      kind: "budget",
+      event: "BudgetReserved",
+      sequence: 5,
+      phase: "execution",
+      unit: "model_tokens",
+      amount: 0,
+      usageId: "invocation-worker-8-1",
+      modelInvocationId: "worker-8-1",
+    },
+    {
+      ...reserved,
+      kind: "budget",
+      event: "BudgetReconciled",
+      sequence: 6,
+      phase: "execution",
+      unit: "model_tokens",
+      amount: 3,
+      usageId: "worker-8-1",
+      modelInvocationId: "worker-8-1",
+      reportedModelUsage: { inputTokens: 2, outputTokens: 1, cachedInputTokens: 1 },
+    },
     { ...reserved, event: "AttemptFailed", sequence: 8, reason },
     { ...common, kind: "run", event: "FactoryRunEscalated", sequence: 9 },
   ];
   const observe = () => ({
     receipts: events.map((event, index) => ({ event, commentId: index + 1, actorId: 41 })),
-    status: { run: { runId: common.runId, state: "escalated" } },
+    status: {
+      run: { runId: common.runId, state: "escalated" },
+      workItems: [{ number: 8, state: "failed" }],
+      summary: {
+        outcome: "escalated",
+        attempts: { total: 1, failed: 1 },
+        validation: { recorded: 0 },
+        delivery: { publications: 0, integrationsCompleted: 0 },
+        economics: {
+          unresolvedModelInvocations: 0,
+          usage: { model_tokens: { availability: "observed", value: 3 } },
+          modelTokenBreakdown: {
+            inputTokens: { tokens: { value: 2 } },
+            outputTokens: { tokens: { value: 1 } },
+            cachedInputTokens: { tokens: { value: 1 } },
+          },
+        },
+      },
+    },
   });
   const transferRef = `refs/clockgrove-factory/artifact-transfers/${hash(JSON.stringify(identity))}`;
   const retainedSymlink = (target = "../lfs/primary.bin") => {
@@ -387,7 +428,6 @@ function fixture(scenario = "scope") {
       [intent.head],
       message("ready"),
     );
-    events.push({ ...reserved, event: "AttemptSucceeded", sequence: 5, artifactDigest: digest });
   };
   return {
     context,
@@ -484,7 +524,7 @@ describe("installed large-file refusal ports (scripted Git/MCP contracts, no liv
     expect(JSON.stringify(h.context.evidence)).not.toContain("Q".repeat(40));
   });
   it.each(["scope", "secret"])(
-    "proves %s collection refusal and exact ref absence without claiming zero unreferenced uploads",
+    "proves %s collection refusal from settled receipts without reading retired refs",
     async (scenario) => {
       const f = fixture(scenario),
         result = await createLargeFileRefusalPorts(f.context, f.source).artifactRefusal(
@@ -495,13 +535,18 @@ describe("installed large-file refusal ports (scripted Git/MCP contracts, no liv
         boundary: "collection-before-retained-transfer",
         attempt: 1,
         uploadCount: null,
-        modelCalls: null,
-        transfer: {
-          intent: { ref: `${f.transferRef}/intent`, status: 404 },
-          ready: { ref: `${f.transferRef}/ready`, status: 404 },
+        modelCalls: 1,
+        model: {
+          calls: 1,
+          inputTokens: 2,
+          outputTokens: 1,
+          cachedInputTokens: 1,
+          totalTokens: 3,
+          unresolvedInvocations: 0,
         },
       });
       expect(f.invoke).not.toHaveBeenCalled();
+      expect(f.request).not.toHaveBeenCalled();
     },
   );
   it.each([
@@ -509,10 +554,9 @@ describe("installed large-file refusal ports (scripted Git/MCP contracts, no liv
     "publication",
     "authentication",
     "reason",
-    "broadened-packet",
-    "ready",
-    "unknown-read",
-    "authority-moved",
+    "missing-accounting",
+    "counter-mismatch",
+    "missing-worker",
   ])("refuses invalid %s evidence", async (fault) => {
     const f = fixture();
     if (fault === "duplicate") f.events.push({ ...f.events[2]!, attempt: 2, sequence: 10 });
@@ -523,39 +567,21 @@ describe("installed large-file refusal ports (scripted Git/MCP contracts, no liv
         event: "PublicationRecorded",
         sequence: 10,
       });
-    if (fault === "reason") f.events[4]!.reason = "provider crashed";
-    if (fault === "broadened-packet") {
-      f.session.packet.allowedPaths = [f.source.paths.prefix + "/"];
-      f.session.binding.packetDigest = hash(canonical(f.session.packet));
-      f.events[2]!.localScopeBatch!.identity.invocationDigest = f.session.binding.packetDigest;
-      f.checkpoint(f.sessionRef, ".clockgrove-factory/control/app-server-session.json", f.session, [
-        f.reservationOid,
-      ]);
-    }
-    if (fault === "ready") f.refs.set(`${f.transferRef}/ready`, f.reservationOid);
-    if (fault === "unknown-read") {
-      const original = f.request.getMockImplementation()!;
-      f.request.mockImplementation(async (route, args) => {
-        if (String(args.ref).endsWith("/intent"))
-          throw Object.assign(new Error("not authorized"), { status: 403 });
-        return original(route, args);
-      });
-    }
-    if (fault === "authority-moved") {
-      const original = f.request.getMockImplementation()!;
-      let canonicalReads = 0;
-      f.request.mockImplementation(async (route, args) => {
-        if (
-          route.endsWith("/git/ref/{ref}") &&
-          args.ref === "clockgrove-factory/admission/work-item-8" &&
-          ++canonicalReads > 2
-        ) {
-          const ref = `refs/${args.ref}`;
-          return { data: { ref, object: { type: "commit", sha: "9".repeat(40) } } };
-        }
-        return original(route, args);
-      });
-    }
+    if (fault === "reason")
+      f.events.find((event) => event.event === "AttemptFailed")!.reason = "provider crashed";
+    if (fault === "missing-accounting")
+      f.events.splice(
+        f.events.findIndex((event) => event.event === "BudgetReconciled"),
+        1,
+      );
+    if (fault === "counter-mismatch")
+      f.events.find((event) => event.event === "BudgetReconciled")!.reportedModelUsage = {
+        inputTokens: 2,
+        outputTokens: 2,
+        cachedInputTokens: 1,
+      };
+    if (fault === "missing-worker")
+      delete f.events.find((event) => event.event === "AttemptStarted")!.providerResourceId;
     const observation = f.observe();
     if (fault === "authentication") observation.receipts[0]!.actorId = 42;
     await expect(
@@ -565,15 +591,15 @@ describe("installed large-file refusal ports (scripted Git/MCP contracts, no liv
   });
   it("requires the captured GitHub-token guard rather than the generic credential fallback", async () => {
     const f = fixture("secret");
-    f.events[4]!.reason = "artifact content contains suspected credential bytes";
+    f.events.find((event) => event.event === "AttemptFailed")!.reason =
+      "artifact content contains suspected credential bytes";
     await expect(
       createLargeFileRefusalPorts(f.context, f.source).artifactRefusal(f.observe()),
     ).rejects.toThrow("different artifact boundary");
     expect(f.save).not.toHaveBeenCalled();
   });
-  it("retains and verifies raw symlink bytes without claiming filesystem materialization or zero Git writes", async () => {
+  it("proves symlink refusal after all disposable transfer refs have been retired", async () => {
     const f = fixture("symlink");
-    f.retainedSymlink();
     const result = await createLargeFileRefusalPorts(f.context, f.source).artifactRefusal(
       f.observe(),
     );
@@ -581,23 +607,26 @@ describe("installed large-file refusal ports (scripted Git/MCP contracts, no liv
       refused: true,
       boundary: "filesystem-materialization",
       uploadCount: null,
-      transfer: {
-        rawTarget: "../lfs/primary.bin",
-        mode: "120000",
-        mediaType: "application/octet-stream",
-        materialized: false,
-      },
+      reason:
+        "symlink artifacts support Git-object-only operations, not filesystem materialization",
+      modelCalls: 1,
     });
     expect(f.invoke).not.toHaveBeenCalled();
+    expect(f.request).not.toHaveBeenCalled();
   });
-  it("rejects a changed symlink target and any validation command completion", async () => {
+  it("rejects any success or validation receipt for refused output", async () => {
     const f = fixture("symlink");
-    f.retainedSymlink("../../foreign");
+    f.events.push({
+      ...f.events[2]!,
+      kind: "attempt",
+      event: "AttemptSucceeded",
+      sequence: 7,
+      artifactDigest: "f".repeat(64),
+    });
     await expect(
       createLargeFileRefusalPorts(f.context, f.source).artifactRefusal(f.observe()),
-    ).rejects.toThrow("raw target");
+    ).rejects.toThrow(/reached success/);
     const g = fixture("symlink");
-    g.retainedSymlink();
     g.events.push({
       ...g.events[2]!,
       kind: "validation",
@@ -607,6 +636,6 @@ describe("installed large-file refusal ports (scripted Git/MCP contracts, no liv
     });
     await expect(
       createLargeFileRefusalPorts(g.context, g.source).artifactRefusal(g.observe()),
-    ).rejects.toThrow("validation command completion");
+    ).rejects.toThrow(/validation/);
   });
 });

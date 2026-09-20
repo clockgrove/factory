@@ -5,6 +5,7 @@ import {
   assertInnerDirectorCollision,
   assertPhaseKillRecovery,
   assertResourceCeilingEvidence,
+  directorContentionResponseRecord,
 } from "../scripts/qualification-director-contention.mjs";
 
 const policyDigest = "a".repeat(64);
@@ -19,15 +20,8 @@ const canonical = (value: unknown): string =>
           .join(",")}}`
       : JSON.stringify(value);
 const digest = (value: unknown) => createHash("sha256").update(canonical(value)).digest("hex");
-const responseProof = (clientInvocationId: string, response: Record<string, unknown>) => {
-  const bytes = Buffer.from(JSON.stringify(response));
-  return {
-    clientInvocationId,
-    response,
-    responseBytes: bytes.length,
-    responseSha256: createHash("sha256").update(bytes).digest("hex"),
-  };
-};
+const responseProof = (clientInvocationId: string, response: Record<string, unknown>) =>
+  directorContentionResponseRecord(clientInvocationId, response);
 
 function modelEvents(runId = "run-7", workItem = 11, sequence = 3) {
   const common = {
@@ -164,7 +158,6 @@ function collision() {
     ],
     responses: [
       responseProof("client-a", {
-        isError: false,
         content: [
           {
             type: "text",
@@ -384,6 +377,38 @@ describe("inner Director qualification assertions", () => {
       winner: "client-a",
       loser: "client-b",
     });
+  });
+
+  it("binds a production success without isError to its exact noncanonical JSON bytes", () => {
+    const value = collision();
+    const response = {
+      structuredContent: { status: "completed" },
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ objective: 7, runId: "run-7", status: "completed" }),
+        },
+      ],
+    };
+    const record = directorContentionResponseRecord("client-a", response);
+    expect(record.responseSha256).toBe(
+      createHash("sha256").update(JSON.stringify(response)).digest("hex"),
+    );
+    expect(record.responseSha256).not.toBe(digest(response));
+    value.responses[0] = record;
+    expect(assertInnerDirectorCollision(value)).toMatchObject({
+      winner: "client-a",
+      winnerResponseSha256: record.responseSha256,
+    });
+
+    const refused = collision();
+    refused.responses[0] = directorContentionResponseRecord("client-a", {
+      isError: true,
+      content: [{ type: "text", text: "unexpected refusal" }],
+    });
+    expect(() => assertInnerDirectorCollision(refused)).toThrow(
+      /winning contender returned an error/,
+    );
   });
 
   it("rejects duplicate winners, duplicate admission, and absent peer progress", () => {

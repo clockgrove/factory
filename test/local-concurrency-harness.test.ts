@@ -25,6 +25,7 @@ import {
   verifyConcurrencyArtifacts,
   type ConcurrencyPort,
 } from "../scripts/verify-local-concurrency.mjs";
+import { directorContentionResponseRecord } from "../scripts/qualification-director-contention.mjs";
 import { qualificationPaths } from "../scripts/verify-live-objective.mjs";
 
 const repository = "example/disposable";
@@ -2044,19 +2045,9 @@ describe("bounded existing installed-controller composition", () => {
   });
   it("retains retired contender response and lease authority through final cleanup", async () => {
     const f = scenarioPort();
-    const record = (clientInvocationId: string, response: Record<string, unknown>) => {
-      const bytes = Buffer.from(JSON.stringify(response));
-      return {
-        clientInvocationId,
-        response,
-        responseBytes: bytes.length,
-        responseSha256: createHash("sha256").update(bytes).digest("hex"),
-      };
-    };
     const collision = {
       responses: [
-        record("winner", {
-          isError: false,
+        directorContentionResponseRecord("winner", {
           content: [
             {
               type: "text",
@@ -2064,7 +2055,7 @@ describe("bounded existing installed-controller composition", () => {
             },
           ],
         }),
-        record("loser", {
+        directorContentionResponseRecord("loser", {
           isError: true,
           content: [{ type: "text", text: "another Director won lease acquisition" }],
         }),

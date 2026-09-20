@@ -7,7 +7,6 @@ const hash = (value) =>
     .update(typeof value === "string" ? value : canonical(value))
     .digest("hex");
 const responseBytes = (value) => Buffer.from(JSON.stringify(value));
-const responseHash = (value) => createHash("sha256").update(responseBytes(value)).digest("hex");
 
 const canonical = (value) =>
   Array.isArray(value)
@@ -41,6 +40,22 @@ const pathsOverlap = (left, right) =>
 
 function assertDistinct(values, reason) {
   assert.equal(new Set(values).size, values.length, reason);
+}
+
+/** Capture the exact bounded JSON bytes later replayed by the collision proof. */
+export function directorContentionResponseRecord(clientInvocationId, response) {
+  assert.ok(
+    typeof clientInvocationId === "string" && clientInvocationId.length > 0,
+    "contender response identity unavailable",
+  );
+  const bytes = responseBytes(response);
+  assert.ok(bytes.length > 0 && bytes.length <= 65536, "contender response is unbounded");
+  return {
+    clientInvocationId,
+    response,
+    responseBytes: bytes.length,
+    responseSha256: createHash("sha256").update(bytes).digest("hex"),
+  };
 }
 
 function assertAccounting(events) {
@@ -102,14 +117,13 @@ export function assertInnerDirectorCollision(input) {
     "contender responses do not match the owned processes",
   );
   for (const record of input.responses) {
-    const bytes = responseBytes(record.response);
-    assert.ok(bytes.length > 0 && bytes.length <= 65536, "contender response is unbounded");
-    assert.equal(record.responseBytes, bytes.length, "contender response byte count changed");
+    const captured = directorContentionResponseRecord(record.clientInvocationId, record.response);
     assert.equal(
-      record.responseSha256,
-      responseHash(record.response),
-      "contender response changed",
+      record.responseBytes,
+      captured.responseBytes,
+      "contender response byte count changed",
     );
+    assert.equal(record.responseSha256, captured.responseSha256, "contender response changed");
   }
   const winnerResponse = one(
       input.responses.filter((entry) => entry.clientInvocationId === winner.clientInvocationId),
@@ -119,7 +133,7 @@ export function assertInnerDirectorCollision(input) {
       input.responses.filter((entry) => entry.clientInvocationId === loser.clientInvocationId),
       "losing contender response missing",
     );
-  assert.equal(winnerResponse.response.isError, false, "winning contender returned an error");
+  assert.notEqual(winnerResponse.response.isError, true, "winning contender returned an error");
   assert.ok(
     Array.isArray(winnerResponse.response.content),
     "winning contender response content unavailable",

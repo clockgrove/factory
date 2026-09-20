@@ -25,6 +25,7 @@ import {
   assertExplainReplayEvidence,
   assertInnerDirectorCollision,
   assertResourceCeilingEvidence,
+  directorContentionResponseRecord,
 } from "./qualification-director-contention.mjs";
 import {
   installedBundleIdentity,
@@ -1900,18 +1901,10 @@ export async function main(env = process.env, run = checkpointMain) {
                     "inner collision response loss is ambiguous; retain the repository without retry or cleanup",
                   );
                   return results.map((result, index) => {
-                    const response = structuredClone(result.value),
-                      bytes = Buffer.from(JSON.stringify(response));
-                    assert.ok(
-                      bytes.length > 0 && bytes.length <= 65536,
-                      "contender response is unbounded",
+                    return directorContentionResponseRecord(
+                      contenders[index].clientInvocationId,
+                      structuredClone(result.value),
                     );
-                    return {
-                      clientInvocationId: contenders[index].clientInvocationId,
-                      response,
-                      responseBytes: bytes.length,
-                      responseSha256: hash(response),
-                    };
                   });
                 });
                 evidence.directorContention.collision.responses = responseRecords;
@@ -1920,11 +1913,11 @@ export async function main(env = process.env, run = checkpointMain) {
                 save();
                 responseProof = await withQualificationStage("director-response-parsing", () => {
                   const winnerIndex = responseRecords.findIndex(
-                    (record) => record.response.isError === false,
+                    (record) => record.response.isError !== true,
                   );
                   assert.ok(winnerIndex >= 0, "inner collision has no completed winner");
                   assert.equal(
-                    responseRecords.filter((record) => record.response.isError === false).length,
+                    responseRecords.filter((record) => record.response.isError !== true).length,
                     1,
                     "inner collision produced multiple winners",
                   );

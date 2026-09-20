@@ -41,6 +41,13 @@ const minimumGitHubQuota = 1_000;
 const minimumModelTokens = 250_000;
 const maximumModelTokens = 500_000;
 const maximumConcurrencyModelTokens = 750_000;
+const qualificationCompilerEvaluation = Object.freeze({
+  mode: "auto-repair",
+  maxRepairs: 2,
+  maxInvocations: 7,
+  timeoutSeconds: 600,
+  maxObservedTokens: 500_000,
+});
 const namespacePattern = /^[a-z](?:[a-z0-9-]{6,46}[a-z0-9])$/;
 
 export function qualificationNamespace(value, generate = randomUUID) {
@@ -399,6 +406,7 @@ export function boundedPolicy(
     maxManagedAgentSessions: 0,
     trust: "explicitly_activated_repo",
     managementBackend: "codex-cli/local",
+    compilerEvaluation: { ...qualificationCompilerEvaluation },
     allowedNetworkDestinations: ["api.openai.com"],
     gitLfsOutputNetworkDestinations: [],
     compilerMediaEgress: {

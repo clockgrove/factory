@@ -106,6 +106,17 @@ async function continuationRead(stage, field, invariant, operation) {
   }
 }
 
+export async function withAppServerCheckpointDiagnostic(stage, field, invariant, operation) {
+  assert.ok(continuationStages.has(stage), "unsupported App Server diagnostic stage");
+  assert.equal(field, "settledDelivery", "unsupported App Server diagnostic field");
+  assert.equal(
+    invariant,
+    "authenticated-settlement",
+    "unsupported App Server diagnostic invariant",
+  );
+  return continuationRead(stage, field, invariant, operation);
+}
+
 function admissionContinuation(proof, reserved, stage) {
   if (proof.reservationAuthority.source !== "issue-admission") return undefined;
   const commits = continuationAssertion(

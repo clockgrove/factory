@@ -31,9 +31,16 @@ export function appServerCheckpointContinuationFailureContext(error: unknown):
         | "authenticated-authority"
         | "authority-descendant"
         | "authority-revision"
-        | "authority-transition";
+        | "authority-transition"
+        | "authenticated-settlement";
     }
   | undefined;
+export function withAppServerCheckpointDiagnostic<T>(
+  stage: "checkpoint" | "post-takeover" | "final",
+  field: "settledDelivery",
+  invariant: "authenticated-settlement",
+  operation: () => T | Promise<T>,
+): Promise<T>;
 export function observeAppServerCheckpoints(
   request: (route: string, args: Record<string, unknown>) => Promise<unknown>,
   observation: unknown,

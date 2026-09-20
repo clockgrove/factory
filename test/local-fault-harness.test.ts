@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assessLocalFault,
   assertFaultControllerAuthority,
+  assertInstalledFaultControllerAuthority,
   assertFaultAuthenticationEnvironment,
   faultRequest,
   faultTerminalReady,
@@ -171,6 +172,71 @@ describe("local fault controller authority", () => {
       mutateObjective();
     }).toThrow();
     expect(mutateObjective).not.toHaveBeenCalled();
+  });
+
+  it("admits the receipt-bound npm controller and rejects an unlisted same-digest path", () => {
+    const receiptIdentity = `sha256:${"e".repeat(64)}`;
+    const npmBundle = "/retained/npm/dist/factory.js";
+    const pluginBundle = "/retained/plugin/dist/factory.js";
+    const surfaces: Array<{
+      surface: "npm" | "plugin-cache";
+      path: string;
+      sha256: string;
+      installReceiptIdentity: string;
+    }> = [
+      {
+        surface: "npm",
+        path: npmBundle,
+        sha256: "a".repeat(64),
+        installReceiptIdentity: receiptIdentity,
+      },
+      {
+        surface: "plugin-cache",
+        path: pluginBundle,
+        sha256: "a".repeat(64),
+        installReceiptIdentity: receiptIdentity,
+      },
+    ];
+    const argv = [expected.launcher, npmBundle, ...expected.runningArgv.slice(2)];
+    expect(
+      assertInstalledFaultControllerAuthority(
+        { ...status, unit: "factory.service" },
+        {
+          artifactIdentity,
+          installReceiptIdentity: receiptIdentity,
+          factoryBundleSurfaces: surfaces,
+          repository: expected.repository,
+          checkout: expected.checkout,
+        },
+        {
+          pid: () => 123,
+          argv: () => argv,
+          bundle: () => ({ path: npmBundle, sha256: "a".repeat(64) }),
+        },
+      ),
+    ).toMatchObject({
+      pid: 123,
+      installSurface: "npm",
+      authenticatedDigest: artifactIdentity,
+      expectedReceiptIdentity: receiptIdentity,
+    });
+    expect(() =>
+      assertInstalledFaultControllerAuthority(
+        { ...status, unit: "factory.service" },
+        {
+          artifactIdentity,
+          installReceiptIdentity: receiptIdentity,
+          factoryBundleSurfaces: surfaces,
+          repository: expected.repository,
+          checkout: expected.checkout,
+        },
+        {
+          pid: () => 123,
+          argv: () => [expected.launcher, "/unlisted/factory.js", ...expected.runningArgv.slice(2)],
+          bundle: () => ({ path: "/unlisted/factory.js", sha256: "a".repeat(64) }),
+        },
+      ),
+    ).toThrow(/outside retained install surfaces/);
   });
 });
 

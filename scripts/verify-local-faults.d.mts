@@ -76,6 +76,37 @@ export function assertFaultControllerAuthority(
     runningArgv: string[];
   },
 ): void;
+export function assertInstalledFaultControllerAuthority(
+  controller: Record<string, unknown>,
+  authority: {
+    artifactIdentity: string;
+    installReceiptIdentity: string;
+    factoryBundleSurfaces: Array<{
+      surface: "npm" | "plugin-cache";
+      path: string;
+      sha256: string;
+      installReceiptIdentity: string;
+    }>;
+    repository: string;
+    checkout: string;
+  },
+  port?: {
+    pid(unit: string): number;
+    argv(pid: number): string[];
+    bundle(path: string): { path: string; sha256: string };
+  },
+): {
+  pid: number;
+  artifactIdentity: string;
+  launcher: string;
+  bundle: string;
+  repository: string;
+  checkout: string;
+  runningArgv: string[];
+  installSurface: "npm" | "plugin-cache";
+  authenticatedDigest: string;
+  expectedReceiptIdentity: string;
+};
 export function runQualification(
   progress: {
     phase(value: string): void;

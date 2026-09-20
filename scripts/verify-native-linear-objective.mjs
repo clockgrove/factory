@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -30,7 +30,10 @@ import {
   isQualificationModelMarker,
   qualificationModelAccounting,
 } from "./qualification-model-accounting.mjs";
-import { assertFaultControllerAuthority, parseUnitObservation } from "./verify-local-faults.mjs";
+import {
+  assertInstalledFaultControllerAuthority,
+  parseUnitObservation,
+} from "./verify-local-faults.mjs";
 
 const scope = "installed-local-native-linear-stack";
 const cases = new Set(["cascade", "response-loss-restart", "active-cancellation"]);
@@ -266,73 +269,20 @@ function observeSentinelUnit(unit, port) {
   );
 }
 
-function controllerProcessPort() {
-  return {
-    pid: (unit) =>
-      Number(command("systemctl", ["--user", "show", unit, "--property=MainPID", "--value"])),
-    argv: (pid) => readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean),
-    bundle: (path) => {
-      const canonical = realpathSync(path);
-      return {
-        path: canonical,
-        sha256: createHash("sha256").update(readFileSync(canonical)).digest("hex"),
-      };
-    },
-  };
-}
-
-export function assertNativeLinearControllerAuthority(
-  controller,
-  evidence,
-  checkout,
-  port = controllerProcessPort(),
-) {
+export function assertNativeLinearControllerAuthority(controller, evidence, checkout, port) {
   const candidate = evidence.installedCandidate;
   assert.ok(candidate, "retained installed candidate authority is unavailable");
-  const pid = port.pid(controller.unit);
-  assert.ok(Number.isSafeInteger(pid) && pid > 0, "active controller PID unavailable");
-  const runningArgv = port.argv(pid);
-  const surfaces = candidate.artifactAuthority?.factoryBundleSurfaces;
-  assert.ok(Array.isArray(surfaces) && surfaces.length === 2, "controller surfaces unavailable");
-  assert.deepEqual(
-    surfaces.map(({ surface }) => surface).sort(),
-    ["npm", "plugin-cache"],
-    "controller install surfaces differ",
+  return assertInstalledFaultControllerAuthority(
+    controller,
+    {
+      artifactIdentity: candidate.factoryArtifactIdentity,
+      installReceiptIdentity: candidate.installReceiptIdentity,
+      factoryBundleSurfaces: candidate.artifactAuthority?.factoryBundleSurfaces,
+      repository: evidence.repository,
+      checkout,
+    },
+    port,
   );
-  assert.match(candidate.installReceiptIdentity ?? "", /^sha256:[a-f0-9]{64}$/);
-  assert.match(candidate.factoryArtifactIdentity ?? "", /^sha256:[a-f0-9]{64}$/);
-  const expectedDigest = candidate.factoryArtifactIdentity.slice("sha256:".length);
-  for (const surface of surfaces) {
-    assert.ok(surface.path.startsWith("/"), "controller surface path must be absolute");
-    assert.equal(surface.sha256, expectedDigest, "controller surface digest differs");
-    assert.equal(
-      surface.installReceiptIdentity,
-      candidate.installReceiptIdentity,
-      "controller surface receipt differs",
-    );
-  }
-  assert.ok(Array.isArray(runningArgv) && runningArgv.length === 9, "controller argv differs");
-  const observedBundle = port.bundle(runningArgv[1]);
-  const matches = surfaces.filter((surface) => surface.path === observedBundle.path);
-  assert.equal(matches.length, 1, "running controller bundle is outside retained install surfaces");
-  const selected = matches[0];
-  assert.equal(observedBundle.sha256, selected.sha256, "running controller bundle digest differs");
-  const authority = {
-    artifactIdentity: candidate.factoryArtifactIdentity,
-    launcher: realpathSync(process.execPath),
-    bundle: selected.path,
-    repository: evidence.repository,
-    checkout,
-    runningArgv,
-  };
-  assertFaultControllerAuthority(controller, authority);
-  return {
-    pid,
-    ...authority,
-    installSurface: selected.surface,
-    authenticatedDigest: `sha256:${observedBundle.sha256}`,
-    expectedReceiptIdentity: candidate.installReceiptIdentity,
-  };
 }
 
 export function startNativeLinearSentinel(port = systemdPort()) {

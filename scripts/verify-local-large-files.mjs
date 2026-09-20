@@ -32,7 +32,9 @@ import {
   LARGE_FILE_RECIPE_VERSION,
   LARGE_FILE_VALIDATION_COMMAND,
   LARGE_FILE_VALIDATION_SCRIPT,
+  assessLargeFileExecutionPreflight,
   largeFileObjectiveBody,
+  largeFileRefusalObjectiveBody,
   producedLfsObjectiveBody,
   largeFileValidationRecipe,
   observeLargeFilePatch,
@@ -414,21 +416,14 @@ function checkedFixture(authority) {
 }
 
 function objectiveBody(authority) {
-  const fixture = checkedFixture(authority);
+  checkedFixture(authority);
   const scenario = authority.largeFile.scenario;
   let body =
     scenario === "produced-lfs-restart"
       ? producedLfsObjectiveBody(authority.namespace)
       : largeFileObjectiveBody(authority.namespace);
   if (["scope", "secret", "symlink"].includes(scenario)) {
-    body =
-      `Exercise the committed bounded negative-artifact fixture for ${scenario}. ` +
-      `Create exactly one Work Item, with no dependencies, which invokes node ${fixture.paths.recipe} ${scenario}. ` +
-      `Do not alter the recipe, baseline test, attributes or LFS pointers. ` +
-      `Allowed output path is only ${fixture.paths.payload}. Do not repair or normalize the deliberately invalid fixture output. ` +
-      `This is synthetic qualification content, not a real credential or an authorization to change any other path. ` +
-      `Validation command: ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest entry point. ` +
-      `Factory is expected to reject the produced artifact; do not fabricate a successful artifact or change the acceptance boundary.\n`;
+    body = largeFileRefusalObjectiveBody(authority.namespace, scenario);
   }
   return `${body}\n${qualificationNamespaceMarker(authority.namespace)}\n`;
 }
@@ -904,6 +899,17 @@ export function largeFileExtension(authority) {
     objectiveBody,
     preflight(context) {
       context.evidence.largeFileStage = "baseline-preflight";
+      if (authority.largeFile.scenario === "symlink") {
+        assert.deepEqual(authority.policy.backendOrder, ["codex-app-server/local-worktree"]);
+        const execution = assessLargeFileExecutionPreflight({
+          scenario: "symlink",
+          trust: "trusted_local",
+          routes: [{ id: "codex-app-server/local-worktree", isolation: "process" }],
+        });
+        context.evidence.largeFileExecutionPreflight = execution;
+        context.save();
+        assert.equal(execution.result, "passed", JSON.stringify(execution.violations));
+      }
       context.save();
       fixture = verifyBaseline(context);
       context.evidence.largeFileStage = "preflight-complete";

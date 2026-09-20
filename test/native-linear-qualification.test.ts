@@ -574,8 +574,10 @@ describe("native linear-stack installed matrix", () => {
   });
 
   it("binds controller status and exact running argv to the retained candidate", () => {
-    const pluginRoot = process.cwd();
     const artifactIdentity = `sha256:${digest("a")}`;
+    const receiptIdentity = `sha256:${digest("e")}`;
+    const npmBundle = "/retained/npm/dist/factory.js";
+    const pluginBundle = "/retained/plugin/dist/factory.js";
     const controller = {
       unit: "factory.service",
       installed: true,
@@ -590,7 +592,7 @@ describe("native linear-stack installed matrix", () => {
     const checkout = "/home/operator/project";
     const expectedArgv = [
       process.execPath,
-      `${pluginRoot}/dist/factory.js`,
+      npmBundle,
       "controller",
       "run",
       "example/fixture",
@@ -599,25 +601,82 @@ describe("native linear-stack installed matrix", () => {
       "--executable-identity",
       artifactIdentity,
     ];
+    const argvWithBundle = (bundle: string) =>
+      expectedArgv.map((value, index) => (index === 1 ? bundle : value));
     const evidence = {
       repository: "example/fixture",
       installedCandidate: {
         factoryArtifactIdentity: artifactIdentity,
-        artifactAuthority: { pluginRoot },
+        installReceiptIdentity: receiptIdentity,
+        artifactAuthority: {
+          factoryBundleSurfaces: [
+            {
+              surface: "npm",
+              path: npmBundle,
+              sha256: digest("a"),
+              installReceiptIdentity: receiptIdentity,
+            },
+            {
+              surface: "plugin-cache",
+              path: pluginBundle,
+              sha256: digest("a"),
+              installReceiptIdentity: receiptIdentity,
+            },
+          ],
+        },
       },
     };
     expect(
       assertNativeLinearControllerAuthority(controller, evidence, checkout, {
         pid: () => 123,
         argv: () => expectedArgv,
+        bundle: () => ({ path: npmBundle, sha256: digest("a") }),
       }),
-    ).toMatchObject({ pid: 123, artifactIdentity });
+    ).toMatchObject({
+      pid: 123,
+      artifactIdentity,
+      installSurface: "npm",
+      authenticatedDigest: artifactIdentity,
+      expectedReceiptIdentity: receiptIdentity,
+    });
+    expect(
+      assertNativeLinearControllerAuthority(controller, evidence, checkout, {
+        pid: () => 123,
+        argv: () => argvWithBundle(pluginBundle),
+        bundle: () => ({ path: pluginBundle, sha256: digest("a") }),
+      }),
+    ).toMatchObject({ installSurface: "plugin-cache" });
     expect(() =>
       assertNativeLinearControllerAuthority(controller, evidence, checkout, {
         pid: () => 123,
         argv: () => [...expectedArgv.slice(0, -1), `sha256:${digest("b")}`],
+        bundle: () => ({ path: npmBundle, sha256: digest("a") }),
       }),
     ).toThrow();
+    expect(() =>
+      assertNativeLinearControllerAuthority(controller, evidence, checkout, {
+        pid: () => 123,
+        argv: () => argvWithBundle("/unbound/dist/factory.js"),
+        bundle: () => ({ path: "/unbound/dist/factory.js", sha256: digest("a") }),
+      }),
+    ).toThrow(/outside retained install surfaces/);
+    expect(() =>
+      assertNativeLinearControllerAuthority(controller, evidence, checkout, {
+        pid: () => 123,
+        argv: () => expectedArgv,
+        bundle: () => ({ path: npmBundle, sha256: digest("b") }),
+      }),
+    ).toThrow(/digest differs/);
+    const staleReceipt = structuredClone(evidence);
+    staleReceipt.installedCandidate.artifactAuthority
+      .factoryBundleSurfaces[0]!.installReceiptIdentity = `sha256:${digest("f")}`;
+    expect(() =>
+      assertNativeLinearControllerAuthority(controller, staleReceipt, checkout, {
+        pid: () => 123,
+        argv: () => expectedArgv,
+        bundle: () => ({ path: npmBundle, sha256: digest("a") }),
+      }),
+    ).toThrow(/receipt differs/);
   });
 
   it.each(["", "other", "native-unavailable"])(

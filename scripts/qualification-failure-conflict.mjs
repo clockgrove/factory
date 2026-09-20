@@ -45,7 +45,7 @@ export function failureFixture(namespace, scenario) {
     files,
     output,
     competing: "operator\n",
-    validationCommand: `node --test ${paths.test}`,
+    validationCommand: "npm test",
     recipeCommand: `node ${paths.recipe}`,
   };
 }
@@ -57,7 +57,7 @@ export function failureObjectiveBody(namespace, scenario) {
     `Create exactly one Work Item, with no dependencies, to run the existing committed command \`${fixture.recipeCommand}\`. ` +
     `The only allowed write path is \`${fixture.paths.payload}\`; its exact resulting bytes must be ${JSON.stringify(fixture.output)}. ` +
     `Do not edit the recipe, test, package scripts, or any other file. Do not repair intentional qualification failures. ` +
-    `The independent validation plan must contain exactly \`${fixture.validationCommand}\`. ` +
+    `The independent validation plan must contain exactly \`${fixture.validationCommand}\`, the repository-observed package validation recipe. ` +
     `This is an explicitly authorized negative fixture: ${scenario === "failed-validation" ? "the unchanged validation must fail, and Factory must refuse publication" : "the completed worker output will be retained before an independently authorized competing trunk edit"}. ` +
     `Do not publish, merge, call Factory tools, or change GitHub settings.\n`
   );

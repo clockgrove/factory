@@ -261,9 +261,14 @@ PATH without `git-lfs`; missing-object preparation leaves a named synthetic cach
 that new fixture only. Do not uninstall host tools or remove production content. These cases invoke
 explicit compilation without starting the controller and require the pre-model LFS correction.
 Other cases use a real worker to produce the committed scope, synthetic-secret or symlink output.
-Scope/secret cases require collection refusal; symlink handling may retain raw Git objects but must
-refuse filesystem materialization before validation commands or publication. Ref absence does not
-prove zero unreferenced uploads, and a refusal alone does not prove zero model usage.
+Scope/secret cases require collection refusal. Symlink handling may retain raw Git objects, but it
+must refuse filesystem materialization before validation commands or publication. The committed
+synthetic symlink fixture declares `trusted_local` execution. The qualifier records a structured
+preflight proving that the pinned execution route satisfies that trust requirement before it creates
+an Objective or invokes a model. This does not weaken the production backend's isolation capability
+or the artifact materialization refusal.
+Ref absence does not prove zero unreferenced uploads, and a refusal alone does not prove zero model
+usage.
 
 Failure preserves private evidence and stops automatic progression. There is no automatic retry,
 new allowance, fixture publication, controller cleanup or retirement of audit refs. Inspect exact

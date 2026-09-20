@@ -903,6 +903,7 @@ export async function runQualification(
       qualificationRoot: candidate.qualificationRoot,
       pluginRoot,
       codexHome: candidate.codexHome,
+      factoryBundleSurfaces: candidate.factoryBundleSurfaces,
     },
     providerRuntime: {
       home: runtimeEnvironment.HOME,

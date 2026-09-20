@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   assessLocalFault,
@@ -197,7 +197,8 @@ describe("local fault controller authority", () => {
         installReceiptIdentity: receiptIdentity,
       },
     ];
-    const argv = [expected.launcher, npmBundle, ...expected.runningArgv.slice(2)];
+    const launcher = realpathSync(process.execPath);
+    const argv = [launcher, npmBundle, ...expected.runningArgv.slice(2)];
     expect(
       assertInstalledFaultControllerAuthority(
         { ...status, unit: "factory.service" },
@@ -211,6 +212,7 @@ describe("local fault controller authority", () => {
         {
           pid: () => 123,
           argv: () => argv,
+          launcher: (path) => realpathSync(path),
           bundle: () => ({ path: npmBundle, sha256: "a".repeat(64) }),
         },
       ),
@@ -232,11 +234,64 @@ describe("local fault controller authority", () => {
         },
         {
           pid: () => 123,
-          argv: () => [expected.launcher, "/unlisted/factory.js", ...expected.runningArgv.slice(2)],
+          argv: () => [launcher, "/unlisted/factory.js", ...expected.runningArgv.slice(2)],
+          launcher: (path) => realpathSync(path),
           bundle: () => ({ path: "/unlisted/factory.js", sha256: "a".repeat(64) }),
         },
       ),
     ).toThrow(/outside retained install surfaces/);
+  });
+
+  it("accepts a launcher symlink only when it resolves to the current executable", () => {
+    const root = mkdtempSync("/tmp/factory-controller-launcher-");
+    const linkedLauncher = `${root}/node`;
+    const receiptIdentity = `sha256:${"e".repeat(64)}`;
+    const npmBundle = "/retained/npm/dist/factory.js";
+    symlinkSync(process.execPath, linkedLauncher);
+    try {
+      const authority = {
+        artifactIdentity,
+        installReceiptIdentity: receiptIdentity,
+        factoryBundleSurfaces: [
+          {
+            surface: "npm" as const,
+            path: npmBundle,
+            sha256: "a".repeat(64),
+            installReceiptIdentity: receiptIdentity,
+          },
+          {
+            surface: "plugin-cache" as const,
+            path: "/retained/plugin/dist/factory.js",
+            sha256: "a".repeat(64),
+            installReceiptIdentity: receiptIdentity,
+          },
+        ],
+        repository: expected.repository,
+        checkout: expected.checkout,
+      };
+      const argv = [linkedLauncher, npmBundle, ...expected.runningArgv.slice(2)];
+      expect(
+        assertInstalledFaultControllerAuthority({ ...status, unit: "factory.service" }, authority, {
+          pid: () => 123,
+          argv: () => argv,
+          launcher: (path) => realpathSync(path),
+          bundle: () => ({ path: npmBundle, sha256: "a".repeat(64) }),
+        }),
+      ).toMatchObject({
+        launcher: realpathSync(process.execPath),
+        observedLauncher: linkedLauncher,
+      });
+      expect(() =>
+        assertInstalledFaultControllerAuthority({ ...status, unit: "factory.service" }, authority, {
+          pid: () => 123,
+          argv: () => argv,
+          launcher: () => "/unrelated/node",
+          bundle: () => ({ path: npmBundle, sha256: "a".repeat(64) }),
+        }),
+      ).toThrow(/launcher identity differs/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

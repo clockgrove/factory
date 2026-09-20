@@ -93,6 +93,7 @@ export function assertInstalledFaultControllerAuthority(
   port?: {
     pid(unit: string): number;
     argv(pid: number): string[];
+    launcher(path: string): string;
     bundle(path: string): { path: string; sha256: string };
   },
 ): {
@@ -106,6 +107,7 @@ export function assertInstalledFaultControllerAuthority(
   installSurface: "npm" | "plugin-cache";
   authenticatedDigest: string;
   expectedReceiptIdentity: string;
+  observedLauncher: string;
 };
 export function runQualification(
   progress: {

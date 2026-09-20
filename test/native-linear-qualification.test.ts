@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   assertNativeControllerTakeover,
@@ -630,6 +631,7 @@ describe("native linear-stack installed matrix", () => {
       assertNativeLinearControllerAuthority(controller, evidence, checkout, {
         pid: () => 123,
         argv: () => expectedArgv,
+        launcher: () => realpathSync(process.execPath),
         bundle: () => ({ path: npmBundle, sha256: digest("a") }),
       }),
     ).toMatchObject({
@@ -643,6 +645,7 @@ describe("native linear-stack installed matrix", () => {
       assertNativeLinearControllerAuthority(controller, evidence, checkout, {
         pid: () => 123,
         argv: () => argvWithBundle(pluginBundle),
+        launcher: () => realpathSync(process.execPath),
         bundle: () => ({ path: pluginBundle, sha256: digest("a") }),
       }),
     ).toMatchObject({ installSurface: "plugin-cache" });
@@ -650,6 +653,7 @@ describe("native linear-stack installed matrix", () => {
       assertNativeLinearControllerAuthority(controller, evidence, checkout, {
         pid: () => 123,
         argv: () => [...expectedArgv.slice(0, -1), `sha256:${digest("b")}`],
+        launcher: () => realpathSync(process.execPath),
         bundle: () => ({ path: npmBundle, sha256: digest("a") }),
       }),
     ).toThrow();
@@ -657,6 +661,7 @@ describe("native linear-stack installed matrix", () => {
       assertNativeLinearControllerAuthority(controller, evidence, checkout, {
         pid: () => 123,
         argv: () => argvWithBundle("/unbound/dist/factory.js"),
+        launcher: () => realpathSync(process.execPath),
         bundle: () => ({ path: "/unbound/dist/factory.js", sha256: digest("a") }),
       }),
     ).toThrow(/outside retained install surfaces/);
@@ -664,6 +669,7 @@ describe("native linear-stack installed matrix", () => {
       assertNativeLinearControllerAuthority(controller, evidence, checkout, {
         pid: () => 123,
         argv: () => expectedArgv,
+        launcher: () => realpathSync(process.execPath),
         bundle: () => ({ path: npmBundle, sha256: digest("b") }),
       }),
     ).toThrow(/digest differs/);
@@ -674,6 +680,7 @@ describe("native linear-stack installed matrix", () => {
       assertNativeLinearControllerAuthority(controller, staleReceipt, checkout, {
         pid: () => 123,
         argv: () => expectedArgv,
+        launcher: () => realpathSync(process.execPath),
         bundle: () => ({ path: npmBundle, sha256: digest("a") }),
       }),
     ).toThrow(/receipt differs/);

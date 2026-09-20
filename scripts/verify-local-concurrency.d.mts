@@ -20,7 +20,11 @@ export function directorContentionObjectiveBody(
   sharedResource: string,
 ): string;
 export function concurrencyRefill(pair: unknown[]): Record<string, unknown> | null;
-export function concurrencyReceiptProgress(phase: string, pair: unknown[]): boolean;
+export function concurrencyReceiptProgress(
+  phase: string,
+  pair: unknown[],
+  accept?: (pair: unknown[]) => boolean,
+): boolean;
 export function qualifyConcurrencyAttempts(
   events: unknown[],
   backendOrder: string[],

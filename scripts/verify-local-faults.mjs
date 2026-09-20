@@ -848,6 +848,7 @@ function installedControllerProcessPort() {
     pid: (unit) =>
       Number(command("systemctl", ["--user", "show", unit, "--property=MainPID", "--value"])),
     argv: (pid) => readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean),
+    launcher: (path) => realpathSync(path),
     bundle: (path) => {
       const canonical = realpathSync(path);
       return {
@@ -888,6 +889,10 @@ export function assertInstalledFaultControllerAuthority(
   assert.ok(Number.isSafeInteger(pid) && pid > 0, "active controller PID unavailable");
   const runningArgv = port.argv(pid);
   assert.ok(Array.isArray(runningArgv) && runningArgv.length === 9, "controller argv differs");
+  assert.ok(runningArgv[0].startsWith("/"), "controller launcher path must be absolute");
+  const launcher = port.launcher(runningArgv[0]);
+  const expectedLauncher = realpathSync(process.execPath);
+  assert.equal(launcher, expectedLauncher, "running controller launcher identity differs");
   const observedBundle = port.bundle(runningArgv[1]);
   const matches = factoryBundleSurfaces.filter((surface) => surface.path === observedBundle.path);
   assert.equal(matches.length, 1, "running controller bundle is outside retained install surfaces");
@@ -895,11 +900,11 @@ export function assertInstalledFaultControllerAuthority(
   assert.equal(observedBundle.sha256, selected.sha256, "running controller bundle digest differs");
   const authority = {
     artifactIdentity,
-    launcher: realpathSync(process.execPath),
+    launcher: expectedLauncher,
     bundle: selected.path,
     repository,
     checkout,
-    runningArgv,
+    runningArgv: [launcher, ...runningArgv.slice(1)],
   };
   assertFaultControllerAuthority(controller, authority);
   return {
@@ -908,6 +913,7 @@ export function assertInstalledFaultControllerAuthority(
     installSurface: selected.surface,
     authenticatedDigest: `sha256:${observedBundle.sha256}`,
     expectedReceiptIdentity: installReceiptIdentity,
+    observedLauncher: runningArgv[0],
   };
 }
 

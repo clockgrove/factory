@@ -1418,6 +1418,32 @@ describe("independent authenticated timing assertions", () => {
     });
     expect(concurrencyReceiptProgress("refill", [...pair()].reverse())).toBe(true);
   });
+  it("reevaluates scoped-pause settlement when later integration satisfies its active predicate", () => {
+    const pause = event(2, 6, "RunPauseAcknowledged", 10, 21);
+    const integrated = event(2, 7, "AttemptIntegrated", 11, 21);
+    const arbitrary = event(2, 7, "FindingDecision", 11, 21);
+    const hinted = (change: Record<string, unknown>) => [
+      { ...observation([]), changedReceipts: [], pendingReceipts: [] },
+      {
+        ...observation([pause, change]),
+        changedReceipts: [{ event: change }],
+        pendingReceipts: [{ event: change }],
+      },
+    ];
+    const settled = (value: unknown[]) => {
+      const events = (value[1] as { receipts: Array<{ event: { event: string } }> }).receipts.map(
+        ({ event }) => event.event,
+      );
+      return events.includes("RunPauseAcknowledged") && events.includes("AttemptIntegrated");
+    };
+    expect(concurrencyReceiptProgress("scoped-pause", hinted(integrated), settled)).toBe(true);
+    expect(concurrencyReceiptProgress("scoped-pause", hinted(arbitrary), settled)).toBe(false);
+    expect(
+      concurrencyReceiptProgress("scoped-pause", hinted(integrated), () => {
+        throw Error("contradictory settlement");
+      }),
+    ).toBe(false);
+  });
   it("proves overlap and refill separately without manufacturing either", () => {
     const overlap = pair();
     overlap[0]!.receipts.splice(3);

@@ -243,7 +243,19 @@ function capacitySnapshot(observations) {
   return { observedAt: new Date().toISOString(), reservations };
 }
 
-export function concurrencyReceiptProgress(phase, pair) {
+function phaseAcceptanceProgress(phase, pair, accept) {
+  if (phase !== "scoped-pause") return false;
+  assert.equal(typeof accept, "function", "scoped-pause acceptance predicate unavailable");
+  try {
+    // Hints never authorize progression. Reusing the active phase predicate here only decides
+    // whether its newly satisfiable state warrants a fresh complete authenticated observation.
+    return accept(pair) === true;
+  } catch {
+    return false;
+  }
+}
+
+export function concurrencyReceiptProgress(phase, pair, accept) {
   const hasChangedReceiptBoundary = pair.some((observation) =>
     Object.hasOwn(observation, "changedReceipts"),
   );
@@ -281,7 +293,8 @@ export function concurrencyReceiptProgress(phase, pair) {
               ),
             )
           : phase === "scoped-pause"
-            ? signalEvents(pair[1]).some((event) => event.event === "RunPauseAcknowledged")
+            ? signalEvents(pair[1]).some((event) => event.event === "RunPauseAcknowledged") ||
+              phaseAcceptanceProgress(phase, pair, accept)
             : phase === "peer-completed"
               ? signalEvents(pair[0]).some((event) => event.event === "FactoryRunCompleted")
               : phase === "completed"
@@ -2002,7 +2015,8 @@ export async function main(env = process.env, run = checkpointMain) {
               const hinted = evidence.objectives.map((record) =>
                 hintedObservation(record, changedComments),
               );
-              if (!concurrencyReceiptProgress(phase, hinted) && !adverseProgress(hinted)) continue;
+              if (!concurrencyReceiptProgress(phase, hinted, accept) && !adverseProgress(hinted))
+                continue;
               // Incremental comments are wake hints only. Every acceptance, terminal refusal and
               // subsequent action is based on a fresh complete authenticated observation pair.
               pair = [];

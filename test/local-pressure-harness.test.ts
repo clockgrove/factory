@@ -71,7 +71,7 @@ function kernelFixture() {
   const files: Record<string, string> = {
     "/proc/sys/kernel/random/boot_id": "boot",
     [`/proc/${identity.pid}/stat`]: `${identity.pid} (node) ${["S", ...Array(18).fill("0"), identity.startTicks].join(" ")}`,
-    [`/proc/${identity.pid}/cmdline`]: `${identity.node}\0${identity.bundle}\0`,
+    [`/proc/${identity.pid}/cmdline`]: `node\0${identity.bundle}\0`,
     [`/proc/${identity.pid}/cgroup`]: `0::${identity.cgroup}\n`,
     "/proc/meminfo": "MemFree: 8388608 kB\n",
   };

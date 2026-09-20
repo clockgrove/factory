@@ -2010,32 +2010,52 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
       headSha: pull.headSha,
     };
   });
+  let stackMembershipChanged = () => false;
+  let changedStackMembershipObserved = () => false;
+  let stackMembersSnapshot = () => [] as number[];
   if (options.retainedPrefix) {
     let stackMembers: number[] = options.premergedNativeRoot ? [...sourceNativePulls] : [];
     let lostStackResponse = false;
-    const observedStack = async () => ({
-      number: 90,
-      baseRef: "main",
-      open: true,
-      pullRequests: await Promise.all(
-        stackMembers
-          .filter(
-            (number) => !(options.dropUpperAfterMerge && f.mergeShas.has(18) && number === 20),
-          )
-          .map(async (number) => {
-            const pull = await store.readPullRequest(number);
-            return {
-              number,
-              state: pull.state,
-              draft: false,
-              mergedAt: pull.merged ? new Date().toISOString() : null,
-              headRef: pull.headRef!,
-              headSha: pull.headSha,
-              baseRef: pull.baseRef,
-              baseSha: pull.baseSha,
-            };
-          }),
-      ),
+    let membershipChanged = false;
+    let changedMembershipObserved = false;
+    const observedStack = async () => {
+      const observedMembers = [...stackMembers];
+      const membershipChangedAtStart = membershipChanged;
+      const pullRequests = await Promise.all(
+        observedMembers.map(async (number) => {
+          const pull = await store.readPullRequest(number);
+          return {
+            number,
+            state: pull.state,
+            draft: false,
+            mergedAt: pull.merged ? new Date().toISOString() : null,
+            headRef: pull.headRef!,
+            headSha: pull.headSha,
+            baseRef: pull.baseRef,
+            baseSha: pull.baseSha,
+          };
+        }),
+      );
+      if (membershipChangedAtStart && !observedMembers.includes(20))
+        changedMembershipObserved = true;
+      return {
+        number: 90,
+        baseRef: "main",
+        open: true,
+        pullRequests,
+      };
+    };
+    const mergePullRequest = f.merge.getMockImplementation();
+    if (!mergePullRequest) throw new Error("fixture merge implementation unavailable");
+    f.merge.mockImplementation(async (input) => {
+      const mergeSha = await mergePullRequest(input);
+      if (options.dropUpperAfterMerge && input.number === 18) {
+        if (!stackMembers.includes(20))
+          throw new Error("fixture cannot remove absent retained upper PR 20");
+        stackMembers = stackMembers.filter((number) => number !== 20);
+        membershipChanged = true;
+      }
+      return mergeSha;
     });
     vi.spyOn(GitHubStacks.prototype, "list").mockImplementation(async (number) =>
       number !== undefined && stackMembers.includes(number) ? [await observedStack()] : [],
@@ -2112,6 +2132,9 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
             : { state: "failed", reason: "different request failed" },
       );
     }
+    stackMembershipChanged = () => membershipChanged;
+    changedStackMembershipObserved = () => changedMembershipObserved;
+    stackMembersSnapshot = () => [...stackMembers];
   }
   const original = structuredClone(
     [
@@ -2133,6 +2156,9 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
     failRemoteLfs: (failure: "missing" | "changed" | "unavailable" | null) => {
       remoteLfsFailure = failure;
     },
+    stackMembershipChanged,
+    changedStackMembershipObserved,
+    stackMembers: stackMembersSnapshot,
     run: (signal?: AbortSignal) =>
       f.run(
         {
@@ -3790,13 +3816,52 @@ export function registerSuccessorStackIntegrityTests() {
         nativeSource: true,
         dropUpperAfterMerge: true,
       });
-      expect(await f.run()).toMatchObject({
-        status: "escalated",
-        reason: "partially integrated native stack membership changed",
-      });
-      expect(f.mergeShas.has(18)).toBe(true);
-      expect(f.mergeShas.has(19)).toBe(false);
-      expect(f.mergeShas.has(20)).toBe(false);
+      const stop = new AbortController();
+      const running = f.run(stop.signal);
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      const diagnostics = () =>
+        JSON.stringify({
+          messages: f.messages.slice(-8).map((message) => message.slice(0, 400)),
+          mergeShas: [...f.mergeShas].slice(-4),
+          stackMembers: f.stackMembers(),
+          stackMembershipChanged: f.stackMembershipChanged(),
+          changedStackMembershipObserved: f.changedStackMembershipObserved(),
+          refs: [...f.refs]
+            .filter(
+              ([ref]) =>
+                ref.startsWith("refs/clockgrove-factory/") || ref.startsWith("refs/heads/factory/"),
+            )
+            .slice(-12),
+        });
+      try {
+        const result = await Promise.race([
+          running,
+          new Promise<never>((_, reject) => {
+            watchdog = setTimeout(() => {
+              const error = new Error("stack membership fixture exceeded its 20s watchdog");
+              stop.abort(error);
+              reject(error);
+            }, 20_000);
+          }),
+        ]);
+        expect(result).toMatchObject({
+          status: "escalated",
+          reason: "partially integrated native stack membership changed",
+        });
+        expect(f.stackMembershipChanged()).toBe(true);
+        expect(f.changedStackMembershipObserved()).toBe(true);
+        expect(f.stackMembers()).toEqual([18, 19]);
+        expect(f.mergeShas.has(18)).toBe(true);
+        expect(f.mergeShas.has(19)).toBe(false);
+        expect(f.mergeShas.has(20)).toBe(false);
+      } catch (error) {
+        stop.abort(error);
+        await running.catch(() => undefined);
+        const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        throw new Error(`stack membership fixture failed: ${detail}; ${diagnostics()}`);
+      } finally {
+        if (watchdog) clearTimeout(watchdog);
+      }
     }, 60_000);
     it("rejects a changed retained root without launching its child", async () => {
       const f = await successorFixture({ retainedPrefix: 1, stackLength: 2, nativeSource: true });

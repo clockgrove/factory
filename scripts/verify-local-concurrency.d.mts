@@ -21,6 +21,13 @@ export function directorContentionObjectiveBody(
 ): string;
 export function concurrencyRefill(pair: unknown[]): Record<string, unknown> | null;
 export function concurrencyReceiptProgress(phase: string, pair: unknown[]): boolean;
+export function scopedPauseObservationContract(
+  settled: (observation: unknown, paused: true) => boolean,
+): {
+  phase: "scoped-pause";
+  accept(pair: unknown[]): boolean;
+  progress(pair: unknown[]): boolean;
+};
 export function qualifyConcurrencyAttempts(
   events: unknown[],
   backendOrder: string[],
@@ -69,7 +76,11 @@ export interface ConcurrencyPort {
   action(action: string): Promise<unknown>;
   controller(state: string, prior?: unknown): Promise<unknown>;
   contend(pair: unknown[]): Promise<unknown>;
-  pollPair(phase: string, accept: (pair: unknown[]) => boolean): Promise<unknown[]>;
+  pollPair(
+    phase: string,
+    accept: (pair: unknown[]) => boolean,
+    progress?: (pair: unknown[]) => boolean,
+  ): Promise<unknown[]>;
   scoped(action: string): Promise<unknown>;
   settled(observation: unknown, paused: boolean, index?: number, activated?: boolean): boolean;
   pollPeer(phase: string): Promise<unknown>;

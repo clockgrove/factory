@@ -12,6 +12,7 @@ import {
   directorContentionObjectiveBody,
   concurrencyRefill,
   concurrencyReceiptProgress,
+  scopedPauseObservationContract,
   observeSettledConcurrencyMergeProofs,
   qualifyConcurrencyAttempts,
   assertInnerTakeover,
@@ -1418,6 +1419,35 @@ describe("independent authenticated timing assertions", () => {
     });
     expect(concurrencyReceiptProgress("refill", [...pair()].reverse())).toBe(true);
   });
+  it("uses exact active-reservation dependencies for partial scoped-pause wake hints", () => {
+    const request = event(2, 5, "RunPauseRequested", 9, 21);
+    const ack = event(2, 6, "RunPauseAcknowledged", 10, 21);
+    const integrated = event(2, 7, "AttemptIntegrated", 11, 21);
+    const arbitrary = event(2, 7, "FindingDecision", 11, 21);
+    const hinted = (change: Record<string, unknown>) => [
+      { ...observation([]), changedReceipts: [], pendingReceipts: [] },
+      {
+        ...observation([request, ack, change]),
+        changedReceipts: [{ event: change }],
+        pendingReceipts: [{ event: change }],
+        status: { capacity: { activeReservations: [{ workItem: 21, attempt: 1 }] } },
+      },
+    ];
+    const contract = scopedPauseObservationContract(() => {
+      throw Error("full settlement proof must not run on a partial hint");
+    });
+    expect(contract.progress(hinted(integrated))).toBe(true);
+    expect(contract.progress(hinted(arbitrary))).toBe(false);
+    expect(
+      contract.progress([
+        hinted(integrated)[0],
+        {
+          ...hinted(integrated)[1],
+          status: { capacity: { activeReservations: [{ workItem: 22, attempt: 1 }] } },
+        },
+      ]),
+    ).toBe(false);
+  });
   it("proves overlap and refill separately without manufacturing either", () => {
     const overlap = pair();
     overlap[0]!.receipts.splice(3);
@@ -1817,6 +1847,55 @@ describe("bounded existing installed-controller composition", () => {
       "controller:inactive",
       "throughput-final-proofs",
     ]);
+  });
+  it("rereads the full scoped-pause observation after a later integration hint", async () => {
+    const f = scenarioPort();
+    const originalPoll = f.port.pollPair;
+    const activeReservation = { workItem: 4, attempt: 1 };
+    const pauseRequest = event(2, 5, "RunPauseRequested", 9, 4);
+    const pauseAck = event(2, 6, "RunPauseAcknowledged", 10, 4);
+    const integration = event(2, 7, "AttemptIntegrated", 11, 4);
+    const unrelated = event(2, 7, "FindingDecision", 11, 4);
+    const contradictory = event(2, 7, "AttemptIntegrated", 11, 5);
+    const scoped = (receipts: Record<string, unknown>[], activeReservations: unknown[]) => ({
+      scopedPauseFixture: true,
+      receipts: receipts.map((event) => ({ event })),
+      status: { capacity: { activeReservations } },
+    });
+    const baseline = scoped([pauseRequest, pauseAck], [activeReservation]);
+    const hint = (changed: Record<string, unknown>) => ({
+      ...scoped([pauseRequest, pauseAck, changed], [activeReservation]),
+      changedReceipts: [{ event: changed }],
+      pendingReceipts: [{ event: changed }],
+    });
+    const hinted = hint(integration);
+    const complete = scoped([pauseRequest, pauseAck, integration], []);
+    f.port.settled = (observation, paused) => {
+      if (!(observation as { scopedPauseFixture?: boolean }).scopedPauseFixture) return true;
+      expect(paused).toBe(true);
+      const value = observation as typeof complete;
+      const integrated = value.receipts.some(({ event }) => event.event === "AttemptIntegrated");
+      if (!integrated) return false;
+      if (value.status.capacity.activeReservations.length > 0)
+        throw Error("stale active capacity must not be accepted");
+      return true;
+    };
+    f.port.pollPair = async (phase, accept, progress) => {
+      if (phase !== "scoped-pause") return originalPoll(phase, accept, progress);
+      f.actions.push(phase);
+      const peer = pair()[0]!;
+      expect(accept([peer, baseline])).toBe(false);
+      expect(progress?.([peer, hint(unrelated)])).toBe(false);
+      expect(progress?.([peer, hint(contradictory)])).toBe(false);
+      expect(() => accept([peer, hinted])).toThrow(/stale active capacity/);
+      expect(progress?.([peer, hinted])).toBe(true);
+      expect(accept([peer, complete])).toBe(true);
+      return [peer, complete];
+    };
+    await expect(runConcurrencyLeaseFaultScenario(f.port, faultAuthority)).resolves.toMatchObject({
+      result: "passed",
+    });
+    expect(f.actions.filter((action) => action === "scoped-pause")).toHaveLength(1);
   });
   it("returns an authenticated policy stop without retry, restart, stop, or final proofs", async () => {
     const f = scenarioPort();

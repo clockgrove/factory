@@ -8,6 +8,7 @@ import {
   budgetStopPolicy,
   createBudgetStopQualification,
   main,
+  recordBudgetStopSettlement,
 } from "../scripts/verify-budget-stop.mjs";
 import {
   boundedPolicy,
@@ -57,14 +58,31 @@ function observation() {
       event("BudgetReconciled", "budget", 5, {
         phase: "management",
         unit: "model_tokens",
+        modelInvocationId: `compile-${"a".repeat(40)}`,
+        policyDigest,
+        directorEpoch: 1,
         usageId: `compile-${"b".repeat(64)}`,
         amount: 15919,
         reportedModelUsage: { inputTokens: 14460, outputTokens: 1459 },
       }),
-      event("FactoryRunEscalated", "run", 6, { reason: budgetRefusalReason }),
-      event("DeliverySelected", "delivery", 4, {
+      event("FactoryRunEscalated", "run", 7, { reason: budgetRefusalReason }),
+      event("DeliverySelected", "delivery", 2, {
         requested: "regular-prs",
         selected: "regular-prs",
+      }),
+      event("BudgetReserved", "budget", 3, {
+        phase: "management",
+        unit: "model_tokens",
+        modelInvocationId: `compile-${"a".repeat(40)}`,
+        usageId: `invocation-compile-${"a".repeat(40)}`,
+        policyDigest,
+        directorEpoch: 1,
+        amount: 0,
+      }),
+      event("GraphCompiled", "graph", 6, {
+        graphDigest: "c".repeat(64),
+        graphSize: 3,
+        baseSha: "a".repeat(40),
       }),
     ].map((event, index) => ({ event, commentId: 100 + index, actorId: actor.id })),
     status: {
@@ -97,6 +115,7 @@ function observation() {
           },
           usage: { model_tokens: { availability: "observed", value: 15919 } },
           budgets: { modelTokens: { value: { configured: 1, committed: 15919 } } },
+          unresolvedModelInvocations: 0,
         },
       },
       workItems: [] as unknown[],
@@ -234,7 +253,6 @@ describe("observed pre-projection terminal rather than queued/cancelled assumpti
   });
   it.each([
     ["CapacityReserved", "capacity"],
-    ["GraphCompiled", "graph"],
     ["GraphProjected", "graph"],
     ["WorkItemQueued", "scheduling"],
     ["PublicationRecorded", "publication"],
@@ -440,6 +458,31 @@ describe("observed pre-projection terminal rather than queued/cancelled assumpti
 describe("prospective completion and original-exercise preservation", () => {
   it("requires exact terminal evidence plus service absence", () => {
     expect(() => assertBudgetStopCompletion(terminalEvidence())).not.toThrow();
+  });
+  it("records the authenticated terminal before observing exact owned cleanup", async () => {
+    const value = terminalEvidence();
+    delete (value.budgetStop as { terminalObservation?: unknown }).terminalObservation;
+    delete (value.budgetStop as { cleanup?: unknown }).cleanup;
+    const saves: Array<{ terminal: boolean; cleanup: boolean }> = [];
+    const result = await recordBudgetStopSettlement(
+      value,
+      async (primary) => ({
+        state: "absent",
+        unit: primary.unit,
+        bootDigest: primary.bootDigest,
+      }),
+      () =>
+        saves.push({
+          terminal: value.budgetStop.terminalObservation !== undefined,
+          cleanup: value.budgetStop.cleanup !== undefined,
+        }),
+    );
+    expect(result.cleanup).toMatchObject({ state: "absent", unit: "exact.service" });
+    expect(saves).toEqual([
+      { terminal: true, cleanup: false },
+      { terminal: true, cleanup: true },
+    ]);
+    expect(() => assertBudgetStopCompletion(value)).not.toThrow();
   });
   const changes: Array<[string, (v: ReturnType<typeof terminalEvidence>) => void]> = [
     [

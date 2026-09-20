@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -225,6 +226,10 @@ describe("installed failed-validation/conflict authority and evidence", () => {
     });
     expect(failureObjectiveBody(namespace, "failed-validation")).toContain(
       "Do not repair intentional qualification failures",
+    );
+    expect(failureFixture(namespace, "failed-validation").validationCommand).toBe("npm test");
+    expect(failureObjectiveBody(namespace, "failed-validation")).toContain(
+      "`npm test`, the repository-observed package validation recipe",
     );
   });
 
@@ -591,6 +596,43 @@ describe("installed failed-validation/conflict authority and evidence", () => {
 });
 
 describe("independent real Git content proof (not live worker evidence)", () => {
+  it.each([
+    ["failed-validation", 1],
+    ["real-conflict", 0],
+  ] as const)(
+    "uses the admitted repository recipe and preserves the intended %s outcome",
+    (scenario, expectedStatus) => {
+      const root = mkdtempSync(join(tmpdir(), "factory-failure-validation-test-"));
+      const fixture = failureFixture(namespace, scenario);
+      try {
+        for (const [path, content] of Object.entries({
+          ...fixture.files,
+          "package.json": '{"scripts":{"test":"node --test"}}\n',
+        })) {
+          mkdirSync(dirname(join(root, path)), { recursive: true });
+          writeFileSync(join(root, path), content);
+        }
+        const run = (command: string, args: string[]) =>
+          spawnSync(command, args, {
+            cwd: root,
+            encoding: "utf8",
+            timeout: 15_000,
+            env: { PATH: process.env.PATH, HOME: root },
+          });
+        expect(run("npm", ["test"]).status).toBe(0);
+        expect(run(process.execPath, [fixture.paths.recipe]).status).toBe(0);
+        const validation = run("npm", ["test"]);
+        expect(validation.status).toBe(expectedStatus);
+        if (scenario === "failed-validation")
+          expect(`${validation.stdout}${validation.stderr}`).toContain(
+            "factory-qualification-invalid-value",
+          );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("proves the retained patch conflicts and never checks out or invokes repository hooks", () => {
     const root = mkdtempSync(join(tmpdir(), "factory-failure-fixture-test-"));
     const fixture = failureFixture(namespace, "real-conflict");

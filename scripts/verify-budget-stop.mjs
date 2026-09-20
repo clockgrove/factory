@@ -70,9 +70,8 @@ function noWork(events, status) {
   assert.ok(
     !events.some(
       (event) =>
-        ["attempt", "capacity", "validation", "publication", "graph", "scheduling"].includes(
-          event.kind,
-        ) || event.event === "BudgetReserved",
+        ["attempt", "capacity", "validation", "publication", "scheduling"].includes(event.kind) ||
+        ["GraphProjected", "WorkItemQueued"].includes(event.event),
     ),
     "projection or worker/resource admission is not pre-projection refusal",
   );
@@ -98,7 +97,11 @@ export function assessBudgetStopObservation({ receipts, status, context }) {
     FactoryRunStarted: "run",
     ControllerObserved: "controller",
     DeliverySelected: "delivery",
+    BudgetReserved: "budget",
     BudgetReconciled: "budget",
+    GraphCompiled: "graph",
+    FindingDecision: "finding",
+    FindingDisposition: "finding",
     FactoryRunEscalated: "run",
   };
   assert.ok(
@@ -141,7 +144,20 @@ export function assessBudgetStopObservation({ receipts, status, context }) {
   const terminal = terminals[0];
   assert.equal(terminal.event, "FactoryRunEscalated");
   assert.equal(terminal.reason, budgetRefusalReason);
-  const usage = events.filter((event) => event.kind === "budget");
+  const reservations = events.filter((event) => event.event === "BudgetReserved");
+  assert.equal(reservations.length, 1);
+  const reservation = reservations[0];
+  assert.equal(reservation.kind, "budget");
+  assert.equal(reservation.phase, "management");
+  assert.equal(reservation.unit, "model_tokens");
+  assert.equal(reservation.amount, 0);
+  assert.equal(reservation.workItem, undefined);
+  assert.equal(reservation.attempt, undefined);
+  assert.match(reservation.modelInvocationId, /^compile-[a-f0-9]{40}$/);
+  assert.match(reservation.usageId, /^invocation-compile-[a-f0-9]{40}$/);
+  assert.equal(reservation.policyDigest, start.policyDigest);
+  assert.ok(Number.isSafeInteger(reservation.directorEpoch) && reservation.directorEpoch > 0);
+  const usage = events.filter((event) => event.event === "BudgetReconciled");
   assert.equal(usage.length, 1);
   const compiler = usage[0];
   assert.equal(compiler.event, "BudgetReconciled");
@@ -150,12 +166,33 @@ export function assessBudgetStopObservation({ receipts, status, context }) {
   assert.equal(compiler.workItem, undefined);
   assert.equal(compiler.attempt, undefined);
   assert.match(compiler.usageId, /^compile-[a-f0-9]{64}$/);
-  assert.ok(start.sequence < compiler.sequence && compiler.sequence < terminal.sequence);
+  assert.equal(compiler.modelInvocationId, reservation.modelInvocationId);
+  assert.equal(compiler.policyDigest, reservation.policyDigest);
+  assert.equal(compiler.directorEpoch, reservation.directorEpoch);
+  assert.ok(
+    start.sequence < reservation.sequence &&
+      reservation.sequence < compiler.sequence &&
+      compiler.sequence < terminal.sequence,
+  );
   const deliveries = events.filter((event) => event.event === "DeliverySelected");
   assert.equal(deliveries.length, 1);
   assert.equal(deliveries[0].requested, "regular-prs");
   assert.equal(deliveries[0].selected, "regular-prs");
   assert.ok(start.sequence < deliveries[0].sequence && deliveries[0].sequence < compiler.sequence);
+  const graphs = events.filter((event) => event.event === "GraphCompiled");
+  assert.equal(graphs.length, 1);
+  const graph = graphs[0];
+  assert.ok(
+    graph.kind === "graph" &&
+      Number.isSafeInteger(graph.graphSize) &&
+      graph.graphSize > 0 &&
+      graph.graphSize <= 1_000 &&
+      /^[a-f0-9]{64}$/.test(graph.graphDigest) &&
+      /^[a-f0-9]{40}$/.test(graph.baseSha) &&
+      compiler.sequence < graph.sequence &&
+      graph.sequence < terminal.sequence,
+    "compiled graph identity is unavailable or out of order",
+  );
   assert.ok(Number.isSafeInteger(compiler.amount) && compiler.amount > 1);
   for (const key of ["inputTokens", "outputTokens"])
     assert.ok(
@@ -187,6 +224,7 @@ export function assessBudgetStopObservation({ receipts, status, context }) {
   assert.equal(economics.usage.model_tokens.value, compiler.amount);
   assert.equal(economics.budgets.modelTokens?.value?.configured, 1);
   assert.equal(economics.budgets.modelTokens.value.committed, compiler.amount);
+  assert.equal(economics.unresolvedModelInvocations, 0);
   // These are recorded-call subtotals, not an estimate of unreported provider use.
   // Management receipts have no backend/epoch fields; do not invent those bindings.
   const breakdown = economics.modelTokenBreakdown;
@@ -204,7 +242,13 @@ export function assessBudgetStopObservation({ receipts, status, context }) {
     observationScope: "observed-pre-projection-budget-refusal",
     runId: start.runId,
     start,
+    reservation,
     compiler,
+    graph: {
+      graphDigest: graph.graphDigest,
+      graphSize: graph.graphSize,
+      baseSha: graph.baseSha,
+    },
     terminal,
     compilerTokens: compiler.amount,
     durableGraph: "uninspected",
@@ -274,6 +318,17 @@ export function assertBudgetStopCompletion(evidence) {
   assert.equal(cleanup.state, "absent");
   assert.equal(cleanup.unit, primary.unit);
   assert.equal(cleanup.bootDigest, primary.bootDigest);
+}
+
+export async function recordBudgetStopSettlement(evidence, observeCleanup, save = () => {}) {
+  const observation = assertTerminal(evidence);
+  evidence.budgetStop.terminalObservation = observation;
+  save();
+  const cleanup = await observeCleanup(evidence.budgetStop.primary);
+  evidence.budgetStop.cleanup = cleanup;
+  save();
+  assertBudgetStopCompletion(evidence);
+  return { terminalObservation: observation, cleanup };
 }
 
 export function createBudgetStopQualification(authority, env = process.env, port) {
@@ -348,14 +403,16 @@ export function createBudgetStopQualification(authority, env = process.env, port
     // No duringRun control hook: await the original terminal without cancelling,
     // assuming queue projection, retrying admission or invoking another model.
     afterRun: safe(async (hooks) => {
-      hooks.evidence.budgetStop.terminalObservation = assertTerminal(hooks.evidence);
-      hooks.save();
-      const observed = observeSchedulingService(primary, port);
-      hooks.evidence.budgetStop.cleanup =
-        observed.state === "absent"
-          ? observed
-          : await changeSchedulingService(primary, "stop", port);
-      hooks.save();
+      await recordBudgetStopSettlement(
+        hooks.evidence,
+        async () => {
+          const observed = observeSchedulingService(primary, port);
+          return observed.state === "absent"
+            ? observed
+            : await changeSchedulingService(primary, "stop", port);
+        },
+        hooks.save,
+      );
     }),
     assessCompletion: (evidence) => {
       try {

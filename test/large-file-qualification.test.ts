@@ -16,11 +16,13 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   LARGE_FILE_AUDIO_BYTES,
+  assessLargeFileExecutionPreflight,
   assertLargeFileArtifact,
   assertLargeFileFinalTree,
   assertLargeFileRefusal,
   createLargeFileFixture,
   largeFileObjectiveBody,
+  largeFileRefusalObjectiveBody,
   largeFilePaths,
   largeFileScenario,
   renderLargeFileRecipe,
@@ -109,6 +111,38 @@ function fixture() {
 }
 
 describe("installed large-file qualifier fixture and proof contracts", () => {
+  it("binds the synthetic symlink fixture to reachable trusted-local execution", () => {
+    expect(largeFileRefusalObjectiveBody("large-files-test-a", "symlink")).toContain(
+      "execution trust to trusted_local",
+    );
+    expect(
+      assessLargeFileExecutionPreflight({
+        scenario: "symlink",
+        trust: "trusted_local",
+        routes: [{ id: "codex-app-server/local-worktree", isolation: "process" }],
+      }),
+    ).toMatchObject({ result: "passed", minimumIsolation: "process", violations: [] });
+    expect(
+      assessLargeFileExecutionPreflight({
+        scenario: "symlink",
+        trust: "isolated",
+        routes: [{ id: "codex-app-server/local-worktree", isolation: "process" }],
+      }),
+    ).toMatchObject({
+      result: "blocked",
+      minimumIsolation: "container",
+      violations: [
+        {
+          code: "fixture-execution-isolation-unavailable",
+          field: "executionIntent.trust",
+        },
+      ],
+    });
+    expect(largeFileRefusalObjectiveBody("large-files-test-a", "secret")).not.toContain(
+      "trusted_local",
+    );
+  });
+
   it("copies a bounded raw standalone recipe with exactly one safe namespace substitution", () => {
     const template = readFileSync(
       new URL("../scripts/qualification-large-files-recipe.mjs", import.meta.url),

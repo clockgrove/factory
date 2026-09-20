@@ -54,6 +54,18 @@ describe("retained qualification install authority", () => {
       codexHome: value.codexHome,
       codexCli: value.codexCli,
       candidateVersion: value.version,
+      factoryBundleSurfaces: [
+        {
+          surface: "npm",
+          path: join(value.installedFactoryRoot, "dist/factory.js"),
+          installReceiptIdentity: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        },
+        {
+          surface: "plugin-cache",
+          path: join(value.installedPluginRoot, "dist/factory.js"),
+          installReceiptIdentity: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        },
+      ],
     });
     expect(listPlugins).toHaveBeenCalledWith(value.codexCli, value.codexHome, expect.any(Object));
     expect(authority.committedQualificationFiles).toHaveLength(3);

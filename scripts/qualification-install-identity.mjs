@@ -630,6 +630,18 @@ export function installedQualificationAuthority(
     portable,
     packageManifest: installedPackageManifest,
   });
+  const installReceiptIdentity = `sha256:${hash(installReceiptBytes)}`;
+  const factoryBundleSurfaces = [
+    { surface: "npm", root: installedFactoryRoot },
+    { surface: "plugin-cache", root: installedPluginRoot },
+  ].map(({ surface, root }) => {
+    const path = realpathSync(join(root, "dist/factory.js"));
+    within(root, path, `${surface} Factory controller bundle`);
+    regularFile(path, uid, MAX_ARTIFACT_BYTES);
+    const sha256 = hash(readFileSync(path));
+    assert.equal(sha256, receipt.factoryBundleSha256, `${surface} controller digest differs`);
+    return { surface, path, sha256, installReceiptIdentity };
+  });
 
   return {
     factoryCli,
@@ -641,7 +653,7 @@ export function installedQualificationAuthority(
     pluginArchive,
     qualificationRoot,
     installReceiptPath,
-    installReceiptIdentity: `sha256:${hash(installReceiptBytes)}`,
+    installReceiptIdentity,
     candidateSourceCommit: receipt.sourceCommit,
     candidateVersion: receipt.version,
     artifactIdentity: `sha256:${receipt.factoryBundleSha256}`,
@@ -649,6 +661,7 @@ export function installedQualificationAuthority(
     inventoryIdentity: `sha256:${receipt.bundleInventorySha256}`,
     pluginArtifact,
     pluginIdentity,
+    factoryBundleSurfaces,
     committedQualificationFiles,
     installReceipt: receipt,
   };

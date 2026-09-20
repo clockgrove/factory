@@ -1002,6 +1002,7 @@ export async function main(
       qualificationRoot: candidate.qualificationRoot,
       pluginRoot,
       codexHome: candidate.codexHome,
+      factoryBundleSurfaces: candidate.factoryBundleSurfaces,
     },
     providerRuntime: {
       home: runtimeEnvironment.HOME,

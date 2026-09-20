@@ -843,6 +843,80 @@ export function assertFaultControllerAuthority(
   ]);
 }
 
+function installedControllerProcessPort() {
+  return {
+    pid: (unit) =>
+      Number(command("systemctl", ["--user", "show", unit, "--property=MainPID", "--value"])),
+    argv: (pid) => readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean),
+    launcher: (path) => realpathSync(path),
+    bundle: (path) => {
+      const canonical = realpathSync(path);
+      return {
+        path: canonical,
+        sha256: createHash("sha256").update(readFileSync(canonical)).digest("hex"),
+      };
+    },
+  };
+}
+
+export function assertInstalledFaultControllerAuthority(
+  controller,
+  { artifactIdentity, installReceiptIdentity, factoryBundleSurfaces, repository, checkout },
+  port = installedControllerProcessPort(),
+) {
+  assert.match(artifactIdentity ?? "", /^sha256:[a-f0-9]{64}$/);
+  assert.match(installReceiptIdentity ?? "", /^sha256:[a-f0-9]{64}$/);
+  assert.ok(
+    Array.isArray(factoryBundleSurfaces) && factoryBundleSurfaces.length === 2,
+    "controller surfaces unavailable",
+  );
+  assert.deepEqual(
+    factoryBundleSurfaces.map(({ surface }) => surface).sort(),
+    ["npm", "plugin-cache"],
+    "controller install surfaces differ",
+  );
+  const expectedDigest = artifactIdentity.slice("sha256:".length);
+  for (const surface of factoryBundleSurfaces) {
+    assert.ok(surface.path.startsWith("/"), "controller surface path must be absolute");
+    assert.equal(surface.sha256, expectedDigest, "controller surface digest differs");
+    assert.equal(
+      surface.installReceiptIdentity,
+      installReceiptIdentity,
+      "controller surface receipt differs",
+    );
+  }
+  const pid = port.pid(controller.unit);
+  assert.ok(Number.isSafeInteger(pid) && pid > 0, "active controller PID unavailable");
+  const runningArgv = port.argv(pid);
+  assert.ok(Array.isArray(runningArgv) && runningArgv.length === 9, "controller argv differs");
+  assert.ok(runningArgv[0].startsWith("/"), "controller launcher path must be absolute");
+  const launcher = port.launcher(runningArgv[0]);
+  const expectedLauncher = realpathSync(process.execPath);
+  assert.equal(launcher, expectedLauncher, "running controller launcher identity differs");
+  const observedBundle = port.bundle(runningArgv[1]);
+  const matches = factoryBundleSurfaces.filter((surface) => surface.path === observedBundle.path);
+  assert.equal(matches.length, 1, "running controller bundle is outside retained install surfaces");
+  const selected = matches[0];
+  assert.equal(observedBundle.sha256, selected.sha256, "running controller bundle digest differs");
+  const authority = {
+    artifactIdentity,
+    launcher: expectedLauncher,
+    bundle: selected.path,
+    repository,
+    checkout,
+    runningArgv: [launcher, ...runningArgv.slice(1)],
+  };
+  assertFaultControllerAuthority(controller, authority);
+  return {
+    pid,
+    ...authority,
+    installSurface: selected.surface,
+    authenticatedDigest: `sha256:${observedBundle.sha256}`,
+    expectedReceiptIdentity: installReceiptIdentity,
+    observedLauncher: runningArgv[0],
+  };
+}
+
 export async function runQualification(
   progress,
   env = process.env,
@@ -903,6 +977,7 @@ export async function runQualification(
       qualificationRoot: candidate.qualificationRoot,
       pluginRoot,
       codexHome: candidate.codexHome,
+      factoryBundleSurfaces: candidate.factoryBundleSurfaces,
     },
     providerRuntime: {
       home: runtimeEnvironment.HOME,
@@ -1019,23 +1094,12 @@ export async function runQualification(
     });
     const controllerObservation = observeUnit(controller.unit);
     assert.equal(controllerObservation.status, "active");
-    const controllerPid = Number(
-      command("systemctl", ["--user", "show", controller.unit, "--property=MainPID", "--value"]),
-    );
-    assert.ok(
-      Number.isSafeInteger(controllerPid) && controllerPid > 0,
-      "active controller PID unavailable",
-    );
-    const runningArgv = readFileSync(`/proc/${controllerPid}/cmdline`, "utf8")
-      .split("\0")
-      .filter(Boolean);
-    assertFaultControllerAuthority(controller, {
+    const controllerAuthority = assertInstalledFaultControllerAuthority(controller, {
       artifactIdentity: candidate.artifactIdentity,
-      launcher: realpathSync(process.execPath),
-      bundle: realpathSync(join(pluginRoot, "dist/factory.js")),
+      installReceiptIdentity: candidate.installReceiptIdentity,
+      factoryBundleSurfaces: candidate.factoryBundleSurfaces,
       repository,
       checkout,
-      runningArgv,
     });
     if (phase === "preflight") {
       console.log(
@@ -1048,6 +1112,7 @@ export async function runQualification(
           installedArtifact: artifact,
           compilerPreflight,
           controllerUnit: controller.unit,
+          controllerAuthority,
           modelTokenLimit: maxModelTokens,
         }),
       );

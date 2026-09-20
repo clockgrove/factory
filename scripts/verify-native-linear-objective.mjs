@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -30,7 +30,10 @@ import {
   isQualificationModelMarker,
   qualificationModelAccounting,
 } from "./qualification-model-accounting.mjs";
-import { assertFaultControllerAuthority, parseUnitObservation } from "./verify-local-faults.mjs";
+import {
+  assertInstalledFaultControllerAuthority,
+  parseUnitObservation,
+} from "./verify-local-faults.mjs";
 
 const scope = "installed-local-native-linear-stack";
 const cases = new Set(["cascade", "response-loss-restart", "active-cancellation"]);
@@ -266,35 +269,20 @@ function observeSentinelUnit(unit, port) {
   );
 }
 
-function controllerProcessPort() {
-  return {
-    pid: (unit) =>
-      Number(command("systemctl", ["--user", "show", unit, "--property=MainPID", "--value"])),
-    argv: (pid) => readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean),
-  };
-}
-
-export function assertNativeLinearControllerAuthority(
-  controller,
-  evidence,
-  checkout,
-  port = controllerProcessPort(),
-) {
+export function assertNativeLinearControllerAuthority(controller, evidence, checkout, port) {
   const candidate = evidence.installedCandidate;
   assert.ok(candidate, "retained installed candidate authority is unavailable");
-  const pid = port.pid(controller.unit);
-  assert.ok(Number.isSafeInteger(pid) && pid > 0, "active controller PID unavailable");
-  const runningArgv = port.argv(pid);
-  const authority = {
-    artifactIdentity: candidate.factoryArtifactIdentity,
-    launcher: realpathSync(process.execPath),
-    bundle: realpathSync(join(candidate.artifactAuthority.pluginRoot, "dist/factory.js")),
-    repository: evidence.repository,
-    checkout,
-    runningArgv,
-  };
-  assertFaultControllerAuthority(controller, authority);
-  return { pid, ...authority };
+  return assertInstalledFaultControllerAuthority(
+    controller,
+    {
+      artifactIdentity: candidate.factoryArtifactIdentity,
+      installReceiptIdentity: candidate.installReceiptIdentity,
+      factoryBundleSurfaces: candidate.artifactAuthority?.factoryBundleSurfaces,
+      repository: evidence.repository,
+      checkout,
+    },
+    port,
+  );
 }
 
 export function startNativeLinearSentinel(port = systemdPort()) {

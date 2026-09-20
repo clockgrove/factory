@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   assessLocalFault,
   assertFaultControllerAuthority,
+  assertInstalledFaultControllerAuthority,
   assertFaultAuthenticationEnvironment,
   faultRequest,
   faultTerminalReady,
@@ -171,6 +172,126 @@ describe("local fault controller authority", () => {
       mutateObjective();
     }).toThrow();
     expect(mutateObjective).not.toHaveBeenCalled();
+  });
+
+  it("admits the receipt-bound npm controller and rejects an unlisted same-digest path", () => {
+    const receiptIdentity = `sha256:${"e".repeat(64)}`;
+    const npmBundle = "/retained/npm/dist/factory.js";
+    const pluginBundle = "/retained/plugin/dist/factory.js";
+    const surfaces: Array<{
+      surface: "npm" | "plugin-cache";
+      path: string;
+      sha256: string;
+      installReceiptIdentity: string;
+    }> = [
+      {
+        surface: "npm",
+        path: npmBundle,
+        sha256: "a".repeat(64),
+        installReceiptIdentity: receiptIdentity,
+      },
+      {
+        surface: "plugin-cache",
+        path: pluginBundle,
+        sha256: "a".repeat(64),
+        installReceiptIdentity: receiptIdentity,
+      },
+    ];
+    const launcher = realpathSync(process.execPath);
+    const argv = [launcher, npmBundle, ...expected.runningArgv.slice(2)];
+    expect(
+      assertInstalledFaultControllerAuthority(
+        { ...status, unit: "factory.service" },
+        {
+          artifactIdentity,
+          installReceiptIdentity: receiptIdentity,
+          factoryBundleSurfaces: surfaces,
+          repository: expected.repository,
+          checkout: expected.checkout,
+        },
+        {
+          pid: () => 123,
+          argv: () => argv,
+          launcher: (path) => realpathSync(path),
+          bundle: () => ({ path: npmBundle, sha256: "a".repeat(64) }),
+        },
+      ),
+    ).toMatchObject({
+      pid: 123,
+      installSurface: "npm",
+      authenticatedDigest: artifactIdentity,
+      expectedReceiptIdentity: receiptIdentity,
+    });
+    expect(() =>
+      assertInstalledFaultControllerAuthority(
+        { ...status, unit: "factory.service" },
+        {
+          artifactIdentity,
+          installReceiptIdentity: receiptIdentity,
+          factoryBundleSurfaces: surfaces,
+          repository: expected.repository,
+          checkout: expected.checkout,
+        },
+        {
+          pid: () => 123,
+          argv: () => [launcher, "/unlisted/factory.js", ...expected.runningArgv.slice(2)],
+          launcher: (path) => realpathSync(path),
+          bundle: () => ({ path: "/unlisted/factory.js", sha256: "a".repeat(64) }),
+        },
+      ),
+    ).toThrow(/outside retained install surfaces/);
+  });
+
+  it("accepts a launcher symlink only when it resolves to the current executable", () => {
+    const root = mkdtempSync("/tmp/factory-controller-launcher-");
+    const linkedLauncher = `${root}/node`;
+    const receiptIdentity = `sha256:${"e".repeat(64)}`;
+    const npmBundle = "/retained/npm/dist/factory.js";
+    symlinkSync(process.execPath, linkedLauncher);
+    try {
+      const authority = {
+        artifactIdentity,
+        installReceiptIdentity: receiptIdentity,
+        factoryBundleSurfaces: [
+          {
+            surface: "npm" as const,
+            path: npmBundle,
+            sha256: "a".repeat(64),
+            installReceiptIdentity: receiptIdentity,
+          },
+          {
+            surface: "plugin-cache" as const,
+            path: "/retained/plugin/dist/factory.js",
+            sha256: "a".repeat(64),
+            installReceiptIdentity: receiptIdentity,
+          },
+        ],
+        repository: expected.repository,
+        checkout: expected.checkout,
+      };
+      const argv = [linkedLauncher, npmBundle, ...expected.runningArgv.slice(2)];
+      expect(
+        assertInstalledFaultControllerAuthority({ ...status, unit: "factory.service" }, authority, {
+          pid: () => 123,
+          argv: () => argv,
+          launcher: (path) => realpathSync(path),
+          bundle: () => ({ path: npmBundle, sha256: "a".repeat(64) }),
+        }),
+      ).toMatchObject({
+        launcher: realpathSync(process.execPath),
+        observedLauncher: linkedLauncher,
+      });
+      expect(() =>
+        assertInstalledFaultControllerAuthority({ ...status, unit: "factory.service" }, authority, {
+          pid: () => 123,
+          argv: () => argv,
+          launcher: () => "/unrelated/node",
+          bundle: () => ({ path: npmBundle, sha256: "a".repeat(64) }),
+        }),
+      ).toThrow(/launcher identity differs/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

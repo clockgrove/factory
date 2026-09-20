@@ -280,17 +280,13 @@ export function concurrencyReceiptProgress(phase, pair) {
                 (event) => event.event === "AttemptStarted" || endNames.has(event.event),
               ),
             )
-          : phase === "scoped-pause"
-            ? signalEvents(pair[1]).some((event) => event.event === "RunPauseAcknowledged")
-            : phase === "peer-completed"
-              ? signalEvents(pair[0]).some((event) => event.event === "FactoryRunCompleted")
-              : phase === "completed"
-                ? pair.some((observation) =>
-                    signalEvents(observation).some(
-                      (event) => event.event === "FactoryRunCompleted",
-                    ),
-                  )
-                : undefined;
+          : phase === "peer-completed"
+            ? signalEvents(pair[0]).some((event) => event.event === "FactoryRunCompleted")
+            : phase === "completed"
+              ? pair.some((observation) =>
+                  signalEvents(observation).some((event) => event.event === "FactoryRunCompleted"),
+                )
+              : undefined;
     if (relevant === undefined) throw Error(`unsupported concurrency observation phase: ${phase}`);
     if (!relevant) return false;
   }
@@ -308,6 +304,34 @@ export function concurrencyReceiptProgress(phase, pair) {
       eventsOf(observation).some((event) => event.event === "FactoryRunCompleted"),
     );
   throw Error(`unsupported concurrency observation phase: ${phase}`);
+}
+
+export function scopedPauseObservationContract(settled) {
+  assert.equal(typeof settled, "function", "scoped-pause settlement predicate unavailable");
+  return {
+    phase: "scoped-pause",
+    accept: (pair) => settled(pair[1], true),
+    progress: (pair) => {
+      const target = pair[1];
+      assert.ok(target && Object.hasOwn(target, "changedReceipts"));
+      const changed = eventsOf({
+        receipts: [...target.changedReceipts, ...target.pendingReceipts],
+      });
+      if (changed.some((event) => event.event === "RunPauseAcknowledged")) return true;
+      const events = eventsOf(target);
+      if (!events.some((event) => event.event === "RunPauseAcknowledged")) return false;
+      const active = target.status?.capacity?.activeReservations;
+      assert.ok(Array.isArray(active), "scoped-pause active reservations unavailable");
+      return changed.some(
+        (event) =>
+          event.event === "AttemptIntegrated" &&
+          active.some(
+            (reservation) =>
+              reservation.workItem === event.workItem && reservation.attempt === event.attempt,
+          ),
+      );
+    },
+  };
 }
 
 const adverseProgress = (pair) =>
@@ -1060,7 +1084,12 @@ export async function runConcurrencyLeaseFaultScenario(port, authority) {
   const overlap = await port.pollPair("refill", (pair) => concurrencyRefill(pair) !== null);
   const refill = concurrencyRefill(overlap);
   await port.scoped("pause");
-  const paused = await port.pollPair("scoped-pause", (pair) => port.settled(pair[1], true));
+  const pauseObservation = scopedPauseObservationContract(port.settled);
+  const paused = await port.pollPair(
+    pauseObservation.phase,
+    pauseObservation.accept,
+    pauseObservation.progress,
+  );
   const pause = one(
     eventsOf(paused[1]).filter((event) => event.event === "RunPauseRequested"),
     "pause request missing",
@@ -1972,7 +2001,7 @@ export async function main(env = process.env, run = checkpointMain) {
                 requestId: `${authority.namespaces[1]}-${action}`,
               }),
             ),
-          pollPair: async (phase, accept) => {
+          pollPair: async (phase, accept, progress) => {
             const maximumPolls = Math.ceil(
               (authority.policy.objectiveTimeoutMinutes * 60000) / 15000,
             );
@@ -2002,7 +2031,10 @@ export async function main(env = process.env, run = checkpointMain) {
               const hinted = evidence.objectives.map((record) =>
                 hintedObservation(record, changedComments),
               );
-              if (!concurrencyReceiptProgress(phase, hinted) && !adverseProgress(hinted)) continue;
+              const changed = progress
+                ? progress(hinted)
+                : concurrencyReceiptProgress(phase, hinted);
+              if (!changed && !adverseProgress(hinted)) continue;
               // Incremental comments are wake hints only. Every acceptance, terminal refusal and
               // subsequent action is based on a fresh complete authenticated observation pair.
               pair = [];
